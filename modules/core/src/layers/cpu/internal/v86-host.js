@@ -223,13 +223,15 @@ export async function createV86Host(config){
      * @type {{ ram: Uint8Array, ramOffset: number,
      *     data: DataView, reg32: Int32Array, eip: Int32Array, flags: Int32Array,
      *     flagsChanged: Int32Array, cr: Int32Array, inHlt: Uint8Array,
-     *     counter: Uint32Array, xmm: Int32Array, mxcsr: Int32Array }}
+     *     counter: Uint32Array, xmm: Int32Array, mxcsr: Int32Array,
+     *     fpuStackPtr: Uint8Array }}
      */
     const views = {
         ram: new Uint8Array(0), ramOffset: 0, data: new DataView(new ArrayBuffer(0)),
         reg32: new Int32Array(0), eip: new Int32Array(0), flags: new Int32Array(0),
         flagsChanged: new Int32Array(0), cr: new Int32Array(0), inHlt: new Uint8Array(0),
         counter: new Uint32Array(0), xmm: new Int32Array(0), mxcsr: new Int32Array(0),
+        fpuStackPtr: new Uint8Array(0),
     };
     const v = ()=>{
         // Whether the memory has moved since the views were taken is read off
@@ -257,6 +259,7 @@ export async function createV86Host(config){
         views.counter = take(cpu.instruction_counter, Uint32Array);
         views.xmm = take(cpu.reg_xmm32s, Int32Array);
         views.mxcsr = take(cpu.mxcsr, Int32Array);
+        views.fpuStackPtr = take(cpu.fpu_stack_ptr, Uint8Array);
         return views;
     };
     // How many compiled modules the emulator actually published, and the first
@@ -498,7 +501,9 @@ export async function createV86Host(config){
         getEflags: ()=>cpu.wm.exports.get_eflags() >>> 0,
 
         /** The x87 stack's top, for an engine's entry lookup. */
-        x87Top: ()=>cpu.fpu_stack_ptr[0] & 7,
+        // Off the view: the emulator's property is a proxy that makes a
+        // typed array per access, and the hybrid loop asks every turn.
+        x87Top: ()=>v().fpuStackPtr[0] & 7,
 
         /**
          * Flags a page a translator holds code for: a slice arriving there

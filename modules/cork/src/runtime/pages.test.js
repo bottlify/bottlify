@@ -55,3 +55,21 @@ test('the table survives a grow of the memory', ()=>{
     assert.equal(pages.get(3), PageFlag.HAS_CODE);
     assert.equal(pages.get(0x100), PageFlag.INACCESSIBLE);
 });
+
+test('code marked on a page keeps a range of granules; data beside it is outside', ()=>{
+    const layout = ownLayout({ ramSize: 1 << 20 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const pages = createPageTable(memory, layout);
+    pages.markCode(0x1040, 0x30);                       // granules 2..3 of page 1
+    assert.equal(pages.get(1) & PageFlag.HAS_CODE, PageFlag.HAS_CODE);
+    assert.deepEqual(pages.codeRange(1), [2, 4]);
+    pages.markCode(0x1000, 8);                          // widens down to granule 0
+    assert.deepEqual(pages.codeRange(1), [0, 4]);
+    pages.markCode(0x1ff0, 0x20);                       // across into page 2
+    assert.deepEqual(pages.codeRange(1), [0, 128]);
+    assert.deepEqual(pages.codeRange(2), [0, 1]);
+    pages.clearCode(1);
+    assert.equal(pages.get(1) & PageFlag.HAS_CODE, 0);
+    assert.deepEqual(pages.codeRange(1), [0, 0]);
+    assert.deepEqual(pages.codeRange(2), [0, 1], 'the other page keeps its range');
+});

@@ -521,6 +521,28 @@ export class ModuleBuilder {
         /** @param {number[][]} entriesOf */
         const entries = entriesOf=>vector(entriesOf.flat(), entriesOf.length);
 
+        /**
+         * Pieces concatenated once: a body is a typed array and stays one,
+         * never spread through a JavaScript array (a large region's module
+         * spent longer being assembled than compiled).
+         *
+         * @param {(number[] | Uint8Array)[]} pieces
+         */
+        const concat = pieces=>{
+            let length = 0;
+            for (const piece of pieces)
+            {
+                length += piece.length;
+            }
+            const out = new Uint8Array(length);
+            let at = 0;
+            for (const piece of pieces)
+            {
+                out.set(piece, at);
+                at += piece.length;
+            }
+            return out;
+        };
         const codes = this.functions.map(({ locals, body })=>{
             // Runs of one type are one entry: "3 × i32, 1 × f64".
             /** @type {number[][]} */
@@ -539,9 +561,12 @@ export class ModuleBuilder {
             }
             const declared = vector(
                 runs.flatMap(([count, type])=>[...leb128u(count), type]), runs.length);
-            const content = [...declared, ...body];
-            return [...leb128u(content.length), ...content];
+            return concat([leb128u(declared.length + body.length), declared, body]);
         });
+        const codeSection = codes.length === 0 ? new Uint8Array(0) : (()=>{
+            const content = concat([leb128u(codes.length), ...codes]);
+            return concat([[10], leb128u(content.length), content]);
+        })();
 
         const table = this.tableMin === null
             ? []
@@ -551,17 +576,17 @@ export class ModuleBuilder {
             ...vector(functions.flatMap(index=>leb128u(index)), functions.length),
         ]);
 
-        return Uint8Array.from([
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
-            ...section(1, entries(this.typeBytes)),
-            ...section(2, entries(this.imports)),
-            ...section(3, vector(
+        return concat([
+            [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00],
+            section(1, entries(this.typeBytes)),
+            section(2, entries(this.imports)),
+            section(3, vector(
                 this.functions.flatMap(f=>leb128u(f.typeIndex)), this.functions.length)),
-            ...section(4, this.tableMin === null ? [] : vector(table, 1)),
-            ...section(6, entries(this.globals)),
-            ...section(7, entries(this.exports)),
-            ...section(9, entries(elements)),
-            ...section(10, entries(codes)),
+            section(4, this.tableMin === null ? [] : vector(table, 1)),
+            section(6, entries(this.globals)),
+            section(7, entries(this.exports)),
+            section(9, entries(elements)),
+            codeSection,
         ]);
     }
 }

@@ -162,6 +162,8 @@
  * @property {number} volatilePages    Pages written so often they are no longer translated.
  * @property {Record<ExitKind, number>} exits
  * @property {Record<string, number>} refused  Opcode ("0f 2e", "f3 0f 10") → times met.
+ * @property {number} translateMs      Milliseconds spent forming, emitting and compiling.
+ * @property {number} moduleBytes      Wasm bytes built this run.
  * @property {number} handoffMisses    Hybrid: slices the emulator ran through translated code.
  */
 
@@ -193,4 +195,4 @@
  * grown behind its views. The layer reports the RAM below it as the memory's
  * size to every other layer, so nothing of the guest is ever placed there.
  */
-export const TABLES_RESERVE = 2 * 1024 * 1024;
+export const TABLES_RESERVE = 4 * 1024 * 1024;

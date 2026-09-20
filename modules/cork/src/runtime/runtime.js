@@ -97,6 +97,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @property {Set<number>} pages
      * @property {number[]} slots   entry indices
      * @property {number} table     the function's index in the table, or -1
+     * @property {[number, number][]} spans   the blocks' [start, end)
      */
     /** @type {Set<RegionRecord>} */
     const regions = new Set();
@@ -106,7 +107,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const generation = new Map();
     /** @type {Map<number, number>} page → times a write dropped its regions */
     const dropped = new Map();
-    const counts = { modules: 0, invalidations: 0, volatilePages: 0, dropped: 0 };
+    const counts = {
+        modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, translateMs: 0, moduleBytes: 0,
+    };
     let nextTable = 0;
     /** @type {Record<ExitKind, number>} */
     const exits = { untranslated: 0, budget: 0, trap: 0, halt: 0, fault: 0, stale: 0 };
@@ -117,7 +120,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     // reads come less than 2^32 instructions apart.
     let counted = 0;
     let lastWord = 0;
-    const view = ()=>new DataView(memory.buffer);
+    /** @type {DataView | null} */
+    let cachedView = null;
+    // One view, taken again only when the memory grew (which detaches the
+    // buffer it was on): a view per region run was a fifth of a call's cost.
+    const view = ()=>{
+        if (cachedView === null || cachedView.buffer !== memory.buffer)
+        {
+            cachedView = new DataView(memory.buffer);
+        }
+        return cachedView;
+    };
     const counterWord = ()=>view().getUint32(layout.counter, true);
     const fold = ()=>{
         const word = counterWord();
@@ -160,10 +173,23 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
             for (const p of touched)
             {
-                if (!byPage.get(p)?.size)
+                const left = byPage.get(p);
+                pages.clearCode(p);
+                if (!left?.size)
                 {
-                    pages.clear(p, PageFlag.HAS_CODE);
                     imports.handoffPage?.(p, false);
+                    continue;
+                }
+                // The page's range from the regions still on it.
+                for (const record of left)
+                {
+                    for (const [start, end] of record.spans)
+                    {
+                        if ((start >>> 12) <= p && ((end - 1) >>> 12) >= p)
+                        {
+                            pages.markCode(start, end - start);
+                        }
+                    }
                 }
             }
         }
@@ -264,6 +290,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 return 0;
             }
+            const startedAt = performance.now();
             const batch = [...queue].slice(0, settings.batchRegions);
             for (const [key] of batch)
             {
@@ -329,6 +356,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
             if (formed.length === 0)
             {
+                counts.translateMs += performance.now() - startedAt;
                 return 0;
             }
             /** @type {WebAssembly.Instance} */
@@ -340,7 +368,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // millisecond per region, while the promise form's result is
                 // a task the host's own yield may not run for a whole
                 // program's length (seen in a process without a presenter).
-                const module = new WebAssembly.Module(m.toBytes());
+                const bytes = m.toBytes();
+                counts.moduleBytes += bytes.length;
+                const module = new WebAssembly.Module(bytes);
                 instance = new WebAssembly.Instance(module, {
                     env: {
                         memory, getEflags: imports.getEflags, ...mathImports(),
@@ -352,6 +382,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // The whole batch is refused: the program runs on as it did.
                 refused.batch = (refused.batch ?? 0) + 1;
                 refused[`batch: ${String(e).slice(0, 120)}`] = 1;
+                counts.translateMs += performance.now() - startedAt;
                 return 0;
             }
             counts.modules++;
@@ -381,7 +412,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     continue;
                 }
                 /** @type {RegionRecord} */
-                const record = { entry: region.entry, pages: region.pages, slots: [], table: -1 };
+                /** @type {RegionRecord} */
+                const record = {
+                    entry: region.entry, pages: region.pages, slots: [], table: -1,
+                    spans: region.blocks.map(block=>[block.start, block.end]),
+                };
                 if (table)
                 {
                     let index = freeTable.pop();
@@ -402,7 +437,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 }
                 for (const block of region.blocks)
                 {
-                    pages.markRange(block.start, block.end - block.start, PageFlag.HAS_CODE);
+                    pages.markCode(block.start, block.end - block.start);
                 }
                 for (const page of region.pages)
                 {
@@ -424,6 +459,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 regions.add(record);
                 published++;
             }
+            counts.translateMs += performance.now() - startedAt;
             return published;
         },
         invalidatePage,
@@ -434,6 +470,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return {
                 regions: regions.size,
                 entries: table ? entries.hashed() : entries.count(),
+                translateMs: counts.translateMs,
+                moduleBytes: counts.moduleBytes,
                 modules: counts.modules,
                 translatedShare: counted > 0 ? corkRetired / counted : 0,
                 cacheHits: 0,

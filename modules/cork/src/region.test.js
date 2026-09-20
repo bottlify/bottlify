@@ -149,3 +149,14 @@ test('the hash follows the bytes, not the address the region was formed at', ()=
     const c = regionOf([0xb9, 0x0b, 0, 0, 0, 0x49, 0x75, rel8(-3), 0xc3], 0x1000);
     assert.notEqual(a.hash, c.hash);
 });
+
+test('a run of zero bytes past a call ends the region as data, not as four thousand adds', ()=>{
+    // call [table]; then the page's zero fill
+    const region = regionOf([0xff, 0x15, 0x00, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert.equal(region.blocks.length, 2, 'the call, and the block after it');
+    const after = region.blocks[1];
+    assert.equal(after.start, 0x1006);
+    assert.equal(after.instructions.length, 0, 'not one add of the fill');
+    assert.equal(after.exit.kind, 'refused');
+    assert.equal(region.refused.get('00 00'), 1);
+});

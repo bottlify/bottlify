@@ -29,7 +29,15 @@ function run(bytes, { regs = {}, mark = [], undoLog = false } = {}){
     }
     for (const [address, length, flag] of mark)
     {
-        m.pages.markRange(address, length, flag);
+        // Code is marked as the runtime marks it: the flag and the granules.
+        if (flag === PageFlag.HAS_CODE)
+        {
+            m.pages.markCode(address, length);
+        }
+        else
+        {
+            m.pages.markRange(address, length, flag);
+        }
     }
     const exit = m.runProgram(CODE, { undoLog });
     return { m, exit };
@@ -209,4 +217,28 @@ test('a store into a page the other executor compiled leaves stale too, with the
     plain.write(CODE, [0xb8, 0x78, 0x56, 0x34, 0x12, 0x66, 0xa3, 0x06, 0x30, 0, 0, 0xf4]);
     plain.setReg('esp', STACK);
     assert.equal(plain.runProgram(CODE).kind, Exit.HALT, 'an unmarked page: no exit');
+});
+
+test('a store into a code page outside the code\'s own granules is no stale', ()=>{
+    // mov [0x1800], eax: the code sits at 0x1000..0x1010, the store 2 KiB
+    // past it on the same page.
+    const m = createTestMachine();
+    m.write(CODE, [0xb8, 0x11, 0x11, 0x11, 0x11, 0xa3, 0x00, 0x18, 0, 0, 0xf4]);
+    m.setReg('esp', STACK);
+    m.pages.markCode(CODE, 0x10);
+    const unit = m.translate(CODE);
+    assert.deepEqual(unit.run(CODE), { kind: 3, vector: 0 }, 'halted, not stale');
+    assert.equal(m.readU32(0x1800), 0x11111111);
+    // The same store into the code's own granules is.
+    const n = createTestMachine();
+    n.write(CODE, [0xb8, 0x11, 0x11, 0x11, 0x11, 0xa3, 0x0c, 0x10, 0, 0, 0xf4]);
+    n.setReg('esp', STACK);
+    n.pages.markCode(CODE, 0x10);
+    assert.deepEqual(n.translate(CODE).run(CODE), { kind: Exit.STALE, vector: 0 });
+    // A dword whose last byte reaches the code's granule is too.
+    const o = createTestMachine();
+    o.write(CODE, [0xb8, 0x11, 0x11, 0x11, 0x11, 0xa3, 0x1e, 0x10, 0, 0, 0xf4]);
+    o.setReg('esp', STACK);
+    o.pages.markCode(CODE + 0x20, 0x10);            // granule 1 only
+    assert.deepEqual(o.translate(CODE).run(CODE), { kind: Exit.STALE, vector: 0 });
 });

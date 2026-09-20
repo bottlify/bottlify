@@ -88,6 +88,7 @@ test('a hot address becomes a region after translatePending, and runs under a bu
     assert.equal(d.modules, 1);
     assert.equal(d.exits.halt, 1);
     assert.equal(d.translatedShare, 1, 'everything retired so far was in cork');
+    assert.ok(d.translateMs > 0 && d.moduleBytes > 100, 'the cost of translating is reported');
 });
 
 test('two regions land in one batch and both run; an entry is asked by its own address', async()=>{
@@ -278,4 +279,20 @@ test('an address the translator keeps leaving for becomes a candidate of its own
     new DataView(m.memory.buffer).setUint32(m.layout.eip, CODE, true);
     assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt',
         'the call and the return transfer now');
+});
+
+test('a loop that stores into data on its own page keeps its region', async()=>{
+    const m = machine();
+    // mov ecx, 1000; L: mov [0x1800], ecx; dec ecx; jnz L; hlt -- the data
+    // two kilobytes past the code, on the same page.
+    m.write(CODE, [0xb9, 0xe8, 0x03, 0, 0, 0x89, 0x0d, 0x00, 0x18, 0, 0, 0x49, 0x75, 0xf7, 0xf4]);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE);
+    assert.equal(await m.runtime.translatePending(), 1);
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+    assert.equal(exit.kind, 'halt');
+    const d = m.runtime.diagnostics();
+    assert.equal(d.exits.stale, 0, 'no store counted as a store into code');
+    assert.equal(d.invalidations, 0);
+    assert.equal(d.regions, 1);
 });

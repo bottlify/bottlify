@@ -165,6 +165,28 @@ export function formRegion(read, entry,
                 };
                 break;
             }
+            // Two all-zero instructions in a row (`add [eax], al` twice) are
+            // a page's zero fill, not code: a region that walked past a call
+            // that never returns would otherwise decode a page of it.
+            if (decoded.length === 2 && read(decoded.eip) === 0 && read(decoded.eip + 1) === 0)
+            {
+                const previous = block.instructions[block.instructions.length - 1];
+                if (previous && previous.length === 2 && read(previous.eip) === 0
+                    && read(previous.eip + 1) === 0)
+                {
+                    block.instructions.pop();
+                    block.end = previous.eip;
+                    bytes -= previous.length;
+                    refused.set('00 00', (refused.get('00 00') ?? 0) + 1);
+                    block.exit = {
+                        kind: 'refused', targets: [], next: previous.eip, backEdge: false,
+                        refusal: {
+                            refused: true, eip: previous.eip, opcode: '00 00', reason: 'zero fill',
+                        },
+                    };
+                    break;
+                }
+            }
             block.instructions.push(decoded);
             bytes += decoded.length;
             eip = (eip + decoded.length) >>> 0;

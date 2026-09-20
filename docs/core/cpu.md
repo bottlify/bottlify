@@ -54,7 +54,9 @@ mirrored into an open-addressing hash in the translator's tables (65 536 slots o
 address, the table index, the label and the top), and an exit for an untranslated address
 with budget left probes that hash in the epilogue and tail-calls the region found -- a
 return, an indirect jump or a call into translated code costs no crossing, and a hot
-region's direct callees are formed in the same batch so the call and the return both hit. Candidates come from two places: the
+region's direct callees are formed in the same batch so the call and the return both hit. A region ends at a run of zero bytes
+(two all-zero instructions in a row are a page's fill, not code: a region that walked past
+a call that never returns once decoded eight kilobytes of it). Candidates come from two places: the
 layer's sampler, which hands every hot bucket over at the address its last slice ended on
 whenever that address is a new one, and the translator's own count of untranslated exits by
 target address (`cork.missThreshold`, default 64), which is what finds a stub reached only
@@ -124,7 +126,10 @@ of the address space, kept in the memory after the guest RAM): a page beyond RAM
 inaccessible from boot and an access to it is a precise `#GP` with the registers as before
 the instruction; a page that holds translated code makes a store into it leave translated
 code with a `stale` exit right after the instruction, so the runtime can drop what it
-translated there. The null page is *not* marked, because the emulator lets a program read
+translated there -- a store into the code's own bytes, that is: beside the flag the table
+keeps, per page, the first and last 32-byte granule holding translated code, and a store
+into the page's data next to its code (a small image keeps both in one page, and a loop
+storing into its own page went volatile after eight such stores) is no store into code. The null page is *not* marked, because the emulator lets a program read
 address 0 today and the two engines must agree; marking it, and projecting the memory
 layer's read-only regions into the table, is a policy switch this layer's owner throws when
 the emulator is no longer the reference for it.
@@ -146,7 +151,7 @@ enter the type check or the bundle.
 
 | option          | type                       | default             | meaning |
 |-----------------|----------------------------|---------------------|---------|
-| `memorySize`    | number (power of two)      | `1 GiB`             | Guest RAM. Reserved, not committed: the host pays for pages the guest touches. Must be a power of two; the emulator requires it. With an engine other than `emulator` the top `TABLES_RESERVE` (2 MiB) is the translator's tables, and `layout.memorySize` reports the rest. |
+| `memorySize`    | number (power of two)      | `1 GiB`             | Guest RAM. Reserved, not committed: the host pays for pages the guest touches. Must be a power of two; the emulator requires it. With an engine other than `emulator` the top `TABLES_RESERVE` (4 MiB) is the translator's tables, and `layout.memorySize` reports the rest. |
 | `engineUrl`     | string                     | none                | The translator's entry module, imported at `boot()` under `hybrid`; `createApp` resolves it from `cork.moduleUrl` or the package beside core. Absent, `hybrid` runs with no translator. |
 | `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold`, `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`. |
 | `trapPort`      | number                     | `0xb077`            | The I/O port a stub writes its trap id to. |

@@ -31,7 +31,10 @@ export const PAGE = 65536;
  * entry hash: open addressing over the guest address, slots of the
  * address, the region's index in the function table, the block's label
  * and the x87 top it was compiled for (8 for any); an empty slot holds
- * address 0, a removed one all ones.
+ * address 0, a removed one all ones. Last, two bytes per page: the first
+ * and one past the last 32-byte granule of the page that holds translated
+ * code, so a store into the page's data beside its code is not a store
+ * into code.
  */
 export const Tables = Object.freeze({
     PAGE_FLAGS: 0,
@@ -45,7 +48,9 @@ export const Tables = Object.freeze({
     HASH: (1 << 20) + 16 + 4096 * 24,
     HASH_SLOTS: 65536,
     HASH_SLOT: 12,
-    SIZE: (1 << 20) + 16 + 4096 * 24 + 65536 * 12,
+    CODE_RANGES: (1 << 20) + 16 + 4096 * 24 + 65536 * 12,
+    CODE_GRANULE_SHIFT: 5,
+    SIZE: (1 << 20) + 16 + 4096 * 24 + 65536 * 12 + (1 << 21),
 });
 
 /**

@@ -74,7 +74,13 @@ export function noteStore(e, size){
     {
         b.localGet(Local.addr).i32const(size).call(e.context.undo);
     }
-    b.localGet(Local.pflags).i32const(PageFlag.HAS_CODE).op(I32.and);
+    // This engine's own code, to the granule: the page's flag and then its
+    // range, for the store's first byte and its last.
+    b.localGet(Local.addr).call(e.context.codeHit);
+    if (size > 1)
+    {
+        b.localGet(Local.addr).i32const(size - 1).op(I32.add).call(e.context.codeHit).op(I32.or);
+    }
     if (e.layout.codePages >= 0)
     {
         // The other executor's own table too: its compiled page is as much
@@ -89,6 +95,37 @@ export function noteStore(e, size){
     b.i32const(0).i32const(size).store('i32', { offset: e.layout.tables + Tables.STALE_SIZE });
     e.close();
     e.staleCheck = true;
+}
+
+/**
+ * Adds the helper `codeHit(address) -> 0|1`: whether the byte lies in
+ * translated code -- its page flagged, and its 32-byte granule within the
+ * page's code range.
+ *
+ * @param {import('../wasm/encoder.js').ModuleBuilder} m
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @returns {number} the function index
+ */
+export function addCodeHitHelper(m, layout){
+    const type = m.type({ params: [ValType.i32], results: [ValType.i32] });
+    const b = new Body();
+    const flags = layout.tables + Tables.PAGE_FLAGS;
+    const ranges = layout.tables + Tables.CODE_RANGES;
+    // local 1: the page; local 2: the granule
+    b.localGet(0).i32const(12).op(I32.shrU).localSet(1);
+    b.localGet(1).load('i32_8u', { offset: flags }).i32const(PageFlag.HAS_CODE).op(I32.and);
+    b.op(I32.eqz);
+    b.if(EMPTY);
+    b.i32const(0).op(0x0f); // return
+    b.end();
+    b.localGet(0).i32const(Tables.CODE_GRANULE_SHIFT).op(I32.shrU)
+        .i32const(0xfff >>> Tables.CODE_GRANULE_SHIFT).op(I32.and).localSet(2);
+    b.localGet(2).localGet(1).i32const(1).op(I32.shl).load('i32_8u', { offset: ranges })
+        .op(I32.geU);
+    b.localGet(2).localGet(1).i32const(1).op(I32.shl).load('i32_8u', { offset: ranges + 1 })
+        .op(I32.ltU);
+    b.op(I32.and);
+    return m.function(type, [ValType.i32, ValType.i32], b.toBytes());
 }
 
 /**

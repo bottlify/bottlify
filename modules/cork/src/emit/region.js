@@ -43,7 +43,7 @@ import {
     ARITH, I32, Kind, addMaterialiseHelper, emitCondition, emitFlag, kindOf, widthCode,
 } from './flags.js';
 import { emitInstruction } from './integer.js';
-import { addUndoHelper, emitStaleExit } from './memory.js';
+import { addCodeHitHelper, addUndoHelper, emitStaleExit } from './memory.js';
 import { Tables } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
 import {
@@ -114,6 +114,7 @@ const LOCAL_TYPES = [
  * @property {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @property {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @property {number} [undo]           the undo helper's function index, in a differential build
+ * @property {number} codeHit          the helper telling whether a byte lies in translated code
  * @property {number} [getEflags]      the host's flag fold, imported when the layout keeps
  *                                     lazy flags (the emulator's `flags_changed`)
  * @property {number} f80ToF64         the extended-precision readers
@@ -168,10 +169,11 @@ export function prepareModule(m, layout, features, memory = {},
     const materialise = addMaterialiseHelper(m);
     const { f80ToF64, f64ToF80 } = addF80Helpers(m);
     const round = addRoundHelper(m);
+    const codeHit = addCodeHitHelper(m, layout);
     /** @type {ModuleContext} */
     const context = {
         m, regionType, materialise, layout, features, f80ToF64, f64ToF80, round, math,
-        hash: hashed,
+        hash: hashed, codeHit,
     };
     if (trapPort !== undefined)
     {
