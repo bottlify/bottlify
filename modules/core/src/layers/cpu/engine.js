@@ -101,6 +101,9 @@
  * @property {number} [maxRegionBlocks]  Default 64.
  * @property {number} [maxRegionBytes]   Default 8192.
  * @property {number} [batchRegions]     Regions per wasm module. Default 32.
+ * @property {'frame' | 'slice'} [feed]  When the sampler's hot buckets become candidates:
+ *     once a frame (the default, paced by presentation) or after every slice, for a run
+ *     that has no frames -- a test in a process without a presenter.
  * @property {TranslationStore} [store]  The per-bundle cache; none = translate every run.
  * @property {string} [bundleId]         The cache's namespace.
  */

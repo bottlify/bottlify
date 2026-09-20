@@ -274,7 +274,19 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 {
                     continue;
                 }
-                const translation = emitRegion(context, region, { entryTop });
+                /** @type {import('../emit/region.js').Translation} */
+                let translation;
+                try
+                {
+                    translation = emitRegion(context, region, { entryTop });
+                }
+                catch (e){
+                    // The emitter's own defect on this code: named in the
+                    // report rather than lost in a rejected promise, and the
+                    // program runs on without the region.
+                    refused[`emit at ${eip.toString(16)}: ${String(e).slice(0, 120)}`] = 1;
+                    continue;
+                }
                 for (const [opcode, times] of translation.unsupported)
                 {
                     refused[opcode] = (refused[opcode] ?? 0) + times;
@@ -290,8 +302,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             let instance;
             try
             {
-                const module = await WebAssembly.compile(m.toBytes());
-                instance = await WebAssembly.instantiate(module, {
+                // Compiled on this thread, at the feed point: the batch is a
+                // few regions and the baseline compiler takes well under a
+                // millisecond per region, while the promise form's result is
+                // a task the host's own yield may not run for a whole
+                // program's length (seen in a process without a presenter).
+                const module = new WebAssembly.Module(m.toBytes());
+                instance = new WebAssembly.Instance(module, {
                     env: {
                         memory, getEflags: imports.getEflags, ...mathImports(),
                         ...(table ? { table } : {}),

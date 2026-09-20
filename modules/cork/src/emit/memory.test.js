@@ -137,7 +137,7 @@ test('a rep movs that runs into an inaccessible page faults with its progress ke
     assert.equal(exit.retired, 3 + 4, 'the iterations that completed');
 });
 
-test('the other precise faults: a divide by zero, ud2, and int3 as a trap past itself', ()=>{
+test('the other precise faults: a divide by zero, ud2; int3 and int n are left before', ()=>{
     const div = run([0x31, 0xc9, 0xf7, 0xf1]);                // xor ecx, ecx; div ecx
     assert.equal(div.exit.kind, Exit.FAULT);
     assert.equal(div.exit.vector, 0);
@@ -145,14 +145,15 @@ test('the other precise faults: a divide by zero, ud2, and int3 as a trap past i
     const ud = run([0x0f, 0x0b]);
     assert.equal(ud.exit.vector, 6);
     assert.equal(ud.exit.eip, CODE);
+    // The machine's -2: the region at the instruction makes no progress,
+    // which is the other executor's cue to run it.
     const int3 = run([0xb9, 0x05, 0, 0, 0, 0xcc]);
-    assert.equal(int3.exit.kind, Exit.FAULT);
-    assert.equal(int3.exit.vector, 3);
-    assert.equal(int3.exit.eip, CODE + 6, 'past the int3');
-    assert.equal(int3.exit.retired, 2, 'a trap counts its instruction');
-    const intn = run([0xcd, 0x21]);
-    assert.equal(intn.exit.vector, 0x21);
-    assert.equal(intn.exit.eip, CODE + 2);
+    assert.equal(int3.exit.kind, -2);
+    assert.equal(int3.exit.eip, CODE + 5, 'at the int3, for the other executor to raise');
+    assert.equal(int3.exit.retired, 1, 'uncounted');
+    const intn = run([0x90, 0xcd, 0x21]);
+    assert.equal(intn.exit.kind, -2);
+    assert.equal(intn.exit.eip, CODE + 1);
 });
 
 test('the undo log records every store with its old bytes, in order, and folds to spans', ()=>{

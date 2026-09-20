@@ -240,6 +240,7 @@ export class RegionEmitter {
          * @type {Set<number>}
          */
         this.leaving = new Set();
+        this.blockIndex = 0;
         /** Whether the current block's remaining instructions are unreachable. */
         this.dead = false;
         /** Instructions retired in the current block so far, to charge at its end. */
@@ -623,6 +624,7 @@ export class RegionEmitter {
         this.dead = false;
         this.blockRetired = 0;
         this.blockDepth = this.controls.length;
+        this.blockIndex = index;
         if (block.instructions.length === 0)
         {
             this.leaving.add(index);
@@ -650,10 +652,6 @@ export class RegionEmitter {
                 this.unsupported.set(instruction.opcode,
                     (this.unsupported.get(instruction.opcode) ?? 0) + 1);
                 this.instructions--;
-                if (i === 0)
-                {
-                    this.leaving.add(index);
-                }
                 this.exitBefore(instruction.eip, Exit.UNTRANSLATED);
                 this.dead = true;
                 return;
@@ -838,6 +836,15 @@ export class RegionEmitter {
      * @param {number} eip @param {number} kind @param {number} [vector]
      */
     exitBefore(eip, kind, vector = 0){
+        if (kind === Exit.UNTRANSLATED && this.blockRetired === 1)
+        {
+            // The block's first instruction is the other executor's: the
+            // block retires nothing, so it must not be an entry (see
+            // `leaving`). Every untranslated exit before an instruction is
+            // unconditional; a fault's is not, and a block that may fault
+            // first still runs when it does not.
+            this.leaving.add(this.blockIndex);
+        }
         this.blockRetired--;
         this.exitAt(eip, kind, vector);
         this.blockRetired++;

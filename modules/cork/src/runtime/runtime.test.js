@@ -112,12 +112,14 @@ test('an invalidation between noteHot and translatePending drops the region', as
     m.runtime.invalidatePage(CODE >>> 12);
     assert.equal(await m.runtime.translatePending(), 0, 'the candidate went with the page');
     assert.equal(m.runtime.diagnostics().regions, 0);
-    // And a page that moves while a batch is forming is dropped at publication.
+    // A batch is compiled and published at the feed point itself; a page
+    // that moves afterwards loses its region to the invalidation.
     m.runtime.noteHot(CODE);
     const pending = m.runtime.translatePending();
     m.runtime.invalidatePage(CODE >>> 12);
-    assert.equal(await pending, 0);
+    assert.equal(await pending, 1);
     assert.equal(m.runtime.diagnostics().regions, 0);
+    assert.equal(m.runtime.diagnostics().invalidations, 1);
     assert.equal(m.runtime.entryOf(CODE), -1);
 });
 

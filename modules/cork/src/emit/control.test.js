@@ -141,3 +141,38 @@ test('a block that leaves at once is no entry, so a transfer never spins on it',
     assert.equal(r.runs, 2);
     assert.equal(m.reg('ecx'), 2);
 });
+
+test('an indirect call reaches its target with the return address pushed', ()=>{
+    // Found by a whole program under hybrid: the call's target was parked in
+    // the local the push then used for the value, so every indirect call
+    // "returned" to the instruction after itself without calling anything.
+    /** @type {[string, number[]][]} */
+    const forms = [
+        ['register', [0xb8, ...u32(CODE + 0x20), 0xff, 0xd0]],        // mov eax, F; call eax
+        ['memory', [0xff, 0x15, ...u32(DATA)]],                       // call [DATA]
+        ['stack-relative', [0x68, ...u32(CODE + 0x20), 0xff, 0x14, 0x24]], // push F; call [esp]
+    ];
+    for (const [name, call] of forms)
+    {
+        const m = machine([
+            0xbb, ...u32(1),                    //     mov ebx, 1
+            ...call,
+            0xf4,                               //     hlt (never: F halts)
+        ], [...u32(CODE + 0x20)]);
+        const F = CODE + 0x20;
+        m.write(F, [
+            0x5a,                               // F:  pop edx     the return address
+            0xbb, ...u32(2),                    //     mov ebx, 2
+            0xf4,                               //     hlt
+        ]);
+        const returnAddress = CODE + 5 + call.length;
+        const unit = m.translate(CODE, { hash: true });
+        assert.deepEqual(unit.run(CODE), { kind: 0, vector: 0 }, name);
+        assert.equal(m.eip(), F, `${name}: left for the target`);
+        assert.equal(m.readU32(m.reg('esp')), returnAddress, `${name}: the return address`);
+        const r = m.runProgram(F);
+        assert.equal(r.kind, 3, name);
+        assert.equal(m.reg('edx'), returnAddress, name);
+        assert.equal(m.reg('ebx'), 2, name);
+    }
+});

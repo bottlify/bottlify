@@ -592,6 +592,10 @@ export const cpuModule = {
                 if (samplingEnabled && instructions > 0)
                 {
                     creditSample(state.samples, machine.eip(), instructions);
+                    if (settings.cork.feed === 'slice')
+                    {
+                        feedTranslator();
+                    }
                 }
                 return instructions;
             },

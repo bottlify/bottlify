@@ -1984,7 +1984,7 @@ test('a slice returns on reaching a flagged page, and runs on when the flag is g
     host.writePhysical(GUEST_CODE, new Uint8Array([
         0xb9, ...u32(100000),               //     mov ecx, N
         0x49,                               // L:  dec ecx
-        0xe9, ...u32(SECOND - (GUEST_CODE + 10)), //  jmp SECOND
+        0xe9, ...u32(SECOND - (GUEST_CODE + 11)), //  jmp SECOND
     ]));
     host.writePhysical(SECOND, new Uint8Array([
         0x0f, 0x85, ...u32((GUEST_CODE + 5) - (SECOND + 6)), // jnz L
@@ -2022,7 +2022,7 @@ test('with the entry hash set, a slice returns only at an address the hash holds
     host.writePhysical(GUEST_CODE, new Uint8Array([
         0xb9, ...u32(1000000),              //     mov ecx, N
         0x49,                               // L:  dec ecx
-        0xe9, ...u32(SECOND - (GUEST_CODE + 10)), //  jmp SECOND
+        0xe9, ...u32(SECOND - (GUEST_CODE + 11)), //  jmp SECOND
     ]));
     host.writePhysical(SECOND, new Uint8Array([
         0x0f, 0x85, ...u32((GUEST_CODE + 5) - (SECOND + 6)), // jnz L
@@ -2054,3 +2054,105 @@ test('with the entry hash set, a slice returns only at an address the hash holds
     assert.ok(retired <= 3, `stopped at the flagged page (${retired})`);
     host.stop();
 });
+
+test('a page flagged for handoff is left interpreted, and compiled again once unflagged', async()=>{
+    const host = await boot();
+    if (!host.handoffAvailable())
+    {
+        host.stop();
+        return;
+    }
+    /** Steps run in compiled code, or -1 without the counters. */
+    const compiled = ()=>{
+        const state = host.jitState();
+        return state === -1 ? -1 : state.compiledSteps;
+    };
+    if (compiled() < 0)
+    {
+        host.stop();
+        return; // a build without the counters
+    }
+    // mov ecx, N; L: dec ecx; jnz L; hlt -- a page the emulator's compiler
+    // would take after its threshold.
+    host.writePhysical(GUEST_CODE, new Uint8Array([
+        0xb9, ...u32(600000), 0x49, 0x75, 0xfd, 0xf4,
+    ]));
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+    host.cpu().in_hlt[0] = 0;
+    host.cpu().instruction_pointer[0] = GUEST_CODE;
+    host.handoffPage(GUEST_CODE >>> 12, true);
+    const before = compiled();
+    for (let i = 0; i < 400 && !host.cpu().in_hlt[0]; i++)
+    {
+        // Flagged, the slice returns after one instruction at a time; the
+        // count asked is what the emulator would otherwise compile within.
+        host.runSlice(1000);
+        if (i % 50 === 49)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 0));
+        }
+    }
+    assert.equal(compiled(), before, 'nothing of the flagged page ran compiled');
+    host.handoffPage(GUEST_CODE >>> 12, false);
+    let slices = 0;
+    while (!host.cpu().in_hlt[0] && slices < 20000)
+    {
+        host.runSlice(1000);
+        slices++;
+        if (slices % 20 === 0)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 0));
+        }
+    }
+    assert.ok(host.cpu().in_hlt[0], `the loop ran to its end (${slices} slices)`);
+    assert.ok(compiled() > before, 'unflagged, the page was compiled and ran compiled');
+    host.stop();
+});
+
+test('a page compiled before it is flagged is dropped, and the slice returns at its hashed head',
+    async()=>{
+        const host = await boot();
+        if (!host.handoffAvailable()
+            || typeof host.cpu().wm.exports.bottlify_handoff_hash !== 'function')
+        {
+            host.stop();
+            return;
+        }
+        const compiled = ()=>{
+            const state = host.jitState();
+            return state === -1 ? -1 : state.compiledSteps;
+        };
+        // mov ecx, N; L: dec ecx; jnz L; hlt -- run hot enough to be compiled
+        // first, then flagged with its loop head in the hash.
+        host.writePhysical(GUEST_CODE, new Uint8Array([
+            0xb9, ...u32(50_000_000), 0x49, 0x75, 0xfd, 0xf4,
+        ]));
+        host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+        host.cpu().in_hlt[0] = 0;
+        host.cpu().instruction_pointer[0] = GUEST_CODE;
+        for (let i = 0; i < 8; i++)
+        {
+            host.runSlice(100000);
+            await new Promise(resolve=>setTimeout(resolve, 5));
+        }
+        const before = compiled();
+        if (before < 0)
+        {
+            host.stop();
+            return; // no counters in this build
+        }
+        assert.ok(before > 0, 'the loop was compiled');
+        const HASH = 0x100000;
+        const slot = Math.imul(GUEST_CODE + 5, 0x9e3779b1) >>> 16;
+        host.writePhysical(HASH + slot * 12, new Uint8Array(u32(GUEST_CODE + 5)));
+        host.handoffHash(HASH);
+        host.handoffPage(GUEST_CODE >>> 12, true);
+        for (let i = 0; i < 4; i++)
+        {
+            const retired = host.runSlice(1000);
+            assert.ok(retired <= 2, `slice ${i} returned at the loop head (${retired})`);
+            assert.equal(host.eip(), GUEST_CODE + 5);
+        }
+        assert.equal(compiled(), before, 'nothing ran compiled once flagged');
+        host.stop();
+    });

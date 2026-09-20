@@ -350,9 +350,13 @@ export function emitInstruction(e, instruction, flagsLive){
         case 'call':
             if (dst.kind !== 'rel')
             {
+                // The target is read before the push moves esp (`call [esp+8]`
+                // names the caller's frame) and held in a local the push does
+                // not use: `count` is a shift's or a string instruction's own
+                // and free between instructions; t2 is the push's scratch.
                 prepare(e, dst);
                 readOp(e, dst);
-                b.localSet(Local.t2);
+                b.localSet(Local.count);
             }
             push(e, 4, ()=>b.i32const(next));
             if (dst.kind === 'rel')
@@ -361,7 +365,7 @@ export function emitInstruction(e, instruction, flagsLive){
             }
             else
             {
-                b.localGet(Local.t2).localSet(Local.eip);
+                b.localGet(Local.count).localSet(Local.eip);
                 e.exitDynamic(Exit.UNTRANSLATED);
             }
             e.dead = true;
@@ -466,13 +470,13 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         case 'movs': case 'stos': case 'lods': case 'cmps': case 'scas':
             return stringInstruction(e, instruction);
-        case 'int3':
-            // A trap: EIP past the instruction, as the frame reader expects.
-            e.exitAt(next, Exit.FAULT, 3);
-            e.dead = true;
-            return true;
-        case 'int':
-            e.exitAt(next, Exit.FAULT, /** @type {number} */ (dst.value));
+        case 'int3': case 'int': case 'into':
+            // Left to the other executor, before the instruction: a trap
+            // taken past it would be skipped by a host that re-executes the
+            // instruction to raise it, and the software interrupt goes
+            // through the emulator's own vector table. A trap exit of this
+            // engine's own returns with the engine that delivers it.
+            e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
             e.dead = true;
             return true;
         case 'ud2': case 'ud1':

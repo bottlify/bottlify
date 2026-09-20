@@ -59,16 +59,25 @@ A block that would leave before retiring anything (nothing decoded, its first in
 left out) has no entry, so a transfer never spins on it. The same hash is given to the
 emulator (`handoffHash`, the fork's `bottlify_handoff_hash`): its slice then returns only at
 an address the hash holds, not anywhere in a flagged page, which would otherwise hand a page
-half translated back one instruction at a time. Without tail calls the map alone answers and
-the slice loop crosses between regions as before. The translator's layout is the emulator's
+half translated back one instruction at a time. A page flagged for handoff is one the
+emulator's own compiler leaves alone: what it compiled there is dropped when the flag is set
+and the page is not compiled again while flagged, since generated code runs a page's blocks
+without returning to the slice loop where the handoff is checked -- the emulator interprets
+it, and its interpreter's own loop returns at an entry as the slice loop does, until the
+translator takes it. Without tail calls the map
+alone answers and the slice loop crosses between regions as before. The translator's layout is the emulator's
 own register file, read off its typed views at boot (`stateLayout`), and its tables take the
 top of the guest RAM (`engine.js`'s `TABLES_RESERVE`; the layer reports the RAM below it as
 the memory's size), so a switch between the two copies nothing. Translated code adds what it
 retired to the emulator's own counter word, so `instructionCount()` and the sampler are
 unchanged. Candidates come from the sampler: once a frame, every 64-byte bucket credited past
 `cork.hotThreshold` instructions is handed to the translator at the exact address its last
-slice ended on, and the pending batch is instantiated -- paced by frames, never inside a
-slice. A region with x87 instructions in it is compiled for the x87 stack top it is entered
+slice ended on, and the pending batch is compiled and instantiated there and then -- paced
+by frames (`cork.feed: 'frame'`, the default) or, for a run without a presenter such as a
+test, after every slice (`'slice'`), never inside one. The batch is compiled on the engine
+thread rather than through the promise form: a batch is a few regions and the baseline
+compiler takes well under a millisecond per region, while the promise's result is a task the
+host's own yield was seen not to run for a whole program's length. A region with x87 instructions in it is compiled for the x87 stack top it is entered
 with, and its entries are keyed by address and top (`entryOf(eip, x87Top)`, the top read off
 the emulator's `fpu_stack_ptr` before every turn); a region without them is entered with any
 top. A lookup that misses at an address compiled for another top queues that top for the
