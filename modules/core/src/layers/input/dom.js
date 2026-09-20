@@ -254,6 +254,17 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
 
     /** @param {PointerEvent} e */
     const onPointerMove = e=>{
+        // A move with Control held is the person's, not the program's: the
+        // way out of a title that grabs the pointer and looks nowhere else,
+        // to reach the page around it. The position is forgotten so that the
+        // next free move starts from where it is rather than jumping the
+        // distance travelled while held.
+        if (e.ctrlKey)
+        {
+            lastX = null;
+            lastY = null;
+            return;
+        }
         // Deliberately not gated on focus. Focus decides where a keystroke goes
         // and nothing else: a pointer that moved over this canvas moved over
         // this canvas whether or not somebody clicked a panel beside it a

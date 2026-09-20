@@ -185,6 +185,25 @@ test('a pointer is reported in the game\'s pixels, not the page\'s', ()=>{
     assert.deepEqual(h.drain(), [{ kind: 'pointerMove', x: 320, y: 240, dx: 1, dy: 0 }]);
 });
 
+test('a move with Control held belongs to the person and never reaches the program', ()=>{
+    // The way out of a title that grabs the pointer: held, the pointer is
+    // free to leave; released, the next move starts afresh rather than
+    // delivering the distance travelled while held.
+    const h = harness({ canvas: {
+        width: 640, height: 480, rect: { left: 0, top: 0, width: 640, height: 480 },
+    } });
+    h.canvas.fire('focus', {});
+    h.drain();
+    h.canvas.fire('pointermove', { clientX: 10, clientY: 10, movementX: 0, movementY: 0 });
+    h.drain();
+    h.canvas.fire('pointermove', { clientX: 300, clientY: 300, movementX: 290, movementY: 290,
+        ctrlKey: true });
+    assert.deepEqual(h.drain(), [], 'nothing crossed');
+    h.canvas.fire('pointermove', { clientX: 301, clientY: 300, movementX: 1, movementY: 0 });
+    assert.deepEqual(h.drain(), [{ kind: 'pointerMove', x: 301, y: 300, dx: 1, dy: 0 }],
+        'the first free move is one pixel, not the whole way across');
+});
+
 test('motion too small to count is kept rather than dropped', ()=>{
     const h = harness({ canvas: {
         width: 640, height: 480, rect: { left: 0, top: 0, width: 1280, height: 960 },

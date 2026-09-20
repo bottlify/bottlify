@@ -124,7 +124,9 @@ beside the viewport is a fact about the page, not the mouse.
   Relative motion is the difference of two projected positions rather than `movementX/Y`, which a
   browser reports in different units on a scaled display; fractions left by rounding are carried.
   A locked pointer has no position, so it is the one case that uses `movementX/Y`, and no `x`/`y`
-  are sent. A press or release that arrives without a preceding move -- a touch, a pen, a
+  are sent. A move with Control held is the person's, never the program's -- the way out of a
+  title that grabs the pointer -- and the next free move starts afresh rather than delivering the
+  distance travelled while held. A press or release that arrives without a preceding move -- a touch, a pen, a
   synthesised click -- moves the cursor to its own position first. `pointerdown` focuses the
   canvas, captures the pointer, and requests pointer lock only when `attach` asked for it;
   `contextmenu` is suppressed.
