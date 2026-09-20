@@ -293,7 +293,12 @@ inside one instruction and cannot await.
 state) and `v86.wasm` (or `v86-profiler.wasm`), via `wasm_fn`. Views over the emulator's
 memory are taken once and again only when the memory has grown -- which detaches the buffer
 they were on, so a view reading as empty is the signal -- rather than through its proxies, which
-create a fresh typed array per property access, or through the buffer accessor on every read. Two emulator methods are wrapped for counting:
+create a fresh typed array per property access, or through the buffer accessor on every read. The host also reads and writes the SSE and x87 state as records
+(`readXmm`/`writeXmm`, `readMxcsr`/`writeMxcsr`, `x87State`/`restoreX87State` -- the eight x87
+registers by physical index, decoded from whichever of the emulator's two forms each is in,
+with the raw bytes beside them) for the translator package's differential harness, which
+snapshots this machine, runs the same code on both engines and compares; cold paths, nothing a
+slice pays for. Two emulator methods are wrapped for counting:
 `codegen_finalize` (published modules, and the first refusal) and `jit_clear_func` (discarded
 ones).
 

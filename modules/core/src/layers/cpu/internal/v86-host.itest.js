@@ -1916,3 +1916,53 @@ test('the emulator says why the interpreter ran, and on which page', async()=>{
         `the page carries every reason seen at it: ${closed.interpPages}`);
     host.stop();
 });
+
+test('the SSE and x87 state read as a record and go back as one, for the harness', async()=>{
+    const host = await boot();
+    // movaps xmm3, [0x9000]; fld1; fldz; then trap: what the record must show.
+    host.writePhysical(0x9000, new Uint8Array([
+        ...u32(0x3f800000), ...u32(0x40000000), ...u32(0x7fc00001), ...u32(0xdeadbeef),
+    ]));
+    host.writePhysical(GUEST_CODE, new Uint8Array([
+        0x0f, 0x28, 0x1d, ...u32(0x9000),                     // movaps xmm3, [0x9000]
+        0xd9, 0xe8,                                           // fld1
+        0xd9, 0xee,                                           // fldz
+        0x66, 0xba, TRAP_PORT & 0xff, TRAP_PORT >>> 8 & 0xff, // mov dx, TRAP_PORT
+        0xb8, ...u32(1),                                      // mov eax, 1
+        0xef,                                                 // out dx, eax
+        0xf4,                                                 // hlt
+    ]));
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+    assert.equal(await runUntilTrap(host), 1);
+
+    assert.deepEqual([...host.readXmm(3)], [0x3f800000, 0x40000000, 0x7fc00001, 0xdeadbeef],
+        'lanes as bit patterns, a NaN payload included');
+    assert.deepEqual([...host.readXmm(0)], [0, 0, 0, 0]);
+    host.writeXmm(0, new Uint32Array([1, 2, 3, 0x80000000]));
+    assert.deepEqual([...host.readXmm(0)], [1, 2, 3, 0x80000000]);
+    assert.equal(host.readMxcsr(), 0x1f80, 'the reset value');
+    host.writeMxcsr(0x9f80);
+    assert.equal(host.readMxcsr(), 0x9f80);
+
+    const before = host.x87State();
+    assert.equal(before.top, 6, 'two pushes from an empty stack');
+    assert.equal(before.empty & 0xc0, 0, 'physical 6 and 7 are held');
+    assert.equal(before.registers[7], 1, 'fld1 landed in physical 7');
+    assert.equal(before.registers[6], 0, 'fldz in physical 6');
+    assert.equal(before.raw.length, 128);
+
+    // Wreck it, put it back, read the same record.
+    host.restoreX87State({
+        top: 0, empty: 0xff, control: 0x37f, status: 0, raw: new Uint8Array(128),
+    });
+    assert.equal(host.x87State().top, 0);
+    assert.equal(host.readReg32('eax'), 1);
+    host.restoreX87State(before);
+    const after = host.x87State();
+    assert.deepEqual(
+        { top: after.top, empty: after.empty, control: after.control, status: after.status },
+        { top: before.top, empty: before.empty, control: before.control, status: before.status });
+    assert.deepEqual([...after.registers], [...before.registers]);
+    assert.deepEqual([...after.raw], [...before.raw]);
+    host.stop();
+});

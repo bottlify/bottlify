@@ -7,6 +7,7 @@
 import {
     buildBootRom, BRING_UP_PARK, GUEST_JUMP, ROM_BASE, DEAD_BOOT_CODE,
 } from './boot-rom.js';
+import { decodeRegister } from './fpu.js';
 
 /**
  * The only place in the codebase that knows the emulator underneath is v86.
@@ -222,13 +223,13 @@ export async function createV86Host(config){
      * @type {{ ram: Uint8Array, ramOffset: number,
      *     data: DataView, reg32: Int32Array, eip: Int32Array, flags: Int32Array,
      *     flagsChanged: Int32Array, cr: Int32Array, inHlt: Uint8Array,
-     *     counter: Uint32Array }}
+     *     counter: Uint32Array, xmm: Int32Array, mxcsr: Int32Array }}
      */
     const views = {
         ram: new Uint8Array(0), ramOffset: 0, data: new DataView(new ArrayBuffer(0)),
         reg32: new Int32Array(0), eip: new Int32Array(0), flags: new Int32Array(0),
         flagsChanged: new Int32Array(0), cr: new Int32Array(0), inHlt: new Uint8Array(0),
-        counter: new Uint32Array(0),
+        counter: new Uint32Array(0), xmm: new Int32Array(0), mxcsr: new Int32Array(0),
     };
     const v = ()=>{
         // Whether the memory has moved since the views were taken is read off
@@ -254,6 +255,8 @@ export async function createV86Host(config){
         views.cr = take(cpu.cr, Int32Array);
         views.inHlt = take(cpu.in_hlt, Uint8Array);
         views.counter = take(cpu.instruction_counter, Uint32Array);
+        views.xmm = take(cpu.reg_xmm32s, Int32Array);
+        views.mxcsr = take(cpu.mxcsr, Int32Array);
         return views;
     };
     // How many compiled modules the emulator actually published, and the first
@@ -610,6 +613,66 @@ export async function createV86Host(config){
          * what the emulator underneath is.
          */
         cpu: ()=>cpu,
+
+        // The SSE and x87 state as a record, for the differential harness that
+        // compares this machine against a translator's: cold paths, read
+        // through the views like everything else, and nothing a slice pays for.
+
+        /** One XMM register's four lanes as u32 bit patterns. @param {number} index */
+        readXmm: index=>Uint32Array.from(v().xmm.subarray(index * 4, index * 4 + 4)),
+
+        /** @param {number} index @param {Uint32Array} words */
+        writeXmm(index, words){
+            v().xmm.set(Int32Array.from(words, word=>word | 0), index * 4);
+        },
+
+        readMxcsr: ()=>v().mxcsr[0] >>> 0,
+
+        /** @param {number} value */
+        writeMxcsr(value){
+            v().mxcsr[0] = value | 0;
+        },
+
+        /**
+         * The x87 block: the eight registers by physical index, decoded from
+         * whichever of the emulator's two forms each is in, with the raw bytes
+         * beside them so a restore puts back exactly what was there.
+         *
+         * @returns {{ top: number, empty: number, control: number, status: number,
+         *     registers: Float64Array, raw: Uint8Array }}
+         */
+        x87State(){
+            const words = new Int32Array(cpu.fpu_st);
+            const registers = new Float64Array(8);
+            for (let index = 0; index < 8; index++)
+            {
+                registers[index] = decodeRegister(
+                    words[index * 4] >>> 0, words[index * 4 + 1] >>> 0,
+                    words[index * 4 + 2] & 0xffff);
+            }
+            return {
+                top: cpu.fpu_stack_ptr[0],
+                empty: cpu.fpu_stack_empty[0],
+                control: cpu.fpu_control_word[0],
+                status: cpu.fpu_status_word[0],
+                registers,
+                raw: new Uint8Array(words.buffer, words.byteOffset, words.byteLength),
+            };
+        },
+
+        /**
+         * @param {{ top: number, empty: number, control: number, status: number,
+         *     raw: Uint8Array }} state
+         */
+        restoreX87State(state){
+            cpu.fpu_st.set(new Int32Array(state.raw.buffer, state.raw.byteOffset, 32));
+            cpu.fpu_stack_ptr[0] = state.top;
+            cpu.fpu_stack_empty[0] = state.empty;
+            // Through the export, not the field: the fast arithmetic path
+            // reads a precision byte derived from the control word by it.
+            cpu.wm.exports.set_control_word(state.control);
+            cpu.fpu_status_word[0] = state.status;
+        },
 
         /** @returns {number} guest EIP */
         eip: ()=>v().eip[0] >>> 0,
