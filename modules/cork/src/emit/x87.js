@@ -83,7 +83,7 @@ export function isX87(instruction){
 
 /** The instructions this step leaves to the other executor. */
 const LEFT_OUT = new Set([
-    'fldenv', 'fnstenv', 'fnsave', 'frstor', 'fxsave', 'fxrstor', 'fbld', 'fbstp',
+    'fxsave', 'fxrstor', 'fbld', 'fbstp',
 ]);
 
 /**
@@ -154,7 +154,7 @@ export function step(instruction, state){
         case 'fdecstp':
             push();
             return next;
-        case 'fninit':
+        case 'fninit': case 'fnsave':
             next.top = 0;
             return next;
         default:
@@ -1192,6 +1192,104 @@ export function emitX87(e, instruction, flagsLive){
             b.localGet(Local.addr).localGet(Local.x87Control)
                 .store('i32_16', { offset: e.layout.ramBase });
             return finish();
+        case 'fnstenv': case 'fnsave':
+        {
+            // The 32-bit protected-mode environment: control, status with
+            // the top, the tag word, and the instruction and data pointers,
+            // which this engine does not keep (zero, as the other executor
+            // has them). fnsave follows with the eight registers in stack
+            // order as ten-byte values, and leaves the unit as fninit does.
+            const save = op === 'fnsave';
+            prepare(e, { ...dst, size: save ? 108 : 28 });
+            noteStore(e, save ? 108 : 28);
+            const ram = e.layout.ramBase;
+            b.localGet(Local.addr).localGet(Local.x87Control).i32const(0xffff0000 | 0)
+                .op(I32.or).store('i32', { offset: ram });
+            b.localGet(Local.addr).localGet(Local.x87Status).i32const(~0x3800).op(I32.and)
+                .i32const((state.top << 11) | (0xffff0000 | 0)).op(I32.or)
+                .store('i32', { offset: ram + 4 });
+            // The tag word, two bits per physical register: valid 0, zero 1,
+            // special (infinite or NaN) 2, empty 3.
+            b.i32const(0xffff0000 | 0).localSet(Local.t1);
+            for (let k = 0; k < 8; k++)
+            {
+                const local = x.base + state.slot[k];
+                b.i32const(3);
+                b.i32const(1);
+                b.i32const(2);
+                b.i32const(0);
+                b.localGet(local).localGet(local).op(F64.sub).f64const(0).op(F64.ne);
+                b.select();
+                b.localGet(local).f64const(0).op(F64.eq);
+                b.select();
+                b.localGet(Local.x87Empty).i32const(1 << k).op(I32.and);
+                b.select();
+                b.i32const(2 * k).op(I32.shl).localGet(Local.t1).op(I32.or).localSet(Local.t1);
+            }
+            b.localGet(Local.addr).localGet(Local.t1).store('i32', { offset: ram + 8 });
+            b.localGet(Local.addr).i32const(0).store('i32', { offset: ram + 12 });
+            b.localGet(Local.addr).i32const(0).store('i32', { offset: ram + 16 });
+            b.localGet(Local.addr).i32const(0).store('i32', { offset: ram + 20 });
+            b.localGet(Local.addr).i32const(0xffff0000 | 0).store('i32', { offset: ram + 24 });
+            if (save)
+            {
+                for (let i = 0; i < 8; i++)
+                {
+                    b.localGet(st(i));
+                    b.localGet(Local.addr).i32const(ram + 28 + 10 * i).op(I32.add);
+                    b.call(/** @type {number} */ (e.context.f64ToF80));
+                }
+                b.i32const(0).localSet(Local.x87Top);
+                b.i32const(0xff).localSet(Local.x87Empty);
+                b.i32const(0).localSet(Local.x87Status);
+                b.i32const(DEFAULT_CONTROL).localSet(Local.x87Control);
+                x.controlWritten = true;
+            }
+            return finish();
+        }
+        case 'fldenv': case 'frstor':
+        {
+            // The environment back, and for frstor the eight registers in
+            // stack order into their physical locals. The top it sets is
+            // known only at run time, and every block here is compiled for
+            // one: the instruction leaves for the next block, which the
+            // entry hash enters compiled for whatever the top now is.
+            const restore = op === 'frstor';
+            prepare(e, { ...(src ?? dst), size: restore ? 108 : 28 });
+            const ram = e.layout.ramBase;
+            b.localGet(Local.addr).load('i32_16u', { offset: ram }).localSet(Local.x87Control);
+            x.controlWritten = true;
+            b.localGet(Local.addr).load('i32_16u', { offset: ram + 4 }).localSet(Local.t1);
+            b.localGet(Local.t1).i32const(~0x3800).op(I32.and).localSet(Local.x87Status);
+            b.localGet(Local.t1).i32const(11).op(I32.shrU).i32const(7).op(I32.and)
+                .localSet(Local.x87Top);
+            b.localGet(Local.addr).load('i32_16u', { offset: ram + 8 }).localSet(Local.t2);
+            b.i32const(0).localSet(Local.x87Empty);
+            for (let k = 0; k < 8; k++)
+            {
+                b.localGet(Local.t2).i32const(2 * k).op(I32.shrU).i32const(3).op(I32.and)
+                    .i32const(3).op(I32.eq).i32const(k).op(I32.shl)
+                    .localGet(Local.x87Empty).op(I32.or).localSet(Local.x87Empty);
+            }
+            if (restore)
+            {
+                // Physical register k holds ST((k - top) & 7), the value at
+                // 28 + 10 * that in the block.
+                for (let k = 0; k < 8; k++)
+                {
+                    b.i32const(k).localGet(Local.x87Top).op(I32.sub).i32const(7).op(I32.and)
+                        .i32const(10).op(I32.mul);
+                    b.localGet(Local.addr).op(I32.add).i32const(ram + 28).op(I32.add);
+                    b.call(/** @type {number} */ (e.context.f80ToF64));
+                    b.localSet(x.base + state.slot[k]);
+                }
+                b.i32const(0xff).localSet(Local.x87Dirty);
+            }
+            finish();
+            e.exitAt(instruction.eip + instruction.length, Exit.UNTRANSLATED);
+            e.dead = true;
+            return true;
+        }
         default:
             return false;
     }

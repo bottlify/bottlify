@@ -120,7 +120,7 @@ test('a region entered from the hash sees the registers the other left', { skip:
     });
 
 test('a block that leaves at once is no entry, so a transfer never spins on it', ()=>{
-    // `fnsave` is left to the other executor: the block it starts leaves
+    // `fxsave` is left to the other executor: the block it starts leaves
     // before running anything, and the loop that jumps to it must come back
     // to the caller rather than transfer into that block forever.
     const m = machine([
@@ -130,8 +130,8 @@ test('a block that leaves at once is no entry, so a transfer never spins on it',
         0x75, 0x03,                 //     jnz F
         0xf4,                       //     hlt
         0x90, 0x90,                 //     (pad)
-        0xdd, 0x35, ...u32(DATA),   // F:  fnsave [DATA]
-        0xeb, 0xf2,                 //     jmp L
+        0x0f, 0xae, 0x05, ...u32(DATA), // F: fxsave [DATA]
+        0xeb, 0xf1,                 //     jmp L
     ]);
     const r = m.runProgram(CODE, { budget: 1000 });
     // The machine's answer for a region that makes no progress at its

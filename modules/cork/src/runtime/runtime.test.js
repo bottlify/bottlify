@@ -172,8 +172,8 @@ test('a page invalidated too often becomes volatile and is not translated again'
 
 test('a region that meets an instruction the emitter leaves out still runs up to it', async()=>{
     const m = machine();
-    // mov eax, 1; fnsave [0x2000] (an environment form, left out); hlt
-    m.write(CODE, [0xb8, 0x01, 0, 0, 0, 0xdd, 0x35, 0x00, 0x20, 0, 0, 0xf4]);
+    // mov eax, 1; fxsave [0x2000] (left out); hlt
+    m.write(CODE, [0xb8, 0x01, 0, 0, 0, 0x0f, 0xae, 0x05, 0x00, 0x20, 0, 0, 0xf4]);
     m.runtime.noteHot(CODE);
     assert.equal(await m.runtime.translatePending(), 1);
     const exit = m.runtime.run(m.runtime.entryOf(CODE), 1000);
@@ -181,7 +181,7 @@ test('a region that meets an instruction the emitter leaves out still runs up to
     assert.equal(exit.retired, 1);
     assert.equal(m.eip(), CODE + 5, 'at the instruction the other executor must run');
     assert.equal(m.reg(0), 1);
-    assert.ok((m.runtime.diagnostics().refused['dd 35'] ?? 0) >= 1,
+    assert.ok(Object.keys(m.runtime.diagnostics().refused).some(key=>key.startsWith('0f ae')),
         `the opcode is named: ${JSON.stringify(m.runtime.diagnostics().refused)}`);
 });
 
@@ -230,9 +230,9 @@ test('a hot region\'s direct callee lands in the same batch, and the call transf
 
 test('an address a region formed nothing at is not queued again until its page moves', async()=>{
     const m = machine();
-    // fnsave [0x2000]; jmp back to it: the one block leaves at once, so the
+    // fxsave [0x2000]; jmp back to it: the one block leaves at once, so the
     // region has nothing to enter.
-    m.write(CODE, [0xdd, 0x35, 0x00, 0x20, 0, 0, 0xeb, 0xf8]);
+    m.write(CODE, [0x0f, 0xae, 0x05, 0x00, 0x20, 0, 0, 0xeb, 0xf7]);
     m.runtime.noteHot(CODE);
     assert.equal(await m.runtime.translatePending(), 0);
     m.runtime.noteHot(CODE);

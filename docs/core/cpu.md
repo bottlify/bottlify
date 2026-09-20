@@ -102,9 +102,12 @@ read the MXCSR rounding control the same way; a NaN an operation makes carries t
 processor's negative sign whatever the host's default NaN is; exception masks are not
 honoured, an exception behaves as masked. The transcendentals (`fsin`, `fcos`, `fsincos`,
 `fptan`, `fpatan`, `f2xm1`, `fyl2x`, `fyl2xp1`) go through the host's `Math`, imported by every
-translated module, as the emulator's do, so the two agree on one engine; the environment
-forms (`fnsave`, `frstor`, `fldenv`, `fnstenv`, `fxsave`, `fxrstor`) end a region and run on the
-emulator. A store translated code makes into a page the emulator's own compiler compiled is
+translated module, as the emulator's do, so the two agree on one engine. `fnstenv` and
+`fnsave` write the protected-mode environment as the emulator does (the instruction and data
+pointers zero, which neither keeps); `fldenv` and `frstor` read it back into the locals and
+leave for the next block, since the top they set is known only at run time and every block
+is compiled for one -- the entry hash re-enters the code compiled for whatever the top then
+is. `fxsave` and `fxrstor` still end a region and run on the emulator. A store translated code makes into a page the emulator's own compiler compiled is
 seen too: the store checks the emulator's byte-per-page "has code" table beside the
 translator's own flags (`layout.codePages`, the fork's `bottlify_page_has_code_ptr`) and
 leaves `stale` with the address and width, and the runtime dirties the emulator's cache for
