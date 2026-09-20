@@ -54,7 +54,8 @@ mirrored into an open-addressing hash in the translator's tables (65 536 slots o
 address, the table index, the label and the top), and an exit for an untranslated address
 with budget left probes that hash in the epilogue and tail-calls the region found -- a
 return, an indirect jump or a call into translated code costs no crossing, and a hot
-region's direct callees are formed in the same batch so the call and the return both hit. A region ends at a run of zero bytes
+region's direct callees are formed in the same batch so the call and the return both hit. A block whose conditional branch comes back to its own start is a wasm loop with the back
+edge a direct branch, the slice's budget looked at on that edge as on any jump. A region ends at a run of zero bytes
 (two all-zero instructions in a row are a page's fill, not code: a region that walked past
 a call that never returns once decoded eight kilobytes of it). Candidates come from two places: the
 layer's sampler, which hands every hot bucket over at the address its last slice ended on

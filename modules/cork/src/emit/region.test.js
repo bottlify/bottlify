@@ -86,3 +86,58 @@ test('an exit writes every register, the flags word and eip back; nothing is kep
     assert.equal(m.eip(), 1, 'the indirect target');
     assert.equal(m.counter(), 10);
 });
+
+test('a block branching to its own start is a loop of its own, with the budget still looked at',
+    ()=>{
+        // mov ecx, 1000; L: dec ecx; jnz L; hlt -- the loop block is one wasm
+        // loop, and a budget spent inside it still leaves at the head.
+        const m = createTestMachine();
+        m.write(CODE, [0xb9, 0xe8, 0x03, 0, 0, 0x49, 0x75, 0xfd, 0xf4]);
+        m.setReg('esp', 0x80000);
+        const unit = m.translate(CODE);
+        assert.equal(unit.translation.loops, 1, 'the loop block');
+        assert.deepEqual(unit.run(CODE, 101), { kind: 1, vector: 0 }, 'budget');
+        assert.equal(m.eip(), CODE + 5, 'at the loop head');
+        assert.equal(m.counter(), 101);
+        assert.deepEqual(unit.run(CODE + 5, 1_000_000), { kind: 3, vector: 0 });
+        assert.equal(m.reg('ecx'), 0);
+        assert.equal(m.counter(), 1 + 2 * 1000 + 1);
+        // A budget spent on the very round the loop ends: the decision the
+        // round took is not taken again after the leave (found by a bench
+        // whose loop counted past zero and never halted).
+        for (const budget of [3, 4, 5, 7, 8])
+        {
+            const n = createTestMachine();
+            n.write(CODE, [0xb9, 0x0a, 0, 0, 0, 0x49, 0x75, 0xfd, 0xf4]); // ten rounds
+            n.setReg('esp', 0x80000);
+            const u = n.translate(CODE);
+            let eip = CODE;
+            let runs = 0;
+            let exit = u.run(eip, budget);
+            while (exit.kind === 1 && runs < 50)
+            {
+                runs++;
+                eip = n.eip();
+                exit = u.run(eip, budget);
+            }
+            assert.deepEqual(exit, { kind: 3, vector: 0 }, `budget ${budget}: halted`);
+            assert.equal(n.reg('ecx'), 0, `budget ${budget}`);
+            assert.equal(n.counter(), 22, `budget ${budget}: every instruction once`);
+        }
+        // With x87 in the loop and the stack as it started each round, still
+        // a loop; with an exchange left in it, the dispatcher's edge instead.
+        const same = createTestMachine();
+        same.write(CODE, [0xd9, 0xe8, 0xb9, 0x0a, 0, 0, 0,     // fld1; mov ecx, 10
+            0xd8, 0xc0, 0x49, 0x75, 0xfb, 0xf4]);                // L: fadd st0, st0; dec; jnz L
+        same.setReg('esp', 0x80000);
+        const s = same.translate(CODE);
+        assert.equal(s.translation.loops, 1);
+        assert.deepEqual(s.run(CODE), { kind: 3, vector: 0 });
+        const swapped = createTestMachine();
+        swapped.write(CODE, [0xd9, 0xe8, 0xd9, 0xee, 0xb9, 0x0a, 0, 0, 0, // fld1; fldz; mov ecx
+            0xd9, 0xc9, 0x49, 0x75, 0xfb, 0xf4]);                          // L: fxch; dec; jnz L
+        swapped.setReg('esp', 0x80000);
+        const w = swapped.translate(CODE);
+        assert.equal(w.translation.loops, 0, 'the exchange changes the state each round');
+        assert.deepEqual(w.run(CODE), { kind: 3, vector: 0 });
+    });

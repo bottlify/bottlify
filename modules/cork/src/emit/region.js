@@ -47,7 +47,8 @@ import { addCodeHitHelper, addUndoHelper, emitStaleExit } from './memory.js';
 import { Tables } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
 import {
-    addF80Helpers, addRoundHelper, prepareX87, x87BlockStart, x87Edge, x87Epilogue, x87Normalise,
+    addF80Helpers, addRoundHelper, prepareX87, sameState, x87BlockStart, x87Edge, x87Epilogue,
+    x87Normalise,
     x87Prologue,
 } from './x87.js';
 
@@ -199,6 +200,7 @@ export function prepareModule(m, layout, features, memory = {},
  * @property {Set<number>} cut      labels of blocks that leave at once (an x87 state
  *     conflict, nothing decoded, the first instruction left out): entered only from outside
  * @property {number} entryTop      the x87 top the function was compiled for
+ * @property {number} loops         blocks emitted as wasm loops onto themselves
  */
 
 /**
@@ -249,6 +251,10 @@ export class RegionEmitter {
          */
         this.leaving = new Set();
         this.blockIndex = 0;
+        /** Whether the current block is a wasm loop onto itself (see `emitBlock`). */
+        this.selfLoop = false;
+        /** Blocks emitted as loops onto themselves. */
+        this.loops = 0;
         /** Whether the current block's remaining instructions are unreachable. */
         this.dead = false;
         /** Instructions retired in the current block so far, to charge at its end. */
@@ -365,7 +371,7 @@ export class RegionEmitter {
         return {
             functionIndex, labels: this.labels, unsupported: this.unsupported,
             instructions: this.instructions, cut: new Set([...this.x87.cut, ...this.leaving]),
-            entryTop: this.entryTop,
+            entryTop: this.entryTop, loops: this.loops,
         };
     }
 
@@ -643,6 +649,24 @@ export class RegionEmitter {
             this.exitAt(block.start, Exit.UNTRANSLATED);
             return;
         }
+        // A block whose conditional branch comes back to its own start -- the
+        // shape of most inner loops -- is a wasm loop with a direct branch
+        // on the back edge, sparing the dispatcher's round trip each time.
+        // With x87 in play, only when the block ends in the state it starts
+        // in, so the edge needs no moves.
+        const x = this.x87;
+        this.selfLoop = (block.exit.kind === 'jcc' || block.exit.kind === 'loop')
+            && block.exit.targets[0] === block.start && block.instructions.length > 0
+            && (!x.active || (x.states[index] !== null && x.ends[index] !== null
+                && sameState(x.states[index], x.ends[index])));
+        if (this.selfLoop)
+        {
+            this.openLoop(`self${index}`);
+            this.loops++;
+            // The loop is the block's own level: a charge at it settles the
+            // block's count, so the budget exit inside it charges nothing twice.
+            this.blockDepth = this.controls.length;
+        }
         const live = deadFlagPass(block);
         for (let i = 0; i < block.instructions.length; i++)
         {
@@ -662,10 +686,12 @@ export class RegionEmitter {
                 this.instructions--;
                 this.exitBefore(instruction.eip, Exit.UNTRANSLATED);
                 this.dead = true;
+                this.closeSelfLoop();
                 return;
             }
             if (this.dead)
             {
+                this.closeSelfLoop();
                 return;
             }
             if (this.staleCheck)
@@ -677,6 +703,16 @@ export class RegionEmitter {
             }
         }
         this.emitExit(block, index);
+        this.closeSelfLoop();
+    }
+
+    /** Closes the block's loop onto itself, when it is one. */
+    closeSelfLoop(){
+        if (this.selfLoop)
+        {
+            this.close();
+            this.selfLoop = false;
+        }
     }
 
     /**
@@ -725,6 +761,28 @@ export class RegionEmitter {
                 const [taken, notTaken] = exit.targets;
                 const last = block.instructions[block.instructions.length - 1];
                 this.charge();
+                if (this.selfLoop)
+                {
+                    // The back edge directly: on the taken edge, and only
+                    // there, the budget looked at as any jump does -- a
+                    // leave before the decision would have the next run
+                    // repeat the body past a fall-through it never took.
+                    this.pushBranchCondition(last);
+                    this.openIf('taken');
+                    this.b.localGet(Local.budget).i32const(0).op(I32.leS);
+                    this.openIf('spent');
+                    this.exitAt(block.start, Exit.BUDGET);
+                    this.close();
+                    this.b.br(this.depthOf(`self${index}`));
+                    this.close();
+                    this.closeSelfLoop();
+                    if (next && next.start === notTaken)
+                    {
+                        return;
+                    }
+                    this.jumpTo(notTaken);
+                    return;
+                }
                 this.pushBranchCondition(last);
                 this.openIf('taken');
                 this.jumpTo(taken);

@@ -95,7 +95,7 @@ const LEFT_OUT = new Set([
 /** @param {StackState} state */
 const cloneState = state=>({ top: state.top, slot: [...state.slot] });
 /** @param {StackState} a @param {StackState} b */
-const sameState = (a, b)=>a.top === b.top && a.slot.every((s, i)=>s === b.slot[i]);
+export const sameState = (a, b)=>a.top === b.top && a.slot.every((s, i)=>s === b.slot[i]);
 
 /**
  * The stack after one instruction, or null when the instruction ends the
@@ -251,6 +251,7 @@ export function trackRegion(region, entryTop){
  * @property {number} temp2
  * @property {number} temp3
  * @property {(StackState | null)[]} states
+ * @property {(StackState | null)[]} ends   the state at each block's end, for a loop onto itself
  * @property {Set<number>} cut
  * @property {StackState | null} current   the state at the current point of emission
  * @property {boolean} controlWritten
@@ -272,18 +273,19 @@ export function prepareX87(e, entryTop){
     if (!uses || mmx)
     {
         return {
-            active: false, base: 0, temp: 0, temp2: 0, temp3: 0, states: [], cut: new Set(),
+            active: false, base: 0, temp: 0, temp2: 0, temp3: 0, states: [], ends: [],
+            cut: new Set(),
             current: null, controlWritten: false,
         };
     }
-    const { states, cut } = trackRegion(region, entryTop);
+    const { states, cut, ends } = trackRegion(region, entryTop);
     const base = e.localTypes.length + 2;
     for (let k = 0; k < 11; k++)
     {
         e.localTypes.push(ValType.f64);
     }
     return {
-        active: true, base, temp: base + 8, temp2: base + 9, temp3: base + 10, states, cut,
+        active: true, base, temp: base + 8, temp2: base + 9, temp3: base + 10, states, ends, cut,
         current: null, controlWritten: false,
     };
 }
