@@ -663,6 +663,18 @@ function describe(result, context, calls, symbols){
         const at = (/** @type {number} */ share)=>gaps[Math.min(gaps.length - 1,
             Math.floor(gaps.length * share))].toFixed(1);
         say(`  present gap ms: median ${at(0.5)}, p90 ${at(0.9)}, max ${at(1)}`);
+        // In order as well: a run that starts smooth and slows down, or one
+        // that stutters every few seconds, has a shape the quantiles hide.
+        const inOrder = /** @type {number[]} */ (result.presentGaps ?? []);
+        const bucket = Math.max(1, Math.ceil(inOrder.length / 24));
+        /** @type {string[]} */
+        const shape = [];
+        for (let from = 0; from < inOrder.length; from += bucket)
+        {
+            const slice = inOrder.slice(from, from + bucket);
+            shape.push((slice.reduce((sum, gap)=>sum + gap, 0) / slice.length).toFixed(0));
+        }
+        say(`  present gap ms in order (${bucket} presents a bucket): ${shape.join(' ')}`);
     }
     if (result.longTasks)
     {
