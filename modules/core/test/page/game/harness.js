@@ -888,8 +888,8 @@ function codeOf(character){
     {
         return `Digit${character}`;
     }
-    return { ' ': 'Space', '.': 'Period', '-': 'Minus', '_': 'Minus', '@': 'Digit2' }[character]
-        ?? 'KeyA';
+    return { ' ': 'Space', '.': 'Period', '-': 'Minus', '_': 'Minus', '@': 'Digit2', '/': 'Slash',
+        ',': 'Comma', ':': 'Semicolon' }[character] ?? 'KeyA';
 }
 
 /**

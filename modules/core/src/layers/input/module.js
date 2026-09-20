@@ -206,6 +206,8 @@ export const inputModule = {
              * @param {number} x @param {number} y
              */
             place: (x, y)=>router.place(x, y),
+            /** @param {boolean} visible */
+            cursorShown: visible=>router.shown(visible),
 
             /**
              * Says a window has appeared, which is when a program can be told

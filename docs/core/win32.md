@@ -331,7 +331,12 @@ implements).
 - **`SetCursorPos` moves the same cursor the input router owns**, through its `place()`: placing is
   not motion, so a relative device (DirectInput) sees nothing from it, but a real cursor warp is
   announced with `WM_MOUSEMOVE` when the position actually changes — what a mouse-look program that
-  reads its distance from the centre and warps back every frame needs to keep working.
+  reads its distance from the centre and warps back every frame needs to keep working. A placement
+  holds while the program holds the cursor — hidden, or with a button down, as in a drag that turns
+  a camera — and the pointer's positions are taken as motion from it; once the cursor is shown with
+  no button held, the pointer's next position is the cursor's again, since the page's pointer could
+  not be warped and the person is looking at it (the router's `shown()`, fed by both `cursor`
+  reporters).
 - **The `cursor` event is user32's own report.** `ShowCursor`'s display count and `SetCursor`'s
   null/non-null answer both derive one picture, `{ shown }`, reported to the page only on a change
   of that picture — a program that hides the cursor inside its frame loop does not flood the page's

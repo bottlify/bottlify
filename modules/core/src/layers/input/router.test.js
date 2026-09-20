@@ -343,7 +343,9 @@ test('a cursor the program places is where it said, and motion goes on from ther
     h.drain();
     h.mouse.mouseState();
 
-    // The mouse-look step: the program puts the cursor back to the centre.
+    // The mouse-look step: the program hides the cursor and puts it back to
+    // the centre every frame.
+    h.router.shown(false);
     h.router.place(320, 240);
     assert.deepEqual(h.router.cursor(), { x: 320, y: 240 });
     const [warp] = h.drain();
@@ -364,6 +366,46 @@ test('a cursor the program places is where it said, and motion goes on from ther
     // A placement outside the space the cursor is confined to lands on its edge.
     h.router.place(-50, 900);
     assert.deepEqual(h.router.cursor(), { x: 0, y: 479 });
+});
+
+test('a placement outlives the pointer only while the program holds the cursor', ()=>{
+    // A drag that turns the camera: the cursor is hidden at the press,
+    // warped back to the anchor every frame, shown again at the release. The
+    // pointer on the page could not be warped, so once the cursor is shown
+    // with no button held, the pointer's next position is the cursor's --
+    // the person sees the pointer, and a cursor a warp's width away from it
+    // for the rest of the run is the drift this exists to end.
+    const h = harness({ bounds: ()=>({ width: 640, height: 480 }) });
+    h.send({ kind: 'pointerMove', x: 100, y: 100 });
+    h.send({ kind: 'pointerButton', button: 'left', down: true });
+    h.router.shown(false);
+    h.router.place(100, 100);
+    h.send({ kind: 'pointerMove', x: 130, y: 90 });
+    assert.deepEqual(h.router.cursor(), { x: 130, y: 90 });
+    h.router.place(100, 100);
+    h.send({ kind: 'pointerMove', x: 160, y: 80 });
+    assert.deepEqual(h.router.cursor(), { x: 130, y: 90 }, 'motion from the anchor');
+    h.router.place(100, 100);
+    h.router.shown(true);
+    h.send({ kind: 'pointerButton', button: 'left', down: false });
+    h.drain();
+    h.mouse.mouseState();
+
+    // Shown and released: the next position is taken as it is.
+    h.send({ kind: 'pointerMove', x: 165, y: 82 });
+    assert.deepEqual(h.router.cursor(), { x: 165, y: 82 }, 'the pointer is the cursor again');
+    const moved = h.mouse.mouseState();
+    assert.deepEqual([moved.x, moved.y], [5, 2], 'the relative device still saw the travel');
+
+    // Shown but with a button held -- a drag with the cursor visible -- the
+    // placement still stands.
+    h.send({ kind: 'pointerButton', button: 'right', down: true });
+    h.router.place(200, 200);
+    h.send({ kind: 'pointerMove', x: 175, y: 82 });
+    assert.deepEqual(h.router.cursor(), { x: 210, y: 200 });
+    h.send({ kind: 'pointerButton', button: 'right', down: false });
+    h.send({ kind: 'pointerMove', x: 180, y: 90 });
+    assert.deepEqual(h.router.cursor(), { x: 180, y: 90 });
 });
 
 test('a declared cursor space scales motion, so a viewport sweep spans the space', ()=>{

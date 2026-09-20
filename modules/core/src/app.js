@@ -2717,7 +2717,10 @@ async function buildApp(options){
             // composites one over the frame; the host is told, with the
             // bitmap and the hot spot, and shows it the way its screen can.
             /** @param {any} cursor */
-            cursor: cursor=>events.emit('cursor', cursor),
+            cursor: cursor=>{
+                core.api('input')?.cursorShown?.(cursor.shown !== false);
+                events.emit('cursor', cursor);
+            },
         },
         win32: {
             // The one namespace a named mutex, event, semaphore, timer and
@@ -2737,7 +2740,10 @@ async function buildApp(options){
             // the Direct3D device methods emit above. Two producers, one
             // consumer, and the last report wins.
             /** @param {any} cursor */
-            reportCursor: cursor=>events.emit('cursor', cursor),
+            reportCursor: cursor=>{
+                core.api('input')?.cursorShown?.(cursor.shown !== false);
+                events.emit('cursor', cursor);
+            },
             // Sound leaves through the audio layer's mixer, and win32 sits
             // below it. Handed down as a thunk and asked for only when a
             // program opens a device: audio is created after win32, and a build
