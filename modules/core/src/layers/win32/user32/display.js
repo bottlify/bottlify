@@ -29,15 +29,18 @@ export const REFRESH_RATES = Object.freeze([REFRESH_HZ, 120]);
 
 /**
  * A handful of sizes, not a catalogue: the three every program of the era
- * assumes exist, the two widescreen standards, and the display's own size
+ * assumes exist, the widescreen standards, the sizes the laptops of today
+ * present themselves at -- both the scaled size a person sees and the native
+ * one behind it, since a page can be either -- and the display's own size
  * added below. A long list is a menu nobody scrolls, and every size a person
  * would actually pick is here.
  *
  * @type {readonly (readonly [number, number])[]}
  */
 const SIZES = Object.freeze([
-    [640, 480], [800, 600], [1024, 768], [1280, 720], [1440, 900], [1600, 900], [1680, 1050],
-    [1920, 1080], [1920, 1200], [2560, 1440], [2560, 1600],
+    [640, 480], [800, 600], [1024, 768], [1280, 720], [1280, 800], [1280, 832], [1440, 900],
+    [1512, 982], [1600, 900], [1680, 1050], [1728, 1117], [1920, 1080], [1920, 1200],
+    [2560, 1440], [2560, 1600], [2560, 1664], [2880, 1800], [3024, 1964], [3456, 2234],
 ]);
 
 /**

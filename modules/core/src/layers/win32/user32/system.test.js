@@ -492,9 +492,9 @@ test('the display enumeration ends', ()=>{
     }
     // Every size of the era, whatever the display: a program's resolution
     // menu is built from exactly this walk.
-    assert.equal(index, 22, 'every size of the era at both rates, and then the end');
+    assert.equal(index, 38, 'every size of the era at both rates, and then the end');
     const last = memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth);
-    assert.equal(last, 2560, 'the largest listed is the largest of the era');
+    assert.equal(last, 3456, 'the largest listed is the largest of the era');
     assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmDisplayFrequency), 120,
         'the second rate of the last size ends the list');
 });
@@ -617,7 +617,7 @@ test('the name the device enumeration gives is one the mode enumeration takes', 
         index++;
         assert.ok(index < 1000, 'the enumeration did not terminate');
     }
-    assert.equal(index, 22, 'every mode the display offers answers under its own name');
+    assert.equal(index, 38, 'every mode the display offers answers under its own name');
 });
 
 test('AdjustWindowRectEx grows a client rectangle by the frame the style carries', ()=>{
