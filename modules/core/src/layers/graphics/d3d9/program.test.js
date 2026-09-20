@@ -18,7 +18,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from './constants.js';
-import { D3DPT, D3DTS } from '../d3d8/constants.js';
+import { D3DPT, D3DRS, D3DTS } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from './declaration.js';
 import { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, versionToken } from './shader.js';
@@ -397,20 +397,103 @@ test('a pixel shader over fixed-function vertices gets a vertex stage of its own
     assert.equal(h.device.release(), 0);
 });
 
-test('a vertex shader over the fixed-function pixel stage is declined and reported once',
+/**
+ * vs_2_0 for the fixed pixel stage: position through c0..c3, the colour and
+ * the coordinate set passed on.
+ *
+ *     dcl_position v0
+ *     dcl_color v1
+ *     dcl_texcoord v2
+ *     m4x4 oPos, v0, c0
+ *     mov oD0, v1
+ *     mov oT0, v2
+ */
+const TEXTURED_VERTEX_SHADER = [
+    versionToken(SHADER_KIND.VERTEX, 2, 0),
+    ...dclInput(D3DDECLUSAGE.POSITION, 0),
+    ...dclInput(D3DDECLUSAGE.COLOR, 1),
+    ...dclInput(D3DDECLUSAGE.TEXCOORD, 2),
+    op(OPCODE.M4x4, 3), dst(REGISTER.RASTOUT, 0), src(REGISTER.INPUT, 0), src(REGISTER.CONST, 0),
+    op(OPCODE.MOV, 2), dst(REGISTER.ATTROUT, 0), src(REGISTER.INPUT, 1),
+    op(OPCODE.MOV, 2), dst(REGISTER.TEXCRDOUT, 0), src(REGISTER.INPUT, 2),
+    END_TOKEN,
+];
+
+test('a vertex shader over the fixed-function pixel stage gets a fragment stage of its own',
+    async()=>{
+        // The shader-model-1 era's ordinary draw: transform in a program,
+        // texture and blend in the stages. The stage cascade, the fog and
+        // the alpha test in force become a fragment stage over what the
+        // shader wrote, bound the way a pixel shader would be.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        assert.equal(h.device.CreateVertexShader(TEXTURED_VERTEX_SHADER, vs), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetTexture(0, h.texture);
+        h.device.SetRenderState(D3DRS.ALPHATESTENABLE, 1);
+        h.device.SetRenderState(D3DRS.ALPHAREF, 0x80);
+        h.device.SetRenderState(D3DRS.ALPHAFUNC, 5);
+        h.device.SetRenderState(D3DRS.TEXTUREFACTOR, 0xff204060);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        const diagnostics = h.device.diagnostics();
+        assert.equal(diagnostics.programmable, 1);
+        assert.equal(diagnostics.skipped.program, 0);
+
+        const modules = h.gpu.of('createShaderModule').map(call=>call.descriptor);
+        const fragment = modules.find(module=>module.label.startsWith('ps:'));
+        assert.ok(fragment, 'a fragment stage was made for the shader');
+        // The cascade over the shader's colour and coordinate set, the
+        // block at the pixel stage's first binding, the texture in the
+        // sampler group, and the alpha test the render state asked for.
+        assert.ok(fragment.code.includes('@group(1) @binding(0) var<uniform> uniforms'));
+        assert.ok(fragment.code.includes('@group(2) @binding(0) var texture0'));
+        assert.ok(fragment.code.includes('input.diffuse = in.v0;'));
+        assert.ok(fragment.code.includes('input.texCoord0 = in.t0.xy;'));
+        assert.ok(fragment.code.includes('input.specular = vec4f(0.0);'),
+            'a varying the shader does not write is the fixed function default');
+        assert.ok(fragment.code.includes('sampleStage0(input.texCoord0)'));
+        assert.ok(fragment.code.includes('current.a > uniforms.alphaRef'));
+        assert.ok(!fragment.code.includes('@location(1) v1'),
+            'and is not declared as an input the vertex stage would have to supply');
+
+        // The block the fragment reads is the fixed-function block, with the
+        // render state's texture factor and alpha reference in it.
+        const groups = h.groupsOfDraw();
+        const block = new Float32Array(h.boundBytes(groups.get(1), 0).buffer);
+        assert.equal(block.length, 100);
+        assert.deepEqual([...block.subarray(36, 40)].map(v=>Math.round(v * 255)),
+            [0x20, 0x40, 0x60, 0xff]);
+        assert.equal(Math.round(block[72] * 255), 0x80);
+
+        h.device.SetTexture(0, null);
+        h.device.SetVertexShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        vs.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
+test('a vertex shader that writes no coordinate set ends the cascade before a sampling stage',
     async()=>{
         const h = harness();
         /** @type {{ shader?: any }} */
         const vs = {};
         assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
         h.device.SetVertexShader(vs.shader);
+        h.device.SetTexture(0, h.texture);
         await h.draw();
-        await h.draw();
-        const diagnostics = h.device.diagnostics();
-        assert.equal(diagnostics.programmable, 0);
-        assert.equal(diagnostics.skipped.program, 2);
-        assert.equal(h.reports.length, 1);
-        assert.match(h.reports[0], /fixed-function pixel stage/);
+        assert.equal(h.device.diagnostics().programmable, 1);
+        const fragment = h.gpu.of('createShaderModule').map(call=>call.descriptor)
+            .find(module=>module.label.startsWith('ps:'));
+        assert.ok(fragment);
+        assert.ok(!fragment.code.includes('sampleStage0'),
+            'stage zero wanted coordinate set zero, which the shader never wrote');
+        h.device.SetTexture(0, null);
         h.device.SetVertexShader(null);
         h.device.SetVertexDeclaration(null);
         h.device.SetStreamSource(0, null, 0, 0);

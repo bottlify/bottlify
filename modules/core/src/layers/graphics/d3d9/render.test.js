@@ -454,6 +454,52 @@ test('a reset gives the previous back buffer and depth back to the GPU', async()
         .length, 4, 'the new back buffer and depth are new textures');
 });
 
+test('a target smaller than the bound depth surface gets a depth of its own size', async()=>{
+    // Direct3D binds a depth surface at least as large as the target and
+    // uses its corner; WebGPU attaches equal sizes only, and a pass that
+    // disagrees invalidates the whole frame. A quarter-size glow target
+    // drawn with the screen's depth still bound is the ordinary case.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    /** @type {{ surface?: any }} */
+    const small = {};
+    assert.equal(device.CreateRenderTarget(4, 4, D3DFMT.A8R8G8B8, false, small), D3D_OK);
+    /** @type {{ surface?: any }} */
+    const back = {};
+    assert.equal(device.GetBackBuffer(0, 0, 0, back), D3D_OK);
+
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, argb(1, 2, 3), 1, 0),
+        D3D_OK);
+    assert.equal(device.SetRenderTarget(0, small.surface), D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, argb(4, 5, 6), 1, 0),
+        D3D_OK);
+    assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, argb(7, 8, 9), 1, 0),
+        D3D_OK);
+    await h.present();
+
+    const passes = h.gpu.of('beginRenderPass').map((/** @type {any} */ call)=>call.descriptor);
+    const depthOf = (/** @type {any} */ pass)=>pass.depthStencilAttachment.view.texture.descriptor;
+    const colourOf = (/** @type {any} */ pass)=>pass.colorAttachments[0].view.texture.descriptor;
+    assert.equal(passes.length, 3);
+    assert.deepEqual(passes.map(pass=>[colourOf(pass).size.width, depthOf(pass).size.width]),
+        [[8, 8], [4, 4], [8, 8]], 'each pass has a depth the size of its target');
+    assert.equal(depthOf(passes[1]).label, 'depth-stand-in');
+    assert.equal(depthOf(passes[0]).label, 'depth');
+    assert.equal(depthOf(passes[2]), depthOf(passes[0]), 'the bound depth surface, when it fits');
+
+    // The stand-in is kept, not remade per pass.
+    assert.equal(device.SetRenderTarget(0, small.surface), D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, argb(4, 5, 6), 1, 0), D3D_OK);
+    await h.present();
+    assert.equal(h.gpu.of('createTexture')
+        .filter((/** @type {any} */ call)=>call.descriptor.label === 'depth-stand-in').length, 1);
+
+    assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+    back.surface.release();
+    small.surface.release();
+});
+
 test('a viewport wider than its target is refused', ()=>{
     const h = harness({ width: 8, height: 8 });
 

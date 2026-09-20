@@ -929,6 +929,24 @@ export async function game(options){
         const reportPath = join(REPORTS_DIR, `game-${stamp}.txt`);
         const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
         writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));
+        // The last presented frame as the engine read it back, beside the
+        // page's screenshot: the screenshot is what the compositor showed at
+        // the moment of the stop, the frame is what the program drew.
+        if (result.frameRgba && result.frame)
+        {
+            const rgba = Buffer.from(result.frameRgba, 'base64');
+            const bgra = Buffer.alloc(rgba.length);
+            for (let at = 0; at < rgba.length; at += 4)
+            {
+                bgra[at] = rgba[at + 2];
+                bgra[at + 1] = rgba[at + 1];
+                bgra[at + 2] = rgba[at];
+                bgra[at + 3] = rgba[at + 3];
+            }
+            writeFileSync(join(REPORTS_DIR, `game-${stamp}-frame.png`),
+                toPng(result.frame.width, result.frame.height, bgra));
+            delete result.frameRgba;
+        }
 
         await drainLog();
 
@@ -952,6 +970,14 @@ export async function game(options){
         }, options.calls, symbols);
         writeFileSync(reportPath, text);
 
+        // The graphics layer's whole account as JSON beside the report: the
+        // frame records, the presenter's copies by source, every counter --
+        // what a black or a frozen picture is read from.
+        if (result.graphics)
+        {
+            writeFileSync(join(REPORTS_DIR, `game-${stamp}-graphics.json`),
+                JSON.stringify(result.graphics, null, 1));
+        }
         // A file of its own: one line per draw is thousands of lines, which is
         // a thing to grep rather than a thing to read past.
         const drawn = result.graphics?.device?.lastDump ?? [];

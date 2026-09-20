@@ -362,7 +362,15 @@ version. `shader.js` parses the bytecode (operand counts from a table before mod
 addressing tokens from model 2 on, literal definitions read as raw dwords) and holds the constant
 files; `wgsl.js` translates one instruction at a time into a literal WGSL body: inputs by location
 typed as the declaration lays them, varyings at fixed locations per usage so the two stages agree,
-constants in three uniform arrays per stage, samplers as texture and sampler pairs. `stateblock.js`
+constants in three uniform arrays per stage, samplers as texture and sampler pairs. A draw binds
+any of the three combinations: a shader pair; a pixel shader over fixed-function vertices, which
+gets a vertex stage made from the declaration (`fixedVertexStage`); or a vertex shader over the
+fixed-function pixel stage, which gets a fragment stage made from the stage cascade, fog and alpha
+test in force (`fixedFragmentStage`), reading the colours, coordinate sets and fog the shader
+wrote and the fixed function's own defaults for what it did not -- the shader-model-1 era's
+ordinary draw, transform in a program and texturing in the stages. A target bound with a larger
+depth surface, which Direct3D allows and WebGPU does not, is drawn with a depth of its own size
+standing in (`depth-stand-in`), kept per depth surface and size. `stateblock.js`
 records what is set between `BeginStateBlock` and `EndStateBlock` -- and in this version a state set
 while recording goes into the block, not the device. `declaration.js` converts between vertex
 declarations and FVF codes; a fixed-function draw through a declaration is drawn when it describes

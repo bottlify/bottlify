@@ -320,6 +320,15 @@ export const graphicsModule = {
                     : undefined,
                 allocate: config?.allocate,
                 free: config?.free,
+                // The same per-draw account and the same knobs Direct3D 8
+                // takes, for the same reason.
+                dumpDraws: device?.dumpDraws === true,
+                maxDraws: device?.maxDraws,
+                divergence: config?.divergence,
+                skipTexture: device?.skipTexture,
+                probeTexture: device?.probeTexture,
+                fog: device?.fog,
+                mips: device?.mips,
             }),
             // OpenGL asks for a device only when there is one, so it is the
             // one API here that a headless build can run to a finished frame.

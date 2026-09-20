@@ -535,6 +535,82 @@ export function generateFixedFunction(state, layout){
             ? `    out.fogAmount = ${has('specular') ? 'vertex.specular.a' : '1.0'};`
             : '    out.fogAmount = fogFactorOf(out.position.w);'];
 
+    const lightCount = lighting === null ? 0 : lighting.lights.length;
+    const code = `${lightCount === 0 ? '' : LIGHT_STRUCT}${uniformStruct(lightCount)}
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+${functionDeclarations(lighting, state.fogMode)}${samplerDeclarations(state.stages.length, 0, 1)}
+${sampleFunctions(state.stages.length)}
+struct VertexIn {
+${inputs}
+};
+
+struct VertexOut {
+    @builtin(position) position: vec4f,
+${varyings.join('\n')}
+};
+
+@vertex
+fn vertexMain(vertex: VertexIn) -> VertexOut {
+    var out: VertexOut;
+${position}
+${[...assignments, ...fogAmount].join('\n')}
+    return out;
+}
+
+@fragment
+fn fragmentMain(input: VertexOut) -> @location(0) vec4f {
+${fragmentBody(state, specularEnable)}
+    return current;
+}
+`;
+
+    return {
+        code,
+        label: `fixed-function:${state.fvf.toString(16)}:${state.stages.length}`
+            + (lighting === null ? '' : `:lit${lightCount}`),
+        textureCount: state.stages.length,
+    };
+}
+
+/**
+ * The block the fixed-function stages read, as WGSL declares it; the layout
+ * `UNIFORM_AT` in the renderer is this struct's.
+ *
+ * @param {number} lightCount
+ */
+function uniformStruct(lightCount){
+    return `struct Uniforms {
+    worldViewProjection: mat4x4f,
+    world: mat4x4f,
+    viewportOffset: vec2f,
+    viewportScale: vec2f,
+    textureFactor: vec4f,
+    fogColor: vec4f,
+    fogFactors: vec4f,
+    materialDiffuse: vec4f,
+    materialAmbient: vec4f,
+    materialSpecular: vec4f,
+    materialEmissive: vec4f,
+    ambient: vec4f,
+    eye: vec4f,
+    alphaRef: f32,
+    stage0: u32,
+    stage1: u32,
+    stage2: u32,
+    texTransform: array<vec4f, 6>,${lightCount === 0 ? '' : `
+    lights: array<Light, ${lightCount}>,`}
+};`;
+}
+
+/**
+ * The fragment half of the fixed function: the stage cascade over `input`'s
+ * diffuse, specular and coordinate sets, then the specular add, the fog and
+ * the alpha test, leaving the result in `current`.
+ *
+ * @param {import('./pipeline.js').PipelineState} state
+ * @param {boolean} specularEnable
+ */
+function fragmentBody(state, specularEnable){
     const stages = state.stages.length === 0
         ? '    var current = input.diffuse;'
         : ['    var current = input.diffuse;', ...state.stages.map((stage, index)=>{
@@ -575,61 +651,91 @@ export function generateFixedFunction(state, layout){
         ? `\n    if (!(${compareExpression(state.alphaFunc, 'current.a', 'uniforms.alphaRef')}))`
             + '\n    {\n        discard;\n    }'
         : '';
-
-    const lightCount = lighting === null ? 0 : lighting.lights.length;
-    const code = `${lightCount === 0 ? '' : LIGHT_STRUCT}struct Uniforms {
-    worldViewProjection: mat4x4f,
-    world: mat4x4f,
-    viewportOffset: vec2f,
-    viewportScale: vec2f,
-    textureFactor: vec4f,
-    fogColor: vec4f,
-    fogFactors: vec4f,
-    materialDiffuse: vec4f,
-    materialAmbient: vec4f,
-    materialSpecular: vec4f,
-    materialEmissive: vec4f,
-    ambient: vec4f,
-    eye: vec4f,
-    alphaRef: f32,
-    stage0: u32,
-    stage1: u32,
-    stage2: u32,
-    texTransform: array<vec4f, 6>,${lightCount === 0 ? '' : `
-    lights: array<Light, ${lightCount}>,`}
-};
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
-${functionDeclarations(lighting, state.fogMode)}${samplerDeclarations(state.stages.length)}
-${sampleFunctions(state.stages.length)}
-struct VertexIn {
-${inputs}
-};
-
-struct VertexOut {
-    @builtin(position) position: vec4f,
-${varyings.join('\n')}
-};
-
-@vertex
-fn vertexMain(vertex: VertexIn) -> VertexOut {
-    var out: VertexOut;
-${position}
-${[...assignments, ...fogAmount].join('\n')}
-    return out;
+    return `${stages}${specular}${fog}${alphaTest}`;
 }
 
+/**
+ * A fragment stage for a draw that binds a vertex shader and no pixel
+ * shader: the fixed-function cascade, fog and alpha test over what the
+ * shader wrote -- its colours, its coordinate sets and its fog -- which is
+ * how a title of the shader-model-1 era draws nearly everything: transform
+ * and skin in a program, texture and blend in the stages.
+ *
+ * Bound as a programmable pixel stage is: the block above at group 1's first
+ * binding, the stages' textures and samplers at group 2. A varying the shader
+ * does not write is not declared -- a fragment input the vertex stage does
+ * not produce fails the pipeline -- and reads as the fixed function's own
+ * default: opaque white diffuse, black specular, zero coordinates, and no fog.
+ *
+ * @param {import('./pipeline.js').PipelineState} state
+ * @param {readonly number[]} written  The vertex stage's varying locations.
+ * @returns {{ wgsl: string, entry: string, samplers: { index: number, type: string }[],
+ *     inputs: never[], outputs: never[], constants: number, error: string | null }}
+ */
+export function fixedFragmentStage(state, written){
+    const has = (/** @type {number} */ location)=>written.includes(location);
+    /** @type {string[]} */
+    const fields = ['    @builtin(position) position: vec4f,'];
+    /** @type {string[]} */
+    const carried = [];
+    // The programmable convention: colours at 0 and 1, coordinate set n at
+    // 2 + n, fog at 10 (`varyingLocation` in the translator).
+    carried.push(`    input.diffuse = ${has(0) ? 'in.v0' : 'vec4f(1.0)'};`);
+    if (has(0))
+    {
+        fields.push('    @location(0) v0: vec4f,');
+    }
+    carried.push(`    input.specular = ${has(1) ? 'in.v1' : 'vec4f(0.0)'};`);
+    if (has(1))
+    {
+        fields.push('    @location(1) v1: vec4f,');
+    }
+    const sets = state.stages.reduce(
+        (most, stage)=>Math.max(most, (stage.texCoordIndex & COORD_SET_MASK) + 1), 0);
+    for (let set = 0; set < sets; set++)
+    {
+        if (has(2 + set))
+        {
+            fields.push(`    @location(${2 + set}) t${set}: vec4f,`);
+        }
+        carried.push(`    input.texCoord${set} = `
+            + `${has(2 + set) ? `in.t${set}.xy` : 'vec2f(0.0)'};`);
+    }
+    if (state.fogMode !== D3DFOG.NONE)
+    {
+        if (has(10))
+        {
+            fields.push('    @location(10) fog: vec4f,');
+        }
+        carried.push(`    input.fogAmount = ${has(10) ? 'in.fog.x' : '1.0'};`);
+    }
+    const members = ['    diffuse: vec4f,', '    specular: vec4f,',
+        ...Array.from({ length: sets }, (_, set)=>`    texCoord${set}: vec2f,`),
+        ...(state.fogMode !== D3DFOG.NONE ? ['    fogAmount: f32,'] : [])];
+    const wgsl = `${uniformStruct(0)}
+@group(1) @binding(0) var<uniform> uniforms: Uniforms;
+${functionDeclarations(null, state.fogMode)}${samplerDeclarations(state.stages.length, 2, 0)}
+${sampleFunctions(state.stages.length)}
+struct PsIn {
+${fields.join('\n')}
+};
+
+struct Carried {
+${members.join('\n')}
+};
+
 @fragment
-fn fragmentMain(input: VertexOut) -> @location(0) vec4f {
-${stages}${specular}${fog}${alphaTest}
+fn ps_main(in: PsIn) -> @location(0) vec4f {
+    var input: Carried;
+${carried.join('\n')}
+${fragmentBody(state, state.specularEnable === true)}
     return current;
 }
 `;
-
     return {
-        code,
-        label: `fixed-function:${state.fvf.toString(16)}:${state.stages.length}`
-            + (lighting === null ? '' : `:lit${lightCount}`),
-        textureCount: state.stages.length,
+        wgsl, entry: 'ps_main',
+        samplers: state.stages.map((_, index)=>({ index, type: '2d' })),
+        inputs: [], outputs: [], constants: 0, error: null,
     };
 }
 
@@ -742,17 +848,21 @@ ${transformed}    let flags = ${flags};
 }
 
 /**
- * Texture and sampler bindings, one pair per stage, from binding 1 upward.
+ * Texture and sampler bindings, one pair per stage, from `first` upward in
+ * `group`: the fixed-function pipeline's own group after its block, or the
+ * programmable layout's sampler group from its start.
  *
- * @param {number} count @returns {string}
+ * @param {number} count @param {number} group @param {number} first @returns {string}
  */
-function samplerDeclarations(count){
+function samplerDeclarations(count, group, first){
     /** @type {string[]} */
     const lines = [];
     for (let index = 0; index < count; index++)
     {
-        lines.push(`@group(0) @binding(${1 + index * 2}) var texture${index}: texture_2d<f32>;`);
-        lines.push(`@group(0) @binding(${2 + index * 2}) var sampler${index}: sampler;`);
+        lines.push(`@group(${group}) @binding(${first + index * 2})`
+            + ` var texture${index}: texture_2d<f32>;`);
+        lines.push(`@group(${group}) @binding(${first + 1 + index * 2})`
+            + ` var sampler${index}: sampler;`);
     }
     return lines.join('\n');
 }

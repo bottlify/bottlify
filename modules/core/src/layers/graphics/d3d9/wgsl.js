@@ -134,6 +134,8 @@ export function varyingLocation(usage, index){
  * @property {string} wgsl
  * @property {string} entry       The entry point's name.
  * @property {ShaderInput[]} inputs
+ * @property {number[]} outputs   A vertex stage's varyings, as the locations it
+ *     writes (`varyingLocation`): what a fragment stage made for it may read.
  * @property {{ index: number, type: string }[]} samplers
  * @property {number} constants   How many float registers the shader reaches.
  * @property {string | null} error
@@ -949,6 +951,8 @@ export function translateShader(parsed, options = {}){
     const inputFields = [];
     /** @type {string[]} */
     const outputFields = [];
+    /** @type {number[]} */
+    const outputs = [];
     /** @type {string[]} */
     const prologue = [];
     let entry;
@@ -979,14 +983,18 @@ export function translateShader(parsed, options = {}){
             }
         }
         outputFields.push('    @builtin(position) oPos: vec4f,');
+        /** @param {number} location @param {string} name */
+        const emits = (location, name)=>{
+            outputFields.push(`    @location(${location}) ${name}: vec4f,`);
+            outputs.push(location);
+        };
         if (major >= 3)
         {
             for (const [index, declaration] of semantics)
             {
                 if (declaration.usage !== D3DDECLUSAGE.POSITION)
                 {
-                    outputFields.push(`    @location(${varyingLocation(declaration.usage,
-                        declaration.usageIndex)}) o${index}: vec4f,`);
+                    emits(varyingLocation(declaration.usage, declaration.usageIndex), `o${index}`);
                 }
             }
         }
@@ -996,23 +1004,21 @@ export function translateShader(parsed, options = {}){
             {
                 if (output >= 200)
                 {
-                    outputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.TEXCOORD,
-                        output - 200)}) oT${output - 200}: vec4f,`);
+                    emits(varyingLocation(D3DDECLUSAGE.TEXCOORD, output - 200),
+                        `oT${output - 200}`);
                 }
                 else if (output >= 100)
                 {
-                    outputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.COLOR,
-                        output - 100)}) oD${output - 100}: vec4f,`);
+                    emits(varyingLocation(D3DDECLUSAGE.COLOR, output - 100),
+                        `oD${output - 100}`);
                 }
                 else if (output === 1)
                 {
-                    outputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.FOG, 0)})`
-                        + ' oFog: vec4f,');
+                    emits(varyingLocation(D3DDECLUSAGE.FOG, 0), 'oFog');
                 }
                 else if (output === 2)
                 {
-                    outputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.PSIZE, 0)})`
-                        + ' oPts: vec4f,');
+                    emits(varyingLocation(D3DDECLUSAGE.PSIZE, 0), 'oPts');
                 }
             }
         }
@@ -1067,7 +1073,7 @@ export function translateShader(parsed, options = {}){
     ].join('\n');
 
     return {
-        wgsl, entry, inputs, samplers,
+        wgsl, entry, inputs, outputs, samplers,
         constants: reach === Infinity ? (vertex ? 256 : 224) : reach,
         error,
     };
@@ -1092,6 +1098,8 @@ export function fixedVertexStage(elements, shapes){
     const inputFields = [];
     /** @type {string[]} */
     const outputFields = ['    @builtin(position) oPos: vec4f,'];
+    /** @type {number[]} */
+    const outputs = [];
     /** @type {string[]} */
     const body = [];
     /** @type {ShaderInput[]} */
@@ -1119,6 +1127,7 @@ export function fixedVertexStage(elements, shapes){
         {
             const location = varyingLocation(element.usage, element.usageIndex);
             outputFields.push(`    @location(${location}) o${location}: vec4f,`);
+            outputs.push(location);
             body.push(`    out.o${location} = ${value};`);
         }
     }
@@ -1143,7 +1152,7 @@ export function fixedVertexStage(elements, shapes){
         '}',
     ].join('\n');
     return {
-        wgsl, entry: 'vs_main', inputs, samplers: [], constants: HYBRID_CONSTANTS.COUNT,
+        wgsl, entry: 'vs_main', inputs, outputs, samplers: [], constants: HYBRID_CONSTANTS.COUNT,
         error: position ? null : 'the declaration carries no position',
     };
 }

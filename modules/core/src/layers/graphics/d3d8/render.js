@@ -49,6 +49,8 @@ import {
 } from '../webgpu/internal/programmable.js';
 import { HYBRID_CONSTANTS, fixedVertexStage, translateShader } from '../d3d9/wgsl.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
+import { fixedFragmentStage } from '../webgpu/internal/fixedfunction.js';
+import { pipelineKey } from '../webgpu/internal/pipeline.js';
 
 /** A stage state's DWORD, as the D3D8 header lays it out. */
 const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
@@ -101,7 +103,7 @@ const PLANAR_IDENTITY = Object.freeze([1, 0, 0, 0, 1, 0]);
 const TTFF_COUNT2 = 2;
 
 /** Textures whose texels a dumping run keeps. Enough to find one, not a heap dump. */
-const TEXTURE_DUMP_LIMIT = 24;
+const TEXTURE_DUMP_LIMIT = 96;
 
 /** Distinct cascade truncations a run keeps, so a report names them without a flood. */
 const TRUNCATION_SAMPLES = 8;
@@ -2958,13 +2960,71 @@ export function createRenderer(options){
     };
 
     /**
+     * Depth surfaces of a target's own size, standing in for a depth
+     * surface larger than the target it is bound with. Direct3D allows a
+     * depth surface at least as large as the colour target and uses its
+     * top-left corner; WebGPU attaches only equal sizes, and a pass that
+     * disagrees invalidates the whole frame's command buffer -- a black
+     * frame with nothing else wrong in it. A program drawing a glow into a
+     * quarter-size target with its screen-size depth still bound is the
+     * ordinary case. The stand-in is per depth surface and size, kept for
+     * the run; what it holds is not what the corner of the larger one
+     * would, which a program that reads depth back across that boundary
+     * would notice and nothing else does.
+     *
+     * @type {WeakMap<object, Map<string, import('../webgpu/contract.js').Surface>>}
+     */
+    const standInDepths = new WeakMap();
+
+    /**
+     * The depth attachment for the model's targets: the bound depth surface
+     * when it is the target's size, a stand-in of the target's size when
+     * it is larger, and none when there is none.
+     *
+     * @param {RenderModel} model
+     * @param {import('../webgpu/contract.js').Surface} target
+     */
+    const depthFor = (model, target)=>{
+        if (!model.depthStencil)
+        {
+            return null;
+        }
+        const depth = surfaceFor(model.depthStencil);
+        if (depth.width === target.width && depth.height === target.height)
+        {
+            return depth;
+        }
+        let sizes = standInDepths.get(depth);
+        if (!sizes)
+        {
+            sizes = new Map();
+            standInDepths.set(depth, sizes);
+        }
+        const key = `${target.width}x${target.height}`;
+        const standing = sizes.get(key);
+        if (standing)
+        {
+            return standing;
+        }
+        const made = backend.createSurface({
+            width: target.width,
+            height: target.height,
+            format: depth.format,
+            label: 'depth-stand-in',
+            usage: TextureUsage.RENDER_ATTACHMENT,
+        });
+        sizes.set(key, made);
+        return made;
+    };
+
+    /**
      * @param {RenderModel} model
      * @param {{ clearColor?: any, clearDepth?: number, clearStencil?: number }} clearing
      */
     const beginPass = (model, clearing)=>{
         const frame = ensureFrame();
         const target = surfaceFor(model.renderTarget);
-        const depth = model.depthStencil ? surfaceFor(model.depthStencil) : null;
+        const depth = depthFor(model, target);
         frame.commands.push({ kind: 'pass', target, depth, ...clearing });
         frame.pass = { target, depth };
         frame.viewport = null;
@@ -2974,7 +3034,7 @@ export function createRenderer(options){
     const ensurePass = model=>{
         const frame = ensureFrame();
         const target = surfaceFor(model.renderTarget);
-        const depth = model.depthStencil ? surfaceFor(model.depthStencil) : null;
+        const depth = depthFor(model, target);
         if (!frame.pass || frame.pass.target !== target || frame.pass.depth !== depth)
         {
             beginPass(model, {});
@@ -3096,21 +3156,17 @@ export function createRenderer(options){
      * @param {ProgramState} program
      */
     const prepareProgram = (model, stride, topology, program)=>{
-        if (!program.pixel)
-        {
-            // A vertex shader feeding the fixed-function pixel stage needs
-            // that stage's fragment formula driven by the shader's outputs,
-            // which the fixed-function generator does not yet do.
-            skip('program');
-            reportProgram('vs-only', 'a draw with a vertex shader and the fixed-function'
-                + ' pixel stage was not drawn: only a shader pair, or a pixel shader over'
-                + ' fixed-function vertices, is drawn');
-            return null;
-        }
         if (!program.declaration)
         {
             skip('program');
+            reportProgram(`nodecl:${program.vertexId}/${program.pixelId}`,
+                `a draw with shaders ${program.vertexId}/${program.pixelId} and no vertex`
+                + ' declaration or FVF was not drawn');
             return null;
+        }
+        if (!program.pixel)
+        {
+            return prepareMixed(model, stride, topology, program);
         }
         const pixelShader = /** @type {object} */ (program.pixelShader);
         const pixel = translationOf(pixelShader, 'ps', ()=>translateShader(
@@ -3212,6 +3268,122 @@ export function createRenderer(options){
                 source: {
                     key: `${state.vertexShader}/${state.pixelShader}/${program.declarationId}`
                         + `/${shapes}/${stride}`,
+                    vertex, pixel, layout,
+                },
+                declarationId: program.declarationId,
+                vertexBlocks,
+                pixelBlocks,
+                samplerBindings,
+            },
+        };
+    };
+
+    /**
+     * A vertex shader over the fixed-function pixel stage: the shader's
+     * translation as the vertex stage, and a fragment stage made from the
+     * stage cascade, fog and alpha test in force, reading what the shader
+     * wrote. The pipeline is the programmable one, so the cascade's block
+     * travels as the pixel stage's first constant buffer and its textures
+     * in the sampler group.
+     *
+     * @param {RenderModel} model
+     * @param {number} stride
+     * @param {string} topology
+     * @param {ProgramState} program
+     * @returns {PreparedDraw | null}
+     */
+    const prepareMixed = (model, stride, topology, program)=>{
+        const base = translationOf(/** @type {object} */ (program.vertexShader), 'vs',
+            ()=>translateShader(
+                /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex)));
+        if (base.error)
+        {
+            skip('program');
+            reportProgram(`vs:${program.vertexId}`,
+                `vertex shader ${program.vertexId} was not drawn: ${base.error}`);
+            return null;
+        }
+        const declaration = /** @type {readonly import('../webgpu/internal/programmable.js')
+            .VertexElement[]} */ (program.declaration);
+        const laid = vertexLayoutOf(declaration, base.inputs, stride);
+        if (!laid.layout)
+        {
+            skip('program');
+            reportProgram(`decl:${program.declarationId}`,
+                `a draw through declaration ${program.declarationId} was not drawn: ${laid.error}`);
+            return null;
+        }
+        const layout = laid.layout;
+        const shapes = shapeKey(layout);
+        /** @type {import('../d3d9/wgsl.js').TranslatedShader} */
+        const vertex = translationOf(/** @type {object} */ (program.vertexShader),
+            `vs:${shapes}`, ()=>translateShader(
+                /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
+                { inputs: layout.shapes }));
+        if (vertex.error)
+        {
+            skip('program');
+            reportProgram(`vs:${program.vertexId}:${program.declarationId}`,
+                `vertex stage of shader ${program.vertexId} was not drawn: ${vertex.error}`);
+            return null;
+        }
+        // The cascade ends where the shader stopped writing coordinate sets,
+        // as it ends where a vertex format stops carrying them.
+        let sets = 0;
+        for (const location of vertex.outputs)
+        {
+            if (location >= 2 && location < 10)
+            {
+                sets = Math.max(sets, location - 1);
+            }
+        }
+        const cascade = stageCascade(model, {
+            texCoordSets: sets, attributes: [], stride, preTransformed: false, blendWeights: 0,
+        });
+        reportCascade(cascade);
+        const state = {
+            ...pipelineStateOf(model, {
+                fvf: 0, topology, ...formatsOf(model), stages: cascade.stages, lighting: null,
+                fog: fogApplied,
+            }),
+            vertexShader: program.vertexId,
+            pixelShader: -1,
+        };
+        const pixel = fixedFragmentStage(state, vertex.outputs);
+        const samplerBindings = cascade.stages.map((stage, index)=>{
+            const texture = cascade.textures[index];
+            return {
+                stage: index,
+                texture,
+                view: texture ? uploadIfDirty(texture).view : placeholderView(),
+                sampler: samplerFor(model.stageStates(index)),
+                placeholder: !texture,
+            };
+        });
+        const take = ensureFrame().arena.take;
+        const vertexBlocks = constantBlocks(program.vertexConstants, vertex.constants, take);
+        const pixelBlocks = [uniformsOf(model, null, take, mipsApplied), take(64), take(16)];
+        counters.prepared.built++;
+        return {
+            version: undefined,
+            contentVersion: 0,
+            stride,
+            topology,
+            state,
+            uniforms: vertexBlocks[0],
+            template: null,
+            stageBindings: samplerBindings,
+            lighting: null,
+            fogSetting: '',
+            layout: null,
+            textures: cascade.textures,
+            truncated: cascade.truncated,
+            pipelineFrame: null,
+            pipelineIndex: 0,
+            program: {
+                source: {
+                    key: `${state.vertexShader}/ffp/${program.declarationId}/${shapes}/${stride}`
+                        + `/${pipelineKey(state)}`,
                     vertex, pixel, layout,
                 },
                 declarationId: program.declarationId,

@@ -1243,6 +1243,9 @@ export function createHarness(canvas, how = {}){
             };
             result.colours = census(image);
             result.opacity = opacity(image);
+            // The frame itself, for the driver to write out as an image: a
+            // census says whether there is a picture, not what it is.
+            result.frameRgba = toBase64(image.pixels);
         }
         result.presents = presentState.presents;
 
