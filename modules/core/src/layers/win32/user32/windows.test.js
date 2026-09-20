@@ -37,6 +37,7 @@ const HINSTANCE = 0x400000;
 const UNTOUCHED = 0xa5a5a5a5;
 
 const WM_DESTROY = 0x0002;
+const WM_NCDESTROY = 0x0082;
 const WM_CLOSE = 0x0010;
 const WM_QUIT = 0x0012;
 const WM_KEYDOWN = 0x0100;
@@ -1079,15 +1080,20 @@ test('a subclassed window is dispatched to its new procedure', ()=>{
     assert.equal(dispatched[0].wndProc, 0x402000);
 });
 
-test('WM_DESTROY reaches the procedure of the window that is going away', ()=>{
-    const { fns, memory, dispatched, hwnd } = withWindow();
-    fns.DestroyWindow.handler([hwnd]);
-
-    assert.equal(fns.GetMessageA.handler([MSG_BUFFER, 0, 0, 0]), 1);
-    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_DESTROY);
-    assert.equal(fns.DispatchMessageA.handler([MSG_BUFFER]), 0x1234);
-    assert.equal(dispatched[0].wndProc, WNDPROC);
-});
+test('WM_DESTROY and WM_NCDESTROY are sent to the window going away, before it has gone',
+    async()=>{
+        // Sent, not posted: a program that destroys its window and then frees
+        // what the procedure reads through GWL_USERDATA relies on the
+        // procedure having run inside DestroyWindow. A queued WM_DESTROY
+        // arrived after the free and the procedure called into freed memory.
+        const { fns, dispatched, hwnd } = withWindow();
+        assert.equal(await fns.DestroyWindow.handler([hwnd]), 1);
+        assert.deepEqual(dispatched.map((/** @type {any} */ d)=>[d.hwnd, d.message]),
+            [[hwnd, WM_DESTROY], [hwnd, WM_NCDESTROY]]);
+        assert.equal(dispatched[0].wndProc, WNDPROC);
+        assert.equal(fns.IsWindow.handler([hwnd]), 0, 'and only then is the handle gone');
+        assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, 0]), 0, 'nothing queued');
+    });
 
 // --- the default window procedure ---
 

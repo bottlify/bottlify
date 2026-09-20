@@ -47,6 +47,7 @@ import {
 
 /** Messages this layer has an opinion about. */
 const WM_DESTROY = 0x0002;
+const WM_NCDESTROY = 0x0082;
 const WM_MOVE = 0x0003;
 const WM_SIZE = 0x0005;
 /** WM_SIZE's wParam for a plain resize: not minimised, not maximised. */
@@ -933,10 +934,23 @@ export function createWindowFunctions(host){
      * Destroys a window and everything that hangs off it. A child outliving its
      * parent is a handle nobody is left to close.
      *
-     * @param {number} hwnd
-     * @returns {number} 1 when there was a window to destroy
+     * WM_DESTROY is *sent*: the window procedure runs before this returns,
+     * while whatever the program keeps behind the window still exists. A
+     * program that destroys its window and then frees the object the
+     * procedure reads through GWL_USERDATA is entitled to that order, and
+     * one handed the message later, from its queue, called into freed
+     * memory. Then the children go, then WM_NCDESTROY, the last message a
+     * window sees, and only then does the handle stop resolving.
+     *
+     * A window whose creation failed part way is taken down with less: one
+     * refused by the CBT hook never existed to its procedure and hears
+     * nothing; one whose WM_CREATE answered -1 hears WM_NCDESTROY alone.
+     *
+     * @param {number} hwnd @param {unknown} [thread]
+     * @param {'all' | 'ncdestroy' | 'none'} [told]  Which of the two it hears.
+     * @returns {number | Promise<number>} 1 when there was a window to destroy
      */
-    const destroyWindow = hwnd=>{
+    const destroyWindow = (hwnd, thread, told = 'all')=>{
         const record = live(hwnd);
         if (!record)
         {
@@ -949,45 +963,49 @@ export function createWindowFunctions(host){
         // So do its hot keys: one left registered would keep eating the
         // keystroke for a window that can no longer be delivered to.
         host.queue.unregisterHotKeysFor?.(record.hwnd);
-        // Windows *sends* WM_DESTROY, which means running the window procedure
-        // before this call returns, and that road goes through the bridge.
-        // Queuing it preserves the order the program observes and keeps the
-        // procedure reachable, which is why the record outlives the handle.
-        host.queue.post({ hwnd: record.hwnd, message: WM_DESTROY, wParam: 0, lParam: 0 });
         const covered = shown(record) ? geometry.windowRect(record) : null;
-        record.destroyed = true;
-        // A dialog's font is the dialog manager's, made from its template,
-        // and goes with the dialog.
-        if (record.dialogFont)
-        {
-            draw?.deleteFont?.(record.dialogFont);
-        }
-        host.handles.close(record.hwnd);
-        if (active === record.hwnd)
-        {
-            active = 0;
-        }
-        if (focus === record.hwnd)
-        {
-            focus = 0;
-        }
-        if (captured === record.hwnd)
-        {
-            captured = 0;
-        }
-
-        for (const child of windows.values())
-        {
-            if (child.parent === record.hwnd && !child.destroyed)
-            {
-                destroyWindow(child.hwnd);
-            }
-        }
-        if (covered)
-        {
-            uncover(covered);
-        }
-        return 1;
+        const on = thread ?? host.callerThread?.();
+        /** @param {number} message @returns {number | Promise<number>} */
+        const tell = message=>(told === 'all' || (told === 'ncdestroy' && message === WM_NCDESTROY)
+            ? send(record.hwnd, message, 0, 0, on)
+            : 0);
+        return andThen(tell(WM_DESTROY), ()=>{
+            const children = [...windows.values()]
+                .filter(child=>child.parent === record.hwnd && !child.destroyed);
+            /** @param {number} index @returns {number | Promise<number>} */
+            const destroyChildren = index=>(index < children.length
+                ? andThen(destroyWindow(children[index].hwnd, on, told),
+                    ()=>destroyChildren(index + 1))
+                : 1);
+            return andThen(destroyChildren(0),
+                ()=>andThen(tell(WM_NCDESTROY), ()=>{
+                    record.destroyed = true;
+                    // A dialog's font is the dialog manager's, made from its
+                    // template, and goes with the dialog.
+                    if (record.dialogFont)
+                    {
+                        draw?.deleteFont?.(record.dialogFont);
+                    }
+                    host.handles.close(record.hwnd);
+                    if (active === record.hwnd)
+                    {
+                        active = 0;
+                    }
+                    if (focus === record.hwnd)
+                    {
+                        focus = 0;
+                    }
+                    if (captured === record.hwnd)
+                    {
+                        captured = 0;
+                    }
+                    if (covered)
+                    {
+                        uncover(covered);
+                    }
+                    return 1;
+                }));
+        });
     };
 
     /** @param {any} record @param {number} index */
@@ -1278,8 +1296,7 @@ export function createWindowFunctions(host){
             }, host.callerThread?.()), created=>{
                 if ((created | 0) === -1)
                 {
-                    destroyWindow(record.hwnd);
-                    return 0;
+                    return andThen(destroyWindow(record.hwnd, undefined, 'ncdestroy'), ()=>0);
                 }
                 return record.hwnd;
             });
@@ -1347,14 +1364,12 @@ export function createWindowFunctions(host){
         return andThen(cbt, refused=>{
             if ((refused | 0) !== 0)
             {
-                destroyWindow(record.hwnd);
-                return done(0);
+                return andThen(destroyWindow(record.hwnd, thread, 'none'), ()=>done(0));
             }
             return andThen(tell(WM_CREATE), created=>{
                 if ((created | 0) === -1)
                 {
-                    destroyWindow(record.hwnd);
-                    return done(0);
+                    return andThen(destroyWindow(record.hwnd, thread, 'ncdestroy'), ()=>done(0));
                 }
                 return done(record.hwnd);
             });
@@ -1855,8 +1870,7 @@ export function createWindowFunctions(host){
                 return 1;
             }
             case WM_CLOSE:
-                destroyWindow(record.hwnd);
-                return 0;
+                return andThen(destroyWindow(record.hwnd, thread), ()=>0);
             // Validates the window: a procedure that hands WM_PAINT here has
             // nothing to draw, and the area has to be cleared or the same
             // paint is retrieved for ever. The frame and background still

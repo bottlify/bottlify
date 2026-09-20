@@ -208,7 +208,11 @@ gets its own heap, hive, queue and COM registry.
   `WM_SIZE` clips its cursor to the picture. A window has the frame its styles give it
   (`frame.js`: border, caption with title and close box, scroll bars), which `DefWindowProc`
   paints on `WM_NCPAINT` and which `GetClientRect`, `ClientToScreen` and `AdjustWindowRect` all
-  derive from the same metrics. Painting goes through the desktop surface the graphics layer
+  derive from the same metrics. `DestroyWindow` *sends* `WM_DESTROY`, then destroys the children,
+  then sends `WM_NCDESTROY`, and only then stops the handle resolving -- the procedure runs before
+  the call returns, while whatever the program keeps behind the window still exists; a window
+  whose CBT hook refused it hears nothing, one whose `WM_CREATE` answered -1 hears `WM_NCDESTROY`
+  alone. Painting goes through the desktop surface the graphics layer
   owns (`docs/core/graphics.md`): `BeginPaint` sends `WM_NCPAINT` and `WM_ERASEBKGND` first, a
   window's update area is one rectangle, a window that is invalidated marks every window painted
   after it that overlaps it, and the desktop is presented when the queue finds nothing left to

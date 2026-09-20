@@ -275,7 +275,13 @@ test('DialogBox pumps until EndDialog and answers what it was given', async()=>{
 
     const answer = fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
     assert.equal(await answer, 7);
-    assert.deepEqual(delivered, [{ message: 0x0110, thread: 'the caller' }]);
+    // WM_INITDIALOG on the way in, WM_DESTROY and WM_NCDESTROY on the way
+    // out: a modal dialog is destroyed, and its procedure hears so.
+    assert.deepEqual(delivered, [
+        { message: 0x0110, thread: 'the caller' },
+        { message: 0x0002, thread: 'the caller' },
+        { message: 0x0082, thread: 'the caller' },
+    ]);
     assert.equal(fns.DialogBoxIndirectParamA.handler([HINSTANCE, 0, 0, DIALOGPROC, 0]), -1,
         'and a dialog that cannot be made answers -1 at once');
     assert.equal(fns.DialogBoxIndirectParamA.argBytes, 20);
