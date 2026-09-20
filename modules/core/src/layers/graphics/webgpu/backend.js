@@ -150,7 +150,7 @@ export function createBackend(options){
             return {
                 bindGroupLayout: layouts.group,
                 vertexLayout: layout,
-                gpu: device.createRenderPipeline({
+                gpu: await device.createRenderPipelineAsync({
                     label: generated.label,
                     layout: layouts.pipeline,
                     vertex: {
@@ -525,6 +525,22 @@ export function createBackend(options){
                 throw new Error('A render pipeline needs an explicit pipeline layout');
             }
             return device.createRenderPipeline(descriptor);
+        },
+
+        /**
+         * The same, resolved once the pipeline is valid and rejected with the
+         * validation message when it is not: a pipeline returned invalid
+         * fails every command buffer it is set on, and with it every frame.
+         *
+         * @param {any} descriptor
+         */
+        createRenderPipelineAsync(descriptor){
+            if (!descriptor.layout || typeof descriptor.layout !== 'object')
+            {
+                return Promise.reject(
+                    new Error('A render pipeline needs an explicit pipeline layout'));
+            }
+            return device.createRenderPipelineAsync(descriptor);
         },
 
         /** @param {{ code: string, label?: string }} request */

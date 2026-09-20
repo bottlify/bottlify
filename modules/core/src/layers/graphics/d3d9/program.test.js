@@ -91,9 +91,9 @@ const ELEMENTS = [
 ];
 const STRIDE = 24;
 
-/** @param {{ dumpDraws?: boolean }} [options] */
+/** @param {{ dumpDraws?: boolean, refusePipeline?: (descriptor: any) => string | null }} [options] */
 function harness(options = {}){
-    const gpu = createFakeDevice();
+    const gpu = createFakeDevice({ refusePipeline: options.refusePipeline });
     /** @type {string[]} */
     const reports = [];
     const backend = createBackend({
@@ -554,6 +554,80 @@ test('a varying the pixel shader reads and the vertex shader never writes is wri
         h.device.SetStreamSource(0, null, 0, 0);
         ps.shader.release();
         vs.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
+test('a pixel shader over a declaration that carries only a position is given what it reads',
+    async()=>{
+        // The fixed-function pipeline hands a pixel shader white where the
+        // vertex has no colour and zero where it has no coordinate set; a
+        // fragment input the vertex stage does not write fails the pipeline.
+        const h = harness();
+        /** @type {{ declaration?: any }} */
+        const positionOnly = {};
+        assert.equal(h.device.CreateVertexDeclaration([ELEMENTS[0]], positionOnly), D3D_OK);
+        assert.equal(h.device.SetVertexDeclaration(positionOnly.declaration), D3D_OK);
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTexture(0, h.texture);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        assert.deepEqual(h.device.diagnostics().failures, []);
+        assert.equal(h.device.diagnostics().programmable, 1);
+        const vertexModule = h.gpu.of('createShaderModule')
+            .map(call=>call.descriptor).find(module=>module.label.startsWith('vs:'));
+        assert.ok(vertexModule);
+        const colour = varyingLocation(D3DDECLUSAGE.COLOR, 0);
+        const coordinates = varyingLocation(D3DDECLUSAGE.TEXCOORD, 0);
+        assert.ok(vertexModule.code.includes(`out.o${colour} = vec4f(1.0);`), 'colour white');
+        assert.ok(vertexModule.code.includes(`out.o${coordinates} = vec4f(0.0);`),
+            'coordinates zero');
+        const [pipeline] = h.gpu.of('createRenderPipeline').map(call=>call.descriptor);
+        assert.deepEqual(pipeline.vertex.buffers[0].attributes,
+            [{ shaderLocation: 0, offset: 0, format: 'float32x3' }]);
+
+        h.device.SetTexture(0, null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        ps.shader.release();
+        positionOnly.declaration.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
+test('a pipeline the GPU refuses loses its draw and names the reason; the frame goes on',
+    async()=>{
+        // A pipeline handed back invalid fails every command buffer it is
+        // set on, and with it every frame from then on: the build has to
+        // reject instead, so that one draw is skipped and the failure read.
+        const h = harness({
+            refusePipeline: descriptor=>descriptor.label.startsWith('programmable:')
+                ? 'Fragment input at location 2 has no vertex output' : null,
+        });
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTexture(0, h.texture);
+        await h.draw();
+        assert.deepEqual(h.device.diagnostics().failures,
+            ['Fragment input at location 2 has no vertex output']);
+        assert.equal(h.gpu.count('submit'), 1, 'the frame is still submitted');
+        assert.equal(h.gpu.count('draw'), 0, 'without the draw');
+
+        h.device.SetTexture(0, null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        ps.shader.release();
         h.texture.release();
         h.declaration.release();
         h.vb.release();

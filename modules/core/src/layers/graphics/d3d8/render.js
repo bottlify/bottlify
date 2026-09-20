@@ -47,7 +47,10 @@ import { resourceId } from '../webgpu/internal/bindings.js';
 import {
     constantBlocks, createProgramCache, shapeKey, vertexLayoutOf,
 } from '../webgpu/internal/programmable.js';
-import { HYBRID_CONSTANTS, fixedVertexStage, translateShader } from '../d3d9/wgsl.js';
+import {
+    HYBRID_CONSTANTS, fixedVertexStage, translateShader, varyingLocation,
+} from '../d3d9/wgsl.js';
+import { D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import { fixedFragmentStage } from '../webgpu/internal/fixedfunction.js';
 import { pipelineKey } from '../webgpu/internal/pipeline.js';
@@ -3235,21 +3238,25 @@ export function createRenderer(options){
         // is zero, as the vertex stage's own output: a fragment input with
         // no vertex output fails the pipeline, where Direct3D reads whatever
         // was left in the register.
-        const missing = program.vertex
-            ? pixel.reads.filter((/** @type {number} */ location)=>{
-                const base = translationOf(/** @type {object} */ (program.vertexShader), 'vs',
-                    ()=>translateShader(
-                        /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex)));
-                return !base.outputs.includes(location);
-            })
-            : [];
+        const written = program.vertex
+            ? translationOf(/** @type {object} */ (program.vertexShader), 'vs',
+                ()=>translateShader(
+                    /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex)))
+                .outputs
+            : wanted
+                .filter(element=>element.usage === D3DDECLUSAGE.COLOR
+                    || element.usage === D3DDECLUSAGE.TEXCOORD)
+                .map(element=>varyingLocation(element.usage, element.usageIndex));
+        const missing = pixel.reads.filter(
+            (/** @type {number} */ location)=>!written.includes(location));
         const vertex = program.vertex
             ? translationOf(/** @type {object} */ (program.vertexShader),
                 `vs:${shapes}|w${missing.join(',')}`,
                 ()=>translateShader(
                     /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
                     { inputs: layout.shapes, alsoWrite: missing }))
-            : hybridStageFor(`${program.declarationId}|${shapes}`, wanted, layout.shapes);
+            : hybridStageFor(`${program.declarationId}|${shapes}|w${missing.join(',')}`,
+                wanted, layout.shapes, missing);
         if (vertex.error)
         {
             skip('program');
@@ -3429,14 +3436,15 @@ export function createRenderer(options){
      * @param {string} key
      * @param {import('../webgpu/internal/programmable.js').DeclaredInput[]} wanted
      * @param {Map<number, import('../d3d9/wgsl.js').InputShape>} shapes
+     * @param {number[]} alsoWrite
      */
-    const hybridStageFor = (key, wanted, shapes)=>{
+    const hybridStageFor = (key, wanted, shapes, alsoWrite)=>{
         const existing = hybridStages.get(key);
         if (existing)
         {
             return existing;
         }
-        const made = fixedVertexStage(wanted, shapes);
+        const made = fixedVertexStage(wanted, shapes, alsoWrite);
         hybridStages.set(key, made);
         return made;
     };

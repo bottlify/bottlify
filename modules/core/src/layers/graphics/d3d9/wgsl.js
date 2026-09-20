@@ -1113,9 +1113,14 @@ export function translateShader(parsed, options = {}){
  *        The declaration's elements, with the location each will arrive at
  *        as its `register`.
  * @param {Map<number, InputShape>} shapes  By register.
+ * @param {readonly number[]} [alsoWrite]
+ *        Varying locations the pixel shader reads that the declaration does
+ *        not supply. A fragment input with no vertex output fails the
+ *        pipeline, so each is written as the fixed-function pipeline leaves
+ *        it: a colour as white, a coordinate set as zero.
  * @returns {TranslatedShader}
  */
-export function fixedVertexStage(elements, shapes){
+export function fixedVertexStage(elements, shapes, alsoWrite = []){
     /** @type {string[]} */
     const inputFields = [];
     /** @type {string[]} */
@@ -1151,6 +1156,17 @@ export function fixedVertexStage(elements, shapes){
             outputFields.push(`    @location(${location}) o${location}: vec4f,`);
             outputs.push(location);
             body.push(`    out.o${location} = ${value};`);
+        }
+    }
+    for (const location of alsoWrite)
+    {
+        if (!outputs.includes(location))
+        {
+            outputFields.push(`    @location(${location}) o${location}: vec4f,`);
+            outputs.push(location);
+            const colour = location === varyingLocation(D3DDECLUSAGE.COLOR, 0)
+                || location === varyingLocation(D3DDECLUSAGE.COLOR, 1);
+            body.push(`    out.o${location} = vec4f(${colour ? '1.0' : '0.0'});`);
         }
     }
     body.unshift(`    out.oPos = ${position ?? 'vec4f(0.0, 0.0, 0.0, 1.0)'};`);

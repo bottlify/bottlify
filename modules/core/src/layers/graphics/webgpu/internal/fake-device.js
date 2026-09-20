@@ -27,7 +27,8 @@ const KEPT_FORMATS = /** @type {Record<string, number>} */ ({
 });
 
 /**
- * @param {{ compilationMessages?: Record<string, any[]> }} [options]
+ * @param {{ compilationMessages?: Record<string, any[]>,
+ *           refusePipeline?: (descriptor: any) => string | null | undefined }} [options]
  */
 export function createFakeDevice(options = {}){
     /** @type {any[]} */
@@ -271,6 +272,18 @@ export function createFakeDevice(options = {}){
             return group;
         },
         createRenderPipeline: recorder('createRenderPipeline'),
+        // Recorded under the same name, so a test counts pipelines one way.
+        // `options.refusePipeline` names the validation message a descriptor
+        // is refused with, for a test of a build that fails.
+        /** @param {any} descriptor */
+        createRenderPipelineAsync: descriptor=>{
+            const refused = options.refusePipeline?.(descriptor);
+            if (refused)
+            {
+                return Promise.reject(new Error(refused));
+            }
+            return Promise.resolve(recorder('createRenderPipeline')(descriptor));
+        },
     };
 
     const queue = {

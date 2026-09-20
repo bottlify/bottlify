@@ -368,7 +368,12 @@ gets a vertex stage made from the declaration (`fixedVertexStage`); or a vertex 
 fixed-function pixel stage, which gets a fragment stage made from the stage cascade, fog and alpha
 test in force (`fixedFragmentStage`), reading the colours, coordinate sets and fog the shader
 wrote and the fixed function's own defaults for what it did not -- the shader-model-1 era's
-ordinary draw, transform in a program and texturing in the stages. A target bound with a larger
+ordinary draw, transform in a program and texturing in the stages. In every combination the
+vertex stage writes each varying the pixel stage reads, since a fragment input with no vertex
+output fails the pipeline: a shader writes zero for what it never wrote, the made stage white for
+a colour the declaration lacks and zero for a coordinate set. A pipeline the GPU still refuses is
+built asynchronously and rejects, so its draw alone is skipped and the reason is in the device's
+`failures`; the frame around it is submitted. A target bound with a larger
 depth surface, which Direct3D allows and WebGPU does not, is drawn with a depth of its own size
 standing in (`depth-stand-in`), kept per depth surface and size. `stateblock.js`
 records what is set between `BeginStateBlock` and `EndStateBlock` -- and in this version a state set
