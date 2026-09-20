@@ -104,6 +104,11 @@ self.onmessage = ({ data })=>{
             self.postMessage({ type: 'answer', id: data.id,
                 value: harness?.frameReport() ?? null });
             break;
+        case 'frameShot':
+            (harness ? harness.frameShot() : Promise.resolve(null)).then(value=>{
+                self.postMessage({ type: 'answer', id: data.id, value });
+            });
+            break;
         case 'journalRecent':
             self.postMessage({ type: 'answer', id: data.id,
                 value: harness?.journalRecent(data.count) ?? [] });

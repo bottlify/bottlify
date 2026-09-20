@@ -950,6 +950,8 @@ export function scalars(layers){
  *     Drops what the call log holds, so a window measured after it is the
  *     window's own calls rather than whatever filled the cap getting there.
  * @property {() => string} frameReport
+ * @property {() => Promise<{ width: number, height: number, format: string,
+ *     pixels: string } | null>} frameShot
  *     Where a frame's time goes, asked while the run is still going. A report
  *     at the end of a run answers what a whole run cost; this answers what one
  *     frame costs, which is the question a frame rate is.
@@ -1092,6 +1094,8 @@ export function createHarness(canvas, how = {}){
                 // two and nothing else.
                 presenter: layers.graphics?.presenter ?? null,
                 media: layers.media ?? null,
+                // The translator's account, when the engine has one.
+                cork: layers.cpu?.cork ?? null,
                 // The whole path a sound takes, stage by stage. A silent run and a
                 // working one used to produce the same report.
                 audio: layers.audio ?? null,
@@ -1210,6 +1214,11 @@ export function createHarness(canvas, how = {}){
             // something inside its own code makes no host call to record, and the
             // instruction pointer is then the only account of what it was doing --
             // which is exactly the situation once a game reaches its own main loop.
+            // Which execution engine runs the program, and the translator's
+            // own settings when it is one with a translator: a run compares
+            // engines on the same route by naming one here.
+            engine: request.engine || undefined,
+            cork: request.cork || undefined,
             jit: request.jit || undefined,
             sampling: request.sampling,
             quantum: request.quantum || undefined,
@@ -1457,6 +1466,20 @@ export function createHarness(canvas, how = {}){
             return true;
         },
         frameReport: ()=>frameReport ? frameReport() : JSON.stringify({ ready: false }),
+        // The frame presented last, read back from the device while the run
+        // goes on: what a person sees at this present, so two runs can be
+        // compared at the same one. The pixels are the surface's own bytes,
+        // in its format, as base64.
+        frameShot: async()=>{
+            if (!running || !presentState.presented)
+            {
+                return null;
+            }
+            const surface = presentState.presented.surface;
+            const image = await readBack((await opened).device, surface);
+            return { width: image.width, height: image.height, format: surface.format,
+                pixels: toBase64(image.pixels) };
+        },
         // The tail of the engine's journal, formatted: what a category a run
         // switched on has recorded, read while the run is still going.
         /** @param {number} [count] */
