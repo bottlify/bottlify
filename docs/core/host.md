@@ -82,6 +82,7 @@ replaced by what it is built from. The worker rebuilds the object it needs.
 | `memorySize`, `heapSize`, `stackSize` | `number` | Guest RAM (a power of two), the heap's ceiling, the main thread's stack. |
 | `quantum` | `number` | Guest instructions per scheduler turn. |
 | `jit` | `Record<string, number>` | The emulator's compiler budgets, for measurement. |
+| `engine` | `'emulator' \| 'hybrid' \| 'cork' \| 'differential'` | Which execution engine runs the program (`docs/core/cpu.md`'s "Engines"). Default `emulator`. Chosen per launch: the launcher passes the person's choice for the bundle, or the manifest's suggestion. |
 | `sampling` | `boolean` | The `cpu` layer's always-on guest sampler (`docs/core/cpu.md`'s "Sampling"). `false` turns it off, for a caller measuring the emulator's own compiler rather than the guest's code. Always on otherwise. |
 | `record` | `number` | How many bridge events to keep for a replayable session; `0` keeps none. |
 | `traceStrings`, `profileCalls` | `boolean` | Keep the text an argument pointed at; time every host call as a phase. Both cost, both off by default. |

@@ -120,6 +120,10 @@ import { createBlockCache, resolveBlockStore }
  *           write it somewhere.
  * @property {Record<string, number>} [jit]
  *     The emulator's compiler budgets, by config index. For measurement.
+ * @property {'emulator' | 'hybrid' | 'cork' | 'differential'} [engine]
+ *     Which execution engine runs the program (`docs/core/cpu.md`'s "Engines").
+ *     Default `emulator`. Chosen per launch: a launcher passes the person's
+ *     choice for the bundle, or the bundle manifest's suggestion.
  * @property {boolean} [sampling]  The `cpu` layer's always-on guest sampler
  *     (`docs/core/cpu.md`'s "Sampling"). `false` turns it off, for a caller
  *     measuring the emulator's own compiler rather than the guest's code.
@@ -2410,7 +2414,7 @@ async function buildApp(options){
                 limit: STACK_POOL_BASE + STACK_POOL_SIZE,
             },
         },
-        cpu: { jit: options.jit, sampling: options.sampling, memorySize },
+        cpu: { jit: options.jit, sampling: options.sampling, memorySize, engine: options.engine },
         bridge: {
             // win32 sits above the bridge and cannot be reached from it, so the
             // reader is handed down from here. It costs one call per traced

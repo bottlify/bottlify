@@ -1,6 +1,6 @@
 # Cork — the integration plan
 
-**Status:** in progress since 2026-09-20. Landed: 1.0 (the package and the executor contract). The design this plan carries out
+**Status:** in progress since 2026-09-20. Landed: 1.0 (the package and the executor contract), 1.1 (`engine` configuration, the hybrid host with no translator). The design this plan carries out
 is [`cork-x86-translator.md`](./cork-x86-translator.md) (and the first entry of
 [`decisions.md`](./decisions.md) §B); read that first. This document says *in which order, in
 which files, behind which contracts, checked by which tests and accepted by which number* the

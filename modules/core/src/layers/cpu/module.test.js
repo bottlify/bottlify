@@ -83,6 +83,27 @@ test('a disposed cpu answers harmlessly rather than throwing', async()=>{
         /cpu: boot\(\) must be called before the guest can run/);
 });
 
+test('an engine a launch may select is named, and one that is not is refused', async()=>{
+    await assert.rejects(cpuModule.create({ engine: 'x' }, /** @type {any} */ ({
+        requireApi: ()=>({}), provide: ()=>{},
+    })), { message: 'cpu: unknown engine "x" (emulator, hybrid, cork, differential)' });
+    // Named in the contract, refused for the right reason until built.
+    await assert.rejects(cpuModule.create({ engine: 'cork' }, /** @type {any} */ ({
+        requireApi: ()=>({}), provide: ()=>{},
+    })), { message: 'cpu: engine "cork" is not built yet' });
+
+    await cpuModule.create({ engine: 'hybrid' }, /** @type {any} */ ({
+        requireApi: ()=>({}), provide: ()=>{},
+    }));
+    assert.equal(cpuModule.diagnostics().metrics?.engine, 'hybrid',
+        'the selected engine is reported before boot');
+    await cpuModule.dispose();
+
+    await open();
+    assert.equal(cpuModule.diagnostics().metrics?.engine, 'emulator', 'the default');
+    await cpuModule.dispose();
+});
+
 test('diagnostics answers for the live instance', async()=>{
     await open();
     const second = await open();

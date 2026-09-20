@@ -30,10 +30,12 @@ a `StateLayout` naming where every register lives, and the host functions transl
 call, and answers a `Runtime` (`entryOf`, `run`, `noteHot`, `translatePending`,
 `invalidatePage`, `diagnostics`). The layer never imports an engine package — `check:boundaries`
 refuses it — so a launch that selects the emulator runs with no translator installed, and a
-launch that selects the translator loads nothing of the emulator. How the layer composes a
-runtime with its own contexts, traps and faults, and the `engine` configuration field that
-selects one, arrive with the translator's own steps (`roadmap/cork-plan.md`); today the
-contract exists and every launch runs the emulator.
+launch that selects the translator loads nothing of the emulator. The `engine` configuration
+field selects one per launch; `internal/hybrid-host.js` composes the emulator's host with a
+translator's runtime on one register file (today with none attached, so `hybrid` is the
+emulator under another name, proven by identical instruction counts); the rest of the
+composition arrives with the translator's own steps (`roadmap/cork-plan.md`). `diagnostics()`
+reports the selected engine as `metrics.engine`.
 
 ## 2. Contract
 
@@ -60,6 +62,7 @@ enter the type check or the bundle.
 | `thunkCapacity` | number (bytes)             | `16384 * 16`        | Room reserved for the stub table: 16 384 slots of 16 bytes. Every import and every COM method takes one; none is ever given back. |
 | `jit`           | `Record<number, number>`   | `undefined`         | The emulator's compiler budgets by config index (1 = pages one module may span, 3 = extra basic blocks discovery may follow, 6 = chaining). For measurement, not production. |
 | `sampling`      | `boolean`                  | `true`              | Whether `runSlice` credits an address bucket per slice (see "Sampling" below). Always on; `false` is the only way to turn it off, for a caller measuring the emulator itself. |
+| `engine`        | `'emulator' \| 'hybrid' \| 'cork' \| 'differential'` | `'emulator'` | Which execution engine runs the program (see "Engines" above). An unknown name is refused by `create()` with `cpu: unknown engine "x" (…)`; `cork` and `differential` are refused with `cpu: engine "cork" is not built yet` until their steps land. `hybrid` today composes the emulator's host with no translator attached and runs a program exactly as `emulator` does, to the instruction. |
 
 Chaining (index 6) is switched on automatically when the running engine validates a wasm tail
 call and the caller has not set the knob (`tailCallsSupported()` in `internal/v86-host.js`).

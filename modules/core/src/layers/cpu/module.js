@@ -5,6 +5,7 @@
  */
 
 import { createV86Host } from './internal/v86-host.js';
+import { createHybridHost } from './internal/hybrid-host.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
 import { FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE, VECTORS } from './internal/boot-rom.js';
@@ -20,6 +21,21 @@ import { createSampleTable, creditSample, topSamples } from './internal/samples.
  * committed: the host pays only for what the guest touches.
  */
 export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
+
+/**
+ * The execution engines a launch may select (`engine.js` for the contract).
+ *
+ * `emulator` is the vendored emulator alone; `hybrid` runs the emulator with
+ * a translator taking the regions it has translated, on one register file;
+ * `cork` is the translator alone; `differential` is `hybrid` with every
+ * region replayed on the emulator and compared, for test builds. The last
+ * two are named here so a configuration is refused for the right reason --
+ * not built yet, rather than unknown -- until their steps land.
+ */
+export const ENGINES = Object.freeze(['emulator', 'hybrid', 'cork', 'differential']);
+
+/** The engines a launch can run today. */
+const BUILT_ENGINES = new Set(['emulator', 'hybrid']);
 
 /**
  * cpu — the guest CPU and the channel the guest calls us through.
@@ -95,6 +111,20 @@ export const cpuModule = {
     async create(config, moduleHost){
         const log = moduleHost?.requireApi('log');
 
+        // Refused here rather than at boot: a configuration naming an engine
+        // that does not exist is a configuration error, and the assembler
+        // reports those before any module has a machine to lose.
+        /** @type {string} */
+        const engine = config?.engine ?? 'emulator';
+        if (!ENGINES.includes(engine))
+        {
+            throw new Error(`cpu: unknown engine "${engine}" (${ENGINES.join(', ')})`);
+        }
+        if (!BUILT_ENGINES.has(engine))
+        {
+            throw new Error(`cpu: engine "${engine}" is not built yet`);
+        }
+
         /**
          * Everything this instance owns, and whether it is still open.
          *
@@ -110,12 +140,12 @@ export const cpuModule = {
          * @type {{ host: any, thunks: any, running: boolean, tableWritten: boolean,
          *          worstInterpreted: number, worstInterpretedAt: number,
          *          interpretedBefore: number, lastFault: any, disposed: boolean,
-         *          samples: ReturnType<typeof createSampleTable> }}
+         *          samples: ReturnType<typeof createSampleTable>, engine: string }}
          */
         const state = {
             host: null, thunks: null, running: false, tableWritten: false,
             worstInterpreted: 0, worstInterpretedAt: 0, interpretedBefore: 0,
-            lastFault: null, disposed: false, samples: createSampleTable(),
+            lastFault: null, disposed: false, samples: createSampleTable(), engine,
         };
 
         // Always on, because the whole point is never having to reproduce a
@@ -251,7 +281,15 @@ export const cpuModule = {
                     throw new Error('cpu: already booted');
                 }
                 state.lastFault = null;
-                state.host = await createV86Host({ ...settings, moduleUrl, wasmBytes });
+                const emulator = await createV86Host({ ...settings, moduleUrl, wasmBytes });
+                // Under `hybrid` the emulator's host is composed with the
+                // translator's runtime -- none yet, so the composition is the
+                // emulator's host under another name, which is the point:
+                // the mode has to run a program exactly as the emulator alone
+                // does before a region is ever translated.
+                state.host = engine === 'hybrid'
+                    ? createHybridHost({ emulator, cork: null })
+                    : emulator;
                 state.thunks = createThunkTable({
                     base: settings.thunkBase,
                     port: settings.trapPort,
@@ -612,13 +650,19 @@ export const cpuModule = {
         const instance = current;
         if (!instance || !instance.host)
         {
-            return { name: 'cpu', version: '0.1.0', status: 'created', metrics: {} };
+            return {
+                name: 'cpu', version: '0.1.0', status: 'created',
+                metrics: instance ? { engine: instance.engine } : {},
+            };
         }
         return {
             name: 'cpu',
             version: '0.1.0',
             status: 'ready',
             metrics: {
+                // Which execution engine this launch selected, so a report
+                // says what the figures below were measured on.
+                engine: instance.engine,
                 running: instance.running,
                 instructions: instance.host.instructionCount(),
                 protectedMode: instance.host.inProtectedMode(),

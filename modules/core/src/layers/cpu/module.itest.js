@@ -154,7 +154,9 @@ test('slices against a real emulator credit the address the guest ran at', async
     assert.ok(top.address >= GUEST_CODE - 0x40 && top.address < GUEST_CODE + 3,
         `the heaviest bucket is at 0x${top.address.toString(16)}, not the guest's loop`);
     assert.ok(top.instructions > 0);
-    assert.ok(top.ms >= 0);
+    // No clock per slice: the sampler credits instructions only, and a reader
+    // derives milliseconds from the guest phase (cpu.md, "Sampling").
+    assert.equal(top.ms, undefined);
 
     api.stop();
     await cpuModule.dispose();
@@ -256,3 +258,52 @@ test('a disposed cpu answers as a never-booted one does, after a real boot', asy
     assert.throws(()=>api.runSlice(1),
         /cpu: boot\(\) must be called before the guest can run/);
 });
+
+test('hybrid with no translator runs a program exactly as the emulator does, to the instruction',
+    async()=>{
+        // A loop with a conditional exit and a memory write, so the count
+        // depends on what the guest computed rather than on the slice bound
+        // alone: mov ecx, 5000; L: dec ecx; mov [0x9000], ecx; jnz L; hlt.
+        const program = new Uint8Array([
+            0xb9, ...u32(5000),
+            0x49,
+            0x89, 0x0d, ...u32(0x9000),
+            0x75, 0xf7,
+            0xf4,
+        ]);
+        /** @param {any} config */
+        const runToHalt = async config=>{
+            const { api } = await booted(program, GUEST_CODE, config);
+            const before = api.instructionCount();
+            let retired = 0;
+            for (let slice = 0; slice < 50; slice++)
+            {
+                const ran = api.runSlice(1000);
+                retired += ran;
+                if (ran === 0)
+                {
+                    break;
+                }
+            }
+            const result = {
+                retired, total: api.instructionCount() - before, eip: api.eip(),
+                ecx: api.readReg32('ecx'), engine: cpuModule.diagnostics().metrics?.engine,
+            };
+            api.stop();
+            await cpuModule.dispose();
+            return result;
+        };
+
+        const emulator = await runToHalt({});
+        const hybrid = await runToHalt({ engine: 'hybrid' });
+
+        assert.equal(emulator.engine, 'emulator');
+        assert.equal(hybrid.engine, 'hybrid');
+        // 5000 iterations of three instructions, less the hundred `booted()`
+        // already spent on the first slice.
+        assert.ok(emulator.retired > 5000 * 3 - 200, `the loop ran (${emulator.retired})`);
+        assert.equal(hybrid.retired, emulator.retired, 'slices retired the same count');
+        assert.equal(hybrid.total, emulator.total, 'and the instruction counter agrees');
+        assert.equal(hybrid.eip, emulator.eip, 'ending on the same instruction');
+        assert.equal(hybrid.ecx, 0);
+    });
