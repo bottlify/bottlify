@@ -44,6 +44,7 @@ const WM_KEYDOWN = 0x0100;
 const WM_LBUTTONDOWN = 0x0201;
 const WM_CHAR = 0x0102;
 const WM_PAINT = 0x000f;
+const WM_MOVE = 0x0003;
 const WM_SIZE = 0x0005;
 const WM_SHOWWINDOW = 0x0018;
 const WM_NCACTIVATE = 0x0086;
@@ -914,16 +915,16 @@ test('a window with an area to paint is handed WM_PAINT when nothing else is que
     // Made up at retrieval, as Windows does: never posted, so a hundred
     // invalidations are one paint, and the area stays until BeginPaint clears
     // it -- a look that does not remove finds the same paint again.
-    const { fns, memory, queue, hwnd } = withWindow();
+    const { fns, memory, queue, hwnd, dispatched } = withWindow();
+    const announced = dispatched.length;
     fns.ShowWindow.handler([hwnd, SW_SHOW]);
-    // WM_SHOWWINDOW first, because the window was hidden and now is not.
-    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
-    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_SHOWWINDOW);
-    assert.equal(memory.u32(MSG_BUFFER + MSG.wParam), 1, 'TRUE: the window is being shown');
-    // Then its own size, as the real ShowWindow makes it: the message a
-    // program lays itself out by and rasterises its text for.
-    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
-    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_SIZE, 'a shown window hears its size');
+    // Sent, not posted: the procedure hears WM_SHOWWINDOW first and its own
+    // size second, both before this call returns, because a program measures
+    // the window in the code that follows it. Posting either one leaves the
+    // text rasterised for whatever default the program started with.
+    assert.deepEqual(dispatched.slice(announced).map(entry=>entry.message),
+        [WM_SHOWWINDOW, WM_SIZE], 'shown: the show message, then the size');
+    assert.equal(dispatched[announced].wParam, 1, 'TRUE: the window is being shown');
     // Showing a window is the first thing that paints it.
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
     assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_PAINT, 'a shown window paints');
@@ -961,15 +962,37 @@ test('a paint dispatched to a window with no procedure is validated as the defau
     const { fns, memory, hwnd } = withWindow({ wndProc: 0 });
     fns.ShowWindow.handler([hwnd, SW_SHOW]);
     fns.InvalidateRect.handler([hwnd, 0, 0]);
-    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
-    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_SHOWWINDOW);
-    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
-    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_SIZE, 'and its size first');
+    // The window has no procedure, so the sent show messages go nowhere. The
+    // paint it still owes is made up at retrieval.
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
     assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_PAINT);
     assert.equal(fns.DispatchMessageA.handler([MSG_BUFFER]), 0);
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
         'dispatched once, the area is clean');
+});
+
+test('ShowWindow answers only after the procedures it sent to have run', async()=>{
+    // The failure this prevents: answering the host call while a procedure it
+    // sent to is still pending hands control back to the guest, which reuses
+    // its own stack under the procedure that is still standing on it.
+    /** @type {(value: number) => void} */
+    let answer = ()=>{};
+    const pending = new Promise(resolve=>{
+        answer = resolve;
+    });
+    const { fns, dispatched, hwnd } = withWindow({
+        reply: message=>message.message === WM_SHOWWINDOW ? pending : 0,
+    });
+
+    const result = fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    assert.equal(typeof result.then, 'function', 'the show message is still running');
+    assert.deepEqual(dispatched.map(entry=>entry.message), [WM_SHOWWINDOW],
+        'and the size waits behind it');
+
+    answer(0);
+    assert.equal(await result, 0, 'SW_SHOW on a hidden window answers the state it found');
+    assert.deepEqual(dispatched.map(entry=>entry.message), [WM_SHOWWINDOW, WM_SIZE],
+        'the size went once the show message was answered');
 });
 
 test('WaitMessage yields until there is something to retrieve, and takes nothing', async()=>{
@@ -1230,7 +1253,11 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
     const hwnd = fns.CreateWindowExA.handler(
         [0x200, CLASS_NAME, TITLE, 0x10000000, 10, 20, 300, 200, 0, 0x77, HINSTANCE, 0x999]);
 
-    assert.equal(dispatched.length, 1);
+    // A window created visible hears its size and its place inside the same
+    // call, as the real CreateWindowEx sends them once WM_CREATE is answered:
+    // a program that never calls ShowWindow measures the screen it lays itself
+    // out and rasterises its text for from what it is told here.
+    assert.deepEqual(dispatched.map(entry=>entry.message), [WM_CREATE, WM_SIZE, WM_MOVE]);
     const [message] = dispatched;
     assert.equal(message.message, WM_CREATE);
     assert.equal(message.wndProc, WNDPROC);
@@ -1252,18 +1279,33 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
     assert.equal(memory.u32(at + CREATESTRUCT.lpszName), TITLE);
     assert.equal(memory.u32(at + CREATESTRUCT.lpszClass), CLASS_NAME);
     assert.equal(memory.u32(at + CREATESTRUCT.dwExStyle), 0x200);
+
+    const size = dispatched[1];
+    assert.equal(size.hwnd, hwnd);
+    assert.equal(size.wParam, 0, 'SIZE_RESTORED');
+    fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
+    const clientWidth = memory.u32(RECT_BUFFER + RECT.right)
+        - memory.u32(RECT_BUFFER + RECT.left);
+    const clientHeight = memory.u32(RECT_BUFFER + RECT.bottom)
+        - memory.u32(RECT_BUFFER + RECT.top);
+    assert.equal(size.lParam >>> 16, clientHeight, 'the client height, not the frame');
+    assert.equal(size.lParam & 0xffff, clientWidth, 'and the client width');
+    const place = dispatched[2];
+    assert.equal(place.hwnd, hwnd);
+    assert.equal(place.lParam >>> 16, 20, 'the y it was created at');
+    assert.equal(place.lParam & 0xffff, 10, 'and the x');
 });
 
-test('only WM_CREATE is sent, because sending runs guest code', ()=>{
-    // Two sends in a row from one host call would start the second while the
-    // first is still unwinding. WM_NCCREATE is the one to leave out: its default
-    // answer is TRUE and its structure arrives again a moment later.
+test('a window created hidden hears only WM_CREATE', ()=>{
+    // WM_NCCREATE is the one to leave out: its default answer is TRUE and its
+    // structure arrives again a moment later. A hidden window is told nothing
+    // about a size or a place it does not have on screen yet.
     const { memory, fns, dispatched } = setup({ heap: true });
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     createWindow(fns, memory);
 
-    assert.deepEqual(dispatched.map(m=>m.message), [WM_CREATE]);
+    assert.deepEqual(dispatched.map(m=>m.message), [WM_CREATE], 'hidden: the create only');
 });
 
 test('the CREATESTRUCT is freed once the procedure has seen it', ()=>{

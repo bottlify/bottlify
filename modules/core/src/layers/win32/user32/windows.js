@@ -1377,7 +1377,22 @@ export function createWindowFunctions(host){
                 {
                     return andThen(destroyWindow(record.hwnd, thread, 'ncdestroy'), ()=>done(0));
                 }
-                return done(record.hwnd);
+                // A window created visible hears its own size and place inside
+                // this call, as the real CreateWindowEx sends them once
+                // WM_CREATE has been answered: a program that never calls
+                // ShowWindow measures the screen it lays itself out and
+                // rasterises its text for from the size it is told here.
+                if ((style & WS_VISIBLE) === 0)
+                {
+                    return done(record.hwnd);
+                }
+                const client = geometry.clientRect(record);
+                return andThen(send(record.hwnd, WM_SIZE, SIZE_RESTORED,
+                    ((((client.bottom - client.top) & 0xffff) << 16)
+                        | ((client.right - client.left) & 0xffff)) >>> 0, thread),
+                ()=>andThen(send(record.hwnd, WM_MOVE, 0,
+                    (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
+                ()=>done(record.hwnd)));
             });
         });
     };
@@ -2273,15 +2288,19 @@ export function createWindowFunctions(host){
         const hide = cmdShow === SW_HIDE;
         const covered = wasVisible && hide && shown(record)
             ? geometry.windowRect(record) : null;
-        // Matches Wine's dlls/user32/tests/msg.c WmShowNormal sequence: sent
-        // before WS_VISIBLE actually changes, and only when this call changes
-        // it -- SW_SHOW on an already-visible window says nothing happened,
-        // because nothing did.
-        if (wasVisible === hide)
-        {
-            host.queue.post({ hwnd: record.hwnd, message: WM_SHOWWINDOW,
-                wParam: hide ? 0 : 1, lParam: 0 });
-        }
+        // Matches Wine's dlls/user32/tests/msg.c WmShowNormal sequence: the
+        // message is *sent* -- the procedure runs before this call returns --
+        // and only when this call changes the visibility, because SW_SHOW on
+        // an already-visible window says nothing happened and nothing did.
+        //
+        // Sent, and then chained onto whatever follows it: a procedure the
+        // bridge has to run answers with a promise, so returning this call's
+        // own result before it has answered hands the host call back to the
+        // guest while the guest's procedure is still pending -- and the guest
+        // reuses its own stack under it.
+        const greeting = wasVisible === hide
+            ? send(record.hwnd, WM_SHOWWINDOW, hide ? 0 : 1, 0, host.callerThread?.())
+            : 0;
         record.style = hide
             ? (record.style & ~WS_VISIBLE) >>> 0
             : (record.style | WS_VISIBLE) >>> 0;
@@ -2301,24 +2320,29 @@ export function createWindowFunctions(host){
             activate(record.hwnd);
             raise(record);
         }
+        /** The sent messages so far, for the result to wait on. */
+        let told = greeting;
         if (!wasVisible && !hide)
         {
             appear(record);
             // A window that becomes visible hears its own size, as the real
-            // ShowWindow makes it: the message a program lays itself out by
+            // ShowWindow sends it: the message a program lays itself out by
             // and rasterises every glyph of its text for. Without it a program
             // keeps whatever default it started with, and its text stays
             // scaled for that instead of for its window.
             const client = geometry.clientRect(record);
-            host.queue.post({ hwnd: record.hwnd, message: WM_SIZE, wParam: SIZE_RESTORED,
-                lParam: ((((client.bottom - client.top) & 0xffff) << 16)
-                    | ((client.right - client.left) & 0xffff)) >>> 0 });
+            told = andThen(greeting, ()=>send(record.hwnd, WM_SIZE, SIZE_RESTORED,
+                ((((client.bottom - client.top) & 0xffff) << 16)
+                    | ((client.right - client.left) & 0xffff)) >>> 0,
+                host.callerThread?.()));
         }
         if (covered)
         {
             uncover(covered);
         }
-        return wasVisible ? 1 : 0;
+        // The answer waits for the procedures that were sent to: returning it
+        // before they have run is the stack the guest reuses under itself.
+        return andThen(told, ()=>wasVisible ? 1 : 0);
     };
 
     // Named, because a message for a window with no procedure of its own is
