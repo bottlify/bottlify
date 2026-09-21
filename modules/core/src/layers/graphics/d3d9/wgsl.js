@@ -34,6 +34,12 @@
  *   at bindings 0 to 2 of group 0 for the vertex stage and group 1 for the
  *   pixel stage. The float array is only as long as the shader reaches, so a
  *   draw uploads what the shader reads and not the whole file.
+ * - **Fog is a varying**, at the location `varyingLocation` gives the oFog
+ *   register: the fixed-function vertex stage of a hybrid computes the amount
+ *   from its own clip w and carries the fog colour beside it, and a pixel
+ *   shader the caller fogged reads it and mixes its own colour towards that
+ *   colour by that amount. Direct3D applies its fog stage to a shader-drawn
+ *   surface below model 3 exactly as to a fixed-function one.
  * - **Samplers are texture and sampler pairs** at group 2, two bindings per
  *   sampler register, in the order `samplers` lists them.
  *
@@ -47,6 +53,7 @@
 
 import { OPCODE, REGISTER, SHADER_KIND } from './shader.js';
 import { D3DDECLUSAGE } from './declaration.js';
+import { fogFunctionDeclaration } from '../webgpu/internal/fixedfunction.js';
 
 /** D3DSPSM, the source modifiers. */
 const MODIFIER = Object.freeze({
@@ -91,7 +98,10 @@ export const HYBRID_CONSTANTS = Object.freeze({
     WORLD_VIEW: 5,
     /** Four rows per stage for eight stages: the texture transform a generated coordinate goes through. */
     TRANSFORMS: 9,
-    COUNT: 41,
+    /** The fixed-function fog's start, end and density, and the fog colour beside it. */
+    FOG: 41,
+    FOG_COLOR: 42,
+    COUNT: 43,
 });
 
 /**
@@ -257,14 +267,21 @@ function moduleHeader(options){
  * Translates one shader.
  *
  * @param {import('./shader.js').ParsedShader} parsed
- * @param {{ inputs?: Map<number, InputShape>, alsoWrite?: readonly number[] }} [options]
+ * @param {{ inputs?: Map<number, InputShape>, alsoWrite?: readonly number[],
+ *     fog?: number }} [options]
  *        For a vertex shader, the shape of each v# the declaration supplies,
  *        by register. Absent means every declared input arrives as four
  *        floats; present, a declared register it does not name reads as the
  *        default vertex. `alsoWrite` names varying locations the paired
  *        pixel stage reads that this shader does not write: each is written
  *        as zero, because a fragment input with no vertex output fails the
- *        pipeline, where Direct3D reads whatever was there.
+ *        pipeline, where Direct3D reads whatever was there. `fog` is the
+ *        D3DFOG mode of the fixed-function fog stage that runs after a pixel
+ *        shader below model 3: the pixel stage then reads the oFog varying
+ *        the vertex stage wrote -- the amount in x and the fog colour in
+ *        y,z,w -- and mixes the shader's own colour towards that colour,
+ *        which is where Direct3D applies it. Only a draw whose vertex stage
+ *        is the fixed one can promise the varying, so only it is fogged.
  * @returns {TranslatedShader}
  */
 export function translateShader(parsed, options = {}){
@@ -1078,6 +1095,22 @@ export function translateShader(parsed, options = {}){
                 ? '    out.oDepth = oDepth.x;'
                 : `    out.oC${output} = oC${output};`);
         }
+        // The fog stage Direct3D applies after a pixel shader below model 3:
+        // what the shader wrote is the colour it mixes towards the fog, by the
+        // factor the vertex stage carried in the oFog varying -- its amount in
+        // x and the fog colour in y,z,w. The mix goes in after the body and
+        // before the outputs are written: fog on the shaded colour.
+        if (options.fog && pixelOutputs.has(0))
+        {
+            inputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.FOG, 0)}) fog: vec4f,`);
+            reads.push(varyingLocation(D3DDECLUSAGE.FOG, 0));
+            const fogLines = [
+                '    oC0 = vec4f(mix(in.fog.yzw, oC0.rgb,'
+                    + ' clamp(in.fog.x, 0.0, 1.0)), oC0.a);',
+            ];
+            const at = body.indexOf('    out.oC0 = oC0;');
+            body.splice(at < 0 ? body.length : at, 0, ...fogLines);
+        }
         entry = 'ps_main';
     }
 
@@ -1133,9 +1166,14 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  *        then view in `c[WORLD_VIEW..]`) and puts it through the stage's
  *        transform (`c[TRANSFORMS..]`), whatever the declaration carries
  *        under that set.
+ * @param {number} [fog]  D3DFOG mode; zero for none. Set, the stage computes
+ *        the fixed function's fog factor from the vertex's clip w and writes
+ *        it, with the fog colour, in the oFog varying a fogged pixel shader
+ *        reads -- which is the stage Direct3D applies after a pixel shader
+ *        below model 3.
  * @returns {TranslatedShader}
  */
-export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = []){
+export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [], fog = 0){
     /** @type {string[]} */
     const inputFields = [];
     /** @type {string[]} */
@@ -1219,6 +1257,18 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             + ` dot(c[${row + 2}], vec4f(${coordinate}, 1.0)),`
             + ` dot(c[${row + 3}], vec4f(${coordinate}, 1.0)));`);
     }
+    // The fog the fixed-function stage adds after the pixel shader: the amount
+    // from the vertex's own clip w -- the eye-space depth a perspective
+    // projection carries into it -- and the colour beside it, so a fogged
+    // pixel shader needs nothing but the varying to apply it.
+    if (fog !== 0)
+    {
+        const location = varyingLocation(D3DDECLUSAGE.FOG, 0);
+        outputFields.push(`    @location(${location}) o${location}: vec4f,`);
+        outputs.push(location);
+        body.push(`    out.o${location} = vec4f(fogFactorOf(out.oPos.w),`
+            + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
+    }
     for (const location of alsoWrite)
     {
         if (!outputs.includes(location))
@@ -1236,6 +1286,8 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             vertex: true, constants: HYBRID_CONSTANTS.COUNT, samplers: [], inputFields,
             outputFields,
         }),
+        // The fog curve over the fixed function's own range row.
+        fogFunctionDeclaration(fog, `c[${HYBRID_CONSTANTS.FOG}]`).trimEnd(),
         // The viewport's inverse offset and scale, as the fixed-function stage
         // applies them to a vertex given in target pixels.
         'fn viewportPosition(vertex: vec4f) -> vec4f {',
