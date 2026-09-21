@@ -864,6 +864,10 @@ export function presentFrame(app, request, state, frame){
     // as the page's keyboard delivers one, released the frame after.
     for (const typed of request.typed ?? [])
     {
+        if (typed.after < 0)
+        {
+            continue;
+        }
         const index = state.presents - typed.after;
         if (index >= 0 && index < typed.text.length)
         {
