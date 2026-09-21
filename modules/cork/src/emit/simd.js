@@ -66,12 +66,36 @@ const wordShuffle = words=>words.flatMap(w=>[w * 2, w * 2 + 1]);
  * Emits an SSE or MMX instruction. Answers false when it is not one this
  * file translates.
  *
+ * An MMX instruction -- one with an mm operand, whichever end the register
+ * is at, a read or a store into memory included -- puts the x87 stack in the
+ * MMX state, as on the processor: the top at zero and every register held,
+ * which the region's exit writes out. The rule sits here, where every form
+ * passes through, rather than in the forms' own lowering, so a form added
+ * later cannot forget it and a form the file refuses cannot claim it.
+ *
  * @param {E} e
  * @param {Instruction} instruction
  * @param {boolean} flagsLive
  * @returns {boolean}
  */
 export function emitSimd(e, instruction, flagsLive){
+    const done = emitForm(e, instruction, flagsLive);
+    if (done && instruction.operands.some(operand=>operand.kind === 'mm'))
+    {
+        markMmx(e);
+    }
+    return done;
+}
+
+/**
+ * One form's lowering.
+ *
+ * @param {E} e
+ * @param {Instruction} instruction
+ * @param {boolean} flagsLive
+ * @returns {boolean}
+ */
+function emitForm(e, instruction, flagsLive){
     const { b } = e;
     const { op, operands } = instruction;
     const [dst, src, imm] = operands;
@@ -334,7 +358,6 @@ export function emitSimd(e, instruction, flagsLive){
             else
             {
                 b.simdMem(SIMD.store64Lane, { align: 3, offset: e.layout.ramBase, lane: 0 });
-                markMmx(e);
             }
             return true;
         }
@@ -624,7 +647,6 @@ export function emitSimd(e, instruction, flagsLive){
             packedToInt(e);
             b.op(0xfd, [SIMD.i64x2ExtractLane, 0]);
             writeM(e, dst, null);
-            markMmx(e);
             return true;
 
         // --- packed integer ---
@@ -967,7 +989,6 @@ function writeM(e, operand, pushValue){
     {
         pushValue?.();
         b.localSet(e.mmLocal(/** @type {number} */ (operand.reg), true));
-        markMmx(e);
         return;
     }
     if (pushValue !== null)
@@ -988,7 +1009,12 @@ function writeM(e, operand, pushValue){
     b.store('i64', { offset: e.layout.ramBase });
 }
 
-/** An MMX instruction ran: the x87 stack is reset at the region's exit. @param {E} e */
+/**
+ * An MMX instruction ran: the region's exit puts the x87 stack in the MMX
+ * state, the top at zero and every register held.
+ *
+ * @param {E} e
+ */
 function markMmx(e){
     e.b.i32const(1).localSet(e.mmxTouchedLocal());
 }

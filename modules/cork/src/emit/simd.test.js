@@ -323,3 +323,39 @@ test('MMX runs in the low lane and leaves the x87 stack held with its top at zer
     assert.equal(new DataView(after.memory.buffer).getUint8(after.layout.x87Empty), 0xff,
         'empty after emms');
 });
+
+test('an MMX form that only reads an mm register still holds the x87 stack', { skip }, ()=>{
+    // A store into memory, a read into an xmm, a read into a general
+    // register: none of them writes an mm register, and each is an MMX
+    // instruction all the same, so the processor puts the x87 stack in the
+    // MMX state for it. The sequence corpus found the three of them leaving
+    // the stack as the machine had it, so the next x87 instruction pushed
+    // onto a register the stack said was free.
+    /**
+     * The x87 top and empty mask a program leaves, from a stack with its top
+     * at five and every register empty.
+     *
+     * @param {number[]} bytes
+     */
+    const stack = bytes=>{
+        const m = createTestMachine();
+        const view = new DataView(m.memory.buffer);
+        view.setUint8(m.layout.x87Top, 5);
+        view.setUint8(m.layout.x87Empty, 0xff);
+        m.write(DATA, [1, 2, 3, 4, 5, 6, 7, 8]);
+        m.write(CODE, [...bytes, 0xf4]);
+        m.setReg('esp', 0x80000);
+        const exit = m.runProgram(CODE);
+        assert.equal(exit.kind, 3,
+            `halted (exit ${JSON.stringify(exit)}, left out ${[...exit.unsupported]})`);
+        return [view.getUint8(m.layout.x87Top), view.getUint8(m.layout.x87Empty)];
+    };
+    // movq [DATA], mm1
+    assert.deepEqual(stack([0x0f, 0x7f, 0x0d, DATA & 255, DATA >> 8 & 255, 0, 0]), [0, 0]);
+    // movq2dq xmm1, mm1
+    assert.deepEqual(stack([0xf3, 0x0f, 0xd6, 0xc9]), [0, 0]);
+    // cvtpi2ps xmm0, mm0
+    assert.deepEqual(stack([0x0f, 0x2a, 0xc0]), [0, 0]);
+    // pextrw eax, mm1, 1
+    assert.deepEqual(stack([0x0f, 0xc5, 0xc1, 0x01]), [0, 0]);
+});
