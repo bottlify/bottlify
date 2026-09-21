@@ -385,3 +385,36 @@ test('emms after an MMX instruction leaves the top at the zero it set', { skip }
     assert.deepEqual(stack([...EMMS, ...PXOR]), [0, 0], 'an MMX instruction after it holds');
     assert.deepEqual(stack([...PXOR, ...EMMS, ...PXOR]), [0, 0]);
 });
+
+test('an emms in a region holding the x87 registers empties its own mask', { skip }, ()=>{
+    // A region with x87 instructions in it keeps the eight registers, the
+    // top and the empty mask in locals and writes them back at its exit, so
+    // an emms that wrote the state block's mask was overwritten by that
+    // exit and the stack stayed held. The sequence corpus's pair was
+    // fld qword [m]; emms, which left ST(7) holding what the load put there.
+    /** @param {number[]} bytes */
+    const stack = bytes=>{
+        const m = createTestMachine();
+        const view = new DataView(m.memory.buffer);
+        m.write(DATA, [0, 0, 0, 0, 0, 0, 0x0a, 0x40]);     // 3.25
+        m.write(CODE, [...bytes, 0xf4]);
+        m.setReg('esp', 0x80000);
+        const exit = m.runProgram(CODE);
+        assert.equal(exit.kind, 3, `halted (exit ${JSON.stringify(exit)},`
+            + ` left out ${[...exit.unsupported]})`);
+        return {
+            top: view.getUint8(m.layout.x87Top),
+            empty: view.getUint8(m.layout.x87Empty),
+            status: view.getUint16(m.layout.x87Status, true),
+        };
+    };
+    const FLD = [0xdd, 0x05, DATA & 255, DATA >> 8 & 255, 0, 0];  // fld qword [DATA]
+    const FLD1 = [0xd9, 0xe8];
+    const EMMS = [0x0f, 0x77];
+    assert.deepEqual(stack([...FLD, ...EMMS]),
+        { top: 7, empty: 0xff, status: 0 }, 'the register the load held is free again');
+    // And the mask is the one the instructions after the emms read: the push
+    // is onto a free register, so it raises no stack fault.
+    assert.deepEqual(stack([...FLD1, ...FLD1, ...EMMS, ...FLD1]),
+        { top: 5, empty: 0xdf, status: 0 });
+});

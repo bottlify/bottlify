@@ -362,12 +362,23 @@ function emitForm(e, instruction, flagsLive){
             return true;
         }
         case 'emms':
-            // Every register empty again -- and the run's hold released, or
-            // the epilogue would hold every register right after. The top is
-            // left alone: an MMX instruction of this run put it at zero and
-            // leaving the MMX state does not put it back, and a run with none
-            // leaves the machine's own.
-            b.i32const(0).i32const(0xff).store('i32_8', { offset: e.layout.x87Empty });
+            // Every register empty again -- into the empty mask the region
+            // keeps when the x87 registers are in its own locals, since its
+            // exit writes that mask back over anything written straight into
+            // the state block, and into the state block otherwise. The
+            // run's hold is released too, or the exit would hold every
+            // register right after. The top is left alone: an MMX instruction
+            // of this run put it at zero and leaving the MMX state does not
+            // put it back, and a run with none leaves the machine's own.
+            if (e.x87.active)
+            {
+                b.i32const(0xff).localSet(Local.x87Empty);
+            }
+            else
+            {
+                b.i32const(0).i32const(0xff).store('i32_8',
+                    { offset: e.layout.x87Empty });
+            }
             b.localGet(e.mmxTouchedLocal()).i32const(~MMX_HELD).op(I32.and)
                 .localSet(e.mmxTouchedLocal());
             return true;
