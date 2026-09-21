@@ -998,6 +998,7 @@ export function createHarness(canvas, how = {}){
      *           keys?: { code: string, after: number }[],
      *           typed?: { text: string, after: number }[],
      *           pasted?: { text: string, after: number }[],
+     *           logMatch?: string,
      *           network?: { module: string, url: string, room: string },
      *           keyTimes?: { code: string, atMs: number, holdMs?: number }[],
      *           files?: { path: string, base64: string }[],
@@ -1154,6 +1155,7 @@ export function createHarness(canvas, how = {}){
             ? await (await import(/* @vite-ignore */ request.network.module))
                 .connectRelay({ url: request.network.url, room: request.network.room })
             : null;
+        const logMatch = request.logMatch ? new RegExp(request.logMatch) : null;
         const app = await createApp({
             pacing: how.pacing,
             win32: network ? { network } : undefined,
@@ -1202,7 +1204,14 @@ export function createHarness(canvas, how = {}){
                 ? (/** @type {any} */ call)=>{
                     if (callLog.length < (request.logLines || LIMITS.log))
                     {
-                        callLog.push(formatCall(call));
+                        const line = formatCall(call);
+                        // Only the calls a run asked about, when it named
+                        // them: a question about one family of calls should
+                        // not fill the log with the frame loop's.
+                        if (!logMatch || logMatch.test(line))
+                        {
+                            callLog.push(line);
+                        }
                     }
                 }
                 : undefined,

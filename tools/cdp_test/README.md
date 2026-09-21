@@ -47,6 +47,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--wait SECONDS` | 900 | how long the page runs before it is asked for its result. The page cannot be asked how it is doing while the engine holds its thread, so this is the run's length |
 | `--turns N` | 200000 | scheduler turns before the run gives up |
 | `--calls N` | 40 | how many of the last host calls the report prints |
+| `--log-match REGEX` | off | keep only the host calls whose formatted line matches, so a question about one family of calls (`"EnumDisplay|CreateDevice"`) is answered across the whole run instead of the last N lines of the frame loop |
 | `--log FILE` | off | every host call, drained in chunks, to a file. The ring in a report holds the end of a run, and what a program decided it decided long before that |
 | `--log-lines N` | 400000 | how many of those to keep; the default holds the head of the run, where a program makes its decisions, and something that only happens once a title is up needs more |
 | `--profile [N]` | off; quantum 2000 when on | samples the guest's instruction pointer at turn boundaries. A sample lands at a turn boundary, so the quantum is the resolution: lowering it is what makes a sample a measurement rather than a rumour |

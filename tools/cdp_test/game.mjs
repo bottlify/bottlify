@@ -183,6 +183,9 @@ function parse(argv){
         // is where a program makes its decisions; something that only happens
         // once a title is up needs more than that.
         logLines: number('--log-lines', 0),
+        // Only the calls whose line matches this expression are kept, so a
+        // question about one family of calls is answered by the whole run.
+        logMatch: argv.includes('--log-match') ? argv[argv.indexOf('--log-match') + 1] : null,
         // Where every draw of the last frame landed, and under what state.
         // Off unless asked for: it transforms every vertex of every draw a
         // second time on the processor.
@@ -908,6 +911,7 @@ export async function game(options){
             clicks: options.clicks,
             typed: options.typed,
             pasted: options.pasted,
+            logMatch: options.logMatch,
             network: options.network
                 ? {
                     module: new URL('/networking/client/index.js', pageUrl).href,
