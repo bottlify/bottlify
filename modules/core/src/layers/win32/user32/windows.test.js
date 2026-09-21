@@ -44,6 +44,7 @@ const WM_KEYDOWN = 0x0100;
 const WM_LBUTTONDOWN = 0x0201;
 const WM_CHAR = 0x0102;
 const WM_PAINT = 0x000f;
+const WM_SIZE = 0x0005;
 const WM_SHOWWINDOW = 0x0018;
 const WM_NCACTIVATE = 0x0086;
 const WM_USER = 0x0400;
@@ -919,6 +920,10 @@ test('a window with an area to paint is handed WM_PAINT when nothing else is que
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
     assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_SHOWWINDOW);
     assert.equal(memory.u32(MSG_BUFFER + MSG.wParam), 1, 'TRUE: the window is being shown');
+    // Then its own size, as the real ShowWindow makes it: the message a
+    // program lays itself out by and rasterises its text for.
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_SIZE, 'a shown window hears its size');
     // Showing a window is the first thing that paints it.
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
     assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_PAINT, 'a shown window paints');
@@ -958,6 +963,8 @@ test('a paint dispatched to a window with no procedure is validated as the defau
     fns.InvalidateRect.handler([hwnd, 0, 0]);
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
     assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_SHOWWINDOW);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_SIZE, 'and its size first');
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
     assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_PAINT);
     assert.equal(fns.DispatchMessageA.handler([MSG_BUFFER]), 0);

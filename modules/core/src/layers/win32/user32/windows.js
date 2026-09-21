@@ -2304,6 +2304,15 @@ export function createWindowFunctions(host){
         if (!wasVisible && !hide)
         {
             appear(record);
+            // A window that becomes visible hears its own size, as the real
+            // ShowWindow makes it: the message a program lays itself out by
+            // and rasterises every glyph of its text for. Without it a program
+            // keeps whatever default it started with, and its text stays
+            // scaled for that instead of for its window.
+            const client = geometry.clientRect(record);
+            host.queue.post({ hwnd: record.hwnd, message: WM_SIZE, wParam: SIZE_RESTORED,
+                lParam: ((((client.bottom - client.top) & 0xffff) << 16)
+                    | ((client.right - client.left) & 0xffff)) >>> 0 });
         }
         if (covered)
         {
