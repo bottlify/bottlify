@@ -1426,6 +1426,22 @@ function parse(tokens, text){
                 mask: null, saturate: false, extended: false,
             };
         }
+        if (token.type === 'float' || token.type === 'int')
+        {
+            // A literal written without braces is a scalar source: the value
+            // every component takes, which is what `{ 0.2 }` means written the
+            // short way. Programs of this era write `MOV R1.y, 0.2;` and a
+            // driver takes it, so refusing it refuses the whole program -- and
+            // a program that was not loaded is a material that draws nothing.
+            const value = Number(token.value);
+            return {
+                kind: 'constant', name: null,
+                binding: { kind: 'constant', values: [value, value, value, value] },
+                index: null, relative: null,
+                components: normalise(parseSuffix(scalar, token.position), negate),
+                mask: null, saturate: false, extended: false,
+            };
+        }
         if (token.type !== 'identifier')
         {
             fail('a source register was expected', token.position);
