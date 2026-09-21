@@ -1766,6 +1766,22 @@ export function createGdiFunctions(host){
                 drawing.bound(hdc)?.fillRect(hdc >>> 0, rect, solidBrush(color)) === true,
 
             /**
+             * A fill of the window manager's own background: the screen's
+             * desktop colour, laid down before any window is on it.
+             *
+             * Painted and not shown. A draw the program makes is a frame, and
+             * a draw the manager makes of its own background is not: showing
+             * it handed a display a blank screen as if it were the program's
+             * first frame, which is the frame a launcher stops waiting on.
+             *
+             * @param {number} hdc
+             * @param {{ left: number, top: number, right: number, bottom: number }} rect
+             * @param {number} color  A COLORREF.
+             */
+            fillBackground: (hdc, rect, color)=>
+                drawing.bound(hdc, false)?.fillRect(hdc >>> 0, rect, solidBrush(color)) === true,
+
+            /**
              * @param {number} hdc
              * @param {{ left: number, top: number, right: number, bottom: number }} rect
              * @param {number} brush  A brush handle the program owns.

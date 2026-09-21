@@ -1487,6 +1487,15 @@ export function createWindowFunctions(host){
     /**
      * The desktop itself, painted once in the desktop colour before the
      * first window goes on it. Nothing else ever paints the whole screen.
+     *
+     * It is painted and **not presented**: the desktop colour is the window
+     * manager's own background, not a picture the program drew, and the first
+     * frame a display is handed is what a launcher hides its loading screen
+     * on. Presenting this one showed a blank coloured screen as if it were
+     * the program's first frame, before the program had presented anything.
+     * What the program draws still reaches the screen -- a GDI draw presents
+     * the desktop itself, and a window's frame or the uncovering of one marks
+     * it painted below -- so nothing legitimate is lost.
      */
     let desktopPainted = false;
     const paintDesktop = ()=>{
@@ -1500,10 +1509,10 @@ export function createWindowFunctions(host){
             return;
         }
         desktopPainted = true;
-        draw?.fill(hdc, { left: 0, top: 0, right: host.screen.width, bottom: host.screen.height },
+        (draw?.fillBackground ?? draw?.fill)?.call(draw, hdc,
+            { left: 0, top: 0, right: host.screen.width, bottom: host.screen.height },
             sysColor(COLOR_BACKGROUND));
         host.dc?.()?.release(0, hdc);
-        painted();
     };
 
     /**

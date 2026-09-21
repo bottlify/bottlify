@@ -160,6 +160,31 @@ const ERROR_INVALID_THREAD_ID = 1444;
 const PARKED = Object.freeze({ parked: true });
 
 /**
+ * The display a test drives the window manager's painting through: a screen to
+ * paint the desktop on, a device context to paint with, and a record of every
+ * fill and every showing. `fill` is the draw a program makes (which presents);
+ * `fillBackground` is the window manager's own screen background (which does
+ * not).
+ *
+ * @param {{ rect: any, color: number, quiet: boolean }[]} fills
+ * @param {number[]} presents
+ */
+function paintedHost(fills, presents){
+    return {
+        screen: { width: 640, height: 480, bitsPerPixel: 32 },
+        dc: ()=>({ get: ()=>1, release: ()=>{} }),
+        draw: {
+            fill: (/** @type {any} */ hdc, /** @type {any} */ rect,
+                /** @type {number} */ color)=>fills.push({ rect, color, quiet: false }),
+            // The manager's own screen background: painted, not shown.
+            fillBackground: (/** @type {any} */ hdc, /** @type {any} */ rect,
+                /** @type {number} */ color)=>fills.push({ rect, color, quiet: true }),
+        },
+        present: ()=>presents.push(1),
+    };
+}
+
+/**
  * @param {Object} [options]
  * @param {boolean} [options.heap] Whether the build has guest memory to put a
  *        CREATESTRUCT in. Without it a window is made and nothing is announced,
@@ -173,8 +198,13 @@ const PARKED = Object.freeze({ parked: true });
  * @param {(id: number) => boolean} [options.threadExists] Which thread identifiers
  *        name a thread of this process, for PostThreadMessage.
  * @param {(message: any) => void} [options.trace] Told every message a procedure receives.
+ * @param {boolean} [options.paint] Whether the build has a display to paint the
+ *        desktop on, so a test can see what is painted and what is shown.
  */
-function setup({ heap = false, reply, waitForObjects, now, hookReply, threadExists, trace } = {}){
+function setup({
+    heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
+} = {})
+{
     const memory = fakeMemory();
     const handles = fakeHandles();
     const queue = createMessageQueue();
@@ -195,6 +225,16 @@ function setup({ heap = false, reply, waitForObjects, now, hookReply, threadExis
     let heapNext = HEAP_BASE;
     /** @type {number[]} */
     const released = [];
+
+    /**
+     * What the window manager drew on the desktop and when it showed it, for
+     * a test that drives the painter. Only collected when `paint` is asked
+     * for: a build with no display draws nothing and presents nothing.
+     */
+    /** @type {{ rect: any, color: number, quiet: boolean }[]} */
+    const fills = [];
+    /** @type {number[]} */
+    const presents = [];
 
     /** @type {import('./windows.js').WindowService | null} */
     /** @type {import('./windows.js').WindowService | null} */
@@ -236,6 +276,7 @@ function setup({ heap = false, reply, waitForObjects, now, hookReply, threadExis
             return at;
         } : undefined,
         release: heap ? (/** @type {number} */ at)=>released.push(at) : undefined,
+        ...(paint ? paintedHost(fills, presents) : {}),
     });
 
     /** Lets every waiting call look at the queue once more. */
@@ -249,7 +290,7 @@ function setup({ heap = false, reply, waitForObjects, now, hookReply, threadExis
     };
 
     return { memory, handles, queue, fns, dispatched, parked, tick, idlers, released,
-        called, divergences, errors,
+        called, divergences, errors, fills, presents,
         service: /** @type {import('./windows.js').WindowService} */ (
             /** @type {unknown} */ (service)) };
 }
@@ -296,11 +337,12 @@ function createWindow(fns, memory, options = {}){
  * A class plus a window of it, which almost every test below needs.
  *
  * @param {Parameters<typeof putClass>[1] & Parameters<typeof createWindow>[2]
- *     & { reply?: (message: any) => any, trace?: (message: any) => void }} [options]
+ *     & { reply?: (message: any) => any, trace?: (message: any) => void,
+ *         paint?: boolean }} [options]
  */
 function withWindow(options = {}){
-    const { reply, trace, ...rest } = options;
-    const context = setup({ reply, trace });
+    const { reply, trace, paint, ...rest } = options;
+    const context = setup({ reply, trace, paint });
     putClass(context.memory, rest);
     context.fns.RegisterClassA.handler([CLASS_STRUCT]);
     const hwnd = createWindow(context.fns, context.memory, rest);
@@ -909,6 +951,53 @@ test('MsgWaitForMultipleObjects with no handles is a sleep the queue can cut sho
     await tick();
     await tick();
     assert.equal(await expired, WAIT_TIMEOUT, 'and the deadline is kept on the guest clock');
+});
+
+/**
+ * Retrieves and validates until the queue is empty, which runs a paint pass to
+ * its end -- and is where the desktop is shown, if it was marked painted.
+ *
+ * @param {any} fns @param {number} hwnd
+ */
+function pump(fns, hwnd){
+    for (let guard = 0; guard < 32; guard++)
+    {
+        if (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) === 0)
+        {
+            return;
+        }
+        fns.ValidateRect.handler([hwnd, 0]);
+    }
+    throw new Error('the queue never drained');
+}
+
+test('a window appearing paints the desktop but does not present it as a frame', ()=>{
+    // The desktop colour is the window manager's own background, not a
+    // picture the program drew. Presenting it handed the display a blank
+    // screen as the first frame -- the frame a launcher hides its loading
+    // screen on -- before the program had presented anything. The colour is
+    // still painted underneath, so whatever the program draws shows over it.
+    const { fns, hwnd, fills, presents } = withWindow({ paint: true });
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    pump(fns, hwnd);
+
+    assert.equal(fills.length, 1, 'the desktop was painted once');
+    assert.equal(fills[0].color, 0x808080, 'in the desktop colour');
+    assert.equal(fills[0].quiet, true, 'through the paint that does not present');
+    assert.deepEqual(presents, [], 'and was not presented as a frame');
+});
+
+test('uncovering the desktop presents it, because a window no longer covers it', ()=>{
+    // The other direction, and it is not the same case: something the program
+    // had on the screen left a hole, and the desktop showing through that hole
+    // is a picture worth a frame.
+    const { fns, hwnd, presents } = withWindow({ paint: true });
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    pump(fns, hwnd);
+    fns.ShowWindow.handler([hwnd, SW_HIDE]);
+    pump(fns, hwnd);
+
+    assert.ok(presents.length >= 1, 'the desktop under the closed window is shown');
 });
 
 test('a window with an area to paint is handed WM_PAINT when nothing else is queued', ()=>{
