@@ -359,3 +359,29 @@ test('an MMX form that only reads an mm register still holds the x87 stack', { s
     // pextrw eax, mm1, 1
     assert.deepEqual(stack([0x0f, 0xc5, 0xc1, 0x01]), [0, 0]);
 });
+
+test('emms after an MMX instruction leaves the top at the zero it set', { skip }, ()=>{
+    // From a stack whose top is not zero: the MMX instruction put the top at
+    // zero and held every register, and leaving the MMX state empties them
+    // again without putting the top back. The sequence corpus's pair found
+    // the run's mark clearing both, so the region's exit wrote neither and
+    // the machine kept the top it had come in with.
+    /** @param {number[]} bytes */
+    const stack = bytes=>{
+        const m = createTestMachine();
+        const view = new DataView(m.memory.buffer);
+        view.setUint8(m.layout.x87Top, 5);
+        view.setUint8(m.layout.x87Empty, 0xff);
+        m.write(CODE, [...bytes, 0xf4]);
+        m.setReg('esp', 0x80000);
+        const exit = m.runProgram(CODE);
+        assert.equal(exit.kind, 3, `halted (exit ${JSON.stringify(exit)},`
+            + ` left out ${[...exit.unsupported]})`);
+        return [view.getUint8(m.layout.x87Top), view.getUint8(m.layout.x87Empty)];
+    };
+    const PXOR = [0x0f, 0xef, 0xc9];        // pxor mm1, mm1
+    const EMMS = [0x0f, 0x77];
+    assert.deepEqual(stack([...PXOR, ...EMMS]), [0, 0xff], 'the hold goes, the top stays');
+    assert.deepEqual(stack([...EMMS, ...PXOR]), [0, 0], 'an MMX instruction after it holds');
+    assert.deepEqual(stack([...PXOR, ...EMMS, ...PXOR]), [0, 0]);
+});

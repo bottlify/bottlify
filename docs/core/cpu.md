@@ -131,7 +131,8 @@ inside the region alone, where the edge brings the stack into it, since entered 
 it would push, pop and write the top back for a stack the machine does not have. A block
 whose shape the tracking does not know keeps the top the machine had. An MMX instruction
 holds every x87 register with the top at zero, as the processor does, and `emms` empties them
-again, whichever order the two come in within one run. `fxsave` and `fxrstor` still end a region and run on the emulator. A store translated code makes into a page the emulator's own compiler compiled is
+again, whichever order the two come in within one run, and leaves the top at the zero the MMX
+instruction set -- leaving the MMX state does not undo it. `fxsave` and `fxrstor` still end a region and run on the emulator. A store translated code makes into a page the emulator's own compiler compiled is
 seen too: the store checks the emulator's byte-per-page "has code" table beside the
 translator's own flags (`layout.codePages`, the fork's `bottlify_page_has_code_ptr`) and
 leaves `stale` with the address and width, and the runtime dirties the emulator's cache for

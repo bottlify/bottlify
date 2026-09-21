@@ -25,7 +25,7 @@ import { CF, OF, PF, SF, ZF, AF } from '../decode/table.js';
 import { EMPTY, ValType } from '../wasm/encoder.js';
 import { SIMD } from '../wasm/simd.js';
 import { I32 } from './flags.js';
-import { Local } from './region.js';
+import { Local, MMX_HELD, MMX_TOP } from './region.js';
 import { emitAddress, readOp, writeOp, writeReg } from './integer.js';
 import { checkAccess, noteStore } from './memory.js';
 
@@ -362,10 +362,14 @@ function emitForm(e, instruction, flagsLive){
             return true;
         }
         case 'emms':
-            // Every register empty again -- and the run's MMX mark cleared,
-            // or the epilogue would hold every register right after.
+            // Every register empty again -- and the run's hold released, or
+            // the epilogue would hold every register right after. The top is
+            // left alone: an MMX instruction of this run put it at zero and
+            // leaving the MMX state does not put it back, and a run with none
+            // leaves the machine's own.
             b.i32const(0).i32const(0xff).store('i32_8', { offset: e.layout.x87Empty });
-            b.i32const(0).localSet(e.mmxTouchedLocal());
+            b.localGet(e.mmxTouchedLocal()).i32const(~MMX_HELD).op(I32.and)
+                .localSet(e.mmxTouchedLocal());
             return true;
 
         // --- packed and scalar float arithmetic ---
@@ -1011,12 +1015,15 @@ function writeM(e, operand, pushValue){
 
 /**
  * An MMX instruction ran: the region's exit puts the x87 stack in the MMX
- * state, the top at zero and every register held.
+ * state, the top at zero and every register held. Both bits, and not a set
+ * of the hold alone: an `emms` later in the run releases the hold, and the
+ * top is then still the zero this instruction put there.
  *
  * @param {E} e
  */
 function markMmx(e){
-    e.b.i32const(1).localSet(e.mmxTouchedLocal());
+    e.b.localGet(e.mmxTouchedLocal()).i32const(MMX_HELD | MMX_TOP).op(I32.or)
+        .localSet(e.mmxTouchedLocal());
 }
 
 /** A v128 scratch local. @param {E} e */

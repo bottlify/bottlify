@@ -75,6 +75,14 @@ export const Exit = Object.freeze({
     UNTRANSLATED: 0, BUDGET: 1, TRAP: 2, HALT: 3, FAULT: 4, STALE: 5,
 });
 
+/**
+ * The bits of a run's MMX mark (`Local.mmxTouched`). The first MMX
+ * instruction of a run sets both; an `emms` clears the hold and leaves
+ * the top, so the region's exit writes the one and not the other.
+ */
+export const MMX_HELD = 1;
+export const MMX_TOP = 2;
+
 /** Local indices every region function shares. */
 export const Local = Object.freeze({
     label: 0, budget: 1,
@@ -537,10 +545,16 @@ export class RegionEmitter {
         if (this.mmLocals.size > 0)
         {
             // An MMX instruction ran: the x87 stack's top is zero and every
-            // register is held, as on the processor.
-            b.localGet(Local.mmxTouched);
+            // register is held, as on the processor. The two are written
+            // apart, because an `emms` after them releases the hold -- it
+            // wrote the empty mask itself -- and leaves the top at the zero
+            // the first of them set.
+            b.localGet(Local.mmxTouched).i32const(MMX_TOP).op(I32.and);
             b.if(EMPTY);
             b.i32const(0).i32const(0).store('i32_8', { offset: layout.x87Top });
+            b.end();
+            b.localGet(Local.mmxTouched).i32const(MMX_HELD).op(I32.and);
+            b.if(EMPTY);
             b.i32const(0).i32const(0).store('i32_8', { offset: layout.x87Empty });
             b.end();
         }
