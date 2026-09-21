@@ -53,7 +53,7 @@
 
 import { OPCODE, REGISTER, SHADER_KIND } from './shader.js';
 import { D3DDECLUSAGE } from './declaration.js';
-import { fogFunctionDeclaration } from '../webgpu/internal/fixedfunction.js';
+import { compareExpression, fogFunctionDeclaration } from '../webgpu/internal/fixedfunction.js';
 
 /** D3DSPSM, the source modifiers. */
 const MODIFIER = Object.freeze({
@@ -101,8 +101,22 @@ export const HYBRID_CONSTANTS = Object.freeze({
     /** The fixed-function fog's start, end and density, and the fog colour beside it. */
     FOG: 41,
     FOG_COLOR: 42,
-    COUNT: 43,
+    /** The alpha reference the fixed-function alpha test compares against. */
+    ALPHA: 43,
+    COUNT: 44,
 });
+
+/**
+ * The varying the alpha test's reference travels at, and the fixed vertex
+ * stage writes it at.
+ *
+ * The locations this translation hands out are colours (0 and 1), coordinate
+ * sets (2 + set), fog (10) and point size (11), so the first free one is 12.
+ * A shader model above 2.0 would use more of the range for declared
+ * semantics, and this device refuses one -- `translateShader` builds a 3.0
+ * vertex stage only for a caller that asks, and the seam never does.
+ */
+const ALPHA_LOCATION = 12;
 
 /**
  * Where a varying of a given usage travels between the two stages: colours
@@ -268,7 +282,7 @@ function moduleHeader(options){
  *
  * @param {import('./shader.js').ParsedShader} parsed
  * @param {{ inputs?: Map<number, InputShape>, alsoWrite?: readonly number[],
- *     fog?: number }} [options]
+ *     fog?: number, alphaFunc?: number }} [options]
  *        For a vertex shader, the shape of each v# the declaration supplies,
  *        by register. Absent means every declared input arrives as four
  *        floats; present, a declared register it does not name reads as the
@@ -1095,21 +1109,38 @@ export function translateShader(parsed, options = {}){
                 ? '    out.oDepth = oDepth.x;'
                 : `    out.oC${output} = oC${output};`);
         }
-        // The fog stage Direct3D applies after a pixel shader below model 3:
-        // what the shader wrote is the colour it mixes towards the fog, by the
-        // factor the vertex stage carried in the oFog varying -- its amount in
-        // x and the fog colour in y,z,w. The mix goes in after the body and
-        // before the outputs are written: fog on the shaded colour.
-        if (options.fog && pixelOutputs.has(0))
+        // The stages Direct3D adds after a pixel shader below model 3, in the
+        // order it adds them: the alpha test on the alpha the shader wrote,
+        // then the fog mix on the colour that survived. Both read a varying
+        // the fixed vertex stage carried -- the reference in one, the fog
+        // amount and colour in the other -- and the comparison itself is the
+        // translation's, because it is one function of the state for every
+        // pixel of the draw. The mix goes in after the body and before the
+        // outputs are written: both stages work on the shaded colour.
+        if (pixelOutputs.has(0) && (options.alphaFunc || options.fog))
         {
-            inputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.FOG, 0)}) fog: vec4f,`);
-            reads.push(varyingLocation(D3DDECLUSAGE.FOG, 0));
-            const fogLines = [
-                '    oC0 = vec4f(mix(in.fog.yzw, oC0.rgb,'
-                    + ' clamp(in.fog.x, 0.0, 1.0)), oC0.a);',
-            ];
+            /** @type {string[]} */
+            const tail = [];
+            if (options.alphaFunc)
+            {
+                inputFields.push(`    @location(${ALPHA_LOCATION}) alpha: vec4f,`);
+                reads.push(ALPHA_LOCATION);
+                tail.push(
+                    `    if (!(${compareExpression(options.alphaFunc, 'oC0.a', 'in.alpha.x')}))`,
+                    '    {',
+                    '        discard;',
+                    '    }');
+            }
+            if (options.fog)
+            {
+                const location = varyingLocation(D3DDECLUSAGE.FOG, 0);
+                inputFields.push(`    @location(${location}) fog: vec4f,`);
+                reads.push(location);
+                tail.push('    oC0 = vec4f(mix(in.fog.yzw, oC0.rgb,'
+                    + ' clamp(in.fog.x, 0.0, 1.0)), oC0.a);');
+            }
             const at = body.indexOf('    out.oC0 = oC0;');
-            body.splice(at < 0 ? body.length : at, 0, ...fogLines);
+            body.splice(at < 0 ? body.length : at, 0, ...tail);
         }
         entry = 'ps_main';
     }
@@ -1171,9 +1202,14 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  *        it, with the fog colour, in the oFog varying a fogged pixel shader
  *        reads -- which is the stage Direct3D applies after a pixel shader
  *        below model 3.
+ * @param {boolean} [alphaTest]  True, the stage carries the alpha reference
+ *        the fixed-function alpha test compares against, in the varying at
+ *        `ALPHA_LOCATION`, so a pixel shader over it can run that test.
  * @returns {TranslatedShader}
  */
-export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [], fog = 0){
+export function fixedVertexStage(
+    elements, shapes, alsoWrite = [], generated = [], fog = 0, alphaTest = false)
+{
     /** @type {string[]} */
     const inputFields = [];
     /** @type {string[]} */
@@ -1268,6 +1304,15 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         outputs.push(location);
         body.push(`    out.o${location} = vec4f(fogFactorOf(out.oPos.w),`
             + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
+    }
+    // The reference the alpha test a pixel shader runs compares against: a
+    // state of the draw, so it travels the same way the fog colour does.
+    if (alphaTest)
+    {
+        outputFields.push(`    @location(${ALPHA_LOCATION}) o${ALPHA_LOCATION}: vec4f,`);
+        outputs.push(ALPHA_LOCATION);
+        body.push(`    out.o${ALPHA_LOCATION} = vec4f(c[${HYBRID_CONSTANTS.ALPHA}].x,`
+            + ' 0.0, 0.0, 1.0);');
     }
     for (const location of alsoWrite)
     {

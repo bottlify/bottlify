@@ -1258,6 +1258,25 @@ export function fogModeOf(model, applied = true){
 }
 
 /**
+ * The alpha comparison a draw runs under: the D3DCMP function when the test is
+ * enabled, and zero for none. It is a fixed-function stage Direct3D runs after
+ * a pixel shader below model 3 exactly as for a fixed-function draw, and the
+ * default function is `ALWAYS`, so a program that enables the test and sets no
+ * function gets the one that discards nothing.
+ *
+ * @param {RenderModel} model
+ * @returns {number} D3DCMP, or 0 for no test.
+ */
+export function alphaTestOf(model){
+    const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
+    if (rs('ALPHATESTENABLE') === 0)
+    {
+        return 0;
+    }
+    return rs('ALPHAFUNC') || D3DCMP.ALWAYS;
+}
+
+/**
  * The render state of a draw, as the pipeline cache keys it.
  *
  * The two paired blend modes are expanded here: they set both factors from one
@@ -1293,6 +1312,7 @@ export function pipelineStateOf(model, shape){
         destBlend = D3DBLEND.SRCALPHA;
     }
     const fogMode = fogModeOf(model, shape.fog !== false);
+    const alphaFunc = alphaTestOf(model);
 
     return {
         fvf: shape.fvf,
@@ -1316,8 +1336,8 @@ export function pipelineStateOf(model, shape){
         // opaque the presented frame is, which nothing in the picture explains.
         colorWrite: rs('COLORWRITEENABLE')
             & (shape.targetHasAlpha === false ? ~COLORWRITEENABLE_ALPHA : ~0),
-        alphaTest: rs('ALPHATESTENABLE') !== 0,
-        alphaFunc: rs('ALPHAFUNC'),
+        alphaTest: alphaFunc !== 0,
+        alphaFunc,
         fogMode,
         stages: shape.stages,
         // Specular is a fragment-stage decision as much as a lighting one: the
@@ -2149,9 +2169,13 @@ export function createRenderer(options){
         dump.push(`#${dump.length} program n=${count}`
             + ` vs=${prepared.state.vertexShader} ps=${prepared.state.pixelShader}`
             + ` decl=${program.declarationId}`
-            // The fog stage below model 3 runs after the shader too, so a
-            // program's draw is another place its numbers can be wrong.
+            // The fog and alpha-test stages below model 3 run after the shader
+            // too, so a program's draw is another place their numbers can be
+            // wrong.
             + ` fog=${prepared.state.fogMode === D3DFOG.NONE ? '-' : fogSettingOf(model)}`
+            + ` aTest=${prepared.state.alphaTest
+                ? `${prepared.state.alphaFunc}/${model.renderStates.get(D3DRS.ALPHAREF) ?? 0}`
+                : '-'}`
             + ` target=${describeTarget(model)}`
             + ` view=${model.viewport.rect.x},${model.viewport.rect.y}`
             + `+${model.viewport.rect.width}x${model.viewport.rect.height}`
@@ -3422,10 +3446,20 @@ export function createRenderer(options){
         // program's own keeps the fog Direct3D would take from that shader,
         // which this translation does not compute.
         const fog = program.vertex ? 0 : fogModeOf(model, fogApplied);
-        const pixel = translationOf(pixelShader, `ps|fog${fog}`,
+        // The alpha test is the same fixed-function stage as the fog: Direct3D
+        // runs it on a pixel shader's output below model 3, so a cut-out
+        // texture a shader draws discards exactly what a fixed-function draw
+        // would. Its reference travels from the fixed vertex stage with the
+        // fog, so a draw through a vertex shader of the program's own keeps
+        // the gap the fog has there.
+        const alphaFunc = program.vertex ? 0 : alphaTestOf(model);
+        const pixel = translationOf(pixelShader, `ps|fog${fog}|a${alphaFunc}`,
             ()=>translateShader(
                 /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.pixel),
-                fog === 0 ? {} : { fog }));
+                {
+                    ...(fog === 0 ? {} : { fog }),
+                    ...(alphaFunc === 0 ? {} : { alphaFunc }),
+                }));
         if (pixel.error)
         {
             skip('program');
@@ -3498,8 +3532,8 @@ export function createRenderer(options){
                     { inputs: layout.shapes, alsoWrite: missing }))
             : hybridStageFor(
                 `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`
-                    + `|f${fog}`,
-                wanted, layout.shapes, missing, generated, fog);
+                    + `|f${fog}|a${alphaFunc === 0 ? 0 : 1}`,
+                wanted, layout.shapes, missing, generated, fog, alphaFunc !== 0);
         if (vertex.error)
         {
             skip('program');
@@ -3655,14 +3689,15 @@ export function createRenderer(options){
      * @param {number[]} alsoWrite
      * @param {number[]} generated
      * @param {number} fog  D3DFOG; zero for none.
+     * @param {boolean} [alphaTest]  Whether the stage carries the alpha reference.
      */
-    const hybridStageFor = (key, wanted, shapes, alsoWrite, generated, fog)=>{
+    const hybridStageFor = (key, wanted, shapes, alsoWrite, generated, fog, alphaTest = false)=>{
         const existing = hybridStages.get(key);
         if (existing)
         {
             return existing;
         }
-        const made = fixedVertexStage(wanted, shapes, alsoWrite, generated, fog);
+        const made = fixedVertexStage(wanted, shapes, alsoWrite, generated, fog, alphaTest);
         hybridStages.set(key, made);
         return made;
     };
@@ -3728,6 +3763,9 @@ export function createRenderer(options){
         const fogColour = colorToFloats(rs('FOGCOLOR'));
         floats.set([fogColour.r, fogColour.g, fogColour.b, fogColour.a],
             HYBRID_CONSTANTS.FOG_COLOR * 4);
+        // The alpha reference the pixel shader's alpha test compares against,
+        // normalized as the fixed-function block normalizes it.
+        floats.set([rs('ALPHAREF') / 255, 0, 0, 0], HYBRID_CONSTANTS.ALPHA * 4);
         return [floats, take(64), take(16)];
     };
 

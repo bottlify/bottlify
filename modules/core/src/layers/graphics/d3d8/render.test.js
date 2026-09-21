@@ -33,11 +33,12 @@ import {
 } from './constants.js';
 import { createDirect3D8 } from './device.js';
 import {
-    IDENTITY, LIGHT_FLOATS, UNIFORM_AT, UNIFORM_FLOATS, colorToFloats, expandTexels, eyePosition,
-    HARDWARE_SAMPLER, listIndices, multiplyMatrices, packLight, pipelineStateOf, samplerFlagsOf,
-    screenExtent, transformPosition, uniformBlock, fogModeOf,
+    IDENTITY, LIGHT_FLOATS, UNIFORM_AT, UNIFORM_FLOATS, alphaTestOf, colorToFloats, expandTexels,
+    eyePosition, HARDWARE_SAMPLER, listIndices, multiplyMatrices, packLight, pipelineStateOf,
+    samplerFlagsOf, screenExtent, transformPosition, uniformBlock, fogModeOf,
     vertexCountOf,
 } from './render.js';
+import { pipelineKey } from '../webgpu/internal/pipeline.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF, decodeFvf } from '../webgpu/internal/vertexformat.js';
@@ -2839,4 +2840,51 @@ test('fog: the table mode is the one that runs when it is set, else the vertex m
     });
     assert.equal(fogModeOf(disabled), D3DFOG.NONE);
     assert.equal(fogModeOf(both, false), D3DFOG.NONE);
+});
+
+test('alpha test: the comparison is the state, and it is in the pipeline key', ()=>{
+    /** @param {Record<number, number>} states @returns {any} */
+    const modelOf = states=>({
+        renderStates: new Map(Object.entries(states)
+            .map(([state, value])=>[Number(state), value])),
+        stageStates: ()=>new Map(),
+        textures: new Map(),
+        transforms: new Map(),
+        lights: new Map(),
+        material: material8(),
+    });
+    // Disabled is no test at all, whatever function is set beside it.
+    assert.equal(alphaTestOf(modelOf({
+        [D3DRS.ALPHATESTENABLE]: 0,
+        [D3DRS.ALPHAFUNC]: D3DCMP.GREATER,
+    })), 0);
+    // Enabled, the function is the test, and Direct3D's default is ALWAYS.
+    assert.equal(alphaTestOf(modelOf({
+        [D3DRS.ALPHATESTENABLE]: 1,
+        [D3DRS.ALPHAFUNC]: D3DCMP.GREATER,
+    })), D3DCMP.GREATER);
+    assert.equal(alphaTestOf(modelOf({ [D3DRS.ALPHATESTENABLE]: 1 })), D3DCMP.ALWAYS);
+
+    // The state reaches the pipeline, and the key that cache is held under:
+    // two draws whose comparisons differ get a pipeline each, which is what a
+    // shader with one comparison written into it needs.
+    const shape = {
+        fvf: FVF.XYZRHW | FVF.DIFFUSE,
+        topology: 'triangle-list',
+        targetFormat: 'bgra8unorm',
+        depthFormat: undefined,
+        stages: [],
+    };
+    const greater = pipelineStateOf(modelOf({
+        [D3DRS.ALPHATESTENABLE]: 1,
+        [D3DRS.ALPHAFUNC]: D3DCMP.GREATER,
+    }), shape);
+    const less = pipelineStateOf(modelOf({
+        [D3DRS.ALPHATESTENABLE]: 1,
+        [D3DRS.ALPHAFUNC]: D3DCMP.LESS,
+    }), shape);
+    assert.equal(greater.alphaTest, true);
+    assert.equal(greater.alphaFunc, D3DCMP.GREATER);
+    assert.notEqual(pipelineKey(greater), pipelineKey(less),
+        'a different comparison is a different pipeline');
 });

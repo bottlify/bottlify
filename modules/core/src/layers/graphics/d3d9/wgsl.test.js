@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, parseShader, versionToken } from './shader.js';
 import { HYBRID_CONSTANTS, fixedVertexStage, translateShader, varyingLocation } from './wgsl.js';
 import { D3DDECLUSAGE } from './declaration.js';
-import { D3DFOG } from './constants.js';
+import { D3DCMP, D3DFOG } from './constants.js';
 
 /** @param {number} type @param {number} index @param {number} writeMask @param {number} result */
 const dst = (type, index, writeMask = 0xf, result = 0)=>(0x80000000 | ((type & 7) << 28)
@@ -464,7 +464,7 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     assert.equal(stage.error, null);
     assert.equal(stage.entry, 'vs_main');
     assert.equal(stage.constants, HYBRID_CONSTANTS.COUNT);
-    assertLine(stage.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 43>;');
+    assertLine(stage.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 44>;');
     assertLine(stage.wgsl,
         'out.oPos = mat4x4f(c[0], c[1], c[2], c[3]) * vec4f(vec4f(in.v0, 1.0).xyz, 1.0);');
     assertLine(stage.wgsl, `out.o${varyingLocation(D3DDECLUSAGE.COLOR, 0)} = in.v1.zyxw;`);
@@ -535,6 +535,18 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     assertLine(fogged.wgsl, `out.o${fogLocation} = vec4f(fogFactorOf(out.oPos.w),`
         + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
     assertLine(fogged.wgsl, `let scaled = c[${HYBRID_CONSTANTS.FOG}].z * dist;`);
+
+    // The alpha reference a fogged shader's alpha test compares against
+    // travels the same way, in the varying at location 12.
+    const tested = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
+    ], new Map([[0, { components: 3, scalar: 'f32', bgra: false }]]), [], [],
+    D3DFOG.NONE, true);
+    assert.equal(tested.error, null);
+    assert.ok(tested.outputs.includes(12), 'the reference varying is written');
+    assertLine(tested.wgsl, '@location(12) o12: vec4f,');
+    assertLine(tested.wgsl,
+        `out.o12 = vec4f(c[${HYBRID_CONSTANTS.ALPHA}].x, 0.0, 0.0, 1.0);`);
 });
 
 test('the fog stage after a pixel shader mixes the shaded colour by the varying', ()=>{
@@ -575,4 +587,55 @@ test('the fog stage after a pixel shader mixes the shaded colour by the varying'
     const plain = translateShader(parsed);
     assert.ok(!plain.wgsl.includes('fog: vec4f'), 'no fog varying');
     assert.ok(!plain.wgsl.includes('in.fog'), 'and no mix');
+});
+
+test('the alpha test after a pixel shader discards on the alpha the shader wrote', ()=>{
+    const parsed = parseShader([PS_2_0,
+        ...dclSampler(0),
+        op(OPCODE.DCL, 2), 0x80000000, dst(REGISTER.TEXTURE, 2),
+        op(OPCODE.TEX, 3), dst(REGISTER.TEMP, 0), src(REGISTER.TEXTURE, 2),
+        src(REGISTER.SAMPLER, 0),
+        op(OPCODE.MUL, 3), dst(REGISTER.COLOROUT, 0), src(REGISTER.TEMP, 0),
+        src(REGISTER.TEMP, 0),
+        END_TOKEN]);
+    assert.equal(parsed.error, null);
+
+    // Every D3DCMP function, as the comparison it means. The two that are
+    // decided before a value is read stay that way.
+    /** @type {[number, string][]} */
+    const compares = [
+        [D3DCMP.NEVER, 'false'],
+        [D3DCMP.LESS, 'oC0.a < in.alpha.x'],
+        [D3DCMP.EQUAL, 'oC0.a == in.alpha.x'],
+        [D3DCMP.LESSEQUAL, 'oC0.a <= in.alpha.x'],
+        [D3DCMP.GREATER, 'oC0.a > in.alpha.x'],
+        [D3DCMP.NOTEQUAL, 'oC0.a != in.alpha.x'],
+        [D3DCMP.GREATEREQUAL, 'oC0.a >= in.alpha.x'],
+        [D3DCMP.ALWAYS, 'true'],
+    ];
+    for (const [func, expression] of compares)
+    {
+        const translated = translateShader(parsed, { alphaFunc: func });
+        assert.equal(translated.error, null);
+        assertLine(translated.wgsl, '@location(12) alpha: vec4f,');
+        assert.ok(translated.reads.includes(12), 'and the reference is a varying it reads');
+        assertLine(translated.wgsl, `if (!(${expression}))`);
+        assertLine(translated.wgsl, 'discard;');
+    }
+
+    // Both stages of the pixel epilogue in the order Direct3D runs them: the
+    // alpha test on the shader's own alpha, then the fog mix.
+    const both = translateShader(parsed, { alphaFunc: D3DCMP.GREATEREQUAL, fog: D3DFOG.LINEAR });
+    const lines = both.wgsl.split('\n').map(line=>line.trim());
+    const tested = lines.indexOf('if (!(oC0.a >= in.alpha.x))');
+    const mixed = lines.indexOf('oC0 = vec4f(mix(in.fog.yzw, oC0.rgb,'
+        + ' clamp(in.fog.x, 0.0, 1.0)), oC0.a);');
+    const out = lines.indexOf('out.oC0 = oC0;');
+    assert.ok(tested >= 0 && mixed > tested, 'the alpha test comes first');
+    assert.ok(out > mixed, 'and both before the colour is written out');
+
+    // A surface with no test declares none of it.
+    const plain = translateShader(parsed);
+    assert.ok(!plain.wgsl.includes('alpha: vec4f'), 'no reference varying');
+    assert.ok(!plain.wgsl.includes('discard'), 'and nothing to discard');
 });

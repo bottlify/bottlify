@@ -1011,8 +1011,21 @@ function samplerDeclarations(count, group, first){
     return lines.join('\n');
 }
 
-/** @param {number} func @param {string} value @param {string} reference */
-function compareExpression(func, value, reference){
+/**
+ * The alpha test's comparison, as one WGSL expression over two names.
+ *
+ * One definition, because the fixed-function fragment stage and a translated
+ * pixel shader's alpha test have to agree byte for byte about which way each
+ * D3DCMP function points. `NEVER` and `ALWAYS` are decided before any value is
+ * read, and are written as themselves rather than as a comparison no operand
+ * can satisfy.
+ *
+ * @param {number} func  D3DCMP
+ * @param {string} value  WGSL expression for the alpha being tested.
+ * @param {string} reference  WGSL expression for the reference it is tested against.
+ * @returns {string}
+ */
+export function compareExpression(func, value, reference){
     const operator = {
         1: null, 2: '<', 3: '==', 4: '<=', 5: '>', 6: '!=', 7: '>=', 8: null,
     }[func];
