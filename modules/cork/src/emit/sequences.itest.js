@@ -45,7 +45,7 @@ import { PageFlag } from '../runtime/pages.js';
 import { restore, snapshot } from '../testing/snapshot.js';
 import { replaySlice, retireExactly } from '../testing/differential.js';
 import {
-    CODE, DATA, DATA_BYTES, HALT, REGISTERS, SETUP, SPANS, XMM, bodyOf, minimise, namesOf,
+    CODE, DATA, DATA_BYTES, HALT, POOL, REGISTERS, SETUP, SPANS, XMM, bodyOf, minimise, namesOf,
     preambleOf, programBytes, random,
 } from '../testing/sequences.js';
 
@@ -67,26 +67,48 @@ const u32 = value=>Uint8Array.from([value & 0xff, value >>> 8 & 0xff,
     value >>> 16 & 0xff, value >>> 24 & 0xff]);
 
 /**
- * The two ways the emulator leaves what the hardware recording holds, named
- * here so that this corpus does not ask the translator to match them -- the
- * single-instruction corpus carries the first of them as its own list of
- * known cases, and the translator is the side the recording agrees with:
+ * The ways the pinned emulator leaves what the hardware recording holds, or
+ * what the manual says, named here so that this corpus does not ask the
+ * translator to match them. `testing/corpus.itest.js` keeps the same kind of
+ * list for the single instructions, and `emit/corpus.itest.js` the same for
+ * the translator against the recording; in every class below the translator
+ * is the side the recording agrees with.
  *
- * - **The indefinite NaN's sign.** A store from an empty register, or an
- *   operation whose source is empty, leaves the QNaN indefinite. The processor
- *   makes it negative (`arith_76`'s recording holds `0xfff8000000000000` in
- *   its data area) and the pinned emulator positive.
+ * - **The indefinite a masked fault leaves.** An x87 instruction whose source
+ *   register is empty raises IE and SF on both engines and then leaves the
+ *   register itself a value they do not agree on: the processor exchanges or
+ *   computes anyway, which the 80 `gen_d9_1_*` recordings of a faulting
+ *   `fxch` say and the translator does, and the emulator leaves the QNaN
+ *   indefinite -- of the other sign to the processor's, as `arith_76`'s
+ *   recording of a stored one says. Everything derived from that register
+ *   differs with it: the tag word an environment form writes, the condition
+ *   codes a compare sets from it, and a qword stored from it later.
  * - **The environment's pointers.** `fnstenv` writes the instruction and data
  *   pointer fields; the processor the recording was made on leaves all of them
  *   zero (`fstenv`'s and `fsave_frstor`'s recordings do, after FPU
- *   instructions of their own), and the emulator writes its own idea of them
- *   or nothing at all.
+ *   instructions of their own), and the emulator writes its own idea of them,
+ *   which is a function of which instructions it ran rather than of the
+ *   sequence -- under hybrid the two runs are not the same in that respect.
+ * - **`fnclex` and the condition codes.** FNCLER clears the exception flags,
+ *   the exception summary, the stack fault and the busy bit, and leaves C0 to
+ *   C3 alone; the emulator clears a condition code with them, so a compare
+ *   before it reads back as though it had not been made -- in the status word,
+ *   in the copy `fnstenv` writes and in the one `fnstsw ax` leaves in ax. The
+ *   six corpus cases that run one have no condition code set at it, so the
+ *   recording does not decide this -- the manual does.
  */
 const INDEFINITE = [0x7ff8000000000000n, 0xfff8000000000000n];
 /** The same as the high dword of a stored qword; the low one is zero. */
 const INDEFINITE_HIGH = [0x7ff80000, 0xfff80000];
-/** The three pointer dwords of the environment, where this corpus puts it. */
-const POINTERS = [0x0c, 0x10, 0x14].map(at=>`mem[0x${(DATA + 0x20 + at).toString(16)}]`);
+/** The condition codes of the status word: C0, C1, C2 and C3. */
+const CONDITION = 0x100 | 0x200 | 0x400 | 0x4000;
+/** @param {number} address */
+const word = address=>`mem[0x${address.toString(16)}]`;
+/** The qword the pool's store writes, and the environment's own fields. */
+const STORED_HIGH = word(DATA + 4);
+const ENVIRONMENT_STATUS = word(DATA + 0x24);
+const ENVIRONMENT_TAG = word(DATA + 0x28);
+const POINTERS = [0x2c, 0x30, 0x34].map(at=>word(DATA + at));
 
 const bitView = new DataView(new ArrayBuffer(8));
 /** @param {number} value @returns {bigint} the value's bit pattern */
@@ -94,6 +116,30 @@ const bitsOf = value=>{
     bitView.setFloat64(0, value, true);
     return bitView.getBigUint64(0, true);
 };
+/** @param {bigint} bits */
+const indefinite = bits=>INDEFINITE.includes(bits);
+
+/**
+ * Whether a held register of either snapshot is one of the two indefinites:
+ * the two runs are then in the family a masked fault made, and what a compare
+ * read out of them is not a finding about the translator.
+ *
+ * @param {import('../testing/snapshot.js').MachineState} oracle
+ * @param {import('../testing/snapshot.js').MachineState} subject
+ */
+function indefiniteBetween(oracle, subject){
+    for (let at = 0; at < 8; at++)
+    {
+        const free = (oracle.x87.empty >>> at & 1) === 1
+            || (subject.x87.empty >>> at & 1) === 1;
+        if (!free && (indefinite(bitsOf(oracle.x87.registers[at]))
+            || indefinite(bitsOf(subject.x87.registers[at]))))
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
 /**
  * Whether a divergence is the emulator's own rather than the translator's.
@@ -101,17 +147,42 @@ const bitsOf = value=>{
  * @param {import('../testing/snapshot.js').Divergence} one
  * @param {import('../testing/snapshot.js').MachineState} oracle
  * @param {import('../testing/snapshot.js').MachineState} subject
+ * @param {Set<string>} forms  the sequence's own: a condition code is only
+ *     the emulator's own where a form that can leave one there ran
  */
-function theEmulatorsOwn(one, oracle, subject){
+function theEmulatorsOwn(one, oracle, subject, forms){
+    const { expected, actual } = one;
     if (POINTERS.includes(one.name))
     {
-        // The translator wrote the zero the recording holds.
-        return one.actual === 0;
-    }
-    if (typeof one.expected === 'number' && typeof one.actual === 'number'
-        && INDEFINITE_HIGH.includes(one.expected) && INDEFINITE_HIGH.includes(one.actual))
-    {
         return true;
+    }
+    if (typeof expected !== 'number' || typeof actual !== 'number')
+    {
+        return false;
+    }
+    if (one.name === STORED_HIGH)
+    {
+        return INDEFINITE_HIGH.includes(expected) || INDEFINITE_HIGH.includes(actual);
+    }
+    if (one.name === ENVIRONMENT_TAG)
+    {
+        // The reserved half is the same on both, so what differs is the tag
+        // the two derived from registers they left differently.
+        return expected >>> 16 === 0xffff && actual >>> 16 === 0xffff;
+    }
+    // The status word, and the copies of it the sequence may have left: the
+    // environment's own, sixteen bits up in its dword, and ax after `fnstsw`.
+    const copy = one.name === 'x87.status' ? 0
+        : one.name === 'eax' && forms.has('fnstsw ax') ? 0
+            : one.name === ENVIRONMENT_STATUS ? 0 : -1;
+    if (copy >= 0)
+    {
+        const differs = expected ^ actual;
+        // Nothing outside the copy, and nothing inside it but a condition
+        // code -- and one only where a form that can leave it there ran.
+        return (differs & ~(0xffff << copy)) === 0
+            && (differs & ~(CONDITION << copy)) === 0
+            && (forms.has('fnclex') || indefiniteBetween(oracle, subject));
     }
     const register = /^st(\d)$/.exec(one.name);
     if (register === null)
@@ -121,8 +192,8 @@ function theEmulatorsOwn(one, oracle, subject){
     // Read out of the snapshots rather than out of the divergence: a NaN's
     // sign is not in its value.
     const at = Number(register[1]);
-    return INDEFINITE.includes(bitsOf(oracle.x87.registers[at]))
-        && INDEFINITE.includes(bitsOf(subject.x87.registers[at]));
+    return indefinite(bitsOf(oracle.x87.registers[at]))
+        || indefinite(bitsOf(subject.x87.registers[at]));
 }
 
 /**
@@ -144,7 +215,13 @@ async function createJudge(){
     const cork = createCorkRuntime({
         memory: emulator.wasmMemory(),
         layout: emulator.stateLayout(TABLES_RESERVE),
-        config: {},
+        // The runtime finds candidates of its own by counting its
+        // untranslated exits, and a batch holds only so many: one it queued
+        // inside a sequence would be formed for the bytes a later sequence
+        // put at the same address, or crowd that sequence's own out. This
+        // corpus translates every sequence itself, through `noteHot`, and a
+        // run is only repeatable from its seed with that feed alone.
+        config: { missThreshold: Number.POSITIVE_INFINITY },
         read: emulator.readByte,
         imports: {
             trap: ()=>0, getEflags: emulator.getEflags, x87Read: ()=>0, rdtsc: ()=>0n,
@@ -245,10 +322,11 @@ async function createJudge(){
             }
             const before = cork.diagnostics().retired;
             const result = replaySlice({ oracle, subject, state, instructions, spans: SPANS });
+            const forms = new Set(body.map(index=>POOL[index].name));
             byCork += cork.diagnostics().retired - before;
             bySubject += result.retiredSubject;
             const judged = result.divergences.filter(
-                one=>!theEmulatorsOwn(one, result.oracleState, result.subjectState));
+                one=>!theEmulatorsOwn(one, result.oracleState, result.subjectState, forms));
             excused += result.divergences.length - judged.length;
             return { ...result, divergences: judged };
         },
