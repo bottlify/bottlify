@@ -58,6 +58,7 @@ export const POOL = [
     { name: 'faddp', bytes: [0xde, 0xc1] },
     { name: 'fmul st0, st1', bytes: [0xd8, 0xc9] },
     { name: 'fxch st1', bytes: [0xd9, 0xc9] },
+    { name: 'fxch st2', bytes: [0xd9, 0xca] },
     { name: 'fcomp', bytes: [0xd8, 0xd9] },
     { name: 'fnstsw ax', bytes: [0xdf, 0xe0] },
     { name: 'fnstenv [m]', bytes: [0xd9, 0x35, ...disp32(ENV)] },
@@ -110,6 +111,8 @@ export function at(name){
  */
 export const PUSHES = ['fld1', 'fldz', 'fld qword [m]'].map(at);
 export const EXCHANGE = at('fxch st1');
+/** The one more permutation the widened preamble reaches: a deeper exchange. */
+export const EXCHANGE2 = at('fxch st2');
 
 /** The data area's known contents, before any sequence writes it. */
 export const DATA_BYTES = (()=>{
@@ -177,20 +180,34 @@ export function bodyOf(next, { shortest = 2, longest = 8 } = {}){
 }
 
 /**
- * The x87 a sequence is entered with: up to three pushes and, sometimes, an
- * exchange -- a top and a permutation the region is compiled for, rather than
- * the empty stack a fresh processor has.
+ * The x87 a sequence is entered with: up to seven pushes, so the entry top is
+ * any of 0..7 rather than only 0, 5, 6 and 7 (the deep tops 1 to 4 a sequence
+ * used to reach only with its own instructions, inside a region rather than at
+ * its entry), and one of two exchanges, so the entry's registers are permuted
+ * two ways rather than one. A region is then compiled for every stack depth and
+ * more of the slot mappings an entry can have -- the entry key is part of where
+ * a defect hides -- and a deep stack overflows on the sequence's own pushes,
+ * which is where the C1 an overflow sets is judged.
  *
  * @param {() => number} next
  * @returns {number[]}  pool indices
  */
 export function preambleOf(next){
-    const pushes = Math.floor(next() * 4);
+    const pushes = Math.floor(next() * 8);
     const items = Array.from({ length: pushes },
         ()=>PUSHES[Math.floor(next() * PUSHES.length)]);
-    if (pushes >= 2 && next() < 0.5)
+    if (pushes >= 2)
     {
-        items.push(EXCHANGE);
+        const which = next();
+        if (which < 0.34)
+        {
+            items.push(EXCHANGE);
+        }
+        else if (which < 0.67 && pushes >= 3)
+        {
+            // st2 needs a third register held to exchange with.
+            items.push(EXCHANGE2);
+        }
     }
     return items;
 }

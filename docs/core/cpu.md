@@ -129,7 +129,17 @@ is. Within a region, only the blocks compiled for the stack in the entry's shape
 no registers exchanged) are entries; a block compiled for another shape is reached from
 inside the region alone, where the edge brings the stack into it, since entered from outside
 it would push, pop and write the top back for a stack the machine does not have. A block
-whose shape the tracking does not know keeps the top the machine had. An MMX instruction
+whose shape the tracking does not know keeps the top the machine had. A region with both x87
+and MMX in it translates the two together rather than cutting at the first instruction that has
+both. On the processor mm<i> is the mantissa of the physical register R<i> (not relative to the
+top), so the eight registers are one set with two views the region keeps consistent: the value
+the x87 side computes in an f64 local and the mantissa the MMX side reads and writes in an i64
+local, reconciled at every write -- an x87 write leaves the mantissa the double's bits, an MMX
+write leaves the value its mantissa decodes to (the indefinite, or a zero mantissa the negative
+infinity, since the write sets the exponent and sign all ones) -- and a per-register form mark
+records which view wrote it last, so the exit puts each register back into the state block in
+that form, the MMX one (the exponent and sign all ones, as the processor leaves them) or the
+relaxed double. An MMX instruction
 holds every x87 register with the top at zero, as the processor does, and `emms` empties them
 again, whichever order the two come in within one run, and leaves the top at the zero the MMX
 instruction set -- leaving the MMX state does not undo it. `fxsave` and `fxrstor` still end a region and run on the emulator. A store translated code makes into a page the emulator's own compiler compiled is

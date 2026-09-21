@@ -28,6 +28,7 @@ import { I32 } from './flags.js';
 import { Local, MMX_HELD, MMX_TOP } from './region.js';
 import { emitAddress, readOp, writeOp, writeReg } from './integer.js';
 import { checkAccess, noteStore } from './memory.js';
+import { x87FromMmx } from './x87.js';
 
 const F32 = Object.freeze({
     eq: 0x5b, ne: 0x5c, lt: 0x5d, gt: 0x5e, le: 0x5f, ge: 0x60, add: 0x92, sub: 0x93, mul: 0x94,
@@ -82,10 +83,29 @@ export function emitSimd(e, instruction, flagsLive){
     const done = emitForm(e, instruction, flagsLive);
     if (done && instruction.operands.some(operand=>operand.kind === 'mm'))
     {
-        markMmx(e);
+        if (e.x87.active)
+        {
+            // The region keeps the x87 stack in its own locals, so the MMX state
+            // goes there rather than into the exit's mark: the top at zero and
+            // every register held, as the processor leaves it and as the x87
+            // after this instruction is compiled (the tracker's top) and run
+            // (the empty mask) for. The registers' values and forms were
+            // reconciled by the write's own lowering (`x87FromMmx`).
+            e.b.i32const(0).localSet(Local.x87Top);
+            e.b.i32const(0).localSet(Local.x87Empty);
+            if (e.x87.current !== null)
+            {
+                e.x87.current = { top: 0, slot: [...e.x87.current.slot] };
+            }
+        }
+        else
+        {
+            markMmx(e);
+        }
     }
     return done;
 }
+
 
 /**
  * One form's lowering.
@@ -1002,8 +1022,13 @@ function writeM(e, operand, pushValue){
     const { b } = e;
     if (operand.kind === 'mm')
     {
+        const physical = /** @type {number} */ (operand.reg);
+        const mm = e.mmLocal(physical, true);
         pushValue?.();
-        b.localSet(e.mmLocal(/** @type {number} */ (operand.reg), true));
+        b.localSet(mm);
+        // The register's x87 view follows its MMX view, so the two agree where
+        // they meet again later in the region (see `x87FromMmx`).
+        x87FromMmx(e, physical, mm);
         return;
     }
     if (pushValue !== null)

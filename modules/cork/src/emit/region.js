@@ -47,8 +47,8 @@ import { addCodeHitHelper, addUndoHelper, emitStaleExit } from './memory.js';
 import { Tables } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
 import {
-    addF80Helpers, addRoundHelper, prepareX87, sameState, x87BlockStart, x87Edge, x87Epilogue,
-    x87Normalise,
+    addF80Helpers, addRoundHelper, isX87, prepareX87, regionHasMmx, sameState, x87BlockStart,
+    x87Edge, x87Epilogue, x87Normalise,
     x87Prologue,
 } from './x87.js';
 
@@ -301,6 +301,16 @@ export class RegionEmitter {
         /** @type {number[]} */
         this.localTypes = [...LOCAL_TYPES];
         this.entryTop = entryTop;
+        // A region that translates both classes keeps the eight registers as one
+        // set with two views, so every register needs an mm local (the mantissa)
+        // beside its x87 local (the value): an exchange or a write of either
+        // class moves the other's, and a register only one class touches is
+        // still written back in the form the other left it. Allocate all eight
+        // mm locals there; elsewhere only the operands'.
+        const mixed = context.features.simd
+            && !context.leaveOut.has('x87')
+            && region.blocks.some(block=>block.instructions.some(isX87))
+            && regionHasMmx(region, context.leaveOut);
         if (context.features.simd)
         {
             this.localTypes.push(ValType.v128, ValType.v128, ValType.v128);
@@ -315,10 +325,30 @@ export class RegionEmitter {
                             this.xmmLocals.set(/** @type {number} */ (operand.reg), this.localTypes.length + 2);
                             this.localTypes.push(ValType.v128);
                         }
-                        if (operand.kind === 'mm' && !this.mmLocals.has(/** @type {number} */ (operand.reg)))
+                    }
+                }
+            }
+            if (mixed)
+            {
+                for (let p = 0; p < 8; p++)
+                {
+                    this.mmLocals.set(p, this.localTypes.length + 2);
+                    this.localTypes.push(ValType.i64);
+                }
+            }
+            else
+            {
+                for (const block of region.blocks)
+                {
+                    for (const instruction of block.instructions)
+                    {
+                        for (const operand of instruction.operands)
                         {
-                            this.mmLocals.set(/** @type {number} */ (operand.reg), this.localTypes.length + 2);
-                            this.localTypes.push(ValType.i64);
+                            if (operand.kind === 'mm' && !this.mmLocals.has(/** @type {number} */ (operand.reg)))
+                            {
+                                this.mmLocals.set(/** @type {number} */ (operand.reg), this.localTypes.length + 2);
+                                this.localTypes.push(ValType.i64);
+                            }
                         }
                     }
                 }
@@ -526,6 +556,19 @@ export class RegionEmitter {
             b.i32const(0).localGet(this.xmmLocal(index))
                 .storeV128({ offset: layout.xmm + index * 16 });
         }
+        if (this.x87.active && this.x87.hasMmx)
+        {
+            // A region of both classes: the eight registers are one set with two
+            // views, reconciled at every write. `x87Epilogue` writes the words
+            // (the top, the masks, the status and control); the registers go
+            // back from the mantissas the mm locals hold, each in the form --
+            // MMX or relaxed double -- its last write left it, which the form
+            // mask names. The run's MMX mark is not consulted: the locals the
+            // instructions kept are the truth, an `emms` among them.
+            x87Epilogue(this);
+            this.storeMixedRegisters();
+            return;
+        }
         for (const index of this.mmWritten)
         {
             b.i32const(0).localGet(this.mmLocal(index))
@@ -559,6 +602,48 @@ export class RegionEmitter {
             b.end();
         }
     }
+
+    /**
+     * The eight registers of a region that translated both classes, back into
+     * the state block from the mantissas the mm locals hold. A register written
+     * by either class is stored; the form mask says which tag it takes, the all
+     * ones an MMX write left or the relaxed double an x87 write left, so the
+     * emulator reads each back as the view that wrote it last. The mantissa is
+     * the mm local's whichever class wrote it: an x87 write kept the mm local
+     * equal to the double's bits, an MMX write to the value it stored.
+     */
+    storeMixedRegisters(){
+        const { b, layout } = this;
+        const x = this.x87;
+        for (let p = 0; p < 8; p++)
+        {
+            const at = layout.x87 + p * 16;
+            const mm = /** @type {number} */ (this.mmLocals.get(p));
+            // An MMX write is unconditional (its local is the mantissa); an x87
+            // one is under the dirty mask, which the register's own writes set.
+            const unconditional = this.mmWritten.has(p);
+            if (!unconditional)
+            {
+                b.localGet(Local.x87Dirty).i32const(1 << p).op(I32.and);
+                this.openIf(`mixed${p}`, EMPTY);
+            }
+            b.i32const(0).localGet(mm).store('i64', { offset: at });
+            if (layout.x87Format === 'tagged80')
+            {
+                b.i32const(0);
+                b.i32const(0xffff);
+                b.i32const(0x7ffe);
+                b.localGet(x.form).i32const(1 << p).op(I32.and);
+                b.select();
+                b.store('i32_16', { offset: at + 8 });
+            }
+            if (!unconditional)
+            {
+                this.close();
+            }
+        }
+    }
+
 
     /**
      * An untranslated exit with budget left probes the entry hash for the

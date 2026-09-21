@@ -108,6 +108,14 @@ export function step(instruction, state){
     const { op, operands } = instruction;
     if (!isX87(instruction))
     {
+        // An MMX instruction puts the stack in the MMX state, as the processor
+        // does: the top at zero and every register held. The hold is the run-time
+        // empty mask the instruction's own emission sets; the top is the tracker's,
+        // so the x87 after it in the region is compiled for a top of zero.
+        if (operands.some(operand=>operand.kind === 'mm'))
+        {
+            return { top: 0, slot: [...state.slot] };
+        }
         return state;
     }
     if (LEFT_OUT.has(op))
@@ -246,7 +254,12 @@ export function trackRegion(region, entryTop){
  *
  * @typedef {Object} X87Emit
  * @property {boolean} active            the region has x87 instructions and they are emitted
+ * @property {boolean} hasMmx            the region also translates MMX, so the eight registers
+ *     are the two views of one set: an MMX register's mantissa in its `i64` local, its x87 value
+ *     in the `f64` local, kept equal at every write and told apart at the exit by the form mask
  * @property {number} base               the first of the eight f64 locals
+ * @property {number} form               the i32 mask of registers an MMX write left in the MMX
+ *     form (the exponent and sign all ones), or -1 when the region translates no MMX
  * @property {number} temp               an f64 scratch local
  * @property {number} temp2
  * @property {number} temp3
@@ -258,9 +271,24 @@ export function trackRegion(region, entryTop){
  */
 
 /**
- * Sets up the region's x87 emission: decides whether the region uses x87
- * (and no MMX -- a region with both leaves x87 to the other executor), runs
- * the tracker and allocates the locals.
+ * Whether a region translates an MMX instruction: one with an mm operand that
+ * the run does not leave out. Such a region, when it also has x87, is the one
+ * the two register views meet inside.
+ *
+ * @param {import('../region.js').Region} region
+ * @param {Set<string>} leaveOut
+ */
+export function regionHasMmx(region, leaveOut){
+    return !leaveOut.has('mmx') && region.blocks.some(block=>block.instructions.some(
+        instruction=>instruction.operands.some(operand=>operand.kind === 'mm')));
+}
+
+/**
+ * Sets up the region's x87 emission: decides whether the region uses x87,
+ * runs the tracker and allocates the locals. A region with MMX in it keeps
+ * x87 too -- the two are the mantissa and the value of one set of eight
+ * registers, reconciled at every write (see `hasMmx`) -- rather than leaving
+ * x87 to the other executor at the first instruction that has both.
  *
  * @param {E} e @param {number} entryTop
  * @returns {X87Emit}
@@ -269,27 +297,32 @@ export function prepareX87(e, entryTop){
     const region = e.region;
     const uses = !e.context.leaveOut.has('x87')
         && region.blocks.some(block=>block.instructions.some(isX87));
-    const mmx = !e.context.leaveOut.has('mmx') && region.blocks.some(block=>block.instructions.some(
-        instruction=>instruction.operands.some(operand=>operand.kind === 'mm')));
-    if (!uses || mmx)
+    if (!uses)
     {
         return {
-            active: false, base: 0, temp: 0, temp2: 0, temp3: 0, states: [], ends: [],
-            cut: new Set(),
-            current: null, controlWritten: false,
+            active: false, hasMmx: false, base: 0, form: -1, temp: 0, temp2: 0, temp3: 0,
+            states: [], ends: [], cut: new Set(), current: null, controlWritten: false,
         };
     }
+    const hasMmx = regionHasMmx(region, e.context.leaveOut);
     const { states, cut, ends } = trackRegion(region, entryTop);
     const base = e.localTypes.length + 2;
     for (let k = 0; k < 11; k++)
     {
         e.localTypes.push(ValType.f64);
     }
+    let form = -1;
+    if (hasMmx)
+    {
+        e.localTypes.push(ValType.i32);
+        form = base + 11;
+    }
     return {
-        active: true, base, temp: base + 8, temp2: base + 9, temp3: base + 10, states, ends, cut,
-        current: null, controlWritten: false,
+        active: true, hasMmx, base, form, temp: base + 8, temp2: base + 9, temp3: base + 10,
+        states, ends, cut, current: null, controlWritten: false,
     };
 }
+
 
 /**
  * The prologue: the empty mask, the status and control words, and every
@@ -307,11 +340,23 @@ export function x87Prologue(e){
     b.i32const(0).load('i32_16u', { offset: layout.x87Status }).localSet(Local.x87Status);
     b.i32const(0).load('i32_16u', { offset: layout.x87Control }).localSet(Local.x87Control);
     b.i32const(0).localSet(Local.x87Dirty);
+    if (x.hasMmx)
+    {
+        b.i32const(0).localSet(x.form);
+    }
     for (let k = 0; k < 8; k++)
     {
         const at = layout.x87 + k * 16;
-        b.localGet(Local.x87Empty).i32const(1 << k).op(I32.and).op(I32.eqz);
-        e.openIf(`held${k}`, EMPTY);
+        // A region with MMX loads every register, not only the held ones: an
+        // MMX instruction holds the whole stack, so the x87 after it may read a
+        // register the machine had empty, and its value is then whatever the
+        // mantissa the state block holds decodes to -- the emulator reads the
+        // same bytes, so the two agree.
+        if (!x.hasMmx)
+        {
+            b.localGet(Local.x87Empty).i32const(1 << k).op(I32.and).op(I32.eqz);
+            e.openIf(`held${k}`, EMPTY);
+        }
         if (layout.x87Format === 'tagged80')
         {
             b.i32const(0).load('i32_16u', { offset: at + 8 }).i32const(RELAXED_TAG).op(I32.eq);
@@ -320,19 +365,34 @@ export function x87Prologue(e){
             b.else();
             b.i32const(at).call(/** @type {number} */ (e.context.f80ToF64)).localSet(x.base + k);
             e.close();
+            if (x.hasMmx)
+            {
+                // The form the register enters in: an MMX write before this
+                // region left the exponent and sign all ones, which the exit
+                // writes back as it found it rather than as a relaxed double.
+                b.i32const(0).load('i32_16u', { offset: at + 8 }).i32const(0xffff).op(I32.eq);
+                e.openIf(`mmxform${k}`, EMPTY);
+                b.localGet(x.form).i32const(1 << k).op(I32.or).localSet(x.form);
+                e.close();
+            }
         }
         else
         {
             b.i32const(0).load('f64', { offset: at }).localSet(x.base + k);
         }
-        e.close();
+        if (!x.hasMmx)
+        {
+            e.close();
+        }
     }
 }
 
 /**
  * The epilogue: top, the masks and words, and every dirty register back
  * into the state block. The current top is in its local, set at every
- * block start and kept by every push and pop.
+ * block start and kept by every push and pop. A region that also translated
+ * MMX writes only the words here; its registers go back from the mantissas
+ * the mm locals hold, in the form each is in (`storeMixedRegisters`).
  *
  * @param {E} e
  */
@@ -345,6 +405,10 @@ export function x87Epilogue(e){
     if (x.controlWritten)
     {
         b.i32const(0).localGet(Local.x87Control).store('i32_16', { offset: layout.x87Control });
+    }
+    if (x.hasMmx)
+    {
+        return;
     }
     for (let k = 0; k < 8; k++)
     {
@@ -465,7 +529,46 @@ function x87MoveTo(e, to){
     }
 }
 
+/**
+ * The x87 view of a physical register an MMX instruction has just written, so
+ * the two views of it agree inside the region. On the processor mm<i> is the
+ * mantissa of R<i> and an MMX write leaves its exponent and sign all ones, so
+ * the value the x87 side reads is what that decodes to: in the emulator's
+ * tagged form the negative infinity of a zero mantissa and the positive QNaN
+ * indefinite of any other (as `decodeRegister` has it), and in cork's own f64
+ * form the mantissa's bits read straight as a double. The form bit is set, so
+ * the exit writes the register back in the MMX form -- the mantissa the MMX
+ * side holds and the exponent all ones -- and not as a relaxed double.
+ *
+ * @param {E} e @param {number} physical  the register mm<i> aliases
+ * @param {number} mm  the i64 local holding the mantissa just written
+ */
+export function x87FromMmx(e, physical, mm){
+    const x = e.x87;
+    if (!x.active || !x.hasMmx || x.current === null)
+    {
+        return;
+    }
+    const { b } = e;
+    const local = x.base + x.current.slot[physical];
+    if (e.layout.x87Format === 'tagged80')
+    {
+        b.localGet(mm).op(I64.eqz);
+        e.openIf('mmxZero', EMPTY);
+        b.f64const(-Infinity).localSet(local);
+        b.else();
+        b.i64const(0x7ff8000000000000n).op(F64.reinterpretI64).localSet(local);
+        e.close();
+    }
+    else
+    {
+        b.localGet(mm).op(F64.reinterpretI64).localSet(local);
+    }
+    b.localGet(x.form).i32const(1 << physical).op(I32.or).localSet(x.form);
+}
+
 // --- the instruction lowerings ---
+
 
 /**
  * @param {E} e @param {Instruction} instruction @param {boolean} flagsLive
@@ -487,20 +590,41 @@ export function emitX87(e, instruction, flagsLive){
     }
     /** The local holding ST(i). @param {number} i */
     const st = i=>x.base + state.slot[(state.top + i) & 7];
+    /**
+     * Keeps the MMX view of a physical register equal to the x87 view just
+     * written into `stLocal`: the mantissa is the double's bits and the form is
+     * the relaxed one, so an MMX read of it after this gets what the x87 wrote.
+     * Only a region that translates both has the mm locals and the form mask.
+     *
+     * @param {number} physical @param {number} stLocal
+     */
+    const syncMm = (physical, stLocal)=>{
+        if (!x.hasMmx)
+        {
+            return;
+        }
+        b.localGet(stLocal).op(I64.reinterpretF64).localSet(e.mmLocal(physical));
+        b.localGet(x.form).i32const(~(1 << physical)).op(I32.and).localSet(x.form);
+    };
     /** Marks ST(i) written. @param {number} i */
     const dirty = i=>{
-        b.localGet(Local.x87Dirty).i32const(1 << ((state.top + i) & 7)).op(I32.or)
+        const physical = (state.top + i) & 7;
+        b.localGet(Local.x87Dirty).i32const(1 << physical).op(I32.or)
             .localSet(Local.x87Dirty);
+        syncMm(physical, st(i));
     };
     const [dst, src] = operands;
     const push = ()=>{
         // The new top's slot is held and dirty; the value is on the stack.
         const top = (state.top - 1) & 7;
-        b.localSet(x.base + state.slot[top]);
+        const local = x.base + state.slot[top];
+        b.localSet(local);
         b.localGet(Local.x87Empty).i32const(~(1 << top)).op(I32.and).localSet(Local.x87Empty);
         b.localGet(Local.x87Dirty).i32const(1 << top).op(I32.or).localSet(Local.x87Dirty);
+        syncMm(top, local);
         b.i32const(top).localSet(Local.x87Top);
     };
+
     /** @param {number} times */
     const popN = times=>{
         let top = state.top;
@@ -702,15 +826,38 @@ export function emitX87(e, instruction, flagsLive){
             return finish();
         case 'fxch':
         {
-            // The locals swap roles: no code but the fault's, and both
+            // The two registers exchange their values: the tracker relabels the
+            // x87 locals, which costs no code. In a region that translates MMX
+            // the mantissas and the forms of the two physical registers move with
+            // the values, so the mm locals and the form bits swap -- re-deriving
+            // them from the x87 locals (as a write does) would lose an MMX-form
+            // mantissa, whose x87 local is the indefinite it decodes to. Both
             // registers count as written.
             const i = /** @type {number} */ (src.reg);
+            const a = state.top;
+            const c = (state.top + i) & 7;
             // An empty register faults, and the registers keep their values.
             guard([0, i], false);
-            dirty(0);
-            dirty(i);
+            b.localGet(Local.x87Dirty).i32const((1 << a) | (1 << c)).op(I32.or)
+                .localSet(Local.x87Dirty);
+            if (x.hasMmx)
+            {
+                const ma = e.mmLocal(a);
+                const mc = e.mmLocal(c);
+                b.localGet(ma).localSet(Local.t64);
+                b.localGet(mc).localSet(ma);
+                b.localGet(Local.t64).localSet(mc);
+                b.localGet(x.form).i32const(a).op(I32.shrU).i32const(1).op(I32.and)
+                    .localSet(Local.t1);
+                b.localGet(x.form).i32const(c).op(I32.shrU).i32const(1).op(I32.and)
+                    .localSet(Local.t2);
+                b.localGet(x.form).i32const(~((1 << a) | (1 << c))).op(I32.and)
+                    .localGet(Local.t1).i32const(c).op(I32.shl).op(I32.or)
+                    .localGet(Local.t2).i32const(a).op(I32.shl).op(I32.or).localSet(x.form);
+            }
             return finish();
         }
+
         case 'ffree': case 'ffreep':
         {
             const k = (state.top + /** @type {number} */ (dst.reg)) & 7;

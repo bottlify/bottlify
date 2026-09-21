@@ -16,8 +16,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decode } from '../decode/decoder.js';
 import {
-    BY_NAME, CODE, DATA, DATA_BYTES, DATA_SIZE, EXCHANGE, HALT, POOL, PUSHES, SETUP, SPANS, XMM,
-    at, bodyOf, minimise, namesOf, preambleOf, programBytes, random,
+    BY_NAME, CODE, DATA, DATA_BYTES, DATA_SIZE, EXCHANGE, EXCHANGE2, HALT, POOL, PUSHES, SETUP,
+    SPANS, XMM, at, bodyOf, minimise, namesOf, preambleOf, programBytes, random,
 } from './sequences.js';
 
 /** Decodes one pool form on its own. @param {number[]} bytes */
@@ -59,7 +59,7 @@ test('the pool holds every class the defect needs, with the operands named', ()=
     assert.deepEqual(kinds('fstp st0'), ['x87', 'x87']);
     assert.deepEqual(kinds('fcomp'), ['x87', 'x87']);
     assert.deepEqual(kinds('fnstsw ax'), ['reg']);
-    assert.equal(POOL.length, 30, 'the pool the itest draws from');
+    assert.equal(POOL.length, 31, 'the pool the itest draws from');
     for (const name of ['fld1', 'fldz', 'fstp qword [m]', 'faddp', 'fmul st0, st1', 'fxch st1',
         'fnstenv [m]', 'fldenv [m]', 'fninit', 'fnclex', 'ffree st0', 'paddw mm0, mm1',
         'pxor mm1, mm1', 'emms', 'mov eax, 0x0f3a9c11', 'add eax, ebx', 'xor ecx, ecx'])
@@ -91,7 +91,7 @@ test('the generator repeats from its seed and differs from another', ()=>{
         }
         for (const index of preambleOf(next))
         {
-            assert.ok(PUSHES.includes(index) || index === EXCHANGE);
+            assert.ok(PUSHES.includes(index) || index === EXCHANGE || index === EXCHANGE2);
         }
     }
     assert.deepEqual(bodyOf(random(3), { shortest: 4, longest: 4 }).length, 4);

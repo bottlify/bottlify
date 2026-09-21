@@ -418,3 +418,55 @@ test('an emms in a region holding the x87 registers empties its own mask', { ski
     assert.deepEqual(stack([...FLD1, ...FLD1, ...EMMS, ...FLD1]),
         { top: 5, empty: 0xdf, status: 0 });
 });
+
+test('x87 and MMX translate in one region: an x87 write is the mm mantissa', { skip }, ()=>{
+    // A region with both classes is no longer cut at its first x87 instruction:
+    // the eight registers are one set with two views kept equal at every write,
+    // so an x87 push leaves the mm view the double's bits and an MMX store of
+    // that register reads them. Without the representation the region is cut at
+    // the fld1, which retires nothing, and runProgram answers -2 (stuck) -- so
+    // this proves both the crossover and that it is one region. Cork's own f64
+    // layout holds the value as the mantissa's bits, so the crossing is the
+    // identity here; the emulator's tagged form, which the sequence corpus
+    // judges, decodes the MMX form to the indefinite instead.
+    const m = createTestMachine();
+    const view = new DataView(m.memory.buffer);
+    m.write(DATA, new Array(8).fill(0));
+    m.write(CODE, [
+        0xd9, 0xe8,                                              // fld1   R7 = 1.0, top 7
+        0x0f, 0x7f, 0x3d, DATA & 255, DATA >> 8 & 255, 0, 0,     // movq [DATA], mm7
+        0xf4,
+    ]);
+    m.setReg('esp', 0x80000);
+    const exit = m.runProgram(CODE);
+    assert.equal(exit.kind, 3,
+        `halted (exit ${JSON.stringify(exit)}, left out ${[...exit.unsupported]})`);
+    assert.equal(exit.regions, 1, 'one region: the crossover is translated, not cut');
+    assert.equal(view.getBigUint64(m.layout.ramBase + DATA, true), 0x3ff0000000000000n,
+        'the MMX store read the 1.0 the x87 push left in R7');
+    assert.equal(view.getUint8(m.layout.x87Top), 0, 'the MMX instruction held the stack, top zero');
+    assert.equal(view.getUint8(m.layout.x87Empty), 0, 'and every register');
+});
+
+test('x87 and MMX translate in one region: an MMX write is the x87 value', { skip }, ()=>{
+    // The other direction: an MMX load writes R0's mantissa and puts the top at
+    // zero, and an x87 store of ST0 (R0) reads it back -- in cork's own f64
+    // layout, the mantissa's bits as a double. Without the representation the
+    // region is cut at the fstp, so it runs as two regions.
+    const m = createTestMachine();
+    const view = new DataView(m.memory.buffer);
+    m.write(DATA, [0, 0, 0, 0, 0, 0, 0x0a, 0x40]);      // 3.25's bits
+    m.write(DATA + 8, new Array(8).fill(0));
+    m.write(CODE, [
+        0x0f, 0x6f, 0x05, DATA & 255, DATA >> 8 & 255, 0, 0,        // movq mm0, [DATA]
+        0xdd, 0x1d, (DATA + 8) & 255, (DATA + 8) >> 8 & 255, 0, 0,  // fstp qword [DATA+8]
+        0xf4,
+    ]);
+    m.setReg('esp', 0x80000);
+    const exit = m.runProgram(CODE);
+    assert.equal(exit.kind, 3,
+        `halted (exit ${JSON.stringify(exit)}, left out ${[...exit.unsupported]})`);
+    assert.equal(exit.regions, 1, 'one region: the crossover is translated, not cut');
+    assert.equal(view.getFloat64(m.layout.ramBase + DATA + 8, true), 3.25,
+        'the x87 store read R0 as the double its mantissa is');
+});
