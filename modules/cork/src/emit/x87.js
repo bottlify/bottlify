@@ -648,7 +648,11 @@ export function emitX87(e, instruction, flagsLive){
     /**
      * The stack-fault check: t1 is set when a source ST(i) is empty or a
      * push finds its register held, and IE and SF are raised. The
-     * instruction then produces the indefinite where it would a value.
+     * instruction then produces the indefinite where it would a value. A
+     * push that overflowed -- its register already held -- also sets C1, as
+     * the processor does to say which way the stack faulted; a region that
+     * translated an MMX instruction meets it, since MMX holds every register
+     * and the x87 push after it overflows.
      *
      * @param {number[]} sources @param {boolean} pushes
      */
@@ -676,6 +680,21 @@ export function emitX87(e, instruction, flagsLive){
         e.openIf('fault', EMPTY);
         setStatus(Status.IE | Status.SF);
         e.close();
+        if (pushes)
+        {
+            // C1 is this push's overflow indicator: set when the register it
+            // would take is held, cleared when the push succeeds -- the
+            // processor leaves C1 saying which way the last push faulted, so a
+            // later successful push clears an earlier overflow's mark.
+            b.localGet(Local.x87Empty).i32const(1 << ((state.top - 1) & 7)).op(I32.and)
+                .op(I32.eqz);
+            e.openIf('overflow', EMPTY);
+            setStatus(Status.C1);
+            b.else();
+            b.localGet(Local.x87Status).i32const(~Status.C1).op(I32.and)
+                .localSet(Local.x87Status);
+            e.close();
+        }
     };
     /**
      * Rounds the f64 on the stack to a float when precision control says

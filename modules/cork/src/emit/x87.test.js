@@ -269,3 +269,22 @@ test('a loop with fxch inside: the edge into the header moves registers to match
     assert.equal(r.f64(DATA), 8);
     assert.equal(r.exit.regions, 1, 'one region: the back edge is inside it');
 });
+
+test('a push onto a full stack sets C1, and a push that fits clears it', ()=>{
+    // Eight pushes fill the stack; the ninth overflows, which sets C1 (with the
+    // IE and SF the fault raises) to say the stack faulted upward, as the
+    // processor does. The emitter set IE and SF but not C1. The sequence corpus
+    // met it at the crossover, where an MMX instruction holds every register and
+    // the x87 push after it overflows -- the same fault, reached another way.
+    const full = Array(8).fill([0xd9, 0xe8]).flat();       // fld1 x8 fills the stack
+    const over = run([...full, 0xd9, 0xe8]);               // the ninth overflows
+    assert.equal(over.exit.kind, 3, `left out ${[...over.exit.unsupported]}`);
+    assert.equal(over.status() & 0x241, 0x241, 'IE, SF and C1 on the overflow');
+    // A push that fits clears C1: the processor leaves it saying which way the
+    // last push faulted. Overflow, pop one so the next push fits, push again.
+    //   fld1 (overflow), fstp st0 (pop one), fld1 (fits -> clears C1)
+    const cleared = run([...full, 0xd9, 0xe8, 0xdd, 0xd8, 0xd9, 0xe8]);
+    assert.equal(cleared.exit.kind, 3, `left out ${[...cleared.exit.unsupported]}`);
+    assert.equal(cleared.status() & 0x200, 0, 'a push that fits cleared C1');
+});
+
