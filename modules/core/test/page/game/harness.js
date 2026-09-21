@@ -759,6 +759,7 @@ export function scheduleKeyTimes(app, request){
  * @property {{ x: number, y: number }} pointerAt  Where the last click left it.
  * @property {number[]} gaps          Milliseconds between one present and the next.
  * @property {number} lastPresent     `performance.now()` at the previous present, or 0.
+ * @property {number} firstPresent    `performance.now()` at the first present, or 0.
  * @property {number} presents        How many frames this harness has presented, ever.
  */
 
@@ -769,12 +770,18 @@ export function scheduleKeyTimes(app, request){
  * on the harness rather than the run, so it keeps counting across a
  * `process-replace`: the frame after a handover is one more, not the first.
  *
+ * An action's `after` is a frame number, or -- given as `afterSeconds` --
+ * a time since the first presented frame, resolved to the first frame
+ * presented at or past it: a frame count drifts with the frame rate, so a
+ * route timed by frames stops reaching its screens when the program's
+ * frames come faster, while the screens themselves arrive on the clock.
+ *
  * @param {any} app
  * @param {{ pointer?: { x: number, y: number, dx?: number, dy?: number, down?: boolean },
- *           clicks?: { x: number, y: number, after: number }[],
- *           keys?: { code: string, after: number }[],
- *           typed?: { text: string, after: number }[],
- *           pasted?: { text: string, after: number }[] }} request
+ *           clicks?: { x: number, y: number, after: number, afterSeconds?: number }[],
+ *           keys?: { code: string, after: number, afterSeconds?: number }[],
+ *           typed?: { text: string, after: number, afterSeconds?: number }[],
+ *           pasted?: { text: string, after: number, afterSeconds?: number }[] }} request
  * @param {PresentState} state
  * @param {any} frame
  */
@@ -786,7 +793,22 @@ export function presentFrame(app, request, state, frame){
     {
         state.gaps.push(now - state.lastPresent);
     }
+    if (state.firstPresent === 0)
+    {
+        state.firstPresent = now;
+    }
     state.lastPresent = now;
+    for (const timed of [request.clicks, request.keys, request.typed, request.pasted])
+    {
+        for (const action of timed ?? [])
+        {
+            if (action.afterSeconds !== undefined && action.after < 0
+                && now - state.firstPresent >= action.afterSeconds * 1000)
+            {
+                action.after = state.presents;
+            }
+        }
+    }
     // A pointer the run asked to hold somewhere, put there every frame: a
     // program that hit-tests the cursor against its own controls draws a
     // different cursor over one than over none, and this page has no mouse
@@ -981,7 +1003,7 @@ export function createHarness(canvas, how = {}){
     /** @type {PresentState} */
     const presentState = {
         presented: null, pointerDown: false, pointerAt: { x: 0, y: 0 },
-        gaps: [], lastPresent: 0, presents: 0,
+        gaps: [], lastPresent: 0, firstPresent: 0, presents: 0,
     };
 
     /**
