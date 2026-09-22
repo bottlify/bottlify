@@ -351,7 +351,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 {
                     refused[opcode] = (refused[opcode] ?? 0) + times;
                 }
-                if (region.blocks.length === 0 || region.blocks[0].instructions.length === 0)
+                // The entry's own block decides whether nothing was formed:
+                // the first in address order is another block wherever the
+                // region reaches code below the entry.
+                const entryBlock = region.blocks.find(block=>block.start === eip);
+                if (entryBlock === undefined || entryBlock.instructions.length === 0)
                 {
                     barren.add(eip);
                     continue;

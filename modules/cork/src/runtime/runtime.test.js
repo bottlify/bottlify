@@ -259,6 +259,27 @@ test('an address a region formed nothing at is not queued again until its page m
     assert.equal(await m.runtime.translatePending(), 1, 'the page moved: tried again');
 });
 
+test('a candidate is barren on its own block, not on the lowest one the region holds',
+    async()=>{
+        const m = machine();
+        // A jump back into bytes the decoder refuses: the empty block the
+        // refusal leaves sits below the entry in address order, and the
+        // entry's own block is the one that decides whether the address
+        // formed nothing.
+        m.write(CODE - 0x10, [0xea, 0, 0, 0, 0, 0, 0]);   // jmp far: refused, empty block
+        m.write(CODE, [0xeb, 0xee]);                      // jmp CODE-0x10
+        m.runtime.noteHot(CODE);
+        assert.equal(await m.runtime.translatePending(), 1, 'the entry block formed');
+        const entry = m.runtime.entryOf(CODE);
+        assert.ok(entry >= 0, 'the entry is published');
+        const exit = m.runtime.run(entry, 100);
+        assert.equal(exit.kind, 'untranslated');
+        assert.equal(m.eip(), CODE - 0x10, 'the jump ran, to the bytes the decoder refuses');
+        m.runtime.noteHot(CODE - 0x10);
+        assert.equal(await m.runtime.translatePending(), 0,
+            'the address of the empty block is barren');
+    });
+
 test('an address the translator keeps leaving for becomes a candidate of its own', async()=>{
     const m = machine({ missThreshold: 3 });
     // mov ecx, 5; L: call [0x2000]; dec ecx; jnz L; hlt; F: ret -- an indirect
