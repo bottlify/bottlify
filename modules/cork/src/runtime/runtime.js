@@ -111,8 +111,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** @type {Map<number, number>} page → times a write dropped its regions */
     const dropped = new Map();
     const counts = {
-        modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, translateMs: 0, moduleBytes: 0,
+        modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, moduleBytes: 0,
         cacheHits: 0, cacheMisses: 0,
+        // The milliseconds of translating, by the part of a batch they are:
+        // `translateMs` is their sum, so a frame's own figure and the split
+        // always agree.
+        formingMs: 0, lookupMs: 0, emitMs: 0, encodeMs: 0, storeMs: 0, instantiateMs: 0,
+        publishMs: 0,
     };
     let nextTable = 0;
     /** @type {Record<ExitKind, number>} */
@@ -302,7 +307,6 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 return 0;
             }
-            const startedAt = performance.now();
             const batch = [...queue].slice(0, settings.batchRegions);
             for (const [key] of batch)
             {
@@ -314,6 +318,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             /** @type {{ region: import('../region.js').Region, entryTop: number,
              *     stamp: string, cached: import('./cache.js').CachedRegion | null }[]} */
             const formed = [];
+            const formedAt = performance.now();
             for (let i = 0; i < batch.length; i++)
             {
                 const [key, eip] = batch[i];
@@ -362,8 +367,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 }
                 formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null });
             }
+            counts.formingMs += performance.now() - formedAt;
             // The store first, for every region of the batch at once: the
             // lookups are asynchronous and the emitter waits for none of them.
+            const lookupAt = performance.now();
             if (store !== null)
             {
                 await Promise.all(formed.map(async one=>{
@@ -389,6 +396,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     }
                 }));
             }
+            counts.lookupMs += performance.now() - lookupAt;
             let published = 0;
             for (const { region, entryTop, stamp: at, cached } of formed)
             {
@@ -403,6 +411,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 }
                 else
                 {
+                    const emitAt = performance.now();
                     const m = new ModuleBuilder();
                     const context = prepareModule(m, layout, found, {}, {
                         undoLog: settings.undoLog, hash: table !== null, leaveOut,
@@ -418,29 +427,37 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                         // The emitter's own defect on this code: named in the
                         // report rather than lost in a rejected promise, and
                         // the program runs on without the region.
+                        counts.emitMs += performance.now() - emitAt;
                         refused[`emit at ${eip.toString(16)}: ${String(e).slice(0, 120)}`] = 1;
                         continue;
                     }
+                    counts.emitMs += performance.now() - emitAt;
                     for (const [opcode, times] of translation.unsupported)
                     {
                         refused[opcode] = (refused[opcode] ?? 0) + times;
                     }
                     m.exportFunction('r0', translation.functionIndex);
+                    const encodeAt = performance.now();
+                    const module = m.toBytes();
+                    counts.encodeMs += performance.now() - encodeAt;
                     built = {
-                        module: m.toBytes(), labels: [...translation.labels],
+                        module, labels: [...translation.labels],
                         cut: [...translation.cut], entryTop: translation.entryTop,
                         instructions: translation.instructions,
                     };
                     if (store !== null)
                     {
+                        const storeAt = performance.now();
                         const key = cacheKey({
                             version: CACHE_VERSION, features: found, layoutId: layout.id,
                             bundleId, entry: eip, hash: `${region.hash}-${entryTop}`,
                         });
                         store.put(key, packRegion(built)).catch(()=>{});
+                        counts.storeMs += performance.now() - storeAt;
                     }
                 }
                 counts.moduleBytes += built.module.length;
+                const instantiateAt = performance.now();
                 /** @type {WebAssembly.Instance} */
                 let instance;
                 try
@@ -456,14 +473,18 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 }
                 catch (e){
                     // The region is refused: the program runs on as it did.
+                    counts.instantiateMs += performance.now() - instantiateAt;
                     refused.batch = (refused.batch ?? 0) + 1;
                     refused[`batch: ${String(e).slice(0, 120)}`] = 1;
                     continue;
                 }
+                counts.instantiateMs += performance.now() - instantiateAt;
                 counts.modules++;
+                const publishAt = performance.now();
                 if (at !== stamp(region.pages))
                 {
                     // A page of it was written while the batch was built.
+                    counts.publishMs += performance.now() - publishAt;
                     counts.dropped++;
                     continue;
                 }
@@ -478,6 +499,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 {
                     // Every block leaves at once (an instruction the other
                     // executor's first): nothing to enter, nothing to keep.
+                    counts.publishMs += performance.now() - publishAt;
                     barren.add(eip);
                     continue;
                 }
@@ -527,8 +549,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 }
                 regions.add(record);
                 published++;
+                counts.publishMs += performance.now() - publishAt;
             }
-            counts.translateMs += performance.now() - startedAt;
             return published;
         },
         invalidatePage,
@@ -539,7 +561,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return {
                 regions: regions.size,
                 entries: table ? entries.hashed() : entries.count(),
-                translateMs: counts.translateMs,
+                translateMs: counts.formingMs + counts.lookupMs + counts.emitMs
+                    + counts.encodeMs + counts.storeMs + counts.instantiateMs + counts.publishMs,
+                formingMs: counts.formingMs,
+                lookupMs: counts.lookupMs,
+                emitMs: counts.emitMs,
+                encodeMs: counts.encodeMs,
+                storeMs: counts.storeMs,
+                instantiateMs: counts.instantiateMs,
+                publishMs: counts.publishMs,
                 moduleBytes: counts.moduleBytes,
                 modules: counts.modules,
                 translatedShare: counted > 0 ? corkRetired / counted : 0,

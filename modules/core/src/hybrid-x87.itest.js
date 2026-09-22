@@ -133,13 +133,16 @@ function buildX87Exe(){
     });
 }
 
-/** @param {Uint8Array} executable @param {'emulator' | 'hybrid'} engine */
-async function run(executable, engine){
+/**
+ * @param {Uint8Array} executable @param {'emulator' | 'hybrid'} engine
+ * @param {Record<string, unknown>} [config]  more translator settings: a store, a bundle id
+ */
+async function run(executable, engine, config = {}){
     const wasm = await readFile(new URL('v86.wasm', PREBUILT));
     const app = await createApp({
         executable,
         engine,
-        cork: { config: { hotThreshold: 100, feed: 'slice' } },
+        cork: { config: { hotThreshold: 100, feed: 'slice', ...config } },
         v86: {
             moduleUrl: new URL('libv86.mjs', PREBUILT).href,
             wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
@@ -180,4 +183,35 @@ test('x87 in the shapes a compiled C program has translates whole under hybrid',
         assert.ok(refused <= 24, `refused ${JSON.stringify(cork.refused)}`);
         assert.ok(cork.exits.untranslated < 15000,
             `untranslated exits ${cork.exits.untranslated}`);
+        // The translation milliseconds are the sum of their parts, whatever
+        // the parts are: the frame's own figure is read against them.
+        assert.equal(cork.translateMs, parts(cork));
+    });
+
+/** The translate split's sum. @param {Record<string, number>} cork */
+const parts = cork=>cork.formingMs + cork.lookupMs + cork.emitMs + cork.encodeMs
+    + cork.storeMs + cork.instantiateMs + cork.publishMs;
+
+test('a second run against one store emits nothing, and the split says where the time goes',
+    { timeout: 120000 }, async()=>{
+        const { memoryTranslationStore } = await import('../../cork/src/runtime/cache.js');
+        const store = memoryTranslationStore();
+        const exe = buildX87Exe();
+        const cold = await run(exe, 'hybrid', { store, bundleId: 'itest' });
+        assert.equal(cold.code, EXPECTED);
+        assert.equal(cold.cork.cacheHits, 0);
+        assert.ok(cold.cork.cacheMisses >= 5, `misses ${cold.cork.cacheMisses}`);
+        assert.ok(cold.cork.emitMs > 0, 'the cold run emits');
+        assert.ok(cold.cork.instantiateMs > 0, 'and instantiates');
+        assert.equal(cold.cork.translateMs, parts(cold.cork));
+        const warm = await run(exe, 'hybrid', { store, bundleId: 'itest' });
+        assert.equal(warm.code, EXPECTED);
+        assert.equal(warm.cork.cacheMisses, 0, 'every region the store held');
+        assert.equal(warm.cork.cacheHits, warm.cork.modules);
+        assert.equal(warm.cork.emitMs, 0, 'a hit emits nothing');
+        assert.equal(warm.cork.encodeMs, 0, 'and encodes nothing');
+        assert.ok(warm.cork.translateMs < cold.cork.translateMs, 'cheaper than emitting');
+        assert.equal(warm.cork.translateMs, parts(warm.cork));
+        assert.equal(warm.cork.regions, cold.cork.regions, 'the same regions, published again');
+        assert.equal(warm.cork.translatedShare, cold.cork.translatedShare);
     });

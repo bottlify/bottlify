@@ -167,7 +167,15 @@
  * @property {number} volatilePages    Pages written so often they are no longer translated.
  * @property {Record<ExitKind, number>} exits
  * @property {Record<string, number>} refused  Opcode ("0f 2e", "f3 0f 10") → times met.
- * @property {number} translateMs      Milliseconds spent forming, emitting and compiling.
+ * @property {number} translateMs      Milliseconds spent translating: the sum of the seven
+ *     parts below, so a whole figure and its split always agree.
+ * @property {number} formingMs        Of it: forming the batch's regions, a decode each.
+ * @property {number} lookupMs         Of it: the store's lookups, awaited.
+ * @property {number} emitMs           Of it: emitting the regions the store did not hold.
+ * @property {number} encodeMs         Of it: encoding their modules.
+ * @property {number} storeMs          Of it: packing the records and handing them to the store.
+ * @property {number} instantiateMs    Of it: compiling and instantiating the modules.
+ * @property {number} publishMs        Of it: the entry hash, the page flags and the records.
  * @property {number} moduleBytes      Wasm bytes built this run.
  * @property {number} handoffMisses    Hybrid: slices the emulator ran through translated code.
  */
