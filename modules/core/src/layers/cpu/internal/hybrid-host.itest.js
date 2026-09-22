@@ -399,5 +399,11 @@ test('the directory store takes the second run from its index and records', asyn
     assert.equal(after.emitMs, 0, 'a hit emits nothing');
     assert.ok(typeof after.lookupMs === 'number');
     assert.ok(after.lookupMs < after.translateMs, 'the lookups are part of the split');
+    // The lookup is the store read for a hit; it runs in the feed's own
+    // fire-and-forget task, so it is not on the frame. The figure is the
+    // stored second run's read wall time, against the first run's misses.
+    console.log(`store second run: hits ${after.cacheHits}, misses ${after.cacheMisses},`
+        + ` lookupMs ${after.lookupMs.toFixed(2)} of translateMs ${after.translateMs.toFixed(2)},`
+        + ` first run lookupMs ${before.lookupMs.toFixed(2)} (misses ${before.cacheMisses})`);
     await cpuModule.dispose();
 });
