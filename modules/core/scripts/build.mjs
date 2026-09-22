@@ -174,12 +174,15 @@ async function copyVendor(){
         }
     }
 
-    if (missing.length > 0)
+    // The emulator is an optional layer since 5.5: a build without it ships
+    // and runs the demos under `cork`, and a launch that selects `emulator`
+    // or `hybrid` is refused with the layer's message. Each artifact present
+    // is still recorded and copied; each absent is named so a build log says
+    // what the package does not carry.
+    for (const artifact of missing)
     {
-        const lines = missing.map(a=>`  vendor/prebuilt/${a.name}  ->  ${a.fetch}`);
-        throw new Error(
-            `cannot build a package that can boot: ${missing.length} vendor artifact(s) `
-            + `are missing.\n${lines.join('\n')}`);
+        console.log(`dist: ${artifact.name} absent (${artifact.fetch}); the package will `
+            + 'not carry the emulator');
     }
 
     // The DirectX runtime is the one optional vendor artifact: present, every

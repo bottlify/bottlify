@@ -3171,12 +3171,29 @@ async function buildApp(options){
     }
     else
     {
+        const chosen = options.engine ?? defaultEngine();
         const emulator = emulatorArtifacts(options.v86);
-        await cpu.boot({
-            moduleUrl: emulator.moduleUrl,
-            wasmBytes: emulator.wasmBytes
-                ?? await bytesAt(/** @type {string} */ (emulator.wasmUrl)),
-        });
+        /** @type {ArrayBuffer} */
+        let wasmBytes;
+        if (emulator.wasmBytes)
+        {
+            wasmBytes = emulator.wasmBytes;
+        }
+        else
+        {
+            try
+            {
+                wasmBytes = await bytesAt(/** @type {string} */ (emulator.wasmUrl));
+            }
+            catch (e){
+                // A build without the emulator's artifacts: the layer is
+                // optional, and a launch that names it is told so rather than
+                // handed a fetch's error.
+                throw new Error('cpu: the emulator is not available in this build'
+                    + ` (engine "${chosen}" needs it)`, { cause: e });
+            }
+        }
+        await cpu.boot({ moduleUrl: emulator.moduleUrl, wasmBytes });
     }
 
     // Mounted after the machine is up. A zstd block is decoded by this

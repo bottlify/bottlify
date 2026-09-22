@@ -262,6 +262,16 @@ export const cpuModule = {
                             ? value : Number(value);
                     }
                 }
+                else
+                {
+                    // No emulator compiler on this engine (`cork`): the columns
+                    // are kept and say `-1`, not the zero a never-read counter
+                    // would look like a dead compiler by.
+                    for (let field = 0; field < JIT_FIELDS.length; field++)
+                    {
+                        counters[JIT_AT + field] = -1;
+                    }
+                }
                 counters[FRAME_INTERPRETED] = state.worstInterpreted;
                 counters[FRAME_INTERPRETED + 1] = state.worstInterpretedAt;
                 state.worstInterpreted = 0;
@@ -425,8 +435,10 @@ export const cpuModule = {
                     const { moduleUrl, wasmBytes } = artifacts;
                     if (!moduleUrl || !wasmBytes)
                     {
-                        throw new Error('cpu: boot() needs moduleUrl and wasmBytes'
-                            + ' for an emulator engine');
+                        // A build without the emulator's artifacts, or a launch
+                        // that named none: the optional layer is not there.
+                        throw new Error('cpu: the emulator is not available in this'
+                            + ` build (engine "${engine}" needs it)`);
                     }
                     const emulator = await createV86Host({ ...settings, moduleUrl, wasmBytes });
                     // Under `hybrid` the emulator's host is composed with the
@@ -789,19 +801,6 @@ export const cpuModule = {
                 context.inHlt = 0;
                 return context;
             },
-
-            /**
-             * Decompresses a zstd frame without awaiting anything.
-             *
-             * Here because the decoder is inside the emulator's wasm and this is
-             * the layer allowed to know that. What uses it is the bundle reader,
-             * which has to answer a guest's read while the CPU is stopped inside
-             * one instruction -- so a promise is not an option.
-             *
-             * @param {Uint8Array} packed @param {number} expectedLength
-             */
-            decompressZstd: (packed, expectedLength)=>
-                started().decompressZstd(packed, expectedLength),
 
             instructionCount: ()=>started().instructionCount(),
             compiledModules: ()=>started().compiledModules(),

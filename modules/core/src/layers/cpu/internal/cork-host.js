@@ -664,11 +664,6 @@ export function createCorkHost(config){
             stop(){},
             read: ()=>null,
         },
-        // The zstd decoder of step 5.0 replaces the emulator's; it is not on
-        // this step's path (a guest bundle read), so it is named until wired.
-        decompressZstd(){
-            throw new Error('cpu: cork-alone zstd decode waits on the step 5.0 decoder');
-        },
     };
 
     host.captureContext = ()=>captureBlockContext(host);

@@ -66,6 +66,29 @@ async function booted(code, at, config = {}){
     return { api, metrics, counters };
 }
 
+test('under cork the jit counters say -1, not a dead compiler', async()=>{
+    // Cork has no emulator compiler: the `jit.*` columns stay in the table
+    // (a caller reads the same schema on every engine) but report -1, so a
+    // zero is never mistaken for a compiler that compiled nothing.
+    const metrics = createMetrics({ shared: false });
+    const api = await cpuModule.create({
+        engine: 'cork',
+        engineUrl: new URL('../../../../cork/src/index.js', import.meta.url).href,
+    }, /** @type {any} */ ({
+        requireApi: ()=>({ metrics, intern: ()=>-1 }), provide: ()=>{},
+    }));
+    await api.boot();
+    api.writePhysical(GUEST_CODE, new Uint8Array([0xf4]));
+    api.writePhysical(0x7000, new Uint8Array(u32(GUEST_CODE)));
+    api.runSlice(100);
+    metrics.sample();
+    const row = readTable(metrics.describe().cpu.counters).row(0);
+    assert.equal(row['jit.compiledSteps'], -1);
+    assert.equal(row['jit.cache'], -1);
+    assert.equal(/** @type {any} */ (cpuModule.diagnostics().metrics).jit, -1);
+    await cpuModule.dispose();
+});
+
 test('a frame names where the interpreter ran, and starts again after it', async()=>{
     // A loop small enough to stay in one block: the interpreter runs it until
     // the page is hot enough to compile, which is exactly the stretch a stall

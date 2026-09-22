@@ -3,11 +3,16 @@
 This lists components not authored in this repository that are distributed with the product.
 Full license texts are kept alongside the corresponding component.
 
-## v86 — x86 PC emulator / x86-to-wasm JIT
+## v86 — x86 PC emulator / x86-to-wasm JIT (optional component)
 
 - Source: fork https://github.com/mrwayer/v86 (upstream: https://github.com/copy/v86)
 - Location in this repository: `modules/core/vendor/v86`
 - License: BSD-2-Clause
+- This component is optional. The default engine, `cork`, is this project's own
+  translator and loads nothing of v86; the emulator is selected per launch and its
+  artifacts are fetched on demand. A package built without `vendor/prebuilt/` carries
+  none of v86 and runs the library's demos under `cork`; a launch that selects
+  `emulator` or `hybrid` is refused with a message saying the layer is absent.
 
 ```
 Copyright (c) 2012, The v86 contributors

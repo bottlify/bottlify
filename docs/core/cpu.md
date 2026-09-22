@@ -285,7 +285,6 @@ otherwise.
 | `restoreContext` | `(context, threadBase) => void` | Restores a context, pointing FS at `threadBase` (the TEB). The TEB is a parameter so a restore that forgets it is not expressible. |
 | `resumeContextAt` | `(context, { eip, returnValue, esp? }) => void` | Redirects a saved context: EIP, EAX and optionally ESP. |
 | `newContext` | `({ entry, stackTop }) => Context` | A context for a thread that has not run: the current machine state as a template, positioned at its entry and stack. |
-| `decompressZstd` | `(packed, expectedLength) => Uint8Array` | Synchronous zstd decode through the emulator's own decoder. A compatibility accessor: a bundle block is decoded by `zstd.js` of this project's own now, and this leaves the api in 5.5. |
 | `instructionCount` | `() => number` | Instructions retired since boot, exact past the emulator's own 32-bit counter. |
 | `compiledModules` / `interpretedSteps` / `hostWrittenBytes` | `() => number` | Compiler and host-write counters (see diagnostics). |
 | `profile` | `{ available, start, stop, read, instructionStats }` | The emulator's address-weighted profile and event counters, present only in a profiler build of the emulator. |
@@ -476,8 +475,8 @@ inside one instruction and cannot await. The bundle path is served by `modules/c
 a decode-only zstd implementation of this project's own (frame, block, literal, Huffman and FSE
 decoding; no dictionaries, the checksum read and not verified). It replaced the decoder the
 emulator's wasm happened to carry, so the default path no longer depends on the emulator for it.
-The cpu api's `decompressZstd` still uses the emulator's decoder in 64 KiB chunks for
-compatibility; it has no caller left and leaves the api in 5.5.
+The cpu api's `decompressZstd` has left the api (5.5): the decoder a bundle read uses is the one
+above, and the emulator's own decoder is reached only by the differential test.
 
 ### What of `vendor/v86` is used
 

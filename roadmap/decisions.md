@@ -346,6 +346,21 @@ because misses stopped being served one block at a time. A block-fetch order rec
 (bounded to 4096 entries) lets the next start's background filler bring in what was actually
 demanded last time, first. *2026-09-12, `9683fc51`.*
 
+**The emulator is an optional layer, and `cork` is the default engine.** What was a hard
+dependency of the package -- the emulator's artifacts in `dist/vendor/`, fetched and packed
+whether or not a launch used them -- is now selectable: a build with `vendor/prebuilt/` empty and
+the `vendor/v86` submodule absent builds, tests and runs the library's demos under `cork`, which
+loads none of it; the package still exports `./libv86.mjs` and `./v86.wasm` for a build that
+carries them, `check-package` accepts either and holds a present binary to a size floor, and a
+launch that selects `emulator` or `hybrid` without the layer is refused with
+`cpu: the emulator is not available in this build (engine "…" needs it)` rather than a fetch's
+error. `cpu.decompressZstd` left the api: the project's own decoder (step 5.0) replaced its one
+caller, and the emulator's decoder is reached directly by the differential test alone. The `jit`
+option and the `jit.*` counters stay -- the schema is the same on every engine -- and report `-1`
+under `cork`, which has no emulator compiler; the launcher's per-bundle engine selector is the
+owner's. The paired browser table (`--engine emulator` as the control) that would confirm the
+target ns per instruction is the owner's to run. *2026-09-22, cork 5.5.*
+
 ## C. Process model and porting
 
 **Process replacement, not two processes in one address space or two machines.** `CreateProcess`
