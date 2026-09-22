@@ -860,6 +860,10 @@ export const cpuModule = {
                 protectedMode: instance.host.inProtectedMode(),
                 traps: instance.thunks ? instance.thunks.size : 0,
                 trapCapacity: instance.thunks ? instance.thunks.capacity : 0,
+                // How many traps the host has answered since boot, so a
+                // program stuck in a trap is visible as a count that grows
+                // with the turns.
+                trapCrossings: instance.host.trapCrossings(),
                 // Whether the emulator is compiling guest code at all, and
                 // how much of it runs compiled rather than interpreted.
                 //
