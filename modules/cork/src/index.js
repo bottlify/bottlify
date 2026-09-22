@@ -28,6 +28,7 @@ import { createCorkRuntime } from './runtime/runtime.js';
 export {
     ownLayout, pagesFor, layoutId, Tables, STATE_BLOCK_SIZE, PAGE,
 } from './runtime/layout.js';
+export { interpret, blockState } from './interp.js';
 
 /**
  * Builds a runtime over the memory and layout the core hands in.
