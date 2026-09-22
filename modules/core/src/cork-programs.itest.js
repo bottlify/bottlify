@@ -36,14 +36,14 @@ const missing = ['v86.wasm', 'libv86.mjs']
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
-/** A loop that calls lstrlenA("abc") ITERATIONS times and exits with the sum. */
-function buildLoopExe(){
+/** A loop that calls lstrlenA("abc") `iterations` times and exits with the sum. */
+function buildLoopExe(iterations = ITERATIONS){
     return buildExe({
         imports: { 'KERNEL32.dll': ['lstrlenA', 'ExitProcess'] },
         data: { text: [0x61, 0x62, 0x63, 0] },
         codeSize: 0x40,
         code: ({ iat, at })=>[
-            0xbe, ...u32(ITERATIONS),
+            0xbe, ...u32(iterations),
             0x31, 0xff,
             0x68, ...u32(at('text')),
             0xff, 0x15, ...u32(iat('lstrlenA')),
@@ -224,6 +224,26 @@ test('a loop calling an import runs and translates under cork',
         assert.ok(corkRate >= emulatorRate * 0.6,
             `cork ran the trap loop at ${corkRate.toFixed(1)} M/s against the`
             + ` emulator's ${emulatorRate.toFixed(1)} M/s`);
+        // E: the translator's cost is a fixed warm-up, not a per-slice toll.
+        // The two runs below leave the same regions, so whatever the longer
+        // one pays more is the engine thread translating on the slice path
+        // after warm-up -- which must be nothing.
+        const warm = await run(buildLoopExe(ITERATIONS / 2), 'cork');
+        const twice = await run(buildLoopExe(ITERATIONS * 2), 'cork');
+        // Same regions and modules on four times the iterations: the
+        // translator does nothing on the slice path after warm-up. The
+        // translateMs bound is loose only because the wasm engine's own JIT
+        // warms in those milliseconds; a per-slice toll would be thousands.
+        assert.equal(twice.cork.regions, warm.cork.regions,
+            'the longer run forms no further regions: the translator is done at warm-up');
+        assert.equal(twice.cork.modules, warm.cork.modules,
+            'no further module is emitted or instantiated after warm-up');
+        assert.ok(twice.cork.translateMs < 20,
+            `translateMs ${twice.cork.translateMs.toFixed(2)} ms for ${ITERATIONS * 2} iterations`);
+        console.log(`cork translateMs: ${warm.cork.translateMs.toFixed(2)} ms at`
+            + ` ${ITERATIONS / 2} iterations, ${twice.cork.translateMs.toFixed(2)} ms at`
+            + ` ${ITERATIONS * 2}, regions ${twice.cork.regions},`
+            + ` modules ${twice.cork.modules}`);
     });
 
 /**
