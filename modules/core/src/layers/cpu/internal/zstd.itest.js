@@ -23,7 +23,9 @@ const PREBUILT = new URL('../../../../vendor/prebuilt/', import.meta.url);
 
 async function bootedCpu(){
     const [wasm] = await Promise.all([readFile(new URL('v86.wasm', PREBUILT))]);
-    const core = await assembleModules({});
+    // The emulator's own decoder, so this file names the engine rather than
+    // taking the run's default (`cork`).
+    const core = await assembleModules({ cpu: { engine: 'emulator' } });
     const cpu = core.api('cpu');
     await cpu.boot({
         moduleUrl: new URL('libv86.mjs', PREBUILT).href,
