@@ -279,6 +279,43 @@ test('a second boot with the same store takes every region from it', async()=>{
     await cpuModule.dispose();
 });
 
+test('with the translation worker the emitting leaves the engine thread', async()=>{
+    // The same program as the first test, but emitting and encoding go to a
+    // `translator.worker.js`; the engine thread keeps only forming, the store
+    // and publication. In a process without a `Worker` the runtime reaches
+    // the file through `worker_threads`, so this runs the worker for real.
+    const config = { engine: 'hybrid', engineUrl: ENGINE };
+    const inline = await booted(PROGRAM, GUEST_CODE, config);
+    await runToHalt(inline);
+    const inlineCork = metricsOf().cork;
+    const expectedCount = inline.api.instructionCount();
+    await cpuModule.dispose();
+
+    const hybrid = await booted(PROGRAM, GUEST_CODE, { ...config, cork: { worker: true } });
+    // Let the worker open before the first candidates are formed.
+    await new Promise(resolve=>setTimeout(resolve, 50));
+    const slices = await runToHalt(hybrid);
+    assert.equal(hybrid.api.readReg32('eax'), 0x1234, `finished in ${slices} slices`);
+    assert.equal(hybrid.api.instructionCount(), expectedCount);
+    const cork = metricsOf().cork;
+    assert.ok(cork.regions >= 1, `regions ${cork.regions}`);
+    assert.ok(cork.translatedShare > 0.5,
+        `the loop is most of the program, translated share ${cork.translatedShare}`);
+    assert.ok(cork.workerMs > 0, `the worker emitted: ${JSON.stringify(cork)}`);
+    assert.equal(cork.emitMs, 0, 'the engine thread emitted nothing');
+    assert.equal(cork.encodeMs, 0, 'and encoded nothing');
+    // The same work moved, not disappeared: the two translate splits add to
+    // about the same, and the share the translator ran is unchanged.
+    assert.equal(cork.translatedShare, inlineCork.translatedShare);
+    console.log(`3e.1 tight loop: inline translateMs ${inlineCork.translateMs.toFixed(2)} ms`
+        + ` (forming ${inlineCork.formingMs.toFixed(2)}, emit ${inlineCork.emitMs.toFixed(2)},`
+        + ` encode ${inlineCork.encodeMs.toFixed(2)},`
+        + ` instantiate ${inlineCork.instantiateMs.toFixed(2)}); worker: engine`
+        + ` translateMs ${cork.translateMs.toFixed(2)} ms + worker`
+        + ` ${cork.workerMs.toFixed(2)} ms`);
+    await cpuModule.dispose();
+});
+
 /**
  * The origin's private file system in memory, with the shape the directory
  * store uses and a count of every `getFileHandle`: the probes the index

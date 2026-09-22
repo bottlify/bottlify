@@ -113,6 +113,11 @@
  * @property {'frame' | 'slice'} [feed]  When the sampler's hot buckets become candidates:
  *     once a frame (the default, paced by presentation) or after every slice, for a run
  *     that has no frames -- a test in a process without a presenter.
+ * @property {boolean} [worker]  Emit and encode off the engine thread, in a translation
+ *     worker. Default: on wherever a `Worker` exists (a page); a process without one uses
+ *     `worker_threads` only when `workerUrl` is named. `false` emits inline.
+ * @property {string} [workerUrl]  The `translator.worker.js` URL. Default: the file beside
+ *     the runtime. Named explicitly by a test process, or a bundler that moves it.
  * @property {TranslationStore} [store]  The per-bundle cache; none = translate every run.
  * @property {string} [bundleId]         The cache's namespace.
  * @property {boolean} [translate]       Test-only: false keeps the translator off, so a run
@@ -180,6 +185,8 @@
  * @property {number} storeMs          Of it: packing the records and handing them to the store.
  * @property {number} instantiateMs    Of it: compiling and instantiating the modules.
  * @property {number} publishMs        Of it: the entry hash, the page flags and the records.
+ * @property {number} workerMs         Emitting and encoding the translation worker did,
+ *     reported apart from `translateMs`, which is the engine thread's own.
  * @property {number} moduleBytes      Wasm bytes built this run.
  * @property {number} handoffMisses    Hybrid: slices the emulator ran through translated code.
  */
