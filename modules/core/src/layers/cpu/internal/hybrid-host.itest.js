@@ -215,6 +215,87 @@ test('with the handoff export the emulator returns at the translated loop mid-sl
     assert.equal(withIt.ecx, without.ecx);
 });
 
+test('a join two x87 tops reach becomes a region for each, and its misses stop', async()=>{
+    // The shape 3j names on real code. main: fninit; mov esi, N
+    //   L: test esi, 1; jz A; fld1
+    //   A: fninit; dec esi; jnz L; mov eax, 0x1234; hlt
+    // A is reached from the `jz` with an empty stack and by the `fld1` with a
+    // pushed one: two tops meet at the join, and a region formed there is
+    // compiled for the top it was entered at, the other edge leaving. Not
+    // doing so cut the region's own entry, published no entry at A, and the
+    // miss repeated with every iteration.
+    const N = 200_000;
+    const A = GUEST_CODE + 0x11;
+    const LOOP = GUEST_CODE + 7;
+    const program = new Uint8Array([
+        0xdb, 0xe3,                              // fninit
+        0xbe, ...u32(N),                         // mov esi, N
+        0xf7, 0xc6, 0x01, 0, 0, 0,               // L: test esi, 1
+        0x74, 0x02,                              //    jz A
+        0xd9, 0xe8,                              //    fld1
+        0xdb, 0xe3,                              // A: fninit
+        0x4e,                                    //    dec esi
+        0x75, 0xf1,                              //    jnz L
+        0xb8, 0x34, 0x12, 0, 0,                  //    mov eax, 0x1234
+        0xf4,                                    //    hlt
+    ]);
+    const { createV86Host } = await import('./v86-host.js');
+    const { createHybridHost } = await import('./hybrid-host.js');
+    const { TABLES_RESERVE } = await import('../engine.js');
+    const { createEngine } = await import(ENGINE);
+    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+    const machine = await createV86Host({
+        moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+        wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+        memorySize: 64 * 1024 * 1024,
+        trapPort: 0xb077,
+        entryVector: 0x7000,
+        initialStack: 0x300000,
+    });
+    const cork = createEngine({
+        memory: machine.wasmMemory(),
+        layout: machine.stateLayout(TABLES_RESERVE),
+        config: {},
+        read: machine.readByte,
+        imports: {
+            trap: ()=>0, getEflags: machine.getEflags, x87Read: ()=>0, rdtsc: ()=>0n,
+            handoffPage: machine.handoffPage, handoffHash: machine.handoffHash,
+            dirtyCode: machine.dirtyCode,
+        },
+    });
+    const host = createHybridHost({ emulator: machine, cork });
+    host.writePhysical(GUEST_CODE, new Uint8Array([0xf4]));
+    host.writePhysical(0x7000, new Uint8Array(u32(GUEST_CODE)));
+    host.runSlice(1000); // the ROM's jump, onto a halt
+    host.writePhysical(GUEST_CODE, program);
+    machine.cpu().instruction_pointer[0] = GUEST_CODE;
+    machine.cpu().in_hlt[0] = 0;
+    // The loop head is the sampler's candidate first, so the handoff bit is
+    // set and the emulator returns to the translator inside the page.
+    cork.noteHot(LOOP, 0);
+    assert.equal(await cork.translatePending(), 1);
+    const countAt = ()=>cork.diagnostics().exitsByTarget
+        .find((/** @type {any} */ entry)=>entry.address === A)?.count ?? 0;
+    let slices = 0;
+    while (machine.readReg32('eax') !== 0x1234 && slices < 400)
+    {
+        host.runSlice(200_000);
+        await cork.translatePending();
+        slices++;
+    }
+    assert.equal(machine.readReg32('eax'), 0x1234, `finished in ${slices} slices`);
+    // Both tops at the join are entries now: the region for the top the
+    // machine had, and one formed for the other when its miss was counted.
+    assert.ok(cork.entryOf(A, 0) >= 0, `top 0 entry at A: ${cork.entryOf(A, 0)}`);
+    assert.ok(cork.entryOf(A, 7) >= 0, `top 7 entry at A: ${cork.entryOf(A, 7)}`);
+    // And with both entries the miss at the join stops growing.
+    const frozen = countAt();
+    host.runSlice(200_000);
+    await cork.translatePending();
+    assert.equal(countAt(), frozen, 'the untranslated exits at the join stopped');
+    machine.stop();
+});
+
 test('a call in the hot loop: the callee, the call and the return all stay in wasm', async()=>{
     // mov ecx, N; L: call F; dec ecx; jnz L; mov eax, 0x1234; hlt; F: inc edx; ret
     const N = 2_000_000;

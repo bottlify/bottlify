@@ -255,6 +255,36 @@ test('a join two agreeing predecessors reach takes their state, not a cut', ()=>
     }
 });
 
+test('a region formed at a two-top join compiles its entry for its own top', ()=>{
+    // The loop head 0x100d is reached by fall-through from the 0x100b `fstp`
+    // (one top) and by the branch out of the head 0x1006 (the other): the
+    // join is the only place the two tops meet. A region formed there is
+    // compiled for the top it was entered at -- the fall-through edge that
+    // arrives with the other top leaves -- rather than having its own entry
+    // cut and publishing no entry at all.
+    // xor ecx, ecx; fld1; fld1
+    // 0x1006 L: cmp ecx, 0; jne J; fstp st0
+    // 0x100d J: inc ecx; cmp ecx, 3; jb L; fstp st0; fstp st0; hlt
+    const J = CODE + 0xd;
+    const program = [
+        0x31, 0xc9, 0xd9, 0xe8, 0xd9, 0xe8,
+        0x83, 0xf9, 0x00, 0x75, 0x02, 0xdd, 0xd8,
+        0x41, 0x83, 0xf9, 0x03, 0x72, 0xf3, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4,
+    ];
+    for (const top of [0, 7])
+    {
+        const m = createTestMachine();
+        m.write(CODE, program);
+        m.setReg('esp', 0x80000);
+        const t = m.translate(J, { entryTop: top });
+        const entryLabel = /** @type {number} */ (t.translation.labels.get(J));
+        assert.ok(!t.translation.cut.has(entryLabel),
+            `top ${top}: the entry is not cut (${JSON.stringify([...t.translation.cut])})`);
+        assert.deepEqual([...t.translation.refusals.keys()], [], `top ${top}`);
+        assert.equal(t.run(J).kind, Exit.HALT, `top ${top}: runs from the entry to its halt`);
+    }
+});
+
 test('a call return is named and gets no entry of its own', ()=>{
     // fninit; call F (elsewhere); RA: fld dword [esp]; fstp st0; hlt -- the
     // callee decides the stack at RA, so the tracker does not know it: the

@@ -147,7 +147,11 @@ top. A lookup that misses at an address compiled for another top queues that top
 next batch. A block the tracker reached with no known state (a call's return address, whose
 top the callee decides) or cut for a second top gets no entry of the caller's region: it is
 noted as a candidate, so the miss at its address forms a region of its own compiled for the
-top the machine has, instead of a partial entry that would shadow every later attempt. The translator keeps every x87 value as a double, as the emulator does; the
+top the machine has, instead of a partial entry that would shadow every later attempt. The
+region's own entry block is the exception: it is always compiled for the top the region was
+formed at, whatever other path reaches it, so a join two tops meet at still publishes an entry
+for each -- the edge that arrives at the entry with the other top leaves, and the runtime forms
+a region there for the top the machine has. The translator keeps every x87 value as a double, as the emulator does; the
 emulator's tagged-double form is read and written directly, a true 80-bit register it left is
 converted inline. The control word is honoured at run time: rounding control rounds the
 integer stores and `frndint`, precision control set to single rounds every arithmetic

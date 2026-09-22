@@ -1028,6 +1028,13 @@ export class RegionEmitter {
                 this.charge();
                 if (next && next.start === exit.targets[0])
                 {
+                    if (this.x87.active && !x87Edge(this, index + 1))
+                    {
+                        // The next block is compiled for another top than the
+                        // one arriving here (a region's own entry, reached by
+                        // fall-through): leave before entering it.
+                        this.exitAt(exit.targets[0], Exit.UNTRANSLATED);
+                    }
                     return;
                 }
                 this.jumpTo(exit.targets[0]);
@@ -1163,9 +1170,14 @@ export class RegionEmitter {
             this.exitAt(target, Exit.UNTRANSLATED);
             return;
         }
-        if (this.x87.active)
+        if (this.x87.active && !x87Edge(this, label))
         {
-            x87Edge(this, label);
+            // The target block is compiled for another top than the one
+            // arriving here (a region's own entry, reached from a path with
+            // a different top): leave, and the runtime enters it at the top
+            // the machine has.
+            this.exitAt(target, Exit.UNTRANSLATED);
+            return;
         }
         // The budget is checked on every jump through the dispatch: only a
         // backward edge can make a loop, but a forward one costs the same
