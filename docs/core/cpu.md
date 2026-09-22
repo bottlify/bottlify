@@ -81,8 +81,9 @@ instruction that the hybrid host answers the same way; either way a call into th
 costs no emulator turn. `out` to any other port, `in`,
 `cli`, `sti`, `int n`, `int3` and `into` are the emulator's, before the instruction.
 `bound` is translated as the no-op the emulator's own decoder makes of it — it consumes the
-instruction and neither checks the pair nor raises `#BR`, so a guest that returns into a page
-of data (the entry vector is the shape seen on a real route) runs the same bytes either way.
+instruction, register form included (`62 d0`), and neither checks the pair nor raises `#BR`,
+so a guest that returns into a page of data (the entry vector is the shape seen on a real
+route, whose first byte is the entry point's low byte) runs the same bytes either way.
 A fault
 translated code detects (a divide by zero, an undefined instruction, an access the page
 table refuses) leaves before the instruction with the registers as they were, and the

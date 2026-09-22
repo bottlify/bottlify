@@ -381,6 +381,16 @@ test('bound is the no-op the emulator makes it, even out of range', ()=>{
     assert.equal(r.m.reg('eax') >>> 0, 0, 'the instruction changed nothing');
     assert.equal(r.exit.unsupported.size, 0, 'bound was translated, not left out');
     agree(r);
+    // The register form (`bound eax, ebx`) is refused by the decoder's
+    // memory-only rule on paper but consumed by the emulator's decoder; a
+    // return into the entry vector's bytes reaches exactly this form, so it
+    // must translate as the same no-op.
+    const reg = both([0x62, 0xc3, 0x40, 0xf4]); // bound eax, ebx; inc eax; hlt
+    assert.equal(reg.exit.kind, 3, 'the register form halts too');
+    assert.equal(reg.exit.eip, CODE + 4);
+    assert.equal(reg.m.reg('eax'), 1, 'the inc after it ran');
+    assert.equal(reg.exit.unsupported.size, 0);
+    agree(reg);
 });
 
 test('a conditional jump reading flags set in another block goes through the word', ()=>{
