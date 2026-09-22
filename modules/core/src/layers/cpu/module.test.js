@@ -88,9 +88,16 @@ test('an engine a launch may select is named, and one that is not is refused', a
         requireApi: ()=>({}), provide: ()=>{},
     })), { message: 'cpu: unknown engine "x" (emulator, hybrid, cork, differential)' });
     // Named in the contract, refused for the right reason until built.
-    await assert.rejects(cpuModule.create({ engine: 'cork' }, /** @type {any} */ ({
+    await assert.rejects(cpuModule.create({ engine: 'differential' }, /** @type {any} */ ({
         requireApi: ()=>({}), provide: ()=>{},
-    })), { message: 'cpu: engine "cork" is not built yet' });
+    })), { message: 'cpu: engine "differential" is not built yet' });
+
+    await cpuModule.create({ engine: 'cork' }, /** @type {any} */ ({
+        requireApi: ()=>({}), provide: ()=>{},
+    }));
+    assert.equal(cpuModule.diagnostics().metrics?.engine, 'cork',
+        'cork is built and reports before boot');
+    await cpuModule.dispose();
 
     await cpuModule.create({ engine: 'hybrid' }, /** @type {any} */ ({
         requireApi: ()=>({}), provide: ()=>{},

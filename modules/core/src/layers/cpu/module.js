@@ -6,6 +6,7 @@
 
 import { createV86Host } from './internal/v86-host.js';
 import { createHybridHost } from './internal/hybrid-host.js';
+import { createCorkHost } from './internal/cork-host.js';
 import { TABLES_RESERVE } from './engine.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
@@ -29,14 +30,14 @@ export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
  * `emulator` is the vendored emulator alone; `hybrid` runs the emulator with
  * a translator taking the regions it has translated, on one register file;
  * `cork` is the translator alone; `differential` is `hybrid` with every
- * region replayed on the emulator and compared, for test builds. The last
- * two are named here so a configuration is refused for the right reason --
- * not built yet, rather than unknown -- until their steps land.
+ * region replayed on the emulator and compared, for test builds. The last is
+ * named here so a configuration is refused for the right reason -- not built
+ * yet, rather than unknown -- until its step lands.
  */
 export const ENGINES = Object.freeze(['emulator', 'hybrid', 'cork', 'differential']);
 
 /** The engines a launch can run today. */
-const BUILT_ENGINES = new Set(['emulator', 'hybrid']);
+const BUILT_ENGINES = new Set(['emulator', 'hybrid', 'cork']);
 
 /**
  * cpu — the guest CPU and the channel the guest calls us through.
@@ -293,7 +294,7 @@ export const cpuModule = {
         /** @type {(id: number) => void} */
         let dispatch = ()=>{};
 
-        /** Every entry point that needs a running emulator goes through this. */
+        /** Every entry point that needs a running machine goes through this. */
         const started = ()=>{
             if (!state.host)
             {
@@ -302,7 +303,37 @@ export const cpuModule = {
             return state.host;
         };
 
-        const fpu = createFpu({ get wasm_memory(){ return started().cpu().wasm_memory; } });
+        const takeHostFault = ()=>{
+            if (state.lastFault === null && state.host
+                && typeof state.host.fault === 'function')
+            {
+                state.lastFault = state.host.fault();
+            }
+        };
+
+        const captureCurrentContext = ()=>{
+            const host = started();
+            return typeof host.captureContext === 'function'
+                ? host.captureContext()
+                : captureContext(host.cpu());
+        };
+
+        const emulatorFpu = createFpu({
+            get wasm_memory(){ return started().cpu().wasm_memory; },
+        });
+        const activeFpu = ()=>{
+            const host = started();
+            return typeof host.fpu === 'function' ? host.fpu() : emulatorFpu;
+        };
+        const fpu = {
+            /** @param {number} value */
+            setResult: value=>activeFpu().setResult(value),
+            /** @param {number} index */
+            get: index=>activeFpu().get(index),
+            pop: ()=>activeFpu().pop(),
+            depth: ()=>activeFpu().depth(),
+            controlWord: ()=>activeFpu().controlWord(),
+        };
 
         current = state;
         return {
@@ -316,20 +347,24 @@ export const cpuModule = {
                 // What anything placing an image has to fit inside. A base
                 // chosen without it is a guess about how much memory the
                 // machine was given, and a wrong guess writes past the end.
-                // With a translator possible, the top of RAM is its tables'.
-                memorySize: settings.memorySize - (engine === 'emulator' ? 0 : TABLES_RESERVE),
+                // Under hybrid the top of the emulator's RAM is the tables';
+                // cork allocates its state block and tables beside the guest's
+                // full RAM, so nothing is carved out of it.
+                memorySize: engine === 'cork'
+                    ? settings.memorySize
+                    : settings.memorySize - (engine === 'emulator' ? 0 : TABLES_RESERVE),
                 // Where our own boot ROM sits. Worth registering as a region
                 // by whoever lays out memory: a fault leaves the processor
                 // standing in the stub behind its vector, and a report that
                 // cannot name that address calls the engine's own code
                 // unmapped -- which is the one place a reader should not be
-                // sent to look for a guest's bug.
-                romBase: ROM_BASE,
-                romSize: ROM_SIZE,
+                // sent to look for a guest's bug. Cork has no ROM.
+                romBase: engine === 'cork' ? -1 : ROM_BASE,
+                romSize: engine === 'cork' ? 0 : ROM_SIZE,
             },
 
             /**
-             * Starts the emulator.
+             * Starts the selected engine.
              *
              * Separate from `create` on purpose: building the module graph should
              * be cheap and should not require the several megabytes of vendor
@@ -339,56 +374,86 @@ export const cpuModule = {
              * Throws if *this instance* has already booted. A different
              * instance that has booted -- the one a process replacement is
              * retiring, say -- has no bearing on this one: each keeps its own
-             * emulator, and only its own.
+             * machine, and only its own.
              *
-             * @param {Object} artifacts
-             * @param {string} artifacts.moduleUrl
-             * @param {ArrayBuffer} artifacts.wasmBytes
+             * Under `cork`, no emulator artifact is fetched or instantiated; the
+             * translator module named by `engineUrl` supplies the host's own
+             * memory and runtime.
+             *
+             * @param {Object} [artifacts]
+             * @param {string} [artifacts.moduleUrl]
+             * @param {ArrayBuffer} [artifacts.wasmBytes]
              */
-            async boot({ moduleUrl, wasmBytes }){
+            async boot(artifacts = {}){
                 if (state.host)
                 {
                     throw new Error('cpu: already booted');
                 }
                 state.lastFault = null;
-                const emulator = await createV86Host({ ...settings, moduleUrl, wasmBytes });
-                // Under `hybrid` the emulator's host is composed with the
-                // translator's runtime, built over the emulator's own memory
-                // and register file by the module the configuration names.
-                // Without one the composition is the emulator's host under
-                // another name, which runs a program exactly as the emulator
-                // alone does.
-                if (engine === 'hybrid' && settings.engineUrl)
+                if (engine === 'cork')
                 {
-                    const { createEngine } = await import(settings.engineUrl);
-                    state.cork = createEngine({
-                        memory: emulator.wasmMemory(),
-                        layout: emulator.stateLayout(TABLES_RESERVE),
-                        config: { trapPort: settings.trapPort, ...settings.cork },
-                        read: emulator.readByte,
-                        imports: {
-                            // The call channel from inside translated code:
-                            // the handler the port write reaches, on the
-                            // register file the region wrote back; 1 when it
-                            // moved EIP or stopped the machine, so the region
-                            // leaves rather than going on.
-                            trap: (/** @type {number} */ value)=>{
-                                const at = emulator.eip();
-                                emulator.raiseTrap(value);
-                                return emulator.eip() !== at || emulator.halted() ? 1 : 0;
-                            },
-                            getEflags: emulator.getEflags,
-                            x87Read: ()=>0,
-                            rdtsc: ()=>0n,
-                            handoffPage: emulator.handoffPage,
-                            handoffHash: emulator.handoffHash,
-                            dirtyCode: emulator.dirtyCode,
-                        },
+                    if (!settings.engineUrl)
+                    {
+                        throw new Error('cpu: engine "cork" needs an engineUrl');
+                    }
+                    const engineModule = await import(settings.engineUrl);
+                    state.host = createCorkHost({
+                        engine: engineModule,
+                        memorySize: settings.memorySize,
+                        trapPort: settings.trapPort,
+                        entryVector: settings.entryVector,
+                        initialStack: settings.initialStack,
+                        cork: settings.cork,
                     });
+                    state.cork = state.host.cork();
                 }
-                state.host = engine === 'hybrid'
-                    ? createHybridHost({ emulator, cork: state.cork })
-                    : emulator;
+                else
+                {
+                    const { moduleUrl, wasmBytes } = artifacts;
+                    if (!moduleUrl || !wasmBytes)
+                    {
+                        throw new Error('cpu: boot() needs moduleUrl and wasmBytes'
+                            + ' for an emulator engine');
+                    }
+                    const emulator = await createV86Host({ ...settings, moduleUrl, wasmBytes });
+                    // Under `hybrid` the emulator's host is composed with the
+                    // translator's runtime, built over the emulator's own memory
+                    // and register file by the module the configuration names.
+                    // Without one the composition is the emulator's host under
+                    // another name, which runs a program exactly as the emulator
+                    // alone does.
+                    if (engine === 'hybrid' && settings.engineUrl)
+                    {
+                        const { createEngine } = await import(settings.engineUrl);
+                        state.cork = createEngine({
+                            memory: emulator.wasmMemory(),
+                            layout: emulator.stateLayout(TABLES_RESERVE),
+                            config: { trapPort: settings.trapPort, ...settings.cork },
+                            read: emulator.readByte,
+                            imports: {
+                                // The call channel from inside translated code:
+                                // the handler the port write reaches, on the
+                                // register file the region wrote back; 1 when it
+                                // moved EIP or stopped the machine, so the region
+                                // leaves rather than going on.
+                                trap: (/** @type {number} */ value)=>{
+                                    const at = emulator.eip();
+                                    emulator.raiseTrap(value);
+                                    return emulator.eip() !== at || emulator.halted() ? 1 : 0;
+                                },
+                                getEflags: emulator.getEflags,
+                                x87Read: ()=>0,
+                                rdtsc: ()=>0n,
+                                handoffPage: emulator.handoffPage,
+                                handoffHash: emulator.handoffHash,
+                                dirtyCode: emulator.dirtyCode,
+                            },
+                        });
+                    }
+                    state.host = engine === 'hybrid'
+                        ? createHybridHost({ emulator, cork: state.cork })
+                        : emulator;
+                }
                 state.thunks = createThunkTable({
                     base: settings.thunkBase,
                     port: settings.trapPort,
@@ -405,7 +470,7 @@ export const cpuModule = {
                     // would come back as "trap has no implementation" -- true,
                     // and the wrong thing to have been told.
                     const vector = id - FAULT_TRAP_BASE;
-                    if (vector >= 0 && vector < VECTORS)
+                    if (engine !== 'cork' && vector >= 0 && vector < VECTORS)
                     {
                         const fault = readFault(
                             vector,
@@ -440,8 +505,14 @@ export const cpuModule = {
              * look the same. Null once this instance is disposed, along with
              * everything else it never booted.
              */
-            fault: ()=>state.lastFault
-                && { ...state.lastFault, text: describeFault(state.lastFault) },
+            fault(){
+                if (!state.disposed)
+                {
+                    takeHostFault();
+                }
+                return state.lastFault
+                    && { ...state.lastFault, text: describeFault(state.lastFault) };
+            },
 
             /**
              * Stops the machine with a fault of the host's own naming, found
@@ -467,6 +538,7 @@ export const cpuModule = {
             run(){
                 state.running = true;
                 started().run();
+                takeHostFault();
             },
 
             stop(){
@@ -601,8 +673,9 @@ export const cpuModule = {
                     // vector would have ended on, had one been reached.
                     machine.halt();
                 }
-                // Folds the emulator's word into the count before it can wrap.
+                // Folds the machine's word into the count before it can wrap.
                 machine.instructionCount();
+                takeHostFault();
                 // One counter read and one comparison per slice, so that a
                 // frame can name the code the interpreter was in. The slice is
                 // already thousands of times more expensive than this.
@@ -632,7 +705,7 @@ export const cpuModule = {
             },
 
             /** @returns {any} the running thread's full CPU state */
-            captureContext: ()=>captureContext(started().cpu()),
+            captureContext: captureCurrentContext,
 
             /**
              * Points a saved context at where a parked thread should carry on,
@@ -676,7 +749,13 @@ export const cpuModule = {
              */
             restoreContext(context, threadBase){
                 setThreadBase(context, threadBase);
-                restoreContext(started().cpu(), context);
+                const host = started();
+                if (typeof host.restoreContext === 'function')
+                {
+                    host.restoreContext(context);
+                    return;
+                }
+                restoreContext(host.cpu(), context);
             },
 
             /**
@@ -690,7 +769,7 @@ export const cpuModule = {
              * @returns {any}
              */
             newContext({ entry, stackTop }){
-                const context = captureContext(started().cpu());
+                const context = captureCurrentContext();
                 context.eip = entry;
                 context.reg32[4] = stackTop; // ESP
                 context.reg32[5] = stackTop; // EBP
