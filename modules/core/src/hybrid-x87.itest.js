@@ -37,6 +37,10 @@ const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 const ITERATIONS = 150_000;
 /** (2*(3+4))^2 per iteration, summed; the exit code is its low byte. */
 const EXPECTED = (98 * ITERATIONS) & 0xff;
+// The transparent-callee program's own count: its loop carries an extra
+// region (the return block) whose first formations are part of the warm-up,
+// so it needs more iterations for that warm-up to be a small part of the run.
+const TRANSPARENT_ITERATIONS = 800_000;
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -134,6 +138,71 @@ function buildX87Exe(){
 }
 
 /**
+ * A second compiled-C-like program, the shape that stuck on real code: the
+ * x87 at a return address whose callee preserves the stack. The callee's
+ * region is entered and left at the call site's top, so the caller's return
+ * block's top is the call site's -- but the tracker does not cross the call,
+ * so the return block has no known state and must become a region of its own,
+ * compiled at the top the machine has, rather than a broken entry of the
+ * caller's region that shadows every later attempt.
+ *
+ * main: fninit; esi = N
+ * L:    push [arg2]; push [arg1]; call F
+ * RA:   fld [tmp2]; fstp [tmp]; add esp, 8; dec esi; jnz L
+ *       fld [tmp]; fistp [out]; exit [out] & 0xff
+ * F:    fld [esp+4]; fadd [esp+8]; fstp [tmp2]; ret   (the stack as it found it)
+ */
+function buildTransparentExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        data: {
+            arg1: f32(3), arg2: f32(4), tmp: [0, 0, 0, 0], tmp2: [0, 0, 0, 0],
+            out: [0, 0, 0, 0],
+        },
+        codeSize: 0x1000,
+        code: ({ iat, at })=>{
+            /** @type {number[]} */
+            const image = [];
+            /** @param {number[]} bytes */
+            const emit = bytes=>image.push(...bytes);
+            /** @param {number} offset */
+            const padTo = offset=>{
+                while (image.length < offset)
+                {
+                    image.push(0x90);
+                }
+            };
+            emit([0xdb, 0xe3]);                        // fninit
+            emit([0xbe, ...u32(TRANSPARENT_ITERATIONS)]); // mov esi, N
+            padTo(OFF_L);
+            emit([0xff, 0x35, ...u32(at('arg2'))]);    // L: push dword [arg2]
+            emit([0xff, 0x35, ...u32(at('arg1'))]);    //    push dword [arg1]
+            const callF = image.length;
+            emit([0xe8, 0, 0, 0, 0]);                  //    call F
+            emit([0xa1, ...u32(at('tmp2'))]);          // RA: mov eax, [tmp2]
+            emit([0xd9, 0x05, ...u32(at('tmp2'))]);    //    fld dword [tmp2]
+            emit([0xd9, 0x1d, ...u32(at('tmp'))]);     //    fstp dword [tmp]
+            emit([0x83, 0xc4, 0x08]);                  //    add esp, 8
+            emit([0x4e]);                              //    dec esi
+            emit([0x75, (OFF_L - (image.length + 2)) & 0xff]); // jnz L
+            emit([0xd9, 0x05, ...u32(at('tmp'))]);     //    fld dword [tmp]
+            emit([0xdb, 0x1d, ...u32(at('out'))]);     //    fistp dword [out]
+            emit([0xa1, ...u32(at('out'))]);           //    mov eax, [out]
+            emit([0x25, 0xff, 0, 0, 0]);               //    and eax, 0xff
+            emit([0x50]);                              //    push eax
+            emit([0xff, 0x15, ...u32(iat('ExitProcess'))]); // call [ExitProcess]
+            padTo(OFF_F);
+            emit([0xd9, 0x44, 0x24, 0x04]);            // F: fld dword [esp+4]
+            emit([0xd8, 0x44, 0x24, 0x08]);            //    fadd dword [esp+8]
+            emit([0xd9, 0x1d, ...u32(at('tmp2'))]);    //    fstp dword [tmp2]
+            emit([0xc3]);                              //    ret
+            image.splice(callF + 1, 4, ...u32(OFF_F - (callF + 5)));
+            return image;
+        },
+    });
+}
+
+/**
  * @param {Uint8Array} executable @param {'emulator' | 'hybrid'} engine
  * @param {Record<string, unknown>} [config]  more translator settings: a store, a bundle id
  */
@@ -186,6 +255,28 @@ test('x87 in the shapes a compiled C program has translates whole under hybrid',
         // The translation milliseconds are the sum of their parts, whatever
         // the parts are: the frame's own figure is read against them.
         assert.equal(cork.translateMs, parts(cork));
+    });
+
+test('a transparent callee leaves the return block a region of its own',
+    { timeout: 120000 }, async()=>{
+        const exe = buildTransparentExe();
+        const reference = await run(exe, 'emulator');
+        assert.equal(reference.code, 7, 'the callee\'s sum, stored after the return');
+        const hybrid = await run(exe, 'hybrid');
+        assert.equal(hybrid.code, reference.code, 'the same answer');
+        const cork = hybrid.cork;
+        assert.ok(cork, 'the translator reports');
+        // The caller's return block has no known state: pre-fix it is a
+        // partial entry of the caller's region at the call site's top, and
+        // the x87 in it is refused for the whole run. With the block a region
+        // of its own, compiled at the top the machine has, the loop is whole.
+        assert.ok(cork.translatedShare > 0.9,
+            `share ${cork.translatedShare}, exits ${JSON.stringify(cork.exits)}`);
+        const why = Object.keys(/** @type {Record<string, number>} */ (cork.refusedWhy));
+        assert.ok(why.some(key=>key.includes('call-return')),
+            `the reason is named: ${JSON.stringify(why)}`);
+        assert.ok(cork.exits.untranslated < 15000,
+            `untranslated exits ${cork.exits.untranslated}`);
     });
 
 /** The translate split's sum. @param {Record<string, number>} cork */

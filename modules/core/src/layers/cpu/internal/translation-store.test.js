@@ -11,11 +11,12 @@ import {
 } from './translation-store.js';
 
 /** A directory handle in memory, with the shape the store uses. */
-function fakeDirectory(){
+function fakeDirectory(counter = { probes: 0 }){
     /** @type {Map<string, any>} */
     const entries = new Map();
     return {
         entries,
+        counter,
         /** @param {string} name @param {{ create?: boolean }} [options] */
         async getDirectoryHandle(name, options = {}){
             let child = entries.get(name);
@@ -25,13 +26,14 @@ function fakeDirectory(){
                 {
                     throw new Error('NotFoundError');
                 }
-                child = fakeDirectory();
+                child = fakeDirectory(counter);
                 entries.set(name, child);
             }
             return child;
         },
         /** @param {string} name @param {{ create?: boolean }} [options] */
         async getFileHandle(name, options = {}){
+            counter.probes++;
             let file = entries.get(name);
             if (!file)
             {
@@ -70,13 +72,22 @@ test('a record goes into the bundle\'s directory under a name hashed from its ke
     await store.put('cork/1/x/401000/abc', new Uint8Array([7, 8, 9]));
     assert.deepEqual([...(await store.get('cork/1/x/401000/abc') ?? [])], [7, 8, 9]);
     const cork = root.entries.get('cork');
-    const bundle = cork.entries.get('my_game_1.0');
+    const bundle = cork.entries.get('my_game_1.0.v1');
     assert.ok(bundle.entries.has(fileNameOf('cork/1/x/401000/abc')));
     assert.match(fileNameOf('anything'), /^[0-9a-f]{16}\.cork$/);
     assert.notEqual(fileNameOf('a'), fileNameOf('b'));
+    // The index lists the record name, one per line.
+    const indexFile = await bundle.entries.get('index').getFile();
+    const indexText = new TextDecoder().decode(new Uint8Array(await indexFile.arrayBuffer()));
+    assert.equal(indexText, `${fileNameOf('cork/1/x/401000/abc')}\n`);
+    // A miss touches the file system for nothing: the index answers it.
+    const probes = root.counter.probes;
+    assert.equal(await store.get('cork/1/x/999/zzz'), null);
+    assert.equal(root.counter.probes, probes, 'a miss probes no file');
     // Overwritten in place.
     await store.put('cork/1/x/401000/abc', new Uint8Array([1]));
     assert.deepEqual([...(await store.get('cork/1/x/401000/abc') ?? [])], [1]);
+    assert.equal(await store.get('cork/1/x/999/zzz'), null);
 });
 
 test('the request resolves to nothing without the API, to itself as an object', async()=>{

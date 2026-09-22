@@ -10,9 +10,26 @@
  * bundle. Resolved inside the engine's own thread from a request, as the
  * block store is, since a store with functions in it cannot cross to the
  * engine from the page.
+ *
+ * A record's file name is a hash of its key, so a lookup cannot tell a miss
+ * from a hit without asking the file system -- and a browser's file system
+ * answers a miss with an exception that costs milliseconds. The bundle
+ * therefore keeps an index of the record names in one file, read once when
+ * the store is first used: a lookup is a probe of that set and only a hit
+ * touches the file system for its bytes.
  */
 
 /** @typedef {import('../engine.js').TranslationStore} TranslationStore */
+
+/**
+ * The store's own layout version: a bundle directory of another version is
+ * not read, so a change to the record naming or the index does not mix old
+ * files into the new set. (The records' own version is the emitter's.)
+ */
+export const STORE_VERSION = 1;
+
+/** The one file that lists every record name in the bundle's directory. */
+const INDEX = 'index';
 
 /**
  * A file name for a key: the key's own characters are a path; what names
@@ -32,6 +49,36 @@ export function fileNameOf(key){
     return `${a.toString(16).padStart(8, '0')}${b.toString(16).padStart(8, '0')}.cork`;
 }
 
+/** @param {any} file */
+const textOf = async file=>new TextDecoder().decode(new Uint8Array(await file.arrayBuffer()));
+
+/**
+ * Writes the whole record into its file, the synchronous handle inside a
+ * worker, the stream on the page.
+ *
+ * @param {any} handle @param {Uint8Array} bytes
+ */
+async function writeRecord(handle, bytes){
+    if (typeof handle.createSyncAccessHandle === 'function')
+    {
+        const access = await handle.createSyncAccessHandle();
+        try
+        {
+            access.truncate(0);
+            access.write(bytes, { at: 0 });
+            access.flush();
+        }
+        finally
+        {
+            access.close();
+        }
+        return;
+    }
+    const writable = await handle.createWritable();
+    await writable.write(bytes);
+    await writable.close();
+}
+
 /**
  * A store over a directory handle (the origin private file system's, or
  * anything with its shape).
@@ -43,41 +90,85 @@ export function fileNameOf(key){
 export async function createDirectoryTranslationStore(root, name){
     const safe = name.replace(/[^A-Za-z0-9._-]/g, '_') || 'bundle';
     const cork = await root.getDirectoryHandle('cork', { create: true });
-    const directory = await cork.getDirectoryHandle(safe, { create: true });
-    return {
-        async get(key){
-            let handle;
+    const directory = await cork.getDirectoryHandle(`${safe}.v${STORE_VERSION}`, { create: true });
+    /** The record names, read once; null until then. @type {Set<string> | null} */
+    let names = null;
+    /** The bundle's record index. @returns {Promise<Set<string>>} */
+    const index = async()=>{
+        if (names !== null)
+        {
+            return names;
+        }
+        names = new Set();
+        try
+        {
+            const handle = await directory.getFileHandle(INDEX);
+            const text = await textOf(await handle.getFile());
+            for (const line of text.split('\n'))
+            {
+                if (line)
+                {
+                    names.add(line);
+                }
+            }
+        }
+        catch {
+            // No index yet: an empty bundle.
+        }
+        return names;
+    };
+    /** Appends a record name to the index. @param {string} line */
+    const publish = async line=>{
+        const handle = await directory.getFileHandle(INDEX, { create: true });
+        if (typeof handle.createSyncAccessHandle === 'function')
+        {
+            const access = await handle.createSyncAccessHandle();
             try
             {
-                handle = await directory.getFileHandle(fileNameOf(key));
+                access.write(new TextEncoder().encode(line), { at: access.getSize() });
+                access.flush();
             }
-            catch {
+            finally
+            {
+                access.close();
+            }
+            return;
+        }
+        // No synchronous handle: the index is small next to the records, so
+        // read it back and rewrite it with the line.
+        let existing = '';
+        try
+        {
+            existing = await textOf(await handle.getFile());
+        }
+        catch {
+            // The first line.
+        }
+        const writable = await handle.createWritable();
+        await writable.write(new TextEncoder().encode(existing + line));
+        await writable.close();
+    };
+    return {
+        async get(key){
+            const fileName = fileNameOf(key);
+            if (!(await index()).has(fileName))
+            {
                 return null;
             }
+            const handle = await directory.getFileHandle(fileName);
             const file = await handle.getFile();
             return new Uint8Array(await file.arrayBuffer());
         },
         async put(key, bytes){
-            const handle = await directory.getFileHandle(fileNameOf(key), { create: true });
-            if (typeof handle.createSyncAccessHandle === 'function')
+            const fileName = fileNameOf(key);
+            const handle = await directory.getFileHandle(fileName, { create: true });
+            await writeRecord(handle, bytes);
+            const set = await index();
+            if (!set.has(fileName))
             {
-                // Inside a worker: the synchronous handle, no stream to close.
-                const access = await handle.createSyncAccessHandle();
-                try
-                {
-                    access.truncate(0);
-                    access.write(bytes, { at: 0 });
-                    access.flush();
-                }
-                finally
-                {
-                    access.close();
-                }
-                return;
+                set.add(fileName);
+                await publish(`${fileName}\n`);
             }
-            const writable = await handle.createWritable();
-            await writable.write(bytes);
-            await writable.close();
         },
     };
 }
