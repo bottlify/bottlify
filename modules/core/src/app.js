@@ -2752,6 +2752,18 @@ async function buildApp(options){
             // not honour yet, and a state accepted in silence is the defect
             // class that produces a picture rather than an error.
             divergence: reportDivergence,
+            // A window's client area, which is the size a device's back buffer
+            // takes when the program asks for zero by zero. Only the window
+            // layer can measure one, and a device answered with the whole
+            // display instead lays out and rasterises against a screen its
+            // window does not have.
+            windowClientSize: (/** @type {number} */ hwnd)=>{
+                const rect = win32.clientRect(hwnd);
+                return rect ? {
+                    width: rect.right - rect.left,
+                    height: rect.bottom - rect.top,
+                } : null;
+            },
             // The cursor a program asks its device to draw. Nothing here
             // composites one over the frame; the host is told, with the
             // bitmap and the hot spot, and shows it the way its screen can.

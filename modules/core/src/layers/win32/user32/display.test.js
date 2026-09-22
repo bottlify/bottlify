@@ -9,8 +9,9 @@ import assert from 'node:assert/strict';
 import { REFRESH_HZ, displayModes } from './display.js';
 
 /** Every size of the era, as the table lists them. */
-const ERA = ['640x480', '800x600', '1024x768', '1280x720', '1440x900', '1600x900', '1680x1050',
-    '1920x1080', '1920x1200', '2560x1440', '2560x1600'];
+const ERA = ['640x480', '800x600', '1024x768', '1280x720', '1280x800', '1280x832', '1440x900',
+    '1512x982', '1600x900', '1680x1050', '1728x1117', '1920x1080', '1920x1200', '2560x1440',
+    '2560x1600', '2560x1664', '2880x1800', '3024x1964', '3456x2234'];
 /** Each size at each rate, as the list walks them. */
 const ERA_MODES = ERA.flatMap(size=>[`${size}@60`, `${size}@120`]);
 /** @param {import('./display.js').DisplayMode[]} modes */
@@ -31,8 +32,7 @@ test('a display of a size the era never had is still in its own list', ()=>{
     // a list without it leaves that program with a selection it cannot make.
     const modes = displayModes({ width: 1000, height: 700, bitsPerPixel: 32 });
     assert.deepEqual([...new Set(modes.map(mode=>`${mode.width}x${mode.height}`))],
-        ['640x480', '800x600', '1000x700', '1024x768', '1280x720', '1440x900', '1600x900',
-            '1680x1050', '1920x1080', '1920x1200', '2560x1440', '2560x1600']);
+        ['640x480', '800x600', '1000x700', ...ERA.slice(2)]);
 });
 
 test('a size of the era is listed once, whether or not the display is that size', ()=>{

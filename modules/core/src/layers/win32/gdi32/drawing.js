@@ -220,8 +220,14 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
      * both of which the caller must turn into a truthful failure.
      *
      * @param {number} handle
+     * @param {boolean} [present]
+     *        Whether a draw through this context puts the desktop on the
+     *        screen. True for a draw the program made, which is a frame; false
+     *        for the window manager's own background, which is not -- showing
+     *        the desktop colour as a frame was the blank screen a display was
+     *        handed before the program had drawn anything.
      */
-    const bound = handle=>{
+    const bound = (handle, present = true)=>{
         const dc = dcOf(handle);
         const interfaces = draw();
         if (!dc || !interfaces || !services.surfaceFor)
@@ -257,7 +263,7 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
         // invisible. The presenter already coalesces a burst of these onto
         // one flush, so calling it once per drawing entry point costs nothing
         // a real frame does not already pay for.
-        if (dc.kind !== 'memory')
+        if (present && dc.kind !== 'memory')
         {
             services.presentDesktop?.();
         }

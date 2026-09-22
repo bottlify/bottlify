@@ -171,11 +171,22 @@ const LIGHT_STRUCT = `struct Light {
  * Direct3D defines and the direction the mix below expects. Linear fog is the
  * only mode with an end: the two exponential ones fade for ever and reach zero
  * only in the limit.
+ *
+ * The row the three numbers live in is the caller's: the fixed-function block
+ * keeps them in a row of its own, and a translated pixel shader keeps them in
+ * the block its fog binding names, and both are this one formula.
+ *
+ * @param {number} mode  D3DFOG; NONE is 0, which declares nothing.
+ * @param {string} [factors]  WGSL expression for the (start, end, density) row.
+ * @returns {string}
  */
-const FOG_FUNCTIONS = Object.freeze({
-    [D3DFOG.LINEAR]: `fn fogFactorOf(dist: f32) -> f32 {
-    let start = uniforms.fogFactors.x;
-    let end = uniforms.fogFactors.y;
+export function fogFunctionDeclaration(mode, factors = 'uniforms.fogFactors'){
+    switch (mode)
+    {
+        case D3DFOG.LINEAR:
+            return `fn fogFactorOf(dist: f32) -> f32 {
+    let start = ${factors}.x;
+    let end = ${factors}.y;
     // A range of nothing is a program asking for a step at that distance, not
     // a division by zero that erases the frame.
     if (end <= start)
@@ -184,17 +195,22 @@ const FOG_FUNCTIONS = Object.freeze({
     }
     return clamp((end - dist) / (end - start), 0.0, 1.0);
 }
-`,
-    [D3DFOG.EXP]: `fn fogFactorOf(dist: f32) -> f32 {
-    return clamp(exp(-uniforms.fogFactors.z * dist), 0.0, 1.0);
+`;
+        case D3DFOG.EXP:
+            return `fn fogFactorOf(dist: f32) -> f32 {
+    return clamp(exp(-${factors}.z * dist), 0.0, 1.0);
 }
-`,
-    [D3DFOG.EXP2]: `fn fogFactorOf(dist: f32) -> f32 {
-    let scaled = uniforms.fogFactors.z * dist;
+`;
+        case D3DFOG.EXP2:
+            return `fn fogFactorOf(dist: f32) -> f32 {
+    let scaled = ${factors}.z * dist;
     return clamp(exp(-scaled * scaled), 0.0, 1.0);
 }
-`,
-});
+`;
+        default:
+            return '';
+    }
+}
 
 /**
  * Distance attenuation, which a directional light does not have and the other
@@ -870,8 +886,7 @@ ${fragmentBody(state, state.specularEnable === true, [])}
 function functionDeclarations(lighting, fogMode){
     // Only for geometry that has a distance to fog by: a pre-transformed vertex
     // carries its factor already and would leave this declared and uncalled.
-    const curves = /** @type {Record<number, string>} */ (FOG_FUNCTIONS);
-    const fog = fogMode === D3DFOG.NONE ? '' : curves[fogMode] ?? '';
+    const fog = fogFunctionDeclaration(fogMode);
     if (lighting === null)
     {
         return fog;

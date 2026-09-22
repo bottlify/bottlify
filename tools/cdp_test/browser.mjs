@@ -129,6 +129,10 @@ function start(browser, flags, headed = false, profileDir){
         browser,
         [
             ...(headed ? [] : ['--headless=new']),
+            // Silent: a measurement's program plays its music through the
+            // machine's speakers otherwise, over whatever the person at it is
+            // doing; the audio path is still exercised, only not heard.
+            '--mute-audio',
             // A fresh profile every launch, so without these a visible window
             // opens on the first-run questions -- a search engine to pick, an
             // account to sign into -- over the page a person came to watch.

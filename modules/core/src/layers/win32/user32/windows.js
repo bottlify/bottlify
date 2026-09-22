@@ -317,6 +317,12 @@ function characterFor(key){
  *           Every live window, children included: a dialog is its controls, and
  *           a report that shows the frame and not the button under the pointer
  *           says nothing about what a click would reach.
+ * @property {(hwnd: number) => { left: number, top: number, right: number,
+ *     bottom: number } | null} clientRect
+ *           One window's client rectangle, or null for a handle that names
+ *           none: the measurement GetClientRect answers with, for the callers
+ *           outside this layer that must answer a size a program asked for as
+ *           zero -- a back buffer's, which means exactly this rectangle.
  * @property {(hwnd: number, x: number, y: number, width: number, height: number,
  *     how?: { announce?: boolean }) => boolean} place
  */
@@ -1371,7 +1377,22 @@ export function createWindowFunctions(host){
                 {
                     return andThen(destroyWindow(record.hwnd, thread, 'ncdestroy'), ()=>done(0));
                 }
-                return done(record.hwnd);
+                // A window created visible hears its own size and place inside
+                // this call, as the real CreateWindowEx sends them once
+                // WM_CREATE has been answered: a program that never calls
+                // ShowWindow measures the screen it lays itself out and
+                // rasterises its text for from the size it is told here.
+                if ((style & WS_VISIBLE) === 0)
+                {
+                    return done(record.hwnd);
+                }
+                const client = geometry.clientRect(record);
+                return andThen(send(record.hwnd, WM_SIZE, SIZE_RESTORED,
+                    ((((client.bottom - client.top) & 0xffff) << 16)
+                        | ((client.right - client.left) & 0xffff)) >>> 0, thread),
+                ()=>andThen(send(record.hwnd, WM_MOVE, 0,
+                    (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
+                ()=>done(record.hwnd)));
             });
         });
     };
@@ -1466,6 +1487,15 @@ export function createWindowFunctions(host){
     /**
      * The desktop itself, painted once in the desktop colour before the
      * first window goes on it. Nothing else ever paints the whole screen.
+     *
+     * It is painted and **not presented**: the desktop colour is the window
+     * manager's own background, not a picture the program drew, and the first
+     * frame a display is handed is what a launcher hides its loading screen
+     * on. Presenting this one showed a blank coloured screen as if it were
+     * the program's first frame, before the program had presented anything.
+     * What the program draws still reaches the screen -- a GDI draw presents
+     * the desktop itself, and a window's frame or the uncovering of one marks
+     * it painted below -- so nothing legitimate is lost.
      */
     let desktopPainted = false;
     const paintDesktop = ()=>{
@@ -1479,10 +1509,10 @@ export function createWindowFunctions(host){
             return;
         }
         desktopPainted = true;
-        draw?.fill(hdc, { left: 0, top: 0, right: host.screen.width, bottom: host.screen.height },
+        (draw?.fillBackground ?? draw?.fill)?.call(draw, hdc,
+            { left: 0, top: 0, right: host.screen.width, bottom: host.screen.height },
             sysColor(COLOR_BACKGROUND));
         host.dc?.()?.release(0, hdc);
-        painted();
     };
 
     /**
@@ -2175,6 +2205,18 @@ export function createWindowFunctions(host){
     });
 
     host.windowService?.({
+        /**
+         * One window's client rectangle, or null for a handle that names no
+         * window. Read by whoever has to answer a size a program asked for as
+         * zero -- a back buffer's, which means exactly this rectangle -- and
+         * the same measurement GetClientRect answers with.
+         *
+         * @param {number} hwnd
+         */
+        clientRect: hwnd=>{
+            const record = live(hwnd);
+            return record ? geometry.clientRect(record) : null;
+        },
         list: ()=>[...windows.values()]
             .filter(record=>!record.destroyed)
             .map(record=>({
@@ -2255,15 +2297,19 @@ export function createWindowFunctions(host){
         const hide = cmdShow === SW_HIDE;
         const covered = wasVisible && hide && shown(record)
             ? geometry.windowRect(record) : null;
-        // Matches Wine's dlls/user32/tests/msg.c WmShowNormal sequence: sent
-        // before WS_VISIBLE actually changes, and only when this call changes
-        // it -- SW_SHOW on an already-visible window says nothing happened,
-        // because nothing did.
-        if (wasVisible === hide)
-        {
-            host.queue.post({ hwnd: record.hwnd, message: WM_SHOWWINDOW,
-                wParam: hide ? 0 : 1, lParam: 0 });
-        }
+        // Matches Wine's dlls/user32/tests/msg.c WmShowNormal sequence: the
+        // message is *sent* -- the procedure runs before this call returns --
+        // and only when this call changes the visibility, because SW_SHOW on
+        // an already-visible window says nothing happened and nothing did.
+        //
+        // Sent, and then chained onto whatever follows it: a procedure the
+        // bridge has to run answers with a promise, so returning this call's
+        // own result before it has answered hands the host call back to the
+        // guest while the guest's procedure is still pending -- and the guest
+        // reuses its own stack under it.
+        const greeting = wasVisible === hide
+            ? send(record.hwnd, WM_SHOWWINDOW, hide ? 0 : 1, 0, host.callerThread?.())
+            : 0;
         record.style = hide
             ? (record.style & ~WS_VISIBLE) >>> 0
             : (record.style | WS_VISIBLE) >>> 0;
@@ -2283,15 +2329,29 @@ export function createWindowFunctions(host){
             activate(record.hwnd);
             raise(record);
         }
+        /** The sent messages so far, for the result to wait on. */
+        let told = greeting;
         if (!wasVisible && !hide)
         {
             appear(record);
+            // A window that becomes visible hears its own size, as the real
+            // ShowWindow sends it: the message a program lays itself out by
+            // and rasterises every glyph of its text for. Without it a program
+            // keeps whatever default it started with, and its text stays
+            // scaled for that instead of for its window.
+            const client = geometry.clientRect(record);
+            told = andThen(greeting, ()=>send(record.hwnd, WM_SIZE, SIZE_RESTORED,
+                ((((client.bottom - client.top) & 0xffff) << 16)
+                    | ((client.right - client.left) & 0xffff)) >>> 0,
+                host.callerThread?.()));
         }
         if (covered)
         {
             uncover(covered);
         }
-        return wasVisible ? 1 : 0;
+        // The answer waits for the procedures that were sent to: returning it
+        // before they have run is the stack the guest reuses under itself.
+        return andThen(told, ()=>wasVisible ? 1 : 0);
     };
 
     // Named, because a message for a window with no procedure of its own is

@@ -1232,6 +1232,24 @@ export function stageCascade(model, layout){
 }
 
 /**
+ * The fog mode a draw runs under: the table mode when the program set one,
+ * else the vertex mode, and none when fog is disabled or a caller turned it
+ * off. Table fog takes precedence at the API's own rule.
+ *
+ * @param {RenderModel} model
+ * @param {boolean} [applied]  False runs the draw as if fog were disabled.
+ * @returns {number} D3DFOG; NONE is 0.
+ */
+export function fogModeOf(model, applied = true){
+    const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
+    if (!applied || rs('FOGENABLE') === 0)
+    {
+        return D3DFOG.NONE;
+    }
+    return rs('FOGTABLEMODE') || rs('FOGVERTEXMODE');
+}
+
+/**
  * The render state of a draw, as the pipeline cache keys it.
  *
  * The two paired blend modes are expanded here: they set both factors from one
@@ -1264,9 +1282,7 @@ export function pipelineStateOf(model, shape){
         srcBlend = D3DBLEND.INVSRCALPHA;
         destBlend = D3DBLEND.SRCALPHA;
     }
-    const fogMode = rs('FOGENABLE') !== 0 && shape.fog !== false
-        ? (rs('FOGTABLEMODE') || rs('FOGVERTEXMODE'))
-        : D3DFOG.NONE;
+    const fogMode = fogModeOf(model, shape.fog !== false);
 
     return {
         fvf: shape.fvf,
@@ -2106,6 +2122,9 @@ export function createRenderer(options){
         dump.push(`#${dump.length} program n=${count}`
             + ` vs=${prepared.state.vertexShader} ps=${prepared.state.pixelShader}`
             + ` decl=${program.declarationId}`
+            // The fog stage below model 3 runs after the shader too, so a
+            // program's draw is another place its numbers can be wrong.
+            + ` fog=${prepared.state.fogMode === D3DFOG.NONE ? '-' : fogSettingOf(model)}`
             + ` target=${describeTarget(model)}`
             + ` view=${model.viewport.rect.x},${model.viewport.rect.y}`
             + `+${model.viewport.rect.width}x${model.viewport.rect.height}`
@@ -3236,8 +3255,18 @@ export function createRenderer(options){
             return prepareMixed(model, stride, topology, program);
         }
         const pixelShader = /** @type {object} */ (program.pixelShader);
-        const pixel = translationOf(pixelShader, 'ps', ()=>translateShader(
-            /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.pixel)));
+        // The fixed-function fog stage runs after a pixel shader below model 3,
+        // so a shader-drawn surface is fogged exactly as a fixed-function one
+        // is -- and this device refuses a pixel shader above model 2. Only a
+        // draw whose vertex stage is the fixed one can promise the oFog
+        // varying the mix reads, so a draw through a vertex shader of the
+        // program's own keeps the fog Direct3D would take from that shader,
+        // which this translation does not compute.
+        const fog = program.vertex ? 0 : fogModeOf(model, fogApplied);
+        const pixel = translationOf(pixelShader, `ps|fog${fog}`,
+            ()=>translateShader(
+                /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.pixel),
+                fog === 0 ? {} : { fog }));
         if (pixel.error)
         {
             skip('program');
@@ -3309,8 +3338,9 @@ export function createRenderer(options){
                     /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
                     { inputs: layout.shapes, alsoWrite: missing }))
             : hybridStageFor(
-                `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`,
-                wanted, layout.shapes, missing, generated);
+                `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`
+                    + `|f${fog}`,
+                wanted, layout.shapes, missing, generated, fog);
         if (vertex.error)
         {
             skip('program');
@@ -3335,7 +3365,8 @@ export function createRenderer(options){
         const pixelBlocks = constantBlocks(program.pixelConstants, pixel.constants, take);
         const state = {
             ...pipelineStateOf(model, {
-                fvf: 0, topology, ...formatsOf(model), stages: [], lighting: null, fog: false,
+                fvf: 0, topology, ...formatsOf(model), stages: [], lighting: null,
+                fog: fogApplied,
             }),
             vertexShader: program.vertex ? program.vertexId : -1,
             pixelShader: program.pixelId,
@@ -3492,14 +3523,15 @@ export function createRenderer(options){
      * @param {Map<number, import('../d3d9/wgsl.js').InputShape>} shapes
      * @param {number[]} alsoWrite
      * @param {number[]} generated
+     * @param {number} fog  D3DFOG; zero for none.
      */
-    const hybridStageFor = (key, wanted, shapes, alsoWrite, generated)=>{
+    const hybridStageFor = (key, wanted, shapes, alsoWrite, generated, fog)=>{
         const existing = hybridStages.get(key);
         if (existing)
         {
             return existing;
         }
-        const made = fixedVertexStage(wanted, shapes, alsoWrite, generated);
+        const made = fixedVertexStage(wanted, shapes, alsoWrite, generated, fog);
         hybridStages.set(key, made);
         return made;
     };
@@ -3552,6 +3584,19 @@ export function createRenderer(options){
         {
             floats.set(rows, (HYBRID_CONSTANTS.TRANSFORMS + index * 4) * 4);
         }
+        // The fog the fixed vertex stage computes and carries to a fogged
+        // pixel shader: its range and colour, beside the transform it already
+        // reads.
+        const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
+        floats.set([
+            dwordToFloat(rs('FOGSTART')),
+            dwordToFloat(rs('FOGEND')),
+            dwordToFloat(rs('FOGDENSITY')),
+            0,
+        ], HYBRID_CONSTANTS.FOG * 4);
+        const fogColour = colorToFloats(rs('FOGCOLOR'));
+        floats.set([fogColour.r, fogColour.g, fogColour.b, fogColour.a],
+            HYBRID_CONSTANTS.FOG_COLOR * 4);
         return [floats, take(64), take(16)];
     };
 

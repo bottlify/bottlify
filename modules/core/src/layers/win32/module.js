@@ -170,9 +170,10 @@ export const win32Module = {
         let libraries = {};
         /** @type {number | null} */
         let exitCode = null;
-        /** @type {{ list: () => any[], place: (hwnd: number, x: number, y: number, width: number,
+        /** @type {{ list: () => any[], clientRect: (hwnd: number) => any,
+         *     place: (hwnd: number, x: number, y: number, width: number,
          *     height: number, how?: { announce?: boolean }) => boolean }} */
-        let windowService = { list: ()=>[], place: ()=>false };
+        let windowService = { list: ()=>[], clientRect: ()=>null, place: ()=>false };
 
         /** @type {(handle: number, text: string) => void} */
         const sink = config?.onOutput ?? (()=>{});
@@ -1561,6 +1562,16 @@ export const win32Module = {
              */
             placeWindow: (hwnd, x, y, width, height, how)=>
                 windowService.place(hwnd, x, y, width, height, how),
+
+            /**
+             * One window's client rectangle, or null for a handle that names
+             * no window. The measurement GetClientRect answers with, for the
+             * callers outside this layer that have to answer a size a program
+             * asked for as zero: a back buffer, whose zero means exactly this.
+             *
+             * @param {number} hwnd
+             */
+            clientRect: (/** @type {number} */ hwnd)=>windowService.clientRect(hwnd),
 
             windowProcedures: ()=>dispatching.map(held=>({
                 hwnd: `0x${held.hwnd.toString(16)}`,
