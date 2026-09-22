@@ -566,6 +566,14 @@ function decodeHuffmanStream(bytes, start, end, packed, maxBits, out, outAt, cou
     at--;
     for (let i = 0; i < count; i++)
     {
+        // Two bytes at a time while the reservoir's empty half can take them:
+        // the common case refills in one step rather than two.
+        while (have <= 16 && at - 1 >= start)
+        {
+            acc |= ((bytes[at] << 8) | bytes[at - 1]) << (16 - have);
+            have += 16;
+            at -= 2;
+        }
         while (have <= 24)
         {
             // Bits past the beginning of the stream read as zero, as the
