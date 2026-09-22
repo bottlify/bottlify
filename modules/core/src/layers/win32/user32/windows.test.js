@@ -44,6 +44,8 @@ const WM_KEYDOWN = 0x0100;
 const WM_LBUTTONDOWN = 0x0201;
 const WM_CHAR = 0x0102;
 const WM_PAINT = 0x000f;
+const WM_MOVE = 0x0003;
+const WM_SIZE = 0x0005;
 const WM_SHOWWINDOW = 0x0018;
 const WM_NCACTIVATE = 0x0086;
 const WM_USER = 0x0400;
@@ -158,6 +160,31 @@ const ERROR_INVALID_THREAD_ID = 1444;
 const PARKED = Object.freeze({ parked: true });
 
 /**
+ * The display a test drives the window manager's painting through: a screen to
+ * paint the desktop on, a device context to paint with, and a record of every
+ * fill and every showing. `fill` is the draw a program makes (which presents);
+ * `fillBackground` is the window manager's own screen background (which does
+ * not).
+ *
+ * @param {{ rect: any, color: number, quiet: boolean }[]} fills
+ * @param {number[]} presents
+ */
+function paintedHost(fills, presents){
+    return {
+        screen: { width: 640, height: 480, bitsPerPixel: 32 },
+        dc: ()=>({ get: ()=>1, release: ()=>{} }),
+        draw: {
+            fill: (/** @type {any} */ hdc, /** @type {any} */ rect,
+                /** @type {number} */ color)=>fills.push({ rect, color, quiet: false }),
+            // The manager's own screen background: painted, not shown.
+            fillBackground: (/** @type {any} */ hdc, /** @type {any} */ rect,
+                /** @type {number} */ color)=>fills.push({ rect, color, quiet: true }),
+        },
+        present: ()=>presents.push(1),
+    };
+}
+
+/**
  * @param {Object} [options]
  * @param {boolean} [options.heap] Whether the build has guest memory to put a
  *        CREATESTRUCT in. Without it a window is made and nothing is announced,
@@ -171,8 +198,13 @@ const PARKED = Object.freeze({ parked: true });
  * @param {(id: number) => boolean} [options.threadExists] Which thread identifiers
  *        name a thread of this process, for PostThreadMessage.
  * @param {(message: any) => void} [options.trace] Told every message a procedure receives.
+ * @param {boolean} [options.paint] Whether the build has a display to paint the
+ *        desktop on, so a test can see what is painted and what is shown.
  */
-function setup({ heap = false, reply, waitForObjects, now, hookReply, threadExists, trace } = {}){
+function setup({
+    heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
+} = {})
+{
     const memory = fakeMemory();
     const handles = fakeHandles();
     const queue = createMessageQueue();
@@ -193,6 +225,16 @@ function setup({ heap = false, reply, waitForObjects, now, hookReply, threadExis
     let heapNext = HEAP_BASE;
     /** @type {number[]} */
     const released = [];
+
+    /**
+     * What the window manager drew on the desktop and when it showed it, for
+     * a test that drives the painter. Only collected when `paint` is asked
+     * for: a build with no display draws nothing and presents nothing.
+     */
+    /** @type {{ rect: any, color: number, quiet: boolean }[]} */
+    const fills = [];
+    /** @type {number[]} */
+    const presents = [];
 
     /** @type {import('./windows.js').WindowService | null} */
     /** @type {import('./windows.js').WindowService | null} */
@@ -234,6 +276,7 @@ function setup({ heap = false, reply, waitForObjects, now, hookReply, threadExis
             return at;
         } : undefined,
         release: heap ? (/** @type {number} */ at)=>released.push(at) : undefined,
+        ...(paint ? paintedHost(fills, presents) : {}),
     });
 
     /** Lets every waiting call look at the queue once more. */
@@ -247,7 +290,7 @@ function setup({ heap = false, reply, waitForObjects, now, hookReply, threadExis
     };
 
     return { memory, handles, queue, fns, dispatched, parked, tick, idlers, released,
-        called, divergences, errors,
+        called, divergences, errors, fills, presents,
         service: /** @type {import('./windows.js').WindowService} */ (
             /** @type {unknown} */ (service)) };
 }
@@ -294,11 +337,12 @@ function createWindow(fns, memory, options = {}){
  * A class plus a window of it, which almost every test below needs.
  *
  * @param {Parameters<typeof putClass>[1] & Parameters<typeof createWindow>[2]
- *     & { reply?: (message: any) => any, trace?: (message: any) => void }} [options]
+ *     & { reply?: (message: any) => any, trace?: (message: any) => void,
+ *         paint?: boolean }} [options]
  */
 function withWindow(options = {}){
-    const { reply, trace, ...rest } = options;
-    const context = setup({ reply, trace });
+    const { reply, trace, paint, ...rest } = options;
+    const context = setup({ reply, trace, paint });
     putClass(context.memory, rest);
     context.fns.RegisterClassA.handler([CLASS_STRUCT]);
     const hwnd = createWindow(context.fns, context.memory, rest);
@@ -909,16 +953,67 @@ test('MsgWaitForMultipleObjects with no handles is a sleep the queue can cut sho
     assert.equal(await expired, WAIT_TIMEOUT, 'and the deadline is kept on the guest clock');
 });
 
+/**
+ * Retrieves and validates until the queue is empty, which runs a paint pass to
+ * its end -- and is where the desktop is shown, if it was marked painted.
+ *
+ * @param {any} fns @param {number} hwnd
+ */
+function pump(fns, hwnd){
+    for (let guard = 0; guard < 32; guard++)
+    {
+        if (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) === 0)
+        {
+            return;
+        }
+        fns.ValidateRect.handler([hwnd, 0]);
+    }
+    throw new Error('the queue never drained');
+}
+
+test('a window appearing paints the desktop but does not present it as a frame', ()=>{
+    // The desktop colour is the window manager's own background, not a
+    // picture the program drew. Presenting it handed the display a blank
+    // screen as the first frame -- the frame a launcher hides its loading
+    // screen on -- before the program had presented anything. The colour is
+    // still painted underneath, so whatever the program draws shows over it.
+    const { fns, hwnd, fills, presents } = withWindow({ paint: true });
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    pump(fns, hwnd);
+
+    assert.equal(fills.length, 1, 'the desktop was painted once');
+    assert.equal(fills[0].color, 0x808080, 'in the desktop colour');
+    assert.equal(fills[0].quiet, true, 'through the paint that does not present');
+    assert.deepEqual(presents, [], 'and was not presented as a frame');
+});
+
+test('uncovering the desktop presents it, because a window no longer covers it', ()=>{
+    // The other direction, and it is not the same case: something the program
+    // had on the screen left a hole, and the desktop showing through that hole
+    // is a picture worth a frame.
+    const { fns, hwnd, presents } = withWindow({ paint: true });
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    pump(fns, hwnd);
+    fns.ShowWindow.handler([hwnd, SW_HIDE]);
+    pump(fns, hwnd);
+
+    assert.ok(presents.length >= 1, 'the desktop under the closed window is shown');
+});
+
 test('a window with an area to paint is handed WM_PAINT when nothing else is queued', ()=>{
     // Made up at retrieval, as Windows does: never posted, so a hundred
     // invalidations are one paint, and the area stays until BeginPaint clears
     // it -- a look that does not remove finds the same paint again.
-    const { fns, memory, queue, hwnd } = withWindow();
+    const { fns, memory, queue, hwnd, dispatched } = withWindow();
+    const announced = dispatched.length;
     fns.ShowWindow.handler([hwnd, SW_SHOW]);
-    // WM_SHOWWINDOW first, because the window was hidden and now is not.
-    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
-    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_SHOWWINDOW);
-    assert.equal(memory.u32(MSG_BUFFER + MSG.wParam), 1, 'TRUE: the window is being shown');
+    // Sent, not posted: the procedure hears WM_SHOWWINDOW first and its own
+    // size second, both before this call returns, because a program measures
+    // the window in the code that follows it. Posting either one leaves the
+    // text rasterised for whatever default the program started with.
+    assert.deepEqual(dispatched.slice(announced).map(entry=>entry.message),
+        [WM_SHOWWINDOW, WM_SIZE], 'shown: the show message, then the size');
+    assert.equal(dispatched[announced].wParam, 1, 'TRUE: the window is being shown');
     // Showing a window is the first thing that paints it.
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
     assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_PAINT, 'a shown window paints');
@@ -956,13 +1051,37 @@ test('a paint dispatched to a window with no procedure is validated as the defau
     const { fns, memory, hwnd } = withWindow({ wndProc: 0 });
     fns.ShowWindow.handler([hwnd, SW_SHOW]);
     fns.InvalidateRect.handler([hwnd, 0, 0]);
-    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
-    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_SHOWWINDOW);
+    // The window has no procedure, so the sent show messages go nowhere. The
+    // paint it still owes is made up at retrieval.
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
     assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_PAINT);
     assert.equal(fns.DispatchMessageA.handler([MSG_BUFFER]), 0);
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
         'dispatched once, the area is clean');
+});
+
+test('ShowWindow answers only after the procedures it sent to have run', async()=>{
+    // The failure this prevents: answering the host call while a procedure it
+    // sent to is still pending hands control back to the guest, which reuses
+    // its own stack under the procedure that is still standing on it.
+    /** @type {(value: number) => void} */
+    let answer = ()=>{};
+    const pending = new Promise(resolve=>{
+        answer = resolve;
+    });
+    const { fns, dispatched, hwnd } = withWindow({
+        reply: message=>message.message === WM_SHOWWINDOW ? pending : 0,
+    });
+
+    const result = fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    assert.equal(typeof result.then, 'function', 'the show message is still running');
+    assert.deepEqual(dispatched.map(entry=>entry.message), [WM_SHOWWINDOW],
+        'and the size waits behind it');
+
+    answer(0);
+    assert.equal(await result, 0, 'SW_SHOW on a hidden window answers the state it found');
+    assert.deepEqual(dispatched.map(entry=>entry.message), [WM_SHOWWINDOW, WM_SIZE],
+        'the size went once the show message was answered');
 });
 
 test('WaitMessage yields until there is something to retrieve, and takes nothing', async()=>{
@@ -1223,7 +1342,11 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
     const hwnd = fns.CreateWindowExA.handler(
         [0x200, CLASS_NAME, TITLE, 0x10000000, 10, 20, 300, 200, 0, 0x77, HINSTANCE, 0x999]);
 
-    assert.equal(dispatched.length, 1);
+    // A window created visible hears its size and its place inside the same
+    // call, as the real CreateWindowEx sends them once WM_CREATE is answered:
+    // a program that never calls ShowWindow measures the screen it lays itself
+    // out and rasterises its text for from what it is told here.
+    assert.deepEqual(dispatched.map(entry=>entry.message), [WM_CREATE, WM_SIZE, WM_MOVE]);
     const [message] = dispatched;
     assert.equal(message.message, WM_CREATE);
     assert.equal(message.wndProc, WNDPROC);
@@ -1245,18 +1368,33 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
     assert.equal(memory.u32(at + CREATESTRUCT.lpszName), TITLE);
     assert.equal(memory.u32(at + CREATESTRUCT.lpszClass), CLASS_NAME);
     assert.equal(memory.u32(at + CREATESTRUCT.dwExStyle), 0x200);
+
+    const size = dispatched[1];
+    assert.equal(size.hwnd, hwnd);
+    assert.equal(size.wParam, 0, 'SIZE_RESTORED');
+    fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
+    const clientWidth = memory.u32(RECT_BUFFER + RECT.right)
+        - memory.u32(RECT_BUFFER + RECT.left);
+    const clientHeight = memory.u32(RECT_BUFFER + RECT.bottom)
+        - memory.u32(RECT_BUFFER + RECT.top);
+    assert.equal(size.lParam >>> 16, clientHeight, 'the client height, not the frame');
+    assert.equal(size.lParam & 0xffff, clientWidth, 'and the client width');
+    const place = dispatched[2];
+    assert.equal(place.hwnd, hwnd);
+    assert.equal(place.lParam >>> 16, 20, 'the y it was created at');
+    assert.equal(place.lParam & 0xffff, 10, 'and the x');
 });
 
-test('only WM_CREATE is sent, because sending runs guest code', ()=>{
-    // Two sends in a row from one host call would start the second while the
-    // first is still unwinding. WM_NCCREATE is the one to leave out: its default
-    // answer is TRUE and its structure arrives again a moment later.
+test('a window created hidden hears only WM_CREATE', ()=>{
+    // WM_NCCREATE is the one to leave out: its default answer is TRUE and its
+    // structure arrives again a moment later. A hidden window is told nothing
+    // about a size or a place it does not have on screen yet.
     const { memory, fns, dispatched } = setup({ heap: true });
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     createWindow(fns, memory);
 
-    assert.deepEqual(dispatched.map(m=>m.message), [WM_CREATE]);
+    assert.deepEqual(dispatched.map(m=>m.message), [WM_CREATE], 'hidden: the create only');
 });
 
 test('the CREATESTRUCT is freed once the procedure has seen it', ()=>{

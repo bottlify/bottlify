@@ -236,8 +236,10 @@ gets its own heap, hive, queue and COM registry.
   session saver treat a registry write like a file write. Roots: `HKEY_CLASSES_ROOT`,
   `HKEY_CURRENT_USER`, `HKEY_LOCAL_MACHINE`, `HKEY_USERS`.
 - **The display** (`user32/display.js`, `user32/system.js`). `displayModes(screen)` lists the sizes
-  of the era whatever the display's own — 640×480, 800×600, 1024×768, 1280×720, 1440×900,
-  1600×900, 1680×1050, 1920×1080, 1920×1200, 2560×1440, 2560×1600, plus the display's size and
+  of the era whatever the display's own — 640×480, 800×600, 1024×768, 1280×720, 1280×800,
+  1280×832, 1440×900, 1512×982, 1600×900, 1680×1050, 1728×1117, 1920×1080, 1920×1200,
+  2560×1440, 2560×1600, 2560×1664, 2880×1800, 3024×1964, 3456×2234 (the widescreen standards
+  and the scaled and native sizes of today's laptop displays), plus the display's size and
   the current mode if not among them — at the screen's depth, each size at 60 and at 120 Hz
   (`REFRESH_RATES`), since a program that saved the rate of the display it was configured on
   looks for a mode at exactly that rate; the mode in effect answers

@@ -676,6 +676,10 @@ export const graphicsModule = {
             // Told the resolution a device is created at, so the reported
             // screen becomes that resolution.
             resolution: config?.resolution,
+            // The client area of a window, which is the size a back buffer
+            // asked for as zero by zero takes. Only the layer that owns the
+            // windows can measure one, and only here is it asked for.
+            windowClientSize: config?.windowClientSize,
             // Absent in a build with no bridge behind it -- a test, an
             // inspection -- which then gets tables that refuse rather than
             // tables that publish into nowhere.

@@ -260,6 +260,40 @@ export const MONITORINFO = Object.freeze({
 export const MONITORINFOEXA_SIZE = 40 + 32;
 
 /**
+ * DISPLAY_DEVICE, both spellings. Four fixed-length strings with the state
+ * word between the second and the third, which is why the wide form is not
+ * the ANSI one doubled: every field past cb sits at its own place in each,
+ * and the size the caller declares says which of the two it built.
+ */
+export const DISPLAY_DEVICEA = Object.freeze({
+    cb: 0,
+    DeviceName: 4,
+    DeviceString: 36,
+    StateFlags: 164,
+    DeviceID: 168,
+    DeviceKey: 296,
+    SIZE: 424,
+});
+
+export const DISPLAY_DEVICEW = Object.freeze({
+    cb: 0,
+    DeviceName: 4,
+    DeviceString: 68,
+    StateFlags: 324,
+    DeviceID: 328,
+    DeviceKey: 584,
+    SIZE: 840,
+});
+
+/** The characters each DISPLAY_DEVICE string field holds, in either spelling. */
+export const DISPLAY_DEVICE_CHARS = Object.freeze({
+    DeviceName: 32,
+    DeviceString: 128,
+    DeviceID: 128,
+    DeviceKey: 128,
+});
+
+/**
  * WINDOWINFO. The last two members are WORDs, which is why the structure ends
  * at 60 rather than at a multiple of four fields.
  */

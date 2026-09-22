@@ -33,6 +33,42 @@ test('the header decides the kind, and only the two ARB headers load', ()=>{
     assert.equal(none.error.position, 0);
 });
 
+test('a literal written without braces is a scalar source, the way a driver takes it', ()=>{
+    // A program of this era writes `MOV R1.y, 0.2;` and `MOV R1.w, 1;`, which
+    // is `{ 0.2 }` written short. Refused, the whole program fails to load --
+    // "a source register was expected", at the literal's own position -- and
+    // the material that needed the program draws nothing at all.
+    const program = parsed(`
+        !!ARBfp1.0
+        TEMP r1;
+        MOV r1.y, 0.2;
+        MOV r1.w, 1;
+        MUL r1, r1, 2;
+        END
+        `);
+    assert.equal(program.instructions.length, 3);
+    /** @param {any} operand @returns {number[]} the literal's four components */
+    function literal(operand){
+        return /** @type {any} */(operand.binding).values;
+    }
+    const [toY, toW, scaled] = program.instructions;
+    assert.equal(toY.src[0].binding?.kind, 'constant');
+    assert.deepEqual(literal(toY.src[0]), [0.2, 0.2, 0.2, 0.2],
+        'the value is every component, which is what a scalar source is');
+    assert.deepEqual(literal(toW.src[0]), [1, 1, 1, 1]);
+    assert.deepEqual(literal(scaled.src[1]), [2, 2, 2, 2]);
+
+    // A sign in front of it negates it like any other source, and a braced
+    // constant is unchanged.
+    const negated = parsed('!!ARBfp1.0\nTEMP r1;\nMOV r1, -0.5;\nEND\n');
+    assert.deepEqual(negated.instructions[0].src[0].components, ['-x', '-y', '-z', '-w'],
+        'the sign rides on the components, the way it does for every other source');
+    assert.deepEqual(literal(negated.instructions[0].src[0]), [0.5, 0.5, 0.5, 0.5]);
+    const braced = parsed('!!ARBfp1.0\nTEMP r1;\nMOV r1, {0.5};\nEND\n');
+    assert.deepEqual(literal(braced.instructions[0].src[0]), [0.5, 0, 0, 1],
+        'a braced constant is the grammar\'s own form, which pads instead');
+});
+
 test('comments and blank lines are skipped, and END closes the program', ()=>{
     const program = parsed(`
         # a comment before the header is not: the header comes first

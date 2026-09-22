@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, parseShader, versionToken } from './shader.js';
 import { HYBRID_CONSTANTS, fixedVertexStage, translateShader, varyingLocation } from './wgsl.js';
 import { D3DDECLUSAGE } from './declaration.js';
+import { D3DFOG } from './constants.js';
 
 /** @param {number} type @param {number} index @param {number} writeMask @param {number} result */
 const dst = (type, index, writeMask = 0xf, result = 0)=>(0x80000000 | ((type & 7) << 28)
@@ -463,7 +464,7 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     assert.equal(stage.error, null);
     assert.equal(stage.entry, 'vs_main');
     assert.equal(stage.constants, HYBRID_CONSTANTS.COUNT);
-    assertLine(stage.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 41>;');
+    assertLine(stage.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 43>;');
     assertLine(stage.wgsl,
         'out.oPos = mat4x4f(c[0], c[1], c[2], c[3]) * vec4f(vec4f(in.v0, 1.0).xyz, 1.0);');
     assertLine(stage.wgsl, `out.o${varyingLocation(D3DDECLUSAGE.COLOR, 0)} = in.v1.zyxw;`);
@@ -519,4 +520,59 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
         { usage: D3DDECLUSAGE.COLOR, usageIndex: 0, register: 0 },
     ], new Map());
     assert.match(none.error ?? '', /no position/);
+
+    // Fogged, the stage computes the fixed function's factor from its own clip
+    // w and carries it, with the fog colour, in the oFog varying a fogged
+    // pixel shader reads.
+    const fogged = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
+    ], new Map([[0, { components: 3, scalar: 'f32', bgra: false }]]), [], [],
+    D3DFOG.EXP2);
+    assert.equal(fogged.error, null);
+    const fogLocation = varyingLocation(D3DDECLUSAGE.FOG, 0);
+    assert.ok(fogged.outputs.includes(fogLocation), 'the oFog varying is written');
+    assertLine(fogged.wgsl, `@location(${fogLocation}) o${fogLocation}: vec4f,`);
+    assertLine(fogged.wgsl, `out.o${fogLocation} = vec4f(fogFactorOf(out.oPos.w),`
+        + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
+    assertLine(fogged.wgsl, `let scaled = c[${HYBRID_CONSTANTS.FOG}].z * dist;`);
+});
+
+test('the fog stage after a pixel shader mixes the shaded colour by the varying', ()=>{
+    const parsed = parseShader([PS_2_0,
+        ...dclSampler(0),
+        op(OPCODE.DCL, 2), 0x80000000, dst(REGISTER.TEXTURE, 2),
+        op(OPCODE.TEX, 3), dst(REGISTER.TEMP, 0), src(REGISTER.TEXTURE, 2),
+        src(REGISTER.SAMPLER, 0),
+        op(OPCODE.MUL, 3), dst(REGISTER.COLOROUT, 0), src(REGISTER.TEMP, 0),
+        src(REGISTER.TEMP, 0),
+        END_TOKEN]);
+    assert.equal(parsed.error, null);
+
+    const fogged = translateShader(parsed, { fog: D3DFOG.LINEAR });
+    assert.equal(fogged.error, null);
+    assert.equal(fogged.entry, 'ps_main');
+    // The amount the vertex stage computed and the fog colour beside it, in
+    // the oFog varying: Direct3D applies its fog stage after the pixel shader,
+    // so the mix is the shader's own colour towards that colour.
+    const fogLocation = varyingLocation(D3DDECLUSAGE.FOG, 0);
+    assertLine(fogged.wgsl, `@location(${fogLocation}) fog: vec4f,`);
+    assertLine(fogged.wgsl, 'oC0 = vec4f(mix(in.fog.yzw, oC0.rgb,'
+        + ' clamp(in.fog.x, 0.0, 1.0)), oC0.a);');
+    assert.ok(fogged.reads.includes(fogLocation), 'and it is a varying it reads');
+
+    // The mix comes after the shader's own last instruction and before the
+    // colour is written out: fog on the shaded colour, which is where the
+    // fixed function applies it.
+    const lines = fogged.wgsl.split('\n').map(line=>line.trim());
+    const written = lines.indexOf('oC0 = (r0 * r0);');
+    const mixed = lines.indexOf('oC0 = vec4f(mix(in.fog.yzw, oC0.rgb,'
+        + ' clamp(in.fog.x, 0.0, 1.0)), oC0.a);');
+    const out = lines.indexOf('out.oC0 = oC0;');
+    assert.ok(written >= 0 && mixed > written, 'the mix is after the shader');
+    assert.ok(out > mixed, 'and before the colour is written out');
+
+    // A surface that is not fogged carries none of it.
+    const plain = translateShader(parsed);
+    assert.ok(!plain.wgsl.includes('fog: vec4f'), 'no fog varying');
+    assert.ok(!plain.wgsl.includes('in.fog'), 'and no mix');
 });

@@ -118,6 +118,7 @@ const open = ()=>openBundle(
  * @param {Object} [options]
  * @param {number[] | null} [options.resident]
  * @param {number} [options.cacheBlocks]
+ * @param {number} [options.hotBlocks]
  */
 async function mount(options = {}){
     const bundle = await open();
@@ -125,6 +126,7 @@ async function mount(options = {}){
     const { readBlock, asked } = blockReader(options.resident ?? null);
     const source = createBundleSource({
         bundle, readBlock, decode, cacheBlocks: options.cacheBlocks,
+        hotBlocks: options.hotBlocks,
     });
     return { bundle, source, calls, asked };
 }
@@ -255,7 +257,8 @@ test('a miss reports every absent block, not just the first', async()=>{
 });
 
 test('the cache evicts the oldest block and loses nothing doing it', async()=>{
-    const { source, calls } = await mount({ cacheBlocks: 1 });
+    // The scan tier on its own: no block is kept because it was read twice.
+    const { source, calls } = await mount({ cacheBlocks: 1, hotBlocks: 0 });
     const ramp = CONTENT['Game\\Ramp.dat'];
 
     same(source.read('Game\\Ramp.dat', 0, 16), ramp.subarray(0, 16));
@@ -272,6 +275,28 @@ test('the cache evicts the oldest block and loses nothing doing it', async()=>{
     // A read wider than the whole cache still assembles correctly, which is the
     // case where eviction happens in the middle of serving it.
     same(source.read('Game\\Ramp.dat', 0, 3000), ramp);
+});
+
+test('a block read twice is not decoded again when a scan passes over it', async()=>{
+    // The shape a movie reader makes: a header consulted between every chunk of
+    // the file it streams. One cache for both roles evicts the header on the
+    // first pass of the scan, and every later look at it decodes the whole
+    // block again -- for a packed block, the decompression of all it holds.
+    const { source, calls } = await mount({ cacheBlocks: 1 });
+    const ramp = CONTENT['Game\\Ramp.dat'];
+
+    same(source.read('Game\\Ramp.dat', 0, 16), ramp.subarray(0, 16));
+    assert.equal(calls.length, 1);
+    same(source.read('Game\\Ramp.dat', 0, 16), ramp.subarray(0, 16));
+    assert.equal(calls.length, 1, 'the second look is a hit, and it is kept apart');
+
+    source.read('Game\\Ramp.dat', 1024, 16);
+    source.read('Game\\Ramp.dat', 2048, 16);
+    assert.equal(calls.length, 3, 'the scan decoded its own blocks, evicting the scan tier');
+
+    same(source.read('Game\\Ramp.dat', 0, 16), ramp.subarray(0, 16),
+        'the header outlived the scan');
+    assert.equal(calls.length, 3, 'and looking at it again decoded nothing');
 });
 
 test('a cache big enough for the file decodes each block once', async()=>{

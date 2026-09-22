@@ -63,7 +63,11 @@ import {
 const FORMAT_COMPONENTS = new Map([
     [GL.RGBA, 4], [GL.BGRA, 4], [GL.RGB, 3], [GL.BGR, 3], [GL.LUMINANCE_ALPHA, 2],
     [GL.LUMINANCE, 1], [GL.ALPHA, 1], [GL.RED, 1], [GL.GREEN, 1], [GL.BLUE, 1],
-    [GL.DEPTH_COMPONENT, 1],
+    // Intensity is one component that is both: a glow or a flare is uploaded
+    // this way, and a format missing from this table has no layout at all, so
+    // the upload is refused and the stage samples the default texel -- an
+    // opaque black quad where the light should be.
+    [GL.INTENSITY, 1], [GL.DEPTH_COMPONENT, 1],
 ]);
 
 /**
@@ -247,6 +251,11 @@ function expand(format, c){
             return [c[0], c[0], c[0], 255];
         case GL.LUMINANCE_ALPHA:
             return [c[0], c[0], c[0], c[1]];
+        // Intensity is the one component read as all four: the colour and the
+        // alpha are the same channel, which is what makes an additive glow
+        // fade the way its texel says.
+        case GL.INTENSITY:
+            return [c[0], c[0], c[0], c[0]];
         case GL.ALPHA:
             return [0, 0, 0, c[0]];
         case GL.RED:

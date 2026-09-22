@@ -36,6 +36,23 @@ import { serveStatic } from './server.mjs';
 import { openBundle } from '../btl.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
+
+/**
+ * When an action happens: a presented-frame count (`120`), or a time since
+ * the first presented frame (`12s`) -- the clock, not the frame count, is
+ * what a program's screens arrive on, so a route timed in seconds survives
+ * a change in the frame rate. An unresolved time is a frame number of -1
+ * until the harness sees the clock pass it.
+ *
+ * @param {string | undefined} text
+ */
+const afterOf = text=>{
+    if (text !== undefined && /^\d+(\.\d+)?s$/.test(text))
+    {
+        return { after: -1, afterSeconds: Number(text.slice(0, -1)) };
+    }
+    return { after: Number(text) || 30 };
+};
 const REPO_ROOT = resolve(TOOL_ROOT, '..', '..');
 const PACKAGE_DIR = join(REPO_ROOT, 'modules', 'core');
 const BUNDLES_DIR = join(REPO_ROOT, 'bundles');
@@ -186,6 +203,9 @@ function parse(argv){
         // is where a program makes its decisions; something that only happens
         // once a title is up needs more than that.
         logLines: number('--log-lines', 0),
+        // Only the calls whose line matches this expression are kept, so a
+        // question about one family of calls is answered by the whole run.
+        logMatch: argv.includes('--log-match') ? argv[argv.indexOf('--log-match') + 1] : null,
         // Where every draw of the last frame landed, and under what state.
         // Off unless asked for: it transforms every vertex of every draw a
         // second time on the processor.
@@ -224,8 +244,8 @@ function parse(argv){
             {
                 return [];
             }
-            const [x, y, after] = argv[index + 1].split(',').map(Number);
-            return [{ x, y, after: after || 30 }];
+            const [x, y, after] = argv[index + 1].split(',');
+            return [{ x: Number(x), y: Number(y), ...afterOf(after) }];
         }),
         // Key taps in the program's own keyboard codes, after that many
         // presented frames each, as `Code,after`: pressed on one frame and
@@ -237,7 +257,7 @@ function parse(argv){
                 return [];
             }
             const [code, after] = argv[index + 1].split(',');
-            return [{ code, after: Number(after) || 30 }];
+            return [{ code, ...afterOf(after) }];
         }),
         // Text typed into whatever has the focus, one character per presented
         // frame from `after` on, as `text,after`: each character is a key
@@ -250,7 +270,7 @@ function parse(argv){
             }
             const at = argv[index + 1].lastIndexOf(',');
             return [{ text: argv[index + 1].slice(0, at),
-                after: Number(argv[index + 1].slice(at + 1)) || 30 }];
+                ...afterOf(argv[index + 1].slice(at + 1)) }];
         }),
         // Text pasted into whatever has the focus at frame `after`, as
         // `text,after`: onto the clipboard, then the Control-V a program
@@ -262,7 +282,7 @@ function parse(argv){
             }
             const at = argv[index + 1].lastIndexOf(',');
             return [{ text: argv[index + 1].slice(0, at),
-                after: Number(argv[index + 1].slice(at + 1)) || 30 }];
+                ...afterOf(argv[index + 1].slice(at + 1)) }];
         }),
         // The relay the run's Winsock reaches the world through, as the
         // launcher names it: `--network wss://host/relay` joins room `harness`.
@@ -914,6 +934,7 @@ export async function game(options){
             clicks: options.clicks,
             typed: options.typed,
             pasted: options.pasted,
+            logMatch: options.logMatch,
             network: options.network
                 ? {
                     module: new URL('/networking/client/index.js', pageUrl).href,

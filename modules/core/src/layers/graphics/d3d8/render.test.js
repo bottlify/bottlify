@@ -35,7 +35,7 @@ import { createDirect3D8 } from './device.js';
 import {
     IDENTITY, LIGHT_FLOATS, UNIFORM_AT, UNIFORM_FLOATS, colorToFloats, expandTexels, eyePosition,
     HARDWARE_SAMPLER, listIndices, multiplyMatrices, packLight, pipelineStateOf, samplerFlagsOf,
-    screenExtent, transformPosition, uniformBlock,
+    screenExtent, transformPosition, uniformBlock, fogModeOf,
     vertexCountOf,
 } from './render.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -2715,4 +2715,35 @@ test('recorded: two draws alternating between two states prepare once each', asy
     assert.deepEqual(draws.map((/** @type {any} */ command)=>
         command.uniforms[UNIFORM_AT.alphaRef]),
     [...Array(DRAWS).keys()].map(index=>Math.fround((index % 2) / 255)));
+});
+
+test('fog: the table mode is the one that runs when it is set, else the vertex mode', ()=>{
+    /** @param {Record<number, number>} states @returns {any} */
+    const modelOf = states=>({
+        renderStates: new Map(Object.entries(states)
+            .map(([state, value])=>[Number(state), value])),
+    });
+    // Table fog takes precedence at the API's own rule: both are set here and
+    // the table mode is the one Direct3D runs.
+    const both = modelOf({
+        [D3DRS.FOGENABLE]: 1,
+        [D3DRS.FOGTABLEMODE]: D3DFOG.LINEAR,
+        [D3DRS.FOGVERTEXMODE]: D3DFOG.EXP,
+    });
+    assert.equal(fogModeOf(both), D3DFOG.LINEAR);
+    // Only the vertex mode set is vertex fog.
+    const vertexOnly = modelOf({
+        [D3DRS.FOGENABLE]: 1,
+        [D3DRS.FOGTABLEMODE]: D3DFOG.NONE,
+        [D3DRS.FOGVERTEXMODE]: D3DFOG.EXP,
+    });
+    assert.equal(fogModeOf(vertexOnly), D3DFOG.EXP);
+    // A mode set while fog is disabled fogs nothing, and neither does a
+    // caller's own switch.
+    const disabled = modelOf({
+        [D3DRS.FOGENABLE]: 0,
+        [D3DRS.FOGTABLEMODE]: D3DFOG.LINEAR,
+    });
+    assert.equal(fogModeOf(disabled), D3DFOG.NONE);
+    assert.equal(fogModeOf(both, false), D3DFOG.NONE);
 });

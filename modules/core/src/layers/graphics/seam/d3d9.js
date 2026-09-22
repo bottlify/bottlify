@@ -131,9 +131,14 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     placed. `announce` asks that the window be told its size even if it
  *     did not change.
  * @param {() => AdapterIdentity | null} [deps.identity]
+ * @param {(window: number) => { width: number, height: number } | null} [deps.windowClientSize]
+ *     The client area of a window, which is the size a back buffer asked for
+ *     as zero by zero takes. Without it the configured display is the nearest
+ *     size this layer knows.
  */
 export function createDirect3D9Seam(
-    { publisher, memory, screen, divergence, cursor, resolution, identity },
+    { publisher, memory, screen, divergence, cursor, resolution, identity,
+        windowClientSize },
 )
 {
     const fields = createFields(memory);
@@ -976,7 +981,7 @@ export function createDirect3D9Seam(
             {
                 return D3DERR_INVALIDCALL;
             }
-            const next = readPresentParameters(parameters >>> 0);
+            const next = readPresentParameters(parameters >>> 0, deviceWindow);
             const hr = device.Reset(next);
             if (hr === D3D_OK)
             {
@@ -1927,16 +1932,39 @@ export function createDirect3D9Seam(
         describe(IID_IDirect3DDevice9, IDIRECT3DDEVICE9_SLOTS, deviceMethods),
     ];
 
-    /** @param {number} address */
-    const readPresentParameters = address=>{
+    /**
+     * @param {number} address
+     * @param {number} [window]
+     *        The window the device presents into when the parameters name
+     *        none: the focus window a creation was given, or the window a
+     *        previous device was made into.
+     */
+    const readPresentParameters = (address, window = 0)=>{
         const raw = fields.readStruct(address, D3DPRESENT_PARAMETERS9);
         const display = screen();
-        // A zero size windowed means the window's client area, which this
-        // seam does not know; the display is the nearest thing it does.
+        // A size asked for as zero by zero means the device window's client
+        // area, which is what the real device answers and what the program's
+        // own layout is measured against. Fullscreen has no window to measure
+        // -- its window is about to become the mode -- so the display stands
+        // for the mode there, and a windowed window this layer cannot measure
+        // falls back to the display. Zero is not a size any device can be made
+        // at: one made at zero leaves the program computing its layout against
+        // a screen that is not there.
         const windowed = raw.Windowed !== 0;
+        const named = windowed ? ((raw.hDeviceWindow >>> 0) || (window >>> 0)) : 0;
+        const measured = named === 0 ? null : windowClientSize?.(named) ?? null;
+        if (windowed && measured === null
+            && ((raw.BackBufferWidth >>> 0) === 0 || (raw.BackBufferHeight >>> 0) === 0))
+        {
+            divergence?.('Direct3D 9',
+                'a back buffer asked for as zero by zero is the size of the device window,'
+                + ' and that window could not be measured: the configured display is'
+                + ' used instead');
+        }
+        const taken = measured ?? display;
         return {
-            backBufferWidth: raw.BackBufferWidth || (windowed ? display.width : 0),
-            backBufferHeight: raw.BackBufferHeight || (windowed ? display.height : 0),
+            backBufferWidth: (raw.BackBufferWidth >>> 0) || taken.width,
+            backBufferHeight: (raw.BackBufferHeight >>> 0) || taken.height,
             backBufferFormat: raw.BackBufferFormat || D3DFMT.X8R8G8B8,
             backBufferCount: raw.BackBufferCount,
             multiSampleType: raw.MultiSampleType,
@@ -2169,7 +2197,7 @@ export function createDirect3D9Seam(
                 fields.writeU32(out >>> 0, 0);
                 return D3DERR_INVALIDCALL;
             }
-            const wanted = readPresentParameters(parameters >>> 0);
+            const wanted = readPresentParameters(parameters >>> 0, focus >>> 0);
             /** @type {{ device?: any }} */
             const held = {};
             const hr = root.CreateDevice(wanted, held, behaviourFlags >>> 0, {
