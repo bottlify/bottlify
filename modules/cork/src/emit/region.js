@@ -854,9 +854,17 @@ export class RegionEmitter {
         {
             return [];
         }
-        const entry = /** @type {import('./x87.js').StackState} */ (x.states[0]);
+        // The entry's block by its address: it is the first in address order
+        // only when nothing the region reaches lies below it.
+        const at = this.region.blocks.findIndex(block=>block.start === this.region.entry);
+        const entry = x.states[at];
+        if (entry === undefined)
+        {
+            return [];
+        }
         return x.states.flatMap((state, index)=>
-            index > 0 && state !== null && !sameState(state, entry) ? [index] : []);
+            index !== at && state !== null
+                && (entry === null || !sameState(state, entry)) ? [index] : []);
     }
 
     /** Closes the block's loop onto itself, when it is one. */

@@ -114,6 +114,47 @@ test('the tracker over a region cuts a block met with two tops', ()=>{
     assert.equal(exit.regions, 2);
 });
 
+test('the tracker seeds the entry block, wherever it lies in address order', ()=>{
+    // A region formed at the return address of a call whose callee returns a
+    // value on the x87 stack: the call site's block joins the region below
+    // the entry, and the seed belongs to the entry, not to the first block.
+    //
+    // 1000 L: call F          1100 F: fld1
+    // 1005 RA: fstp [DATA]          ret
+    // 100b     dec ecx
+    // 100c     jnz L
+    // 100e     hlt
+    const m = createTestMachine();
+    m.write(CODE, [
+        0xe8, 0xfb, 0, 0, 0,                  // L:    call F
+        0xdd, 0x1d, 0, 0x20, 0, 0,            // RA:   fstp qword [DATA]
+        0x49,                                 //       dec ecx
+        0x75, 0xf2,                           //       jnz L
+        0xf4,                                 //       hlt
+    ]);
+    m.write(CODE + 0x100, [0xd9, 0xe8, 0xc3]);
+    /** @param {number} address */
+    const read = address=>new Uint8Array(m.memory.buffer)[m.layout.ramBase + address];
+    const region = formRegion(read, CODE + 5);
+    const entry = region.blocks.findIndex(block=>block.start === CODE + 5);
+    assert.equal(entry, 1, 'the block below the entry in address order is the call site');
+    const { states } = trackRegion(region, 7);
+    assert.equal(states[entry]?.top, 7, 'the entry block carries the top it was formed at');
+    assert.equal(states[0]?.top, 0, 'the loop body is tracked from the back edge, balanced');
+    // Run the loop: the region at the return address retires the store the
+    // mistargeted seed refused, and the program halts.
+    m.setReg('esp', 0x80000);
+    m.setReg('ecx', 1000);
+    const exit = m.runProgram(CODE);
+    assert.equal(exit.kind, 3, `left out ${[...exit.unsupported]}`);
+    assert.equal(exit.regions, 3, 'the loop, the callee, the return address at its top');
+    assert.deepEqual([...exit.unsupported], [['dd 1d', 1]],
+        'the one refusal of the first formation, while the return top was unknown');
+    assert.equal(exit.retired, 6001);
+    assert.equal(m.reg('ecx'), 0);
+    assert.equal(new DataView(m.memory.buffer).getFloat64(m.layout.ramBase + DATA, true), 1);
+});
+
 test('load, multiply, store: fld m64; fmul m64; fstp m64 writes the product', ()=>{
     const r = run([
         0xdd, 0x05, 0x00, 0x20, 0, 0,        // fld qword [DATA]       2.5

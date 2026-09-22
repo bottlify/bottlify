@@ -190,8 +190,13 @@ export function trackRegion(region, entryTop){
     /** @type {Set<number>} */
     const cut = new Set();
     const seen = new Set();
-    states[0] = { top: entryTop, slot: [0, 1, 2, 3, 4, 5, 6, 7] };
-    const work = [0];
+    // The entry's block by its address, not by its place: the blocks are in
+    // address order, and a region formed at a return address has the call
+    // site's block below it -- seeding the first block left the entry's own
+    // x87 with no state and every form in it refused.
+    const entry = index.get(region.entry) ?? 0;
+    states[entry] = { top: entryTop, slot: [0, 1, 2, 3, 4, 5, 6, 7] };
+    const work = [entry];
     while (work.length > 0)
     {
         const i = /** @type {number} */ (work.shift());
