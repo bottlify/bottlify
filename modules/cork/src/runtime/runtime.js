@@ -26,7 +26,7 @@
 
 import { formRegion } from '../region.js';
 import { emitRegion, mathImports, prepareModule } from '../emit/region.js';
-import { isX87 } from '../emit/x87.js';
+import { isX87, trackRegion } from '../emit/x87.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { ANY_TOP, createEntries } from './entries.js';
@@ -323,16 +323,28 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     translatable,
                 });
                 // What the region calls directly lands in the same batch, so
-                // the call and the return transfer without a miss.
-                for (const block of region.blocks)
+                // the call and the return transfer without a miss -- each
+                // callee at the top the call site has, which the tracker
+                // knows wherever it reached the block: batching it at the
+                // entry's top compiled a callee nobody calls for a region
+                // whose own x87 moved the stack before the call.
+                const tracked = usesX87(region) ? trackRegion(region, entryTop) : null;
+                for (let at = 0; at < region.blocks.length; at++)
                 {
-                    const [callee] = block.exit.targets;
-                    if (block.exit.kind === 'call' && batch.length < settings.batchRegions
-                        && entries.entryOf(callee, entryTop) < 0 && translatable(callee)
-                        && !batch.some(([, at])=>at === callee))
+                    const block = region.blocks[at];
+                    if (block.exit.kind !== 'call')
                     {
-                        batch.push([keyOf(callee, entryTop), callee]);
-                        queue.delete(keyOf(callee, entryTop));
+                        continue;
+                    }
+                    const [callee] = block.exit.targets;
+                    const end = tracked === null ? null : tracked.ends[at];
+                    const top = end === null ? entryTop : end.top;
+                    if (batch.length < settings.batchRegions
+                        && entries.entryOf(callee, top) < 0 && translatable(callee)
+                        && !batch.some(([queued])=>queued === keyOf(callee, top)))
+                    {
+                        batch.push([keyOf(callee, top), callee]);
+                        queue.delete(keyOf(callee, top));
                     }
                 }
                 for (const [opcode, times] of region.refused)

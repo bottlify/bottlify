@@ -231,6 +231,19 @@ test('a hot region\'s direct callee lands in the same batch, and the call transf
     }
 });
 
+test('a callee lands in the batch at the top its call site has, not at the entry top', async()=>{
+    const m = machine();
+    // fld1; call F; hlt; F: fld1; ret -- the region is entered with the x87
+    // stack at 7 and reaches the call with it at 6: the callee belongs to the
+    // call site's top, or the call never transfers.
+    m.write(CODE, [0xd9, 0xe8, 0xe8, 0x01, 0, 0, 0, 0xf4, 0xd9, 0xe8, 0xc3]);
+    const F = CODE + 8;
+    m.runtime.noteHot(CODE, 7);
+    assert.equal(await m.runtime.translatePending(), 2, 'the caller and its callee');
+    assert.ok(m.runtime.entryOf(F, 6) >= 0, 'the callee is compiled for the call site top');
+    assert.equal(m.runtime.entryOf(F, 7), -1, 'and not for the entry top');
+});
+
 test('an address a region formed nothing at is not queued again until its page moves', async()=>{
     const m = machine();
     // fxsave [0x2000]; jmp back to it: the one block leaves at once, so the
