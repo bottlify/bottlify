@@ -197,3 +197,26 @@ test('a block compiled for the stack in another shape than the entry gets no ent
     assert.equal(n.eip(), C);
     assert.equal(nview.getUint8(n.layout.x87Top), 5, 'the top as the machine had it');
 });
+
+test('a left-out x87 instruction names why and the shape of its block', ()=>{
+    // call F (elsewhere); RA: fld1; hlt -- the return address's fld1 has no
+    // known state: the tracker does not cross the call to a callee outside.
+    const m = createTestMachine();
+    const RA = CODE + 5;
+    m.write(CODE, [0xe8, 0x1b, 0, 0, 0, 0xd9, 0xe8, 0xf4]); // call F; RA: fld1; hlt
+    m.setReg('esp', 0x80000);
+    const t = m.translate(CODE);
+    assert.deepEqual([...t.translation.refusals.keys()],
+        ['d9 e8 (no-known-state; call-return; entry-known)'],
+        JSON.stringify([...t.translation.refusals.keys()]));
+    assert.equal(RA, CODE + 5, 'the return address');
+    // fld1; test; jnz B; fldz; B: fld1; hlt -- B is reached with top 7 (the
+    // branch) and top 6 (the fall-through): cut for a second top.
+    const n = createTestMachine();
+    n.write(CODE, [0xd9, 0xe8, 0x85, 0xc0, 0x75, 0x02, 0xd9, 0xee, 0xd9, 0xe8, 0xf4]);
+    n.setReg('esp', 0x80000);
+    const u = n.translate(CODE);
+    assert.deepEqual([...u.translation.refusals.keys()],
+        ['d9 e8 (cut-second-top; fall-through+branch-target; entry-known)'],
+        JSON.stringify([...u.translation.refusals.keys()]));
+});

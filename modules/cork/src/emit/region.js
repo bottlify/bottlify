@@ -215,6 +215,7 @@ export function prepareModule(m, layout, features, memory = {},
  * @property {number} functionIndex
  * @property {Map<number, number>} labels     block start eip → label
  * @property {Map<string, number>} unsupported  opcode → instructions the emitter left out
+ * @property {Map<string, number>} refusals  `opcode (reason; entry kinds; entry x87)` → count
  * @property {number} instructions
  * @property {Set<number>} cut      labels of blocks with no entry of their own: ones that
  *     leave at once (an x87 state conflict, nothing decoded, the first instruction left out)
@@ -263,6 +264,16 @@ export class RegionEmitter {
         this.pending = null;
         /** @type {Map<string, number>} */
         this.unsupported = new Map();
+        /**
+         * Why each left-out instruction was left out and the shape of the
+         * block it sat in: `opcode (reason; entry kinds; entry x87)`. What
+         * `unsupported` counts by opcode, split by cause, for the diagnostics.
+         * @type {Map<string, number>}
+         */
+        this.refusals = new Map();
+        /** The x87 emitter's reason for the current instruction being left out.
+         * @type {string | null} */
+        this.x87RefusalReason = null;
         /**
          * Blocks that leave before retiring anything (nothing decoded, or
          * the first instruction left out): no entry is made for them, since
@@ -422,6 +433,7 @@ export class RegionEmitter {
             this.context.regionType, this.localTypes, b.toBytes());
         return {
             functionIndex, labels: this.labels, unsupported: this.unsupported,
+            refusals: this.refusals,
             instructions: this.instructions,
             cut: new Set([...this.x87.cut, ...this.leaving, ...this.shapedBlocks()]),
             entryTop: this.entryTop, loops: this.loops,
@@ -765,6 +777,88 @@ export class RegionEmitter {
     // --- blocks and exits ---
 
     /**
+     * The ways control arrives at a block, for the refusal diagnostics: the
+     * entry of the region, the fall-through of a preceding block, a branch's
+     * target, a call's return address, or (no in-region edge at all) an
+     * address only the runtime enters -- an indirect target.
+     *
+     * @param {number} index
+     */
+    entryKinds(index){
+        const { region } = this;
+        const block = region.blocks[index];
+        const kinds = [];
+        if (block.start === region.entry)
+        {
+            kinds.push('region-entry');
+        }
+        let returns = false;
+        let falls = false;
+        let branch = false;
+        for (let i = 0; i < region.blocks.length; i++)
+        {
+            if (i === index)
+            {
+                continue;
+            }
+            const exit = region.blocks[i].exit;
+            if (exit.next === block.start && (exit.kind === 'call' || exit.kind === 'trap'))
+            {
+                returns = true;
+            }
+            else if (exit.next === block.start
+                && (exit.kind === 'fallthrough' || exit.kind === 'jcc' || exit.kind === 'loop'))
+            {
+                falls = true;
+            }
+            if (exit.targets.includes(block.start))
+            {
+                branch = true;
+            }
+        }
+        if (returns)
+        {
+            kinds.push('call-return');
+        }
+        if (falls)
+        {
+            kinds.push('fall-through');
+        }
+        if (branch)
+        {
+            kinds.push('branch-target');
+        }
+        if (kinds.length === 0)
+        {
+            kinds.push('indirect-target');
+        }
+        return kinds.join('+');
+    }
+
+    /** Whether the region's entry block had a known x87 state. */
+    entryBlockKnown(){
+        if (!this.x87.active)
+        {
+            return true;
+        }
+        const at = this.region.blocks.findIndex(block=>block.start === this.region.entry);
+        return at >= 0 && this.x87.states[at] !== null;
+    }
+
+    /**
+     * Records one left-out instruction, why and the shape of its block.
+     *
+     * @param {import('../decode/decoder.js').Instruction} instruction
+     * @param {string} reason
+     * @param {number} index
+     */
+    noteRefusal(instruction, reason, index){
+        const key = `${instruction.opcode} (${reason}; ${this.entryKinds(index)}; `
+            + `entry-${this.entryBlockKnown() ? 'known' : 'unknown'})`;
+        this.refusals.set(key, (this.refusals.get(key) ?? 0) + 1);
+    }
+
+    /**
      * @param {import('../region.js').Block} block
      * @param {number} index
      */
@@ -781,6 +875,12 @@ export class RegionEmitter {
         if (this.x87.active && !x87BlockStart(this, index))
         {
             // Reached with two different x87 tops: the other executor runs it.
+            const first = block.instructions.find(instruction=>isX87(instruction))
+                ?? block.instructions[0];
+            if (first)
+            {
+                this.noteRefusal(first, 'cut-second-top', index);
+            }
             this.exitAt(block.start, Exit.UNTRANSLATED);
             return;
         }
@@ -809,6 +909,7 @@ export class RegionEmitter {
             const flagsLive = live[i];
             this.current = instruction;
             this.staleCheck = false;
+            this.x87RefusalReason = null;
             // Counted before it is emitted, so an exit *after* it (a halt, a
             // call) has it charged; an exit *before* it uncounts it.
             this.blockRetired++;
@@ -818,6 +919,7 @@ export class RegionEmitter {
             {
                 this.unsupported.set(instruction.opcode,
                     (this.unsupported.get(instruction.opcode) ?? 0) + 1);
+                this.noteRefusal(instruction, this.x87RefusalReason ?? 'no-lowering', index);
                 this.instructions--;
                 this.exitBefore(instruction.eip, Exit.UNTRANSLATED);
                 this.dead = true;

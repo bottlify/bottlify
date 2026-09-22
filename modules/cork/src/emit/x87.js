@@ -583,6 +583,10 @@ export function emitX87(e, instruction, flagsLive){
     const x = e.x87;
     if (!x.active || x.current === null)
     {
+        if (x.active)
+        {
+            e.x87RefusalReason = x.cut.has(e.blockIndex) ? 'cut-second-top' : 'no-known-state';
+        }
         return false;
     }
     const { b } = e;
@@ -591,6 +595,8 @@ export function emitX87(e, instruction, flagsLive){
     const next = step(instruction, state);
     if (next === null)
     {
+        // The tracker cannot follow this form (`fxsave`/`fbld` and kin).
+        e.x87RefusalReason = 'step-null';
         return false;
     }
     /** The local holding ST(i). @param {number} i */
@@ -1468,6 +1474,7 @@ export function emitX87(e, instruction, flagsLive){
             return true;
         }
         default:
+            e.x87RefusalReason = 'unhandled-form';
             return false;
     }
 }

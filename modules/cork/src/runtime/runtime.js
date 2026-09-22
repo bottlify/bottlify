@@ -129,6 +129,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const exit = { retired: 0, kind: 'untranslated', vector: 0 };
     /** @type {Record<string, number>} */
     const refused = {};
+    /** @type {Record<string, number>} why an instruction was left out, with its block */
+    const refusedWhy = {};
     let corkRetired = 0;
     // The counter word folded the way the layer folds it: exact as long as
     // reads come less than 2^32 instructions apart.
@@ -443,6 +445,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     {
                         refused[opcode] = (refused[opcode] ?? 0) + times;
                     }
+                    for (const [key, times] of translation.refusals)
+                    {
+                        refusedWhy[key] = (refusedWhy[key] ?? 0) + times;
+                    }
                     m.exportFunction('r0', translation.functionIndex);
                     const encodeAt = performance.now();
                     const module = m.toBytes();
@@ -587,6 +593,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 volatilePages: counts.volatilePages,
                 exits: { ...exits },
                 refused: { ...refused },
+                refusedWhy: { ...refusedWhy },
                 handoffMisses: 0,
             };
         },
