@@ -405,6 +405,33 @@ test('a flood of distinct misses does not stop a later address reaching the thre
         assert.ok(m.runtime.entryOf(fresh) >= 0);
     });
 
+test('the diagnostics histogram names the untranslated exits and why each target has none',
+    ()=>{
+        const m = machine({ missThreshold: 64 });
+        // A target the decoder refuses (an SSE prefix with no variant): the
+        // exit there can never form a region until the bytes change.
+        m.write(0x3000, [0xf2, 0x0f, 0x28, 0xc1]);
+        for (let i = 0; i < 3; i++)
+        {
+            m.runtime.missAt(0x3000, 0);
+        }
+        // A target queued and not yet formed.
+        m.write(0x4000, [0x90, 0xf4]);
+        m.runtime.noteHot(0x4000);
+        m.runtime.missAt(0x4000, 0);
+        // A target with plain code the runtime knows nothing about.
+        m.write(0x5000, [0x90, 0xf4]);
+        m.runtime.missAt(0x5000, 0);
+        const exits = m.runtime.diagnostics().exitsByTarget;
+        const reasons = Object.fromEntries(exits.map(row=>[row.address, row.reason]));
+        assert.equal(reasons[0x3000], 'refused');
+        assert.equal(reasons[0x4000], 'queued');
+        assert.equal(reasons[0x5000], 'unknown');
+        assert.deepEqual(exits.map(row=>row.address), [0x3000, 0x4000, 0x5000],
+            'ordered by count: three, then the two of one');
+        assert.equal(exits[0].count, 3);
+    });
+
 test('a return block the tracker cannot reach gets a region of its own, not a broken entry',
     async()=>{
         const m = machine();

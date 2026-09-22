@@ -160,6 +160,14 @@ for (const name of ['qsort.exe', 'threads.exe'])
                 + ` instantiate ${cork.cork.instantiateMs.toFixed(0)},`
                 + ` publish ${cork.cork.publishMs.toFixed(0)},`
                 + ` worker ${cork.cork.workerMs.toFixed(0)})`);
+            const targets = /** @type {{ address: number, count: number, reason: string }[]} */ (
+                cork.cork.exitsByTarget ?? []);
+            if (targets.length > 0)
+            {
+                console.log(`${name} exits by target: `
+                    + targets.slice(0, 8).map(row=>`0x${row.address.toString(16)}`
+                        + `:${row.reason}x${row.count}`).join(' '));
+            }
         });
 }
 

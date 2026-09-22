@@ -26,6 +26,7 @@
 
 import { formRegion } from '../region.js';
 import { mathImports } from '../emit/region.js';
+import { decode } from '../decode/decoder.js';
 import { isX87, trackRegion } from '../emit/x87.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { emitBuilt } from './emit-built.js';
@@ -110,6 +111,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const barren = new Set();
     /** @type {Map<number, number>} untranslated exits by target address */
     const misses = new Map();
+    // The untranslated exits by target address over the whole run, for the
+    // diagnostics' histogram: the misses are forgotten when they become
+    // candidates, but what the translator never reached is exactly what this
+    // is read for. Bounded like `misses`; the coldest target makes room.
+    const exitTargets = new Map();
+    const EXIT_TARGETS_CAP = 4096;
     // How many addresses the untranslated-exit count holds at once. A real
     // program leaves for millions of addresses and the map filled in seconds;
     // the old rule stopped recording new ones once it did, so no address
@@ -284,6 +291,51 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** @param {number} address */
     const translatable = address=>(pages.get(address >>> 12)
         & (PageFlag.VOLATILE | PageFlag.INACCESSIBLE)) === 0;
+
+    /**
+     * Why the translator has no entry at an untranslated exit's target, the
+     * histogram's second column: the page is volatile (or beyond RAM), the
+     * address formed nothing (`barren`), it is queued and not yet formed, an
+     * entry stands at another x87 top, or the decoder refuses its first
+     * instruction (`cpuid`, `rdtsc`, `int n`, the `fs:`-forms -- plan 4.2's
+     * list). Anything else is not known.
+     *
+     * @param {number} address
+     * @returns {string}
+     */
+    const missReason = address=>{
+        if (pages.get(address >>> 12) & PageFlag.VOLATILE)
+        {
+            return 'volatile';
+        }
+        if (!translatable(address))
+        {
+            return 'inaccessible';
+        }
+        if (barren.has(address))
+        {
+            return 'barren';
+        }
+        for (const eip of queue.values())
+        {
+            if (eip === address)
+            {
+                return 'queued';
+            }
+        }
+        for (let top = 0; top < 8; top++)
+        {
+            if (entries.entryOf(address, top) >= 0)
+            {
+                return 'other-top';
+            }
+        }
+        if (typeof read === 'function' && 'refused' in decode(byte=>read(byte), address))
+        {
+            return 'refused';
+        }
+        return 'unknown';
+    };
 
     // The translation worker: forming and the store lookup stay on the engine
     // thread, where the memory and the store are, and the emitting and
@@ -565,6 +617,22 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
          * @param {number} address @param {number} [top]
          */
         missAt(address, top = 0){
+            const target = (exitTargets.get(address) ?? 0) + 1;
+            exitTargets.set(address, target);
+            if (exitTargets.size > EXIT_TARGETS_CAP)
+            {
+                let least = -1;
+                let leastCount = Infinity;
+                for (const [at, count] of exitTargets)
+                {
+                    if (count < leastCount)
+                    {
+                        leastCount = count;
+                        least = at;
+                    }
+                }
+                exitTargets.delete(least);
+            }
             const seen = (misses.get(address) ?? 0) + 1;
             if (seen >= settings.missThreshold)
             {
@@ -798,6 +866,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 invalidations: counts.invalidations,
                 volatilePages: counts.volatilePages,
                 exits: { ...exits },
+                // The top untranslated-exit targets over the whole run, and
+                // why each has no entry: what a loading phase leaves behind.
+                exitsByTarget: [...exitTargets].sort((a, b)=>b[1] - a[1]).slice(0, 32)
+                    .map(([address, count])=>({ address, count, reason: missReason(address) })),
                 refused: { ...refused },
                 refusedWhy: { ...refusedWhy },
                 handoffMisses: 0,
