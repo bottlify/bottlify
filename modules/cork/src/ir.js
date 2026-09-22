@@ -21,6 +21,8 @@
  */
 
 import { AF, CF, DF, OF, PF, SF, ZF, conditionReads } from './decode/table.js';
+import { evaluateX87, isX87Op } from './ir-x87.js';
+import { evaluateSimd, isSimdOp, mmxState } from './ir-simd.js';
 
 const ARITH = CF | PF | AF | ZF | SF | OF;
 
@@ -48,6 +50,14 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @property {boolean} halted
  * @property {number} retired
  * @property {number[]} trapped    the values written to the trap port, in order
+ * @property {number} top          the x87 stack's top, 0-7
+ * @property {number} empty        the empty-register mask, bit k for physical k
+ * @property {number} status       the x87 status word
+ * @property {number} control      the x87 control word
+ * @property {Float64Array} f80    the eight physical x87 registers, as doubles
+ * @property {BigInt64Array} f80bits  the same bytes, for an MMX read or write
+ * @property {Uint32Array} xmm     the eight XMM registers, four words each
+ * @property {number} mxcsr
  */
 
 /**
@@ -61,7 +71,15 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 export function createState(memory, { eip = 0, esp = 0, fsBase = 0 } = {}){
     const reg = new Uint32Array(8);
     reg[4] = esp;
-    return { reg, eip, eflags: 0x2, fsBase, memory, halted: false, retired: 0, trapped: [] };
+    const f80Bytes = new ArrayBuffer(64);
+    return {
+        reg, eip, eflags: 0x2, fsBase, memory, halted: false, retired: 0, trapped: [],
+        top: 0, empty: 0xff, status: 0, control: 0x37f,
+        f80: new Float64Array(f80Bytes),
+        f80bits: new BigInt64Array(f80Bytes),
+        xmm: new Uint32Array(32),
+        mxcsr: 0x1f80,
+    };
 }
 
 /** A processor exception the model raises, by vector. */
@@ -285,6 +303,29 @@ export function evaluate(instruction, state){
     };
     const cf = (state.eflags & CF) !== 0 ? 1 : 0;
 
+    if (isX87Op(instruction))
+    {
+        if (!evaluateX87(instruction, state, address))
+        {
+            throw new Unsupported(op);
+        }
+        return;
+    }
+    if (isSimdOp(instruction))
+    {
+        if (!evaluateSimd(instruction, state, address))
+        {
+            throw new Unsupported(op);
+        }
+        // An MMX instruction leaves the stack in the MMX state: top zero,
+        // every register held.
+        if (instruction.operands.some(operand=>operand.kind === 'mm'))
+        {
+            mmxState(state);
+        }
+        return;
+    }
+
     switch (op)
     {
         case 'nop': case 'fwait': case 'prefetch': case 'prefetchw': case 'prefetchnta':
@@ -431,7 +472,7 @@ export function evaluate(instruction, state){
         case 'mul':
         {
             const a = (state.reg[0] & mask) >>> 0;
-            const b = read(operands[0]);
+            const b = read(operands[0]) >>> 0;
             const product = BigInt(a) * BigInt(b);
             const low = Number(product & BigInt(mask));
             const high = Number(product >> BigInt(size * 8));
@@ -543,8 +584,18 @@ export function evaluate(instruction, state){
             }
             return;
         case 'leave':
-            state.reg[4] = state.reg[5];
-            state.reg[5] = pop(4);
+            // A 16-bit leave moves SP (clearing the upper half) and pops BP;
+            // the default moves ESP and pops EBP.
+            if (size === 2)
+            {
+                state.reg[4] = (state.reg[4] & 0xffff0000 | state.reg[5] & 0xffff) >>> 0;
+                state.reg[5] = (state.reg[5] & 0xffff0000 | pop(2)) >>> 0;
+            }
+            else
+            {
+                state.reg[4] = state.reg[5];
+                state.reg[5] = pop(4);
+            }
             return;
         case 'enter':
         {
@@ -845,7 +896,8 @@ function writeWide(size, state, low, high){
  */
 function divide(op, operands, size, state, read, instruction){
     const bits = size * 8;
-    const divisor = read(operands[0]);
+    const operand = read(operands[0]);
+    const divisor = op === 'idiv' ? operand : operand >>> 0;
     if (divisor === 0)
     {
         throw new Fault(0, instruction.eip);

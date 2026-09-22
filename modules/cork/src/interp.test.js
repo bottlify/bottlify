@@ -68,10 +68,26 @@ test('a budget bounds a loop', ()=>{
     assert.equal(rest, 8, 'the three more turns and the hlt');
 });
 
-test('an instruction with no model throws Unsupported', ()=>{
-    // A form the evaluator has no case for. `fld` is x87, still to come.
+test('xorps xors the two XMM operands and movd reaches a register', ()=>{
+    // movd xmm0, eax; movd xmm1, ecx; xorps xmm0, xmm1; movd eax, xmm0; hlt
     const m = machine();
-    m.ram.set([0xd9, 0x00], 0x1000); // fld dword [eax]
+    m.ram.set([
+        0x66, 0x0f, 0x6e, 0xc0, 0x66, 0x0f, 0x6e, 0xc9, 0x0f, 0x57, 0xc1, 0x66, 0x0f, 0x7e, 0xc0,
+        0xf4,
+    ], 0x1000);
+    m.state.reg[0] = 0xf0f0f0f0;
+    m.state.reg[1] = 0x0ff00ff0;
+    const retired = interpret(m.state, 100);
+    assert.equal(retired, 5);
+    assert.equal(m.state.reg[0] >>> 0, 0xff00ff00, 'the xor, not the and, in the low lane');
+    assert.equal(m.state.xmm[0] >>> 0, 0xff00ff00, 'the xor in the register word');
+    assert.equal(m.state.xmm[1], 0, 'and the upper words clear');
+});
+
+test('an instruction with no model throws Unsupported', ()=>{
+    // A form the evaluator leaves to the other executor: fxsave.
+    const m = machine();
+    m.ram.set([0x0f, 0xae, 0x00], 0x1000); // fxsave [eax]
     // `evaluate` counts and advances before it decides it has no case; the
     // host answers the throw for the instruction, not for the count.
     assert.throws(()=>interpret(m.state, 1), /no model for/);

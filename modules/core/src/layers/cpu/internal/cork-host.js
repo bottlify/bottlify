@@ -11,10 +11,11 @@
  * its machine, not its wasm. This host is what stands in for it: a
  * `WebAssembly.Memory` of its own, cork's own layout (a 512-byte state block,
  * the guest's RAM after it, cork's tables after that), and the translator's
- * runtime over the two. The slice loop is the translator's entry, or the
- * interpreter tier of 5.2 for what is not translated; in 5.1 the interpreter
- * is a stub that refuses, so a program with nothing translated yet fails loudly
- * rather than running silently.
+ * runtime over the two. The slice loop is the translator's entry, or -- where
+ * none exists yet -- the interpreter tier of 5.2, which runs cork's own decoder
+ * and evaluator over the state block one instruction at a time. An instruction
+ * the evaluator has no model for is the engine's no-tier answer, and a fault
+ * becomes the host's fault record.
  *
  * There is no ROM. The boot ROM exists to switch the emulator from real mode
  * and set up its descriptor caches; cork's layout has no segment registers and
@@ -48,6 +49,7 @@ const FLAT_CS = 0x08;
 /** The names an engine module must export for this host. */
 const ENGINE_EXPORTS = Object.freeze([
     'createEngine', 'ownLayout', 'pagesFor', 'Tables', 'STATE_BLOCK_SIZE',
+    'interpret', 'blockState',
 ]);
 
 /**
@@ -81,7 +83,8 @@ export function createCorkHost(config){
             throw new Error(`cpu: the cork engine module does not export ${name}`);
         }
     }
-    const { createEngine, ownLayout, pagesFor, Tables, STATE_BLOCK_SIZE } = engine;
+    const { createEngine, ownLayout, pagesFor, Tables, STATE_BLOCK_SIZE, interpret, blockState }
+        = engine;
 
     // The guest RAM is the whole memorySize; the tables and the state block are
     // memory of cork's own beside it, not carved out of the guest's the way the
@@ -157,16 +160,13 @@ export function createCorkHost(config){
     };
 
     /**
-     * The interpreter tier (5.2). In 5.1 it refuses everything, so a program
-     * with no translated entry fails loudly rather than running silently.
+     * The interpreter tier (5.2): cork's own decoder and evaluator over the
+     * state block, one instruction at a time. A `Fault` becomes the fault
+     * record; an `Unsupported` instruction is this engine's no-tier answer.
      *
-     * @param {number} address  The guest address of the instruction to run.
+     * @type {any}
      */
-    const interpret = address=>{
-        const opcode = ram[address] ?? 0;
-        throw new Error(
-            `cpu: cork has no tier for 0x${hex(opcode, 2)} (eip 0x${hex(address)})`);
-    };
+    let interpreter = null;
 
     const runtime = createEngine({
         memory,
@@ -232,15 +232,52 @@ export function createCorkHost(config){
     };
 
     /**
-     * One instruction on the interpreter tier. In 5.1 the tier refuses, so this
-     * throws; 5.2 replaces it with the decoder and evaluator over the block.
+     * One instruction on the interpreter tier: the decoder and evaluator over
+     * the block for the instruction at `address`. A `Fault` from the evaluator
+     * builds the fault record and stops the machine; an instruction the
+     * evaluator has no model for is this engine's no-tier answer.
      *
      * @param {number} address
      * @returns {number}
      */
     const interpretOne = address=>{
-        interpret(address);
-        return 0;
+        interpreter ??= blockState({ memory, layout });
+        const state = interpreter;
+        state.syncIn();
+        state.eip = address;
+        /** @type {number} */
+        let retired;
+        try
+        {
+            retired = interpret(state, 1);
+            if (state.halted)
+            {
+                halted = true;
+            }
+        }
+        catch (e){
+            const fault = /** @type {{ vector?: number, eip?: number, op?: string }} */ (e);
+            if (typeof fault.vector === 'number')
+            {
+                state.eip = fault.eip ?? address;
+                state.syncOut();
+                lastFault = buildFault(fault.vector);
+                halted = true;
+                return 0;
+            }
+            if (typeof fault.op === 'string')
+            {
+                throw new Error(`cpu: cork has no tier for 0x${hex(ram[address] ?? 0, 2)}`
+                    + ` (eip 0x${hex(address)})`, { cause: e });
+            }
+            throw e;
+        }
+        state.syncOut();
+        for (const value of state.trapped.splice(0))
+        {
+            raiseTrap(value);
+        }
+        return retired;
     };
 
     /**
