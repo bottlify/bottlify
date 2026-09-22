@@ -204,9 +204,34 @@ export function createCorkHost(config){
     // Hotness in cork mode, counted by the interpreter itself: a start run
     // `hotThreshold` times becomes a candidate, and the layer's feed forms it.
     // A translated start is never interpreted again, so the count stops there.
-    const hotThreshold = corkConfig?.hotThreshold ?? 2000;
-    /** @type {Map<number, number>} interpreted starts by count */
-    const hot = new Map();
+    // Two under cork, not the sampler's two thousand: there is no compiled
+    // second executor to carry the code in the meantime, so a start costs a
+    // translation on its second visit rather than being run thousands of
+    // times first -- a region is about a millisecond and a thousand
+    // instructions about half of one, and the loading code never reaches a
+    // larger threshold at all.
+    const hotThreshold = corkConfig?.hotThreshold ?? 2;
+    // The counts live in a flat array rather than a map: one byte per four
+    // bytes of the first sixteen megabytes of address space, wrapping there.
+    // A map grew an entry for every instruction a straight-line loader ran
+    // once and never again, which a real route's loading code is millions of;
+    // a slot two addresses share only makes the count reach the threshold a
+    // visit early, and a candidate noted for an address that is not hot is a
+    // translation the runtime declines for nothing.
+    const HOT_SLOTS = 1 << 22;
+    const HOT_MASK = HOT_SLOTS - 1;
+    const hotCounts = new Uint8Array(HOT_SLOTS);
+    /** Counts one interpreted start and notes the address once it is hot.
+     * @param {number} address
+     */
+    const countHot = address=>{
+        const slot = (address >>> 2) & HOT_MASK;
+        if (++hotCounts[slot] >= hotThreshold)
+        {
+            hotCounts[slot] = 0;
+            runtime.noteHot(address, x87Top());
+        }
+    };
 
     /** Fold the block's 32-bit counter word into the exact count. */
     const fold = ()=>{
@@ -239,15 +264,23 @@ export function createCorkHost(config){
     };
 
     /**
-     * One instruction on the interpreter tier: the decoder and evaluator over
-     * the block for the instruction at `address`. A `Fault` from the evaluator
-     * builds the fault record and stops the machine; an instruction the
-     * evaluator has no model for is this engine's no-tier answer.
+     * The interpreter tier over a whole budget: the decoder and evaluator run
+     * over the block from `address` until it halts, faults, records a trap the
+     * host must answer, or reaches an address the translator has an entry for
+     * -- a boundary the interpreter must not cross, because translated code
+     * carries its own register file. One `syncIn` and one `syncOut` bracket the
+     * run rather than one per instruction, and each interpreted start is
+     * counted for hotness, so a run of cold code costs a translation on its
+     * second visit instead of a thousand syncs.
      *
-     * @param {number} address
+     * A `Fault` from the evaluator builds the fault record and stops the
+     * machine; an instruction the evaluator has no model for is this engine's
+     * no-tier answer.
+     *
+     * @param {number} address @param {number} budget
      * @returns {number}
      */
-    const interpretOne = address=>{
+    const interpretRange = (address, budget)=>{
         interpreter ??= blockState({
             memory,
             layout,
@@ -263,33 +296,30 @@ export function createCorkHost(config){
         // A `hlt` on an earlier run left the block's halted flag set; a slice
         // the machine is awake for clears it, as the host's own flag is.
         state.halted = false;
-        /** @type {number} */
-        let retired;
+        const before = state.retired;
+        /** @type {unknown} */
+        let thrown = null;
         try
         {
-            retired = interpret(state, 1);
-            if (state.halted)
-            {
-                halted = true;
-            }
+            interpret(state, budget, {
+                // Answered before each instruction: the runs the host owns the
+                // far side of. A recorded trap has to leave so the handler can
+                // move eip or stop the machine; an address with an entry is
+                // translated code and a different register file.
+                shouldStop: ()=>state.trapped.length > 0
+                    || runtime.entryOf(state.eip, x87Top()) >= 0,
+                onStep: countHot,
+            });
         }
         catch (e){
-            const fault = /** @type {{ vector?: number, eip?: number, op?: string }} */ (e);
+            const fault = /** @type {{ vector?: number, eip?: number }} */ (e);
             if (typeof fault.vector === 'number')
             {
                 state.eip = fault.eip ?? address;
-                state.syncOut();
-                lastFault = buildFault(fault.vector);
-                halted = true;
-                return 0;
             }
-            if (typeof fault.op === 'string')
-            {
-                throw new Error(`cpu: cork has no tier for 0x${hex(ram[address] ?? 0, 2)}`
-                    + ` (eip 0x${hex(address)})`, { cause: e });
-            }
-            throw e;
+            thrown = e;
         }
+        const retired = state.retired - before;
         state.syncOut();
         // The interpreter's instructions count in the block's own word, so the
         // layer's instruction count and the translated share are over the whole
@@ -299,19 +329,29 @@ export function createCorkHost(config){
             const word = blockView.getUint32(layout.counter, true);
             blockView.setUint32(layout.counter, (word + retired) >>> 0, true);
         }
+        if (thrown !== null)
+        {
+            const fault = /** @type {{ vector?: number, eip?: number, op?: string }} */ (thrown);
+            if (typeof fault.vector === 'number')
+            {
+                lastFault = buildFault(fault.vector);
+                halted = true;
+                return retired;
+            }
+            if (typeof fault.op === 'string')
+            {
+                throw new Error(`cpu: cork has no tier for 0x${hex(ram[address] ?? 0, 2)}`
+                    + ` (eip 0x${hex(address)})`, { cause: thrown });
+            }
+            throw thrown;
+        }
         for (const value of state.trapped.splice(0))
         {
             raiseTrap(value);
         }
-        const seen = (hot.get(address) ?? 0) + 1;
-        if (seen >= hotThreshold)
+        if (state.halted)
         {
-            hot.delete(address);
-            runtime.noteHot(address, x87Top());
-        }
-        else
-        {
-            hot.set(address, seen);
+            halted = true;
         }
         return retired;
     };
@@ -321,10 +361,10 @@ export function createCorkHost(config){
      *
      * While the guest stands at an address the translator has an entry for, the
      * translator runs it with what remains of the budget; otherwise the
-     * interpreter runs one instruction (5.2) -- in 5.1 it refuses. A `fault`
-     * exit builds the fault record and stops the machine; a `halt` puts the
-     * processor where a `hlt` would; a `trap` exit re-looks-up wherever the
-     * handler left eip.
+     * interpreter runs the budget's worth of cold code in one call (5.2) until
+     * it meets translated code, a trap or a stop. A `fault` exit builds the
+     * fault record and stops the machine; a `halt` puts the processor where a
+     * `hlt` would; a `trap` exit re-looks-up wherever the handler left eip.
      *
      * @param {number} maxInstructions
      * @returns {number}
@@ -367,9 +407,15 @@ export function createCorkHost(config){
                 }
                 continue;
             }
-            const stepped = interpretOne(at);
+            const stepped = interpretRange(at, remaining);
             remaining -= stepped;
             ran += stepped;
+            if (stepped === 0 && eip() === at)
+            {
+                // A budget of zero, or a first instruction that retired
+                // nothing: leaving rather than spinning on it.
+                break;
+            }
         }
         fold();
         return ran;
