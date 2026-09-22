@@ -293,6 +293,15 @@ test('a join two x87 tops reach becomes a region for each, and its misses stop',
     host.runSlice(200_000);
     await cork.translatePending();
     assert.equal(countAt(), frozen, 'the untranslated exits at the join stopped');
+    // The counters 3j.4 reads: instructions the translator retired against
+    // the emulator's, and the share they make. A share that falls while the
+    // exits fall is the translator retiring less, not fewer misses.
+    const report = cork.diagnostics();
+    const total = machine.instructionCount();
+    console.log('3j two-top join: share'
+        + ` ${report.translatedShare.toFixed(3)}, translator ${report.retired} of`
+        + ` ${total} (emulator ${total - report.retired}), exits`
+        + ` ${JSON.stringify(report.exits)}`);
     machine.stop();
 });
 
