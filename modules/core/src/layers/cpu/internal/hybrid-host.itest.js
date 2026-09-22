@@ -278,3 +278,89 @@ test('a second boot with the same store takes every region from it', async()=>{
     assert.ok(after.translateMs < before.translateMs, 'cheaper than emitting');
     await cpuModule.dispose();
 });
+
+/**
+ * The origin's private file system in memory, with the shape the directory
+ * store uses and a count of every `getFileHandle`: the probes the index
+ * removes. A record file stores an ArrayBuffer; the index a text file.
+ *
+ * @param {{ probes: number }} counter
+ */
+function fakeRoot(counter){
+    /** @param {Map<string, any>} entries */
+    const node = entries=>({
+        entries,
+        /** @param {string} name @param {{ create?: boolean }} [options] */
+        async getDirectoryHandle(name, options = {}){
+            let child = entries.get(name);
+            if (!child && options.create)
+            {
+                child = node(new Map());
+                entries.set(name, child);
+            }
+            if (!child)
+            {
+                throw new Error('NotFoundError');
+            }
+            return child;
+        },
+        /** @param {string} name @param {{ create?: boolean }} [options] */
+        async getFileHandle(name, options = {}){
+            counter.probes++;
+            let file = entries.get(name);
+            if (!file && options.create)
+            {
+                file = {
+                    bytes: new Uint8Array(0),
+                    async getFile(){
+                        const bytes = file.bytes;
+                        return {
+                            arrayBuffer: async()=>bytes.buffer.slice(
+                                bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+                        };
+                    },
+                    async createWritable(){
+                        return {
+                            /** @param {Uint8Array} b */
+                            async write(b){
+                                file.bytes = new Uint8Array(b);
+                            },
+                            async close(){},
+                        };
+                    },
+                };
+                entries.set(name, file);
+            }
+            if (!file)
+            {
+                throw new Error('NotFoundError');
+            }
+            return file;
+        },
+    });
+    return node(new Map());
+}
+
+test('the directory store takes the second run from its index and records', async()=>{
+    const { createDirectoryTranslationStore } = await import('./translation-store.js');
+    const counter = { probes: 0 };
+    const store = await createDirectoryTranslationStore(fakeRoot(counter), 'itest');
+    const config = { engine: 'hybrid', engineUrl: ENGINE, cork: { store, bundleId: 'itest' } };
+    const first = await booted(PROGRAM, GUEST_CODE, config);
+    await runToHalt(first);
+    const before = metricsOf().cork;
+    assert.equal(before.cacheHits, 0);
+    assert.equal(before.cacheMisses, before.regions);
+    await cpuModule.dispose();
+
+    const second = await booted(PROGRAM, GUEST_CODE, config);
+    await runToHalt(second);
+    const after = metricsOf().cork;
+    assert.equal(second.api.readReg32('eax'), 0x1234);
+    assert.equal(after.cacheHits, after.regions, 'every region from the store');
+    assert.equal(after.cacheMisses, 0);
+    assert.equal(after.emitMs, 0, 'a hit emits nothing');
+    assert.ok(typeof after.lookupMs === 'number');
+    assert.ok(after.lookupMs < after.translateMs, 'the lookups are part of the split');
+    await cpuModule.dispose();
+});

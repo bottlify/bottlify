@@ -107,7 +107,10 @@ store (`cork.store`, `cork.bundleId`; `createApp` resolves `'local'` to the orig
 file system in the engine's own thread, a directory per bundle, as it does the block store)
 the second run of a program takes every region it ran before from the store -- the region
 is still formed, a decode, which gives its hash; what is saved is the emitting and the
-encoding, and the report says `cacheHits`/`cacheMisses`. A record of another emitter
+encoding, and the report says `cacheHits`/`cacheMisses`. The directory's records are hashed
+file names beside one index of them, read once when the store is first used, so a lookup is a
+probe of that set and only a hit reads bytes: a miss never asks the file system, whose answer
+to a miss is an exception that costs milliseconds a record. A record of another emitter
 version, feature set or layout is a miss. A region with x87 instructions in it is compiled for the x87 stack top it is entered
 with, and its entries are keyed by address and top (`entryOf(eip, x87Top)`, the top read off
 the emulator's `fpu_stack_ptr` before every turn); a region without them is entered with any
