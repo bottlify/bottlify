@@ -7,8 +7,8 @@
 /**
  * The cork host without an emulator: its own memory and layout, the state
  * block captured and restored whole, the eager flags word, and the cpu api's
- * context over it. The interpreter tier is a stub here (step 5.1), so nothing
- * in this file runs guest code.
+ * context over it. Nothing in this file runs guest code; the interpreter tier
+ * over a small program is `cork-host.itest.js`.
  */
 
 import { test } from 'node:test';

@@ -176,10 +176,11 @@ reads `eip` from the entry vector at the first slice, the way the ROM's indirect
 The whole register file lives in the block, so a context is a copy of the block plus the halted
 flag and `fsBase` (`captureBlockContext`/`restoreBlockContext` in `internal/context.js`); a
 `fault` exit builds the fault record from the vector and the state the faulting instruction
-left, since there is no IDT and no frame to read. This step ships the host and a slice loop
-whose interpreter tier is a stub that refuses an address nothing has translated -- `cpu: cork
-has no tier for 0x… (…)` -- so a program fails loudly rather than running silently until the
-interpreter of 5.2 lands.
+left, since there is no IDT and no frame to read. Where the translator has no entry for an
+address, the slice loop runs cork's own interpreter tier over the same state block, one
+instruction at a time (`interpret`/`blockState` in the engine module). A fault it raises becomes
+the host's fault record and stops the machine; an instruction the evaluator has no model for is
+the engine's no-tier answer, `cpu: cork has no tier for 0x… (…)`.
 
 ## 2. Contract
 
