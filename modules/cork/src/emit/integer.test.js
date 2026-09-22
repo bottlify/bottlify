@@ -207,6 +207,20 @@ test('the stack: push, pop, call, ret, enter, leave, pushad/popad, pushf/popf', 
     assert.equal(r.m.reg('esp'), STACK);
 });
 
+test('ret imm16 pops the return and adds the immediate, model and emitter agreeing', ()=>{
+    const r = both([
+        0x6a, 0x00,                                     // push 0
+        0x6a, 0x00,                                     // push 0
+        0xe8, 0x03, 0x00, 0x00, 0x00,                   // call 0x100c
+        0xf4,                                           // hlt, the return's landing
+        0x90, 0x90,                                     // padding to the callee
+        0xc2, 0x08, 0x00,                               // ret 8
+    ]);
+    assert.equal(r.exit.kind, 3);
+    agree(r);
+    assert.equal(r.m.reg('esp'), STACK, 'the immediate left with the two dwords');
+});
+
 test('conditional moves and sets, bit tests, scans, bswap, cmpxchg, cwde/cdq', ()=>{
     const r = both([
         0xb8, 1, 0, 0, 0, 0xbb, 2, 0, 0, 0, 0x39, 0xd8, 0x0f, 0x4c, 0xc3, // cmovl eax, ebx

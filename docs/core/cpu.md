@@ -211,7 +211,8 @@ address, the slice loop runs cork's own interpreter tier over the same state blo
 trap the host has to answer, or an address the translator has an entry for, where translated
 code's own register file takes over. A fault it raises becomes the host's fault record and stops
 the machine; an instruction the evaluator has no model for is the engine's no-tier answer,
-`cpu: cork has no tier for 0x… (…)`.
+`cpu: cork has no tier for 0x0f (fxsave) (eip 0x00001003)`: the byte and address are the
+instruction the interpreter actually met, not the address the slice started at.
 
 In `cork` mode the interpreter counts hotness itself, per instruction start, in a flat array over
 the address space (not a map: a straight-line loader runs millions of instructions once and would

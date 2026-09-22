@@ -306,6 +306,22 @@ test('pushf/popf, lahf/sahf, the flag instructions, enter/leave, pushad/popad', 
     assert.deepEqual([m.state.reg[0], m.state.reg[3], m.state.reg[4]], [1, 2, 0xf000]);
 });
 
+test('the memory-only SSE forms and movnti have a model', ()=>{
+    // cvttss2si eax, dword [0x2000] with 42.5 there: the source is memory, so
+    // the xmm test alone would miss it and the model would refuse it.
+    let m = run([0xf3, 0x0f, 0x2c, 0x05, 0x00, 0x20, 0, 0, 0xf4],
+        state=>state.memory.write(0x2000, 4, 0x42290000));
+    assert.equal(m.state.reg[0], 42);
+
+    // stmxcsr [0x2000], the reset MXCSR.
+    m = run([0x0f, 0xae, 0x1d, 0x00, 0x20, 0, 0, 0xf4]);
+    assert.equal(m.view.getUint32(0x2000, true), 0x1f80);
+
+    // movnti [0x2000], eax: a store with no flags.
+    m = run([0xb8, 0x78, 0x56, 0x34, 0x12, 0x0f, 0xc3, 0x05, 0x00, 0x20, 0, 0, 0xf4]);
+    assert.equal(m.view.getUint32(0x2000, true), 0x12345678);
+});
+
 test('int3, int n and the trap port', ()=>{
     assert.throws(()=>run([0xcc]),
         (/** @type {any} */ e)=>e instanceof Fault && e.vector === 3 && e.eip === 0x1001);

@@ -19,9 +19,20 @@
 
 import { CF, PF, ZF } from './decode/table.js';
 
+/**
+ * The SSE instructions whose operands are a general or memory one only, so the
+ * xmm/mm test below misses them: `stmxcsr`/`ldmxcsr` (the memory operand) and
+ * the scalar conversions (`Gy,Wss`/`Gy,Wsd`) when the source is memory.
+ * Without them `evaluate` would fall through to the integer switch and refuse
+ * an operation this module does model.
+ */
+const MEMORY_ONLY = new Set([
+    'stmxcsr', 'ldmxcsr', 'cvttss2si', 'cvtss2si', 'cvttsd2si', 'cvtsd2si',
+]);
+
 /** @param {import('./decode/decoder.js').Instruction} instruction */
 export function isSimdOp(instruction){
-    return instruction.op === 'emms'
+    return instruction.op === 'emms' || MEMORY_ONLY.has(instruction.op)
         || instruction.operands.some(operand=>operand.kind === 'xmm' || operand.kind === 'mm');
 }
 

@@ -53,13 +53,26 @@ export function interpret(state, maxInstructions = 1, options = {}){
         const decoded = decode(address=>state.memory.read(address, 1), state.eip);
         if ('refused' in decoded)
         {
-            throw new Unsupported(decoded.opcode);
+            throw new Unsupported(decoded.opcode, decoded.eip);
         }
         // The instruction's own address, for a page fault raised from inside
         // `evaluate` after it has moved eip to the next instruction.
         state.faultEip = decoded.eip;
         onStep?.(decoded.eip);
-        evaluate(decoded, state);
+        try
+        {
+            evaluate(decoded, state);
+        }
+        catch (e){
+            // The no-tier answer carries the address of the instruction the
+            // model could not run, not the one the run started at: the host
+            // names what it actually met.
+            if (e instanceof Unsupported && e.eip === undefined)
+            {
+                e.eip = decoded.eip;
+            }
+            throw e;
+        }
     }
     return state.retired - before;
 }
