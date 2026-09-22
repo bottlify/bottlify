@@ -88,6 +88,14 @@ export function createEntries({ memory, hashBase = -1 } = {}){
     const byEip = new Map();
     /** @type {Set<number>} addresses with an entry compiled for some top */
     const specialised = new Set();
+    /**
+     * Block starts some region holds but cannot enter itself -- a block the
+     * x87 tracker reached with no known state, or one cut for a second top.
+     * A miss at one is a candidate for a region of its own, compiled for the
+     * top the machine has (`runtime.entryOf`), not a plain uncached address.
+     * @type {Set<number>}
+     */
+    const blocked = new Set();
     /** @type {Map<number, Set<number>>} page → slots */
     const byPage = new Map();
     let live = 0;
@@ -134,6 +142,22 @@ export function createEntries({ memory, hashBase = -1 } = {}){
         /** Whether some entry at the address was compiled for a top. @param {number} eip */
         isSpecialised(eip){
             return specialised.has(eip);
+        },
+        /**
+         * Notes that a block starts here in some region but has no entry of
+         * its own: entering it there is a miss the runtime should turn into a
+         * region of its own, at the top the machine has.
+         * @param {number} eip
+         */
+        noteStart(eip){
+            blocked.add(eip);
+        },
+        /**
+         * Whether some region holds a block here that has no entry of its own.
+         * @param {number} eip
+         */
+        isBlocked(eip){
+            return blocked.has(eip);
         },
         /** @param {number} index */
         at(index){

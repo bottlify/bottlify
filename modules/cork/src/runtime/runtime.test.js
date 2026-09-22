@@ -383,3 +383,27 @@ test('with a store, a second runtime takes its regions from the store; a changed
         assert.equal(fourth.runtime.diagnostics().cacheMisses, 1);
         assert.equal(store.size(), 3);
     });
+
+test('a return block the tracker cannot reach gets a region of its own, not a broken entry',
+    async()=>{
+        const m = machine();
+        const RA = CODE + 7;
+        // fninit; call F (elsewhere); RA: mov eax, [0x2000]; fld dword [0x2000];
+        // fstp st0; hlt -- the integer head emits, the x87 is refused, so the
+        // block would be a partial entry of the caller's region at its own top
+        // and shadow every later attempt to compile it.
+        m.write(CODE, [0xdb, 0xe3, 0xe8, 0x39, 0, 0, 0, 0xa1, 0, 0x20, 0, 0,
+            0xd9, 0x05, 0, 0x20, 0, 0, 0xdd, 0xd8, 0xf4]);
+        m.setReg(4, 0x80000);
+        m.runtime.noteHot(CODE);
+        assert.equal(await m.runtime.translatePending(), 1);
+        assert.ok(m.runtime.entryOf(CODE) >= 0, 'the entry runs');
+        assert.equal(m.runtime.entryOf(RA), -1, 'the return block has no entry of its own');
+        assert.equal(await m.runtime.translatePending(), 1,
+            'the miss queued a region of its own');
+        assert.ok(m.runtime.entryOf(RA) >= 0, 'compiled for the top the machine has');
+        const exit = m.runtime.run(m.runtime.entryOf(RA), 100);
+        assert.equal(exit.kind, 'halt');
+        // The fld pushed, the fstp st0 popped: the stack is as the call left it.
+        assert.equal(new DataView(m.memory.buffer).getUint8(m.layout.x87Top), 0);
+    });

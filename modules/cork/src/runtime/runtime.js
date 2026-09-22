@@ -248,10 +248,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         pages,
         entryOf(eip, top = 0){
             const entry = entries.entryOf(eip, top);
-            if (entry < 0 && entries.isSpecialised(eip))
+            if (entry < 0 && (entries.isSpecialised(eip) || entries.isBlocked(eip)))
             {
-                // A region exists here for another top: one for this top is
-                // a candidate, translated with the next batch.
+                // A region exists here for another top, or holds a block here
+                // it cannot enter itself (an x87 block with no known state, or
+                // one cut for a second top): one for this top is a candidate,
+                // translated with the next batch.
                 this.noteHot(eip, top);
             }
             return entry;
@@ -538,6 +540,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 for (const [start, label] of starts)
                 {
                     record.slots.push(entries.add(start, fn, label, top, record.table));
+                }
+                // A cut block start has no entry here: an address the runtime
+                // must answer for with a region of its own at the machine's
+                // top, so a miss there is a candidate, not an unknown address.
+                for (const [start, label] of built.labels)
+                {
+                    if (cut.has(label))
+                    {
+                        entries.noteStart(start);
+                    }
                 }
                 for (const block of region.blocks)
                 {

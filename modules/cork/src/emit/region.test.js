@@ -199,17 +199,16 @@ test('a block compiled for the stack in another shape than the entry gets no ent
 });
 
 test('a left-out x87 instruction names why and the shape of its block', ()=>{
-    // call F (elsewhere); RA: fld1; hlt -- the return address's fld1 has no
-    // known state: the tracker does not cross the call to a callee outside.
+    // fbld [m]; jmp C; C: fld1; hlt -- the tracker cannot follow fbld, so C is
+    // reached with no known state: its fld1 is left out as `no-known-state`.
     const m = createTestMachine();
-    const RA = CODE + 5;
-    m.write(CODE, [0xe8, 0x1b, 0, 0, 0, 0xd9, 0xe8, 0xf4]); // call F; RA: fld1; hlt
+    m.write(CODE, [0xdf, 0x25, ...u32(DATA), 0xeb, 0x00, 0xd9, 0xe8, 0xf4]);
     m.setReg('esp', 0x80000);
     const t = m.translate(CODE);
     assert.deepEqual([...t.translation.refusals.keys()],
-        ['d9 e8 (no-known-state; call-return; entry-known)'],
+        ['df 25 (step-null; region-entry; entry-known)',
+            'd9 e8 (no-known-state; branch-target; entry-known)'],
         JSON.stringify([...t.translation.refusals.keys()]));
-    assert.equal(RA, CODE + 5, 'the return address');
     // fld1; test; jnz B; fldz; B: fld1; hlt -- B is reached with top 7 (the
     // branch) and top 6 (the fall-through): cut for a second top.
     const n = createTestMachine();
@@ -220,3 +219,21 @@ test('a left-out x87 instruction names why and the shape of its block', ()=>{
         ['d9 e8 (cut-second-top; fall-through+branch-target; entry-known)'],
         JSON.stringify([...u.translation.refusals.keys()]));
 });
+
+test('a call return is named and gets no entry of its own', ()=>{
+    // fninit; call F (elsewhere); RA: fld dword [esp]; fstp st0; hlt -- the
+    // callee decides the stack at RA, so the tracker does not know it: the
+    // forms are named and the block is cut, leaving the runtime to compile a
+    // region for it at the top the machine has.
+    const m = createTestMachine();
+    const RA = CODE + 7;
+    m.write(CODE, [0xdb, 0xe3, 0xe8, 0x39, 0, 0, 0, 0xd9, 0x04, 0x24, 0xdd, 0xd8, 0xf4]);
+    m.setReg('esp', 0x80000);
+    const t = m.translate(CODE);
+    const label = /** @type {number} */ (t.translation.labels.get(RA));
+    assert.ok(t.translation.cut.has(label), 'no entry at the return block');
+    assert.deepEqual([...t.translation.refusals.keys()],
+        ['d9 04 (no-known-state; call-return; entry-known)'],
+        JSON.stringify([...t.translation.refusals.keys()]));
+});
+

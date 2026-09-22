@@ -435,7 +435,8 @@ export class RegionEmitter {
             functionIndex, labels: this.labels, unsupported: this.unsupported,
             refusals: this.refusals,
             instructions: this.instructions,
-            cut: new Set([...this.x87.cut, ...this.leaving, ...this.shapedBlocks()]),
+            cut: new Set([...this.x87.cut, ...this.unknownBlocks(), ...this.leaving,
+                ...this.shapedBlocks()]),
             entryTop: this.entryTop, loops: this.loops,
         };
     }
@@ -941,6 +942,22 @@ export class RegionEmitter {
         }
         this.emitExit(block, index);
         this.closeSelfLoop();
+    }
+
+    /**
+     * Blocks the x87 tracker reached with no known state: reached only from
+     * outside the region (a call return, or a runtime entry) or from a block
+     * where tracking had already stopped. Their x87 forms cannot be emitted
+     * for a top the region does not know, so they get no entry of their own
+     * and the runtime forms a region for them at the top the machine has.
+     */
+    unknownBlocks(){
+        const x = this.x87;
+        if (!x.active)
+        {
+            return [];
+        }
+        return x.states.flatMap((state, index)=>state === null ? [index] : []);
     }
 
     /**
