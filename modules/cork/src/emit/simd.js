@@ -265,6 +265,27 @@ function emitForm(e, instruction, flagsLive){
             writeV(e, dst, null);
             return true;
         }
+        case 'addsubps': case 'addsubpd':
+        {
+            // Alternating subtract and add: the even lanes from a - b, the
+            // odd from a + b, picked out of the two results by a shuffle.
+            const double = op.endsWith('pd');
+            const difference = e.vecTempLocal(2);
+            readV(e, dst, 16);
+            b.localSet(vecTemp(e));
+            readV(e, src, 16);
+            b.localSet(vecTemp2(e));
+            b.localGet(vecTemp(e)).localGet(vecTemp2(e));
+            simd(double ? SIMD.f64x2Sub : SIMD.f32x4Sub).localSet(difference);
+            b.localGet(vecTemp(e)).localGet(vecTemp2(e));
+            simd(double ? SIMD.f64x2Add : SIMD.f32x4Add).localSet(vecTemp2(e));
+            b.localGet(difference).localGet(vecTemp2(e));
+            shuffle(double
+                ? [0, 1, 2, 3, 4, 5, 6, 7, 24, 25, 26, 27, 28, 29, 30, 31]
+                : [0, 1, 2, 3, 20, 21, 22, 23, 8, 9, 10, 11, 28, 29, 30, 31]);
+            writeV(e, dst, null);
+            return true;
+        }
         case 'cvtpd2pi': case 'cvttpd2pi':
         {
             // Two doubles to two dwords in an MMX register, each through the

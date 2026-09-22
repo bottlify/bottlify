@@ -182,7 +182,7 @@ that form, the MMX one (the exponent and sign all ones, as the processor leaves 
 relaxed double. An MMX instruction
 holds every x87 register with the top at zero, as the processor does, and `emms` empties them
 again, whichever order the two come in within one run, and leaves the top at the zero the MMX
-instruction set -- leaving the MMX state does not undo it. `fxsave` and `fxrstor` still end a region and run on the emulator. A store translated code makes into a page the emulator's own compiler compiled is
+instruction set -- leaving the MMX state does not undo it. `fxsave`, `fxrstor` and `fbld` still end a region and run on the fallback; `fbstp` writes its packed BCD through the BCD helper the shared helpers module carries. The stubs cork answers itself -- `cpuid` (the pinned emulator's own leaves, `src/cpuid.js`), `rdtsc`, `xlat`, `addsubps`/`addsubpd` -- are lowered in the emitter and modelled in the interpreter, as `int n`/`int3`/`into`, `bound`, `hlt`, `ud2` and the string forms are. A store translated code makes into a page the emulator's own compiler compiled is
 seen too: the store checks the emulator's byte-per-page "has code" table beside the
 translator's own flags (`layout.codePages`, the fork's `bottlify_page_has_code_ptr`) and
 leaves `stale` with the address and width, and the runtime dirties the emulator's cache for

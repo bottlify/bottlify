@@ -21,6 +21,7 @@
  */
 
 import { AF, CF, DF, OF, PF, SF, ZF, conditionReads } from './decode/table.js';
+import { cpuidLeaf } from './cpuid.js';
 import { evaluateX87, isX87Op } from './ir-x87.js';
 import { evaluateSimd, isSimdOp, mmxState } from './ir-simd.js';
 
@@ -724,6 +725,129 @@ export function evaluate(instruction, state){
             return;
         case 'salc':
             write({ kind: 'reg', size: 1, reg: 0, high: false }, cf ? 0xff : 0);
+            return;
+        case 'arpl':
+        {
+            const selector = read(operands[0]) & 0xffff;
+            const requested = read(operands[1]) & 3;
+            if ((selector & 3) < requested)
+            {
+                write(operands[0], (selector & ~3 | requested) & 0xffff);
+                state.eflags |= ZF;
+            }
+            else
+            {
+                state.eflags &= ~ZF;
+            }
+            return;
+        }
+        case 'daa': case 'das':
+        {
+            const add = op === 'daa';
+            const al = state.reg[0] & 0xff;
+            const oldCf = (state.eflags & CF) !== 0;
+            let carry = oldCf;
+            let aux = (state.eflags & AF) !== 0;
+            let value = al;
+            if ((al & 0xf) > 9 || aux)
+            {
+                if (add)
+                {
+                    value += 6;
+                    if (value > 0xff)
+                    {
+                        carry = true;
+                    }
+                }
+                else
+                {
+                    value -= 6;
+                    if (al < 6)
+                    {
+                        carry = true;
+                    }
+                }
+                aux = true;
+            }
+            if (al > 0x99 || oldCf)
+            {
+                value += add ? 0x60 : -0x60;
+                carry = true;
+            }
+            const result = value & 0xff;
+            state.reg[0] = (state.reg[0] & 0xffffff00 | result) >>> 0;
+            state.eflags = logicFlags(result, 1) | (carry ? CF : 0) | (aux ? AF : 0);
+            return;
+        }
+        case 'aaa': case 'aas':
+        {
+            const ax = state.reg[0] & 0xffff;
+            let value = ax;
+            let adjusted = false;
+            if ((ax & 0xf) > 9 || (state.eflags & AF) !== 0)
+            {
+                value = (ax + (op === 'aaa' ? 0x106 : -0x106)) & 0xffff;
+                adjusted = true;
+            }
+            value &= 0xff0f;
+            state.reg[0] = (state.reg[0] & 0xffff0000 | value) >>> 0;
+            state.eflags = logicFlags(value & 0xff, 1)
+                | (adjusted ? CF | AF : 0);
+            return;
+        }
+        case 'aam': case 'aad':
+        {
+            const base = /** @type {number} */ (operands[0].value);
+            const al = state.reg[0] & 0xff;
+            let result;
+            if (op === 'aam')
+            {
+                if (base === 0)
+                {
+                    throw new Fault(0, instruction.eip);
+                }
+                result = (Math.floor(al / base) << 8 | al % base) & 0xffff;
+                state.reg[0] = (state.reg[0] & 0xffff0000 | result) >>> 0;
+            }
+            else
+            {
+                const ah = state.reg[0] >>> 8 & 0xff;
+                result = (al + ah * base) & 0xff;
+                // AH is cleared: the whole low word is the new AL.
+                state.reg[0] = (state.reg[0] & 0xffff0000 | result) >>> 0;
+            }
+            state.eflags = logicFlags(result & 0xff, 1);
+            return;
+        }
+        case 'xlat':
+        {
+            const base = state.reg[3];
+            let at = (base + (state.reg[0] & 0xff)) >>> 0;
+            if (operands[0].addressSize === 16)
+            {
+                at &= 0xffff;
+            }
+            if (operands[0].segment === 4)
+            {
+                at = (at + state.fsBase) >>> 0;
+            }
+            state.reg[0] = (state.reg[0] & 0xffffff00 | state.memory.read(at, 1)) >>> 0;
+            return;
+        }
+        case 'cpuid':
+        {
+            const answer = cpuidLeaf(state.reg[0]);
+            state.reg[0] = answer.eax;
+            state.reg[1] = answer.ecx;
+            state.reg[2] = answer.edx;
+            state.reg[3] = answer.ebx;
+            return;
+        }
+        case 'rdtsc':
+            // The timestamp counter's low and high words; this layer's import
+            // answers zero today, which is what the emulator host reads too.
+            state.reg[0] = 0;
+            state.reg[2] = 0;
             return;
         default:
             if (op.startsWith('set') && instruction.cc !== undefined)

@@ -928,7 +928,45 @@ export function evaluateX87(instruction, state, address){
             }
             return true;
         }
-        case 'fxsave': case 'fxrstor': case 'fbld': case 'fbstp':
+        case 'fbstp':
+        {
+            // ST(0) as an 18-digit packed BCD integer, rounded by the control
+            // word, ten bytes least significant first with the sign last; a
+            // NaN or a value past 999 999 999 999 999 999 stores the 80-bit
+            // integer indefinite, as the processor does.
+            const value = orIndefinite(st(0), guard(state, [0], false));
+            const where = address(dst);
+            const rounded = roundBy(value, state.control);
+            const magnitude = Math.abs(rounded);
+            if (!(magnitude < 1e18))
+            {
+                state.status |= Status.IE;
+                for (let i = 0; i < 9; i++)
+                {
+                    state.memory.write(where + i, 1, i === 7 ? 0xc0 : i === 8 ? 0xff : 0);
+                }
+                state.memory.write(where + 9, 1, 0xff);
+            }
+            else
+            {
+                let rest = Math.trunc(magnitude);
+                const bytes = new Uint8Array(10);
+                for (let i = 0; i < 18; i++)
+                {
+                    const digit = rest % 10;
+                    rest = Math.floor(rest / 10);
+                    bytes[i >> 1] |= digit << ((i & 1) * 4);
+                }
+                bytes[9] = (bits(value) >> 63n) !== 0n ? 0x80 : 0;
+                for (let i = 0; i < 10; i++)
+                {
+                    state.memory.write(where + i, 1, bytes[i]);
+                }
+            }
+            popN(1);
+            return true;
+        }
+        case 'fxsave': case 'fxrstor': case 'fbld':
             return false;
         default:
             return false;

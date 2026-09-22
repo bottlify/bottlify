@@ -24,16 +24,16 @@
 
 import { ValType, ModuleBuilder } from '../wasm/encoder.js';
 import { addMaterialiseHelper } from './flags.js';
-import { addF80Helpers, addRoundHelper } from './x87.js';
+import { addBcdHelper, addF80Helpers, addRoundHelper } from './x87.js';
 import { addCodeHitHelper } from './memory.js';
 
 /** The imported helper names, in the order a region module imports them. */
 export const HELPER_NAMES = Object.freeze([
-    'materialise', 'f80ToF64', 'f64ToF80', 'round', 'codeHit',
+    'materialise', 'f80ToF64', 'f64ToF80', 'round', 'codeHit', 'f64ToBcd',
 ]);
 
 /**
- * Defines the five helpers in a module. Used to build the shared module; the
+ * Defines the helpers in a module. Used to build the shared module; the
  * signatures here and in `importHelpers` must agree.
  *
  * @param {ModuleBuilder} m
@@ -44,11 +44,12 @@ export function defineHelpers(m, layout){
     const { f80ToF64, f64ToF80 } = addF80Helpers(m);
     const round = addRoundHelper(m);
     const codeHit = addCodeHitHelper(m, layout);
-    return { materialise, f80ToF64, f64ToF80, round, codeHit };
+    const f64ToBcd = addBcdHelper(m);
+    return { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd };
 }
 
 /**
- * The shared helpers module: an imported memory and the five exports.
+ * The shared helpers module: an imported memory and the exports.
  *
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @returns {Uint8Array}
@@ -65,12 +66,12 @@ export function buildHelpersModule(layout){
 }
 
 /**
- * Imports the five helpers into a region module, answering the indices the
+ * Imports the helpers into a region module, answering the indices the
  * emitter calls through. The signatures mirror `defineHelpers`'.
  *
  * @param {ModuleBuilder} m
  * @returns {{ materialise: number, f80ToF64: number, f64ToF80: number,
- *     round: number, codeHit: number }}
+ *     round: number, codeHit: number, f64ToBcd: number }}
  */
 export function importHelpers(m){
     const i32 = ValType.i32;
@@ -85,5 +86,7 @@ export function importHelpers(m){
         m.type({ params: [f64, i32], results: [f64] }));
     const codeHit = m.importFunction('env', 'codeHit',
         m.type({ params: [i32], results: [i32] }));
-    return { materialise, f80ToF64, f64ToF80, round, codeHit };
+    const f64ToBcd = m.importFunction('env', 'f64ToBcd',
+        m.type({ params: [f64, i32], results: [] }));
+    return { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd };
 }

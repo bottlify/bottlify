@@ -23,6 +23,7 @@
  */
 
 import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
+import { CPUID_LEAVES } from '../cpuid.js';
 import { EMPTY, ValType } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { Exit, Local } from './region.js';
@@ -114,6 +115,55 @@ export function emitInstruction(e, instruction, flagsLive){
         case 'hlt':
             e.exitAt(next, Exit.HALT);
             e.dead = true;
+            return true;
+        case 'xlat':
+        {
+            // AL = [EBX + AL], BX + AL with the address-size prefix, through
+            // DS unless an fs: override says otherwise.
+            b.localGet(Local.reg + 3);
+            b.localGet(Local.reg).i32const(0xff).op(I32.and).op(I32.add);
+            if (instruction.operands[0].addressSize === 16)
+            {
+                b.i32const(0xffff).op(I32.and);
+            }
+            if (instruction.operands[0].segment === 4)
+            {
+                b.i32const(0).load('i32', { offset: e.layout.fsBase }).op(I32.add);
+            }
+            b.localSet(Local.addr);
+            checkAccess(e, 1);
+            b.localGet(Local.reg).i32const(0xffffff00).op(I32.and);
+            b.localGet(Local.addr).load('i32_8u', { offset: e.layout.ramBase }).op(I32.or);
+            b.localSet(Local.reg);
+            return true;
+        }
+        case 'cpuid':
+        {
+            // The leaves the pinned emulator answers, as constants; a leaf
+            // with no entry answers four zeros. The leaf in eax is saved
+            // before the four registers are cleared and the known ones set.
+            b.localGet(Local.reg).localSet(Local.t1);
+            for (let index = 0; index < 4; index++)
+            {
+                b.i32const(0).localSet(Local.reg + index);
+            }
+            for (const [leaf, answer] of Object.entries(CPUID_LEAVES))
+            {
+                b.localGet(Local.t1).i32const(Number(leaf)).op(I32.eq);
+                e.openIf('cpuid', EMPTY);
+                b.i32const(answer.eax).localSet(Local.reg);
+                b.i32const(answer.ecx).localSet(Local.reg + 1);
+                b.i32const(answer.edx).localSet(Local.reg + 2);
+                b.i32const(answer.ebx).localSet(Local.reg + 3);
+                e.close();
+            }
+            return true;
+        }
+        case 'rdtsc':
+            // The timestamp counter's low and high words; this layer's import
+            // answers zero today, which is what the emulator host reads too.
+            b.i32const(0).localSet(Local.reg);
+            b.i32const(0).localSet(Local.reg + 2);
             return true;
         case 'mov':
             if (dst.kind === 'seg')

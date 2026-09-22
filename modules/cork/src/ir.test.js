@@ -332,3 +332,77 @@ test('int3, int n and the trap port', ()=>{
     assert.deepEqual(m.state.trapped, [7]);
     assert.equal(m.state.retired, 3);
 });
+
+test('arpl raises the RPL and sets ZF, or leaves both', ()=>{
+    // mov ax, 0x10; mov cx, 3; arpl ax, cx
+    let m = run([0x66, 0xb8, 0x10, 0, 0x66, 0xb9, 0x03, 0, 0x63, 0xc8]);
+    assert.equal(m.state.reg[0] & 0xffff, 0x13);
+    assert.equal(m.state.eflags & ZF, ZF);
+    m = run([0x66, 0xb8, 0x13, 0, 0x66, 0xb9, 0x01, 0, 0x63, 0xc8]);
+    assert.equal(m.state.reg[0] & 0xffff, 0x13);
+    assert.equal(m.state.eflags & ZF, 0);
+});
+
+test('daa, aam, aad and aad clearing AH', ()=>{
+    const daa = run([0xb0, 0x9a, 0x27]); // mov al, 0x9a; daa
+    assert.equal(daa.state.reg[0] & 0xff, 0);
+    assert.equal(daa.state.eflags & (CF | AF | ZF), CF | AF | ZF);
+    const aam = run([0xb0, 44, 0xd4, 10]); // mov al, 44; aam 10
+    assert.equal(aam.state.reg[0] & 0xffff, 0x0404);
+    // mov ax, 0x0404; aad 10 leaves 44 in AL and zero in AH.
+    const aad = run([0x66, 0xb8, 0x04, 0x04, 0xd5, 10]);
+    assert.equal(aad.state.reg[0] & 0xffff, 44);
+    // aad 0 must still clear AH: mov ax, 0x1b04; aad 0 -> 0x0004.
+    const base0 = run([0x66, 0xb8, 0x04, 0x1b, 0xd5, 0]);
+    assert.equal(base0.state.reg[0] & 0xffff, 4);
+    assert.throws(()=>run([0xd4, 0x00]),
+        (/** @type {any} */ e)=>e instanceof Fault && e.vector === 0);
+});
+
+test('xlat reads [ebx + al]', ()=>{
+    const m = run([0xd7], state=>{
+        state.reg[3] = 0x2000;
+        state.reg[0] = 5;
+        state.memory.write(0x2005, 1, 0xab);
+    });
+    assert.equal(m.state.reg[0] & 0xff, 0xab);
+});
+
+test('cpuid and rdtsc answer without a crossing', ()=>{
+    const m = run([0xb8, 1, 0, 0, 0, 0x0f, 0xa2, 0x0f, 0x31]);
+    assert.equal(m.state.reg[0], 0); // rdtsc after cpuid
+    assert.equal(m.state.reg[2], 0);
+    const leaf = run([0xb8, 1, 0, 0, 0, 0x0f, 0xa2]);
+    assert.equal(leaf.state.reg[0], 0x00000673);
+    assert.equal(leaf.state.reg[1], 0xc0800001);
+    assert.equal(leaf.state.reg[2], 0x0780a979);
+    assert.equal(leaf.state.reg[3], 0x00010800);
+});
+
+test('addsubps subtracts the even lanes and adds the odd', ()=>{
+    const m = machine();
+    const instruction = decode(
+        address=>[0xf2, 0x0f, 0xd0, 0xc1][address - 0x1000] ?? 0, 0x1000);
+    if ('refused' in instruction)
+    {
+        throw new Error('addsubps refused');
+    }
+    new Float32Array(m.state.xmm.buffer, 0, 4).set([1, 2, 3, 4]);
+    new Float32Array(m.state.xmm.buffer, 16, 4).set([10, 20, 30, 40]);
+    evaluate(instruction, m.state);
+    assert.deepEqual([...new Float32Array(m.state.xmm.buffer, 0, 4)], [-9, 22, -27, 44]);
+});
+
+test('fbstp writes the packed BCD and its sign', ()=>{
+    // fld qword [0x2000]; fbstp [0x2010] with -1.5 there.
+    const bytes = new Uint8Array(8);
+    new DataView(bytes.buffer).setFloat64(0, -1.5, true);
+    const m = run([0xdd, 0x05, 0x00, 0x20, 0, 0, 0xdf, 0x35, 0x10, 0x20, 0, 0], state=>{
+        for (let i = 0; i < 8; i++)
+        {
+            state.memory.write(0x2000 + i, 1, bytes[i]);
+        }
+    });
+    assert.deepEqual([...m.ram.slice(0x2010, 0x201a)],
+        [2, 0, 0, 0, 0, 0, 0, 0, 0, 0x80]);
+});

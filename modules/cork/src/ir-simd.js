@@ -900,6 +900,33 @@ export function evaluateSimd(instruction, state, address){
             writeVector(state, dst, 16, address, out);
             return true;
         }
+        case 'addsubps': case 'addsubpd':
+        {
+            // Alternating subtract and add: the even lanes subtract, the odd
+            // lanes add, the source lane by lane.
+            const double = op.endsWith('pd');
+            const size = double ? 8 : 4;
+            const lanes = double ? 2 : 4;
+            const left = readVector(state, dst, 16, address);
+            const right = readVector(state, src, 16, address);
+            const out = new Uint8Array(16);
+            for (let i = 0; i < lanes; i++)
+            {
+                const x = double ? f64At(left, i * size) : f32At(left, i * size);
+                const y = double ? f64At(right, i * size) : f32At(right, i * size);
+                const value = (i & 1) === 0 ? x - y : x + y;
+                if (double)
+                {
+                    putF64(out, i * size, f64Value(value, [x, y]));
+                }
+                else
+                {
+                    putF32(out, i * size, f32Value(Math.fround(value), [x, y]));
+                }
+            }
+            writeVector(state, dst, 16, address, out);
+            return true;
+        }
         case 'cmpps': case 'cmppd': case 'cmpss': case 'cmpsd':
         {
             const double = op.endsWith('pd') || op.endsWith('sd');

@@ -351,13 +351,36 @@ test('fs-relative reads add the thread base, and 16-bit lea wraps', ()=>{
 
 test('an instruction the emitter leaves out ends the run at its address, state intact', ()=>{
     const m = createTestMachine();
-    m.write(CODE, [0xb8, 7, 0, 0, 0, 0x0f, 0xa2, 0xf4]); // mov eax, 7; cpuid; hlt
+    m.write(CODE, [0xb8, 7, 0, 0, 0, 0xec, 0xf4]); // mov eax, 7; in al, dx; hlt
     const exit = m.runProgram(CODE);
     assert.equal(exit.kind, -2, 'left out');
     assert.equal(exit.eip, CODE + 5);
     assert.equal(m.reg('eax'), 7);
-    assert.deepEqual([...exit.unsupported.keys()], ['0f a2'], 'named by its opcode');
+    assert.deepEqual([...exit.unsupported.keys()], ['ec'], 'named by its opcode');
     assert.equal(m.counter(), 1);
+});
+
+test('cpuid answers the pinned emulator\'s leaves and zero for the rest', ()=>{
+    const one = createTestMachine();
+    one.write(CODE, [0xb8, 1, 0, 0, 0, 0x0f, 0xa2, 0xf4]); // mov eax, 1; cpuid; hlt
+    assert.equal(one.runProgram(CODE).kind, 3);
+    assert.equal(one.reg('eax'), 0x00000673);
+    assert.equal(one.reg('ebx'), 0x00010800);
+    assert.equal(one.reg('ecx'), 0xc0800001);
+    assert.equal(one.reg('edx'), 0x0780a979);
+    const vendor = createTestMachine();
+    vendor.write(CODE, [0x31, 0xc0, 0x0f, 0xa2, 0xf4]); // xor eax, eax; cpuid; hlt
+    assert.equal(vendor.runProgram(CODE).kind, 3);
+    assert.equal(vendor.reg('ebx'), 0x756e6547);
+    assert.equal(vendor.reg('ecx'), 0x6c65746e);
+    assert.equal(vendor.reg('edx'), 0x49656e69);
+    const unknown = createTestMachine();
+    unknown.write(CODE, [0xb8, 0x21, 0, 0, 0, 0x0f, 0xa2, 0xf4]); // leaf 0x21
+    assert.equal(unknown.runProgram(CODE).kind, 3);
+    assert.equal(unknown.reg('eax'), 0);
+    assert.equal(unknown.reg('ebx'), 0);
+    assert.equal(unknown.reg('ecx'), 0);
+    assert.equal(unknown.reg('edx'), 0);
 });
 
 test('int3 and int n are left to the other executor, before the instruction', ()=>{
