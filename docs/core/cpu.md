@@ -164,6 +164,23 @@ address 0 today and the two engines must agree; marking it, and projecting the m
 layer's read-only regions into the table, is a policy switch this layer's owner throws when
 the emulator is no longer the reference for it.
 
+Under `engine: 'cork'` (milestone 5) nothing of the emulator is loaded. The engine module the
+configuration names (`engineUrl`) is loaded by URL at `boot()` like the emulator is, and
+`internal/cork-host.js` builds the translator's runtime over a `WebAssembly.Memory` of its own:
+`memorySize` of guest RAM with cork's 512-byte state block and tables *beside* it, not carved
+from the guest's RAM as hybrid carves the tables from the top of the emulator's. There is no
+boot ROM, so `boot()` needs no `moduleUrl`/`wasmBytes` and `romBase` is `-1`; the host sets the
+registers the ROM would have left (flat segments are implicit, `esp` at the initial stack,
+`eflags = 2`, the x87 control word and MXCSR at their defaults, every x87 register empty) and
+reads `eip` from the entry vector at the first slice, the way the ROM's indirect jump read it.
+The whole register file lives in the block, so a context is a copy of the block plus the halted
+flag and `fsBase` (`captureBlockContext`/`restoreBlockContext` in `internal/context.js`); a
+`fault` exit builds the fault record from the vector and the state the faulting instruction
+left, since there is no IDT and no frame to read. This step ships the host and a slice loop
+whose interpreter tier is a stub that refuses an address nothing has translated -- `cpu: cork
+has no tier for 0x… (…)` -- so a program fails loudly rather than running silently until the
+interpreter of 5.2 lands.
+
 ## 2. Contract
 
 | field      | value                    |
@@ -191,7 +208,7 @@ enter the type check or the bundle.
 | `thunkCapacity` | number (bytes)             | `16384 * 16`        | Room reserved for the stub table: 16 384 slots of 16 bytes. Every import and every COM method takes one; none is ever given back. |
 | `jit`           | `Record<number, number>`   | `undefined`         | The emulator's compiler budgets by config index (1 = pages one module may span, 3 = extra basic blocks discovery may follow, 6 = chaining). For measurement, not production. |
 | `sampling`      | `boolean`                  | `true`              | Whether `runSlice` credits an address bucket per slice (see "Sampling" below). Always on; `false` is the only way to turn it off, for a caller measuring the emulator itself. |
-| `engine`        | `'emulator' \| 'hybrid' \| 'cork' \| 'differential'` | `'emulator'` | Which execution engine runs the program (see "Engines" above). An unknown name is refused by `create()` with `cpu: unknown engine "x" (…)`; `cork` and `differential` are refused with `cpu: engine "cork" is not built yet` until their steps land. `hybrid` without `engineUrl` composes the emulator's host with no translator attached and runs a program exactly as `emulator` does, to the instruction. |
+| `engine`        | `'emulator' \| 'hybrid' \| 'cork' \| 'differential'` | `'emulator'` | Which execution engine runs the program (see "Engines" above). An unknown name is refused by `create()` with `cpu: unknown engine "x" (…)`; `differential` is refused with `cpu: engine "differential" is not built yet` until its step lands. `cork` runs with nothing of the emulator loaded (see "Engines" above); `boot()` under it needs no emulator artifacts and throws `cpu: engine "cork" needs an engineUrl` without one. `hybrid` without `engineUrl` composes the emulator's host with no translator attached and runs a program exactly as `emulator` does, to the instruction. |
 
 Chaining (index 6) is switched on automatically when the running engine validates a wasm tail
 call and the caller has not set the knob (`tailCallsSupported()` in `internal/v86-host.js`).

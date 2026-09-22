@@ -13,11 +13,21 @@
  * this file through a module URL in its configuration, never through an
  * import -- a launch that selects the emulator runs with this package absent.
  *
+ * Under `engine: 'cork'` (milestone 5) the core's cork host runs over a memory
+ * of its own rather than the emulator's, so it also needs the layout this
+ * package translates against and the arithmetic that sizes that memory. Those
+ * are re-exported here for the same reason `createEngine` is: the host reaches
+ * them through the module URL, never through an import.
+ *
  * @typedef {import('../../core/src/layers/cpu/engine.js').EngineEnv} EngineEnv
  * @typedef {import('../../core/src/layers/cpu/engine.js').Runtime} Runtime
  */
 
 import { createCorkRuntime } from './runtime/runtime.js';
+
+export {
+    ownLayout, pagesFor, layoutId, Tables, STATE_BLOCK_SIZE, PAGE,
+} from './runtime/layout.js';
 
 /**
  * Builds a runtime over the memory and layout the core hands in.

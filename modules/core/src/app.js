@@ -3163,15 +3163,24 @@ async function buildApp(options){
     const audio = core.api('audio');
     const input = core.api('input');
 
-    const emulator = emulatorArtifacts(options.v86);
-    await cpu.boot({
-        moduleUrl: emulator.moduleUrl,
-        wasmBytes: emulator.wasmBytes ?? await bytesAt(/** @type {string} */ (emulator.wasmUrl)),
-    });
+    if (options.engine === 'cork')
+    {
+        // Cork runs with nothing of the emulator loaded: its own host, its own
+        // memory, and the translator named by `engineUrl`.
+        await cpu.boot();
+    }
+    else
+    {
+        const emulator = emulatorArtifacts(options.v86);
+        await cpu.boot({
+            moduleUrl: emulator.moduleUrl,
+            wasmBytes: emulator.wasmBytes
+                ?? await bytesAt(/** @type {string} */ (emulator.wasmUrl)),
+        });
+    }
 
-    // Mounted after the emulator is up, because the decoder for a compressed
-    // block is inside it: zstd is the only decompressor available here that
-    // answers a guest's read without a promise.
+    // Mounted after the machine is up. A zstd block is decoded by this
+    // project's own decoder now, so the mount no longer needs the emulator.
     blocks = await mountBundle({ options, cpu, filesystem, events });
 
     // The session's files go onto the volume once it is the one the program
@@ -3242,11 +3251,15 @@ async function buildApp(options){
     // Our own boot ROM, so that a report can name it. A fault leaves the
     // processor standing in the stub behind its vector, and until this was here
     // that address came back as unmapped -- which sent every reader of a crash
-    // looking for a guest bug at an address belonging to the engine.
-    memory.register({
-        name: 'boot-rom', base: cpu.layout.romBase, size: cpu.layout.romSize,
-        kind: memory.RegionKind.LOW_MEM, access: memory.Access.READ_EXECUTE,
-    });
+    // looking for a guest bug at an address belonging to the engine. Cork has
+    // no ROM and so registers none.
+    if (cpu.layout.romSize > 0)
+    {
+        memory.register({
+            name: 'boot-rom', base: cpu.layout.romBase, size: cpu.layout.romSize,
+            kind: memory.RegionKind.LOW_MEM, access: memory.Access.READ_EXECUTE,
+        });
+    }
 
     // Every system module exists in guest memory before the program's first
     // instruction, not when something first asks for it. An address taken early
