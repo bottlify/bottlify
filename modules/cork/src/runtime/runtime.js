@@ -369,6 +369,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     let workerClosed = false;
     /** @type {{ id: number, metas: any[], store: any } | null} */
     let outstanding = null;
+    // A batch's store lookups are in flight: its bytes come back between
+    // frames, and until then no new batch is formed, so the batches publish in
+    // order and the waiting is never the slice's.
+    let storePending = false;
     let workerRequest = 0;
 
     /** The options both the inline emitter and the worker's take. */
@@ -565,6 +569,82 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }, ()=>{});
     }
 
+    /**
+     * The publish half of a batch, when its store lookups are back (or at
+     * once, without a store): the regions the store held are instantiated and
+     * published, and the rest are emitted -- on the worker if there is one,
+     * inline otherwise -- stored and published. Runs off the slice that
+     * requested the batch, so a region whose bytes are not back is not
+     * published this frame.
+     *
+     * @param {any[]} formed
+     * @param {any} store
+     * @returns {number} regions published
+     */
+    const finishBatch = (formed, store)=>{
+        if (workerClosed)
+        {
+            // The machine went away while the store's bytes were in flight.
+            return 0;
+        }
+        let published = 0;
+        for (const one of formed)
+        {
+            if (one.cached !== null)
+            {
+                published += applyBuilt(one, one.cached);
+            }
+        }
+        const unbuilt = formed.filter(one=>one.cached === null);
+        if (unbuilt.length > 0 && worker !== null)
+        {
+            // Off the frame thread: post the batch and answer with it later.
+            // The records are kept until then; nothing here waits.
+            outstanding = { id: ++workerRequest, metas: unbuilt, store };
+            worker.post({
+                id: outstanding.id,
+                jobs: unbuilt.map(one=>({ region: one.region, entryTop: one.entryTop })),
+                layout, features: found, options: emitOptions(),
+            }, []);
+            return published;
+        }
+        for (const one of unbuilt)
+        {
+            // One module per region: the unit the store keeps, and the unit
+            // dropped when a page moves.
+            /** @type {import('./emit-built.js').BuiltRegion} */
+            let built;
+            try
+            {
+                built = emitBuilt(one.region, one.entryTop, layout, found, emitOptions());
+            }
+            catch (e){
+                // The emitter's own defect on this code: named in the report
+                // rather than lost in a rejected promise, and the program runs
+                // on without the region.
+                refused[`emit at ${one.region.entry.toString(16)}: `
+                    + `${String(e).slice(0, 120)}`] = 1;
+                continue;
+            }
+            counts.emitMs += built.emitMs;
+            counts.encodeMs += built.encodeMs;
+            foldTranslation(built);
+            if (store !== null)
+            {
+                const storeAt = performance.now();
+                const key = cacheKey({
+                    version: CACHE_VERSION, features: found, layoutId: layout.id,
+                    bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
+                    hash: `${one.region.hash}-${one.entryTop}`,
+                });
+                store.put(key, packRegion(built)).catch(()=>{});
+                counts.storeMs += performance.now() - storeAt;
+            }
+            published += applyBuilt(one, built);
+        }
+        return published;
+    };
+
     return {
         pages,
         entryOf(eip, top = 0){
@@ -680,11 +760,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             worker = null;
             outstanding = null;
         },
+
+        /** @type {() => Promise<number>} */
         async translatePending(){
             // A batch is with the worker: its answer is published when it
             // comes back, so the engine never waits for it. Candidates
-            // formed in the meantime stay queued for the next call.
-            if (outstanding !== null)
+            // formed in the meantime stay queued for the next call. A
+            // batch's store lookups are likewise in flight: the next batch
+            // waits for them, so the pending ones publish in order.
+            if (outstanding !== null || storePending)
             {
                 return 0;
             }
@@ -753,91 +837,47 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null });
             }
             counts.formingMs += performance.now() - formedAt;
-            // The store first, for every region of the batch at once: the
-            // lookups are asynchronous and the emitter waits for none of them.
+            if (store === null)
+            {
+                return finishBatch(formed, null);
+            }
+            // The store's reads leave the slice path: the batch's records are
+            // requested here and the slice goes on. The batch is published
+            // when the bytes are back -- between frames, as instantiation
+            // already is -- and a region not back is not published this frame.
+            // `lookupMs` is the engine thread's own time to start them.
             const lookupAt = performance.now();
-            if (store !== null)
-            {
-                await Promise.all(formed.map(async one=>{
-                    const key = cacheKey({
-                        version: CACHE_VERSION, features: found, layoutId: layout.id, bundleId,
-                        entry: one.region.entry, hash: `${one.region.hash}-${one.entryTop}`,
-                    });
-                    try
-                    {
-                        const bytes = await store.get(key);
-                        one.cached = bytes === null ? null : unpackRegion(bytes);
-                    }
-                    catch {
-                        one.cached = null;
-                    }
-                    if (one.cached !== null)
-                    {
-                        counts.cacheHits++;
-                    }
-                    else
-                    {
-                        counts.cacheMisses++;
-                    }
-                }));
-            }
-            counts.lookupMs += performance.now() - lookupAt;
-            let published = 0;
-            for (const one of formed)
-            {
-                if (one.cached !== null)
-                {
-                    published += applyBuilt(one, one.cached);
-                }
-            }
-            const unbuilt = formed.filter(one=>one.cached === null);
-            if (unbuilt.length > 0 && worker !== null)
-            {
-                // Off the frame thread: post the batch and answer with it
-                // later. The records are kept until then; nothing here waits.
-                outstanding = { id: ++workerRequest, metas: unbuilt, store };
-                worker.post({
-                    id: outstanding.id,
-                    jobs: unbuilt.map(one=>({ region: one.region, entryTop: one.entryTop })),
-                    layout, features: found, options: emitOptions(),
-                }, []);
-                return published;
-            }
-            for (const one of unbuilt)
-            {
-                // One module per region: the unit the store keeps, and the
-                // unit dropped when a page moves.
-                /** @type {import('./emit-built.js').BuiltRegion} */
-                let built;
+            storePending = true;
+            Promise.all(formed.map(async one=>{
+                const key = cacheKey({
+                    version: CACHE_VERSION, features: found, layoutId: layout.id, bundleId,
+                    entry: one.region.entry, hash: `${one.region.hash}-${one.entryTop}`,
+                });
                 try
                 {
-                    built = emitBuilt(one.region, one.entryTop, layout, found, emitOptions());
+                    const bytes = await store.get(key);
+                    one.cached = bytes === null ? null : unpackRegion(bytes);
                 }
-                catch (e){
-                    // The emitter's own defect on this code: named in the
-                    // report rather than lost in a rejected promise, and the
-                    // program runs on without the region.
-                    refused[`emit at ${one.region.entry.toString(16)}: `
-                        + `${String(e).slice(0, 120)}`] = 1;
-                    continue;
+                catch {
+                    one.cached = null;
                 }
-                counts.emitMs += built.emitMs;
-                counts.encodeMs += built.encodeMs;
-                foldTranslation(built);
-                if (store !== null)
+                if (one.cached !== null)
                 {
-                    const storeAt = performance.now();
-                    const key = cacheKey({
-                        version: CACHE_VERSION, features: found, layoutId: layout.id,
-                        bundleId, entry: one.region.entry,
-                        hash: `${one.region.hash}-${one.entryTop}`,
-                    });
-                    store.put(key, packRegion(built)).catch(()=>{});
-                    counts.storeMs += performance.now() - storeAt;
+                    counts.cacheHits++;
                 }
-                published += applyBuilt(one, built);
-            }
-            return published;
+                else
+                {
+                    counts.cacheMisses++;
+                }
+            })).then(()=>{
+                storePending = false;
+                finishBatch(formed, store);
+            }, ()=>{
+                storePending = false;
+                finishBatch(formed, store);
+            });
+            counts.lookupMs += performance.now() - lookupAt;
+            return 0;
         },
         invalidatePage,
         /** @param {number} page */

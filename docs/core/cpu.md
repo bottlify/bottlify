@@ -106,9 +106,13 @@ unchanged. Candidates come from the sampler: once a frame, every 64-byte bucket 
 `cork.hotThreshold` instructions is handed to the translator at the exact address its last
 slice ended on, and the pending batch is formed and compiled, paced by frames
 (`cork.feed: 'frame'`, the default) or, for a run without a presenter such as a test, after
-every slice (`'slice'`), never inside one. Forming and the store lookup stay on the engine
-thread -- where the memory and the store are -- and the emitting and encoding of what the
-store did not hold go to a translation worker (`translator.worker.js`, opened where a
+every slice (`'slice'`), never inside one. Forming stays on the engine thread -- where the
+memory is -- and a batch's store lookups are *requested* there but not awaited: the slice
+goes on and the batch is published between frames when its bytes come back, so a region
+whose bytes are not back is simply not published this frame (`lookupMs` is the engine
+thread's own time to start the reads, not their wall time). The emitting and encoding of
+what the store did not hold go to a translation worker (`translator.worker.js`, opened
+where a
 `Worker` exists or through Node's `worker_threads`; `cork.worker` forces or forbids it,
 `cork.workerUrl` names the file), which takes the formed region out of the message and
 answers the module bytes and the record, so the engine thread never waits: a batch not back

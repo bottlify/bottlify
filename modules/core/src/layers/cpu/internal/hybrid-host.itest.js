@@ -407,3 +407,37 @@ test('the directory store takes the second run from its index and records', asyn
         + ` first run lookupMs ${before.lookupMs.toFixed(2)} (misses ${before.cacheMisses})`);
     await cpuModule.dispose();
 });
+
+test('a slice never awaits the store: it runs on while a batch\'s bytes are out', async()=>{
+    /** @type {() => void} */
+    let releaseLookup = ()=>{};
+    let lookups = 0;
+    /** @type {any} */
+    const store = {
+        get(){
+            lookups++;
+            return new Promise(resolve=>{
+                releaseLookup = ()=>resolve(null);
+            });
+        },
+        async put(){},
+    };
+    const machine = await booted(PROGRAM, GUEST_CODE,
+        { engine: 'hybrid', engineUrl: ENGINE, cork: { store, bundleId: 'itest' } });
+    // A slice leaves untranslated exits; a frame requests the store's bytes.
+    machine.api.runSlice(100_000);
+    const before = machine.api.instructionCount();
+    machine.metrics.sample();
+    assert.ok(lookups >= 1, `the store was asked (${lookups})`);
+    assert.equal(metricsOf().cork.regions, 0, 'nothing published while the bytes are out');
+    // The guest runs on interpreted: the lookup is the batch's, not the slice's.
+    machine.api.runSlice(100_000);
+    assert.ok(machine.api.instructionCount() > before, 'the guest ran on');
+    assert.equal(metricsOf().cork.regions, 0, 'still nothing published');
+    // The bytes come back, and the next frame publishes them.
+    releaseLookup();
+    await new Promise(resolve=>setTimeout(resolve, 20));
+    machine.metrics.sample();
+    assert.ok(metricsOf().cork.regions >= 1, 'published once the store answered');
+    await cpuModule.dispose();
+});
