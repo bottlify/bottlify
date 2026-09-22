@@ -11,7 +11,8 @@ and traps. Module machinery is described in [`README.md`](./README.md) and
 `cpu` owns the emulated processor: it boots the machine straight into 32-bit protected mode with a
 64 KiB ROM of its own (no BIOS), runs guest code in slices bounded by retired instructions, hands
 out guest-side call stubs that trap into the host, captures and restores a thread's complete CPU
-state, reports processor exceptions by name, and exposes the zstd decoder the emulator carries.
+state, reports processor exceptions by name, and exposes the zstd decoder the emulator carries
+(a compatibility accessor, leaving the api in 5.5; the bundle path no longer uses it).
 
 It deliberately does not know what a trap *means* (that table is the bridge's), when a thread
 should be switched (the kernel's), or what is mapped where (the memory layer's). It emits
@@ -223,7 +224,7 @@ otherwise.
 | `restoreContext` | `(context, threadBase) => void` | Restores a context, pointing FS at `threadBase` (the TEB). The TEB is a parameter so a restore that forgets it is not expressible. |
 | `resumeContextAt` | `(context, { eip, returnValue, esp? }) => void` | Redirects a saved context: EIP, EAX and optionally ESP. |
 | `newContext` | `({ entry, stackTop }) => Context` | A context for a thread that has not run: the current machine state as a template, positioned at its entry and stack. |
-| `decompressZstd` | `(packed, expectedLength) => Uint8Array` | Synchronous zstd decode through the emulator's own decoder. |
+| `decompressZstd` | `(packed, expectedLength) => Uint8Array` | Synchronous zstd decode through the emulator's own decoder. A compatibility accessor: a bundle block is decoded by `zstd.js` of this project's own now, and this leaves the api in 5.5. |
 | `instructionCount` | `() => number` | Instructions retired since boot, exact past the emulator's own 32-bit counter. |
 | `compiledModules` / `interpretedSteps` / `hostWrittenBytes` | `() => number` | Compiler and host-write counters (see diagnostics). |
 | `profile` | `{ available, start, stop, read, instructionStats }` | The emulator's address-weighted profile and event counters, present only in a profiler build of the emulator. |
@@ -409,11 +410,13 @@ decides between the two by asking its region map whether the target could ever b
 
 ### zstd
 
-The emulator's wasm exports the zstd decoder it reads compressed disk images with.
-`decompressZstd` uses it synchronously in 64 KiB chunks, allocating and freeing its context and
-output within the emulator's linear memory before returning. This is the only decompressor
-available that answers without a promise, which a guest file read needs — the CPU is stopped
-inside one instruction and cannot await.
+A guest file read needs a decompressor that answers without a promise — the CPU is stopped
+inside one instruction and cannot await. The bundle path is served by `modules/core/src/zstd.js`,
+a decode-only zstd implementation of this project's own (frame, block, literal, Huffman and FSE
+decoding; no dictionaries, the checksum read and not verified). It replaced the decoder the
+emulator's wasm happened to carry, so the default path no longer depends on the emulator for it.
+The cpu api's `decompressZstd` still uses the emulator's decoder in 64 KiB chunks for
+compatibility; it has no caller left and leaves the api in 5.5.
 
 ### What of `vendor/v86` is used
 

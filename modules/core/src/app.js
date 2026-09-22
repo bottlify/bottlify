@@ -27,6 +27,7 @@ import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
 import { resolveTranslationStore } from './layers/cpu/internal/translation-store.js';
 import { createBlockCache, resolveBlockStore }
     from './layers/filesystem/internal/bundle/cache.js';
+import { decompressZstd } from './zstd.js';
 
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
@@ -1633,7 +1634,7 @@ function expectIndex(expected){
  *                     refetched: () => { blocks: number, bytes: number },
  *                     ranges: () => { requests: number, bytes: number } } | null>}
  */
-async function mountBundle({ options, cpu, filesystem, events }){
+async function mountBundle({ options, filesystem, events }){
     if (!options.bundle?.fetch)
     {
         return null;
@@ -1649,11 +1650,14 @@ async function mountBundle({ options, cpu, filesystem, events }){
     /**
      * A block, turned back into bytes, without awaiting anything.
      *
-     * zstd is decoded here because the emulator carries a decoder that answers
-     * synchronously. Deflate has no synchronous decoder in a browser at all, so
-     * a deflate block is inflated when it is *fetched* -- which is already an
-     * asynchronous step -- and by the time a read reaches it, it is plain. That
-     * is why codec 1 is passed through rather than refused.
+     * zstd is decoded here by this project's own decoder (`zstd.js`), which
+     * answers synchronously; it replaced the one the emulator's wasm happened
+     * to carry, so the default path no longer needs the emulator for it. The
+     * cpu api's `decompressZstd` stays until 5.5, when it leaves. Deflate has
+     * no synchronous decoder in a browser at all, so a deflate block is
+     * inflated when it is *fetched* -- which is already an asynchronous step --
+     * and by the time a read reaches it, it is plain. That is why codec 1 is
+     * passed through rather than refused.
      *
      * @param {number} codec
      * @param {Uint8Array} bytes
@@ -1662,7 +1666,7 @@ async function mountBundle({ options, cpu, filesystem, events }){
     const decode = (codec, bytes, expectedLength)=>{
         if (codec === 2)
         {
-            return cpu.decompressZstd(bytes, expectedLength ?? 0);
+            return decompressZstd(bytes, expectedLength ?? 0);
         }
         return bytes;
     };
