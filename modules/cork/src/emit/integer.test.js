@@ -299,6 +299,41 @@ test('rep stops on a compare and leaves the count and pointers at the stop', ()=
     assert.equal(r.m.eflags() >>> 6 & 1, 0, 'ZF is clear: the bytes differ');
 });
 
+test('the direction flag runs a rep backwards, and the first iteration always runs', ()=>{
+    // std; rep movsb with the pointers at the top of their runs. The first
+    // iteration runs -- there is no count test before it for a nonzero count
+    // -- and each step then moves backwards, leaving both pointers one below
+    // the run's start.
+    const r = both([
+        0xbe, 0x02, 0x20, 0, 0, // mov esi, 0x2002
+        0xbf, 0x02, 0x30, 0, 0, // mov edi, 0x3002
+        0xb9, 3, 0, 0, 0,       // mov ecx, 3
+        0xfd,                   // std
+        0xf3, 0xa4,             // rep movsb
+        0xf4,
+    ], { memory: [[0x2000, [1, 2, 3]], [0x3000, [0, 0, 0]]] });
+    assert.equal(r.exit.kind, 3);
+    agree(r);
+    assert.deepEqual([...r.m.read(0x3000, 3)], [1, 2, 3], 'copied backwards in place');
+    assert.equal(r.m.reg('esi'), 0x2000 - 1, 'one below the source run');
+    assert.equal(r.m.reg('edi'), 0x3000 - 1, 'one below the destination run');
+    assert.equal(r.m.reg('ecx'), 0, 'the count ran out');
+
+    // A count of one still runs the body once and moves one pointer step.
+    const one = both([
+        0xb8, 0x41, 0, 0, 0,    // mov eax, 'A'
+        0xbf, 0x00, 0x40, 0, 0, // mov edi, 0x4000
+        0xb9, 1, 0, 0, 0,       // mov ecx, 1
+        0xf3, 0xaa,             // rep stosb
+        0xf4,
+    ]);
+    assert.equal(one.exit.kind, 3);
+    agree(one);
+    assert.deepEqual([...one.m.read(0x4000, 1)], [0x41]);
+    assert.equal(one.m.reg('edi'), 0x4001);
+    assert.equal(one.m.reg('ecx'), 0);
+});
+
 test('fs-relative reads add the thread base, and 16-bit lea wraps', ()=>{
     const m = createTestMachine();
     m.write(CODE, [
