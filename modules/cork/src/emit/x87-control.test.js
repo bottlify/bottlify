@@ -133,6 +133,14 @@ test('frndint rounds by the control word; fscale scales by a power of two', ()=>
     const neg = run([0xdd, 0x05, 0x00, 0x20, 0, 0, 0xdd, 0x05, 0x08, 0x20, 0, 0, 0xd9, 0xfd],
         { data: [...f64bytes(-2.7), ...f64bytes(8)] });
     assert.equal(neg.st(0), 2, 'the scale is truncated toward zero: 8 * 2^-2');
+    // A scale past the double's range saturates rather than wrapping: the
+    // clamped two-step power still reaches the ends.
+    const huge = run([0xdd, 0x05, 0x00, 0x20, 0, 0, 0xdd, 0x05, 0x08, 0x20, 0, 0, 0xd9, 0xfd],
+        { data: [...f64bytes(2000), ...f64bytes(1)] });
+    assert.equal(huge.st(0), Infinity, '2^2000');
+    const tiny = run([0xdd, 0x05, 0x00, 0x20, 0, 0, 0xdd, 0x05, 0x08, 0x20, 0, 0, 0xd9, 0xfd],
+        { data: [...f64bytes(-2000), ...f64bytes(1)] });
+    assert.equal(tiny.st(0), 0, '2^-2000 underflows to zero');
 });
 
 test('fxtract splits a value; of zero it gives -inf and the zero-divide flag', ()=>{
@@ -191,4 +199,35 @@ test('a spread of doubles through fistp under every rounding mode agrees with JS
             assert.equal(r.u32(DATA + 8) | 0, expect(value) | 0, `${value} under ${rc}`);
         }
     }
+});
+
+test('fprem1 puts the rounded quotient\'s low bits in C0, C3 and C1', ()=>{
+    // fld qword [DATA]; fld qword [DATA+8]; fprem1; fnstsw ax
+    const FREM1 = [0xdd, 0x05, 0x00, 0x20, 0, 0, 0xdd, 0x05, 0x08, 0x20, 0, 0,
+        0xd9, 0xf5, 0xdf, 0xe0];
+    /** @param {number} divisor @param {number} dividend @param {number} bits */
+    const q = (divisor, dividend, bits)=>{
+        const r = run(FREM1, { data: [...f64bytes(divisor), ...f64bytes(dividend)] });
+        assert.equal(r.m.reg('eax') & 0x4700, bits, `${dividend} mod ${divisor}`);
+    };
+    q(3, 10, 0x4200);   // 10/3 rounds to 3 = 011b: C3 (Q1) and C1 (Q0)
+    q(3, 4, 0x0200);    // 4/3 rounds to 1 = 001b: C1
+    q(4, 10, 0x4000);   // 10/4 rounds to even 2 = 010b: C3
+});
+
+test('precision control at single rounds the memory and reversed arithmetic forms too', ()=>{
+    // fld qword [DATA]; fsubr qword [DATA+8]; fstp qword [DATA+16]
+    const subr = [0xdd, 0x05, 0x00, 0x20, 0, 0, 0xdc, 0x2d, 0x08, 0x20, 0, 0,
+        0xdd, 0x1d, 0x10, 0x20, 0, 0];
+    const data = [...f64bytes(1 / 3), ...f64bytes(2 / 3)];
+    const single = run(subr, { data, control: 0x37f & ~0x300 });
+    assert.equal(single.f64(DATA + 16), Math.fround(2 / 3 - 1 / 3),
+        '2/3 - 1/3 rounded to a float');
+    const exact = run(subr, { data });
+    assert.equal(exact.f64(DATA + 16), 2 / 3 - 1 / 3, 'the double under PC = 53');
+    // fld qword [DATA]; fmul qword [DATA+8]; fstp qword [DATA+16]
+    const mul = [0xdd, 0x05, 0x00, 0x20, 0, 0, 0xdc, 0x0d, 0x08, 0x20, 0, 0,
+        0xdd, 0x1d, 0x10, 0x20, 0, 0];
+    const product = run(mul, { data, control: 0x37f & ~0x300 });
+    assert.equal(product.f64(DATA + 16), Math.fround(1 / 3 * (2 / 3)));
 });

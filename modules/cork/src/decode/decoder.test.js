@@ -334,6 +334,16 @@ test('x87: register forms by the modrm byte, memory forms by /r', ()=>{
     assert.equal(at([0xd9, 0xc8]).operands[1].reg, 0, 'fxch st0');
 });
 
+test('bound decodes its register form too, as the emulator consumes it', ()=>{
+    const memory = at([0x62, 0x10]);          // bound edx, [eax]
+    assert.equal(memory.op, 'bound');
+    assert.equal(memory.operands[1].kind, 'mem');
+    const register = at([0x62, 0xd0]);        // bound edx, eax
+    assert.equal(register.op, 'bound');
+    assert.deepEqual(register.operands.map(operand=>operand.kind), ['reg', 'reg']);
+    assert.equal(register.memory, false);
+});
+
 test('the refusals name the opcode and the reason', ()=>{
     assert.deepEqual(refused([0xff, 0xf8]),
         { refused: true, eip: 0, opcode: 'ff /7', reason: 'not in table' });

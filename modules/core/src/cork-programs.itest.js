@@ -59,9 +59,11 @@ function buildLoopExe(){
 /**
  * Calls an import nothing claims -- which returns zero through the stubs so a
  * callback or an unresolved import's return is the shape -- and then returns
- * into the entry vector, where `BOUND` sits. The emulator's decoder consumes
- * that instruction and carries on, so cork must too: the program exits 42 on
- * both. This is the path the real-route run stopped on at 0x7000.
+ * into the entry vector, where `BOUND` sits in its register form (`62 d0`, the
+ * low byte of an entry point followed by a register ModRM, exactly what the
+ * real route's vector held). The emulator's decoder consumes that instruction
+ * and carries on, so cork must too: the program exits 42 on both. This is the
+ * path the real-route run stopped on at 0x7000.
  */
 function buildVectorReturnExe(){
     return buildExe({
@@ -70,8 +72,8 @@ function buildVectorReturnExe(){
         codeSize: 0x80,
         code: ({ iat, code })=>{
             const atExit = code(0x40);
-            const rel = atExit - 0x7007; // the jmp after `62 10`, from 0x7002
-            const first = ((rel & 0xff) << 24 | 0x00e91062) >>> 0; // 62 10 e9 rel0
+            const rel = atExit - 0x7007; // the jmp after `62 d0`, from 0x7002
+            const first = ((rel & 0xff) << 24 | 0x00e9d062) >>> 0; // 62 d0 e9 rel0
             const second = rel >>> 8;
             const atJmp = code(26);
             return [
@@ -158,6 +160,14 @@ for (const name of ['qsort.exe', 'threads.exe'])
                 + ` instantiate ${cork.cork.instantiateMs.toFixed(0)},`
                 + ` publish ${cork.cork.publishMs.toFixed(0)},`
                 + ` worker ${cork.cork.workerMs.toFixed(0)})`);
+            const targets = /** @type {{ address: number, count: number, reason: string }[]} */ (
+                cork.cork.exitsByTarget ?? []);
+            if (targets.length > 0)
+            {
+                console.log(`${name} exits by target: `
+                    + targets.slice(0, 8).map(row=>`0x${row.address.toString(16)}`
+                        + `:${row.reason}x${row.count}`).join(' '));
+            }
         });
 }
 

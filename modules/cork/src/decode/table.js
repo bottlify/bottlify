@@ -230,7 +230,12 @@ for (let reg = 0; reg < 8; reg++)
 }
 ONE_BYTE[0x60] = I('pushad');
 ONE_BYTE[0x61] = I('popad');
-ONE_BYTE[0x62] = I('bound', 'Gv,Ma', 'none', 'trap');
+// bound's second operand is a memory pair (`Ma`) on paper, but the emulator's
+// decoder consumes the register form too -- it neither reads the pair nor
+// raises #BR -- and a lost thread running the entry vector's bytes reaches
+// exactly that form (`62 d0`). `Ev` decodes both; the model and the emitter
+// treat the whole instruction as the no-op the emulator makes of it.
+ONE_BYTE[0x62] = I('bound', 'Gv,Ev', 'none', 'trap');
 // arpl: legal at every privilege level, and in the corpus; it adjusts a
 // selector's requested privilege and says whether it did.
 ONE_BYTE[0x63] = I('arpl', 'Ew,Gw', { r: 0, w: ZF, u: 0 });

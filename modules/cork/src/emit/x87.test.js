@@ -329,3 +329,24 @@ test('a push onto a full stack sets C1, and a push that fits clears it', ()=>{
     assert.equal(cleared.status() & 0x200, 0, 'a push that fits cleared C1');
 });
 
+test('an empty source register faults: IE and SF, the indefinite, the mask kept', ()=>{
+    // fadd st0, st1 with both registers empty (a fresh FPU).
+    const both = run([0xd8, 0xc1, 0xdf, 0xe0]);            // fadd; fnstsw ax
+    assert.equal(both.exit.kind, 3, `left out ${[...both.exit.unsupported]}`);
+    assert.equal(both.m.reg('eax') & 0x41, 0x41, 'IE and SF');
+    assert.ok(Number.isNaN(both.st(0)), 'the indefinite into ST(0)');
+    assert.equal(both.empty(), 0xff, 'the empty mask is unchanged');
+    // fld1; ffree st0; fadd st0, st0 -- the source emptied by hand.
+    const freed = run([0xd9, 0xe8, 0xdd, 0xc0, 0xd8, 0xc0, 0xdf, 0xe0]);
+    assert.equal(freed.exit.kind, 3, `left out ${[...freed.exit.unsupported]}`);
+    assert.equal(freed.m.reg('eax') & 0x41, 0x41, 'IE and SF again');
+    assert.ok(Number.isNaN(freed.st(0)));
+    assert.equal(freed.empty(), 0xff);
+    // fld1; fcom st1 with st1 empty: IE and SF are raised, and ST(0) is left
+    // as it was (a compare reads, it does not write).
+    const compared = run([0xd9, 0xe8, 0xd8, 0xd1, 0xdf, 0xe0]); // fld1; fcom st1; fnstsw ax
+    assert.equal(compared.exit.kind, 3, `left out ${[...compared.exit.unsupported]}`);
+    assert.equal(compared.m.reg('eax') & 0x41, 0x41, 'IE and SF from the empty compare');
+    assert.equal(compared.st(0), 1, 'ST(0) is left as it was');
+});
+

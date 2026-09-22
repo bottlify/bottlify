@@ -26,6 +26,7 @@
 
 import { formRegion } from '../region.js';
 import { mathImports } from '../emit/region.js';
+import { decode } from '../decode/decoder.js';
 import { isX87, trackRegion } from '../emit/x87.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { emitBuilt } from './emit-built.js';
@@ -110,6 +111,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const barren = new Set();
     /** @type {Map<number, number>} untranslated exits by target address */
     const misses = new Map();
+    // The untranslated exits by target address over the whole run, for the
+    // diagnostics' histogram: the misses are forgotten when they become
+    // candidates, but what the translator never reached is exactly what this
+    // is read for. Bounded like `misses`; the coldest target makes room.
+    const exitTargets = new Map();
+    const EXIT_TARGETS_CAP = 4096;
     // How many addresses the untranslated-exit count holds at once. A real
     // program leaves for millions of addresses and the map filled in seconds;
     // the old rule stopped recording new ones once it did, so no address
@@ -285,6 +292,51 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const translatable = address=>(pages.get(address >>> 12)
         & (PageFlag.VOLATILE | PageFlag.INACCESSIBLE)) === 0;
 
+    /**
+     * Why the translator has no entry at an untranslated exit's target, the
+     * histogram's second column: the page is volatile (or beyond RAM), the
+     * address formed nothing (`barren`), it is queued and not yet formed, an
+     * entry stands at another x87 top, or the decoder refuses its first
+     * instruction (`cpuid`, `rdtsc`, `int n`, the `fs:`-forms -- plan 4.2's
+     * list). Anything else is not known.
+     *
+     * @param {number} address
+     * @returns {string}
+     */
+    const missReason = address=>{
+        if (pages.get(address >>> 12) & PageFlag.VOLATILE)
+        {
+            return 'volatile';
+        }
+        if (!translatable(address))
+        {
+            return 'inaccessible';
+        }
+        if (barren.has(address))
+        {
+            return 'barren';
+        }
+        for (const eip of queue.values())
+        {
+            if (eip === address)
+            {
+                return 'queued';
+            }
+        }
+        for (let top = 0; top < 8; top++)
+        {
+            if (entries.entryOf(address, top) >= 0)
+            {
+                return 'other-top';
+            }
+        }
+        if (typeof read === 'function' && 'refused' in decode(byte=>read(byte), address))
+        {
+            return 'refused';
+        }
+        return 'unknown';
+    };
+
     // The translation worker: forming and the store lookup stay on the engine
     // thread, where the memory and the store are, and the emitting and
     // encoding of what the store did not hold go to a worker. The engine
@@ -317,6 +369,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     let workerClosed = false;
     /** @type {{ id: number, metas: any[], store: any } | null} */
     let outstanding = null;
+    // A batch's store lookups are in flight: its bytes come back between
+    // frames, and until then no new batch is formed, so the batches publish in
+    // order and the waiting is never the slice's.
+    let storePending = false;
     let workerRequest = 0;
 
     /** The options both the inline emitter and the worker's take. */
@@ -513,6 +569,82 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }, ()=>{});
     }
 
+    /**
+     * The publish half of a batch, when its store lookups are back (or at
+     * once, without a store): the regions the store held are instantiated and
+     * published, and the rest are emitted -- on the worker if there is one,
+     * inline otherwise -- stored and published. Runs off the slice that
+     * requested the batch, so a region whose bytes are not back is not
+     * published this frame.
+     *
+     * @param {any[]} formed
+     * @param {any} store
+     * @returns {number} regions published
+     */
+    const finishBatch = (formed, store)=>{
+        if (workerClosed)
+        {
+            // The machine went away while the store's bytes were in flight.
+            return 0;
+        }
+        let published = 0;
+        for (const one of formed)
+        {
+            if (one.cached !== null)
+            {
+                published += applyBuilt(one, one.cached);
+            }
+        }
+        const unbuilt = formed.filter(one=>one.cached === null);
+        if (unbuilt.length > 0 && worker !== null)
+        {
+            // Off the frame thread: post the batch and answer with it later.
+            // The records are kept until then; nothing here waits.
+            outstanding = { id: ++workerRequest, metas: unbuilt, store };
+            worker.post({
+                id: outstanding.id,
+                jobs: unbuilt.map(one=>({ region: one.region, entryTop: one.entryTop })),
+                layout, features: found, options: emitOptions(),
+            }, []);
+            return published;
+        }
+        for (const one of unbuilt)
+        {
+            // One module per region: the unit the store keeps, and the unit
+            // dropped when a page moves.
+            /** @type {import('./emit-built.js').BuiltRegion} */
+            let built;
+            try
+            {
+                built = emitBuilt(one.region, one.entryTop, layout, found, emitOptions());
+            }
+            catch (e){
+                // The emitter's own defect on this code: named in the report
+                // rather than lost in a rejected promise, and the program runs
+                // on without the region.
+                refused[`emit at ${one.region.entry.toString(16)}: `
+                    + `${String(e).slice(0, 120)}`] = 1;
+                continue;
+            }
+            counts.emitMs += built.emitMs;
+            counts.encodeMs += built.encodeMs;
+            foldTranslation(built);
+            if (store !== null)
+            {
+                const storeAt = performance.now();
+                const key = cacheKey({
+                    version: CACHE_VERSION, features: found, layoutId: layout.id,
+                    bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
+                    hash: `${one.region.hash}-${one.entryTop}`,
+                });
+                store.put(key, packRegion(built)).catch(()=>{});
+                counts.storeMs += performance.now() - storeAt;
+            }
+            published += applyBuilt(one, built);
+        }
+        return published;
+    };
+
     return {
         pages,
         entryOf(eip, top = 0){
@@ -565,6 +697,22 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
          * @param {number} address @param {number} [top]
          */
         missAt(address, top = 0){
+            const target = (exitTargets.get(address) ?? 0) + 1;
+            exitTargets.set(address, target);
+            if (exitTargets.size > EXIT_TARGETS_CAP)
+            {
+                let least = -1;
+                let leastCount = Infinity;
+                for (const [at, count] of exitTargets)
+                {
+                    if (count < leastCount)
+                    {
+                        leastCount = count;
+                        least = at;
+                    }
+                }
+                exitTargets.delete(least);
+            }
             const seen = (misses.get(address) ?? 0) + 1;
             if (seen >= settings.missThreshold)
             {
@@ -612,11 +760,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             worker = null;
             outstanding = null;
         },
+
+        /** @type {() => Promise<number>} */
         async translatePending(){
             // A batch is with the worker: its answer is published when it
             // comes back, so the engine never waits for it. Candidates
-            // formed in the meantime stay queued for the next call.
-            if (outstanding !== null)
+            // formed in the meantime stay queued for the next call. A
+            // batch's store lookups are likewise in flight: the next batch
+            // waits for them, so the pending ones publish in order.
+            if (outstanding !== null || storePending)
             {
                 return 0;
             }
@@ -685,91 +837,47 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null });
             }
             counts.formingMs += performance.now() - formedAt;
-            // The store first, for every region of the batch at once: the
-            // lookups are asynchronous and the emitter waits for none of them.
+            if (store === null)
+            {
+                return finishBatch(formed, null);
+            }
+            // The store's reads leave the slice path: the batch's records are
+            // requested here and the slice goes on. The batch is published
+            // when the bytes are back -- between frames, as instantiation
+            // already is -- and a region not back is not published this frame.
+            // `lookupMs` is the engine thread's own time to start them.
             const lookupAt = performance.now();
-            if (store !== null)
-            {
-                await Promise.all(formed.map(async one=>{
-                    const key = cacheKey({
-                        version: CACHE_VERSION, features: found, layoutId: layout.id, bundleId,
-                        entry: one.region.entry, hash: `${one.region.hash}-${one.entryTop}`,
-                    });
-                    try
-                    {
-                        const bytes = await store.get(key);
-                        one.cached = bytes === null ? null : unpackRegion(bytes);
-                    }
-                    catch {
-                        one.cached = null;
-                    }
-                    if (one.cached !== null)
-                    {
-                        counts.cacheHits++;
-                    }
-                    else
-                    {
-                        counts.cacheMisses++;
-                    }
-                }));
-            }
-            counts.lookupMs += performance.now() - lookupAt;
-            let published = 0;
-            for (const one of formed)
-            {
-                if (one.cached !== null)
-                {
-                    published += applyBuilt(one, one.cached);
-                }
-            }
-            const unbuilt = formed.filter(one=>one.cached === null);
-            if (unbuilt.length > 0 && worker !== null)
-            {
-                // Off the frame thread: post the batch and answer with it
-                // later. The records are kept until then; nothing here waits.
-                outstanding = { id: ++workerRequest, metas: unbuilt, store };
-                worker.post({
-                    id: outstanding.id,
-                    jobs: unbuilt.map(one=>({ region: one.region, entryTop: one.entryTop })),
-                    layout, features: found, options: emitOptions(),
-                }, []);
-                return published;
-            }
-            for (const one of unbuilt)
-            {
-                // One module per region: the unit the store keeps, and the
-                // unit dropped when a page moves.
-                /** @type {import('./emit-built.js').BuiltRegion} */
-                let built;
+            storePending = true;
+            Promise.all(formed.map(async one=>{
+                const key = cacheKey({
+                    version: CACHE_VERSION, features: found, layoutId: layout.id, bundleId,
+                    entry: one.region.entry, hash: `${one.region.hash}-${one.entryTop}`,
+                });
                 try
                 {
-                    built = emitBuilt(one.region, one.entryTop, layout, found, emitOptions());
+                    const bytes = await store.get(key);
+                    one.cached = bytes === null ? null : unpackRegion(bytes);
                 }
-                catch (e){
-                    // The emitter's own defect on this code: named in the
-                    // report rather than lost in a rejected promise, and the
-                    // program runs on without the region.
-                    refused[`emit at ${one.region.entry.toString(16)}: `
-                        + `${String(e).slice(0, 120)}`] = 1;
-                    continue;
+                catch {
+                    one.cached = null;
                 }
-                counts.emitMs += built.emitMs;
-                counts.encodeMs += built.encodeMs;
-                foldTranslation(built);
-                if (store !== null)
+                if (one.cached !== null)
                 {
-                    const storeAt = performance.now();
-                    const key = cacheKey({
-                        version: CACHE_VERSION, features: found, layoutId: layout.id,
-                        bundleId, entry: one.region.entry,
-                        hash: `${one.region.hash}-${one.entryTop}`,
-                    });
-                    store.put(key, packRegion(built)).catch(()=>{});
-                    counts.storeMs += performance.now() - storeAt;
+                    counts.cacheHits++;
                 }
-                published += applyBuilt(one, built);
-            }
-            return published;
+                else
+                {
+                    counts.cacheMisses++;
+                }
+            })).then(()=>{
+                storePending = false;
+                finishBatch(formed, store);
+            }, ()=>{
+                storePending = false;
+                finishBatch(formed, store);
+            });
+            counts.lookupMs += performance.now() - lookupAt;
+            return 0;
         },
         invalidatePage,
         /** @param {number} page */
@@ -798,6 +906,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 invalidations: counts.invalidations,
                 volatilePages: counts.volatilePages,
                 exits: { ...exits },
+                // The top untranslated-exit targets over the whole run, and
+                // why each has no entry: what a loading phase leaves behind.
+                exitsByTarget: [...exitTargets].sort((a, b)=>b[1] - a[1]).slice(0, 32)
+                    .map(([address, count])=>({ address, count, reason: missReason(address) })),
                 refused: { ...refused },
                 refusedWhy: { ...refusedWhy },
                 handoffMisses: 0,

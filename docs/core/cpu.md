@@ -81,8 +81,9 @@ instruction that the hybrid host answers the same way; either way a call into th
 costs no emulator turn. `out` to any other port, `in`,
 `cli`, `sti`, `int n`, `int3` and `into` are the emulator's, before the instruction.
 `bound` is translated as the no-op the emulator's own decoder makes of it — it consumes the
-instruction and neither checks the pair nor raises `#BR`, so a guest that returns into a page
-of data (the entry vector is the shape seen on a real route) runs the same bytes either way.
+instruction, register form included (`62 d0`), and neither checks the pair nor raises `#BR`,
+so a guest that returns into a page of data (the entry vector is the shape seen on a real
+route, whose first byte is the entry point's low byte) runs the same bytes either way.
 A fault
 translated code detects (a divide by zero, an undefined instruction, an access the page
 table refuses) leaves before the instruction with the registers as they were, and the
@@ -105,9 +106,13 @@ unchanged. Candidates come from the sampler: once a frame, every 64-byte bucket 
 `cork.hotThreshold` instructions is handed to the translator at the exact address its last
 slice ended on, and the pending batch is formed and compiled, paced by frames
 (`cork.feed: 'frame'`, the default) or, for a run without a presenter such as a test, after
-every slice (`'slice'`), never inside one. Forming and the store lookup stay on the engine
-thread -- where the memory and the store are -- and the emitting and encoding of what the
-store did not hold go to a translation worker (`translator.worker.js`, opened where a
+every slice (`'slice'`), never inside one. Forming stays on the engine thread -- where the
+memory is -- and a batch's store lookups are *requested* there but not awaited: the slice
+goes on and the batch is published between frames when its bytes come back, so a region
+whose bytes are not back is simply not published this frame (`lookupMs` is the engine
+thread's own time to start the reads, not their wall time). The emitting and encoding of
+what the store did not hold go to a translation worker (`translator.worker.js`, opened
+where a
 `Worker` exists or through Node's `worker_threads`; `cork.worker` forces or forbids it,
 `cork.workerUrl` names the file), which takes the formed region out of the message and
 answers the module bytes and the record, so the engine thread never waits: a batch not back
@@ -321,7 +326,7 @@ yet are the same state from a caller's perspective.
 | `trapCrossings` | Times the guest has left its own code for ours — every import, COM method and fault comes through the one trap port. | Every crossing. |
 | `jit`           | `{ disabled, maxPages, loopSafety, cache, tableFree, compiledSteps, interpretedSteps, entries, interpretedDispatches, f80Conversions, codePageWrites, modulesLostToWrites, hotnessLostToWrites, chaining, chained, chainMissed, chainRefused, flagsDead, slowWrites, codePageWritesKept, x87TagLost, x87Sites, dirtyPages, finalised, published, discarded, hostWrites, hostWrittenBytes, refused }` | Per slice / per host write. Counters the emulator build does not carry read `-1`. `refused` is the first error a compiled module failed to publish with — a compiler that silently fails leaves every instruction interpreted, which is correct and several times slower. `published` is the last 4096 `[slot, start]` pairs `codegen_finalize` was called with, oldest first — `start` is the guest linear address the compiled unit begins at, for naming a JIT unit by the guest function it compiles once joined against the arrival order of the debugger's own `wasm://` script-parsed events. |
 | `eip`           | The guest's instruction pointer. | Continuously; sampling it names a loop no host call would reveal. |
-| `cork`          | The translator's report (`EngineDiagnostics` in `engine.js`): regions, entries, modules, `translatedShare`, invalidations, volatile pages, exits by kind, refused opcodes, and the milliseconds of translating whole (`translateMs`) and by part (`formingMs` the region forming, `lookupMs` the store's lookups, `emitMs`, `encodeMs`, `storeMs`, `instantiateMs`, `publishMs` — their sum), which says where a heavy run's translation time goes; `workerMs` is the emitting and encoding a translation worker did, apart from `translateMs`, which is the engine thread's own. `refusedWhy` carries the same refusals split by cause and block shape — `opcode (reason; entry kinds; entry x87)`, where the reason is `no-known-state` (the x87 tracker did not reach the block), `cut-second-top` (the block was reached with two different x87 tops), `step-null` or `unhandled-form`. `null` without a translator. The frame counters carry `cork.regions`, `cork.invalidations` and `cork.share` (cumulative), and the frame's own `cork.frameShare` (the share of the frame's instructions the translator ran), `cork.frameTranslateMs` and `cork.frameLeaves` (times translated code came back to the host in the frame). | Per slice, per frame. |
+| `cork`          | The translator's report (`EngineDiagnostics` in `engine.js`): regions, entries, modules, `translatedShare`, invalidations, volatile pages, exits by kind, refused opcodes, and the milliseconds of translating whole (`translateMs`) and by part (`formingMs` the region forming, `lookupMs` the store's lookups, `emitMs`, `encodeMs`, `storeMs`, `instantiateMs`, `publishMs` — their sum), which says where a heavy run's translation time goes; `workerMs` is the emitting and encoding a translation worker did, apart from `translateMs`, which is the engine thread's own. `refusedWhy` carries the same refusals split by cause and block shape — `opcode (reason; entry kinds; entry x87)`, where the reason is `no-known-state` (the x87 tracker did not reach the block), `cut-second-top` (the block was reached with two different x87 tops), `step-null` or `unhandled-form`. `exitsByTarget` is the top 32 untranslated-exit targets with their counts and why each has no entry — `refused` (the decoder refuses its first instruction), `volatile`, `inaccessible`, `barren` (a region formed nothing there), `queued` (a candidate not yet formed), `other-top` (an entry stands at another x87 top) or `unknown` — which is what says whether a loading phase is a translation-policy problem or a decoder one. `null` without a translator. The frame counters carry `cork.regions`, `cork.invalidations` and `cork.share` (cumulative), and the frame's own `cork.frameShare` (the share of the frame's instructions the translator ran), `cork.frameTranslateMs` and `cork.frameLeaves` (times translated code came back to the host in the frame). | Per slice, per frame. |
 | `samples`       | `{ slices, overflow, top: [{ address, instructions, samples }] }` — where every slice since boot has gone, by 64-byte address bucket; `top` is the 64 heaviest by instructions, reported by each bucket's own address rather than by rank. | Every slice that retired at least one instruction (see "Sampling" below). |
 
 `jit.cache` is the emulator's own cache-size counter, which a release build compiles out (it

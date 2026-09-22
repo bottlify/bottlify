@@ -345,12 +345,20 @@ test('a loop that stores into data on its own page keeps its region', async()=>{
 test('with a store, a second runtime takes its regions from the store; a changed byte misses',
     async()=>{
         const { memoryTranslationStore } = await import('./cache.js');
+        // The store's reads leave the slice: a batch is requested, the call
+        // answers before the bytes are back, and the batch is published when
+        // they arrive. `settle` is that turn.
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
         const store = memoryTranslationStore();
         const first = machine({ store, bundleId: 'test' });
         first.write(CODE, COUNTDOWN);
         first.setReg(4, 0x80000);
         first.runtime.noteHot(CODE);
-        assert.equal(await first.runtime.translatePending(), 1);
+        assert.equal(await first.runtime.translatePending(), 0,
+            'the batch is requested, not awaited');
+        assert.equal(first.runtime.entryOf(CODE), -1, 'nothing published this turn');
+        await settle();
+        assert.ok(first.runtime.entryOf(CODE) >= 0, 'published when the bytes came back');
         assert.equal(first.runtime.diagnostics().cacheMisses, 1);
         assert.equal(first.runtime.diagnostics().cacheHits, 0);
         assert.equal(store.size(), 1, 'the region is in the store');
@@ -358,7 +366,8 @@ test('with a store, a second runtime takes its regions from the store; a changed
         second.write(CODE, COUNTDOWN);
         second.setReg(4, 0x80000);
         second.runtime.noteHot(CODE);
-        assert.equal(await second.runtime.translatePending(), 1);
+        await second.runtime.translatePending();
+        await settle();
         const d = second.runtime.diagnostics();
         assert.equal(d.cacheHits, 1, 'from the store');
         assert.equal(d.cacheMisses, 0);
@@ -371,7 +380,8 @@ test('with a store, a second runtime takes its regions from the store; a changed
         third.write(CODE, [0xb9, 0xe9, 0x03, 0, 0, 0x49, 0x75, 0xfd, 0xf4]); // 1001 rounds
         third.setReg(4, 0x80000);
         third.runtime.noteHot(CODE);
-        assert.equal(await third.runtime.translatePending(), 1);
+        await third.runtime.translatePending();
+        await settle();
         assert.equal(third.runtime.diagnostics().cacheMisses, 1);
         assert.equal(store.size(), 2);
         // Another bundle: its own namespace.
@@ -380,6 +390,7 @@ test('with a store, a second runtime takes its regions from the store; a changed
         fourth.setReg(4, 0x80000);
         fourth.runtime.noteHot(CODE);
         await fourth.runtime.translatePending();
+        await settle();
         assert.equal(fourth.runtime.diagnostics().cacheMisses, 1);
         assert.equal(store.size(), 3);
     });
@@ -403,6 +414,33 @@ test('a flood of distinct misses does not stop a later address reaching the thre
         }
         assert.equal(await m.runtime.translatePending(), 1, 'the fresh address was queued');
         assert.ok(m.runtime.entryOf(fresh) >= 0);
+    });
+
+test('the diagnostics histogram names the untranslated exits and why each target has none',
+    ()=>{
+        const m = machine({ missThreshold: 64 });
+        // A target the decoder refuses (an SSE prefix with no variant): the
+        // exit there can never form a region until the bytes change.
+        m.write(0x3000, [0xf2, 0x0f, 0x28, 0xc1]);
+        for (let i = 0; i < 3; i++)
+        {
+            m.runtime.missAt(0x3000, 0);
+        }
+        // A target queued and not yet formed.
+        m.write(0x4000, [0x90, 0xf4]);
+        m.runtime.noteHot(0x4000);
+        m.runtime.missAt(0x4000, 0);
+        // A target with plain code the runtime knows nothing about.
+        m.write(0x5000, [0x90, 0xf4]);
+        m.runtime.missAt(0x5000, 0);
+        const exits = m.runtime.diagnostics().exitsByTarget;
+        const reasons = Object.fromEntries(exits.map(row=>[row.address, row.reason]));
+        assert.equal(reasons[0x3000], 'refused');
+        assert.equal(reasons[0x4000], 'queued');
+        assert.equal(reasons[0x5000], 'unknown');
+        assert.deepEqual(exits.map(row=>row.address), [0x3000, 0x4000, 0x5000],
+            'ordered by count: three, then the two of one');
+        assert.equal(exits[0].count, 3);
     });
 
 test('a return block the tracker cannot reach gets a region of its own, not a broken entry',

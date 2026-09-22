@@ -175,6 +175,8 @@
  * @property {number} invalidations    Regions discarded by a write.
  * @property {number} volatilePages    Pages written so often they are no longer translated.
  * @property {Record<ExitKind, number>} exits
+ * @property {{ address: number, count: number, reason: string }[]} exitsByTarget
+ *     The top untranslated-exit targets and why each has no entry.
  * @property {Record<string, number>} refused  Opcode ("0f 2e", "f3 0f 10") → times met.
  * @property {number} translateMs      Milliseconds spent translating: the sum of the seven
  *     parts below, so a whole figure and its split always agree.
