@@ -40,14 +40,15 @@
 import { CF, DF, OF, ARITH_FLAGS } from '../decode/table.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import {
-    ARITH, I32, Kind, addMaterialiseHelper, emitCondition, emitFlag, kindOf, widthCode,
+    ARITH, I32, Kind, emitCondition, emitFlag, kindOf, widthCode,
 } from './flags.js';
 import { emitInstruction } from './integer.js';
-import { addCodeHitHelper, addUndoHelper, emitStaleExit } from './memory.js';
+import { addUndoHelper, emitStaleExit } from './memory.js';
+import { importHelpers } from './helpers.js';
 import { Tables } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
 import {
-    addF80Helpers, addRoundHelper, isX87, prepareX87, regionHasMmx, sameState, x87BlockStart,
+    isX87, prepareX87, regionHasMmx, sameState, x87BlockStart,
     x87Edge, x87Epilogue, x87Normalise,
     x87Prologue,
 } from './x87.js';
@@ -185,10 +186,10 @@ export function prepareModule(m, layout, features, memory = {},
         math[name] = m.importFunction('env', name, name === 'atan2' ? binary : unary);
     }
     const regionType = m.type({ params: [ValType.i32, ValType.i32], results: [ValType.i32] });
-    const materialise = addMaterialiseHelper(m);
-    const { f80ToF64, f64ToF80 } = addF80Helpers(m);
-    const round = addRoundHelper(m);
-    const codeHit = addCodeHitHelper(m, layout);
+    // The five helpers are one shared module every region imports, rather
+    // than a copy in each; the host instantiates it once with the same
+    // memory (they are defined in `./helpers.js`).
+    const { materialise, f80ToF64, f64ToF80, round, codeHit } = importHelpers(m);
     /** @type {ModuleContext} */
     const context = {
         m, regionType, materialise, layout, features, f80ToF64, f64ToF80, round, math,

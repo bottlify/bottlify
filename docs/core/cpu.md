@@ -121,7 +121,11 @@ store (`cork.store`, `cork.bundleId`; `createApp` resolves `'local'` to the orig
 file system in the engine's own thread, a directory per bundle, as it does the block store)
 the second run of a program takes every region it ran before from the store -- the region
 is still formed, a decode, which gives its hash; what is saved is the emitting and the
-encoding, and the report says `cacheHits`/`cacheMisses`. The directory's records are hashed
+encoding, and the report says `cacheHits`/`cacheMisses`. The five helper functions every
+region module needs (`materialise`, the 80-bit conversions, the rounding and the code-hit
+test) are defined once in a shared module instantiated with the same memory and imported by
+each region, not copied into every module -- a saving of about 3 KB a region, which on a
+route that builds tens of thousands of them is most of the module bytes. The directory's records are hashed
 file names beside one index of them, read once when the store is first used, so a lookup is a
 probe of that set and only a hit reads bytes: a miss never asks the file system, whose answer
 to a miss is an exception that costs milliseconds a record. The index is rewritten whole from

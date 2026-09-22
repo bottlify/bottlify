@@ -29,6 +29,7 @@ import { mathImports } from '../emit/region.js';
 import { isX87, trackRegion } from '../emit/x87.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { emitBuilt } from './emit-built.js';
+import { buildHelpersModule } from '../emit/helpers.js';
 import { openTranslationWorker } from './translator.js';
 import { ANY_TOP, createEntries } from './entries.js';
 import { PageFlag, createPageTable } from './pages.js';
@@ -74,6 +75,19 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     }
     const found = features ?? probeFeatures();
     const pages = createPageTable(memory, layout);
+    // The five helper functions every region imports, defined once here and
+    // instantiated over this memory when the first region is published.
+    /** @type {any} */
+    let helperInstance = null;
+    const helperImports = ()=>{
+        if (helperInstance === null)
+        {
+            const module = new WebAssembly.Module(
+                /** @type {Uint8Array<ArrayBuffer>} */ (buildHelpersModule(layout)));
+            helperInstance = new WebAssembly.Instance(module, { env: { memory } }).exports;
+        }
+        return /** @type {any} */ (helperInstance);
+    };
     // With tail calls, every region function goes into one table shared by
     // every module, and every entry into the hash translated code probes:
     // a return or an indirect jump into translated code then transfers
@@ -350,7 +364,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             instance = new WebAssembly.Instance(module, {
                 env: {
                     memory, getEflags: imports.getEflags, trap: imports.trap,
-                    ...mathImports(), ...(table ? { table } : {}),
+                    ...mathImports(), ...helperImports(), ...(table ? { table } : {}),
                 },
             });
         }

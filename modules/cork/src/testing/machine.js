@@ -15,6 +15,7 @@ import { formRegion } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
 import { features } from '../wasm/features.js';
 import { emitRegion, prepareModule, mathImports } from '../emit/region.js';
+import { buildHelpersModule } from '../emit/helpers.js';
 import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
 import { createPageTable } from '../runtime/pages.js';
 import { ANY_TOP, createEntries } from '../runtime/entries.js';
@@ -51,6 +52,18 @@ export function createTestMachine(given = {}){
     const table = found.tailCalls ? new WebAssembly.Table({ element: 'anyfunc', initial: 0 })
         : null;
     const entries = createEntries(table ? { memory, hashBase: layout.tables + Tables.HASH } : {});
+    // The shared helpers module, one instance per machine, over its memory.
+    /** @type {any} */
+    let helperInstance = null;
+    const helperImports = ()=>{
+        if (helperInstance === null)
+        {
+            const module = new WebAssembly.Module(
+                /** @type {Uint8Array<ArrayBuffer>} */ (buildHelpersModule(layout)));
+            helperInstance = new WebAssembly.Instance(module, { env: { memory } }).exports;
+        }
+        return helperInstance;
+    };
     return {
         layout,
         memory,
@@ -123,7 +136,7 @@ export function createTestMachine(given = {}){
             }
             const instance = new WebAssembly.Instance(new WebAssembly.Module(built), {
                 env: {
-                    memory, ...mathImports(), ...(table ? { table } : {}),
+                    memory, ...mathImports(), ...helperImports(), ...(table ? { table } : {}),
                     trap: trap ?? (()=>0),
                 },
             });
