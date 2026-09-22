@@ -58,6 +58,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // translator's own: the slice sampler sees only where budgets run
         // out, and a stub reached through such exits alone never appears there.
         missThreshold: 64,
+        // Test-only: a run with the translator off, so the whole program is
+        // the interpreter tier's and the corpus can judge it alone.
+        translate: true,
         undoLog: false,
         ...config,
     };
@@ -294,6 +297,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return exit;
         },
         noteHot(eip, top = 0){
+            if (!settings.translate)
+            {
+                return;
+            }
             const key = keyOf(eip, top & 7);
             if (entries.entryOf(eip, top & 7) >= 0 || queue.has(key) || barren.has(eip)
                 || !translatable(eip))
@@ -303,7 +310,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             queue.set(key, eip);
         },
         async translatePending(){
-            if (queue.size === 0)
+            if (!settings.translate || queue.size === 0)
             {
                 return 0;
             }

@@ -115,6 +115,8 @@
  *     that has no frames -- a test in a process without a presenter.
  * @property {TranslationStore} [store]  The per-bundle cache; none = translate every run.
  * @property {string} [bundleId]         The cache's namespace.
+ * @property {boolean} [translate]       Test-only: false keeps the translator off, so a run
+ *     is the interpreter tier's alone. Default true.
  */
 
 /**

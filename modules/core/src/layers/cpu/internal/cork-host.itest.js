@@ -85,3 +85,31 @@ test('a fault becomes the fault record and stops the machine', ()=>{
     assert.equal(fault.vector, 0);
     assert.equal(h.haltedFlag(), 1);
 });
+
+test('an interpreted access beyond RAM is a #GP at the instruction', ()=>{
+    const h = host();
+    // mov eax, [eax]; hlt -- eax points past the 1 MiB of guest RAM.
+    load(h, 0x1000, [0x8b, 0x00, 0xf4]);
+    h.writeReg32('eax', 0x200000);
+    h.runSlice(10);
+    const fault = h.fault();
+    assert.ok(fault, 'a fault record was built');
+    assert.equal(fault.vector, 13);
+    assert.equal(fault.eip, 0x1000, 'at the faulting instruction');
+    assert.equal(h.haltedFlag(), 1);
+});
+
+test('an interpreted store into a translated page invalidates the region', async()=>{
+    const h = host();
+    const runtime = h.cork();
+    // A region at 0x1000: mov eax, 1; hlt.
+    h.writePhysical(0x1000, Uint8Array.from([0xb8, 1, 0, 0, 0, 0xf4]));
+    runtime.noteHot(0x1000);
+    assert.equal(await runtime.translatePending(), 1, 'the region was formed');
+    assert.equal(runtime.holdsPage(0x1000 >>> 12), true);
+    // At 0x2000 the interpreter stores into the region's page and halts. The
+    // write goes through the same page-flag check a translated store uses.
+    load(h, 0x2000, [0xb8, 0, 0x10, 0, 0, 0x89, 0x00, 0xf4]);
+    h.runSlice(100);
+    assert.equal(runtime.holdsPage(0x1000 >>> 12), false, 'the region was dropped');
+});

@@ -44,6 +44,7 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @typedef {Object} EvalState
  * @property {Uint32Array} reg     the eight general registers
  * @property {number} eip
+ * @property {number} faultEip     the address a fault raised this instruction names
  * @property {number} eflags       the eager word
  * @property {number} fsBase       what an `fs:` access adds
  * @property {Memory} memory
@@ -73,7 +74,8 @@ export function createState(memory, { eip = 0, esp = 0, fsBase = 0 } = {}){
     reg[4] = esp;
     const f80Bytes = new ArrayBuffer(64);
     return {
-        reg, eip, eflags: 0x2, fsBase, memory, halted: false, retired: 0, trapped: [],
+        reg, eip, faultEip: eip, eflags: 0x2, fsBase, memory,
+        halted: false, retired: 0, trapped: [],
         top: 0, empty: 0xff, status: 0, control: 0x37f,
         f80: new Float64Array(f80Bytes),
         f80bits: new BigInt64Array(f80Bytes),

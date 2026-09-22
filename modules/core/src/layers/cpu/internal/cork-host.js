@@ -241,10 +241,21 @@ export function createCorkHost(config){
      * @returns {number}
      */
     const interpretOne = address=>{
-        interpreter ??= blockState({ memory, layout });
+        interpreter ??= blockState({
+            memory,
+            layout,
+            // An interpreted store into a page a region was translated on
+            // invalidates it, as a translated store's `stale` exit does.
+            onCodeWrite: (/** @type {number} */ at, /** @type {number} */ size)=>{
+                invalidate(at, size);
+            },
+        });
         const state = interpreter;
         state.syncIn();
         state.eip = address;
+        // A `hlt` on an earlier run left the block's halted flag set; a slice
+        // the machine is awake for clears it, as the host's own flag is.
+        state.halted = false;
         /** @type {number} */
         let retired;
         try
