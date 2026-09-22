@@ -18,9 +18,11 @@
  */
 
 import { decode } from './decode/decoder.js';
-import { Unsupported, createState, evaluate } from './ir.js';
+import { Fault, Unsupported, createState, evaluate } from './ir.js';
+import { Tables } from './runtime/layout.js';
+import { PageFlag } from './runtime/pages.js';
 
-export { Unsupported, createState };
+export { Fault, Unsupported, createState };
 
 /**
  * Runs instructions from `state.eip` until the budget is spent or the machine
@@ -39,6 +41,9 @@ export function interpret(state, maxInstructions = 1){
         {
             throw new Unsupported(decoded.opcode);
         }
+        // The instruction's own address, for a page fault raised from inside
+        // `evaluate` after it has moved eip to the next instruction.
+        state.faultEip = decoded.eip;
         evaluate(decoded, state);
     }
     return state.retired - before;
@@ -50,32 +55,79 @@ export function interpret(state, maxInstructions = 1){
  * translator would. The memory is cork's own RAM.
  *
  * @param {{ memory: WebAssembly.Memory,
- *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout }} what
+ *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
+ *     onCodeWrite?: (address: number, size: number) => void }} what
+ *     `onCodeWrite` is called after an interpreted store lands in a page
+ *     holding translated code, so the caller can invalidate the region it
+ *     translated there, as a translated store's `stale` exit does.
  * @returns {import('./ir.js').EvalState & { syncIn: () => void, syncOut: () => void }}
  */
-export function blockState({ memory, layout }){
+export function blockState({ memory, layout, onCodeWrite }){
     const view = new DataView(memory.buffer);
     const reg = new Uint32Array(memory.buffer, layout.regs, 8);
+    const flagAt = (/** @type {number} */ address)=>
+        view.getUint8(layout.tables + Tables.PAGE_FLAGS + (address >>> 12));
+    /** @param {number} address @param {number} size */
+    const inaccessible = (address, size)=>{
+        if ((flagAt(address) & PageFlag.INACCESSIBLE) !== 0)
+        {
+            return true;
+        }
+        return size > 1 && (flagAt(address + size - 1) & PageFlag.INACCESSIBLE) !== 0;
+    };
+    const at = layout.tables + Tables.CODE_RANGES;
+    const granuleShift = Tables.CODE_GRANULE_SHIFT;
+    const granule = (/** @type {number} */ address)=>
+        (address >>> granuleShift) & (0xfff >>> granuleShift);
+    /** Whether the byte lies in translated code: its page flagged and its
+     * granule within the page's code range, as the emitter's `codeHit` does.
+     * @param {number} address
+     */
+    const codeHit = address=>{
+        if ((flagAt(address) & PageFlag.HAS_CODE) === 0)
+        {
+            return false;
+        }
+        const range = at + (address >>> 12) * 2;
+        return granule(address) >= view.getUint8(range)
+            && granule(address) < view.getUint8(range + 1);
+    };
+    /** The instruction's own address, kept by `interpret` for a fault's EIP. */
+    let faultEip = 0;
+    const fault = ()=>new Fault(13, faultEip);
     /** @param {number} address @param {number} size */
     const read = (address, size)=>{
-        const at = layout.ramBase + address;
-        return size === 1 ? view.getUint8(at)
-            : size === 2 ? view.getUint16(at, true) : view.getUint32(at, true);
+        if (inaccessible(address, size))
+        {
+            throw fault();
+        }
+        const offset = layout.ramBase + address;
+        return size === 1 ? view.getUint8(offset)
+            : size === 2 ? view.getUint16(offset, true) : view.getUint32(offset, true);
     };
     /** @param {number} address @param {number} size @param {number} value */
     const write = (address, size, value)=>{
-        const at = layout.ramBase + address;
+        if (inaccessible(address, size))
+        {
+            throw fault();
+        }
+        const offset = layout.ramBase + address;
         if (size === 1)
         {
-            view.setUint8(at, value);
+            view.setUint8(offset, value);
         }
         else if (size === 2)
         {
-            view.setUint16(at, value, true);
+            view.setUint16(offset, value, true);
         }
         else
         {
-            view.setUint32(at, value, true);
+            view.setUint32(offset, value, true);
+        }
+        if ((codeHit(address) || (size > 1 && codeHit(address + size - 1)))
+            && onCodeWrite !== undefined)
+        {
+            onCodeWrite(address, size);
         }
     };
     // The x87 registers are one f64 every sixteen bytes in the block, which no
@@ -130,6 +182,12 @@ export function blockState({ memory, layout }){
         },
         set eip(value){
             view.setUint32(layout.eip, value >>> 0, true);
+        },
+        get faultEip(){
+            return faultEip;
+        },
+        set faultEip(value){
+            faultEip = value >>> 0;
         },
         get eflags(){
             return view.getUint32(layout.eflags, true);

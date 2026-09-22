@@ -182,6 +182,12 @@ instruction at a time (`interpret`/`blockState` in the engine module). A fault i
 the host's fault record and stops the machine; an instruction the evaluator has no model for is
 the engine's no-tier answer, `cpu: cork has no tier for 0x… (…)`.
 
+In `cork` mode the interpreter counts hotness itself, per instruction start: a start interpreted
+`hotThreshold` times becomes a candidate, the layer's feed forms it, and once a region exists the
+host runs it rather than interpreting it -- cold code stays on the interpreter, hot code moves to
+the translator. The interpreted instructions count in the block's own instruction word, so
+`translatedShare` is the translator's share of the whole run, not only of what it ran.
+
 ## 2. Contract
 
 | field      | value                    |

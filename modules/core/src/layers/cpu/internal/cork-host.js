@@ -201,6 +201,13 @@ export function createCorkHost(config){
         }
     };
 
+    // Hotness in cork mode, counted by the interpreter itself: a start run
+    // `hotThreshold` times becomes a candidate, and the layer's feed forms it.
+    // A translated start is never interpreted again, so the count stops there.
+    const hotThreshold = corkConfig?.hotThreshold ?? 2000;
+    /** @type {Map<number, number>} interpreted starts by count */
+    const hot = new Map();
+
     /** Fold the block's 32-bit counter word into the exact count. */
     const fold = ()=>{
         const word = blockView.getUint32(layout.counter, true) >>> 0;
@@ -241,10 +248,21 @@ export function createCorkHost(config){
      * @returns {number}
      */
     const interpretOne = address=>{
-        interpreter ??= blockState({ memory, layout });
+        interpreter ??= blockState({
+            memory,
+            layout,
+            // An interpreted store into a page a region was translated on
+            // invalidates it, as a translated store's `stale` exit does.
+            onCodeWrite: (/** @type {number} */ at, /** @type {number} */ size)=>{
+                invalidate(at, size);
+            },
+        });
         const state = interpreter;
         state.syncIn();
         state.eip = address;
+        // A `hlt` on an earlier run left the block's halted flag set; a slice
+        // the machine is awake for clears it, as the host's own flag is.
+        state.halted = false;
         /** @type {number} */
         let retired;
         try
@@ -273,9 +291,27 @@ export function createCorkHost(config){
             throw e;
         }
         state.syncOut();
+        // The interpreter's instructions count in the block's own word, so the
+        // layer's instruction count and the translated share are over the whole
+        // run rather than only over what the translator ran.
+        if (retired > 0)
+        {
+            const word = blockView.getUint32(layout.counter, true);
+            blockView.setUint32(layout.counter, (word + retired) >>> 0, true);
+        }
         for (const value of state.trapped.splice(0))
         {
             raiseTrap(value);
+        }
+        const seen = (hot.get(address) ?? 0) + 1;
+        if (seen >= hotThreshold)
+        {
+            hot.delete(address);
+            runtime.noteHot(address, x87Top());
+        }
+        else
+        {
+            hot.set(address, seen);
         }
         return retired;
     };

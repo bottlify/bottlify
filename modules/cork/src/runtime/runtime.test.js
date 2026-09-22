@@ -50,6 +50,15 @@ function machine(config = {}){
 // mov ecx, 1000; L: dec ecx; jnz L; hlt
 const COUNTDOWN = [0xb9, 0xe8, 0x03, 0, 0, 0x49, 0x75, 0xfd, 0xf4];
 
+test('translate: false keeps the translator off for the interpreter alone', async()=>{
+    const m = machine({ translate: false });
+    m.write(CODE, COUNTDOWN);
+    m.runtime.noteHot(CODE);
+    m.runtime.noteHot(CODE);
+    assert.equal(await m.runtime.translatePending(), 0, 'nothing is ever formed');
+    assert.equal(m.runtime.entryOf(CODE), -1, 'and there is no entry to run');
+});
+
 test('a hot address becomes a region after translatePending, and runs under a budget', async()=>{
     const m = machine();
     m.write(CODE, COUNTDOWN);

@@ -13,9 +13,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { interpret, blockState } from './interp.js';
+import { Fault, interpret, blockState } from './interp.js';
 import { createState } from './ir.js';
 import { ownLayout, pagesFor, Tables } from './runtime/layout.js';
+import { PageFlag } from './runtime/pages.js';
 
 /** A little machine and a state over it. */
 function machine(){
@@ -107,4 +108,34 @@ test('blockState runs over cork\'s own state block', ()=>{
     assert.equal(reg32[0] >>> 0, 0x1235);
     const view = new DataView(memory.buffer);
     assert.equal(view.getUint32(layout.eip, true), 0x1007);
+});
+
+test('blockState faults on an inaccessible page and reports a code write', ()=>{
+    const layout = ownLayout({ ramSize: 1 << 20 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const flags = new Uint8Array(
+        memory.buffer, layout.tables + Tables.PAGE_FLAGS, Tables.PAGE_FLAGS_SIZE);
+    const ranges = new Uint8Array(memory.buffer, layout.tables + Tables.CODE_RANGES, 1 << 21);
+    /** @type {[number, number][]} */
+    const writes = [];
+    const state = blockState({
+        memory, layout, onCodeWrite: (address, size)=>writes.push([address, size]),
+    });
+    // A #GP before the instruction, at the instruction's own address rather
+    // than the next one `evaluate` leaves in eip.
+    flags[0x30] = PageFlag.INACCESSIBLE;
+    state.faultEip = 0x30000;
+    assert.throws(()=>state.memory.read(0x30000, 1),
+        e=>e instanceof Fault && e.vector === 13 && e.eip === 0x30000);
+    assert.throws(()=>state.memory.write(0x30000, 4, 0),
+        e=>e instanceof Fault && e.vector === 13);
+    // A write into a page holding translated code reports it, so the caller
+    // can invalidate; a write outside the code's granules does not.
+    flags[0x40] = PageFlag.HAS_CODE;
+    ranges[0x40 * 2] = 0;
+    ranges[0x40 * 2 + 1] = 2;
+    state.memory.write(0x40000, 4, 0x11223344);
+    assert.deepEqual(writes, [[0x40000, 4]]);
+    state.memory.write(0x40f00, 1, 0);
+    assert.deepEqual(writes, [[0x40000, 4]], 'beside the code, no report');
 });
