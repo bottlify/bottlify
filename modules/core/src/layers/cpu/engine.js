@@ -125,6 +125,8 @@
  * @typedef {Object} TranslationStore
  * @property {(key: string) => Promise<Uint8Array | null>} get
  * @property {(key: string, bytes: Uint8Array) => Promise<void>} put
+ * @property {() => Promise<void>} [flush]  Writes any pending bookkeeping
+ *     (a directory store's index) before the run ends. Optional.
  */
 
 /**
@@ -190,8 +192,12 @@
  * @property {(entry: number, budget: number) => ExitRecord} run
  * @property {(eip: number, x87Top?: number) => void} noteHot  A candidate from the layer's
  *     sampler, with the x87 top a region there is compiled for.
+ * @property {(address: number, x87Top?: number) => void} missAt  One untranslated exit to
+ *     an address; it becomes a candidate once enough land there.
  * @property {() => Promise<number>} translatePending
  *     Regions published; resolves when the batch is instantiated.
+ * @property {() => Promise<void>} flush  Writes the store's own bookkeeping (a directory
+ *     store's index) before a run ends.
  * @property {(page: number) => void} invalidatePage  A host or guest write into code.
  * @property {(page: number) => boolean} holdsPage  Whether a published region spans the page
  *     (the pages the emulator's handoff bit is set for).

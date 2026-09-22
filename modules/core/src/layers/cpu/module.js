@@ -888,6 +888,14 @@ export const cpuModule = {
     async dispose(){
         if (current)
         {
+            // The translator's own bookkeeping -- a directory store's index --
+            // lands before the machine goes away, so the next run finds this
+            // one's regions in it. Awaiting also keeps a put in flight from
+            // rejecting after the store is gone.
+            if (current.cork && typeof current.cork.flush === 'function')
+            {
+                await current.cork.flush();
+            }
             if (current.host)
             {
                 current.host.stop();

@@ -85,7 +85,7 @@ async function writeRecord(handle, bytes){
  *
  * @param {{ getDirectoryHandle: Function }} root  where the bundle's directory is made
  * @param {string} name  the bundle's, made safe for a directory name
- * @returns {Promise<TranslationStore>}
+ * @returns {Promise<TranslationStore & { flush: () => Promise<void> }>}
  */
 export async function createDirectoryTranslationStore(root, name){
     const safe = name.replace(/[^A-Za-z0-9._-]/g, '_') || 'bundle';
@@ -117,36 +117,52 @@ export async function createDirectoryTranslationStore(root, name){
         }
         return names;
     };
-    /** Appends a record name to the index. @param {string} line */
-    const publish = async line=>{
-        const handle = await directory.getFileHandle(INDEX, { create: true });
-        if (typeof handle.createSyncAccessHandle === 'function')
+    // The index is rewritten whole from the in-memory set, not appended to,
+    // and one write is in flight at a time. Both matter: several puts land in
+    // the same turn, and an append of a line read back first loses every one
+    // but the last of a concurrent batch, while a synchronous append races on
+    // the file's size. Rewriting the set is idempotent and self-healing, and
+    // the index is small next to the records. Puts already running share the
+    // write that is queued rather than each starting one.
+    /** @type {Promise<void> | null} */
+    let publishing = null;
+    /** Queues one write of the whole index. @returns {Promise<void>} */
+    const publish = ()=>{
+        if (publishing !== null)
         {
-            const access = await handle.createSyncAccessHandle();
-            try
+            return publishing;
+        }
+        publishing = (async()=>{
+            // Let the puts of this turn add their names first, so one write
+            // carries all of them.
+            await Promise.resolve();
+            const text = [...names ?? []].map(line=>`${line}\n`).join('');
+            const handle = await directory.getFileHandle(INDEX, { create: true });
+            if (typeof handle.createSyncAccessHandle === 'function')
             {
-                access.write(new TextEncoder().encode(line), { at: access.getSize() });
-                access.flush();
+                const access = await handle.createSyncAccessHandle();
+                try
+                {
+                    access.truncate(0);
+                    access.write(new TextEncoder().encode(text), { at: 0 });
+                    access.flush();
+                }
+                finally
+                {
+                    access.close();
+                }
             }
-            finally
+            else
             {
-                access.close();
+                const writable = await handle.createWritable();
+                await writable.write(new TextEncoder().encode(text));
+                await writable.close();
             }
-            return;
-        }
-        // No synchronous handle: the index is small next to the records, so
-        // read it back and rewrite it with the line.
-        let existing = '';
-        try
-        {
-            existing = await textOf(await handle.getFile());
-        }
-        catch {
-            // The first line.
-        }
-        const writable = await handle.createWritable();
-        await writable.write(new TextEncoder().encode(existing + line));
-        await writable.close();
+            publishing = null;
+        })().catch(()=>{
+            publishing = null;
+        });
+        return publishing;
     };
     return {
         async get(key){
@@ -164,10 +180,20 @@ export async function createDirectoryTranslationStore(root, name){
             const handle = await directory.getFileHandle(fileName, { create: true });
             await writeRecord(handle, bytes);
             const set = await index();
-            if (!set.has(fileName))
+            set.add(fileName);
+            await publish();
+        },
+
+        /**
+         * Writes any index not yet on disk. `put` already queues its own, so
+         * this is for a caller that finishes a run -- the last names of a
+         * batch land before the page goes away rather than with the next put
+         * that may never come.
+         */
+        async flush(){
+            if (publishing !== null)
             {
-                set.add(fileName);
-                await publish(`${fileName}\n`);
+                await publishing;
             }
         },
     };

@@ -62,7 +62,11 @@ a call that never returns once decoded eight kilobytes of it). Candidates come f
 layer's sampler, which hands every hot bucket over at the address its last slice ended on
 whenever that address is a new one, and the translator's own count of untranslated exits by
 target address (`cork.missThreshold`, default 64), which is what finds a stub reached only
-through such exits -- the sampler sees only where budgets run out. An address a region formed
+through such exits -- the sampler sees only where budgets run out. The count is bounded, and
+the oldest address is evicted and the counts halved as it fills: a real program leaves for
+millions of addresses, and a hard cap that dropped every new one once full is what kept a
+loading run at a share of 0.5 -- no address reached after the fill could climb to the
+threshold. An address a region formed
 nothing at (every block of it leaves at once) is not tried again until its page moves.
 A block that would leave before retiring anything (nothing decoded, its first instruction
 left out) has no entry, so a transfer never spins on it. The host's call channel is
@@ -114,7 +118,11 @@ is still formed, a decode, which gives its hash; what is saved is the emitting a
 encoding, and the report says `cacheHits`/`cacheMisses`. The directory's records are hashed
 file names beside one index of them, read once when the store is first used, so a lookup is a
 probe of that set and only a hit reads bytes: a miss never asks the file system, whose answer
-to a miss is an exception that costs milliseconds a record. A record of another emitter
+to a miss is an exception that costs milliseconds a record. The index is rewritten whole from
+the names known in memory, one write in flight at a time and a flush before the run ends,
+rather than appended a line at a time: a run puts its regions in one turn, and an append that
+reads the old file back first loses every name of a concurrent batch but one -- which emptied a
+real route's index on a warm second run. A record of another emitter
 version, feature set or layout is a miss. A region with x87 instructions in it is compiled for the x87 stack top it is entered
 with, and its entries are keyed by address and top (`entryOf(eip, x87Top)`, the top read off
 the emulator's `fpu_stack_ptr` before every turn); a region without them is entered with any
