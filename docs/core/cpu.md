@@ -22,8 +22,8 @@ layer adds on top.
 
 ### Engines
 
-The layer runs a program on one of two execution engines, chosen per launch. The vendored
-emulator is the one everything below describes. The other is a translator package
+The layer runs a program on one of two execution engines, chosen per launch and defaulting to
+the translator (`cork`). The vendored emulator is the one everything below describes. The other is a translator package
 (`@bottlify/cork`, `modules/cork`), which the layer loads at `boot()` by a module URL in its
 configuration, the way it loads the emulator, and which implements the executor contract the
 layer defines in `src/layers/cpu/engine.js`: an `EngineFactory` that takes the layer's memory,
@@ -32,7 +32,9 @@ call, and answers a `Runtime` (`entryOf`, `run`, `noteHot`, `translatePending`,
 `invalidatePage`, `diagnostics`). The layer never imports an engine package — `check:boundaries`
 refuses it — so a launch that selects the emulator runs with no translator installed, and a
 launch that selects the translator loads nothing of the emulator. The `engine` configuration
-field selects one per launch; `internal/hybrid-host.js` composes the emulator's host with a
+field selects one per launch, and `BOTTLIFY_ENGINE` overrides the default where the host
+exposes it (a node test, a paired measurement), which is how the engine-agnostic tests run
+against the emulator as the control; `internal/hybrid-host.js` composes the emulator's host with a
 translator's runtime on one register file. `diagnostics()` reports the selected engine as
 `metrics.engine` and the translator's own report as `metrics.cork` (null when none is
 attached).
@@ -250,7 +252,7 @@ enter the type check or the bundle.
 | `thunkCapacity` | number (bytes)             | `16384 * 16`        | Room reserved for the stub table: 16 384 slots of 16 bytes. Every import and every COM method takes one; none is ever given back. |
 | `jit`           | `Record<number, number>`   | `undefined`         | The emulator's compiler budgets by config index (1 = pages one module may span, 3 = extra basic blocks discovery may follow, 6 = chaining). For measurement, not production. |
 | `sampling`      | `boolean`                  | `true`              | Whether `runSlice` credits an address bucket per slice (see "Sampling" below). Always on; `false` is the only way to turn it off, for a caller measuring the emulator itself. |
-| `engine`        | `'emulator' \| 'hybrid' \| 'cork' \| 'differential'` | `'emulator'` | Which execution engine runs the program (see "Engines" above). An unknown name is refused by `create()` with `cpu: unknown engine "x" (…)`; `differential` is refused with `cpu: engine "differential" is not built yet` until its step lands. `cork` runs with nothing of the emulator loaded (see "Engines" above); `boot()` under it needs no emulator artifacts and throws `cpu: engine "cork" needs an engineUrl` without one. `hybrid` without `engineUrl` composes the emulator's host with no translator attached and runs a program exactly as `emulator` does, to the instruction. |
+| `engine`        | `'emulator' \| 'hybrid' \| 'cork' \| 'differential'` | `'cork'` | Which execution engine runs the program (see "Engines" above). The default is `cork`; `BOTTLIFY_ENGINE` overrides it where the host exposes the environment (a node test, a paired measurement). An unknown name is refused by `create()` with `cpu: unknown engine "x" (…)`; `differential` is refused with `cpu: engine "differential" is not built yet` until its step lands. `cork` runs with nothing of the emulator loaded (see "Engines" above); `boot()` under it needs no emulator artifacts and throws `cpu: engine "cork" needs an engineUrl` without one. `hybrid` without `engineUrl` composes the emulator's host with no translator attached and runs a program exactly as `emulator` does, to the instruction. |
 
 Chaining (index 6) is switched on automatically when the running engine validates a wasm tail
 call and the caller has not set the knob (`tailCallsSupported()` in `internal/v86-host.js`).

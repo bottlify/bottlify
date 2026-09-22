@@ -40,6 +40,17 @@ export const ENGINES = Object.freeze(['emulator', 'hybrid', 'cork', 'differentia
 const BUILT_ENGINES = new Set(['emulator', 'hybrid', 'cork']);
 
 /**
+ * The engine a run gets when the configuration names none: `cork` alone.
+ * `BOTTLIFY_ENGINE` overrides it where a host exposes the environment (a
+ * node test, a paired measurement), so the engine-agnostic itests can be run
+ * against the emulator as the control without changing their code.
+ */
+export function defaultEngine(){
+    const env = /** @type {any} */ (globalThis).process?.env?.BOTTLIFY_ENGINE;
+    return typeof env === 'string' && env !== '' ? env : 'cork';
+}
+
+/**
  * cpu — the guest CPU and the channel the guest calls us through.
  *
  * The only layer that knows an emulator is underneath. Everything above it
@@ -123,9 +134,11 @@ export const cpuModule = {
 
         // Refused here rather than at boot: a configuration naming an engine
         // that does not exist is a configuration error, and the assembler
-        // reports those before any module has a machine to lose.
+        // reports those before any module has a machine to lose. The default
+        // is `cork`; `BOTTLIFY_ENGINE` overrides it for a paired measurement
+        // or an emulator run of an itest that is engine-agnostic.
         /** @type {string} */
-        const engine = config?.engine ?? 'emulator';
+        const engine = config?.engine ?? defaultEngine();
         if (!ENGINES.includes(engine))
         {
             throw new Error(`cpu: unknown engine "${engine}" (${ENGINES.join(', ')})`);

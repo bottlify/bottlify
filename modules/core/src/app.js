@@ -9,7 +9,7 @@ import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
 import { captureTrace, describeAddress, formatTrace } from './trace.js';
 import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
-import { DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
+import { DEFAULT_MEMORY_SIZE, defaultEngine } from './layers/cpu/module.js';
 import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports, rvaToFileOffset } from './layers/loader/internal/pe.js';
@@ -2453,7 +2453,7 @@ async function buildApp(options){
         },
         cpu: {
             jit: options.jit, sampling: options.sampling, memorySize, engine: options.engine,
-            engineUrl: options.engine && options.engine !== 'emulator'
+            engineUrl: (options.engine ?? defaultEngine()) !== 'emulator'
                 ? corkArtifacts(options.cork).moduleUrl : null,
             // The translator's cache goes with the bundle's blocks: local by
             // default, the bundle's name its namespace, resolved here in the
@@ -3163,7 +3163,7 @@ async function buildApp(options){
     const audio = core.api('audio');
     const input = core.api('input');
 
-    if (options.engine === 'cork')
+    if ((options.engine ?? defaultEngine()) === 'cork')
     {
         // Cork runs with nothing of the emulator loaded: its own host, its own
         // memory, and the translator named by `engineUrl`.
