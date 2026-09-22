@@ -22,7 +22,7 @@
 
 import { AF, CF, DF, OF, PF, SF, ZF, conditionReads } from './decode/table.js';
 import { evaluateX87, isX87Op } from './ir-x87.js';
-import { evaluateSimd, isSimdOp } from './ir-simd.js';
+import { evaluateSimd, isSimdOp, mmxState } from './ir-simd.js';
 
 const ARITH = CF | PF | AF | ZF | SF | OF;
 
@@ -316,6 +316,12 @@ export function evaluate(instruction, state){
         if (!evaluateSimd(instruction, state, address))
         {
             throw new Unsupported(op);
+        }
+        // An MMX instruction leaves the stack in the MMX state: top zero,
+        // every register held.
+        if (instruction.operands.some(operand=>operand.kind === 'mm'))
+        {
+            mmxState(state);
         }
         return;
     }
