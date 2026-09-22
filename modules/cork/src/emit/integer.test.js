@@ -246,6 +246,45 @@ test('the string instructions with rep, repne and the direction flag', ()=>{
     assert.deepEqual([...r.m.read(0x5000, 4)], [7, 7, 7, 7]);
 });
 
+test('a zero-count rep touches nothing and keeps the flags', ()=>{
+    // The count is tested before the first iteration, so ecx = 0 runs the
+    // body not once: no store, no pointer move, and the flags the instruction
+    // before it set are the ones that survive.
+    const r = both([
+        0xb8, 0x41, 0, 0, 0,    // mov eax, 'A'
+        0xbf, 0x00, 0x40, 0, 0, // mov edi, 0x4000
+        0x31, 0xc9,             // xor ecx, ecx   (ZF = 1)
+        0xf3, 0xaa,             // rep stosb, ecx = 0
+        0xf4,
+    ]);
+    assert.equal(r.exit.kind, 3);
+    agree(r);
+    assert.deepEqual([...r.m.read(0x4000, 1)], [0], 'nothing written');
+    assert.equal(r.m.reg('edi'), 0x4000, 'the pointer did not move');
+    assert.equal(r.m.eflags() >>> 6 & 1, 1, 'ZF from the xor survives the rep');
+});
+
+test('rep stops on a compare and leaves the count and pointers at the stop', ()=>{
+    // repe cmpsb over three equal bytes then a difference: the count is what
+    // is left, and both pointers stand one past the mismatching pair.
+    const r = both([
+        0xbe, 0x00, 0x20, 0, 0, // mov esi, 0x2000
+        0xbf, 0x00, 0x30, 0, 0, // mov edi, 0x3000
+        0xb9, 3, 0, 0, 0,       // mov ecx, 3
+        0xf3, 0xa6,             // repe cmpsb
+        0xf4,
+    ], { memory: [
+        [0x2000, [1, 2, 4]],
+        [0x3000, [1, 2, 3]],
+    ] });
+    assert.equal(r.exit.kind, 3);
+    agree(r);
+    assert.equal(r.m.reg('ecx'), 0, 'the count ran out on the mismatching pair');
+    assert.equal(r.m.reg('esi'), 0x2003);
+    assert.equal(r.m.reg('edi'), 0x3003);
+    assert.equal(r.m.eflags() >>> 6 & 1, 0, 'ZF is clear: the bytes differ');
+});
+
 test('fs-relative reads add the thread base, and 16-bit lea wraps', ()=>{
     const m = createTestMachine();
     m.write(CODE, [
