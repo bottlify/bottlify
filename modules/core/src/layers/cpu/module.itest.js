@@ -37,9 +37,7 @@ async function booted(code, at, config = {}){
     const metrics = createMetrics({ shared: false });
     /** @type {string[]} */
     const words = [];
-    // This file is the emulator's own account of a machine, so it names the
-    // engine rather than taking the run's default (`cork`).
-    const api = await cpuModule.create({ engine: 'emulator', ...config }, /** @type {any} */ ({
+    const api = await cpuModule.create(config, /** @type {any} */ ({
         requireApi: ()=>({
             metrics,
             /** @param {string} text */
@@ -227,7 +225,7 @@ test('a second instance in one realm boots on its own, never seeing the first on
         const { api: first } = await booted(new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE);
 
         const metrics = createMetrics({ shared: false });
-        const second = await cpuModule.create({ engine: 'emulator' }, /** @type {any} */ ({
+        const second = await cpuModule.create({}, /** @type {any} */ ({
             requireApi: ()=>({ metrics, intern: ()=>-1 }),
             provide: ()=>{},
         }));
