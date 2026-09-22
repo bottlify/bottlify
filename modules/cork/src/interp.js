@@ -34,22 +34,27 @@ export { Fault, Unsupported, createState };
  * the next address has an entry, or when a trap has been recorded and only the
  * host can answer it), and `onStep` is told each instruction's start before it
  * runs (the host counts hotness from it). Both are optional, so the tight
- * one-instruction loop the corpus and tests use is unchanged.
+ * one-instruction loop the corpus and tests use is unchanged. `force` runs the
+ * first instruction whatever `shouldStop` answers: the host's progress
+ * guarantee, for a turn that would otherwise retire nothing.
  *
  * @param {import('./ir.js').EvalState} state
  * @param {number} [maxInstructions]
- * @param {{ shouldStop?: () => boolean, onStep?: (eip: number) => void }} [options]
+ * @param {{ shouldStop?: () => boolean, onStep?: (eip: number) => void,
+ *     force?: boolean }} [options]
  * @returns {number}
  */
 export function interpret(state, maxInstructions = 1, options = {}){
-    const { shouldStop, onStep } = options;
+    const { shouldStop, onStep, force } = options;
     const before = state.retired;
+    let first = force === true;
     while (state.retired - before < maxInstructions && !state.halted)
     {
-        if (shouldStop !== undefined && shouldStop())
+        if (!first && shouldStop !== undefined && shouldStop())
         {
             break;
         }
+        first = false;
         const decoded = decode(address=>state.memory.read(address, 1), state.eip);
         if ('refused' in decoded)
         {

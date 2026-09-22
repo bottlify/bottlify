@@ -143,6 +143,10 @@ for (const name of ['qsort.exe', 'threads.exe'])
             assert.equal(cork.output, reference.output);
             assert.ok(cork.cork.regions >= 1,
                 `no region formed: ${JSON.stringify(cork.cork)}`);
+            // No turn of the loading phase retired nothing: the host would
+            // have forced a step and counted it (`forcedSteps`).
+            assert.equal(cork.cork.forcedSteps, 0,
+                `a turn retired nothing and was forced: ${cork.cork.forcedSteps}`);
             // The loading phase: how cork runs the program against the
             // emulator, and where the translation time went. These programs are
             // short and boot-dominated, so the instruction counts and the split
