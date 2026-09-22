@@ -90,9 +90,23 @@ test('the packed tarball installs and hands a consumer the emulator',
 
         const checksums = JSON.parse(await readFile(
             join(consumer, 'node_modules', '@bottlify', 'core', 'dist', 'checksums.json'), 'utf8'));
+        // The video decoder is an optional artifact like the emulator since
+        // 5.5: absent, its export still resolves, and there is nothing to
+        // check; present, it is held to the same floor.
+        const optional = new Set(['video-decoder.wasm']);
         for (const [name, url] of Object.entries(result.artifacts))
         {
             const path = fileURLToPath(url);
+            if (optional.has(name))
+            {
+                try
+                {
+                    await stat(path);
+                }
+                catch {
+                    continue;
+                }
+            }
             const { size } = await stat(path);
             // The worklet is a page of code; the emulator's artifacts are not.
             const floor = name === 'worklet.js' ? 1000 : MIN_BYTES;

@@ -297,6 +297,10 @@ export function createCorkHost(config){
         // the machine is awake for clears it, as the host's own flag is.
         state.halted = false;
         const before = state.retired;
+        // Where the last instruction the interpreter stepped began, so a
+        // no-tier answer names the instruction it actually met rather than the
+        // address the range started at.
+        let lastStart = address;
         /** @type {unknown} */
         let thrown = null;
         try
@@ -308,7 +312,10 @@ export function createCorkHost(config){
                 // translated code and a different register file.
                 shouldStop: ()=>state.trapped.length > 0
                     || runtime.entryOf(state.eip, x87Top()) >= 0,
-                onStep: countHot,
+                onStep: (/** @type {number} */ at)=>{
+                    lastStart = at;
+                    countHot(at);
+                },
             });
         }
         catch (e){
@@ -340,8 +347,9 @@ export function createCorkHost(config){
             }
             if (typeof fault.op === 'string')
             {
-                throw new Error(`cpu: cork has no tier for 0x${hex(ram[address] ?? 0, 2)}`
-                    + ` (eip 0x${hex(address)})`, { cause: thrown });
+                const at = typeof fault.eip === 'number' ? fault.eip : lastStart;
+                throw new Error(`cpu: cork has no tier for 0x${hex(ram[at] ?? 0, 2)}`
+                    + ` (${fault.op}) (eip 0x${hex(at)})`, { cause: thrown });
             }
             throw thrown;
         }
@@ -663,11 +671,6 @@ export function createCorkHost(config){
             start: ()=>false,
             stop(){},
             read: ()=>null,
-        },
-        // The zstd decoder of step 5.0 replaces the emulator's; it is not on
-        // this step's path (a guest bundle read), so it is named until wired.
-        decompressZstd(){
-            throw new Error('cpu: cork-alone zstd decode waits on the step 5.0 decoder');
         },
     };
 

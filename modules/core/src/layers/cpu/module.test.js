@@ -111,6 +111,23 @@ test('an engine a launch may select is named, and one that is not is refused', a
     await cpuModule.dispose();
 });
 
+test('an engine that needs the emulator says so when the launch passes none', async()=>{
+    // Since 5.5 the emulator is an optional layer: a build may carry none of
+    // it, and a launch that selects it is told the layer is missing rather
+    // than failing deeper on an absent file.
+    for (const engine of ['emulator', 'hybrid'])
+    {
+        const api = await cpuModule.create({ engine }, /** @type {any} */ ({
+            requireApi: ()=>({}), provide: ()=>{},
+        }));
+        await assert.rejects(api.boot(), {
+            message: `cpu: the emulator is not available in this build`
+                + ` (engine "${engine}" needs it)`,
+        });
+        await cpuModule.dispose();
+    }
+});
+
 test('diagnostics answers for the live instance', async()=>{
     await open();
     const second = await open();

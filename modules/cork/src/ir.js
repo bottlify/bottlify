@@ -96,10 +96,14 @@ export class Fault extends Error {
 
 /** An instruction the model has no case for yet. */
 export class Unsupported extends Error {
-    /** @param {string} op */
-    constructor(op){
+    /** @param {string} op @param {number} [eip] the instruction's own address */
+    constructor(op, eip){
         super(`ir: no model for ${op}`);
         this.op = op;
+        if (eip !== undefined)
+        {
+            this.eip = eip;
+        }
     }
 }
 
@@ -352,6 +356,10 @@ export function evaluate(instruction, state){
                 write({ ...operands[0], size: 4 }, read(operands[1]));
                 return;
             }
+            write(operands[0], read(operands[1]));
+            return;
+        case 'movnti':
+            // A non-temporal store is a store, with no flags to leave.
             write(operands[0], read(operands[1]));
             return;
         case 'movzx':

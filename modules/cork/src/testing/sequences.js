@@ -80,6 +80,23 @@ export const POOL = [
     { name: 'cvtpi2ps xmm0, mm0', bytes: [0x0f, 0x2a, 0xc0] },
     { name: 'movq2dq xmm1, mm1', bytes: [0xf3, 0x0f, 0xd6, 0xc9] },
     { name: 'movdq2q mm2, xmm2', bytes: [0xf2, 0x0f, 0xd6, 0xd2] },
+    // --- the hardening list: bitwise-not order and the shift matrix ---
+    { name: 'andnps xmm0, xmm1', bytes: [0x0f, 0x55, 0xc1] },
+    { name: 'andnpd xmm0, xmm1', bytes: [0x66, 0x0f, 0x55, 0xc1] },
+    { name: 'pandn mm0, mm1', bytes: [0x0f, 0xdf, 0xc1] },
+    { name: 'psrlw mm0, 4', bytes: [0x0f, 0x71, 0xd0, 0x04] },
+    { name: 'psraw mm0, 4', bytes: [0x0f, 0x71, 0xe0, 0x04] },
+    { name: 'psllw mm0, 4', bytes: [0x0f, 0x71, 0xf0, 0x04] },
+    { name: 'psrld mm0, 4', bytes: [0x0f, 0x72, 0xd0, 0x04] },
+    { name: 'psrlq mm0, 4', bytes: [0x0f, 0x73, 0xd0, 0x04] },
+    { name: 'psrlw xmm0, 4', bytes: [0x66, 0x0f, 0x71, 0xd0, 0x04] },
+    { name: 'psrldq xmm0, 4', bytes: [0x66, 0x0f, 0x73, 0xd8, 0x04] },
+    // --- scalar forms keep the upper lanes ---
+    { name: 'addss xmm0, xmm1', bytes: [0xf3, 0x0f, 0x58, 0xc1] },
+    { name: 'addsd xmm0, xmm1', bytes: [0xf2, 0x0f, 0x58, 0xc1] },
+    { name: 'mulss xmm0, xmm1', bytes: [0xf3, 0x0f, 0x59, 0xc1] },
+    // --- x87: the tag word a non-popping store leaves ---
+    { name: 'fst qword [m]', bytes: [0xdd, 0x15, ...disp32(M0)] },
     // --- integer, between them ---
     { name: 'mov eax, 0x0f3a9c11', bytes: [0xb8, 0x11, 0x9c, 0x3a, 0x0f] },
     { name: 'add eax, ebx', bytes: [0x01, 0xd8] },

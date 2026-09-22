@@ -207,6 +207,20 @@ test('the stack: push, pop, call, ret, enter, leave, pushad/popad, pushf/popf', 
     assert.equal(r.m.reg('esp'), STACK);
 });
 
+test('ret imm16 pops the return and adds the immediate, model and emitter agreeing', ()=>{
+    const r = both([
+        0x6a, 0x00,                                     // push 0
+        0x6a, 0x00,                                     // push 0
+        0xe8, 0x03, 0x00, 0x00, 0x00,                   // call 0x100c
+        0xf4,                                           // hlt, the return's landing
+        0x90, 0x90,                                     // padding to the callee
+        0xc2, 0x08, 0x00,                               // ret 8
+    ]);
+    assert.equal(r.exit.kind, 3);
+    agree(r);
+    assert.equal(r.m.reg('esp'), STACK, 'the immediate left with the two dwords');
+});
+
 test('conditional moves and sets, bit tests, scans, bswap, cmpxchg, cwde/cdq', ()=>{
     const r = both([
         0xb8, 1, 0, 0, 0, 0xbb, 2, 0, 0, 0, 0x39, 0xd8, 0x0f, 0x4c, 0xc3, // cmovl eax, ebx
@@ -244,6 +258,80 @@ test('the string instructions with rep, repne and the direction flag', ()=>{
     assert.deepEqual([...r.m.read(0x3000, 16)], source);
     assert.deepEqual([...r.m.read(0x4000, 9)], [65, 65, 65, 65, 65, 65, 65, 65, 0]);
     assert.deepEqual([...r.m.read(0x5000, 4)], [7, 7, 7, 7]);
+});
+
+test('a zero-count rep touches nothing and keeps the flags', ()=>{
+    // The count is tested before the first iteration, so ecx = 0 runs the
+    // body not once: no store, no pointer move, and the flags the instruction
+    // before it set are the ones that survive.
+    const r = both([
+        0xb8, 0x41, 0, 0, 0,    // mov eax, 'A'
+        0xbf, 0x00, 0x40, 0, 0, // mov edi, 0x4000
+        0x31, 0xc9,             // xor ecx, ecx   (ZF = 1)
+        0xf3, 0xaa,             // rep stosb, ecx = 0
+        0xf4,
+    ]);
+    assert.equal(r.exit.kind, 3);
+    agree(r);
+    assert.deepEqual([...r.m.read(0x4000, 1)], [0], 'nothing written');
+    assert.equal(r.m.reg('edi'), 0x4000, 'the pointer did not move');
+    assert.equal(r.m.eflags() >>> 6 & 1, 1, 'ZF from the xor survives the rep');
+});
+
+test('rep stops on a compare and leaves the count and pointers at the stop', ()=>{
+    // repe cmpsb over three equal bytes then a difference: the count is what
+    // is left, and both pointers stand one past the mismatching pair.
+    const r = both([
+        0xbe, 0x00, 0x20, 0, 0, // mov esi, 0x2000
+        0xbf, 0x00, 0x30, 0, 0, // mov edi, 0x3000
+        0xb9, 3, 0, 0, 0,       // mov ecx, 3
+        0xf3, 0xa6,             // repe cmpsb
+        0xf4,
+    ], { memory: [
+        [0x2000, [1, 2, 4]],
+        [0x3000, [1, 2, 3]],
+    ] });
+    assert.equal(r.exit.kind, 3);
+    agree(r);
+    assert.equal(r.m.reg('ecx'), 0, 'the count ran out on the mismatching pair');
+    assert.equal(r.m.reg('esi'), 0x2003);
+    assert.equal(r.m.reg('edi'), 0x3003);
+    assert.equal(r.m.eflags() >>> 6 & 1, 0, 'ZF is clear: the bytes differ');
+});
+
+test('the direction flag runs a rep backwards, and the first iteration always runs', ()=>{
+    // std; rep movsb with the pointers at the top of their runs. The first
+    // iteration runs -- there is no count test before it for a nonzero count
+    // -- and each step then moves backwards, leaving both pointers one below
+    // the run's start.
+    const r = both([
+        0xbe, 0x02, 0x20, 0, 0, // mov esi, 0x2002
+        0xbf, 0x02, 0x30, 0, 0, // mov edi, 0x3002
+        0xb9, 3, 0, 0, 0,       // mov ecx, 3
+        0xfd,                   // std
+        0xf3, 0xa4,             // rep movsb
+        0xf4,
+    ], { memory: [[0x2000, [1, 2, 3]], [0x3000, [0, 0, 0]]] });
+    assert.equal(r.exit.kind, 3);
+    agree(r);
+    assert.deepEqual([...r.m.read(0x3000, 3)], [1, 2, 3], 'copied backwards in place');
+    assert.equal(r.m.reg('esi'), 0x2000 - 1, 'one below the source run');
+    assert.equal(r.m.reg('edi'), 0x3000 - 1, 'one below the destination run');
+    assert.equal(r.m.reg('ecx'), 0, 'the count ran out');
+
+    // A count of one still runs the body once and moves one pointer step.
+    const one = both([
+        0xb8, 0x41, 0, 0, 0,    // mov eax, 'A'
+        0xbf, 0x00, 0x40, 0, 0, // mov edi, 0x4000
+        0xb9, 1, 0, 0, 0,       // mov ecx, 1
+        0xf3, 0xaa,             // rep stosb
+        0xf4,
+    ]);
+    assert.equal(one.exit.kind, 3);
+    agree(one);
+    assert.deepEqual([...one.m.read(0x4000, 1)], [0x41]);
+    assert.equal(one.m.reg('edi'), 0x4001);
+    assert.equal(one.m.reg('ecx'), 0);
 });
 
 test('fs-relative reads add the thread base, and 16-bit lea wraps', ()=>{

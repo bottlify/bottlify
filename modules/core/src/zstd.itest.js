@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import zlib from 'node:zlib';
-import { assembleModules } from './core.js';
+import { createV86Host } from './layers/cpu/internal/v86-host.js';
 import { writeBundle } from '../../../tools/btl.mjs';
 import { openBundle, Codec } from './layers/filesystem/internal/bundle/format.js';
 import { decompressZstd } from './zstd.js';
@@ -84,13 +84,15 @@ test('every zstd block of a bundle matches the emulator\'s decoder', async t=>{
     assert.ok(zstdBlocks.length >= 1, 'the fixture carries zstd blocks');
 
     const [wasm] = await Promise.all([readFile(new URL('v86.wasm', PREBUILT))]);
-    const core = await assembleModules({});
-    const cpu = core.api('cpu');
-    await cpu.boot({
+    // The emulator's decoder lives in its wasm and left the cpu api in 5.5,
+    // so the machine is built directly to judge this project's own decoder.
+    const machine = await createV86Host({
         moduleUrl: new URL('libv86.mjs', PREBUILT).href,
         wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+        memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
+        initialStack: 0x300000,
     });
-    t.after(()=>core.dispose());
+    t.after(()=>machine.stop());
 
     let packed = 0;
     let unpacked = 0;
@@ -99,7 +101,7 @@ test('every zstd block of a bundle matches the emulator\'s decoder', async t=>{
         packed += block.packed.length;
         const mine = decompressZstd(block.packed, block.length);
         assert.equal(mine.length, block.length);
-        const theirs = cpu.decompressZstd(block.packed, block.length);
+        const theirs = machine.decompressZstd(block.packed, block.length);
         assert.deepEqual([...mine], [...theirs], `block of ${block.packed.length} bytes`);
         unpacked += mine.length;
     }
@@ -109,7 +111,7 @@ test('every zstd block of a bundle matches the emulator\'s decoder', async t=>{
         for (const block of zstdBlocks)
         {
             decompressZstd(block.packed, block.length);
-            cpu.decompressZstd(block.packed, block.length);
+            machine.decompressZstd(block.packed, block.length);
         }
     }
     const mineAt = performance.now();
@@ -121,7 +123,7 @@ test('every zstd block of a bundle matches the emulator\'s decoder', async t=>{
     const theirsAt = performance.now();
     for (const block of zstdBlocks)
     {
-        cpu.decompressZstd(block.packed, block.length);
+        machine.decompressZstd(block.packed, block.length);
     }
     const theirsMs = performance.now() - theirsAt;
 

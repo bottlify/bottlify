@@ -59,10 +59,25 @@ test('the pool holds every class the defect needs, with the operands named', ()=
     assert.deepEqual(kinds('fstp st0'), ['x87', 'x87']);
     assert.deepEqual(kinds('fcomp'), ['x87', 'x87']);
     assert.deepEqual(kinds('fnstsw ax'), ['reg']);
-    assert.equal(POOL.length, 31, 'the pool the itest draws from');
-    for (const name of ['fld1', 'fldz', 'fstp qword [m]', 'faddp', 'fmul st0, st1', 'fxch st1',
-        'fnstenv [m]', 'fldenv [m]', 'fninit', 'fnclex', 'ffree st0', 'paddw mm0, mm1',
-        'pxor mm1, mm1', 'emms', 'mov eax, 0x0f3a9c11', 'add eax, ebx', 'xor ecx, ecx'])
+    // The hardening forms: the bitwise-not order, the shift-by-immediate
+    // groups, the scalar forms and the non-popping store.
+    assert.deepEqual(kinds('andnps xmm0, xmm1'), ['xmm', 'xmm']);
+    assert.deepEqual(kinds('pandn mm0, mm1'), ['mm', 'mm']);
+    assert.deepEqual(kinds('psrlw mm0, 4'), ['mm', 'imm']);
+    assert.deepEqual(kinds('psrld mm0, 4'), ['mm', 'imm']);
+    assert.deepEqual(kinds('psrlq mm0, 4'), ['mm', 'imm']);
+    assert.deepEqual(kinds('psrlw xmm0, 4'), ['xmm', 'imm']);
+    assert.deepEqual(kinds('psrldq xmm0, 4'), ['xmm', 'imm']);
+    assert.deepEqual(kinds('addss xmm0, xmm1'), ['xmm', 'xmm']);
+    assert.deepEqual(kinds('fst qword [m]'), ['mem', 'x87']);
+    assert.equal(POOL.length, 45, 'the pool the itest draws from');
+    for (const name of ['fld1', 'fldz', 'fstp qword [m]', 'fst qword [m]', 'faddp',
+        'fmul st0, st1', 'fxch st1', 'fnstenv [m]', 'fldenv [m]', 'fninit', 'fnclex',
+        'ffree st0', 'paddw mm0, mm1', 'pxor mm1, mm1', 'emms', 'andnps xmm0, xmm1',
+        'andnpd xmm0, xmm1', 'pandn mm0, mm1', 'psrlw mm0, 4', 'psraw mm0, 4',
+        'psllw mm0, 4', 'psrld mm0, 4', 'psrlq mm0, 4', 'psrlw xmm0, 4',
+        'psrldq xmm0, 4', 'addss xmm0, xmm1', 'addsd xmm0, xmm1', 'mulss xmm0, xmm1',
+        'mov eax, 0x0f3a9c11', 'add eax, ebx', 'xor ecx, ecx'])
     {
         assert.ok(BY_NAME.has(name), `the pool holds ${name}`);
     }

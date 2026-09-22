@@ -141,6 +141,23 @@ for (const name of ['qsort.exe', 'threads.exe'])
             assert.equal(cork.output, reference.output);
             assert.ok(cork.cork.regions >= 1,
                 `no region formed: ${JSON.stringify(cork.cork)}`);
+            // The loading phase: how cork runs the program against the
+            // emulator, and where the translation time went. These programs are
+            // short and boot-dominated, so the instruction counts and the split
+            // say more than a rate rounded to zero.
+            console.log(`${name}: share ${cork.cork.translatedShare.toFixed(3)},`
+                + ` regions ${cork.cork.regions},`
+                + ` cork ${cork.instructions} instr in ${cork.ms.toFixed(1)} ms vs`
+                + ` emulator ${reference.instructions} in ${reference.ms.toFixed(1)} ms,`
+                + ` translateMs ${cork.cork.translateMs.toFixed(0)}`
+                + ` (forming ${cork.cork.formingMs.toFixed(0)},`
+                + ` lookup ${cork.cork.lookupMs.toFixed(0)},`
+                + ` emit ${cork.cork.emitMs.toFixed(0)},`
+                + ` encode ${cork.cork.encodeMs.toFixed(0)},`
+                + ` store ${cork.cork.storeMs.toFixed(0)},`
+                + ` instantiate ${cork.cork.instantiateMs.toFixed(0)},`
+                + ` publish ${cork.cork.publishMs.toFixed(0)},`
+                + ` worker ${cork.cork.workerMs.toFixed(0)})`);
         });
 }
 
