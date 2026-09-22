@@ -231,7 +231,7 @@ export function trackRegion(region, entryTop){
     // block, since every round that does not stop the loop adds a cut.
     for (let round = 0; round <= count; round++)
     {
-        /** @type {(StackState | undefined)[]} */
+        /** @type {(StackState | null | undefined)[]} */
         const pending = new Array(count).fill(undefined);
         const seen = new Set();
         pending[entry] = { top: entryTop, slot: [0, 1, 2, 3, 4, 5, 6, 7] };
@@ -246,7 +246,7 @@ export function trackRegion(region, entryTop){
                 continue;
             }
             seen.add(i);
-            let state = /** @type {StackState} */ (pending[i]);
+            let state = /** @type {StackState | null} */ (pending[i]);
             for (const instruction of blocks[i].instructions)
             {
                 if (state === null)
