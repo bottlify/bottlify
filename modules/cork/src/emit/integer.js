@@ -106,6 +106,11 @@ export function emitInstruction(e, instruction, flagsLive){
         case 'prefetchnta': case 'prefetcht0': case 'prefetcht1': case 'prefetcht2':
         case 'lfence': case 'mfence': case 'sfence': case 'pause':
             return true;
+        // The emulator's decoder consumes BOUND and neither checks the bounds
+        // nor raises #BR, so translated code does the same. A guest that runs
+        // data (a return into the entry vector) reaches it and must go on.
+        case 'bound':
+            return true;
         case 'hlt':
             e.exitAt(next, Exit.HALT);
             e.dead = true;

@@ -280,6 +280,21 @@ test('int3 and int n are left to the other executor, before the instruction', ()
     assert.equal(m.counter(), 1, 'the nop alone');
 });
 
+test('bound is the no-op the emulator makes it, even out of range', ()=>{
+    // mov eax, -1; mov ebx, bounds; bound eax, [ebx]; inc eax; hlt. A real
+    // processor raises #BR for -1 outside the {0, 0} pair; the emulator does
+    // not, so translated code must not either -- the run reaches the `inc`.
+    const r = both(
+        [0xb8, 0xff, 0xff, 0xff, 0xff, 0xbb, 0x00, 0x20, 0x00, 0x00,
+            0x62, 0x03, 0x40, 0xf4],
+        { memory: [[0x2000, [0, 0, 0, 0, 0, 0, 0, 0]]] });
+    assert.equal(r.exit.kind, 3, 'the run halted rather than stopping at 0x62');
+    assert.equal(r.exit.eip, CODE + 14);
+    assert.equal(r.m.reg('eax') >>> 0, 0, 'the instruction changed nothing');
+    assert.equal(r.exit.unsupported.size, 0, 'bound was translated, not left out');
+    agree(r);
+});
+
 test('a conditional jump reading flags set in another block goes through the word', ()=>{
     // 1000: cmp eax, 5
     // 1003: jmp 1005      (the jcc is in a block of its own)

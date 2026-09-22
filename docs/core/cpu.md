@@ -75,7 +75,11 @@ and goes on after the write, or leaves untranslated where the handler put EIP. A
 holding x87 registers in its locals takes the older form instead, a `trap` exit past the
 instruction that the hybrid host answers the same way; either way a call into the bridge
 costs no emulator turn. `out` to any other port, `in`,
-`cli`, `sti`, `int n`, `int3` and `into` are the emulator's, before the instruction. A fault
+`cli`, `sti`, `int n`, `int3` and `into` are the emulator's, before the instruction.
+`bound` is translated as the no-op the emulator's own decoder makes of it — it consumes the
+instruction and neither checks the pair nor raises `#BR`, so a guest that returns into a page
+of data (the entry vector is the shape seen on a real route) runs the same bytes either way.
+A fault
 translated code detects (a divide by zero, an undefined instruction, an access the page
 table refuses) leaves before the instruction with the registers as they were, and the
 emulator re-executes it and raises it through the same vector and report a program on the

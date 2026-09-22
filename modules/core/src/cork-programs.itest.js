@@ -57,6 +57,37 @@ function buildLoopExe(){
 }
 
 /**
+ * Calls an import nothing claims -- which returns zero through the stubs so a
+ * callback or an unresolved import's return is the shape -- and then returns
+ * into the entry vector, where `BOUND` sits. The emulator's decoder consumes
+ * that instruction and carries on, so cork must too: the program exits 42 on
+ * both. This is the path the real-route run stopped on at 0x7000.
+ */
+function buildVectorReturnExe(){
+    return buildExe({
+        imports: { 'msvcrt.dll': ['no_such_import'], 'KERNEL32.dll': ['ExitProcess'] },
+        data: {},
+        codeSize: 0x80,
+        code: ({ iat, code })=>{
+            const atExit = code(0x40);
+            const rel = atExit - 0x7007; // the jmp after `62 10`, from 0x7002
+            const first = ((rel & 0xff) << 24 | 0x00e91062) >>> 0; // 62 10 e9 rel0
+            const second = rel >>> 8;
+            const atJmp = code(26);
+            return [
+                0xc7, 0x05, ...u32(0x7000), ...u32(first), // mov dword [0x7000], ...
+                0xc7, 0x05, ...u32(0x7004), ...u32(second),
+                0xff, 0x15, ...u32(iat('no_such_import')), // call the unresolved import
+                0xe9, ...u32(0x7000 - (atJmp + 5)), // jmp 0x7000
+                ...new Array(0x40 - 31).fill(0x90),
+                0x6a, 0x2a, 0xff, 0x15, ...u32(iat('ExitProcess')), // exit 42
+                ...new Array(20).fill(0x90),
+            ];
+        },
+    });
+}
+
+/**
  * @param {Uint8Array} executable @param {'emulator' | 'cork'} engine
  */
 async function run(executable, engine){
@@ -109,6 +140,17 @@ for (const name of ['qsort.exe', 'threads.exe'])
                 `no region formed: ${JSON.stringify(cork.cork)}`);
         });
 }
+
+test('a return into the entry vector runs BOUND under cork as on the emulator',
+    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 60000 }, async()=>{
+        const exe = buildVectorReturnExe();
+        const reference = await run(exe, 'emulator');
+        const cork = await run(exe, 'cork');
+        assert.equal(reference.code, 42, 'the emulator ran past BOUND');
+        assert.equal(cork.code, reference.code,
+            `cork stopped where the emulator carried on: ${JSON.stringify(cork.cork)}`);
+        assert.equal(cork.output, reference.output);
+    });
 
 test('a loop calling an import runs and translates under cork',
     { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 60000 }, async()=>{
