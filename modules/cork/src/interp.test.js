@@ -69,9 +69,9 @@ test('a budget bounds a loop', ()=>{
 });
 
 test('an instruction with no model throws Unsupported', ()=>{
-    // A form the evaluator has no case for. `fld` is x87, still to come.
+    // A form the evaluator leaves to the other executor: fxsave.
     const m = machine();
-    m.ram.set([0xd9, 0x00], 0x1000); // fld dword [eax]
+    m.ram.set([0x0f, 0xae, 0x00], 0x1000); // fxsave [eax]
     // `evaluate` counts and advances before it decides it has no case; the
     // host answers the throw for the instruction, not for the count.
     assert.throws(()=>interpret(m.state, 1), /no model for/);

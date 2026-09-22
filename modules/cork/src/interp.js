@@ -51,7 +51,7 @@ export function interpret(state, maxInstructions = 1){
  *
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout }} what
- * @returns {import('./ir.js').EvalState}
+ * @returns {import('./ir.js').EvalState & { syncIn: () => void, syncOut: () => void }}
  */
 export function blockState({ memory, layout }){
     const view = new DataView(memory.buffer);
@@ -78,12 +78,53 @@ export function blockState({ memory, layout }){
             view.setUint32(at, value, true);
         }
     };
+    // The x87 registers are one f64 every sixteen bytes in the block, which no
+    // typed array can stride; they are copied in and out around each run, as
+    // the XMM registers are. The words beside them are read and written
+    // directly.
+    const f80Bytes = new ArrayBuffer(64);
+    const f80 = new Float64Array(f80Bytes);
+    const f80bits = new BigInt64Array(f80Bytes);
+    const xmm = new Uint32Array(32);
     return {
         reg,
         memory: { read, write },
         halted: false,
         retired: 0,
         trapped: [],
+        f80,
+        f80bits,
+        xmm,
+        get top(){
+            return view.getUint8(layout.x87Top) & 7;
+        },
+        set top(value){
+            view.setUint8(layout.x87Top, value & 7);
+        },
+        get empty(){
+            return view.getUint8(layout.x87Empty);
+        },
+        set empty(value){
+            view.setUint8(layout.x87Empty, value & 0xff);
+        },
+        get status(){
+            return view.getUint16(layout.x87Status, true);
+        },
+        set status(value){
+            view.setUint16(layout.x87Status, value & 0xffff, true);
+        },
+        get control(){
+            return view.getUint16(layout.x87Control, true);
+        },
+        set control(value){
+            view.setUint16(layout.x87Control, value & 0xffff, true);
+        },
+        get mxcsr(){
+            return view.getUint32(layout.mxcsr, true);
+        },
+        set mxcsr(value){
+            view.setUint32(layout.mxcsr, value >>> 0, true);
+        },
         get eip(){
             return view.getUint32(layout.eip, true);
         },
@@ -103,6 +144,28 @@ export function blockState({ memory, layout }){
             if (layout.fsBase >= 0)
             {
                 view.setUint32(layout.fsBase, value >>> 0, true);
+            }
+        },
+        /** Takes the block's x87 and XMM registers into the arrays. */
+        syncIn(){
+            for (let i = 0; i < 8; i++)
+            {
+                f80[i] = view.getFloat64(layout.x87 + i * 16, true);
+            }
+            for (let word = 0; word < 32; word++)
+            {
+                xmm[word] = view.getUint32(layout.xmm + word * 4, true);
+            }
+        },
+        /** Writes the arrays back into the block. */
+        syncOut(){
+            for (let i = 0; i < 8; i++)
+            {
+                view.setFloat64(layout.x87 + i * 16, f80[i], true);
+            }
+            for (let word = 0; word < 32; word++)
+            {
+                view.setUint32(layout.xmm + word * 4, xmm[word], true);
             }
         },
     };
