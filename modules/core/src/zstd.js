@@ -429,7 +429,10 @@ function readHuffmanWeights(bytes, at, size){
  *
  * @param {number[]} weights  one per symbol so far, 0 for absent; the last
  *     symbol's weight is deduced and appended
- * @returns {{ symbols: Uint8Array, bits: Uint8Array, maxBits: number }}
+ * @returns {{ packed: Uint16Array, maxBits: number }}
+ *     `packed[cell]` holds the symbol in its low byte and the code width in
+ *     its high byte, so one lookup answers both what to write and how far to
+ *     advance.
  */
 function buildHuffman(weights){
     let total = 0;
@@ -458,8 +461,7 @@ function buildHuffman(weights){
         start[weight] = next;
         next += count[weight] << (weight - 1);
     }
-    const symbols = new Uint8Array(1 << maxBits);
-    const bits = new Uint8Array(1 << maxBits);
+    const packed = new Uint16Array(1 << maxBits);
     for (let symbol = 0; symbol < weights.length; symbol++)
     {
         const weight = weights[symbol];
@@ -471,18 +473,16 @@ function buildHuffman(weights){
         const width = maxBits + 1 - weight;
         const from = start[weight];
         const to = from + run;
-        bits.fill(width, from, to);
-        symbols.fill(symbol, from, to);
+        packed.fill(symbol | (width << 8), from, to);
         start[weight] = to;
     }
-    return { symbols, bits, maxBits };
+    return { packed, maxBits };
 }
 
 /**
  * A Huffman tree as a Compressed_Literals_Block carries one.
  *
- * @typedef {{ symbols: Uint8Array, bits: Uint8Array, maxBits: number,
- *     bytes: number }} Huffman
+ * @typedef {{ packed: Uint16Array, maxBits: number, bytes: number }} Huffman
  */
 
 /**
@@ -512,24 +512,57 @@ function readHuffmanTree(bytes, at){
         weights = readHuffmanWeights(bytes, at, header);
         at += header;
     }
-    const { symbols, bits, maxBits } = buildHuffman(weights);
-    return { symbols, bits, maxBits, bytes: at - start };
+    const { packed, maxBits } = buildHuffman(weights);
+    return { packed, maxBits, bytes: at - start };
 }
 
 /**
  * One Huffman-coded stream, read backward, into `out` at `outAt`.
  *
+ * The bits are consumed from the stream's end downward, so they are gathered
+ * into a 32-bit accumulator with the first bit read landing at the top: a
+ * lookup of the packed table by the top `maxBits` bits answers the symbol and
+ * the width in one array read, and the accumulator is refilled a byte at a
+ * time from below. The per-cell two-array lookup and the per-bit function
+ * calls the first version made were the decoder's whole cost.
+ *
  * @param {Uint8Array} bytes @param {number} start @param {number} end
- * @param {Uint8Array} symbols @param {Uint8Array} bits @param {number} maxBits
+ * @param {Uint16Array} packed @param {number} maxBits
  * @param {Uint8Array} out @param {number} outAt @param {number} count
  */
-function decodeHuffmanStream(bytes, start, end, symbols, bits, maxBits, out, outAt, count){
-    const stream = new ReverseBits(bytes, start, end);
+function decodeHuffmanStream(bytes, start, end, packed, maxBits, out, outAt, count){
+    if (count === 0)
+    {
+        return;
+    }
+    const last = bytes[end - 1];
+    if (last === 0)
+    {
+        throw new Error('zstd: corrupt bitstream');
+    }
+    // The stop bit is the last set bit of the final byte; the bits below it
+    // are the stream's first bits, already in most-significant-first order.
+    const stop = highBit(last);
+    let at = end - 1;
+    let acc = stop === 0 ? 0 : (bytes[at] & ((1 << stop) - 1)) << (32 - stop);
+    let have = stop;
+    const shift0 = 32 - maxBits;
+    at--;
     for (let i = 0; i < count; i++)
     {
-        const cell = stream.peek(maxBits);
-        out[outAt + i] = symbols[cell];
-        stream.skip(bits[cell]);
+        while (have <= 24)
+        {
+            // Bits past the beginning of the stream read as zero, as the
+            // format's padding allows.
+            const group = at >= start ? bytes[at] : 0;
+            acc |= group << (24 - have);
+            have += 8;
+            at--;
+        }
+        const code = packed[acc >>> shift0];
+        out[outAt + i] = code & 0xff;
+        acc <<= code >>> 8;
+        have -= code >>> 8;
     }
 }
 
@@ -629,8 +662,8 @@ function decodeLiterals(bytes, start, frame){
     if (streams === 1)
     {
         zstdStats.huffmanOneStream++;
-        decodeHuffmanStream(bytes, contentAt + treeSize, contentEnd, tree.symbols,
-            tree.bits, tree.maxBits, literals, 0, regenerated);
+        decodeHuffmanStream(bytes, contentAt + treeSize, contentEnd, tree.packed,
+            tree.maxBits, literals, 0, regenerated);
     }
     else
     {
@@ -650,7 +683,7 @@ function decodeLiterals(bytes, start, frame){
             {
                 throw new Error('zstd: corrupt jump table');
             }
-            decodeHuffmanStream(bytes, at, at + sizes[i], tree.symbols, tree.bits,
+            decodeHuffmanStream(bytes, at, at + sizes[i], tree.packed,
                 tree.maxBits, literals, i * per, counts[i]);
             at += sizes[i];
         }
@@ -704,10 +737,8 @@ function decodeCompressed(bytes, start, end, out, frame){
     if (sequences === 0)
     {
         out.ensure(literals.length);
-        for (let i = 0; i < literals.length; i++)
-        {
-            out.bytes[out.length++] = literals[i];
-        }
+        out.bytes.set(literals, out.length);
+        out.length += literals.length;
         return;
     }
     const modes = bytes[at++];
@@ -819,14 +850,33 @@ function decodeCompressed(bytes, start, end, out, frame){
             throw new Error('zstd: offset past the window');
         }
         out.ensure(literalLength + matchLength);
+        const dst = out.bytes;
         for (let i = 0; i < literalLength; i++)
         {
-            out.bytes[out.length++] = literals[litAt++];
+            dst[out.length++] = literals[litAt++];
         }
-        for (let i = 0; i < matchLength; i++)
+        // A match whose offset reaches past its own length copies once; a
+        // shorter offset repeats a pattern, so the first `offset` bytes are
+        // copied forward and then the written prefix is doubled until the
+        // match is filled -- a handful of `copyWithin`s instead of a byte
+        // loop, as the format's LZ matches ask for.
+        if (offset >= matchLength)
         {
-            out.bytes[out.length] = out.bytes[out.length - offset];
-            out.length++;
+            dst.copyWithin(out.length, out.length - offset, out.length - offset + matchLength);
+            out.length += matchLength;
+        }
+        else
+        {
+            const matchStart = out.length;
+            dst.copyWithin(matchStart, matchStart - offset, matchStart);
+            let written = offset;
+            while (written < matchLength)
+            {
+                const chunk = Math.min(written, matchLength - written);
+                dst.copyWithin(matchStart + written, matchStart, matchStart + chunk);
+                written += chunk;
+            }
+            out.length += matchLength;
         }
         if (sequence + 1 < sequences)
         {
@@ -835,10 +885,11 @@ function decodeCompressed(bytes, start, end, out, frame){
             ofState = baseOf(ofTable, ofState) + stream.read(bitsOf(ofTable, ofState));
         }
     }
-    while (litAt < literals.length)
+    if (litAt < literals.length)
     {
-        out.ensure(1);
-        out.bytes[out.length++] = literals[litAt++];
+        out.ensure(literals.length - litAt);
+        out.bytes.set(literals.subarray(litAt), out.length);
+        out.length += literals.length - litAt;
     }
     frame.repeat1 = repeat1;
     frame.repeat2 = repeat2;
