@@ -472,7 +472,7 @@ export function evaluate(instruction, state){
         case 'mul':
         {
             const a = (state.reg[0] & mask) >>> 0;
-            const b = read(operands[0]);
+            const b = read(operands[0]) >>> 0;
             const product = BigInt(a) * BigInt(b);
             const low = Number(product & BigInt(mask));
             const high = Number(product >> BigInt(size * 8));
@@ -588,7 +588,7 @@ export function evaluate(instruction, state){
             // the default moves ESP and pops EBP.
             if (size === 2)
             {
-                state.reg[4] = state.reg[5] & 0xffff;
+                state.reg[4] = (state.reg[4] & 0xffff0000 | state.reg[5] & 0xffff) >>> 0;
                 state.reg[5] = (state.reg[5] & 0xffff0000 | pop(2)) >>> 0;
             }
             else
@@ -896,7 +896,8 @@ function writeWide(size, state, low, high){
  */
 function divide(op, operands, size, state, read, instruction){
     const bits = size * 8;
-    const divisor = read(operands[0]);
+    const operand = read(operands[0]);
+    const divisor = op === 'idiv' ? operand : operand >>> 0;
     if (divisor === 0)
     {
         throw new Fault(0, instruction.eip);

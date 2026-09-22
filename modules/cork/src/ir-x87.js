@@ -31,9 +31,9 @@ function condition(cc, eflags){
     const sf = (eflags & 0x80) !== 0;
     const of = (eflags & 0x800) !== 0;
     return [
-        cf, !cf, cf || zf, !cf && !zf,
-        zf, !zf, zf || cf, !zf && !cf,
-        sf, !sf, pf, !pf, of, !of, sf || of, !sf && !of,
+        of, !of, cf, !cf,
+        zf, !zf, cf || zf, !cf && !zf,
+        sf, !sf, pf, !pf, sf !== of, sf === of, zf || sf !== of, !(zf || sf !== of),
     ][cc] ?? false;
 }
 /** The eight escape bytes and the wait. */
@@ -47,6 +47,8 @@ export function isX87Op(instruction){
 const scratch = new ArrayBuffer(8);
 const scratchF = new Float64Array(scratch);
 const scratchI = new BigInt64Array(scratch);
+const scratchF32 = new Float32Array(scratch);
+const scratchU32 = new Uint32Array(scratch);
 /** @param {number} value */
 const bits = value=>{
     scratchF[0] = value;
@@ -310,8 +312,8 @@ function storeFloat(state, address, size, value){
         {
             state.status |= Status.UE;
         }
-        scratchF[0] = Math.fround(value);
-        writeMem(state, address, 4, BigInt(Number(new Int32Array(scratch)[0]) >>> 0));
+        scratchF32[0] = Math.fround(value);
+        writeMem(state, address, 4, BigInt(scratchU32[0]));
         return;
     }
     writeMem(state, address, 8, bits(value));
@@ -554,15 +556,23 @@ export function evaluateX87(instruction, state, address){
             const original = st(0);
             let value = original;
             let exponent = 0;
+            let significand;
             if (value === 0)
             {
                 state.status |= Status.ZE;
                 exponent = -Infinity;
+                significand = original;
             }
-            else if (Math.abs(value) < 2 ** -1022)
+            else
             {
-                value *= 2 ** 54;
-                exponent = -54;
+                if (Math.abs(value) < 2 ** -1022)
+                {
+                    value *= 2 ** 54;
+                    exponent = -54;
+                }
+                const word = bits(value);
+                exponent += Number(word >> 52n & 0x7ffn) - 1023;
+                significand = fromBits(word & -0x7ff0000000000001n | 0x3ff0000000000000n);
             }
             if (Number.isNaN(value) || Math.abs(value) === Infinity)
             {
@@ -570,9 +580,6 @@ export function evaluateX87(instruction, state, address){
                 pushValue(orIndefinite(original, t1));
                 return true;
             }
-            const word = bits(value);
-            exponent += Number(word >> 52n & 0x7ffn) - 1023;
-            const significand = fromBits(word & -0x7ff0000000000001n | 0x3ff0000000000000n);
             setSt(0, orIndefinite(exponent, t1));
             pushValue(orIndefinite(significand, t1));
             return true;
@@ -788,11 +795,11 @@ export function evaluateX87(instruction, state, address){
         }
         case 'fcomi': case 'fcomip': case 'fucomi': case 'fucomip':
         {
-            guard(state, [0, Number(src.reg)], false);
+            const empty = guard(state, [0, Number(src.reg)], false);
             const a = st(0);
             const c = st(Number(src.reg));
-            const t1 = (Number.isNaN(a) || Number.isNaN(c)) ? 1 : 0;
-            state.eflags &= ~(0x40 | 0x04 | 0x01 | 0x80 | 0x800);
+            const t1 = empty !== 0 || Number.isNaN(a) || Number.isNaN(c) ? 1 : 0;
+            state.eflags &= ~(0x40 | 0x04 | 0x01 | 0x10 | 0x80 | 0x800);
             if (t1)
             {
                 state.eflags |= 0x40 | 0x04 | 0x01;
@@ -872,7 +879,7 @@ export function evaluateX87(instruction, state, address){
         {
             const save = op === 'fnsave';
             const where = at(dst);
-            state.memory.write(where, 4, state.control);
+            state.memory.write(where, 4, (state.control | 0xffff0000) >>> 0);
             state.memory.write(where + 4, 4, (statusWord(state) | 0xffff0000) >>> 0);
             state.memory.write(where + 8, 4, (tagWord(state) | 0xffff0000) >>> 0);
             state.memory.write(where + 12, 4, 0);

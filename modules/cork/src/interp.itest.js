@@ -157,4 +157,6 @@ test('the interpreter leaves what the hardware left, on every case it models',
         assert.equal(failures.length, 0,
             `${failures.length} diverged:\n${failures.slice(0, 40).join('\n')}`);
         assert.ok(judged > 0);
+        assert.equal(precision, X87_PRECISION.size,
+            'every named precision case still diverges, and no other');
     });
