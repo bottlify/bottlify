@@ -477,12 +477,16 @@ decides between the two by asking its region map whether the target could ever b
 ### zstd
 
 A guest file read needs a decompressor that answers without a promise — the CPU is stopped
-inside one instruction and cannot await. The bundle path is served by `modules/core/src/zstd.js`,
-a decode-only zstd implementation of this project's own (frame, block, literal, Huffman and FSE
-decoding; no dictionaries, the checksum read and not verified). It replaced the decoder the
-emulator's wasm happened to carry, so the default path no longer depends on the emulator for it.
-The cpu api's `decompressZstd` has left the api (5.5): the decoder a bundle read uses is the one
-above, and the emulator's own decoder is reached only by the differential test.
+inside one instruction and cannot await. Two decoders can: the emulator's wasm one, reached
+through the cpu api's `decompressZstd` while the emulator is loaded, and
+`modules/core/src/zstd.js`, a decode-only zstd implementation of this project's own (frame,
+block, literal, Huffman and FSE decoding; no dictionaries, the checksum read and not verified).
+A first bundle load decodes the whole bundle, and the wasm decoder is several times faster than
+the JavaScript one (measured by `zstd.itest.js` per MiB on the bundle's own blocks), so
+`mountBundle` chooses by engine: `emulator` and `hybrid` use the wasm decoder, `cork` — which
+has no emulator — uses `zstd.js`. The choice is made once, at mount, by `chooseZstdDecoder`
+(unit-tested per engine in `app.test.js`); when `zstd.js` is measured at the wasm decoder's
+speed it becomes the decoder for every engine, and the api's `decompressZstd` can leave again.
 
 ### What of `vendor/v86` is used
 

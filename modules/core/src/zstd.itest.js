@@ -65,7 +65,10 @@ async function buildBundle(){
 }
 
 test('every zstd block of a bundle matches the emulator\'s decoder', async t=>{
-    const bytes = await buildBundle();
+    // The largest bundle's blocks when one is named (the owner's own), the
+    // fixture below otherwise: `BOTTLIFY_ZSTD_BUNDLE=/path/to/bundle.btl`.
+    const named = process.env.BOTTLIFY_ZSTD_BUNDLE;
+    const bytes = named ? new Uint8Array(await readFile(named)) : await buildBundle();
     const bundle = await openBundle(
         async(at, count)=>bytes.subarray(at, at + count),
         (codec, block)=>codec === Codec.DEFLATE_RAW
@@ -128,9 +131,10 @@ test('every zstd block of a bundle matches the emulator\'s decoder', async t=>{
     const theirsMs = performance.now() - theirsAt;
 
     const mb = unpacked / (1024 * 1024);
-    console.log(`zstd: ${zstdBlocks.length} blocks, ${(packed / 1024).toFixed(0)} KiB packed, `
-        + `${mb.toFixed(1)} MiB out; ours ${(mb / (mineMs / 1000)).toFixed(1)} MiB/s `
-        + `(${mineMs.toFixed(1)} ms), the emulator's ${(mb / (theirsMs / 1000)).toFixed(1)} MiB/s `
-        + `(${theirsMs.toFixed(1)} ms)`);
+    console.log(`zstd (${named ?? 'the itest fixture'}): ${zstdBlocks.length} blocks, `
+        + `${(packed / 1024).toFixed(0)} KiB packed, ${mb.toFixed(1)} MiB out; `
+        + `ours ${(mb / (mineMs / 1000)).toFixed(1)} MiB/s (${(mineMs / 1000).toFixed(2)} s), `
+        + `the emulator's ${(mb / (theirsMs / 1000)).toFixed(1)} MiB/s`
+        + ` (${(theirsMs / 1000).toFixed(2)} s)`);
     assert.ok(mb > 0.1, `enough to time: ${mb} MiB`);
 });

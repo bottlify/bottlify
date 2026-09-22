@@ -1613,6 +1613,27 @@ function expectIndex(expected){
 }
 
 /**
+ * The zstd decoder a bundle read uses, by engine. While the emulator is loaded
+ * its wasm decoder is several times faster than this project's own
+ * (`modules/core/src/zstd.js`), and a first bundle load decodes the whole
+ * bundle, so `emulator` and `hybrid` use it; `cork` has no emulator and uses
+ * the project's. Both answer synchronously, as a guest read needs. The choice
+ * is made once, when the bundle is mounted; when `zstd.js` is measured at the
+ * wasm decoder's speed it becomes the decoder for every engine.
+ *
+ * @param {string} engine
+ * @param {{ decompressZstd: (packed: Uint8Array, expectedLength: number) => Uint8Array }} cpu
+ * @returns {(packed: Uint8Array, expectedLength: number) => Uint8Array}
+ */
+export function chooseZstdDecoder(engine, cpu){
+    if (engine !== 'cork')
+    {
+        return (packed, expectedLength)=>cpu.decompressZstd(packed, expectedLength);
+    }
+    return decompressZstd;
+}
+
+/**
  * Mounts a bundle as the read-only half of the volume.
  *
  * The blocks that have been brought in are held here rather than inside the
@@ -1634,7 +1655,7 @@ function expectIndex(expected){
  *                     refetched: () => { blocks: number, bytes: number },
  *                     ranges: () => { requests: number, bytes: number } } | null>}
  */
-async function mountBundle({ options, filesystem, events }){
+async function mountBundle({ options, cpu, filesystem, events }){
     if (!options.bundle?.fetch)
     {
         return null;
@@ -1647,13 +1668,13 @@ async function mountBundle({ options, filesystem, events }){
         retry: options.bundle.retry,
     });
 
+    const zstdForEngine = chooseZstdDecoder(options.engine ?? 'emulator', cpu);
     /**
      * A block, turned back into bytes, without awaiting anything.
      *
-     * zstd is decoded here by this project's own decoder (`zstd.js`), which
-     * answers synchronously; it replaced the one the emulator's wasm happened
-     * to carry, so the default path no longer needs the emulator for it. The
-     * cpu api's `decompressZstd` stays until 5.5, when it leaves. Deflate has
+     * zstd is decoded by the engine's decoder (`chooseZstdDecoder` above): the
+     * emulator's wasm one under `emulator`/`hybrid`, this project's own
+     * (`zstd.js`) under `cork`. Both answer synchronously. Deflate has
      * no synchronous decoder in a browser at all, so a deflate block is
      * inflated when it is *fetched* -- which is already an asynchronous step --
      * and by the time a read reaches it, it is plain. That is why codec 1 is
@@ -1666,7 +1687,7 @@ async function mountBundle({ options, filesystem, events }){
     const decode = (codec, bytes, expectedLength)=>{
         if (codec === 2)
         {
-            return decompressZstd(bytes, expectedLength ?? 0);
+            return zstdForEngine(bytes, expectedLength ?? 0);
         }
         return bytes;
     };

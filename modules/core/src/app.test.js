@@ -27,12 +27,13 @@ import {
     createKernelGl,
     resolveOpenglEntry,
     describeEvent,
+    chooseZstdDecoder,
 } from './app.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
 import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
-import { createAccessors } from './layers/memory/internal/accessors.js';
+import { decompressZstd } from './zstd.js';import { createAccessors } from './layers/memory/internal/accessors.js';
 import { Access, RegionKind, createRegionMap } from './layers/memory/internal/regions.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 
@@ -1020,3 +1021,19 @@ test('an event line names a picture by its size, never by its pixels', ()=>{
     assert.equal(line,
         'width=32 height=32 hotSpot={"x":1,"y":2} bgra=<4096 bytes> shown=true names=[a b]');
 });
+
+test('the bundle zstd decoder follows the engine: the emulator while it is loaded, ours for cork',
+    ()=>{
+        const calls = [];
+        const cpu = { decompressZstd: (/** @type {Uint8Array} */ packed, /** @type {number} */ length)=>{
+            calls.push([packed, length]);
+            return new Uint8Array([1, 2, 3]);
+        } };
+        const theirs = chooseZstdDecoder('emulator', cpu);
+        assert.deepEqual([...theirs(new Uint8Array([9]), 4)], [1, 2, 3]);
+        assert.deepEqual([...chooseZstdDecoder('hybrid', cpu)(new Uint8Array([9]), 4)], [1, 2, 3]);
+        assert.equal(calls.length, 2, 'the emulator decoder answered both');
+        // Under cork the api has no emulator decoder: the project's own decoder
+        // is the choice, by identity.
+        assert.equal(chooseZstdDecoder('cork', /** @type {any} */ ({})), decompressZstd);
+    });

@@ -794,6 +794,17 @@ export const cpuModule = {
             interpretedSteps: ()=>started().interpretedSteps(),
             hostWrittenBytes: ()=>started().hostWrittenBytes(),
             /**
+             * The emulator's own zstd decoder, which a bundle read can use
+             * while the emulator is loaded: it answers synchronously, as a
+             * guest read needs, and is several times faster than this project's
+             * own. Under `cork` there is none -- the host has no such member --
+             * so the caller falls back to `modules/core/src/zstd.js`.
+             *
+             * @param {Uint8Array} packed @param {number} expectedLength
+             */
+            decompressZstd: (packed, expectedLength)=>
+                started().decompressZstd(packed, expectedLength),
+            /**
              * The emulator's account of where the guest ran, by address and
              * weighted by instructions. Kept only between start and stop, and
              * only by a build that carries it.
