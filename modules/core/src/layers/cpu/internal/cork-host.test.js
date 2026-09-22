@@ -160,6 +160,38 @@ test('the interpreter stops only at an entry for the top the machine has', async
     assert.equal(h.block()[h.blockLayout().x87Top], 0, 'the machine top, not the region top');
 });
 
+test('a context carries the flags, the x87 block and fsBase field for field', ()=>{
+    const h = host();
+    const layout = h.blockLayout();
+    const block = h.block();
+    const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+    view.setUint32(layout.eflags, 0x246, true);
+    view.setUint32(layout.fsBase, 0x7ffde000, true);
+    view.setFloat64(layout.x87, 1.5, true);
+    view.setUint8(layout.x87Top, 7);
+    view.setUint16(layout.x87Status, 0x3840, true);
+    const context = h.captureContext();
+    assert.equal(context.fsBase, 0x7ffde000);
+    block.fill(0);
+    h.restoreContext(context);
+    assert.equal(view.getUint32(layout.eflags, true), 0x246);
+    assert.equal(view.getUint32(layout.fsBase, true), 0x7ffde000);
+    assert.equal(view.getFloat64(layout.x87, true), 1.5);
+    assert.equal(view.getUint8(layout.x87Top), 7);
+    assert.equal(view.getUint16(layout.x87Status, true), 0x3840);
+});
+
+test('a host write into a translated page invalidates the region', async()=>{
+    const h = host();
+    const runtime = h.cork();
+    h.writePhysical(0x1000, Uint8Array.from([0xb8, 1, 0, 0, 0, 0xf4]));
+    runtime.noteHot(0x1000);
+    assert.equal(await runtime.translatePending(), 1, 'the region was formed');
+    assert.equal(runtime.holdsPage(0x1000 >>> 12), true);
+    h.writePhysical(0x1000, Uint8Array.from([0x90]));
+    assert.equal(runtime.holdsPage(0x1000 >>> 12), false, 'the host write dropped it');
+});
+
 test('newContext under cork positions eip and esp', async()=>{
     const { cpuModule } = await import('../module.js');
     const api = await cpuModule.create({
