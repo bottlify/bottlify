@@ -25,6 +25,10 @@ const MAGIC = 0xfd2fb528;
 const SKIPPABLE_MASK = 0xfffffff0;
 const SKIPPABLE = 0x184d2a50;
 const MAX_WINDOW = 128 * 1024 * 1024;
+/** Stand-ins for an RLE FSE table's arrays, so the sequence loop has none to
+ * test for. */
+const EMPTY_BYTES = new Uint8Array(0);
+const EMPTY_BASELINE = new Int32Array(0);
 
 /** Hints the tests read: which encodings the frames actually used. */
 export const zstdStats = {
@@ -265,10 +269,12 @@ export function buildFseTable(probs, accuracyLog){
 
 /**
  * One FSE table as the block carries it: a full decoding table, or an RLE
- * symbol that every sequence uses.
+ * symbol that every sequence uses. The table is flat -- three arrays indexed
+ * by state -- because the decode loop reads one cell per sequence and an
+ * object per cell was three property loads per symbol.
  *
- * @typedef {{ log: number, states: { symbol: number, numBits: number,
- *     baseline: number }[] } | { rle: number }} FseTable
+ * @typedef {{ log: number, symbol: Uint8Array, numBits: Uint8Array,
+ *     baseline: Int32Array } | { rle: number }} FseTable
  */
 
 /**
@@ -347,7 +353,17 @@ function readFseDistribution(bits, maxSymbol, maxAccuracy){
 
 /** @param {number[]} probs @param {number} accuracyLog @returns {FseTable} */
 function fse(probs, accuracyLog){
-    return { log: accuracyLog, states: buildFseTable(probs, accuracyLog) };
+    const cells = buildFseTable(probs, accuracyLog);
+    const symbol = new Uint8Array(cells.length);
+    const numBits = new Uint8Array(cells.length);
+    const baseline = new Int32Array(cells.length);
+    for (let at = 0; at < cells.length; at++)
+    {
+        symbol[at] = cells[at].symbol;
+        numBits[at] = cells[at].numBits;
+        baseline[at] = cells[at].baseline;
+    }
+    return { log: accuracyLog, symbol, numBits, baseline };
 }
 
 let predefinedLL = /** @type {FseTable | null} */ (null);
@@ -783,22 +799,38 @@ function decodeCompressed(bytes, start, end, out, frame){
     frame.of = ofTable;
     frame.ml = mlTable;
     const stream = new ReverseBits(bytes, at, end);
-    /** @param {FseTable} table @param {number} state */
-    const symbolOf = (table, state)=>'rle' in table ? table.rle : table.states[state].symbol;
-    /** @param {FseTable} table @param {number} state */
-    const bitsOf = (table, state)=>'rle' in table ? 0 : table.states[state].numBits;
-    /** @param {FseTable} table @param {number} state */
-    const baseOf = (table, state)=>'rle' in table ? 0 : table.states[state].baseline;
-    let llState = 'rle' in llTable ? 0 : stream.read(llTable.log);
-    let ofState = 'rle' in ofTable ? 0 : stream.read(ofTable.log);
-    let mlState = 'rle' in mlTable ? 0 : stream.read(mlTable.log);
+    // Flat out of the union once, so the sequence loop indexes arrays rather
+    // than testing the table shape per symbol.
+    const llRle = 'rle' in llTable;
+    const ofRle = 'rle' in ofTable;
+    const mlRle = 'rle' in mlTable;
+    const flat = { symbol: EMPTY_BYTES, numBits: EMPTY_BYTES,
+        baseline: EMPTY_BASELINE, log: 0 };
+    const llFlat = llRle ? flat : /** @type {any} */ (llTable);
+    const ofFlat = ofRle ? flat : /** @type {any} */ (ofTable);
+    const mlFlat = mlRle ? flat : /** @type {any} */ (mlTable);
+    const llSym = llFlat.symbol;
+    const llBits = llFlat.numBits;
+    const llBase = llFlat.baseline;
+    const ofSym = ofFlat.symbol;
+    const ofBits = ofFlat.numBits;
+    const ofBase = ofFlat.baseline;
+    const mlSym = mlFlat.symbol;
+    const mlBits = mlFlat.numBits;
+    const mlBase = mlFlat.baseline;
+    const llRleValue = llRle ? /** @type {any} */ (llTable).rle : 0;
+    const ofRleValue = ofRle ? /** @type {any} */ (ofTable).rle : 0;
+    const mlRleValue = mlRle ? /** @type {any} */ (mlTable).rle : 0;
+    let llState = llRle ? 0 : stream.read(llFlat.log);
+    let ofState = ofRle ? 0 : stream.read(ofFlat.log);
+    let mlState = mlRle ? 0 : stream.read(mlFlat.log);
     let { repeat1, repeat2, repeat3 } = frame;
     let litAt = 0;
     for (let sequence = 0; sequence < sequences; sequence++)
     {
-        const offsetCode = symbolOf(ofTable, ofState);
-        const mlCode = symbolOf(mlTable, mlState);
-        const llCode = symbolOf(llTable, llState);
+        const offsetCode = ofRle ? ofRleValue : ofSym[ofState];
+        const mlCode = mlRle ? mlRleValue : mlSym[mlState];
+        const llCode = llRle ? llRleValue : llSym[llState];
         if (offsetCode > 31 || mlCode > 52 || llCode > 35)
         {
             throw new Error('zstd: corrupt sequence symbol');
@@ -851,9 +883,11 @@ function decodeCompressed(bytes, start, end, out, frame){
         }
         out.ensure(literalLength + matchLength);
         const dst = out.bytes;
-        for (let i = 0; i < literalLength; i++)
+        if (literalLength > 0)
         {
-            dst[out.length++] = literals[litAt++];
+            dst.set(literals.subarray(litAt, litAt + literalLength), out.length);
+            out.length += literalLength;
+            litAt += literalLength;
         }
         // A match whose offset reaches past its own length copies once; a
         // shorter offset repeats a pattern, so the first `offset` bytes are
@@ -880,9 +914,9 @@ function decodeCompressed(bytes, start, end, out, frame){
         }
         if (sequence + 1 < sequences)
         {
-            llState = baseOf(llTable, llState) + stream.read(bitsOf(llTable, llState));
-            mlState = baseOf(mlTable, mlState) + stream.read(bitsOf(mlTable, mlState));
-            ofState = baseOf(ofTable, ofState) + stream.read(bitsOf(ofTable, ofState));
+            llState = llRle ? 0 : llBase[llState] + stream.read(llBits[llState]);
+            mlState = mlRle ? 0 : mlBase[mlState] + stream.read(mlBits[mlState]);
+            ofState = ofRle ? 0 : ofBase[ofState] + stream.read(ofBits[ofState]);
         }
     }
     if (litAt < literals.length)
