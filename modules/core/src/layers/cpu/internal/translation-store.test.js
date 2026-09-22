@@ -90,6 +90,33 @@ test('a record goes into the bundle\'s directory under a name hashed from its ke
     assert.equal(await store.get('cork/1/x/999/zzz'), null);
 });
 
+test('a batch of puts is indexed whole and a reopened store hits every one', async()=>{
+    // The shape that lost the real route's warm run: a run's regions are put
+    // in one turn, and an index built by reading a line back and rewriting
+    // loses every line but one of a concurrent batch.
+    const root = fakeDirectory();
+    const first = await createDirectoryTranslationStore(root, 'bundle');
+    const COUNT = 64;
+    await Promise.all(Array.from({ length: COUNT },
+        (_, i)=>first.put(`cork/1/bundle/40${i}/hash`, new Uint8Array([i, i, i]))));
+    await first.flush();
+
+    const second = await createDirectoryTranslationStore(root, 'bundle');
+    let hits = 0;
+    for (let i = 0; i < COUNT; i++)
+    {
+        if (await second.get(`cork/1/bundle/40${i}/hash`) !== null)
+        {
+            hits++;
+        }
+    }
+    assert.equal(hits, COUNT, 'every record of the batch is found after a reopen');
+    const bundle = root.entries.get('cork').entries.get('bundle.v1');
+    const text = new TextDecoder().decode(
+        new Uint8Array(await (await bundle.entries.get('index').getFile()).arrayBuffer()));
+    assert.equal(text.trim().split('\n').length, COUNT, 'the index lists them all');
+});
+
 test('the request resolves to nothing without the API, to itself as an object', async()=>{
     assert.equal(await resolveTranslationStore(null, 'x'), null);
     assert.equal(await resolveTranslationStore(undefined, 'x'), null);

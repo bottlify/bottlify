@@ -220,6 +220,41 @@ test('a left-out x87 instruction names why and the shape of its block', ()=>{
         JSON.stringify([...u.translation.refusals.keys()]));
 });
 
+test('a join two agreeing predecessors reach takes their state, not a cut', ()=>{
+    // The shapes 3d names: an if/else that does no x87 on either arm and a
+    // `fld` at the join; a loop head entered from before the loop and from a
+    // balanced back edge; a switch whose cases all fall to one join. Each
+    // predecessor leaves the same top, so the join is compiled, not refused.
+    /** @type {[string, number[], number][]} */
+    const shapes = [
+        ['if/else join', [
+            0xd9, 0xe8, 0x85, 0xc0, 0x74, 0x04, 0x90, 0x90, 0xeb, 0x02, 0x90, 0x90,
+            0xd9, 0xe8, 0xf4,
+        ], 6],
+        ['balanced loop head', [
+            0x31, 0xc9, 0xd9, 0xe8, 0xd9, 0xe8, 0xdd, 0xd8, 0x41,
+            0x83, 0xf9, 0x03, 0x72, 0xf6, 0xdd, 0xd8, 0xf4,
+        ], 0],
+        ['switch to one join', [
+            0xd9, 0xe8, 0x83, 0xf9, 0x00, 0x74, 0x07, 0x83, 0xf9, 0x01,
+            0x74, 0x03, 0xeb, 0x02, 0x90, 0x90, 0x90,
+            0xd9, 0x44, 0x24, 0x04, 0xf4,
+        ], 6],
+    ];
+    for (const [name, bytes, top] of shapes)
+    {
+        const m = createTestMachine();
+        m.write(CODE, bytes);
+        m.setReg('esp', 0x80000);
+        const t = m.translate(CODE);
+        assert.deepEqual([...t.translation.refusals.keys()], [],
+            `${name}: ${JSON.stringify([...t.translation.refusals.keys()])}`);
+        assert.equal(t.run(CODE).kind, Exit.HALT, `${name} ran to its halt`);
+        const view = new DataView(m.memory.buffer);
+        assert.equal(view.getUint8(m.layout.x87Top), top, `${name}: top after the run`);
+    }
+});
+
 test('a call return is named and gets no entry of its own', ()=>{
     // fninit; call F (elsewhere); RA: fld dword [esp]; fstp st0; hlt -- the
     // callee decides the stack at RA, so the tracker does not know it: the

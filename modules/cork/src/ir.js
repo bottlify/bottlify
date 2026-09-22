@@ -334,6 +334,13 @@ export function evaluate(instruction, state){
         case 'prefetcht0': case 'prefetcht1': case 'prefetcht2': case 'lfence': case 'mfence':
         case 'sfence': case 'pause':
             return;
+        // BOUND is a no-op here because it is one to the emulator: its
+        // decoder consumes the instruction and neither reads the memory
+        // operand nor raises #BR, so a guest that runs data containing 0x62
+        // continues under the emulator and must continue here. A program
+        // returned to the entry vector is the shape that reached it.
+        case 'bound':
+            return;
         case 'hlt':
             state.halted = true;
             return;

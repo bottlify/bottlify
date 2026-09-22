@@ -182,73 +182,109 @@ export function step(instruction, state){
  *     `ends`: the state at each block's end (null when the block is cut or tracking stops in it)
  */
 export function trackRegion(region, entryTop){
-    const index = new Map(region.blocks.map((block, i)=>[block.start, i]));
-    /** @type {(StackState | null)[]} */
-    const states = new Array(region.blocks.length).fill(null);
-    /** @type {(StackState | null)[]} */
-    const ends = new Array(region.blocks.length).fill(null);
-    /** @type {Set<number>} */
-    const cut = new Set();
-    const seen = new Set();
+    const blocks = region.blocks;
+    const count = blocks.length;
+    const index = new Map(blocks.map((block, i)=>[block.start, i]));
     // The entry's block by its address, not by its place: the blocks are in
     // address order, and a region formed at a return address has the call
     // site's block below it -- seeding the first block left the entry's own
     // x87 with no state and every form in it refused.
     const entry = index.get(region.entry) ?? 0;
-    states[entry] = { top: entryTop, slot: [0, 1, 2, 3, 4, 5, 6, 7] };
-    const work = [entry];
-    while (work.length > 0)
-    {
-        const i = /** @type {number} */ (work.shift());
-        if (seen.has(i) || cut.has(i))
-        {
-            continue;
-        }
-        seen.add(i);
-        let state = states[i];
-        const block = region.blocks[i];
-        for (const instruction of block.instructions)
-        {
-            if (state === null)
-            {
-                break;
-            }
-            state = step(instruction, state);
-        }
-        ends[i] = state;
-        if (state === null)
-        {
-            // Tracking stopped inside the block: its successors are not
-            // reached from here with a known state; whatever else reaches
-            // them decides. (The block itself exits before the instruction.)
-            continue;
-        }
+    /** @type {(StackState | null)[]} */
+    let states = new Array(count).fill(null);
+    /** @type {(StackState | null)[]} */
+    let ends = new Array(count).fill(null);
+    /** @type {Set<number>} */
+    const cut = new Set();
+
+    /** The blocks an edge leaves this one by, as indices.
+     * @param {number} i
+     */
+    const successors = i=>{
+        const block = blocks[i];
         const targets = [...block.exit.targets];
         if (block.exit.kind === 'fallthrough' || block.exit.kind === 'jcc'
             || block.exit.kind === 'loop')
         {
             targets.push(block.exit.next);
         }
+        /** @type {number[]} */
+        const out = [];
         for (const target of targets)
         {
             const j = index.get(target);
-            if (j === undefined)
+            if (j !== undefined && !out.includes(j))
+            {
+                out.push(j);
+            }
+        }
+        return out;
+    };
+
+    // A fixed point rather than one forward sweep. A block met with two
+    // different tops is cut, and a cut block seeds nothing -- so the sweep is
+    // repeated whenever a cut is found, this time not letting the cut block
+    // hand its state to a successor that another, agreeing predecessor should
+    // decide. Without the repetition the first predecessor to arrive poisoned
+    // the join: a block was cut after it had already propagated, and the join
+    // kept a state the region could no longer justify. At most one round per
+    // block, since every round that does not stop the loop adds a cut.
+    for (let round = 0; round <= count; round++)
+    {
+        /** @type {(StackState | null | undefined)[]} */
+        const pending = new Array(count).fill(undefined);
+        const seen = new Set();
+        pending[entry] = { top: entryTop, slot: [0, 1, 2, 3, 4, 5, 6, 7] };
+        const work = [entry];
+        ends = new Array(count).fill(null);
+        let addedCut = false;
+        while (work.length > 0)
+        {
+            const i = /** @type {number} */ (work.shift());
+            if (seen.has(i) || cut.has(i) || pending[i] === undefined)
             {
                 continue;
             }
-            const known = states[j];
-            if (known === null)
+            seen.add(i);
+            let state = /** @type {StackState | null} */ (pending[i]);
+            for (const instruction of blocks[i].instructions)
             {
-                states[j] = cloneState(state);
-                work.push(j);
+                if (state === null)
+                {
+                    break;
+                }
+                state = step(instruction, state);
             }
-            else if (known.top !== state.top)
+            ends[i] = state;
+            if (state === null)
             {
-                // Two tops meet: the block cannot be compiled for both.
-                cut.add(j);
-                states[j] = null;
+                // Tracking stopped inside the block: its successors are not
+                // reached from here with a known state; whatever else reaches
+                // them decides. (The block itself exits before the instruction.)
+                continue;
             }
-            // A different permutation with the same top is fixed on the edge.
+            for (const j of successors(i))
+            {
+                const known = pending[j];
+                if (known === undefined)
+                {
+                    pending[j] = cloneState(state);
+                    work.push(j);
+                }
+                else if (known !== null && known.top !== state.top)
+                {
+                    // Two tops meet: the block cannot be compiled for both.
+                    cut.add(j);
+                    pending[j] = null;
+                    addedCut = true;
+                }
+                // A different permutation with the same top is fixed on the edge.
+            }
+        }
+        states = pending.map((state, i)=>cut.has(i) ? null : state ?? null);
+        if (!addedCut)
+        {
+            break;
         }
     }
     return { states, cut, ends };

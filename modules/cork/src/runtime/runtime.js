@@ -95,6 +95,28 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const barren = new Set();
     /** @type {Map<number, number>} untranslated exits by target address */
     const misses = new Map();
+    // How many addresses the untranslated-exit count holds at once. A real
+    // program leaves for millions of addresses and the map filled in seconds;
+    // the old rule stopped recording new ones once it did, so no address
+    // reached after the fill could ever climb to the threshold and a
+    // straight-line loader never became a candidate. The oldest is evicted
+    // instead, and the counts halve every cap insertions so an address hit
+    // once does not hold a slot against one hit often.
+    const MISSES_CAP = 4096;
+    let missesInserted = 0;
+    const decayMisses = ()=>{
+        for (const [address, count] of misses)
+        {
+            if (count <= 1)
+            {
+                misses.delete(address);
+            }
+            else
+            {
+                misses.set(address, count >> 1);
+            }
+        }
+    };
     /** @param {number} eip @param {number} top */
     const keyOf = (eip, top)=>eip * 16 + top;
     /**
@@ -271,17 +293,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             exits[kind]++;
             if (kind === 'untranslated')
             {
-                const to = view().getUint32(layout.eip, true);
-                const seen = (misses.get(to) ?? 0) + 1;
-                if (seen >= settings.missThreshold)
-                {
-                    misses.delete(to);
-                    this.noteHot(to, view().getUint8(layout.x87Top));
-                }
-                else if (seen > 1 || misses.size < 4096)
-                {
-                    misses.set(to, seen);
-                }
+                this.missAt(view().getUint32(layout.eip, true), view().getUint8(layout.x87Top));
             }
             if (kind === 'stale')
             {
@@ -300,6 +312,34 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             exit.vector = code >>> 8;
             return exit;
         },
+        /** Records one untranslated exit to `address`: the address becomes a
+         * candidate of the translator's own once `missThreshold` of them land
+         * there. The count is bounded and the coldest entry makes room.
+         * @param {number} address @param {number} [top]
+         */
+        missAt(address, top = 0){
+            const seen = (misses.get(address) ?? 0) + 1;
+            if (seen >= settings.missThreshold)
+            {
+                misses.delete(address);
+                this.noteHot(address, top);
+                return;
+            }
+            if (!misses.has(address) && misses.size >= MISSES_CAP)
+            {
+                const oldest = misses.keys().next().value;
+                if (oldest !== undefined)
+                {
+                    misses.delete(oldest);
+                }
+                if (++missesInserted >= MISSES_CAP)
+                {
+                    missesInserted = 0;
+                    decayMisses();
+                }
+            }
+            misses.set(address, seen);
+        },
         noteHot(eip, top = 0){
             if (!settings.translate)
             {
@@ -312,6 +352,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 return;
             }
             queue.set(key, eip);
+        },
+        /** Writes whatever the store keeps aside from its records, so the
+         * names of this run's regions are on disk before the run ends and the
+         * next run's index can find them. */
+        async flush(){
+            await settings.store?.flush?.();
         },
         async translatePending(){
             if (!settings.translate || queue.size === 0)

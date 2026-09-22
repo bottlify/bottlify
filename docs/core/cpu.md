@@ -62,7 +62,11 @@ a call that never returns once decoded eight kilobytes of it). Candidates come f
 layer's sampler, which hands every hot bucket over at the address its last slice ended on
 whenever that address is a new one, and the translator's own count of untranslated exits by
 target address (`cork.missThreshold`, default 64), which is what finds a stub reached only
-through such exits -- the sampler sees only where budgets run out. An address a region formed
+through such exits -- the sampler sees only where budgets run out. The count is bounded, and
+the oldest address is evicted and the counts halved as it fills: a real program leaves for
+millions of addresses, and a hard cap that dropped every new one once full is what kept a
+loading run at a share of 0.5 -- no address reached after the fill could climb to the
+threshold. An address a region formed
 nothing at (every block of it leaves at once) is not tried again until its page moves.
 A block that would leave before retiring anything (nothing decoded, its first instruction
 left out) has no entry, so a transfer never spins on it. The host's call channel is
@@ -75,7 +79,11 @@ and goes on after the write, or leaves untranslated where the handler put EIP. A
 holding x87 registers in its locals takes the older form instead, a `trap` exit past the
 instruction that the hybrid host answers the same way; either way a call into the bridge
 costs no emulator turn. `out` to any other port, `in`,
-`cli`, `sti`, `int n`, `int3` and `into` are the emulator's, before the instruction. A fault
+`cli`, `sti`, `int n`, `int3` and `into` are the emulator's, before the instruction.
+`bound` is translated as the no-op the emulator's own decoder makes of it — it consumes the
+instruction and neither checks the pair nor raises `#BR`, so a guest that returns into a page
+of data (the entry vector is the shape seen on a real route) runs the same bytes either way.
+A fault
 translated code detects (a divide by zero, an undefined instruction, an access the page
 table refuses) leaves before the instruction with the registers as they were, and the
 emulator re-executes it and raises it through the same vector and report a program on the
@@ -110,7 +118,11 @@ is still formed, a decode, which gives its hash; what is saved is the emitting a
 encoding, and the report says `cacheHits`/`cacheMisses`. The directory's records are hashed
 file names beside one index of them, read once when the store is first used, so a lookup is a
 probe of that set and only a hit reads bytes: a miss never asks the file system, whose answer
-to a miss is an exception that costs milliseconds a record. A record of another emitter
+to a miss is an exception that costs milliseconds a record. The index is rewritten whole from
+the names known in memory, one write in flight at a time and a flush before the run ends,
+rather than appended a line at a time: a run puts its regions in one turn, and an append that
+reads the old file back first loses every name of a concurrent batch but one -- which emptied a
+real route's index on a warm second run. A record of another emitter
 version, feature set or layout is a miss. A region with x87 instructions in it is compiled for the x87 stack top it is entered
 with, and its entries are keyed by address and top (`entryOf(eip, x87Top)`, the top read off
 the emulator's `fpu_stack_ptr` before every turn); a region without them is entered with any
@@ -183,16 +195,23 @@ The whole register file lives in the block, so a context is a copy of the block 
 flag and `fsBase` (`captureBlockContext`/`restoreBlockContext` in `internal/context.js`); a
 `fault` exit builds the fault record from the vector and the state the faulting instruction
 left, since there is no IDT and no frame to read. Where the translator has no entry for an
-address, the slice loop runs cork's own interpreter tier over the same state block, one
-instruction at a time (`interpret`/`blockState` in the engine module). A fault it raises becomes
-the host's fault record and stops the machine; an instruction the evaluator has no model for is
-the engine's no-tier answer, `cpu: cork has no tier for 0x… (…)`.
+address, the slice loop runs cork's own interpreter tier over the same state block
+(`interpret`/`blockState` in the engine module) for the slice's whole budget in one call,
+`syncIn`/`syncOut` bracketing the run rather than one per instruction; it stops at a halt, a
+trap the host has to answer, or an address the translator has an entry for, where translated
+code's own register file takes over. A fault it raises becomes the host's fault record and stops
+the machine; an instruction the evaluator has no model for is the engine's no-tier answer,
+`cpu: cork has no tier for 0x… (…)`.
 
-In `cork` mode the interpreter counts hotness itself, per instruction start: a start interpreted
-`hotThreshold` times becomes a candidate, the layer's feed forms it, and once a region exists the
-host runs it rather than interpreting it -- cold code stays on the interpreter, hot code moves to
-the translator. The interpreted instructions count in the block's own instruction word, so
-`translatedShare` is the translator's share of the whole run, not only of what it ran.
+In `cork` mode the interpreter counts hotness itself, per instruction start, in a flat array over
+the address space (not a map: a straight-line loader runs millions of instructions once and would
+grow one entry each): a start interpreted `hotThreshold` times becomes a candidate, the layer's
+feed forms it, and once a region exists the host runs it rather than interpreting it -- cold code
+stays on the interpreter, hot code moves to the translator. The default is two under `cork`, not
+the sampler's two thousand, because there is no compiled second executor to carry the code in the
+meantime; a region formed for cold code is bounded by `maxRegionBlocks`/`maxRegionBytes`. The
+interpreted instructions count in the block's own instruction word, so `translatedShare` is the
+translator's share of the whole run, not only of what it ran.
 
 ## 2. Contract
 
@@ -213,7 +232,7 @@ enter the type check or the bundle.
 |-----------------|----------------------------|---------------------|---------|
 | `memorySize`    | number (power of two)      | `1 GiB`             | Guest RAM. Reserved, not committed: the host pays for pages the guest touches. Must be a power of two; the emulator requires it. With an engine other than `emulator` the top `TABLES_RESERVE` (4 MiB) is the translator's tables, and `layout.memorySize` reports the rest. |
 | `engineUrl`     | string                     | none                | The translator's entry module, imported at `boot()` under `hybrid`; `createApp` resolves it from `cork.moduleUrl` or the package beside core. Absent, `hybrid` runs with no translator. |
-| `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold`, `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`, `feed`, `missThreshold`, and `leaveOut`, the instruction classes (`x87`, `mmx`, `sse`) a run leaves to the emulator so a defect can be localised by class; such a run keeps no translation store. |
+| `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold` (the interpreter's own count under `cork`; default 2, where the sampler's default is 2000), `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`, `feed`, `missThreshold`, and `leaveOut`, the instruction classes (`x87`, `mmx`, `sse`) a run leaves to the emulator so a defect can be localised by class; such a run keeps no translation store. |
 | `trapPort`      | number                     | `0xb077`            | The I/O port a stub writes its trap id to. |
 | `entryVector`   | number                     | `0x7000`            | Linear address of the dword the ROM jumps through to enter guest code. |
 | `initialStack`  | number                     | `0x300000`          | ESP the ROM sets before jumping into the guest. |

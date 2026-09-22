@@ -384,6 +384,27 @@ test('with a store, a second runtime takes its regions from the store; a changed
         assert.equal(store.size(), 3);
     });
 
+test('a flood of distinct misses does not stop a later address reaching the threshold',
+    async()=>{
+        const m = machine({ missThreshold: 64 });
+        // Ten thousand addresses left for once each: the untranslated-exit
+        // count fills and evicts, but a new address is still recorded.
+        for (let i = 0; i < 10_000; i++)
+        {
+            m.runtime.missAt(0x10000 + i * 4, 0);
+        }
+        // A fresh address left for 64 times is a candidate, not dropped
+        // because the map was full when it first appeared.
+        const fresh = 0x80000;
+        m.write(fresh, [0xb8, 7, 0, 0, 0, 0xf4]); // mov eax, 7; hlt
+        for (let i = 0; i < 64; i++)
+        {
+            m.runtime.missAt(fresh, 0);
+        }
+        assert.equal(await m.runtime.translatePending(), 1, 'the fresh address was queued');
+        assert.ok(m.runtime.entryOf(fresh) >= 0);
+    });
+
 test('a return block the tracker cannot reach gets a region of its own, not a broken entry',
     async()=>{
         const m = machine();

@@ -28,14 +28,28 @@ export { Fault, Unsupported, createState };
  * Runs instructions from `state.eip` until the budget is spent or the machine
  * halts, answering how many were retired.
  *
+ * The host tier hands a whole slice's budget to one call. Two hooks make that
+ * possible without giving up the boundary the translator needs: `shouldStop`
+ * is asked before each instruction and ends the run there (the host stops when
+ * the next address has an entry, or when a trap has been recorded and only the
+ * host can answer it), and `onStep` is told each instruction's start before it
+ * runs (the host counts hotness from it). Both are optional, so the tight
+ * one-instruction loop the corpus and tests use is unchanged.
+ *
  * @param {import('./ir.js').EvalState} state
  * @param {number} [maxInstructions]
+ * @param {{ shouldStop?: () => boolean, onStep?: (eip: number) => void }} [options]
  * @returns {number}
  */
-export function interpret(state, maxInstructions = 1){
+export function interpret(state, maxInstructions = 1, options = {}){
+    const { shouldStop, onStep } = options;
     const before = state.retired;
     while (state.retired - before < maxInstructions && !state.halted)
     {
+        if (shouldStop !== undefined && shouldStop())
+        {
+            break;
+        }
         const decoded = decode(address=>state.memory.read(address, 1), state.eip);
         if ('refused' in decoded)
         {
@@ -44,6 +58,7 @@ export function interpret(state, maxInstructions = 1){
         // The instruction's own address, for a page fault raised from inside
         // `evaluate` after it has moved eip to the next instruction.
         state.faultEip = decoded.eip;
+        onStep?.(decoded.eip);
         evaluate(decoded, state);
     }
     return state.retired - before;
@@ -64,6 +79,9 @@ export function interpret(state, maxInstructions = 1){
  */
 export function blockState({ memory, layout, onCodeWrite }){
     const view = new DataView(memory.buffer);
+    // The decoder reads code a byte at a time, so the byte path skips the
+    // DataView call and its bounds check; wider accesses keep the DataView.
+    const ramBytes = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     const reg = new Uint32Array(memory.buffer, layout.regs, 8);
     const flagAt = (/** @type {number} */ address)=>
         view.getUint8(layout.tables + Tables.PAGE_FLAGS + (address >>> 12));
@@ -102,7 +120,7 @@ export function blockState({ memory, layout, onCodeWrite }){
             throw fault();
         }
         const offset = layout.ramBase + address;
-        return size === 1 ? view.getUint8(offset)
+        return size === 1 ? ramBytes[address]
             : size === 2 ? view.getUint16(offset, true) : view.getUint32(offset, true);
     };
     /** @param {number} address @param {number} size @param {number} value */
@@ -114,7 +132,7 @@ export function blockState({ memory, layout, onCodeWrite }){
         const offset = layout.ramBase + address;
         if (size === 1)
         {
-            view.setUint8(offset, value);
+            ramBytes[address] = value;
         }
         else if (size === 2)
         {
