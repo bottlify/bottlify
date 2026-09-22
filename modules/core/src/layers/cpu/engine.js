@@ -178,6 +178,8 @@
  * @property {{ address: number, count: number, reason: string }[]} exitsByTarget
  *     The top untranslated-exit targets and why each has no entry.
  * @property {Record<string, number>} refused  Opcode ("0f 2e", "f3 0f 10") → times met.
+ * @property {number} forcedSteps      Turns that retired nothing and were forced to interpret one
+ *     instruction, so no slice of translated-plus-interpreted code stops moving.
  * @property {number} translateMs      Milliseconds spent translating: the sum of the seven
  *     parts below, so a whole figure and its split always agree.
  * @property {number} formingMs        Of it: forming the batch's regions, a decode each.
@@ -203,6 +205,8 @@
  *     sampler, with the x87 top a region there is compiled for.
  * @property {(address: number, x87Top?: number) => void} missAt  One untranslated exit to
  *     an address at an x87 top; it becomes a candidate once enough land there at that top.
+ * @property {() => void} forcedStep  Records one turn the host forced an interpreted instruction
+ *     through, for the progress guarantee's `forcedSteps`.
  * @property {() => Promise<number>} translatePending
  *     Regions published; resolves when the batch is instantiated.
  * @property {() => Promise<void>} flush  Writes the store's own bookkeeping (a directory

@@ -59,6 +59,14 @@ test('translate: false keeps the translator off for the interpreter alone', asyn
     assert.equal(m.runtime.entryOf(CODE), -1, 'and there is no entry to run');
 });
 
+test('a forced step is counted in the diagnostics', ()=>{
+    const m = machine();
+    assert.equal(m.runtime.diagnostics().forcedSteps, 0);
+    m.runtime.forcedStep();
+    m.runtime.forcedStep();
+    assert.equal(m.runtime.diagnostics().forcedSteps, 2);
+});
+
 test('a hot address becomes a region after translatePending, and runs under a budget', async()=>{
     const m = machine();
     m.write(CODE, COUNTDOWN);

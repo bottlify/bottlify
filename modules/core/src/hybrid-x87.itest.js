@@ -203,6 +203,83 @@ function buildTransparentExe(){
 }
 
 /**
+ * The gameplay shape the owner's scene is hot in: an SSE sound mixer loop
+ * (`MixSoundTwoSpeakerMono`: two float arrays, `mulps`/`addps`, the `cvt*`
+ * round trip) called every frame, with a scalar x87 accumulation in the
+ * calling function. Several thousand loop iterations per call; the caller
+ * runs a few hundred frames.
+ *
+ * main:  fninit; edi = FRAMES
+ * frame: call F
+ *        fld [a]; fadd [acc]; fstp [acc]; dec edi; jnz frame
+ *        fld [acc]; fistp [out]; exit ([out] & 0xff)
+ * F:     esi = ITER
+ * L:     movups xmm0,[a]; movups xmm1,[b]; mulps xmm0,xmm1; addps xmm0,xmm1;
+ *        cvttps2dq xmm0,xmm0; cvtdq2ps xmm0,xmm0; movups [a],xmm0;
+ *        dec esi; jnz L; ret
+ */
+const MIX_ITER = 10_000;
+const MIX_FRAMES = 200;
+const OFF_MIX_F = 0x200;
+function buildMixerExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        data: {
+            a: [...f32(1), ...f32(1), ...f32(1), ...f32(1)],
+            b: [...f32(0.5), ...f32(0.5), ...f32(0.5), ...f32(0.5)],
+            acc: [0, 0, 0, 0],
+            out: [0, 0, 0, 0],
+        },
+        codeSize: 0x1000,
+        code: ({ iat, at, code })=>{
+            /** @type {number[]} */
+            const image = [];
+            /** @param {number[]} bytes */
+            const emit = bytes=>image.push(...bytes);
+            /** @param {number} offset */
+            const padTo = offset=>{
+                while (image.length < offset)
+                {
+                    image.push(0x90);
+                }
+            };
+            const F = code(OFF_MIX_F);
+            emit([0xdb, 0xe3]);                        // fninit
+            emit([0xbf, ...u32(MIX_FRAMES)]);          // mov edi, FRAMES
+            const frame = image.length;
+            const callAt = image.length;
+            emit([0xe8, 0, 0, 0, 0]);                  //    call F
+            emit([0xd9, 0x05, ...u32(at('a'))]);       //    fld dword [a]
+            emit([0xd8, 0x05, ...u32(at('acc'))]);     //    fadd dword [acc]
+            emit([0xd9, 0x1d, ...u32(at('acc'))]);     //    fstp dword [acc]
+            emit([0x4f]);                              //    dec edi
+            emit([0x75, (frame - (image.length + 2)) & 0xff]); // jnz frame
+            emit([0xd9, 0x05, ...u32(at('acc'))]);     //    fld dword [acc]
+            emit([0xdb, 0x1d, ...u32(at('out'))]);     //    fistp dword [out]
+            emit([0xa1, ...u32(at('out'))]);           //    mov eax, [out]
+            emit([0x25, 0xff, 0, 0, 0]);               //    and eax, 0xff
+            emit([0x50]);                              //    push eax
+            emit([0xff, 0x15, ...u32(iat('ExitProcess'))]); // call [ExitProcess]
+            image.splice(callAt + 1, 4, ...u32(F - (code(callAt) + 5)));
+            padTo(OFF_MIX_F);
+            emit([0xbe, ...u32(MIX_ITER)]);            // F: mov esi, ITER
+            const loop = image.length;                 // L
+            emit([0x0f, 0x10, 0x05, ...u32(at('a'))]); //    movups xmm0, [a]
+            emit([0x0f, 0x10, 0x0d, ...u32(at('b'))]); //    movups xmm1, [b]
+            emit([0x0f, 0x59, 0xc1]);                  //    mulps xmm0, xmm1
+            emit([0x0f, 0x58, 0xc1]);                  //    addps xmm0, xmm1
+            emit([0xf3, 0x0f, 0x5b, 0xc0]);            //    cvttps2dq xmm0, xmm0
+            emit([0x0f, 0x5b, 0xc0]);                  //    cvtdq2ps xmm0, xmm0
+            emit([0x0f, 0x11, 0x05, ...u32(at('a'))]); //    movups [a], xmm0
+            emit([0x4e]);                              //    dec esi
+            emit([0x75, (loop - (image.length + 2)) & 0xff]); // jnz L
+            emit([0xc3]);                              //    ret
+            return image;
+        },
+    });
+}
+
+/**
  * @param {Uint8Array} executable @param {'emulator' | 'hybrid'} engine
  * @param {Record<string, unknown>} [config]  more translator settings: a store, a bundle id
  */
@@ -219,9 +296,12 @@ async function run(executable, engine, config = {}){
     });
     try
     {
+        const began = performance.now();
         const code = await app.run({ timeoutMs: 60000 });
+        const ms = performance.now() - began;
         const { metrics } = cpuModule.diagnostics();
-        return { code, cork: /** @type {any} */ (metrics).cork };
+        return { code, ms, instructions: /** @type {any} */ (metrics).instructions,
+            cork: /** @type {any} */ (metrics).cork };
     }
     finally
     {
@@ -277,6 +357,32 @@ test('a transparent callee leaves the return block a region of its own',
             `the reason is named: ${JSON.stringify(why)}`);
         assert.ok(cork.exits.untranslated < 15000,
             `untranslated exits ${cork.exits.untranslated}`);
+    });
+
+test('the mixer shape runs its loop whole and no slower than the emulator under hybrid',
+    { timeout: 180000 }, async()=>{
+        const exe = buildMixerExe();
+        const reference = await run(exe, 'emulator');
+        assert.equal(reference.code, 200, 'the x87 accumulation, mod 256');
+        assert.equal(reference.cork, null);
+        const hybrid = await run(exe, 'hybrid');
+        assert.equal(hybrid.code, reference.code, 'the same accumulated answer');
+        const cork = hybrid.cork;
+        assert.ok(cork, 'the translator reports');
+        // The loop is the program: the mixer's SSE body runs whole in cork.
+        assert.ok(cork.translatedShare > 0.95,
+            `share ${cork.translatedShare}, exits ${JSON.stringify(cork.exits)},`
+            + ` refused ${JSON.stringify(cork.refused)}`);
+        /** @param {{ ms: number, instructions: number }} result */
+        const perInstruction = result=>result.ms * 1e6 / result.instructions;
+        const hybridNs = perInstruction(hybrid);
+        const emulatorNs = perInstruction(reference);
+        console.log(`3j mixer: hybrid ${hybridNs.toFixed(2)} ns/instr at share`
+            + ` ${cork.translatedShare.toFixed(3)}, regions ${cork.regions}, emulator`
+            + ` ${emulatorNs.toFixed(2)} ns/instr`);
+        assert.ok(hybridNs <= emulatorNs,
+            `hybrid ${hybridNs.toFixed(2)} ns/instr against the emulator's`
+            + ` ${emulatorNs.toFixed(2)}`);
     });
 
 /** The translate split's sum. @param {Record<string, number>} cork */

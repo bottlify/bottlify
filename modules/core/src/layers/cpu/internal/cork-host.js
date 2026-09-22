@@ -277,10 +277,13 @@ export function createCorkHost(config){
      * machine; an instruction the evaluator has no model for is this engine's
      * no-tier answer.
      *
-     * @param {number} address @param {number} budget
+     * With `force`, the first instruction runs whatever `shouldStop` answers:
+     * the host forces one step when a turn would otherwise retire nothing.
+     *
+     * @param {number} address @param {number} budget @param {boolean} [force]
      * @returns {number}
      */
-    const interpretRange = (address, budget)=>{
+    const interpretRange = (address, budget, force = false)=>{
         interpreter ??= blockState({
             memory,
             layout,
@@ -316,6 +319,7 @@ export function createCorkHost(config){
                     lastStart = at;
                     countHot(at);
                 },
+                force,
             });
         }
         catch (e){
@@ -411,7 +415,18 @@ export function createCorkHost(config){
                 }
                 if (exit.retired === 0 && eip() === at)
                 {
-                    break;
+                    // The region at this (address, top) ran nothing -- it is
+                    // compiled for another top, or leaves at its own entry.
+                    // Force one interpreted instruction so the turn moves
+                    // rather than spinning on the same entry.
+                    const forced = interpretRange(at, remaining, true);
+                    runtime.forcedStep();
+                    remaining -= forced;
+                    ran += forced;
+                    if (forced === 0 && eip() === at)
+                    {
+                        break;
+                    }
                 }
                 continue;
             }
@@ -421,8 +436,15 @@ export function createCorkHost(config){
             if (stepped === 0 && eip() === at)
             {
                 // A budget of zero, or a first instruction that retired
-                // nothing: leaving rather than spinning on it.
-                break;
+                // nothing: force one instruction rather than spinning on it.
+                const forced = interpretRange(at, remaining, true);
+                runtime.forcedStep();
+                remaining -= forced;
+                ran += forced;
+                if (forced === 0 && eip() === at)
+                {
+                    break;
+                }
             }
         }
         fold();

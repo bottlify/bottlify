@@ -23,6 +23,7 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { cpuModule } from './layers/cpu/module.js';
+import { bridgeModule } from './layers/bridge/module.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 
 const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
@@ -114,6 +115,8 @@ async function run(executable, engine){
         const { metrics } = cpuModule.diagnostics();
         return { code, output: output.join(''), diagnostics: cpuModule.diagnostics(), ms,
             instructions: /** @type {any} */ (metrics).instructions,
+            trapsHot: /** @type {[string, number][]} */ (
+                /** @type {any} */ (bridgeModule.diagnostics().metrics).hot ?? []),
             cork: /** @type {any} */ (metrics).cork };
     }
     finally
@@ -143,6 +146,10 @@ for (const name of ['qsort.exe', 'threads.exe'])
             assert.equal(cork.output, reference.output);
             assert.ok(cork.cork.regions >= 1,
                 `no region formed: ${JSON.stringify(cork.cork)}`);
+            // No turn of the loading phase retired nothing: the host would
+            // have forced a step and counted it (`forcedSteps`).
+            assert.equal(cork.cork.forcedSteps, 0,
+                `a turn retired nothing and was forced: ${cork.cork.forcedSteps}`);
             // The loading phase: how cork runs the program against the
             // emulator, and where the translation time went. These programs are
             // short and boot-dominated, so the instruction counts and the split
@@ -159,7 +166,12 @@ for (const name of ['qsort.exe', 'threads.exe'])
                 + ` store ${cork.cork.storeMs.toFixed(0)},`
                 + ` instantiate ${cork.cork.instantiateMs.toFixed(0)},`
                 + ` publish ${cork.cork.publishMs.toFixed(0)},`
-                + ` worker ${cork.cork.workerMs.toFixed(0)})`);
+                + ` worker ${cork.cork.workerMs.toFixed(0)})`
+                + ` traps ${cork.diagnostics.metrics?.trapCrossings},`
+                + ` forced ${cork.cork.forcedSteps}`);
+            const hot = cork.trapsHot.slice(0, 4)
+                .map(([called, count])=>`${called}x${count}`).join(' ');
+            console.log(`${name} traps by import: ${hot || '(none)'}`);
             const targets = /** @type {{ address: number, count: number, reason: string }[]} */ (
                 cork.cork.exitsByTarget ?? []);
             if (targets.length > 0)

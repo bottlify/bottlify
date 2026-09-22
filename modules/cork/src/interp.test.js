@@ -85,6 +85,21 @@ test('xorps xors the two XMM operands and movd reaches a register', ()=>{
     assert.equal(m.state.xmm[1], 0, 'and the upper words clear');
 });
 
+test('force runs the first instruction whatever shouldStop answers', ()=>{
+    // mov eax, 7; inc eax; hlt
+    const m = machine();
+    m.ram.set([0xb8, 7, 0, 0, 0, 0x40, 0xf4], 0x1000);
+    // A stop before the first instruction: nothing runs.
+    assert.equal(interpret(m.state, 100, { shouldStop: ()=>true }), 0);
+    assert.equal(m.state.reg[0], 0);
+    // Forced, the first instruction runs and the stop applies from then on:
+    // the host's progress guarantee for a turn that would retire nothing.
+    assert.equal(interpret(m.state, 100, { shouldStop: ()=>true, force: true }), 1);
+    assert.equal(m.state.reg[0] >>> 0, 7);
+    assert.equal(interpret(m.state, 100, { shouldStop: ()=>true, force: true }), 1);
+    assert.equal(m.state.reg[0] >>> 0, 8);
+});
+
 test('an instruction with no model throws Unsupported', ()=>{
     // A form the evaluator leaves to the other executor: fxsave.
     const m = machine();

@@ -273,6 +273,17 @@ export function trackRegion(region, entryTop){
                 }
                 else if (known !== null && known.top !== state.top)
                 {
+                    if (j === entry)
+                    {
+                        // The region's own entry block is compiled for the
+                        // top the region was formed at, whatever other path
+                        // reaches it: the edge that arrives with a different
+                        // top leaves at the entry (see `x87Edge`), and the
+                        // runtime forms a region there for the top it has.
+                        // Cutting the entry instead would publish no entry at
+                        // all and the miss would repeat forever.
+                        continue;
+                    }
                     // Two tops meet: the block cannot be compiled for both.
                     cut.add(j);
                     pending[j] = null;
@@ -495,16 +506,28 @@ export function x87BlockStart(e, index){
  * than the current state's: moves them, as a permutation, through the
  * scratch local.
  *
+ * Answers false when the edge cannot be taken inside the region: the target
+ * is compiled for a top the stack arriving here does not have. That is the
+ * edge into a region's own entry -- always built for the region's top -- when
+ * another path reaches the entry with a different top. The caller leaves
+ * instead, and the runtime enters the target at the top the machine has.
+ *
  * @param {E} e @param {number} targetIndex
+ * @returns {boolean}
  */
 export function x87Edge(e, targetIndex){
     const x = e.x87;
     const to = x.states[targetIndex];
     if (!to || x.cut.has(targetIndex))
     {
-        return;
+        return true;
+    }
+    if (x.current !== null && to.top !== x.current.top)
+    {
+        return false;
     }
     x87MoveTo(e, to);
+    return true;
 }
 
 /**

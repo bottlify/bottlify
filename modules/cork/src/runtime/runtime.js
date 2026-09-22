@@ -215,6 +215,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** @type {Record<string, number>} why an instruction was left out, with its block */
     const refusedWhy = {};
     let corkRetired = 0;
+    // Turns the host retired nothing in and forced one interpreted
+    // instruction through, so a slice always moves (the progress guarantee).
+    let forcedSteps = 0;
     // The counter word folded the way the layer folds it: exact as long as
     // reads come less than 2^32 instructions apart.
     let counted = 0;
@@ -921,6 +924,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         invalidatePage,
         /** @param {number} page */
         holdsPage: page=>(pages.get(page) & PageFlag.HAS_CODE) !== 0,
+        /** One turn the host forced an interpreted instruction through, for
+         * the progress guarantee's diagnostics. */
+        forcedStep(){
+            forcedSteps++;
+        },
         diagnostics(){
             fold();
             return {
@@ -951,6 +959,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     .map(([address, count])=>({ address, count, reason: missReason(address) })),
                 refused: { ...refused },
                 refusedWhy: { ...refusedWhy },
+                forcedSteps,
                 handoffMisses: 0,
             };
         },
