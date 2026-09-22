@@ -105,11 +105,48 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     {
         imports.handoffHash?.(layout.tables + Tables.HASH - layout.ramBase);
     }
+    /** The queue, miss and barren key: one address at one x87 top. Every
+     * "has an entry" question is for a top, so a region compiled for another
+     * top is no answer. @param {number} eip @param {number} top */
+    const keyOf = (eip, top)=>eip * 16 + top;
     /** @type {Map<number, number>} candidates not yet formed: key(eip, top) → eip */
     const queue = new Map();
-    /** @type {Set<number>} addresses a region formed nothing at, until their page moves */
-    const barren = new Set();
-    /** @type {Map<number, number>} untranslated exits by target address */
+    /** @type {Map<number, number>} key(eip, top) → eip of a candidate a region
+     * formed nothing at, until its page moves. Per top: a region that formed
+     * nothing at one top says nothing about a region for another -- the entry
+     * block a top compiles empty is emptiness for that top alone. */
+    const barren = new Map();
+    /** Whether a candidate at this address is barren for this top.
+     * @param {number} eip @param {number} top */
+    const barrenHas = (eip, top)=>barren.has(keyOf(eip, top & 7));
+    /** @param {number} eip @param {number} top */
+    const barrenAdd = (eip, top)=>{
+        if (top === ANY_TOP)
+        {
+            // A region indifferent to the stack is empty for every top.
+            for (let t = 0; t < 8; t++)
+            {
+                barren.set(keyOf(eip, t), eip);
+            }
+            return;
+        }
+        barren.set(keyOf(eip, top & 7), eip);
+    };
+    /** Whether any top at this address is barren, for the diagnostics.
+     * @param {number} eip */
+    const barrenAt = eip=>{
+        for (let top = 0; top < 8; top++)
+        {
+            if (barren.has(keyOf(eip, top)))
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    /** @type {Map<number, number>} untranslated exits by target and top: a
+     * count per key(eip, top), so misses at one top never stand in for
+     * another's threshold. Keyed to the address for the histogram. */
     const misses = new Map();
     // The untranslated exits by target address over the whole run, for the
     // diagnostics' histogram: the misses are forgotten when they become
@@ -127,20 +164,18 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const MISSES_CAP = 4096;
     let missesInserted = 0;
     const decayMisses = ()=>{
-        for (const [address, count] of misses)
+        for (const [key, count] of misses)
         {
             if (count <= 1)
             {
-                misses.delete(address);
+                misses.delete(key);
             }
             else
             {
-                misses.set(address, count >> 1);
+                misses.set(key, count >> 1);
             }
         }
     };
-    /** @param {number} eip @param {number} top */
-    const keyOf = (eip, top)=>eip * 16 + top;
     /**
      * @typedef {Object} RegionRecord
      * @property {number} entry
@@ -264,11 +299,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 queue.delete(key);
             }
         }
-        for (const eip of [...barren])
+        for (const [key, eip] of [...barren])
         {
             if ((eip >>> 12) === page)
             {
-                barren.delete(eip);
+                barren.delete(key);
             }
         }
         generation.set(page, (generation.get(page) ?? 0) + 1);
@@ -312,7 +347,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         {
             return 'inaccessible';
         }
-        if (barren.has(address))
+        if (barrenAt(address))
         {
             return 'barren';
         }
@@ -452,7 +487,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // Every block leaves at once (an instruction the other executor's
             // first): nothing to enter, nothing to keep.
             counts.publishMs += performance.now() - publishAt;
-            barren.add(eip);
+            barrenAdd(eip, top);
             return 0;
         }
         /** @type {RegionRecord} */
@@ -691,36 +726,40 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             exit.vector = code >>> 8;
             return exit;
         },
-        /** Records one untranslated exit to `address`: the address becomes a
-         * candidate of the translator's own once `missThreshold` of them land
-         * there. The count is bounded and the coldest entry makes room.
+        /** Records one untranslated exit to `address` at `top`: the address
+         * becomes a candidate of the translator's own once `missThreshold` of
+         * them land there at that top. The count is per top, so a flood of
+         * misses at a top that is already served never withholds the one that
+         * is not; it is bounded and the coldest key makes room.
          * @param {number} address @param {number} [top]
          */
         missAt(address, top = 0){
+            const at = top & 7;
             const target = (exitTargets.get(address) ?? 0) + 1;
             exitTargets.set(address, target);
             if (exitTargets.size > EXIT_TARGETS_CAP)
             {
                 let least = -1;
                 let leastCount = Infinity;
-                for (const [at, count] of exitTargets)
+                for (const [addr, count] of exitTargets)
                 {
                     if (count < leastCount)
                     {
                         leastCount = count;
-                        least = at;
+                        least = addr;
                     }
                 }
                 exitTargets.delete(least);
             }
-            const seen = (misses.get(address) ?? 0) + 1;
+            const key = keyOf(address, at);
+            const seen = (misses.get(key) ?? 0) + 1;
             if (seen >= settings.missThreshold)
             {
-                misses.delete(address);
-                this.noteHot(address, top);
+                misses.delete(key);
+                this.noteHot(address, at);
                 return;
             }
-            if (!misses.has(address) && misses.size >= MISSES_CAP)
+            if (!misses.has(key) && misses.size >= MISSES_CAP)
             {
                 const oldest = misses.keys().next().value;
                 if (oldest !== undefined)
@@ -733,7 +772,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     decayMisses();
                 }
             }
-            misses.set(address, seen);
+            misses.set(key, seen);
         },
         noteHot(eip, top = 0){
             if (!settings.translate)
@@ -741,7 +780,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 return;
             }
             const key = keyOf(eip, top & 7);
-            if (entries.entryOf(eip, top & 7) >= 0 || queue.has(key) || barren.has(eip)
+            if (entries.entryOf(eip, top & 7) >= 0 || queue.has(key) || barrenHas(eip, top & 7)
                 || !translatable(eip))
             {
                 return;
@@ -831,7 +870,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 const entryBlock = region.blocks.find(block=>block.start === eip);
                 if (entryBlock === undefined || entryBlock.instructions.length === 0)
                 {
-                    barren.add(eip);
+                    barrenAdd(eip, entryTop);
                     continue;
                 }
                 formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null });
