@@ -143,6 +143,23 @@ test('the host boots a real runtime over cork\'s own memory', ()=>{
     assert.equal(h.inProtectedMode(), true);
 });
 
+test('the interpreter stops only at an entry for the top the machine has', async()=>{
+    const h = host();
+    // fld1; hlt -- translated at top 0 alone.
+    load(h, 0x1000, [0xd9, 0xe8, 0xf4]);
+    h.cork().noteHot(0x1000, 0);
+    assert.ok(await h.cork().translatePending() >= 1, 'the top 0 region formed');
+    assert.ok(h.cork().entryOf(0x1000, 0) >= 0);
+    assert.equal(h.cork().entryOf(0x1000, 1), -1, 'no region for top 1');
+    // The machine stands at the same address with top 1: the entry compiled
+    // for top 0 is no answer, so the interpreter runs the code and leaves the
+    // top its own fld1 wrote (0), not the region's static (7).
+    h.block()[h.blockLayout().x87Top] = 1;
+    h.writeReg32('eip', 0x1000);
+    assert.equal(h.runSlice(100), 2, 'the interpreter ran fld1 and hlt');
+    assert.equal(h.block()[h.blockLayout().x87Top], 0, 'the machine top, not the region top');
+});
+
 test('newContext under cork positions eip and esp', async()=>{
     const { cpuModule } = await import('../module.js');
     const api = await cpuModule.create({

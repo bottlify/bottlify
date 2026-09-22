@@ -466,3 +466,50 @@ test('a return block the tracker cannot reach gets a region of its own, not a br
         // The fld pushed, the fstp st0 popped: the stack is as the call left it.
         assert.equal(new DataView(m.memory.buffer).getUint8(m.layout.x87Top), 0);
     });
+
+test('a second x87 top at an entry is a miss of its own, not done for every top',
+    async()=>{
+        const m = machine();
+        // fld1; hlt -- x87, so the region is compiled for the top it was
+        // formed at and the entry is keyed by that top.
+        m.write(CODE, [0xd9, 0xe8, 0xf4]);
+        m.runtime.noteHot(CODE, 0);
+        assert.equal(await m.runtime.translatePending(), 1);
+        assert.ok(m.runtime.entryOf(CODE, 0) >= 0);
+        assert.equal(m.runtime.entryOf(CODE, 1), -1, 'nothing for top 1 yet');
+        // A machine arriving with top 1: the entry at top 0 is no answer, so
+        // the runtime notes the top and forms a second region for it.
+        m.runtime.noteHot(CODE, 1);
+        assert.equal(await m.runtime.translatePending(), 1, 'a region for top 1');
+        assert.ok(m.runtime.entryOf(CODE, 1) >= 0, 'top 1 runs now');
+        assert.ok(m.runtime.entryOf(CODE, 0) >= 0, 'top 0 keeps its own');
+        // The exit the machine was making stops: running at top 1 now reaches
+        // the second region and halts, adding no untranslated exit.
+        const before = m.runtime.diagnostics().exits.untranslated;
+        const exit = m.runtime.run(m.runtime.entryOf(CODE, 1), 100);
+        assert.equal(exit.kind, 'halt');
+        assert.equal(m.runtime.diagnostics().exits.untranslated, before,
+            'the exit count stopped growing');
+    });
+
+test('the miss count is per top, so a flood at a served top cannot withhold another',
+    async()=>{
+        const m = machine({ missThreshold: 64 });
+        m.write(CODE, [0xd9, 0xe8, 0xf4]);
+        m.runtime.noteHot(CODE, 0);
+        assert.equal(await m.runtime.translatePending(), 1);
+        // After each miss at top 1, sixty-three misses at top 0, which already
+        // has an entry: every shared-count crossing there resets the count,
+        // so an address-keyed count would erase the top 1 miss each round and
+        // the region the machine actually needs would never be formed.
+        for (let i = 0; i < 64; i++)
+        {
+            m.runtime.missAt(CODE, 1);
+            for (let j = 0; j < 63; j++)
+            {
+                m.runtime.missAt(CODE, 0);
+            }
+        }
+        assert.equal(await m.runtime.translatePending(), 1, 'top 1 reached the threshold');
+        assert.ok(m.runtime.entryOf(CODE, 1) >= 0);
+    });

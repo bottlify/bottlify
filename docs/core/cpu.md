@@ -61,13 +61,15 @@ edge a direct branch, the slice's budget looked at on that edge as on any jump. 
 a call that never returns once decoded eight kilobytes of it). Candidates come from two places: the
 layer's sampler, which hands every hot bucket over at the address its last slice ended on
 whenever that address is a new one, and the translator's own count of untranslated exits by
-target address (`cork.missThreshold`, default 64), which is what finds a stub reached only
-through such exits -- the sampler sees only where budgets run out. The count is bounded, and
-the oldest address is evicted and the counts halved as it fills: a real program leaves for
-millions of addresses, and a hard cap that dropped every new one once full is what kept a
-loading run at a share of 0.5 -- no address reached after the fill could climb to the
+target address and x87 top (`cork.missThreshold`, default 64), which is what finds a stub reached only
+through such exits -- the sampler sees only where budgets run out. The count is per top, so
+misses at a top a region already exists for never withhold the region another top needs; it
+is bounded, and the oldest key is evicted and the counts halved as it fills: a real program
+leaves for millions of addresses, and a hard cap that dropped every new one once full is what
+kept a loading run at a share of 0.5 -- no address reached after the fill could climb to the
 threshold. An address a region formed
-nothing at (every block of it leaves at once) is not tried again until its page moves.
+nothing at for a top (every block of it leaves at once) is not tried again at that top until
+its page moves.
 A block that would leave before retiring anything (nothing decoded, its first instruction
 left out) has no entry, so a transfer never spins on it. The host's call channel is
 translated too: `out dx, eax` to the trap port (`cork.trapPort`, the layer's own) writes the
