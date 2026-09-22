@@ -120,10 +120,16 @@ export function createCorkHost(config){
     let trapCrossings = 0;
     let halted = false;
     let stopped = false;
+    // Set when the interpreter notes a hot start: the slice ends there so the
+    // layer's feed forms the candidate before the next slice, instead of the
+    // whole first pass running interpreted ahead of the translator.
+    let feedDue = false;
     // Read through these in a loop condition: `stopped` is set by `stop()` and
     // `halted` by a nested slice, which the static check cannot see.
     const isHalted = ()=>halted;
     const isStopped = ()=>stopped;
+    // Read through a function like the two above: `countHot` sets it.
+    const isFeedDue = ()=>feedDue;
     // eip is read from the entry vector at the first slice, the way the ROM's
     // indirect jump read it: the loader writes the entry point after boot.
     let entered = false;
@@ -230,6 +236,13 @@ export function createCorkHost(config){
         {
             hotCounts[slot] = 0;
             runtime.noteHot(address, x87Top());
+            // Under the slice feed the candidate is formed at the slice's end,
+            // so leave the interpreter there rather than run the whole hot
+            // body interpreted before the translator ever sees it.
+            if (corkConfig?.feed === 'slice')
+            {
+                feedDue = true;
+            }
         }
     };
 
@@ -313,7 +326,7 @@ export function createCorkHost(config){
                 // far side of. A recorded trap has to leave so the handler can
                 // move eip or stop the machine; an address with an entry is
                 // translated code and a different register file.
-                shouldStop: ()=>state.trapped.length > 0
+                shouldStop: ()=>state.trapped.length > 0 || feedDue
                     || runtime.entryOf(state.eip, x87Top()) >= 0,
                 onStep: (/** @type {number} */ at)=>{
                     lastStart = at;
@@ -383,13 +396,14 @@ export function createCorkHost(config){
      */
     const runSlice = maxInstructions=>{
         stopped = false;
+        feedDue = false;
         if (!entered)
         {
             setEip(whole.getUint32(ramOffset(entryVector), true));
         }
         let remaining = maxInstructions;
         let ran = 0;
-        while (remaining > 0 && !isHalted() && !isStopped())
+        while (remaining > 0 && !isHalted() && !isStopped() && !isFeedDue())
         {
             const at = eip();
             const entry = runtime.entryOf(at, x87Top());
@@ -501,7 +515,13 @@ export function createCorkHost(config){
             {
                 const before = eip();
                 const stepped = runSlice(1 << 20);
-                if (stepped === 0 && eip() === before)
+                if (feedDue)
+                {
+                    // A hot start was noted: form it before the next slice so
+                    // the hot body is not interpreted whole ahead of it.
+                    runtime.translatePending().catch(()=>{});
+                }
+                if (stepped === 0 && eip() === before && !feedDue)
                 {
                     break;
                 }
