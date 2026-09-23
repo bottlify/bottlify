@@ -5,9 +5,10 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -89,12 +90,18 @@ function buildInDocker(){
         {
             throw new Error('containerized zstd.wasm build failed');
         }
-        const copy = spawnSync('docker', ['cp', `${name}:/out/zstd.wasm`, join(OUT, ARTIFACT)],
+        // Copied to the local temp directory first: `docker cp` onto a shared
+        // volume can refuse, and a plain file copy from there does not.
+        const staged = join(tmpdir(), `${name}.wasm`);
+        const copy = spawnSync('docker', ['cp', `${name}:/out/zstd.wasm`, staged],
             { stdio: 'inherit' });
-        if (copy.status !== 0 || !existsSync(join(OUT, ARTIFACT)))
+        if (copy.status !== 0 || !existsSync(staged))
         {
-            throw new Error('the container built nothing at /out/zstd.wasm');
+            throw new Error('the container built nothing at /out/zstd.wasm'
+                + ' (docker cp answered nothing)');
         }
+        copyFileSync(staged, join(OUT, ARTIFACT));
+        unlinkSync(staged);
     }
     finally
     {
