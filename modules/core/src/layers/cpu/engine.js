@@ -102,6 +102,8 @@
  * @property {number} [maxRegionBlocks]  Default 64.
  * @property {number} [maxRegionBytes]   Default 8192.
  * @property {number} [batchRegions]     Regions per wasm module. Default 32.
+ * @property {number} [maxBatchRegions]  The most regions one batch takes when the queue is deep
+ *     (a quarter of the queue past `batchRegions`). Default 256.
  * @property {number} [maxQueued]        Candidates kept waiting at most; past it the coldest,
  *     oldest is evicted (the interpreter notes it again should it get hot). Default 8192.
  * @property {number} [missThreshold]    Untranslated exits to one address before the engine

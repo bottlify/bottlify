@@ -140,6 +140,17 @@ test('the hottest candidate is formed first, whatever order the candidates arriv
     assert.ok(m.runtime.entryOf(CODE) >= 0);
 });
 
+test('a deep queue takes a bigger batch, a quarter of what waits', async()=>{
+    const m = machine({ batchRegions: 2, maxBatchRegions: 64 });
+    for (let i = 0; i < 40; i++)
+    {
+        m.write(CODE + i * 0x40, [0xb8, i, 0, 0, 0, 0xf4]); // mov eax, i; hlt
+        m.runtime.noteHot(CODE + i * 0x40, 0, 4);
+    }
+    assert.equal(await m.runtime.translatePending(), 10, 'forty waiting: ten in one batch');
+    assert.equal(m.runtime.diagnostics().queued, 30);
+});
+
 test('a full queue evicts its coldest, oldest candidate', async()=>{
     const m = machine({ maxQueued: 2 });
     m.runtime.noteHot(CODE, 0, 2);

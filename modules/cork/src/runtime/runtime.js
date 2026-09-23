@@ -55,7 +55,7 @@ const KINDS = /** @type {ExitKind[]} */ (
 export function createCorkRuntime({ memory, layout, config = {}, read, imports, features }){
     const settings = {
         hotThreshold: 2000, maxRegionBlocks: 64, maxRegionBytes: 8192, batchRegions: 32,
-        maxQueued: 8192,
+        maxQueued: 8192, maxBatchRegions: 256,
         // Invalidations of one page before it is left to the other executor.
         volatileAfter: 8,
         // Untranslated exits to one address before it is a candidate of the
@@ -948,7 +948,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 return 0;
             }
-            const batch = hottest(settings.batchRegions);
+            // A deep queue -- a loading phase, where every start met twice is
+            // a candidate and one batch is in flight at a time -- takes a bigger
+            // batch, a quarter of what waits up to `maxBatchRegions`, so the
+            // round trip through the worker and the store is paid per hundreds
+            // of regions rather than per thirty-two.
+            const wanted = Math.min(settings.maxBatchRegions,
+                Math.max(settings.batchRegions, queue.size >> 2));
+            const batch = hottest(wanted);
             for (const [key] of batch)
             {
                 unqueue(key);
