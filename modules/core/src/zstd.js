@@ -460,7 +460,10 @@ function buildHuffman(weights){
         }
     }
     const maxBits = highBit(total) + 1;
-    weights.push((1 << maxBits) - total);
+    // The last symbol's weight is the one that completes the power of two:
+    // its run is the remainder, so the weight is the remainder's log plus one
+    // (a remainder of 4 is weight 3, not 4).
+    weights.push(highBit((1 << maxBits) - total) + 1);
     /** @type {number[]} */
     const count = new Array(maxBits + 1).fill(0);
     for (const weight of weights)

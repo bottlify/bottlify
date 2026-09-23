@@ -211,3 +211,23 @@ test('an FSE table puts the "less than one" symbols at the end, one cell each', 
     assert.equal(table.filter(cell=>cell.symbol === 0).length, 15);
     assert.equal(table.filter(cell=>cell.symbol === 1).length, 15);
 });
+
+test('a tree whose last symbol carries the largest weight decodes', ()=>{
+    // The implied last weight completes the power of two: when the highest
+    // symbol is the most frequent its run is 4 or more, and the weight is the
+    // run's log plus one, not the run itself -- a level-1 frame of a buffer
+    // that is mostly 0xff read back wrong until this was so.
+    const buffer = Buffer.alloc(200_000);
+    for (let at = 0; at < buffer.length; at++)
+    {
+        const r = (Math.imul(at, 2654435761) >>> 0) % 100;
+        buffer[at] = r < 80 ? 0xff : r < 90 ? 0x41 : r < 95 ? 0x42 : (r % 7) + 0x30;
+    }
+    for (const level of [1, 3, 19])
+    {
+        const packed = zlib.zstdCompressSync(buffer,
+            { params: { [zlib.constants.ZSTD_c_compressionLevel]: level } });
+        assert.deepEqual(Buffer.from(decompressZstd(packed, buffer.length)), buffer,
+            `level ${level}`);
+    }
+});
