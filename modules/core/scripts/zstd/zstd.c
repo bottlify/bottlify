@@ -82,10 +82,59 @@ static void zero_u32(u32* at, u32 count){
     while (count--) *at++ = 0;
 }
 
-static void copy_forward(u8* dst, const u8* src, u32 n){
-    /* A byte at a time on purpose: a match whose offset is shorter than its
-     * length reads what it just wrote, which is the format's run encoding. */
+/* Unaligned 64-bit loads and stores: an eight-byte memcpy of constant size,
+ * which every compiler lowers to a single load or store (wasm allows
+ * unaligned access), is what makes a copy a word at a time rather than a
+ * byte. The wasm build names the builtin so no call to the memcpy below is
+ * ever emitted; a native build takes its libc's. */
+#ifdef __wasm__
+#define COPY8(dst, src) __builtin_memcpy((dst), (src), 8)
+#define COPY4(dst, src) __builtin_memcpy((dst), (src), 4)
+#else
+#include <string.h>
+#define COPY8(dst, src) memcpy((dst), (src), 8)
+#define COPY4(dst, src) memcpy((dst), (src), 4)
+#endif
+
+static u64 load64(const u8* at){
+    u64 value;
+    COPY8(&value, at);
+    return value;
+}
+
+static void store64(u8* at, u64 value){
+    COPY8(at, &value);
+}
+
+/* A copy whose source and destination do not overlap within eight bytes:
+ * literals, raw blocks and matches whose offset is at least eight. Eight
+ * bytes at a time, the tail by bytes. */
+static void copy_wide(u8* dst, const u8* src, u32 n){
+    while (n >= 8)
+    {
+        store64(dst, load64(src));
+        dst += 8;
+        src += 8;
+        n -= 8;
+    }
     while (n--) *dst++ = *src++;
+}
+
+/* A match: `offset` back from `dst`, `n` bytes. An offset shorter than the
+ * length reads what it just wrote, which is the format's run encoding; below
+ * eight the copy goes a byte at a time so the overlap is honoured. */
+static void copy_match(u8* dst, u32 offset, u32 n){
+    const u8* src = dst - offset;
+    if (offset >= 8)
+    {
+        copy_wide(dst, src, n);
+        return;
+    }
+    while (n--) *dst++ = *src++;
+}
+
+static void copy_forward(u8* dst, const u8* src, u32 n){
+    copy_wide(dst, src, n);
 }
 
 static u32 high_bit(u32 value){
@@ -135,45 +184,58 @@ static u32 forward_read(Forward* f, u32 n){
     return value;
 }
 
-/* Backward, from the marker bit at the end: Huffman streams, weights, the
- * sequences. `bit` is the number of bits left below the marker. */
+/* Backward, from the marker bit at the end: the weights and the sequences.
+ * The next bits sit at the top of a 64-bit container refilled a byte at a
+ * time from the end of the stream towards its start; bytes before the start
+ * read as zero, as the reference reader has them. `bit` is the number of bits
+ * left below the marker, which the weights loop reads. */
 typedef struct {
     const u8* bytes;
-    u32 size;
+    i32 at;       /* the next byte to pull into the container, going down */
+    u64 acc;
+    u32 have;     /* bits in the container */
     i32 bit;
 } Reverse;
 
+static void reverse_refill(Reverse* r){
+    while (r->have <= 56)
+    {
+        u64 byte = r->at >= 0 ? r->bytes[r->at] : 0;
+        r->acc |= byte << (56 - r->have);
+        r->have += 8;
+        r->at--;
+    }
+}
+
 static int reverse_init(Reverse* r, const u8* bytes, u32 size){
     r->bytes = bytes;
-    r->size = size;
+    r->acc = 0;
+    r->have = 0;
     r->bit = 0;
+    r->at = -1;
     if (size > 0)
     {
         u8 last = bytes[size - 1];
+        u32 stop;
         if (last == 0) return ZSTD_E_CORRUPT;
-        r->bit = (i32)(size - 1) * 8 + (i32)high_bit(last);
+        stop = high_bit(last);
+        r->acc = stop == 0 ? 0 : ((u64)(last & ((1u << stop) - 1))) << (64 - stop);
+        r->have = stop;
+        r->at = (i32)size - 2;
+        r->bit = (i32)(size - 1) * 8 + (i32)stop;
     }
+    reverse_refill(r);
     return 0;
 }
 
-/* The n bits from position p up, bit p the lowest; positions outside the
- * stream read as zero, as the reference reader has them. */
-static u32 reverse_extract(const Reverse* r, i32 p, u32 n){
-    i32 base = p >= 0 ? (p >> 3) : -((-p + 7) >> 3);
-    u32 shift = (u32)(p - base * 8);
-    u64 word = 0;
-    u32 i;
-    for (i = 0; i < 8; i++)
-    {
-        i32 at = base + (i32)i;
-        if (at >= 0 && (u32)at < r->size) word |= (u64)r->bytes[at] << (8 * i);
-    }
-    word >>= shift;
-    return n >= 32 ? (u32)word : (u32)(word & (((u64)1 << n) - 1));
-}
-
+/* The next n bits, n at most 32, the first read bit the highest. */
 static u32 reverse_read(Reverse* r, u32 n){
-    u32 value = reverse_extract(r, r->bit - (i32)n, n);
+    u32 value;
+    if (n == 0) return 0;
+    if (r->have < n) reverse_refill(r);
+    value = (u32)(r->acc >> (64 - n));
+    r->acc <<= n;
+    r->have -= n;
     r->bit -= (i32)n;
     return value;
 }
@@ -462,42 +524,138 @@ static int read_huffman_tree(const u8* bytes, u32 at, u32 limit, Huffman* h, u32
     return 0;
 }
 
-/* One Huffman-coded stream, read backward from `end`, `count` symbols into
- * `out`; the 32-bit accumulator holds the next bits with the newest at the top. */
-static int decode_huffman_stream(const u8* bytes, u32 start, u32 end, const Huffman* h, u8* out, u32 count){
-    u32 last, stop, acc, have, shift0, i;
+/* A Huffman stream's reader: the next bits at the top of a 64-bit container,
+ * refilled four bytes at a time from the end of the stream towards its start,
+ * bytes before the start reading as zero. */
+typedef struct {
+    u64 acc;
+    u32 have;
     i32 at;
-    const u16* packed = h->packed;
-    if (count == 0) return 0;
+    i32 start;
+} HufBits;
+
+static u32 load32(const u8* at){
+    u32 value;
+    COPY4(&value, at);
+    return value;
+}
+
+static int huf_init(HufBits* s, const u8* bytes, u32 start, u32 end){
+    u32 last, stop;
     if (end <= start) return ZSTD_E_CORRUPT;
     last = bytes[end - 1];
     if (last == 0) return ZSTD_E_CORRUPT;
     stop = high_bit(last);
-    at = (i32)end - 1;
-    acc = stop == 0 ? 0 : ((u32)bytes[at] & ((1u << stop) - 1)) << (32 - stop);
-    have = stop;
-    shift0 = 32 - h->maxBits;
-    at--;
-    for (i = 0; i < count; i++)
+    s->acc = stop == 0 ? 0 : ((u64)(last & ((1u << stop) - 1))) << (64 - stop);
+    s->have = stop;
+    s->at = (i32)end - 2;
+    s->start = (i32)start;
+    return 0;
+}
+
+/* Tops the container up past 56 bits: a whole word while four bytes are
+ * left, then bytes, then zeros. */
+static void huf_refill(const u8* bytes, HufBits* s){
+    if (s->have <= 32 && s->at - 3 >= s->start)
     {
-        u16 code;
-        while (have <= 16 && at - 1 >= (i32)start)
+        s->acc |= (u64)load32(bytes + s->at - 3) << (32 - s->have);
+        s->have += 32;
+        s->at -= 4;
+    }
+    while (s->have <= 56)
+    {
+        u64 byte = s->at >= s->start ? bytes[s->at] : 0;
+        s->acc |= byte << (56 - s->have);
+        s->have += 8;
+        s->at--;
+    }
+}
+
+/* One symbol: the table cell the next maxBits bits name, its width consumed. */
+#define HUF_SYMBOL(s, packed, shift0, dst) do {     u16 code_ = (packed)[(s).acc >> (shift0)];     (dst) = (u8)(code_ & 0xff);     (s).acc <<= code_ >> 8;     (s).have -= code_ >> 8; } while (0)
+
+/* One Huffman-coded stream, read backward from `end`, `count` symbols into
+ * `out`. A refill holds at least 57 bits and a symbol is at most 12, so four
+ * symbols follow each refill. */
+static int decode_huffman_stream(const u8* bytes, u32 start, u32 end, const Huffman* h, u8* out, u32 count){
+    HufBits s;
+    const u16* packed = h->packed;
+    u32 shift0 = 64 - h->maxBits;
+    u32 i = 0;
+    int error;
+    if (count == 0) return 0;
+    error = huf_init(&s, bytes, start, end);
+    if (error) return error;
+    while (i + 4 <= count)
+    {
+        huf_refill(bytes, &s);
+        HUF_SYMBOL(s, packed, shift0, out[i]);
+        HUF_SYMBOL(s, packed, shift0, out[i + 1]);
+        HUF_SYMBOL(s, packed, shift0, out[i + 2]);
+        HUF_SYMBOL(s, packed, shift0, out[i + 3]);
+        i += 4;
+    }
+    while (i < count)
+    {
+        huf_refill(bytes, &s);
+        HUF_SYMBOL(s, packed, shift0, out[i]);
+        i++;
+    }
+    return 0;
+}
+
+/* The four streams of a literals section decoded in lockstep, so the four
+ * dependency chains overlap in the processor instead of running one after
+ * another. Streams one to three carry `per` symbols, the fourth `rest`. */
+static int decode_huffman_4(const u8* bytes, const u32* starts, const u32* ends, const Huffman* h,
+    u8* out, u32 per, u32 rest){
+    HufBits s[4];
+    const u16* packed = h->packed;
+    u32 shift0 = 64 - h->maxBits;
+    u32 i = 0, k;
+    int error;
+    u8* o0 = out;
+    u8* o1 = out + per;
+    u8* o2 = out + 2 * per;
+    u8* o3 = out + 3 * per;
+    for (k = 0; k < 4; k++)
+    {
+        if (k < 3 || rest > 0)
         {
-            acc |= (((u32)bytes[at] << 8) | (u32)bytes[at - 1]) << (16 - have);
-            have += 16;
-            at -= 2;
+            error = huf_init(&s[k], bytes, starts[k], ends[k]);
+            if (error) return error;
         }
-        while (have <= 24)
+    }
+    /* Two symbols per stream per refill: at least 57 bits, at most 24 spent. */
+    while (i + 2 <= rest)
+    {
+        huf_refill(bytes, &s[0]);
+        huf_refill(bytes, &s[1]);
+        huf_refill(bytes, &s[2]);
+        huf_refill(bytes, &s[3]);
+        HUF_SYMBOL(s[0], packed, shift0, o0[i]);
+        HUF_SYMBOL(s[1], packed, shift0, o1[i]);
+        HUF_SYMBOL(s[2], packed, shift0, o2[i]);
+        HUF_SYMBOL(s[3], packed, shift0, o3[i]);
+        HUF_SYMBOL(s[0], packed, shift0, o0[i + 1]);
+        HUF_SYMBOL(s[1], packed, shift0, o1[i + 1]);
+        HUF_SYMBOL(s[2], packed, shift0, o2[i + 1]);
+        HUF_SYMBOL(s[3], packed, shift0, o3[i + 1]);
+        i += 2;
+    }
+    for (; i < per; i++)
+    {
+        huf_refill(bytes, &s[0]);
+        huf_refill(bytes, &s[1]);
+        huf_refill(bytes, &s[2]);
+        HUF_SYMBOL(s[0], packed, shift0, o0[i]);
+        HUF_SYMBOL(s[1], packed, shift0, o1[i]);
+        HUF_SYMBOL(s[2], packed, shift0, o2[i]);
+        if (i < rest)
         {
-            u32 group = at >= (i32)start ? bytes[at] : 0;
-            acc |= group << (24 - have);
-            have += 8;
-            at--;
+            huf_refill(bytes, &s[3]);
+            HUF_SYMBOL(s[3], packed, shift0, o3[i]);
         }
-        code = packed[acc >> shift0];
-        out[i] = (u8)(code & 0xff);
-        acc <<= code >> 8;
-        have -= code >> 8;
     }
     return 0;
 }
@@ -631,13 +789,17 @@ static int decode_literals(const u8* bytes, u32 start, u32 limit, u32* count, u3
         counts[3] = regenerated - 3 * per;
         if (3 * per > regenerated) counts[3] = 0;
         at = streamsAt + 6;
-        for (i = 0; i < 4; i++)
         {
-            if (at + sizes[i] > contentEnd) return ZSTD_E_CORRUPT;
-            error = decode_huffman_stream(bytes, at, at + sizes[i], &frame.huffman,
-                literals + i * per, counts[i]);
+            u32 starts[4], ends[4];
+            for (i = 0; i < 4; i++)
+            {
+                if (at + sizes[i] > contentEnd) return ZSTD_E_CORRUPT;
+                starts[i] = at;
+                ends[i] = at + sizes[i];
+                at += sizes[i];
+            }
+            error = decode_huffman_4(bytes, starts, ends, &frame.huffman, literals, per, counts[3]);
             if (error) return error;
-            at += sizes[i];
         }
     }
     *count = regenerated;
@@ -793,7 +955,7 @@ static int decode_compressed(const u8* bytes, u32 start, u32 end, u8* out, u32 o
             *outLength += literalLength;
             litAt += literalLength;
         }
-        copy_forward(out + *outLength, out + *outLength - offset, matchLength);
+        copy_match(out + *outLength, offset, matchLength);
         *outLength += matchLength;
         if (sequence + 1 < sequences)
         {
