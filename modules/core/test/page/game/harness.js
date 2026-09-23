@@ -1397,6 +1397,7 @@ export function createHarness(canvas, how = {}){
         // `[ready]` table drops it whole and a cork run would say nothing about
         // why its loops stayed interpreted.
         result.cork = metrics('cpu').cork ?? null;
+        result.differential = metrics('cpu').differential ?? null;
 
         // Named rather than left to `scalars`, which keeps only numbers and strings
         // -- every metric this layer reports is an object, so all of them were

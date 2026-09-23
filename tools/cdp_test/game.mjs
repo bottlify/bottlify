@@ -566,6 +566,21 @@ function describe(result, context, calls, symbols){
         say('');
     }
 
+    if (result.differential)
+    {
+        say(`  differential: ${result.differential.replayed} regions replayed,`
+            + ` ${result.differential.divergences} diverged`);
+        if (result.differential.first)
+        {
+            say(`    first divergence at ${result.differential.first.at}:`);
+            for (const field of result.differential.first.diff)
+            {
+                say(`      ${field.name}: emulator=${field.expected} cork=${field.actual}`);
+            }
+        }
+        say('');
+    }
+
     const phases = result.phases;
     if (phases && phases.top.length > 0)
     {

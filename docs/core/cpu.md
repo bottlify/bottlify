@@ -48,7 +48,18 @@ cleared when the page holds none), and the emulator's slice returns as soon as i
 such a page having retired something, so the two go round within one slice until the budget
 is spent. An emulator build without the export runs its turn to a boundary of its own and
 ends the slice; `cork.handoffMisses` counts the slices that so ended inside a page the
-translator holds (`Runtime.holdsPage`), zero with the export. Between regions, translated
+translator holds (`Runtime.holdsPage`), zero with the export.
+
+Under `differential` the same slice loop replays every region on the emulator before its run
+stands: the state is snapshotted, the translator runs the region, the state is snapshotted
+again and restored, the emulator runs the region's retired count, and the two records are
+compared -- the emulator is the oracle. The comparison is over registers, flags, eip, the x87
+block and XMM (the memory spans the region wrote are the undo log's, a later step), and
+`metrics.differential` reports how many regions were replayed, how many diverged, and the
+first region that did with the fields that differed. The guest carries on from the
+translator's state, so a divergence is named without changing what the program does next.
+
+Between regions, translated
 code needs no slice loop at all where the engine has tail calls: every region function is
 placed in one function table shared by every module, every entry (block start, x87 top) is
 mirrored into an open-addressing hash in the translator's tables (65 536 slots of the
@@ -269,7 +280,7 @@ enter the type check or the bundle.
 | `thunkCapacity` | number (bytes)             | `16384 * 16`        | Room reserved for the stub table: 16 384 slots of 16 bytes. Every import and every COM method takes one; none is ever given back. |
 | `jit`           | `Record<number, number>`   | `undefined`         | The emulator's compiler budgets by config index (1 = pages one module may span, 3 = extra basic blocks discovery may follow, 6 = chaining). For measurement, not production. |
 | `sampling`      | `boolean`                  | `true`              | Whether `runSlice` credits an address bucket per slice (see "Sampling" below). Always on; `false` is the only way to turn it off, for a caller measuring the emulator itself. |
-| `engine`        | `'emulator' \| 'hybrid' \| 'cork' \| 'differential'` | `'emulator'` | Which execution engine runs the program (see "Engines" above). An unknown name is refused by `create()` with `cpu: unknown engine "x" (…)`; `differential` is refused with `cpu: engine "differential" is not built yet` until its step lands. `cork` runs with nothing of the emulator loaded (see "Engines" above); `boot()` under it needs no emulator artifacts and throws `cpu: engine "cork" needs an engineUrl` without one. `hybrid` without `engineUrl` composes the emulator's host with no translator attached and runs a program exactly as `emulator` does, to the instruction. |
+| `engine`        | `'emulator' \| 'hybrid' \| 'cork' \| 'differential'` | `'emulator'` | Which execution engine runs the program (see "Engines" above). An unknown name is refused by `create()` with `cpu: unknown engine "x" (…)`. `cork` runs with nothing of the emulator loaded (see "Engines" above); `boot()` under it needs no emulator artifacts and throws `cpu: engine "cork" needs an engineUrl` without one. `hybrid` without `engineUrl` composes the emulator's host with no translator attached and runs a program exactly as `emulator` does, to the instruction. `differential` is `hybrid` with every region replayed on the emulator and compared; it needs the emulator artifacts and an `engineUrl`. |
 
 Chaining (index 6) is switched on automatically when the running engine validates a wasm tail
 call and the caller has not set the knob (`tailCallsSupported()` in `internal/v86-host.js`).
