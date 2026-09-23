@@ -481,8 +481,11 @@ function describeCork(cork, say){
     {
         say(`    refused opcodes: ${refused.map(([opcode, count])=>`${opcode} x${count}`)
             .join(', ')}`);
-        say(`      ${refused.map(([opcode])=>`${opcode} = ${cork.refusedWhy?.[opcode] ?? '?'}`)
-            .join('; ')}`);
+        const why = Object.entries(cork.refusedWhy ?? {});
+        if (why.length > 0)
+        {
+            say(`      ${why.map(([reason, count])=>`${reason} x${count}`).join('; ')}`);
+        }
     }
     const byTarget = cork.exitsByTarget ?? [];
     if (byTarget.length > 0)
