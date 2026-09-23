@@ -86,7 +86,10 @@ export function createDifferentialHost({ emulator, cork, engine }){
                     retired += stepped;
                 }
                 const oracleState = snapshot(emulator, []);
-                const diff = compare(oracleState, subjectState);
+                // The comparison masks the x87 status bits the two engines may
+                // leave differently (the top, already compared on its own, and
+                // the summary bits), the way the corpus's runner does.
+                const diff = compare(oracleState, subjectState, { statusMask: 0xfdd5 });
                 if (diff.length > 0)
                 {
                     divergences++;
