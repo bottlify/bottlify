@@ -13,8 +13,8 @@ import { createCorkRuntime } from './runtime.js';
 const CODE = 0x1000;
 
 /** A machine of 4 MiB with cork's own layout and a runtime over it. */
-function machine(config = {}){
-    const layout = ownLayout({ ramSize: 4 << 20 });
+function machine(config = {}, ramSize = 4 << 20){
+    const layout = ownLayout({ ramSize });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
     const bytes = ()=>new Uint8Array(memory.buffer);
     const view = ()=>new DataView(memory.buffer);
@@ -123,6 +123,19 @@ test('two regions land in one batch, each its own module, and both run; an entry
     assert.equal(second.kind, 'halt');
     assert.equal(second.retired, 2);
     assert.equal(m.reg(0), 7);
+});
+
+test('a page write clears the candidates on a page above 256 MB', async()=>{
+    // A candidate key is eip * 16 + top, past 2^32 there: the page it is
+    // filed under must come from a division, not a shift that wraps.
+    const m = machine({}, (256 << 20) + (16 << 12));
+    const high = (256 << 20) + 0x2000;
+    m.write(high, COUNTDOWN);
+    m.runtime.noteHot(high);
+    assert.equal(m.runtime.diagnostics().queued, 1);
+    m.runtime.invalidatePage(high >>> 12);
+    assert.equal(m.runtime.diagnostics().queued, 0, 'the candidate went with its page');
+    assert.equal(await m.runtime.translatePending(), 0);
 });
 
 test('an invalidation between noteHot and translatePending drops the region', async()=>{

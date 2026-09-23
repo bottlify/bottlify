@@ -57,7 +57,13 @@ compared -- the emulator is the oracle. The comparison is over registers, flags,
 block and XMM (the memory spans the region wrote are the undo log's, a later step), and
 `metrics.differential` reports how many regions were replayed, how many diverged, and the
 first region that did with the fields that differed. The guest carries on from the
-translator's state, so a divergence is named without changing what the program does next.
+translator's register state. Memory is the mode's limit: the emulator replays the region on
+the memory the translator already wrote, so a store that reads what it writes (an increment
+in memory, a counter) lands twice, and a program whose regions do that runs differently
+under `differential` from the point of the first replay -- the mode is a diagnostic for the
+register state a wrong instruction corrupts first, not a way to run a program; the undo log
+of the region (`prepareModule(..., { undoLog })`) is what would rewind the translator's stores
+before the replay, and is the step that makes the mode whole.
 
 Between regions, translated
 code needs no slice loop at all where the engine has tail calls: every region function is
@@ -193,7 +199,7 @@ that form, the MMX one (the exponent and sign all ones, as the processor leaves 
 relaxed double. An MMX instruction
 holds every x87 register with the top at zero, as the processor does, and `emms` empties them
 again, whichever order the two come in within one run, and leaves the top at the zero the MMX
-instruction set -- leaving the MMX state does not undo it. `fxsave`, `fxrstor` and `fbld` still end a region and run on the fallback; `fbstp` writes its packed BCD through the BCD helper the shared helpers module carries. The stubs cork answers itself -- `cpuid` (the pinned emulator's own leaves, `src/cpuid.js`), `rdtsc`, `xlat`, `addsubps`/`addsubpd` -- are lowered in the emitter and modelled in the interpreter, as `int n`/`int3`/`into`, `bound`, `hlt`, `ud2` and the string forms are. A store translated code makes into a page the emulator's own compiler compiled is
+instruction set -- leaving the MMX state does not undo it. `fxsave`, `fxrstor` and `fbld` still end a region and run on the fallback; `fbstp` writes its packed BCD through the BCD helper the shared helpers module carries. The stubs cork answers itself -- `cpuid` (the pinned emulator's own leaves, `src/cpuid.js`), `rdtsc` (the host's counter through the `rdtsc` import: the emulator's own `read_tsc` under hybrid, the engine's clock in nanoseconds under cork, so a program timing itself sees one monotonic clock either way), `xlat`, `addsubps`/`addsubpd` -- are lowered in the emitter and modelled in the interpreter, as `int n`/`int3`/`into`, `bound`, `hlt`, `ud2` and the string forms are. A store translated code makes into a page the emulator's own compiler compiled is
 seen too: the store checks the emulator's byte-per-page "has code" table beside the
 translator's own flags (`layout.codePages`, the fork's `bottlify_page_has_code_ptr`) and
 leaves `stale` with the address and width, and the runtime dirties the emulator's cache for

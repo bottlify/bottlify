@@ -127,6 +127,7 @@ const LOCAL_TYPES = [
  * @property {number} codeHit          the helper telling whether a byte lies in translated code
  * @property {number} [getEflags]      the host's flag fold, imported when the layout keeps
  *                                     lazy flags (the emulator's `flags_changed`)
+ * @property {number} rdtsc            the host's time-stamp counter, imported by every region
  * @property {number} f80ToF64         the extended-precision readers
  * @property {number} f64ToF80
  * @property {number} round            the rounding-control helper
@@ -177,6 +178,10 @@ export function prepareModule(m, layout, features, memory = {},
     const getEflags = layout.flagsChanged >= 0
         ? m.importFunction('env', 'getEflags', m.type({ params: [], results: [ValType.i32] }))
         : undefined;
+    // The time-stamp counter is the host's -- the emulator's own under hybrid,
+    // cork's clock under cork -- so `rdtsc` needs no crossing and the two agree.
+    const rdtsc = m.importFunction('env', 'rdtsc',
+        m.type({ params: [], results: [ValType.i64] }));
     // The transcendentals wasm has no operation for, as the host's Math.
     const unary = m.type({ params: [ValType.f64], results: [ValType.f64] });
     const binary = m.type({ params: [ValType.f64, ValType.f64], results: [ValType.f64] });
@@ -194,7 +199,7 @@ export function prepareModule(m, layout, features, memory = {},
     /** @type {ModuleContext} */
     const context = {
         m, regionType, materialise, layout, features, f80ToF64, f64ToF80, round, math,
-        hash: hashed, codeHit, f64ToBcd, leaveOut,
+        hash: hashed, codeHit, f64ToBcd, rdtsc, leaveOut,
     };
     if (trapPort !== undefined)
     {

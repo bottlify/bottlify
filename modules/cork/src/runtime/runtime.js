@@ -122,8 +122,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * this clears a page's own keys instead. */
     const pageKeys = new Map();
     /** @param {number} key */
+    // A key is eip * 16 + top, past 2^32 for an address above 256 MB, so its
+    // page is a division rather than a shift, which would wrap there.
+    const pageOfKey = key=>Math.floor(key / 65536);
+    /** @param {number} key */
     const noteKey = key=>{
-        const page = key >>> 16;
+        const page = pageOfKey(key);
         let keys = pageKeys.get(page);
         if (!keys)
         {
@@ -134,7 +138,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     };
     /** @param {number} key */
     const dropKey = key=>{
-        const page = key >>> 16;
+        const page = pageOfKey(key);
         const keys = pageKeys.get(page);
         if (keys)
         {
@@ -489,6 +493,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             instance = new WebAssembly.Instance(module, {
                 env: {
                     memory, getEflags: imports.getEflags, trap: imports.trap,
+                    rdtsc: imports.rdtsc ?? (()=>0n),
                     ...mathImports(), ...helperImports(), ...(table ? { table } : {}),
                 },
             });

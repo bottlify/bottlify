@@ -160,10 +160,13 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         }
         case 'rdtsc':
-            // The timestamp counter's low and high words; this layer's import
-            // answers zero today, which is what the emulator host reads too.
-            b.i32const(0).localSet(Local.reg);
-            b.i32const(0).localSet(Local.reg + 2);
+            // The time-stamp counter, read through the host's import (the
+            // emulator's own under hybrid, cork's clock under cork): the low
+            // word to eax, the high word to edx.
+            b.call(e.context.rdtsc).localSet(Local.t64);
+            b.localGet(Local.t64).op(I64.wrap).localSet(Local.reg);
+            b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap)
+                .localSet(Local.reg + 2);
             return true;
         case 'mov':
             if (dst.kind === 'seg')

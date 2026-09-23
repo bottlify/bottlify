@@ -370,8 +370,13 @@ test('xlat reads [ebx + al]', ()=>{
 
 test('cpuid and rdtsc answer without a crossing', ()=>{
     const m = run([0xb8, 1, 0, 0, 0, 0x0f, 0xa2, 0x0f, 0x31]);
-    assert.equal(m.state.reg[0], 0); // rdtsc after cpuid
+    assert.equal(m.state.reg[0], 0); // rdtsc after cpuid, no counter given
     assert.equal(m.state.reg[2], 0);
+    const clocked = run([0x0f, 0x31], state=>{
+        state.rdtsc = ()=>0x123456789abcdef0n;
+    });
+    assert.equal(clocked.state.reg[0], 0x9abcdef0, 'the counter\'s low word in eax');
+    assert.equal(clocked.state.reg[2], 0x12345678, 'and its high word in edx');
     const leaf = run([0xb8, 1, 0, 0, 0, 0x0f, 0xa2]);
     assert.equal(leaf.state.reg[0], 0x00000673);
     assert.equal(leaf.state.reg[1], 0xc0800001);

@@ -183,6 +183,11 @@ export function createCorkHost(config){
      */
     let interpreter = null;
 
+    // Cork's own time-stamp counter: nanoseconds of the page's clock since the
+    // host was made, monotonic, at the scale the emulator's counter has.
+    const tscBase = performance.now();
+    const readTsc = ()=>BigInt(Math.floor((performance.now() - tscBase) * 1e6));
+
     const runtime = createEngine({
         memory,
         layout,
@@ -193,7 +198,7 @@ export function createCorkHost(config){
             getEflags: eflagsWord,
             x87Read: (/** @type {number} */ index)=>
                 blockView.getFloat64(x87At(index), true),
-            rdtsc: ()=>0n,
+            rdtsc: readTsc,
         },
     });
 
@@ -316,6 +321,7 @@ export function createCorkHost(config){
         interpreter ??= blockState({
             memory,
             layout,
+            rdtsc: readTsc,
             // An interpreted store into a page a region was translated on
             // invalidates it, as a translated store's `stale` exit does.
             onCodeWrite: (/** @type {number} */ at, /** @type {number} */ size)=>{

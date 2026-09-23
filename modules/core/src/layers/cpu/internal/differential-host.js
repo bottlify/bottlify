@@ -24,6 +24,13 @@
  * memory spans are left empty here (the region's undo log is a later step), so
  * the comparison is over registers, flags, eip, x87 and XMM -- the state a
  * wrong instruction corrupts first.
+ *
+ * The limit that follows: the emulator replays the region on the memory the
+ * translator already wrote, so a store that reads what it writes (an increment
+ * in memory) lands twice, and a program whose regions do that runs differently
+ * from the first replay on. The mode is a diagnostic, not a way to run a
+ * program; rewinding the translator's stores through the undo log before the
+ * replay is what would make it whole.
  */
 
 import { createHybridHost } from './hybrid-host.js';

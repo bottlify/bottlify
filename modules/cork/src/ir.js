@@ -52,6 +52,7 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @property {boolean} halted
  * @property {number} retired
  * @property {number[]} trapped    the values written to the trap port, in order
+ * @property {() => bigint} [rdtsc]  the host's time-stamp counter; absent, it reads zero
  * @property {number} top          the x87 stack's top, 0-7
  * @property {number} empty        the empty-register mask, bit k for physical k
  * @property {number} status       the x87 status word
@@ -844,11 +845,15 @@ export function evaluate(instruction, state){
             return;
         }
         case 'rdtsc':
-            // The timestamp counter's low and high words; this layer's import
-            // answers zero today, which is what the emulator host reads too.
-            state.reg[0] = 0;
-            state.reg[2] = 0;
+        {
+            // The time-stamp counter is the host's (the emulator's own under
+            // hybrid, cork's clock under cork): the low word to eax, the high
+            // word to edx.
+            const value = state.rdtsc ? state.rdtsc() : 0n;
+            state.reg[0] = Number(value & 0xffffffffn);
+            state.reg[2] = Number((value >> 32n) & 0xffffffffn);
             return;
+        }
         default:
             if (op.startsWith('set') && instruction.cc !== undefined)
             {

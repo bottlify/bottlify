@@ -526,6 +526,12 @@ export async function createV86Host(config){
         },
         /** Whether the build has the handoff export. */
         handoffAvailable: ()=>typeof cpu.wm.exports.bottlify_handoff_page === 'function',
+        /** The emulator's own time-stamp counter, the value its `rdtsc` reads,
+         * so translated code under hybrid reads the same clock. */
+        readTsc: ()=>{
+            const value = cpu.wm.exports.read_tsc();
+            return typeof value === 'bigint' ? value : BigInt(Math.floor(Number(value)));
+        },
         /** Times a handoff flag was asked of a build without the export. */
         handoffUnavailable: ()=>handoffUnavailable,
 

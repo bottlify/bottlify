@@ -360,6 +360,14 @@ test('an instruction the emitter leaves out ends the run at its address, state i
     assert.equal(m.counter(), 1);
 });
 
+test('rdtsc reads the host\'s counter into edx:eax', ()=>{
+    const m = createTestMachine({ rdtsc: ()=>0x123456789abcdef0n });
+    m.write(CODE, [0x0f, 0x31, 0xf4]); // rdtsc; hlt
+    assert.equal(m.runProgram(CODE).kind, 3);
+    assert.equal(m.reg('eax'), 0x9abcdef0);
+    assert.equal(m.reg('edx'), 0x12345678);
+});
+
 test('cpuid answers the pinned emulator\'s leaves and zero for the rest', ()=>{
     const one = createTestMachine();
     one.write(CODE, [0xb8, 1, 0, 0, 0, 0x0f, 0xa2, 0xf4]); // mov eax, 1; cpuid; hlt

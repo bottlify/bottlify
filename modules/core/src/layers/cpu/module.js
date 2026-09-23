@@ -460,7 +460,7 @@ export const cpuModule = {
                                 },
                                 getEflags: emulator.getEflags,
                                 x87Read: ()=>0,
-                                rdtsc: ()=>0n,
+                                rdtsc: ()=>emulator.readTsc(),
                                 handoffPage: emulator.handoffPage,
                                 handoffHash: emulator.handoffHash,
                                 dirtyCode: emulator.dirtyCode,

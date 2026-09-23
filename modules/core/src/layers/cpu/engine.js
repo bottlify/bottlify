@@ -80,7 +80,8 @@
  *     flags before writing them.
  * @property {(index: number) => number} x87Read  A physical x87 register the state
  *     block holds in a form the engine cannot read inline, as an f64.
- * @property {() => bigint} rdtsc
+ * @property {() => bigint} rdtsc      The time-stamp counter `rdtsc` reads: the
+ *     emulator's own under hybrid, the engine's clock under cork.
  * @property {(page: number, on: boolean) => void} [handoffPage]
  *     Hybrid: flags a page the engine holds code for, so the other executor's slice
  *     returns when the guest arrives there (`handoffPage` on the emulator's host).
@@ -174,6 +175,10 @@
  * @property {number} cacheMisses
  * @property {number} invalidations    Regions discarded by a write.
  * @property {number} volatilePages    Pages written so often they are no longer translated.
+ * @property {number} [dropped]        Regions dropped at publication because a page moved.
+ * @property {number} [queued]         Candidates noted and not yet formed.
+ * @property {number} [barren]         Candidate keys a region formed nothing at.
+ * @property {number} [queueDrops]     Candidates a page write cleared.
  * @property {Record<ExitKind, number>} exits
  * @property {{ address: number, count: number, reason: string }[]} exitsByTarget
  *     The top untranslated-exit targets and why each has no entry.

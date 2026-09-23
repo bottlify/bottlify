@@ -25,13 +25,14 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 
 /**
  * @param {{ ramSize?: number, codePages?: boolean, trapPort?: number,
- *     trap?: (value: number) => number, leaveOut?: string[] }} [given]
+ *     trap?: (value: number) => number, rdtsc?: () => bigint,
+ *     leaveOut?: string[] }} [given]
  *     trapPort: `out dx, eax` to it calls
  *     `trap` from inside the region (answering 1 when it moved EIP), as under a host with
  *     a call channel; without `trap`, one that answers 0
  */
 export function createTestMachine(given = {}){
-    const { ramSize = 1 << 20, codePages = false, trapPort, trap, leaveOut = [] } = given;
+    const { ramSize = 1 << 20, codePages = false, trapPort, trap, rdtsc, leaveOut = [] } = given;
     // With `codePages`, the undo ring's area doubles as another executor's
     // byte-per-page code table, for the tests of a store into its pages.
     const own = ownLayout({ ramSize });
@@ -138,6 +139,7 @@ export function createTestMachine(given = {}){
                 env: {
                     memory, ...mathImports(), ...helperImports(), ...(table ? { table } : {}),
                     trap: trap ?? (()=>0),
+                    rdtsc: rdtsc ?? (()=>0n),
                 },
             });
             const run = /** @type {(label: number, budget: number) => number} */ (
