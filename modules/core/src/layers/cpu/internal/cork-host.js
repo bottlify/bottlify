@@ -120,10 +120,25 @@ export function createCorkHost(config){
     let trapCrossings = 0;
     let halted = false;
     let stopped = false;
+    // Set when the interpreter notes a hot start: the slice ends there so the
+    // layer's feed forms the candidate before the next slice, instead of the
+    // whole first pass running interpreted ahead of the translator.
+    let feedDue = false;
+    // A hot note under the frame feed: the interpreter yields so the translator
+    // can run, but the slice does NOT end -- the loop below feeds and carries on
+    // with what is left of the budget. A loading phase is one long frame, so a
+    // frame-boundary feed alone would run the whole load interpreted.
+    let translateDue = false;
+    // Interpreted steps since the last in-slice feed, so a loader that meets a
+    // new start every few instructions does not translate on every one.
+    let stepsSinceFeed = 0;
+    const FEED_MIN_STEPS = 2048;
     // Read through these in a loop condition: `stopped` is set by `stop()` and
     // `halted` by a nested slice, which the static check cannot see.
     const isHalted = ()=>halted;
     const isStopped = ()=>stopped;
+    // Read through a function like the two above: `countHot` sets it.
+    const isFeedDue = ()=>feedDue;
     // eip is read from the entry vector at the first slice, the way the ROM's
     // indirect jump read it: the loader writes the entry point after boot.
     let entered = false;
@@ -204,13 +219,15 @@ export function createCorkHost(config){
     // Hotness in cork mode, counted by the interpreter itself: a start run
     // `hotThreshold` times becomes a candidate, and the layer's feed forms it.
     // A translated start is never interpreted again, so the count stops there.
-    // Two under cork, not the sampler's two thousand: there is no compiled
-    // second executor to carry the code in the meantime, so a start costs a
-    // translation on its second visit rather than being run thousands of
-    // times first -- a region is about a millisecond and a thousand
-    // instructions about half of one, and the loading code never reaches a
-    // larger threshold at all.
-    const hotThreshold = corkConfig?.hotThreshold ?? 2;
+    // Low, but not two: a start costs a translation on its second visit, yet
+    // a title's loader runs millions of instructions that are each met once or
+    // twice, and a threshold of two turned every one of them into a candidate
+    // -- Doom 3's load left a queue of twenty thousand candidates and formed a
+    // few thousand, so the genuinely hot loop (met forty thousand times) never
+    // reached the front and stayed interpreted. Two hundred and fifty-six
+    // still costs the hot loop a few hundred interpreted turns before it
+    // translates, and leaves the run-once loader code alone.
+    const hotThreshold = corkConfig?.hotThreshold ?? 256;
     // The counts live in a flat array rather than a map: one byte per four
     // bytes of the first sixteen megabytes of address space, wrapping there.
     // A map grew an entry for every instruction a straight-line loader ran
@@ -230,6 +247,18 @@ export function createCorkHost(config){
         {
             hotCounts[slot] = 0;
             runtime.noteHot(address, x87Top());
+            // Under the slice feed the candidate is formed at the slice's end,
+            // so leave the interpreter there rather than run the whole hot
+            // body interpreted before the translator ever sees it. Under the
+            // frame feed the slice does not end; the loop feeds in place.
+            if (corkConfig?.feed === 'slice')
+            {
+                feedDue = true;
+            }
+            else if (stepsSinceFeed >= FEED_MIN_STEPS)
+            {
+                translateDue = true;
+            }
         }
     };
 
@@ -313,10 +342,11 @@ export function createCorkHost(config){
                 // far side of. A recorded trap has to leave so the handler can
                 // move eip or stop the machine; an address with an entry is
                 // translated code and a different register file.
-                shouldStop: ()=>state.trapped.length > 0
+                shouldStop: ()=>state.trapped.length > 0 || feedDue || translateDue
                     || runtime.entryOf(state.eip, x87Top()) >= 0,
                 onStep: (/** @type {number} */ at)=>{
                     lastStart = at;
+                    stepsSinceFeed++;
                     countHot(at);
                 },
                 force,
@@ -383,14 +413,24 @@ export function createCorkHost(config){
      */
     const runSlice = maxInstructions=>{
         stopped = false;
+        feedDue = false;
         if (!entered)
         {
             setEip(whole.getUint32(ramOffset(entryVector), true));
         }
         let remaining = maxInstructions;
         let ran = 0;
-        while (remaining > 0 && !isHalted() && !isStopped())
+        while (remaining > 0 && !isHalted() && !isStopped() && !isFeedDue())
         {
+            if (translateDue)
+            {
+                // Form what the interpreter noted and carry on with the rest
+                // of the budget: the slice's count is unchanged, so a loader
+                // that never presents a frame still translates.
+                translateDue = false;
+                stepsSinceFeed = 0;
+                runtime.translatePending().catch(()=>{});
+            }
             const at = eip();
             const entry = runtime.entryOf(at, x87Top());
             if (entry >= 0)
@@ -501,7 +541,13 @@ export function createCorkHost(config){
             {
                 const before = eip();
                 const stepped = runSlice(1 << 20);
-                if (stepped === 0 && eip() === before)
+                if (feedDue)
+                {
+                    // A hot start was noted: form it before the next slice so
+                    // the hot body is not interpreted whole ahead of it.
+                    runtime.translatePending().catch(()=>{});
+                }
+                if (stepped === 0 && eip() === before && !feedDue)
                 {
                     break;
                 }

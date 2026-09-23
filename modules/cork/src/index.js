@@ -24,11 +24,14 @@
  */
 
 import { createCorkRuntime } from './runtime/runtime.js';
+import { replaySlice } from './testing/differential.js';
 
 export {
     ownLayout, pagesFor, layoutId, Tables, STATE_BLOCK_SIZE, PAGE,
 } from './runtime/layout.js';
 export { interpret, blockState } from './interp.js';
+export { snapshot, restore, compare } from './testing/snapshot.js';
+export { replaySlice };
 
 /**
  * Builds a runtime over the memory and layout the core hands in.

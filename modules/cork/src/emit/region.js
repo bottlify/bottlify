@@ -130,6 +130,7 @@ const LOCAL_TYPES = [
  * @property {number} f80ToF64         the extended-precision readers
  * @property {number} f64ToF80
  * @property {number} round            the rounding-control helper
+ * @property {number} f64ToBcd         the `fbstp` packed-BCD store
  * @property {Record<string, number>} math  the transcendentals imported from the host
  * @property {boolean} hash            an untranslated exit probes the entry hash and
  *                                     tail-calls the region found, through the host's table
@@ -189,11 +190,11 @@ export function prepareModule(m, layout, features, memory = {},
     // The five helpers are one shared module every region imports, rather
     // than a copy in each; the host instantiates it once with the same
     // memory (they are defined in `./helpers.js`).
-    const { materialise, f80ToF64, f64ToF80, round, codeHit } = importHelpers(m);
+    const { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd } = importHelpers(m);
     /** @type {ModuleContext} */
     const context = {
         m, regionType, materialise, layout, features, f80ToF64, f64ToF80, round, math,
-        hash: hashed, codeHit, leaveOut,
+        hash: hashed, codeHit, f64ToBcd, leaveOut,
     };
     if (trapPort !== undefined)
     {

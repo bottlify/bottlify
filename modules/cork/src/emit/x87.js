@@ -83,7 +83,7 @@ export function isX87(instruction){
 
 /** The instructions this step leaves to the other executor. */
 const LEFT_OUT = new Set([
-    'fxsave', 'fxrstor', 'fbld', 'fbstp',
+    'fxsave', 'fxrstor', 'fbld',
 ]);
 
 /**
@@ -139,9 +139,9 @@ export function step(instruction, state){
         case 'fpatan': case 'fyl2x': case 'fyl2xp1':
             pop();
             return next;
-        case 'fstp': case 'fistp': case 'fisttp': case 'faddp': case 'fsubp': case 'fsubrp':
-        case 'fmulp': case 'fdivp': case 'fdivrp': case 'fcomp': case 'fucomp': case 'fcomip':
-        case 'fucomip': case 'ffreep': case 'ficomp':
+        case 'fstp': case 'fistp': case 'fisttp': case 'fbstp': case 'faddp': case 'fsubp':
+        case 'fsubrp': case 'fmulp': case 'fdivp': case 'fdivrp': case 'fcomp': case 'fucomp':
+        case 'fcomip': case 'fucomip': case 'ffreep': case 'ficomp':
             pop();
             return next;
         case 'fcompp': case 'fucompp':
@@ -913,6 +913,28 @@ export function emitX87(e, instruction, flagsLive){
                 popN(1);
             }
             return finish();
+        case 'fbstp':
+        {
+            guard([0], false);
+            prepare(e, dst);
+            noteStore(e, 10);
+            b.localGet(st(0));
+            orIndefinite();
+            b.localGet(Local.x87Control).call(/** @type {number} */ (e.context.round));
+            b.localSet(x.temp2);
+            // A NaN or a magnitude past 18 digits raises the invalid operation
+            // too.
+            b.localGet(x.temp2).op(F64.abs).f64const(1e18).op(F64.ge);
+            b.localGet(x.temp2).localGet(x.temp2).op(F64.ne).op(I32.or);
+            e.openIf('invalid', EMPTY);
+            setStatus(Status.IE);
+            e.close();
+            b.localGet(x.temp2);
+            b.localGet(Local.addr).i32const(e.layout.ramBase).op(I32.add);
+            b.call(/** @type {number} */ (e.context.f64ToBcd));
+            popN(1);
+            return finish();
+        }
         case 'fxch':
         {
             // The two registers exchange their values: the tracker relabels the
@@ -1857,6 +1879,65 @@ export function addF80Helpers(m){
             ValType.i32], b.toBytes());
     })();
     return { f80ToF64, f64ToF80 };
+}
+
+/**
+ * The BCD store helper a module carries: `f64ToBcd(value, wasmAddress)`
+ * writes the ten bytes `fbstp` writes -- an 18-digit packed BCD integer,
+ * least significant digit first, the sign byte 0x80 for a negative value --
+ * and the 80-bit integer indefinite for a NaN or a value past 18 digits. The
+ * value is already rounded by the control word by the caller.
+ *
+ * @param {import('../wasm/encoder.js').ModuleBuilder} m
+ * @returns {number} the function index
+ */
+export function addBcdHelper(m){
+    const type = m.type({ params: [ValType.f64, ValType.i32], results: [] });
+    // locals: 0 value, 1 address, 2 bits (i64), 3 sign (i32), 4 magnitude (f64),
+    // 5 rest (i64), 6 packed (i64), 7 index (i32), 8 digit (i64), 9 high (i64)
+    const b = new Body();
+    b.localGet(0).op(I64.reinterpretF64).localSet(2);
+    b.localGet(2).i64const(63n).op(I64.shrU).op(I64.wrap).i32const(1).op(I32.and)
+        .localSet(3);
+    b.localGet(0).op(F64.abs).localSet(4);
+    // A NaN or a value at or past 10^18 stores the integer indefinite.
+    b.localGet(4).f64const(1e18).op(F64.ge);
+    b.localGet(4).localGet(4).op(F64.ne);
+    b.op(I32.or);
+    b.if(EMPTY);
+    b.localGet(1).i64const(0n).store('i64', { offset: 0 });
+    b.localGet(1).i32const(0xc0).store('i32_8', { offset: 7 });
+    b.localGet(1).i32const(0xff).store('i32_8', { offset: 8 });
+    b.localGet(1).i32const(0xff).store('i32_8', { offset: 9 });
+    b.return();
+    b.end();
+    b.localGet(4).op(0xb0).localSet(5); // i64.trunc_f64_s
+    b.i64const(0n).localSet(6);
+    b.i64const(0n).localSet(9);
+    b.i32const(0).localSet(7);
+    b.block(EMPTY);
+    b.loop(EMPTY);
+    b.localGet(7).i32const(18).op(I32.eq).brIf(1);
+    b.localGet(5).i64const(10n).op(0x82).localSet(8); // i64.rem_u
+    b.localGet(5).i64const(10n).op(0x80).localSet(5); // i64.div_u
+    b.localGet(7).i32const(16).op(I32.ltU);
+    b.if(EMPTY);
+    b.localGet(6).localGet(8).localGet(7).i32const(4).op(I32.mul).op(I64.extendU)
+        .op(I64.shl).op(I64.or).localSet(6);
+    b.else();
+    b.localGet(9).localGet(8).localGet(7).i32const(16).op(I32.sub).i32const(4)
+        .op(I32.mul).op(I64.extendU).op(I64.shl).op(I64.or).localSet(9);
+    b.end();
+    b.localGet(7).i32const(1).op(I32.add).localSet(7);
+    b.br(0);
+    b.end();
+    b.end();
+    b.localGet(1).localGet(6).store('i64', { offset: 0 });
+    b.localGet(1).localGet(9).op(I64.wrap).store('i32_8', { offset: 8 });
+    b.localGet(1).localGet(3).i32const(7).op(I32.shl).store('i32_8', { offset: 9 });
+    return m.function(type,
+        [ValType.i64, ValType.i32, ValType.f64, ValType.i64, ValType.i64, ValType.i32,
+            ValType.i64, ValType.i64], b.toBytes());
 }
 
 export { Exit, readOp };

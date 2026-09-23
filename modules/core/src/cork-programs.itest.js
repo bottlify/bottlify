@@ -36,14 +36,14 @@ const missing = ['v86.wasm', 'libv86.mjs']
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
-/** A loop that calls lstrlenA("abc") ITERATIONS times and exits with the sum. */
-function buildLoopExe(){
+/** A loop that calls lstrlenA("abc") `iterations` times and exits with the sum. */
+function buildLoopExe(iterations = ITERATIONS){
     return buildExe({
         imports: { 'KERNEL32.dll': ['lstrlenA', 'ExitProcess'] },
         data: { text: [0x61, 0x62, 0x63, 0] },
         codeSize: 0x40,
         code: ({ iat, at })=>[
-            0xbe, ...u32(ITERATIONS),
+            0xbe, ...u32(iterations),
             0x31, 0xff,
             0x68, ...u32(at('text')),
             0xff, 0x15, ...u32(iat('lstrlenA')),
@@ -119,6 +119,13 @@ async function run(executable, engine){
                 /** @type {any} */ (bridgeModule.diagnostics().metrics).hot ?? []),
             cork: /** @type {any} */ (metrics).cork };
     }
+    catch (e){
+        // The translator's report goes with the rejection: the machine is gone
+        // once the app is disposed.
+        const { metrics } = cpuModule.diagnostics();
+        /** @type {any} */ (e).cork = /** @type {any} */ (metrics).cork;
+        throw e;
+    }
     finally
     {
         await app.dispose();
@@ -135,7 +142,7 @@ test('hello ends under cork as it ends on the emulator, with the emulator absent
         assert.equal(cork.diagnostics.metrics?.engine, 'cork');
     });
 
-for (const name of ['qsort.exe', 'threads.exe'])
+for (const name of ['qsort.exe', 'threads.exe', 'session.exe'])
 {
     test(`${name} ends under cork as it ends on the emulator`,
         { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 60000 }, async()=>{
@@ -217,6 +224,26 @@ test('a loop calling an import runs and translates under cork',
         assert.ok(corkRate >= emulatorRate * 0.6,
             `cork ran the trap loop at ${corkRate.toFixed(1)} M/s against the`
             + ` emulator's ${emulatorRate.toFixed(1)} M/s`);
+        // E: the translator's cost is a fixed warm-up, not a per-slice toll.
+        // The two runs below leave the same regions, so whatever the longer
+        // one pays more is the engine thread translating on the slice path
+        // after warm-up -- which must be nothing.
+        const warm = await run(buildLoopExe(ITERATIONS / 2), 'cork');
+        const twice = await run(buildLoopExe(ITERATIONS * 2), 'cork');
+        // Same regions and modules on four times the iterations: the
+        // translator does nothing on the slice path after warm-up. The
+        // translateMs bound is loose only because the wasm engine's own JIT
+        // warms in those milliseconds; a per-slice toll would be thousands.
+        assert.equal(twice.cork.regions, warm.cork.regions,
+            'the longer run forms no further regions: the translator is done at warm-up');
+        assert.equal(twice.cork.modules, warm.cork.modules,
+            'no further module is emitted or instantiated after warm-up');
+        assert.ok(twice.cork.translateMs < 20,
+            `translateMs ${twice.cork.translateMs.toFixed(2)} ms for ${ITERATIONS * 2} iterations`);
+        console.log(`cork translateMs: ${warm.cork.translateMs.toFixed(2)} ms at`
+            + ` ${ITERATIONS / 2} iterations, ${twice.cork.translateMs.toFixed(2)} ms at`
+            + ` ${ITERATIONS * 2}, regions ${twice.cork.regions},`
+            + ` modules ${twice.cork.modules}`);
     });
 
 /**
@@ -278,4 +305,141 @@ test('a compute loop runs under cork not below the emulator',
         assert.ok(corkRate >= emulatorRate,
             `cork ran the compute loop at ${corkRate.toFixed(1)} M/s against the`
             + ` emulator's ${emulatorRate.toFixed(1)} M/s`);
+    });
+
+test('the trap count and the trap log agree with the emulator\'s run of the loop',
+    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 120000 }, async()=>{
+        const exe = buildLoopExe();
+        const reference = await run(exe, 'emulator');
+        const cork = await run(exe, 'cork');
+        assert.equal(cork.code, reference.code);
+        assert.equal(cork.diagnostics.metrics?.trapCrossings,
+            reference.diagnostics.metrics?.trapCrossings,
+            'the same number of crossings');
+        assert.deepEqual(cork.trapsHot, reference.trapsHot,
+            'the same imports trapped, the same number of times');
+    });
+
+/** A hot loop, then an undefined instruction: the fault comes from translated code. */
+function buildFaultExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        codeSize: 0x40,
+        code: ()=>[
+            0xb9, ...u32(2_000_000),     //     mov ecx, N
+            0x49,                        // L:  dec ecx
+            0x75, 0xfd,                  //     jnz L
+            0x0f, 0x0b,                  //     ud2
+            0xf4,                        //     hlt
+        ],
+    });
+}
+
+/**
+ * The run's rejection, for a program that faults.
+ * @param {Uint8Array} executable @param {'emulator' | 'cork'} engine
+ */
+async function fault(executable, engine){
+    try
+    {
+        await run(executable, engine);
+    }
+    catch (e){
+        return { error: /** @type {any} */ (e), cork: /** @type {any} */ (e).cork };
+    }
+    throw new Error('the program did not fault');
+}
+
+test('a fault under cork is reported as the emulator reports it',
+    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 120000 }, async()=>{
+        const exe = buildFaultExe();
+        const reference = await fault(exe, 'emulator');
+        assert.equal(reference.error.reason, 'guest-fault');
+        const cork = await fault(exe, 'cork');
+        assert.equal(cork.error.reason, 'guest-fault');
+        assert.ok(cork.cork.regions >= 1, 'the loop translated');
+        assert.ok(cork.cork.translatedShare > 0.9, `share ${cork.cork.translatedShare}`);
+        // The same fault at the same address: transcribed code left before the
+        // instruction and cork's own fault path built the record.
+        const at = (/** @type {string} */ message)=>message.match(/0x0040[0-9a-f]{4}/)?.[0];
+        assert.equal(at(cork.error.message), at(reference.error.message));
+        assert.equal(at(cork.error.message), '0x00401008');
+        assert.equal(cork.error.message.replace(/\s+/g, ' '),
+            reference.error.message.replace(/\s+/g, ' '));
+    });
+
+/**
+ * An unpacker's shape: a routine copied into a buffer, a constant in it
+ * patched, called; patched again, called again. The result is the sum the
+ * two versions add, and the exit code carries it.
+ */
+function buildUnpackerExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        data: { buffer: new Array(64).fill(0) },
+        codeSize: 0x80,
+        code: ({ iat, at, code })=>{
+            const routine = [
+                0xb8, ...u32(0x11),             // mov eax, 0x11   (patched at +1)
+                0x01, 0xc3,                     // add ebx, eax
+                0xc3,                           // ret
+            ];
+            const ROUTINE = 0x50;
+            const CALLS = 200000;
+            const body = [
+                0x31, 0xdb,                             //     xor ebx, ebx
+                0xbe, ...u32(code(ROUTINE)),            //     mov esi, routine
+                0xbf, ...u32(at('buffer')),             //     mov edi, buffer
+                0xb9, ...u32(routine.length),           //     mov ecx, len
+                0xf3, 0xa4,                             //     rep movsb
+                0xb9, ...u32(CALLS),                    //     mov ecx, N
+                0xff, 0x15, ...u32(0),                  // L:  call [buffer_ptr]  (patched below)
+                0x49,                                   //     dec ecx
+                0x75, 0xf7,                             //     jnz L
+                0xc6, 0x05, ...u32(at('buffer') + 1), 0x22, //  mov byte [buffer+1], 0x22
+                0xb9, ...u32(CALLS),                    //     mov ecx, N
+                0xff, 0x15, ...u32(0),                  // M:  call [buffer_ptr]
+                0x49,                                   //     dec ecx
+                0x75, 0xf7,                             //     jnz M
+                0x81, 0xe3, ...u32(0xff),               //     and ebx, 0xff
+                0x53,                                   //     push ebx
+                0xff, 0x15, ...u32(iat('ExitProcess')), //     call [ExitProcess]
+            ];
+            const POINTER = 0x48;
+            const pointer = u32(at('buffer'));
+            for (let i = 0; i + 5 < body.length; i++)
+            {
+                if (body[i] === 0xff && body[i + 1] === 0x15 && body[i + 2] === 0
+                    && body[i + 3] === 0 && body[i + 4] === 0 && body[i + 5] === 0)
+                {
+                    body.splice(i + 2, 4, ...u32(code(POINTER)));
+                }
+            }
+            const image = [...body];
+            while (image.length < POINTER)
+            {
+                image.push(0xcc);
+            }
+            image.push(...pointer);
+            while (image.length < ROUTINE)
+            {
+                image.push(0xcc);
+            }
+            image.push(...routine);
+            return image;
+        },
+    });
+}
+
+test('an unpacker-shaped program runs under cork',
+    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 180000 }, async()=>{
+        const exe = buildUnpackerExe();
+        const reference = await run(exe, 'emulator');
+        assert.equal(reference.code, (0x11 * 200000 + 0x22 * 200000) & 0xff);
+        const cork = await run(exe, 'cork');
+        assert.equal(cork.code, reference.code);
+        assert.equal(cork.output, reference.output);
+        assert.ok(cork.cork.regions >= 1);
+        assert.ok(cork.cork.invalidations >= 1 || cork.cork.exits.stale >= 1,
+            `the patch was seen: ${JSON.stringify(cork.cork)}`);
     });

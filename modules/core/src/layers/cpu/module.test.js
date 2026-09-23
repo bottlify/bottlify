@@ -87,16 +87,19 @@ test('an engine a launch may select is named, and one that is not is refused', a
     await assert.rejects(cpuModule.create({ engine: 'x' }, /** @type {any} */ ({
         requireApi: ()=>({}), provide: ()=>{},
     })), { message: 'cpu: unknown engine "x" (emulator, hybrid, cork, differential)' });
-    // Named in the contract, refused for the right reason until built.
-    await assert.rejects(cpuModule.create({ engine: 'differential' }, /** @type {any} */ ({
-        requireApi: ()=>({}), provide: ()=>{},
-    })), { message: 'cpu: engine "differential" is not built yet' });
 
     await cpuModule.create({ engine: 'cork' }, /** @type {any} */ ({
         requireApi: ()=>({}), provide: ()=>{},
     }));
     assert.equal(cpuModule.diagnostics().metrics?.engine, 'cork',
         'cork is built and reports before boot');
+    await cpuModule.dispose();
+
+    await cpuModule.create({ engine: 'differential' }, /** @type {any} */ ({
+        requireApi: ()=>({}), provide: ()=>{},
+    }));
+    assert.equal(cpuModule.diagnostics().metrics?.engine, 'differential',
+        'differential is built and reports before boot');
     await cpuModule.dispose();
 
     await cpuModule.create({ engine: 'hybrid' }, /** @type {any} */ ({
@@ -115,7 +118,7 @@ test('an engine that needs the emulator says so when the launch passes none', as
     // Since 5.5 the emulator is an optional layer: a build may carry none of
     // it, and a launch that selects it is told the layer is missing rather
     // than failing deeper on an absent file.
-    for (const engine of ['emulator', 'hybrid'])
+    for (const engine of ['emulator', 'hybrid', 'differential'])
     {
         const api = await cpuModule.create({ engine }, /** @type {any} */ ({
             requireApi: ()=>({}), provide: ()=>{},

@@ -76,6 +76,21 @@ test('packed float arithmetic, lane by lane', { skip }, ()=>{
     assert.equal(words(sqrt, 0)[3], 0xffc00000, 'the default NaN, sign set');
 });
 
+test('addsubps subtracts the even lanes and adds the odd', { skip }, ()=>{
+    const register = run([0xf2, 0x0f, 0xd0, 0xc1], { xmm0: [1, 2, 3, 4],
+        xmm1: [10, 20, 30, 40] });
+    assert.deepEqual(lanes(register, 0), [-9, 22, -27, 44]);
+    // The memory form reads the same source.
+    const f32 = (/** @type {number[]} */ values)=>values.flatMap(value=>{
+        const b = new Uint8Array(4);
+        new DataView(b.buffer).setFloat32(0, value, true);
+        return [...b];
+    });
+    const memory = run([0xf2, 0x0f, 0xd0, 0x05, 0x00, 0x20, 0, 0],
+        { xmm0: [1, 2, 3, 4], data: f32([10, 20, 30, 40]) });
+    assert.deepEqual(lanes(memory, 0), [-9, 22, -27, 44]);
+});
+
 test('an invalid operation leaves the default NaN; a NaN input keeps its own', { skip }, ()=>{
     const m = createTestMachine();
     const view = new DataView(m.memory.buffer);

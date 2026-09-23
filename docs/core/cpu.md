@@ -48,7 +48,18 @@ cleared when the page holds none), and the emulator's slice returns as soon as i
 such a page having retired something, so the two go round within one slice until the budget
 is spent. An emulator build without the export runs its turn to a boundary of its own and
 ends the slice; `cork.handoffMisses` counts the slices that so ended inside a page the
-translator holds (`Runtime.holdsPage`), zero with the export. Between regions, translated
+translator holds (`Runtime.holdsPage`), zero with the export.
+
+Under `differential` the same slice loop replays every region on the emulator before its run
+stands: the state is snapshotted, the translator runs the region, the state is snapshotted
+again and restored, the emulator runs the region's retired count, and the two records are
+compared -- the emulator is the oracle. The comparison is over registers, flags, eip, the x87
+block and XMM (the memory spans the region wrote are the undo log's, a later step), and
+`metrics.differential` reports how many regions were replayed, how many diverged, and the
+first region that did with the fields that differed. The guest carries on from the
+translator's state, so a divergence is named without changing what the program does next.
+
+Between regions, translated
 code needs no slice loop at all where the engine has tail calls: every region function is
 placed in one function table shared by every module, every entry (block start, x87 top) is
 mirrored into an open-addressing hash in the translator's tables (65 536 slots of the
@@ -182,7 +193,7 @@ that form, the MMX one (the exponent and sign all ones, as the processor leaves 
 relaxed double. An MMX instruction
 holds every x87 register with the top at zero, as the processor does, and `emms` empties them
 again, whichever order the two come in within one run, and leaves the top at the zero the MMX
-instruction set -- leaving the MMX state does not undo it. `fxsave` and `fxrstor` still end a region and run on the emulator. A store translated code makes into a page the emulator's own compiler compiled is
+instruction set -- leaving the MMX state does not undo it. `fxsave`, `fxrstor` and `fbld` still end a region and run on the fallback; `fbstp` writes its packed BCD through the BCD helper the shared helpers module carries. The stubs cork answers itself -- `cpuid` (the pinned emulator's own leaves, `src/cpuid.js`), `rdtsc`, `xlat`, `addsubps`/`addsubpd` -- are lowered in the emitter and modelled in the interpreter, as `int n`/`int3`/`into`, `bound`, `hlt`, `ud2` and the string forms are. A store translated code makes into a page the emulator's own compiler compiled is
 seen too: the store checks the emulator's byte-per-page "has code" table beside the
 translator's own flags (`layout.codePages`, the fork's `bottlify_page_has_code_ptr`) and
 leaves `stale` with the address and width, and the runtime dirties the emulator's cache for
@@ -229,9 +240,13 @@ In `cork` mode the interpreter counts hotness itself, per instruction start, in 
 the address space (not a map: a straight-line loader runs millions of instructions once and would
 grow one entry each): a start interpreted `hotThreshold` times becomes a candidate, the layer's
 feed forms it, and once a region exists the host runs it rather than interpreting it -- cold code
-stays on the interpreter, hot code moves to the translator. The default is two under `cork`, not
-the sampler's two thousand, because there is no compiled second executor to carry the code in the
-meantime; a region formed for cold code is bounded by `maxRegionBlocks`/`maxRegionBytes`. The
+stays on the interpreter, hot code moves to the translator. The default is two hundred and fifty-six
+under `cork`, not two: a title's loader runs millions of instructions each met once or twice, and a
+threshold of two turned every one into a candidate, so the genuinely hot loop never reached the
+front of the queue and stayed interpreted (Doom 3's load left twenty thousand candidates and formed
+a few thousand at 6 % share); two hundred and fifty-six still translates the loop that runs forty
+thousand times after a few hundred interpreted turns, and leaves the run-once code alone. A region
+formed for cold code is bounded by `maxRegionBlocks`/`maxRegionBytes`. The
 interpreted instructions count in the block's own instruction word, so `translatedShare` is the
 translator's share of the whole run, not only of what it ran. A turn that would retire nothing --
 an entry at the address run and left at once, for another top or a region of its own -- is forced
@@ -257,7 +272,7 @@ enter the type check or the bundle.
 |-----------------|----------------------------|---------------------|---------|
 | `memorySize`    | number (power of two)      | `1 GiB`             | Guest RAM. Reserved, not committed: the host pays for pages the guest touches. Must be a power of two; the emulator requires it. With an engine other than `emulator` the top `TABLES_RESERVE` (4 MiB) is the translator's tables, and `layout.memorySize` reports the rest. |
 | `engineUrl`     | string                     | none                | The translator's entry module, imported at `boot()` under `hybrid`; `createApp` resolves it from `cork.moduleUrl` or the package beside core. Absent, `hybrid` runs with no translator. |
-| `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold` (the interpreter's own count under `cork`; default 2, where the sampler's default is 2000), `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`, `feed`, `missThreshold`, and `leaveOut`, the instruction classes (`x87`, `mmx`, `sse`) a run leaves to the emulator so a defect can be localised by class; such a run keeps no translation store. |
+| `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold` (the interpreter's own count under `cork`; default 256, where the sampler's default is 2000), `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`, `feed`, `missThreshold`, and `leaveOut`, the instruction classes (`x87`, `mmx`, `sse`) a run leaves to the emulator so a defect can be localised by class; such a run keeps no translation store. |
 | `trapPort`      | number                     | `0xb077`            | The I/O port a stub writes its trap id to. |
 | `entryVector`   | number                     | `0x7000`            | Linear address of the dword the ROM jumps through to enter guest code. |
 | `initialStack`  | number                     | `0x300000`          | ESP the ROM sets before jumping into the guest. |
@@ -265,7 +280,7 @@ enter the type check or the bundle.
 | `thunkCapacity` | number (bytes)             | `16384 * 16`        | Room reserved for the stub table: 16 384 slots of 16 bytes. Every import and every COM method takes one; none is ever given back. |
 | `jit`           | `Record<number, number>`   | `undefined`         | The emulator's compiler budgets by config index (1 = pages one module may span, 3 = extra basic blocks discovery may follow, 6 = chaining). For measurement, not production. |
 | `sampling`      | `boolean`                  | `true`              | Whether `runSlice` credits an address bucket per slice (see "Sampling" below). Always on; `false` is the only way to turn it off, for a caller measuring the emulator itself. |
-| `engine`        | `'emulator' \| 'hybrid' \| 'cork' \| 'differential'` | `'emulator'` | Which execution engine runs the program (see "Engines" above). An unknown name is refused by `create()` with `cpu: unknown engine "x" (…)`; `differential` is refused with `cpu: engine "differential" is not built yet` until its step lands. `cork` runs with nothing of the emulator loaded (see "Engines" above); `boot()` under it needs no emulator artifacts and throws `cpu: engine "cork" needs an engineUrl` without one. `hybrid` without `engineUrl` composes the emulator's host with no translator attached and runs a program exactly as `emulator` does, to the instruction. |
+| `engine`        | `'emulator' \| 'hybrid' \| 'cork' \| 'differential'` | `'emulator'` | Which execution engine runs the program (see "Engines" above). An unknown name is refused by `create()` with `cpu: unknown engine "x" (…)`. `cork` runs with nothing of the emulator loaded (see "Engines" above); `boot()` under it needs no emulator artifacts and throws `cpu: engine "cork" needs an engineUrl` without one. `hybrid` without `engineUrl` composes the emulator's host with no translator attached and runs a program exactly as `emulator` does, to the instruction. `differential` is `hybrid` with every region replayed on the emulator and compared; it needs the emulator artifacts and an `engineUrl`. |
 
 Chaining (index 6) is switched on automatically when the running engine validates a wasm tail
 call and the caller has not set the knob (`tailCallsSupported()` in `internal/v86-host.js`).

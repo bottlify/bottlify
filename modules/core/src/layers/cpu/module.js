@@ -7,6 +7,7 @@
 import { createV86Host } from './internal/v86-host.js';
 import { createHybridHost } from './internal/hybrid-host.js';
 import { createCorkHost } from './internal/cork-host.js';
+import { createDifferentialHost } from './internal/differential-host.js';
 import { TABLES_RESERVE } from './engine.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
@@ -37,7 +38,7 @@ export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
 export const ENGINES = Object.freeze(['emulator', 'hybrid', 'cork', 'differential']);
 
 /** The engines a launch can run today. */
-const BUILT_ENGINES = new Set(['emulator', 'hybrid', 'cork']);
+const BUILT_ENGINES = new Set(['emulator', 'hybrid', 'cork', 'differential']);
 
 /**
  * cpu — the guest CPU and the channel the guest calls us through.
@@ -433,10 +434,14 @@ export const cpuModule = {
                     // and register file by the module the configuration names.
                     // Without one the composition is the emulator's host under
                     // another name, which runs a program exactly as the emulator
-                    // alone does.
-                    if (engine === 'hybrid' && settings.engineUrl)
+                    // alone does. `differential` is the same composition plus a
+                    // replay of every region on the emulator, so it loads the
+                    // module's snapshot machinery too.
+                    let engineModule = null;
+                    if ((engine === 'hybrid' || engine === 'differential') && settings.engineUrl)
                     {
-                        const { createEngine } = await import(settings.engineUrl);
+                        engineModule = await import(settings.engineUrl);
+                        const { createEngine } = engineModule;
                         state.cork = createEngine({
                             memory: emulator.wasmMemory(),
                             layout: emulator.stateLayout(TABLES_RESERVE),
@@ -464,7 +469,11 @@ export const cpuModule = {
                     }
                     state.host = engine === 'hybrid'
                         ? createHybridHost({ emulator, cork: state.cork })
-                        : emulator;
+                        : engine === 'differential'
+                            ? createDifferentialHost({
+                                emulator, cork: state.cork, engine: engineModule,
+                            })
+                            : emulator;
                 }
                 state.thunks = createThunkTable({
                     base: settings.thunkBase,
@@ -895,6 +904,11 @@ export const cpuModule = {
                 },
                 // The translator's own report, or null when none is attached.
                 cork: instance.cork ? instance.cork.diagnostics() : null,
+                // The differential's own account, or null when the engine is
+                // not one with a replay.
+                differential: typeof instance.host?.differentialDiagnostics === 'function'
+                    ? instance.host.differentialDiagnostics()
+                    : null,
             },
         };
     },

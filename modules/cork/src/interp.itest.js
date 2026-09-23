@@ -110,6 +110,14 @@ test('the interpreter leaves what the hardware left, on every case it models',
             catch (e){
                 if (e instanceof Unsupported)
                 {
+                    // A decoder refusal at the address the hardware raised #UD
+                    // is that same invalid encoding, not a gap in the model --
+                    // the emitter's corpus counts it the same way.
+                    if (one.expected.exception === 'UD' && e.eip === one.expected.eip)
+                    {
+                        invalid++;
+                        continue;
+                    }
                     leftOut.set(e.op, (leftOut.get(e.op) ?? 0) + 1);
                     continue;
                 }

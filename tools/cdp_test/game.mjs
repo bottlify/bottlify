@@ -443,6 +443,63 @@ function symbolName(at, symbols){
 }
 
 /**
+ * The translator's own account, when an engine has one: the share of retired
+ * instructions it ran, why the rest ran interpreted (the refused opcodes and
+ * the untranslated exits by target), and how much translating cost. The
+ * loading-phase question -- is a loop left interpreted by a policy or by a
+ * decoder gap -- is answered by `exitsByTarget`'s reasons and `refusedWhy`,
+ * which the `[ready]` table drops because their shapes are not scalars.
+ *
+ * @param {any} cork
+ * @param {(text: string) => void} say
+ */
+function describeCork(cork, say){
+    const share = cork.translatedShare ?? 0;
+    say(`  cork: ${cork.regions} regions, ${cork.entries} entries, ${cork.modules} modules`
+        + `, share ${(share * 100).toFixed(1)}%`
+        + ` (retired ${cork.retired ?? 0})`);
+    say(`    volatile pages: ${cork.volatilePages ?? 0}`
+        + `  invalidations: ${cork.invalidations ?? 0}`
+        + `  dropped: ${cork.dropped ?? 0}`
+        + `  queued: ${cork.queued ?? 0}`
+        + `  barren: ${cork.barren ?? 0}`
+        + `  queueDrops: ${cork.queueDrops ?? 0}`
+        + `  forced steps: ${cork.forcedSteps ?? 0}`
+        + `  cache: ${cork.cacheHits ?? 0} hit / ${cork.cacheMisses ?? 0} miss`);
+    const exits = cork.exits ?? {};
+    say(`    exits: ${Object.entries(exits).map(([kind, count])=>`${kind}=${count}`).join(' ')}`);
+    if (typeof cork.translateMs === 'number')
+    {
+        say(`    translate ms: ${cork.translateMs.toFixed(1)}`
+            + ` (forming ${cork.formingMs?.toFixed(1)} lookup ${cork.lookupMs?.toFixed(1)}`
+            + ` emit ${cork.emitMs?.toFixed(1)} encode ${cork.encodeMs?.toFixed(1)}`
+            + ` store ${cork.storeMs?.toFixed(1)} instantiate ${cork.instantiateMs?.toFixed(1)}`
+            + ` publish ${cork.publishMs?.toFixed(1)} worker ${cork.workerMs?.toFixed(1)})`);
+    }
+    const refused = Object.entries(cork.refused ?? {});
+    if (refused.length > 0)
+    {
+        say(`    refused opcodes: ${refused.map(([opcode, count])=>`${opcode} x${count}`)
+            .join(', ')}`);
+        const why = Object.entries(cork.refusedWhy ?? {});
+        if (why.length > 0)
+        {
+            say(`      ${why.map(([reason, count])=>`${reason} x${count}`).join('; ')}`);
+        }
+    }
+    const byTarget = cork.exitsByTarget ?? [];
+    if (byTarget.length > 0)
+    {
+        say(`    untranslated exits by target:`);
+        for (const { address, count, reason } of byTarget)
+        {
+            say(`      0x${(address >>> 0).toString(16).padStart(8, '0')}`
+                + ` x${count}  ${reason}`);
+        }
+    }
+}
+
+/**
  * The whole run as text: what was asked, what answered, and where it stopped.
  *
  * @param {any} result
@@ -502,6 +559,27 @@ function describe(result, context, calls, symbols){
         say(`  ${layer.name} [${layer.status}] ${metrics}`);
     }
     say('');
+
+    if (result.cork)
+    {
+        describeCork(result.cork, say);
+        say('');
+    }
+
+    if (result.differential)
+    {
+        say(`  differential: ${result.differential.replayed} regions replayed,`
+            + ` ${result.differential.divergences} diverged`);
+        if (result.differential.first)
+        {
+            say(`    first divergence at ${result.differential.first.at}:`);
+            for (const field of result.differential.first.diff)
+            {
+                say(`      ${field.name}: emulator=${field.expected} cork=${field.actual}`);
+            }
+        }
+        say('');
+    }
 
     const phases = result.phases;
     if (phases && phases.top.length > 0)
