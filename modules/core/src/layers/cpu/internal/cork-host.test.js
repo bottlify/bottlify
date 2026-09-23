@@ -174,6 +174,26 @@ test('a hlt ends the slice and the next slice goes on after it, as the timer int
         assert.equal(h.runSlice(100), 2);
     });
 
+test('a trap a region leaves for with x87 held in its locals runs the handler', async()=>{
+    const h = host();
+    // fld1; mov dx, 0x1234; mov eax, 0x55; out dx, eax; int3 -- a hook stub that
+    // holds EIP, reached with the x87 stack live: the handler moves EIP on.
+    load(h, 0x1000, [0xd9, 0xe8, 0x66, 0xba, 0x34, 0x12, 0xb8, 0x55, 0, 0, 0, 0xef, 0xcc]);
+    h.writePhysical(0x1100, Uint8Array.from([0xf4]));
+    /** @type {number[]} */
+    const seen = [];
+    h.onTrap((/** @type {number} */ value)=>{
+        seen.push(value);
+        h.writeReg32('eip', 0x1100);
+    });
+    h.cork().noteHot(0x1000, 0);
+    assert.ok(await h.cork().translatePending() >= 1);
+    h.writeReg32('eip', 0x1000);
+    h.runSlice(100);
+    assert.deepEqual(seen, [0x55]);
+    assert.equal(h.readReg32('eip'), 0x1101, 'where the handler put EIP, then its hlt');
+});
+
 test('a context carries the flags, the x87 block and fsBase field for field', ()=>{
     const h = host();
     const layout = h.blockLayout();

@@ -96,7 +96,8 @@ have reached (`raiseTrap` on the emulator's host, the same handler and the same 
 answers whether it moved EIP or stopped the machine -- takes the state back into the locals
 and goes on after the write, or leaves untranslated where the handler put EIP. A region
 holding x87 registers in its locals takes the older form instead, a `trap` exit past the
-instruction that the hybrid host answers the same way; either way a call into the bridge
+instruction that the hybrid host and the cork host answer the same way (the cork host once
+ignored it, and a hook stub reached with the x87 stack live ran on into its `int3` padding); either way a call into the bridge
 costs no emulator turn. `out` to any other port, `in`,
 `cli`, `sti`, `int n`, `int3` and `into` are the emulator's, before the instruction.
 `bound` is translated as the no-op the emulator's own decoder makes of it — it consumes the

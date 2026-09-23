@@ -495,6 +495,14 @@ export function createCorkHost(config){
                     halted = true;
                     break;
                 }
+                if (exit.kind === 'trap')
+                {
+                    // A port write the region could not answer itself (x87
+                    // held in its locals, or no trap import): it left past the
+                    // write, and the handler runs here with the value it wrote.
+                    raiseTrap(reg32[0]);
+                    continue;
+                }
                 if (exit.kind === 'budget')
                 {
                     break;
