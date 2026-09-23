@@ -219,13 +219,15 @@ export function createCorkHost(config){
     // Hotness in cork mode, counted by the interpreter itself: a start run
     // `hotThreshold` times becomes a candidate, and the layer's feed forms it.
     // A translated start is never interpreted again, so the count stops there.
-    // Two under cork, not the sampler's two thousand: there is no compiled
-    // second executor to carry the code in the meantime, so a start costs a
-    // translation on its second visit rather than being run thousands of
-    // times first -- a region is about a millisecond and a thousand
-    // instructions about half of one, and the loading code never reaches a
-    // larger threshold at all.
-    const hotThreshold = corkConfig?.hotThreshold ?? 2;
+    // Low, but not two: a start costs a translation on its second visit, yet
+    // a title's loader runs millions of instructions that are each met once or
+    // twice, and a threshold of two turned every one of them into a candidate
+    // -- Doom 3's load left a queue of twenty thousand candidates and formed a
+    // few thousand, so the genuinely hot loop (met forty thousand times) never
+    // reached the front and stayed interpreted. Two hundred and fifty-six
+    // still costs the hot loop a few hundred interpreted turns before it
+    // translates, and leaves the run-once loader code alone.
+    const hotThreshold = corkConfig?.hotThreshold ?? 256;
     // The counts live in a flat array rather than a map: one byte per four
     // bytes of the first sixteen megabytes of address space, wrapping there.
     // A map grew an entry for every instruction a straight-line loader ran
