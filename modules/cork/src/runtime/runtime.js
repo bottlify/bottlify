@@ -116,6 +116,35 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * nothing at one top says nothing about a region for another -- the entry
      * block a top compiles empty is emptiness for that top alone. */
     const barren = new Map();
+    /** @type {Map<number, Set<number>>} page → the queue/barren keys on it.
+     * A host write invalidates its page every time, and copying two whole maps
+     * per write (a loading run's writes are thousands a second) was the cost;
+     * this clears a page's own keys instead. */
+    const pageKeys = new Map();
+    /** @param {number} key */
+    const noteKey = key=>{
+        const page = key >>> 16;
+        let keys = pageKeys.get(page);
+        if (!keys)
+        {
+            keys = new Set();
+            pageKeys.set(page, keys);
+        }
+        keys.add(key);
+    };
+    /** @param {number} key */
+    const dropKey = key=>{
+        const page = key >>> 16;
+        const keys = pageKeys.get(page);
+        if (keys)
+        {
+            keys.delete(key);
+            if (keys.size === 0)
+            {
+                pageKeys.delete(page);
+            }
+        }
+    };
     /** Whether a candidate at this address is barren for this top.
      * @param {number} eip @param {number} top */
     const barrenHas = (eip, top)=>barren.has(keyOf(eip, top & 7));
@@ -126,11 +155,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // A region indifferent to the stack is empty for every top.
             for (let t = 0; t < 8; t++)
             {
-                barren.set(keyOf(eip, t), eip);
+                const key = keyOf(eip, t);
+                barren.set(key, eip);
+                noteKey(key);
             }
             return;
         }
-        barren.set(keyOf(eip, top & 7), eip);
+        const key = keyOf(eip, top & 7);
+        barren.set(key, eip);
+        noteKey(key);
     };
     /** Whether any top at this address is barren, for the diagnostics.
      * @param {number} eip */
@@ -295,19 +328,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 }
             }
         }
-        for (const [key, eip] of [...queue])
+        const notes = pageKeys.get(page);
+        if (notes)
         {
-            if ((eip >>> 12) === page)
+            for (const key of notes)
             {
                 queue.delete(key);
-            }
-        }
-        for (const [key, eip] of [...barren])
-        {
-            if ((eip >>> 12) === page)
-            {
                 barren.delete(key);
             }
+            pageKeys.delete(page);
         }
         generation.set(page, (generation.get(page) ?? 0) + 1);
         // Only a write that cost a region counts towards volatility: the
@@ -789,6 +818,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 return;
             }
             queue.set(key, eip);
+            noteKey(key);
         },
         /** Writes whatever the store keeps aside from its records, so the
          * names of this run's regions are on disk before the run ends and the
@@ -822,6 +852,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             for (const [key] of batch)
             {
                 queue.delete(key);
+                dropKey(key);
             }
             // A diagnostic run with classes left out keeps no translations.
             const store = leaveOut.size > 0 ? null : (settings.store ?? null);
@@ -861,6 +892,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     {
                         batch.push([keyOf(callee, top), callee]);
                         queue.delete(keyOf(callee, top));
+                        dropKey(keyOf(callee, top));
                     }
                 }
                 for (const [opcode, times] of region.refused)
