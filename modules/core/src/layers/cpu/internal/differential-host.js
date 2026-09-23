@@ -72,24 +72,33 @@ export function createDifferentialHost({ emulator, cork, engine }){
             restore(emulator, state);
             if (exit.kind === 'untranslated' || exit.kind === 'budget' || exit.kind === 'halt')
             {
-                // The emulator answers the same code, but its slice may stop
-                // early at a page the translator holds (the handoff bit), so it
-                // is run to the region's retired count rather than once.
-                let retired = 0;
-                while (retired < exit.retired && !emulator.halted())
+                // The emulator answers the same code, run to where the region
+                // left, not by the region's retired count: the two count a
+                // rep-prefixed instruction differently (the translator retires
+                // one per iteration, the emulator one per instruction), so a
+                // count would put the emulator past the region's exit. One
+                // instruction at a time is what stops it exactly on the exit's
+                // address, where a larger slice could overshoot a branch.
+                const target = subjectState.eip;
+                let guard = exit.retired + 64;
+                while (guard > 0 && !emulator.halted() && emulator.eip() !== target)
                 {
-                    const stepped = emulator.runSlice(exit.retired - retired);
+                    const stepped = emulator.runSlice(1);
                     if (stepped === 0)
                     {
                         break;
                     }
-                    retired += stepped;
+                    guard -= stepped;
                 }
                 const oracleState = snapshot(emulator, []);
+                const landed = emulator.eip() === target;
                 // The comparison masks the x87 status bits the two engines may
                 // leave differently (the top, already compared on its own, and
                 // the summary bits), the way the corpus's runner does.
-                const diff = compare(oracleState, subjectState, { statusMask: 0xfdd5 });
+                const diff = landed
+                    ? compare(oracleState, subjectState, { statusMask: 0xfdd5 })
+                    : [{ name: 'control', expected: `0x${(target >>> 0).toString(16)}`,
+                        actual: `0x${(emulator.eip() >>> 0).toString(16)}` }];
                 if (diff.length > 0)
                 {
                     divergences++;
