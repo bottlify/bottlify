@@ -42,6 +42,9 @@ const VENDOR_ARTIFACTS = [
         fetch: 'npm run fetch:video-decoder',
         rebuilt: false,
     },
+    // The bundle decoder's wasm build: optional, the JavaScript decoder (or the
+    // emulator's) standing in when a build leaves it out.
+    { name: 'zstd.wasm', lock: 'zstd-lock.json', fetch: 'npm run fetch:zstd', rebuilt: false },
 ];
 
 /** Files that must travel with the package, copied from the repository root. */

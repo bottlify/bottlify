@@ -35,6 +35,7 @@ export const OPTIONAL_VENDOR = new Set([
     'dist/vendor/libv86.mjs',
     'dist/vendor/v86.wasm',
     'dist/vendor/video-decoder.wasm',
+    'dist/vendor/zstd.wasm',
 ]);
 
 /**

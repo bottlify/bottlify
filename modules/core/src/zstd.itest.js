@@ -23,6 +23,7 @@ import { createV86Host } from './layers/cpu/internal/v86-host.js';
 import { writeBundle } from '../../../tools/btl.mjs';
 import { openBundle, Codec } from './layers/filesystem/internal/bundle/format.js';
 import { decompressZstd } from './zstd.js';
+import { loadZstdWasm } from './zstd-wasm.js';
 
 const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 const BLOCK_SIZE = 64 * 1024;
@@ -137,4 +138,44 @@ test('every zstd block of a bundle matches the emulator\'s decoder', async t=>{
         + `the emulator's ${(mb / (theirsMs / 1000)).toFixed(1)} MiB/s`
         + ` (${(theirsMs / 1000).toFixed(2)} s)`);
     assert.ok(mb > 0.1, `enough to time: ${mb} MiB`);
+
+    // The wasm build of the same decoder, when this checkout carries it: byte
+    // for byte the emulator's answer, and not slower than the emulator's decoder.
+    let wasmBytes = null;
+    try
+    {
+        wasmBytes = await readFile(new URL('zstd.wasm', PREBUILT));
+    }
+    catch {
+        console.log('zstd.wasm absent from vendor/prebuilt (npm run fetch:zstd or build:zstd):'
+            + ' the wasm build is not judged');
+    }
+    if (wasmBytes)
+    {
+        const ours = await loadZstdWasm(wasmBytes);
+        for (const block of zstdBlocks)
+        {
+            assert.deepEqual([...ours.decompress(block.packed, block.length)],
+                [...machine.decompressZstd(block.packed, block.length)],
+                `wasm build, block of ${block.packed.length} bytes`);
+        }
+        for (let round = 0; round < 3; round++)
+        {
+            for (const block of zstdBlocks)
+            {
+                ours.decompress(block.packed, block.length);
+            }
+        }
+        const wasmAt = performance.now();
+        for (const block of zstdBlocks)
+        {
+            ours.decompress(block.packed, block.length);
+        }
+        const wasmMs = performance.now() - wasmAt;
+        console.log(`zstd wasm build: ${(mb / (wasmMs / 1000)).toFixed(1)} MiB/s`
+            + ` (${(wasmMs / 1000).toFixed(2)} s)`);
+        assert.ok(wasmMs <= theirsMs * 1.25,
+            `the wasm build (${wasmMs.toFixed(0)} ms) is not slower than the emulator's decoder`
+            + ` (${theirsMs.toFixed(0)} ms) beyond timing noise`);
+    }
 });

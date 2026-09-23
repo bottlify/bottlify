@@ -509,12 +509,22 @@ inside one instruction and cannot await. Two decoders can: the emulator's wasm o
 through the cpu api's `decompressZstd` while the emulator is loaded, and
 `modules/core/src/zstd.js`, a decode-only zstd implementation of this project's own (frame,
 block, literal, Huffman and FSE decoding; no dictionaries, the checksum read and not verified).
-A first bundle load decodes the whole bundle, and the wasm decoder is several times faster than
-the JavaScript one (measured by `zstd.itest.js` per MiB on the bundle's own blocks), so
-`mountBundle` chooses by engine: `emulator` and `hybrid` use the wasm decoder, `cork` — which
-has no emulator — uses `zstd.js`. The choice is made once, at mount, by `chooseZstdDecoder`
-(unit-tested per engine in `app.test.js`); when `zstd.js` is measured at the wasm decoder's
-speed it becomes the decoder for every engine, and the api's `decompressZstd` can leave again.
+A first bundle load decodes the whole bundle, and a wasm decoder is several times faster than
+the JavaScript one on Huffman-heavy blocks (measured by `zstd.itest.js` per MiB on the bundle's
+own blocks), so the decoder is a third thing: the same algorithm as `zstd.js`, written once
+more as freestanding C (`modules/core/scripts/zstd/zstd.c`, no libc, no dictionaries, one
+`zstd_decompress` export) and compiled to `vendor/zstd.wasm` by `build-zstd.mjs` -- in the pinned
+container of `Dockerfile.zstd` (the vendor workflow, or any machine with Docker) or natively
+with a clang that targets wasm32 (`--native`). `src/zstd-wasm.js` instantiates it once and
+answers `decompress(packed, expectedLength)` synchronously with `zstd.js`'s errors.
+`mountBundle` chooses once, by `chooseZstdDecoder` (unit-tested in `app.test.js`): the wasm
+build for every engine when the package carries it (`AppOptions.zstd`, or `vendor/zstd.wasm`
+beside the module); without it, the emulator's decoder under `emulator` and `hybrid` and
+`zstd.js` under `cork`. The artifact is optional (`check-package`), fetched by
+`npm run fetch:zstd` from the release the vendor workflow publishes and pinned in
+`zstd-lock.json`. The three decoders are judged byte for byte against each other and against
+the emulator's on a bundle's own blocks by `zstd.itest.js`, which also asserts the wasm build
+is not slower than the emulator's decoder when both are present.
 
 ### What of `vendor/v86` is used
 

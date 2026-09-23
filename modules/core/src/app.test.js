@@ -1036,4 +1036,11 @@ test('the bundle zstd decoder follows the engine: the emulator while it is loade
         // Under cork the api has no emulator decoder: the project's own decoder
         // is the choice, by identity.
         assert.equal(chooseZstdDecoder('cork', /** @type {any} */ ({})), decompressZstd);
+        // With the wasm build present it decodes for every engine.
+        const wasm = { decompress: ()=>new Uint8Array([7]), version: 1 };
+        for (const engine of ['emulator', 'hybrid', 'cork'])
+        {
+            assert.equal(chooseZstdDecoder(engine, cpu, wasm), wasm.decompress, engine);
+        }
+        assert.equal(calls.length, 2, 'the emulator decoder was not asked with the wasm present');
     });
