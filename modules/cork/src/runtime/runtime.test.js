@@ -140,6 +140,20 @@ test('the hottest candidate is formed first, whatever order the candidates arriv
     assert.ok(m.runtime.entryOf(CODE) >= 0);
 });
 
+test('a target untranslated exits keep reaching is formed before a start met twice', async()=>{
+    const m = machine({ batchRegions: 1, missThreshold: 4 });
+    m.write(CODE, COUNTDOWN);
+    m.write(CODE + 0x100, [0xb8, 0x07, 0, 0, 0, 0xf4]);   // mov eax, 7; hlt
+    m.runtime.noteHot(CODE, 0, 2);
+    for (let i = 0; i < 4; i++)
+    {
+        m.runtime.missAt(CODE + 0x100, 0);
+    }
+    assert.equal(await m.runtime.translatePending(), 1);
+    assert.ok(m.runtime.entryOf(CODE + 0x100) >= 0, 'the exit target went first');
+    assert.equal(m.runtime.entryOf(CODE), -1);
+});
+
 test('a deep queue takes a bigger batch, a quarter of what waits', async()=>{
     const m = machine({ batchRegions: 2, maxBatchRegions: 64 });
     for (let i = 0; i < 40; i++)

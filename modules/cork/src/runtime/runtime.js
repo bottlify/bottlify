@@ -879,7 +879,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             if (seen >= settings.missThreshold)
             {
                 misses.delete(key);
-                this.noteHot(address, at);
+                // Noted with the exits this target has taken as its heat, and
+                // again at every further threshold, so a target translated
+                // code leaves for millions of times is formed before a start
+                // the interpreter met twice -- a candidate noted cold sat in the
+                // queue's bottom bucket behind a loader's thousands while
+                // twelve million exits went to it.
+                this.noteHot(address, at, target);
                 return;
             }
             if (!misses.has(key) && misses.size >= MISSES_CAP)
