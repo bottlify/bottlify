@@ -111,6 +111,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const keyOf = (eip, top)=>eip * 16 + top;
     /** @type {Map<number, number>} candidates not yet formed: key(eip, top) → eip */
     const queue = new Map();
+    /** @type {Map<number, number>} key(eip, top) → how hot the layer said the
+     * candidate is (the interpreter's visit count under cork, 0 from the
+     * sampler). A batch takes the hottest first, so a loader's run-twice code
+     * waits behind the loop it ran a thousand times. */
+    const heat = new Map();
     /** @type {Map<number, number>} key(eip, top) → eip of a candidate a region
      * formed nothing at, until its page moves. Per top: a region that formed
      * nothing at one top says nothing about a region for another -- the entry
@@ -340,6 +345,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             for (const key of notes)
             {
                 queue.delete(key);
+                heat.delete(key);
                 barren.delete(key);
             }
             pageKeys.delete(page);
@@ -719,6 +725,38 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         return published;
     };
 
+    /**
+     * The `count` hottest candidates, the queue's own order among equals
+     * (arrival order, so the sampler's candidates keep theirs). One pass over
+     * the queue and a short sorted list, not a sort of the whole queue per feed.
+     *
+     * @param {number} count
+     * @returns {[number, number][]}
+     */
+    const hottest = count=>{
+        /** @type {[number, number, number][]} key, eip, heat */
+        const top = [];
+        for (const [key, eip] of queue)
+        {
+            const h = heat.get(key) ?? 0;
+            if (top.length === count && h <= top[top.length - 1][2])
+            {
+                continue;
+            }
+            let at = top.length;
+            while (at > 0 && top[at - 1][2] < h)
+            {
+                at--;
+            }
+            top.splice(at, 0, [key, eip, h]);
+            if (top.length > count)
+            {
+                top.pop();
+            }
+        }
+        return top.map(([key, eip])=>[key, eip]);
+    };
+
     return {
         pages,
         entryOf(eip, top = 0){
@@ -813,18 +851,29 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
             misses.set(key, seen);
         },
-        noteHot(eip, top = 0){
+        noteHot(eip, top = 0, hotness = 0){
             if (!settings.translate)
             {
                 return;
             }
             const key = keyOf(eip, top & 7);
-            if (entries.entryOf(eip, top & 7) >= 0 || queue.has(key) || barrenHas(eip, top & 7)
+            if (queue.has(key))
+            {
+                // Noted again while it waits: the layer saw it run more, so
+                // it moves up.
+                if (hotness > (heat.get(key) ?? 0))
+                {
+                    heat.set(key, hotness);
+                }
+                return;
+            }
+            if (entries.entryOf(eip, top & 7) >= 0 || barrenHas(eip, top & 7)
                 || !translatable(eip))
             {
                 return;
             }
             queue.set(key, eip);
+            heat.set(key, hotness);
             noteKey(key);
         },
         /** Writes whatever the store keeps aside from its records, so the
@@ -855,10 +904,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 return 0;
             }
-            const batch = [...queue].slice(0, settings.batchRegions);
+            const batch = hottest(settings.batchRegions);
             for (const [key] of batch)
             {
                 queue.delete(key);
+                heat.delete(key);
                 dropKey(key);
             }
             // A diagnostic run with classes left out keeps no translations.
@@ -899,6 +949,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     {
                         batch.push([keyOf(callee, top), callee]);
                         queue.delete(keyOf(callee, top));
+                        heat.delete(keyOf(callee, top));
                         dropKey(keyOf(callee, top));
                     }
                 }

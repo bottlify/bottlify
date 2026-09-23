@@ -125,6 +125,21 @@ test('two regions land in one batch, each its own module, and both run; an entry
     assert.equal(m.reg(0), 7);
 });
 
+test('the hottest candidate is formed first, whatever order the candidates arrived in', async()=>{
+    const m = machine({ batchRegions: 1 });
+    m.write(CODE, COUNTDOWN);
+    m.write(CODE + 0x100, [0xb8, 0x07, 0, 0, 0, 0xf4]);   // mov eax, 7; hlt
+    m.runtime.noteHot(CODE, 0, 2);
+    m.runtime.noteHot(CODE + 0x100, 0, 2);
+    // Noted again while waiting, hotter: it moves up.
+    m.runtime.noteHot(CODE + 0x100, 0, 128);
+    assert.equal(await m.runtime.translatePending(), 1);
+    assert.ok(m.runtime.entryOf(CODE + 0x100) >= 0, 'the hotter candidate went first');
+    assert.equal(m.runtime.entryOf(CODE), -1, 'the cooler one waits for the next batch');
+    assert.equal(await m.runtime.translatePending(), 1);
+    assert.ok(m.runtime.entryOf(CODE) >= 0);
+});
+
 test('a page write clears the candidates on a page above 256 MB', async()=>{
     // A candidate key is eip * 16 + top, past 2^32 there: the page it is
     // filed under must come from a division, not a shift that wraps.

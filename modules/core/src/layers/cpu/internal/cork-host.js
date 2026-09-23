@@ -224,15 +224,16 @@ export function createCorkHost(config){
     // Hotness in cork mode, counted by the interpreter itself: a start run
     // `hotThreshold` times becomes a candidate, and the layer's feed forms it.
     // A translated start is never interpreted again, so the count stops there.
-    // Low, but not two: a start costs a translation on its second visit, yet
-    // a title's loader runs millions of instructions that are each met once or
-    // twice, and a threshold of two turned every one of them into a candidate
-    // -- Doom 3's load left a queue of twenty thousand candidates and formed a
-    // few thousand, so the genuinely hot loop (met forty thousand times) never
-    // reached the front and stayed interpreted. Two hundred and fifty-six
-    // still costs the hot loop a few hundred interpreted turns before it
-    // translates, and leaves the run-once loader code alone.
-    const hotThreshold = corkConfig?.hotThreshold ?? 256;
+    // Two under cork, not the sampler's two thousand: there is no compiled
+    // second executor to carry the code in the meantime, so a start costs a
+    // translation on its second visit. A title's loader runs millions of
+    // instructions each met once or twice, and every one met twice is a
+    // candidate -- which is why the runtime drains its queue hottest first:
+    // the count keeps growing while a candidate waits and is handed over at
+    // every power of two, so the loop met forty thousand times is formed
+    // before the code met twice, and the queue's length costs nothing but
+    // memory.
+    const hotThreshold = corkConfig?.hotThreshold ?? 2;
     // The counts live in a flat array rather than a map: one byte per four
     // bytes of the first sixteen megabytes of address space, wrapping there.
     // A map grew an entry for every instruction a straight-line loader ran
@@ -248,10 +249,18 @@ export function createCorkHost(config){
      */
     const countHot = address=>{
         const slot = (address >>> 2) & HOT_MASK;
-        if (++hotCounts[slot] >= hotThreshold)
+        // Saturating: past 255 a start is as hot as it gets.
+        if (hotCounts[slot] < 255)
         {
-            hotCounts[slot] = 0;
-            runtime.noteHot(address, x87Top());
+            hotCounts[slot]++;
+        }
+        const count = hotCounts[slot];
+        // Handed over at the threshold and again at every power of two after
+        // it, each time with the count as its heat, so a candidate that keeps
+        // running moves up the runtime's queue while it waits.
+        if (count >= hotThreshold && (count & (count - 1)) === 0)
+        {
+            runtime.noteHot(address, x87Top(), count);
             // Under the slice feed the candidate is formed at the slice's end,
             // so leave the interpreter there rather than run the whole hot
             // body interpreted before the translator ever sees it. Under the

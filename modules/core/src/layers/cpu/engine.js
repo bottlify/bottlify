@@ -206,7 +206,8 @@
  * @typedef {Object} Runtime
  * @property {(eip: number, x87Top?: number) => number} entryOf  Function index, or -1.
  * @property {(entry: number, budget: number) => ExitRecord} run
- * @property {(eip: number, x87Top?: number) => void} noteHot  A candidate from the layer's
+ * @property {(eip: number, x87Top?: number, hotness?: number) => void} noteHot
+ *     A candidate from the layer's
  *     sampler, with the x87 top a region there is compiled for.
  * @property {(address: number, x87Top?: number) => void} missAt  One untranslated exit to
  *     an address at an x87 top; it becomes a candidate once enough land there at that top.

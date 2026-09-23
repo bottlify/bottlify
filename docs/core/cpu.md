@@ -246,18 +246,12 @@ In `cork` mode the interpreter counts hotness itself, per instruction start, in 
 the address space (not a map: a straight-line loader runs millions of instructions once and would
 grow one entry each): a start interpreted `hotThreshold` times becomes a candidate, the layer's
 feed forms it, and once a region exists the host runs it rather than interpreting it -- cold code
-stays on the interpreter, hot code moves to the translator. The default is two hundred and fifty-six
-under `cork`, not two: a title's loader runs millions of instructions each met once or twice, and a
-threshold of two turned every one into a candidate, so the genuinely hot loop never reached the
-front of the queue and stayed interpreted (Doom 3's load left twenty thousand candidates and formed
-a few thousand at 6 % share); two hundred and fifty-six still translates the loop that runs forty
-thousand times after a few hundred interpreted turns, and leaves the run-once code alone. A region
-formed for cold code is bounded by `maxRegionBlocks`/`maxRegionBytes`. The
-interpreted instructions count in the block's own instruction word, so `translatedShare` is the
-translator's share of the whole run, not only of what it ran. A turn that would retire nothing --
-an entry at the address run and left at once, for another top or a region of its own -- is forced
-to interpret one instruction instead of spinning, and each such turn is counted as
-`forcedSteps` in the translator's report, zero when every turn moves.
+stays on the interpreter, hot code moves to the translator. The default is two under `cork`, not the sampler's two thousand: there is no compiled second
+executor to carry the code in the meantime. A title's loader runs millions of instructions each
+met once or twice, so the candidates are many; the runtime drains its queue hottest first -- the
+interpreter keeps counting a waiting candidate and hands it over again at every power of two with
+the count as its heat -- so the loop met forty thousand times is formed before the code met twice,
+and a long queue costs memory, not the hot loop's place.
 
 ## 2. Contract
 
@@ -278,7 +272,7 @@ enter the type check or the bundle.
 |-----------------|----------------------------|---------------------|---------|
 | `memorySize`    | number (power of two)      | `1 GiB`             | Guest RAM. Reserved, not committed: the host pays for pages the guest touches. Must be a power of two; the emulator requires it. With an engine other than `emulator` the top `TABLES_RESERVE` (4 MiB) is the translator's tables, and `layout.memorySize` reports the rest. |
 | `engineUrl`     | string                     | none                | The translator's entry module, imported at `boot()` under `hybrid`; `createApp` resolves it from `cork.moduleUrl` or the package beside core. Absent, `hybrid` runs with no translator. |
-| `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold` (the interpreter's own count under `cork`; default 256, where the sampler's default is 2000), `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`, `feed`, `missThreshold`, and `leaveOut`, the instruction classes (`x87`, `mmx`, `sse`) a run leaves to the emulator so a defect can be localised by class; such a run keeps no translation store. |
+| `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold` (the interpreter's own count under `cork`; default 2, where the sampler's default is 2000; the queue is drained hottest first), `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`, `feed`, `missThreshold`, and `leaveOut`, the instruction classes (`x87`, `mmx`, `sse`) a run leaves to the emulator so a defect can be localised by class; such a run keeps no translation store. |
 | `trapPort`      | number                     | `0xb077`            | The I/O port a stub writes its trap id to. |
 | `entryVector`   | number                     | `0x7000`            | Linear address of the dword the ROM jumps through to enter guest code. |
 | `initialStack`  | number                     | `0x300000`          | ESP the ROM sets before jumping into the guest. |
