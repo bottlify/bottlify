@@ -227,6 +227,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const dropped = new Map();
     const counts = {
         modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, moduleBytes: 0,
+        queueDrops: 0,
         cacheHits: 0, cacheMisses: 0,
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
@@ -331,6 +332,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         const notes = pageKeys.get(page);
         if (notes)
         {
+            counts.queueDrops += notes.size;
             for (const key of notes)
             {
                 queue.delete(key);
@@ -983,6 +985,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 cacheHits: counts.cacheHits,
                 cacheMisses: counts.cacheMisses,
                 invalidations: counts.invalidations,
+                dropped: counts.dropped,
+                queued: queue.size,
+                barren: barren.size,
+                queueDrops: counts.queueDrops,
                 volatilePages: counts.volatilePages,
                 exits: { ...exits },
                 // The top untranslated-exit targets over the whole run, and

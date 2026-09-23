@@ -1392,6 +1392,11 @@ export function createHarness(canvas, how = {}){
         result.profile = profile(layout);
         result.exact = exactProfile(running, layout);
         result.samples = guestSamples(metrics('cpu').samples, layout);
+        // Named rather than left to `scalars`: the translator's report is an
+        // object of objects (`exitsByTarget`, `refused`, `refusedWhy`), so the
+        // `[ready]` table drops it whole and a cork run would say nothing about
+        // why its loops stayed interpreted.
+        result.cork = metrics('cpu').cork ?? null;
 
         // Named rather than left to `scalars`, which keeps only numbers and strings
         // -- every metric this layer reports is an object, so all of them were
