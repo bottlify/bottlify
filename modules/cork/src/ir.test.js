@@ -275,6 +275,11 @@ test('bit tests, scans, bswap, xchg, xadd, cmpxchg, cwde/cdq, setcc, cmovcc, jcc
     assert.equal(m.state.eflags & ZF, ZF);
     m = run([0xb8, 5, 0, 0, 0, 0xb9, 6, 0, 0, 0, 0xba, 9, 0, 0, 0, 0x0f, 0xb1, 0xd1]);
     assert.deepEqual([m.state.reg[0], m.state.reg[1]], [6, 6]);
+    // mov eax, -1; mov ecx, -1; xor edx, edx; cmpxchg ecx, edx: a free LockCount
+    m = run([0xb8, 0xff, 0xff, 0xff, 0xff, 0xb9, 0xff, 0xff, 0xff, 0xff,
+        0x31, 0xd2, 0x0f, 0xb1, 0xd1]);
+    assert.equal(m.state.reg[1], 0);
+    assert.equal(m.state.eflags & ZF, ZF);
     m = run([0xb8, 0x80, 0xff, 0xff, 0xff, 0x98, 0x99]); // cwde; cdq
     assert.deepEqual([m.state.reg[0], m.state.reg[2]], [0xffffff80, 0xffffffff]);
     // mov eax, 1; mov ebx, 2; cmp eax, ebx; cmovl eax, ebx

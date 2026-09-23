@@ -677,8 +677,8 @@ export function evaluate(instruction, state){
         }
         case 'cmpxchg':
         {
-            const accumulator = state.reg[0] & mask;
-            const destination = read(operands[0]);
+            const accumulator = (state.reg[0] & mask) >>> 0;
+            const destination = read(operands[0]) >>> 0;
             const { flags } = subFlags(accumulator, destination, 0, size);
             if (accumulator === destination)
             {
