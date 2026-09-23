@@ -77,7 +77,8 @@ export async function loadZstdWasm(bytes){
             : Math.max(PAGE, packed.length * 8);
         for (;;)
         {
-            ensure(outAt - base + capacity);
+            // The decoder's copies may run OUT_SLACK (32) bytes past the capacity.
+            ensure(outAt - base + capacity + 32);
             new Uint8Array(memory.buffer, inAt, packed.length).set(packed);
             const answer = exports.zstd_decompress(inAt, packed.length, outAt, capacity);
             if (answer === -4 && expectedLength === 0)

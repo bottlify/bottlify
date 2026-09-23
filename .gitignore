@@ -34,3 +34,6 @@ dbg/
 
 # The nasm corpus the translator tests fetch, pinned by modules/cork/corpus-lock.json.
 modules/cork/vendor/
+
+# AppleDouble files the host writes on the shared checkout
+._*

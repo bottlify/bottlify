@@ -47,7 +47,8 @@ int main(int argc, char** argv){
     fclose(f);
     capacity = (uint32_t)strtoul(argv[3], NULL, 10);
     if (argc == 5) repeat = atoi(argv[4]);
-    out = (uint8_t*)malloc(capacity > 0 ? capacity : 1);
+    /* The decoder's copies may run 32 bytes past the capacity. */
+    out = (uint8_t*)malloc(capacity + 32);
     started = clock();
     for (i = 0; i < repeat; i++)
     {
