@@ -59,26 +59,45 @@ export function createDifferentialHost({ emulator, cork, engine }){
             && emulator.handoffAvailable();
 
         /** Runs one region and replays it on the emulator, recording a
-         * divergence the first time one is seen.
+         * divergence the first time one is seen. Only a region whose exit is a
+         * clean stop -- untranslated, budget or halt -- is replayed: a trap or
+         * a fault stops the region at the instruction that raised it, and the
+         * emulator's own run would answer it inline, so the two records would
+         * never agree and every such region would read as a divergence.
          * @param {number} eip @param {number} entry @param {number} budget */
         const replayRegion = (eip, entry, budget)=>{
             const state = snapshot(emulator, []);
             const exit = runtime.run(entry, budget);
             const subjectState = snapshot(emulator, []);
             restore(emulator, state);
-            emulator.runSlice(exit.retired);
-            const oracleState = snapshot(emulator, []);
-            const diff = compare(oracleState, subjectState);
-            restore(emulator, subjectState);
-            replayed++;
-            if (diff.length > 0)
+            if (exit.kind === 'untranslated' || exit.kind === 'budget' || exit.kind === 'halt')
             {
-                divergences++;
-                if (first === null)
+                // The emulator answers the same code, but its slice may stop
+                // early at a page the translator holds (the handoff bit), so it
+                // is run to the region's retired count rather than once.
+                let retired = 0;
+                while (retired < exit.retired && !emulator.halted())
                 {
-                    first = { at: eip, diff };
+                    const stepped = emulator.runSlice(exit.retired - retired);
+                    if (stepped === 0)
+                    {
+                        break;
+                    }
+                    retired += stepped;
                 }
+                const oracleState = snapshot(emulator, []);
+                const diff = compare(oracleState, subjectState);
+                if (diff.length > 0)
+                {
+                    divergences++;
+                    if (first === null)
+                    {
+                        first = { at: eip, diff };
+                    }
+                }
+                replayed++;
             }
+            restore(emulator, subjectState);
             return exit;
         };
 
