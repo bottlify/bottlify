@@ -160,6 +160,20 @@ test('the interpreter stops only at an entry for the top the machine has', async
     assert.equal(h.block()[h.blockLayout().x87Top], 0, 'the machine top, not the region top');
 });
 
+test('a hlt ends the slice and the next slice goes on after it, as the timer interrupt does',
+    ()=>{
+        const h = host();
+        // hlt; jmp -3 -- the idle loop a scheduler parks the processor in.
+        load(h, 0x1000, [0xf4, 0xeb, 0xfd]);
+        h.writeReg32('eip', 0x1000);
+        assert.equal(h.runSlice(100), 1, 'the hlt retired and ended the slice');
+        assert.equal(h.halted(), true);
+        assert.equal(h.readReg32('eip'), 0x1001, 'eip past the hlt');
+        assert.equal(h.runSlice(100), 2, 'the next slice runs the jump and halts again');
+        assert.equal(h.halted(), true);
+        assert.equal(h.runSlice(100), 2);
+    });
+
 test('a context carries the flags, the x87 block and fsBase field for field', ()=>{
     const h = host();
     const layout = h.blockLayout();

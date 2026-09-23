@@ -429,6 +429,14 @@ export function createCorkHost(config){
     const runSlice = maxInstructions=>{
         stopped = false;
         feedDue = false;
+        // A slice is the clock's tick. On the emulator a `hlt` holds the
+        // processor until its timer interrupt, whose handler in the ROM only
+        // returns, so the guest goes on at the instruction after the `hlt`
+        // when the layer next runs it; this host has no timer, so being asked
+        // to run is the tick, and a halt ends a slice, never the machine. A
+        // fault's halt ends the same way: the layer has read the record and
+        // decided where to run.
+        halted = false;
         if (!entered)
         {
             setEip(whole.getUint32(ramOffset(entryVector), true));
