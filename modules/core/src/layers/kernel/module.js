@@ -106,7 +106,7 @@ export const kernelModule = {
          * own threads, sync objects and handles.
          *
          * @type {{ scheduler: any, sync: any, handles: any, clock: any,
-         *          switcher: any, processes: any, disposed: boolean }}
+         *          switcher: any, processes: any, disposed: boolean, resumeLog: string[] }}
          */
         const state = {
             scheduler: null,
@@ -116,6 +116,17 @@ export const kernelModule = {
             switcher: null,
             processes: null,
             disposed: false,
+            // The last parks, holds and scheduled resumes, newest last: what a
+            // thread that sits in the park loop is read by.
+            resumeLog: [],
+        };
+        /** @param {string} entry */
+        const noteResume = entry=>{
+            state.resumeLog.push(entry);
+            if (state.resumeLog.length > 16)
+            {
+                state.resumeLog.shift();
+            }
         };
 
         state.switcher = createSwitcher({ cpu });
@@ -255,6 +266,8 @@ export const kernelModule = {
                 const esp = cpu.readReg32('esp');
                 const returnAddress = memory.readU32(esp);
                 memory.writeU32(esp, cpu.parkAddress());
+                noteResume(`hold ${state.scheduler.current()?.name}`
+                    + `@0x${(returnAddress >>> 0).toString(16)}`);
                 return returnAddress;
             },
 
@@ -272,6 +285,7 @@ export const kernelModule = {
             parkThread(thread, restingStack){
                 const esp = cpu.readReg32('esp');
                 thread.parkedReturn = memory.readU32(esp);
+                noteResume(`park ${thread.name}@0x${(thread.parkedReturn >>> 0).toString(16)}`);
                 thread.resumeStack = restingStack;
                 memory.writeU32(esp, cpu.parkAddress());
             },
@@ -290,6 +304,7 @@ export const kernelModule = {
              * @param {number} [where.returnValue]
              */
             scheduleResume(thread, { eip, esp, returnValue = 0 }){
+                noteResume(`schedule ${thread.name}@0x${(eip >>> 0).toString(16)}`);
                 thread.parkedReturn = eip;
                 thread.resumeStack = esp ?? null;
                 thread.waitResult = returnValue;
@@ -539,6 +554,7 @@ export const kernelModule = {
             metrics: {
                 ...instance.scheduler.diagnostics(),
                 ...instance.switcher.diagnostics(),
+                recentScheduled: instance.resumeLog.slice(),
                 handles: instance.handles.diagnostics(),
                 sync: instance.sync.summary(),
                 processes: instance.processes.diagnostics(),

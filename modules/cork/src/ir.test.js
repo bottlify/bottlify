@@ -368,6 +368,18 @@ test('xlat reads [ebx + al]', ()=>{
     assert.equal(m.state.reg[0] & 0xff, 0xab);
 });
 
+test('call through a memory operand relative to esp reads the target before the push', ()=>{
+    // call dword [esp+8]: the slot two above the return address the call
+    // writes; read after the push it would be [esp+4], a different dword.
+    const m = run([0xff, 0x54, 0x24, 0x08], state=>{
+        state.memory.write(0xf008, 4, 0x2000);
+        state.memory.write(0xf004, 4, 0x3000);
+    });
+    assert.equal(m.state.eip, 0x2000, 'the target is the caller slot [esp+8]');
+    assert.equal(m.state.reg[4], 0xeffc, 'the return address was pushed');
+    assert.equal(m.state.memory.read(0xeffc, 4), 0x1004);
+});
+
 test('cpuid and rdtsc answer without a crossing', ()=>{
     const m = run([0xb8, 1, 0, 0, 0, 0x0f, 0xa2, 0x0f, 0x31]);
     assert.equal(m.state.reg[0], 0); // rdtsc after cpuid, no counter given

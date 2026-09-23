@@ -590,11 +590,17 @@ export function evaluate(instruction, state){
                 : read(operands[0]);
             return;
         case 'call':
-            push(next, 4);
-            state.eip = operands[0].kind === 'rel'
+        {
+            // The target is read before the return address is pushed: a
+            // memory operand relative to ESP names the caller's slot, not the
+            // one below it -- read after the push, [esp+0x128] was [esp+0x124].
+            const target = operands[0].kind === 'rel'
                 ? /** @type {number} */ (operands[0].target)
                 : read(operands[0]);
+            push(next, 4);
+            state.eip = target;
             return;
+        }
         case 'ret':
             state.eip = pop(4);
             if (operands.length === 1)

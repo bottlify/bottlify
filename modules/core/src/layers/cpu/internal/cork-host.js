@@ -65,6 +65,7 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  * @property {number} memorySize   Guest RAM in bytes.
  * @property {number} trapPort
  * @property {number} entryVector  Linear address of the dword holding the entry point.
+ * @property {number} [thunkBase]  Where the thunk table and its park loop begin.
  * @property {number} initialStack Initial guest ESP.
  * @property {import('../engine.js').EngineConfig} [cork]  The translator's config.
  */
@@ -118,6 +119,19 @@ export function createCorkHost(config){
     /** @type {((value: number) => void) | null} */
     let trapHandler = null;
     let trapCrossings = 0;
+    /** The last slices, newest last: where each began and ended, what it
+     * retired, the traps it crossed and whether it halted -- what a run that
+     * makes no progress is read by.
+     * @type {{ at: number, end: number, retired: number, traps: number, halted: boolean }[]} */
+    const recent = [];
+    const RECENT = 16;
+    /** The last instruction starts the interpreter ran, a ring: the path a run
+     * took into wherever it sits. */
+    const starts = new Uint32Array(256);
+    let startAt = 0;
+    // The park loop (hlt; jmp at the thunk base) is where a thread waits, not
+    // a path: its starts are left out so the ring keeps how the thread got there.
+    const parkBase = (config.thunkBase ?? 0x100000) >>> 0;
     let halted = false;
     let stopped = false;
     // Set when the interpreter notes a hot start: the slice ends there so the
@@ -361,6 +375,13 @@ export function createCorkHost(config){
                     || runtime.entryOf(state.eip, x87Top()) >= 0,
                 onStep: (/** @type {number} */ at)=>{
                     lastStart = at;
+                    // Neither the park loop nor a slide through zero-filled
+                    // memory (add [eax], al, twice a step) is a path: the ring
+                    // keeps the code that led there.
+                    if (((at - parkBase) >>> 0) > 2 && (ram[at] !== 0 || ram[at + 1] !== 0))
+                    {
+                        starts[startAt++ & 255] = at;
+                    }
                     stepsSinceFeed++;
                     countHot(at);
                 },
@@ -443,6 +464,8 @@ export function createCorkHost(config){
         }
         let remaining = maxInstructions;
         let ran = 0;
+        const startedAt = eip();
+        const trapsBefore = trapCrossings;
         while (remaining > 0 && !isHalted() && !isStopped() && !isFeedDue())
         {
             if (translateDue)
@@ -511,6 +534,12 @@ export function createCorkHost(config){
             }
         }
         fold();
+        recent.push({ at: startedAt, end: eip(), retired: ran, traps: trapCrossings - trapsBefore,
+            halted });
+        if (recent.length > RECENT)
+        {
+            recent.shift();
+        }
         return ran;
     };
 
@@ -747,6 +776,30 @@ export function createCorkHost(config){
         inProtectedMode: ()=>true,
         eip,
         trapCrossings: ()=>trapCrossings,
+        /** The last thirty-two interpreted instruction starts with their first bytes,
+         * oldest first, two per string. */
+        recentStarts: ()=>{
+            const out = [];
+            for (let i = 224; i < 256; i += 2)
+            {
+                const parts = [];
+                for (let k = 0; k < 2; k++)
+                {
+                    const at = starts[(startAt + i + k) & 255] >>> 0;
+                    let bytes = '';
+                    for (let n = 0; n < 8; n++)
+                    {
+                        bytes += hex(ram[at + n] ?? 0, 2);
+                    }
+                    parts.push(`${hex(at)}:${bytes}`);
+                }
+                out.push(parts.join(' '));
+            }
+            return out;
+        },
+        /** The last slices as short strings, newest last. */
+        recentSlices: ()=>recent.map(r=>`${hex(r.at)}->${hex(r.end)} r${r.retired} t${r.traps}`
+            + (r.halted ? ' H' : '')),
         hostWrites: ()=>hostWrites,
         hostWrittenBytes: ()=>hostWrittenBytes,
         // Cork has no emulator JIT; the translator's own figures are in

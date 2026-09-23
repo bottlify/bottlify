@@ -873,6 +873,10 @@ export const cpuModule = {
                 // program stuck in a trap is visible as a count that grows
                 // with the turns.
                 trapCrossings: instance.host.trapCrossings(),
+                // Under cork, the last slices: where each began and ended and what
+                // it retired, so a run that makes no progress says where it sits.
+                recent: instance.host.recentSlices ? instance.host.recentSlices() : null,
+                recentStarts: instance.host.recentStarts ? instance.host.recentStarts() : null,
                 // Whether the emulator is compiling guest code at all, and
                 // how much of it runs compiled rather than interpreted.
                 //
