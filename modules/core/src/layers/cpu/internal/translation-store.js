@@ -19,7 +19,9 @@
  * says where each is, a miss touches nothing, and a hit is one read at an
  * offset -- synchronous through the file's access handle inside a worker,
  * which is where the engine runs, so a lookup costs microseconds and no
- * turn of the event loop.
+ * turn of the event loop. The index is a log: a batch appends its lines,
+ * and a name that appears twice means the later place (a rewrite of the
+ * whole index per batch was seconds of a loading phase's engine thread).
  *
  * A record's name is a hash of its key, two ways so a collision needs both
  * to agree; the key's own characters would be a path.
@@ -59,19 +61,45 @@ export function fileNameOf(key){
 const textOf = async file=>new TextDecoder().decode(new Uint8Array(await file.arrayBuffer()));
 
 /**
- * Writes the whole of a small file: the synchronous handle inside a worker,
- * the stream on the page.
+ * Removes `<name>.v<n>` directories of any version but this one.
  *
- * @param {any} handle @param {Uint8Array} bytes
+ * @param {any} cork  the store's own directory
+ * @param {string} name  the bundle's safe name
  */
-async function writeWhole(handle, bytes){
+async function sweepOtherVersions(cork, name){
+    if (typeof cork.entries !== 'function' || typeof cork.removeEntry !== 'function')
+    {
+        return;
+    }
+    const keep = `${name}.v${STORE_VERSION}`;
+    /** @type {string[]} */
+    const stale = [];
+    for await (const [entry] of cork.entries())
+    {
+        if (entry !== keep && entry.startsWith(`${name}.v`))
+        {
+            stale.push(entry);
+        }
+    }
+    for (const entry of stale)
+    {
+        await cork.removeEntry(entry, { recursive: true }).catch(()=>{});
+    }
+}
+
+/**
+ * Appends to a small file at a known end: the synchronous handle inside a
+ * worker, the stream on the page.
+ *
+ * @param {any} handle @param {number} at @param {Uint8Array} bytes
+ */
+async function appendAt(handle, at, bytes){
     if (typeof handle.createSyncAccessHandle === 'function')
     {
         const access = await handle.createSyncAccessHandle();
         try
         {
-            access.truncate(0);
-            access.write(bytes, { at: 0 });
+            access.write(bytes, { at });
             access.flush();
         }
         finally
@@ -80,8 +108,8 @@ async function writeWhole(handle, bytes){
         }
         return;
     }
-    const writable = await handle.createWritable();
-    await writable.write(bytes);
+    const writable = await handle.createWritable({ keepExistingData: true });
+    await writable.write({ type: 'write', position: at, data: bytes });
     await writable.close();
 }
 
@@ -97,6 +125,11 @@ export async function createDirectoryTranslationStore(root, name){
     const safe = name.replace(/[^A-Za-z0-9._-]/g, '_') || 'bundle';
     const cork = await root.getDirectoryHandle('cork', { create: true });
     const directory = await cork.getDirectoryHandle(`${safe}.v${STORE_VERSION}`, { create: true });
+    // The bundle's directories of other layout versions go: nothing reads
+    // them again, and the block store mounts the origin's whole file system
+    // and stats every file in it on every start -- a version that kept a
+    // file per record left tens of thousands, a minute of a launch.
+    await sweepOtherVersions(cork, safe);
     /** Each record's place in the records file, read once; null until then.
      * @type {Map<string, { offset: number, length: number }> | null} */
     let places = null;
@@ -109,6 +142,10 @@ export async function createDirectoryTranslationStore(root, name){
     let end = 0;
     /** @type {Promise<void> | null} */
     let opening = null;
+    /** The index file's length: where the next lines go. */
+    let indexEnd = 0;
+    /** Lines put since the last append. @type {string[]} */
+    let pendingLines = [];
 
     const open = ()=>{
         opening ??= (async()=>{
@@ -133,15 +170,19 @@ export async function createDirectoryTranslationStore(root, name){
             {
                 const handle = await directory.getFileHandle(INDEX);
                 const text = await textOf(await handle.getFile());
+                indexEnd = new TextEncoder().encode(text).length;
                 for (const line of text.split('\n'))
                 {
-                    const [recordName, offsetText, lengthText] = line.split(' ');
+                    const parts = line.split(' ');
+                    const [recordName, offsetText, lengthText] = parts;
                     const offset = Number(offsetText);
                     const length = Number(lengthText);
                     // A place past the file's end is a write the index outran
-                    // (the page went away between the two): not a record.
-                    if (recordName && Number.isInteger(offset) && Number.isInteger(length)
-                        && length >= 0 && offset + length <= end)
+                    // (the page went away between the two): not a record; nor
+                    // is a line cut short, which reads as a length of zero.
+                    if (parts.length === 3 && recordName && lengthText !== ''
+                        && Number.isInteger(offset) && Number.isInteger(length)
+                        && length > 0 && offset + length <= end)
                     {
                         places.set(recordName, { offset, length });
                     }
@@ -154,10 +195,10 @@ export async function createDirectoryTranslationStore(root, name){
         return opening;
     };
 
-    // The index is rewritten whole from the in-memory map, not appended to,
-    // and one write is in flight at a time: several puts land in the same
-    // turn, and the write that is queued carries all of them. The records
-    // are flushed first, so the index never names bytes not yet on disk.
+    // The index is appended to, one write in flight at a time: several puts
+    // land in the same turn, and the write that is queued carries all of
+    // their lines. The records are flushed first, so the index never names
+    // bytes not yet on disk.
     /** @type {Promise<void> | null} */
     let publishing = null;
     /** A place set since the index was last written: the write goes round again. */
@@ -174,11 +215,11 @@ export async function createDirectoryTranslationStore(root, name){
                 dirty = false;
                 await Promise.resolve();
                 access?.flush();
-                const text = [...places ?? []]
-                    .map(([recordName, place])=>`${recordName} ${place.offset} ${place.length}\n`)
-                    .join('');
-                await writeWhole(await directory.getFileHandle(INDEX, { create: true }),
-                    new TextEncoder().encode(text));
+                const bytes = new TextEncoder().encode(pendingLines.join(''));
+                pendingLines = [];
+                const at = indexEnd;
+                indexEnd += bytes.length;
+                await appendAt(await directory.getFileHandle(INDEX, { create: true }), at, bytes);
             }
             publishing = null;
         })().catch(()=>{
@@ -229,8 +270,10 @@ export async function createDirectoryTranslationStore(root, name){
                 });
                 await appending;
             }
+            const recordName = fileNameOf(key);
             /** @type {Map<string, { offset: number, length: number }>} */ (places)
-                .set(fileNameOf(key), { offset, length: bytes.length });
+                .set(recordName, { offset, length: bytes.length });
+            pendingLines.push(`${recordName} ${offset} ${bytes.length}\n`);
             await publish();
         },
         /**

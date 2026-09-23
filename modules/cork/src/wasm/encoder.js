@@ -364,6 +364,8 @@ export class ModuleBuilder {
         this.importedTable = false;
         /** @type {{ offset: number, functions: number[] }[]} */
         this.elements = [];
+        /** @type {[number, string][]} function index and name, for the `name` section */
+        this.functionNames = [];
     }
 
     /**
@@ -488,6 +490,18 @@ export class ModuleBuilder {
         return index;
     }
 
+    /**
+     * Names a function in the module's custom `name` section, which a
+     * browser's profiler reads: a region function named by its address shows
+     * in a CPU profile as itself rather than as `wasm-function[0]`.
+     *
+     * @param {number} functionIndex @param {string} functionName
+     */
+    nameFunction(functionIndex, functionName){
+        this.functionNames.push([functionIndex, functionName]);
+        return this;
+    }
+
     /** @param {string} field @param {number} functionIndex */
     exportFunction(field, functionIndex){
         this.exports.push([...name(field), 0x00, ...leb128u(functionIndex)]);
@@ -568,6 +582,15 @@ export class ModuleBuilder {
             return concat([[10], leb128u(content.length), content]);
         })();
 
+        // The custom `name` section, last: its function-names subsection (1)
+        // maps indices to names.
+        const nameSection = this.functionNames.length === 0 ? new Uint8Array(0) : (()=>{
+            const map = vector(this.functionNames.flatMap(
+                ([index, functionName])=>[...leb128u(index), ...name(functionName)]),
+            this.functionNames.length);
+            const content = [...name('name'), 0x01, ...leb128u(map.length), ...map];
+            return concat([[0x00], leb128u(content.length), content]);
+        })();
         const table = this.tableMin === null
             ? []
             : [ValType.funcref, 0x00, ...leb128u(this.tableMin)];
@@ -587,6 +610,7 @@ export class ModuleBuilder {
             section(7, entries(this.exports)),
             section(9, entries(elements)),
             codeSection,
+            nameSection,
         ]);
     }
 }

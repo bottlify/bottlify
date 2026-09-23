@@ -22,7 +22,7 @@
  *                                  [--command-line STRING]
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
- *                                  [--exact]
+ *                                  [--exact] [--cpu-profile SECONDS]
  */
 
 import { deflateSync } from 'node:zlib';
@@ -33,6 +33,7 @@ import { fileURLToPath } from 'node:url';
 import { launchWithGpu, shutdown } from './browser.mjs';
 import { CdpEndpoint } from './cdp.mjs';
 import { serveStatic } from './server.mjs';
+import { describeProfile, profileWorkers, summarise } from './profile.mjs';
 import { openBundle } from '../btl.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -179,6 +180,11 @@ function parse(argv){
         // title that reaches its loop and would otherwise run out the turns
         // hours later. Zero means the turns alone decide.
         runSeconds: number('--run-seconds', 0),
+        // The browser's own sampling profiler on the engine's workers for
+        // this many seconds from the start (or until the run ends): which
+        // functions -- translated regions by address, the interpreter, the
+        // runtime, the layers -- the engine thread's time went to.
+        cpuProfile: number('--cpu-profile', 0),
         // Which execution engine runs the program (`emulator`, the default,
         // or `hybrid` with the translator), so two runs differ by that alone.
         engine: argv.includes('--engine') ? argv[argv.indexOf('--engine') + 1] : undefined,
@@ -852,6 +858,15 @@ function describe(result, context, calls, symbols){
         say(`  [page] ${line}`);
     }
 
+    for (const one of result.cpuProfiles ?? [])
+    {
+        say('');
+        for (const line of describeProfile(one.url, one.summary, one.windowMs))
+        {
+            say(line);
+        }
+    }
+
     if (result.profile)
     {
         say('');
@@ -1028,6 +1043,33 @@ export async function game(options){
             bundleId: options.id,
             exact: options.exact,
         });
+        /** @type {Awaited<ReturnType<typeof profileWorkers>> | null} */
+        const profiler = options.cpuProfile > 0 && options.worker
+            ? await profileWorkers(cdp, sessionId) : null;
+        const profilingFrom = Date.now();
+        /** @type {{ url: string, profile: any, windowMs: number }[] | null} */
+        let cpuProfiles = null;
+        const stopProfiling = async()=>{
+            if (profiler === null || cpuProfiles !== null)
+            {
+                return;
+            }
+            const windowMs = Date.now() - profilingFrom;
+            cpuProfiles = (await profiler.stop()).map(one=>({ ...one, windowMs }));
+        };
+        const profileTimer = profiler === null
+            ? null
+            : setTimeout(()=>{
+                stopProfiling().catch(()=>{});
+            }, options.cpuProfile * 1000);
+        /** @param {string} stampFor */
+        const saveProfiles = stampFor=>{
+            for (const [index, one] of (cpuProfiles ?? []).entries())
+            {
+                writeFileSync(join(REPORTS_DIR, `game-${stampFor}-cpu-${index}.cpuprofile`),
+                    JSON.stringify(one.profile));
+            }
+        };
         await cdp.send('Runtime.evaluate',
             { expression: `window.__bottlify__.start(${request}); null`,
                 returnByValue: true },
@@ -1069,10 +1111,21 @@ export async function game(options){
                 options.waitMs);
         }
         catch (e){
+            if (profileTimer !== null)
+            {
+                clearTimeout(profileTimer);
+            }
+            await stopProfiling().catch(()=>{});
             await drainLog();
             const onTimeout = await cdp.send(
                 'Page.captureScreenshot', { format: 'png' }, sessionId);
             const stampOut = new Date().toISOString().replace(/[:.]/g, '-');
+            saveProfiles(stampOut);
+            for (const one of cpuProfiles ?? [])
+            {
+                console.log(describeProfile(one.url, summarise(one.profile, one.windowMs),
+                    one.windowMs).join('\n'));
+            }
             writeFileSync(join(REPORTS_DIR, `game-${stampOut}.png`),
                 Buffer.from(onTimeout.data, 'base64'));
             return {
@@ -1085,6 +1138,15 @@ export async function game(options){
         const stamp = new Date().toISOString().replace(/[:.]/g, '-');
         const shotPath = join(REPORTS_DIR, `game-${stamp}.png`);
         const reportPath = join(REPORTS_DIR, `game-${stamp}.txt`);
+        if (profileTimer !== null)
+        {
+            clearTimeout(profileTimer);
+        }
+        await stopProfiling().catch(()=>{});
+        saveProfiles(stamp);
+        result.cpuProfiles = (cpuProfiles ?? []).map(one=>({
+            url: one.url, windowMs: one.windowMs, summary: summarise(one.profile, one.windowMs),
+        }));
         const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
         writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));
         // The last presented frame as the engine read it back, beside the

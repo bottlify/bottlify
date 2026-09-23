@@ -227,7 +227,11 @@
  * @property {(page: number) => void} invalidatePage  A host or guest write into code.
  * @property {(page: number) => boolean} holdsPage  Whether a published region spans the page
  *     (the pages the emulator's handoff bit is set for).
- * @property {() => EngineDiagnostics} diagnostics
+ * @property {() => EngineDiagnostics} diagnostics  The whole snapshot, for a report: it
+ *     sorts and explains the exit targets, so it is not for a slice.
+ * @property {() => Pick<EngineDiagnostics, 'regions' | 'modules' | 'invalidations'
+ *     | 'translatedShare' | 'retired' | 'translateMs' | 'exits'>} counters
+ *     The slice-cheap subset, read by the frame counters every slice.
  */
 
 /**

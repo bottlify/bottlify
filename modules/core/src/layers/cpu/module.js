@@ -221,7 +221,7 @@ export const cpuModule = {
                 feedTranslator();
                 if (state.cork)
                 {
-                    const cork = state.cork.diagnostics();
+                    const cork = state.cork.counters();
                     counters[CORK_AT] = cork.regions;
                     counters[CORK_AT + 1] = cork.invalidations;
                     counters[CORK_AT + 2] = cork.translatedShare;

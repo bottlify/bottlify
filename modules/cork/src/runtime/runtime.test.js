@@ -125,6 +125,23 @@ test('two regions land in one batch, each its own module, and both run; an entry
     assert.equal(m.reg(0), 7);
 });
 
+test('the slice counters carry the snapshot\'s numbers without its sorted exit targets', async()=>{
+    const m = machine({ batchRegions: 4 });
+    m.write(CODE, COUNTDOWN);
+    m.runtime.noteHot(CODE);
+    await m.runtime.translatePending();
+    m.runtime.run(m.runtime.entryOf(CODE), 1000);
+    const cheap = m.runtime.counters();
+    const whole = m.runtime.diagnostics();
+    for (const key of /** @type {const} */ (['regions', 'modules', 'invalidations',
+        'translatedShare', 'retired', 'translateMs']))
+    {
+        assert.equal(cheap[key], whole[key], key);
+    }
+    assert.deepEqual(cheap.exits, whole.exits);
+    assert.ok(!('exitsByTarget' in cheap), 'no sorted targets on the slice path');
+});
+
 test('the hottest candidate is formed first, whatever order the candidates arrived in', async()=>{
     const m = machine({ batchRegions: 1 });
     m.write(CODE, COUNTDOWN);

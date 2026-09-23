@@ -21,7 +21,7 @@ import {
  */
 function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
     /** @type {Map<string, any>} */
-    const entries = new Map();
+    const children = new Map();
     /** @param {Uint8Array} bytes */
     const fileOf = bytes=>({
         size: bytes.length,
@@ -31,11 +31,18 @@ function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
         slice: (from, to)=>fileOf(bytes.subarray(from, to)),
     });
     return {
-        entries,
+        children,
         counter,
+        async* entries(){
+            yield* children;
+        },
+        /** @param {string} name */
+        async removeEntry(name){
+            children.delete(name);
+        },
         /** @param {string} name @param {{ create?: boolean }} [options] */
         async getDirectoryHandle(name, options = {}){
-            let child = entries.get(name);
+            let child = children.get(name);
             if (!child)
             {
                 if (!options.create)
@@ -43,14 +50,14 @@ function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
                     throw new Error('NotFoundError');
                 }
                 child = fakeDirectory(counter, sync);
-                entries.set(name, child);
+                children.set(name, child);
             }
             return child;
         },
         /** @param {string} name @param {{ create?: boolean }} [options] */
         async getFileHandle(name, options = {}){
             counter.probes++;
-            let file = entries.get(name);
+            let file = children.get(name);
             if (!file)
             {
                 if (!options.create)
@@ -115,7 +122,7 @@ function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
                         },
                     } : {},
                 };
-                entries.set(name, file);
+                children.set(name, file);
             }
             return file;
         },
@@ -124,9 +131,9 @@ function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
 
 /** @param {any} root @param {string} bundle */
 async function indexOf(root, bundle){
-    const directory = root.entries.get('cork').entries.get(`${bundle}.v${STORE_VERSION}`);
+    const directory = root.children.get('cork').children.get(`${bundle}.v${STORE_VERSION}`);
     return new TextDecoder().decode(
-        new Uint8Array(await (await directory.entries.get('index').getFile()).arrayBuffer()));
+        new Uint8Array(await (await directory.children.get('index').getFile()).arrayBuffer()));
 }
 
 test('a record is appended to the bundle\'s records file and the index names its place',
@@ -136,8 +143,8 @@ test('a record is appended to the bundle\'s records file and the index names its
         assert.equal(await store.get('cork/1/x/401000/abc'), null);
         await store.put('cork/1/x/401000/abc', new Uint8Array([7, 8, 9]));
         assert.deepEqual([...(await store.get('cork/1/x/401000/abc') ?? [])], [7, 8, 9]);
-        const bundle = root.entries.get('cork').entries.get('my_game_1.0.v2');
-        assert.ok(bundle.entries.has('records'), 'one records file');
+        const bundle = root.children.get('cork').children.get('my_game_1.0.v2');
+        assert.ok(bundle.children.has('records'), 'one records file');
         assert.match(fileNameOf('anything'), /^[0-9a-f]{16}\.cork$/);
         assert.notEqual(fileNameOf('a'), fileNameOf('b'));
         // The index names the record's place: name, offset, length.
@@ -151,8 +158,11 @@ test('a record is appended to the bundle\'s records file and the index names its
         await store.put('cork/1/x/401000/abc', new Uint8Array([1]));
         assert.deepEqual([...(await store.get('cork/1/x/401000/abc') ?? [])], [1]);
         assert.equal(await indexOf(root, 'my_game_1.0'),
-            `${fileNameOf('cork/1/x/401000/abc')} 3 1\n`);
-        assert.equal(bundle.entries.get('records').bytes.length, 4, 'both records are kept');
+            `${fileNameOf('cork/1/x/401000/abc')} 0 3\n${fileNameOf('cork/1/x/401000/abc')} 3 1\n`,
+            'the index is a log: the later line for a name wins');
+        const reopened = await createDirectoryTranslationStore(root, 'my game/1.0');
+        assert.deepEqual([...(await reopened.get('cork/1/x/401000/abc') ?? [])], [1]);
+        assert.equal(bundle.children.get('records').bytes.length, 4, 'both records are kept');
     });
 
 test('a batch of puts is indexed whole and a reopened store hits every one', async()=>{
@@ -203,10 +213,21 @@ test('an index entry the records file does not reach is not a record', async()=>
     await store.flush();
     // The page went away after the index was written but before the records
     // were: the file is shorter than the index says.
-    const directory = root.entries.get('cork').entries.get(`bundle.v${STORE_VERSION}`);
-    directory.entries.get('records').bytes = new Uint8Array(0);
+    const directory = root.children.get('cork').children.get(`bundle.v${STORE_VERSION}`);
+    directory.children.get('records').bytes = new Uint8Array(0);
     const reopened = await createDirectoryTranslationStore(root, 'bundle');
     assert.equal(await reopened.get('cork/1/a'), null, 'a torn write is a miss, not garbage');
+});
+
+test('opening a store removes the bundle\'s directories of other layout versions', async()=>{
+    const root = fakeDirectory();
+    const cork = await root.getDirectoryHandle('cork', { create: true });
+    await cork.getDirectoryHandle('bundle.v1', { create: true });
+    await cork.getDirectoryHandle('other.v1', { create: true });
+    await createDirectoryTranslationStore(root, 'bundle');
+    assert.ok(!cork.children.has('bundle.v1'), 'the old version is gone');
+    assert.ok(cork.children.has(`bundle.v${STORE_VERSION}`), 'this one stands');
+    assert.ok(cork.children.has('other.v1'), 'another bundle\'s is not touched');
 });
 
 test('the request resolves to nothing without the API, to itself as an object', async()=>{

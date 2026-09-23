@@ -1079,6 +1079,24 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         forcedStep(){
             forcedSteps++;
         },
+        // The numbers a slice's counters want, and nothing that costs more
+        // than reading them: the frame counters ask every slice, and the
+        // whole snapshot below sorts the exit targets and names each one's
+        // reason across the candidate queue -- a third of a loading phase's
+        // engine time when it was asked that often.
+        counters(){
+            fold();
+            return {
+                regions: regions.size,
+                modules: counts.modules,
+                invalidations: counts.invalidations,
+                translatedShare: counted > 0 ? corkRetired / counted : 0,
+                retired: corkRetired,
+                translateMs: counts.formingMs + counts.lookupMs + counts.emitMs
+                    + counts.encodeMs + counts.storeMs + counts.instantiateMs + counts.publishMs,
+                exits,
+            };
+        },
         diagnostics(){
             fold();
             return {

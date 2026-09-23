@@ -807,7 +807,7 @@ export function createCorkHost(config){
         // emulator's JIT columns rather than read fields off a number.
         jitState: ()=>-1,
         jitCacheSize: ()=>0,
-        compiledModules: ()=>runtime.diagnostics().modules,
+        compiledModules: ()=>runtime.counters().modules,
         interpretedSteps: ()=>0,
         instructionStats: ()=>null,
         profile: {

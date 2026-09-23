@@ -178,6 +178,20 @@ test('a tail call to a sibling through the table',
         assert.equal(g(21), 42);
     });
 
+test('a named function is in the name section a profiler reads', ()=>{
+    const m = new ModuleBuilder();
+    const type = m.type({ params: [], results: [ValType.i32] });
+    const index = m.function(type, [], new Body().i32const(7).toBytes(), { exportAs: 'f' });
+    m.nameFunction(index, 'r00401000');
+    const bytes = m.toBytes();
+    assert.ok(WebAssembly.validate(bytes), 'valid with the section');
+    const module = new WebAssembly.Module(bytes);
+    const [section] = WebAssembly.Module.customSections(module, 'name');
+    assert.ok(section, 'a name section');
+    assert.ok(new TextDecoder().decode(section).includes('r00401000'));
+    assert.equal(/** @type {any} */ (new WebAssembly.Instance(module).exports).f(), 7);
+});
+
 test('a body with a block left open is refused with its depth', ()=>{
     const b = new Body().block(EMPTY).i32const(1).drop();
     assert.throws(()=>b.toBytes(), { message: 'encoder: block left open (1 deep)' });

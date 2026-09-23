@@ -57,6 +57,10 @@ export function emitBuilt(region, entryTop, layout, features, options = {}){
     const emitAt = performance.now();
     const translation = emitRegion(context, region, { entryTop });
     m.exportFunction('r0', translation.functionIndex);
+    // Named by its address, so a browser's CPU profile of the engine says
+    // which regions the time went to.
+    m.nameFunction(translation.functionIndex,
+        `r${region.entry.toString(16).padStart(8, '0')}`);
     const encodedAt = performance.now();
     const module = m.toBytes();
     const doneAt = performance.now();
