@@ -172,10 +172,6 @@ static u32 reverse_extract(const Reverse* r, i32 p, u32 n){
     return n >= 32 ? (u32)word : (u32)(word & (((u64)1 << n) - 1));
 }
 
-static u32 reverse_peek(const Reverse* r, u32 n){
-    return reverse_extract(r, r->bit - (i32)n, n);
-}
-
 static u32 reverse_read(Reverse* r, u32 n){
     u32 value = reverse_extract(r, r->bit - (i32)n, n);
     r->bit -= (i32)n;
