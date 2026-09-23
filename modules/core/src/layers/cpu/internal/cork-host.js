@@ -124,6 +124,15 @@ export function createCorkHost(config){
     // layer's feed forms the candidate before the next slice, instead of the
     // whole first pass running interpreted ahead of the translator.
     let feedDue = false;
+    // A hot note under the frame feed: the interpreter yields so the translator
+    // can run, but the slice does NOT end -- the loop below feeds and carries on
+    // with what is left of the budget. A loading phase is one long frame, so a
+    // frame-boundary feed alone would run the whole load interpreted.
+    let translateDue = false;
+    // Interpreted steps since the last in-slice feed, so a loader that meets a
+    // new start every few instructions does not translate on every one.
+    let stepsSinceFeed = 0;
+    const FEED_MIN_STEPS = 2048;
     // Read through these in a loop condition: `stopped` is set by `stop()` and
     // `halted` by a nested slice, which the static check cannot see.
     const isHalted = ()=>halted;
@@ -238,10 +247,15 @@ export function createCorkHost(config){
             runtime.noteHot(address, x87Top());
             // Under the slice feed the candidate is formed at the slice's end,
             // so leave the interpreter there rather than run the whole hot
-            // body interpreted before the translator ever sees it.
+            // body interpreted before the translator ever sees it. Under the
+            // frame feed the slice does not end; the loop feeds in place.
             if (corkConfig?.feed === 'slice')
             {
                 feedDue = true;
+            }
+            else if (stepsSinceFeed >= FEED_MIN_STEPS)
+            {
+                translateDue = true;
             }
         }
     };
@@ -326,10 +340,11 @@ export function createCorkHost(config){
                 // far side of. A recorded trap has to leave so the handler can
                 // move eip or stop the machine; an address with an entry is
                 // translated code and a different register file.
-                shouldStop: ()=>state.trapped.length > 0 || feedDue
+                shouldStop: ()=>state.trapped.length > 0 || feedDue || translateDue
                     || runtime.entryOf(state.eip, x87Top()) >= 0,
                 onStep: (/** @type {number} */ at)=>{
                     lastStart = at;
+                    stepsSinceFeed++;
                     countHot(at);
                 },
                 force,
@@ -405,6 +420,15 @@ export function createCorkHost(config){
         let ran = 0;
         while (remaining > 0 && !isHalted() && !isStopped() && !isFeedDue())
         {
+            if (translateDue)
+            {
+                // Form what the interpreter noted and carry on with the rest
+                // of the budget: the slice's count is unchanged, so a loader
+                // that never presents a frame still translates.
+                translateDue = false;
+                stepsSinceFeed = 0;
+                runtime.translatePending().catch(()=>{});
+            }
             const at = eip();
             const entry = runtime.entryOf(at, x87Top());
             if (entry >= 0)
