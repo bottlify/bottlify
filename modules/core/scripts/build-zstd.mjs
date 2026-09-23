@@ -71,11 +71,34 @@ function buildInDocker(){
     {
         throw new Error('failed to build the zstd builder image');
     }
-    const run = spawnSync(
-        'docker', ['run', '--rm', '-v', `${OUT}:/out`, IMAGE, '/out'], { stdio: 'inherit' });
-    if (run.status !== 0)
+    // No bind mount: a mount onto a shared or network volume (a VM's disk seen
+    // from its host) can succeed and still leave nothing behind, so the
+    // container writes to its own /out and the bytes are copied out of it.
+    const name = `bottlify-zstd-build-${process.pid}`;
+    spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
+    const create = spawnSync('docker', ['create', '--name', name, IMAGE, '/out'],
+        { stdio: 'inherit' });
+    if (create.status !== 0)
     {
-        throw new Error('containerized zstd.wasm build failed');
+        throw new Error('failed to create the zstd build container');
+    }
+    try
+    {
+        const run = spawnSync('docker', ['start', '-a', name], { stdio: 'inherit' });
+        if (run.status !== 0)
+        {
+            throw new Error('containerized zstd.wasm build failed');
+        }
+        const copy = spawnSync('docker', ['cp', `${name}:/out/zstd.wasm`, join(OUT, ARTIFACT)],
+            { stdio: 'inherit' });
+        if (copy.status !== 0 || !existsSync(join(OUT, ARTIFACT)))
+        {
+            throw new Error('the container built nothing at /out/zstd.wasm');
+        }
+    }
+    finally
+    {
+        spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
     }
 }
 
