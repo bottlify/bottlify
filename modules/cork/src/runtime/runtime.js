@@ -55,6 +55,7 @@ const KINDS = /** @type {ExitKind[]} */ (
 export function createCorkRuntime({ memory, layout, config = {}, read, imports, features }){
     const settings = {
         hotThreshold: 2000, maxRegionBlocks: 64, maxRegionBytes: 8192, batchRegions: 32,
+        maxQueued: 8192,
         // Invalidations of one page before it is left to the other executor.
         volatileAfter: 8,
         // Untranslated exits to one address before it is a candidate of the
@@ -111,11 +112,61 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const keyOf = (eip, top)=>eip * 16 + top;
     /** @type {Map<number, number>} candidates not yet formed: key(eip, top) → eip */
     const queue = new Map();
-    /** @type {Map<number, number>} key(eip, top) → how hot the layer said the
-     * candidate is (the interpreter's visit count under cork, 0 from the
-     * sampler). A batch takes the hottest first, so a loader's run-twice code
-     * waits behind the loop it ran a thousand times. */
-    const heat = new Map();
+    /** The candidates by heat: bucket b holds the ones whose heat (the
+     * interpreter's visit count under cork, 0 from the sampler) is in
+     * [2^b, 2^(b+1)), the last bucket everything from 256 up; each in arrival
+     * order. A batch takes the hottest first, so a loader's run-twice code
+     * waits behind the loop it ran a thousand times, and the queue is capped:
+     * past `maxQueued` the coldest, oldest candidate is evicted -- the
+     * interpreter keeps counting it and notes it again should it get hot.
+     * @type {Map<number, number>[]} */
+    const buckets = Array.from({ length: 9 }, ()=>new Map());
+    /** @type {Map<number, number>} key → its bucket */
+    const heatOf = new Map();
+    /** @param {number} hotness */
+    const bucketOf = hotness=>{
+        let b = 0;
+        let h = hotness >>> 1;
+        while (h > 0 && b < 8)
+        {
+            b++;
+            h >>>= 1;
+        }
+        return b;
+    };
+    /** Removes a candidate from the queue and its bucket. @param {number} key */
+    const unqueue = key=>{
+        queue.delete(key);
+        const b = heatOf.get(key);
+        if (b !== undefined)
+        {
+            buckets[b].delete(key);
+            heatOf.delete(key);
+        }
+    };
+    /** Adds a candidate at its heat, evicting the coldest when the queue is full.
+     * @param {number} key @param {number} eip @param {number} hotness */
+    const enqueue = (key, eip, hotness)=>{
+        if (queue.size >= settings.maxQueued)
+        {
+            for (const bucket of buckets)
+            {
+                if (bucket.size > 0)
+                {
+                    const [oldest] = bucket.keys();
+                    unqueue(oldest);
+                    dropKey(oldest);
+                    counts.queueEvictions++;
+                    break;
+                }
+            }
+        }
+        const b = bucketOf(hotness);
+        queue.set(key, eip);
+        buckets[b].set(key, eip);
+        heatOf.set(key, b);
+        noteKey(key);
+    };
     /** @type {Map<number, number>} key(eip, top) → eip of a candidate a region
      * formed nothing at, until its page moves. Per top: a region that formed
      * nothing at one top says nothing about a region for another -- the entry
@@ -236,7 +287,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const dropped = new Map();
     const counts = {
         modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, moduleBytes: 0,
-        queueDrops: 0,
+        queueDrops: 0, queueEvictions: 0,
         cacheHits: 0, cacheMisses: 0,
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
@@ -344,8 +395,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             counts.queueDrops += notes.size;
             for (const key of notes)
             {
-                queue.delete(key);
-                heat.delete(key);
+                unqueue(key);
                 barren.delete(key);
             }
             pageKeys.delete(page);
@@ -726,35 +776,27 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     };
 
     /**
-     * The `count` hottest candidates, the queue's own order among equals
-     * (arrival order, so the sampler's candidates keep theirs). One pass over
-     * the queue and a short sorted list, not a sort of the whole queue per feed.
+     * The `count` hottest candidates: the buckets from the hottest down, in
+     * arrival order within one, so the sampler's candidates keep theirs.
      *
      * @param {number} count
      * @returns {[number, number][]}
      */
     const hottest = count=>{
-        /** @type {[number, number, number][]} key, eip, heat */
+        /** @type {[number, number][]} */
         const top = [];
-        for (const [key, eip] of queue)
+        for (let b = buckets.length - 1; b >= 0 && top.length < count; b--)
         {
-            const h = heat.get(key) ?? 0;
-            if (top.length === count && h <= top[top.length - 1][2])
+            for (const entry of buckets[b])
             {
-                continue;
-            }
-            let at = top.length;
-            while (at > 0 && top[at - 1][2] < h)
-            {
-                at--;
-            }
-            top.splice(at, 0, [key, eip, h]);
-            if (top.length > count)
-            {
-                top.pop();
+                top.push(entry);
+                if (top.length === count)
+                {
+                    break;
+                }
             }
         }
-        return top.map(([key, eip])=>[key, eip]);
+        return top;
     };
 
     return {
@@ -860,10 +902,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             if (queue.has(key))
             {
                 // Noted again while it waits: the layer saw it run more, so
-                // it moves up.
-                if (hotness > (heat.get(key) ?? 0))
+                // it moves up a bucket.
+                const b = bucketOf(hotness);
+                const was = heatOf.get(key) ?? 0;
+                if (b > was)
                 {
-                    heat.set(key, hotness);
+                    buckets[was].delete(key);
+                    buckets[b].set(key, eip);
+                    heatOf.set(key, b);
                 }
                 return;
             }
@@ -872,9 +918,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 return;
             }
-            queue.set(key, eip);
-            heat.set(key, hotness);
-            noteKey(key);
+            enqueue(key, eip, hotness);
         },
         /** Writes whatever the store keeps aside from its records, so the
          * names of this run's regions are on disk before the run ends and the
@@ -907,8 +951,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             const batch = hottest(settings.batchRegions);
             for (const [key] of batch)
             {
-                queue.delete(key);
-                heat.delete(key);
+                unqueue(key);
                 dropKey(key);
             }
             // A diagnostic run with classes left out keeps no translations.
@@ -948,8 +991,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                         && !batch.some(([queued])=>queued === keyOf(callee, top)))
                     {
                         batch.push([keyOf(callee, top), callee]);
-                        queue.delete(keyOf(callee, top));
-                        heat.delete(keyOf(callee, top));
+                        unqueue(keyOf(callee, top));
                         dropKey(keyOf(callee, top));
                     }
                 }
@@ -1045,6 +1087,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 queued: queue.size,
                 barren: barren.size,
                 queueDrops: counts.queueDrops,
+                queueEvictions: counts.queueEvictions,
                 volatilePages: counts.volatilePages,
                 exits: { ...exits },
                 // The top untranslated-exit targets over the whole run, and

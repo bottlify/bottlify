@@ -102,6 +102,8 @@
  * @property {number} [maxRegionBlocks]  Default 64.
  * @property {number} [maxRegionBytes]   Default 8192.
  * @property {number} [batchRegions]     Regions per wasm module. Default 32.
+ * @property {number} [maxQueued]        Candidates kept waiting at most; past it the coldest,
+ *     oldest is evicted (the interpreter notes it again should it get hot). Default 8192.
  * @property {number} [missThreshold]    Untranslated exits to one address before the engine
  *     queues it as a candidate of its own. Default 64.
  * @property {('x87' | 'mmx' | 'sse')[]} [leaveOut]  Instruction classes the translator leaves
@@ -179,6 +181,7 @@
  * @property {number} [queued]         Candidates noted and not yet formed.
  * @property {number} [barren]         Candidate keys a region formed nothing at.
  * @property {number} [queueDrops]     Candidates a page write cleared.
+ * @property {number} [queueEvictions] Candidates evicted cold when the queue was full.
  * @property {Record<ExitKind, number>} exits
  * @property {{ address: number, count: number, reason: string }[]} exitsByTarget
  *     The top untranslated-exit targets and why each has no entry.

@@ -140,6 +140,20 @@ test('the hottest candidate is formed first, whatever order the candidates arriv
     assert.ok(m.runtime.entryOf(CODE) >= 0);
 });
 
+test('a full queue evicts its coldest, oldest candidate', async()=>{
+    const m = machine({ maxQueued: 2 });
+    m.runtime.noteHot(CODE, 0, 2);
+    m.runtime.noteHot(CODE + 0x100, 0, 64);
+    m.runtime.noteHot(CODE + 0x200, 0, 4);
+    const d = m.runtime.diagnostics();
+    assert.equal(d.queued, 2);
+    assert.equal(d.queueEvictions, 1, 'the coldest went');
+    // The evicted one is noted again as the interpreter keeps counting it.
+    m.runtime.noteHot(CODE, 0, 128);
+    assert.equal(m.runtime.diagnostics().queued, 2);
+    assert.equal(m.runtime.diagnostics().queueEvictions, 2);
+});
+
 test('a page write clears the candidates on a page above 256 MB', async()=>{
     // A candidate key is eip * 16 + top, past 2^32 there: the page it is
     // filed under must come from a division, not a shift that wraps.
