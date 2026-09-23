@@ -36,8 +36,21 @@ function handle(data, send){
         try
         {
             const built = emitBuilt(job.region, job.entryTop, layout, features, options);
+            // Compiled here too: a WebAssembly.Module travels in the message
+            // (structured clone shares the compiled code), so the engine
+            // thread only instantiates -- the compile was most of its
+            // per-region cost on a loading phase.
+            let compiled = null;
+            try
+            {
+                compiled = new WebAssembly.Module(
+                    /** @type {Uint8Array<ArrayBuffer>} */ (built.module));
+            }
+            catch {
+                compiled = null;
+            }
             transfer.push(built.module.buffer);
-            return { ok: true, built };
+            return { ok: true, built, compiled };
         }
         catch (e){
             const message = e instanceof Error ? e.message : String(e);

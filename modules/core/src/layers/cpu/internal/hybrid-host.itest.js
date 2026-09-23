@@ -437,22 +437,40 @@ function fakeRoot(counter){
             let file = entries.get(name);
             if (!file && options.create)
             {
+                /** @param {Uint8Array} bytes @returns {any} */
+                const fileOf = bytes=>({
+                    size: bytes.length,
+                    arrayBuffer: async()=>bytes.buffer.slice(
+                        bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+                    /** @param {number} from @param {number} to */
+                    slice: (from, to)=>fileOf(bytes.subarray(from, to)),
+                });
                 file = {
                     bytes: new Uint8Array(0),
                     async getFile(){
-                        const bytes = file.bytes;
-                        return {
-                            arrayBuffer: async()=>bytes.buffer.slice(
-                                bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
-                        };
+                        return fileOf(file.bytes);
                     },
-                    async createWritable(){
+                    /** @param {{ keepExistingData?: boolean }} [how] */
+                    async createWritable(how = {}){
+                        let draft = how.keepExistingData
+                            ? new Uint8Array(file.bytes) : new Uint8Array(0);
                         return {
-                            /** @param {Uint8Array} b */
+                            /** @param {any} b */
                             async write(b){
-                                file.bytes = new Uint8Array(b);
+                                if (b instanceof Uint8Array)
+                                {
+                                    draft = new Uint8Array(b);
+                                    return;
+                                }
+                                const grown = new Uint8Array(
+                                    Math.max(draft.length, b.position + b.data.length));
+                                grown.set(draft);
+                                grown.set(b.data, b.position);
+                                draft = grown;
                             },
-                            async close(){},
+                            async close(){
+                                file.bytes = draft;
+                            },
                         };
                     },
                 };

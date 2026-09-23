@@ -46,11 +46,11 @@ export const Tables = Object.freeze({
     UNDO_ENTRIES: 4096,
     UNDO_ENTRY: 24,
     HASH: (1 << 20) + 16 + 4096 * 24,
-    HASH_SLOTS: 65536,
+    HASH_SLOTS: 262144,
     HASH_SLOT: 12,
-    CODE_RANGES: (1 << 20) + 16 + 4096 * 24 + 65536 * 12,
+    CODE_RANGES: (1 << 20) + 16 + 4096 * 24 + 262144 * 12,
     CODE_GRANULE_SHIFT: 5,
-    SIZE: (1 << 20) + 16 + 4096 * 24 + 65536 * 12 + (1 << 21),
+    SIZE: (1 << 20) + 16 + 4096 * 24 + 262144 * 12 + (1 << 21),
 });
 
 /**

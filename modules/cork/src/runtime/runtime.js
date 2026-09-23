@@ -533,9 +533,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      *
      * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string }} one
      * @param {import('./cache.js').CachedRegion} built
+     * @param {WebAssembly.Module | null} [compiled]  The module the worker compiled, when it did.
      * @returns {number} 1 when a region was published, 0 when it was dropped
      */
-    const applyBuilt = (one, built)=>{
+    const applyBuilt = (one, built, compiled = null)=>{
         const { region } = one;
         const eip = region.entry;
         counts.moduleBytes += built.module.length;
@@ -544,7 +545,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         let instance;
         try
         {
-            const module = new WebAssembly.Module(
+            // The worker compiles what it emitted and sends the module along;
+            // a record from the store, or a build made here, is compiled here.
+            const module = compiled ?? new WebAssembly.Module(
                 /** @type {Uint8Array<ArrayBuffer>} */ (built.module));
             instance = new WebAssembly.Instance(module, {
                 env: {
@@ -649,7 +652,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * and publish. Runs on the engine thread when the message arrives, which
      * is between the frames the host asked for.
      *
-     * @param {{ id: number, results: { ok: boolean, built?: any, message?: string }[] }} data
+     * @param {{ id: number, results: { ok: boolean, built?: any,
+     *     compiled?: WebAssembly.Module | null, message?: string }[] }} data
      */
     const onWorkerResults = data=>{
         const batch = outstanding;
@@ -682,7 +686,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 batch.store.put(key, packRegion(built)).catch(()=>{});
                 counts.storeMs += performance.now() - storeAt;
             }
-            applyBuilt(one, built);
+            applyBuilt(one, built, result.compiled ?? null);
         }
     };
 
@@ -925,6 +929,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
          * next run's index can find them. */
         async flush(){
             await settings.store?.flush?.();
+            settings.store?.close?.();
             // The worker holds nothing the store needs; end it and drop any
             // batch it still owes.
             workerClosed = true;

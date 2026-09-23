@@ -68,7 +68,7 @@ before the replay, and is the step that makes the mode whole.
 Between regions, translated
 code needs no slice loop at all where the engine has tail calls: every region function is
 placed in one function table shared by every module, every entry (block start, x87 top) is
-mirrored into an open-addressing hash in the translator's tables (65 536 slots of the
+mirrored into an open-addressing hash in the translator's tables (262 144 slots of the
 address, the table index, the label and the top), and an exit for an untranslated address
 with budget left probes that hash in the epilogue and tail-calls the region found -- a
 return, an indirect jump or a call into translated code costs no crossing, and a hot
@@ -149,14 +149,16 @@ encoding, and the report says `cacheHits`/`cacheMisses`. The five helper functio
 region module needs (`materialise`, the 80-bit conversions, the rounding and the code-hit
 test) are defined once in a shared module instantiated with the same memory and imported by
 each region, not copied into every module -- a saving of about 3 KB a region, which on a
-route that builds tens of thousands of them is most of the module bytes. The directory's records are hashed
-file names beside one index of them, read once when the store is first used, so a lookup is a
-probe of that set and only a hit reads bytes: a miss never asks the file system, whose answer
-to a miss is an exception that costs milliseconds a record. The index is rewritten whole from
-the names known in memory, one write in flight at a time and a flush before the run ends,
-rather than appended a line at a time: a run puts its regions in one turn, and an append that
-reads the old file back first loses every name of a concurrent batch but one -- which emptied a
-real route's index on a warm second run. A record of another emitter
+route that builds tens of thousands of them is most of the module bytes. The directory holds one `records` file with every record appended back to back and one
+`index` naming each record's place in it (a hashed name, an offset, a length), read once when
+the store is first used: a miss never asks the file system, whose answer to a miss is an
+exception that costs milliseconds a record, and a hit is one read at an offset -- synchronous
+through the records file's access handle inside a worker, where the engine runs, so a warm
+load's tens of thousands of hits cost microseconds each rather than a file open apiece. The
+index is rewritten whole from the places known in memory, one write in flight at a time and
+going round again when a put lands during it, the records flushed before it; a place the file
+does not reach (a torn write) is not a record; `flush` before the run ends and `close` after
+let go of the handle. A record of another emitter
 version, feature set or layout is a miss. A region with x87 instructions in it is compiled for the x87 stack top it is entered
 with, and its entries are keyed by address and top (`entryOf(eip, x87Top)`, the top read off
 the emulator's `fpu_stack_ptr` before every turn); a region without them is entered with any
@@ -276,7 +278,7 @@ enter the type check or the bundle.
 |-----------------|----------------------------|---------------------|---------|
 | `memorySize`    | number (power of two)      | `1 GiB`             | Guest RAM. Reserved, not committed: the host pays for pages the guest touches. Must be a power of two; the emulator requires it. With an engine other than `emulator` the top `TABLES_RESERVE` (4 MiB) is the translator's tables, and `layout.memorySize` reports the rest. |
 | `engineUrl`     | string                     | none                | The translator's entry module, imported at `boot()` under `hybrid`; `createApp` resolves it from `cork.moduleUrl` or the package beside core. Absent, `hybrid` runs with no translator. |
-| `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold` (the interpreter's own count under `cork`; default 2, where the sampler's default is 2000; the queue is drained hottest first), `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`, `maxQueued` (the candidates kept waiting, the coldest evicted past it; default 8192), `maxBatchRegions` (a deep queue takes a quarter of itself per batch, up to this; default 256), `feed`, `missThreshold`, and `leaveOut`, the instruction classes (`x87`, `mmx`, `sse`) a run leaves to the emulator so a defect can be localised by class; such a run keeps no translation store. |
+| `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold` (the interpreter's own count under `cork`; default 2, where the sampler's default is 2000; the queue is drained hottest first), `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`, `maxQueued` (the candidates kept waiting, the coldest evicted past it; default 8192), `maxBatchRegions` (a deep queue takes a quarter of itself per batch, up to this; default 256), `maxBatchRegions` (a deep queue takes a quarter of itself per batch, up to this; default 256), `feed`, `missThreshold`, and `leaveOut`, the instruction classes (`x87`, `mmx`, `sse`) a run leaves to the emulator so a defect can be localised by class; such a run keeps no translation store. |
 | `trapPort`      | number                     | `0xb077`            | The I/O port a stub writes its trap id to. |
 | `entryVector`   | number                     | `0x7000`            | Linear address of the dword the ROM jumps through to enter guest code. |
 | `initialStack`  | number                     | `0x300000`          | ESP the ROM sets before jumping into the guest. |

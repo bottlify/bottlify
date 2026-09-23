@@ -137,6 +137,8 @@
  * @property {(key: string, bytes: Uint8Array) => Promise<void>} put
  * @property {() => Promise<void>} [flush]  Writes any pending bookkeeping
  *     (a directory store's index) before the run ends. Optional.
+ * @property {() => void} [close]  Lets go of what the store holds open (a directory
+ *     store's access handle on its records file). Optional; after `flush`.
  */
 
 /**
@@ -240,4 +242,4 @@
  * grown behind its views. The layer reports the RAM below it as the memory's
  * size to every other layer, so nothing of the guest is ever placed there.
  */
-export const TABLES_RESERVE = 4 * 1024 * 1024;
+export const TABLES_RESERVE = 8 * 1024 * 1024;
