@@ -55,12 +55,16 @@ function git(args){
 }
 
 function requireDocker(){
+    // The answer has to be a version, not merely a zero exit: an npm package
+    // named `docker` (a documentation generator) on one PATH accepted every
+    // argument, exited 0 and built nothing.
     const probe = spawnSync(
-        'docker', ['version', '--format', '{{.Server.Version}}'], { stdio: 'ignore' });
-    if (probe.status !== 0)
+        'docker', ['version', '--format', '{{.Server.Version}}'], { encoding: 'utf8' });
+    if (probe.status !== 0 || !/^\d+\.\d+/.test((probe.stdout ?? '').trim()))
     {
-        throw new Error('docker is required for the container build of zstd.wasm and is not'
-            + ' available; on a machine with clang and lld, `--native` builds it directly');
+        throw new Error('docker is required for the container build of zstd.wasm and the'
+            + ' `docker` on PATH is not it (no server version answered); on a machine with'
+            + ' clang and lld, `--native` builds it directly');
     }
 }
 
