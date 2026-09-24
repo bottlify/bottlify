@@ -388,3 +388,25 @@ test('a frame carries the counters of the layers it was given, and zero for the 
     assert.equal(row[FRAME_COLUMNS.length + FRAME_COLUMNS.indexOf('retired')], 4000,
         'the next row carries the next reading, cumulative as the counter is');
 });
+
+test('the slowest frames of the whole run are kept after the ring has lapped them', ()=>{
+    const { profiler, at } = harness({ frames: 3 });
+    let time = 0;
+    for (let index = 0; index < 40; index++)
+    {
+        // Frame 5 is the freeze: a texture upload held the thread for 300.
+        const long = index === 5;
+        at(time).beginFrame();
+        at(time + 1).begin(long ? 'glCompressedTexImage2DARB' : 'glDrawElements');
+        at(time + (long ? 301 : 11)).end(long ? 'glCompressedTexImage2DARB' : 'glDrawElements');
+        time += long ? 320 : 20;
+        at(time).endFrame();
+    }
+    const { slowestFrames, recentFrames } = profiler.snapshot();
+    assert.ok(!recentFrames.some((/** @type {any} */ frame)=>frame.index === 5),
+        'the ring has moved past it');
+    assert.equal(slowestFrames.length, 8);
+    assert.equal(slowestFrames[0].index, 5);
+    assert.equal(slowestFrames[0].ms, 320);
+    assert.deepEqual(slowestFrames[0].longest, { name: 'glCompressedTexImage2DARB', ms: 300 });
+});

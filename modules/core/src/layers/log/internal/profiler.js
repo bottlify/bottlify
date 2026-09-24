@@ -284,6 +284,13 @@ export function createProfiler(options){
     /** @type {FrameRecord | null} */
     let open = null;
     let frameIndex = 0;
+    /**
+     * The slowest frames of the whole run, slowest first: a freeze a minute ago
+     * is gone from the ring of recent frames, and it is the one to explain.
+     * @type {FrameRecord[]}
+     */
+    const slowest = [];
+    const SLOWEST = 8;
     let unbalanced = 0;
     /**
      * What each imbalance was, for the first few. A count alone says the
@@ -570,6 +577,12 @@ export function createProfiler(options){
             {
                 publishFrame(slot, tables.frames);
             }
+            if (slowest.length < SLOWEST || slot.ms > slowest[slowest.length - 1].ms)
+            {
+                slowest.push(copyFrame(slot));
+                slowest.sort((one, two)=>two.ms - one.ms);
+                slowest.length = Math.min(slowest.length, SLOWEST);
+            }
             return copyFrame(slot);
         },
 
@@ -606,6 +619,7 @@ export function createProfiler(options){
                 averageFrameMs: recent.length > 0 ? totalMs / recent.length : 0,
                 phases: [...rows.values()].sort((one, two)=>two.selfMs - one.selfMs),
                 worstFrames: [...recent].sort((one, two)=>two.ms - one.ms).slice(0, worst),
+                slowestFrames: slowest.map(copyFrame),
                 recentFrames: recent,
             };
         },

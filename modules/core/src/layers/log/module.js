@@ -368,6 +368,15 @@ export const logModule = {
                 // Which ones, for the first few: a count says the accounting is
                 // wrong somewhere, a name says where.
                 imbalances: profile.imbalances,
+                // The run's slowest frames, each with what held it longest: what
+                // a freeze was made of, long after the ring of recent frames
+                // has moved past it.
+                slowFrames: profile.slowestFrames.map((/** @type {any} */ frame)=>
+                    `#${frame.index} ${frame.ms.toFixed(0)}ms host=${frame.byKind.host.toFixed(0)}`
+                    + ` guest=${frame.byKind.guest.toFixed(0)}`
+                    + ` longest=${frame.longest.name}:${frame.longest.ms.toFixed(0)}`
+                    + ` slice=${frame.longestGuest.ms.toFixed(0)}ms`
+                    + `/${frame.longestGuest.instructions}`),
                 topPhases: profile.phases.slice(0, TOP_PHASES).map((/** @type {any} */ row)=>
                     `${row.name} ${row.kind} x${row.count} self=${row.selfMs.toFixed(3)}`
                     + ` worst=${row.worstMs.toFixed(3)}`),

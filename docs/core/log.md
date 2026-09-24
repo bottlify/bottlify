@@ -98,6 +98,7 @@ figures nobody keeps as they change are copied into their tables.
 | `averageFrameMs` | Mean wall time over the history. |
 | `unbalancedPhases`, `imbalances` | Count of `end` calls that did not pair, and the first eight described by name. |
 | `topPhases` | The sixteen phases with the most self time, as `name kind xcount self=… worst=…`. |
+| `slowFrames` | The eight slowest frames of the whole run, slowest first, as `#index ms host=… guest=… longest=phase:ms slice=ms/instructions` -- a freeze long gone from the ring of recent frames, with what held it longest. |
 
 `issues` carries the "no clock configured" notice when `now` was not a function.
 
