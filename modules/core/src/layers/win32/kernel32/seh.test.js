@@ -246,23 +246,83 @@ test('unwinding calls each handler with the unwinding flag, and stops at the tar
     assert.equal(m.get(TEB), frames[2], 'and the head becomes the target');
 });
 
-test('a walk that never reached its target leaves the head alone', async()=>{
-    // Writing back the frame the walk gave up on publishes the damage for the
-    // next throw to walk again.
+test('an unwind to a frame that is not on the chain unwinds nothing', async()=>{
+    // The target is the program's mistake. Taking every frame off on the way
+    // to not finding it would destroy state the program still has, and
+    // writing back the frame the walk gave up on publishes damage.
     const m = machine();
     const frames = m.registerFrames([0x51000, 0x52000]);
 
     const result = await m.seh.unwind(0x79000, 0x401000);
 
     assert.equal(result.unwound, false);
+    assert.deepEqual(m.called, [], 'no handler is told its frame is going');
     assert.equal(m.get(TEB), frames[0], 'unchanged');
+});
+
+test('each frame leaves the chain as its handler returns, not all at the end', async()=>{
+    // A handler that raises while it runs -- a destructor that throws -- starts
+    // a new dispatch from the head as it stands, and must not find the frames
+    // already unwound still on it.
+    /** @type {number[]} */
+    const heads = [];
+    const m = machine({ answer: ()=>{
+        heads.push(m.get(TEB));
+        return Disposition.CONTINUE_SEARCH;
+    } });
+    const frames = m.registerFrames([0x51000, 0x52000, 0x53000]);
+
+    await m.seh.unwind(frames[2], 0x401000);
+
+    assert.deepEqual(heads, [frames[0], frames[1]],
+        'a handler runs with its own frame still at the head, and the one before it gone');
+    assert.equal(m.get(TEB), frames[2]);
+});
+
+test('an unwind with no target takes every frame, and says it is an exit unwind', async()=>{
+    const m = machine();
+    m.registerFrames([0x51000, 0x52000]);
+
+    const result = await m.seh.unwind(0, 0x401000);
+
+    assert.equal(result.unwound, true);
+    assert.deepEqual(m.called.map(call=>call.entry), [0x51000, 0x52000]);
+    const [{ args: [record] }] = m.called;
+    assert.equal(m.get(record + RECORD.FLAGS) & 0x06, 0x06, 'unwinding, and exit unwind');
+    assert.equal(m.get(TEB), END_OF_CHAIN);
+});
+
+test('an unwind for an exception shows handlers that exception, flagged as unwinding', async()=>{
+    const m = machine();
+    const frames = m.registerFrames([0x51000, 0x52000]);
+    const exception = 0x31000;
+    m.put(exception + RECORD.CODE, 0xe06d7363);
+
+    await m.seh.unwind(frames[1], 0x401000, { record: exception });
+
+    assert.equal(m.called[0].args[0], exception, 'the exception, not a record of its own');
+    assert.equal(m.get(exception + RECORD.FLAGS) & EH_UNWINDING, EH_UNWINDING);
+});
+
+test('an unwind carves its record below the stack it is told, not the processor\'s', async()=>{
+    // A caller that has awaited anything is no longer on the processor; what
+    // the registers say by then belongs to whoever is.
+    const m = machine();
+    const frames = m.registerFrames([0x51000, 0x52000]);
+
+    await m.seh.unwind(frames[1], 0x401000, { registers: { esp: 0x70000 } });
+
+    const [{ args: [record] }] = m.called;
+    assert.ok(record < 0x70000 && record > 0x70000 - 0x400,
+        `the record at 0x${record.toString(16)} is just below the stack given`);
 });
 
 test('a processor fault becomes an exception a program can handle', async()=>{
     const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
     m.registerFrames([0x51000]);
 
-    const result = await m.seh.onFault({ vector: 14, eip: 0x401500, errorCode: 2 });
+    const result = await m.seh.onFault({ vector: 14, eip: 0x401500, errorCode: 2 },
+        { ...m.registers(), eip: 0x401500 });
 
     assert.equal(result.handled, true, 'a program that faults on purpose is ordinary');
     const [{ args: [record] }] = m.called;
@@ -270,14 +330,56 @@ test('a processor fault becomes an exception a program can handle', async()=>{
     assert.equal(m.get(record + RECORD.INFORMATION), 1, 'error code bit 1 says it was a write');
 });
 
+test('a fault\'s context holds the registers the faulting code had', async()=>{
+    // The stub that reported the fault has moved the stack and spent two
+    // registers; the handler has to see the program's, not the stub's.
+    const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+    m.registerFrames([0x51000]);
+    const faulting = { ...m.registers(), eax: 0xa1, edx: 0xd1, esp: 0x60000, eip: 0x401500 };
+
+    const result = await m.seh.onFault({ vector: 0, eip: 0x401500, errorCode: null }, faulting);
+
+    const [{ args: [record, , context] }] = m.called;
+    assert.equal(m.get(record + RECORD.CODE), STATUS.INTEGER_DIVIDE_BY_ZERO);
+    assert.equal(m.get(context + CONTEXT.EAX), 0xa1);
+    assert.equal(m.get(context + CONTEXT.EDX), 0xd1);
+    assert.equal(m.get(context + CONTEXT.ESP), 0x60000);
+    assert.ok(record < 0x60000, 'and the record is built below the faulting stack');
+    assert.equal(result.registers?.eax, 0xa1, 'continuing resumes with them');
+});
+
+test('a protection fault is an access violation with no address to give', async()=>{
+    const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+    m.registerFrames([0x51000]);
+
+    await m.seh.onFault({ vector: 13, eip: 0x401500, errorCode: 0 }, m.registers());
+
+    const [{ args: [record] }] = m.called;
+    assert.equal(m.get(record + RECORD.CODE), STATUS.ACCESS_VIOLATION,
+        'never a privileged instruction: the guest runs at ring zero');
+    assert.equal(m.get(record + RECORD.INFORMATION + 4), 0xffffffff);
+});
+
 test('a vector no program can handle is not dressed up as one it can', async()=>{
     const m = machine();
     m.registerFrames([0x51000]);
 
-    const result = await m.seh.onFault({ vector: 8, eip: 0x401500, errorCode: 0 });
+    assert.equal(m.seh.claims(8), false);
+    assert.equal(m.seh.claims(0), true);
+    const result = await m.seh.onFault({ vector: 8, eip: 0x401500, errorCode: 0 }, m.registers());
 
     assert.equal(result.handled, false);
     assert.equal(m.called.length, 0, 'a double fault is not offered to the program');
+});
+
+test('a fault nothing took, with no last-chance filter, is left to be reported', async()=>{
+    const m = machine();
+    m.registerFrames([0x51000]);
+
+    const result = await m.seh.onFault({ vector: 6, eip: 0x401500, errorCode: null },
+        m.registers());
+
+    assert.equal(result.handled, false, 'the report is the only account of it');
 });
 
 test('the top-level filter is guest code, and is called', async()=>{
@@ -295,7 +397,7 @@ test('the top-level filter is guest code, and is called', async()=>{
 });
 
 test('RaiseException dispatches instead of throwing', async()=>{
-    const m = machine();
+    const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
     m.registerFrames([0x51000]);
     m.put(0x30000, 0xaa);
     m.put(0x30004, 0xbb);
@@ -308,11 +410,47 @@ test('RaiseException dispatches instead of throwing', async()=>{
     assert.equal(m.get(record + RECORD.INFORMATION + 4), 0xbb);
 });
 
-test('an unhandled non-continuable exception is reported, not returned from', async()=>{
+test('an exception nothing handles ends the process with its code, and never returns', async()=>{
+    /** @type {any[]} */
+    const ended = [];
     const m = machine();
+    const seh = createSeh({ ...m.host, terminate: what=>ended.push(what) });
     m.registerFrames([]);
 
-    await assert.rejects(
-        ()=>m.seh.table.RaiseException.handler([0xc0000017, 1, 0, 0]),
-        /could not continue/);
+    let returned = false;
+    seh.table.RaiseException.handler([0xc0000017, 1, 0, 0]).then(()=>{
+        returned = true;
+    });
+    await new Promise(resolve=>setImmediate(resolve));
+
+    assert.deepEqual(ended, [{ code: 0xc0000017, address: 0x401000 }]);
+    assert.equal(returned, false, 'the call that raised does not come back');
+});
+
+test('the last-chance filter is asked first, and can have the exception continue', async()=>{
+    /** @type {any[]} */
+    const ended = [];
+    const m = machine({ answer: entry=>(entry === 0x61000 ? -1 : Disposition.CONTINUE_SEARCH) });
+    const seh = createSeh({ ...m.host, terminate: what=>ended.push(what) });
+    m.registerFrames([0x51000]);
+    seh.table.SetUnhandledExceptionFilter.handler([0x61000]);
+
+    const result = await seh.raise({ code: 0xe0000002, address: 0x401000 });
+
+    assert.equal(result.handled, true);
+    assert.deepEqual(m.called.map(call=>call.entry), [0x51000, 0x61000],
+        'the chain first, then the filter');
+    const [pointers] = m.called[1].args;
+    assert.equal(m.get(pointers), m.called[0].args[0], 'handed the same record the chain saw');
+    assert.deepEqual(ended, []);
+});
+
+test('RtlUnwind answers with the value it was given for EAX', async()=>{
+    const m = machine();
+    const frames = m.registerFrames([0x51000, 0x52000]);
+
+    const answer = await m.seh.table.RtlUnwind.handler([frames[1], 0x401000, 0, 0x1234]);
+
+    assert.equal(answer, 0x1234);
+    assert.equal(m.get(TEB), frames[1]);
 });

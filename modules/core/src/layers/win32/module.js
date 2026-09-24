@@ -20,9 +20,9 @@ import { createEnvironmentFunctions } from './kernel32/environment.js';
 import { createSystemFunctions } from './kernel32/system.js';
 import { createSpawner, createSpawnFunctions } from './kernel32/spawn.js';
 import { createAtomFunctions } from './kernel32/atoms.js';
-import { createExceptionFunctions } from './kernel32/exceptions.js';
 import { createSeh } from './kernel32/seh.js';
 import { createCrtSeh } from './msvcrt/seh.js';
+import { createCxxExceptions } from './msvcrt/eh.js';
 import { createResourceFunctions } from './kernel32/resources.js';
 import { createProfileFunctions } from './kernel32/profile.js';
 import { createDriveFunctions } from './kernel32/drives.js';
@@ -576,6 +576,18 @@ export const win32Module = {
             }),
         });
 
+        /**
+         * How the C runtime ends a process that has already lost -- `abort`,
+         * `terminate`, a pure virtual call: exit code 3, as the runtime's own
+         * does, and a line saying why, since the code alone says nothing.
+         *
+         * @param {string} why
+         */
+        const abortProcess = why=>{
+            trace(`the C runtime aborted the process: ${why}`);
+            exitCode ??= 3;
+        };
+
         // Structured exception handling. Everything it needs now exists: the
         // chain's head lives in the thread block at FS:[0], and a processor
         // fault is reported with its vector rather than stopping the machine.
@@ -594,6 +606,12 @@ export const win32Module = {
             currentThread: ()=>kernel.currentThread(),
             /** @param {string} text */
             trace: text=>trace(text),
+            // What Windows does once nothing handled an exception and the
+            // last-chance filter declined it: the process ends, with the
+            // exception's code as its exit code.
+            terminate: ({ code })=>{
+                exitCode = code >>> 0;
+            },
         });
 
         // The one IMalloc, shared by ole32 and shell32: a block the shell
@@ -862,10 +880,6 @@ export const win32Module = {
                     spawned: request=>config?.spawned?.(request),
                     spawner,
                 }),
-                // Placed after the throwing pair it replaces: RaiseException and
-                // RtlUnwind are defined by not returning, and now there is a
-                // chain to walk they can do that properly.
-                ...createExceptionFunctions({ readMemory }),
                 ...seh.table,
                 ...createModuleFunctions({
                     readCString,
@@ -923,7 +937,9 @@ export const win32Module = {
                     setRegisters,
                     /** @param {any} call */
                     callGuest: call=>bridge.callGuest(call),
+                    continueAt: (registers, options)=>bridge.continueAt(registers, options),
                     currentThread: ()=>kernel.currentThread(),
+                    teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
                     unwind: seh.unwind,
                     divergence: config?.divergence,
                 }).table,
@@ -986,7 +1002,29 @@ export const win32Module = {
                         exit: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
                     },
                     divergence: config?.divergence,
+                    abort: abortProcess,
                 }),
+                // After the runtime's own table: `terminate` is answered here,
+                // where the handler `set_terminate` installed is known.
+                ...createCxxExceptions({
+                    readMemory,
+                    writeMemory,
+                    readCString,
+                    /** @param {number} address */
+                    isMapped: address=>memory.find(address) !== null,
+                    registers: ()=>Object.fromEntries(
+                        registerNames.map(name=>[name, cpuRegisters.read(name)])),
+                    /** @param {any} call */
+                    callGuest: call=>bridge.callGuest(call),
+                    continueAt: (registers, options)=>bridge.continueAt(registers, options),
+                    currentThread: ()=>kernel.currentThread(),
+                    raise: what=>seh.raise(what),
+                    unwind: (targetFrame, address, options)=>
+                        seh.unwind(targetFrame, address, options),
+                    abort: abortProcess,
+                    park: ()=>bridge.park(),
+                    divergence: config?.divergence,
+                }).table,
             },
 
             // One registry behind all three, as on a real machine: a socket
@@ -1530,6 +1568,39 @@ export const win32Module = {
                 message: `0x${held.message.toString(16)}`,
                 forMs: Date.now() - held.at,
             })),
+
+            /**
+             * A processor exception the running thread took, offered to the
+             * handlers it registered. Null when it is not one a program can
+             * be handed; otherwise settles with where the thread goes on --
+             * or with null once nothing took it, for the machine to stop on
+             * the fault as it always has. A handler that finds its catch
+             * sends the thread on by itself, and then this never settles.
+             *
+             * @param {{ vector: number, eip: number, errorCode: number | null,
+             *           eflags: number, eax?: number, edx?: number, stack?: number }} fault
+             * @returns {Promise<any> | null}
+             */
+            dispatchFault(fault){
+                if (!kernel.currentThread() || fault.stack === undefined
+                    || !seh.claims(fault.vector))
+                {
+                    return null;
+                }
+                const registers = {
+                    ...Object.fromEntries(registerNames.map(name=>[name, cpuRegisters.read(name)])),
+                    eax: fault.eax ?? 0,
+                    edx: fault.edx ?? 0,
+                    esp: fault.stack,
+                    // A breakpoint is reported at the instruction, not after
+                    // it, as the system reports one.
+                    eip: fault.vector === 3 ? fault.eip - 1 >>> 0 : fault.eip,
+                    eflags: fault.eflags,
+                };
+                return seh.onFault(fault, registers).then(result=>(result.handled
+                    ? bridge.continueAt(/** @type {Record<string, number>} */ (result.registers))
+                    : null));
+            },
 
             /** Set once the guest has asked to terminate. */
             exitCode: ()=>exitCode,

@@ -169,12 +169,6 @@ test('a pure virtual call stops the program rather than returning', ()=>{
     assert.deepEqual(aborted, ['pure virtual function call']);
 });
 
-test('terminate stops it too, by the decorated name a compiler emits', ()=>{
-    const { aborted, table } = build();
-    table['?terminate@@YAXXZ'].handler([]);
-    assert.deepEqual(aborted, ['terminate']);
-});
-
 test('raw_name is the decorated name inside the descriptor; the destructor pops nothing', ()=>{
     // typeid(x) == typeid(y) is a strcmp of raw_name(): an answer of zero
     // there is a null pointer handed to strcmp. Both are thiscall, with `this`

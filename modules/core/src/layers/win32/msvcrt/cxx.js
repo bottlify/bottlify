@@ -195,15 +195,5 @@ export function createCxxFunctions(host){
             argBytes: 4,
             handler: ()=>0,
         },
-
-        /** void terminate(void) */
-        '?terminate@@YAXXZ': {
-            convention: 'cdecl',
-            argBytes: 0,
-            handler: ()=>{
-                host.abort?.('terminate');
-                return 0;
-            },
-        },
     };
 }

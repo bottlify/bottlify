@@ -3105,6 +3105,32 @@ async function buildApp(options){
         wasmBytes: emulator.wasmBytes ?? await bytesAt(/** @type {string} */ (emulator.wasmUrl)),
     });
 
+    // A processor exception goes to the handlers the program registered
+    // before it stops the machine. The thread waits the way a host call does
+    // while they run; if none of them takes it, the machine stops on the
+    // fault exactly as it would have without being asked.
+    cpu.onFault((/** @type {any} */ fault)=>{
+        const thread = kernel.currentThread();
+        const answer = thread ? win32.dispatchFault(fault) : null;
+        if (!answer)
+        {
+            return false;
+        }
+        bridge.holdForFault(thread, {
+            name: `<${fault.name}>`,
+            restingStack: fault.stack ?? 0,
+            hostReturn: fault.eip,
+        }, answer.then((/** @type {any} */ where)=>{
+            if (where)
+            {
+                return where;
+            }
+            cpu.stopWithFault(fault);
+            return new Promise(()=>{});
+        }));
+        return true;
+    });
+
     // Mounted after the emulator is up, because the decoder for a compressed
     // block is inside it: zstd is the only decompressor available here that
     // answers a guest's read without a promise.

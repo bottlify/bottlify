@@ -107,17 +107,32 @@ export const STATUS = Object.freeze({
     SINGLE_STEP: 0x80000004,
     FLOAT_DIVIDE_BY_ZERO: 0xc000008e,
     STACK_OVERFLOW: 0xc00000fd,
+    UNWIND: 0xc0000027,
+    INTEGER_OVERFLOW: 0xc0000095,
+    ARRAY_BOUNDS_EXCEEDED: 0xc000008c,
+    DATATYPE_MISALIGNMENT: 0x80000002,
+    FLOAT_MULTIPLE_TRAPS: 0xc00002b5,
 });
 
-/** Which exception a processor vector is, for the ones a program can handle. */
+/**
+ * Which exception a processor vector is, for the ones a program can handle.
+ *
+ * A general protection fault is an access violation to a program -- the
+ * system reports it with an unknown address -- and never a privileged
+ * instruction here: the guest runs at ring zero, where nothing is privileged.
+ */
 const VECTOR_TO_STATUS = Object.freeze({
     0: STATUS.INTEGER_DIVIDE_BY_ZERO,
     1: STATUS.SINGLE_STEP,
     3: STATUS.BREAKPOINT,
+    4: STATUS.INTEGER_OVERFLOW,
+    5: STATUS.ARRAY_BOUNDS_EXCEEDED,
     6: STATUS.ILLEGAL_INSTRUCTION,
-    13: STATUS.PRIVILEGED_INSTRUCTION,
+    13: STATUS.ACCESS_VIOLATION,
     14: STATUS.ACCESS_VIOLATION,
     16: STATUS.FLOAT_DIVIDE_BY_ZERO,
+    17: STATUS.DATATYPE_MISALIGNMENT,
+    19: STATUS.FLOAT_MULTIPLE_TRAPS,
 });
 
 /**
@@ -151,7 +166,17 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
  *           a handler writing over what it is reading.
  * @property {() => any} [currentThread]
  * @property {(text: string) => void} [trace]
+ * @property {(what: { code: number, address: number }) => void} [terminate]
+ *           Ends the process for an exception nothing handled, with the
+ *           exception's code as its exit code -- what Windows does once the
+ *           last-chance filter has had its say.
  */
+
+/** EXCEPTION_EXIT_UNWIND: an unwind with no target, taking every frame. */
+export const EXCEPTION_EXIT_UNWIND = 0x04;
+
+/** What a filter answers to have the faulting instruction run again. */
+export const EXCEPTION_CONTINUE_EXECUTION = -1;
 
 /**
  * @param {SehHost} host
@@ -166,6 +191,13 @@ export function createSeh(host){
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         host.writeMemory(at, bytes);
     };
+
+    /**
+     * A thread's block, whose first word heads its chain.
+     *
+     * @param {any} [thread]
+     */
+    const tebOf = thread=>(thread?.tebAddress ?? host.teb()) >>> 0;
 
     /** The last top-level filter a program installed. */
     let topLevelFilter = 0;
@@ -235,12 +267,13 @@ export function createSeh(host){
      * above the one before it, ends the walk -- a chain that points backwards
      * is a cycle, and following it does not terminate.
      *
+     * @param {any} [thread]  Whose chain; the running thread's by default.
      * @returns {{ frames: { frame: number, handler: number }[], damaged: boolean }}
      */
-    const chain = ()=>{
+    const chain = thread=>{
         /** @type {{ frame: number, handler: number }[]} */
         const frames = [];
-        let at = readU32(host.teb());
+        let at = readU32(tebOf(thread));
         let previous = 0;
         while (at !== END_OF_CHAIN && at !== 0)
         {
@@ -286,10 +319,17 @@ export function createSeh(host){
      * exception or the chain runs out.
      *
      * @param {{ code: number, flags?: number, address: number, parameters?: number[] }} what
-     * @returns {Promise<{ handled: boolean, registers?: Record<string, number> }>}
+     * @param {Record<string, number>} [given]  The registers at the exception,
+     *        when they are not the processor's right now -- a fault is
+     *        reported from a stub that has already moved the stack and spent
+     *        two of them.
+     * @returns {Promise<{ handled: boolean, registers?: Record<string, number>,
+     *     record?: number, context?: number, top?: number, asked?: any }>}
+     *     When nothing handled it, where the record and context were built,
+     *     for the last-chance filter to be handed the same ones.
      */
-    const dispatch = async what=>{
-        const registers = host.registers();
+    const dispatch = async(what, given)=>{
+        const registers = given ?? host.registers();
         const at = carve(registers);
         writeRecord(at.record, {
             code: what.code >>> 0,
@@ -338,33 +378,76 @@ export function createSeh(host){
             }
         }
 
-        return { handled: false };
+        return { handled: false, record: at.record, context: at.context, top: at.top, asked };
     };
 
     /**
      * Calls each frame's handler with the unwinding flag, down to but not
-     * including the target, and republishes the head.
+     * including the target, taking each frame off the chain as its handler
+     * returns.
+     *
+     * One at a time, not all at the end: a handler that raises while it runs
+     * -- a destructor that throws, a `__finally` that faults -- starts a new
+     * dispatch from the head as it stands, and the frames already unwound
+     * must not be found on it and unwound a second time.
+     *
+     * A target of zero or -1 is no target: every frame goes, which is how a
+     * thread leaves the chain on its way out.
      *
      * @param {number} targetFrame
      * @param {number} address
+     * @param {Object} [options]
+     * @param {number} [options.record]  The record the handlers are shown.
+     *        The exception being unwound for when there is one -- a handler
+     *        reads which exception is taking its frame away -- and a fresh one
+     *        when there is not.
+     * @param {Record<string, number>} [options.registers]  Where the unwinding
+     *        thread stands. Given by a caller that has awaited anything since
+     *        it was called: the processor's registers are somebody else's by
+     *        then, and a record carved below them lands on another stack.
+     * @param {any} [options.thread]  Whose frames these are, for the same reason.
      */
-    const unwind = async(targetFrame, address)=>{
-        const { frames, damaged } = chain();
-        const registers = host.registers();
+    const unwind = async(targetFrame, address, options = {})=>{
+        const { frames, damaged } = chain(options.thread);
+        const registers = options.registers ?? host.registers();
+        const record = options.record ?? 0;
         const at = carve(registers);
-        writeRecord(at.record, {
-            code: STATUS.BREAKPOINT,
-            flags: EH_UNWINDING | EXCEPTION_NONCONTINUABLE,
-            address,
-        });
+        const target = targetFrame >>> 0;
+        const everything = target === 0 || target === END_OF_CHAIN;
+        const flags = EH_UNWINDING | (everything ? EXCEPTION_EXIT_UNWIND : 0);
+        let shown = at.record;
+        if (record !== 0 && host.isMapped(record))
+        {
+            shown = record >>> 0;
+            writeU32(shown + RECORD.FLAGS, readU32(shown + RECORD.FLAGS) | flags);
+        }
+        else
+        {
+            writeRecord(at.record, {
+                code: STATUS.UNWIND,
+                flags: flags | EXCEPTION_NONCONTINUABLE,
+                address,
+            });
+        }
+        writeContext(at.context, registers);
+
+        // A target that is not on the chain is the program's mistake, and
+        // taking every frame off on the way to not finding it would destroy
+        // state the program still has. Nothing is unwound.
+        if (!everything && !frames.some(({ frame })=>frame === target))
+        {
+            return { unwound: false };
+        }
 
         // As above: the unwind runs a handler per frame, and only the first
         // of them runs on the thread that is standing here now.
-        const asked = host.currentThread?.();
-        let reached = false;
-        for (const { frame, handler } of frames)
+        const asked = options.thread ?? host.currentThread?.();
+        const teb = tebOf(asked);
+        let reached = everything;
+        for (let index = 0; index < frames.length; index++)
         {
-            if (frame === (targetFrame >>> 0))
+            const { frame, handler } = frames[index];
+            if (frame === target)
             {
                 reached = true;
                 break;
@@ -373,27 +456,87 @@ export function createSeh(host){
             {
                 await host.callGuest({
                     entry: handler,
-                    args: [at.record, frame, at.context, 0],
+                    args: [shown, frame, at.context, 0],
                     thread: asked,
                     stackAtRest: at.top,
                 });
             }
+            // The next frame is published only when it is one the walk could
+            // read. A chain damaged beyond this frame is left where it is
+            // rather than having the damage written back as the new head.
+            const next = frames[index + 1]?.frame
+                ?? (damaged ? null : END_OF_CHAIN);
+            if (next !== null)
+            {
+                writeU32(teb, next);
+            }
         }
+        return { unwound: reached && !damaged };
+    };
 
-        // Only when the walk actually arrived. A chain that was damaged, or a
-        // target that was never on it, leaves the head alone: writing the frame
-        // the walk gave up on would publish the damage for the next throw.
-        if (reached && !damaged)
+    /**
+     * An exception nothing on the chain took: the last-chance filter the
+     * program installed is asked, and the process ends unless it says the
+     * exception is fixed.
+     *
+     * @param {{ code: number, flags?: number, address: number }} what
+     * @param {{ record: number, context: number, top: number, asked?: any }} at
+     * @returns {Promise<{ handled: boolean, registers?: Record<string, number> }>}
+     */
+    const lastChance = async(what, at)=>{
+        if (topLevelFilter !== 0)
         {
-            writeU32(host.teb(), targetFrame >>> 0);
+            const pointers = (at.top - 8) >>> 0;
+            writeU32(pointers, at.record);
+            writeU32(pointers + 4, at.context);
+            const answer = await host.callGuest({
+                entry: topLevelFilter,
+                args: [pointers],
+                thread: at.asked,
+                stackAtRest: pointers,
+            }) | 0;
+            if (answer === EXCEPTION_CONTINUE_EXECUTION
+                && ((what.flags ?? 0) & EXCEPTION_NONCONTINUABLE) === 0)
+            {
+                return { handled: true, registers: readContext(at.context) };
+            }
         }
-        return { unwound: reached };
+        host.trace?.(`unhandled exception ${hex(what.code)} at ${hex(what.address)}`);
+        host.terminate?.({ code: what.code >>> 0, address: what.address >>> 0 });
+        // The process is over; the call that raised never returns.
+        return new Promise(()=>{});
+    };
+
+    /**
+     * Raises an exception on the running thread and answers with what the
+     * raising call should do next. Nothing handled means the process ends.
+     *
+     * @param {{ code: number, flags?: number, address: number, parameters?: number[] }} what
+     */
+    const raise = async what=>{
+        const result = await dispatch(what);
+        if (result.handled)
+        {
+            return result;
+        }
+        return lastChance(what, {
+            record: result.record ?? 0, context: result.context ?? 0,
+            top: result.top ?? 0, asked: result.asked,
+        });
     };
 
     return {
         dispatch,
+        raise,
         unwind,
         chain,
+
+        /**
+         * Whether a processor exception is one a program can be handed.
+         *
+         * @param {number} vector
+         */
+        claims: vector=>Object.hasOwn(VECTOR_TO_STATUS, vector),
 
         /**
          * A processor exception, offered to the program before it becomes a
@@ -402,8 +545,11 @@ export function createSeh(host){
          * loses every one of them.
          *
          * @param {{ vector: number, eip: number, errorCode: number | null }} fault
+         * @param {Record<string, number>} registers  The faulting code's, as
+         *        the context shows them.
+         * @returns {Promise<{ handled: boolean, registers?: Record<string, number> }>}
          */
-        async onFault(fault){
+        async onFault(fault, registers){
             const code = VECTOR_TO_STATUS[/** @type {keyof typeof VECTOR_TO_STATUS} */
                 (fault.vector)];
             if (code === undefined)
@@ -411,11 +557,27 @@ export function createSeh(host){
                 return { handled: false };
             }
             // An access violation says whether it was a read or a write, and
-            // what address, because a handler is allowed to read them.
+            // what address, because a handler is allowed to read them. A
+            // protection fault has no address to give, and says so with -1.
             const parameters = code === STATUS.ACCESS_VIOLATION
-                ? [(fault.errorCode ?? 0) & 2 ? 1 : 0, 0]
+                ? [(fault.errorCode ?? 0) & 2 ? 1 : 0, fault.vector === 13 ? 0xffffffff : 0]
                 : [];
-            return dispatch({ code, address: fault.eip, parameters });
+            const result = await dispatch({ code, address: registers.eip, parameters }, registers);
+            if (result.handled)
+            {
+                return result;
+            }
+            // The last chance, as for a raise -- except that a program with no
+            // filter of its own ends with the fault reported rather than with
+            // an exit code, since the report is the only account of it.
+            if (topLevelFilter === 0)
+            {
+                return { handled: false };
+            }
+            return lastChance({ code, address: registers.eip }, {
+                record: result.record ?? 0, context: result.context ?? 0,
+                top: result.top ?? 0, asked: result.asked,
+            });
         },
 
         /** The guest-callable half. */
@@ -436,17 +598,12 @@ export function createSeh(host){
                     {
                         parameters.push(readU32(from + at * 4));
                     }
-                    return dispatch({
+                    return raise({
                         code: code >>> 0,
-                        flags: flags >>> 0,
+                        flags: flags >>> 0 & EXCEPTION_NONCONTINUABLE,
                         address: host.registers().eip,
                         parameters,
                     }).then(result=>{
-                        if (!result.handled && (flags >>> 0 & EXCEPTION_NONCONTINUABLE) !== 0)
-                        {
-                            throw new Error(`RaiseException: ${hex(code)} was not handled `
-                                + 'and the program said it could not continue');
-                        }
                         if (result.registers)
                         {
                             host.setRegisters(result.registers);
@@ -463,8 +620,9 @@ export function createSeh(host){
             RtlUnwind: {
                 argBytes: 16,
                 /** @param {number[]} args */
-                handler: ([targetFrame, targetIp])=>
-                    unwind(targetFrame >>> 0, targetIp >>> 0).then(()=>0),
+                handler: ([targetFrame, targetIp, record, returnValue])=>
+                    unwind(targetFrame >>> 0, targetIp >>> 0, { record: record >>> 0 })
+                        .then(()=>returnValue >>> 0),
             },
 
             /**
