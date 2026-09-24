@@ -35,46 +35,55 @@ export { Fault, Unsupported, createState };
 const decodedBy = new WeakMap();
 // ponytail: cleared whole when full; an LRU if a title's cold set churns it.
 const DECODED_CAP = 1 << 16;
+const NO_BYTES = new Uint8Array(0);
 
 /**
- * @typedef {{ decoded: import('./decode/decoder.js').Instruction, bytes: Uint8Array,
+ * An instruction's entry: where it starts and where the next one does, and its
+ * compiled step. A refusal is an entry of the same shape with no bytes, not
+ * kept.
+ *
+ * @typedef {{ decoded: import('./decode/decoder.js').Instruction
+ *         | import('./decode/decoder.js').Refusal,
+ *     bytes: Uint8Array, start: number, next: number,
  *     step: ((state: import('./ir.js').EvalState) => void) | null }} CachedStep
  */
 
 /**
- * @param {import('./ir.js').EvalState} state
- * @returns {CachedStep | { decoded: import('./decode/decoder.js').Refusal, step: null }}
+ * Whether memory still holds `bytes` at `address`, read as the decoder would
+ * (a fault where it would fault). A memory that knows its own layout answers
+ * it without a call a byte (`blockState`'s `same`).
+ *
+ * @param {{ read: (address: number, size: number) => number }} memory
+ * @param {number} address @param {Uint8Array} bytes
  */
-function decodeCached(state){
-    const { memory, eip } = state;
-    let cache = decodedBy.get(state);
-    if (cache === undefined)
+function sameBytes(memory, address, bytes){
+    for (let i = 0; i < bytes.length; i++)
     {
-        cache = new Map();
-        decodedBy.set(state, cache);
+        if (memory.read(address + i, 1) !== bytes[i])
+        {
+            return false;
+        }
     }
+    return true;
+}
+
+/**
+ * @param {import('./ir.js').EvalState} state
+ * @param {Map<number, CachedStep>} cache
+ * @returns {CachedStep}
+ */
+function decodeCached(state, cache){
+    const { memory, eip } = state;
     const hit = cache.get(eip);
-    if (hit !== undefined)
+    if (hit !== undefined && (memory.same !== undefined
+        ? memory.same(eip, hit.bytes) : sameBytes(memory, eip, hit.bytes)))
     {
-        const { bytes } = hit;
-        let same = true;
-        for (let i = 0; i < bytes.length; i++)
-        {
-            if (memory.read(eip + i, 1) !== bytes[i])
-            {
-                same = false;
-                break;
-            }
-        }
-        if (same)
-        {
-            return hit;
-        }
+        return hit;
     }
     const decoded = decode(address=>memory.read(address, 1), eip);
     if ('refused' in decoded)
     {
-        return { decoded, step: null };
+        return { decoded, bytes: NO_BYTES, start: eip, next: 0, step: null };
     }
     {
         if (cache.size >= DECODED_CAP)
@@ -86,7 +95,10 @@ function decodeCached(state){
         {
             bytes[i] = memory.read(eip + i, 1);
         }
-        const entry = { decoded, bytes, step: compileFast(decoded) };
+        const entry = {
+            decoded, bytes, start: eip, next: (eip + decoded.length) >>> 0,
+            step: compileFast(decoded),
+        };
         cache.set(eip, entry);
         return entry;
     }
@@ -122,6 +134,12 @@ export function interpret(state, maxInstructions = 1, options = {}){
     // Where falling through from the last instruction lands.
     let fallthrough = entered === true ? -1 : state.eip;
     let first = force === true;
+    let cache = decodedBy.get(state);
+    if (cache === undefined)
+    {
+        cache = new Map();
+        decodedBy.set(state, cache);
+    }
     while (state.retired - before < maxInstructions && !state.halted)
     {
         if (!first && shouldStop !== undefined && shouldStop())
@@ -129,25 +147,31 @@ export function interpret(state, maxInstructions = 1, options = {}){
             break;
         }
         first = false;
-        const { decoded, step } = decodeCached(state);
-        if ('refused' in decoded)
+        // Every entry has the one shape, and the decoded record (whose shape
+        // varies with the instruction) is not touched on a compiled step.
+        const { decoded, start, next, step } = decodeCached(state, cache);
+        if (step === null && 'refused' in decoded)
         {
             throw new Unsupported(decoded.opcode, decoded.eip);
         }
         // The instruction's own address, for a page fault raised from inside
         // `evaluate` after it has moved eip to the next instruction.
-        state.faultEip = decoded.eip;
-        onStep?.(decoded.eip, decoded.eip !== fallthrough);
-        fallthrough = (decoded.eip + decoded.length) >>> 0;
+        state.faultEip = start;
+        onStep?.(start, start !== fallthrough);
+        fallthrough = next;
         try
         {
             if (step !== null)
             {
+                // A compiled step finds eip and the count already moved, as
+                // `evaluate` moves them before its work.
+                state.eip = next;
+                state.retired++;
                 step(state);
             }
             else
             {
-                evaluate(decoded, state);
+                evaluate(/** @type {import('./decode/decoder.js').Instruction} */ (decoded), state);
             }
         }
         catch (e){
@@ -156,7 +180,7 @@ export function interpret(state, maxInstructions = 1, options = {}){
             // names what it actually met.
             if (e instanceof Unsupported && e.eip === undefined)
             {
-                e.eip = decoded.eip;
+                e.eip = start;
             }
             throw e;
         }
@@ -184,6 +208,11 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
     // DataView call and its bounds check; wider accesses keep the DataView.
     const ramBytes = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     const reg = new Uint32Array(memory.buffer, layout.regs, 8);
+    // Every step writes eip and most read and write eflags: a word array is
+    // cheaper than a DataView call where the block keeps them aligned.
+    const words = new Uint32Array(memory.buffer, 0, memory.buffer.byteLength >>> 2);
+    const eipWord = layout.eip % 4 === 0 ? layout.eip >>> 2 : -1;
+    const eflagsWord = layout.eflags % 4 === 0 ? layout.eflags >>> 2 : -1;
     // The page flags as bytes: every access tests one or two, and a typed array
     // is cheaper than a DataView call.
     const pageFlags = new Uint8Array(memory.buffer, layout.tables + Tables.PAGE_FLAGS,
@@ -214,12 +243,14 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
         return granule(address) >= view.getUint8(range)
             && granule(address) < view.getUint8(range + 1);
     };
-    /** The instruction's own address, kept by `interpret` for a fault's EIP. */
-    let faultEip = 0;
-    const fault = ()=>new Fault(13, faultEip);
+    const fault = ()=>new Fault(13, state.faultEip);
+    // An access within one page tests that page's flag once; one that crosses
+    // a page tests both, as `inaccessible` does.
     /** @param {number} address @param {number} size */
     const read = (address, size)=>{
-        if (inaccessible(address, size))
+        if ((address & 0xfff) <= 0x1000 - size
+            ? (pageFlags[address >>> 12] & PageFlag.INACCESSIBLE) !== 0
+            : inaccessible(address, size))
         {
             throw fault();
         }
@@ -229,6 +260,25 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
     };
     /** @param {number} address @param {number} size @param {number} value */
     const write = (address, size, value)=>{
+        // A store within one page of plain memory -- neither inaccessible nor
+        // holding translated code -- has nothing to test after its flag.
+        if ((address & 0xfff) <= 0x1000 - size
+            && (pageFlags[address >>> 12] & (PageFlag.INACCESSIBLE | PageFlag.HAS_CODE)) === 0)
+        {
+            if (size === 1)
+            {
+                ramBytes[address] = value;
+            }
+            else if (size === 2)
+            {
+                view.setUint16(layout.ramBase + address, value, true);
+            }
+            else
+            {
+                view.setUint32(layout.ramBase + address, value, true);
+            }
+            return;
+        }
         if (inaccessible(address, size))
         {
             throw fault();
@@ -284,13 +334,31 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
             xmmIn = true;
         }
     };
-    return {
-        reg,
-        memory: { read, write },
-        halted: false,
-        retired: 0,
-        trapped: [],
-        rdtsc,
+    /** The decode cache's check: whether RAM still holds `bytes` at `address`,
+     * compared in place when they lie in one accessible page, read one by one
+     * (faulting as a fetch would) when not.
+     * @param {number} address @param {Uint8Array} bytes */
+    const same = (address, bytes)=>{
+        const n = bytes.length;
+        if ((address & 0xfff) > 0x1000 - n
+            || (pageFlags[address >>> 12] & PageFlag.INACCESSIBLE) !== 0)
+        {
+            return sameBytes({ read }, address, bytes);
+        }
+        for (let i = 0; i < n; i++)
+        {
+            if (ramBytes[address + i] !== bytes[i])
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+    // The accessors live on a prototype and the fields a step touches on the
+    // object itself: one literal holding both is too many accessors for V8's
+    // fast properties, and every `state.retired++` and `state.eip =` was a
+    // dictionary lookup and an uninlined call.
+    const accessors = {
         get f80(){
             loadX87();
             return f80;
@@ -334,22 +402,30 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
             view.setUint32(layout.mxcsr, value >>> 0, true);
         },
         get eip(){
-            return view.getUint32(layout.eip, true);
+            return eipWord >= 0 ? words[eipWord] : view.getUint32(layout.eip, true);
         },
         set eip(value){
-            view.setUint32(layout.eip, value >>> 0, true);
-        },
-        get faultEip(){
-            return faultEip;
-        },
-        set faultEip(value){
-            faultEip = value >>> 0;
+            if (eipWord >= 0)
+            {
+                words[eipWord] = value;
+            }
+            else
+            {
+                view.setUint32(layout.eip, value >>> 0, true);
+            }
         },
         get eflags(){
-            return view.getUint32(layout.eflags, true);
+            return eflagsWord >= 0 ? words[eflagsWord] : view.getUint32(layout.eflags, true);
         },
         set eflags(value){
-            view.setUint32(layout.eflags, value >>> 0, true);
+            if (eflagsWord >= 0)
+            {
+                words[eflagsWord] = value;
+            }
+            else
+            {
+                view.setUint32(layout.eflags, value >>> 0, true);
+            }
         },
         get fsBase(){
             return layout.fsBase >= 0 ? view.getUint32(layout.fsBase, true) : 0;
@@ -385,4 +461,15 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
             xmmIn = false;
         },
     };
+    const state = /** @type {import('./ir.js').EvalState & typeof accessors} */ (
+        Object.create(accessors));
+    state.reg = reg;
+    state.memory = { read, write, same };
+    state.halted = false;
+    state.retired = 0;
+    state.trapped = [];
+    state.rdtsc = rdtsc;
+    // The instruction's own address, kept by `interpret` for a fault's EIP.
+    state.faultEip = 0;
+    return state;
 }

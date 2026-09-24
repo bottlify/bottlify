@@ -428,3 +428,29 @@ test('fbstp writes the packed BCD and its sign', ()=>{
     assert.deepEqual([...m.ram.slice(0x2010, 0x201a)],
         [2, 0, 0, 0, 0, 0, 0, 0, 0, 0x80]);
 });
+
+test('the x87 memory forms by words: single precision, a negative quadword, a signalling NaN', ()=>{
+    // fld qword [0x2000]; fmul qword [0x2008]; fistp qword [0x2010] under
+    // single precision: the product rounded to 24 bits, stored whole.
+    const a = -(2 ** 40 + 1.7);
+    const b = 3.3;
+    const product = run([0xdd, 0x05, 0x00, 0x20, 0, 0, 0xdc, 0x0d, 0x08, 0x20, 0, 0,
+        0xdf, 0x3d, 0x10, 0x20, 0, 0], state=>{
+        state.control = 0x07f;
+        const bytes = new DataView(new ArrayBuffer(16));
+        bytes.setFloat64(0, a, true);
+        bytes.setFloat64(8, b, true);
+        for (let i = 0; i < 16; i++)
+        {
+            state.memory.write(0x2000 + i, 1, bytes.getUint8(i));
+        }
+    });
+    assert.equal(product.view.getBigInt64(0x2010, true), BigInt(Math.fround(a * b)));
+    // fld dword [0x2000]; fstp qword [0x2008] of a signalling NaN: IE, and
+    // the value stored quieted with its payload.
+    const nan = run([0xd9, 0x05, 0x00, 0x20, 0, 0, 0xdd, 0x1d, 0x08, 0x20, 0, 0], state=>{
+        state.memory.write(0x2000, 4, 0x7f800001);
+    });
+    assert.equal(nan.state.status & 1, 1);
+    assert.equal(nan.view.getBigUint64(0x2008, true), 0x7ff8000020000000n);
+});

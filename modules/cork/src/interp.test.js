@@ -187,4 +187,44 @@ test('blockState faults on an inaccessible page and reports a code write', ()=>{
     assert.deepEqual(writes, [[0x40000, 4]]);
     state.memory.write(0x40f00, 1, 0);
     assert.deepEqual(writes, [[0x40000, 4]], 'beside the code, no report');
+    // An access that crosses into the next page is judged by that page too: a
+    // read or a write into an inaccessible one faults, a write whose last byte
+    // lands in translated code reports.
+    assert.throws(()=>state.memory.read(0x2fffe, 4), e=>e instanceof Fault);
+    assert.throws(()=>state.memory.write(0x2ffff, 2, 0), e=>e instanceof Fault);
+    state.memory.write(0x3fffe, 4, 0);
+    assert.deepEqual(writes, [[0x40000, 4], [0x3fffe, 4]]);
+});
+
+test('blockState keeps its fields fast and sees code rewritten in place', ()=>{
+    const layout = ownLayout({ ramSize: 1 << 20 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
+    const state = blockState({ memory, layout });
+    // The step's fields are the object's own and the accessors its
+    // prototype's: one literal holding both fell into V8's dictionary mode.
+    assert.deepEqual(Object.keys(state).sort(),
+        ['faultEip', 'halted', 'memory', 'rdtsc', 'reg', 'retired', 'trapped']);
+    // mov eax, imm32 across a page boundary, then hlt; run, rewrite the
+    // immediate's byte in the second page, run again.
+    const at = 0x1ffe;
+    ram.set([0xb8, 1, 2, 3, 4, 0xf4], at);
+    state.eip = at;
+    interpret(state, 10);
+    assert.equal(state.reg[0], 0x04030201);
+    ram[at + 3] = 9;
+    state.eip = at;
+    state.halted = false;
+    interpret(state, 10);
+    assert.equal(state.reg[0], 0x04090201);
+    // And within one page.
+    ram.set([0xb8, 1, 0, 0, 0, 0xf4], 0x3000);
+    state.eip = 0x3000;
+    state.halted = false;
+    interpret(state, 10);
+    ram[0x3001] = 7;
+    state.eip = 0x3000;
+    state.halted = false;
+    interpret(state, 10);
+    assert.equal(state.reg[0], 7);
 });

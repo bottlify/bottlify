@@ -115,10 +115,17 @@ function byPrecision(value, state){
     {
         return value;
     }
-    const word = bits(value);
-    const rounded = (word + ((word >> 29n) & 1n) + 0x0fffffffn) & -0x20000000n;
-    return (word & 0x7ff0000000000000n) === 0x7ff0000000000000n
-        ? value : fromBits(rounded);
+    // Round to nearest even at bit 29 of the double's bits, as two words: the
+    // low word's sum carries into the high one.
+    scratchF[0] = value;
+    if ((scratchU32[1] & 0x7ff00000) === 0x7ff00000)
+    {
+        return value;
+    }
+    const sum = scratchU32[0] + ((scratchU32[0] >>> 29) & 1) + 0x0fffffff;
+    scratchU32[0] = sum & 0xe0000000;
+    scratchU32[1] += sum >= 4294967296 ? 1 : 0;
+    return scratchF[0];
 }
 
 /** @param {number} value @param {number} control */
@@ -169,22 +176,59 @@ function signalling(value){
 
 /** @param {import('./ir.js').EvalState} state @param {number} address @param {number} size */
 function readMem(state, address, size){
-    let value = 0n;
-    for (let i = size - 1; i >= 0; i--)
+    if (size === 8)
     {
-        value = value << 8n | BigInt(state.memory.read(address + i, 1) & 0xff);
+        const low = state.memory.read(address, 4);
+        return BigInt(state.memory.read(address + 4, 4)) << 32n | BigInt(low);
     }
-    return value;
+    return BigInt(state.memory.read(address, size));
+}
+
+/**
+ * A memory operand's low and high words as numbers, for the loads that need no
+ * BigInt: a double's bits are two words.
+ *
+ * @param {import('./ir.js').EvalState} state @param {number} address
+ */
+function readWords(state, address){
+    scratchU32[0] = state.memory.read(address, 4);
+    scratchU32[1] = state.memory.read(address + 4, 4);
+}
+
+/**
+ * Writes the scratch's two words: a store of a double, or of a quadword the
+ * scratch holds.
+ *
+ * @param {import('./ir.js').EvalState} state @param {number} address
+ */
+function writeWords(state, address){
+    state.memory.write(address, 4, scratchU32[0]);
+    state.memory.write(address + 4, 4, scratchU32[1]);
 }
 
 /** @param {import('./ir.js').EvalState} state @param {number} address @param {number} size @param {number | bigint} value */
 function writeMem(state, address, size, value){
-    let word = BigInt.asUintN(64, BigInt(value));
-    for (let i = 0; i < size; i++)
+    const word = BigInt.asUintN(64, BigInt(value));
+    if (size === 8)
     {
-        state.memory.write(address + i, 1, Number(word & 0xffn));
-        word >>= 8n;
+        state.memory.write(address, 4, Number(word & 0xffffffffn));
+        state.memory.write(address + 4, 4, Number(word >> 32n));
+        return;
     }
+    state.memory.write(address, size, Number(BigInt.asUintN(size * 8, word)));
+}
+
+/**
+ * Writes an integer-valued double as a quadword, two's complement, without a
+ * BigInt: the high word is the floor of a division by 2^32, and what is left
+ * is exact.
+ *
+ * @param {import('./ir.js').EvalState} state @param {number} address @param {number} value
+ */
+function writeQuad(state, address, value){
+    const high = Math.floor(value / 4294967296);
+    state.memory.write(address, 4, (value - high * 4294967296) >>> 0);
+    state.memory.write(address + 4, 4, high >>> 0);
 }
 
 /**
@@ -278,25 +322,27 @@ function loadFloat(state, address, size){
         }
         return f80ToF64(low, high);
     }
+    // A signalling NaN raises IE and loads quieted.
     if (size === 4)
     {
-        let word = readMem(state, address, 4) & 0xffffffffn;
-        if ((word & 0x7fffffffn) > 0x7f800000n && (word & 0x400000n) === 0n)
+        let word = state.memory.read(address, 4);
+        if ((word & 0x7fffffff) > 0x7f800000 && (word & 0x400000) === 0)
         {
             state.status |= Status.IE;
-            word |= 0x400000n;
+            word |= 0x400000;
         }
-        scratchI[0] = BigInt.asIntN(32, word);
-        return Math.fround(new Float32Array(scratch)[0]);
+        scratchU32[0] = word;
+        return scratchF32[0];
     }
-    let word = BigInt.asUintN(64, readMem(state, address, 8));
-    if ((word & 0x7fffffffffffffffn) > 0x7ff0000000000000n
-        && (word & 0x0008000000000000n) === 0n)
+    readWords(state, address);
+    const high = scratchU32[1] & 0x7fffffff;
+    if ((high > 0x7ff00000 || (high === 0x7ff00000 && scratchU32[0] !== 0))
+        && (high & 0x80000) === 0)
     {
         state.status |= Status.IE;
-        word |= 0x0008000000000000n;
+        scratchU32[1] |= 0x80000;
     }
-    return fromBits(word);
+    return scratchF[0];
 }
 
 /** @param {import('./ir.js').EvalState} state @param {number} address @param {number} size @param {number} value */
@@ -313,10 +359,11 @@ function storeFloat(state, address, size, value){
             state.status |= Status.UE;
         }
         scratchF32[0] = Math.fround(value);
-        writeMem(state, address, 4, BigInt(scratchU32[0]));
+        state.memory.write(address, 4, scratchU32[0]);
         return;
     }
-    writeMem(state, address, 8, bits(value));
+    scratchF[0] = value;
+    writeWords(state, address);
 }
 
 /**
@@ -345,11 +392,11 @@ function storeInt(state, address, size, value, truncate){
     }
     if (size === 8)
     {
-        writeMem(state, address, 8, BigInt(Math.trunc(rounded)));
+        writeQuad(state, address, Math.trunc(rounded));
     }
     else
     {
-        writeMem(state, address, size, BigInt(Math.trunc(rounded) >>> 0));
+        state.memory.write(address, size, (Math.trunc(rounded) & (size === 2 ? 0xffff : -1)) >>> 0);
     }
 }
 

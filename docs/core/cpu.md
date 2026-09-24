@@ -277,6 +277,17 @@ code's own register file takes over. A fault it raises goes the same way; an ins
 `cpu: cork has no tier for 0x0f (fxsave) (eip 0x00001003)`: the byte and address are the
 instruction the interpreter actually met, not the address the slice started at.
 
+The interpreter keeps each decoded instruction by address, checked against RAM byte for byte on
+every hit so code rewritten in place is decoded again, with a step compiled for it once
+(`fast.js`): the common integer instructions, shifts and two- and three-operand `imul` included,
+become a function of the state with their operands resolved, and an x87 instruction goes
+straight to the x87 model; the rest runs through `evaluate`. `blockState` keeps the fields a
+step touches on the state object itself and its accessors on a prototype -- one literal holding
+both put the object in V8's dictionary mode, and every `state.retired++` was a hash lookup (a
+load/add/store loop 250 -> 20 ns an instruction, x87 370 -> 56). An access within one page tests
+that page's flag once, and a store to a page that is neither inaccessible nor translated code
+does nothing more; an access that crosses a page is judged by both.
+
 In `cork` mode the interpreter counts hotness itself, at the starts a jump reached -- a taken
 branch, a call, a return, or the target a region's untranslated exit went to -- in a flat array over
 the address space (not a map: a straight-line loader runs millions of instructions once and would
