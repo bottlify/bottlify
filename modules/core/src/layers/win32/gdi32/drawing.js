@@ -67,8 +67,6 @@ const RGNDATAHEADER_SIZE = 32;
 const RECT_SIZE = 16;
 const RDH_RECTANGLES = 1;
 
-/** ABC: three LONGs, the left bearing, the black width and the right bearing. */
-const ABC_SIZE = 12;
 
 /** What a call that should have returned a UINT says when it failed. */
 const GDI_ERROR = 0xffffffff;
@@ -592,26 +590,19 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
         ExtTextOutA: {
             argBytes: 32,
             /** @param {number[]} args */
-            handler: ([handle, x, y, options, rect, string, count, dx])=>{
-                const interfaces = bound(handle);
-                if (!interfaces)
-                {
-                    return 0;
-                }
-                const length = count >>> 0;
-                const text = (string >>> 0) === 0 || length === 0
-                    ? ''
-                    : String.fromCharCode(...host.readMemory(string >>> 0, length));
-                const advances = (dx >>> 0) === 0 || length === 0
-                    ? undefined
-                    : [...Array(length).keys()].map(index=>{
-                        const bytes = host.readMemory((dx >>> 0) + index * 4, 4);
-                        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16
-                            | bytes[3] << 24) | 0;
-                    });
-                return interfaces.extTextOutA(handle >>> 0, x | 0, y | 0, options >>> 0,
-                    (rect >>> 0) === 0 ? null : readRect(host, rect), text, advances) ? 1 : 0;
-            },
+            handler: args=>extTextOut(args, false),
+        },
+
+        /**
+         * BOOL ExtTextOutW(HDC hdc, int x, int y, UINT options,
+         *   const RECT *lprect, LPCWSTR lpString, UINT c, const INT *lpDx)
+         *
+         * The same call over UTF-16 code units, drawn by the same engine.
+         */
+        ExtTextOutW: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: args=>extTextOut(args, true),
         },
 
         /**
@@ -697,34 +688,6 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                 });
                 host.writeMemory(bits >>> 0, buffer);
                 return written;
-            },
-        },
-
-        /**
-         * BOOL GetCharABCWidthsA(HDC hdc, UINT wFirst, UINT wLast, LPABC lpABC)
-         *
-         * An estimate, and consistent with every other measurement this build
-         * makes: the whole advance is the black box, with no bearing either
-         * side. Real bearings need a rasterised glyph, and a program that lays
-         * text out against these stays consistent with what is drawn, which is
-         * what matters until there are real ones.
-         */
-        GetCharABCWidthsA: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([handle, first, last, out])=>{
-                const dc = dcOf(handle);
-                if (!dc || (out >>> 0) === 0 || (last >>> 0) < (first >>> 0))
-                {
-                    return 0;
-                }
-                const width = currentMetrics(dc).aveCharWidth;
-                const count = (last >>> 0) - (first >>> 0) + 1;
-                for (let index = 0; index < count; index++)
-                {
-                    writeU32s(host, (out >>> 0) + index * ABC_SIZE, [0, width, 0]);
-                }
-                return 1;
             },
         },
 
@@ -1274,6 +1237,38 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                 return services.swapBuffers(handle >>> 0) ? 1 : 0;
             },
         },
+    };
+
+    /**
+     * ExtTextOut, spelt once: the string read as bytes or as UTF-16 code
+     * units, `c` of them either way and unterminated, and lpDx one advance per
+     * character, which is how justified text is positioned.
+     *
+     * @param {number[]} args @param {boolean} wide
+     */
+    const extTextOut = ([handle, x, y, options, rect, string, count, dx], wide)=>{
+        const interfaces = bound(handle);
+        if (!interfaces)
+        {
+            return 0;
+        }
+        const length = count >>> 0;
+        const bytes = (string >>> 0) === 0 || length === 0
+            ? new Uint8Array(0)
+            : host.readMemory(string >>> 0, wide ? length * 2 : length);
+        let text = '';
+        for (let at = 0; at < length && (wide ? at * 2 + 1 : at) < bytes.length; at++)
+        {
+            text += String.fromCharCode(wide ? bytes[at * 2] | bytes[at * 2 + 1] << 8 : bytes[at]);
+        }
+        const advances = (dx >>> 0) === 0 || length === 0
+            ? undefined
+            : [...Array(length).keys()].map(index=>{
+                const word = host.readMemory((dx >>> 0) + index * 4, 4);
+                return (word[0] | word[1] << 8 | word[2] << 16 | word[3] << 24) | 0;
+            });
+        return interfaces.extTextOutA(handle >>> 0, x | 0, y | 0, options >>> 0,
+            (rect >>> 0) === 0 ? null : readRect(host, rect), text, advances) ? 1 : 0;
     };
     return { functions, bound };
 }

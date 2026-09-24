@@ -1253,3 +1253,52 @@ test('OffsetWindowOrgEx moves the window origin and reports where it was', ()=>{
     assert.equal(fns.OffsetWindowOrgEx.argBytes, 16);
     assert.equal(fns.LPtoDP.argBytes, 12);
 });
+
+/** @param {ReturnType<typeof fakeMemory>} memory @param {number} at @param {string} text */
+const putWide = (memory, at, text)=>memory.writeMemory(at, Uint8Array.from(
+    [...text].flatMap(c=>[c.charCodeAt(0) & 0xff, c.charCodeAt(0) >> 8]).concat([0, 0])));
+
+test('the W spellings of the font calls measure what the A ones measure', ()=>{
+    const { fns, memory, hdc } = withDC();
+    putLogFont(memory, { height: -20, weight: 700, charSet: 0xcc, faceName: '' });
+    putWide(memory, STRUCT + LOGFONTA.lfFaceName, 'Arial');
+    const font = fns.CreateFontIndirectW.handler([STRUCT]);
+    assert.ok(font > 0);
+    fns.SelectObject.handler([hdc, font]);
+
+    memory.fill(OUT, 60 / 4);
+    assert.equal(fns.GetTextMetricsW.handler([hdc, OUT]), 1);
+    assert.equal(memory.i32(OUT + TEXTMETRICA.tmWeight), 700);
+    assert.equal(memory.u8(OUT + 56), 0xcc, 'TEXTMETRICW\'s charset sits past four WCHARs');
+    assert.equal(memory.u8(OUT + 44) | memory.u8(OUT + 45) << 8, 0x20, 'tmFirstChar as a WCHAR');
+
+    const TEXT_A = 0x9200;
+    const TEXT_W = 0x9300;
+    const SIZE_A = 0x9400;
+    const SIZE_W = 0x9410;
+    memory.putString(TEXT_A, 'Hello');
+    putWide(memory, TEXT_W, 'Hello');
+    fns.GetTextExtentPoint32A.handler([hdc, TEXT_A, 5, SIZE_A]);
+    assert.equal(fns.GetTextExtentPoint32W.handler([hdc, TEXT_W, 5, SIZE_W]), 1);
+    assert.equal(memory.i32(SIZE_W), memory.i32(SIZE_A));
+    assert.equal(fns.GetTextExtentPointW, fns.GetTextExtentPoint32W);
+    assert.equal(fns.CreateFontW.argBytes, 56);
+});
+
+test('ABC widths are each character\'s own advance, and agree with GetCharWidth', ()=>{
+    const { fns, memory, hdc } = withDC();
+    const WIDTHS = 0x9500;
+    const ABCS = 0x9600;
+
+    assert.equal(fns.GetCharWidth32W.handler([hdc, 0x41, 0x43, WIDTHS]), 1);
+    assert.equal(fns.GetCharABCWidthsW.handler([hdc, 0x41, 0x43, ABCS]), 1);
+    for (let index = 0; index < 3; index++)
+    {
+        assert.deepEqual(
+            [memory.i32(ABCS + index * 12), memory.i32(ABCS + index * 12 + 4),
+                memory.i32(ABCS + index * 12 + 8)],
+            [0, memory.i32(WIDTHS + index * 4), 0]);
+    }
+    assert.equal(fns.GetCharABCWidthsA.handler([hdc, 0x43, 0x41, ABCS]), 0, 'a reversed range');
+    assert.equal(fns.GetCharWidthW, fns.GetCharWidth32W);
+});

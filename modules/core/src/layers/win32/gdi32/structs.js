@@ -105,6 +105,26 @@ export const TEXTMETRICA = Object.freeze({
     SIZE: 56,
 });
 
+/**
+ * TEXTMETRICW: TEXTMETRICA's LONGs, then the four characters as WCHARs, so
+ * everything after them sits four bytes further on and the whole is 60.
+ */
+export const TEXTMETRICW = Object.freeze({
+    tmFirstChar: 44,
+    tmLastChar: 46,
+    tmDefaultChar: 48,
+    tmBreakChar: 50,
+    tmItalic: 52,
+    tmUnderlined: 53,
+    tmStruckOut: 54,
+    tmPitchAndFamily: 55,
+    tmCharSet: 56,
+    SIZE: 60,
+});
+
+/** LOGFONTW: LOGFONTA with the face name as 32 WCHARs. */
+export const LOGFONTW_SIZE = 92;
+
 /** POINT, which every *Ex function hands the previous value back through. */
 export const POINT = Object.freeze({ x: 0, y: 4, SIZE: 8 });
 
@@ -254,7 +274,6 @@ export function readLogBrush(memory, address){
  * @returns {LogFontFields}
  */
 export function readLogFont(memory, address){
-    const bytes = memory.readMemory(address + LOGFONTA.lfItalic, 8);
     // The face name is a fixed-width array, not a pointer: it is NUL-padded
     // rather than NUL-terminated, and a name that fills it has no terminator
     // at all.
@@ -264,6 +283,43 @@ export function readLogFont(memory, address){
     {
         end++;
     }
+    return {
+        ...readLogFontFields(memory, address),
+        faceName: new TextDecoder('latin1').decode(name.subarray(0, end)),
+    };
+}
+
+/**
+ * A LOGFONTW: the same fields, the face name in UTF-16.
+ *
+ * @param {StructMemory} memory
+ * @param {number} address
+ * @returns {LogFontFields}
+ */
+export function readLogFontW(memory, address){
+    const name = memory.readMemory(address + LOGFONTA.lfFaceName, LF_FACESIZE * 2);
+    let faceName = '';
+    for (let at = 0; at < LF_FACESIZE; at++)
+    {
+        const unit = name[at * 2] | name[at * 2 + 1] << 8;
+        if (unit === 0)
+        {
+            break;
+        }
+        faceName += String.fromCharCode(unit);
+    }
+    return { ...readLogFontFields(memory, address), faceName };
+}
+
+/**
+ * Everything of a LOGFONT but its face name, which is where the A and W
+ * layouts part.
+ *
+ * @param {StructMemory} memory
+ * @param {number} address
+ */
+function readLogFontFields(memory, address){
+    const bytes = memory.readMemory(address + LOGFONTA.lfItalic, 8);
     return {
         height: readI32(memory, address + LOGFONTA.lfHeight),
         width: readI32(memory, address + LOGFONTA.lfWidth),
@@ -278,7 +334,6 @@ export function readLogFont(memory, address){
         clipPrecision: bytes[5],
         quality: bytes[6],
         pitchAndFamily: bytes[7],
-        faceName: new TextDecoder('latin1').decode(name.subarray(0, end)),
     };
 }
 
@@ -360,7 +415,28 @@ export function readLogPalette(memory, address){
  * @param {TextMetricFields} metrics
  */
 export function writeTextMetrics(memory, address, metrics){
-    const bytes = new Uint8Array(TEXTMETRICA.SIZE);
+    writeTextMetricsAs(memory, address, metrics, false);
+}
+
+/**
+ * A TEXTMETRICW: the same measures, the four characters as WCHARs.
+ *
+ * @param {StructMemory} memory
+ * @param {number} address
+ * @param {TextMetricFields} metrics
+ */
+export function writeTextMetricsW(memory, address, metrics){
+    writeTextMetricsAs(memory, address, metrics, true);
+}
+
+/**
+ * @param {StructMemory} memory
+ * @param {number} address
+ * @param {TextMetricFields} metrics
+ * @param {boolean} wide
+ */
+function writeTextMetricsAs(memory, address, metrics, wide){
+    const bytes = new Uint8Array(wide ? TEXTMETRICW.SIZE : TEXTMETRICA.SIZE);
     const view = new DataView(bytes.buffer);
     /** @param {number} offset @param {number} value */
     const long = (offset, value)=>view.setInt32(offset, value | 0, true);
@@ -375,15 +451,20 @@ export function writeTextMetrics(memory, address, metrics){
     long(TEXTMETRICA.tmOverhang, 0);
     long(TEXTMETRICA.tmDigitizedAspectX, metrics.digitizedAspectX);
     long(TEXTMETRICA.tmDigitizedAspectY, metrics.digitizedAspectY);
-    bytes[TEXTMETRICA.tmFirstChar] = metrics.firstChar & 0xff;
-    bytes[TEXTMETRICA.tmLastChar] = metrics.lastChar & 0xff;
-    bytes[TEXTMETRICA.tmDefaultChar] = metrics.defaultChar & 0xff;
-    bytes[TEXTMETRICA.tmBreakChar] = metrics.breakChar & 0xff;
-    bytes[TEXTMETRICA.tmItalic] = metrics.italic & 0xff;
-    bytes[TEXTMETRICA.tmUnderlined] = metrics.underlined & 0xff;
-    bytes[TEXTMETRICA.tmStruckOut] = metrics.struckOut & 0xff;
-    bytes[TEXTMETRICA.tmPitchAndFamily] = metrics.pitchAndFamily & 0xff;
-    bytes[TEXTMETRICA.tmCharSet] = metrics.charSet & 0xff;
+    const layout = wide ? TEXTMETRICW : TEXTMETRICA;
+    /** @param {number} offset @param {number} value */
+    const character = (offset, value)=>(wide
+        ? view.setUint16(offset, value & 0xffff, true)
+        : view.setUint8(offset, value & 0xff));
+    character(layout.tmFirstChar, metrics.firstChar);
+    character(layout.tmLastChar, metrics.lastChar);
+    character(layout.tmDefaultChar, metrics.defaultChar);
+    character(layout.tmBreakChar, metrics.breakChar);
+    bytes[layout.tmItalic] = metrics.italic & 0xff;
+    bytes[layout.tmUnderlined] = metrics.underlined & 0xff;
+    bytes[layout.tmStruckOut] = metrics.struckOut & 0xff;
+    bytes[layout.tmPitchAndFamily] = metrics.pitchAndFamily & 0xff;
+    bytes[layout.tmCharSet] = metrics.charSet & 0xff;
     memory.writeMemory(address, bytes);
 }
 

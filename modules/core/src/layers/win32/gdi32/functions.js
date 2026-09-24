@@ -27,14 +27,19 @@ import {
     readBitmapInfoHeader,
     readLogBrush,
     readLogFont,
+    readLogFontW,
     readLogPalette,
     readLogPen,
     paletteEntryToPixel,
     writePoint,
     writeSize,
     writeTextMetrics,
+    writeTextMetricsW,
     writeU32s,
 } from './structs.js';
+
+/** ABC: the three widths of one character, A and C the bearings either side of B. */
+const ABC_SIZE = 12;
 
 /** Stock object indices, in the order wingdi.h numbers them. */
 const WHITE_BRUSH = 0;
@@ -610,6 +615,53 @@ export function createGdiFunctions(host){
     };
 
     /**
+     * A UTF-16 string out of guest memory: `count` code units when `counted`,
+     * as the text calls take them unterminated, else up to a terminator
+     * within that many.
+     *
+     * @param {number} address @param {number} count @param {boolean} [counted]
+     */
+    const wideText = (address, count, counted = false)=>{
+        const bytes = host.readMemory(address >>> 0, Math.max(0, count) * 2);
+        let text = '';
+        for (let at = 0; at * 2 + 1 < bytes.length; at++)
+        {
+            const unit = bytes[at * 2] | bytes[at * 2 + 1] << 8;
+            if (unit === 0 && !counted)
+            {
+                break;
+            }
+            text += String.fromCharCode(unit);
+        }
+        return text;
+    };
+
+    /**
+     * One record per character of a range, each made from that character's
+     * advance in the context's font: GetCharWidth's INTs and
+     * GetCharABCWidths' ABCs alike.
+     *
+     * @param {number} handle @param {number} first @param {number} last
+     * @param {number} out @param {number} stride
+     * @param {(width: number) => number[]} record
+     * @param {number} mask  What of a code is a character: a byte for the A
+     *        spellings, a code unit for the W ones.
+     */
+    const writeWidths = (handle, first, last, out, stride, record, mask)=>{
+        const dc = dcOf(handle);
+        if (!dc || (out >>> 0) === 0 || last < first)
+        {
+            return 0;
+        }
+        for (let code = first; code <= last; code++)
+        {
+            writeU32s(host, (out >>> 0) + (code - first) * stride,
+                record(widthOf(dc, String.fromCharCode(code & mask))));
+        }
+        return 1;
+    };
+
+    /**
      * The extents a mapping mode fixes, or null for MM_ANISOTROPIC, which
      * keeps whatever the DC had.
      *
@@ -1159,6 +1211,37 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([logfont])=>objects.create('font', readLogFont(host, logfont)),
+        },
+
+        /** HFONT CreateFontIndirectW(const LOGFONTW *lplf) */
+        CreateFontIndirectW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([logfont])=>((logfont >>> 0) === 0
+                ? 0
+                : objects.create('font', readLogFontW(host, logfont))),
+        },
+
+        /** HFONT CreateFontW(..., LPCWSTR pszFaceName): CreateFontA with the face name wide. */
+        CreateFontW: {
+            argBytes: 56,
+            /** @param {number[]} args */
+            handler: args=>objects.create('font', logFont({
+                height: args[0] | 0,
+                width: args[1] | 0,
+                escapement: args[2] | 0,
+                orientation: args[3] | 0,
+                weight: args[4] | 0,
+                italic: args[5] & 0xff,
+                underline: args[6] & 0xff,
+                strikeOut: args[7] & 0xff,
+                charSet: args[8] & 0xff,
+                outPrecision: args[9] & 0xff,
+                clipPrecision: args[10] & 0xff,
+                quality: args[11] & 0xff,
+                pitchAndFamily: args[12] & 0xff,
+                faceName: (args[13] >>> 0) === 0 ? '' : wideText(args[13], MAX_FACE_NAME),
+            })),
         },
 
         /** HBITMAP CreateCompatibleBitmap(HDC hdc, int cx, int cy) */
@@ -1753,6 +1836,70 @@ export function createGdiFunctions(host){
             },
         },
 
+        /** BOOL GetTextMetricsW(HDC hdc, LPTEXTMETRICW lptm) */
+        GetTextMetricsW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const dc = dcOf(handle);
+                if (!dc || (out >>> 0) === 0)
+                {
+                    return 0;
+                }
+                writeTextMetricsW(host, out, currentMetrics(dc));
+                return 1;
+            },
+        },
+
+        /** BOOL GetTextExtentPoint32W(HDC hdc, LPCWSTR lpString, int c, LPSIZE psizl) */
+        GetTextExtentPoint32W: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, string, count, out])=>{
+                const dc = dcOf(handle);
+                if (!dc || (count | 0) < 0)
+                {
+                    return 0;
+                }
+                const text = (string >>> 0) === 0 ? '' : wideText(string, count | 0, true);
+                writeSize(host, out, { cx: widthOf(dc, text), cy: currentMetrics(dc).height });
+                return 1;
+            },
+        },
+
+        /** BOOL GetCharWidth32W(HDC hdc, UINT iFirst, UINT iLast, LPINT lpBuffer) */
+        GetCharWidth32W: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, first, last, out])=>
+                writeWidths(handle, first >>> 0, last >>> 0, out, 4, width=>[width], 0xffff),
+        },
+
+        /**
+         * BOOL GetCharABCWidthsA(HDC hdc, UINT wFirst, UINT wLast, LPABC lpABC)
+         *
+         * Each character's own advance, measured as GetCharWidth measures it,
+         * as the black box, with no bearing either side: real bearings need
+         * a rasterised glyph, and text laid out against these widths stays
+         * consistent with what is drawn and with every other measurement.
+         */
+        GetCharABCWidthsA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, first, last, out])=>
+                writeWidths(handle, first >>> 0, last >>> 0, out, ABC_SIZE,
+                    width=>[0, width, 0], 0xff),
+        },
+
+        /** BOOL GetCharABCWidthsW(HDC hdc, UINT wFirst, UINT wLast, LPABC lpABC) */
+        GetCharABCWidthsW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, first, last, out])=>
+                writeWidths(handle, first >>> 0, last >>> 0, out, ABC_SIZE,
+                    width=>[0, width, 0], 0xffff),
+        },
+
         /** BOOL GetTextMetricsA(HDC hdc, LPTEXTMETRICA lptm) */
         GetTextMetricsA: {
             argBytes: 8,
@@ -1800,20 +1947,8 @@ export function createGdiFunctions(host){
         GetCharWidth32A: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([handle, first, last, out])=>{
-                const dc = dcOf(handle);
-                if (!dc || (out >>> 0) === 0 || (last >>> 0) < (first >>> 0))
-                {
-                    return 0;
-                }
-                const widths = [];
-                for (let code = first >>> 0; code <= (last >>> 0); code++)
-                {
-                    widths.push(widthOf(dc, String.fromCharCode(code & 0xff)));
-                }
-                writeU32s(host, out >>> 0, widths);
-                return 1;
-            },
+            handler: ([handle, first, last, out])=>
+                writeWidths(handle, first >>> 0, last >>> 0, out, 4, width=>[width], 0xff),
         },
     };
 
@@ -1823,6 +1958,8 @@ export function createGdiFunctions(host){
         ...table,
         GetTextExtentPointA: table.GetTextExtentPoint32A,
         GetCharWidthA: table.GetCharWidth32A,
+        GetTextExtentPointW: table.GetTextExtentPoint32W,
+        GetCharWidthW: table.GetCharWidth32W,
     };
 
     /**
