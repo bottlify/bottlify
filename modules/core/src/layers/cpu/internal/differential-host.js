@@ -57,6 +57,11 @@ export function createDifferentialHost({ emulator, cork, engine, memory, layout 
     let divergences = 0;
     let handoffMisses = 0;
     const skipped = { hostCalls: 0, overran: 0, budget: 0 };
+    /** Divergences by the first field that differed, with the first few regions
+     * of each: 'control' (the emulator did not reach the exit) apart from a
+     * register or a byte.
+     * @type {Map<string, { count: number, at: string[] }>} */
+    const byField = new Map();
 
     // Every call translated code makes into the host passes here: a region
     // that made one is not replayed, so no handler runs twice.
@@ -99,39 +104,44 @@ export function createDifferentialHost({ emulator, cork, engine, memory, layout 
             return { ...log, spans };
         };
 
-        /** Hides an address from the entry hash the emulator hands off at, for
-         * one step of the replay: standing on a translated entry, the emulator
-         * returns at once to let the translator run it, so a replay that calls
-         * into translated code would stop at the callee. The slots holding the
-         * address read as removed (the probe goes on past them) until the
-         * returned function puts them back.
+        /** Makes the region's exit a place the emulator stops: the emulator's
+         * slice returns on arriving at an address the translator's entry hash
+         * holds, in a page flagged for handoff, and a slice of one instruction is
+         * not one instruction there (it ran through a callee, a trampoline and a
+         * host stub past an exit it never stopped at). The address goes into a
+         * free slot of the hash, and its page is flagged when the translator
+         * holds nothing there, until the returned function takes both back.
          * @param {number} address @returns {() => void} */
-        const hideEntry = address=>{
+        const breakAt = address=>{
             const view = new DataView(/** @type {WebAssembly.Memory} */ (memory).buffer);
             const base = layout.tables + engine.Tables.HASH;
             const slots = engine.Tables.HASH_SLOTS;
-            /** @type {number[]} */
-            const hidden = [];
             let slot = engine.slotOf(address);
-            for (let probed = 0; probed < slots; probed++)
+            let at = base + slot * engine.Tables.HASH_SLOT;
+            let key = view.getUint32(at, true);
+            // A free slot: empty (0) or removed (all ones), as the probe reads them.
+            for (let probed = 0; key !== 0 && key !== 0xffffffff && probed < slots; probed++)
             {
-                const at = base + slot * engine.Tables.HASH_SLOT;
-                const key = view.getUint32(at, true);
-                if (key === 0)
-                {
-                    break;
-                }
-                if (key === address)
-                {
-                    view.setUint32(at, 0xffffffff, true);
-                    hidden.push(at);
-                }
                 slot = (slot + 1) & (slots - 1);
+                at = base + slot * engine.Tables.HASH_SLOT;
+                key = view.getUint32(at, true);
+            }
+            // Compiled for any x87 top (8), so no top the emulator stands at misses it.
+            const top = view.getUint8(at + 10);
+            view.setUint32(at, address, true);
+            view.setUint8(at + 10, 8);
+            const page = address >>> 12;
+            const flag = !runtime.holdsPage(page);
+            if (flag)
+            {
+                emulator.handoffPage(page, true);
             }
             return ()=>{
-                for (const at of hidden)
+                view.setUint32(at, key, true);
+                view.setUint8(at + 10, top);
+                if (flag)
                 {
-                    view.setUint32(at, address, true);
+                    emulator.handoffPage(page, false);
                 }
             };
         };
@@ -184,30 +194,32 @@ export function createDifferentialHost({ emulator, cork, engine, memory, layout 
             {
                 emulator.writePhysical(stores.entries[i].address, stores.entries[i].old);
             }
-            // The emulator answers the same code, run to where the region
-            // left, not by the region's retired count: the two count a
-            // rep-prefixed instruction differently (the translator retires
-            // one per iteration, the emulator one per instruction), so a
-            // count would put the emulator past the region's exit. One
-            // instruction at a time is what stops it exactly on the exit's
-            // address, where a larger slice could overshoot a branch.
+            // The emulator answers the same code, run to where the region left
+            // -- not by the region's retired count: the two count a rep-prefixed
+            // instruction differently (the translator one per iteration, the
+            // emulator one per instruction). It stops at the exit because the
+            // exit is made a place it hands off at; it may also stop at any other
+            // translated entry on the way, and goes on from there.
             const target = subjectState.eip;
+            const unbreak = handoff && typeof engine.slotOf === 'function'
+                ? breakAt(target) : ()=>undefined;
             let guard = exit.retired + 64;
+            /** @type {string[]} */
+            const trail = [`0x${(emulator.eip() >>> 0).toString(16)}`];
             while (guard > 0 && !emulator.halted() && emulator.eip() !== target)
             {
-                let stepped = emulator.runSlice(1);
-                if (stepped === 0 && undo && typeof engine.slotOf === 'function')
-                {
-                    const unhide = hideEntry(emulator.eip());
-                    stepped = emulator.runSlice(1);
-                    unhide();
-                }
+                const stepped = emulator.runSlice(guard);
                 if (stepped === 0)
                 {
                     break;
                 }
                 guard -= stepped;
+                if (trail.length < 12)
+                {
+                    trail.push(`${stepped}:0x${(emulator.eip() >>> 0).toString(16)}`);
+                }
             }
+            unbreak();
             const oracleState = snapshot(emulator, stores.spans);
             const landed = emulator.eip() === target;
             // The comparison masks the x87 status bits the two engines may
@@ -215,11 +227,22 @@ export function createDifferentialHost({ emulator, cork, engine, memory, layout 
             // the summary bits), the way the corpus's runner does.
             const diff = landed
                 ? compare(oracleState, subjectState, { statusMask: 0xfdd5 })
-                : [{ name: 'control', expected: `0x${(target >>> 0).toString(16)}`,
-                    actual: `0x${(emulator.eip() >>> 0).toString(16)}` }];
+                // As a comparison names them: the emulator expected, the translator actual.
+                : [{ name: 'control', expected: `0x${(emulator.eip() >>> 0).toString(16)}`,
+                    actual: `0x${(target >>> 0).toString(16)}`,
+                    trail: trail.join(' ') }];
             if (diff.length > 0)
             {
                 divergences++;
+                const field = diff[0].name.startsWith('mem[') ? 'mem' : diff[0].name;
+                const kind = byField.get(field) ?? { count: 0, at: [] };
+                kind.count++;
+                if (kind.at.length < 4)
+                {
+                    kind.at.push(`0x${(eip >>> 0).toString(16)}`
+                        + (field === 'control' ? ` (emulator at ${diff[0].expected})` : ''));
+                }
+                byField.set(field, kind);
                 if (first === null)
                 {
                     first = { at: eip, diff };
@@ -297,6 +320,7 @@ export function createDifferentialHost({ emulator, cork, engine, memory, layout 
         divergences,
         handoffMisses,
         skipped: { ...skipped },
+        byField: Object.fromEntries(byField),
         first: first
             ? { at: `0x${(first.at >>> 0).toString(16).padStart(8, '0')}`, diff: first.diff }
             : null,

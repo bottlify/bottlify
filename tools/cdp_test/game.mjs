@@ -582,12 +582,17 @@ function describe(result, context, calls, symbols){
                     + ` ${result.differential.skipped.overran} overran the undo ring,`
                     + ` ${result.differential.skipped.budget ?? 0} left on their budget)`
                 : ''));
+        for (const [field, kind] of Object.entries(result.differential.byField ?? {}))
+        {
+            say(`    ${field}: ${kind.count} (${kind.at.join(', ')})`);
+        }
         if (result.differential.first)
         {
             say(`    first divergence at ${result.differential.first.at}:`);
             for (const field of result.differential.first.diff)
             {
-                say(`      ${field.name}: emulator=${field.expected} cork=${field.actual}`);
+                say(`      ${field.name}: emulator=${field.expected} cork=${field.actual}`
+                    + (field.trail ? ` (emulator steps: ${field.trail})` : ''));
             }
         }
         say('');

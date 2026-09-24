@@ -63,7 +63,13 @@ whose stores overran the ring (it cannot be rewound), nor one that left on its b
 at a loop head of its own, which the emulator reaches on its first pass); `metrics.differential`
 counts all three under
 `skipped`, beside how many regions were replayed, how many diverged, and the first region that
-did with the fields that differed.
+did with the fields that differed; `byField` counts the divergences by the first field that
+differed, with the first regions of each. The emulator is run to the region's exit by making
+the exit a place it hands off at (the address in a free slot of the entry hash, its page
+flagged while the replay lasts), since its slice of one instruction is not one instruction in
+compiled code; a `control` divergence carries the trail of the emulator's slices. Where the
+emulator's compiled code transfers within a page without the handoff check, it still runs past
+the exit -- a limit of the oracle, named by the trail, not a divergence of the translator.
 
 Between regions, translated
 code needs no slice loop at all where the engine has tail calls: every region function is

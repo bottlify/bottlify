@@ -66,7 +66,7 @@ test('the differential host names itself', ()=>{
     assert.equal(host.engine(), 'differential');
     assert.deepEqual(host.differentialDiagnostics(),
         { replayed: 0, divergences: 0, handoffMisses: 0,
-            skipped: { hostCalls: 0, overran: 0, budget: 0 }, first: null });
+            skipped: { hostCalls: 0, overran: 0, budget: 0 }, byField: {}, first: null });
 });
 
 test('a region run is replayed and a divergence is recorded', ()=>{
@@ -82,6 +82,7 @@ test('a region run is replayed and a divergence is recorded', ()=>{
     assert.equal(report.divergences, 1);
     assert.equal(report.first.at, '0x00001000');
     assert.deepEqual(report.first.diff, [{ name: 'eax', expected: 1, actual: 2 }]);
+    assert.deepEqual(report.byField, { eax: { count: 1, at: ['0x1000'] } });
 });
 
 test('an agreeing replay records no divergence', ()=>{
@@ -94,7 +95,7 @@ test('an agreeing replay records no divergence', ()=>{
     host.runSlice(10);
     assert.deepEqual(host.differentialDiagnostics(),
         { replayed: 1, divergences: 0, handoffMisses: 0,
-            skipped: { hostCalls: 0, overran: 0, budget: 0 }, first: null });
+            skipped: { hostCalls: 0, overran: 0, budget: 0 }, byField: {}, first: null });
 });
 
 test('without the snapshot machinery the differential host refuses', ()=>{
@@ -192,41 +193,66 @@ test('a region that called the host is not replayed', ()=>{
     assert.equal(emulator.mem[0x3000], 1);
 });
 
-test('a replay that calls into translated code steps through the callee\'s entry', async()=>{
+test('the replay stops at the region\'s exit, which the emulator would run past', async()=>{
     const { Tables, slotOf, readUndoLog, resetUndoLog, spansOf } = await import(
         '../../../../../cork/src/index.js');
     const memory = new WebAssembly.Memory({ initial: Math.ceil(Tables.SIZE / 65536) + 1 });
     const layout = { tables: 0 };
     const view = new DataView(memory.buffer);
-    const CALLEE = 0x1500;
-    const slotAt = Tables.HASH + slotOf(CALLEE) * Tables.HASH_SLOT;
-    view.setUint32(slotAt, CALLEE, true);
+    const EXIT = 0x2000;
     const emulator = /** @type {any} */ (fakeEmulator());
     emulator.writePhysical = ()=>undefined;
-    // The emulator's handoff: standing on an address the hash holds, it
-    // returns without running anything.
+    emulator.handoffAvailable = ()=>true;
+    /** @type {string[]} */
+    const flags = [];
+    emulator.handoffPage = (/** @type {number} */ page, /** @type {boolean} */ on)=>{
+        flags.push(`${page.toString(16)} ${on}`);
+    };
+    /** Whether the translator's hash holds an address, as the emulator probes it.
+     * @param {number} address */
+    const hashed = address=>{
+        for (let slot = slotOf(address); ; slot = (slot + 1) & (Tables.HASH_SLOTS - 1))
+        {
+            const key = view.getUint32(Tables.HASH + slot * Tables.HASH_SLOT, true);
+            if (key === 0)
+            {
+                return false;
+            }
+            if (key === address)
+            {
+                return true;
+            }
+        }
+    };
+    // The emulator's slice: a path through the exit and on, stopping only on
+    // arriving at an address the hash holds.
+    const path = [0x1000, 0x1500, EXIT, 0x3000];
     emulator.runSlice = ()=>{
-        if (emulator.at === 0x1000)
+        let retired = 0;
+        let at = path.indexOf(emulator.at);
+        while (at < path.length - 1)
         {
-            emulator.at = CALLEE;
-            return 1;
+            at++;
+            retired++;
+            if (hashed(path[at]))
+            {
+                break;
+            }
         }
-        if (emulator.at === CALLEE && view.getUint32(slotAt, true) !== CALLEE)
-        {
-            emulator.at = 0x2000;
-            return 1;
-        }
-        return 0;
+        emulator.at = path[at];
+        return retired;
     };
-    const engine = {
-        ...fakeEngine([]), Tables, slotOf, readUndoLog, resetUndoLog, spansOf,
+    const cork = fakeCork(emulator);
+    cork.run = ()=>{
+        emulator.at = EXIT;
+        return { retired: 2, kind: 'untranslated', vector: 0 };
     };
-    const host = createDifferentialHost({
-        emulator, cork: fakeCork(emulator), engine, memory, layout,
-    });
+    const engine = { ...fakeEngine([]), Tables, slotOf, readUndoLog, resetUndoLog, spansOf };
+    const host = createDifferentialHost({ emulator, cork, engine, memory, layout });
     host.runSlice(10);
     const report = host.differentialDiagnostics();
     assert.equal(report.replayed, 1);
-    assert.equal(report.divergences, 0, 'the emulator reached the exit past the callee');
-    assert.equal(view.getUint32(slotAt, true), CALLEE, 'and the entry is back in the hash');
+    assert.equal(report.divergences, 0, 'the emulator stopped at the exit');
+    assert.equal(hashed(EXIT), false, 'and the exit left the hash again');
+    assert.deepEqual(flags, ['2 true', '2 false'], 'its page flagged for the replay alone');
 });
