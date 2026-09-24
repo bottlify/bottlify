@@ -19,6 +19,7 @@
 
 import { decode } from './decode/decoder.js';
 import { Fault, Unsupported, createState, evaluate } from './ir.js';
+import { compileFast } from './fast.js';
 import { Tables } from './runtime/layout.js';
 import { PageFlag } from './runtime/pages.js';
 
@@ -28,15 +29,21 @@ export { Fault, Unsupported, createState };
  * from. A hit is checked byte for byte against memory, so code rewritten in
  * place (by the guest or the host) is decoded again without any invalidation;
  * the check is a few byte reads where a decode builds the whole record.
- * @type {WeakMap<object, Map<number, { decoded: import('./decode/decoder.js').Instruction,
- *     bytes: Uint8Array }>>} */
+ * The entry keeps the instruction's compiled step too (`compileFast`), null for
+ * one `evaluate` runs.
+ * @type {WeakMap<object, Map<number, CachedStep>>} */
 const decodedBy = new WeakMap();
 // ponytail: cleared whole when full; an LRU if a title's cold set churns it.
 const DECODED_CAP = 1 << 16;
 
 /**
+ * @typedef {{ decoded: import('./decode/decoder.js').Instruction, bytes: Uint8Array,
+ *     step: ((state: import('./ir.js').EvalState) => void) | null }} CachedStep
+ */
+
+/**
  * @param {import('./ir.js').EvalState} state
- * @returns {import('./decode/decoder.js').Instruction | import('./decode/decoder.js').Refusal}
+ * @returns {CachedStep | { decoded: import('./decode/decoder.js').Refusal, step: null }}
  */
 function decodeCached(state){
     const { memory, eip } = state;
@@ -61,11 +68,14 @@ function decodeCached(state){
         }
         if (same)
         {
-            return hit.decoded;
+            return hit;
         }
     }
     const decoded = decode(address=>memory.read(address, 1), eip);
-    if (!('refused' in decoded))
+    if ('refused' in decoded)
+    {
+        return { decoded, step: null };
+    }
     {
         if (cache.size >= DECODED_CAP)
         {
@@ -76,9 +86,10 @@ function decodeCached(state){
         {
             bytes[i] = memory.read(eip + i, 1);
         }
-        cache.set(eip, { decoded, bytes });
+        const entry = { decoded, bytes, step: compileFast(decoded) };
+        cache.set(eip, entry);
+        return entry;
     }
-    return decoded;
 }
 
 /**
@@ -112,7 +123,7 @@ export function interpret(state, maxInstructions = 1, options = {}){
             break;
         }
         first = false;
-        const decoded = decodeCached(state);
+        const { decoded, step } = decodeCached(state);
         if ('refused' in decoded)
         {
             throw new Unsupported(decoded.opcode, decoded.eip);
@@ -123,7 +134,14 @@ export function interpret(state, maxInstructions = 1, options = {}){
         onStep?.(decoded.eip);
         try
         {
-            evaluate(decoded, state);
+            if (step !== null)
+            {
+                step(state);
+            }
+            else
+            {
+                evaluate(decoded, state);
+            }
         }
         catch (e){
             // The no-tier answer carries the address of the instruction the
