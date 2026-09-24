@@ -101,20 +101,26 @@ function decodeCached(state){
  * is asked before each instruction and ends the run there (the host stops when
  * the next address has an entry, or when a trap has been recorded and only the
  * host can answer it), and `onStep` is told each instruction's start before it
- * runs (the host counts hotness from it). Both are optional, so the tight
+ * runs, with whether it was reached by a jump rather than by falling through
+ * from the instruction before (the host counts hotness at those starts only).
+ * `entered` says the first instruction is itself such a start -- a jump's
+ * target the run begins at -- rather than a place an earlier run stopped
+ * midway through a block. Both hooks are optional, so the tight
  * one-instruction loop the corpus and tests use is unchanged. `force` runs the
  * first instruction whatever `shouldStop` answers: the host's progress
  * guarantee, for a turn that would otherwise retire nothing.
  *
  * @param {import('./ir.js').EvalState} state
  * @param {number} [maxInstructions]
- * @param {{ shouldStop?: () => boolean, onStep?: (eip: number) => void,
- *     force?: boolean }} [options]
+ * @param {{ shouldStop?: () => boolean, onStep?: (eip: number, jumped: boolean) => void,
+ *     force?: boolean, entered?: boolean }} [options]
  * @returns {number}
  */
 export function interpret(state, maxInstructions = 1, options = {}){
-    const { shouldStop, onStep, force } = options;
+    const { shouldStop, onStep, force, entered } = options;
     const before = state.retired;
+    // Where falling through from the last instruction lands.
+    let fallthrough = entered === true ? -1 : state.eip;
     let first = force === true;
     while (state.retired - before < maxInstructions && !state.halted)
     {
@@ -131,7 +137,8 @@ export function interpret(state, maxInstructions = 1, options = {}){
         // The instruction's own address, for a page fault raised from inside
         // `evaluate` after it has moved eip to the next instruction.
         state.faultEip = decoded.eip;
-        onStep?.(decoded.eip);
+        onStep?.(decoded.eip, decoded.eip !== fallthrough);
+        fallthrough = (decoded.eip + decoded.length) >>> 0;
         try
         {
             if (step !== null)

@@ -367,11 +367,17 @@ export function createCorkHost(config){
      *
      * With `force`, the first instruction runs whatever `shouldStop` answers:
      * the host forces one step when a turn would otherwise retire nothing.
+     * `jumpedIn` says `address` is where a region's untranslated exit went: a
+     * jump's target, counted for hotness like one the interpreter took itself.
+     * Any other range starts where an earlier one stopped -- mid-block, at the
+     * slice's end or at a feed -- and a start counted there became a region
+     * entered in the middle of another's block, a different set each run.
      *
      * @param {number} address @param {number} budget @param {boolean} [force]
+     * @param {boolean} [jumpedIn]
      * @returns {number}
      */
-    const interpretRange = (address, budget, force = false)=>{
+    const interpretRange = (address, budget, force = false, jumpedIn = false)=>{
         interpreter ??= blockState({
             memory,
             layout,
@@ -404,7 +410,7 @@ export function createCorkHost(config){
                 // translated code and a different register file.
                 shouldStop: ()=>state.trapped.length > 0 || feedDue || translateDue
                     || runtime.entryOf(state.eip, x87Top()) >= 0,
-                onStep: (/** @type {number} */ at)=>{
+                onStep: (/** @type {number} */ at, /** @type {boolean} */ jumped)=>{
                     lastStart = at;
                     // Neither the park loop nor a slide through zero-filled
                     // memory (add [eax], al, twice a step) is a path: the ring
@@ -414,9 +420,13 @@ export function createCorkHost(config){
                         starts[startAt++ & 255] = at;
                     }
                     stepsSinceFeed++;
-                    countHot(at);
+                    if (jumped)
+                    {
+                        countHot(at);
+                    }
                 },
                 force,
+                entered: jumpedIn,
             });
         }
         catch (e){
@@ -496,6 +506,8 @@ export function createCorkHost(config){
         let ran = 0;
         const startedAt = eip();
         const trapsBefore = trapCrossings;
+        // The last region left through an untranslated exit: `eip` is a jump's target.
+        let jumpedIn = false;
         while (remaining > 0 && !isHalted() && !isStopped() && !isFeedDue())
         {
             if (translateDue)
@@ -512,6 +524,7 @@ export function createCorkHost(config){
             if (entry >= 0)
             {
                 const exit = runtime.run(entry, remaining);
+                jumpedIn = exit.kind === 'untranslated';
                 remaining -= exit.retired;
                 ran += exit.retired;
                 if (exit.kind === 'halt')
@@ -553,7 +566,8 @@ export function createCorkHost(config){
                 }
                 continue;
             }
-            const stepped = interpretRange(at, remaining);
+            const stepped = interpretRange(at, remaining, false, jumpedIn);
+            jumpedIn = false;
             remaining -= stepped;
             ran += stepped;
             if (stepped === 0 && eip() === at)

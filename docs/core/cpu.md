@@ -270,9 +270,13 @@ code's own register file takes over. A fault it raises goes the same way; an ins
 `cpu: cork has no tier for 0x0f (fxsave) (eip 0x00001003)`: the byte and address are the
 instruction the interpreter actually met, not the address the slice started at.
 
-In `cork` mode the interpreter counts hotness itself, per instruction start, in a flat array over
+In `cork` mode the interpreter counts hotness itself, at the starts a jump reached -- a taken
+branch, a call, a return, or the target a region's untranslated exit went to -- in a flat array over
 the address space (not a map: a straight-line loader runs millions of instructions once and would
-grow one entry each): a start interpreted `hotThreshold` times becomes a candidate, the layer's
+grow one entry each). Only those: an interpreted run stops wherever a feed or the slice's end falls,
+mostly mid-block, and when every instruction counted, each such place became a region entered in
+the middle of another's block -- twelve thousand of a Doom 3 warm run's seventeen thousand store
+misses, and a different set each run, so the store never caught up. A start interpreted `hotThreshold` times becomes a candidate, the layer's
 feed forms it, and once a region exists the host runs it rather than interpreting it -- cold code
 stays on the interpreter, hot code moves to the translator. The default is two under `cork`, not the sampler's two thousand: there is no compiled second
 executor to carry the code in the meantime. A title's loader runs millions of instructions each
@@ -304,7 +308,7 @@ enter the type check or the bundle.
 |-----------------|----------------------------|---------------------|---------|
 | `memorySize`    | number (power of two)      | `1 GiB`             | Guest RAM. Reserved, not committed: the host pays for pages the guest touches. Must be a power of two; the emulator requires it. With an engine other than `emulator` the top `TABLES_RESERVE` (4 MiB) is the translator's tables, and `layout.memorySize` reports the rest. |
 | `engineUrl`     | string                     | none                | The translator's entry module, imported at `boot()` under `hybrid`; `createApp` resolves it from `cork.moduleUrl` or the package beside core. Absent, `hybrid` runs with no translator. |
-| `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold` (the interpreter's own count under `cork`; default 2, where the sampler's default is 2000; the queue is drained hottest first), `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`, `maxQueued` (the candidates kept waiting, the coldest evicted past it; default 8192), `maxBatchRegions` (a deep queue takes a quarter of itself per batch, up to this; default 256), `relinkAfter` and `relinkRegions` (see the relink above; 0 turns it off), `countTransfers` (a diagnostic: each transfer between regions through the hash counts into `transfers`), `feed`, `missThreshold`, and `leaveOut`, the instruction classes (`x87`, `mmx`, `sse`) a run leaves to the emulator so a defect can be localised by class; such a run keeps no translation store. |
+| `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold` (the interpreter's own count under `cork`; default 2, where the sampler's default is 2000; the queue is drained hottest first), `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`, `maxQueued` (the candidates kept waiting, the coldest evicted past it; default 8192), `maxBatchRegions` (a deep queue takes a quarter of itself per batch, up to this; default 256), `relinkAfter` and `relinkRegions` (see the relink above; 0 turns it off), `countTransfers` (a diagnostic: each transfer between regions through the hash counts into `transfers`), `traceStore` (a diagnostic: every store key put and missed, `entry:hash:top` with the blocks' spans, in the diagnostics' `storeTrace`; the harness writes it beside the report as `-store.json`, and `missNoRecord`/`missNoModule` split the misses always), `feed`, `missThreshold`, and `leaveOut`, the instruction classes (`x87`, `mmx`, `sse`) a run leaves to the emulator so a defect can be localised by class; such a run keeps no translation store. |
 | `trapPort`      | number                     | `0xb077`            | The I/O port a stub writes its trap id to. |
 | `entryVector`   | number                     | `0x7000`            | Linear address of the dword the ROM jumps through to enter guest code. |
 | `initialStack`  | number                     | `0x300000`          | ESP the ROM sets before jumping into the guest. |

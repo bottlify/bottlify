@@ -67,6 +67,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         translate: true,
         undoLog: false,
         countTransfers: false,
+        // Diagnostic: every store key put and every one missed, as
+        // `entry:hash:top`, in the diagnostics -- what tells two runs' keys apart.
+        traceStore: false,
         // Batch modules published before the running regions are gathered into
         // big ones (0: never), and how many regions go into each of those:
         // a tail call into another module costs more the more modules there are.
@@ -303,7 +306,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const counts = {
         modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, moduleBytes: 0,
         queueDrops: 0, queueEvictions: 0,
-        cacheHits: 0, cacheMisses: 0,
+        cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0,
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
         // always agree.
@@ -709,6 +712,20 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         return 1;
     };
 
+    /** @type {{ put: string[], missed: string[] }} */
+    const storeTrace = { put: [], missed: [] };
+    /** @param {string[]} list
+     * @param {{ region: { entry: number, hash: string, blocks?: { start: number, end: number }[] },
+     *     entryTop: number }} one */
+    const trace = (list, one)=>{
+        if (settings.traceStore)
+        {
+            const spans = one.region.blocks
+                ?.map(block=>`${block.start.toString(16)}-${block.end.toString(16)}`);
+            list.push(`${one.region.entry.toString(16)}:${one.region.hash}:${one.entryTop}`
+                + (spans ? `:${spans.join(',')}` : ''));
+        }
+    };
     /** The store key of one formed region.
      * @param {{ region: { entry: number, hash: string }, entryTop: number }} one */
     const regionKey = one=>cacheKey({
@@ -771,6 +788,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             if (store !== null)
             {
                 const storeAt = performance.now();
+                trace(storeTrace.put, metas[i]);
                 store.put(regionKey(metas[i]), packRegion({ ...result.region,
                     module: new Uint8Array(0), moduleKey: key })).catch(()=>{});
                 counts.storeMs += performance.now() - storeAt;
@@ -1361,6 +1379,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 {
                     const bytes = await store.get(key);
                     one.cached = bytes === null ? null : unpackRegion(bytes);
+                    if (one.cached === null)
+                    {
+                        counts.missNoRecord++;
+                    }
                     const batchKey = one.cached?.moduleKey;
                     if (batchKey !== undefined && !batchInstances.has(batchKey))
                     {
@@ -1369,6 +1391,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                         one.moduleBytes = await moduleBytes(batchKey);
                         if (one.moduleBytes === null)
                         {
+                            counts.missNoModule++;
                             one.cached = null;
                         }
                     }
@@ -1383,6 +1406,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 else
                 {
                     counts.cacheMisses++;
+                    trace(storeTrace.missed, one);
                 }
             })).then(()=>{
                 storePending = false;
@@ -1445,6 +1469,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 retired: corkRetired,
                 cacheHits: counts.cacheHits,
                 cacheMisses: counts.cacheMisses,
+                missNoRecord: counts.missNoRecord,
+                missNoModule: counts.missNoModule,
+                ...(settings.traceStore ? { storeTrace } : {}),
                 invalidations: counts.invalidations,
                 dropped: counts.dropped,
                 queued: queue.size,

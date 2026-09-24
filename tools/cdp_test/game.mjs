@@ -479,7 +479,8 @@ function describeCork(cork, say){
         + `  barren: ${cork.barren ?? 0}`
         + `  queueDrops: ${cork.queueDrops ?? 0}`
         + `  forced steps: ${cork.forcedSteps ?? 0}`
-        + `  cache: ${cork.cacheHits ?? 0} hit / ${cork.cacheMisses ?? 0} miss`);
+        + `  cache: ${cork.cacheHits ?? 0} hit / ${cork.cacheMisses ?? 0} miss`
+        + ` (no record ${cork.missNoRecord ?? 0}, no module ${cork.missNoModule ?? 0})`);
     const exits = cork.exits ?? {};
     say(`    exits: ${Object.entries(exits).map(([kind, count])=>`${kind}=${count}`).join(' ')}`
         + (cork.transfers ? `  transfers through the hash: ${cork.transfers}` : ''));
@@ -1219,6 +1220,14 @@ export async function game(options){
             executableBytes: executable.length,
         }, options.calls, symbols);
         writeFileSync(reportPath, text);
+        // The store's keys put and missed (`traceStore` in --cork-config), for
+        // comparing a cold run's keys with a warm run's.
+        if (result.cork?.storeTrace)
+        {
+            writeFileSync(join(REPORTS_DIR, `game-${stamp}-store.json`),
+                JSON.stringify(result.cork.storeTrace));
+            delete result.cork.storeTrace;
+        }
 
         // The graphics layer's whole account as JSON beside the report: the
         // frame records, the presenter's copies by source, every counter --

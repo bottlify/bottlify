@@ -160,6 +160,30 @@ test('the interpreter stops only at an entry for the top the machine has', async
     assert.equal(h.block()[h.blockLayout().x87Top], 0, 'the machine top, not the region top');
 });
 
+test('only a jump target is a hot start, not where a slice stopped', ()=>{
+    const h = host({ cork: { translate: false } });
+    // mov ecx, 3; nop; nop; L: dec ecx; jnz L; hlt
+    load(h, 0x1000, [0xb9, 3, 0, 0, 0, 0x90, 0x90, 0x49, 0x75, 0xfd, 0xf4]);
+    const runtime = h.cork();
+    /** @type {number[]} */
+    const noted = [];
+    runtime.noteHot = (/** @type {number} */ address)=>{
+        noted.push(address);
+    };
+    // Twice through the straight line one instruction a slice, every slice
+    // starting where the last one stopped, then the loop to its end.
+    for (let pass = 0; pass < 2; pass++)
+    {
+        h.writeReg32('eip', 0x1000);
+        for (let i = 0; i < 3; i++)
+        {
+            h.runSlice(1);
+        }
+    }
+    h.runSlice(100);
+    assert.deepEqual(noted, [0x1007], 'the loop head its jnz reached twice, and nothing else');
+});
+
 test('a hlt ends the slice and the next slice goes on after it, as the timer interrupt does',
     ()=>{
         const h = host();

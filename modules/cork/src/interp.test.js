@@ -82,6 +82,27 @@ test('a budget bounds a loop', ()=>{
     assert.equal(rest, 8, 'the three more turns and the hlt');
 });
 
+test('onStep says which starts a jump reached, and a resumed run starts mid-block', ()=>{
+    // mov ecx, 2; L: dec ecx; jnz L; hlt
+    const m = machine();
+    m.ram.set([0xb9, 2, 0, 0, 0, 0x49, 0x75, 0xfd, 0xf4], 0x1000);
+    /** @type {string[]} */
+    const seen = [];
+    /** @param {number} at @param {boolean} jumped */
+    const onStep = (at, jumped)=>seen.push(`${at.toString(16)}${jumped ? '*' : ''}`);
+    interpret(m.state, 2, { onStep });
+    interpret(m.state, 100, { onStep });
+    // The second run begins at the jnz, where the first stopped: not a jump's
+    // target; the loop's head is, the second time round.
+    assert.deepEqual(seen, ['1000', '1005', '1006', '1005*', '1006', '1008']);
+    /** @type {boolean[]} */
+    const entered = [];
+    m.state.eip = 0x1005;
+    m.state.halted = false;
+    interpret(m.state, 1, { onStep: (at, jumped)=>entered.push(jumped), entered: true });
+    assert.deepEqual(entered, [true], 'a run entered at a jump target counts its first start');
+});
+
 test('xorps xors the two XMM operands and movd reaches a register', ()=>{
     // movd xmm0, eax; movd xmm1, ecx; xorps xmm0, xmm1; movd eax, xmm0; hlt
     const m = machine();
