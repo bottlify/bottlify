@@ -73,6 +73,9 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  * @property {number} [processId]      What the running process is numbered.
  * @property {() => string} [imagePath]  Where its image is, for a snapshot's entry.
  * @property {(handle: number) => string | null} [handleType]
+ * @property {(thread: any, routine: number, args: number[]) => void} [queueApc]
+ *           Queues a routine to a thread, to run when it next waits alertably:
+ *           what a waitable timer's completion routine becomes at each expiry.
  * @property {(api: string, detail: string) => void} [divergence]
  *           Where a call that does less than the real one says so.
  *           What kind of object a handle names. The kernel's handle table
@@ -689,7 +692,7 @@ export function createThreadingFunctions(host){
         SetWaitableTimer: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([handle, dueTime, period])=>{
+            handler: ([handle, dueTime, period, routine, argument])=>{
                 const timer = object(handle >>> 0, 'timer');
                 if (!timer || (dueTime >>> 0) === 0)
                 {
@@ -705,7 +708,22 @@ export function createThreadingFunctions(host){
                     ? now + Number(-raw) / 10000
                     : now + Math.max(0,
                         Number(raw / 10000n) - FILETIME_EPOCH_MS - kernel.clock.wallClock());
-                kernel.armTimer(timer, due, Math.max(0, period | 0));
+                // A completion routine is queued to the thread that set the
+                // timer, once per expiry, with the time it expired as a
+                // FILETIME; it runs when that thread next waits alertably.
+                const thread = host.currentThread();
+                const fired = (routine >>> 0) === 0 || !host.queueApc
+                    ? null
+                    : ()=>{
+                        const filetime = BigInt(Math.floor(
+                            kernel.clock.wallClock() + FILETIME_EPOCH_MS)) * 10000n;
+                        host.queueApc?.(thread, routine >>> 0, [
+                            argument >>> 0,
+                            Number(filetime & 0xffffffffn),
+                            Number(filetime >> 32n & 0xffffffffn),
+                        ]);
+                    };
+                kernel.armTimer(timer, due, Math.max(0, period | 0), fired);
                 return 1;
             },
         },

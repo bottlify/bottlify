@@ -316,3 +316,20 @@ test('a parked thread resumes on the stack it was told, however far the stub got
     assert.deepEqual(resumed, [{ eip: RETURN, esp: TRAP_ESP + 12, returnValue: 0 }],
         'the thread comes back at its return address with the stack at rest');
 });
+
+test('alert ends an alertable wait with the answer given, and leaves any other alone', async()=>{
+    const { kernel } = await makeKernel();
+    const thread = kernel.createThread({ entry: 0x00402000, name: 'worker' });
+    const event = kernel.createEvent({});
+
+    kernel.block(thread, 'something of its own');
+    assert.equal(kernel.alert(thread, 0xc0), false, 'a plain wait is not ended');
+    kernel.wake(thread);
+
+    assert.equal(kernel.alertably(thread, ()=>kernel.wait(event, thread)), null);
+    assert.equal(kernel.alert(thread, 0xc0), true);
+    assert.equal(thread.state, 'ready');
+    assert.equal(thread.waitResult, 0xc0, 'what the wait answers');
+    assert.deepEqual(event.waiters, [], 'and it is no longer queued on the event');
+    assert.equal(kernel.alert(thread, 0xc0), false, 'a thread not waiting is left alone');
+});

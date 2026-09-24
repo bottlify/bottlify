@@ -416,9 +416,51 @@ export const kernelModule = {
                 live() ? state.sync.createTimer(options) : null,
             /**
              * @param {any} timer @param {number} due @param {number} period
+             * @param {((at: number) => void) | null} [fired]
              */
-            armTimer: (/** @type {any} */ timer, due, period)=>
-                live() ? state.sync.armTimer(timer, due, period) : false,
+            armTimer: (/** @type {any} */ timer, due, period, fired)=>
+                live() ? state.sync.armTimer(timer, due, period, fired) : false,
+
+            /**
+             * Runs `wait` as an alertable wait: a block it makes may be ended
+             * early by `alert`. Anything it answers without blocking is its
+             * own answer.
+             *
+             * @template T
+             * @param {any} thread
+             * @param {() => T} wait
+             * @returns {T}
+             */
+            alertably(thread, wait){
+                thread.enteringAlertable = true;
+                try
+                {
+                    return wait();
+                }
+                finally
+                {
+                    thread.enteringAlertable = false;
+                }
+            },
+
+            /**
+             * Ends an alertable wait early, with `result` as what the call that
+             * waited answers. A thread that is not blocked in an alertable wait
+             * is left alone.
+             *
+             * @param {any} thread
+             * @param {number} result
+             * @returns {boolean} whether the wait was ended
+             */
+            alert(thread, result){
+                if (!live() || thread.state !== ThreadState.BLOCKED || thread.alertable !== true)
+                {
+                    return false;
+                }
+                state.sync.stopWaiting(thread);
+                thread.waitResult = result >>> 0;
+                return state.scheduler.wake(thread);
+            },
             /** @param {any} timer */
             cancelTimer: (/** @type {any} */ timer)=>{
                 if (live())

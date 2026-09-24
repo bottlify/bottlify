@@ -721,30 +721,6 @@ export function createProcessFunctions(host){
         },
 
         /**
-         * DWORD SleepEx(DWORD dwMilliseconds, BOOL bAlertable)
-         *
-         * Sleep, plus a flag that lets a queued APC wake it early. No APC is
-         * delivered here, so it always sleeps the whole interval and answers 0
-         * (nothing woke it). Declared with its own two arguments: kernel32
-         * exports it undecorated though it is stdcall, and a stub popping only
-         * Sleep's one argument leaks four bytes of stack on every call -- which
-         * a frame loop that calls it makes fatal.
-         */
-        SleepEx: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([milliseconds])=>{
-                const wait = milliseconds >>> 0;
-                if (wait === 0)
-                {
-                    return 0;
-                }
-                host.sleep(wait);
-                return host.park();
-            },
-        },
-
-        /**
          * The process priority and processor affinity a program reads and sets
          * to tune itself. There is one processor and one priority here; the
          * settings are accepted and have nothing to act on, and the queries

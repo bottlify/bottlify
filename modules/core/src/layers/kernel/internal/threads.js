@@ -646,6 +646,11 @@ export function createScheduler(options){
             thread.lastWaitingOn = reason ?? null;
             thread.deadline = timed?.deadline ?? null;
             thread.timeoutResult = timed?.result ?? 0;
+            // Whether a queued APC may end this wait early. Set for the one
+            // block made inside an alertable call and no other, and gone again
+            // at the wake: a later wait that is not alertable must not be
+            // interrupted by an APC queued during it.
+            thread.alertable = thread.enteringAlertable === true;
             if (thread.deadline !== null
                 && (noDeadlineBefore === null || thread.deadline < noDeadlineBefore))
             {
@@ -663,6 +668,7 @@ export function createScheduler(options){
             thread.readySince = now();
             thread.waitingOn = null;
             thread.deadline = null;
+            thread.alertable = false;
             return true;
         },
 

@@ -57,7 +57,8 @@ export function createSyncObjects({ scheduler }){
     // Only the queues it stood in are searched: a thread remembers them when
     // it is queued, and a scan of every object for every expiry was a cost
     // paid tens of thousands of times a second by a program that polls.
-    scheduler.onTimeout?.((/** @type {any} */ thread)=>{
+    /** @param {any} thread */
+    const stopWaiting = thread=>{
         for (const object of thread.queuedOn ?? objects)
         {
             const at = object.waiters.indexOf(thread);
@@ -68,7 +69,8 @@ export function createSyncObjects({ scheduler }){
         }
         thread.queuedOn = null;
         thread.waitSet = null;
-    });
+    };
+    scheduler.onTimeout?.(stopWaiting);
 
     /** @param {any} object */
     const isSignalled = object=>{
@@ -313,6 +315,8 @@ export function createSyncObjects({ scheduler }){
                 kind: SyncKind.TIMER, name: name ?? 'timer',
                 manualReset, signalled: false, waiters: [],
                 due: null, period: 0, token: null,
+                /** @type {((at: number) => void) | null} */
+                fired: null,
             };
             objects.push(object);
             created[SyncKind.TIMER]++;
@@ -326,8 +330,11 @@ export function createSyncObjects({ scheduler }){
          * that arrives after it.
          *
          * @param {any} object @param {number} due @param {number} period
+         * @param {((at: number) => void) | null} [fired]  Told each time it
+         *        comes due, with the guest time it came due at -- how a
+         *        completion routine is queued, one call per expiry.
          */
-        armTimer(object, due, period){
+        armTimer(object, due, period, fired = null){
             if (object.token !== null && object.token !== undefined)
             {
                 scheduler.removeTimer(object.token);
@@ -338,9 +345,12 @@ export function createSyncObjects({ scheduler }){
             object.token = scheduler.addTimer(due, object.period, (/** @type {number} */ next)=>{
                 // A periodic timer moves on to its next boundary; a one-shot
                 // has fired for the last time.
+                const at = object.due;
                 object.due = object.period > 0 ? next : null;
                 api.setEvent(object);
+                object.fired?.(at);
             });
+            object.fired = fired;
             return true;
         },
 
@@ -358,7 +368,16 @@ export function createSyncObjects({ scheduler }){
             object.token = null;
             object.due = null;
             object.period = 0;
+            object.fired = null;
         },
+
+        /**
+         * Takes a blocked thread off every queue it stands in, for a wait that
+         * ends for a reason none of its objects gave -- an APC, here.
+         *
+         * @param {any} thread
+         */
+        stopWaiting,
 
         /**
          * Waits for one object.

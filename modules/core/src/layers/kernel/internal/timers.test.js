@@ -159,3 +159,57 @@ test('a timer among a set releases the wait with the index of the object that ca
     // program that built the set.
     assert.equal(a.waitResult, 0, 'WAIT_OBJECT_0 + 0');
 });
+
+test('a timer tells whoever armed it of every expiry, with the time it came due', ()=>{
+    // How a completion routine is queued: once per expiry, never after a cancel.
+    const h = harness();
+    const timer = h.sync.createTimer({ manualReset: false, name: 'tick' });
+    /** @type {number[]} */
+    const fired = [];
+    h.sync.armTimer(timer, 1010, 20, at=>fired.push(at));
+    const a = h.thread('a');
+
+    h.sync.wait(timer, a);
+    h.sched.runOnce();
+    h.sync.wait(timer, a);
+    h.sched.runOnce();
+    assert.deepEqual(fired, [1010, 1030]);
+
+    h.sync.cancelTimer(timer);
+    assert.equal(timer.fired, null, 'and a cancelled timer tells nobody');
+});
+
+test('a block made inside an alertable call is alertable until it wakes, and no other is', ()=>{
+    const h = harness();
+    const a = h.thread('a');
+    const event = h.sync.createEvent({ name: 'never' });
+
+    h.sync.wait(event, a);
+    assert.equal(a.alertable, false, 'an ordinary wait');
+    h.sched.wake(a);
+    h.sync.stopWaiting(a);
+
+    a.enteringAlertable = true;
+    h.sync.wait(event, a);
+    a.enteringAlertable = false;
+    assert.equal(a.alertable, true);
+
+    h.sched.wake(a);
+    assert.equal(a.alertable, false, 'the wake ends it, whatever woke it');
+});
+
+test('a thread that stops waiting leaves every queue, so the object goes to someone else', ()=>{
+    const h = harness();
+    const a = h.thread('a');
+    const b = h.thread('b');
+    const event = h.sync.createEvent({ name: 'once' });
+
+    h.sync.waitAny([event], a);
+    h.sync.wait(event, b);
+    h.sync.stopWaiting(a);
+    h.sched.wake(a);
+    h.sync.setEvent(event);
+
+    assert.equal(b.state, 'ready', 'the waiter still in the queue took it');
+    assert.equal(event.waiters.length, 0);
+});

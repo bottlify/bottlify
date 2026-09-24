@@ -23,6 +23,7 @@ import { createAtomFunctions } from './kernel32/atoms.js';
 import { createSeh } from './kernel32/seh.js';
 import { createCrtSeh } from './msvcrt/seh.js';
 import { createCxxExceptions } from './msvcrt/eh.js';
+import { createApcs } from './kernel32/apc.js';
 import { createResourceFunctions } from './kernel32/resources.js';
 import { createProfileFunctions } from './kernel32/profile.js';
 import { createDriveFunctions } from './kernel32/drives.js';
@@ -660,6 +661,22 @@ export const win32Module = {
             spawned: request=>config?.spawned?.(request),
         });
 
+        // Routines queued to a thread and run by it when it waits alertably:
+        // the waits themselves are the ordinary ones, looked up when called.
+        const apcs = createApcs({
+            kernel,
+            register: (name, fn)=>bridge.register(name, fn),
+            /** @param {any} call */
+            callGuest: call=>bridge.callGuest(call),
+            currentThread: ()=>kernel.currentThread(),
+            writeU32: (address, value)=>memory.writeU32(address, value),
+            setLastError: setError,
+            call: name=>{
+                const entry = libraries['KERNEL32.dll']?.[name] ?? libraries['USER32.dll']?.[name];
+                return /** @type {(args: number[]) => any} */ (entry.handler);
+            },
+        });
+
         libraries = {
             'KERNEL32.dll': {
                 ...createConsoleFunctions({
@@ -691,7 +708,9 @@ export const win32Module = {
                     threadBlock: config?.threadBlock,
                     /** @param {number} handle */
                     handleType: handle=>kernel.handles.typeOf(handle),
+                    queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
                 }),
+                ...apcs.table,
                 ...createDebugFunctions({
                     readCString,
                     readWideString: (address, maxLength)=>
@@ -1340,6 +1359,9 @@ export const win32Module = {
         // has are shell32's folder calls under another library's name, so a
         // program that linked against this small library gets the same answers
         // as one that linked against shell32 directly.
+        libraries['USER32.dll'].MsgWaitForMultipleObjectsEx =
+            apcs.user32.MsgWaitForMultipleObjectsEx;
+
         libraries['SHFOLDER.dll'] = {
             SHGetFolderPathA: libraries['SHELL32.dll'].SHGetFolderPathA,
             SHGetFolderPathW: libraries['SHELL32.dll'].SHGetFolderPathW,

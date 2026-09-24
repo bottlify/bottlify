@@ -143,8 +143,9 @@ function fakeKernel(){
          * was already parked, and a positive period re-arms it.
          *
          * @param {any} timer @param {number} due @param {number} period
+         * @param {((at: number) => void) | null} [fired]
          */
-        armTimer(timer, due, period){
+        armTimer(timer, due, period, fired = null){
             const at = state.timers.findIndex(entry=>entry.timer === timer);
             if (at >= 0)
             {
@@ -153,6 +154,7 @@ function fakeKernel(){
             timer.signalled = false;
             timer.due = due;
             timer.period = period;
+            timer.fired = fired;
             state.timers.push({ timer, due, period });
             state.arms.push({ timer, due, period });
         },
@@ -830,4 +832,42 @@ test('a wait on a pseudo-handle is a wait on the running object, which is not si
     assert.equal(fns.WaitForSingleObject.handler([duplicate, 100]), PARKED);
     kernel.advance(100);
     assert.equal(current.waitResult, 0x102, 'the thread was still running');
+});
+
+test('a timer\'s completion routine is queued to the setting thread at each expiry', ()=>{
+    // With the timer's argument and the time it expired as a FILETIME. It runs
+    // when that thread next waits alertably; queuing it is all this does.
+    const { fns, kernel, host, current } = setup();
+    /** @type {any[]} */
+    const queued = [];
+    host.queueApc = (thread, routine, args)=>queued.push({ thread, routine, args });
+    const bytes = new Uint8Array(0x100);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    kernel.state.now = 1000;
+    const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
+    const object = kernel.handles.resolve(timer, 'timer');
+    new DataView(bytes.buffer).setBigInt64(0x10, -160000n, true);
+
+    assert.equal(fns.SetWaitableTimer.handler([timer, 0x10, 0, 0x00405000, 0x1234, 0]), 1);
+    object.fired(1016);
+
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].thread, current, 'the thread that set it, not whoever is running');
+    assert.equal(queued[0].routine, 0x00405000);
+    assert.equal(queued[0].args[0], 0x1234);
+    const filetime = BigInt(queued[0].args[2]) << 32n | BigInt(queued[0].args[1]);
+    assert.ok(filetime > 116444736000000000n, 'a FILETIME, after 1970');
+});
+
+test('a timer set without a routine queues nothing', ()=>{
+    const { fns, kernel, host } = setup();
+    const bytes = new Uint8Array(0x100);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.queueApc = ()=>assert.fail('nothing to queue');
+    const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
+    new DataView(bytes.buffer).setBigInt64(0x10, -160000n, true);
+
+    fns.SetWaitableTimer.handler([timer, 0x10, 0, 0, 0, 0]);
+
+    assert.equal(kernel.handles.resolve(timer, 'timer').fired, null);
 });

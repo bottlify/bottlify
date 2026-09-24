@@ -445,12 +445,8 @@ test('the guest-side paths read the block and fall back to the host past it', ()
     assert.equal(code.length, slow + 5);
 });
 
-test('SleepEx and the priority and affinity calls pop their own stdcall bytes', ()=>{
+test('the priority and affinity calls pop their own stdcall bytes', ()=>{
     const { fns, host } = setup();
-    assert.equal(fns.SleepEx.handler([0, 1]), 0, 'a zero sleep yields');
-    assert.equal(fns.SleepEx.handler([16, 0]), PARKED, 'a real sleep parks');
-    assert.equal(fns.SleepEx.argBytes, 8);
-
     assert.equal(fns.GetPriorityClass.handler([0xffffffff]), 0x20);
     assert.equal(fns.SetPriorityClass.handler([0xffffffff, 0x80]), 1);
     assert.equal(fns.SetProcessAffinityMask.handler([0xffffffff, 3]), 1);

@@ -43,7 +43,10 @@ const IMPORTS = {
     'KERNEL32.dll': {
         undecorated: [
             'ExitProcess@4', 'GetStdHandle@4', 'WriteFile@20', 'RaiseException@16',
-            'CreateThread@24', 'WaitForSingleObject@8', 'Sleep@4',
+            'CreateThread@24', 'WaitForSingleObject@8', 'Sleep@4', 'QueueUserAPC@12',
+            'SleepEx@8', 'WaitForSingleObjectEx@12', 'CreateEventA@16', 'SetEvent@4',
+            'CreateWaitableTimerA@12', 'SetWaitableTimer@24', 'GetCurrentThreadId@0',
+            'GetCurrentThread@0',
         ],
     },
     'msvcrt.dll': {
@@ -60,6 +63,7 @@ const PROGRAMS = [
     { name: 'seh', source: 'seh.c', cxx: false },
     { name: 'cxxeh', source: 'cxxeh.cpp', cxx: true },
     { name: 'unhandled', source: 'unhandled.cpp', cxx: true },
+    { name: 'apc', source: 'apc.c', cxx: false },
 ];
 
 /**
