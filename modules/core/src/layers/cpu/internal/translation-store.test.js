@@ -335,6 +335,37 @@ test('a compaction cut short before its generation is named leaves the old one w
     assert.deepEqual([...(await fifth.get('b') ?? [])], [5]);
 });
 
+test('an index of touches is rewritten when it outgrows its records', async()=>{
+    // A warm run that only reads: every run touches the same forty records,
+    // and the records stay far under the compaction floor.
+    const root = fakeDirectory();
+    const limits = { keepSessions: 4, compactFloor: 1 << 20, cap: 1 << 30, indexFloor: 16384 };
+    /** @type {number[]} */
+    const sizes = [];
+    for (let run = 0; run < 60; run++)
+    {
+        const store = await createDirectoryTranslationStore(root, 'bundle', limits);
+        for (let i = 0; i < 40; i++)
+        {
+            if (await store.get(`region/${i}`) === null)
+            {
+                await store.put(`region/${i}`, new Uint8Array(64).fill(i));
+            }
+        }
+        await store.flush();
+        store.close();
+        const directory = root.children.get('cork').children.get(`bundle.v${STORE_VERSION}`);
+        const current = directory.children.get('current');
+        const generation = current ? new TextDecoder().decode(current.bytes) : '0';
+        sizes.push(directory.children.get(generation === '0' ? 'index' : `index.${generation}`)
+            .bytes.length);
+    }
+    assert.ok(Math.max(...sizes.slice(30)) <= 16384 + 40 * 60, `bounded: ${sizes.join(' ')}`);
+    const store = await createDirectoryTranslationStore(root, 'bundle', limits);
+    assert.deepEqual([...(await store.get('region/7') ?? [])], Array(64).fill(7),
+        'and all still read');
+});
+
 test('past the cap the records least recently used go first', async()=>{
     const root = fakeDirectory();
     for (let run = 0; run < 4; run++)

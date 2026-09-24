@@ -53,9 +53,13 @@ const CURRENT = 'current';
  * what a relink's module no region names any more becomes -- is copied, live
  * records only, into the next generation; and live records past `cap` go, the
  * least recently used first. Without it every run's relinked modules and every
- * re-put stayed for ever: a profile reached 29 GB.
+ * re-put stayed for ever: a profile reached 29 GB. The index is judged on its
+ * own as well: a warm run touches every record it reads, a line each, so with
+ * the records under the floor it grew by a run's reads every run and was read
+ * whole at every open; past `indexFloor` and four times the lines the live
+ * records need, it is rewritten with them.
  */
-const LIMITS = { keepSessions: 4, compactFloor: 64 << 20, cap: 1 << 30 };
+const LIMITS = { keepSessions: 4, compactFloor: 64 << 20, cap: 1 << 30, indexFloor: 4 << 20 };
 
 /** @param {string} base @param {number} generation */
 const generationName = (base, generation)=>(generation === 0 ? base : `${base}.${generation}`);
@@ -166,7 +170,9 @@ async function appendAt(handle, at, bytes){
  *
  * @param {{ getDirectoryHandle: Function }} root  where the bundle's directory is made
  * @param {string} name  the bundle's, made safe for a directory name
- * @param {typeof LIMITS} [limits]  the ages and sizes it is kept to (tests shrink them)
+ * @param {{ keepSessions: number, compactFloor: number, cap: number,
+ *     indexFloor?: number }} [limits]
+ *     the ages and sizes it is kept to (tests shrink them)
  * @returns {Promise<TranslationStore & { flush: () => Promise<void>, close: () => void }>}
  */
 export async function createDirectoryTranslationStore(root, name, limits = LIMITS){
@@ -242,7 +248,11 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         const all = /** @type {Map<string, Place>} */ (places);
         let live = [...all].filter(([, place])=>place.session >= session - limits.keepSessions);
         let liveBytes = live.reduce((sum, [, place])=>sum + place.length, 0);
-        if (liveBytes <= limits.cap && (end < limits.compactFloor || liveBytes * 2 > end))
+        // A live record's line is some fifty bytes.
+        const indexBloated = indexEnd > Math.max(limits.indexFloor ?? LIMITS.indexFloor,
+            live.length * 200);
+        if (liveBytes <= limits.cap && !indexBloated
+            && (end < limits.compactFloor || liveBytes * 2 > end))
         {
             return;
         }

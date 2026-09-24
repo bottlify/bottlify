@@ -189,7 +189,7 @@ its name, or unused for four sessions, which is what an old translator version's
 module no region names any more become -- is copied, live records only, into the next
 generation (`records.<g>`, `index.<g>`, named by a `current` file written last, so a page that
 goes away mid-copy leaves the old generation current and whole), and live records past 1 GiB go,
-the least recently used first (layout version 3); `flush` before the run ends and `close` after
+the least recently used first (layout version 3). An index past 4 MB and four times what its live records need is rewritten the same way even with the records small: a warm run touches every record it reads, a line each, and the whole index is read at every open; `flush` before the run ends and `close` after
 let go of the handle. A record of another emitter
 version, feature set or layout is a miss. A region with x87 instructions in it is compiled for the x87 stack top it is entered
 with, and its entries are keyed by address and top (`entryOf(eip, x87Top)`, the top read off
