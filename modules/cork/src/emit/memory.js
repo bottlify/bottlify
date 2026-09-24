@@ -28,6 +28,13 @@ import { Exit, Local } from './region.js';
 /** @typedef {import('./region.js').RegionEmitter} E */
 
 /**
+ * The vector of an untranslated exit that goes back to the host rather than
+ * through the epilogue's hash probe (`transfer` probes only a bare
+ * untranslated code).
+ */
+export const HELD = 1;
+
+/**
  * Stores whose code note `checkAccess` already made, by the instruction they
  * belong to: `noteStore` for that instruction only keeps the undo log.
  *
@@ -503,9 +510,12 @@ export function emitGroupChecks(e, checks){
         }
         b.i32const(12).op(I32.shrU).load('i32_8u', { offset: table });
     };
+    // Held: the epilogue's hash probe would find this very address's entry
+    // and tail-call it, whose check leaves again with nothing retired -- for
+    // ever, the budget untouched. Back at the host, the interpreter runs it.
     const leave = ()=>{
         e.blockRetired--;
-        e.exitAt(e.current.eip, Exit.UNTRANSLATED);
+        e.exitAt(e.current.eip, Exit.UNTRANSLATED, HELD);
         e.blockRetired++;
     };
     for (const group of checks)
@@ -559,6 +569,162 @@ export function emitGroupChecks(e, checks){
         e.close();
         e.close();
     }
+}
+
+// --- a loop's access streams ---
+//
+// A block that loops onto itself moves the registers its accesses go off by
+// the same amount every turn when it changes them only by push, pop and a
+// constant add, sub, inc or dec. Each such group of accesses (one base, one
+// index, one scale) is then a stream: its window moves by a fixed stride a
+// turn. The turns a stride of at most 4096 bytes takes span at most three
+// pages beyond the window, so the pages the next `turns` of every stream
+// reach are tested once, before them -- against INACCESSIBLE, and against
+// code, at the page, for a stream with a store -- and those turns run a copy
+// of the body with no test on the streams' accesses (`emitHoistedLoop` in
+// `region.js`). A window that is not clean, or turns spent, go back to the
+// test; a window not clean runs the checked copy to the loop's end. An access
+// off a register the block changes in another way is left to its own test.
+
+/**
+ * @typedef {{ base: number, index: number, scale: number, lo: number, hi: number,
+ *     stride: number, store: boolean }} Stream
+ */
+
+/**
+ * The accesses of a self-looping block that go off registers moved by a
+ * fixed stride a turn, as streams, with the plan the unchecked copy is
+ * emitted under and how many turns one test of the streams covers; null
+ * when no access qualifies.
+ *
+ * @param {import('../decode/decoder.js').Instruction[]} instructions
+ * @returns {{ plan: Map<number, Planned>, streams: Stream[], turns: number } | null}
+ */
+export function planLoop(instructions){
+    const version = new Array(8).fill(0);
+    const delta = new Array(8).fill(0);
+    /** @param {number} r */
+    const bump = r=>{
+        version[r]++;
+        delta[r] = 0;
+    };
+    /** @type {{ i: number, base: number, index: number, scale: number, off: number,
+     *     size: number, store: boolean }[]} */
+    const found = [];
+    instructions.forEach((ins, i)=>{
+        const access = accessOf(ins);
+        if (access !== null)
+        {
+            const mem = access.operand;
+            const base = mem === null ? 4 : mem.base ?? -1;
+            const index = mem === null ? -1 : mem.index ?? -1;
+            const scale = mem === null ? 1 : mem.scale ?? 1;
+            // Off the registers as the turn found them, moved by known amounts.
+            if ((base < 0 || version[base] === 0) && (index < 0 || version[index] === 0))
+            {
+                const off = (mem === null ? access.stack : mem.disp ?? 0)
+                    + (base >= 0 ? delta[base] : 0) + (index >= 0 ? delta[index] * scale : 0);
+                found.push({ i, base, index, scale, off, size: access.size, store: access.store });
+            }
+        }
+        effect(ins, delta, bump);
+    });
+    /** @param {number} r */
+    const fixed = r=>r < 0 || version[r] === 0;
+    /** @type {Map<string, Stream>} */
+    const streams = new Map();
+    /** @type {Map<number, Planned>} */
+    const plan = new Map();
+    for (const access of found)
+    {
+        if (!fixed(access.base) || !fixed(access.index))
+        {
+            continue;
+        }
+        const key = `${access.base}.${access.index}.${access.scale}`;
+        const stride = (access.base >= 0 ? delta[access.base] : 0)
+            + (access.index >= 0 ? delta[access.index] * access.scale : 0);
+        let stream = streams.get(key);
+        if (stream === undefined)
+        {
+            stream = { base: access.base, index: access.index, scale: access.scale,
+                lo: access.off, hi: access.off + access.size, stride, store: false };
+            streams.set(key, stream);
+        }
+        stream.lo = Math.min(stream.lo, access.off);
+        stream.hi = Math.max(stream.hi, access.off + access.size);
+        stream.store ||= access.store;
+        plan.set(access.i, { checks: [], access: { i: access.i, off: access.off,
+            size: access.size, store: access.store }, size: access.size, store: access.store,
+        used: false });
+    }
+    const kept = [...streams.values()].filter(stream=>stream.hi - stream.lo <= 4096
+        && Math.abs(stream.stride) <= 4096);
+    if (kept.length === 0)
+    {
+        return null;
+    }
+    for (const i of [...plan.keys()])
+    {
+        const access = found.find(a=>a.i === i);
+        if (!kept.some(s=>s.base === access?.base && s.index === access.index
+            && s.scale === access.scale))
+        {
+            plan.delete(i);
+        }
+    }
+    const widest = Math.max(...kept.map(stream=>Math.abs(stream.stride)));
+    const turns = widest === 0 ? 1 << 16 : 1 + Math.floor(4096 / widest);
+    return { plan, streams: kept, turns };
+}
+
+/**
+ * Leaves 1 on the stack when every page the streams reach in the next
+ * `turns` turns is accessible, and holds no code where a stream stores; 0
+ * otherwise. Each stream's reach is at most 8192 bytes, so its first page,
+ * the one 4096 bytes on and its last cover it.
+ *
+ * @param {E} e @param {Stream[]} streams @param {number} turns
+ */
+export function emitStreamWindow(e, streams, turns){
+    const { b } = e;
+    const table = e.layout.tables + Tables.PAGE_FLAGS;
+    b.i32const(0);
+    for (const stream of streams)
+    {
+        const span = (turns - 1) * stream.stride;
+        const from = stream.lo + Math.min(0, span);
+        const width = stream.hi - stream.lo + Math.abs(span);
+        if (stream.base >= 0)
+        {
+            b.localGet(Local.reg + stream.base);
+        }
+        else
+        {
+            b.i32const(0);
+        }
+        if (stream.index >= 0)
+        {
+            b.localGet(Local.reg + stream.index).i32const(stream.scale).op(I32.mul).op(I32.add);
+        }
+        b.i32const(from | 0).op(I32.add).localSet(Local.addr);
+        const bits = PageFlag.INACCESSIBLE | (stream.store ? PageFlag.HAS_CODE : 0);
+        [0, Math.min(4096, width - 1), width - 1].forEach((at, k)=>{
+            b.localGet(Local.addr);
+            if (at !== 0)
+            {
+                b.i32const(at).op(I32.add);
+            }
+            b.i32const(12).op(I32.shrU).load('i32_8u', { offset: table });
+            if (k > 0)
+            {
+                b.op(I32.or);
+            }
+        });
+        // This stream's flagged pages, into the word under it.
+        b.i32const(bits).op(I32.and).op(I32.or);
+    }
+    b.op(I32.eqz);
 }
 
 /**

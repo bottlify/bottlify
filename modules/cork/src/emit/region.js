@@ -43,7 +43,9 @@ import {
     ARITH, CARRY_IN_WORD, I32, Kind, eagerFlagsOf, emitCondition, emitFlag, kindOf, widthCode,
 } from './flags.js';
 import { emitInstruction } from './integer.js';
-import { addUndoHelper, emitGroupChecks, emitStaleExit, planBlock } from './memory.js';
+import {
+    addUndoHelper, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock, planLoop,
+} from './memory.js';
 import { importHelpers } from './helpers.js';
 import { Tables } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
@@ -1125,6 +1127,14 @@ export class RegionEmitter {
             && block.exit.targets[0] === block.start && block.instructions.length > 0
             && (!x.active || (x.states[index] !== null && x.ends[index] !== null
                 && sameState(x.states[index], x.ends[index])));
+        const live = deadFlagPass(block);
+        const streams = this.selfLoop && !x.active && this.layout.codePages < 0
+            ? planLoop(block.instructions) : null;
+        if (streams !== null)
+        {
+            this.emitHoistedLoop(block, index, live, streams);
+            return;
+        }
         if (this.selfLoop)
         {
             this.openLoop(`self${index}`);
@@ -1133,10 +1143,119 @@ export class RegionEmitter {
             // block's count, so the budget exit inside it charges nothing twice.
             this.blockDepth = this.controls.length;
         }
-        const live = deadFlagPass(block);
         // The other executor's code table in a hybrid layout is a second
         // thing a store is noted against: that layout checks each access.
         const plan = this.layout.codePages < 0 ? planBlock(block.instructions) : new Map();
+        if (!this.emitInstructions(block, index, live, plan))
+        {
+            this.closeSelfLoop();
+            return;
+        }
+        if (this.x87.active)
+        {
+            // The stack words the block's plain x87 left stale, written
+            // before every way out of it -- the fall-through and the loop's
+            // own back edge too.
+            x87BlockEnd(this);
+        }
+        this.emitExit(block, index);
+        this.closeSelfLoop();
+    }
+
+    /**
+     * A self-looping block whose accesses move by fixed strides
+     * (`planLoop`), in two copies: turns whose streams' pages were tested
+     * once before them run a copy with no test on those accesses, and when a
+     * test finds a page not clean the checked copy runs to the loop's end.
+     * The unchecked copy goes back to the test when the turns it was cleared
+     * for are spent. Both copies charge, look at the budget and leave as the
+     * one loop did; the checked copy is emitted first, so a block that ends
+     * early (an instruction with no lowering) ends before a second copy.
+     *
+     * @param {import('../region.js').Block} block @param {number} index
+     * @param {boolean[]} live
+     * @param {{ plan: Map<number, any>, streams: import('./memory.js').Stream[],
+     *     turns: number }} streams
+     */
+    emitHoistedLoop(block, index, live, streams){
+        const { b } = this;
+        const hint = this.hint;
+        const last = block.instructions[block.instructions.length - 1];
+        const turns = this.localTypes.length + 2;
+        this.localTypes.push(ValType.i32);
+        const depth = this.controls.length;
+        this.loops++;
+        this.open(`selfDone${index}`, EMPTY);
+        this.openLoop(`self${index}`);
+        emitStreamWindow(this, streams.streams, streams.turns);
+        b.op(I32.eqz);
+        this.openIf('streamsFlagged');
+        // The checked copy, to the loop's end.
+        this.openLoop(`checked${index}`);
+        this.blockDepth = this.controls.length;
+        this.blockRetired = 0;
+        if (!this.emitInstructions(block, index, live, planBlock(block.instructions)))
+        {
+            while (this.controls.length > depth)
+            {
+                this.close();
+            }
+            this.selfLoop = false;
+            return;
+        }
+        const backEdge = (/** @type {() => void} */ taken)=>{
+            this.charge();
+            this.pushBranchCondition(last);
+            this.openIf('taken');
+            b.localGet(Local.budget).i32const(0).op(I32.leS);
+            this.openIf('spent');
+            this.exitAt(block.start, Exit.BUDGET);
+            this.close();
+            taken();
+            this.close();
+            b.br(this.depthOf(`selfDone${index}`));
+        };
+        backEdge(()=>b.br(this.depthOf(`checked${index}`)));
+        this.close(); // checked
+        this.close(); // streamsFlagged
+        // The unchecked copy, for as many turns as the test cleared.
+        b.i32const(streams.turns).localSet(turns);
+        this.openLoop(`unchecked${index}`);
+        this.blockDepth = this.controls.length;
+        this.blockRetired = 0;
+        this.pending = null;
+        this.dead = false;
+        this.hint = hint;
+        const counted = this.instructions;
+        this.emitInstructions(block, index, live, streams.plan);
+        this.instructions = counted;
+        backEdge(()=>{
+            b.localGet(turns).i32const(1).op(I32.sub).localTee(turns);
+            b.brIf(this.depthOf(`unchecked${index}`));
+            b.br(this.depthOf(`self${index}`));
+        });
+        this.close(); // unchecked
+        this.close(); // self
+        this.close(); // selfDone
+        this.selfLoop = false;
+        const [, notTaken] = block.exit.targets;
+        const next = this.region.blocks[index + 1];
+        if (next && next.start === notTaken)
+        {
+            return;
+        }
+        this.jumpTo(notTaken);
+    }
+
+    /**
+     * The block's instructions, each under its access plan. Answers false
+     * when the block ended early -- an instruction with no lowering, or one
+     * that leaves unconditionally -- and nothing after it is reached.
+     *
+     * @param {import('../region.js').Block} block @param {number} index
+     * @param {boolean[]} live @param {Map<number, any>} plan
+     */
+    emitInstructions(block, index, live, plan){
         for (let i = 0; i < block.instructions.length; i++)
         {
             const instruction = block.instructions[i];
@@ -1169,13 +1288,11 @@ export class RegionEmitter {
                 this.instructions--;
                 this.exitBefore(instruction.eip, Exit.UNTRANSLATED);
                 this.dead = true;
-                this.closeSelfLoop();
-                return;
+                return false;
             }
             if (this.dead)
             {
-                this.closeSelfLoop();
-                return;
+                return false;
             }
             if (this.staleCheck)
             {
@@ -1185,15 +1302,7 @@ export class RegionEmitter {
                 emitStaleExit(this, instruction.eip + instruction.length);
             }
         }
-        if (this.x87.active)
-        {
-            // The stack words the block's plain x87 left stale, written
-            // before every way out of it -- the fall-through and the loop's
-            // own back edge too.
-            x87BlockEnd(this);
-        }
-        this.emitExit(block, index);
-        this.closeSelfLoop();
+        return true;
     }
 
     /**
