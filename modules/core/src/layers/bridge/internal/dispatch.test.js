@@ -1152,3 +1152,44 @@ test('with call.hook on, a site hook writes the frame before its handler and the
     assert.deepEqual(written[1],
         'loop.faces fellThrough eip=0x900000 esp=0x3000');
 });
+
+test('a variadic call near the top of the stack reads what is there and zero past it', ()=>{
+    // printf reads a fixed number of slots for its variable arguments; a call
+    // from a thread's first frame has fewer words than that above it, and
+    // past the stack is nothing the caller passed.
+    const top = 0x3010;
+    const m = machine({
+        esp: 0x3000,
+        args: [0x11, 0x22, 0x33],
+        memoryExtras: {
+            /** @param {number} address */
+            find: address=>(address >= 0x2000 && address < top
+                ? { base: 0x2000, size: top - 0x2000 } : null),
+        },
+    });
+    /** @type {number[]} */
+    let seen = [];
+    m.dispatcher.register(1, {
+        name: 'msvcrt.dll!printf',
+        convention: Convention.CDECL,
+        argBytes: 6 * 4,
+        /** @param {number[]} args */
+        handler: args=>{
+            seen = args.slice();
+            return 0;
+        },
+    });
+
+    m.dispatcher.dispatch(1);
+
+    assert.deepEqual(seen, [0x11, 0x22, 0x33, 0, 0, 0]);
+});
+
+test('a read that fails inside no region at all still fails', ()=>{
+    const m = machine({ esp: 0x3000, args: [1], memoryExtras: { find: ()=>null } });
+    m.dispatcher.register(1, {
+        name: 'X.dll!Y', convention: Convention.CDECL, argBytes: 8, handler: ()=>0,
+    });
+
+    assert.throws(()=>m.dispatcher.dispatch(1), /Unmapped read/);
+});

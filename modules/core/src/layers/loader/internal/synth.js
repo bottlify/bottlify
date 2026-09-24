@@ -58,10 +58,12 @@ const encoder = new TextEncoder();
  * @property {number} [ordinal]  Given for all exports or for none; defaults to a dense table.
  * @property {number} [target]   Guest address of the host trap stub this export jumps to.
  * @property {Uint8Array} [data]
- *   A variable rather than a function: the slot holds these bytes and the
- *   export's address is theirs. A runtime exports its command line and its
- *   flags this way, and a program reads through the address it imported --
- *   a jump there would be read as a pointer.
+ *   A variable rather than a function: the export's address is these bytes.
+ *   A runtime exports its command line and its flags this way, and a program
+ *   reads through the address it imported -- a jump there would be read as a
+ *   pointer. Up to a slot's worth sits in the export's own slot; anything
+ *   larger -- an array of records, as the runtime's standard streams are --
+ *   gets room of its own after the export directory.
  */
 
 /**
@@ -119,6 +121,19 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
     // The directory's size spans everything it owns, which is what tells a loader
     // whether an exported address is code or a forwarder.
     const exportDirectorySize = cursor - exportDirectoryRva;
+
+    // Variables too big for a slot, after the directory -- outside its range,
+    // so none is taken for a forwarder string -- each aligned like a slot.
+    /** @type {Map<number, number>} */
+    const dataRvas = new Map();
+    exports.forEach((entry, index)=>{
+        if (entry.data && entry.data.length > TRAMPOLINE_STRIDE)
+        {
+            cursor = align(cursor, TRAMPOLINE_STRIDE);
+            dataRvas.set(index, cursor);
+            cursor += entry.data.length;
+        }
+    });
     const sectionSize = cursor - SECTION_RVA;
     const size = SECTION_RVA + align(sectionSize, PAGE);
 
@@ -131,15 +146,11 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
     });
 
     exports.forEach((entry, index)=>{
-        const rva = trampolinesRva + index * TRAMPOLINE_STRIDE;
-        bytes.fill(INT3, rva, rva + TRAMPOLINE_STRIDE);
+        const slot = trampolinesRva + index * TRAMPOLINE_STRIDE;
+        bytes.fill(INT3, slot, slot + TRAMPOLINE_STRIDE);
+        const rva = dataRvas.get(index) ?? slot;
         if (entry.data)
         {
-            if (entry.data.length > TRAMPOLINE_STRIDE)
-            {
-                throw new Error(
-                    `export "${entry.name}" holds more than ${TRAMPOLINE_STRIDE} bytes`);
-            }
             bytes.set(entry.data, rva);
         }
         else
@@ -176,7 +187,7 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
     strings.forEach((text, index)=>bytes.set(encoder.encode(text), stringRvas[index]));
 
     const table = new Map(exports.map((entry, index)=>[entry.name, {
-        address: base + trampolinesRva + index * TRAMPOLINE_STRIDE,
+        address: base + (dataRvas.get(index) ?? trampolinesRva + index * TRAMPOLINE_STRIDE),
         ordinal: ordinals[index],
     }]));
 

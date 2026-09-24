@@ -370,3 +370,18 @@ test('every entry point is cdecl and declares the stack it does not pop', ()=>{
     assert.equal(fns.__p__commode.argBytes, 0);
     assert.equal(fns.exit.argBytes, 4);
 });
+
+test('the version variables are GetVersion\'s figures, _HUGE is infinity, _environ a vector', ()=>{
+    const { machine, fns } = fakeMachine('"C:\\App\\Game.exe"');
+    /** @param {string} name */
+    const dword = name=>new DataView(fns[name].data().buffer).getUint32(0, true);
+
+    assert.equal(dword('_winmajor'), 5);
+    assert.equal(dword('_winminor'), 1);
+    assert.equal(dword('_winver'), 0x0501);
+    assert.equal(dword('_osver'), 2600);
+    assert.equal(new DataView(fns._HUGE.data().buffer).getFloat64(0, true), Infinity);
+    const environ = dword('_environ');
+    assert.notEqual(environ, 0, 'a vector, not null: a program walks it to its terminator');
+    assert.equal(machine.u32(environ), 0, 'empty, as __getmainargs hands it');
+});

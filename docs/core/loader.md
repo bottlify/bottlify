@@ -50,7 +50,7 @@ hook of the same shape that says where a call to an unclaimed import should land
 | `map` | `(file, { base?, name = 'image' }) => Mapped` | Map and relocate without binding anything; register and write. Returns an opaque record for `bind`. |
 | `bind` | `(mapped, resolveImport, missing?) => string[]` | Bind the import directory of a mapped image and write the image again. Returns what nothing claimed, as `"dll!name"` or `"dll!#ordinal"`. |
 | `bindDelayed` | `(mapped, resolveImport, missing?) => string[]` | The same for the delay-load directory; appended to the record's `unresolved`. |
-| `synthesise` | `({ name, base, exports, entryPoint? }) => { base, size, entryPoint, addressOf, ordinalOf }` | Put a system module into guest memory: a PE32 image whose exports jump to the given targets. `exports` is `{ name, target, ordinal? }[]`; `entryPoint` names the export that is its `DllMain`. |
+| `synthesise` | `({ name, base, exports, entryPoint? }) => { base, size, entryPoint, addressOf, ordinalOf }` | Put a system module into guest memory: a PE32 image whose exports jump to the given targets. `exports` is `{ name, target \| data, ordinal? }[]`; `entryPoint` names the export that is its `DllMain`. |
 | `list` | `() => { base, entryPoint, unresolved, name? }[]` | Every image this instance placed, in order. |
 | `bindHooks` | `(spec, image, register, resolveHandler, allocate?) => { bound, refused }` | Binds a bundle's sidecar hooks (`internal/hooks.js`) against an image already placed. `allocate` is guest heap room for a `site` entry's trampoline; omit it when `spec` holds only `slot` entries. See "Sidecar hooks" below. |
 
@@ -125,7 +125,10 @@ first bytes of an exported function — and all three are ordinary. So every sys
 real PE32 DLL image in guest memory: one `.text` section with page-aligned section and file
 alignment (so the emitted bytes are simultaneously the file and the mapping), a sixteen-byte
 trampoline per export (`jmp rel32` to the bridge stub, padded with `int3`), then the export
-directory with its function, name and name-ordinal tables and the strings.
+directory with its function, name and name-ordinal tables and the strings. An export given
+`data` rather than a target is a variable: its address is the bytes, in its own slot when they
+fit and otherwise after the directory, aligned like a slot -- the runtime's `_iob`, twenty
+records, is one of those.
 
 Declared ordinals are honoured exactly and the rest are assigned above them, so an import by
 number binds to the function the program compiled against. The name table is sorted so a

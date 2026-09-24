@@ -110,7 +110,7 @@ instantiation of the module reports (method in "Inventory" below):
 |---------|-----------|--------:|----------------|
 | `KERNEL32.dll` | `kernel32/` | 331 | Console, threads and waits, heap and virtual memory, process and TLS, modules, files and directories, critical sections, locale and code pages, environment and command line, system info and time, `CreateProcess`, exceptions and SEH, resources, drives, file mappings and pipes, completion ports, file times, console I/O, APCs and the alertable waits (`apc.js`). |
 | `USER32.dll` | `user32/` | 254 | Windows and classes, painting, system queries and display settings, objects (cursors, icons, menus, clipboard), dialogs, hot keys, `SendInput`, the keyboard-layout family (`GetKeyboardLayout`, `MapVirtualKeyA`/`Ex`, `ToUnicode`) over the one en-US layout this build has. |
-| `msvcrt.dll` | `msvcrt/` | 268 (217 without `fpu`) | The C runtime: strings, multibyte strings, conversion, formatting and scanning, heap, math, paths, streams (`stdio.js`: `fopen` and its family over the volume), threads (`threads.js`: `_beginthread`/`_beginthreadex` through kernel32's `CreateThread`), time, C++ support (`cxx.js`), CRT startup, structured and C++ exceptions (`seh.js`, `eh.js`). |
+| `msvcrt.dll` | `msvcrt/` | 268 (217 without `fpu`) | The C runtime: strings, multibyte strings, conversion, formatting and scanning, heap, math, paths, streams (`stdio.js`: `fopen` and its family over the volume, and the standard three as `_iob`'s first records, writing to the console), threads (`threads.js`: `_beginthread`/`_beginthreadex` through kernel32's `CreateThread`), time, C++ support (`cxx.js`), CRT startup, structured and C++ exceptions (`seh.js`, `eh.js`). |
 | `GDI32.dll` | `gdi32/` | 102 | Device contexts, objects and their lifetimes, metrics, drawing entry points. |
 | `ntdll.dll` | `ntdll/` | 96 | Counted strings, status translation, machine queries, 64-bit helpers — and 76 entries that are the same function object kernel32 or msvcrt already publish. |
 | `ADVAPI32.dll` | `advapi32/` | 71 | The registry API over the hive, `GetUserNameA`, SIDs, and a CryptoAPI provider (MD5, SHA-1, SHA-256, RC4, RSA signature verification). |
@@ -360,6 +360,12 @@ implements).
 
 ### Small contracts, one paragraph each
 
+- **The C runtime's variables are data exports**, read through the address a program imported:
+  `_acmdln`, `_pctype`, `__mb_cur_max`, `_adjust_fdiv`; the system version as `_osver`,
+  `_winver`, `_winmajor` and `_winminor`, the figures `GetVersion` answers; `_HUGE` as
+  infinity; `_environ` as the vector `__getmainargs` hands `main`; and `_iob`, twenty `FILE`
+  records whose first three are stdin (at its end: nobody types), stdout and stderr (the console)
+  -- `__iob_func` answers the same array.
 - **The processor is described once** (`kernel32/processor.js`): the emulated CPUID's leaf 1 --
   GenuineIntel, family 6 model 7 stepping 3, its EDX and ECX feature bits -- and everything a
   program can ask derives from it: `GetSystemInfo`'s level and revision, `IsProcessorFeaturePresent`

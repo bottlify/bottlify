@@ -30,6 +30,8 @@
  *   pointed at a buffer that will be reused.
  */
 
+import { VERSION_BUILD, VERSION_MAJOR, VERSION_MINOR } from '../kernel32/process.js';
+
 /** What `_controlfp` reports when nothing has changed it: the MSVC default. */
 const DEFAULT_CONTROL_WORD = 0x0009001f;
 
@@ -215,6 +217,13 @@ export function createStartupFunctions(host){
             env: publishVector([]),
         };
         return mainArgs;
+    };
+
+    /** @param {number} value @returns {Uint8Array} a dword, as a data export holds one */
+    const dword = value=>{
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        return bytes;
     };
 
     /** An int in guest memory that a `__p__*` accessor can hand out. */
@@ -505,6 +514,41 @@ export function createStartupFunctions(host){
          * division the program does.
          */
         _adjust_fdiv: { data: ()=>new Uint8Array(4) },
+
+        /**
+         * unsigned _osver, _winver, _winmajor, _winminor
+         *
+         * The runtime's copy of the system version, which a start-up and a
+         * program's own version check read without calling GetVersion: the
+         * build, major and minor in one word, and each part alone. The same
+         * figures GetVersion answers, since a program may compare the two.
+         */
+        _osver: { data: ()=>dword(VERSION_BUILD) },
+        _winver: { data: ()=>dword(VERSION_MAJOR << 8 | VERSION_MINOR) },
+        _winmajor: { data: ()=>dword(VERSION_MAJOR) },
+        _winminor: { data: ()=>dword(VERSION_MINOR) },
+
+        /**
+         * double _HUGE
+         *
+         * What `HUGE_VAL` reads, the value a math function answers on
+         * overflow: infinity, not the largest finite double.
+         */
+        _HUGE: {
+            data: ()=>{
+                const bytes = new Uint8Array(8);
+                new DataView(bytes.buffer).setFloat64(0, Infinity, true);
+                return bytes;
+            },
+        },
+
+        /**
+         * char **_environ
+         *
+         * The environment `__getmainargs` hands `main` as its third argument,
+         * the same vector: a program walks whichever it has.
+         */
+        _environ: { data: ()=>dword(buildMainArgs().env) },
 
         /**
          * int __mb_cur_max

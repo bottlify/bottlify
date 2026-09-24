@@ -433,8 +433,9 @@ test('every function is cdecl and declares the stack its arguments occupy', ()=>
         // A C++ member is the one exception: `this` travels in ECX. Its
         // decoration says so -- QBE/UAE are `const`/virtual thiscall members.
         const expected = /@@[QU][AB]E/.test(name) ? 'thiscall' : 'cdecl';
-        assert.equal(fn.convention, expected, `${name} is ${expected}`);
-        assert.equal(fn.argBytes % 4, 0, `${name} takes whole DWORDs`);
+        const entry = /** @type {any} */ (fn);
+        assert.equal(entry.convention, expected, `${name} is ${expected}`);
+        assert.equal(entry.argBytes % 4, 0, `${name} takes whole DWORDs`);
     }
 
     assert.equal(fns.strlen.argBytes, 4);

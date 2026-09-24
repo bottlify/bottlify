@@ -55,10 +55,15 @@ export function fakeVolume(files, { late = false } = {}){
     };
 }
 
+/** Where the runtime's `_iob` sits, as the loader would have placed it. */
+const IOB = 0x9000;
+
 /** @param {{ late?: boolean }} [options] */
 function build(options = {}){
     const memory = fakeMemory();
     const files = fakeVolume({ 'C:\\data.bin': new Uint8Array([1, 2, 3, 4, 5, 6, 7]) }, options);
+    /** @type {[number, string][]} */
+    const console = [];
     const fns = /** @type {any} */ (createStdioFunctions({
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
@@ -66,8 +71,10 @@ function build(options = {}){
         allocate: memory.allocate,
         free: ()=>true,
         files,
+        write: (handle, text)=>console.push([handle, text]),
+        iob: ()=>IOB,
     }));
-    return { memory, files, fns };
+    return { memory, files, fns, console };
 }
 
 test('a stream reads whole elements, tells its position, seeks and closes', ()=>{
@@ -181,4 +188,35 @@ test('setvbuf accepts a stream and a real mode, and does nothing observable', ()
     assert.equal(fns.setvbuf.handler([stream, 0, IOLBF, 512]), 0);
     assert.equal(fns.setvbuf.handler([stream, 0, 0x1234, 0]), -1, 'not a mode this runtime has');
     assert.equal(fns.setvbuf.handler([0x999, 0, IONBF, 0]), -1, 'not a stream at all');
+});
+
+test('_iob is the records themselves, the standard three first, each naming its descriptor', ()=>{
+    const { fns } = build();
+    const bytes = fns._iob.data();
+    const view = new DataView(bytes.buffer);
+
+    assert.equal(bytes.length, 20 * 32, 'twenty records');
+    assert.deepEqual([0, 1, 2].map(index=>view.getUint32(index * 32 + 16, true)), [0, 1, 2]);
+    assert.deepEqual([0, 1, 2].map(index=>view.getUint32(index * 32 + 12, true)),
+        [0x1, 0x2, 0x2], 'stdin reads, stdout and stderr write');
+    assert.equal(fns.__iob_func.handler([]), IOB);
+    assert.equal(fns.__p__iob.handler([]), IOB);
+});
+
+test('stdout and stderr write to the console; stdin is at its end', ()=>{
+    const { memory, fns, console } = build();
+    const text = memory.put('%s=%d');
+    const name = memory.put('x');
+    const bytes = memory.put('hey');
+
+    assert.equal(fns.fprintf.handler([IOB + 32, text, name, 3]), 3);
+    assert.equal(fns.fwrite.handler([bytes, 1, 3, IOB + 64]), 3);
+    assert.deepEqual(console, [[2, 'x=3'], [3, 'hey']], 'the standard handles, 2 and 3');
+
+    const buffer = memory.allocate(4);
+    assert.equal(fns.fread.handler([buffer, 1, 1, IOB]), 0);
+    assert.equal(fns.fseek.handler([IOB + 32, 0, 0]), -1, 'the console does not seek');
+    assert.equal(fns.fclose.handler([IOB + 32]), 0, 'and is not the program\'s to free');
+    assert.equal(fns.fprintf.handler([IOB + 96, text, name, 3]), -1,
+        'the fourth record is no stream until something opens one');
 });

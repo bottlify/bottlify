@@ -6,6 +6,7 @@
 
 import { formatToString } from './format.js';
 import { VARIADIC_SLOTS } from './scan.js';
+import { HANDLE_STDERR, HANDLE_STDIN, HANDLE_STDOUT } from '../kernel32/console.js';
 
 /**
  * Buffered file streams: fopen and the calls that take what it hands out.
@@ -23,6 +24,14 @@ import { VARIADIC_SLOTS } from './scan.js';
 const FILE_SIZE = 32;
 const FILE_FLAG = 12;
 const FILE_FILE = 16;
+
+/**
+ * `_iob`: the runtime's own streams, stdin, stdout and stderr first, twenty
+ * records in all. A program reaches the first three as `&_iob[n]`, the
+ * address it imported plus a record's size per stream.
+ */
+const IOB_ENTRIES = 20;
+const STANDARD_STREAMS = [HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR];
 
 /** `_flag` bits, as the runtime sets them from the mode string. */
 const IOREAD = 0x0001;
@@ -51,14 +60,18 @@ const IONBF = 0x0004;
  * @property {(bytes: number) => number} allocate
  * @property {(address: number) => boolean} free
  * @property {any} files  The volume: open, read, write, close, stat.
+ * @property {(handle: number, text: string) => void} [write]
+ *           The console, for the standard streams.
+ * @property {() => number} [iob]  Where `_iob` was placed, once it has been.
  */
 
 /**
  * @typedef {Object} Stream
- * @property {any} node       The volume's open file.
+ * @property {any} node       The volume's open file; null for a standard stream.
  * @property {string} path
  * @property {number} position
  * @property {number} flags
+ * @property {number} [console]  The standard handle a standard stream writes to.
  */
 
 /**
@@ -103,8 +116,47 @@ export function createStdioFunctions(host){
         value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
     ]));
 
-    /** @param {number} pointer */
-    const streamOf = pointer=>streams.get(pointer >>> 0) ?? null;
+    /**
+     * The stream a record is. One of `_iob`'s first three is a standard
+     * stream the first time it is used: nothing opens them, and the program's
+     * `stdout` is only ever the address of a record in the runtime's image.
+     *
+     * @param {number} pointer
+     * @returns {Stream | null}
+     */
+    const streamOf = pointer=>{
+        const known = streams.get(pointer >>> 0);
+        if (known)
+        {
+            return known;
+        }
+        const base = host.iob?.() ?? 0;
+        const offset = (pointer >>> 0) - base;
+        if (base === 0 || offset < 0 || offset % FILE_SIZE !== 0
+            || offset / FILE_SIZE >= STANDARD_STREAMS.length)
+        {
+            return null;
+        }
+        const index = offset / FILE_SIZE;
+        /** @type {Stream} */
+        const stream = {
+            node: null, path: '', position: 0,
+            flags: index === 0 ? IOREAD : IOWRT,
+            console: STANDARD_STREAMS[index],
+        };
+        streams.set(pointer >>> 0, stream);
+        return stream;
+    };
+
+    /**
+     * Writes to a standard stream: the console, a byte to a character.
+     *
+     * @param {Stream} stream
+     * @param {string} text
+     */
+    const toConsole = (stream, text)=>{
+        host.write?.(/** @type {number} */ (stream.console), text);
+    };
 
     /** @param {Stream} stream @param {number} bit */
     const raise = (stream, bit)=>{
@@ -124,6 +176,32 @@ export function createStdioFunctions(host){
     const cdecl = (argBytes, handler)=>({ convention: 'cdecl', argBytes, handler });
 
     return {
+        /**
+         * FILE _iob[20]
+         *
+         * Data, not code: the records themselves, at the address a program
+         * imported. The first three are the standard streams, each saying
+         * which it is in `_file` as `_fileno` reads it.
+         */
+        _iob: {
+            data: ()=>{
+                const bytes = new Uint8Array(IOB_ENTRIES * FILE_SIZE);
+                const view = new DataView(bytes.buffer);
+                STANDARD_STREAMS.forEach((_, index)=>{
+                    view.setUint32(index * FILE_SIZE + FILE_FLAG,
+                        index === 0 ? IOREAD : IOWRT, true);
+                    view.setUint32(index * FILE_SIZE + FILE_FILE, index, true);
+                });
+                return bytes;
+            },
+        },
+
+        /** FILE *__iob_func(void) -- the same array, for a runtime that asks by call. */
+        __iob_func: cdecl(0, ()=>host.iob?.() ?? 0),
+
+        /** FILE *__p__iob(void) */
+        __p__iob: cdecl(0, ()=>host.iob?.() ?? 0),
+
         /**
          * FILE *fopen(const char *filename, const char *mode)
          *
@@ -174,6 +252,11 @@ export function createStdioFunctions(host){
             {
                 return EOF;
             }
+            // A standard stream is the runtime's, not the program's to free.
+            if (stream.console !== undefined)
+            {
+                return 0;
+            }
             host.files.close(stream.node);
             streams.delete(pointer >>> 0);
             host.free(pointer >>> 0);
@@ -193,6 +276,12 @@ export function createStdioFunctions(host){
             const wanted = (size >>> 0) * (count >>> 0);
             if (!stream || wanted === 0 || (stream.flags & (IOREAD | IORW)) === 0)
             {
+                return 0;
+            }
+            // Nobody types into the console, so standard input is at its end.
+            if (stream.console !== undefined)
+            {
+                raise(stream, IOEOF);
                 return 0;
             }
             /** @param {Uint8Array} bytes */
@@ -223,6 +312,11 @@ export function createStdioFunctions(host){
                 return 0;
             }
             const bytes = host.readMemory(buffer >>> 0, wanted).slice();
+            if (stream.console !== undefined)
+            {
+                toConsole(stream, String.fromCharCode(...bytes));
+                return count >>> 0;
+            }
             const stored = host.files.write(stream.node, stream.position, bytes);
             stream.position += stored;
             if (stored < wanted)
@@ -240,7 +334,7 @@ export function createStdioFunctions(host){
          */
         fseek: cdecl(12, ([pointer, offset, origin])=>{
             const stream = streamOf(pointer);
-            if (!stream)
+            if (!stream || stream.console !== undefined)
             {
                 return -1;
             }
@@ -274,6 +368,11 @@ export function createStdioFunctions(host){
                 return EOF;
             }
             const text = formatToString(readString(format), args.slice(2), readString);
+            if (stream.console !== undefined)
+            {
+                toConsole(stream, text);
+                return text.length;
+            }
             const bytes = new TextEncoder().encode(text);
             const stored = host.files.write(stream.node, stream.position, bytes);
             stream.position += stored;

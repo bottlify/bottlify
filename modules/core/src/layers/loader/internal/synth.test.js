@@ -334,10 +334,28 @@ test('a data export holds its bytes at the exported address, not a jump', ()=>{
     const rva = decoded.functionRvas[decoded.nameOrdinals[decoded.names.indexOf('_acmdln')]];
     assert.equal(module.addressOf('_acmdln'), BASE + rva);
     assert.deepEqual([...module.bytes.subarray(rva, rva + 5)], [0x78, 0x56, 0x34, 0x12, 0xcc]);
-    assert.throws(
-        ()=>synthesiseModule({
-            name: 'A.dll', base: BASE, exports: [{ name: 'Big', data: new Uint8Array(17) }],
-        }),
-        /more than 16 bytes/,
-    );
+});
+
+test('a variable larger than a slot gets room of its own, outside the export directory', ()=>{
+    // The runtime's standard streams are an array of twenty records: the
+    // export's address is the first, and the other nineteen follow it.
+    const streams = new Uint8Array(20 * 32).map((_, index)=>index & 0xff);
+    const module = synthesiseModule({
+        name: 'MSVCRT.dll',
+        base: BASE,
+        exports: [{ name: 'exit', target: 0x2000 }, { name: '_iob', data: streams },
+            { name: '_small', data: new Uint8Array([1, 2, 3, 4]) }],
+    });
+    const decoded = decodeExports(module.bytes);
+    const rva = decoded.functionRvas[decoded.nameOrdinals[decoded.names.indexOf('_iob')]];
+
+    assert.equal(module.addressOf('_iob'), BASE + rva);
+    assert.deepEqual(module.bytes.subarray(rva, rva + streams.length), streams);
+    assert.equal(rva % 16, 0);
+    assert.ok(rva >= decoded.directoryRva + decoded.directorySize,
+        'past the directory, so it is not read as a forwarder');
+    assert.ok(rva + streams.length <= module.size, 'and inside the image');
+    const small = decoded.functionRvas[decoded.nameOrdinals[decoded.names.indexOf('_small')]];
+    assert.deepEqual([...module.bytes.subarray(small, small + 4)], [1, 2, 3, 4],
+        'a small one still sits in its slot');
 });

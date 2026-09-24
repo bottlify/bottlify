@@ -88,6 +88,7 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  * @property {() => number} [now]           Guest running time, milliseconds.
  * @property {any} [files]                  The volume, for the path functions.
  * @property {() => string[]} [drives]      Letters the filesystem has mounted.
+ * @property {() => number} [iob]           Where the runtime's `_iob` was placed, once it has been.
  * @property {import('./float.js').FloatHost} [fpu]
  * @property {() => string} [commandLine]
  *           What the process was started with, as GetCommandLineA reports it.
@@ -833,6 +834,8 @@ export function createMsvcrtFunctions(host){
                 allocate: host.allocate,
                 free: host.free,
                 files: host.files,
+                write: host.write,
+                iob: host.iob,
             })
             : {}),
         ...(host.threads ? createThreadFunctions(host.threads) : {}),

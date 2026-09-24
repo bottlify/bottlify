@@ -1001,6 +1001,9 @@ export const win32Module = {
                         exitCode = code;
                     },
                     files: volume,
+                    // The standard streams are records in the runtime's own
+                    // image, wherever the loader put its `_iob`.
+                    iob: ()=>modules.find('msvcrt.dll')?.addressOf?.('_iob') ?? 0,
                     // The same set GetLogicalDrives reports, from the same
                     // place: a program populates its drive list from whichever
                     // of the two it happens to call.

@@ -37,7 +37,8 @@ const SOURCES = join(FIXTURES, 'src');
 /**
  * What the fixtures import, per library. A name ending in `@N` is stdcall and
  * is imported undecorated, as the system's own libraries export it, unless it
- * is listed under `decorated` -- the runtime exports a few with the suffix.
+ * is listed under `decorated` -- the runtime exports a few with the suffix. A
+ * name marked DATA is a variable, imported through its address.
  */
 const IMPORTS = {
     'KERNEL32.dll': {
@@ -46,7 +47,7 @@ const IMPORTS = {
             'CreateThread@24', 'WaitForSingleObject@8', 'Sleep@4', 'QueueUserAPC@12',
             'SleepEx@8', 'WaitForSingleObjectEx@12', 'CreateEventA@16', 'SetEvent@4',
             'CreateWaitableTimerA@12', 'SetWaitableTimer@24', 'GetCurrentThreadId@0',
-            'GetCurrentThread@0', 'GetSystemInfo@4', 'IsProcessorFeaturePresent@4',
+            'GetCurrentThread@0', 'GetSystemInfo@4', 'IsProcessorFeaturePresent@4', 'GetVersion@0',
         ],
     },
     'ADVAPI32.dll': {
@@ -55,7 +56,9 @@ const IMPORTS = {
     'msvcrt.dll': {
         undecorated: [
             '__CxxFrameHandler3', '_CxxThrowException@8', '_except_handler3', 'qsort',
-            '??3@YAXPAX@Z', '_setjmp3', 'longjmp',
+            '??3@YAXPAX@Z', '_setjmp3', 'longjmp', 'fprintf', 'fwrite', 'fread', '__iob_func',
+            '_iob DATA', '_osver DATA', '_winver DATA', '_winmajor DATA', '_winminor DATA',
+            '_HUGE DATA', '_environ DATA',
         ],
         decorated: ['_seh_longjmp_unwind@4'],
     },
@@ -68,6 +71,7 @@ const PROGRAMS = [
     { name: 'unhandled', source: 'unhandled.cpp', cxx: true },
     { name: 'apc', source: 'apc.c', cxx: false },
     { name: 'processor', source: 'processor.c', cxx: false },
+    { name: 'crtdata', source: 'crtdata.c', cxx: false },
 ];
 
 /**

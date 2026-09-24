@@ -172,6 +172,29 @@ const hookClock = typeof performance === 'undefined' ? Date.now : ()=>performanc
  */
 export function createDispatcher(deps){
     const { cpu, memory, parking, suspend } = deps;
+
+    /**
+     * Reads a call's stack words one at a time up to the end of the region
+     * they start in, and zeroes the rest. Only reached when the span runs past
+     * that region; a read that fails for any other reason fails as it did.
+     *
+     * @param {number} from @param {number} count @param {number[]} into
+     * @param {number} at @param {unknown} failure
+     */
+    const readWithinStack = (from, count, into, at, failure)=>{
+        const region = memory.find?.(from);
+        if (!region)
+        {
+            throw failure;
+        }
+        const end = region.base + region.size;
+        for (let word = 0; word < count; word++)
+        {
+            const address = from + word * 4;
+            into[at + word] = address + 4 <= end ? memory.readU32(address) | 0 : 0;
+        }
+    };
+
     const journal = deps.journal ?? null;
     const HOOK_AREA = 'call.hook';
     /**
@@ -587,8 +610,19 @@ export function createDispatcher(deps){
                     // and a call takes several words at once. The memory layer
                     // validates the span once and falls back to per-word reads
                     // itself when a stack straddles two adjacent regions (legal
-                    // layout, if rare), so there is nothing to catch here.
-                    memory.readU32sInto(esp + 4, entry.stackWords, args, at);
+                    // layout, if rare).
+                    try
+                    {
+                        memory.readU32sInto(esp + 4, entry.stackWords, args, at);
+                    }
+                    catch (e){
+                        // A variadic entry reads a fixed number of slots, and a
+                        // call made near the top of its thread's stack has
+                        // fewer words above it than that: past the stack is
+                        // nothing the caller passed, so it reads as zero rather
+                        // than stopping the machine.
+                        readWithinStack(esp + 4, entry.stackWords, args, at, e);
+                    }
                 }
             }
 

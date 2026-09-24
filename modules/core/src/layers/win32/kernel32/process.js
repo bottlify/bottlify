@@ -57,9 +57,9 @@ const TLS_SLOTS_IN_BLOCK = 64;
  * era both understands and is willing to run on -- old enough that nothing
  * demands a feature we do not have, new enough that an NT check passes.
  */
-const VERSION_MAJOR = 5;
-const VERSION_MINOR = 1;
-const VERSION_BUILD = 2600;
+export const VERSION_MAJOR = 5;
+export const VERSION_MINOR = 1;
+export const VERSION_BUILD = 2600;
 const VER_PLATFORM_WIN32_NT = 2;
 const VER_NT_WORKSTATION = 1;
 

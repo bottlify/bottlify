@@ -263,7 +263,10 @@ the stack into the function's own array (the convention was worked out once, at 
 through one `memory.window` call over the whole span rather than a read per word; a stack that
 straddles two adjacent regions (legal guest layout, though no guest here reaches it today) makes
 `window` refuse the span, and dispatch falls back to reading each argument word on its own rather
-than refusing the call. It records the name in a ring and a detail record in another, fills the
+than refusing the call. A span that runs past the end of the region it starts in -- a variadic
+entry such as `printf` reads a fixed number of slots, and a call from a thread's first frame has
+fewer words above it than that -- is read up to the region's end and zero beyond it, since past
+the stack is nothing the caller passed; a span that starts in no region still fails. It records the name in a ring and a detail record in another, fills the
 `frame` for this depth of
 nesting — everything a handler might need about where it was called from, read **before** it
 runs because a handler that calls the guest back overwrites that part of the stack — brackets
