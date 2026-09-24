@@ -141,7 +141,7 @@ export function createBackend(options){
                 throw new Error(
                     'A bound vertex shader must be translated before it reaches the backend');
             }
-            const layout = decodeFvf(state.fvf);
+            const layout = state.vertexLayout ?? decodeFvf(state.fvf);
             const generated = generateFixedFunction(state, layout);
             const module = await shaders.build(generated);
             const descriptor = pipelineDescriptor(state, layout);

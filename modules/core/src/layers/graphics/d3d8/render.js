@@ -967,7 +967,11 @@ export function eyePosition(view){
  * @property {Material} material
  * @property {any} backBuffer                                What Present shows.
  * @property {{ vertexShader: number, fvf: number, pixelShader: number,
- *              program?: ProgramState | null }} stageProcessing
+ *              program?: ProgramState | null,
+ *              fixedFunctionLayout?: import('../d3d9/declaration.js').FixedFunctionLayout | null
+ *            }} stageProcessing
+ *     `fixedFunctionLayout` is how the fixed-function stage reads a bound
+ *     declaration that no vertex format spells (`fvf` is then zero).
  *     `program` is what a device that makes shader objects hands over: the
  *     parsed shaders, the declaration and the constant files. Absent, a bound
  *     shader is a draw this renderer declines.
@@ -1262,6 +1266,8 @@ export function fogModeOf(model, applied = true){
  * @param {RenderModel} model
  * @param {Object} shape
  * @param {number} shape.fvf
+ * @param {import('../webgpu/internal/vertexformat.js').VertexLayout} [shape.vertexLayout]
+ * @param {string} [shape.vertexLayoutKey]
  * @param {string} shape.topology
  * @param {string} shape.targetFormat
  * @param {boolean} [shape.targetHasAlpha]
@@ -1319,6 +1325,10 @@ export function pipelineStateOf(model, shape){
         // computed it or the program supplied it.
         specularEnable: rs('SPECULARENABLE') !== 0,
         lighting: shape.lighting ?? null,
+        ...(shape.vertexLayout ? {
+            vertexLayout: shape.vertexLayout,
+            vertexLayoutKey: shape.vertexLayoutKey,
+        } : {}),
     };
 }
 
@@ -2582,6 +2592,33 @@ export function createRenderer(options){
         }
     };
 
+    /**
+     * The vertex layout of a declaration the fixed-function stage reads, for a
+     * stream of this stride, or null when a member would reach past the vertex.
+     *
+     * @param {import('../d3d9/declaration.js').FixedFunctionLayout} declared
+     * @param {number} stride
+     * @returns {import('../webgpu/internal/vertexformat.js').VertexLayout | null}
+     */
+    const layoutOfDeclaration = (declared, stride)=>{
+        if (declared.attributes.some(attribute=>attribute.offset + attribute.bytes > stride))
+        {
+            return null;
+        }
+        return {
+            stride,
+            attributes: declared.attributes.map((attribute, index)=>({
+                name: attribute.name,
+                offset: attribute.offset,
+                format: attribute.format,
+                shaderLocation: index,
+            })),
+            preTransformed: declared.preTransformed,
+            texCoordSets: declared.texCoordSets,
+            blendWeights: 0,
+        };
+    };
+
     let layoutReported = false;
     /** Says once that fixed-function draws were dropped for want of a format. */
     const reportLayout = ()=>{
@@ -2589,8 +2626,9 @@ export function createRenderer(options){
         {
             layoutReported = true;
             divergence('Direct3D 8',
-                'a fixed-function draw over a vertex declaration no vertex format spells'
-                + ' is not drawn');
+                'a fixed-function draw over a vertex declaration the fixed-function stage'
+                + ' cannot read (a second stream, blend weights, a colour that is not a'
+                + ' D3DCOLOR, or a member past the vertex) is not drawn');
         }
     };
 
@@ -3859,7 +3897,7 @@ export function createRenderer(options){
      * draw's own shape are not in it: see `preparationKeyOf`, which adds them.
      *
      * @param {RenderModel} model
-     * @param {{ fvf: number }} processing
+     * @param {{ fvf: number, fixedFunctionLayout?: { id: number } | null }} processing
      * @returns {number}
      */
     const stateNumberOf = (model, processing)=>{
@@ -3876,6 +3914,8 @@ export function createRenderer(options){
         };
         put(slowStateOf(model));
         put(processing.fvf);
+        // A declaration read without a format is told apart by its own id.
+        put(processing.fixedFunctionLayout?.id ?? 0);
         put(model.renderStates.size);
         for (const [state, value] of model.renderStates)
         {
@@ -3956,7 +3996,7 @@ export function createRenderer(options){
      * bytes, which change without the device hearing of it.
      *
      * @param {RenderModel} model
-     * @param {{ fvf: number }} processing
+     * @param {{ fvf: number, fixedFunctionLayout?: { id: number } | null }} processing
      * @param {number} stride
      * @param {string} topology
      * @returns {string}
@@ -4074,22 +4114,39 @@ export function createRenderer(options){
             preparedState = cached;
             return reuse(model, cached);
         }
+        /** @type {import('../webgpu/internal/vertexformat.js').VertexLayout} */
+        let layout;
+        /** @type {string | undefined} */
+        let vertexLayoutKey;
         if ((processing.fvf & POSITION_MASK) === 0)
         {
-            // Direct3D draws the fixed-function pipeline from any declaration;
-            // this one reads a vertex only through a format, and a declaration
-            // that no format spells arrives here as none. The draw is dropped
-            // and counted -- the program was already told it succeeded -- and
-            // never raised into the program's thread.
-            skip('layout');
-            reportLayout();
-            return null;
+            // A declaration no format spells: read through the layout the
+            // device worked out from its elements, when the fixed-function
+            // stage can read it at all. Otherwise the draw is dropped and
+            // counted -- the program was already told it succeeded -- and never
+            // raised into the program's thread.
+            const declared = processing.fixedFunctionLayout
+                ? layoutOfDeclaration(processing.fixedFunctionLayout, stride)
+                : null;
+            if (!declared)
+            {
+                skip('layout');
+                reportLayout();
+                return null;
+            }
+            layout = declared;
+            vertexLayoutKey = `d${stride}:${declared.attributes
+                .map(attribute=>`${attribute.name}@${attribute.offset}:${attribute.format}`)
+                .join(',')}`;
         }
-        const layout = decodeFvf(processing.fvf);
-        if (stride !== layout.stride)
+        else
         {
-            skip('stride');
-            return null;
+            layout = decodeFvf(processing.fvf);
+            if (stride !== layout.stride)
+            {
+                skip('stride');
+                return null;
+            }
         }
         const cascade = stageCascade(model, layout);
         reportCascade(cascade);
@@ -4117,6 +4174,7 @@ export function createRenderer(options){
         counters.prepared.built++;
         const state = pipelineStateOf(model, {
             fvf: processing.fvf,
+            ...(vertexLayoutKey === undefined ? {} : { vertexLayout: layout, vertexLayoutKey }),
             topology,
             ...formatsOf(model),
             stages: cascade.stages,

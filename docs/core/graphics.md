@@ -395,9 +395,14 @@ depth surface, which Direct3D allows and WebGPU does not, is drawn with a depth 
 standing in (`depth-stand-in`), kept per depth surface and size. `stateblock.js`
 records what is set between `BeginStateBlock` and `EndStateBlock` -- and in this version a state set
 while recording goes into the block, not the device. `declaration.js` converts between vertex
-declarations and FVF codes; a fixed-function draw through a declaration is drawn when it describes
-an FVF and, when it does not, dropped -- counted in `skipped.layout` and reported once -- rather
-than raised into the program's thread.
+declarations and FVF codes. A fixed-function draw through a declaration that no FVF spells -- its
+members in another order, at other offsets, or beside ones only a shader reads (tangents, binormals
+and the like are ignored, as Direct3D ignores them) -- is read through a layout made from the
+declaration's own offsets (`fixedFunctionLayoutOf`), carried in the pipeline state and its key. A
+declaration this stage cannot read -- a second stream, a tessellator method, blend weights, a colour
+that is not a `D3DCOLOR`, a position of another type, coordinate sets with a gap, or a member past
+the stream's stride -- is dropped, counted in `skipped.layout` and reported once, rather than raised
+into the program's thread.
 
 **Direct3D 10 and DXGI** (`src/layers/graphics/d3d10/`). `dxbc.js` opens the container (`ISGN`,
 `OSGN`, `SHDR`; older token streams answer `E_INVALIDARG`); `sm4.js` decodes the token stream with

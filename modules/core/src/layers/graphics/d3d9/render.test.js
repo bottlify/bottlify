@@ -654,21 +654,62 @@ test('a state block applied between two draws is a new preparation for the secon
     assert.deepEqual(refs, [0, 5]);
 });
 
-test('a fixed-function draw over a declaration no format spells is dropped, not raised', async()=>{
-    // The colour laid before the position is legal in a declaration and has no
-    // vertex format. Drawing it without a vertex shader must not throw into the
-    // program's thread: the draw is counted as dropped and said once.
-    const h = harness();
-    const { device } = h;
+/**
+ * A declaration of a colour before a pre-transformed position: legal, and no
+ * vertex format spells it, since a format puts the position first.
+ *
+ * @param {any} device @param {number} [colourStream]
+ */
+function colourFirstDeclaration(device, colourStream = 0){
     /** @type {{ declaration?: any }} */
     const made = {};
     assert.equal(device.CreateVertexDeclaration([
-        { Stream: 0, Offset: 0, Type: D3DDECLTYPE.D3DCOLOR, Method: 0,
+        { Stream: colourStream, Offset: 0, Type: D3DDECLTYPE.D3DCOLOR, Method: 0,
             Usage: D3DDECLUSAGE.COLOR, UsageIndex: 0 },
         { Stream: 0, Offset: 4, Type: D3DDECLTYPE.FLOAT4, Method: 0,
             Usage: D3DDECLUSAGE.POSITIONT, UsageIndex: 0 },
     ], made), D3D_OK);
     assert.equal(device.SetVertexDeclaration(made.declaration), D3D_OK);
+}
+
+test('a fixed-function draw reads a declaration no format spells at its offsets', async()=>{
+    // Direct3D's fixed-function pipeline reads any declaration of the members
+    // it knows. The colour is at offset 0 and the position at 4 here, where a
+    // format would put them the other way round; the pipeline has to read
+    // them where the declaration says.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    colourFirstDeclaration(device);
+    const bytes = new DataView(new ArrayBuffer(60));
+    [[1, 1], [7, 1], [1, 4]].forEach(([x, y], index)=>{
+        bytes.setUint32(index * 20, argb(0, 0, 255), true);
+        bytes.setFloat32(index * 20 + 4, x, true);
+        bytes.setFloat32(index * 20 + 8, y, true);
+        bytes.setFloat32(index * 20 + 12, 0.5, true);
+        bytes.setFloat32(index * 20 + 16, 1, true);
+    });
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(bytes.buffer), 20),
+        D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const diagnostics = device.diagnostics();
+    assert.equal(diagnostics.skipped.layout, 0);
+    const layout = h.gpu.of('createRenderPipeline')
+        .map((/** @type {any} */ call)=>call.descriptor.vertex.buffers[0])
+        .find((/** @type {any} */ buffer)=>buffer && buffer.arrayStride === 20);
+    assert.ok(layout, 'a pipeline over the declared stride');
+    assert.deepEqual(layout.attributes.map((/** @type {any} */ attribute)=>
+        [attribute.offset, attribute.format]), [[0, 'unorm8x4'], [4, 'float32x4']]);
+});
+
+test('a declaration the fixed-function stage cannot read is dropped, not raised', async()=>{
+    // A colour in a second stream: this stage reads one stream. The draw must
+    // not throw into the program's thread; it is counted and said once.
+    const h = harness();
+    const { device } = h;
+    colourFirstDeclaration(device, 1);
     assert.equal(device.BeginScene(), D3D_OK);
     assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK);
     assert.equal(device.EndScene(), D3D_OK);

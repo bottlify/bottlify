@@ -66,7 +66,8 @@ import {
 import { SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters } from './validity.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import {
-    MAX_STREAMS, createVertexDeclaration, elementsOfFvf, fvfOfElements, validateElements,
+    MAX_STREAMS, createVertexDeclaration, elementsOfFvf, fixedFunctionLayoutOf, fvfOfElements,
+    validateElements,
 } from './declaration.js';
 import {
     CONSTANT_FILE, SHADER_KIND, createConstantFile, createShader, validateShader, versionOf,
@@ -1029,6 +1030,28 @@ function createDeviceObject(parameters, caps, services, identity){
             return 0;
         }
         return vertexDeclaration.fvf || fvfOfElements(vertexDeclaration.declaration.elements);
+    };
+
+    /**
+     * The layout the fixed-function pipeline reads the bound declaration
+     * through when no vertex format spells it, worked out once per declaration.
+     *
+     * @type {WeakMap<object, import('./declaration.js').FixedFunctionLayout | null>}
+     */
+    const fixedFunctionLayouts = new WeakMap();
+    const fixedFunctionLayout = ()=>{
+        const declaration = vertexDeclaration.declaration;
+        if (!declaration || vertexShader || effectiveFvf() !== 0)
+        {
+            return null;
+        }
+        let layout = fixedFunctionLayouts.get(declaration);
+        if (layout === undefined)
+        {
+            layout = fixedFunctionLayoutOf(declaration);
+            fixedFunctionLayouts.set(declaration, layout);
+        }
+        return layout;
     };
 
     /**
@@ -2328,6 +2351,7 @@ function createDeviceObject(parameters, caps, services, identity){
             return {
                 vertexShader: vertexShader ? vertexShader.id : 0,
                 fvf: effectiveFvf(),
+                fixedFunctionLayout: fixedFunctionLayout(),
                 fixedFunctionVertex: !vertexShader,
                 pixelShader: pixelShader ? pixelShader.id : 0,
                 program: vertexShader || pixelShader
