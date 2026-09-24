@@ -240,7 +240,14 @@ code with a `stale` exit right after the instruction, so the runtime can drop wh
 translated there -- a store into the code's own bytes, that is: beside the flag the table
 keeps, per page, the first and last 32-byte granule holding translated code, and a store
 into the page's data next to its code (a small image keeps both in one page, and a loop
-storing into its own page went volatile after eight such stores) is no store into code. The null page is *not* marked, because the emulator lets a program read
+storing into its own page went volatile after eight such stores) is no store into code.
+The common case is one test per access: the flags of the access's page and of the next one,
+read as one halfword (the last byte of an access lies in one of the two), against
+inaccessible -- and, for an access that is only written (`mov` to memory, a push, `stos`),
+against code too, so the store's code note needs no second test. Only when a flag is up are
+the last byte's own flags read, so an access beside an unmapped page or beside code faults
+or notes only when it reaches it. On a push/pop loop this took a third off (2.3 -> 1.5 ns an
+instruction), on a load/store copy a quarter (1.14 -> 0.86), on a call-heavy loop a tenth. The null page is *not* marked, because the emulator lets a program read
 address 0 today and the two engines must agree; marking it, and projecting the memory
 layer's read-only regions into the table, is a policy switch this layer's owner throws when
 the emulator is no longer the reference for it.

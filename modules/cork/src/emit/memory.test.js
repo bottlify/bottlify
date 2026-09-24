@@ -95,6 +95,38 @@ test('a store into a page holding translated code leaves stale after the instruc
     assert.equal(exit.retired, 2);
 });
 
+test('a wide access beside an inaccessible page faults only when it reaches it', ()=>{
+    const near = [[0x5000, 0x1000, PageFlag.INACCESSIBLE]];
+    // mov eax, [0x4ffc]; mov [0x4ffc], eax: the dword ends at the page's last byte.
+    const inside = run([0xa1, 0xfc, 0x4f, 0, 0, 0xa3, 0xfc, 0x4f, 0, 0], {
+        regs: { eax: 0 }, mark: /** @type {[number, number, number][]} */ (near) });
+    assert.equal(inside.exit.kind, Exit.HALT);
+    for (const [bytes, size] of [[[0xa1, 0xfd, 0x4f, 0, 0], 4], [[0x66, 0xa1, 0xff, 0x4f, 0, 0], 2],
+        [[0x66, 0xa3, 0xff, 0x4f, 0, 0], 2]])
+    {
+        const { exit } = run(/** @type {number[]} */ (bytes), {
+            mark: /** @type {[number, number, number][]} */ (near) });
+        assert.equal(exit.kind, Exit.FAULT, `a ${size}-byte access over the edge`);
+        assert.equal(exit.eip, CODE);
+    }
+});
+
+test('a wide store beside a code page is no stale unless it reaches it', ()=>{
+    const code = /** @type {[number, number, number][]} */ ([[0x3000, 0x20, PageFlag.HAS_CODE]]);
+    const inside = run([0xa3, 0xfc, 0x2f, 0, 0], { mark: code });   // mov [0x2ffc], eax
+    assert.equal(inside.exit.kind, Exit.HALT);
+    const over = run([0x66, 0xa3, 0xff, 0x2f, 0, 0], { mark: code }); // mov [0x2fff], ax
+    assert.equal(over.exit.kind, Exit.STALE);
+    assert.equal(over.m.pages.staleAddress(), 0x2fff);
+    // A push, whose check makes the code note in the same test: esp 0x3000
+    // writes 0x2ffc..0x2fff, esp 0x3002 reaches the code.
+    const push = run([0x50], { regs: { esp: 0x3000 }, mark: code });
+    assert.equal(push.exit.kind, Exit.HALT);
+    const reaching = run([0x50], { regs: { esp: 0x3002 }, mark: code });
+    assert.equal(reaching.exit.kind, Exit.STALE);
+    assert.equal(reaching.m.pages.staleAddress(), 0x2ffe);
+});
+
 test('a store spanning into a code page is caught by its last byte', ()=>{
     const { m, exit } = run([
         0xb8, 0x78, 0x56, 0x34, 0x12,       // mov eax, 0x12345678
