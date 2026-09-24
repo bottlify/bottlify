@@ -259,7 +259,8 @@ into the page's data next to its code (a small image keeps both in one page, and
 storing into its own page went volatile after eight such stores) is no store into code.
 The common case is one test per access: the flags of the access's page and of the next one,
 read as one halfword (the last byte of an access lies in one of the two), against
-inaccessible -- and, for an access that is only written (`mov` to memory, a push, `stos`),
+inaccessible -- and, for an access that is only written (`mov` to memory, a push, `stos`, an SSE
+or MMX store such as `movaps`/`movss`/`movq` to memory or `stmxcsr`),
 against code too, so the store's code note needs no second test. Only when a flag is up are
 the last byte's own flags read, so an access beside an unmapped page or beside code faults
 or notes only when it reaches it. On a push/pop loop this took a third off (2.3 -> 1.5 ns an
