@@ -168,6 +168,12 @@ import { loadZstdWasm } from './zstd-wasm.js';
  *           once per iteration of a loop that keeps asking, so this is how the
  *           machine is made to stand still at the point of the request with the
  *           evidence still in it.
+ * @property {boolean} [exitNotice]
+ *           Whether a run the program ended with exit code 0 says so to the
+ *           player: a `message-box` of the engine's own (`exit: { code }`,
+ *           id 0), drawn by the page like the program's boxes, that the game
+ *           has finished and its process has stopped. On by default; a
+ *           nonzero code is the page's error report instead.
  * @property {any} [device]          The GPU to draw on, when there is one.
  * @property {{ presenter?: any, compressedTextures?: boolean }} [graphics]
  *           The graphics layer's configuration (docs/core/graphics.md, the
@@ -5461,6 +5467,9 @@ async function buildApp(options){
  */
 const REPLACEMENT_HISTORY = 16;
 
+/** The engine's own end-of-game box: MB_OK with MB_ICONINFORMATION. */
+const EXIT_NOTICE_TYPE = 0x40;
+
 /**
  * createApp — the consumer-facing entry point.
  *
@@ -5614,6 +5623,41 @@ export async function createApp(options){
     };
 
     /**
+     * How deep in `own.run` the run is: a child that runs beside its waiting
+     * parent is run through it too, and its exit is not the end of the game.
+     */
+    let depth = 0;
+    /** The image of the process running now, the one whose exit ends the game. */
+    let imagePath = options.imagePath ?? 'C:\\app.exe';
+
+    /**
+     * Tells the player the game is over when it ended by itself with code 0:
+     * otherwise the canvas just stops changing, which reads as a hang. The box
+     * is the engine's, not the program's -- the process is gone, and nothing
+     * waits on its answer -- so it carries id 0, which no program's box does,
+     * and `exit` for a page that draws it differently.
+     *
+     * @param {number} code
+     */
+    const noticeExit = code=>{
+        if (options.exitNotice === false || code !== 0 || current.exitCode() !== 0)
+        {
+            return;
+        }
+        events.emit('message-box', {
+            id: 0,
+            text: 'The game has finished and its process has stopped.',
+            caption: imagePath.split(/[\\/]/).pop(),
+            type: EXIT_NOTICE_TYPE,
+            buttons: [{ id: 1, label: 'OK' }],
+            defaultButton: 1,
+            icon: 'information',
+            trace: null,
+            exit: { code },
+        });
+    };
+
+    /**
      * The journal's sequence as the live machine has written it, for the
      * machine built next to continue from.
      */
@@ -5660,8 +5704,11 @@ export async function createApp(options){
         Object.assign(facade, current, own);
         bindLogLevels();
         events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence });
+        const parentImage = imagePath;
+        imagePath = request.imagePath;
 
         const code = await own.run(runOptions);
+        imagePath = parentImage;
 
         // Read while the child's machine stands, and put back into the
         // parent's: what an installer's second stage laid down is what the
@@ -5682,6 +5729,86 @@ export async function createApp(options){
         events.emit('process-resumed', { image: request.imagePath, code });
     };
 
+    /**
+     * Runs the live process, and each child that takes its place or runs
+     * beside it, until one exits with nothing left to run.
+     *
+     * @param {any} runOptions
+     * @returns {Promise<number>} the last program's exit code
+     */
+    const runProcesses = async runOptions=>{
+        while (true)
+        {
+            const code = await current.run(runOptions);
+            const request = current.replacement();
+            if (!request)
+            {
+                if (depth === 1)
+                {
+                    noticeExit(code);
+                }
+                return code;
+            }
+
+            if (current.waitingOn(request))
+            {
+                await runBeside(current, request, runOptions);
+                continue;
+            }
+
+            // Read before the tear-down, because the volume it comes off
+            // belongs to the process being torn down. So does everything
+            // that process wrote: an extractor that unpacked its payload
+            // and then started it has to hand that payload across, or the
+            // child is launched against files that no longer exist.
+            const child = await current.readImage(request.imagePath);
+            const carried = current.session.export();
+            // The sequence the journal reached, read while the machine that
+            // wrote it still stands. The child's journal continues from
+            // here, so the cursor a reader is holding points into it rather
+            // than past the end of a block that started over.
+            const written = current.diagnostics()
+                .find((/** @type {any} */ layer)=>layer.name === 'log')
+                ?.metrics?.journal?.written;
+            if (typeof written === 'number')
+            {
+                logSequence = written;
+            }
+            // Likewise read while it stands: the decoder the parent made is
+            // handed to the child so the same compiled module and linear
+            // memory serve both, and only the parent still holds it.
+            mediaInstance = current.media.instance() ?? mediaInstance;
+            await current.dispose();
+
+            if (!child)
+            {
+                throw new Error(
+                    `cannot start ${request.imagePath}: it is not on the volume`);
+            }
+
+            current = await buildApp(machine({
+                executable: child,
+                imagePath: request.imagePath,
+                commandLine: request.commandLine,
+                patches: request.patches,
+                seed: carried,
+            }));
+            imagePath = request.imagePath;
+            replayLogLevels();
+            Object.assign(facade, current, own);
+            bindLogLevels();
+            // The child's journal is a fresh block, continuing the parent's
+            // sequence. Whoever holds a reader of its own -- the page's
+            // keeper -- is told where it starts so it can be handed the
+            // block: a drain cursor taken before the swap is above zero and
+            // below the child's first record, and only this says so.
+            events.emit('process-started', {
+                image: request.imagePath,
+                sequenceBase: logSequence,
+            });
+        }
+    };
+
     const own = {
         /**
          * Runs the program, and whatever replaces it, to completion.
@@ -5691,70 +5818,14 @@ export async function createApp(options){
          * @returns {Promise<number>} the last program's exit code
          */
         async run(runOptions){
-            while (true)
+            depth++;
+            try
             {
-                const code = await current.run(runOptions);
-                const request = current.replacement();
-                if (!request)
-                {
-                    return code;
-                }
-
-                if (current.waitingOn(request))
-                {
-                    await runBeside(current, request, runOptions);
-                    continue;
-                }
-
-                // Read before the tear-down, because the volume it comes off
-                // belongs to the process being torn down. So does everything
-                // that process wrote: an extractor that unpacked its payload
-                // and then started it has to hand that payload across, or the
-                // child is launched against files that no longer exist.
-                const child = await current.readImage(request.imagePath);
-                const carried = current.session.export();
-                // The sequence the journal reached, read while the machine that
-                // wrote it still stands. The child's journal continues from
-                // here, so the cursor a reader is holding points into it rather
-                // than past the end of a block that started over.
-                const written = current.diagnostics()
-                    .find((/** @type {any} */ layer)=>layer.name === 'log')
-                    ?.metrics?.journal?.written;
-                if (typeof written === 'number')
-                {
-                    logSequence = written;
-                }
-                // Likewise read while it stands: the decoder the parent made is
-                // handed to the child so the same compiled module and linear
-                // memory serve both, and only the parent still holds it.
-                mediaInstance = current.media.instance() ?? mediaInstance;
-                await current.dispose();
-
-                if (!child)
-                {
-                    throw new Error(
-                        `cannot start ${request.imagePath}: it is not on the volume`);
-                }
-
-                current = await buildApp(machine({
-                    executable: child,
-                    imagePath: request.imagePath,
-                    commandLine: request.commandLine,
-                    patches: request.patches,
-                    seed: carried,
-                }));
-                replayLogLevels();
-                Object.assign(facade, current, own);
-                bindLogLevels();
-                // The child's journal is a fresh block, continuing the parent's
-                // sequence. Whoever holds a reader of its own -- the page's
-                // keeper -- is told where it starts so it can be handed the
-                // block: a drain cursor taken before the swap is above zero and
-                // below the child's first record, and only this says so.
-                events.emit('process-started', {
-                    image: request.imagePath,
-                    sequenceBase: logSequence,
-                });
+                return await runProcesses(runOptions);
+            }
+            finally
+            {
+                depth--;
             }
         },
 

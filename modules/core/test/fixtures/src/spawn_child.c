@@ -7,7 +7,8 @@
 /*
  * The child spawn.exe starts and waits on: it leaves a file and a registry
  * value for its parent to find, and exits with a code the parent reads back --
- * 42, or 7 when its command line says it is the second one.
+ * 42, or 0 when its command line says it is the second one: a child that
+ * ends cleanly while its parent goes on is not the end of the game.
  */
 
 #include "rt.h"
@@ -47,7 +48,7 @@ int mainCRTStartup(void)
     if (second())
     {
         say("child: second\r\n");
-        ExitProcess(7);
+        ExitProcess(0);
     }
     void *file = CreateFileA("C:\\App\\made.txt", GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);
     unsigned written;

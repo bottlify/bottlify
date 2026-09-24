@@ -44,9 +44,12 @@ async function run(t, name, engine = 'emulator'){
     /** @type {string[]} */
     const output = [];
     app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>output.push(text));
+    /** @type {any[]} */
+    const boxes = [];
+    app.on('message-box', (/** @type {any} */ box)=>boxes.push(box));
     const code = await app.run({ timeoutMs: 20000 });
     const bridge = app.diagnostics().find((/** @type {any} */ entry)=>entry.name === 'bridge');
-    return { code, text: output.join(''), suspended: bridge?.metrics?.suspended };
+    return { code, text: output.join(''), suspended: bridge?.metrics?.suspended, boxes };
 }
 
 /**
@@ -99,8 +102,9 @@ test('C++ exceptions: catch, destroy, rethrow, across a callback and two threads
 
 test('a C++ exception nothing catches ends the process with its code', { timeout: 60000 },
     async t=>{
-        const { code, text } = await run(t, 'unhandled');
+        const { code, text, boxes } = await run(t, 'unhandled');
 
         assert.equal(text, 'throwing\r\n', 'nothing after the throw ran');
         assert.equal(code, 0xe06d7363, 'the exception code is the exit code, as on Windows');
+        assert.deepEqual(boxes, [], 'and a run that failed is not told as a game that finished');
     });

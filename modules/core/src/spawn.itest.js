@@ -50,9 +50,11 @@ async function spawnOn(t, engine){
         output.push(text));
     /** @type {string[]} */
     const lifecycle = [];
-    app.on?.('process-child', (/** @type {any} */ event)=>lifecycle.push(`child ${event.image}`));
-    app.on?.('process-resumed', (/** @type {any} */ event)=>
+    app.on('process-child', (/** @type {any} */ event)=>lifecycle.push(`child ${event.image}`));
+    app.on('process-resumed', (/** @type {any} */ event)=>
         lifecycle.push(`resumed ${event.code}`));
+    app.on('message-box', (/** @type {any} */ event)=>
+        lifecycle.push(`box ${event.id} ${event.caption} ${JSON.stringify(event.exit)}`));
 
     const code = await app.run({ timeoutMs: 60000 });
 
@@ -65,11 +67,11 @@ async function spawnOn(t, engine){
         ['child: first', 'child: second', 'parent: done'],
         'the children ran in turn, and the parent after them');
     assert.equal(code, 0, 'the run ends with the parent\'s own exit code');
-    if (app.on)
-    {
-        assert.deepEqual(lifecycle, ['child C:\\App\\spawn_child.exe', 'resumed 42',
-            'child C:\\App\\spawn_child.exe', 'resumed 7']);
-    }
+    assert.deepEqual(lifecycle, [
+        'child C:\\App\\spawn_child.exe', 'resumed 42',
+        'child C:\\App\\spawn_child.exe', 'resumed 0',
+        'box 0 spawn.exe {"code":0}',
+    ], 'the game is over only when the parent is: a child ending with 0 is not it');
 }
 
 test('a parent waiting on its child goes on after the child exits, with what it left',

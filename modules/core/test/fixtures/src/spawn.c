@@ -97,7 +97,7 @@ int mainCRTStartup(void)
     check("a wait for any of a set answers with the child's place in it",
         WaitForMultipleObjects(2, set, 0, INFINITE) == 1);
     GetExitCodeProcess(child.process, &code);
-    check("and its code", code == 7);
+    check("and its code", code == 0);
 
     say("parent: done\r\n");
     ExitProcess(failures);
