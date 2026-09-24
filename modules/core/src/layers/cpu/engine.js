@@ -187,6 +187,8 @@
  * @property {number} retired          Instructions retired in the engine, for a frame's share.
  * @property {number} cacheHits        Regions taken from the store.
  * @property {number} cacheMisses
+ * @property {number} [precisionSwitches]  Times x87 regions went from wide precision to rounding.
+ * @property {boolean} [wide]  Whether x87 regions are still compiled for wide precision.
  * @property {number} invalidations    Regions discarded by a write.
  * @property {number} volatilePages    Pages written so often they are no longer translated.
  * @property {number} [dropped]        Regions dropped at publication because a page moved.
