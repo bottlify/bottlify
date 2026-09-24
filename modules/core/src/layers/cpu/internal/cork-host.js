@@ -91,7 +91,9 @@ export function createCorkHost(config){
     // memory of cork's own beside it, not carved out of the guest's the way the
     // hybrid carves the tables from the top of the emulator's RAM.
     const layout = ownLayout({ ramSize: memorySize });
-    const pages = pagesFor(layout, Tables.SIZE);
+    // A profiling run (`blockProfile`) has the block profile past the tables.
+    const pages = pagesFor(layout,
+        Tables.SIZE + (corkConfig?.blockProfile ? Tables.BLOCK_PROFILE_SIZE : 0));
     const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
 
     // The memory is fixed (initial === maximum), so the buffer never detaches

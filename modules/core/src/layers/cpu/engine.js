@@ -106,6 +106,7 @@
  *     credited before its address is a region candidate. Default 2000.
  * @property {number} [maxRegionBlocks]  Default 128.
  * @property {number} [maxRegionBytes]   Default 8192.
+ * @property {boolean} [blockProfile]    A diagnostic: every block counts its executions.
  * @property {number} [batchRegions]     Regions per wasm module. Default 32.
  * @property {number} [maxBatchRegions]  The most regions one batch takes when the queue is deep
  *     (a quarter of the queue past `batchRegions`). Default 256.
@@ -189,6 +190,10 @@
  * @property {number} cacheMisses
  * @property {number} [precisionSwitches]  Times x87 regions went from wide precision to rounding.
  * @property {boolean} [wide]  Whether x87 regions are still compiled for wide precision.
+ * @property {[number, number, number][]} [blockCounts]  With `blockProfile`: every counted
+ *     block as [address, executions, shared slot], most executed first.
+ * @property {{ address: number, count: number, shared: boolean, entry: number,
+ *     bytes: number }[]} [topBlocks]  The forty most executed, with the region each is in.
  * @property {number} invalidations    Regions discarded by a write.
  * @property {number} volatilePages    Pages written so often they are no longer translated.
  * @property {number} [dropped]        Regions dropped at publication because a page moved.

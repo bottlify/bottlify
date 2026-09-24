@@ -53,7 +53,23 @@ export const Tables = Object.freeze({
     CODE_RANGES: (1 << 20) + 16 + 4096 * 24 + 262144 * 12,
     CODE_GRANULE_SHIFT: 5,
     SIZE: (1 << 20) + 16 + 4096 * 24 + 262144 * 12 + (1 << 21),
+    // A diagnostic block profile (`blockProfile`), past the tables and only in
+    // a memory a profiling host sized for it: a slot per hashed block start
+    // (`blockSlot`) of its address, its executions and whether another block
+    // shared the slot.
+    BLOCK_PROFILE: (1 << 20) + 16 + 4096 * 24 + 262144 * 12 + (1 << 21),
+    BLOCK_SLOTS: 1 << 20,
+    BLOCK_SLOT: 12,
+    BLOCK_PROFILE_SIZE: (1 << 20) * 12,
 });
+
+/**
+ * The block profile's slot for a block start: the top twenty bits of the
+ * address times the golden ratio.
+ *
+ * @param {number} address
+ */
+export const blockSlot = address=>Math.imul(address, 0x9e3779b1) >>> 12;
 
 /**
  * Cork's own layout for a memory holding `ramSize` bytes of guest RAM.

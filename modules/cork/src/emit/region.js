@@ -48,7 +48,7 @@ import {
     addUndoHelper, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock, planLoop,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
-import { Tables } from '../runtime/layout.js';
+import { Tables, blockSlot } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
 import { inlineReturns } from '../region.js';
 import {
@@ -163,6 +163,8 @@ const LOCAL_TYPES = [
  * @property {number} [undo]           the undo helper's function index, in a differential build
  * @property {boolean} [countTransfers] each transfer through the hash adds one to the
  *     tables' transfer count (a diagnostic run)
+ * @property {boolean} [blockProfile] each block counts its executions in the block
+ *     profile past the tables (a diagnostic run, in a memory sized for it)
  * @property {boolean} [wide]  compiled for the wide precision controls (double, extended):
  *     no rounding to single, and a block leaves with `PRECISION` if it finds single set
  * @property {number} codeHit         the helper telling whether a byte lies in translated code
@@ -190,7 +192,7 @@ const LOCAL_TYPES = [
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
- *     countTransfers?: boolean, wide?: boolean }}
+ *     countTransfers?: boolean, wide?: boolean, blockProfile?: boolean }}
  *     [options]  undoLog:
  *     record every store's old bytes (differential builds only; part of the cache key);
  *     hash: import the host's function table and transfer through the entry hash (needs
@@ -199,7 +201,7 @@ const LOCAL_TYPES = [
  */
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
-        wide = false } = {})
+        wide = false, blockProfile = false } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -266,6 +268,10 @@ export function prepareModule(m, layout, features, memory = {},
     if (wide)
     {
         context.wide = true;
+    }
+    if (blockProfile)
+    {
+        context.blockProfile = true;
     }
     return context;
 }
@@ -1365,6 +1371,26 @@ export class RegionEmitter {
     }
 
     /**
+     * One more execution of the block at `start` in its profile slot: the count,
+     * and the address when the slot is another block's (then marked shared).
+     *
+     * @param {number} start
+     */
+    countBlock(start){
+        const { b } = this;
+        const at = this.layout.tables + Tables.BLOCK_PROFILE + blockSlot(start) * Tables.BLOCK_SLOT;
+        b.i32const(0).i32const(0).load('i32', { offset: at + 4 }).i32const(1).op(I32.add)
+            .store('i32', { offset: at + 4 });
+        b.i32const(0).load('i32', { offset: at }).i32const(start | 0).op(I32.ne);
+        this.openIf('profileSlot');
+        b.i32const(0).i32const(0).load('i32', { offset: at + 8 })
+            .i32const(0).load('i32', { offset: at }).i32const(0).op(I32.ne).op(I32.or)
+            .store('i32', { offset: at + 8 });
+        b.i32const(0).i32const(start | 0).store('i32', { offset: at });
+        this.close();
+    }
+
+    /**
      * The block's instructions, each under its access plan. Answers false
      * when the block ended early -- an instruction with no lowering, or one
      * that leaves unconditionally -- and nothing after it is reached.
@@ -1373,6 +1399,10 @@ export class RegionEmitter {
      * @param {boolean[]} live @param {Map<number, any>} plan
      */
     emitInstructions(block, index, live, plan){
+        if (this.context.blockProfile)
+        {
+            this.countBlock(block.start);
+        }
         for (let i = 0; i < block.instructions.length; i++)
         {
             const instruction = block.instructions[i];

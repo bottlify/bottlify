@@ -481,6 +481,12 @@ function describeCork(cork, say){
         + `  forced steps: ${cork.forcedSteps ?? 0}`
         + `  cache: ${cork.cacheHits ?? 0} hit / ${cork.cacheMisses ?? 0} miss`
         + ` (no record ${cork.missNoRecord ?? 0}, no module ${cork.missNoModule ?? 0})`);
+    if (cork.topBlocks?.length)
+    {
+        // The block profile's most executed blocks (--cork-config blockProfile).
+        say(`    hottest blocks: ${cork.topBlocks.slice(0, 20).map((/** @type {any} */ b)=>
+            `${b.address.toString(16)}x${b.count}${b.shared ? '*' : ''}`).join(' ')}`);
+    }
     if (cork.stalls?.length)
     {
         // The engine thread's long holds (host ms): laid beside the audio
@@ -1233,6 +1239,13 @@ export async function game(options){
             writeFileSync(join(REPORTS_DIR, `game-${stamp}-store.json`),
                 JSON.stringify(result.cork.storeTrace));
             delete result.cork.storeTrace;
+        }
+        // Every counted block (`blockProfile` in --cork-config), for tools/cork-mix.mjs.
+        if (result.cork?.blockCounts)
+        {
+            writeFileSync(join(REPORTS_DIR, `game-${stamp}-blocks.json`),
+                JSON.stringify({ bundle: options.id, blocks: result.cork.blockCounts }));
+            delete result.cork.blockCounts;
         }
 
         // The graphics layer's whole account as JSON beside the report: the

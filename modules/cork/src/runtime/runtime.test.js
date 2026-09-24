@@ -15,7 +15,8 @@ const CODE = 0x1000;
 /** A machine of 4 MiB with cork's own layout and a runtime over it. */
 function machine(config = {}, ramSize = 4 << 20){
     const layout = ownLayout({ ramSize });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout,
+        Tables.SIZE + (/** @type {any} */ (config).blockProfile ? Tables.BLOCK_PROFILE_SIZE : 0)) });
     const bytes = ()=>new Uint8Array(memory.buffer);
     const view = ()=>new DataView(memory.buffer);
     const runtime = createCorkRuntime({
@@ -869,4 +870,30 @@ test('a transfer carries the registers and the count to a callee that names none
     assert.equal(m.reg(2), 1, 'edx from the callee');
     assert.equal(m.counter() - before, 4, 'mov, call, inc and hlt, counted once across both');
     assert.equal(exit.retired, 4);
+});
+
+test('a block profile counts each block\'s executions: a loop\'s body its iterations', async()=>{
+    const m = machine({ blockProfile: true });
+    m.write(CODE, COUNTDOWN);
+    m.runtime.noteHot(CODE);
+    await m.runtime.translatePending();
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 100_000);
+    assert.equal(exit.kind, 'halt');
+    const { blockCounts, topBlocks } = /** @type {any} */ (m.runtime.diagnostics());
+    const count = (/** @type {number} */ address)=>blockCounts
+        .find((/** @type {number[]} */ [at])=>at === address)?.[1];
+    assert.equal(count(CODE + 5), 1000, 'dec ecx; jnz -- the loop body, once a turn');
+    assert.equal(count(CODE), 1, 'the entry block, once');
+    assert.equal(topBlocks[0].address, CODE + 5);
+    assert.equal(topBlocks[0].entry, CODE, 'in the region entered at the start');
+    assert.equal(topBlocks[0].shared, false);
+});
+
+test('without a block profile a run counts nothing and says nothing of blocks', async()=>{
+    const m = machine();
+    m.write(CODE, COUNTDOWN);
+    m.runtime.noteHot(CODE);
+    await m.runtime.translatePending();
+    m.runtime.run(m.runtime.entryOf(CODE), 100_000);
+    assert.equal(/** @type {any} */ (m.runtime.diagnostics()).blockCounts, undefined);
 });

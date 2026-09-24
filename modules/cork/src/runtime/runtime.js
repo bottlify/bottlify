@@ -68,6 +68,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         translate: true,
         undoLog: false,
         countTransfers: false,
+        // Diagnostic: every block counts its executions in the block profile past
+        // the tables -- only in a memory the host sized for it (cork's own layout)
+        // -- and the diagnostics name the counts. Such a run keeps no store.
+        blockProfile: false,
         // Diagnostic: every store key put and every one missed, as
         // `entry:hash:top`, in the diagnostics -- what tells two runs' keys apart.
         traceStore: false,
@@ -602,10 +606,48 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     let storePending = false;
     let workerRequest = 0;
 
+    // The block profile is past cork's own tables, in a memory sized for it;
+    // the hybrid layout's tables are carved from the emulator's RAM.
+    const profiling = settings.blockProfile === true && (layout.codePages ?? -1) < 0;
+    /** Every counted block as [address, executions, shared], by the slot table. */
+    const blockCounts = ()=>{
+        const data = view();
+        const base = layout.tables + Tables.BLOCK_PROFILE;
+        /** @type {[number, number, number][]} */
+        const out = [];
+        for (let slot = 0; slot < Tables.BLOCK_SLOTS; slot++)
+        {
+            const at = base + slot * Tables.BLOCK_SLOT;
+            const count = data.getUint32(at + 4, true);
+            if (count > 0)
+            {
+                out.push([data.getUint32(at, true), count, data.getUint32(at + 8, true)]);
+            }
+        }
+        return out.sort((one, two)=>two[1] - one[1]);
+    };
+    /** The forty most executed, with the region each is in. @param {[number, number, number][]} blocks */
+    const topBlocks = blocks=>blocks.slice(0, 40).map(([address, count, shared])=>{
+        let entry = -1;
+        let size = 0;
+        for (const record of regions)
+        {
+            const span = record.spans.find(([start])=>start === address);
+            if (span)
+            {
+                entry = record.entry;
+                size = span[1] - span[0];
+                break;
+            }
+        }
+        return { address, count, shared: shared !== 0, entry, bytes: size };
+    });
+
     /** The options both the inline emitter and the worker's take. */
     const emitOptions = ()=>({
         undoLog: settings.undoLog,
         countTransfers: settings.countTransfers,
+        blockProfile: profiling,
         hash: table !== null,
         wide,
         leaveOut,
@@ -1362,7 +1404,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // until its own batch comes back. A title's queue is never empty --
             // the cold starts met twice stay -- so the test is the heat, not the
             // length.
-            const keeps = leaveOut.size > 0 || settings.undoLog ? null : (settings.store ?? null);
+            const keeps = leaveOut.size > 0 || settings.undoLog || profiling
+                ? null : (settings.store ?? null);
             if (!buckets.slice(HOT_BUCKET).some(bucket=>bucket.size > 0) && relinkStep(keeps))
             {
                 return 0;
@@ -1388,7 +1431,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
             // A diagnostic run with classes left out, or with an undo log the
             // stored modules were built without, keeps no translations.
-            const store = leaveOut.size > 0 || settings.undoLog ? null : (settings.store ?? null);
+            const store = leaveOut.size > 0 || settings.undoLog || profiling
+                ? null : (settings.store ?? null);
             /** @type {{ region: import('../region.js').Region, entryTop: number,
              *     stamp: string, cached: import('./cache.js').CachedRegion | null, wide?: boolean,
              *     moduleBytes?: Uint8Array | null }[]} */
@@ -1543,7 +1587,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         },
         diagnostics(){
             fold();
+            const blocks = profiling ? blockCounts() : null;
             return {
+                ...(blocks ? { blockCounts: blocks, topBlocks: topBlocks(blocks) } : {}),
                 regions: regions.size,
                 // Counted only by a run that asked (`countTransfers`), else 0.
                 transfers: view().getUint32(layout.tables + Tables.TRANSFERS, true),
