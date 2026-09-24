@@ -110,7 +110,7 @@ instantiation of the module reports (method in "Inventory" below):
 |---------|-----------|--------:|----------------|
 | `KERNEL32.dll` | `kernel32/` | 331 | Console, threads and waits, heap and virtual memory, process and TLS, modules, files and directories, critical sections, locale and code pages, environment and command line, system info and time, `CreateProcess`, exceptions and SEH, resources, drives, file mappings and pipes, completion ports, file times, console I/O, APCs and the alertable waits (`apc.js`). |
 | `USER32.dll` | `user32/` | 254 | Windows and classes, painting, system queries and display settings, objects (cursors, icons, menus, clipboard), dialogs, hot keys, `SendInput`, the keyboard-layout family (`GetKeyboardLayout`, `MapVirtualKeyA`/`Ex`, `ToUnicode`) over the one en-US layout this build has. |
-| `msvcrt.dll` | `msvcrt/` | 268 (217 without `fpu`) | The C runtime: strings, multibyte strings, conversion, formatting and scanning, heap, math, paths, streams (`stdio.js`: `fopen` and its family over the volume, and the standard three as `_iob`'s first records, writing to the console), threads (`threads.js`: `_beginthread`/`_beginthreadex` through kernel32's `CreateThread`), time, C++ support (`cxx.js`), CRT startup, structured and C++ exceptions (`seh.js`, `eh.js`). |
+| `msvcrt.dll` | `msvcrt/` | 277 (226 without `fpu`) | The C runtime: strings, multibyte strings, conversion, formatting and scanning, heap, math, paths, streams (`stdio.js`: `fopen` and its family over the volume, and the standard three as `_iob`'s first records, writing to the console), threads (`threads.js`: `_beginthread`/`_beginthreadex` through kernel32's `CreateThread`), time, C++ support (`cxx.js`), CRT startup, structured and C++ exceptions (`seh.js`, `eh.js`). |
 | `GDI32.dll` | `gdi32/` | 102 | Device contexts, objects and their lifetimes, metrics, drawing entry points. |
 | `ntdll.dll` | `ntdll/` | 96 | Counted strings, status translation, machine queries, 64-bit helpers — and 76 entries that are the same function object kernel32 or msvcrt already publish. |
 | `ADVAPI32.dll` | `advapi32/` | 71 | The registry API over the hive, `GetUserNameA`, SIDs, and a CryptoAPI provider (MD5, SHA-1, SHA-256, RC4, RSA signature verification). |
@@ -124,7 +124,7 @@ instantiation of the module reports (method in "Inventory" below):
 | `WININET.dll` | `wininet/` | 12 | HTTP as a handle tree; a request parks the caller. |
 | `IMM32.dll` | `imm32/` | 10 | "There is no input method" — which is the state a game asks for. |
 | `RPCRT4.dll` | `rpcrt4/` | 6 | `UuidCreate` and the other GUID/status helpers a COM-adjacent program links directly. |
-| `VERSION.dll` | `version/` | 5 | The version block read out of a file's own image. |
+| `VERSION.dll` | `version/` | 8 | The version block read out of a file's own image, A and W: `VerQueryValueA` answers a text value in ANSI, in the room `GetFileVersionInfoSize` reserves behind the block (marked `FE2X`), or in place when the caller copied the block into less; `VerQueryValueW` answers the block's own UTF-16. |
 | `LZ32.dll` | `lz32/` | 4 | The LZ compression stubs an older installer links and never has cause to call successfully. |
 | `MSWSOCK.dll` | `wsock32/` | 4 | The Winsock extensions. |
 | `COMDLG32.dll` | `comdlg32/` | 4 | File dialogs, answered as cancelled. |
@@ -135,7 +135,7 @@ instantiation of the module reports (method in "Inventory" below):
 | `SHFOLDER.dll` | *(built in `module.js`)* | 2 | A two-export forwarder to shell32's `SHGetFolderPathA`/`SHGetFolderPathW`, sharing shell32's own function objects. |
 | *(no DLL)* | `quartz/` | — | The DirectShow filter graph, reached through `CoCreateInstance(CLSID_FilterGraph)`; registered on the COM registry, not as an import table. |
 
-Total: 1511 table entries across 28 libraries, 1378 distinct functions.
+Total: 1523 table entries across 28 libraries, 1390 distinct functions.
 
 **Inventory method.** `dbg/docs/count-dlls.mjs` (throwaway; not part of the build) creates the
 module against the same stub host `src/layers/win32/module.test.js` uses

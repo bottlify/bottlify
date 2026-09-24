@@ -1090,6 +1090,7 @@ export const win32Module = {
                 readMemory,
                 writeMemory,
                 readCString,
+                readWideString,
                 setLastError: setError,
                 /** @param {string} path */
                 versionInfo: path=>modules.versionInfo?.(path) ?? null,

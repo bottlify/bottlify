@@ -108,6 +108,14 @@ function machine(resource = block()){
             }
             return text;
         },
+        readWideString: (/** @type {number} */ a)=>{
+            let text = '';
+            for (let at = a; (memory[at] | memory[at + 1]) !== 0 && at < memory.length; at += 2)
+            {
+                text += String.fromCharCode(memory[at] | memory[at + 1] << 8);
+            }
+            return text;
+        },
         setLastError: ()=>{},
         versionInfo: ()=>resource,
     };
@@ -115,16 +123,33 @@ function machine(resource = block()){
     const putString = (at, text)=>{
         memory.set(new Uint8Array([...text].map(c=>c.charCodeAt(0)).concat([0])), at);
     };
+    /** @param {number} at @param {string} text */
+    const putWide = (at, text)=>{
+        memory.set(new Uint8Array([...text].flatMap(c=>[c.charCodeAt(0) & 0xff,
+            c.charCodeAt(0) >> 8]).concat([0, 0])), at);
+    };
+    /** @param {number} at */
+    const readString = at=>{
+        let text = '';
+        for (let step = at; memory[step] !== 0; step++)
+        {
+            text += String.fromCharCode(memory[step]);
+        }
+        return text;
+    };
     const get32 = (/** @type {number} */ at)=>(memory[at] | memory[at + 1] << 8
         | memory[at + 2] << 16 | memory[at + 3] << 24) >>> 0;
-    return { memory, host, putString, get32,
+    return { memory, host, putString, putWide, readString, get32,
         version: /** @type {any} */ (createVersionFunctions(host)) };
 }
 
-test('the size reported is the resource, and zero when there is none', ()=>{
+/** What GetFileVersionInfoSize answers: the block, a mark, and half again for ANSI. */
+const ROOMY = block().length + 4 + Math.ceil(block().length / 2);
+
+test('the size reported is the resource and room for its ANSI answers, and zero for none', ()=>{
     const m = machine();
     m.putString(0x10, 'C:\\thing.exe');
-    assert.equal(m.version.GetFileVersionInfoSizeA.handler([0x10, 0x20]), block().length);
+    assert.equal(m.version.GetFileVersionInfoSizeA.handler([0x10, 0x20]), ROOMY);
     assert.equal(m.get32(0x20), 0, 'the handle is documented as zero, and written');
 
     const empty = machine(null);
@@ -194,24 +219,58 @@ test('the root query answers with the fixed information, at its own size', ()=>{
     assert.equal(m.get32(at + 8), 1 << 16 | 26);
 });
 
-test('a string is found down the tree, and its length is in characters', ()=>{
+test('a string is found down the tree, in ANSI, and its length is in characters', ()=>{
     // wValueLength counts bytes for a binary value and characters for a text
     // one. A reader that treats them alike halves or doubles every string.
     const m = machine();
     m.putString(0x10, 'C:\\thing.exe');
-    m.version.GetFileVersionInfoA.handler([0x10, 0, block().length, 0x400]);
+    m.version.GetFileVersionInfoA.handler([0x10, 0, ROOMY, 0x400]);
+    const before = m.memory.slice(0x400, 0x400 + block().length);
     m.putString(0x20, '\\StringFileInfo\\040904b0\\FileVersion');
 
     assert.equal(m.version.VerQueryValueA.handler([0x400, 0x20, 0x30, 0x34]), 1);
     assert.equal(m.get32(0x34), 5, '"1.26" and its terminator, in characters');
-
     const at = m.get32(0x30);
-    let text = '';
-    for (let step = 0; step < 4; step++)
-    {
-        text += String.fromCharCode(m.memory[at + step * 2]);
-    }
-    assert.equal(text, '1.26');
+    assert.equal(m.readString(at), '1.26', 'a string an A caller can print');
+    assert.ok(at >= 0x400 + block().length && at < 0x400 + ROOMY,
+        'in the room behind the block');
+    assert.deepEqual(m.memory.slice(0x400, 0x400 + block().length), before,
+        'which is left as it was, for the next query to walk');
+
+    m.putString(0x20, '\\StringFileInfo\\040904b0\\ProductName');
+    assert.equal(m.version.VerQueryValueA.handler([0x400, 0x20, 0x40, 0x44]), 1);
+    assert.equal(m.readString(m.get32(0x40)), 'A Program');
+    assert.equal(m.readString(at), '1.26', 'and one answer does not overwrite another');
+});
+
+test('a block copied into only its own size is answered in ANSI in place', ()=>{
+    const m = machine();
+    m.putString(0x10, 'C:\\thing.exe');
+    m.version.GetFileVersionInfoA.handler([0x10, 0, block().length, 0x400]);
+    m.putString(0x20, '\\StringFileInfo\\040904b0\\ProductName');
+
+    assert.equal(m.version.VerQueryValueA.handler([0x400, 0x20, 0x30, 0x34]), 1);
+    const at = m.get32(0x30);
+    assert.ok(at > 0x400 && at < 0x400 + block().length);
+    assert.equal(m.readString(at), 'A Program');
+    assert.equal(m.memory[0x400 + block().length], 0, 'nothing is written past the caller\'s room');
+});
+
+test('the W spellings name the file and the path in UTF-16 and answer in it', ()=>{
+    const m = machine();
+    m.putWide(0x100, 'C:\\thing.exe');
+    assert.equal(m.version.GetFileVersionInfoSizeW.handler([0x100, 0]), ROOMY);
+    assert.equal(m.version.GetFileVersionInfoW.handler([0x100, 0, ROOMY, 0x400]), 1);
+    m.putWide(0x200, '\\StringFileInfo\\040904b0\\FileVersion');
+
+    assert.equal(m.version.VerQueryValueW.handler([0x400, 0x200, 0x30, 0x34]), 1);
+    assert.equal(m.get32(0x34), 5);
+    const at = m.get32(0x30);
+    assert.equal(m.host.readWideString(at), '1.26');
+    assert.ok(at < 0x400 + block().length, 'the block\'s own string, where it lies');
+    assert.equal(m.version.VerQueryValueW.argBytes, 16);
+    assert.equal(m.version.GetFileVersionInfoW.argBytes, 16);
+    assert.equal(m.version.GetFileVersionInfoSizeW.argBytes, 8);
 });
 
 test('the translation is a binary value, counted in bytes', ()=>{

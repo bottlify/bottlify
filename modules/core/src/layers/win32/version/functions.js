@@ -12,8 +12,16 @@ import { expand } from '../lz32/expand.js';
  * The three calls are one operation split in three: ask how big the block is,
  * copy it into memory you own, then query fields out of the copy. The block is
  * a resource of type 16 in the file's own image, and the third call walks the
- * copy rather than the file -- which is why `VerQueryValueA` answers with a
- * pointer *into* the caller's buffer and never copies anything.
+ * copy rather than the file -- which is why `VerQueryValue` answers with a
+ * pointer *into* the caller's buffer.
+ *
+ * The block is UTF-16 whichever spelling copied it, and `VerQueryValueA` owes
+ * its caller an ANSI string. That is what the size the first call reports
+ * leaves room for: past the block itself, a four-byte mark and then scratch
+ * space half the block's length, where each text value's ANSI form is written
+ * at half its own offset -- so no two values' copies overlap, and asking for
+ * one twice writes it to the same place. A caller that copied the block into
+ * less room than that gets the conversion in place, over the UTF-16 value.
  *
  * The block is a tree of nodes that all share one shape, and the shape is the
  * only thing worth knowing here: a length, a value length, a type flag, a
@@ -51,6 +59,15 @@ const VFF_BUFFTOOSMALL = 0x0004;
 const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
 const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
 
+/**
+ * What `GetFileVersionInfoA` leaves after the block when the caller gave room
+ * for the ANSI scratch space behind it -- "FE2X", as Windows marks it.
+ */
+const ROOM_MARK = new Uint8Array([0x46, 0x45, 0x32, 0x58]);
+
+/** How much room past a block of `total` bytes its ANSI answers need. */
+const scratchFor = (/** @type {number} */ total)=>ROOM_MARK.length + Math.ceil(total / 2);
+
 /** Where the fixed information keeps the file's own version. */
 const FIXED_FILE_VERSION_MS = 8;
 const FIXED_FILE_VERSION_LS = 12;
@@ -60,6 +77,8 @@ const FIXED_FILE_VERSION_LS = 12;
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, maxLength: number) => string} [readWideString]
+ *           For the W spellings; without it they read an empty path.
  * @property {(code: number) => void} setLastError
  * @property {(path: string) => Uint8Array | null} [versionInfo]
  *           The raw version resource of the named file, or null when there is
@@ -215,10 +234,9 @@ export function createVersionFunctions(host){
      * when the file exists but carries no VS_VERSION_INFO resource. Without a
      * filesystem behind this build there is no way to tell the two apart, so a
      * missing resource reads as an ordinary file with no version information.
-     * @param {number} address
+     * @param {string} path
      */
-    const resourceFor = address=>{
-        const path = host.readCString(address >>> 0, MAX_PATH);
+    const resourceFor = path=>{
         const resource = host.versionInfo?.(path) ?? null;
         if (!resource)
         {
@@ -226,6 +244,122 @@ export function createVersionFunctions(host){
             host.setLastError(exists ? ERROR_RESOURCE_DATA_NOT_FOUND : ERROR_FILE_NOT_FOUND);
         }
         return resource;
+    };
+
+    /** @param {number} address */
+    const narrow = address=>host.readCString(address >>> 0, MAX_PATH);
+    /** @param {number} address */
+    const wide = address=>host.readWideString?.(address >>> 0, MAX_PATH) ?? '';
+
+    /**
+     * GetFileVersionInfoSize, for either spelling: the block and the room its
+     * ANSI answers take behind it, which is the same for both.
+     *
+     * @param {string} path @param {number} handle
+     */
+    const sizeOf = (path, handle)=>{
+        if ((handle >>> 0) !== 0)
+        {
+            // Documented as always zero, and a caller passes it back to
+            // GetFileVersionInfo, so leaving it unwritten leaves it whatever
+            // the caller's stack happened to hold.
+            host.writeMemory(handle >>> 0, dword(0));
+        }
+        const resource = resourceFor(path);
+        return resource ? resource.length + scratchFor(resource.length) : 0;
+    };
+
+    /**
+     * GetFileVersionInfo, for either spelling. The block goes in as it is; the
+     * mark behind it says whether there is room for ANSI answers, and only
+     * the ANSI spelling needs them.
+     *
+     * @param {string} path @param {number} length @param {number} data
+     * @param {boolean} ansi
+     */
+    const copyInto = (path, length, data, ansi)=>{
+        const resource = resourceFor(path);
+        if (!resource)
+        {
+            return 0;
+        }
+        if ((length >>> 0) < resource.length)
+        {
+            host.setLastError(ERROR_RESOURCE_TYPE_NOT_FOUND);
+            return 0;
+        }
+        host.writeMemory(data >>> 0, resource);
+        if (ansi && (length >>> 0) >= resource.length + scratchFor(resource.length))
+        {
+            host.writeMemory((data >>> 0) + resource.length, ROOM_MARK);
+        }
+        return 1;
+    };
+
+    /**
+     * VerQueryValue, for either spelling: walks the caller's block for the
+     * path and answers with where the value is and how long.
+     *
+     * @param {number} blockAddress @param {string} subBlock
+     * @param {number} buffer @param {number} length @param {boolean} ansi
+     */
+    const query = (blockAddress, subBlock, buffer, length, ansi)=>{
+        // The head says how long the block is, and the block has to be read
+        // whole before it can be walked -- reading the head alone and asking
+        // it to parse itself fails its own bounds check.
+        const base = blockAddress >>> 0;
+        const head = host.readMemory(base, 2);
+        const total = head[0] | head[1] << 8;
+        if (total < 6)
+        {
+            return 0;
+        }
+        const block = host.readMemory(base, total);
+
+        const path = subBlock.split('\\').filter(step=>step.length > 0);
+        const node = find(block, path);
+        if (!node || node.valueLength === 0)
+        {
+            return 0;
+        }
+
+        // The root's value is the fixed information, and its length is the
+        // structure's rather than whatever the block claims -- a caller copies
+        // exactly this many bytes out of it.
+        const isRoot = path.length === 0;
+        if (isRoot && node.value + 4 <= block.length)
+        {
+            const signature = block[node.value] | block[node.value + 1] << 8
+                | block[node.value + 2] << 16 | block[node.value + 3] << 24;
+            if ((signature >>> 0) !== VS_FFI_SIGNATURE)
+            {
+                return 0;
+            }
+        }
+
+        let answer = base + node.value;
+        if (ansi && node.type === 1)
+        {
+            // Characters the code page has no byte for are what WideCharToMultiByte
+            // puts in their place.
+            const text = new Uint8Array(node.valueLength);
+            for (let index = 0; index < node.valueLength; index++)
+            {
+                const unit = u16(block, node.value + index * 2);
+                if (unit === 0)
+                {
+                    break;
+                }
+                text[index] = unit < 0x100 ? unit : 0x3f;
+            }
+            const mark = host.readMemory(base + total, ROOM_MARK.length);
+            const roomy = mark.every((byte, index)=>byte === ROOM_MARK[index]);
+            answer = roomy ? base + total + ROOM_MARK.length + (node.value >>> 1) : answer;
+            host.writeMemory(answer, text);
+        }
+        host.writeMemory(buffer >>> 0, dword(answer));
+        host.writeMemory(length >>> 0, dword(isRoot ? FIXED_FILE_INFO_SIZE : node.valueLength));
+        return 1;
     };
 
     /** @param {string} base @param {string} leaf */
@@ -308,21 +442,14 @@ export function createVersionFunctions(host){
         GetFileVersionInfoSizeA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([filename, handle])=>{
-                if ((handle >>> 0) !== 0)
-                {
-                    // Documented as always zero, and a caller passes it back to
-                    // GetFileVersionInfo, so leaving it unwritten leaves it
-                    // whatever the caller's stack happened to hold.
-                    host.writeMemory(handle >>> 0, dword(0));
-                }
-                const resource = resourceFor(filename);
-                if (!resource)
-                {
-                    return 0;
-                }
-                return resource.length;
-            },
+            handler: ([filename, handle])=>sizeOf(narrow(filename), handle),
+        },
+
+        /** DWORD GetFileVersionInfoSizeW(LPCWSTR lptstrFilename, LPDWORD lpdwHandle) */
+        GetFileVersionInfoSizeW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([filename, handle])=>sizeOf(wide(filename), handle),
         },
 
         /**
@@ -332,73 +459,47 @@ export function createVersionFunctions(host){
         GetFileVersionInfoA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([filename, , length, data])=>{
-                const resource = resourceFor(filename);
-                if (!resource)
-                {
-                    return 0;
-                }
-                if ((length >>> 0) < resource.length)
-                {
-                    host.setLastError(ERROR_RESOURCE_TYPE_NOT_FOUND);
-                    return 0;
-                }
-                host.writeMemory(data >>> 0, resource);
-                return 1;
-            },
+            handler: ([filename, , length, data])=>copyInto(narrow(filename), length, data, true),
+        },
+
+        /**
+         * BOOL GetFileVersionInfoW(LPCWSTR lptstrFilename, DWORD dwHandle,
+         *                          DWORD dwLen, LPVOID lpData)
+         */
+        GetFileVersionInfoW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([filename, , length, data])=>copyInto(wide(filename), length, data, false),
         },
 
         /**
          * BOOL VerQueryValueA(LPCVOID pBlock, LPCSTR lpSubBlock,
          *                     LPVOID *lplpBuffer, PUINT puLen)
          *
-         * Answers with a pointer into the caller's own block rather than a copy,
-         * which is why the block has to stay alive for as long as the answer is
-         * used -- the caller's problem, and the documented contract.
+         * Answers with a pointer into the caller's own block rather than a
+         * separate allocation, which is why the block has to stay alive for
+         * as long as the answer is used -- the caller's problem, and the
+         * documented contract. A text value is answered in ANSI, in the room
+         * behind the block; the length is in characters either way.
          */
         VerQueryValueA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([blockAddress, subBlock, buffer, length])=>{
-                const query = host.readCString(subBlock >>> 0, MAX_PATH);
-                // The head says how long the block is, and the block has to be
-                // read whole before it can be walked -- reading the head alone
-                // and asking it to parse itself fails its own bounds check.
-                const head = host.readMemory(blockAddress >>> 0, 2);
-                const total = head[0] | head[1] << 8;
-                if (total < 6)
-                {
-                    return 0;
-                }
-                const block = host.readMemory(blockAddress >>> 0, total);
+            handler: ([block, subBlock, buffer, length])=>
+                query(block, narrow(subBlock), buffer, length, true),
+        },
 
-                const path = query.split('\\').filter(step=>step.length > 0);
-                const node = find(block, path);
-                if (!node || node.valueLength === 0)
-                {
-                    return 0;
-                }
-
-                // The root's value is the fixed information, and its length is
-                // the structure's rather than whatever the block claims -- a
-                // caller copies exactly this many bytes out of it.
-                const isRoot = path.length === 0;
-                if (isRoot && node.value + 4 <= block.length)
-                {
-                    const signature = block[node.value] | block[node.value + 1] << 8
-                        | block[node.value + 2] << 16 | block[node.value + 3] << 24;
-                    if ((signature >>> 0) !== VS_FFI_SIGNATURE)
-                    {
-                        return 0;
-                    }
-                }
-
-                host.writeMemory(buffer >>> 0,
-                    dword((blockAddress >>> 0) + node.value));
-                host.writeMemory(length >>> 0, dword(
-                    isRoot ? FIXED_FILE_INFO_SIZE : node.valueLength));
-                return 1;
-            },
+        /**
+         * BOOL VerQueryValueW(LPCVOID pBlock, LPCWSTR lpSubBlock,
+         *                     LPVOID *lplpBuffer, PUINT puLen)
+         *
+         * The block's own UTF-16, where it lies.
+         */
+        VerQueryValueW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([block, subBlock, buffer, length])=>
+                query(block, wide(subBlock), buffer, length, false),
         },
 
         /**
