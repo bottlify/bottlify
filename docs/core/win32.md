@@ -197,10 +197,22 @@ gets its own heap, hive, queue and COM registry.
   only memory that has been handed out before. A commit inside a reservation writes nothing at
   all: the reservation was handed over reading zero, and a page the program had not committed it
   cannot have written. That also makes committing an already-committed page keep its contents, as
-  Windows documents. What a program gives back with `MEM_DECOMMIT` is remembered as a range and
-  cleared if it commits inside that range again, because there Windows takes the pages away and
-  hands new ones back. The one thing this must never do is let one allocation's data reach the
-  next, and that is the case the tests pin hardest.
+  Windows documents. What a program gives back with `MEM_DECOMMIT` is remembered as ranges, kept
+  apart so a page between two of them stays committed, and cleared where it commits inside them
+  again, because there Windows takes the pages away and hands new ones back. The one thing this
+  must never do is let one allocation's data reach the next, and that is the case the tests pin
+  hardest.
+  **`VirtualAlloc` does what its allocation type says.** `MEM_RESERVE` with an address places the
+  reservation there -- the address rounded down to its granule, the end to the page -- through the
+  allocator's `allocateAt`, and fails with `ERROR_INVALID_ADDRESS` (487) if any of it is taken;
+  `MEM_COMMIT` alone at an address commits inside an existing reservation, 487 outside one;
+  `MEM_RESET` keeps the pages and their contents, since there is no paging to spare them from. A
+  type with none of those, `MEM_RESET` with another, or a zero size is `ERROR_INVALID_PARAMETER`
+  (87); `MEM_TOP_DOWN` and `MEM_WRITE_WATCH` are accepted and ignored. `VirtualFree` takes exactly
+  one of `MEM_DECOMMIT` and `MEM_RELEASE` (87 otherwise); a release takes the reservation's base
+  and no size (487 for an interior address, 87 for a size), a decommit any pages inside it. Both
+  set the last error on every refusal. The compiled `virtual.exe` (`src/virtual.itest.js`) checks
+  each of these through a real program.
 - **Windows** (`user32/windows.js` with `paint.js`, `system.js`, `objects.js`, `dialogs.js`,
   `controls.js`, `frame.js`). One window table shared by the files. `windowService` is the
   outward view: `list()` of live windows with their screen rectangles and `place()`, which is what

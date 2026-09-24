@@ -95,7 +95,7 @@ From the repository root (`package.json` is an npm workspace over `modules/*`):
 | `npm run lint` | ESLint flat config, zero warnings tolerated. |
 | `npm test` | Node's `node:test` over every `*.test.js` colocated with its code, across the workspaces. |
 | `npm run test:integration` | `*.itest.js`: whole programs from `test/fixtures/` run through the engine, needing the prebuilt emulator. |
-| `node scripts/build-fixtures.mjs` (in `modules/core`) | Rebuilds the compiled fixtures (`seh.exe`, `cxxeh.exe`, `unhandled.exe`) from `test/fixtures/src/` with clang, lld-link and llvm-dlltool against the MSVC ABI -- no Microsoft toolchain. Only after changing a source; the executables are committed, and the build is byte-reproducible. |
+| `node scripts/build-fixtures.mjs` (in `modules/core`) | Rebuilds the compiled fixtures (`seh.exe`, `cxxeh.exe`, `unhandled.exe`, `apc.exe`, `processor.exe`, `crtdata.exe`, `virtual.exe`) from `test/fixtures/src/` with clang, lld-link and llvm-dlltool against the MSVC ABI -- no Microsoft toolchain. Only after changing a source; the executables are committed, and the build is byte-reproducible. |
 | `npm run check:boundaries` | The layer graph and the acyclic import check. |
 | `npm run fetch:v86`, `npm run fetch:video-decoder` | Pull the pinned emulator and decoder binaries into `vendor/prebuilt/`, verified against their lock files. |
 | `npm run build` | esbuild → `dist/core.js`, `dist/engine.worker.js`, `dist/worklet.js`, `dist/vendor/*`, `dist/checksums.json`. |

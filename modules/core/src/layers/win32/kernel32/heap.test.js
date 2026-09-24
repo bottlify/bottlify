@@ -13,6 +13,9 @@ const HEAP_REALLOC_IN_PLACE_ONLY = 0x10;
 const MEM_COMMIT = 0x1000;
 const MEM_RESERVE = 0x2000;
 const MEM_DECOMMIT = 0x4000;
+const MEM_RESET = 0x80000;
+const MEM_TOP_DOWN = 0x100000;
+const ERROR_INVALID_ADDRESS = 487;
 const MEM_RELEASE = 0x8000;
 const INVALID_SIZE = 0xffffffff;
 const PAGE_SIZE = 4096;
@@ -579,6 +582,120 @@ test('VirtualAlloc at a chosen address only succeeds where we already have it', 
         'a request larger than the reservation cannot be satisfied there');
     assert.equal(fns.VirtualAlloc.handler([0x900000, PAGE_SIZE, MEM_COMMIT, 0x04]), 0,
         'an address we never handed out is not ours to map');
+});
+
+/**
+ * The VirtualAlloc setup, with the last errors it set kept in order.
+ *
+ * @param {{ base: number, size: number }} [arena]
+ */
+function recording(arena = RESERVING_ARENA){
+    /** @type {number[]} */
+    const errors = [];
+    const host = { ...fakeHost(arena), setLastError: (/** @type {number} */ code)=>{
+        errors.push(code);
+    } };
+    return { host, errors, fns: createHeapFunctions(host) };
+}
+
+test('the allocator places a block at a chosen address only when all of it is free', ()=>{
+    const allocator = createHeapAllocator({ base: 0x10000, size: 0x40000 });
+
+    assert.equal(allocator.allocateAt(0x20000, 0x10000, { owner: 'mine' }), true);
+    assert.equal(allocator.block(0x20000)?.owner, 'mine');
+    assert.equal(allocator.allocateAt(0x28000, 0x1000), false, 'inside a block already there');
+    assert.equal(allocator.allocateAt(0x1f000, 0x2000), false, 'running into one');
+    assert.equal(allocator.allocateAt(0x48000, 0x10000), false, 'running out of the arena');
+    assert.equal(allocator.allocateAt(0x8000, 0x1000), false, 'before the arena');
+
+    // What is left on either side is still there to be handed out.
+    assert.equal(allocator.allocateAt(0x10000, 0x10000), true);
+    assert.equal(allocator.allocateAt(0x30000, 0x20000), true);
+    assert.equal(allocator.allocate(8), 0, 'and that was all of it');
+    assert.equal(allocator.free(0x20000), true);
+    assert.equal(allocator.allocate(0x10000), 0x20000, 'a placed block frees like any other');
+});
+
+test('MEM_RESERVE at an address places the reservation there, on its granule', ()=>{
+    const { fns, errors } = recording();
+    const wanted = 2 * GRANULARITY + 0x1234;
+
+    assert.equal(fns.VirtualAlloc.handler([wanted, PAGE_SIZE, MEM_RESERVE, 0x04]),
+        2 * GRANULARITY, 'the address is rounded down to where a reservation may begin');
+    assert.equal(fns.VirtualAlloc.handler([wanted + PAGE_SIZE, 0x100, MEM_COMMIT, 0x04]),
+        2 * GRANULARITY + 2 * PAGE_SIZE, 'and its pages can be committed');
+    assert.equal(fns.VirtualAlloc.handler([wanted + PAGE_SIZE, PAGE_SIZE, MEM_COMMIT, 0x04]), 0,
+        'up to the page the last byte asked for, and not past it');
+
+    assert.equal(fns.VirtualAlloc.handler([wanted, PAGE_SIZE, MEM_RESERVE, 0x04]), 0,
+        'a reservation cannot be made over another');
+    assert.equal(fns.VirtualAlloc.handler([2 * GRANULARITY, PAGE_SIZE, MEM_RESERVE | MEM_COMMIT,
+        0x04]), 0, 'nor committed into being there');
+    assert.deepEqual(errors, Array(3).fill(ERROR_INVALID_ADDRESS));
+
+    assert.equal(fns.VirtualAlloc.handler([3 * GRANULARITY, 2 * PAGE_SIZE,
+        MEM_RESERVE | MEM_COMMIT, 0x04]), 3 * GRANULARITY, 'where it is free, both at once');
+});
+
+test('VirtualAlloc refuses a type that asks for nothing, or MEM_RESET with more', ()=>{
+    const { fns, errors } = recording();
+
+    assert.equal(fns.VirtualAlloc.handler([0, PAGE_SIZE, 0, 0x04]), 0);
+    assert.equal(fns.VirtualAlloc.handler([0, PAGE_SIZE, MEM_DECOMMIT, 0x04]), 0);
+    assert.equal(fns.VirtualAlloc.handler([0, PAGE_SIZE, MEM_RESET | MEM_COMMIT, 0x04]), 0);
+    assert.equal(fns.VirtualAlloc.handler([0, 0, MEM_COMMIT, 0x04]), 0);
+    assert.deepEqual(errors, Array(4).fill(ERROR_INVALID_PARAMETER));
+
+    assert.notEqual(fns.VirtualAlloc.handler([0, PAGE_SIZE, MEM_COMMIT | MEM_TOP_DOWN, 0x04]), 0,
+        'a hint nothing here acts on is not a reason to refuse');
+});
+
+test('MEM_RESET keeps the pages and what is in them, inside a reservation only', ()=>{
+    const { host, fns, errors } = recording();
+    const reserved = fns.VirtualAlloc.handler([0, GRANULARITY, MEM_RESERVE | MEM_COMMIT, 0x04]);
+    host.dirty(reserved, PAGE_SIZE);
+    const before = host.written();
+
+    assert.equal(fns.VirtualAlloc.handler([reserved + 0x10, PAGE_SIZE, MEM_RESET, 0x04]),
+        reserved);
+    assert.equal(host.written(), before, 'nothing is written: the contents are only undefined');
+    assert.equal(fns.VirtualAlloc.handler([0, PAGE_SIZE, MEM_RESET, 0x04]), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_ADDRESS]);
+});
+
+test('VirtualFree says why it failed', ()=>{
+    const { fns, errors } = recording();
+    const reserved = fns.VirtualAlloc.handler([0, GRANULARITY, MEM_RESERVE, 0x04]);
+
+    assert.equal(fns.VirtualFree.handler([reserved, 0, MEM_RELEASE | MEM_DECOMMIT]), 0);
+    assert.equal(fns.VirtualFree.handler([reserved, 0, 0]), 0);
+    assert.equal(fns.VirtualFree.handler([reserved, PAGE_SIZE, MEM_RELEASE]), 0);
+    assert.equal(fns.VirtualFree.handler([reserved + PAGE_SIZE, 0, MEM_RELEASE]), 0,
+        'a release names the reservation by its base');
+    assert.equal(fns.VirtualFree.handler([3 * GRANULARITY, 0, MEM_RELEASE]), 0);
+    assert.equal(fns.VirtualFree.handler([reserved, GRANULARITY * 2, MEM_DECOMMIT]), 0,
+        'a decommit past the reservation\'s end');
+    assert.deepEqual(errors, [
+        ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER,
+        ERROR_INVALID_ADDRESS, ERROR_INVALID_ADDRESS, ERROR_INVALID_ADDRESS,
+    ]);
+    assert.equal(fns.VirtualFree.handler([reserved, 0, MEM_RELEASE]), 1);
+});
+
+test('pages decommitted apart are given back apart: the one between keeps its contents', ()=>{
+    const { host, fns } = recording();
+    const reserved = fns.VirtualAlloc.handler([0, GRANULARITY, MEM_RESERVE | MEM_COMMIT, 0x04]);
+    host.dirty(reserved, 3 * PAGE_SIZE);
+
+    assert.equal(fns.VirtualFree.handler([reserved, PAGE_SIZE, MEM_DECOMMIT]), 1);
+    assert.equal(fns.VirtualFree.handler([reserved + 2 * PAGE_SIZE + 8, 8, MEM_DECOMMIT]), 1,
+        'a decommit may name any page inside the reservation');
+    fns.VirtualAlloc.handler([reserved, 3 * PAGE_SIZE, MEM_COMMIT, 0x04]);
+
+    assert.ok(all(host.bytes.subarray(reserved, reserved + PAGE_SIZE), 0));
+    assert.ok(all(host.bytes.subarray(reserved + PAGE_SIZE, reserved + 2 * PAGE_SIZE), 0xaa),
+        'the page that was never given back');
+    assert.ok(all(host.bytes.subarray(reserved + 2 * PAGE_SIZE, reserved + 3 * PAGE_SIZE), 0));
 });
 
 test('every function declares the stack it pops', ()=>{

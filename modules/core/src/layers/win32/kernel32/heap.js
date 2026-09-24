@@ -30,8 +30,19 @@ const GMEM_INVALID_HANDLE = 0x8000;
 const HEAP_REALLOC_IN_PLACE_ONLY = 0x00000010;
 
 const MEM_COMMIT = 0x00001000;
+const MEM_RESERVE = 0x00002000;
 const MEM_DECOMMIT = 0x00004000;
 const MEM_RELEASE = 0x00008000;
+const MEM_RESET = 0x00080000;
+
+/**
+ * Every VirtualAlloc type bit accepted. MEM_TOP_DOWN asks for the highest
+ * address that fits and MEM_WRITE_WATCH for the pages written to be tracked;
+ * both are hints whose absence nothing observes, and a program passing one is
+ * not refused for it. MEM_RESET_UNDO, MEM_PHYSICAL and MEM_LARGE_PAGES promise
+ * what this arena cannot, and fall outside.
+ */
+const ALLOCATION_TYPES = MEM_COMMIT | MEM_RESERVE | MEM_RESET | 0x00100000 | 0x00200000;
 
 /** What HeapSize returns when it cannot answer: (SIZE_T)-1. */
 const INVALID_SIZE = 0xffffffff;
@@ -368,6 +379,59 @@ export function createHeapAllocator({ base, size }){
         },
 
         /**
+         * A block at exactly `address`, when the whole of it is free.
+         *
+         * What a program asks for when it names where its reservation goes: a
+         * loader placing an image at its preferred base, a runtime rebuilding
+         * a heap at the address a saved pointer expects. Unlike `allocate`
+         * there is no choosing, so there is no bin to look in -- only the one
+         * free span that could hold it, found by walking them.
+         *
+         * @param {number} address
+         * @param {number} bytes
+         * @param {Object} [options]
+         * @param {any} [options.owner]
+         * @returns {boolean} false when any of the range is taken or outside the arena
+         */
+        allocateAt(address, bytes, { owner = null } = {}){
+            const capacity = Math.max(ALIGNMENT, roundUp(bytes, ALIGNMENT));
+            const start = address >>> 0;
+            const end = start + capacity;
+            if (start % ALIGNMENT !== 0 || start < base || end > base + size)
+            {
+                return false;
+            }
+            let span = null;
+            for (const candidate of byBase.values())
+            {
+                if (candidate && candidate.base <= start && candidate.base + candidate.size >= end)
+                {
+                    span = candidate;
+                    break;
+                }
+            }
+            if (span === null)
+            {
+                return false;
+            }
+            const spanEnd = span.base + span.size;
+            remove(span);
+            if (start > span.base)
+            {
+                insert(span.base, start - span.base);
+            }
+            if (end < spanEnd)
+            {
+                insert(end, spanEnd - end);
+            }
+            const fresh = start >= handedTo;
+            handedTo = Math.max(handedTo, end);
+            live.set(start, { address: start, size: bytes, capacity, owner, fresh });
+            liveBlocks++;
+            return true;
+        },
+
+        /**
          * @param {number} address
          * @returns {boolean} false when the address is not the start of a live block
          */
@@ -577,19 +641,87 @@ export function createHeapFunctions(host){
     };
 
     /**
-     * Reservations with pages the program gave back, as one range covering
-     * them.
+     * Reservations with pages the program gave back, as the ranges it gave.
      *
      * A decommitted page is gone on Windows, and committing it again yields a
      * fresh zero-filled one. Page-level commit state is not modelled here, so
-     * what is modelled is that promise: the range is noted, and cleared when
-     * the program commits inside it again. Noted rather than cleared at the
+     * what is modelled is that promise: the ranges are noted, and cleared when
+     * the program commits inside them again. Noted rather than cleared at the
      * decommit, so a program that never asks for the memory back never pays
-     * for it.
+     * for it. Kept apart rather than as one range around them all, because a
+     * page between two that were given back is still committed, and committing
+     * it again must leave what the program put there.
      *
-     * @type {Map<number, { from: number, to: number }>}
+     * @type {Map<number, { from: number, to: number }[]>}
      */
     const decommitted = new Map();
+
+    /**
+     * Notes [from, to) of a reservation as given back.
+     *
+     * @param {number} reservation @param {number} from @param {number} to
+     */
+    const giveBack = (reservation, from, to)=>{
+        let merged = { from, to };
+        const kept = [];
+        for (const range of decommitted.get(reservation) ?? [])
+        {
+            if (range.to < merged.from || range.from > merged.to)
+            {
+                kept.push(range);
+            }
+            else
+            {
+                merged = {
+                    from: Math.min(range.from, merged.from), to: Math.max(range.to, merged.to),
+                };
+            }
+        }
+        kept.push(merged);
+        decommitted.set(reservation, kept);
+    };
+
+    /**
+     * Commits [from, to) of a reservation: whatever of it was given back is
+     * zeroed and is no longer noted, and the rest is left as it is.
+     *
+     * @param {number} reservation @param {number} from @param {number} to
+     */
+    const takeBack = (reservation, from, to)=>{
+        const given = decommitted.get(reservation);
+        if (!given)
+        {
+            return;
+        }
+        const kept = [];
+        for (const range of given)
+        {
+            const start = Math.max(range.from, from);
+            const end = Math.min(range.to, to);
+            if (start >= end)
+            {
+                kept.push(range);
+                continue;
+            }
+            zero(start, end - start);
+            if (range.from < start)
+            {
+                kept.push({ from: range.from, to: start });
+            }
+            if (end < range.to)
+            {
+                kept.push({ from: end, to: range.to });
+            }
+        }
+        if (kept.length > 0)
+        {
+            decommitted.set(reservation, kept);
+        }
+        else
+        {
+            decommitted.delete(reservation);
+        }
+    };
 
     /**
      * The block at `address`, but only if it belongs to `heap`. Windows leaves
@@ -761,18 +893,56 @@ export function createHeapFunctions(host){
             },
         },
 
-        /** LPVOID VirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD) */
+        /**
+         * LPVOID VirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType,
+         *                     DWORD flProtect)
+         *
+         * What the call does is the allocation type's to say, and the address
+         * only says where: MEM_RESERVE at an address places a reservation
+         * there, MEM_COMMIT alone commits pages of one already made, and
+         * MEM_RESET marks committed pages as holding nothing worth keeping. A
+         * type naming none of those, or MEM_RESET with either of the others,
+         * is refused, as Windows refuses it.
+         */
         VirtualAlloc: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([pointer, bytes])=>{
+            handler: ([pointer, bytes, type])=>{
+                const kind = type >>> 0;
                 const size = bytes >>> 0;
-                if (size === 0)
+                const requested = pointer >>> 0;
+                const acting = kind & (MEM_COMMIT | MEM_RESERVE | MEM_RESET);
+                if ((kind & ~ALLOCATION_TYPES) !== 0 || acting === 0
+                    || ((kind & MEM_RESET) !== 0 && acting !== MEM_RESET) || size === 0)
                 {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const requested = pointer >>> 0;
                 const rounded = roundUp(size, PAGE_SIZE);
+
+                if (requested !== 0 && (kind & MEM_RESERVE) !== 0)
+                {
+                    // A reservation begins on an allocation granule, the
+                    // address rounded down to one, and runs to the end of the
+                    // page the last byte asked for is in. Whatever of that is
+                    // already taken -- another reservation, or anything else
+                    // -- refuses the whole of it: a reservation is never
+                    // made around something that is in its way.
+                    const start = (requested & ~(ALLOCATION_GRANULARITY - 1)) >>> 0;
+                    const span = roundUp(requested + size - start, PAGE_SIZE);
+                    if (!allocator.allocateAt(start, span, { owner: VIRTUAL }))
+                    {
+                        host.setLastError(ERROR_INVALID_ADDRESS);
+                        host.divergence?.('VirtualAlloc', `reservation of ${span} bytes at 0x${
+                            start.toString(16)} refused: ${allocator.blockContaining(start)
+                            ?? allocator.blockContaining(start + span - 1)
+                            ? 'something is already there' : 'not free in the arena'}`);
+                        return 0;
+                    }
+                    decommitted.delete(start);
+                    zeroHandedOver(start, span);
+                    return start;
+                }
 
                 if (requested !== 0)
                 {
@@ -786,12 +956,12 @@ export function createHeapFunctions(host){
                     // as having run out of memory while most of what it
                     // reserved sits untouched.
                     //
-                    // An address we never gave out is still refused: this
-                    // allocator places memory, it does not map it.
+                    // An address inside no reservation is refused: there is
+                    // nothing there to commit.
                     //
-                    // The range committed is whole pages: from the page the
-                    // address is in to the end of the page the last byte is
-                    // in, as Windows rounds it.
+                    // The range is whole pages: from the page the address is
+                    // in to the end of the page the last byte is in, as
+                    // Windows rounds it.
                     const page = requested & ~(PAGE_SIZE - 1);
                     const needed = roundUp(requested + size - page, PAGE_SIZE);
                     const existing = allocator.blockContaining(requested);
@@ -800,13 +970,22 @@ export function createHeapFunctions(host){
                         || existing.capacity - offset < needed)
                     {
                         host.setLastError(ERROR_INVALID_ADDRESS);
-                        host.divergence?.('VirtualAlloc', `commit of ${size} bytes at 0x${
+                        host.divergence?.('VirtualAlloc', `${acting === MEM_RESET
+                            ? 'reset' : 'commit'} of ${size} bytes at 0x${
                             requested.toString(16)} refused: ${existing
                             ? `the reservation at 0x${existing.address.toString(16)} holds ${
                                 existing.capacity} bytes, ${existing.owner === VIRTUAL
                                 ? 'virtual' : 'not virtual'}`
                             : 'no reservation there'}`);
                         return 0;
+                    }
+                    if (acting === MEM_RESET)
+                    {
+                        // The pages keep whatever they hold: MEM_RESET lets the
+                        // system throw the contents away instead of paging them
+                        // out, and says they are undefined afterwards, not
+                        // zero. With no paging there is nothing to spare.
+                        return page;
                     }
                     // Committing inside a reservation writes nothing.
                     //
@@ -817,19 +996,21 @@ export function createHeapFunctions(host){
                     // promises are there without anyone putting them there.
                     // What is not free is a page the program gave back: that
                     // one it did write, and Windows would hand it over fresh.
-                    const given = decommitted.get(existing.address);
-                    if (given)
-                    {
-                        const from = Math.max(page, given.from);
-                        const to = Math.min(page + needed, given.to);
-                        zero(from, Math.max(0, to - from));
-                    }
+                    //
                     // A page that is already committed keeps what the program
                     // put in it: Windows documents committing one twice as
                     // succeeding without zeroing, and an allocator that
                     // commits up to its high-water mark each time it grows
                     // does exactly that.
+                    takeBack(existing.address, page, page + needed);
                     return page;
+                }
+
+                if (acting === MEM_RESET)
+                {
+                    // Resetting needs pages to reset.
+                    host.setLastError(ERROR_INVALID_ADDRESS);
+                    return 0;
                 }
 
                 // A reservation is granted in whole allocation granules, as
@@ -870,31 +1051,49 @@ export function createHeapFunctions(host){
             },
         },
 
-        /** BOOL VirtualFree(LPVOID lpAddress, SIZE_T dwSize, DWORD dwFreeType) */
+        /**
+         * BOOL VirtualFree(LPVOID lpAddress, SIZE_T dwSize, DWORD dwFreeType)
+         *
+         * Exactly one of MEM_DECOMMIT and MEM_RELEASE. A release names the
+         * reservation by its base and frees all of it, so it takes no size; a
+         * decommit names pages anywhere inside one. Each failure says why
+         * through the last error: an address that is not a reservation's is
+         * ERROR_INVALID_ADDRESS, a malformed request ERROR_INVALID_PARAMETER.
+         */
         VirtualFree: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([pointer, bytes, type])=>{
                 const address = pointer >>> 0;
-                const block = allocator.block(address);
+                const kind = type >>> 0;
+                const size = bytes >>> 0;
+                if (kind !== MEM_DECOMMIT && kind !== MEM_RELEASE)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const block = allocator.blockContaining(address);
                 if (!block || block.owner !== VIRTUAL)
                 {
+                    host.setLastError(ERROR_INVALID_ADDRESS);
                     return 0;
                 }
-                if (type & MEM_RELEASE)
+                const end = block.address + block.capacity;
+                if (kind === MEM_RELEASE)
                 {
-                    // Documented: MEM_RELEASE frees the whole reservation and
-                    // dwSize must be zero.
-                    if (bytes !== 0 || !allocator.free(address))
+                    if (size !== 0)
                     {
+                        host.setLastError(ERROR_INVALID_PARAMETER);
                         return 0;
                     }
+                    if (address !== block.address)
+                    {
+                        host.setLastError(ERROR_INVALID_ADDRESS);
+                        return 0;
+                    }
+                    allocator.free(address);
                     decommitted.delete(address);
                     return 1;
-                }
-                if ((type & MEM_DECOMMIT) === 0)
-                {
-                    return 0;
                 }
                 // Decommit keeps the reservation. Page-level commit state is not
                 // modelled, so the memory stays readable -- observably identical
@@ -902,14 +1101,17 @@ export function createHeapFunctions(host){
                 // purpose to notice. What is remembered is the range, because a
                 // commit of it later has to read as zeroes: Windows took those
                 // pages away and gives back new ones.
-                const span = bytes >>> 0;
-                const to = address + (span === 0
-                    ? block.capacity
-                    : Math.min(roundUp(span, PAGE_SIZE), block.capacity));
-                const given = decommitted.get(address);
-                decommitted.set(address, given
-                    ? { from: Math.min(given.from, address), to: Math.max(given.to, to) }
-                    : { from: address, to });
+                //
+                // No size is the rest of the reservation from the page named,
+                // which from its base is the whole of it.
+                const page = (address & ~(PAGE_SIZE - 1)) >>> 0;
+                const to = size === 0 ? end : roundUp(address + size, PAGE_SIZE);
+                if (to > end)
+                {
+                    host.setLastError(ERROR_INVALID_ADDRESS);
+                    return 0;
+                }
+                giveBack(block.address, Math.max(page, block.address), to);
                 return 1;
             },
         },

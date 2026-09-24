@@ -48,6 +48,7 @@ const IMPORTS = {
             'SleepEx@8', 'WaitForSingleObjectEx@12', 'CreateEventA@16', 'SetEvent@4',
             'CreateWaitableTimerA@12', 'SetWaitableTimer@24', 'GetCurrentThreadId@0',
             'GetCurrentThread@0', 'GetSystemInfo@4', 'IsProcessorFeaturePresent@4', 'GetVersion@0',
+            'VirtualAlloc@16', 'VirtualFree@12', 'GetLastError@0', 'SetLastError@4',
         ],
     },
     'ADVAPI32.dll': {
@@ -72,6 +73,7 @@ const PROGRAMS = [
     { name: 'apc', source: 'apc.c', cxx: false },
     { name: 'processor', source: 'processor.c', cxx: false },
     { name: 'crtdata', source: 'crtdata.c', cxx: false },
+    { name: 'virtual', source: 'virtual.c', cxx: false },
 ];
 
 /**
