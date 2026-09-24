@@ -22,11 +22,13 @@ Two tracked documents, because they are consulted differently, plus the local wo
   go wrong; written against the design above, ending with cork as the default engine and the
   emulator an optional layer chosen per bundle launch, with the seams for x86-64 named.
 
-Three `00-*` files sit beside these and **are not in git** (`.gitignore` excludes `roadmap/00-*`):
-the follow-ups roadmap — what is decided and not yet built after the phased plan — the
-register of pitfalls that each cost weeks, required reading before touching the kernel, bridge,
-graphics or audio layers — and `00-TODO-list.md`, the current follow-ups list drawn from staff
-reports and review audits. A fresh clone has everything here except those files. Nothing else depends
+The `00-*` files beside these are **not in git** (`.gitignore` excludes `roadmap/00-*`):
+`00-TODO-list.md` is an index of them -- the week's goal and one file per area (cork, v86,
+graphics, win32 and kernel, audio and input, installers and bundles, diagnostics), each holding
+that area's open work and then its pitfalls, the ones that each cost weeks and are required reading
+before touching the kernel, bridge, graphics or audio layers -- beside `00-product-plan.md`, what
+is decided and not yet built around the engine, and `00-references.md`.
+A fresh clone has everything here except those files. Nothing else depends
 on having read them: `phases-history.md` states the scope and acceptance criteria each phase
 inherited, the same as the documents it replaced.
 
