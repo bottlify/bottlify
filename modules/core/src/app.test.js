@@ -27,6 +27,7 @@ import {
     createKernelGl,
     resolveOpenglEntry,
     describeEvent,
+    answeredByEngine,
 } from './app.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
@@ -344,6 +345,21 @@ test('a bare name is looked for beside the executable, then where the system kee
         'a qualified name has one place');
     assert.deepEqual(libraryCandidates('plugins\\Sound.dll', IMAGE),
         ['C:\\App\\plugins\\Sound.dll'], 'and so does one with a directory in it');
+});
+
+test('a redistributable runtime is answered by the engine whoever brought a copy', ()=>{
+    // A sound library loads its MPEG provider out of its own directory by full
+    // path; the engine stands in for that runtime (roadmap/decisions.md), so
+    // the program's copy is not what loads -- run as emulated x86 it was a
+    // third of the machine. A KnownDLL is answered the same way; any other
+    // library the engine has a table for still loses to the program's file.
+    const ours = answeredByEngine(['kernel32.dll'], ['Mp3dec.asi', 'ijl15.dll']);
+    assert.equal(ours('C:\\App\\redist\\miles\\Mp3dec.asi'), true);
+    assert.equal(ours('MP3DEC.ASI'), true);
+    assert.equal(ours('ijl15'), true);
+    assert.equal(ours('KERNEL32.dll'), true);
+    assert.equal(ours('d3dx9_26.dll'), false, 'a runtime the program may bring its own of');
+    assert.equal(ours('mss32.dll'), false, 'the sound library itself runs as shipped');
 });
 
 test('a library missing beside the program is read from the system volume', async()=>{
