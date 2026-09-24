@@ -257,7 +257,10 @@ Per API:
   the fourth reads the longer descriptor. Reference counts are per generation, as the API does it.
   The three enumerations call into guest code through the bridge and answer with a promise; without
   `callGuest` they succeed having named nothing. `GetDC` is answered by `win32.gdi().createSurfaceDc`
-  over the surface's own bytes. Display modes: 640x480, 800x600, 1024x768, 1280x1024 at 8, 16 and
+  over the surface's own bytes. On an indexed surface the DC's colour table is a live view the
+  palette keeps (`Palette.view`): `SetEntries` rewrites it in place and `SetPalette` refills it, so
+  GDI drawing on a DC held across a palette animation uses the current colours. A surface with no
+  palette of its own draws in the primary's. Display modes: 640x480, 800x600, 1024x768, 1280x1024 at 8, 16 and
   32 bits, plus the configured screen size if it is not in the list.
 - **`d3d7.js`** publishes no root; it hands the DirectDraw seam the `IDirect3D7` descriptor to put
   beside its own, and keeps one Direct3D 7 object per DirectDraw object. A draw takes its vertex

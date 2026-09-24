@@ -505,6 +505,76 @@ test('a held device context blocks a lock, but a held lock does not block GetDC'
     assert.ok(ddraw.destroyed);
 });
 
+/**
+ * An eight-bit exclusive mode with a primary, and the attributes every DC
+ * taken on its surfaces was made from.
+ */
+function indexedWithDcs(){
+    /** @type {import('./objects.js').DcAttributes[]} */
+    const made = [];
+    const ddraw = createDirectDraw({
+        version: 7,
+        createDc: attributes=>{
+            made.push(attributes);
+            return 0x0100 + made.length;
+        },
+    });
+    ddraw.setCooperativeLevel(HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    assert.equal(ddraw.setDisplayMode(320, 240, 8), DD_OK);
+    const primary = ddraw.createSurface({ flags: DDSD_CAPS, caps: DDSCAPS_PRIMARYSURFACE });
+    const offscreen = ddraw.createSurface({
+        flags: SIZED, caps: DDSCAPS_OFFSCREENPLAIN, width: 16, height: 16,
+    });
+    /** @param {number[]} entries */
+    const palette = entries=>{
+        const created = ddraw.createPalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256, entries);
+        return /** @type {NonNullable<typeof created.palette>} */ (created.palette);
+    };
+    return {
+        ddraw, made, palette,
+        primary: /** @type {NonNullable<typeof primary.surface>} */ (primary.surface),
+        offscreen: /** @type {NonNullable<typeof offscreen.surface>} */ (offscreen.surface),
+    };
+}
+
+test('a DC on an indexed surface draws in the palette as it is now, not as it was at GetDC', ()=>{
+    const { made, palette, primary } = indexedWithDcs();
+    const colours = palette([0x000000ff, 0x0000ff00]);
+    primary.setPalette(colours);
+
+    const dc = primary.getDC();
+    assert.equal(dc.hr, DD_OK);
+    // PALETTEENTRY holds red low; a pixel holds it high.
+    assert.deepEqual(made[0].palette?.slice(0, 2), [0x00ff0000, 0x0000ff00]);
+
+    // A palette animated while the DC is out: GDI draws the next thing with it.
+    colours.setEntries(0, [0x00ff0000]);
+    assert.equal(made[0].palette?.[0], 0x000000ff);
+
+    // Another palette set on the surface is what the DC draws with from then on.
+    const other = palette([0x00123456]);
+    primary.setPalette(other);
+    assert.equal(made[0].palette?.[0], 0x00563412);
+    colours.setEntries(0, [0]);
+    assert.equal(made[0].palette?.[0], 0x00563412, 'and the palette it left no longer reaches it');
+
+    // Given back, the table is left alone.
+    primary.releaseDC(/** @type {number} */ (dc.dc));
+    other.setEntries(0, [0]);
+    assert.equal(made[0].palette?.[0], 0x00563412);
+});
+
+test('an indexed surface with no palette of its own draws in the primary\'s', ()=>{
+    const { made, palette, primary, offscreen } = indexedWithDcs();
+    const colours = palette([0x00000080]);
+    primary.setPalette(colours);
+
+    assert.equal(offscreen.getDC().hr, DD_OK);
+    assert.equal(made[0].palette?.[0], 0x00800000);
+    colours.setEntries(0, [0x00008000]);
+    assert.equal(made[0].palette?.[0], 0x00008000);
+});
+
 test('a device context on one surface says nothing about another', ()=>{
     const ddraw = withLevel();
     const first = makeOffscreen(ddraw);

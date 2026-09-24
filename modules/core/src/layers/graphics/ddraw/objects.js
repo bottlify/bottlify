@@ -176,6 +176,11 @@ export function depthFormatForDepth(bitDepth){
  * @property {(on: boolean) => void} markPrimary
  * @property {(start: number, values: readonly number[]) => number} setEntries
  * @property {(start: number, count: number) => { hr: number, entries: number[] }} getEntries
+ * @property {(pixels?: number[]) => number[]} view
+ *           The entries as pixels, in an array the palette keeps current: every
+ *           SetEntries rewrites it in place until it is given back. An array
+ *           passed in is refilled and kept rather than a new one made.
+ * @property {(pixels: number[]) => void} unview
  *
  * @typedef {Object} Clipper
  * @property {number} refCount
@@ -569,6 +574,16 @@ export function createDirectDraw(options = {}){
         // Every entry exists from the start: a program reads back the ones it
         // never wrote and expects zeros, not a shorter array.
         const held = Array.from({ length: size }, (_, index)=>(entries[index] ?? 0) >>> 0);
+        /**
+         * The pixel arrays handed to device contexts on surfaces this palette
+         * colours. A DC is taken once and drawn with for as long as the
+         * program holds it, and the palette may be animated underneath it the
+         * whole while; a copy taken at GetDC would draw every later frame in
+         * the first frame's colours.
+         *
+         * @type {Set<number[]>}
+         */
+        const views = new Set();
         const life = counted(()=>{
             if (owner)
             {
@@ -606,6 +621,10 @@ export function createDirectDraw(options = {}){
                 }
                 values.forEach((value, index)=>{
                     held[start + index] = value >>> 0;
+                    for (const pixels of views)
+                    {
+                        pixels[start + index] = paletteEntryToPixel(value);
+                    }
                 });
                 return DD_OK;
             },
@@ -622,7 +641,45 @@ export function createDirectDraw(options = {}){
                 }
                 return { hr: DD_OK, entries: held.slice(start, start + count) };
             },
+
+            /** @param {number[]} [pixels]  An array to fill and keep, instead of a new one. */
+            view(pixels = []){
+                pixels.length = held.length;
+                held.forEach((entry, index)=>{
+                    pixels[index] = paletteEntryToPixel(entry);
+                });
+                views.add(pixels);
+                return pixels;
+            },
+
+            /** @param {number[]} pixels */
+            unview(pixels){
+                views.delete(pixels);
+            },
         };
+    }
+
+    /**
+     * The palette an eight-bit surface's DC draws with: its own, or, for one
+     * that has none, the primary surface's -- the colours its pixels will be
+     * shown in when it is blitted there, which is what Windows uses too.
+     *
+     * @param {Palette | null} own
+     * @returns {Palette | null}
+     */
+    function drawingPalette(own){
+        if (own)
+        {
+            return own;
+        }
+        for (const surface of surfaces)
+        {
+            if ((surface.caps & DDSCAPS_PRIMARYSURFACE) !== 0 && surface.palette)
+            {
+                return surface.palette;
+            }
+        }
+        return null;
     }
 
     /** @returns {Clipper} */
@@ -706,6 +763,14 @@ export function createDirectDraw(options = {}){
         const locks = [];
         /** @type {number | null} */
         let dc = null;
+        /**
+         * The live colours the DC out on this surface draws with, and the
+         * palette keeping them so; null for a DC on a surface that is not
+         * indexed.
+         *
+         * @type {{ pixels: number[], from: Palette } | null}
+         */
+        let dcColors = null;
         let lost = false;
         /** Colour keys by the DDCKEY flag that names them. @type {Map<number, ColorKey>} */
         const colorKeys = new Map();
@@ -871,6 +936,16 @@ export function createDirectDraw(options = {}){
                     palette.release();
                 }
                 palette = next;
+                // A DC already out keeps its colour table and has it refilled,
+                // since GDI holds that array and not the palette: the next
+                // thing drawn on it is in the new palette's colours.
+                const colours = drawingPalette(next);
+                if (dcColors && colours && colours !== dcColors.from)
+                {
+                    dcColors.from.unview(dcColors.pixels);
+                    colours.view(dcColors.pixels);
+                    dcColors.from = colours;
+                }
                 if (next)
                 {
                     next.addRef();
@@ -984,13 +1059,15 @@ export function createDirectDraw(options = {}){
                 {
                     return { hr: DDERR_SURFACELOST, dc: null };
                 }
+                const colours = bpp === 1 ? drawingPalette(palette) : null;
+                dcColors = colours ? { pixels: colours.view(), from: colours } : null;
                 dc = createDc({
                     width: spec.width,
                     height: spec.height,
                     pitch,
                     bitCount: bpp * 8,
                     bits: buffer,
-                    palette: bpp === 1 && palette ? palette.entries.map(paletteEntryToPixel) : null,
+                    palette: dcColors ? dcColors.pixels : null,
                     format: spec.pixelFormat.greenMask === 0x07e0 ? '565' : '555',
                 });
                 return { hr: DD_OK, dc };
@@ -1005,6 +1082,8 @@ export function createDirectDraw(options = {}){
                 void handle;
                 releaseDc(dc);
                 dc = null;
+                dcColors?.from.unview(dcColors.pixels);
+                dcColors = null;
                 uniqueness++;
                 surface.present();
                 return DD_OK;
