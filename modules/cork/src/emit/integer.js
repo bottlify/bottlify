@@ -483,11 +483,15 @@ export function emitInstruction(e, instruction, flagsLive){
             b.localGet(Local.reg + 4).i32const(4 + (dst ? /** @type {number} */ (dst.value) : 0))
                 .op(I32.add).localSet(Local.reg + 4);
             // Back to a call of this region whose callee it formed in: a jump.
+            // Charged once, here at the block's depth, for every way out below:
+            // a charge inside the `if` left the block's count standing, and the
+            // jump's own budget or untranslated exit charged it a second time
+            // (+2 a spent budget for `inc edx; ret`).
+            e.charge();
             for (const at of e.returns.get(e.region.blocks[e.blockIndex].start) ?? [])
             {
                 b.localGet(Local.eip).i32const(at).op(I32.eq);
                 e.openIf('return');
-                e.charge();
                 e.jumpTo(at);
                 e.close();
             }
