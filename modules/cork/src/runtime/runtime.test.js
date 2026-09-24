@@ -745,3 +745,28 @@ test('a variant for another x87 top the machine keeps reaching goes before cold 
     await m.runtime.translatePending();
     assert.equal(reason(), 'translated since');
 });
+
+test('a transfer carries the registers and the count to a callee that names none of them,'
+    + ' and its exit to the host writes them all', async()=>{
+    const m = machine({ leafCalls: false });
+    // mov ebx, 7; call F; hlt; F: inc edx; hlt -- F neither reads nor writes ebx, and the
+    // caller never reaches its own exit, so the value is only ever in the transfer.
+    m.write(CODE, [0xbb, 7, 0, 0, 0, 0xe8, 0x01, 0, 0, 0, 0xf4, 0x42, 0xf4]);
+    m.setReg(3, 0x1234);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE);
+    await m.runtime.translatePending();
+    const before = m.counter();
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1000);
+    if (m.runtime.diagnostics().exits.untranslated > 0)
+    {
+        return; // no tail calls: every region leaves for the host
+    }
+    assert.equal(exit.kind, 'halt');
+    assert.equal(m.eip(), CODE + 13);
+    assert.equal(m.reg(3), 7, 'ebx, written before the transfer, reaches the state block');
+    assert.equal(m.reg(4), 0x80000 - 4, 'esp after the call\'s push');
+    assert.equal(m.reg(2), 1, 'edx from the callee');
+    assert.equal(m.counter() - before, 4, 'mov, call, inc and hlt, counted once across both');
+    assert.equal(exit.retired, 4);
+});

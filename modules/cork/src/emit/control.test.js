@@ -198,6 +198,9 @@ test('out dx, eax to the trap port calls the host from inside the region; others
             trap: value=>{
                 seen.push({ eax: value, eip: m.eip(), counter: m.counter() });
                 m.setReg('eax', 0x77);
+                // One the region never names: under cork's layout it came in
+                // as a parameter, and the exit writes every register back.
+                m.setReg('esi', 0x99);
                 return 0;
             },
         });
@@ -208,6 +211,7 @@ test('out dx, eax to the trap port calls the host from inside the region; others
         assert.deepEqual(seen, [{ eax: 7, eip: CODE + 15, counter: 4 }]);
         assert.equal(m.reg('eax'), 0x77, 'the answer, taken back into the locals');
         assert.equal(m.reg('ebx'), 2, 'the instruction after it ran');
+        assert.equal(m.reg('esi'), 0x99, 'a register the handler set and the region never names');
         assert.equal(m.counter(), 6);
         // A handler that moves EIP: the region leaves there, untranslated.
         const moved = createTestMachine({

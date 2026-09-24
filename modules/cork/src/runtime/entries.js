@@ -31,7 +31,8 @@ const HASH_LOAD = Tables.HASH_SLOTS * 3 / 4;
 /**
  * @typedef {Object} Entry
  * @property {number} eip
- * @property {(label: number, budget: number) => number} fn   the region function
+ * @property {(label: number, budget: number, ...state: number[]) => number} fn
+ *     the region function (`enterRegion` supplies the state)
  * @property {number} label    the block's label in the function's dispatcher
  * @property {number} page     the page the block starts in
  * @property {number} top      the x87 top it was compiled for, or ANY_TOP

@@ -25,7 +25,7 @@
  */
 
 import { formRegion } from '../region.js';
-import { mathImports } from '../emit/region.js';
+import { enterRegion, mathImports } from '../emit/region.js';
 import { decode } from '../decode/decoder.js';
 import { isX87, trackRegion } from '../emit/x87.js';
 import { features as probeFeatures } from '../wasm/features.js';
@@ -1166,7 +1166,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // and re-enters per call, and an object per leave was the
             // collector's share of the cost.
             const before = counterWord();
-            const code = fn(label, budget) >>> 0;
+            const code = enterRegion(fn, label, budget, view(), layout) >>> 0;
             const retired = (counterWord() - before) >>> 0;
             corkRetired += retired;
             const kind = KINDS[code & 0xff] ?? 'untranslated';
