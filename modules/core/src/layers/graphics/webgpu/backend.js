@@ -787,6 +787,7 @@ export function createBackend(options){
                     {
                         buffer.flush();
                     }
+                    uniforms.flush();
                     endUpload();
 
                     const endSubmit = profiler.phase('submit');

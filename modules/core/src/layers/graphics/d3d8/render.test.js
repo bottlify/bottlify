@@ -758,18 +758,19 @@ test('recorded: two draws with different transforms in one pass get their own of
     assert.equal(device.EndScene(), D3D_OK);
     await h.present();
 
-    const blocks = gpu.of('writeBuffer').filter((/** @type {any} */ call)=>
+    const writes = gpu.of('writeBuffer').filter((/** @type {any} */ call)=>
         call.buffer.descriptor.label.startsWith('uniforms'));
-    assert.equal(blocks.length, 2);
-    assert.equal(blocks[0].buffer, blocks[1].buffer, 'one ring');
-    assert.notEqual(blocks[0].bufferOffset, blocks[1].bufferOffset,
-        'one block rewritten twice would show both draws the second matrix');
-    assert.equal(new Float32Array(blocks[0].bytes.buffer, blocks[0].bytes.byteOffset, 16)[12], 0);
-    assert.equal(new Float32Array(blocks[1].bytes.buffer, blocks[1].bytes.byteOffset, 16)[12], 5);
+    assert.equal(writes.length, 1, 'both blocks reach the ring in one write, before the submit');
     const bound = gpu.of('setBindGroup');
+    const blocks = bound.map((/** @type {any} */ call)=>call.resolved[0]);
+    assert.equal(blocks[0].buffer, blocks[1].buffer, 'one ring');
+    assert.notEqual(blocks[0].offset, blocks[1].offset,
+        'one block rewritten twice would show both draws the second matrix');
+    /** @param {any} block */
+    const worldX = block=>new Float32Array(block.range.buffer, block.range.byteOffset, 16)[12];
+    assert.equal(worldX(blocks[0]), 0);
+    assert.equal(worldX(blocks[1]), 5);
     assert.equal(bound[0].group, bound[1].group, 'and both draws bound the one group');
-    assert.deepEqual(bound.map((/** @type {any} */ call)=>call.offsets),
-        [[blocks[0].bufferOffset], [blocks[1].bufferOffset]], 'each at its own offset');
     assert.equal(gpu.count('beginRenderPass'), 1, 'in one pass');
     assert.equal(gpu.count('createRenderPipeline'), 1,
         'with one pipeline: the state did not change');

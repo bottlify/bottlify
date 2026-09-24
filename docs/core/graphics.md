@@ -155,7 +155,10 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
   layout drops a binding the generated shader did not use and every textured draw then silently
   disappears. Uniform blocks come out of one ring buffer bound at a dynamic offset, so a bind group
   names a texture, a sampler and the ring and nothing that changes per draw; the group cache is
-  keyed on those identities and lives as long as the backend.
+  keyed on those identities and lives as long as the backend. The blocks are laid into a copy of the
+  ring on this side and reach the GPU in one `writeBuffer` per frame, just before its submit (and
+  once more before a wrap or a new ring), not in one per block: a shader draw hands out six blocks,
+  and each write is a trip to the GPU process.
 - **Dynamic buffers** (`internal/buffers.js`). A lock's flags are a promise: `DISCARD` renames the
   backing and only bytes written since travel; `NOOVERWRITE` renames nothing and sends the newly
   written ranges; neither flag leaves the decision to whether a draw of a frame not yet submitted
@@ -373,6 +376,10 @@ counters the same way: every setter goes through its one `setState`, and a state
 reset and a new target or depth surface raise them as well; a value set again that is already there
 changes nothing. The Direct3D 7 device does not publish them yet and is prepared for on every draw.
 `diagnostics().prepared` counts what was built and what was reused.
+A draw through shaders keeps its translations, vertex layout, pipeline state and samplers while
+`stateVersionBesideTextures`, the shaders, the declaration, the stride and the topology hold still --
+setting constants raises no version, so a frame that sets its constants and binds a texture before
+every draw prepares once -- and copies only the constant blocks and takes the texture views per draw.
 
 A texture the program releases for the last time gives its guest storage back at once, and its GPU
 texture at the first present that finds it bound on no stage, after that frame's replay: a binding
