@@ -30,8 +30,7 @@ import { mkdir, open, rename, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 // The one thing this side knows about the container: where the block region
 // starts, so it can leave room for a header it writes last and never reads.
-import { HEADER_SIZE }
-    from '../../../core/src/layers/filesystem/internal/bundle/format.js';
+import { HEADER_SIZE } from '@bottlify/core/bundle';
 
 /** Nothing larger is read into memory for one request. */
 const MAX_PART = 64 << 20;

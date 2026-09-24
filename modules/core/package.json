@@ -32,6 +32,8 @@
   },
   "exports": {
     ".": "./dist/core.js",
+    "./bundle": "./src/bundle.js",
+    "./bundle/node": "./src/bundle-node.js",
     "./engine.worker.js": "./dist/engine.worker.js",
     "./worklet.js": "./dist/worklet.js",
     "./libv86.mjs": "./dist/vendor/libv86.mjs",
@@ -42,7 +44,11 @@
   "files": [
     "dist",
     "LICENSE",
-    "THIRD-PARTY-NOTICES.md"
+    "THIRD-PARTY-NOTICES.md",
+    "src/bundle.js",
+    "src/bundle-node.js",
+    "src/layers/filesystem/internal/bundle/format.js",
+    "src/layers/filesystem/internal/bundle/crc32.js"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",

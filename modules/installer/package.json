@@ -13,7 +13,6 @@
     "./prefix": "./src/prefix.js",
     "./silent": "./src/silent.js",
     "./pack": "./src/pack.js",
-    "./bundle": "./src/bundle.js",
     "./upload": "./src/upload.js",
     "./server": "./src/server/index.js"
   },
@@ -25,5 +24,8 @@
     "test:integration": "node --test \"src/**/*.itest.js\"",
     "typecheck": "tsc -p jsconfig.json",
     "bottles": "node src/server/cli.js"
+  },
+  "dependencies": {
+    "@bottlify/core": "^0.1.0"
   }
 }

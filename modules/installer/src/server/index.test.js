@@ -19,8 +19,9 @@ import zlib from 'node:zlib';
 import { mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openBundle, Codec }
-    from '../../../core/src/layers/filesystem/internal/bundle/format.js';
+// The engine's own reader, which is not published.
+import { openBundle } from '../../../core/src/layers/filesystem/internal/bundle/format.js';
+import { Codec } from '@bottlify/core/bundle';
 import { collectFrom, publish } from '../index.js';
 import { createBottleServer } from './index.js';
 

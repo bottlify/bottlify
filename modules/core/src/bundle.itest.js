@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { createApp, READ_AHEAD_BYTES } from './app.js';
-import { writeBundle } from '../../../tools/btl.mjs';
+import { writeBundle } from './bundle-node.js';
 
 /** The fixture's blocks, small so a read of a few bytes still misses one. */
 const BLOCK_SIZE = 64 * 1024;

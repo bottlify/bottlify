@@ -1,0 +1,472 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * The .btl bundle format on a host: read and write files of it with Node.
+ * Published as `@bottlify/core/bundle/node`; the format's constants and
+ * checksum, which a browser needs too, are `@bottlify/core/bundle`.
+ *
+ * A bundle holds a game and nothing else. What the game *is* -- its title, its
+ * cover, which version this is -- lives in a manifest beside it, because that
+ * is catalogue data: it changes without the bytes changing, it is read by
+ * things that will never open the archive, and a format that carries it forces
+ * a rewrite of gigabytes to correct a description.
+ *
+ * The shape is dictated by how it will be read: over HTTP, by a browser, a few
+ * kilobytes at a time, in whatever order the game seeks. So
+ *
+ *   - a fixed header at the very front, so one small range request tells the
+ *     reader where everything is;
+ *   - data cut into fixed-size blocks, so reading a hundred bytes at a random
+ *     offset costs one block, not a file;
+ *   - a codec per block rather than per bundle, because game data is mostly
+ *     already-compressed archives with a few executables mixed in, and the two
+ *     want opposite answers;
+ *   - the index at the end, so writing is a single forward pass over the input
+ *     and never needs to seek back and patch a size.
+ *
+ * Layout:
+ *
+ *     0x00  magic "BTL1"                    4
+ *     0x04  format version                  4
+ *     0x08  block size                      4
+ *     0x0c  reserved                        4
+ *     0x10  index offset                    8
+ *     0x18  index length (as stored)        8
+ *     0x20  index codec                     4
+ *     0x24  reserved                        4
+ *           ... blocks, back to back ...
+ *           ... index ...
+ */
+
+import { createReadStream } from 'node:fs';
+import { open, stat, readdir, mkdir } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { join, relative, sep } from 'node:path';
+import zlib from 'node:zlib';
+import { MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec, crc32 } from './bundle.js';
+
+// Re-exported from the reader rather than restated here. A writer and a reader
+// that each carry their own copy of a magic number, a header size or a version
+// are two programs that can disagree about a file neither of them is wrong
+// about -- and the version had already begun to.
+//
+// Codec: two compressors rather than one, chosen per block, because pack time
+// is free and the two disagree often enough to matter. A reader must be able to
+// decode whatever it finds; the manifest names the set a bundle actually used,
+// so one that only has deflate can be told before it fetches anything.
+export { MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec };
+
+/**
+ * A quarter of a mebibyte.
+ *
+ * The block is not the granularity of a request -- runs of blocks are coalesced
+ * up to a separate cap, and the rest of the bundle is filled in while nothing is
+ * being read -- so the two numbers are independent knobs and this one answers
+ * only one question: how long a guest thread is held.
+ *
+ * A thread that reads a byte nobody has fetched is parked for one whole block,
+ * however few bytes it asked for. That is the cost this is chosen against, and
+ * it outranks what a larger block would win. Compression context and index size
+ * both improve with size and neither is worth holding a thread: about 21 ms here
+ * on a domestic connection, against a third of a second at 4 MiB and five
+ * seconds at 64.
+ *
+ * A measurement once had this size beating 1, 4 and 16 MiB on ratio as well.
+ * That part was an artefact of the probe below, which was then capped and so
+ * judged a large block on an ever smaller fraction of itself. The probe is an
+ * uncapped fraction now, so that comparison would have to be run again -- but
+ * its outcome would not move this number, because latency decides it.
+ */
+export const DEFAULT_BLOCK_SIZE = 1 << 18;
+
+/**
+ * A block is stored uncompressed unless compression saves at least this much.
+ *
+ * Below it the saving is not worth the decompression on every future read --
+ * and on this kind of data most blocks land at "saves nothing at all", so the
+ * threshold is what keeps the archive fast rather than merely small.
+ */
+const MIN_SAVING = 0.04;
+
+/**
+ * How much of a block to compress before deciding whether to compress it.
+ *
+ * Game data is mostly already-compressed archives, and compressing all of it to
+ * discover that is most of the build time. A cheap look at part of a block
+ * predicts the rest well enough, because a block is one kind of data.
+ *
+ * A fraction and nothing else. A fixed size silently becomes a worse predictor
+ * as the block grows -- a compressible region diluted into a large block stops
+ * clearing the threshold, and the block is stored whole. That is what made large
+ * blocks look bad when this was 96 KiB regardless, and a cap does the same thing
+ * one block size later, which is why there is no longer one.
+ */
+const PROBE_FRACTION = 0.4;
+const PROBE_LEVEL = 1;
+
+const deflate = (/** @type {Buffer} */ bytes, /** @type {number} */ level)=>
+    zlib.deflateRawSync(bytes, { level });
+const inflate = (/** @type {Buffer | Uint8Array} */ bytes)=>zlib.inflateRawSync(bytes);
+
+/**
+ * zstd at its slowest and densest setting.
+ *
+ * Affordable because a bundle is packed once, offline, and because the probe
+ * below means only the blocks that will actually compress are ever handed to
+ * it -- three per cent of a large game.
+ */
+const ZSTD_LEVEL = 19;
+const zstdPack = (/** @type {Buffer} */ bytes)=>zlib.zstdCompressSync(bytes, {
+    params: { [zlib.constants.ZSTD_c_compressionLevel]: ZSTD_LEVEL },
+});
+const zstdUnpack = (/** @type {Buffer | Uint8Array} */ bytes)=>zlib.zstdDecompressSync(bytes);
+
+/**
+ * Chooses how to store one block, and returns it stored that way.
+ *
+ * @param {Buffer} block
+ * @param {number} level
+ * @returns {{ codec: number, bytes: Buffer }}
+ */
+export function packBlock(block, level = 9){
+    const probeBytes = Math.ceil(block.length * PROBE_FRACTION);
+    const probe = block.length > probeBytes ? block.subarray(0, probeBytes) : block;
+    const sample = deflate(probe, PROBE_LEVEL);
+    if (sample.length > probe.length * (1 - MIN_SAVING))
+    {
+        return { codec: Codec.STORED, bytes: block };
+    }
+
+    // Both, and keep the smaller. Packing twice costs build time, which is
+    // spent once and by us; a byte saved is paid for by every download.
+    const candidates = [
+        { codec: Codec.DEFLATE_RAW, bytes: deflate(block, level) },
+        { codec: Codec.ZSTD, bytes: zstdPack(block) },
+    ].sort((a, b)=>a.bytes.length - b.bytes.length);
+
+    const best = candidates[0];
+    return best.bytes.length <= block.length * (1 - MIN_SAVING)
+        ? best
+        : { codec: Codec.STORED, bytes: block };
+}
+
+/**
+ * @param {number} codec
+ * @param {Buffer | Uint8Array} bytes
+ * @returns {Buffer | Uint8Array}
+ */
+export function unpackBlock(codec, bytes){
+    switch (codec){
+        case Codec.STORED:
+            return bytes;
+        case Codec.DEFLATE_RAW:
+            return inflate(bytes);
+        case Codec.ZSTD:
+            return zstdUnpack(bytes);
+        default:
+            throw new Error(`btl: unknown block codec ${codec}`);
+    }
+}
+
+/**
+ * Every file under a directory, in a stable order, with the paths a guest will
+ * ask for: relative to the root and separated by backslashes.
+ *
+ * @param {string} root
+ * @returns {Promise<{ files: { path: string, source: string, size: number }[],
+ *                     directories: string[] }>}
+ */
+export async function scanTree(root){
+    /** @type {{ path: string, source: string, size: number }[]} */
+    const files = [];
+    /** @type {string[]} */
+    const directories = [];
+
+    /** @param {string} dir */
+    async function walk(dir){
+        const entries = await readdir(dir, { withFileTypes: true });
+        // Sorted so a rebuild of the same input produces the same bundle: a
+        // directory listing's order is the filesystem's business, not ours.
+        entries.sort((a, b)=>a.name < b.name ? -1 : 1);
+
+        for (const entry of entries)
+        {
+            const path = join(dir, entry.name);
+            if (entry.isDirectory())
+            {
+                await walk(path);
+            }
+            else if (entry.isFile())
+            {
+                const info = await stat(path);
+                files.push({
+                    path: relative(root, path).split(sep).join('\\'),
+                    source: path,
+                    size: info.size,
+                });
+            }
+        }
+        // An empty directory is part of what a program expects to find: some
+        // create files in one and fail if it is missing, and nothing about the
+        // file list would put it back. Only a genuinely empty one is recorded --
+        // a directory holding another is rebuilt along with what it holds.
+        if (entries.length === 0 && dir !== root)
+        {
+            directories.push(relative(root, dir).split(sep).join('\\'));
+        }
+    }
+
+    await walk(root);
+    return { files, directories };
+}
+
+/**
+ * Writes a bundle.
+ *
+ * @param {Object} options
+ * @param {string} options.root         Directory to pack.
+ * @param {string} options.output       Path of the .btl file.
+ * @param {number} [options.blockSize]
+ * @param {number} [options.level]
+ * @param {boolean} [options.store]     Store everything; skip compression entirely.
+ * @param {(progress: any) => void} [options.onProgress]
+ * @returns {Promise<any>} what the manifest needs to know about the bundle
+ */
+export async function writeBundle(options){
+    const {
+        root, output, blockSize = DEFAULT_BLOCK_SIZE, level = 9, store = false, onProgress,
+    } = options;
+    const { files, directories } = await scanTree(root);
+    const handle = await open(output, 'w');
+
+    const header = Buffer.alloc(HEADER_SIZE);
+    header.write(MAGIC, 0, 'latin1');
+    header.writeUInt32LE(FORMAT_VERSION, 4);
+    header.writeUInt32LE(blockSize, 8);
+    await handle.write(header, 0, HEADER_SIZE, 0);
+
+    /** @type {{ offset: number, packed: number, codec: number, crc: number }[]} */
+    const blocks = [];
+    /** @type {any[]} */
+    const index = [];
+    const digest = createHash('sha256');
+
+    let cursor = HEADER_SIZE;
+    let rawTotal = 0;
+    let packedTotal = 0;
+
+    for (const file of files)
+    {
+        const firstBlock = blocks.length;
+        const fileDigest = createHash('sha256');
+
+        // Streamed rather than read whole: a bundle holds files far larger than
+        // this process may hold in memory.
+        const stream = createReadStream(file.source, { highWaterMark: blockSize });
+        /** @type {Buffer[]} */
+        let pending = [];
+        let pendingBytes = 0;
+
+        /** @param {Buffer} block */
+        const emit = async block=>{
+            fileDigest.update(block);
+            const { codec, bytes } = store
+                ? { codec: Codec.STORED, bytes: block }
+                : packBlock(block, level);
+            await handle.write(bytes, 0, bytes.length, cursor);
+            digest.update(bytes);
+            // Over the stored bytes, not the block's contents: this is checked
+            // when a block arrives, before anything decodes it, so it has to be
+            // a checksum of what actually travels.
+            blocks.push({ offset: cursor, packed: bytes.length, codec, crc: crc32(bytes) });
+            cursor += bytes.length;
+            rawTotal += block.length;
+            packedTotal += bytes.length;
+            onProgress?.({ path: file.path, rawTotal, packedTotal, blocks: blocks.length });
+        };
+
+        for await (const chunk of stream)
+        {
+            pending.push(chunk);
+            pendingBytes += chunk.length;
+            while (pendingBytes >= blockSize)
+            {
+                const joined = Buffer.concat(pending, pendingBytes);
+                await emit(joined.subarray(0, blockSize));
+                pending = [joined.subarray(blockSize)];
+                pendingBytes = pending[0].length;
+            }
+        }
+        if (pendingBytes > 0)
+        {
+            await emit(Buffer.concat(pending, pendingBytes));
+        }
+        index.push({
+            path: file.path,
+            size: file.size,
+            firstBlock,
+            blocks: blocks.length - firstBlock,
+            sha256: fileDigest.digest('hex'),
+        });
+    }
+
+    const indexJson = Buffer.from(JSON.stringify({ blockSize, files: index, directories, blocks }));
+    const indexBytes = deflate(indexJson, 9);
+    await handle.write(indexBytes, 0, indexBytes.length, cursor);
+
+    header.writeBigUInt64LE(BigInt(cursor), 0x10);
+    header.writeBigUInt64LE(BigInt(indexBytes.length), 0x18);
+    header.writeUInt32LE(Codec.DEFLATE_RAW, 0x20);
+    await handle.write(header, 0, HEADER_SIZE, 0);
+    await handle.close();
+
+    const total = cursor + indexBytes.length;
+    return {
+        format: `btl/${FORMAT_VERSION}`,
+        blockSize,
+        files: index.length,
+        directories: directories.length,
+        uncompressedBytes: rawTotal,
+        bytes: total,
+        ratio: rawTotal === 0 ? 1 : packedTotal / rawTotal,
+        storedBlocks: blocks.filter(block=>block.codec === Codec.STORED).length,
+        totalBlocks: blocks.length,
+        indexBytes: indexBytes.length,
+        sha256: digest.digest('hex'),
+        // The index carries every block's checksum, so it is the one part of
+        // the container whose own integrity cannot be established from inside
+        // it. This digest belongs in the manifest, which comes from somewhere
+        // other than the bytes it describes -- and unlike the whole-bundle
+        // digest it is cheap enough to check on every launch.
+        indexSha256: createHash('sha256').update(indexBytes).digest('hex'),
+    };
+}
+
+/**
+ * Opens a bundle for reading: the header and the index, and nothing else until
+ * something is actually read.
+ *
+ * @param {string} path
+ */
+export async function openBundle(path){
+    const handle = await open(path, 'r');
+    const header = Buffer.alloc(HEADER_SIZE);
+    await handle.read(header, 0, HEADER_SIZE, 0);
+
+    if (header.toString('latin1', 0, 4) !== MAGIC)
+    {
+        await handle.close();
+        throw new Error(`${path} is not a .btl bundle`);
+    }
+    const version = header.readUInt32LE(4);
+    if (!READABLE_VERSIONS.includes(version))
+    {
+        await handle.close();
+        throw new Error(`${path} is format version ${version}; this reader knows `
+            + READABLE_VERSIONS.join(' and '));
+    }
+
+    const blockSize = header.readUInt32LE(8);
+    const indexOffset = Number(header.readBigUInt64LE(0x10));
+    const indexLength = Number(header.readBigUInt64LE(0x18));
+    const indexCodec = header.readUInt32LE(0x20);
+
+    const stored = Buffer.alloc(indexLength);
+    await handle.read(stored, 0, indexLength, indexOffset);
+    const index = JSON.parse(Buffer.from(unpackBlock(indexCodec, stored)).toString());
+
+    const byPath = new Map(index.files.map((/** @type {any} */ file)=>
+        [file.path.toLowerCase(), file]));
+
+    return {
+        blockSize,
+        index,
+
+        list: ()=>index.files,
+        directories: ()=>index.directories,
+
+        /** @param {string} filePath */
+        stat: filePath=>byPath.get(filePath.toLowerCase()) ?? null,
+
+        /**
+         * Reads a range of one file, touching only the blocks it covers.
+         *
+         * @param {string} filePath
+         * @param {number} [offset]
+         * @param {number} [length]
+         * @returns {Promise<Buffer>}
+         */
+        async read(filePath, offset = 0, length = Infinity){
+            const file = byPath.get(filePath.toLowerCase());
+            if (!file)
+            {
+                throw new Error(`${filePath} is not in this bundle`);
+            }
+
+            const end = Math.min(file.size, offset + length);
+            if (end <= offset)
+            {
+                return Buffer.alloc(0);
+            }
+
+            const first = Math.floor(offset / blockSize);
+            const last = Math.floor((end - 1) / blockSize);
+            /** @type {Buffer[]} */
+            const parts = [];
+
+            for (let at = first; at <= last; at++)
+            {
+                const block = index.blocks[file.firstBlock + at];
+                const raw = Buffer.alloc(block.packed);
+                await handle.read(raw, 0, block.packed, block.offset);
+                const bytes = Buffer.from(unpackBlock(block.codec, raw));
+
+                const from = at === first ? offset - first * blockSize : 0;
+                const to = at === last ? end - at * blockSize : bytes.length;
+                parts.push(bytes.subarray(from, to));
+            }
+            return Buffer.concat(parts);
+        },
+
+        close: ()=>handle.close(),
+    };
+}
+
+/**
+ * Reads a whole bundle back and checks every file against the digest recorded
+ * when it was written.
+ *
+ * @param {string} path
+ * @param {(progress: any) => void} [onProgress]
+ */
+export async function verifyBundle(path, onProgress){
+    const bundle = await openBundle(path);
+    let checked = 0;
+    /** @type {string[]} */
+    const bad = [];
+
+    for (const file of bundle.list())
+    {
+        const digest = createHash('sha256');
+        for (let at = 0; at < file.size; at += bundle.blockSize)
+        {
+            digest.update(await bundle.read(file.path, at, bundle.blockSize));
+        }
+        if (digest.digest('hex') !== file.sha256)
+        {
+            bad.push(file.path);
+        }
+        checked++;
+        onProgress?.({ checked, total: bundle.list().length, path: file.path });
+    }
+
+    await bundle.close();
+    return { checked, bad };
+}
+
+/** @param {string} directory */
+export const ensureDirectory = directory=>mkdir(directory, { recursive: true });

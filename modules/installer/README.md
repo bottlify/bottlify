@@ -70,9 +70,9 @@ Packed on the way out rather than after: `pack.js` compresses and blocks the tre
 in the browser and hands the bytes straight to the request, so what crosses the
 wire is smaller than the installed tree and nothing is written locally at all.
 
-`pack.js` is a second writer for a format `tools/btl.mjs` already writes, and the
-two agree because both take the layout constants and the checksum from the
-reader in `core/src/layers/filesystem/internal/bundle/`. Two departures, both
+`pack.js` is a second writer for a format `@bottlify/core/bundle/node` already
+writes, and the two agree because both take the layout constants and the
+checksum from `@bottlify/core/bundle`, which the engine's reader uses too. Two departures, both
 forced: deflate only (a browser's `CompressionStream` has no zstd), and no
 whole-bundle digest (`crypto.subtle` cannot hash incrementally, so the server
 computes that one as the bytes pass through).

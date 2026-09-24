@@ -14,9 +14,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
+// The engine's own reader, which is not published: what it reads back is what
+// a packed bottle has to be.
 import { openBundle } from '../../core/src/layers/filesystem/internal/bundle/format.js';
-import { Codec } from '../../core/src/layers/filesystem/internal/bundle/format.js';
-import { crc32 } from '../../core/src/layers/filesystem/internal/bundle/crc32.js';
+import { Codec, crc32 } from '@bottlify/core/bundle';
 import { packBundle, packBlock } from './pack.js';
 
 /** @param {number} codec @param {Uint8Array} stored */
