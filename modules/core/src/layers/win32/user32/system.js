@@ -1445,7 +1445,16 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 {
                     return 0;
                 }
-                const siblings = ordered().filter(other=>other.parent === record.parent);
+                // The records are kept bottom-up, the order they are painted
+                // in; GetWindow walks from the top. Top-level windows are
+                // therefore read backwards, the topmost first. Children stay in
+                // creation order, since a new child goes below its siblings:
+                // a dialog's first control is its GW_CHILD, and its tab order
+                // is GW_HWNDNEXT from there.
+                const child = host.isChild(record);
+                const siblings = child
+                    ? ordered().filter(other=>other.parent === record.parent && host.isChild(other))
+                    : ordered().filter(other=>!host.isChild(other)).reverse();
                 const at = siblings.indexOf(record);
                 switch (command >>> 0){
                     case GW_HWNDFIRST:
@@ -1457,9 +1466,11 @@ export function createSystemFunctions({ host, live, windows, classes }){
                     case GW_HWNDPREV:
                         return at > 0 ? siblings[at - 1].hwnd : 0;
                     case GW_CHILD:
-                        return ordered().find(other=>other.parent === record.hwnd)?.hwnd ?? 0;
+                        return ordered().find(other=>other.parent === record.hwnd
+                            && host.isChild(other))?.hwnd ?? 0;
                     case GW_OWNER:
-                        return record.parent;
+                        // A child has a parent, not an owner.
+                        return child ? 0 : record.parent;
                     default:
                         return 0;
                 }
@@ -2853,8 +2864,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 {
                     return 0;
                 }
-                host.activate?.(hwnd >>> 0);
-                return previous;
+                return andThen(host.activate?.(hwnd >>> 0,
+                    { thread: host.callerThread?.(), sent: true }), ()=>previous);
             },
         },
 
@@ -2868,9 +2879,9 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 {
                     return 0;
                 }
-                host.activate?.(hwnd >>> 0);
                 host.raise?.(record);
-                return 1;
+                return andThen(host.activate?.(hwnd >>> 0,
+                    { thread: host.callerThread?.(), sent: true }), ()=>1);
             },
         },
 

@@ -173,8 +173,11 @@ export const win32Module = {
         let exitCode = null;
         /** @type {{ list: () => any[], clientRect: (hwnd: number) => any,
          *     place: (hwnd: number, x: number, y: number, width: number,
-         *     height: number, how?: { announce?: boolean }) => boolean }} */
-        let windowService = { list: ()=>[], clientRect: ()=>null, place: ()=>false };
+         *     height: number, how?: { announce?: boolean }) => boolean,
+         *     active: () => number }} */
+        let windowService = {
+            list: ()=>[], clientRect: ()=>null, place: ()=>false, active: ()=>0,
+        };
 
         /** @type {(handle: number, text: string) => void} */
         const sink = config?.onOutput ?? (()=>{});
@@ -1618,6 +1621,9 @@ export const win32Module = {
              */
             /** Every top-level window's rectangle, as the program declared it. */
             windows: ()=>windowService.list(),
+
+            /** The window the program is active through, as GetForegroundWindow answers. */
+            activeWindow: ()=>windowService.active(),
 
             /**
              * Places a window as the system would, telling the program with a

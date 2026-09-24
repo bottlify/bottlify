@@ -69,6 +69,7 @@ const WM_MOUSEACTIVATE = 0x0021;
 /** WM_ACTIVATE's wParam: who is being told, and why. */
 const WA_INACTIVE = 0;
 const WA_ACTIVE = 1;
+const WA_CLICKACTIVE = 2;
 const WM_NCCALCSIZE = 0x0083;
 const WM_NCPAINT = 0x0085;
 /**
@@ -92,8 +93,14 @@ const HTBORDER = 18;
 const HTCLOSE = 20;
 const HTVSCROLL = 7;
 const HTHSCROLL = 6;
-/** WM_MOUSEACTIVATE: activate the window and deliver the click. */
+/** WM_MOUSEACTIVATE's answers: whether to activate, and whether the click still goes. */
 const MA_ACTIVATE = 1;
+const MA_ACTIVATEANDEAT = 2;
+const MA_NOACTIVATE = 3;
+const MA_NOACTIVATEANDEAT = 4;
+/** The presses, client and non-client, that activate the window they land in. */
+const PRESSES = new Set([WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN, 0x020b,
+    WM_NCLBUTTONDOWN, 0x00a4, 0x00a7, 0x00ab]);
 /** SC_CLOSE: what the close box asks for. */
 const SC_CLOSE = 0xf060;
 /** System colours the frame is painted from. */
@@ -297,6 +304,9 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           zero -- a back buffer's, which means exactly this rectangle.
  * @property {(hwnd: number, x: number, y: number, width: number, height: number,
  *     how?: { announce?: boolean }) => boolean} place
+ * @property {() => number} active
+ *           The active top-level window -- what GetForegroundWindow answers --
+ *           or zero while there is none.
  */
 
 /**
@@ -779,8 +789,23 @@ export function createWindowFunctions(host){
         }
         return candidate;
     };
-    /** @param {number} hwnd */
-    const activate = hwnd=>{
+    /**
+     * Makes a top-level window the active one, telling the window that loses
+     * activation and the one that gains it.
+     *
+     * Told by sending when the caller is a guest call -- `sent` -- so the
+     * window procedures have heard it before the call returns, as Windows
+     * sends the set: SetFocus, SetActiveWindow, ShowWindow, a click taken
+     * from the queue. Posted otherwise, when nothing of the guest's is
+     * running to send from: a window made visible as it is created.
+     *
+     * @param {number} hwnd
+     * @param {{ thread?: unknown, sent?: boolean, how?: number }} [options]
+     *        `how` is WM_ACTIVATE's wParam for the window gaining it:
+     *        WA_CLICKACTIVE when a click did it.
+     * @returns {number | Promise<number>} once every procedure told has answered
+     */
+    const activate = (hwnd, { thread, sent = false, how = WA_ACTIVE } = {})=>{
         const record = live(hwnd);
         const previous = active;
         active = record ? topLevelOf(record).hwnd : 0;
@@ -802,23 +827,42 @@ export function createWindowFunctions(host){
         // is the ordinary case -- activates its mouse, captures and clips only in
         // the window it believes active, and without this message that window is
         // never told it is.
-        if (previous !== 0 && active !== previous)
+        if (previous === 0 || active === previous)
         {
-            // Matches Wine's dlls/user32/tests/msg.c activation sequences
-            // (WmActivateWindow, WmSetFocus): WM_NCACTIVATE always comes
-            // first, to the window losing activation and then, when there is
-            // one, to the window gaining it -- the frame redraws itself
-            // before either window's own procedure hears WM_ACTIVATE.
-            host.queue.post({ hwnd: previous, message: WM_NCACTIVATE, wParam: 0, lParam: 0 });
-            host.queue.post({ hwnd: previous, message: WM_ACTIVATE,
-                wParam: WA_INACTIVE, lParam: active });
-            if (active !== 0)
-            {
-                host.queue.post({ hwnd: active, message: WM_NCACTIVATE, wParam: 1, lParam: 0 });
-                host.queue.post({ hwnd: active, message: WM_ACTIVATE,
-                    wParam: WA_ACTIVE, lParam: previous });
-            }
+            return 0;
         }
+        // WM_NCACTIVATE comes first, to the window losing activation and
+        // then, when there is one, to the window gaining it: the frame redraws
+        // itself before either window's own procedure hears WM_ACTIVATE.
+        const gained = active;
+        /** @type {[number, number, number, number][]} */
+        const told = [
+            [previous, WM_NCACTIVATE, 0, 0],
+            [previous, WM_ACTIVATE, WA_INACTIVE, gained],
+            ...(gained !== 0 ? /** @type {[number, number, number, number][]} */ ([
+                [gained, WM_NCACTIVATE, 1, 0],
+                [gained, WM_ACTIVATE, how, previous],
+            ]) : []),
+        ];
+        if (!sent)
+        {
+            for (const [target, message, wParam, lParam] of told)
+            {
+                host.queue.post({ hwnd: target, message, wParam, lParam });
+            }
+            return 0;
+        }
+        /** @param {number} index @returns {number | Promise<number>} */
+        const tell = index=>{
+            if (index >= told.length)
+            {
+                return 0;
+            }
+            const [target, message, wParam, lParam] = told[index];
+            return andThen(live(target) ? send(target, message, wParam, lParam, thread) : 0,
+                ()=>tell(index + 1));
+        };
+        return tell(0);
     };
 
     /**
@@ -849,13 +893,13 @@ export function createWindowFunctions(host){
             return previous;
         }
         focus = target;
-        if (target !== 0)
-        {
-            activate(target);
-        }
-        return andThen(previous !== 0 ? send(previous, WM_KILLFOCUS, target, 0, thread) : 0,
-            ()=>andThen(target !== 0 ? send(target, WM_SETFOCUS, previous, 0, thread) : 0,
-                ()=>previous));
+        // Activation is told first, then the focus: a window gaining both
+        // hears WM_ACTIVATE before WM_SETFOCUS.
+        const activated = target !== 0 ? activate(target, { thread, sent: true }) : 0;
+        return andThen(activated, ()=>
+            andThen(previous !== 0 ? send(previous, WM_KILLFOCUS, target, 0, thread) : 0,
+                ()=>andThen(target !== 0 ? send(target, WM_SETFOCUS, previous, 0, thread) : 0,
+                    ()=>previous)));
     };
 
     /** The window that has the mouse, or zero. */
@@ -1819,17 +1863,9 @@ export function createWindowFunctions(host){
         {
             return null;
         }
-        // A press brings the window it lands in to the front and makes it
-        // the active one, before the message reaches it.
-        if (kind === WM_LBUTTONDOWN || kind === WM_RBUTTONDOWN || kind === WM_MBUTTONDOWN)
-        {
-            const top = topLevelOf(found.record);
-            if (top.hwnd !== activeWindow())
-            {
-                activate(top.hwnd);
-                raise(top);
-            }
-        }
+        // A press activates the window it lands in when the program takes
+        // it from the queue -- `mouseActivate` -- not here, where nothing of
+        // the program is running to be told.
         if (found.hit !== HTCLIENT)
         {
             return { ...message, hwnd: found.record.hwnd,
@@ -1841,6 +1877,59 @@ export function createWindowFunctions(host){
             lParam: (((y - origin.y) & 0xffff) << 16 | (x - origin.x) & 0xffff) >>> 0 };
     };
     host.queue.routeWith?.(route);
+
+    /**
+     * What a press does as the program takes it from the queue: the window
+     * it landed in is asked with WM_MOUSEACTIVATE whether to activate --
+     * sent from the thread taking it, before the press reaches the window --
+     * and its top-level window is activated and raised unless it says not
+     * to. An answer that eats the click means the press is not delivered.
+     *
+     * @param {any} entry @param {unknown} thread
+     * @returns {boolean | Promise<boolean>} whether the press is still delivered
+     */
+    const mouseActivate = (entry, thread)=>{
+        const record = PRESSES.has(entry.message >>> 0) ? live(entry.hwnd) : null;
+        if (!record)
+        {
+            return true;
+        }
+        const top = topLevelOf(record);
+        if (top.hwnd === activeWindow())
+        {
+            return true;
+        }
+        const hit = (entry.message >>> 0) >= WM_MOUSEMOVE ? HTCLIENT : entry.wParam & 0xffff;
+        return andThen(send(record.hwnd, WM_MOUSEACTIVATE, top.hwnd,
+            ((entry.message & 0xffff) << 16 | hit) >>> 0, thread), answer=>{
+            const how = answer >>> 0;
+            const eaten = how === MA_ACTIVATEANDEAT || how === MA_NOACTIVATEANDEAT;
+            if (how === MA_NOACTIVATE || how === MA_NOACTIVATEANDEAT)
+            {
+                return !eaten;
+            }
+            raise(top);
+            return andThen(activate(top.hwnd, { thread, sent: true, how: WA_CLICKACTIVE }),
+                ()=>!eaten);
+        });
+    };
+
+    /**
+     * The next message a retrieval takes, a press having activated its
+     * window first; a press its window ate is passed over for the one after.
+     *
+     * @param {() => any} take @param {unknown} thread
+     * @returns {any}
+     */
+    const takeThrough = (take, thread)=>{
+        const entry = take();
+        if (!entry)
+        {
+            return null;
+        }
+        return andThen(mouseActivate(entry, thread),
+            (/** @type {boolean} */ keep)=>(keep ? entry : takeThrough(take, thread)));
+    };
 
     /**
      * The default window procedure, as every window procedure falls back on
@@ -1901,10 +1990,6 @@ export function createWindowFunctions(host){
                 return hitTest(record, point.x, point.y) >>> 0;
             }
             case WM_NCLBUTTONDOWN: {
-                if (!isChild(record))
-                {
-                    activate(record.hwnd);
-                }
                 const hit = message.wParam | 0;
                 if (hit === HTCLOSE)
                 {
@@ -1924,10 +2009,15 @@ export function createWindowFunctions(host){
                 }
                 return 0;
             case WM_MOUSEACTIVATE:
+                // A child asks its parent first, as the default procedure
+                // does: a dialog decides for the controls in it.
+                if (isChild(record) && live(record.parent))
+                {
+                    return andThen(send(record.parent, WM_MOUSEACTIVATE, message.wParam,
+                        message.lParam, thread),
+                    answer=>((answer >>> 0) !== 0 ? answer : MA_ACTIVATE));
+                }
                 return MA_ACTIVATE;
-            case WM_LBUTTONDOWN:
-                activate(record.hwnd);
-                return 0;
             case WM_SETTEXT: {
                 const address = message.lParam >>> 0;
                 record.title = address === 0 ? '' : host.readCString(address, MAX_WINDOW_TEXT);
@@ -2198,6 +2288,9 @@ export function createWindowFunctions(host){
     });
 
     host.windowService?.({
+        /** The window GetForegroundWindow answers with, or zero. */
+        active: ()=>activeWindow(),
+
         /**
          * One window's client rectangle, or null for a handle that names no
          * window. Read by whoever has to answer a size a program asked for as
@@ -2317,13 +2410,14 @@ export function createWindowFunctions(host){
         {
             record.style = (record.style & ~WS_MINIMIZE) >>> 0;
         }
-        if (!hide && !SHOW_WITHOUT_ACTIVATING.has(cmdShow) && !isChild(record))
-        {
-            activate(record.hwnd);
-            raise(record);
-        }
         /** The sent messages so far, for the result to wait on. */
         let told = greeting;
+        if (!hide && !SHOW_WITHOUT_ACTIVATING.has(cmdShow) && !isChild(record))
+        {
+            told = andThen(greeting, ()=>activate(record.hwnd,
+                { thread: host.callerThread?.(), sent: true }));
+            raise(record);
+        }
         if (!wasVisible && !hide)
         {
             appear(record);
@@ -2906,18 +3000,24 @@ export function createWindowFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([out, hwnd, filterMin, filterMax, removeFlag])=>{
-                const entry = host.queue.peek({
+                const remove = (removeFlag & PM_REMOVE) !== 0;
+                const look = ()=>host.queue.peek({
                     hwnd: windowFilter(hwnd),
                     first: filterMin >>> 0,
                     last: filterMax >>> 0,
-                    remove: (removeFlag & PM_REMOVE) !== 0,
+                    remove,
                 });
-                if (!entry)
-                {
-                    return 0;
-                }
-                writeMessage(host, out, entry);
-                return 1;
+                // Only a message taken activates: a look leaves the press,
+                // and the activation, for the call that takes it.
+                const entry = remove ? takeThrough(look, host.callerThread?.()) : look();
+                return andThen(entry, (/** @type {any} */ taken)=>{
+                    if (!taken)
+                    {
+                        return 0;
+                    }
+                    writeMessage(host, out, taken);
+                    return 1;
+                });
             },
         },
 
@@ -3017,24 +3117,31 @@ export function createWindowFunctions(host){
                     remove: true,
                 });
 
-                let entry = take();
-                if (!entry)
-                {
+                const thread = host.callerThread?.();
+                const next = ()=>takeThrough(take, thread);
+                /** @param {any} entry */
+                const answer = entry=>{
+                    writeMessage(host, out, entry);
+                    return entry.message === WM_QUIT ? 0 : 1;
+                };
+                return andThen(next(), (/** @type {any} */ first)=>{
+                    if (first)
+                    {
+                        return answer(first);
+                    }
                     // GetMessage waits; it does not report an empty queue. The
                     // wait is the host's to hold, so the answer is a promise and
                     // the bridge suspends the caller until something arrives.
                     return (async()=>{
+                        let entry = null;
                         while (!entry)
                         {
                             await host.idle();
-                            entry = take();
+                            entry = await next();
                         }
-                        writeMessage(host, out, entry);
-                        return entry.message === WM_QUIT ? 0 : 1;
+                        return answer(entry);
                     })();
-                }
-                writeMessage(host, out, entry);
-                return entry.message === WM_QUIT ? 0 : 1;
+                });
             },
         },
 

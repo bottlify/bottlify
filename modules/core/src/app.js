@@ -2332,9 +2332,11 @@ async function buildApp(options){
         return byName.get(moduleKeyOf(name)) ?? null;
     };
 
-    // Where input goes when nobody says otherwise: the most recently created
-    // window, which is what a person would be looking at.
-    let foreground = 0;
+    // Where input goes when nobody names a window: the active one, and while
+    // there is none -- a program whose window was never shown -- the one it
+    // made last, which is the only other thing it could be looking at.
+    let lastCreated = 0;
+    const foreground = ()=>win32.activeWindow?.() || lastCreated;
     /** Whether a frame is open in the journal: the first present opens one, the rest close and reopen. */
     let framed = false;
     // Where the counters stood when the frame being measured began.
@@ -2661,10 +2663,10 @@ async function buildApp(options){
             publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
                 core.api('bridge').publishInterface(object, iid),
             now: ()=>core.api('kernel').clock.virtualTime(),
-            // Where a keystroke goes. The same window win32 reports as
-            // foreground, because a person types into what they are looking at
-            // and only this side of the assembly knows which that is.
-            foreground: ()=>foreground,
+            // Where a keystroke goes: the window win32 reports as foreground --
+            // the active one, not merely the last made, which may be hidden or
+            // a child -- because a person types into what they are looking at.
+            foreground,
             // The cursor is confined to the display the program was told it
             // has: a program that reads a position outside its own screen
             // concludes the mouse left the window.
@@ -3118,7 +3120,7 @@ async function buildApp(options){
             },
             /** @param {number} hwnd */
             created: hwnd=>{
-                foreground = hwnd;
+                lastCreated = hwnd;
                 // A program becomes the active application when it has a window
                 // to be told through, and not before: input is wired to the
                 // viewport when the run starts, which is earlier than the
@@ -5156,7 +5158,7 @@ async function buildApp(options){
          */
         post(message){
             win32.queue().post({
-                hwnd: message.hwnd ?? foreground,
+                hwnd: message.hwnd ?? foreground(),
                 message: message.message,
                 wParam: message.wParam ?? 0,
                 lParam: message.lParam ?? 0,

@@ -269,6 +269,31 @@ function makeWindow(memory, fns, style = WS_OVERLAPPED){
         [0, CLASS_NAME, TITLE, style, 0, 0, 320, 240, 0, 0, HINSTANCE, 0]);
 }
 
+test('GetWindow walks top-level windows from the top, and children in creation order', ()=>{
+    const GW_HWNDFIRST = 0;
+    const GW_HWNDLAST = 1;
+    const GW_HWNDNEXT = 2;
+    const GW_OWNER = 4;
+    const GW_CHILD = 5;
+    const WS_CHILD = 0x40000000;
+    const { memory, fns } = setup();
+    const bottom = makeWindow(memory, fns);
+    const top = makeWindow(memory, fns);
+    /** @param {number} parent */
+    const child = parent=>fns.CreateWindowExA.handler(
+        [0, CLASS_NAME, TITLE, WS_CHILD, 0, 0, 10, 10, parent, 0, HINSTANCE, 0]);
+    const firstControl = child(top);
+    const secondControl = child(top);
+
+    assert.equal(fns.GetWindow.handler([bottom, GW_HWNDFIRST]), top, 'the newest is on top');
+    assert.equal(fns.GetWindow.handler([top, GW_HWNDNEXT]), bottom, 'and the next is below it');
+    assert.equal(fns.GetWindow.handler([top, GW_HWNDLAST]), bottom);
+    assert.equal(fns.GetWindow.handler([top, GW_CHILD]), firstControl,
+        'a dialog\'s first control is the first one made');
+    assert.equal(fns.GetWindow.handler([firstControl, GW_HWNDNEXT]), secondControl);
+    assert.equal(fns.GetWindow.handler([firstControl, GW_OWNER]), 0, 'a child has no owner');
+});
+
 // --- painting ---
 
 test('RedrawWindow invalidates, validates and updates as its flags say', ()=>{

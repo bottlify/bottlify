@@ -807,6 +807,63 @@ test('a window that takes the activation is told, and the one it replaced is tol
     assert.equal(told.indexOf(gainedNc) < told.indexOf(gained), true);
 });
 
+test('SetFocus into another window sends the activation set, then the focus', ()=>{
+    const context = setup();
+    putClass(context.memory);
+    context.fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const first = createWindow(context.fns, context.memory, { style: WS_VISIBLE });
+    const second = createWindow(context.fns, context.memory, { style: WS_VISIBLE });
+    context.fns.SetFocus.handler([second]);
+    context.dispatched.length = 0;
+
+    context.fns.SetFocus.handler([first]);
+
+    assert.deepEqual(context.dispatched.map(call=>[call.hwnd, call.message, call.wParam]), [
+        [second, WM_NCACTIVATE, 0], [second, 0x0006, 0], [first, WM_NCACTIVATE, 1],
+        [first, 0x0006, 1], [second, 0x0008, first], [first, 0x0007, second],
+    ], 'sent before the call returns: NCACTIVATE, ACTIVATE, then KILLFOCUS and SETFOCUS');
+});
+
+test('a press activates its window as the program takes it, unless the window says not to', ()=>{
+    const WM_MOUSEACTIVATE = 0x0021;
+    const MA_NOACTIVATEANDEAT = 4;
+    /** @type {number} */
+    let refuse = 0;
+    const context = setup({
+        reply: (/** @type {any} */ message)=>(message.message === WM_MOUSEACTIVATE
+            && message.hwnd === refuse ? MA_NOACTIVATEANDEAT : 0),
+    });
+    putClass(context.memory);
+    context.fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const first = createWindow(context.fns, context.memory, { style: WS_VISIBLE });
+    const second = createWindow(context.fns, context.memory, { style: WS_VISIBLE });
+    while (context.queue.depth() > 0)
+    {
+        context.queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
+    }
+    assert.equal(context.fns.GetActiveWindow.handler(), second);
+
+    // The window procedure answers zero, so the default procedure's
+    // MA_ACTIVATE stands: activated by the click, and the click delivered.
+    context.dispatched.length = 0;
+    context.queue.post({ hwnd: first, message: WM_LBUTTONDOWN, wParam: 1, lParam: 0x00050005 });
+    context.fns.PeekMessageA.handler([MSG_BUFFER, 0, WM_LBUTTONDOWN, WM_LBUTTONDOWN, PM_REMOVE]);
+    assert.equal(context.memory.u32(MSG_BUFFER + 4), WM_LBUTTONDOWN, 'the press is delivered');
+    assert.equal(context.fns.GetActiveWindow.handler(), first);
+    const asked = context.dispatched.find(call=>call.message === WM_MOUSEACTIVATE);
+    assert.equal(asked?.wParam, first, 'asked with its top-level window');
+    assert.equal(asked?.lParam >>> 0, (WM_LBUTTONDOWN << 16 | 1) >>> 0, 'and the hit and message');
+    assert.equal(context.dispatched.find(call=>call.hwnd === first && call.message === 0x0006)
+        ?.wParam, 2, 'WA_CLICKACTIVE');
+
+    // One that refuses and eats the click keeps things as they were.
+    refuse = second;
+    context.queue.post({ hwnd: second, message: WM_LBUTTONDOWN, wParam: 1, lParam: 0 });
+    assert.equal(context.fns.PeekMessageA.handler(
+        [MSG_BUFFER, 0, WM_LBUTTONDOWN, WM_LBUTTONDOWN, PM_REMOVE]), 0, 'eaten');
+    assert.equal(context.fns.GetActiveWindow.handler(), first, 'and not activated');
+});
+
 // --- the message queue ---
 
 test('PostMessageA refuses a window that has been destroyed', ()=>{

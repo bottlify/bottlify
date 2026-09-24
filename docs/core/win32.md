@@ -79,6 +79,7 @@ the module graph is built. All are optional.
 | `com()` | The COM class registry; graphics and audio register their factories here. |
 | `heap()` | The one allocator: `allocate`, `free`, `block`, `resize`, `diagnostics`. |
 | `mappings()`, `ioCompletionWaits()`, `waveDevices()`, `waveThread()`, `criticalSections()`, `messages()`, `windows()`, `windowProcedures()` | Live views of the state below, used by `diagnostics()`. |
+| `activeWindow()` | The active top-level window, as `GetForegroundWindow` answers, or 0: where the input layer sends what names no window. |
 | `placeWindow(hwnd, x, y, width, height, how?)` | Place a top-level window as the system would and tell the program with `WM_MOVE` when it moved and `WM_SIZE` when its client size changed -- nothing for a placement that changed neither, as `DefWindowProc` says nothing for one, since a program that resets its device on `WM_SIZE` would otherwise be reset by its own reset's placement without end. `how.announce` says the size whether or not it changed: what a mode switch says to the window it lands in, which the graphics layer asks for once, at a fullscreen device's first frame, when both the window and the device exist to hear it -- a program of this era configures its viewport and its full-speed/background state on that message. |
 | `dispatchFault(fault)` | Offers a processor exception the running thread took to its structured exception handlers. `null` when the vector is not one a program is handed (see "Exceptions"); otherwise a promise of where the thread goes on, or `null` once nothing took it. The application wires `cpu.onFault` to this. |
 | `exitCode()` | Set once the program has asked to terminate -- or once an exception nothing handled, or the C runtime's `abort`, ended it; `null` before. |
@@ -242,7 +243,19 @@ gets its own heap, hive, queue and COM registry.
   procedure sees every message first and `DefDlgProc` the rest, and `IsDialogMessage` handles
   Enter, Escape and Tab. Pointer messages from the input layer are routed to the window under
   the point (or the capture), in that window's client coordinates, with the frame's hit test
-  turning them into non-client messages; keys go to the focus window.
+  turning them into non-client messages; keys go to the focus window. **Activation** is sent,
+  not posted, whenever a guest call causes it -- `SetFocus`, `SetActiveWindow`,
+  `SetForegroundWindow`, `ShowWindow` -- in Windows' order: `WM_NCACTIVATE` and `WM_ACTIVATE` to
+  the window losing it, the same to the one gaining it, then `WM_KILLFOCUS`/`WM_SETFOCUS`. A press
+  activates its window when the program takes it from the queue (`GetMessage`, `PeekMessage` with
+  `PM_REMOVE`): `WM_MOUSEACTIVATE` is sent (a child's default procedure asks its parent), and
+  `MA_ACTIVATE` activates with `WA_CLICKACTIVE` and raises, the `NOACTIVATE` answers leave the
+  activation alone, and the `ANDEAT` answers drop the press. Only a window made visible as it is
+  created is still told by posting, there being no guest call to send from. The input layer's
+  foreground is the active window (`activeWindow()` on the API) -- not simply the last one
+  created, which may be hidden or a child -- and only while none is active the last created.
+  `GetWindow` walks top-level windows from the top of the Z order and children in creation order,
+  a new child going below its siblings, so a dialog's first control is its `GW_CHILD`.
 - **Message queue** (`user32/messages.js`). Posted messages are a list; `WM_MOUSEMOVE` is one
   slot, not a backlog; `WM_QUIT` is a flag that becomes a message when the queue is empty;
   `WM_TIMER` is never queued but synthesised when a program asks and a timer is due, with the due
