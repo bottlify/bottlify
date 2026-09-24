@@ -61,15 +61,132 @@ import { decode } from './decode/decoder.js';
 /** Exits that end a block and are not followed into another block of this region. */
 const TERMINAL = new Set(['ret', 'indirect', 'call', 'trap', 'hlt', 'refused', 'fault']);
 
+/** The callee a direct call is formed into its caller with, at most. */
+const LEAF_BLOCKS = 8;
+const LEAF_BYTES = 256;
+
+/**
+ * Whether the function at `target` is a small leaf: a few blocks reached by
+ * direct branches alone, every way out of them a `ret`. Only a guess at the
+ * shape -- a return is still checked against the return address at run time
+ * -- so anything else (a call, an indirect jump, a trap, a refusal, a page
+ * not to translate) answers no.
+ *
+ * @param {(address: number) => number} read @param {number} target
+ * @param {(eip: number) => boolean} translatable
+ */
+function isLeaf(read, target, translatable){
+    const seen = new Set();
+    const work = [target];
+    let bytes = 0;
+    while (work.length > 0)
+    {
+        const start = /** @type {number} */ (work.pop());
+        if (seen.has(start))
+        {
+            continue;
+        }
+        if (seen.size >= LEAF_BLOCKS || !translatable(start))
+        {
+            return false;
+        }
+        seen.add(start);
+        for (let eip = start; ;)
+        {
+            const decoded = decode(read, eip);
+            if ('refused' in decoded)
+            {
+                return false;
+            }
+            bytes += decoded.length;
+            if (bytes > LEAF_BYTES)
+            {
+                return false;
+            }
+            eip = (eip + decoded.length) >>> 0;
+            const exit = exitOf(decoded, eip);
+            if (exit === null)
+            {
+                continue;
+            }
+            if (exit.kind === 'jump' || exit.kind === 'jcc' || exit.kind === 'loop')
+            {
+                work.push(...exit.targets);
+                break;
+            }
+            if (exit.kind === 'ret')
+            {
+                break;
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Where each `ret` of the region may come back to inside it: the return
+ * addresses of the direct calls whose callee is formed into the region with
+ * them (the callee's start and the return address both blocks), for the rets
+ * the callee reaches by its own branches. Such a ret that comes back to one
+ * of them jumps there rather than leaving; the region's other rets are no
+ * edge to them.
+ *
+ * @param {Region} region
+ * @returns {Map<number, number[]>}  ret block start → return addresses
+ */
+export function inlineReturns(region){
+    const byStart = new Map(region.blocks.map(block=>[block.start, block]));
+    /** @type {Map<number, number[]>} */
+    const out = new Map();
+    for (const block of region.blocks)
+    {
+        const { kind, targets, next } = block.exit;
+        if (kind !== 'call' || !byStart.has(targets[0]) || !byStart.has(next))
+        {
+            continue;
+        }
+        const seen = new Set();
+        const work = [targets[0]];
+        while (work.length > 0)
+        {
+            const at = /** @type {number} */ (work.pop());
+            const reached = byStart.get(at);
+            if (reached === undefined || seen.has(at))
+            {
+                continue;
+            }
+            seen.add(at);
+            const exit = reached.exit;
+            if (exit.kind === 'ret')
+            {
+                const list = out.get(at) ?? [];
+                if (!list.includes(next))
+                {
+                    list.push(next);
+                }
+                out.set(at, list);
+            }
+            else if (exit.kind === 'fallthrough' || exit.kind === 'jump' || exit.kind === 'jcc'
+                || exit.kind === 'loop')
+            {
+                work.push(...exit.targets, ...(exit.kind === 'jump' ? [] : [exit.next]));
+            }
+        }
+    }
+    return out;
+}
+
 /**
  * @param {(address: number) => number} read
  * @param {number} entry
  * @param {{ maxBlocks?: number, maxBytes?: number,
- *     translatable?: (eip: number) => boolean }} [options]
+ *     translatable?: (eip: number) => boolean, leafCalls?: boolean }} [options]
+ *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`)
  * @returns {Region}
  */
 export function formRegion(read, entry,
-    { maxBlocks = 64, maxBytes = 8192, translatable = ()=>true } = {})
+    { maxBlocks = 64, maxBytes = 8192, translatable = ()=>true, leafCalls = true } = {})
 {
     /** @type {Map<number, Block>} by start */
     const blocks = new Map();
@@ -214,6 +331,14 @@ export function formRegion(read, entry,
                 // the port write: a block there lets the return come back
                 // into translated code.
                 pending.push(exit.next);
+                if (leafCalls && exit.kind === 'call'
+                    && isLeaf(read, exit.targets[0], translatable))
+                {
+                    // A small leaf callee is formed into its caller: the call
+                    // becomes a jump inside the region, and its return, when
+                    // it comes back to this call's return address, one too.
+                    pending.push(exit.targets[0]);
+                }
             }
             break;
         }

@@ -40,6 +40,7 @@ import { I32 } from './flags.js';
 import { Local, Exit } from './region.js';
 import { prepare, writeReg, readOp } from './integer.js';
 import { noteStore } from './memory.js';
+import { inlineReturns } from '../region.js';
 
 /** @typedef {import('./region.js').RegionEmitter} E */
 /** @typedef {import('../decode/decoder.js').Instruction} Instruction */
@@ -202,6 +203,8 @@ export function trackRegion(region, entryTop){
     // site's block below it -- seeding the first block left the entry's own
     // x87 with no state and every form in it refused.
     const entry = index.get(region.entry) ?? 0;
+    // Where a return of the region may jump inside it: a leaf callee's.
+    const returns = inlineReturns(region);
     /** @type {(StackState | null)[]} */
     let states = new Array(count).fill(null);
     /** @type {(StackState | null)[]} */
@@ -219,6 +222,10 @@ export function trackRegion(region, entryTop){
             || block.exit.kind === 'loop')
         {
             targets.push(block.exit.next);
+        }
+        else if (block.exit.kind === 'ret')
+        {
+            targets.push(...returns.get(block.start) ?? []);
         }
         /** @type {number[]} */
         const out = [];

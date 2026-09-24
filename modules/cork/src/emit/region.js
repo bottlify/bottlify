@@ -47,6 +47,7 @@ import { addUndoHelper, emitStaleExit } from './memory.js';
 import { importHelpers } from './helpers.js';
 import { Tables } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
+import { inlineReturns } from '../region.js';
 import {
     isX87, prepareX87, regionHasMmx, sameState, x87BlockEnd, x87BlockStart,
     x87Edge, x87Epilogue, x87LoadRegisters, x87Normalise,
@@ -265,6 +266,8 @@ export class RegionEmitter {
         this.b = new Body();
         /** @type {Map<number, number>} */
         this.labels = new Map(region.blocks.map((block, index)=>[block.start, index]));
+        /** By ret block: the return addresses it jumps to rather than leaves by. */
+        this.returns = inlineReturns(region);
         /** @type {string[]} the open control labels, innermost last */
         this.controls = [];
         /**
@@ -1187,6 +1190,15 @@ export class RegionEmitter {
                 {
                     this.charge();
                     this.exitAt(exit.next, Exit.UNTRANSLATED);
+                }
+                return;
+            case 'call':
+                // A direct call to a block of the region: the push is done
+                // and the jump is the block's. Any other left by itself.
+                if (!this.dead)
+                {
+                    this.charge();
+                    this.jumpTo(exit.targets[0]);
                 }
                 return;
             default:
