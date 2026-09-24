@@ -234,6 +234,48 @@ test('a dword read alternating between the stack and the TEB hits the cache both
     assert.equal(regions.scans, 2, 'the stack and the TEB were each validated once');
 });
 
+test('a call\'s stack, TEB and data are each validated once, until a permission moves', ()=>{
+    // A host call reads its arguments off the stack, its last error out of
+    // the TEB and its string out of the image: three regions in turn, which a
+    // two-entry cache missed on every read.
+    const bytes = new Uint8Array(0x4000);
+    const view = new DataView(bytes.buffer);
+    const raw = {
+        readPhysical: (/** @type {number} */ address, /** @type {number} */ length)=>
+            bytes.subarray(address, address + length),
+        writePhysical: (/** @type {number} */ address, /** @type {Uint8Array} */ data)=>
+            bytes.set(data, address),
+        readU32: (/** @type {number} */ address)=>view.getUint32(address, true),
+    };
+    const regions = createRegionMap();
+    /** @type {[string, number][]} */
+    const layout = [['stack', 0x1000], ['teb', 0x2000], ['data', 0x3000]];
+    for (const [name, base] of layout)
+    {
+        regions.register({ name, base, size: 0x100, kind: RegionKind.THUNK_DATA,
+            access: Access.READ_WRITE });
+    }
+    let asked = 0;
+    const assertSpan = regions.assert;
+    regions.assert = (...args)=>{
+        asked++;
+        return assertSpan.apply(regions, args);
+    };
+    const accessors = createAccessors({ raw, regions });
+    for (let turn = 0; turn < 4; turn++)
+    {
+        accessors.readU32(0x1010);
+        accessors.readU32(0x2010);
+        accessors.readU32(0x3010);
+    }
+    assert.equal(asked, 3, 'each of the three validated once');
+    const version = regions.version;
+    regions.protect('data', Access.READ);
+    assert.equal(regions.version, version + 1);
+    accessors.readU32(0x3010);
+    assert.equal(asked, 4, 'a changed table is asked again');
+});
+
 test('a read is a snapshot, not a window onto guest memory', ()=>{
     const raw = fakeMemory();
     const accessors = createAccessors({ raw, regions: mapWithCode() });

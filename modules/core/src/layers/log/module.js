@@ -231,6 +231,8 @@ export const logModule = {
 
             /** @param {string} category @param {number} level */
             enabled: (category, level)=>live() && journal.enabled(category, level),
+            /** Moves with every level change: an `enabled` answer holds until it does. */
+            revision: ()=>(live() ? journal.revision() : -1),
             /** @param {string} category @param {unknown} level */
             setLevel: (category, level)=>{
                 if (live())

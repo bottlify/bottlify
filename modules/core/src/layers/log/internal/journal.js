@@ -168,6 +168,7 @@ export function createJournal(options){
     /** @type {Map<string, number>} */
     const levels = new Map(Object.entries(options.categories ?? {}));
     let fallback = options.level ?? Level.INFO;
+    let revision = 0;
     /** @type {Map<string, number>} */
     const topics = new Map();
     /** @type {Map<string, { message: string, category: string, level: number, count: number }>} */
@@ -278,12 +279,20 @@ export function createJournal(options){
         /** @param {string} category @param {number} level */
         setLevel(category, level){
             levels.set(category, level);
+            revision++;
         },
 
         /** @param {number} level The level of every category nobody set explicitly. */
         setDefaultLevel(level){
             fallback = level;
+            revision++;
         },
+
+        /**
+         * Bumped by every level change, so a caller asking `enabled` for the
+         * same category on every host call can keep the answer until it moves.
+         */
+        revision: ()=>revision,
 
         levelOf,
 

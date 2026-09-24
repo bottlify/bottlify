@@ -1561,7 +1561,10 @@ export const win32Module = {
             // Zero when there is no thread to ask: a call that ends its own
             // thread is still on the stack when this is read, and a thread that
             // has gone has no last error rather than an unknown one.
-            lastError: ()=>(kernel.currentThread() ? lastErrorOf() : 0),
+            lastError: ()=>{
+                const thread = kernel.currentThread();
+                return thread ? lastErrorOf(thread) : 0;
+            },
 
             /**
              * Where a COM class is registered. Whoever implements an interface

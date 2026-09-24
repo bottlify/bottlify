@@ -518,6 +518,25 @@ test('the detail ring hands out copies, and its records are written over, not re
     assert.equal(newer.result, '0x2');
 });
 
+test('a record reused by a call of another arity has that call\'s arguments and no more', ()=>{
+    // The ring's record keeps its argument array while the count stays; a
+    // call with fewer or more arguments gets one of its own length.
+    const m = machine({ args: [1, 2] });
+    m.dispatcher.register(1, {
+        name: 'TEST.dll!Two', convention: 'stdcall', argBytes: 8, handler: ()=>1,
+    });
+    m.dispatcher.register(2, {
+        name: 'TEST.dll!None', convention: 'stdcall', argBytes: 0, handler: ()=>2,
+    });
+    m.dispatcher.dispatch(1);
+    m.dispatcher.dispatch(2);
+    m.dispatcher.dispatch(1);
+    const [two, none, again] = m.dispatcher.detailed(3);
+    assert.deepEqual(two.args, [1, 2]);
+    assert.deepEqual(none.args, []);
+    assert.deepEqual(again.args, [1, 2]);
+});
+
 test('a call sink is handed the record as recorded, with nothing peeked for it', ()=>{
     // Peeking every argument for a string, for a sink that does not read
     // strings, cost more than the rest of the dispatch together. With tracing
