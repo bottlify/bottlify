@@ -1567,16 +1567,24 @@ export function createRenderer(options){
      */
     const uploaded = new Map();
     /**
-     * Every texture record in creation order.
+     * Every live texture record in creation order.
      *
      * `textures` is weak, so it cannot be walked, and a diagnostic that wants
-     * to show what a program made needs the list. The records are small and
-     * hold no pixels -- the texels stay in guest memory and are read only when
-     * something asks -- so keeping them costs a run nothing.
+     * to show what a program made needs the list. A record leaves it when the
+     * program releases its texture for the last time -- it holds the GPU
+     * texture, and a program that streams its textures in and out would keep
+     * every one it ever made.
      *
-     * @type {any[]}
+     * @type {Set<any>}
      */
-    const roster = [];
+    const roster = new Set();
+    /**
+     * Records whose texture the program released for the last time, waiting
+     * for a present that finds them bound on no stage.
+     *
+     * @type {Set<any>}
+     */
+    const released = new Set();
     let nextTextureId = 0;
     /** @type {any} */
     let placeholder = null;
@@ -4342,7 +4350,27 @@ export function createRenderer(options){
                 ...desc,
             };
             textures.set(texture, entry);
-            roster.push(entry);
+            roster.add(entry);
+
+            // The last release gives the texture's guest storage back. Its GPU
+            // texture outlives that for as long as a stage still binds it --
+            // a binding holds its texture without a public reference, and a
+            // program may release its own and go on drawing -- and goes at the
+            // first present that finds it bound nowhere, after that frame's
+            // replay.
+            const releaseTexture = texture.release;
+            if (typeof releaseTexture === 'function')
+            {
+                texture.release = ()=>{
+                    const left = releaseTexture();
+                    if (left === 0 && roster.has(entry))
+                    {
+                        roster.delete(entry);
+                        released.add(entry);
+                    }
+                    return left;
+                };
+            }
 
             /** @param {number} level */
             const soiled = level=>{
@@ -4882,6 +4910,22 @@ export function createRenderer(options){
             frameStats = blankFrameStats();
             counters.frames++;
             chain = chain.then(()=>replay(recorded, surface)).catch(failure);
+            if (released.size > 0)
+            {
+                const bound = new Set(model.textures.values());
+                for (const entry of released)
+                {
+                    if (!bound.has(entry.texture))
+                    {
+                        released.delete(entry);
+                        if (entry.gpu)
+                        {
+                            retiring.push(entry.gpu);
+                            entry.gpu = null;
+                        }
+                    }
+                }
+            }
             if (retiring.length > 0)
             {
                 const gone = retiring.splice(0);
@@ -4965,7 +5009,7 @@ export function createRenderer(options){
                 // rather than pixels: a reader that can read guest memory can
                 // fetch the ones it wants, and every texture at once would be
                 // tens of megabytes through a diagnostics call.
-                textureRecords: roster.map(entry=>({
+                textureRecords: [...roster].map(entry=>({
                     id: entry.id,
                     base: entry.base,
                     width: entry.width,

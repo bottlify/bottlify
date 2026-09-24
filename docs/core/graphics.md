@@ -374,6 +374,12 @@ reset and a new target or depth surface raise them as well; a value set again th
 changes nothing. The Direct3D 7 device does not publish them yet and is prepared for on every draw.
 `diagnostics().prepared` counts what was built and what was reused.
 
+A texture the program releases for the last time gives its guest storage back at once, and its GPU
+texture at the first present that finds it bound on no stage, after that frame's replay: a binding
+holds its texture without a public reference (binding changes no count, as the API reports it), so a
+program may release its own reference and go on drawing with it. `diagnostics().textureRecords`
+lists the textures still held.
+
 **Direct3D 9** (`src/layers/graphics/d3d9/`). The device advertises vertex and pixel shader model
 2.0 -- the version the translator builds a pipeline from whole -- and refuses a create for a higher
 version. `shader.js` parses the bytecode (operand counts from a table before model 2, relative

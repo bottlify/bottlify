@@ -2748,6 +2748,39 @@ test('recorded: a texture bound before each draw is served from its own preparat
     });
 });
 
+test('recorded: a texture released for the last time goes once no stage binds it', async()=>{
+    // Recorded commands. A program that streams its textures creates and
+    // releases them all the time, and the GPU texture has to go with them or
+    // every one made is kept. A binding holds its texture without a public
+    // reference, so a texture released while bound lives until it is unbound.
+    const h = harness();
+    const { device } = h;
+    const texture = textureFrom(h, 2, 2, D3DFMT.A8R8G8B8, new Uint8Array(16));
+    selectTexture(device);
+    const geometry = quad([0, 0, 4, 4], argb(255, 255, 255), true);
+    const draw = async()=>{
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2, geometry, 28), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+    };
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    await draw();
+    const made = h.gpu.of('createTexture').at(-1).texture;
+    assert.equal(device.diagnostics().textureRecords.length, 1);
+
+    assert.equal(texture.release(), 0);
+    assert.equal(device.diagnostics().textureRecords.length, 0, 'no longer listed');
+    await draw();
+    assert.equal(h.gpu.of('destroyTexture').length, 0, 'still bound, still drawn with');
+
+    assert.equal(device.SetTexture(0, null), D3D_OK);
+    await h.present();
+    assert.deepEqual(h.gpu.of('destroyTexture').map((/** @type {any} */ call)=>call.texture),
+        [made], 'destroyed at the first present that finds it bound nowhere');
+});
+
 test('recorded: a view transform changed and set back is two preparations, not three', async()=>{
     // Recorded commands. The transforms beside the world one are part of the
     // state's name even when no string of them is rebuilt: a new matrix is a
