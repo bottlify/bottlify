@@ -13,6 +13,7 @@
     "./prefix": "./src/prefix.js",
     "./silent": "./src/silent.js",
     "./pack": "./src/pack.js",
+    "./bundle": "./src/bundle.js",
     "./upload": "./src/upload.js",
     "./server": "./src/server/index.js"
   },
