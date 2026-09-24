@@ -29,7 +29,7 @@ import { mathImports } from '../emit/region.js';
 import { decode } from '../decode/decoder.js';
 import { isX87, trackRegion } from '../emit/x87.js';
 import { features as probeFeatures } from '../wasm/features.js';
-import { emitBatch } from './emit-built.js';
+import { emitBatch, relinkBatch } from './emit-built.js';
 import { buildHelpersModule } from '../emit/helpers.js';
 import { openTranslationWorker } from './translator.js';
 import { ANY_TOP, createEntries } from './entries.js';
@@ -66,6 +66,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // the interpreter tier's and the corpus can judge it alone.
         translate: true,
         undoLog: false,
+        countTransfers: false,
+        // Batch modules published before the running regions are gathered into
+        // big ones (0: never), and how many regions go into each of those:
+        // a tail call into another module costs more the more modules there are.
+        relinkAfter: 16,
+        relinkRegions: 4096,
         ...config,
     };
     /** @type {Set<string>} instruction classes left to the other executor */
@@ -276,6 +282,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @property {number[]} slots   entry indices
      * @property {number} table     the function's index in the table, or -1
      * @property {[number, number][]} spans   the blocks' [start, end)
+     * @property {number} entryTop  the x87 top it was formed for
+     * @property {string} hash      of its bytes, which a relink forms it from again
+     * @property {string} labels    its block starts and labels, which a relinked function
+     *     must keep for the entries to stand
+     * @property {boolean} [linked]  its function is in a relinked module already
      */
     /** @type {Set<RegionRecord>} */
     const regions = new Set();
@@ -292,6 +303,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
         // always agree.
+        relinks: 0, relinked: 0,
         formingMs: 0, lookupMs: 0, emitMs: 0, encodeMs: 0, storeMs: 0, instantiateMs: 0,
         publishMs: 0,
         // Emitting and encoding the worker did: reported apart from
@@ -496,7 +508,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      *     terminate: () => void } | null} */
     let worker = null;
     let workerClosed = false;
-    /** @type {{ id: number, metas: any[], store: any } | null} */
+    /** @type {{ id: number, metas?: any[], relink?: RegionRecord[], store: any } | null} */
     let outstanding = null;
     // A batch's store lookups are in flight: its bytes come back between
     // frames, and until then no new batch is formed, so the batches publish in
@@ -507,6 +519,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** The options both the inline emitter and the worker's take. */
     const emitOptions = ()=>({
         undoLog: settings.undoLog,
+        countTransfers: settings.countTransfers,
         hash: table !== null,
         leaveOut,
         ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
@@ -568,6 +581,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * until the machine goes -- an eviction when a title's churn shows in memory.
      * @type {Map<string, WebAssembly.Instance>} */
     const batchInstances = new Map();
+    /** Batch modules instantiated since the last relink began. */
+    let modulesSinceRelink = 0;
+    /** The running regions a relink still has to gather, or null between relinks.
+     * @type {RegionRecord[] | null} */
+    let relinkQueue = null;
+    /** Whether the relink has this call, when batches wait too. */
+    let relinkTurn = false;
 
     /**
      * Stamps a built or stored region and publishes every block start as an
@@ -577,7 +597,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      *
      * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string }} one
      * @param {{ labels: [number, number][], cut: number[], entryTop: number,
-     *     exportName?: string }} built
+     *     exportName?: string, linked?: boolean }} built
      * @param {WebAssembly.Instance} instance
      * @returns {number} 1 when a region was published, 0 when it was dropped
      */
@@ -611,6 +631,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         const record = {
             entry: region.entry, pages: region.pages, slots: [], table: -1,
             spans: region.blocks.map(block=>[block.start, block.end]),
+            entryTop: one.entryTop, hash: region.hash, labels: JSON.stringify(built.labels),
+            linked: built.linked === true,
         };
         if (table)
         {
@@ -628,7 +650,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
         for (const [start, label] of starts)
         {
-            record.slots.push(entries.add(start, fn, label, top, record.table));
+            // An address another region's entry already holds stays that
+            // region's: the record keeps only the entries it made, or a relink
+            // of it would put its function under the other's label (and a drop
+            // of it would take the other's entry away).
+            const slot = entries.add(start, fn, label, top, record.table);
+            if (entries.at(slot).fn === fn)
+            {
+                record.slots.push(slot);
+            }
         }
         // A cut block start has no entry here: an address the runtime must
         // answer for with a region of its own at the machine's top, so a miss
@@ -667,7 +697,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     };
 
     /** The store key of one formed region.
-     * @param {{ region: import('../region.js').Region, entryTop: number }} one */
+     * @param {{ region: { entry: number, hash: string }, entryTop: number }} one */
     const regionKey = one=>cacheKey({
         version: CACHE_VERSION, features: found, layoutId: layout.id,
         bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
@@ -700,6 +730,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
         counts.moduleBytes += batch.module.length;
         const instance = instantiate(compiled ?? batch.module);
+        modulesSinceRelink++;
         /** @type {string | undefined} */
         let key;
         if (store !== null)
@@ -740,6 +771,133 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     };
 
     /**
+     * A relinked chunk: its module instantiated once, and every region of it
+     * still running switched to its function there -- the same labels, so the
+     * entries and the table slot stand and only the function under them moves.
+     * The old batch modules go when no region uses them any more.
+     *
+     * @param {RegionRecord[]} records  the chunk, in the order its jobs went
+     * @param {import('./emit-built.js').BuiltBatch} batch
+     * @param {WebAssembly.Module | null} compiled
+     * @param {any} store
+     */
+    const applyRelink = (records, batch, compiled, store)=>{
+        if (!batch.results.some(result=>result.ok))
+        {
+            return;
+        }
+        counts.moduleBytes += batch.module.length;
+        const instance = instantiate(compiled ?? batch.module);
+        if (instance === null)
+        {
+            return;
+        }
+        /** @type {string | undefined} */
+        let key;
+        if (store !== null)
+        {
+            key = moduleKey({ version: CACHE_VERSION, features: found, layoutId: layout.id,
+                bundleId: settings.bundleId ?? 'unknown' }, batch.module);
+            store.put(key, packRegion({ module: batch.module, labels: [], cut: [], entryTop: 0,
+                instructions: 0 })).catch(()=>{});
+            batchInstances.set(key, instance);
+        }
+        for (let i = 0; i < records.length; i++)
+        {
+            const record = records[i];
+            const result = batch.results[i];
+            if (!result.ok || !regions.has(record)
+                || JSON.stringify(result.region.labels) !== record.labels)
+            {
+                continue;
+            }
+            const fn = /** @type {(label: number, budget: number) => number} */ (
+                instance.exports[result.region.exportName]);
+            if (table && record.table >= 0)
+            {
+                table.set(record.table, fn);
+            }
+            for (const slot of record.slots)
+            {
+                entries.at(slot).fn = fn;
+            }
+            record.linked = true;
+            counts.relinked++;
+            if (store !== null)
+            {
+                store.put(regionKey({ region: { entry: record.entry, hash: record.hash },
+                    entryTop: record.entryTop }), packRegion({ ...result.region,
+                    module: new Uint8Array(0), moduleKey: key, linked: true })).catch(()=>{});
+            }
+        }
+    };
+
+    /**
+     * One step of a relink, when the translator is otherwise idle: once enough
+     * batch modules have gathered, the running regions go in chunks of
+     * `relinkRegions` to be formed again from a copy of their pages and
+     * emitted into one module each -- on the worker if there is one.
+     *
+     * @param {any} store
+     * @returns {boolean} whether a chunk was taken this call
+     */
+    const relinkStep = store=>{
+        if (relinkQueue === null)
+        {
+            if (settings.relinkAfter <= 0 || modulesSinceRelink < settings.relinkAfter)
+            {
+                return false;
+            }
+            // Only what still lives in a batch's own small module: a region
+            // relinked once stays in its big one.
+            relinkQueue = [...regions].filter(record=>!record.linked);
+            modulesSinceRelink = 0;
+            counts.relinks++;
+        }
+        const chunk = relinkQueue.splice(0, settings.relinkRegions)
+            .filter(record=>regions.has(record));
+        if (relinkQueue.length === 0)
+        {
+            relinkQueue = null;
+        }
+        if (chunk.length === 0)
+        {
+            return false;
+        }
+        /** @type {Map<number, Uint8Array>} */
+        const copies = new Map();
+        for (const record of chunk)
+        {
+            for (const page of record.pages)
+            {
+                if (!copies.has(page))
+                {
+                    const at = layout.ramBase + page * 4096;
+                    copies.set(page, new Uint8Array(memory.buffer.slice(at, at + 4096)));
+                }
+            }
+        }
+        const relink = {
+            jobs: chunk.map(record=>({ entry: record.entry, entryTop: record.entryTop,
+                hash: record.hash })),
+            pages: [...copies],
+            form: { maxBlocks: settings.maxRegionBlocks, maxBytes: settings.maxRegionBytes },
+        };
+        if (worker !== null)
+        {
+            outstanding = { id: ++workerRequest, relink: chunk, store };
+            worker.post({ id: outstanding.id, relink, layout, features: found,
+                options: emitOptions() }, [...copies.values()].map(bytes=>bytes.buffer));
+            return true;
+        }
+        const batch = relinkBatch(relink, layout, found, emitOptions());
+        counts.emitMs += batch.emitMs;
+        counts.encodeMs += batch.encodeMs;
+        applyRelink(chunk, batch, null, store);
+        return true;
+    };
+
+    /**
      * A worker's answer: one module for the batch, published. Runs on the
      * engine thread when the message arrives, which is between the frames the
      * host asked for.
@@ -760,7 +918,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return;
         }
         counts.workerMs += data.batch.emitMs + data.batch.encodeMs;
-        publishBatch(pending.metas, data.batch, data.compiled ?? null, pending.store);
+        if (pending.relink)
+        {
+            applyRelink(pending.relink, data.batch, data.compiled ?? null, pending.store);
+            return;
+        }
+        publishBatch(pending.metas ?? [], data.batch, data.compiled ?? null, pending.store);
     };
 
     if (workerUrl !== null)
@@ -813,6 +976,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 if (instance !== undefined && key !== undefined)
                 {
                     batchInstances.set(key, instance);
+                    modulesSinceRelink++;
                 }
             }
             if (instance !== undefined)
@@ -1023,7 +1187,19 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 return 0;
             }
-            if (!settings.translate || queue.size === 0)
+            if (!settings.translate)
+            {
+                return 0;
+            }
+            // A relink's next chunk, taking turns with the candidates' batches
+            // while both have work, so neither waits on the other.
+            relinkTurn = !relinkTurn || queue.size === 0;
+            const keeps = leaveOut.size > 0 || settings.undoLog ? null : (settings.store ?? null);
+            if (relinkTurn && relinkStep(keeps))
+            {
+                return 0;
+            }
+            if (queue.size === 0)
             {
                 return 0;
             }
@@ -1198,6 +1374,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             fold();
             return {
                 regions: regions.size,
+                // Counted only by a run that asked (`countTransfers`), else 0.
+                transfers: view().getUint32(layout.tables + Tables.TRANSFERS, true),
+                relinks: counts.relinks,
+                relinked: counts.relinked,
                 entries: table ? entries.hashed() : entries.count(),
                 translateMs: counts.formingMs + counts.lookupMs + counts.emitMs
                     + counts.encodeMs + counts.storeMs + counts.instantiateMs + counts.publishMs,

@@ -175,6 +175,9 @@
  * @property {number} entries          Entry points in the hash (in the map alone, without
  *     tail calls).
  * @property {number} modules          Wasm modules instantiated.
+ * @property {number} [relinks]        Relinks begun: the running regions gathered into big modules.
+ * @property {number} [relinked]       Regions switched to a relinked module's function.
+ * @property {number} [transfers]      Transfers between regions, when counted (`countTransfers`).
  * @property {number} translatedShare  Instructions retired in the engine / retired, 0..1.
  * @property {number} retired          Instructions retired in the engine, for a frame's share.
  * @property {number} cacheHits        Regions taken from the store.

@@ -21,18 +21,23 @@
  * which differ only in how the scope receives and sends messages.
  */
 
-import { emitBatch } from './emit-built.js';
+import { emitBatch, relinkBatch } from './emit-built.js';
 
 /**
- * @param {{ id: number, jobs: { region: any, entryTop: number }[], layout: any,
- *     features: any, options: any }} data
+ * A batch of formed regions (`jobs`), or a relink of running ones (`relink`:
+ * formed here again from a copy of their pages).
+ *
+ * @param {{ id: number, jobs?: { region: any, entryTop: number }[], relink?: any,
+ *     layout: any, features: any, options: any }} data
  * @param {(message: any, transfer: any[]) => void} send
  */
 function handle(data, send){
-    const { id, jobs, layout, features, options } = data;
+    const { id, jobs, relink, layout, features, options } = data;
     try
     {
-        const batch = emitBatch(jobs, layout, features, options);
+        const batch = relink
+            ? relinkBatch(relink, layout, features, options)
+            : emitBatch(jobs ?? [], layout, features, options);
         // Compiled here too: a WebAssembly.Module travels in the message
         // (structured clone shares the compiled code), so the engine thread
         // only instantiates -- the compile was most of its cost on a loading

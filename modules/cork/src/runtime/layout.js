@@ -41,6 +41,8 @@ export const Tables = Object.freeze({
     PAGE_FLAGS_SIZE: 1 << 20,
     STALE_ADDRESS: 1 << 20,
     STALE_SIZE: (1 << 20) + 4,
+    // Transfers between regions through the hash, counted when a run asks.
+    TRANSFERS: (1 << 20) + 12,
     UNDO_HEAD: (1 << 20) + 8,
     UNDO_RING: (1 << 20) + 16,
     UNDO_ENTRIES: 4096,

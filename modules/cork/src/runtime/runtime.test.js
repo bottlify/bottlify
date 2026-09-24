@@ -605,3 +605,32 @@ test('the miss count is per top, so a flood at a served top cannot withhold anot
         assert.equal(await m.runtime.translatePending(), 1, 'top 1 reached the threshold');
         assert.ok(m.runtime.entryOf(CODE, 1) >= 0);
     });
+
+test('a relink gathers the running regions into one module; an entry another region'
+    + ' holds keeps running that region\'s code', async()=>{
+    // B at CODE+0x104: dec ecx; hlt. A at CODE+0x100: inc ebx; jmp CODE+0x104 -- A holds a
+    // block at B's address, whose entry is B's (label 0 in B, label 1 in A).
+    const m = machine({ relinkAfter: 1 });
+    m.write(CODE + 0x100, [0x43, 0xeb, 0x01, 0x90, 0x49, 0xf4]);
+    m.runtime.noteHot(CODE + 0x104);
+    m.runtime.noteHot(CODE + 0x104);
+    assert.equal(await m.runtime.translatePending(), 1, 'B');
+    m.runtime.noteHot(CODE + 0x100);
+    m.runtime.noteHot(CODE + 0x100);
+    assert.equal(await m.runtime.translatePending(), 1, 'A');
+    await m.runtime.translatePending();
+    const d = m.runtime.diagnostics();
+    assert.ok((d.relinked ?? 0) >= 2, `relinked ${d.relinked}`);
+    // Entering at B's address runs B: ebx untouched.
+    m.setReg(1, 5);
+    m.setReg(3, 0);
+    const exit = m.runtime.run(m.runtime.entryOf(CODE + 0x104), 100);
+    assert.equal(exit.kind, 'halt');
+    assert.equal(m.reg(3), 0, 'B\'s code, not A\'s block under B\'s label');
+    assert.equal(m.reg(1), 4);
+    // And A runs whole from its own entry.
+    const whole = m.runtime.run(m.runtime.entryOf(CODE + 0x100), 100);
+    assert.equal(whole.kind, 'halt');
+    assert.equal(m.reg(3), 1);
+    assert.equal(m.reg(1), 3);
+});

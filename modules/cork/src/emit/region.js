@@ -124,6 +124,8 @@ const LOCAL_TYPES = [
  * @property {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @property {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @property {number} [undo]           the undo helper's function index, in a differential build
+ * @property {boolean} [countTransfers] each transfer through the hash adds one to the
+ *     tables' transfer count (a diagnostic run)
  * @property {number} codeHit          the helper telling whether a byte lies in translated code
  * @property {number} [getEflags]      the host's flag fold, imported when the layout keeps
  *                                     lazy flags (the emulator's `flags_changed`)
@@ -148,7 +150,8 @@ const LOCAL_TYPES = [
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
- * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string> }}
+ * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
+ *     countTransfers?: boolean }}
  *     [options]  undoLog:
  *     record every store's old bytes (differential builds only; part of the cache key);
  *     hash: import the host's function table and transfer through the entry hash (needs
@@ -156,7 +159,7 @@ const LOCAL_TYPES = [
  * @returns {ModuleContext}
  */
 export function prepareModule(m, layout, features, memory = {},
-    { undoLog = false, hash = false, trapPort, leaveOut = new Set() } = {})
+    { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -213,6 +216,10 @@ export function prepareModule(m, layout, features, memory = {},
     if (undoLog)
     {
         context.undo = addUndoHelper(m, layout);
+    }
+    if (countTransfers)
+    {
+        context.countTransfers = true;
     }
     return context;
 }
@@ -692,6 +699,12 @@ export class RegionEmitter {
         b.localGet(Local.addr).i32const(0).load('i32_8u', { offset: layout.x87Top }).op(I32.eq);
         b.op(I32.or);
         this.openIf('top');
+        if (this.context.countTransfers)
+        {
+            const at = layout.tables + Tables.TRANSFERS;
+            b.i32const(0).i32const(0).load('i32', { offset: at }).i32const(1).op(I32.add)
+                .store('i32', { offset: at });
+        }
         b.localGet(Local.t2).load('i32_16u', { offset: 8 });
         b.localGet(Local.budget);
         b.localGet(Local.t2).load('i32', { offset: 4 });

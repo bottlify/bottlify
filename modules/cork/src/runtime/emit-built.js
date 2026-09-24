@@ -19,6 +19,7 @@
  */
 
 import { emitRegion, prepareModule } from '../emit/region.js';
+import { formRegion } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
 
 /**
@@ -64,7 +65,7 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @param {{ region: import('../region.js').Region, entryTop: number }[]} jobs
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
- * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number,
+ * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
  *     leaveOut?: Set<string> | string[] }} [options]
  * @returns {BuiltBatch}
  */
@@ -76,6 +77,7 @@ export function emitBatch(jobs, layout, features, options = {}){
     const context = prepareModule(m, layout, features, {}, {
         undoLog: options.undoLog === true,
         hash: options.hash === true,
+        countTransfers: options.countTransfers === true,
         leaveOut,
         ...(options.trapPort === undefined ? {} : { trapPort: options.trapPort }),
     });
@@ -111,6 +113,40 @@ export function emitBatch(jobs, layout, features, options = {}){
     const encodedAt = performance.now();
     const module = m.toBytes();
     return { module, results, emitMs: encodedAt - emitAt, encodeMs: performance.now() - encodedAt };
+}
+
+/**
+ * Regions already running, formed again from a copy of their pages and emitted
+ * into one module: the relink that gathers the regions of many small batch
+ * modules into a few big ones. A region whose bytes no longer hash as they did
+ * is answered as a failure (`changed`) and keeps the function it has.
+ *
+ * @param {{ jobs: { entry: number, entryTop: number, hash: string }[],
+ *     pages: [number, Uint8Array][], form: { maxBlocks: number, maxBytes: number } }} relink
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
+ * @param {Parameters<typeof emitBatch>[3]} [options]
+ * @returns {BuiltBatch}
+ */
+export function relinkBatch({ jobs, pages, form }, layout, features, options = {}){
+    const byPage = new Map(pages);
+    /** @param {number} address */
+    const read = address=>byPage.get(address >>> 12)?.[address & 0xfff] ?? 0;
+    // The pages the regions were formed over are the translatable ones: a page
+    // one of them was refused at is not among any region's pages.
+    /** @param {number} address */
+    const translatable = address=>byPage.has(address >>> 12);
+    const formed = jobs.map(job=>{
+        const region = formRegion(read, job.entry, { ...form, translatable });
+        return region.hash === job.hash ? { region, entryTop: job.entryTop } : null;
+    });
+    const batch = emitBatch(/** @type {{ region: any, entryTop: number }[]} */ (
+        formed.filter(one=>one !== null)), layout, features, options);
+    let next = 0;
+    const results = formed.map(one=>(one === null
+        ? { ok: /** @type {const} */ (false), message: 'changed' }
+        : batch.results[next++]));
+    return { ...batch, results };
 }
 
 /**

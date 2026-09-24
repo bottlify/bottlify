@@ -63,6 +63,7 @@ export function moduleKey({ version, features, layoutId, bundleId }, bytes){
  *     record whose module is a batch's, kept apart under `moduleKey`
  * @property {string} [exportName]     the region's function in the module (`r0` when absent)
  * @property {string} [moduleKey]      where the batch module's bytes are kept
+ * @property {boolean} [linked]        the module is a relinked one, which gathers many regions
  * @property {[number, number][]} labels  block start → label
  * @property {number[]} cut            labels of blocks that leave at once
  * @property {number} entryTop
@@ -76,6 +77,7 @@ export function packRegion(region){
         instructions: region.instructions,
         ...(region.exportName === undefined ? {} : { exportName: region.exportName }),
         ...(region.moduleKey === undefined ? {} : { moduleKey: region.moduleKey }),
+        ...(region.linked ? { linked: true } : {}),
     }));
     const out = new Uint8Array(12 + header.length + region.module.length);
     const view = new DataView(out.buffer);
@@ -120,6 +122,7 @@ export function unpackRegion(bytes){
             entryTop: header.entryTop, instructions: header.instructions,
             ...(typeof header.exportName === 'string' ? { exportName: header.exportName } : {}),
             ...(typeof header.moduleKey === 'string' ? { moduleKey: header.moduleKey } : {}),
+            ...(header.linked === true ? { linked: true } : {}),
         };
     }
     catch {

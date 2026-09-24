@@ -186,6 +186,12 @@ function parse(argv){
         // runtime, the layers -- the engine thread's time went to.
         cpuProfile: number('--cpu-profile', 0),
         cpuProfileFrom: number('--cpu-profile-from', 0),
+        // V8 flags for the browser ("--no-liftoff", "--liftoff-only"): how a run
+        // depends on the wasm tiers.
+        jsFlags: argv.includes('--js-flags') ? argv[argv.indexOf('--js-flags') + 1] : undefined,
+        // The translator's own settings as JSON ('{"countTransfers":true}').
+        corkConfig: argv.includes('--cork-config')
+            ? JSON.parse(argv[argv.indexOf('--cork-config') + 1]) : undefined,
         // Which execution engine runs the program (`emulator`, the default,
         // or `hybrid` with the translator), so two runs differ by that alone.
         engine: argv.includes('--engine') ? argv[argv.indexOf('--engine') + 1] : undefined,
@@ -474,7 +480,8 @@ function describeCork(cork, say){
         + `  forced steps: ${cork.forcedSteps ?? 0}`
         + `  cache: ${cork.cacheHits ?? 0} hit / ${cork.cacheMisses ?? 0} miss`);
     const exits = cork.exits ?? {};
-    say(`    exits: ${Object.entries(exits).map(([kind, count])=>`${kind}=${count}`).join(' ')}`);
+    say(`    exits: ${Object.entries(exits).map(([kind, count])=>`${kind}=${count}`).join(' ')}`
+        + (cork.transfers ? `  transfers through the hash: ${cork.transfers}` : ''));
     if (typeof cork.translateMs === 'number')
     {
         say(`    translate ms: ${cork.translateMs.toFixed(1)}`
@@ -968,7 +975,8 @@ export async function game(options){
         coi: options.coi,
         port: options.port,
     });
-    const browser = await launchWithGpu({ profileDir: options.userDataDir ?? undefined });
+    const browser = await launchWithGpu({ profileDir: options.userDataDir ?? undefined,
+        extraFlags: options.jsFlags ? [`--js-flags=${options.jsFlags}`] : [] });
     mkdirSync(REPORTS_DIR, { recursive: true });
 
     const pageUrl = `http://127.0.0.1:${server.port}/sandbox/test/page/game/index.html`
@@ -1021,6 +1029,7 @@ export async function game(options){
             maxTurns: options.turns,
             maxMs: options.runSeconds > 0 ? options.runSeconds * 1000 : null,
             engine: options.engine,
+            cork: options.corkConfig ? { config: options.corkConfig } : undefined,
             screen: options.screen,
             quantum: options.quantum,
             log: Boolean(options.log),
