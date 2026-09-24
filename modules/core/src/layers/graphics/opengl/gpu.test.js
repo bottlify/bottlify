@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { FRAGMENT_PROGRAM_BINDING, VERTEX_PROGRAM_BINDING } from './arb-wgsl.js';import { createGlContext } from './context.js';
-import { createGpuRenderer } from './gpu.js';
+import { createGpuRenderer, describeSnapshot } from './gpu.js';
 import { CANONICAL_STRIDE } from './gpu-layout.js';
 import { COPY_UNIFORM_FLOATS, UNIFORM } from './wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -21,6 +21,23 @@ import { createFakeDevice } from '../webgpu/internal/fake-device.js';
  *
  * @param {object} [services]  extra renderer services (the dump options)
  */
+/**
+ * The uniform blocks the draws were given, in the order they were bound: each
+ * as the ring holds it once the frame is submitted, since the blocks reach the
+ * ring in one write per frame rather than a write each.
+ *
+ * @param {{ gpu: any }} r
+ * @returns {{ buffer: any, bytes: Uint8Array, size: number }[]}
+ */
+function uniformBlocks(r){
+    return r.gpu.of('setBindGroup')
+        .flatMap((/** @type {any} */ call)=>call.resolved)
+        .filter((/** @type {any} */ block)=>/uniforms/.test(block.buffer.descriptor.label))
+        .map((/** @type {any} */ block)=>({
+            buffer: block.buffer, bytes: block.range, size: block.size,
+        }));
+}
+
 function rig(services = {}){
     const gpu = createFakeDevice();
     /** @type {any[]} */
@@ -263,7 +280,7 @@ test('the uniform block carries the matrices, the current colour and the unit co
     context.glEnd();
     await r.swap();
 
-    const uniforms = r.gpu.of('writeBuffer').filter(w=>/uniforms/.test(w.buffer.descriptor.label));
+    const uniforms = uniformBlocks(r).filter(w=>/uniforms/.test(w.buffer.descriptor.label));
     // The show copy's block is the last write; the draw's is the one before.
     const block = new Float32Array(uniforms[uniforms.length - 2].bytes.buffer,
         uniforms[uniforms.length - 2].bytes.byteOffset, UNIFORM.floats);
@@ -309,7 +326,7 @@ test('two draws with unchanged state share the fixed uniform block; a changed on
         assert.equal(diag.uniformsBuilt, 2, 'the same matrix reloaded rebuilds nothing');
         assert.equal(diag.uniformsReused, 2, 'and the block is reused');
 
-        const uniforms = r.gpu.of('writeBuffer')
+        const uniforms = uniformBlocks(r)
             .filter(w=>/uniforms/.test(w.buffer.descriptor.label));
         // The show copy's block is the last write of each swap; the draw's is
         // the one before it.
@@ -825,7 +842,7 @@ function copyTarget(r){
  * @param {ReturnType<typeof rig>} r
  */
 function copyUniforms(r){
-    const block = r.gpu.of('writeBuffer')
+    const block = uniformBlocks(r)
         .find(w=>/uniforms/.test(w.buffer.descriptor.label)
             && w.size === COPY_UNIFORM_FLOATS * 4);
     assert.ok(block, 'the copy wrote a uniform block');
@@ -1103,7 +1120,7 @@ test('a draw under both programs runs the emitted stages and fills their blocks'
 
     // The vertex block: four MVP rows, then the env parameter. An orthographic
     // projection of 0..64 by 0..32 over an identity modelview.
-    const vertexBlock = r.gpu.of('writeBuffer').find(w=>w.size === 20 * 4
+    const vertexBlock = uniformBlocks(r).find(w=>w.size === 20 * 4
         && /uniforms/.test(w.buffer.descriptor.label));
     assert.ok(vertexBlock, 'the vertex program block travelled');
     const vertexFloats = new Float32Array(vertexBlock.bytes.buffer,
@@ -1112,7 +1129,7 @@ test('a draw under both programs runs the emitted stages and fills their blocks'
     assert.equal(vertexFloats[3], -1, 'MVP row zero, translation');
     assert.deepEqual([...vertexFloats.subarray(16, 20)], [1, 0.5, 0.25, 1],
         'the env parameter the program binds');
-    const fragmentBlock = r.gpu.of('writeBuffer').find(w=>w.size === 4 * 4
+    const fragmentBlock = uniformBlocks(r).find(w=>w.size === 4 * 4
         && /uniforms/.test(w.buffer.descriptor.label));
     assert.ok(fragmentBlock, 'the fragment program block travelled');
     const fragmentFloats = new Float32Array(fragmentBlock.bytes.buffer,
@@ -1277,7 +1294,7 @@ END
     context.glDrawArrays(GL.TRIANGLES, 0, 3);
     await r.swap();
 
-    const block = r.gpu.of('writeBuffer').find(w=>w.size === 12 * 4
+    const block = uniformBlocks(r).find(w=>w.size === 12 * 4
         && /uniforms/.test(w.buffer.descriptor.label));
     assert.ok(block, 'the vertex program block travelled');
     const floats = new Float32Array(block.bytes.buffer, block.bytes.byteOffset, 12);
@@ -1574,6 +1591,43 @@ test('a probe window names the draws of a frame it reads around', async()=>{
     assert.deepEqual(probed.map(text=>text.slice(0, 7)), ['draw 1:', 'draw 2:'],
         'the window, not the frame\'s end, chooses');
     assert.equal(r.gpu.of('copyTextureToBuffer').length, 4);
+});
+
+test('a probe reads only while its frame is the newest, so a late replay reads nothing', async()=>{
+    // Two frames presented before either is replayed: the first is behind by
+    // the time it runs, and a probe there would add two read-backs a frame to
+    // a replay already late. Only the second, the one the report reads, is probed.
+    const r = rig({ dumpDraws: true, probeTexture: 't1' });
+    programRig(r);
+    const { context, renderer } = r;
+    for (let frame = 0; frame < 2; frame++)
+    {
+        for (let i = 0; i < 6; i++)
+        {
+            context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+        }
+        renderer.present(context);
+    }
+    await renderer.settled();
+    assert.equal(r.gpu.of('copyTextureToBuffer').length, 8, 'four probed draws, one frame');
+});
+
+test('a probe reads its points inside the scissor of the draw, not at fixed places', ()=>{
+    // An 8x8 target, blue everywhere but a 2x2 red square at 4,4 -- the
+    // rectangle the draw was scissored to. Every point and the grid fall in it.
+    const data = new Uint8Array(8 * 8 * 4);
+    for (let y = 0; y < 8; y++)
+    {
+        for (let x = 0; x < 8; x++)
+        {
+            const at = (y * 8 + x) * 4;
+            const inside = x >= 4 && x < 6 && y >= 4 && y < 6;
+            data.set(inside ? [0, 0, 255, 255] : [255, 0, 0, 255], at);
+        }
+    }
+    const text = describeSnapshot({ width: 8, height: 8, data },
+        { x: 4, y: 4, width: 2, height: 2 });
+    assert.equal(text, `${Array(7).fill('255/0/0').join(',')} distinct=1`);
 });
 
 test('a program sampling past the fourth unit gets bindings of its own', async()=>{

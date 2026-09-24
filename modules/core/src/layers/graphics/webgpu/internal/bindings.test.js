@@ -74,12 +74,17 @@ test('a uniform pool lays each block at its own offset of one ring, as bytes', (
     assert.equal(first.dynamicOffset, 0);
     assert.equal(second.dynamicOffset, 256, 'the next block, at the alignment');
     assert.equal(first.size, 64);
+    assert.equal(gpu.count('writeBuffer'), 0, 'nothing written before the flush');
+    pool.flush();
     const writes = gpu.of('writeBuffer');
-    assert.equal(writes.length, 2);
+    assert.equal(writes.length, 1, 'both blocks in one write, not a write a block');
     assert.equal(writes[0].bufferOffset, 0);
-    assert.equal(writes[1].bufferOffset, 256);
-    assert.equal(writes[0].bytes[0], 1);
-    assert.equal(writes[1].bytes[0], 2);
+    const ring = first.buffer.bytes;
+    assert.equal(ring[0], 1);
+    assert.equal(ring[256], 2);
+    assert.equal(ring[128], 0, 'the gap between blocks is not written with anything');
+    pool.flush();
+    assert.equal(gpu.count('writeBuffer'), 1, 'a flush with nothing laid writes nothing');
     assert.deepEqual(dynamicOffsetsOf([{ binding: 0, resource: second }]), [256]);
     assert.equal(dynamicOffsetsOf([{ binding: 1, resource: {} }]), undefined,
         'a view carries no offset');
@@ -91,14 +96,17 @@ test('the ring wraps rather than growing, and a block larger than it gets a larg
 
     pool.allocate(new Uint8Array(64));
     pool.allocate(new Uint8Array(64));
-    const wrapped = pool.allocate(new Uint8Array(64));
+    const wrapped = pool.allocate(new Uint8Array(64).fill(3));
     assert.equal(wrapped.dynamicOffset, 0,
         'back to the start: the queue orders the write after the submits before it');
+    assert.equal(gpu.count('writeBuffer'), 1, 'what was laid before the wrap is written first');
+    pool.flush();
+    assert.equal(wrapped.buffer.bytes[0], 3);
     assert.equal(gpu.count('createBuffer'), 1);
 
     const large = pool.allocate(new Uint8Array(1024));
     assert.equal(gpu.count('createBuffer'), 2, 'a ring the block fits');
     assert.ok(gpu.of('createBuffer')[1].descriptor.size >= 1024);
     assert.equal(large.dynamicOffset, 0);
-    assert.deepEqual(pool.stats(), { created: 2, reused: 4 });
+    assert.deepEqual(pool.stats(), { created: 2, reused: 4, writes: 2 });
 });

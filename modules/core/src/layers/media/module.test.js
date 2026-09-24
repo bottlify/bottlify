@@ -48,6 +48,7 @@ test('the diagnostics name every library the layer stands in for', async()=>{
     assert.deepEqual(mediaModule.diagnostics().metrics?.libraries, Object.keys(api.libraries()),
         'every library the loader is handed is one the diagnostics report');
     assert.ok(api.libraries()['ijl15.dll']);
+    assert.deepEqual(api.runtimes(), ['ijl15.dll'], 'a runtime answered whoever brought a copy');
     await mediaModule.dispose();
 });
 
@@ -147,6 +148,7 @@ test('a disposed media refuses to open rather than throwing', async()=>{
     assert.equal(api.openAudio({ formatTag: 0x55, sampleRate: 44100, channels: 2 }), null);
     assert.equal(api.instance(), null);
     assert.deepEqual(api.libraries(), {});
+    assert.deepEqual(api.runtimes(), []);
     assert.deepEqual(api.ordinals(), {});
     assert.doesNotThrow(()=>api.closeAll());
     await assert.rejects(()=>api.open(new Uint8Array(1)), /no decoder binary/);

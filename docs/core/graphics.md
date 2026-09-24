@@ -155,7 +155,10 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
   layout drops a binding the generated shader did not use and every textured draw then silently
   disappears. Uniform blocks come out of one ring buffer bound at a dynamic offset, so a bind group
   names a texture, a sampler and the ring and nothing that changes per draw; the group cache is
-  keyed on those identities and lives as long as the backend.
+  keyed on those identities and lives as long as the backend. The blocks are laid into a copy of the
+  ring on this side and reach the GPU in one `writeBuffer` per frame, just before its submit (and
+  once more before a wrap or a new ring), not in one per block: a shader draw hands out six blocks,
+  and each write is a trip to the GPU process.
 - **Dynamic buffers** (`internal/buffers.js`). A lock's flags are a promise: `DISCARD` renames the
   backing and only bytes written since travel; `NOOVERWRITE` renames nothing and sends the newly
   written ranges; neither flag leaves the decision to whether a draw of a frame not yet submitted
@@ -265,7 +268,8 @@ Per API:
   the fourth reads the longer descriptor. Reference counts are per generation, as the API does it.
   The three enumerations call into guest code through the bridge and answer with a promise; without
   `callGuest` they succeed having named nothing. `GetDC` is answered by `win32.gdi().createSurfaceDc`
-  over the surface's own bytes. Display modes: 640x480, 800x600, 1024x768, 1280x1024 at 8, 16 and
+  over the surface's own bytes, and an indexed surface's DC is given its palette's live table, so a
+  palette changed while the DC is held is the one it draws in. Display modes: 640x480, 800x600, 1024x768, 1280x1024 at 8, 16 and
   32 bits, plus the configured screen size if it is not in the list.
 - **`d3d7.js`** publishes no root; it hands the DirectDraw seam the `IDirect3D7` descriptor to put
   beside its own, and keeps one Direct3D 7 object per DirectDraw object. A draw takes its vertex
@@ -359,9 +363,29 @@ the block of uniforms all but the two fields the world transform reaches. The wo
 the one state the counter deliberately ignores, because it moves between most draws of a frame;
 whoever reads the counter therefore owes the world matrix a fresh read on every draw, and nothing
 else derived from it may be kept. A texture whose bytes the program rewrites raises a counter of
-its own, so the upload owed to it still happens inside the next draw that samples it. The Direct3D
-7 and 9 devices do not publish the counter yet and are prepared for on every draw, as before.
+its own, so the upload owed to it still happens inside the next draw that samples it. When the
+counter has moved, the preparation is looked up by the state's values among those the frame has
+built. That name is made in two parts so that the common changes stay cheap: the device also
+publishes `stateVersionBesideTextures`, which a texture binding does not raise, and while it holds
+still the state beside the textures keeps the number it was given -- a program that binds a new
+texture before every draw pays for a lookup of that number and the bindings, not for the whole
+state. The render and stage states are named as words by their hash (compared in full on a hit),
+and the targets, transforms, material, lights and viewport are named once per change of the objects
+the device holds, which it replaces rather than writes into. The Direct3D 9 device publishes both
+counters the same way: every setter goes through its one `setState`, and a state block applied, a
+reset and a new target or depth surface raise them as well; a value set again that is already there
+changes nothing. The Direct3D 7 device does not publish them yet and is prepared for on every draw.
 `diagnostics().prepared` counts what was built and what was reused.
+A draw through shaders keeps its translations, vertex layout, pipeline state and samplers while
+`stateVersionBesideTextures`, the shaders, the declaration, the stride and the topology hold still --
+setting constants raises no version, so a frame that sets its constants and binds a texture before
+every draw prepares once -- and copies only the constant blocks and takes the texture views per draw.
+
+A texture the program releases for the last time gives its guest storage back at once, and its GPU
+texture at the first present that finds it bound on no stage, after that frame's replay: a binding
+holds its texture without a public reference (binding changes no count, as the API reports it), so a
+program may release its own reference and go on drawing with it. `diagnostics().textureRecords`
+lists the textures still held.
 
 **Direct3D 9** (`src/layers/graphics/d3d9/`). The device advertises vertex and pixel shader model
 2.0 -- the version the translator builds a pipeline from whole -- and refuses a create for a higher
@@ -385,8 +409,14 @@ depth surface, which Direct3D allows and WebGPU does not, is drawn with a depth 
 standing in (`depth-stand-in`), kept per depth surface and size. `stateblock.js`
 records what is set between `BeginStateBlock` and `EndStateBlock` -- and in this version a state set
 while recording goes into the block, not the device. `declaration.js` converts between vertex
-declarations and FVF codes; a fixed-function draw through a declaration is drawn when it describes
-an FVF and reported once when it does not.
+declarations and FVF codes. A fixed-function draw through a declaration that no FVF spells -- its
+members in another order, at other offsets, or beside ones only a shader reads (tangents, binormals
+and the like are ignored, as Direct3D ignores them) -- is read through a layout made from the
+declaration's own offsets (`fixedFunctionLayoutOf`), carried in the pipeline state and its key. A
+declaration this stage cannot read -- a second stream, a tessellator method, blend weights, a colour
+that is not a `D3DCOLOR`, a position of another type, coordinate sets with a gap, or a member past
+the stream's stride -- is dropped, counted in `skipped.layout` and reported once, rather than raised
+into the program's thread.
 
 **Direct3D 10 and DXGI** (`src/layers/graphics/d3d10/`). `dxbc.js` opens the container (`ISGN`,
 `OSGN`, `SHDR`; older token streams answer `E_INVALIDARG`); `sm4.js` decodes the token stream with

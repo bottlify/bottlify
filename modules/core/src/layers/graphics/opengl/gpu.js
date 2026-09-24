@@ -193,7 +193,7 @@ const PROBE_LIMIT = 4;
  * @param {{ width: number, height: number, data: Uint8Array }} shot
  * @param {{ x: number, y: number, width: number, height: number }} rect
  */
-function describeSnapshot(shot, rect){
+export function describeSnapshot(shot, rect){
     /** @param {number} x @param {number} y */
     const at = (x, y)=>{
         const px = Math.min(shot.width - 1, rect.x + Math.floor(x * Math.max(1, rect.width)));

@@ -209,6 +209,12 @@ export const mediaModule = {
 
             /** The libraries this layer stands in for, keyed as an import names them. */
             libraries: ()=>live() ? { ...(state.ijl?.libraries ?? {}) } : {},
+            /**
+             * Which of them are redistributable runtimes answered for whoever's
+             * copy the program brought: all of them -- a decoder library a game
+             * ships is the runtime this layer stands in for.
+             */
+            runtimes: ()=>live() ? Object.keys(state.ijl?.libraries ?? {}) : [],
             /** Their exports by ordinal, for a program that imports by number. */
             ordinals: ()=>live() ? { ...(state.ijl?.ordinals ?? {}) } : {},
         };

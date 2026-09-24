@@ -10,7 +10,8 @@ import { D3DERR_INVALIDCALL, D3D_OK } from './constants.js';
 import { createReferenceCount } from './resources.js';
 import {
     D3DDECLMETHOD, D3DDECLTYPE, D3DDECLUSAGE, D3DERR_MOREDATA, MAX_DECLARATION_LENGTH,
-    createVertexDeclaration, declarationEnd, elementsOfFvf, fvfOfElements, strideOf,
+    createVertexDeclaration, declarationEnd, elementsOfFvf, fixedFunctionLayoutOf, fvfOfElements,
+    strideOf,
     validateElements,
 } from './declaration.js';
 
@@ -176,4 +177,31 @@ test('a declaration reads back with its sentinel, and says when the room was too
     // What was made from is not what the elements happen to describe.
     assert.equal(declaration.fvf, 0);
     assert.equal(declaration.release(), 0);
+});
+
+test('fixed function reads a declaration by its offsets and refuses what it cannot', ()=>{
+    const position = element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 16);
+    const layout = fixedFunctionLayoutOf({ id: 7, elements: [
+        element(D3DDECLUSAGE.TEXCOORD, D3DDECLTYPE.FLOAT2, 0),
+        element(D3DDECLUSAGE.TANGENT, D3DDECLTYPE.FLOAT3, 8),
+        position,
+    ] });
+    assert.deepEqual(layout, {
+        id: 7,
+        attributes: [
+            { name: 'texCoord0', offset: 0, format: 'float32x2', bytes: 8 },
+            { name: 'position', offset: 16, format: 'float32x3', bytes: 12 },
+        ],
+        preTransformed: false,
+        texCoordSets: 1,
+    }, 'the tangent is ignored and the rest read where they lie');
+    assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [position,
+        element(D3DDECLUSAGE.BLENDWEIGHT, D3DDECLTYPE.FLOAT1, 28)] }), null, 'blend weights');
+    assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [position,
+        element(D3DDECLUSAGE.TEXCOORD, D3DDECLTYPE.FLOAT2, 28, { index: 1 })] }), null,
+    'a gap in the sets');
+    assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [position,
+        element(D3DDECLUSAGE.COLOR, D3DDECLTYPE.UBYTE4N, 28)] }), null, 'a colour in R, G, B, A');
+    assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [
+        element(D3DDECLUSAGE.NORMAL, D3DDECLTYPE.FLOAT3, 0)] }), null, 'no position');
 });

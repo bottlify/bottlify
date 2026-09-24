@@ -310,6 +310,14 @@ export const audioModule = {
                 ? { ...dsound.libraries }
                 : { ...dsound.libraries, ...mp3.libraries }),
 
+            /**
+             * Which of those are redistributable runtimes this engine answers
+             * for whoever's copy the program brought (`roadmap/decisions.md`):
+             * the MPEG provider a sound library loads out of its own directory
+             * is one, where DirectSound is a system library like any other.
+             */
+            runtimes: ()=>(config?.mp3 === false ? [] : Object.keys(mp3.libraries)),
+
             /** The MPEG provider, for whoever is measuring. */
             mp3: ()=>mp3,
 

@@ -468,6 +468,8 @@ test('the MPEG provider is a library beside DirectSound, with an entry point', a
     const f = await playing();
     const provider = f.api.libraries()['Mp3dec.asi'];
     assert.ok(provider, 'listed with the rest');
+    assert.deepEqual(f.api.runtimes(), ['Mp3dec.asi'],
+        'and a runtime the engine answers for, whoever brought a copy');
     assert.equal(provider?.DllMain.argBytes, 12);
     assert.ok(provider?.ASI_stream_open && provider?.ASI_stream_process);
     assert.deepEqual(audioModule.diagnostics().metrics?.mp3, {
@@ -484,6 +486,7 @@ test('the MPEG provider can be left out, for a run to compare against', async()=
         provide: ()=>{},
     });
     assert.deepEqual(Object.keys(api.libraries()), ['DSOUND.dll']);
+    assert.deepEqual(api.runtimes(), [], 'and then the copy the program brought is what loads');
 });
 
 test('the decoder behind the provider follows the configuration', async()=>{
