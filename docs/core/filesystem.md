@@ -144,7 +144,9 @@ file with zeroes. The table hands back objects; the win32 layer gives them numbe
 
 ### Bundles as the read-only source
 
-`tools/btl.mjs` writes the `.btl` container; `src/layers/filesystem/internal/bundle/` reads it.
+`src/bundle-node.js` (published as `@bottlify/core/bundle/node`, and what `tools/btl.mjs` re-exports)
+writes the `.btl` container on a host; `src/layers/filesystem/internal/bundle/` reads it in the
+engine; `src/bundle.js` (`@bottlify/core/bundle`) publishes the constants and checksum both share.
 
 - **Format** (`format.js`): a 0x28-byte header — magic `BTL1`, format version (1 or 2 readable),
   block size, index offset/length/codec — then blocks back to back, then a deflated JSON index
@@ -236,7 +238,7 @@ engine journals what its callers decide to say.
 ## 5. Tests
 
 `node:test` unit tests over the in-memory store, no browser needed; run with `npm test` from
-`modules/core`. The bundle tests write a fixture with `tools/btl.mjs` and read it back.
+`modules/core`. The bundle tests write a fixture with `src/bundle-node.js` and read it back.
 
 | file | covers |
 |------|--------|

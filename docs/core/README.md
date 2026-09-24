@@ -49,7 +49,10 @@ asynchronous and why, `host: 'thread'` for tests, and the current limitations of
 [`host.md`](./host.md). The emulator and decoder binaries are subpath exports of the package
 (`@bottlify/core/libv86.mjs`, `@bottlify/core/v86.wasm`, `@bottlify/core/video-decoder.wasm`,
 `@bottlify/core/worklet.js`, `@bottlify/core/engine.worker.js`); a bundler resolves them like the
-entry point.
+entry point. The `.btl` bundle format is published too: `@bottlify/core/bundle` carries what a
+writer and the engine's reader agree on (the header constants, the codecs, `crc32`) and runs in a
+browser, and `@bottlify/core/bundle/node` reads and writes bundle files on a host (`openBundle`,
+`writeBundle`, `verifyBundle`) -- the reader and writer the bundle tools in `tools/` use.
 
 ## The layers
 

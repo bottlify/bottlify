@@ -9,7 +9,7 @@
  * compresses well, most of it does not, and a reader asks for small ranges at
  * arbitrary offsets rather than for whole files.
  *
- * Run with: node --test tools/btl.test.js
+ * Run with: node --test src/bundle-node.test.js (in modules/core)
  */
 
 import { test } from 'node:test';
@@ -18,7 +18,9 @@ import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { Codec, openBundle, packBlock, unpackBlock, verifyBundle, writeBundle } from './btl.mjs';
+import {
+    Codec, openBundle, packBlock, unpackBlock, verifyBundle, writeBundle,
+} from './bundle-node.js';
 
 /** Compresses well: what an executable or a text file looks like to a compressor. */
 const compressible = (/** @type {number} */ size)=>Buffer.alloc(size, 0x41);

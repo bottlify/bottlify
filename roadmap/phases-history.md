@@ -146,7 +146,7 @@ the Master Plan's write-close-reopen-elsewhere acceptance) all landed. What the 
 deliberately out of scope — installers, a streaming-download policy beyond what range reads make
 possible, a session-sync server — are still out of scope in exactly the sense the phase meant:
 installers became Phase 8, a download/prefetch policy and the sync backend are both named in
-`roadmap/00-auth-and-shareplay.md` rather than here. Nothing from this phase is open as a defect;
+`roadmap/00-product-plan.md` rather than here. Nothing from this phase is open as a defect;
 what remains is product work already tracked elsewhere.
 
 ## Phase 5 — Graphics

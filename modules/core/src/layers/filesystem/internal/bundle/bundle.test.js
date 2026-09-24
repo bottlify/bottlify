@@ -16,7 +16,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import zlib from 'node:zlib';
-import { writeBundle } from '../../../../../../../tools/btl.mjs';
+import { writeBundle } from '../../../../bundle-node.js';
 import { openBundle, Codec, HEADER_SIZE, MAGIC } from './format.js';
 import { createBundleSource, BLOCK_MISS } from './source.js';
 

@@ -19,6 +19,9 @@ import { createWebSocketServer } from './websocket.js';
 
 export { createRelay } from './relay.js';
 export { createWebSocketServer, Connection } from './websocket.js';
+// Whether the relay may open a connection to a host outside its rooms, for a
+// server that hosts the relay itself.
+export { permits } from './cli.js';
 
 /**
  * @typedef {import('./relay.js').RelayOptions & {

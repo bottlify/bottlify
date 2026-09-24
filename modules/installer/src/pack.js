@@ -29,9 +29,7 @@
  *     index is small enough to hold.
  */
 
-import { MAGIC, HEADER_SIZE, FORMAT_VERSION, Codec }
-    from '../../core/src/layers/filesystem/internal/bundle/format.js';
-import { crc32 } from '../../core/src/layers/filesystem/internal/bundle/crc32.js';
+import { MAGIC, HEADER_SIZE, FORMAT_VERSION, Codec, crc32 } from '@bottlify/core/bundle';
 
 /** A quarter of a mebibyte, as the Node writer uses: it decides how long a guest thread is held. */
 export const DEFAULT_BLOCK_SIZE = 1 << 18;

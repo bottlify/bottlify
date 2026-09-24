@@ -20,7 +20,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import zlib from 'node:zlib';
 import { createV86Host } from './layers/cpu/internal/v86-host.js';
-import { writeBundle } from '../../../tools/btl.mjs';
+import { writeBundle } from './bundle-node.js';
 import { openBundle, Codec } from './layers/filesystem/internal/bundle/format.js';
 import { decompressZstd } from './zstd.js';
 import { loadZstdWasm } from './zstd-wasm.js';

@@ -19,13 +19,11 @@ the guest, its files directly in that directory.
 | `game.mjs` | starts the engine on a bundle in a GPU browser, waits, writes a report | `npm run cdp:game -- <bundle-id> [flags]` |
 | `frames.mjs` | lets a title settle, watches a window, reports what a frame costs and why | `npm run cdp:frames -- <bundle-id> [flags]` |
 | `launcher.mjs` | starts a title in the launcher the way a person does and profiles the page thread | `node tools/cdp_test/launcher.mjs <bundle-id> [flags]` (launcher running: `npm run ui`) |
-| `repro.mjs` | replays a scripted sequence of clicks and keys and stops on the first engine fault | `node tools/cdp_test/repro.mjs <bundle-id> [--scenario file.json]` |
 | `triangle.mjs` | the graphics acceptance scenario: a fixture draws a triangle, four pixels are compared byte for byte | `node tools/cdp_test/triangle.mjs` |
 | `probe.mjs` / `cli.mjs` | the Phase 0 acceptance probe: browser, page, worker, ping, screenshot | `npm run cdp:probe` |
 | `browser.mjs` | finds and launches a Chromium with a CDP endpoint | library |
 | `cdp.mjs` | a minimal CDP client over WebSocket | library |
 | `server.mjs` | a static server for the sandbox pages, the sources and a bundle | library |
-| `lease.mjs` | serialises everything that drives one shared, watched browser | `node tools/cdp_test/lease.mjs <who> -- <command...>` |
 
 Reports land in `tools/cdp_test/reports/` (gitignored).
 
@@ -129,24 +127,6 @@ It also prints two frame counts over the window: frames the engine drew into
 the canvas, and frames the browser composed for the screen. They differ, and
 the second is the one a person sees.
 
-## `repro.mjs` -- a failure on demand
-
-A crash reached by clicking through a menu costs a minute of attention every
-time. A scenario here is data: a list of steps in a small JSON file, run
-against a real browser; the moment the engine reports a fault the whole trace
-is printed and the run fails.
-
-```
-node tools/cdp_test/repro.mjs <bundle-id> [--scenario file.json] [--seconds 120] [--video] [--keep]
-```
-
-A scenario is `{ "steps": [ ... ] }`, each step one of `{ "wait": ms }`,
-`{ "click": [x, y] }` (canvas coordinates), `{ "type": "escape" }` (a key by
-name or a character), `{ "hide": ms }` (background the page), `{ "note": "..." }`
-(printed, so a log reads as a path) or `{ "until": "frames > 100", "for": ms }`.
-With no scenario it runs and watches, which is the shortest way to ask "does
-this still crash on its own". `--keep` leaves the browser open at the end.
-
 ## `browser.mjs` -- launching a browser that has a GPU
 
 `findBrowser()` takes `CDP_TEST_CHROME` or `CHROME_BIN`, then the usual Chrome
@@ -185,25 +165,6 @@ while the engine holds the page's thread is not answered until it yields.
 `/sandbox/`, `srcDir` under `/src/` and any extra prefix, on a free port.
 Every file is range-addressable, because one of the things served is a game
 bundle: a gigabyte that must never be read whole to answer one block.
-
-## `lease.mjs` -- one browser at a time
-
-A person may be watching a long-lived browser (the one on CDP port 9333), and
-two scripts navigating it at once ruin both runs and the watching. Anything
-that drives that browser -- navigates, clicks, types, reloads -- runs under
-the lease:
-
-```
-node tools/cdp_test/lease.mjs <who> -- node some-script.mjs args...
-```
-
-The lease is a directory in the temp folder: creating it is atomic, so whoever
-creates it wins. A holder is waited for (up to 45 minutes), a lease older than
-10 minutes is taken over (a killed script must not block the queue for ever),
-and the lease is released when the command exits, however it exits. A script
-that only reads -- attaches, evaluates, screencasts, drains the journal, never
-sends input or navigates -- does not need the lease and must not take one:
-a read-only capture attaches beside whoever is driving.
 
 ## What comes back
 

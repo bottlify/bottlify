@@ -24,5 +24,8 @@
     "test:integration": "node --test \"src/**/*.itest.js\"",
     "typecheck": "tsc -p jsconfig.json",
     "bottles": "node src/server/cli.js"
+  },
+  "dependencies": {
+    "@bottlify/core": "^0.1.0"
   }
 }
