@@ -972,8 +972,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 unqueue(key);
                 dropKey(key);
             }
-            // A diagnostic run with classes left out keeps no translations.
-            const store = leaveOut.size > 0 ? null : (settings.store ?? null);
+            // A diagnostic run with classes left out, or with an undo log the
+            // stored modules were built without, keeps no translations.
+            const store = leaveOut.size > 0 || settings.undoLog ? null : (settings.store ?? null);
             const bundleId = settings.bundleId ?? 'unknown';
             /** @type {{ region: import('../region.js').Region, entryTop: number,
              *     stamp: string, cached: import('./cache.js').CachedRegion | null }[]} */

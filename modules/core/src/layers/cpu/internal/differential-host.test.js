@@ -65,7 +65,8 @@ test('the differential host names itself', ()=>{
     const host = createDifferentialHost({ emulator: fakeEmulator(), cork: null, engine: {} });
     assert.equal(host.engine(), 'differential');
     assert.deepEqual(host.differentialDiagnostics(),
-        { replayed: 0, divergences: 0, handoffMisses: 0, first: null });
+        { replayed: 0, divergences: 0, handoffMisses: 0,
+            skipped: { hostCalls: 0, overran: 0 }, first: null });
 });
 
 test('a region run is replayed and a divergence is recorded', ()=>{
@@ -92,7 +93,8 @@ test('an agreeing replay records no divergence', ()=>{
     });
     host.runSlice(10);
     assert.deepEqual(host.differentialDiagnostics(),
-        { replayed: 1, divergences: 0, handoffMisses: 0, first: null });
+        { replayed: 1, divergences: 0, handoffMisses: 0,
+            skipped: { hostCalls: 0, overran: 0 }, first: null });
 });
 
 test('without the snapshot machinery the differential host refuses', ()=>{
@@ -101,4 +103,91 @@ test('without the snapshot machinery the differential host refuses', ()=>{
         cork: /** @type {any} */ ({ entryOf: ()=>-1, holdsPage: ()=>false, diagnostics: ()=>({}) }),
         engine: {},
     }), /snapshot, restore and compare/);
+});
+
+/** A machine whose one region increments a counter in memory: the translator
+ * run and the emulator's replay each add one, as `inc dword [0x3000]` does.
+ * @param {{ callHost?: boolean }} [options] */
+function counterMachine({ callHost = false } = {}){
+    const emulator = /** @type {any} */ (fakeEmulator());
+    emulator.mem = new Uint8Array(0x4000);
+    emulator.writePhysical = (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>{
+        emulator.mem.set(bytes, at);
+    };
+    emulator.hostCalls = 0;
+    emulator.raiseTrap = ()=>{
+        emulator.hostCalls++;
+    };
+    emulator.runSlice = ()=>{
+        emulator.mem[0x3000]++;
+        emulator.at = 0x2000;
+        return 1;
+    };
+    /** @type {{ address: number, size: number, old: Uint8Array }[]} */
+    let ring = [];
+    const cork = /** @type {any} */ ({
+        entryOf: (/** @type {number} */ eip)=>(eip === 0x1000 ? 7 : -1),
+        holdsPage: ()=>false,
+        run(){
+            ring.push({ address: 0x3000, size: 4, old: emulator.mem.slice(0x3000, 0x3004) });
+            emulator.mem[0x3000]++;
+            if (callHost)
+            {
+                emulator.raiseTrap(0);
+            }
+            emulator.at = 0x2000;
+            return { retired: 1, kind: 'untranslated', vector: 0 };
+        },
+        diagnostics: ()=>({}),
+    });
+    const engine = {
+        /** @param {any} host @param {{ address: number, length: number }[]} spans */
+        snapshot: (host, spans)=>({
+            eip: host.eip(),
+            memory: spans.map(span=>({
+                address: span.address,
+                bytes: host.mem.slice(span.address, span.address + span.length),
+            })),
+        }),
+        restore: (/** @type {any} */ host, /** @type {any} */ state)=>{
+            host.at = state.eip;
+            for (const { address, bytes } of state.memory)
+            {
+                host.mem.set(bytes, address);
+            }
+        },
+        compare: (/** @type {any} */ a, /** @type {any} */ b)=>a.memory
+            .filter((/** @type {any} */ span, /** @type {number} */ i)=>
+                span.bytes.some((/** @type {number} */ v, /** @type {number} */ j)=>v !== b.memory[i].bytes[j]))
+            .map(()=>({ name: 'mem', expected: 0, actual: 0 })),
+        resetUndoLog: ()=>{
+            ring = [];
+        },
+        readUndoLog: ()=>({ entries: ring, wrapped: false }),
+        spansOf: (/** @type {{ address: number, size: number }[]} */ entries)=>
+            entries.map(({ address, size })=>({ start: address, end: address + size })),
+    };
+    const host = createDifferentialHost({
+        emulator, cork, engine, memory: /** @type {any} */ ({}), layout: {},
+    });
+    return { emulator, host };
+}
+
+test('a region that increments memory is replayed on the bytes it found', ()=>{
+    const { emulator, host } = counterMachine();
+    host.runSlice(1);
+    const report = host.differentialDiagnostics();
+    assert.equal(report.replayed, 1);
+    assert.equal(report.divergences, 0, 'the store was rewound before the emulator ran it');
+    assert.equal(emulator.mem[0x3000], 1, 'the guest goes on with one increment, not two');
+});
+
+test('a region that called the host is not replayed', ()=>{
+    const { emulator, host } = counterMachine({ callHost: true });
+    host.runSlice(1);
+    const report = host.differentialDiagnostics();
+    assert.equal(report.replayed, 0);
+    assert.deepEqual(report.skipped, { hostCalls: 1, overran: 0 });
+    assert.equal(emulator.hostCalls, 1, 'the handler ran once');
+    assert.equal(emulator.mem[0x3000], 1);
 });

@@ -51,19 +51,17 @@ ends the slice; `cork.handoffMisses` counts the slices that so ended inside a pa
 translator holds (`Runtime.holdsPage`), zero with the export.
 
 Under `differential` the same slice loop replays every region on the emulator before its run
-stands: the state is snapshotted, the translator runs the region, the state is snapshotted
-again and restored, the emulator runs the region's retired count, and the two records are
-compared -- the emulator is the oracle. The comparison is over registers, flags, eip, the x87
-block and XMM (the memory spans the region wrote are the undo log's, a later step), and
-`metrics.differential` reports how many regions were replayed, how many diverged, and the
-first region that did with the fields that differed. The guest carries on from the
-translator's register state. Memory is the mode's limit: the emulator replays the region on
-the memory the translator already wrote, so a store that reads what it writes (an increment
-in memory, a counter) lands twice, and a program whose regions do that runs differently
-under `differential` from the point of the first replay -- the mode is a diagnostic for the
-register state a wrong instruction corrupts first, not a way to run a program; the undo log
-of the region (`prepareModule(..., { undoLog })`) is what would rewind the translator's stores
-before the replay, and is the step that makes the mode whole.
+stands. Its modules are built with the undo log (`undoLog: true`; the translation store is not
+used, since its modules carry no log), each store appending its old bytes to the ring in the
+tables. The state is snapshotted, the translator runs the region, the state is snapshotted
+again with the spans the ring names, the registers are restored and the stores rewound newest
+first, the emulator runs to the region's exit, and the two records are compared -- the
+emulator is the oracle -- over registers, flags, eip, the x87 block, XMM and the written
+bytes. The guest then carries on from the translator's registers and bytes. A region that
+called the host through the trap port is not replayed (the handler would run twice), nor one
+whose stores overran the ring (it cannot be rewound); `metrics.differential` counts both under
+`skipped`, beside how many regions were replayed, how many diverged, and the first region that
+did with the fields that differed.
 
 Between regions, translated
 code needs no slice loop at all where the engine has tail calls: every region function is

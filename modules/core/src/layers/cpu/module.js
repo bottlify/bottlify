@@ -438,14 +438,18 @@ export const cpuModule = {
                     // replay of every region on the emulator, so it loads the
                     // module's snapshot machinery too.
                     let engineModule = null;
+                    const corkLayout = emulator.stateLayout(TABLES_RESERVE);
                     if ((engine === 'hybrid' || engine === 'differential') && settings.engineUrl)
                     {
                         engineModule = await import(settings.engineUrl);
                         const { createEngine } = engineModule;
                         state.cork = createEngine({
                             memory: emulator.wasmMemory(),
-                            layout: emulator.stateLayout(TABLES_RESERVE),
-                            config: { trapPort: settings.trapPort, ...settings.cork },
+                            layout: corkLayout,
+                            // A differential build logs every store's old bytes, so the
+                            // replay can rewind the translator's writes first.
+                            config: { trapPort: settings.trapPort, ...settings.cork,
+                                ...(engine === 'differential' ? { undoLog: true } : {}) },
                             read: emulator.readByte,
                             imports: {
                                 // The call channel from inside translated code:
@@ -472,6 +476,7 @@ export const cpuModule = {
                         : engine === 'differential'
                             ? createDifferentialHost({
                                 emulator, cork: state.cork, engine: engineModule,
+                                memory: emulator.wasmMemory(), layout: corkLayout,
                             })
                             : emulator;
                 }

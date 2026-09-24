@@ -575,7 +575,11 @@ function describe(result, context, calls, symbols){
     if (result.differential)
     {
         say(`  differential: ${result.differential.replayed} regions replayed,`
-            + ` ${result.differential.divergences} diverged`);
+            + ` ${result.differential.divergences} diverged`
+            + (result.differential.skipped
+                ? ` (not replayed: ${result.differential.skipped.hostCalls} called the host,`
+                    + ` ${result.differential.skipped.overran} overran the undo ring)`
+                : ''));
         if (result.differential.first)
         {
             say(`    first divergence at ${result.differential.first.at}:`);

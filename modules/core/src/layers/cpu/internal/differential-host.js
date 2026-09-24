@@ -13,24 +13,23 @@
  * runs the regions it has -- and, each time the translator runs a region,
  * replays that region on the emulator from the same state and compares the
  * two records. The emulator is the oracle: a region whose run leaves the same
- * registers, flags, x87 and XMM state is accepted, and the first region whose
- * run does not is the divergence the mode exists to name.
+ * registers, flags, x87, XMM and written bytes is accepted, and the first
+ * region whose run does not is the divergence the mode exists to name.
  *
- * Both executors work on the emulator's own register file (as in hybrid), so
- * the replay copies nothing: snapshot, run the region, snapshot, restore, run
- * the emulator for the same retired count, snapshot, compare. The guest then
- * carries on from the translator's state, exactly as hybrid leaves it, so a
- * divergence is reported without changing what the program does next. The
- * memory spans are left empty here (the region's undo log is a later step), so
- * the comparison is over registers, flags, eip, x87 and XMM -- the state a
- * wrong instruction corrupts first.
+ * Both executors work on the emulator's own register file and memory (as in
+ * hybrid), so the replay copies only what the region wrote: snapshot, run the
+ * region (a differential build logs each store's old bytes in the undo ring),
+ * snapshot with the spans the ring names, restore the registers and rewind the
+ * stores newest first, run the emulator to the region's exit, snapshot the
+ * same spans, compare. The guest then carries on from the translator's state,
+ * exactly as hybrid leaves it, so a divergence is reported without changing
+ * what the program does next.
  *
- * The limit that follows: the emulator replays the region on the memory the
- * translator already wrote, so a store that reads what it writes (an increment
- * in memory) lands twice, and a program whose regions do that runs differently
- * from the first replay on. The mode is a diagnostic, not a way to run a
- * program; rewinding the translator's stores through the undo log before the
- * replay is what would make it whole.
+ * A region is not replayed when replaying it would not be the same run: it
+ * called the host through the trap port (the handler would run a second time
+ * -- an allocation made twice), or its stores overran the ring (it cannot be
+ * rewound). Both are counted in `skipped`. A region that stopped on a trap or
+ * a fault is not replayed either: the emulator would answer it inline.
  */
 
 import { createHybridHost } from './hybrid-host.js';
@@ -40,9 +39,12 @@ import { createHybridHost } from './hybrid-host.js';
  * @param {any} parts.emulator   The emulator's host (`createV86Host`).
  * @param {import('../engine.js').Runtime | null} parts.cork  The translator's runtime.
  * @param {any} parts.engine  The cork engine module, exporting `snapshot`,
- *     `restore` and `compare` (its testing snapshot).
+ *     `restore` and `compare` (its testing snapshot), and `readUndoLog`,
+ *     `resetUndoLog` and `spansOf` for the stores.
+ * @param {WebAssembly.Memory} [parts.memory]  The memory the undo ring is in.
+ * @param {any} [parts.layout]  The layout the translator runs against.
  */
-export function createDifferentialHost({ emulator, cork, engine }){
+export function createDifferentialHost({ emulator, cork, engine, memory, layout }){
     const host = createHybridHost({ emulator, cork });
     host.engine = ()=>'differential';
 
@@ -52,6 +54,19 @@ export function createDifferentialHost({ emulator, cork, engine }){
     let replayed = 0;
     let divergences = 0;
     let handoffMisses = 0;
+    const skipped = { hostCalls: 0, overran: 0 };
+
+    // Every call translated code makes into the host passes here: a region
+    // that made one is not replayed, so no handler runs twice.
+    let hostCalls = 0;
+    const raiseTrap = emulator.raiseTrap;
+    if (typeof raiseTrap === 'function')
+    {
+        emulator.raiseTrap = (/** @type {number} */ value)=>{
+            hostCalls++;
+            return raiseTrap.call(emulator, value);
+        };
+    }
 
     const runtime = cork;
     if (runtime)
@@ -64,6 +79,23 @@ export function createDifferentialHost({ emulator, cork, engine }){
         }
         const handoff = typeof emulator.handoffAvailable === 'function'
             && emulator.handoffAvailable();
+        const undo = memory !== undefined && layout !== undefined
+            && typeof engine.readUndoLog === 'function';
+
+        /** The stores a region run left in the undo ring, and the spans they cover.
+         * @returns {{ entries: { address: number, old: Uint8Array }[], wrapped: boolean,
+         *     spans: { address: number, length: number }[] }} */
+        const storesOfRun = ()=>{
+            if (!undo)
+            {
+                return { entries: [], wrapped: false, spans: [] };
+            }
+            const log = engine.readUndoLog(memory, layout);
+            /** @type {{ start: number, end: number }[]} */
+            const merged = engine.spansOf(log.entries);
+            const spans = merged.map(one=>({ address: one.start, length: one.end - one.start }));
+            return { ...log, spans };
+        };
 
         /** Runs one region and replays it on the emulator, recording a
          * divergence the first time one is seen. Only a region whose exit is a
@@ -74,48 +106,74 @@ export function createDifferentialHost({ emulator, cork, engine }){
          * @param {number} eip @param {number} entry @param {number} budget */
         const replayRegion = (eip, entry, budget)=>{
             const state = snapshot(emulator, []);
-            const exit = runtime.run(entry, budget);
-            const subjectState = snapshot(emulator, []);
-            restore(emulator, state);
-            if (exit.kind === 'untranslated' || exit.kind === 'budget' || exit.kind === 'halt')
+            if (undo)
             {
-                // The emulator answers the same code, run to where the region
-                // left, not by the region's retired count: the two count a
-                // rep-prefixed instruction differently (the translator retires
-                // one per iteration, the emulator one per instruction), so a
-                // count would put the emulator past the region's exit. One
-                // instruction at a time is what stops it exactly on the exit's
-                // address, where a larger slice could overshoot a branch.
-                const target = subjectState.eip;
-                let guard = exit.retired + 64;
-                while (guard > 0 && !emulator.halted() && emulator.eip() !== target)
-                {
-                    const stepped = emulator.runSlice(1);
-                    if (stepped === 0)
-                    {
-                        break;
-                    }
-                    guard -= stepped;
-                }
-                const oracleState = snapshot(emulator, []);
-                const landed = emulator.eip() === target;
-                // The comparison masks the x87 status bits the two engines may
-                // leave differently (the top, already compared on its own, and
-                // the summary bits), the way the corpus's runner does.
-                const diff = landed
-                    ? compare(oracleState, subjectState, { statusMask: 0xfdd5 })
-                    : [{ name: 'control', expected: `0x${(target >>> 0).toString(16)}`,
-                        actual: `0x${(emulator.eip() >>> 0).toString(16)}` }];
-                if (diff.length > 0)
-                {
-                    divergences++;
-                    if (first === null)
-                    {
-                        first = { at: eip, diff };
-                    }
-                }
-                replayed++;
+                engine.resetUndoLog(memory, layout);
             }
+            const callsBefore = hostCalls;
+            const exit = runtime.run(entry, budget);
+            const stores = storesOfRun();
+            const subjectState = snapshot(emulator, stores.spans);
+            const clean = exit.kind === 'untranslated' || exit.kind === 'budget'
+                || exit.kind === 'halt';
+            if (!clean)
+            {
+                return exit;
+            }
+            if (hostCalls !== callsBefore)
+            {
+                skipped.hostCalls++;
+                return exit;
+            }
+            if (stores.wrapped)
+            {
+                skipped.overran++;
+                return exit;
+            }
+            restore(emulator, state);
+            // The translator's stores rewound newest first, so every span holds
+            // what the region found there when it began.
+            for (let i = stores.entries.length - 1; i >= 0; i--)
+            {
+                emulator.writePhysical(stores.entries[i].address, stores.entries[i].old);
+            }
+            // The emulator answers the same code, run to where the region
+            // left, not by the region's retired count: the two count a
+            // rep-prefixed instruction differently (the translator retires
+            // one per iteration, the emulator one per instruction), so a
+            // count would put the emulator past the region's exit. One
+            // instruction at a time is what stops it exactly on the exit's
+            // address, where a larger slice could overshoot a branch.
+            const target = subjectState.eip;
+            let guard = exit.retired + 64;
+            while (guard > 0 && !emulator.halted() && emulator.eip() !== target)
+            {
+                const stepped = emulator.runSlice(1);
+                if (stepped === 0)
+                {
+                    break;
+                }
+                guard -= stepped;
+            }
+            const oracleState = snapshot(emulator, stores.spans);
+            const landed = emulator.eip() === target;
+            // The comparison masks the x87 status bits the two engines may
+            // leave differently (the top, already compared on its own, and
+            // the summary bits), the way the corpus's runner does.
+            const diff = landed
+                ? compare(oracleState, subjectState, { statusMask: 0xfdd5 })
+                : [{ name: 'control', expected: `0x${(target >>> 0).toString(16)}`,
+                    actual: `0x${(emulator.eip() >>> 0).toString(16)}` }];
+            if (diff.length > 0)
+            {
+                divergences++;
+                if (first === null)
+                {
+                    first = { at: eip, diff };
+                }
+            }
+            replayed++;
+            // The translator's registers and bytes back, as hybrid leaves them.
             restore(emulator, subjectState);
             return exit;
         };
@@ -185,6 +243,7 @@ export function createDifferentialHost({ emulator, cork, engine }){
         replayed,
         divergences,
         handoffMisses,
+        skipped: { ...skipped },
         first: first
             ? { at: `0x${(first.at >>> 0).toString(16).padStart(8, '0')}`, diff: first.diff }
             : null,
