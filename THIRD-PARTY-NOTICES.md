@@ -5,7 +5,7 @@ Full license texts are kept alongside the corresponding component.
 
 ## v86 — x86 PC emulator / x86-to-wasm JIT (optional component)
 
-- Source: fork https://github.com/mrwayer/v86 (upstream: https://github.com/copy/v86)
+- Source: fork https://github.com/bottlify/v86 (upstream: https://github.com/copy/v86)
 - Location in this repository: `modules/core/vendor/v86`
 - License: BSD-2-Clause
 - This component is optional. The default engine, `cork`, is this project's own

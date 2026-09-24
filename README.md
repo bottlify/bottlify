@@ -1,6 +1,6 @@
 # Bottlify
 
-Bottlify runs original Win32 x86 games in the browser: a forked [v86](https://github.com/mrwayer/v86)
+Bottlify runs original Win32 x86 games in the browser: a forked [v86](https://github.com/bottlify/v86)
 for x86 emulation in a Web Worker, plus a from-scratch Win32/DirectX HLE layer on WebGPU, WebAudio
 and OPFS. No plugins, no install, no server in the render path.
 
