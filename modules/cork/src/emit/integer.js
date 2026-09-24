@@ -28,6 +28,8 @@ import { EMPTY, ValType } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { Exit, Local } from './region.js';
 import { checkAccess, emitStaleExit, noteStore, stackAccess } from './memory.js';
+import { Tables } from '../runtime/layout.js';
+import { PageFlag } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
 import { emitX87, isX87 } from './x87.js';
 
@@ -1846,6 +1848,115 @@ function decimal(e, instruction){
 }
 
 /**
+ * A `rep movs` or `rep stos` with DF clear takes, per turn of its loop, every
+ * element that lies wholly on the current page of each pointer (as far as
+ * ecx and the budget go) at once: one flag test of those pages --
+ * inaccessible for either, code for the destination -- then one
+ * `memory.copy`, or a fill, with ecx, the pointers, the count and the budget
+ * moved by the whole run. Anything else takes the per-element path after it:
+ * DF set, an element across a page, a flagged page, and a copy whose
+ * destination lies just ahead of its source (the processor repeats the
+ * source's first elements there, which a memmove does not). What the run
+ * leaves -- registers, memory, count, the budget exit on the instruction --
+ * is what as many single elements leave.
+ *
+ * @param {E} e @param {Instruction} instruction
+ */
+function bulkString(e, instruction){
+    const { b } = e;
+    const { op, size } = instruction;
+    const elementShift = Math.log2(size);
+    const table = e.layout.tables + Tables.PAGE_FLAGS;
+    const ramBase = e.layout.ramBase;
+    const ecx = Local.reg + 1;
+    const esi = Local.reg + 6;
+    const edi = Local.reg + 7;
+    const movs = op === 'movs';
+    // t0 = min(t0, the value on the stack), unsigned.
+    const minInto = ()=>{
+        b.localSet(Local.t1);
+        b.localGet(Local.t1).localGet(Local.t0).localGet(Local.t1).localGet(Local.t0)
+            .op(I32.ltU).select().localSet(Local.t0);
+    };
+    /** The whole elements left on a pointer's page. @param {number} pointer */
+    const room = pointer=>b.i32const(4096).localGet(pointer).i32const(4095).op(I32.and)
+        .op(I32.sub).i32const(elementShift).op(I32.shrU);
+    /** Whether a pointer's page has none of `bits`. @param {number} pointer @param {number} bits */
+    const clear = (pointer, bits)=>b.localGet(pointer).i32const(12).op(I32.shrU)
+        .load('i32_8u', { offset: table }).i32const(bits).op(I32.and).op(I32.eqz);
+    // DF clear: the step is +size.
+    b.localGet(Local.t2).i32const(size).op(I32.eq)
+        .localGet(Local.budget).i32const(0).op(I32.gtS).op(I32.and);
+    e.openIf('bulk', EMPTY);
+    b.localGet(ecx).localSet(Local.t0);
+    b.localGet(Local.budget);
+    minInto();
+    room(edi);
+    minInto();
+    if (movs)
+    {
+        room(esi);
+        minInto();
+    }
+    b.localGet(Local.t0).i32const(0).op(I32.ne);
+    clear(edi, PageFlag.INACCESSIBLE | PageFlag.HAS_CODE);
+    b.op(I32.and);
+    if (movs)
+    {
+        clear(esi, PageFlag.INACCESSIBLE);
+        b.op(I32.and);
+        // Not 0 < edi - esi < the run's bytes: (edi - esi - 1) >=u (bytes - 1).
+        b.localGet(edi).localGet(esi).op(I32.sub).i32const(1).op(I32.sub)
+            .localGet(Local.t0).i32const(elementShift).op(I32.shl).i32const(1).op(I32.sub)
+            .op(I32.geU).op(I32.and);
+    }
+    e.openIf('bulkPages', EMPTY);
+    b.localGet(Local.t0).i32const(elementShift).op(I32.shl).localSet(Local.t1);
+    if (movs)
+    {
+        b.localGet(edi).i32const(ramBase).op(I32.add)
+            .localGet(esi).i32const(ramBase).op(I32.add)
+            .localGet(Local.t1).op(0xfc, [0x0a, 0x00, 0x00]); // memory.copy
+        b.localGet(esi).localGet(Local.t1).op(I32.add).localSet(esi);
+    }
+    else
+    {
+        // A value of one byte repeated is a fill; any other is stored a word
+        // at a time, still with no test between.
+        const lanes = size === 1 ? 1 : size === 2 ? 0x0101 : 0x01010101;
+        b.localGet(Local.reg).i32const(0xff).op(I32.and).i32const(lanes).op(I32.mul)
+            .localGet(Local.reg);
+        mask(e, size);
+        b.op(I32.eq);
+        e.openIf('fill', EMPTY);
+        b.localGet(edi).i32const(ramBase).op(I32.add).localGet(Local.reg)
+            .localGet(Local.t1).op(0xfc, [0x0b, 0x00]); // memory.fill
+        b.else();
+        b.localGet(edi).localSet(Local.addr);
+        b.localGet(edi).localGet(Local.t1).op(I32.add).localSet(Local.pflags);
+        e.openLoop('words');
+        b.localGet(Local.addr).localGet(Local.reg);
+        b.store(storeKind(size), { offset: ramBase });
+        b.localGet(Local.addr).i32const(size).op(I32.add).localTee(Local.addr)
+            .localGet(Local.pflags).op(I32.ne);
+        b.brIf(e.depthOf('words'));
+        e.close();
+        e.close();
+    }
+    b.localGet(edi).localGet(Local.t1).op(I32.add).localSet(edi);
+    b.localGet(ecx).localGet(Local.t0).op(I32.sub).localSet(ecx);
+    b.localGet(Local.retired).localGet(Local.t0).op(I32.add).localSet(Local.retired);
+    b.localGet(Local.budget).localGet(Local.t0).op(I32.sub).localSet(Local.budget);
+    b.localGet(Local.budget).i32const(0).op(I32.leS);
+    e.openIf('bulkSpent', EMPTY);
+    e.exitAt(instruction.eip, Exit.BUDGET);
+    e.close();
+    b.br(e.depthOf('again'));
+    e.close();
+    e.close();
+}
+
+/**
  * The string instructions, with and without a repeat prefix: a loop over
  * ecx with the direction from DF, each iteration counted as one
  * instruction against the budget.
@@ -1882,6 +1993,11 @@ function stringInstruction(e, instruction){
         e.openLoop('again');
         b.localGet(ecx).op(I32.eqz);
         b.brIf(e.depthOf('done'));
+        if ((op === 'movs' || op === 'stos') && e.context.undo === undefined
+            && e.layout.codePages < 0)
+        {
+            bulkString(e, instruction);
+        }
     }
     if (compare)
     {

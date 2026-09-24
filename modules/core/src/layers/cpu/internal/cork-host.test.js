@@ -214,6 +214,31 @@ test('a hlt ends the slice and the next slice goes on after it, as the timer int
         assert.equal(h.runSlice(100), 2);
     });
 
+test('a loop whose stores reach translated code goes on to its end', async()=>{
+    const h = host();
+    // A region on the data page: its code makes the page's stores notes.
+    h.writePhysical(0x3100, Uint8Array.from([0xc3]));
+    h.cork().noteHot(0x3100, 0);
+    // mov esi, 0x3000; mov ecx, 64; L: mov eax, [esi]; mov [esi+4], eax;
+    // add esi, 8; dec ecx; jnz L; hlt -- the loop's two accesses are one
+    // group, whose window meets the code at 0x3100.
+    load(h, 0x1000, [0xbe, 0x00, 0x30, 0, 0, 0xb9, 64, 0, 0, 0,
+        0x8b, 0x06, 0x89, 0x46, 0x04, 0x83, 0xc6, 0x08, 0x49, 0x75, 0xf5, 0xf4]);
+    h.cork().noteHot(0x1000, 0);
+    assert.ok(await h.cork().translatePending() >= 2);
+    h.writeReg32('eip', 0x1000);
+    // The group's check leaves for the host, which interprets the access;
+    // an exit the epilogue probed straight back into the same entry spun
+    // there for ever with the budget untouched.
+    for (let slice = 0; slice < 100 && !h.halted(); slice++)
+    {
+        h.runSlice(10_000);
+    }
+    assert.equal(h.halted(), true, 'the loop ran to its hlt');
+    assert.equal(h.readReg32('ecx'), 0);
+    assert.equal(h.readReg32('esi'), 0x3200);
+});
+
 test('a trap a region leaves for with x87 held in its locals runs the handler', async()=>{
     const h = host();
     // fld1; mov dx, 0x1234; mov eax, 0x55; out dx, eax; int3 -- a hook stub that

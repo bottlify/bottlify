@@ -208,6 +208,181 @@ test('a restart after the fault runs the rep from the partial counts to the end'
         'the restarted copy is the clean one');
 });
 
+/**
+ * Both executors ran to the hlt and left the same registers and bytes.
+ * @param {ReturnType<typeof both>} r @param {number} address @param {number} length
+ */
+function agreeHalted(r, address, length){
+    assert.equal(r.exit.kind, Exit.HALT, 'the translated run reached the hlt');
+    assert.equal(r.fault, null, 'the interpreter did not fault');
+    for (let i = 0; i < 8; i++)
+    {
+        assert.equal(r.machine.reg(REGISTERS[i]), r.state.reg[i], `${REGISTERS[i]} differs`);
+    }
+    sameBytes(r, address, length);
+}
+
+test('a rep movsd whose destination lies one word ahead repeats the source', ()=>{
+    const r = both([
+        0xbe, 0x00, 0x20, 0, 0,             // mov esi, 0x2000
+        0xbf, 0x04, 0x20, 0, 0,             // mov edi, 0x2004
+        0xb9, 0x00, 0x05, 0, 0,             // mov ecx, 0x500 -- across a page
+        0xf3, 0xa5,                         // rep movsd
+        0xf4,
+    ], { memory: [[0x2000, [1, 2, 3, 4, 5, 6, 7, 8]]] });
+    agreeHalted(r, 0x2000, 0x1500);
+    assert.deepEqual([...r.machine.read(0x3400, 4)], [1, 2, 3, 4], 'the first word, repeated');
+});
+
+test('a rep movsd with the source ahead, and one run backwards, copy as element by element', ()=>{
+    const source = Array.from({ length: 64 }, (_, i)=>i * 3 & 255);
+    const ahead = both([
+        0xbe, 0x10, 0x20, 0, 0,             // mov esi, 0x2010
+        0xbf, 0x00, 0x20, 0, 0,             // mov edi, 0x2000
+        0xb9, 0x0c, 0, 0, 0,                // mov ecx, 12
+        0xf3, 0xa5, 0xf4,                   // rep movsd; hlt
+    ], { memory: [[0x2000, source]] });
+    agreeHalted(ahead, 0x2000, 64);
+    const backwards = both([
+        0xfd,                               // std
+        0xbe, 0x3c, 0x20, 0, 0,             // mov esi, 0x203c
+        0xbf, 0xfc, 0x30, 0, 0,             // mov edi, 0x30fc
+        0xb9, 0x10, 0, 0, 0,                // mov ecx, 16
+        0xf3, 0xa5, 0xf4,                   // rep movsd; hlt
+    ], { memory: [[0x2000, source]] });
+    agreeHalted(backwards, 0x3000, 0x100);
+});
+
+test('a rep stosd of a word across a page, of zero, and of bytes into code', ()=>{
+    const word = both([
+        0xb8, 0x44, 0x33, 0x22, 0x11,       // mov eax, 0x11223344
+        0xbf, 0xfe, 0x2f, 0, 0,             // mov edi, 0x2ffe -- its first word straddles
+        0xb9, 0x00, 0x06, 0, 0,             // mov ecx, 0x600
+        0xf3, 0xab, 0xf4,                   // rep stosd; hlt
+    ]);
+    agreeHalted(word, 0x2ff0, 0x1820);
+    const zero = both([
+        0x31, 0xc0,                         // xor eax, eax
+        0xbf, 0x00, 0x20, 0, 0,             // mov edi, 0x2000
+        0xb9, 0x00, 0x08, 0, 0,             // mov ecx, 0x800
+        0xf3, 0xab, 0xf4,                   // rep stosd; hlt
+    ], { memory: [[0x2000, Array(0x2004).fill(0x5a)]] });
+    agreeHalted(zero, 0x2000, 0x2004);
+    const code = both([
+        0xb0, 0x90,                         // mov al, 0x90
+        0xbf, 0xf0, 0x5f, 0, 0,             // mov edi, 0x5ff0
+        0xb9, 0x40, 0, 0, 0,                // mov ecx, 64
+        0xf3, 0xaa, 0xf4,                   // rep stosb; hlt
+    ], { mark: [[0x6000, 0x1000, PageFlag.HAS_CODE]] });
+    // Up to the code page in bulk, into it one element at a time with each
+    // store noted, and `stale` past the rep, as one element at a time did.
+    assert.equal(code.exit.kind, Exit.STALE);
+    assert.equal(code.machine.reg('ecx'), 0);
+    assert.equal(code.machine.reg('edi'), 0x6030);
+    assert.deepEqual([...code.machine.read(0x5ff0, 64)], Array(64).fill(0x90));
+});
+
+test('a bulk rep stops on the budget with the count and the pointers of the elements it ran', ()=>{
+    const m = createTestMachine();
+    m.write(CODE, [
+        0x31, 0xc0,                         // xor eax, eax
+        0xbf, 0x00, 0x20, 0, 0,             // mov edi, 0x2000
+        0xb9, 0xe8, 0x03, 0, 0,             // mov ecx, 1000
+        0xf3, 0xab, 0xf4,                   // rep stosd; hlt
+    ]);
+    m.setReg('esp', STACK);
+    const exit = m.runProgram(CODE, { budget: 100 });
+    assert.equal(exit.kind, Exit.BUDGET);
+    assert.equal(exit.eip, CODE + 12, 'on the rep');
+    // The block's own instructions are charged at its end: the rep has the
+    // whole budget, as one element at a time had it.
+    assert.equal(m.reg('ecx'), 1000 - 100, 'a hundred elements');
+    assert.equal(m.reg('edi'), 0x2000 + 100 * 4);
+});
+
+test('loops whose pointers move by fixed strides agree with the interpreter by pages clean, '
+    + 'inaccessible and holding code', ()=>{
+    // Each case: esi and edi walk by a stride a turn, the body loads and
+    // stores off both, and a page along the way is inaccessible or holds
+    // code -- or none is. The translated run (whose loop tests the pages the
+    // next turns reach once, before them) must fault, note the store into
+    // code or finish exactly where and as the interpreter does.
+    let seed = 0x5eed;
+    const random = (/** @type {number} */ n)=>{
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+        return (seed >>> 8) % n;
+    };
+    const forms = [
+        [0x8b, 0x46], [0x03, 0x46], [0x89, 0x46], [0x66, 0x89, 0x46], [0x8a, 0x46],
+        [0x0f, 0x10, 0x46], [0x0f, 0x11, 0x46], [0x01, 0x46], [0x89, 0x47], [0x8b, 0x57],
+    ];
+    const strides = [4, 12, 16, 60, -4, -16, 0, 124];
+    const low = 0x10000;
+    const span = 0x40000;
+    for (let round = 0; round < Number(process.env.STRIDE_ROUNDS ?? 40); round++)
+    {
+        const body = [];
+        for (let k = 1 + random(4); k > 0; k--)
+        {
+            body.push(...forms[random(forms.length)], random(64) & ~3);
+        }
+        body.push(0x83, 0xc6, strides[random(strides.length)] & 255);
+        body.push(0x83, 0xc7, strides[random(strides.length)] & 255);
+        body.push(0x49, 0x75, (-(body.length + 3)) & 255);
+        const esi = low + 0x10000 + random(0x10000) * 4;
+        const edi = low + 0x10000 + random(0x10000) * 4;
+        const count = 1 + random(3000);
+        const program = [0xbe, ...le(esi), 0xbf, ...le(edi), 0xb9, ...le(count), ...body, 0xf4];
+        const page = (low + random(span)) & ~0xfff;
+        const flag = [0, PageFlag.INACCESSIBLE, PageFlag.HAS_CODE][random(3)];
+        const r = both(program, { mark: flag === 0 ? [] : [[page, 0x1000, flag]] });
+        const what = `round ${round}: esi ${esi.toString(16)} edi ${edi.toString(16)} ecx ${count}`
+            + ` page ${page.toString(16)} flag ${flag}`
+            + ` body ${body.map(x=>x.toString(16)).join(' ')}`;
+        if (r.exit.kind === Exit.STALE || r.exit.kind === -2)
+        {
+            // Stopped past the store into code, or held before a group whose
+            // window is not clean (the host interprets it then): the interpreter, run for as
+            // many instructions, stands at the same place.
+            const model = createTestMachine();
+            model.write(CODE, program);
+            model.setReg('esp', STACK);
+            const state = blockState({ memory: model.memory, layout: model.layout });
+            state.eip = CODE;
+            state.syncIn();
+            interpret(state, r.exit.retired);
+            for (let i = 0; i < 8; i++)
+            {
+                assert.equal(r.machine.reg(REGISTERS[i]), state.reg[i], `${what}: ${REGISTERS[i]}`);
+            }
+            assert.equal(r.exit.eip, state.eip, `${what}: eip`);
+            continue;
+        }
+        for (let i = 0; i < 8; i++)
+        {
+            assert.equal(r.machine.reg(REGISTERS[i]), r.state.reg[i], `${what}: ${REGISTERS[i]}`);
+        }
+        if (r.exit.kind === Exit.FAULT)
+        {
+            assert.ok(r.fault !== null, `${what}: the interpreter faulted too`);
+            assert.equal(r.fault.eip, r.exit.eip, `${what}: the fault's address`);
+        }
+        else
+        {
+            assert.equal(r.exit.kind, Exit.HALT, what);
+            assert.equal(r.fault, null, `${what}: the interpreter did not fault`);
+        }
+        const theirs = new Uint8Array(r.model.memory.buffer, r.model.layout.ramBase + low, span);
+        assert.equal(Buffer.compare(Buffer.from(r.machine.read(low, span)), Buffer.from(theirs)), 0,
+            `${what}: the bytes`);
+    }
+});
+
+/** @param {number} value */
+function le(value){
+    return [value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24 & 255];
+}
+
 test('an MMX instruction whose memory operand faults leaves its register as before', ()=>{
     const program = [
         0x0f, 0x6f, 0x05, 0x00, 0x20, 0, 0, // movq mm0, [0x2000]

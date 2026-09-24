@@ -287,7 +287,37 @@ loads alone are not grouped (the window costs what their own tests do); three ac
 with a store, are. The emitter's own calls are held to the plan: an access it did not foresee,
 or a store it took for a load, is an error in translating rather than a test left out. A copy
 loop through one base 188 -> 113 ms (the no-test ceiling 107), a push/pop loop 245 -> 171 (at
-the ceiling), an indexed walk 161 -> 137 (ceiling 120). The null page is *not* marked, because the emulator lets a program read
+the ceiling), an indexed walk 161 -> 137 (ceiling 120). That leave is *held* (its exit carries
+vector `HELD`): an untranslated exit with budget left goes through the epilogue's hash probe,
+which found this very address's entry and tail-called it, whose check left again with nothing
+retired -- a loop spinning for ever with the budget untouched the moment its window met a page it
+could not use. Held, it returns to the host, which interprets the instruction.
+
+A block that loops onto itself is taken further (`planLoop` and `emitStreamWindow` in
+`emit/memory.js`, `emitHoistedLoop` in `emit/region.js`): when the registers its accesses go
+off change only by push, pop and constant add, sub, inc or dec, each access group moves by a
+fixed stride a turn -- a stream. The turns a stride of at most 4096 bytes takes span at most
+three pages beyond the window, so before the turns the pages every stream reaches in them are
+tested once -- against inaccessible, and against code at the page for a stream with a store --
+and those turns run a second copy of the body with no test on the streams' accesses; the
+back edge counts the turns down and goes back to the test when they are spent. A test that
+finds a page not clean runs the checked copy (the per-block groups above) to the loop's end.
+An access off a register the block changes otherwise keeps its own test in both copies. A
+pointer walk of loads and a store (`mov`/`add`/`mov`, `add esi, 12`) 125 -> 79 ms, an SSE
+dot over an array (`movups`, `mulps`, `add esi, 16`) 157 -> 110, CPU time, best of five
+interleaved runs on a loaded machine; the no-test ceiling was about two thirds of the checked
+figure.
+
+A `rep movs` or `rep stos` with DF clear moves, per turn of its loop, every element that lies
+wholly on the current page of each pointer, as far as ecx and the budget go, at once: one test
+of those pages (inaccessible, and code for the destination), then one `memory.copy` or
+`memory.fill` -- or a word loop for a value that is not one byte repeated -- with ecx, the
+pointers, the count and the budget moved by the whole run. DF set, an element across a page,
+a flagged page, and a copy whose destination lies just ahead of its source (which the
+processor fills with the source's first elements, where a memmove does not) take the
+per-element path. `rep movsd` 5.2 -> 0.7 ns an element, `rep stosd` 2.9 -> 0.6.
+
+The null page is *not* marked, because the emulator lets a program read
 address 0 today and the two engines must agree; marking it, and projecting the memory
 layer's read-only regions into the table, is a policy switch this layer's owner throws when
 the emulator is no longer the reference for it.
