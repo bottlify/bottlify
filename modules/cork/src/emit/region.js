@@ -1291,7 +1291,7 @@ export class RegionEmitter {
         const { b } = this;
         const hint = this.hint;
         const last = block.instructions[block.instructions.length - 1];
-        const turns = this.localTypes.length + 2;
+        const turns = this.localTypes.length + STATE_PARAMS;
         this.localTypes.push(ValType.i32);
         const depth = this.controls.length;
         this.loops++;
