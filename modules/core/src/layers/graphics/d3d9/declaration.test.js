@@ -199,7 +199,7 @@ test('fixed function reads a declaration by its offsets and refuses what it cann
         element(D3DDECLUSAGE.BLENDWEIGHT, D3DDECLTYPE.FLOAT1, 28)] }), null, 'blend weights');
     assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [position,
         element(D3DDECLUSAGE.TEXCOORD, D3DDECLTYPE.FLOAT2, 28, { index: 1 })] }), null,
-        'a gap in the sets');
+    'a gap in the sets');
     assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [position,
         element(D3DDECLUSAGE.COLOR, D3DDECLTYPE.UBYTE4N, 28)] }), null, 'a colour in R, G, B, A');
     assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [
