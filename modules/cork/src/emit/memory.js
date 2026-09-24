@@ -56,6 +56,10 @@ const noted = new WeakMap();
  */
 export function checkAccess(e, size, { counted = true, store = false } = {}){
     const { b } = e;
+    if (planned(e, size, store))
+    {
+        return;
+    }
     const table = e.layout.tables + Tables.PAGE_FLAGS;
     const noting = store && e.layout.codePages < 0 && size <= 16;
     const bits = PageFlag.INACCESSIBLE | (noting ? PageFlag.HAS_CODE : 0);
@@ -105,6 +109,17 @@ export function noteStore(e, size){
     if (e.context.undo !== undefined)
     {
         b.localGet(Local.addr).i32const(size).call(e.context.undo);
+    }
+    const plan = e.memPlan;
+    if (plan !== null && plan.used)
+    {
+        // The group's check at its first access tested this store against
+        // code, to the granule.
+        if (!plan.store)
+        {
+            throw new Error(`memory plan: ${e.current.op} at ${e.current.eip.toString(16)} stores`);
+        }
+        return;
     }
     if (noted.get(e) === e.current)
     {
@@ -193,6 +208,380 @@ export function addCodeHitHelper(m, layout){
         .op(I32.ltU);
     b.op(I32.and);
     return m.function(type, [ValType.i32, ValType.i32], b.toBytes());
+}
+
+// --- the block's access groups ---
+//
+// Most of a block's accesses go off a register the block does not change in
+// between -- a frame through esp or ebp, a struct through one pointer, an
+// array through a base and an index -- or off an address in the instruction.
+// Such a group's accesses lie in a window known from the register values at
+// its first access, and a window of at most 4096 bytes spans at most two
+// pages, each touched by one of the accesses. So the group is checked once,
+// at its first access: both pages' flags against INACCESSIBLE, and the
+// stores' own window against code -- to the granule, through `codeHit`,
+// only when a page is flagged. A clean window leaves every access of the
+// group with no test at all. A window that would fault or note a store into
+// code leaves the region before that first access, untranslated, and the
+// interpreter runs the block's rest with a check on every access: the fault
+// is raised at its instruction and the note made at its store, as they
+// would be here. The plan is made from the decoded operands before the block
+// is emitted, and the emitter's own calls are held to it -- an access the
+// plan did not foresee, or a store it took for a load, is an error rather
+// than a check left out.
+
+const X87_OPCODE = /^(9b$|d[89a-f] )/;
+/** Integer operations whose memory destination is read and written. */
+const INT_RW = new Set([
+    'add', 'sub', 'adc', 'sbb', 'and', 'or', 'xor', 'inc', 'dec', 'not', 'neg',
+    'shl', 'shr', 'sar', 'rol', 'ror', 'rcl', 'rcr', 'shld', 'shrd',
+]);
+/** Integer operations whose memory source is read. */
+const INT_READ = new Set([
+    'mov', 'movzx', 'movsx', 'add', 'sub', 'adc', 'sbb', 'and', 'or', 'xor', 'cmp', 'test',
+    'imul', 'bsf', 'bsr', 'cvttss2si', 'cvtss2si', 'cvttsd2si', 'cvtsd2si',
+]);
+/** Integer operations that write their first operand and no other register. */
+const INT_WRITE_DST = new Set([
+    ...INT_RW, 'mov', 'movzx', 'movsx', 'imul', 'bsf', 'bsr', 'bswap',
+    'cvttss2si', 'cvtss2si', 'cvttsd2si', 'cvtsd2si', 'movmskps', 'movmskpd', 'pmovmskb',
+]);
+/** Integer operations that write no register. */
+const INT_PURE = new Set(['cmp', 'test', 'nop', 'bt']);
+const X87_LOAD = new Set([
+    'fld', 'fild', 'fadd', 'fsub', 'fsubr', 'fmul', 'fdiv', 'fdivr', 'fcom', 'fcomp',
+    'fiadd', 'fisub', 'fisubr', 'fimul', 'fidiv', 'fidivr', 'ficom', 'ficomp', 'fldcw',
+]);
+const X87_STORE = new Set(['fst', 'fstp', 'fist', 'fistp', 'fisttp', 'fnstcw', 'fnstsw']);
+const SSE_STORE = new Set([
+    'movaps', 'movups', 'movapd', 'movupd', 'movdqa', 'movdqu', 'movss', 'movsd',
+    'movlps', 'movlpd', 'movhps', 'movhpd', 'movq', 'movd', 'movntps', 'movntpd', 'movntdq',
+]);
+
+/**
+ * @typedef {{ i: number, off: number, size: number, store: boolean }} Access
+ * @typedef {{ base: number, index: number, scale: number, db: number, di: number,
+ *     first: number, list: Access[], lo: number, width: number }} Group
+ * @typedef {{ checks: Group[], access: Access | null, size: number, store: boolean,
+ *     used: boolean }} Planned
+ */
+
+/**
+ * The one access an instruction makes that a group can take, or null.
+ *
+ * @param {import('../decode/decoder.js').Instruction} ins
+ * @returns {{ operand: import('../decode/decoder.js').Operand | null, size: number,
+ *     store: boolean, stack: number } | null}
+ *     `stack`: the access's offset from esp for a push or pop, else 0
+ */
+function accessOf(ins){
+    const { op, operands } = ins;
+    const [dst] = operands;
+    if (op === 'push' && ins.size === 4
+        && (dst.kind === 'imm' || dst.kind === 'reg' && dst.size === 4))
+    {
+        return { operand: null, size: 4, store: true, stack: -4 };
+    }
+    if (op === 'pop' && dst.kind === 'reg' && dst.size === 4)
+    {
+        return { operand: null, size: 4, store: false, stack: 0 };
+    }
+    const at = operands.findIndex(o=>o.kind === 'mem');
+    if (at < 0 || operands.some((o, k)=>k !== at && o.kind === 'mem'))
+    {
+        return null;
+    }
+    const mem = operands[at];
+    if (mem.addressSize === 16 || mem.segment === 4 || mem.segment === 5 || ins.prefixes.rep
+        || ins.prefixes.repne || ins.prefixes.lock)
+    {
+        return null;
+    }
+    /** @param {boolean} store */
+    const access = store=>({ operand: mem, size: mem.size, store, stack: 0 });
+    if (X87_OPCODE.test(ins.opcode))
+    {
+        return X87_LOAD.has(op) ? access(false) : X87_STORE.has(op) ? access(true) : null;
+    }
+    if (operands.some(o=>o.kind === 'xmm') && !operands.some(o=>o.kind === 'mm'))
+    {
+        return at > 0 ? access(false) : SSE_STORE.has(op) ? access(true) : null;
+    }
+    if (operands.some(o=>o.kind === 'mm' || o.kind === 'xmm' || o.kind === 'seg'))
+    {
+        return null;
+    }
+    if (at === 0)
+    {
+        if ((op === 'shl' || op === 'shr' || op === 'sar') && operands[1].kind === 'imm'
+            && (/** @type {number} */ (operands[1].value) & 31) === 0)
+        {
+            // A shift by a constant zero is no instruction at all to the emitter.
+            return null;
+        }
+        if (op === 'mov' || op.startsWith('set'))
+        {
+            return access(true);
+        }
+        return INT_RW.has(op) ? access(true) : op === 'cmp' || op === 'test' ? access(false) : null;
+    }
+    return at === 1 && (INT_READ.has(op) || op.startsWith('cmov')) ? access(false) : null;
+}
+
+/**
+ * The access groups of a block's instructions, by the instruction each
+ * group is checked at and the instruction each access belongs to.
+ *
+ * @param {import('../decode/decoder.js').Instruction[]} instructions
+ * @returns {Map<number, Planned>}
+ */
+export function planBlock(instructions){
+    // Each register's version (a write it cannot follow starts a new one)
+    // and its offset from the version's value (push, pop, add/sub/inc/dec).
+    const version = new Array(8).fill(0);
+    const delta = new Array(8).fill(0);
+    /** @param {number} r */
+    const bump = r=>{
+        version[r]++;
+        delta[r] = 0;
+    };
+    /** @type {Map<string, Group>} */
+    const groups = new Map();
+    instructions.forEach((ins, i)=>{
+        const access = accessOf(ins);
+        if (access !== null)
+        {
+            const mem = access.operand;
+            const base = mem === null ? 4 : mem.base ?? -1;
+            const index = mem === null ? -1 : mem.index ?? -1;
+            const scale = mem === null ? 1 : mem.scale ?? 1;
+            const db = base >= 0 ? delta[base] : 0;
+            const di = index >= 0 ? delta[index] : 0;
+            const off = (mem === null ? access.stack : mem.disp ?? 0) + db + di * scale;
+            const key = `${base}.${base >= 0 ? version[base] : 0}.${index}.`
+                + `${index >= 0 ? version[index] : 0}.${scale}`;
+            let group = groups.get(key);
+            if (group === undefined)
+            {
+                group = { base, index, scale, db, di, first: i, list: [], lo: 0, width: 0 };
+                groups.set(key, group);
+            }
+            group.list.push({ i, off, size: access.size, store: access.store });
+        }
+        effect(ins, delta, bump);
+    });
+    /** @type {Map<number, Planned>} */
+    const plan = new Map();
+    /** @param {number} i */
+    const at = i=>{
+        let entry = plan.get(i);
+        if (entry === undefined)
+        {
+            entry = { checks: [], access: null, size: 0, store: false, used: false };
+            plan.set(i, entry);
+        }
+        return entry;
+    };
+    for (const group of groups.values())
+    {
+        // Two loads cost their own checks what the window's costs; a store
+        // among them has its code test folded in too.
+        if (group.list.length < (group.list.some(access=>access.store) ? 2 : 3))
+        {
+            continue;
+        }
+        const lo = Math.min(...group.list.map(a=>a.off));
+        const hi = Math.max(...group.list.map(a=>a.off + a.size));
+        if (hi - lo > 4096)
+        {
+            continue;
+        }
+        group.lo = lo;
+        group.width = hi - lo;
+        at(group.first).checks.push(group);
+        for (const access of group.list)
+        {
+            const entry = at(access.i);
+            entry.access = access;
+            entry.size = access.size;
+            entry.store = access.store;
+        }
+    }
+    return plan;
+}
+
+/**
+ * What an instruction does to the registers the groups follow: a push, a
+ * pop and an add, sub, inc or dec of a register by a constant move it by a
+ * known amount; a write they cannot follow starts the register afresh; an
+ * operation not known here starts every register afresh.
+ *
+ * @param {import('../decode/decoder.js').Instruction} ins
+ * @param {number[]} delta @param {(r: number) => void} bump
+ */
+function effect(ins, delta, bump){
+    const { op, operands } = ins;
+    const [dst, src] = operands;
+    const reg32 = dst?.kind === 'reg' && dst.size === 4 ? /** @type {number} */ (dst.reg) : -1;
+    if (op === 'push' && (ins.size === 4 || ins.size === 2) && dst.kind !== 'seg')
+    {
+        delta[4] -= ins.size;
+        return;
+    }
+    if (op === 'pop' && reg32 >= 0)
+    {
+        delta[4] += 4;
+        bump(reg32);
+        return;
+    }
+    if ((op === 'add' || op === 'sub') && reg32 >= 0 && src.kind === 'imm')
+    {
+        delta[reg32] += (op === 'add' ? 1 : -1) * /** @type {number} */ (src.value);
+        return;
+    }
+    if ((op === 'inc' || op === 'dec') && reg32 >= 0)
+    {
+        delta[reg32] += op === 'inc' ? 1 : -1;
+        return;
+    }
+    if (op === 'lea' && reg32 >= 0)
+    {
+        if (src.base === reg32 && (src.index ?? -1) < 0 && src.addressSize !== 16)
+        {
+            delta[reg32] += src.disp ?? 0;
+        }
+        else
+        {
+            bump(reg32);
+        }
+        return;
+    }
+    if (op === 'cdq' || op === 'cwde')
+    {
+        bump(op === 'cdq' ? 2 : 0);
+        return;
+    }
+    if (op === 'imul' && operands.length === 1)
+    {
+        // The widening form: edx:eax.
+        bump(0);
+        bump(2);
+        return;
+    }
+    const known = X87_OPCODE.test(ins.opcode) || operands.some(o=>o.kind === 'xmm')
+        || INT_WRITE_DST.has(op) || INT_PURE.has(op) || op.startsWith('set')
+        || op.startsWith('cmov') || op.startsWith('j');
+    if (!known || op === 'push' || op === 'pop')
+    {
+        for (let r = 0; r < 8; r++)
+        {
+            bump(r);
+        }
+        return;
+    }
+    if (dst?.kind === 'reg' && !INT_PURE.has(op))
+    {
+        bump(/** @type {number} */ (dst.reg));
+    }
+}
+
+/**
+ * The groups checked at the instruction about to be emitted: each window's
+ * pages tested once, and the instruction left untranslated when one would
+ * fault or a store would land in code.
+ *
+ * @param {E} e @param {Group[]} checks
+ */
+export function emitGroupChecks(e, checks){
+    const { b } = e;
+    const table = e.layout.tables + Tables.PAGE_FLAGS;
+    const flagsOf = (/** @type {number} */ offset)=>{
+        b.localGet(Local.addr);
+        if (offset !== 0)
+        {
+            b.i32const(offset).op(I32.add);
+        }
+        b.i32const(12).op(I32.shrU).load('i32_8u', { offset: table });
+    };
+    const leave = ()=>{
+        e.blockRetired--;
+        e.exitAt(e.current.eip, Exit.UNTRANSLATED);
+        e.blockRetired++;
+    };
+    for (const group of checks)
+    {
+        // The window's first byte: the registers now are their version's
+        // value moved by what the block did to them since.
+        if (group.base >= 0)
+        {
+            b.localGet(Local.reg + group.base);
+        }
+        else
+        {
+            b.i32const(0);
+        }
+        if (group.index >= 0)
+        {
+            b.localGet(Local.reg + group.index).i32const(group.scale).op(I32.mul).op(I32.add);
+        }
+        b.i32const((group.lo - group.db - group.di * group.scale) | 0).op(I32.add)
+            .localSet(Local.addr);
+        flagsOf(0);
+        flagsOf(group.width - 1);
+        b.op(I32.or).i32const(PageFlag.INACCESSIBLE).op(I32.and);
+        e.openIf('window', EMPTY);
+        leave();
+        e.close();
+        const stores = group.list.filter(access=>access.store);
+        if (stores.length === 0)
+        {
+            continue;
+        }
+        const first = Math.min(...stores.map(a=>a.off)) - group.lo;
+        const last = Math.max(...stores.map(a=>a.off + a.size)) - 1 - group.lo;
+        flagsOf(first);
+        flagsOf(last);
+        b.op(I32.or).i32const(PageFlag.HAS_CODE).op(I32.and);
+        e.openIf('windowCode', EMPTY);
+        stores.forEach((access, k)=>{
+            for (const end of access.size > 1 ? [0, access.size - 1] : [0])
+            {
+                b.localGet(Local.addr).i32const(access.off - group.lo + end).op(I32.add)
+                    .call(e.context.codeHit);
+                if (k > 0 || end > 0)
+                {
+                    b.op(I32.or);
+                }
+            }
+        });
+        e.openIf('storeCode', EMPTY);
+        leave();
+        e.close();
+        e.close();
+    }
+}
+
+/**
+ * An access the block's plan took into a group: nothing to emit, the group's
+ * check having covered it. Answers false for an access outside the plan.
+ *
+ * @param {E} e @param {number} size @param {boolean} store
+ */
+function planned(e, size, store){
+    const plan = e.memPlan;
+    if (plan === null || plan.access === null)
+    {
+        return false;
+    }
+    // The one memory operand may be read twice (comiss reads it for each
+    // flag); any access of another size is not the one planned.
+    if (size !== plan.size || (store && !plan.store))
+    {
+        throw new Error(`memory plan: ${e.current.op} at ${e.current.eip.toString(16)}`
+            + ` accesses ${size}${store ? ' (store)' : ''}, not as planned`);
+    }
+    plan.used = true;
+    return true;
 }
 
 /**

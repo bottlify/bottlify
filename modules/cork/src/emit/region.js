@@ -43,7 +43,7 @@ import {
     ARITH, I32, Kind, emitCondition, emitFlag, kindOf, widthCode,
 } from './flags.js';
 import { emitInstruction } from './integer.js';
-import { addUndoHelper, emitStaleExit } from './memory.js';
+import { addUndoHelper, emitGroupChecks, emitStaleExit, planBlock } from './memory.js';
 import { importHelpers } from './helpers.js';
 import { Tables } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
@@ -298,6 +298,12 @@ export class RegionEmitter {
         this.blockIndex = 0;
         /** Whether the current block is a wasm loop onto itself (see `emitBlock`). */
         this.selfLoop = false;
+        /**
+         * The current instruction's place in its block's access groups
+         * (`planBlock`), or null.
+         * @type {import('./memory.js').Planned | null}
+         */
+        this.memPlan = null;
         /** Whether the block's port write called the host from here and went on. */
         this.trapped = false;
         /** Blocks emitted as loops onto themselves. */
@@ -984,6 +990,9 @@ export class RegionEmitter {
             this.blockDepth = this.controls.length;
         }
         const live = deadFlagPass(block);
+        // The other executor's code table in a hybrid layout is a second
+        // thing a store is noted against: that layout checks each access.
+        const plan = this.layout.codePages < 0 ? planBlock(block.instructions) : new Map();
         for (let i = 0; i < block.instructions.length; i++)
         {
             const instruction = block.instructions[i];
@@ -995,7 +1004,19 @@ export class RegionEmitter {
             // call) has it charged; an exit *before* it uncounts it.
             this.blockRetired++;
             this.instructions++;
+            this.memPlan = plan.get(i) ?? null;
+            if (this.memPlan !== null && this.memPlan.checks.length > 0)
+            {
+                emitGroupChecks(this, this.memPlan.checks);
+            }
             const done = emitInstruction(this, instruction, flagsLive);
+            if (done && this.memPlan !== null && this.memPlan.access !== null
+                && !this.memPlan.used)
+            {
+                throw new Error(`memory plan: ${instruction.op} at ${instruction.eip.toString(16)}`
+                    + ' made no access');
+            }
+            this.memPlan = null;
             if (!done)
             {
                 this.unsupported.set(instruction.opcode,
