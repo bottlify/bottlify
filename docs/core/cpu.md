@@ -195,7 +195,12 @@ version, feature set or layout is a miss. A region with x87 instructions in it i
 with, and its entries are keyed by address and top (`entryOf(eip, x87Top)`, the top read off
 the emulator's `fpu_stack_ptr` before every turn); a region without them is entered with any
 top. A lookup that misses at an address compiled for another top queues that top for the
-next batch. A block the tracker reached with no known state (a call's return address, whose
+next batch, with a heat that grows each time the machine is found standing there, so a variant
+it keeps arriving at climbs the queue rather than waiting in the bottom bucket behind a
+loader's cold starts while its code runs interpreted. The miss histogram names such a target
+`other-top` only while a top its exits were at still has no region; once every one has, it is
+`translated since` -- those exits were the wait for the translation (a Doom 3 timedemo's 211 000
+untranslated exits read as `other-top` were mostly this), not a gap still open. A block the tracker reached with no known state (a call's return address, whose
 top the callee decides) or cut for a second top gets no entry of the caller's region: it is
 noted as a candidate, so the miss at its address forms a region of its own compiled for the
 top the machine has, instead of a partial entry that would shadow every later attempt. The
