@@ -605,6 +605,9 @@ export async function createV86Host(config){
                 counter: cpu.instruction_counter.byteOffset,
                 tables: ramBase + ramSize,
                 codePages: typeof codePagesPtr === 'function' ? codePagesPtr() >>> 0 : -1,
+                // The emulator's own handoff lookup probes the entry hash from
+                // this slot (the fork's formula), so the translator writes it so.
+                hashShift: 16,
             };
             return { ...fields, id: `v86:${Object.values(fields).join(',')}` };
         },

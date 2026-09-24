@@ -116,7 +116,7 @@ export function createDifferentialHost({ emulator, cork, engine, memory, layout 
             const view = new DataView(/** @type {WebAssembly.Memory} */ (memory).buffer);
             const base = layout.tables + engine.Tables.HASH;
             const slots = engine.Tables.HASH_SLOTS;
-            let slot = engine.slotOf(address);
+            let slot = engine.slotOf(address, layout.hashShift ?? 16);
             let at = base + slot * engine.Tables.HASH_SLOT;
             let key = view.getUint32(at, true);
             // A free slot: empty (0) or removed (all ones), as the probe reads them.

@@ -571,7 +571,12 @@ the request in `handoffUnavailable()` and the slice runs to its own boundary),
 `bottlify_page_has_code_ptr()` names the emulator's own code-page table for the translator's
 stores to test, `bottlify_handoff_hash(physical)` names the translator's entry hash so the
 slice returns at its entries rather than at its pages, and `jit_dirty_cache(address, length)`
-takes a translated store into such a page.
+takes a translated store into such a page. The hash's slot for an address is
+`(eip * 0x9e3779b1) >>> hashShift`, the layout's field: 14 on cork's own layout, so the slots
+cover all 2^18 of the hash, and 16 on the emulator's, the fork's own lookup. With 16 the slots
+began in the hash's first quarter only, and a title's hundred thousand entries filled it into
+one run of 82 000 slots that every miss -- an exit to untranslated code, an insertion -- probed
+to its end: tens of microseconds each, which ran a title's scene at 240 ns an instruction.
 
 ## 4. Limitations and divergences
 

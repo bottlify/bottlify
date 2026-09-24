@@ -85,6 +85,9 @@ export function ownLayout({ ramSize }){
         counter: 344,
         tables: ramBase + ramSize,
         codePages: -1,
+        // The entry hash's slot is the top bits of eip times the golden ratio,
+        // as many as the hash has slots for (2^18).
+        hashShift: 14,
     };
     return { ...fields, id: layoutId(fields) };
 }

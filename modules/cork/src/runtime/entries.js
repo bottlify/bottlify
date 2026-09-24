@@ -21,7 +21,7 @@ import { Tables } from './layout.js';
 const keyOf = (eip, top)=>eip * 16 + top;
 
 /** The slot an address hashes to: the formula translated code probes with. */
-export const slotOf = (/** @type {number} */ eip)=>Math.imul(eip, 0x9e3779b1) >>> 16;
+export const slotOf = (/** @type {number} */ eip, shift = 16)=>Math.imul(eip, 0x9e3779b1) >>> shift;
 
 const EMPTY = 0;
 const REMOVED = 0xffffffff;
@@ -40,10 +40,11 @@ const HASH_LOAD = Tables.HASH_SLOTS * 3 / 4;
  */
 
 /**
- * @param {{ memory?: WebAssembly.Memory, hashBase?: number }} [hash]  the memory and the
- *     offset of the entry hash in it; without them the map alone answers
+ * @param {{ memory?: WebAssembly.Memory, hashBase?: number, shift?: number }} [hash]  the
+ *     memory and the offset of the entry hash in it, and the layout's slot shift; without
+ *     them the map alone answers
  */
-export function createEntries({ memory, hashBase = -1 } = {}){
+export function createEntries({ memory, hashBase = -1, shift = 16 } = {}){
     const hashed = memory !== undefined && hashBase >= 0;
     const view = ()=>new DataView(/** @type {WebAssembly.Memory} */ (memory).buffer);
     const clear = ()=>new Uint8Array(/** @type {WebAssembly.Memory} */ (memory).buffer)
@@ -61,7 +62,7 @@ export function createEntries({ memory, hashBase = -1 } = {}){
             return -1;
         }
         const v = view();
-        let slot = slotOf(eip);
+        let slot = slotOf(eip, shift);
         for (;;)
         {
             const at = hashBase + slot * Tables.HASH_SLOT;

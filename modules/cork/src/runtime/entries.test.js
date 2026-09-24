@@ -154,3 +154,37 @@ test('forty thousand entries are all found, and a removed one is not', ()=>{
     });
     assert.equal(entries.hashed(), unique.length - Math.ceil(unique.length / 3));
 });
+
+test('a title\'s hundred thousand entries spread over the whole hash, with no long runs', ()=>{
+    // The slot is the product's top bits: with 16 of them the slots began in the first
+    // quarter of the hash only, and a title's hundred thousand entries packed it into one
+    // run that every miss scanned to its end (tens of thousands of probes a transfer).
+    const memory = new WebAssembly.Memory({
+        initial: Math.ceil(Tables.HASH_SLOTS * Tables.HASH_SLOT / 65536) + 1,
+    });
+    const entries = createEntries({ memory, hashBase: 0, shift: 14 });
+    for (let i = 0; i < 100_000; i++)
+    {
+        // Block starts of a real image: 0x401000 on, a few bytes apart.
+        entries.add(0x401000 + i * 7, ()=>0, 0, 0, 0);
+    }
+    const view = new DataView(memory.buffer);
+    let run = 0;
+    let longest = 0;
+    let last = 0;
+    for (let slot = 0; slot < Tables.HASH_SLOTS; slot++)
+    {
+        if (view.getUint32(slot * Tables.HASH_SLOT, true) !== 0)
+        {
+            run++;
+            last = slot;
+            longest = Math.max(longest, run);
+        }
+        else
+        {
+            run = 0;
+        }
+    }
+    assert.ok(last > Tables.HASH_SLOTS * 0.9, `the last slot used is ${last}`);
+    assert.ok(longest < 100, `the longest run of used slots is ${longest}`);
+});

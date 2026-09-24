@@ -107,7 +107,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** @type {number[]} table indices of dropped regions */
     const freeTable = [];
     const entries = createEntries(
-        table ? { memory, hashBase: layout.tables + Tables.HASH } : {});
+        table
+            ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16 }
+            : {});
     if (table)
     {
         imports.handoffHash?.(layout.tables + Tables.HASH - layout.ramBase);

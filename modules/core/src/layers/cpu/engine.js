@@ -35,6 +35,8 @@
  * @property {32 | 64} bits        The register width; 32 in every mode built so far.
  * @property {number} ramBase      Wasm address of guest address 0.
  * @property {number} ramSize
+ * @property {number} [hashShift]  The entry hash's slot is `(eip * 0x9e3779b1) >>> hashShift`
+ *     (16 when absent, the emulator's handoff lookup).
  * @property {number} regs         8 × i32 (eax ecx edx ebx esp ebp esi edi); 16 × i64 at 64.
  * @property {number} eip
  * @property {number} previousIp

@@ -52,7 +52,8 @@ export function createTestMachine(given = {}){
     // runtime's would.
     const table = found.tailCalls ? new WebAssembly.Table({ element: 'anyfunc', initial: 0 })
         : null;
-    const entries = createEntries(table ? { memory, hashBase: layout.tables + Tables.HASH } : {});
+    const entries = createEntries(table
+        ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16 } : {});
     // The shared helpers module, one instance per machine, over its memory.
     /** @type {any} */
     let helperInstance = null;

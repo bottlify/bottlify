@@ -470,7 +470,8 @@ function describeCork(cork, say){
     const share = cork.translatedShare ?? 0;
     say(`  cork: ${cork.regions} regions, ${cork.entries} entries, ${cork.modules} modules`
         + `, share ${(share * 100).toFixed(1)}%`
-        + ` (retired ${cork.retired ?? 0})`);
+        + ` (retired ${cork.retired ?? 0})`
+        + (cork.relinks ? `, ${cork.relinked} regions relinked in ${cork.relinks} relinks` : ''));
     say(`    volatile pages: ${cork.volatilePages ?? 0}`
         + `  invalidations: ${cork.invalidations ?? 0}`
         + `  dropped: ${cork.dropped ?? 0}`

@@ -687,7 +687,8 @@ export class RegionEmitter {
         b.localGet(Local.t0).i32const(Exit.UNTRANSLATED).op(I32.eq)
             .localGet(Local.budget).i32const(0).op(I32.gtS).op(I32.and);
         this.openIf('lookup');
-        b.localGet(Local.eip).i32const(0x9e3779b1 | 0).op(I32.mul).i32const(16).op(I32.shrU)
+        b.localGet(Local.eip).i32const(0x9e3779b1 | 0).op(I32.mul).i32const(layout.hashShift ?? 16)
+            .op(I32.shrU)
             .localSet(Local.t1);
         this.openLoop('probe');
         b.localGet(Local.t1).i32const(Tables.HASH_SLOT).op(I32.mul).i32const(base).op(I32.add)
