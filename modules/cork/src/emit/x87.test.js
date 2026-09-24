@@ -350,3 +350,11 @@ test('an empty source register faults: IE and SF, the indefinite, the mask kept'
     assert.equal(compared.st(0), 1, 'ST(0) is left as it was');
 });
 
+
+test('an emms between a push and a store empties what the block knew was held', ()=>{
+    // fldz; emms; fstp qword [DATA] -- the store underflows: the indefinite
+    // and IE, not the zero the push left before emms emptied the stack.
+    const r = run([0xd9, 0xee, 0x0f, 0x77, 0xdd, 0x1d, DATA & 255, DATA >> 8, 0, 0]);
+    assert.equal(r.u32(DATA + 4) >>> 0, 0xfff80000, 'the indefinite, stored');
+    assert.equal(r.status() & 0x41, 0x41, 'IE and SF');
+});

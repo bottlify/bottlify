@@ -422,6 +422,9 @@ function emitForm(e, instruction, flagsLive){
             }
             b.localGet(e.mmxTouchedLocal()).i32const(~MMX_HELD).op(I32.and)
                 .localSet(e.mmxTouchedLocal());
+            // What the block's x87 knew was held is empty now: the next x87
+            // instruction tests the mask again rather than skip the test.
+            /** @type {any} */ (e.x87).known = undefined;
             return true;
 
         // --- packed and scalar float arithmetic ---
