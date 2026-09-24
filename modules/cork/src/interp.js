@@ -24,6 +24,63 @@ import { PageFlag } from './runtime/pages.js';
 
 export { Fault, Unsupported, createState };
 
+/** Decoded instructions per state, by address, with the bytes they were decoded
+ * from. A hit is checked byte for byte against memory, so code rewritten in
+ * place (by the guest or the host) is decoded again without any invalidation;
+ * the check is a few byte reads where a decode builds the whole record.
+ * @type {WeakMap<object, Map<number, { decoded: import('./decode/decoder.js').Instruction,
+ *     bytes: Uint8Array }>>} */
+const decodedBy = new WeakMap();
+// ponytail: cleared whole when full; an LRU if a title's cold set churns it.
+const DECODED_CAP = 1 << 16;
+
+/**
+ * @param {import('./ir.js').EvalState} state
+ * @returns {import('./decode/decoder.js').Instruction | import('./decode/decoder.js').Refusal}
+ */
+function decodeCached(state){
+    const { memory, eip } = state;
+    let cache = decodedBy.get(state);
+    if (cache === undefined)
+    {
+        cache = new Map();
+        decodedBy.set(state, cache);
+    }
+    const hit = cache.get(eip);
+    if (hit !== undefined)
+    {
+        const { bytes } = hit;
+        let same = true;
+        for (let i = 0; i < bytes.length; i++)
+        {
+            if (memory.read(eip + i, 1) !== bytes[i])
+            {
+                same = false;
+                break;
+            }
+        }
+        if (same)
+        {
+            return hit.decoded;
+        }
+    }
+    const decoded = decode(address=>memory.read(address, 1), eip);
+    if (!('refused' in decoded))
+    {
+        if (cache.size >= DECODED_CAP)
+        {
+            cache.clear();
+        }
+        const bytes = new Uint8Array(decoded.length);
+        for (let i = 0; i < bytes.length; i++)
+        {
+            bytes[i] = memory.read(eip + i, 1);
+        }
+        cache.set(eip, { decoded, bytes });
+    }
+    return decoded;
+}
+
 /**
  * Runs instructions from `state.eip` until the budget is spent or the machine
  * halts, answering how many were retired.
@@ -55,7 +112,7 @@ export function interpret(state, maxInstructions = 1, options = {}){
             break;
         }
         first = false;
-        const decoded = decode(address=>state.memory.read(address, 1), state.eip);
+        const decoded = decodeCached(state);
         if ('refused' in decoded)
         {
             throw new Unsupported(decoded.opcode, decoded.eip);

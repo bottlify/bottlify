@@ -56,6 +56,19 @@ test('the interpreter runs integer instructions and halts', ()=>{
     assert.equal(m.state.halted, true);
 });
 
+test('code rewritten in place is decoded again, not answered from the cache', ()=>{
+    // mov eax, 5; hlt -- run, then the immediate rewritten to 9 and run again.
+    const m = machine();
+    m.ram.set([0xb8, 5, 0, 0, 0, 0xf4], 0x1000);
+    interpret(m.state, 100);
+    assert.equal(m.state.reg[0], 5);
+    m.ram[0x1001] = 9;
+    m.state.eip = 0x1000;
+    m.state.halted = false;
+    interpret(m.state, 100);
+    assert.equal(m.state.reg[0], 9);
+});
+
 test('a budget bounds a loop', ()=>{
     // mov ecx, 4; L: dec ecx; jnz L; hlt
     const m = machine();
