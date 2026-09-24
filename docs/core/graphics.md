@@ -367,8 +367,10 @@ still the state beside the textures keeps the number it was given -- a program t
 texture before every draw pays for a lookup of that number and the bindings, not for the whole
 state. The render and stage states are named as words by their hash (compared in full on a hit),
 and the targets, transforms, material, lights and viewport are named once per change of the objects
-the device holds, which it replaces rather than writes into. The Direct3D 7 and 9 devices do not
-publish either counter yet and are prepared for on every draw, as before.
+the device holds, which it replaces rather than writes into. The Direct3D 9 device publishes both
+counters the same way: every setter goes through its one `setState`, and a state block applied, a
+reset and a new target or depth surface raise them as well; a value set again that is already there
+changes nothing. The Direct3D 7 device does not publish them yet and is prepared for on every draw.
 `diagnostics().prepared` counts what was built and what was reused.
 
 **Direct3D 9** (`src/layers/graphics/d3d9/`). The device advertises vertex and pixel shader model
@@ -394,7 +396,8 @@ standing in (`depth-stand-in`), kept per depth surface and size. `stateblock.js`
 records what is set between `BeginStateBlock` and `EndStateBlock` -- and in this version a state set
 while recording goes into the block, not the device. `declaration.js` converts between vertex
 declarations and FVF codes; a fixed-function draw through a declaration is drawn when it describes
-an FVF and reported once when it does not.
+an FVF and, when it does not, dropped -- counted in `skipped.layout` and reported once -- rather
+than raised into the program's thread.
 
 **Direct3D 10 and DXGI** (`src/layers/graphics/d3d10/`). `dxbc.js` opens the container (`ISGN`,
 `OSGN`, `SHDR`; older token streams answer `E_INVALIDARG`); `sm4.js` decodes the token stream with

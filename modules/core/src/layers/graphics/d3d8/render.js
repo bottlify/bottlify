@@ -41,7 +41,7 @@ import {
     D3DTSS, D3DUSAGE, D3DZB, D3D_OK, FORMAT_INFO, argumentsRead, dwordToFloat, isCompressed,
     surfaceBytes,
 } from './constants.js';
-import { FVF, decodeFvf } from '../webgpu/internal/vertexformat.js';
+import { FVF, POSITION_MASK, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { levelExtent } from '../d3d9/resources.js';
 import { resourceId } from '../webgpu/internal/bindings.js';
 import {
@@ -1597,6 +1597,11 @@ export function createRenderer(options){
             texture: 0,
             /** A draw through shaders this renderer could not build a pipeline for. */
             program: 0,
+            /**
+             * A fixed-function draw whose vertex format names no position: a
+             * declaration the fixed-function path cannot read as a format.
+             */
+            layout: 0,
         },
         /** Draws that ran through a program rather than the fixed-function pipeline. */
         programmable: 0,
@@ -2574,6 +2579,18 @@ export function createRenderer(options){
             divergence('Direct3D 8',
                 'a texture stage cascade was cut short and the draw ran untextured'
                 + ` from that stage on: ${line}`);
+        }
+    };
+
+    let layoutReported = false;
+    /** Says once that fixed-function draws were dropped for want of a format. */
+    const reportLayout = ()=>{
+        if (divergence && !layoutReported)
+        {
+            layoutReported = true;
+            divergence('Direct3D 8',
+                'a fixed-function draw over a vertex declaration no vertex format spells'
+                + ' is not drawn');
         }
     };
 
@@ -4056,6 +4073,17 @@ export function createRenderer(options){
             preparedCache.set(key, cached);
             preparedState = cached;
             return reuse(model, cached);
+        }
+        if ((processing.fvf & POSITION_MASK) === 0)
+        {
+            // Direct3D draws the fixed-function pipeline from any declaration;
+            // this one reads a vertex only through a format, and a declaration
+            // that no format spells arrives here as none. The draw is dropped
+            // and counted -- the program was already told it succeeded -- and
+            // never raised into the program's thread.
+            skip('layout');
+            reportLayout();
+            return null;
         }
         const layout = decodeFvf(processing.fvf);
         if (stride !== layout.stride)
