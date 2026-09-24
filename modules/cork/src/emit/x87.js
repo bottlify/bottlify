@@ -776,7 +776,12 @@ export function emitX87(e, instruction, flagsLive){
         // The mantissa rounded to 24 bits, to nearest even, in the double's
         // own bits: the exponent range stays the extended one, which a demote
         // would not keep. Infinity and NaN pass through.
+        // Only under single precision: a branch the common control words
+        // never take, where computing both and selecting paid the rounding on
+        // every operation.
         b.localSet(x.temp3);
+        b.localGet(Local.x87Control).i32const(0x300).op(I32.and).op(I32.eqz);
+        e.openIf('single', EMPTY);
         b.localGet(x.temp3).op(I64.reinterpretF64).localSet(Local.t64);
         b.localGet(Local.t64).localGet(Local.t64).i64const(29n).op(I64.shrU).i64const(1n)
             .op(I64.and).op(I64.add).i64const(0x0fffffffn).op(I64.add)
@@ -784,10 +789,9 @@ export function emitX87(e, instruction, flagsLive){
         b.localGet(Local.t64).localGet(Local.t64b);
         b.localGet(Local.t64).i64const(0x7ff0000000000000n).op(I64.and)
             .i64const(0x7ff0000000000000n).op(I64.eq);
-        b.select().op(F64.reinterpretI64);
+        b.select().op(F64.reinterpretI64).localSet(x.temp3);
+        e.close();
         b.localGet(x.temp3);
-        b.localGet(Local.x87Control).i32const(0x300).op(I32.and).op(I32.eqz);
-        b.select();
     };
     /** Rounds the f64 on the stack by the control word's rounding control. */
     const byRounding = ()=>{
@@ -816,15 +820,20 @@ export function emitX87(e, instruction, flagsLive){
         {
             return;
         }
+        // Only when the result is a NaN at all: the common path is one compare.
         b.localSet(x.temp3);
+        b.localGet(x.temp3).localGet(x.temp3).op(F64.ne);
+        e.openIf('nan', EMPTY);
         b.localGet(x.temp3).f64const(-1).op(F64.copysign);
         b.localGet(x.temp3);
-        b.localGet(x.temp3).localGet(x.temp3).op(F64.ne);
+        b.i32const(1);
         for (const input of inputs)
         {
             b.localGet(input).localGet(input).op(F64.eq).op(I32.and);
         }
-        b.select();
+        b.select().localSet(x.temp3);
+        e.close();
+        b.localGet(x.temp3);
     };
 
     switch (op)
@@ -1306,11 +1315,15 @@ export function emitX87(e, instruction, flagsLive){
                 setStatus(Status.ZE);
                 e.close();
             }
+            // The result a NaN first -- one compare on the common path -- and
+            // only then whether the inputs were not.
             b.localGet(st(target)).localGet(st(target)).op(F64.ne);
-            b.localGet(x.temp).localGet(x.temp).op(F64.eq).op(I32.and);
+            e.openIf('nan', EMPTY);
+            b.localGet(x.temp).localGet(x.temp).op(F64.eq);
             b.localGet(x.temp2).localGet(x.temp2).op(F64.eq).op(I32.and);
             e.openIf('invalid', EMPTY);
             setStatus(Status.IE);
+            e.close();
             e.close();
             e.close();
             dirty(target);
@@ -1586,23 +1599,29 @@ function loadFloat(e, operand){
     }
     if (operand.size === 4)
     {
+        // All-ones exponent with the quiet bit clear first (an infinity or a
+        // signalling NaN), one compare on the common path; the fraction after.
         b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase }).localSet(Local.t2);
-        b.localGet(Local.t2).i32const(0x7fffffff).op(I32.and).i32const(0x7f800000).op(I32.gtU);
-        b.localGet(Local.t2).i32const(0x400000).op(I32.and).op(I32.eqz).op(I32.and);
+        b.localGet(Local.t2).i32const(0x7fc00000).op(I32.and).i32const(0x7f800000).op(I32.eq);
         e.openIf('signalling', EMPTY);
+        b.localGet(Local.t2).i32const(0x3fffff).op(I32.and);
+        e.openIf('nan', EMPTY);
         b.localGet(Local.x87Status).i32const(Status.IE).op(I32.or).localSet(Local.x87Status);
         b.localGet(Local.t2).i32const(0x400000).op(I32.or).localSet(Local.t2);
+        e.close();
         e.close();
         b.localGet(Local.t2).op(0xbe).op(F64.promoteF32); // f32.reinterpret_i32
         return;
     }
     b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase }).localSet(Local.t64);
-    b.localGet(Local.t64).i64const(0x7fffffffffffffffn).op(I64.and)
-        .i64const(0x7ff0000000000000n).op(I64.gtS);
-    b.localGet(Local.t64).i64const(0x0008000000000000n).op(I64.and).op(I64.eqz).op(I32.and);
+    b.localGet(Local.t64).i64const(0x7ff8000000000000n).op(I64.and)
+        .i64const(0x7ff0000000000000n).op(I64.eq);
     e.openIf('signalling', EMPTY);
+    b.localGet(Local.t64).i64const(0x0007ffffffffffffn).op(I64.and).i64const(0n).op(I64.ne);
+    e.openIf('nan', EMPTY);
     b.localGet(Local.x87Status).i32const(Status.IE).op(I32.or).localSet(Local.x87Status);
     b.localGet(Local.t64).i64const(0x0008000000000000n).op(I64.or).localSet(Local.t64);
+    e.close();
     e.close();
     b.localGet(Local.t64).op(F64.reinterpretI64);
 }
