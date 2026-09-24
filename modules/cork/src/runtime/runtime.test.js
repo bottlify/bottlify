@@ -689,3 +689,24 @@ test('a batch the worker forms from a copy of its pages runs as the one formed h
     assert.equal(exit.retired, 1 + 2 * 1000 + 1);
     await m.runtime.flush();
 });
+
+test('a region loads and stores only the registers it names, and a register written on one'
+    + ' path keeps its value on the other', async()=>{
+    const m = machine();
+    // test ecx, ecx; jz skip; mov eax, 5; skip: hlt
+    m.write(CODE, [0x85, 0xc9, 0x74, 0x05, 0xb8, 0x05, 0, 0, 0, 0xf4]);
+    m.runtime.noteHot(CODE);
+    m.runtime.noteHot(CODE);
+    await m.runtime.translatePending();
+    const entry = m.runtime.entryOf(CODE);
+    assert.ok(entry >= 0);
+    m.setReg(0, 0x1234);
+    m.setReg(1, 0);
+    m.setReg(3, 0xbeef);
+    assert.equal(m.runtime.run(entry, 100).kind, 'halt');
+    assert.equal(m.reg(0), 0x1234, 'eax, written only on the path not taken, is what it was');
+    assert.equal(m.reg(3), 0xbeef, 'ebx, not named at all, is untouched');
+    m.setReg(1, 1);
+    assert.equal(m.runtime.run(entry, 100).kind, 'halt');
+    assert.equal(m.reg(0), 5, 'and the path that writes it stores it');
+});
