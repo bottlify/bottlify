@@ -359,8 +359,16 @@ the block of uniforms all but the two fields the world transform reaches. The wo
 the one state the counter deliberately ignores, because it moves between most draws of a frame;
 whoever reads the counter therefore owes the world matrix a fresh read on every draw, and nothing
 else derived from it may be kept. A texture whose bytes the program rewrites raises a counter of
-its own, so the upload owed to it still happens inside the next draw that samples it. The Direct3D
-7 and 9 devices do not publish the counter yet and are prepared for on every draw, as before.
+its own, so the upload owed to it still happens inside the next draw that samples it. When the
+counter has moved, the preparation is looked up by the state's values among those the frame has
+built. That name is made in two parts so that the common changes stay cheap: the device also
+publishes `stateVersionBesideTextures`, which a texture binding does not raise, and while it holds
+still the state beside the textures keeps the number it was given -- a program that binds a new
+texture before every draw pays for a lookup of that number and the bindings, not for the whole
+state. The render and stage states are named as words by their hash (compared in full on a hit),
+and the targets, transforms, material, lights and viewport are named once per change of the objects
+the device holds, which it replaces rather than writes into. The Direct3D 7 and 9 devices do not
+publish either counter yet and are prepared for on every draw, as before.
 `diagnostics().prepared` counts what was built and what was reused.
 
 **Direct3D 9** (`src/layers/graphics/d3d9/`). The device advertises vertex and pixel shader model

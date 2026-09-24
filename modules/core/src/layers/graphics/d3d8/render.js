@@ -960,6 +960,10 @@ export function eyePosition(view){
  *     most draws, and a counter it raised would never hold still -- so whoever
  *     reads this owes the world matrix a fresh read on every draw. A device
  *     that does not offer it is prepared for on every draw, as before.
+ * @property {number} [stateVersionBesideTextures]
+ *     Raised by every change `drawStateVersion` counts except a texture
+ *     binding, so the part of a preparation's key that bindings do not reach is
+ *     built once per such change rather than once per draw.
  * @property {Material} material
  * @property {any} backBuffer                                What Present shows.
  * @property {{ vertexShader: number, fvf: number, pixelShader: number,
@@ -3725,45 +3729,45 @@ export function createRenderer(options){
     };
 
     /**
-     * A stable name for the device state a preparation is built from.
+     * The targets and their formats, the transforms beside the world ones, the
+     * material, the enabled lights and the viewport, as a number: equal numbers
+     * are equal values. Printing their floats is most of what naming a state
+     * costs, and a program that flips a render state between draws changes
+     * none of them; so, for a device that replaces these objects rather than
+     * writing into them (one that offers `stateVersionBesideTextures`), the
+     * number is kept while every one of them is the same object and the lights
+     * have not changed.
      *
-     * The device raises `drawStateVersion` on every change, but a counter cannot
-     * name a state that comes back: two draws alternating between the same two
-     * states raise it twice per pair, so a one-entry cache keyed on it misses on
-     * every draw. This is the state itself -- the values, not the fact that they
-     * changed -- so a preparation can be kept per distinct state the frame draws
-     * with. The world transform is the one state left out, because it moves
-     * between most draws and the block is written afresh from it on every one.
-     *
-     * Surface identity is part of the key because a Reset rebuilds the implicit
+     * Surface identity is part of it because a Reset rebuilds the implicit
      * surfaces: two states that read alike across one are not the same
      * preparation, because the views they hold are of different things.
      *
      * @param {RenderModel} model
-     * @param {{ fvf: number }} processing
-     * @param {number} stride
-     * @param {string} topology
-     * @returns {string}
+     * @returns {number}
      */
-    const preparationKeyOf = (model, processing, stride, topology)=>{
-        /** @type {(string | number)[]} */
-        const parts = [processing.fvf, stride, topology];
-        const formats = formatsOf(model);
-        parts.push(formats.targetFormat, formats.targetHasAlpha ? 1 : 0,
-            formats.depthFormat ?? '-');
-        parts.push(surfaceIdOf(surfaceFor(model.renderTarget)));
-        parts.push(model.depthStencil ? surfaceIdOf(surfaceFor(model.depthStencil)) : '-');
-        for (const [state, value] of model.renderStates)
+    const slowStateOf = model=>{
+        const replaces = model.stateVersionBesideTextures !== undefined
+            && model.lightsVersion !== undefined;
+        /** @type {unknown[]} */
+        const sources = [model.renderTarget, model.depthStencil, model.material, model.viewport,
+            model.lightsVersion];
+        for (const [type, matrix] of model.transforms)
         {
-            parts.push(state, value);
-        }
-        for (let stage = 0; stage < STAGE_COUNT; stage++)
-        {
-            for (const [state, value] of model.stageStates(stage))
+            if (type < D3DTS.WORLD || type > D3DTS.WORLD_LAST)
             {
-                parts.push(stage, state, value);
+                sources.push(type, matrix);
             }
         }
+        if (replaces && sources.length === floatSources.length
+            && sources.every((source, index)=>source === floatSources[index]))
+        {
+            return slowNumber;
+        }
+        const formats = formatsOf(model);
+        /** @type {(string | number)[]} */
+        const parts = [formats.targetFormat, formats.targetHasAlpha ? 1 : 0,
+            formats.depthFormat ?? '-', surfaceIdOf(surfaceFor(model.renderTarget)),
+            model.depthStencil ? surfaceIdOf(surfaceFor(model.depthStencil)) : '-'];
         for (const [type, matrix] of model.transforms)
         {
             if (type >= D3DTS.WORLD && type <= D3DTS.WORLD_LAST)
@@ -3792,13 +3796,169 @@ export function createRenderer(options){
         parts.push(model.viewport.rect.x, model.viewport.rect.y,
             model.viewport.rect.width, model.viewport.rect.height,
             ...model.viewport.offset, ...model.viewport.scale);
+        const text = parts.join('|');
+        let number = slowNumbers.get(text);
+        if (number === undefined)
+        {
+            if (slowNumbers.size >= STATE_NUMBERS_LIMIT)
+            {
+                slowNumbers.clear();
+            }
+            number = nextStateNumber++;
+            slowNumbers.set(text, number);
+        }
+        slowNumber = number;
+        floatSources = replaces ? sources : [];
+        return slowNumber;
+    };
+    /** @type {Map<string, number>} */
+    const slowNumbers = new Map();
+    let slowNumber = -1;
+    /** @type {unknown[]} */
+    let floatSources = [];
+    /**
+     * Numbers name states for as long as the renderer lives and are never
+     * reused, so a key made before a table was cleared cannot name a different
+     * state after it.
+     */
+    let nextStateNumber = 0;
+    const STATE_NUMBERS_LIMIT = 1024;
+
+    /**
+     * A stable number for the device state a preparation is built from: equal
+     * numbers are equal values.
+     *
+     * The device raises `drawStateVersion` on every change, but a counter cannot
+     * name a state that comes back: two draws alternating between the same two
+     * states raise it twice per pair, so a one-entry cache keyed on it misses on
+     * every draw. This is the state itself -- the values, not the fact that they
+     * changed -- so a preparation can be kept per distinct state the frame draws
+     * with. The world transform is the one state left out, because it moves
+     * between most draws and the block is written afresh from it on every one.
+     *
+     * The render and stage states are laid out as words and looked up by
+     * their hash, with no string built: a program that flips one render state
+     * between draws names a state on every draw. Texture bindings and the
+     * draw's own shape are not in it: see `preparationKeyOf`, which adds them.
+     *
+     * @param {RenderModel} model
+     * @param {{ fvf: number }} processing
+     * @returns {number}
+     */
+    const stateNumberOf = (model, processing)=>{
+        let at = 0;
+        /** @param {number} value */
+        const put = value=>{
+            if (at === stateScratch.length)
+            {
+                const grown = new Int32Array(stateScratch.length * 2);
+                grown.set(stateScratch);
+                stateScratch = grown;
+            }
+            stateScratch[at++] = value;
+        };
+        put(slowStateOf(model));
+        put(processing.fvf);
+        put(model.renderStates.size);
+        for (const [state, value] of model.renderStates)
+        {
+            put(state);
+            put(value);
+        }
+        for (let stage = 0; stage < STAGE_COUNT; stage++)
+        {
+            const states = model.stageStates(stage);
+            put(states.size);
+            for (const [state, value] of states)
+            {
+                put(state);
+                put(value);
+            }
+        }
+        // FNV-1a over the words; a hit is compared in full, so a collision
+        // costs a comparison and never names two states alike.
+        let hash = 0x811c9dc5;
+        for (let index = 0; index < at; index++)
+        {
+            hash = Math.imul(hash ^ stateScratch[index], 0x01000193);
+        }
+        const bucket = intStates.get(hash);
+        if (bucket !== undefined)
+        {
+            for (const entry of bucket)
+            {
+                if (entry.values.length === at && sameWords(entry.values, stateScratch))
+                {
+                    return entry.number;
+                }
+            }
+        }
+        if (intStateCount >= STATE_NUMBERS_LIMIT)
+        {
+            intStates.clear();
+            intStateCount = 0;
+        }
+        const entry = { values: stateScratch.slice(0, at), number: nextStateNumber++ };
+        if (bucket !== undefined && intStates.has(hash))
+        {
+            bucket.push(entry);
+        }
+        else
+        {
+            intStates.set(hash, [entry]);
+        }
+        intStateCount++;
+        return entry.number;
+    };
+
+    /** @param {Int32Array} stored @param {Int32Array} scratch @returns {boolean} */
+    const sameWords = (stored, scratch)=>{
+        for (let index = 0; index < stored.length; index++)
+        {
+            if (stored[index] !== scratch[index])
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    let stateScratch = new Int32Array(2048);
+    /** @type {Map<number, { values: Int32Array, number: number }[]>} */
+    const intStates = new Map();
+    let intStateCount = 0;
+    let stateKey = '';
+    /** @type {number | undefined} */
+    let stateKeyVersion;
+
+    /**
+     * The whole key: the state beside textures, kept while
+     * `stateVersionBesideTextures` holds still -- a program that binds a new
+     * texture before most draws changes nothing else between them -- then the
+     * draw's own shape and every stage's texture with the generation of its
+     * bytes, which change without the device hearing of it.
+     *
+     * @param {RenderModel} model
+     * @param {{ fvf: number }} processing
+     * @param {number} stride
+     * @param {string} topology
+     * @returns {string}
+     */
+    const preparationKeyOf = (model, processing, stride, topology)=>{
+        const version = model.stateVersionBesideTextures;
+        if (version === undefined || version !== stateKeyVersion)
+        {
+            stateKey = `s${stateNumberOf(model, processing)}`;
+            stateKeyVersion = version;
+        }
+        let key = `${stateKey}|${stride}|${topology}`;
         for (let stage = 0; stage < STAGE_COUNT; stage++)
         {
             const texture = model.textures.get(stage);
             const held = texture ? textures.get(texture) : null;
-            parts.push(held ? `${held.id}:${held.soil}` : '-');
+            key += held ? `|${held.id}:${held.soil}` : '|-';
         }
-        return parts.join('|');
+        return key;
     };
 
     /**

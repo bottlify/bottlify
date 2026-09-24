@@ -2717,6 +2717,65 @@ test('recorded: two draws alternating between two states prepare once each', asy
     [...Array(DRAWS).keys()].map(index=>Math.fround((index % 2) / 255)));
 });
 
+test('recorded: a texture bound before each draw is served from its own preparation', async()=>{
+    // Recorded commands. The shape of a terrain or a water surface: a new
+    // texture before each draw and nothing else changed, so the rest of the
+    // state is named once and each draw still binds the texture it asked for.
+    const DRAWS = 40;
+    const h = harness();
+    const { device } = h;
+    const white = Uint8Array.from({ length: 16 }, ()=>255);
+    const textures = [0, 1, 2].map(()=>textureFrom(h, 2, 2, D3DFMT.A8R8G8B8, white));
+    selectTexture(device);
+    const geometry = quad([0, 0, 4, 4], argb(255, 255, 255), true);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+    for (let index = 0; index < DRAWS; index++)
+    {
+        assert.equal(device.SetTexture(0, textures[index % 3]), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2, geometry, 28), D3D_OK);
+    }
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    assert.deepEqual(device.diagnostics().prepared, { built: 3, reused: DRAWS - 3 });
+    const views = device.diagnostics().lastFrame
+        .filter((/** @type {any} */ command)=>command.kind === 'draw')
+        .map((/** @type {any} */ command)=>command.stageBindings[0].view);
+    assert.equal(new Set(views).size, 3);
+    views.forEach((/** @type {any} */ view, /** @type {number} */ index)=>{
+        assert.equal(view, views[index % 3], `draw ${index} sampled another texture`);
+    });
+});
+
+test('recorded: a view transform changed and set back is two preparations, not three', async()=>{
+    // Recorded commands. The transforms beside the world one are part of the
+    // state's name even when no string of them is rebuilt: a new matrix is a
+    // new state, and the old matrix set again is the old state.
+    const h = harness();
+    const { device } = h;
+    const geometry = quad([0, 0, 4, 4], argb(255, 0, 0));
+    const shifted = Float32Array.from(IDENTITY);
+    shifted[13] = 2;
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF.XYZ | FVF.DIFFUSE), D3D_OK);
+    for (const view of [IDENTITY, shifted, IDENTITY, shifted])
+    {
+        assert.equal(device.SetTransform(D3DTS.VIEW, view), D3D_OK);
+        assert.equal(device.SetRenderState(D3DRS.ALPHAREF, 1), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2, geometry, 16), D3D_OK);
+        assert.equal(device.SetRenderState(D3DRS.ALPHAREF, 0), D3D_OK);
+    }
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    assert.deepEqual(device.diagnostics().prepared, { built: 2, reused: 2 });
+    const translations = device.diagnostics().lastFrame
+        .filter((/** @type {any} */ command)=>command.kind === 'draw')
+        .map((/** @type {any} */ command)=>command.uniforms[UNIFORM_AT.worldViewProjection + 13]);
+    assert.deepEqual(translations, [0, 2, 0, 2]);
+});
+
 test('fog: the table mode is the one that runs when it is set, else the vertex mode', ()=>{
     /** @param {Record<number, number>} states @returns {any} */
     const modelOf = states=>({
