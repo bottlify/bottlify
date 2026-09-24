@@ -40,6 +40,7 @@ const DT_CALCRECT = 0x0400;
 const DT_NOPREFIX = 0x0800;
 
 /** RedrawWindow's flags, the ones with an effect on an update rectangle. */
+const RDW_ALLCHILDREN = 0x0080;
 const RDW_INVALIDATE = 0x0001;
 const RDW_ERASE = 0x0004;
 const RDW_VALIDATE = 0x0008;
@@ -59,6 +60,9 @@ const ESTIMATED_LINE_HEIGHT = 16;
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(region: number) => Rect | null} [regionBox]
+ *           The rectangle a region object holds, null for a handle that is not
+ *           one: gdi32's, reached the same way `setRegion` is.
  * @property {(region: number, rect: any) => void} [setRegion]
  *           Fills in a region object the caller owns. It belongs to gdi32's
  *           table, which this layer cannot reach, so it arrives as a service or
@@ -244,7 +248,6 @@ export function layoutText(text, rect, format, metrics){
  * @param {Object} options
  * @param {PaintHost} options.host
  * @param {(hwnd: number) => any | null} options.live  A window, if it still is one.
- * @param {any} options.queue
  * @param {number} options.WM_PAINT
  * @param {{ clientSize: (record: any) => { width: number, height: number },
  *     clientRect: (record: any) => Rect, windowRect: (record: any) => Rect,
@@ -256,9 +259,12 @@ export function layoutText(text, rect, format, metrics){
  *        A window's update area grew. Whoever keeps the others in order
  *        marks the ones that now have to repaint after it.
  * @param {() => void} options.painted   Something reached the screen.
+ * @param {(record: any) => any[]} [options.descendants]
+ *        A window's descendants, parents before their children: the order
+ *        RDW_ALLCHILDREN paints them in.
  */
 export function createPaintFunctions(options){
-    const { host, live, queue, WM_PAINT, geometry, send, invalidated, painted } = options;
+    const { host, live, WM_PAINT, geometry, send, invalidated, painted, descendants } = options;
     let iconDivergenceSaid = false;
 
     /** @param {any} record @returns {Rect} */
@@ -277,6 +283,76 @@ export function createPaintFunctions(options){
         record.erase = record.erase || erase;
         invalidated(record);
     };
+
+    /**
+     * What is left of an update rectangle once `taken` is validated out of
+     * it. Exact when the result is still a rectangle -- nothing left, or a
+     * band cut off one side; when the cut would leave an L or a hole, the
+     * rectangle is kept whole, because repainting more than asked is a cost
+     * and repainting less is a hole.
+     *
+     * @param {Rect} dirty @param {Rect} taken
+     * @returns {Rect | null}
+     */
+    const subtract = (dirty, taken)=>{
+        const coversX = taken.left <= dirty.left && taken.right >= dirty.right;
+        const coversY = taken.top <= dirty.top && taken.bottom >= dirty.bottom;
+        if (coversX && coversY)
+        {
+            return null;
+        }
+        if (coversX && taken.top <= dirty.top && taken.bottom > dirty.top)
+        {
+            return { ...dirty, top: taken.bottom };
+        }
+        if (coversX && taken.bottom >= dirty.bottom && taken.top < dirty.bottom)
+        {
+            return { ...dirty, bottom: taken.top };
+        }
+        if (coversY && taken.left <= dirty.left && taken.right > dirty.left)
+        {
+            return { ...dirty, left: taken.right };
+        }
+        if (coversY && taken.right >= dirty.right && taken.left < dirty.right)
+        {
+            return { ...dirty, right: taken.left };
+        }
+        return dirty;
+    };
+
+    /**
+     * Takes an area out of a window's update rectangle; the whole of it when
+     * no area is named.
+     *
+     * @param {any} record @param {Rect | null} area
+     */
+    const validate = (record, area)=>{
+        record.updateRect = record.updateRect && area ? subtract(record.updateRect, area) : null;
+    };
+
+    /**
+     * The area a region names, in the window's client coordinates: its
+     * rectangle, or the whole client area for no region -- or for one that
+     * cannot be read, since repainting more than asked is the safe side.
+     *
+     * @param {any} record @param {number} region
+     */
+    const regionArea = (record, region)=>((region >>> 0) === 0
+        ? clientArea(record)
+        : host.regionBox?.(region >>> 0) ?? clientArea(record));
+
+    /**
+     * WM_PAINT sent now, the window procedure run before the caller goes on,
+     * when the window has anything to paint: what UpdateWindow and
+     * RDW_UPDATENOW do. A procedure that paints clears the area through
+     * BeginPaint; one that does not is sent it once, not in a loop.
+     *
+     * @param {any} record
+     * @returns {number | Promise<number>}
+     */
+    const paintNow = record=>(record.updateRect
+        ? after(send(record.hwnd, WM_PAINT, 0, 0, host.callerThread?.()), ()=>1)
+        : 1);
 
     /** The DC service, or null in a build that cannot make one. */
     const contexts = ()=>host.dc?.() ?? null;
@@ -544,21 +620,20 @@ export function createPaintFunctions(options){
         /**
          * BOOL InvalidateRgn(HWND hWnd, HRGN hRgn, BOOL bErase)
          *
-         * The region is not read: this build's update area is a rectangle,
-         * and a region within the client area invalidates, at most, the
-         * client area. Repainting more than asked is a cost; repainting less
-         * is a hole.
+         * This build's update area is a rectangle, so a region invalidates
+         * its bounding rectangle -- all of what it covers, and at most a
+         * little more. A null region is the whole client area.
          */
         InvalidateRgn: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([hwnd, , erase])=>{
+            handler: ([hwnd, region, erase])=>{
                 const record = live(hwnd);
                 if (!record)
                 {
                     return 0;
                 }
-                invalidate(record, clientArea(record), (erase >>> 0) !== 0);
+                invalidate(record, regionArea(record, region), (erase >>> 0) !== 0);
                 return 1;
             },
         },
@@ -568,10 +643,10 @@ export function createPaintFunctions(options){
          *                   UINT flags)
          *
          * The two halves a program combines: RDW_INVALIDATE is InvalidateRect
-         * (the region, as with InvalidateRgn, stands for the client area),
-         * RDW_VALIDATE takes the area back, and RDW_UPDATENOW is UpdateWindow.
-         * RDW_ERASE marks the background for erasing, as bErase does, and
-         * RDW_FRAME the frame.
+         * or InvalidateRgn, RDW_VALIDATE is ValidateRect or ValidateRgn, and
+         * RDW_UPDATENOW is UpdateWindow -- the window's own, and with
+         * RDW_ALLCHILDREN its descendants' after it. RDW_ERASE marks the
+         * background for erasing, as bErase does, and RDW_FRAME the frame.
          */
         RedrawWindow: {
             argBytes: 16,
@@ -582,9 +657,8 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                const area = (rect >>> 0) !== 0 && (region >>> 0) === 0
-                    ? readRect(host, rect)
-                    : clientArea(record);
+                const named = (region >>> 0) !== 0 || (rect >>> 0) === 0;
+                const area = named ? regionArea(record, region) : readRect(host, rect);
                 if ((flags & RDW_INVALIDATE) !== 0)
                 {
                     invalidate(record, area, (flags & RDW_ERASE) !== 0);
@@ -592,37 +666,42 @@ export function createPaintFunctions(options){
                 }
                 else if ((flags & RDW_VALIDATE) !== 0)
                 {
-                    record.updateRect = null;
+                    validate(record, (rect >>> 0) === 0 && (region >>> 0) === 0 ? null : area);
                 }
-                if ((flags & RDW_UPDATENOW) !== 0 && record.updateRect)
+                if ((flags & RDW_UPDATENOW) === 0)
                 {
-                    queue.post({ hwnd: record.hwnd, message: WM_PAINT, wParam: 0, lParam: 0 });
+                    return 1;
                 }
-                return 1;
+                // The window first, then its descendants in order, each sent
+                // its WM_PAINT before the next: a parent paints under its
+                // children, as the screen shows them.
+                const order = (flags & RDW_ALLCHILDREN) !== 0
+                    ? [record, ...(descendants?.(record) ?? [])]
+                    : [record];
+                /** @param {number} index @returns {number | Promise<number>} */
+                const next = index=>(index >= order.length
+                    ? 1
+                    : after(paintNow(order[index]), ()=>next(index + 1)));
+                return next(0);
             },
         },
 
         /**
          * BOOL UpdateWindow(HWND hWnd)
          *
-         * Windows *sends* WM_PAINT here, which means running the window
-         * procedure before this returns. Posting it keeps the order a program
-         * observes and reaches the same procedure one turn of its own loop
-         * later; a program that calls UpdateWindow and then pumps sees no
-         * difference. A program that calls it and then blocks would, and that is
-         * the ceiling on this.
+         * WM_PAINT is sent, not posted: the window procedure has painted by
+         * the time this returns. A program that creates its window, calls
+         * UpdateWindow and then goes straight to drawing its first frame --
+         * or to a long load with no pump -- relies on it: a posted paint
+         * lands after the frame, over it, or not until the load is done.
+         * Nothing to paint is success with nothing sent.
          */
         UpdateWindow: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([hwnd])=>{
                 const record = live(hwnd);
-                if (!record || !record.updateRect)
-                {
-                    return record ? 1 : 0;
-                }
-                queue.post({ hwnd: record.hwnd, message: WM_PAINT, wParam: 0, lParam: 0 });
-                return 1;
+                return record ? paintNow(record) : 0;
             },
         },
 
@@ -915,7 +994,14 @@ export function createPaintFunctions(options){
             },
         },
 
-        /** BOOL ValidateRect(HWND hWnd, const RECT *lpRect) */
+        /**
+         * BOOL ValidateRect(HWND hWnd, const RECT *lpRect)
+         *
+         * A null rectangle validates everything. Otherwise the rectangle is
+         * taken out of the update area as far as what is left is still a
+         * rectangle -- see `subtract` -- so a program that paints a strip
+         * itself and validates it is not sent a WM_PAINT for that strip.
+         */
         ValidateRect: {
             argBytes: 8,
             /** @param {number[]} args */
@@ -925,13 +1011,24 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                // Only the whole-window case is honoured exactly. Subtracting one
-                // rectangle from another needs a real region, and reporting a
-                // partial validation as complete would lose a repaint.
-                if ((rect >>> 0) === 0 || !record.updateRect)
+                validate(record, (rect >>> 0) === 0 ? null : readRect(host, rect));
+                return 1;
+            },
+        },
+
+        /** BOOL ValidateRgn(HWND hWnd, HRGN hRgn) */
+        ValidateRgn: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, region])=>{
+                const record = live(hwnd);
+                if (!record)
                 {
-                    record.updateRect = null;
+                    return 0;
                 }
+                validate(record, (region >>> 0) === 0
+                    ? null
+                    : host.regionBox?.(region >>> 0) ?? null);
                 return 1;
             },
         },

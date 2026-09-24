@@ -308,6 +308,12 @@ const MAX_WINDOW_TEXT = 1 << 16;
  * @property {any} [draw]
  *           The window manager's own drawing over a device context: fills,
  *           text, the selected font's measure. Absent with `dc`.
+ * @property {(region: number) => ({ left: number, top: number, right: number,
+ *           bottom: number } | null)} [regionBox]
+ *           The rectangle a GDI region holds, for the calls that name an area
+ *           by a region.
+ * @property {(region: number, rect: any) => boolean} [setRegion]
+ *           Makes a GDI region hold a rectangle, for GetUpdateRgn.
  * @property {() => void} [present]
  *           Shows the desktop. Called once a paint pass has finished.
  * @property {(name: string, handler: (message: DispatchedMessage) => number | Promise<number>)
@@ -2012,7 +2018,8 @@ export function createWindowFunctions(host){
         // The drawing with the system colours on it, which FillRect needs
         // for a brush named as a colour index.
         host: Object.assign(Object.create(host), { draw }),
-        live, queue: host.queue, WM_PAINT, geometry, send, invalidated, painted,
+        live, WM_PAINT, geometry, send, invalidated, painted,
+        descendants: (/** @type {any} */ record)=>descendantsOf(record),
     });
 
     /**

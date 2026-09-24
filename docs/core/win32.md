@@ -110,7 +110,7 @@ instantiation of the module reports (method in "Inventory" below):
 | library | directory | exports | what it covers |
 |---------|-----------|--------:|----------------|
 | `KERNEL32.dll` | `kernel32/` | 331 | Console, threads and waits, heap and virtual memory, process and TLS, modules, files and directories, critical sections, locale and code pages, environment and command line, system info and time, `CreateProcess`, exceptions and SEH, resources, drives, file mappings and pipes, completion ports, file times, console I/O, APCs and the alertable waits (`apc.js`). |
-| `USER32.dll` | `user32/` | 267 | Windows and classes, painting, system queries and display settings, objects (cursors, icons, menus, clipboard), dialogs, hot keys, `SendInput`, the keyboard-layout family (`GetKeyboardLayout`, `MapVirtualKey` A/W/`Ex`, `ToUnicode`/`Ex`, `ToAscii`/`Ex`, `VkKeyScan` A/W/`Ex`) over the one en-US layout this build has, read from one table in `keys.js` (`characterOf`/`keyForCharacter`) that `TranslateMessage`'s fallback reads too, under the modifiers held at the time. |
+| `USER32.dll` | `user32/` | 268 | Windows and classes, painting, system queries and display settings, objects (cursors, icons, menus, clipboard), dialogs, hot keys, `SendInput`, the keyboard-layout family (`GetKeyboardLayout`, `MapVirtualKey` A/W/`Ex`, `ToUnicode`/`Ex`, `ToAscii`/`Ex`, `VkKeyScan` A/W/`Ex`) over the one en-US layout this build has, read from one table in `keys.js` (`characterOf`/`keyForCharacter`) that `TranslateMessage`'s fallback reads too, under the modifiers held at the time. |
 | `msvcrt.dll` | `msvcrt/` | 277 (226 without `fpu`) | The C runtime: strings, multibyte strings, conversion, formatting and scanning, heap, math, paths, streams (`stdio.js`: `fopen` and its family over the volume, and the standard three as `_iob`'s first records, writing to the console), threads (`threads.js`: `_beginthread`/`_beginthreadex` through kernel32's `CreateThread`), time, C++ support (`cxx.js`), CRT startup, structured and C++ exceptions (`seh.js`, `eh.js`). |
 | `GDI32.dll` | `gdi32/` | 102 | Device contexts, objects and their lifetimes, metrics, drawing entry points. |
 | `ntdll.dll` | `ntdll/` | 96 | Counted strings, status translation, machine queries, 64-bit helpers — and 76 entries that are the same function object kernel32 or msvcrt already publish. |
@@ -136,7 +136,7 @@ instantiation of the module reports (method in "Inventory" below):
 | `SHFOLDER.dll` | *(built in `module.js`)* | 2 | A two-export forwarder to shell32's `SHGetFolderPathA`/`SHGetFolderPathW`, sharing shell32's own function objects. |
 | *(no DLL)* | `quartz/` | — | The DirectShow filter graph, reached through `CoCreateInstance(CLSID_FilterGraph)`; registered on the COM registry, not as an import table. |
 
-Total: 1536 table entries across 28 libraries, 1403 distinct functions.
+Total: 1537 table entries across 28 libraries, 1404 distinct functions.
 
 **Inventory method.** `dbg/docs/count-dlls.mjs` (throwaway; not part of the build) creates the
 module against the same stub host `src/layers/win32/module.test.js` uses
@@ -229,7 +229,12 @@ gets its own heap, hive, queue and COM registry.
   owns (`docs/core/graphics.md`): `BeginPaint` sends `WM_NCPAINT` and `WM_ERASEBKGND` first, a
   window's update area is one rectangle, a window that is invalidated marks every window painted
   after it that overlaps it, and the desktop is presented when the queue finds nothing left to
-  paint. The **system classes** — `Button`, `Static`, `Edit`, `ListBox`, `ComboBox`,
+  paint. `UpdateWindow` and `RedrawWindow(RDW_UPDATENOW)` *send* `WM_PAINT` (with
+  `RDW_ALLCHILDREN`, to the descendants after the window), so the procedure has painted when the
+  call returns. A region names its bounding rectangle (`InvalidateRgn`, `ValidateRgn`,
+  `RedrawWindow`'s region, read through gdi32's `regionBox`; `GetUpdateRgn` fills one through
+  `setRegion`). `ValidateRect` takes its rectangle out of the update area exactly when what is
+  left is still a rectangle -- a band off one side -- and otherwise leaves the area whole. The **system classes** — `Button`, `Static`, `Edit`, `ListBox`, `ComboBox`,
   `ScrollBar` and the dialog class `#32770`, also by their atoms — have their procedures on this
   side (`controls.js`); each has a real address (a bridge stub) that `GetWindowLong(GWL_WNDPROC)`
   reports and `CallWindowProc` reaches, so a program may subclass one. Dialogs are windows of the

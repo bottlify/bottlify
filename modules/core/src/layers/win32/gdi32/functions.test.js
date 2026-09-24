@@ -1194,3 +1194,15 @@ test('every DC of a window is one drawable, and any other DC is its own', ()=>{
         { key: keyOf(first), width: 640, height: 480 },
         'a window context is the size of the area it was given');
 });
+
+test('a region is readable and fillable from user32, and nothing else is', ()=>{
+    const { gdi } = setup();
+    const region = gdi.table.CreateRectRgn.handler([1, 2, 30, 40]);
+    const pen = gdi.table.CreatePen.handler([0, 1, 0]);
+
+    assert.deepEqual(gdi.regionBox(region), { left: 1, top: 2, right: 30, bottom: 40 });
+    assert.equal(gdi.setRegion(region, { left: 0, top: 0, right: 5, bottom: 6 }), true);
+    assert.deepEqual(gdi.regionBox(region), { left: 0, top: 0, right: 5, bottom: 6 });
+    assert.equal(gdi.regionBox(pen), null);
+    assert.equal(gdi.setRegion(pen, { left: 0, top: 0, right: 1, bottom: 1 }), false);
+});

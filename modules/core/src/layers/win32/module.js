@@ -1253,6 +1253,11 @@ export const win32Module = {
                 // The window manager's own painting -- frames, captions and
                 // the controls of the system classes -- through GDI's engine.
                 draw: gdi.draw,
+                // Regions are GDI objects; the update area is user32's.
+                /** @param {number} region */
+                regionBox: region=>gdi.regionBox(region),
+                /** @param {number} region @param {any} rect */
+                setRegion: (region, rect)=>gdi.setRegion(region, rect),
                 // Shows the desktop once a paint pass has finished. The
                 // graphics layer is above this one and is reached the way the
                 // drawing engine is: through what the assembling caller hands

@@ -1733,6 +1733,38 @@ export function createGdiFunctions(host){
         table: aliased,
 
         /**
+         * The rectangle a region object holds, or null for a handle that is
+         * not a region: what user32 reads when a program names an area to
+         * repaint by a region rather than by a rectangle.
+         *
+         * @param {number} handle
+         * @returns {{ left: number, top: number, right: number, bottom: number } | null}
+         */
+        regionBox(handle){
+            const record = objects.get(handle >>> 0);
+            return record && record.type === 'region' ? { ...record.attributes } : null;
+        },
+
+        /**
+         * Makes a region object the caller owns hold a rectangle, as
+         * GetUpdateRgn fills in the region it is handed.
+         *
+         * @param {number} handle
+         * @param {{ left: number, top: number, right: number, bottom: number }} rect
+         * @returns {boolean} false for a handle that is not a region
+         */
+        setRegion(handle, rect){
+            const record = objects.get(handle >>> 0);
+            if (!record || record.type !== 'region')
+            {
+                return false;
+            }
+            record.attributes = { left: rect.left, top: rect.top, right: rect.right,
+                bottom: rect.bottom };
+            return true;
+        },
+
+        /**
          * A device context over a window, told where on the screen the window's
          * client area is. That rectangle is what the context is bound to when
          * it first draws; a context made without one draws on the whole screen,

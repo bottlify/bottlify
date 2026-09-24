@@ -180,10 +180,12 @@ function fakeContexts(){
  *        What answers a message box: a promise leaves the caller parked, and
  *        nothing at all leaves the box its own default. Defaults to recording
  *        the notice and answering nothing.
+ * @param {(region: number) => any} [options.regionBox]
+ *        The rectangle a GDI region holds, for the calls that name one.
  */
 function setup(
     { cursor, keyState, asyncKeyState, keyboardState, setKeyboardState,
-        findResource, loadString, dispatch = ()=>0, screen, messageBox } = {})
+        findResource, loadString, dispatch = ()=>0, screen, messageBox, regionBox } = {})
 {
     screen ??= { ...SCREEN, displayWidth: SCREEN.width, displayHeight: SCREEN.height };
     const memory = fakeMemory();
@@ -229,6 +231,7 @@ function setup(
         setKeyboardState,
         findResource,
         loadString,
+        regionBox,
         /** @param {any} notice */
         messageBox: messageBox ?? (notice=>{
             notices.push(notice);
@@ -269,7 +272,14 @@ function makeWindow(memory, fns, style = WS_OVERLAPPED){
 // --- painting ---
 
 test('RedrawWindow invalidates, validates and updates as its flags say', ()=>{
-    const { memory, fns, queue } = setup();
+    /** @type {number[]} */
+    const sent = [];
+    const { memory, fns, queue } = setup({
+        dispatch: (/** @type {number} */ _proc, /** @type {any} */ message)=>{
+            sent.push(message.message);
+            return 0;
+        },
+    });
     const hwnd = makeWindow(memory, fns);
     const RDW_INVALIDATE = 0x0001;
     const RDW_ERASE = 0x0004;
@@ -285,12 +295,77 @@ test('RedrawWindow invalidates, validates and updates as its flags say', ()=>{
     assert.equal(queue.depth(), 0, 'and nothing was posted yet');
 
     assert.equal(fns.RedrawWindow.handler([hwnd, 0, 0, RDW_UPDATENOW]), 1);
-    assert.equal(queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true })?.message,
-        0x000f, 'RDW_UPDATENOW is a WM_PAINT');
+    assert.deepEqual(sent, [0x000f], 'RDW_UPDATENOW is a WM_PAINT, sent before it returns');
 
     assert.equal(fns.RedrawWindow.handler([hwnd, 0, 0, RDW_VALIDATE]), 1);
     assert.equal(fns.GetUpdateRect.handler([hwnd, OUT_BUFFER, 0]), 0, 'validated: nothing dirty');
     assert.equal(fns.RedrawWindow.handler([0x9999, 0, 0, RDW_INVALIDATE]), 0);
+});
+
+/** The update rectangle GetUpdateRect reports, or null for none. */
+function updateRectOf(/** @type {any} */ memory, /** @type {any} */ fns, /** @type {number} */ hwnd){
+    return fns.GetUpdateRect.handler([hwnd, OUT_BUFFER, 0]) === 0
+        ? null
+        : [RECT.left, RECT.top, RECT.right, RECT.bottom].map(at=>memory.u32(OUT_BUFFER + at));
+}
+
+test('UpdateWindow sends WM_PAINT before it returns, and only with something to paint', ()=>{
+    /** @type {number[]} */
+    const sent = [];
+    const { memory, fns, queue } = setup({
+        dispatch: (/** @type {number} */ _proc, /** @type {any} */ message)=>{
+            sent.push(message.message);
+            return 0;
+        },
+    });
+    const hwnd = makeWindow(memory, fns);
+    fns.ValidateRect.handler([hwnd, 0]);
+
+    assert.equal(fns.UpdateWindow.handler([hwnd]), 1);
+    assert.deepEqual(sent, [], 'nothing to paint, nothing sent');
+
+    fns.InvalidateRect.handler([hwnd, 0, 0]);
+    assert.equal(fns.UpdateWindow.handler([hwnd]), 1);
+    assert.deepEqual(sent, [0x000f], 'the procedure has run by the time the call returns');
+    assert.equal(queue.depth(), 0, 'and nothing waits in the queue to paint again later');
+    assert.equal(fns.UpdateWindow.handler([0x9999]), 0);
+});
+
+test('InvalidateRgn and ValidateRgn take the region\'s own rectangle', ()=>{
+    const REGION = 0x3000;
+    const { memory, fns } = setup({
+        regionBox: (/** @type {number} */ region)=>(region === REGION
+            ? { left: 5, top: 6, right: 25, bottom: 36 } : null),
+    });
+    const hwnd = makeWindow(memory, fns);
+    fns.ValidateRect.handler([hwnd, 0]);
+
+    assert.equal(fns.InvalidateRgn.handler([hwnd, REGION, 0]), 1);
+    assert.deepEqual(updateRectOf(memory, fns, hwnd), [5, 6, 25, 36]);
+    assert.equal(fns.ValidateRgn.handler([hwnd, REGION]), 1);
+    assert.equal(updateRectOf(memory, fns, hwnd), null);
+    assert.equal(fns.ValidateRgn.argBytes, 8);
+});
+
+test('ValidateRect takes a band off the update area, and keeps it whole over a hole', ()=>{
+    const { memory, fns } = setup();
+    const hwnd = makeWindow(memory, fns);
+    fns.ValidateRect.handler([hwnd, 0]);
+    memory.putU32s(RECT_BUFFER, [0, 0, 100, 100]);
+    fns.InvalidateRect.handler([hwnd, RECT_BUFFER, 0]);
+
+    memory.putU32s(RECT_BUFFER, [0, 0, 100, 30]);
+    fns.ValidateRect.handler([hwnd, RECT_BUFFER]);
+    assert.deepEqual(updateRectOf(memory, fns, hwnd), [0, 30, 100, 100], 'the top band is painted');
+
+    memory.putU32s(RECT_BUFFER, [40, 40, 60, 60]);
+    fns.ValidateRect.handler([hwnd, RECT_BUFFER]);
+    assert.deepEqual(updateRectOf(memory, fns, hwnd), [0, 30, 100, 100],
+        'a hole in the middle is not something a rectangle can hold');
+
+    memory.putU32s(RECT_BUFFER, [0, 0, 200, 200]);
+    fns.ValidateRect.handler([hwnd, RECT_BUFFER]);
+    assert.equal(updateRectOf(memory, fns, hwnd), null, 'all of it');
 });
 
 test('SetRect writes the four sides, and PtInRect is closed on the left and top only', ()=>{
