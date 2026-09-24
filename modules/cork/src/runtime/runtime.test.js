@@ -50,6 +50,35 @@ function machine(config = {}, ramSize = 4 << 20){
 // mov ecx, 1000; L: dec ecx; jnz L; hlt
 const COUNTDOWN = [0xb9, 0xe8, 0x03, 0, 0, 0x49, 0x75, 0xfd, 0xf4];
 
+test('single precision seen leaves a wide x87 region once, and the address is translated'
+    + ' again with the rounding', async()=>{
+    const m = machine();
+    const view = new DataView(m.memory.buffer);
+    view.setUint8(m.layout.x87Empty, 0xff);
+    view.setUint16(m.layout.x87Control, 0x07f, true);
+    // fld1; fld1; fadd st0, st1; fstp st0; fstp st0; hlt -- a rounding block.
+    m.write(CODE, [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4]);
+    m.runtime.noteHot(CODE, 0);
+    await m.runtime.translatePending();
+    assert.equal(m.runtime.diagnostics().wide, true);
+    const exit = m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
+    assert.equal(exit.kind, 'untranslated');
+    assert.equal(exit.retired, 2, 'the two fld1 ran, the fadd did not');
+    assert.equal(m.eip(), CODE + 4);
+    const after = m.runtime.diagnostics();
+    assert.equal(after.precisionSwitches, 1);
+    assert.equal(after.wide, false);
+    assert.equal(m.runtime.entryOf(CODE, 0), -1, 'the wide region went');
+    // Translated again, it runs to the end under single precision.
+    view.setUint32(m.layout.eip, CODE, true);
+    view.setUint8(m.layout.x87Empty, 0xff);
+    view.setUint8(m.layout.x87Top, 0);
+    m.runtime.noteHot(CODE, 0);
+    await m.runtime.translatePending();
+    assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
+    assert.equal(m.runtime.diagnostics().precisionSwitches, 1, 'once');
+});
+
 test('a spent budget at an inlined return charges the callee once', async()=>{
     const m = machine();
     // mov ecx, 50; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret -- F is a

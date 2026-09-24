@@ -218,7 +218,19 @@ every push and pop; a register the block has marked dirty is not marked again. A
 result is tested for a NaN once: the host's NaN sign fixed and IE raised in that branch. The
 control word is honoured at run time: rounding control rounds the
 integer stores and `frndint` (to nearest inline, the other modes through a helper), precision control set to single rounds every arithmetic
-result's mantissa to 24 bits (extended is treated as double); the SSE conversions that round
+result's mantissa to 24 bits (extended is treated as double). That test was a branch on every
+arithmetic operation, a sixth to a fifth of an x87 loop, for a setting most programs never
+change: x87 regions are compiled for the wide controls (double, extended) with no rounding at
+all until the program is seen with single set (the runtime's `wideFirst`), and a block tests the
+control word once, before its first rounding instruction and again after its own
+`fldcw`/`fldenv`/`frstor`/`finit` -- an x87 region's host calls leave it, so nothing else changes
+the word mid-block. Finding single, the block leaves before the instruction with an untranslated
+exit of vector `PRECISION`, which goes to the host rather than the hash; the host interprets it,
+and the runtime compiles x87 regions with the rounding from then on and drops the wide ones (the
+store keeps them under their own key, `-w`), once -- Direct3D sets single at `CreateDevice` and
+keeps it. The test machine does the same, so the corpora run the wide translation. An x87 dot
+loop 8.1 -> 7.3 ns a turn, a cull (the dot and `fcomp`/`fnstsw`) 10.2 -> 8.3; Doom 3's x87
+functions 60-63 -> 49-51 wasm operations an instruction; the SSE conversions that round
 read the MXCSR rounding control the same way; a NaN an operation makes carries the
 processor's negative sign whatever the host's default NaN is; exception masks are not
 honoured, an exception behaves as masked. The transcendentals (`fsin`, `fcos`, `fsincos`,
@@ -396,7 +408,7 @@ enter the type check or the bundle.
 |-----------------|----------------------------|---------------------|---------|
 | `memorySize`    | number (power of two)      | `1 GiB`             | Guest RAM. Reserved, not committed: the host pays for pages the guest touches. Must be a power of two; the emulator requires it. With an engine other than `emulator` the top `TABLES_RESERVE` (4 MiB) is the translator's tables, and `layout.memorySize` reports the rest. |
 | `engineUrl`     | string                     | none                | The translator's entry module, imported at `boot()` under `hybrid`; `createApp` resolves it from `cork.moduleUrl` or the package beside core. Absent, `hybrid` runs with no translator. |
-| `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold` (the interpreter's own count under `cork`; default 2, where the sampler's default is 2000; the queue is drained hottest first), `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`, `maxQueued` (the candidates kept waiting, the coldest evicted past it; default 8192), `maxBatchRegions` (a deep queue takes a quarter of itself per batch, up to this; default 256), `relinkAfter` and `relinkRegions` (see the relink above; 0 turns it off), `leafCalls` (default true: a small leaf callee is formed into its caller, see above), `countTransfers` (a diagnostic: each transfer between regions through the hash counts into `transfers`), `traceStore` (a diagnostic: every store key put and missed, `entry:hash:top` with the blocks' spans, in the diagnostics' `storeTrace`; the harness writes it beside the report as `-store.json`, and `missNoRecord`/`missNoModule` split the misses always), `feed`, `missThreshold`, and `leaveOut`, the instruction classes (`x87`, `mmx`, `sse`) a run leaves to the emulator so a defect can be localised by class; such a run keeps no translation store. |
+| `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold` (the interpreter's own count under `cork`; default 2, where the sampler's default is 2000; the queue is drained hottest first), `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`, `maxQueued` (the candidates kept waiting, the coldest evicted past it; default 8192), `maxBatchRegions` (a deep queue takes a quarter of itself per batch, up to this; default 256), `relinkAfter` and `relinkRegions` (see the relink above; 0 turns it off), `leafCalls` (default true: a small leaf callee is formed into its caller, see above), `wideFirst` (default true: x87 regions compiled for the wide precision controls until single is seen, see the x87 section; false tests precision on every operation from the start), `countTransfers` (a diagnostic: each transfer between regions through the hash counts into `transfers`), `traceStore` (a diagnostic: every store key put and missed, `entry:hash:top` with the blocks' spans, in the diagnostics' `storeTrace`; the harness writes it beside the report as `-store.json`, and `missNoRecord`/`missNoModule` split the misses always), `feed`, `missThreshold`, and `leaveOut`, the instruction classes (`x87`, `mmx`, `sse`) a run leaves to the emulator so a defect can be localised by class; such a run keeps no translation store. |
 | `trapPort`      | number                     | `0xb077`            | The I/O port a stub writes its trap id to. |
 | `entryVector`   | number                     | `0x7000`            | Linear address of the dword the ROM jumps through to enter guest code. |
 | `initialStack`  | number                     | `0x300000`          | ESP the ROM sets before jumping into the guest. |

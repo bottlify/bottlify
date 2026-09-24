@@ -66,7 +66,7 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
- *     leaveOut?: Set<string> | string[] }} [options]
+ *     leaveOut?: Set<string> | string[], wide?: boolean }} [options]
  * @returns {BuiltBatch}
  */
 export function emitBatch(jobs, layout, features, options = {}){
@@ -78,6 +78,7 @@ export function emitBatch(jobs, layout, features, options = {}){
         undoLog: options.undoLog === true,
         hash: options.hash === true,
         countTransfers: options.countTransfers === true,
+        wide: options.wide === true,
         leaveOut,
         ...(options.trapPort === undefined ? {} : { trapPort: options.trapPort }),
     });
