@@ -138,6 +138,9 @@ function writeVector(state, operand, width, address, value){
         return;
     }
     const at = address(operand);
+    // Both ends first: a store over a page edge that faults writes nothing.
+    state.memory.read(at, 1);
+    state.memory.read((at + width - 1) >>> 0, 1);
     for (let i = 0; i < width; i++)
     {
         state.memory.write(at + i, 1, value[i] & 0xff);

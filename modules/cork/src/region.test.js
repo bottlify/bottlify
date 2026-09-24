@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formRegion } from './region.js';
+import { formRegion, inlineReturns } from './region.js';
 
 /** A region over bytes placed at `base`. @param {number[]} bytes @param {number} [base] */
 function regionOf(bytes, base = 0x1000, options = {}){
@@ -159,4 +159,18 @@ test('a run of zero bytes past a call ends the region as data, not as four thous
     assert.equal(after.instructions.length, 0, 'not one add of the fill');
     assert.equal(after.exit.kind, 'refused');
     assert.equal(region.refused.get('00 00'), 1);
+});
+
+test('a small leaf callee is formed into its caller, and only its rets return inside', ()=>{
+    // 1000: call F (e8 01 00 00 00)   1005: ret        F = 1006: inc eax; ret
+    const leaf = regionOf([0xe8, 1, 0, 0, 0, 0xc3, 0x40, 0xc3]);
+    assert.deepEqual(leaf.entries, [0x1000, 0x1005, 0x1006], 'the callee is a block');
+    assert.deepEqual([...inlineReturns(leaf)], [[0x1006, [0x1005]]],
+        'the callee\'s ret comes back after the call; the caller\'s own ret is no edge');
+    const off = regionOf([0xe8, 1, 0, 0, 0, 0xc3, 0x40, 0xc3], 0x1000, { leafCalls: false });
+    assert.deepEqual(off.entries, [0x1000, 0x1005]);
+    // A callee that calls on is no leaf: the call stays an exit.
+    const nested = regionOf([0xe8, 1, 0, 0, 0, 0xc3, 0xe8, 0xf5, 0x0f, 0, 0, 0xc3]);
+    assert.deepEqual(nested.entries, [0x1000, 0x1005]);
+    assert.equal(inlineReturns(nested).size, 0);
 });

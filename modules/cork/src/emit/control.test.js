@@ -42,7 +42,7 @@ test('a call and its return cross regions without leaving wasm', { skip: !tailCa
         0xbb, ...u32(2),            // F:  mov ebx, 2
         0xc3,                       //     ret
     ]);
-    const r = m.runProgram(CODE);
+    const r = m.runProgram(CODE, { leafCalls: false });
     assert.equal(r.kind, 3, 'halted');
     assert.equal(r.regions, 2, 'the caller and the callee');
     assert.equal(r.runs, 2, 'the return came back into the caller by the hash');
@@ -92,7 +92,7 @@ test('ret imm pops the arguments after the return address', { skip: !tailCalls }
         0xf4,                       //     hlt
         0xc2, 0x08, 0x00,           // F:  ret 8
     ]);
-    const r = m.runProgram(CODE);
+    const r = m.runProgram(CODE, { leafCalls: false });
     assert.equal(r.kind, 3);
     assert.equal(r.runs, 2);
     assert.equal(m.reg('esp'), STACK, 'the two arguments and the return address are gone');
@@ -112,7 +112,7 @@ test('a region entered from the hash sees the registers the other left', { skip:
             0x29, 0xc0,                 //     sub eax, eax   ZF = 1
             0xc3,                       //     ret
         ]);
-        const r = m.runProgram(CODE);
+        const r = m.runProgram(CODE, { leafCalls: false });
         assert.equal(r.kind, 3);
         assert.equal(r.runs, 2);
         assert.equal(m.reg('eax'), 7);
@@ -245,3 +245,53 @@ test('out dx, eax to the trap port calls the host from inside the region; others
         assert.deepEqual(n.run(CODE), { kind: 0, vector: 0 });
         assert.equal(none.eip(), CODE + 14);
     });
+
+test('a small leaf callee is formed into its caller: the call and the return are jumps', ()=>{
+    const m = machine([
+        0xb9, ...u32(4),            //     mov ecx, 4
+        0xe8, ...u32(4),            // L:  call F
+        0x49,                       //     dec ecx
+        0x75, 0xf8,                 //     jnz L
+        0xf4,                       //     hlt
+        0x83, 0xc0, 0x03,           // F:  add eax, 3
+        0xc3,                       //     ret
+    ]);
+    const r = m.runProgram(CODE);
+    assert.equal(r.kind, 3);
+    assert.equal(r.regions, 1, 'the callee is a block of the caller');
+    assert.equal(r.runs, 1, 'and nothing left the region');
+    assert.equal(m.reg('eax'), 12);
+    assert.equal(m.reg('esp'), STACK, 'every return address pushed was popped');
+    assert.equal(r.retired, 1 + 4 * 5 + 1);
+});
+
+test('a formed-in callee that returns elsewhere leaves by the address it popped', ()=>{
+    // F replaces its return address: the ret goes to T, not after the call.
+    const T = CODE + 0x40;
+    const m = machine([
+        0xe8, ...u32(1),            //     call F
+        0xf4,                       //     hlt          (not reached)
+        0x58,                       // F:  pop eax
+        0x68, ...u32(T),            //     push T
+        0xc3,                       //     ret
+    ]);
+    m.write(T, [0xbb, ...u32(9), 0xf4]);     // T: mov ebx, 9; hlt
+    const r = m.runProgram(CODE);
+    assert.equal(r.kind, 3);
+    assert.equal(m.reg('ebx'), 9, 'T ran');
+    assert.equal(m.reg('eax'), CODE + 5, 'the return address the call pushed');
+    assert.equal(m.reg('esp'), STACK);
+});
+
+test('a call into a formed-in callee whose push lands in code leaves stale at the callee', ()=>{
+    const m = machine([
+        0xe8, ...u32(1),            //     call F
+        0xf4,                       //     hlt
+        0xc3,                       // F:  ret
+    ]);
+    m.pages.markCode(STACK - 4, 4);
+    const r = m.runProgram(CODE);
+    assert.equal(r.kind, 5, 'stale');
+    assert.equal(m.eip(), CODE + 6, 'past the call, at the callee');
+    assert.equal(m.reg('esp'), STACK - 4, 'with the return address pushed');
+});

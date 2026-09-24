@@ -10,6 +10,8 @@ import { createTestMachine } from '../testing/machine.js';
 import { PageFlag } from '../runtime/pages.js';
 import { readUndoLog, resetUndoLog, spansOf } from './memory.js';
 import { Exit } from './region.js';
+import { blockState, interpret } from '../interp.js';
+import { Fault } from '../ir.js';
 
 const CODE = 0x1000;
 const STACK = 0x80000;
@@ -273,4 +275,298 @@ test('a store into a code page outside the code\'s own granules is no stale', ()
     o.setReg('esp', STACK);
     o.pages.markCode(CODE + 0x20, 0x10);            // granule 1 only
     assert.deepEqual(o.translate(CODE).run(CODE), { kind: Exit.STALE, vector: 0 });
+});
+
+/**
+ * Translates the bytes at CODE with the registers and marks given and runs
+ * them once, returning the exit, EIP and count.
+ *
+ * @param {number[]} bytes
+ * @param {{ regs?: Record<string, number>, code?: [number, number][],
+ *     inaccessible?: number[], data?: [number, number[]][] }} [start]
+ */
+function once(bytes, { regs = {}, code = [], inaccessible = [], data = [] } = {}){
+    const m = createTestMachine();
+    m.write(CODE, [...bytes, 0xf4]);
+    for (const [address, values] of data)
+    {
+        m.write(address, values);
+    }
+    m.setReg('esp', STACK);
+    for (const [name, value] of Object.entries(regs))
+    {
+        m.setReg(name, value);
+    }
+    for (const [address, length] of code)
+    {
+        m.pages.markCode(address, length);
+    }
+    for (const page of inaccessible)
+    {
+        m.pages.markRange(page, 0x1000, PageFlag.INACCESSIBLE);
+    }
+    const before = m.counter();
+    const exit = m.translate(CODE).run(CODE);
+    return { m, exit, eip: m.eip(), retired: m.counter() - before };
+}
+
+test('a group of accesses whose window reaches an inaccessible page leaves before its first', ()=>{
+    // mov ecx, 5; mov eax, [ebx]; mov edi, [ebx+4]; mov edx, 7; mov esi, [ebx+0x7fc]:
+    // the last load's page is inaccessible, so the block leaves untranslated
+    // at the first load, for the interpreter to fault at the last.
+    const bytes = [
+        0xb9, 5, 0, 0, 0, 0x8b, 0x03, 0x8b, 0x7b, 0x04, 0xba, 7, 0, 0, 0,
+        0x8b, 0xb3, 0xfc, 0x07, 0, 0,
+    ];
+    const dirty = once(bytes, { regs: { ebx: 0x4a00 }, inaccessible: [0x5000] });
+    assert.equal(dirty.exit.kind, Exit.UNTRANSLATED);
+    assert.equal(dirty.eip, CODE + 5, 'before the group\'s first access');
+    assert.equal(dirty.retired, 1, 'the mov before it ran, the load did not');
+    assert.equal(dirty.m.reg('ecx'), 5);
+    assert.equal(dirty.m.reg('edx'), 0);
+    const clean = once(bytes, { regs: { ebx: 0x4000 }, inaccessible: [0x5000] });
+    assert.equal(clean.exit.kind, Exit.HALT, 'a window short of the page runs through');
+});
+
+test('a group whose stores land in code leaves before it; code beside them does not', ()=>{
+    // mov [ebx], eax; mov [ebx+4], eax
+    const bytes = [0x89, 0x03, 0x89, 0x43, 0x04];
+    const hit = once(bytes, { regs: { ebx: 0x3000, eax: 9 }, code: [[0x3004, 4]] });
+    assert.equal(hit.exit.kind, Exit.UNTRANSLATED);
+    assert.equal(hit.eip, CODE);
+    assert.equal(hit.m.readU32(0x3000), 0, 'nothing stored');
+    const beside = once(bytes, { regs: { ebx: 0x3000, eax: 9 }, code: [[0x3800, 0x20]] });
+    assert.equal(beside.exit.kind, Exit.HALT, 'the page holds code, the stores\' granules not');
+    assert.equal(beside.m.readU32(0x3004), 9);
+});
+
+test('pushes and pops are one group off esp, checked once', ()=>{
+    // push eax; push ebx; pop edx; pop esi -- esp 0x5004 pushes into 0x4ffc.
+    const bytes = [0x50, 0x53, 0x5a, 0x5e];
+    const dirty = once(bytes, { regs: { esp: 0x5004 }, inaccessible: [0x4000] });
+    assert.equal(dirty.exit.kind, Exit.UNTRANSLATED);
+    assert.equal(dirty.retired, 0);
+    assert.equal(dirty.m.reg('esp'), 0x5004);
+    const clean = once(bytes, { regs: { esp: 0x5008, eax: 1, ebx: 2 }, inaccessible: [0x4000] });
+    assert.equal(clean.exit.kind, Exit.HALT);
+    assert.equal(clean.m.reg('edx'), 2);
+    assert.equal(clean.m.reg('esi'), 1);
+});
+
+test('a register the block rewrites starts a group of its own', ()=>{
+    // mov esi, [edx]; imul dword [ecx]; mov edi, [edx]: the widening imul
+    // writes edx, so the second load is off another edx -- its own page,
+    // inaccessible here, faults at it rather than being checked with the first.
+    const bytes = [0x8b, 0x32, 0xf7, 0x29, 0x8b, 0x3a];
+    // 0x10000 * 0x50000000 leaves edx = 0x5000.
+    const { exit, eip } = once(bytes, {
+        regs: { edx: 0x3000, ecx: 0x3010, eax: 0x10000 }, inaccessible: [0x5000],
+        data: [[0x3010, [0, 0, 0, 0x50]]] });
+    assert.equal(exit.kind, Exit.FAULT);
+    assert.equal(eip, CODE + 4, 'at the load off the new edx');
+});
+
+test('random blocks of register moves and accesses by a page edge match the interpreter', ()=>{
+    // Blocks that move their base registers every way a group follows or
+    // loses (push, pop, add/sub/inc/dec, lea, mov, xchg, imul, cdq) and
+    // access off them beside an inaccessible page and code granules: the
+    // translated run, finished by the interpreter where it leaves, against
+    // the interpreter alone -- registers, the data pages, and the fault.
+    let seed = Number(process.env.GROUP_SEED ?? 0x5eed);
+    const next = (/** @type {number} */ n)=>{
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+        return (seed >>> 8) % n;
+    };
+    const GPR = [0, 1, 2, 3, 5, 6, 7];
+    const pick = ()=>GPR[next(GPR.length)];
+    const disp = ()=>(next(33) - 16) * 4 & 0xff;
+    const modrm = (/** @type {number} */ r, /** @type {number} */ b)=>0x40 | r << 3 | b;
+    const forms = [
+        ()=>[0x8b, modrm(pick(), pick()), disp()],                 // mov r, [b+d]
+        ()=>[0x89, modrm(pick(), pick()), disp()],                 // mov [b+d], r
+        ()=>[0x01, modrm(pick(), pick()), disp()],                 // add [b+d], r
+        ()=>[0x8b, modrm(pick(), 4), 0x24, disp()],                // mov r, [esp+d]
+        ()=>[0x83, 0xc0 | pick(), next(64) - 32 & 0xff],           // add r, imm8
+        ()=>[0x83, 0xe8 | pick(), next(64) - 32 & 0xff],           // sub r, imm8
+        ()=>[0x40 | pick()], ()=>[0x48 | pick()],                   // inc r, dec r
+        ()=>[0x50 | pick()], ()=>[0x58 | pick()], ()=>[0x6a, 7],    // push r, pop r, push 7
+        ()=>{ const r = pick(); return [0x8d, modrm(r, r), disp()]; }, // lea r, [r+d]
+        ()=>[0x89, 0xc0 | pick() << 3 | pick()],                   // mov r, r2
+        ()=>[0x87, 0xc0 | pick() << 3 | pick()],                   // xchg r, r2
+        ()=>[0xf7, 0xe9], ()=>[0x99],                               // imul ecx, cdq
+        ()=>[0xf3, 0x0f, 0x10, modrm(0, pick()), disp()],          // movss xmm0, [b+d]
+        ()=>[0xf3, 0x0f, 0x11, modrm(0, pick()), disp()],          // movss [b+d], xmm0
+    ];
+    const names = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
+    for (let round = 0; round < Number(process.env.GROUP_ROUNDS ?? 1500); round++)
+    {
+        /** @type {number[]} */
+        const bytes = [];
+        for (let k = 0, n = 4 + next(12); k < n; k++)
+        {
+            bytes.push(...forms[next(forms.length)]());
+        }
+        bytes.push(0xf4);
+        const regs = names.map(()=>0x4f00 + next(0x180));
+        const shut = next(2) === 0 ? 0x5000 : 0x4000;
+        const code = next(3) === 0;
+        const fill = Array.from({ length: 0x2000 }, ()=>next(256));
+        const make = ()=>{
+            const m = createTestMachine();
+            m.write(CODE, bytes);
+            m.write(0x4000, fill);
+            names.forEach((name, r)=>m.setReg(name, regs[r]));
+            m.pages.markRange(shut, 0x1000, PageFlag.INACCESSIBLE);
+            if (code)
+            {
+                m.pages.markCode(0x4f80, 0x20);
+            }
+            return m;
+        };
+        /** @param {ReturnType<typeof createTestMachine>} m */
+        const finish = m=>{
+            const state = blockState({ memory: m.memory, layout: m.layout });
+            state.syncIn();
+            try
+            {
+                interpret(state, 200);
+            }
+            catch (e){
+                if (!(e instanceof Fault))
+                {
+                    throw e;
+                }
+                state.syncOut();
+                return `fault ${e.vector} at ${e.eip.toString(16)}`;
+            }
+            state.syncOut();
+            return `halt at ${state.eip.toString(16)}`;
+        };
+        const alone = make();
+        new DataView(alone.memory.buffer).setUint32(alone.layout.eip, CODE, true);
+        const expected = finish(alone);
+        const translated = make();
+        const exit = translated.translate(CODE).run(CODE);
+        const ended = exit.kind === Exit.FAULT
+            ? `fault ${exit.vector} at ${translated.eip().toString(16)}`
+            : exit.kind === Exit.HALT ? `halt at ${translated.eip().toString(16)}`
+                : finish(translated);
+        const hex = `${bytes.map(x=>x.toString(16).padStart(2, '0')).join(' ')}`
+            + ` regs ${JSON.stringify(regs)} shut ${shut} code ${code}`;
+        assert.equal(ended, expected, `round ${round}: ${hex}`);
+        for (const name of names)
+        {
+            assert.equal(translated.reg(name), alone.reg(name), `round ${round} ${name}: ${hex}`);
+        }
+        assert.deepEqual(translated.read(0x4000, 0x2000), alone.read(0x4000, 0x2000),
+            `round ${round} memory: ${hex}`);
+    }
+});
+
+test('every access kind the groups take translates as the plan foresaw it', ()=>{
+    // One block of accesses off ebx: the integer, SSE and x87 forms a group
+    // takes, loads, stores and read-modify-writes. A form the emitter
+    // accesses otherwise than the plan says is an error in translating.
+    const bytes = [
+        0x8b, 0x03,                         // mov eax, [ebx]
+        0x01, 0x43, 0x04,                   // add [ebx+4], eax
+        0x39, 0x43, 0x08,                   // cmp [ebx+8], eax
+        0x85, 0x43, 0x08,                   // test [ebx+8], eax
+        0xff, 0x43, 0x0c,                   // inc dword [ebx+12]
+        0xd1, 0x63, 0x0c,                   // shl dword [ebx+12], 1
+        0xc1, 0x63, 0x0c, 0x00,             // shl dword [ebx+12], 0: no access at all
+        0xc1, 0x43, 0x0c, 0x00,             // rol dword [ebx+12], 0: checked, not stored
+        0x0f, 0x94, 0x43, 0x10,             // setz [ebx+16]
+        0x0f, 0xb6, 0x43, 0x11,             // movzx eax, byte [ebx+17]
+        0x0f, 0xbf, 0x4b, 0x02,             // movsx ecx, word [ebx+2]
+        0x0f, 0xaf, 0x43, 0x04,             // imul eax, [ebx+4]
+        0x0f, 0x44, 0x43, 0x04,             // cmovz eax, [ebx+4]
+        0xf3, 0x0f, 0x10, 0x43, 0x20,       // movss xmm0, [ebx+32]
+        0x0f, 0x10, 0x4b, 0x30,             // movups xmm1, [ebx+48]
+        0x0f, 0x59, 0x4b, 0x40,             // mulps xmm1, [ebx+64]
+        0xf3, 0x0f, 0x11, 0x43, 0x50,       // movss [ebx+80], xmm0
+        0x0f, 0x29, 0x4b, 0x60,             // movaps [ebx+96], xmm1
+        0x0f, 0x17, 0x4b, 0x70,             // movhps [ebx+112], xmm1
+        0x0f, 0x12, 0x53, 0x70,             // movlps xmm2, [ebx+112]
+        0x66, 0x0f, 0x6e, 0x5b, 0x04,       // movd xmm3, [ebx+4]
+        0x66, 0x0f, 0x7e, 0x9b, 0xd0, 0, 0, 0, // movd [ebx+208], xmm3
+        0xf3, 0x0f, 0x7e, 0x63, 0x08,       // movq xmm4, [ebx+8]
+        0x66, 0x0f, 0xd6, 0xa3, 0xd8, 0, 0, 0, // movq [ebx+216], xmm4
+        0xd9, 0x83, 0x80, 0, 0, 0,          // fld dword [ebx+128]
+        0xd8, 0x8b, 0x84, 0, 0, 0,          // fmul dword [ebx+132]
+        0xd9, 0x9b, 0x88, 0, 0, 0,          // fstp dword [ebx+136]
+        0xdb, 0x83, 0x04, 0, 0, 0,          // fild dword [ebx+4]
+        0xdb, 0x9b, 0x8c, 0, 0, 0,          // fistp dword [ebx+140]
+        0xd9, 0xbb, 0x90, 0, 0, 0,          // fnstcw [ebx+144]
+        0xd9, 0xab, 0x90, 0, 0, 0,          // fldcw [ebx+144]
+        0xdd, 0x83, 0x98, 0, 0, 0,          // fld qword [ebx+152]
+        0xdd, 0x9b, 0xa0, 0, 0, 0,          // fstp qword [ebx+160]
+        0xdd, 0xbb, 0xe0, 0, 0, 0,          // fnstsw [ebx+224]
+        0x50, 0x59, 0x6a, 0x05, 0x5a,       // push eax; pop ecx; push 5; pop edx
+        0x66, 0x0f, 0xc4, 0x43, 0x04, 0x01, // pinsrw xmm0, [ebx+4], 1
+        0xf3, 0x0f, 0x2a, 0x43, 0x04,       // cvtsi2ss xmm0, [ebx+4]
+        0xf3, 0x0f, 0x2c, 0x43, 0x20,       // cvttss2si eax, [ebx+32]
+        0x0f, 0x2f, 0x43, 0x20,             // comiss xmm0, [ebx+32]
+        0x0f, 0x2e, 0x43, 0x20,             // ucomiss xmm0, [ebx+32]
+        0x0f, 0xc6, 0x4b, 0x30, 0x00,       // shufps xmm1, [ebx+48], 0
+        0x0f, 0x14, 0x4b, 0x30,             // unpcklps xmm1, [ebx+48]
+        0x0f, 0x54, 0x4b, 0x30,             // andps xmm1, [ebx+48]
+        0x0f, 0x5f, 0x4b, 0x30,             // maxps xmm1, [ebx+48]
+        0x0f, 0xc2, 0x4b, 0x30, 0x01,       // cmpltps xmm1, [ebx+48]
+        0x0f, 0x5a, 0x6b, 0x08,             // cvtps2pd xmm5, [ebx+8]
+        0xf3, 0x0f, 0x5a, 0x6b, 0x20,       // cvtss2sd xmm5, [ebx+32]
+        0xf3, 0x0f, 0x51, 0x43, 0x20,       // sqrtss xmm0, [ebx+32]
+        0x0f, 0x52, 0x4b, 0x30,             // rsqrtps xmm1, [ebx+48]
+        0x0f, 0x5b, 0x4b, 0x30,             // cvtdq2ps xmm1, [ebx+48]
+        0x66, 0x0f, 0x70, 0x4b, 0x30, 0x00, // pshufd xmm1, [ebx+48], 0
+        0x66, 0x0f, 0xf1, 0x4b, 0x30,       // psllw xmm1, [ebx+48]
+        0x66, 0x0f, 0x6c, 0x4b, 0x30,       // punpcklqdq xmm1, [ebx+48]
+        0xf3, 0x0f, 0x16, 0x4b, 0x30,       // movshdup xmm1, [ebx+48]
+        0xf2, 0x0f, 0x7c, 0x4b, 0x30,       // haddps xmm1, [ebx+48]
+        0xf2, 0x0f, 0xd0, 0x4b, 0x30,       // addsubps xmm1, [ebx+48]
+        0xf2, 0x0f, 0xf0, 0x4b, 0x30,       // lddqu xmm1, [ebx+48]
+        0x0f, 0x2b, 0x4b, 0x60,             // movntps [ebx+96], xmm1
+        0xf2, 0x0f, 0x10, 0x73, 0x08,       // movsd xmm6, [ebx+8]
+        0xf2, 0x0f, 0x11, 0xb3, 0xd8, 0, 0, 0, // movsd [ebx+216], xmm6
+        0x66, 0x0f, 0x13, 0x8b, 0xe8, 0, 0, 0, // movlpd [ebx+232], xmm1
+        0x66, 0x0f, 0x16, 0x8b, 0xe8, 0, 0, 0, // movhpd xmm1, [ebx+232]
+        0xdc, 0x93, 0x98, 0, 0, 0,          // fcom qword [ebx+152]
+        0xde, 0x43, 0x04,                   // fiadd word [ebx+4]
+        0xdb, 0x8b, 0x8c, 0, 0, 0,          // fisttp dword [ebx+140]
+        0xd9, 0xe8,                         // fld1
+        0xdf, 0x93, 0x90, 0, 0, 0,          // fist word [ebx+144]
+        0xdf, 0x6b, 0x08,                   // fild qword [ebx+8]
+        0xdf, 0xbb, 0xa0, 0, 0, 0,          // fistp qword [ebx+160]
+        0xdb, 0x6b, 0x08,                   // fld tword [ebx+8]
+        0xdb, 0xbb, 0xf0, 0, 0, 0,          // fstp tword [ebx+240]
+        0xdd, 0xd8,                         // fstp st0
+        0x11, 0x43, 0x04,                   // adc [ebx+4], eax
+        0x19, 0x43, 0x04,                   // sbb [ebx+4], eax
+        0x09, 0x43, 0x04,                   // or [ebx+4], eax
+        0x31, 0x43, 0x04,                   // xor [ebx+4], eax
+        0xf7, 0x5b, 0x0c,                   // neg dword [ebx+12]
+        0xf7, 0x53, 0x0c,                   // not dword [ebx+12]
+        0xd2, 0x7b, 0x11,                   // sar byte [ebx+17], cl
+        0x0f, 0xa4, 0x43, 0x0c, 0x03,       // shld [ebx+12], eax, 3
+        0x0f, 0xad, 0x43, 0x0c,             // shrd [ebx+12], eax, cl
+        0xd1, 0x53, 0x0c,                   // rcl dword [ebx+12], 1
+        0xc1, 0x4b, 0x0c, 0x05,             // ror dword [ebx+12], 5
+        0xc6, 0x43, 0x12, 0x07,             // mov byte [ebx+18], 7
+        0x66, 0x89, 0x43, 0x14,             // mov [ebx+20], ax
+        0xf6, 0x43, 0x10, 0x01,             // test byte [ebx+16], 1
+        0x83, 0x7b, 0x08, 0x03,             // cmp dword [ebx+8], 3
+        0x03, 0x43, 0x04,                   // add eax, [ebx+4]
+        0x0f, 0xbc, 0x43, 0x04,             // bsf eax, [ebx+4]
+        0x0f, 0xb7, 0x43, 0x02,             // movzx eax, word [ebx+2]
+        0x6b, 0x43, 0x04, 0x07,             // imul eax, [ebx+4], 7
+        0x0f, 0x45, 0x43, 0x04,             // cmovnz eax, [ebx+4]
+        0xa1, 0x00, 0x30, 0, 0,             // mov eax, [0x3000]
+        0xa3, 0x04, 0x30, 0, 0,             // mov [0x3004], eax
+        0x89, 0x83, 0xc8, 0, 0, 0,          // mov [ebx+200], eax
+        0x8b, 0x83, 0xc8, 0, 0, 0,          // mov eax, [ebx+200]
+    ];
+    const { m, exit } = once(bytes, { regs: { ebx: 0x3000 } });
+    assert.equal(exit.kind, Exit.HALT);
+    assert.equal(m.reg('edx'), 5);
+    assert.equal(m.readU32(0x30c8), m.reg('eax'), 'the store and the load of one slot');
 });

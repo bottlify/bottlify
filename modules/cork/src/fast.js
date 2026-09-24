@@ -371,8 +371,10 @@ export function compileFast(instruction){
             const read = reader(dst);
             return read && (state=>{
                 const value = read(state);
-                state.reg[4] = (state.reg[4] - 4) >>> 0;
-                state.memory.write(state.reg[4], 4, value >>> 0);
+                // The write first: one that faults leaves esp as it was.
+                const at = (state.reg[4] - 4) >>> 0;
+                state.memory.write(at, 4, value >>> 0);
+                state.reg[4] = at;
             });
         }
         case 'pop':
@@ -415,8 +417,9 @@ export function compileFast(instruction){
             const fixed = dst.kind === 'rel' ? /** @type {number} */ (dst.target) : 0;
             return state=>{
                 const target = read ? read(state) : fixed;
-                state.reg[4] = (state.reg[4] - 4) >>> 0;
-                state.memory.write(state.reg[4], 4, next);
+                const at = (state.reg[4] - 4) >>> 0;
+                state.memory.write(at, 4, next);
+                state.reg[4] = at;
                 state.eip = target;
             };
         }
@@ -434,9 +437,9 @@ export function compileFast(instruction){
                 return null;
             }
             return state=>{
-                state.reg[4] = state.reg[5];
-                const value = state.memory.read(state.reg[4], 4);
-                state.reg[4] = (state.reg[4] + 4) >>> 0;
+                // The read first: one that faults leaves esp as it was.
+                const value = state.memory.read(state.reg[5], 4);
+                state.reg[4] = (state.reg[5] + 4) >>> 0;
                 state.reg[5] = value >>> 0;
             };
         default:

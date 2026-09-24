@@ -41,6 +41,9 @@
  * @property {number} eip
  * @property {number} previousIp
  * @property {number} eflags       The eager word (hybrid: the emulator's `flags`).
+ * @property {number} [flagRecord] Cork's own: five i32 (kind, result, op1, op2, carry in) of
+ *     the arithmetic record a region leaves instead of folding it into `eflags`; the word
+ *     is whole only once `eflagsOf` has folded it. Absent (hybrid): the word is folded at exit.
  * @property {number} flagsChanged Hybrid only, written 0 at every exit; -1 when absent.
  * @property {number} x87          8 × 16 bytes.
  * @property {'f64' | 'tagged80'} x87Format  The engine's own f64, or the emulator's tagged form.
@@ -230,6 +233,8 @@
  * @property {() => Promise<void>} flush  Writes the store's own bookkeeping (a directory
  *     store's index) before a run ends.
  * @property {(page: number) => void} invalidatePage  A host or guest write into code.
+ * @property {(what: string, since: number, floorMs?: number) => void} [noteStall]
+ *     A hold of the engine thread since that `performance.now`, kept when over the floor.
  * @property {(page: number) => boolean} holdsPage  Whether a published region spans the page
  *     (the pages the emulator's handoff bit is set for).
  * @property {() => EngineDiagnostics} diagnostics  The whole snapshot, for a report: it

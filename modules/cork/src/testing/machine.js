@@ -20,6 +20,7 @@ import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
 import { createPageTable } from '../runtime/pages.js';
 import { ANY_TOP, createEntries } from '../runtime/entries.js';
 import { isX87 } from '../emit/x87.js';
+import { eflagsOf, setEflags } from '../emit/flags.js';
 
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 
@@ -95,11 +96,11 @@ export function createTestMachine(given = {}){
             view().setUint32(layout.regs + REGISTERS.indexOf(name) * 4, value >>> 0, true);
         },
         eflags(){
-            return view().getUint32(layout.eflags, true);
+            return eflagsOf(view(), layout);
         },
         /** @param {number} value */
         setEflags(value){
-            view().setUint32(layout.eflags, value >>> 0, true);
+            setEflags(view(), layout, value);
         },
         eip(){
             return view().getUint32(layout.eip, true);
@@ -117,8 +118,9 @@ export function createTestMachine(given = {}){
          *
          * @param {number} entry
          * @param {{ maxBlocks?: number, maxBytes?: number, undoLog?: boolean,
-         *     entryTop?: number, hash?: boolean }} [options]  hash: register the region's
-         *     entries in the machine's hash, so a transfer from another region finds them
+         *     entryTop?: number, hash?: boolean, leafCalls?: boolean }} [options]
+         *     hash: register the region's entries in the machine's hash, so a transfer from
+         *     another region finds them
          */
         translate(entry, options = {}){
             const { undoLog = false, entryTop = 0, hash = false, ...regionOptions } = options;
@@ -187,12 +189,15 @@ export function createTestMachine(given = {}){
          * emitter leaves out. The smallest runtime there is, for tests.
          *
          * @param {number} entry
-         * @param {{ budget?: number, maxRegions?: number, undoLog?: boolean }} [options]
+         * @param {{ budget?: number, maxRegions?: number, undoLog?: boolean,
+         *     leafCalls?: boolean }} [options]
          * @returns {{ kind: number, vector: number, eip: number, regions: number, runs: number,
          *     unsupported: Map<string, number>, retired: number }}  runs: times a region
          *     function was called from here (a transfer between regions is not one)
          */
-        runProgram(entry, { budget = 10_000_000, maxRegions = 2000, undoLog = false } = {}){
+        runProgram(entry, options = {}){
+            const { budget = 10_000_000, maxRegions = 2000, undoLog = false,
+                leafCalls = true } = options;
             /** @type {Map<number, ReturnType<typeof this.translate>>} */
             const translated = new Map();
             /** @type {Map<string, number>} */
@@ -215,7 +220,7 @@ export function createTestMachine(given = {}){
                             retired: budget - left,
                         };
                     }
-                    unit = this.translate(eip, { undoLog, entryTop: top, hash: true });
+                    unit = this.translate(eip, { undoLog, entryTop: top, hash: true, leafCalls });
                     regions++;
                     for (const [opcode, count] of unit.translation.unsupported)
                     {

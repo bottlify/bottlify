@@ -27,7 +27,7 @@ import { CPUID_LEAVES } from '../cpuid.js';
 import { EMPTY, ValType } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { Exit, Local } from './region.js';
-import { checkAccess, noteStore, stackAccess } from './memory.js';
+import { checkAccess, emitStaleExit, noteStore, stackAccess } from './memory.js';
 import { emitSimd } from './simd.js';
 import { emitX87, isX87 } from './x87.js';
 
@@ -223,14 +223,15 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         case 'inc': case 'dec':
         {
-            // CF stays: with the flags live the word is made whole first and
-            // the record takes op1; with them dead a pending record (whose CF
-            // a later reader may still fold) must keep its operands, so the
-            // value goes through a scratch local instead.
+            // CF stays: with the flags live the word takes the CF of the record
+            // before (the rest the record replaces) and the record takes op1 --
+            // nothing between the two leaves; with them dead a pending record
+            // (whose CF a later reader may still fold) must keep its operands,
+            // so the value goes through a scratch local instead.
             const value = flagsLive ? Local.op1 : Local.t1;
             if (flagsLive)
             {
-                e.materialise();
+                e.carryIntoWord();
             }
             prepare(e, dst);
             readOp(e, dst);
@@ -390,7 +391,8 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         case 'popf':
         {
-            const writable = 0xcd5 | DF | 1 << 11;
+            // As the model's: AC and ID too, which the CPUID probe flips.
+            const writable = 0xcd5 | DF | 1 << 11 | 1 << 18 | 1 << 21;
             e.materialise();
             stackAccess(e, size);
             b.localGet(Local.addr)
@@ -451,6 +453,17 @@ export function emitInstruction(e, instruction, flagsLive){
                 b.localSet(Local.count);
             }
             push(e, 4, ()=>b.i32const(next));
+            if (dst.kind === 'rel' && e.labels.has(/** @type {number} */ (dst.target)))
+            {
+                // The callee is a block of this region: the block's exit jumps
+                // there. A push into code leaves first, at the callee.
+                if (e.staleCheck)
+                {
+                    e.staleCheck = false;
+                    emitStaleExit(e, /** @type {number} */ (dst.target));
+                }
+                return true;
+            }
             if (dst.kind === 'rel')
             {
                 e.exitAt(/** @type {number} */ (dst.target), Exit.UNTRANSLATED);
@@ -467,6 +480,15 @@ export function emitInstruction(e, instruction, flagsLive){
             b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase }).localSet(Local.eip);
             b.localGet(Local.reg + 4).i32const(4 + (dst ? /** @type {number} */ (dst.value) : 0))
                 .op(I32.add).localSet(Local.reg + 4);
+            // Back to a call of this region whose callee it formed in: a jump.
+            for (const at of e.returns.get(e.region.blocks[e.blockIndex].start) ?? [])
+            {
+                b.localGet(Local.eip).i32const(at).op(I32.eq);
+                e.openIf('return');
+                e.charge();
+                e.jumpTo(at);
+                e.close();
+            }
             e.exitDynamic(Exit.UNTRANSLATED);
             e.dead = true;
             return true;

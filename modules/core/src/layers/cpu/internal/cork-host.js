@@ -49,7 +49,7 @@ const FLAT_CS = 0x08;
 /** The names an engine module must export for this host. */
 const ENGINE_EXPORTS = Object.freeze([
     'createEngine', 'ownLayout', 'pagesFor', 'Tables', 'STATE_BLOCK_SIZE',
-    'interpret', 'blockState',
+    'interpret', 'blockState', 'eflagsOf', 'setEflags',
 ]);
 
 /**
@@ -84,8 +84,8 @@ export function createCorkHost(config){
             throw new Error(`cpu: the cork engine module does not export ${name}`);
         }
     }
-    const { createEngine, ownLayout, pagesFor, Tables, STATE_BLOCK_SIZE, interpret, blockState }
-        = engine;
+    const { createEngine, ownLayout, pagesFor, Tables, STATE_BLOCK_SIZE, interpret, blockState,
+        eflagsOf, setEflags } = engine;
 
     // The guest RAM is the whole memorySize; the tables and the state block are
     // memory of cork's own beside it, not carved out of the guest's the way the
@@ -103,8 +103,8 @@ export function createCorkHost(config){
     const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     const whole = new DataView(memory.buffer);
 
-    /** The eager flags word; cork's layout keeps no lazy part. */
-    const eflagsWord = ()=>blockView.getUint32(layout.eflags, true) >>> 0;
+    /** The flags word, whole: the record a region left is folded into it first. */
+    const eflagsWord = ()=>eflagsOf(blockView, layout) >>> 0;
     /** @param {number} address  A guest address. */
     const ramOffset = address=>layout.ramBase + address;
 
@@ -488,6 +488,7 @@ export function createCorkHost(config){
      * @returns {number}
      */
     const runSlice = maxInstructions=>{
+        const sliceAt = performance.now();
         stopped = false;
         feedDue = false;
         // A slice is the clock's tick. On the emulator a `hlt` holds the
@@ -587,6 +588,8 @@ export function createCorkHost(config){
         fold();
         recent.push({ at: startedAt, end: eip(), retired: ran, traps: trapCrossings - trapsBefore,
             halted });
+        // A slice is a few milliseconds; one of twenty holds a timer's thread.
+        runtime.noteStall?.('slice', sliceAt, 20);
         if (recent.length > RECENT)
         {
             recent.shift();
@@ -752,7 +755,7 @@ export function createCorkHost(config){
             }
             if (name === 'eflags')
             {
-                blockView.setUint32(layout.eflags, value >>> 0, true);
+                setEflags(blockView, layout, value);
                 return;
             }
             const index = REGISTERS.indexOf(name);

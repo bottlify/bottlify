@@ -431,6 +431,66 @@ function conditionBits(state, a, c, ordered, t1){
 }
 
 /**
+ * `fxsave`: the 512-byte x87/SSE image -- control and status words, the
+ * abridged tag byte (a bit per physical register, set when it holds a value),
+ * MXCSR and its mask, ST(0)..ST(7) in 16-byte slots and XMM0..XMM7. The
+ * instruction and operand pointers are zero, as the rest of the model keeps
+ * none, and the reserved tail is left as it was. The mask leaves out DAZ
+ * (0xffbf), which the SSE model does not implement, so a program that tests it
+ * before setting it does not.
+ *
+ * @param {import('./ir.js').EvalState} state @param {number} where
+ */
+export function fxsave(state, where){
+    /** @param {number} offset @param {number} size @param {number} value */
+    const put = (offset, size, value)=>state.memory.write(where + offset, size, value >>> 0);
+    put(0, 2, state.control);
+    put(2, 2, statusWord(state));
+    put(4, 2, ~state.empty & 0xff);
+    put(6, 2, 0);
+    for (let offset = 8; offset < 24; offset += 4)
+    {
+        put(offset, 4, 0);
+    }
+    put(24, 4, state.mxcsr);
+    put(28, 4, 0xffbf);
+    for (let i = 0; i < 8; i++)
+    {
+        writeF80(state, where + 32 + 16 * i, state.f80[(state.top + i) & 7]);
+        put(32 + 16 * i + 10, 2, 0);
+        put(32 + 16 * i + 12, 4, 0);
+        for (let j = 0; j < 4; j++)
+        {
+            put(160 + 16 * i + 4 * j, 4, state.xmm[i * 4 + j]);
+        }
+    }
+}
+
+/**
+ * `fxrstor`: the image `fxsave` writes, read back.
+ *
+ * @param {import('./ir.js').EvalState} state @param {number} where
+ */
+export function fxrstor(state, where){
+    state.control = state.memory.read(where, 2);
+    const word = state.memory.read(where + 2, 2);
+    state.status = word & ~0x3800;
+    state.top = (word >>> 11) & 7;
+    state.empty = ~state.memory.read(where + 4, 1) & 0xff;
+    state.mxcsr = state.memory.read(where + 24, 4) >>> 0;
+    for (let i = 0; i < 8; i++)
+    {
+        const low = readMem(state, where + 32 + 16 * i, 8);
+        const high = state.memory.read(where + 32 + 16 * i + 8, 2);
+        state.f80[(state.top + i) & 7] = f80ToF64(BigInt.asUintN(64, low), high);
+        for (let j = 0; j < 4; j++)
+        {
+            state.xmm[i * 4 + j] = state.memory.read(where + 160 + 16 * i + 4 * j, 4) >>> 0;
+        }
+    }
+}
+
+/**
  * The x87 instruction, or false when the evaluator has no case for it.
  *
  * @param {import('./decode/decoder.js').Instruction} instruction

@@ -40,13 +40,14 @@
 import { CF, DF, OF, ARITH_FLAGS } from '../decode/table.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import {
-    ARITH, I32, Kind, emitCondition, emitFlag, kindOf, widthCode,
+    ARITH, CARRY_IN_WORD, I32, Kind, eagerFlagsOf, emitCondition, emitFlag, kindOf, widthCode,
 } from './flags.js';
 import { emitInstruction } from './integer.js';
-import { addUndoHelper, emitStaleExit } from './memory.js';
+import { addUndoHelper, emitGroupChecks, emitStaleExit, planBlock } from './memory.js';
 import { importHelpers } from './helpers.js';
 import { Tables } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
+import { inlineReturns } from '../region.js';
 import {
     isX87, prepareX87, regionHasMmx, sameState, x87BlockEnd, x87BlockStart,
     x87Edge, x87Epilogue, x87LoadRegisters, x87Normalise,
@@ -100,6 +101,8 @@ export const Local = Object.freeze({
     // and mm locals a region uses follow, then the x87 locals, per region.
     vec: 37,
 });
+/** The record's locals in the order the layout's `flagRecord` keeps them. */
+const RECORD_LOCALS = [Local.kind, Local.res, Local.op1, Local.op2, Local.cin];
 const LOCAL_TYPES = [
     // the eight registers
     ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32,
@@ -261,10 +264,14 @@ export class RegionEmitter {
     constructor(context, region, { entryTop = 0 } = {}){
         this.context = context;
         this.layout = context.layout;
+        /** Where the layout keeps the flag record between regions, or -1. */
+        this.flagRecord = context.layout.flagRecord ?? -1;
         this.region = region;
         this.b = new Body();
         /** @type {Map<number, number>} */
         this.labels = new Map(region.blocks.map((block, index)=>[block.start, index]));
+        /** By ret block: the return addresses it jumps to rather than leaves by. */
+        this.returns = inlineReturns(region);
         /** @type {string[]} the open control labels, innermost last */
         this.controls = [];
         /**
@@ -276,6 +283,11 @@ export class RegionEmitter {
          * @type {{ kind: number, width: number } | null}
          */
         this.pending = null;
+        /** The record at each emitted block's end, and the guess for this one's start.
+         * @type {({ kind: number, width: number } | null)[]} */
+        this.ends = [];
+        /** @type {{ kind: number, width: number } | null} */
+        this.hint = null;
         /** @type {Map<string, number>} */
         this.unsupported = new Map();
         /**
@@ -298,6 +310,12 @@ export class RegionEmitter {
         this.blockIndex = 0;
         /** Whether the current block is a wasm loop onto itself (see `emitBlock`). */
         this.selfLoop = false;
+        /**
+         * The current instruction's place in its block's access groups
+         * (`planBlock`), or null.
+         * @type {import('./memory.js').Planned | null}
+         */
+        this.memPlan = null;
         /** Whether the block's port write called the host from here and went on. */
         this.trapped = false;
         /** Blocks emitted as loops onto themselves. */
@@ -513,6 +531,16 @@ export class RegionEmitter {
     loadState(){
         const { b, layout } = this;
         b.i32const(0).load('i32', { offset: layout.eflags }).localSet(Local.flags);
+        if (this.flagRecord >= 0)
+        {
+            // The record the last region left, as it left it: its kind is not
+            // known here, and a read folds it only when it must.
+            for (const [i, local] of RECORD_LOCALS.entries())
+            {
+                b.i32const(0).load('i32', { offset: this.flagRecord + i * 4 }).localSet(local);
+            }
+            this.pending = null;
+        }
         if (layout.flagsChanged >= 0 && this.context.getEflags !== undefined)
         {
             // The other executor keeps some flags lazy: when its record says
@@ -541,7 +569,10 @@ export class RegionEmitter {
     /** The run's own locals at their start: no record, nothing retired, nothing touched. */
     resetRun(){
         const { b } = this;
-        b.i32const(0).localSet(Local.kind);
+        if (this.flagRecord < 0)
+        {
+            b.i32const(0).localSet(Local.kind);
+        }
         b.i32const(0).localSet(Local.retired);
         b.i32const(0).localSet(Local.mmxTouched);
         b.i32const(0).localSet(Local.stale);
@@ -565,7 +596,20 @@ export class RegionEmitter {
      */
     storeState(){
         const { b, layout } = this;
-        this.materialise();
+        if (this.flagRecord >= 0)
+        {
+            // The record goes as it is: the helper at every exit was a fifth of
+            // a call-heavy loop, and the next region mostly writes the flags
+            // before it reads them. Whoever reads the word folds it.
+            for (const [i, local] of RECORD_LOCALS.entries())
+            {
+                b.i32const(0).localGet(local).store('i32', { offset: this.flagRecord + i * 4 });
+            }
+        }
+        else
+        {
+            this.materialise();
+        }
         this.deferred.push({ at: b.bytes.length, kind: 'store' });
         b.i32const(0).localGet(Local.flags).store('i32', { offset: layout.eflags });
         if (layout.flagsChanged >= 0)
@@ -802,28 +846,104 @@ export class RegionEmitter {
     }
 
     /**
+     * Makes the word own CF, which is all an `inc` or `dec` keeps of the
+     * flags before it: a known record's CF is computed inline into the word
+     * (a `dec ecx` after an `add` or `xor` in a loop called the helper each
+     * turn for five flags the `dec` overwrites); an unknown one is folded
+     * only when its kind does not leave CF in the word already -- a counting
+     * loop's head meets its own `dec`'s record there. The record stays as it
+     * was otherwise, its word agreeing with it.
+     */
+    carryIntoWord(){
+        const { b } = this;
+        const pending = this.pending;
+        if (pending === null)
+        {
+            // The unfolded kind in t2; CF of a kind that does not keep it in
+            // the word, without the helper: the operands are masked to their
+            // width, so an unsigned compare is the carry at every width.
+            const k = Local.t2;
+            b.localGet(Local.kind).i32const(2).op(I32.shrU).localSet(k);
+            b.i32const(CARRY_IN_WORD).localGet(k).op(I32.shrU).i32const(1).op(I32.and).op(I32.eqz);
+            this.openIf('carry', EMPTY);
+            b.localGet(Local.flags).i32const(~CF).op(I32.and);
+            // SUB/SBB: op1 < op2, or equal with a borrow in (SBB).
+            b.localGet(k).i32const(Kind.SUB).op(I32.sub).i32const(2).op(I32.ltU);
+            b.localGet(Local.op1).localGet(Local.op2).op(I32.ltU);
+            b.localGet(Local.op1).localGet(Local.op2).op(I32.eq).localGet(Local.cin).op(I32.and)
+                .localGet(k).i32const(Kind.SBB).op(I32.eq).op(I32.and);
+            b.op(I32.or).op(I32.and);
+            // ADD/ADC: the sum wrapped below op1, or equal with a carry in (ADC).
+            b.localGet(k).i32const(Kind.ADD).op(I32.sub).i32const(2).op(I32.ltU);
+            b.localGet(Local.res).localGet(Local.op1).op(I32.ltU);
+            b.localGet(Local.res).localGet(Local.op1).op(I32.eq).localGet(Local.cin).op(I32.and)
+                .localGet(k).i32const(Kind.ADC).op(I32.eq).op(I32.and);
+            b.op(I32.or).op(I32.and);
+            b.op(I32.or);
+            // NEG: op2 was not zero. LOGIC: none of the three, 0.
+            b.localGet(k).i32const(Kind.NEG).op(I32.eq);
+            b.localGet(Local.op2).i32const(0).op(I32.ne).op(I32.and);
+            b.op(I32.or);
+            b.op(I32.or).localSet(Local.flags);
+            this.close();
+            return;
+        }
+        if ((eagerFlagsOf(pending.kind) & CF) !== 0)
+        {
+            return;
+        }
+        b.localGet(Local.flags).i32const(~CF).op(I32.and);
+        emitFlag(b, this.flagLocals, pending.kind, pending.width, CF);
+        b.op(I32.or).localSet(Local.flags);
+    }
+
+    /**
      * Pushes 0/1 for a flag, from the record when its kind is known here and
      * from the word otherwise.
      *
      * @param {number} flag
      */
     pushFlag(flag){
-        if (this.pending === null)
-        {
-            this.materialise();
-        }
-        const { kind, width } = /** @type {{ kind: number, width: number }} */ (this.pending);
-        emitFlag(this.b, this.flagLocals, kind, width, flag);
+        this.pushRead((kind, width)=>emitFlag(this.b, this.flagLocals, kind, width, flag));
     }
 
     /** Pushes 0/1 for a condition code. @param {number} cc */
     pushCondition(cc){
+        this.pushRead((kind, width)=>emitCondition(this.b, this.flagLocals, kind, width, cc));
+    }
+
+    /**
+     * A read of the flags: from the record when its kind is known here; where
+     * it is not (a block's start), from the record when it is of the kind the
+     * block before left -- the second `jcc` of a `cmp; je; jl` chain, the
+     * test after a loop's head -- and through the helper otherwise.
+     *
+     * @param {(kind: number, width: number) => void} read
+     */
+    pushRead(read){
+        const hint = this.pending === null ? this.hint : null;
+        if (hint !== null)
+        {
+            const { b } = this;
+            b.localGet(Local.kind).i32const(hint.kind * 4 + hint.width).op(I32.eq);
+            this.openIf('flagHint', ValType.i32);
+            read(hint.kind, hint.width);
+            b.else();
+            b.localGet(Local.kind).localGet(Local.res).localGet(Local.op1).localGet(Local.op2)
+                .localGet(Local.cin).localGet(Local.flags);
+            b.call(this.context.materialise);
+            b.localSet(Local.flags);
+            b.i32const(0).localSet(Local.kind);
+            read(Kind.EAGER, 2);
+            this.close();
+            return;
+        }
         if (this.pending === null)
         {
             this.materialise();
         }
         const { kind, width } = /** @type {{ kind: number, width: number }} */ (this.pending);
-        emitCondition(this.b, this.flagLocals, kind, width, cc);
+        read(kind, width);
     }
 
     /**
@@ -846,7 +966,16 @@ export class RegionEmitter {
      * @param {number} mask
      */
     eagerWrite(mask){
-        this.materialise();
+        if ((mask & ARITH) === ARITH)
+        {
+            // All six are written: nothing of the record survives to fold.
+            this.b.i32const(0).localSet(Local.kind);
+            this.pending = { kind: Kind.EAGER, width: 2 };
+        }
+        else
+        {
+            this.materialise();
+        }
         this.b.localGet(Local.flags).i32const(~mask).op(I32.and).localSet(Local.flags);
     }
 
@@ -944,6 +1073,27 @@ export class RegionEmitter {
      * @param {number} index
      */
     emitBlock(block, index){
+        // The record's kind at the end of the block before, and the hint for
+        // this one: what an earlier block that goes on here left. Only a guess
+        // -- the block is entered from elsewhere too -- so a read checks it.
+        if (index > 0)
+        {
+            this.ends[index - 1] = this.pending;
+        }
+        this.hint = null;
+        const blocks = this.region.blocks;
+        for (let i = 0; i < index && this.hint === null; i++)
+        {
+            const end = this.ends[i];
+            const { kind, next, targets } = blocks[i].exit;
+            const flows = kind === 'fallthrough' || kind === 'jcc' || kind === 'loop'
+                ? next === block.start || targets.includes(block.start)
+                : kind === 'jump' && targets[0] === block.start;
+            if (flows && end && end.kind !== Kind.EAGER)
+            {
+                this.hint = end;
+            }
+        }
         this.pending = null;
         this.dead = false;
         this.blockRetired = 0;
@@ -984,6 +1134,9 @@ export class RegionEmitter {
             this.blockDepth = this.controls.length;
         }
         const live = deadFlagPass(block);
+        // The other executor's code table in a hybrid layout is a second
+        // thing a store is noted against: that layout checks each access.
+        const plan = this.layout.codePages < 0 ? planBlock(block.instructions) : new Map();
         for (let i = 0; i < block.instructions.length; i++)
         {
             const instruction = block.instructions[i];
@@ -995,7 +1148,19 @@ export class RegionEmitter {
             // call) has it charged; an exit *before* it uncounts it.
             this.blockRetired++;
             this.instructions++;
+            this.memPlan = plan.get(i) ?? null;
+            if (this.memPlan !== null && this.memPlan.checks.length > 0)
+            {
+                emitGroupChecks(this, this.memPlan.checks);
+            }
             const done = emitInstruction(this, instruction, flagsLive);
+            if (done && this.memPlan !== null && this.memPlan.access !== null
+                && !this.memPlan.used)
+            {
+                throw new Error(`memory plan: ${instruction.op} at ${instruction.eip.toString(16)}`
+                    + ' made no access');
+            }
+            this.memPlan = null;
             if (!done)
             {
                 this.unsupported.set(instruction.opcode,
@@ -1187,6 +1352,15 @@ export class RegionEmitter {
                 {
                     this.charge();
                     this.exitAt(exit.next, Exit.UNTRANSLATED);
+                }
+                return;
+            case 'call':
+                // A direct call to a block of the region: the push is done
+                // and the jump is the block's. Any other left by itself.
+                if (!this.dead)
+                {
+                    this.charge();
+                    this.jumpTo(exit.targets[0]);
                 }
                 return;
             default:
