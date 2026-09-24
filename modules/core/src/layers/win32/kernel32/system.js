@@ -175,36 +175,55 @@ export function createSystemFunctions(host){
         }
     };
 
-    /** @param {number} address @param {number} maxLength */
-    const readAnsi = (address, maxLength)=>{
+    /**
+     * A terminated string of `width`-byte units, read a span at a time -- up to
+     * 64 bytes and never across a page -- rather than a unit at a time: a
+     * read per character was an allocation and a region check per character,
+     * most of what an lstrlen cost. A span that cannot be read whole is read a
+     * unit at a time, so a string ending just short of unmapped memory reads
+     * as it always did, and one running into it throws where it always did.
+     *
+     * @param {number} address @param {number} maxLength @param {1 | 2} width
+     */
+    const readUnits = (address, maxLength, width)=>{
         let text = '';
-        for (let at = 0; at < maxLength; at++)
+        let at = address;
+        let left = maxLength;
+        while (left > 0)
         {
-            const byte = host.readMemory(address + at, 1)[0];
-            if (byte === 0)
+            const units = Math.min(left, 64 / width,
+                Math.max(1, (PAGE_SIZE - (at & (PAGE_SIZE - 1))) / width | 0));
+            /** @type {Uint8Array | null} */
+            let bytes = null;
+            try
             {
-                break;
+                bytes = host.readMemory(at, units * width);
             }
-            text += String.fromCharCode(byte);
+            catch (e){
+                void e;
+            }
+            for (let i = 0; i < units; i++)
+            {
+                const pair = bytes ?? host.readMemory(at + i * width, width);
+                const from = bytes ? i * width : 0;
+                const unit = width === 1 ? pair[from] : pair[from] | pair[from + 1] << 8;
+                if (unit === 0)
+                {
+                    return text;
+                }
+                text += String.fromCharCode(unit);
+            }
+            at += units * width;
+            left -= units;
         }
         return text;
     };
 
     /** @param {number} address @param {number} maxLength */
-    const readWide = (address, maxLength)=>{
-        let text = '';
-        for (let at = 0; at < maxLength; at++)
-        {
-            const pair = host.readMemory(address + at * 2, 2);
-            const unit = pair[0] | pair[1] << 8;
-            if (unit === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(unit);
-        }
-        return text;
-    };
+    const readAnsi = (address, maxLength)=>readUnits(address, maxLength, 1);
+
+    /** @param {number} address @param {number} maxLength */
+    const readWide = (address, maxLength)=>readUnits(address, maxLength, 2);
 
     /** @param {number} address @param {string} text  Written with a terminator. */
     const writeAnsi = (address, text)=>{

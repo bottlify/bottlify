@@ -41,6 +41,8 @@ marshalling whatever bytes live at it.
 | `callPhases` | boolean | `false` | Time every handler as a phase of its own in the profiler; the crossing itself is always sampled. |
 | `onCall` | `(record) => void` | `undefined` | A sink handed every call record as it is made (and again when a waiting call answers). |
 
+A call record handed to `onCall` is one of a ring the dispatcher reuses, fields written in place on every call; its `result` is an own, enumerable getter defined onto the record rather than written in its literal -- a getter in a literal puts the object in V8's dictionary mode, which made each of the record's seven writes per call a hash lookup (the dispatcher alone, 95 -> 30 ns a call). A sink's `{ ...record }` carries it all the same.
+
 ### API
 
 | member | signature | meaning |
