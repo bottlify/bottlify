@@ -173,6 +173,9 @@ export function depthFormatForDepth(bitDepth){
  * @property {() => number} release
  * @property {number} caps
  * @property {number[]} entries
+ * @property {number[]} pixels
+ *     The entries as the pixels a drawing surface holds, kept up to date in
+ *     place, so a device context given this array sees every later SetEntries.
  * @property {(on: boolean) => void} markPrimary
  * @property {(start: number, values: readonly number[]) => number} setEntries
  * @property {(start: number, count: number) => { hr: number, entries: number[] }} getEntries
@@ -569,6 +572,7 @@ export function createDirectDraw(options = {}){
         // Every entry exists from the start: a program reads back the ones it
         // never wrote and expects zeros, not a shorter array.
         const held = Array.from({ length: size }, (_, index)=>(entries[index] ?? 0) >>> 0);
+        const pixels = held.map(paletteEntryToPixel);
         const life = counted(()=>{
             if (owner)
             {
@@ -590,6 +594,9 @@ export function createDirectDraw(options = {}){
             get entries(){
                 return held;
             },
+            get pixels(){
+                return pixels;
+            },
             /** @param {boolean} on */
             markPrimary(on){
                 caps = (on ? caps | DDPCAPS_PRIMARYSURFACE : caps & ~DDPCAPS_PRIMARYSURFACE) >>> 0;
@@ -606,6 +613,7 @@ export function createDirectDraw(options = {}){
                 }
                 values.forEach((value, index)=>{
                     held[start + index] = value >>> 0;
+                    pixels[start + index] = paletteEntryToPixel(value >>> 0);
                 });
                 return DD_OK;
             },
@@ -990,7 +998,9 @@ export function createDirectDraw(options = {}){
                     pitch,
                     bitCount: bpp * 8,
                     bits: buffer,
-                    palette: bpp === 1 && palette ? palette.entries.map(paletteEntryToPixel) : null,
+                    // The palette's own live array: a program that animates its
+                    // palette while holding the DC draws in the new colours.
+                    palette: bpp === 1 && palette ? palette.pixels : null,
                     format: spec.pixelFormat.greenMask === 0x07e0 ? '565' : '555',
                 });
                 return { hr: DD_OK, dc };
