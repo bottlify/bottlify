@@ -48,7 +48,7 @@ import { importHelpers } from './helpers.js';
 import { Tables } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
 import {
-    isX87, prepareX87, regionHasMmx, sameState, x87BlockStart,
+    isX87, prepareX87, regionHasMmx, sameState, x87BlockEnd, x87BlockStart,
     x87Edge, x87Epilogue, x87Normalise,
     x87Prologue,
 } from './x87.js';
@@ -960,6 +960,13 @@ export class RegionEmitter {
                 this.staleCheck = false;
                 emitStaleExit(this, instruction.eip + instruction.length);
             }
+        }
+        if (this.x87.active)
+        {
+            // The stack words the block's plain x87 left stale, written
+            // before every way out of it -- the fall-through and the loop's
+            // own back edge too.
+            x87BlockEnd(this);
         }
         this.emitExit(block, index);
         this.closeSelfLoop();

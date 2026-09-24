@@ -195,8 +195,15 @@ formed at, whatever other path reaches it, so a join two tops meet at still publ
 for each -- the edge that arrives at the entry with the other top leaves, and the runtime forms
 a region there for the top the machine has. The translator keeps every x87 value as a double, as the emulator does; the
 emulator's tagged-double form is read and written directly, a true 80-bit register it left is
-converted inline. The control word is honoured at run time: rounding control rounds the
-integer stores and `frndint`, precision control set to single rounds every arithmetic
+converted inline. Within a block the emitter knows what the block's own pushes and pops made
+of the empty mask, so the stack-fault checks they decide cost nothing, and the plain forms
+(loads, stores, arithmetic, compares) leave the empty mask and the top in their locals stale:
+they are written once, where something reads them -- a check on a register the block changed,
+`fxam`, an MMX instruction or `emms`, every exit and edge, and the block's end -- rather than at
+every push and pop; a register the block has marked dirty is not marked again. An arithmetic
+result is tested for a NaN once: the host's NaN sign fixed and IE raised in that branch. The
+control word is honoured at run time: rounding control rounds the
+integer stores and `frndint` (to nearest inline, the other modes through a helper), precision control set to single rounds every arithmetic
 result's mantissa to 24 bits (extended is treated as double); the SSE conversions that round
 read the MXCSR rounding control the same way; a NaN an operation makes carries the
 processor's negative sign whatever the host's default NaN is; exception masks are not

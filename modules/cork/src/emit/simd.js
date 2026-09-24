@@ -28,7 +28,7 @@ import { I32 } from './flags.js';
 import { Local, MMX_HELD, MMX_TOP } from './region.js';
 import { emitAddress, readOp, writeOp, writeReg } from './integer.js';
 import { checkAccess, noteStore } from './memory.js';
-import { x87FromMmx } from './x87.js';
+import { x87Forget, x87FromMmx } from './x87.js';
 
 const F32 = Object.freeze({
     eq: 0x5b, ne: 0x5c, lt: 0x5d, gt: 0x5e, le: 0x5f, ge: 0x60, add: 0x92, sub: 0x93, mul: 0x94,
@@ -91,6 +91,7 @@ export function emitSimd(e, instruction, flagsLive){
             // after this instruction is compiled (the tracker's top) and run
             // (the empty mask) for. The registers' values and forms were
             // reconciled by the write's own lowering (`x87FromMmx`).
+            x87Forget(e);
             e.b.i32const(0).localSet(Local.x87Top);
             e.b.i32const(0).localSet(Local.x87Empty);
             if (e.x87.current !== null)
@@ -413,6 +414,7 @@ function emitForm(e, instruction, flagsLive){
             // put it back, and a run with none leaves the machine's own.
             if (e.x87.active)
             {
+                x87Forget(e);
                 b.i32const(0xff).localSet(Local.x87Empty);
             }
             else

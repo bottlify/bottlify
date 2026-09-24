@@ -332,7 +332,34 @@ export function trackRegion(region, entryTop){
  * @property {Set<number>} cut
  * @property {StackState | null} current   the state at the current point of emission
  * @property {boolean} controlWritten
+ * @property {Known} known   what the current block's own x87 has made of the stack words
  */
+
+/**
+ * What the current block's own x87 instructions have made of the empty mask
+ * and the top, known while translating. A register an earlier push of the
+ * block filled is held and one it popped is empty, so the stack-fault checks
+ * on them are decided here; and the pushes and pops of the plain forms
+ * (`MASK_SAFE`) leave the mask and top locals stale, written once where they
+ * are read -- before a check that needs a stale bit, at every exit and edge
+ * (`x87Flush`), and at the block's end -- rather than at each. A register the
+ * block has already marked dirty is not marked again. Known only within a
+ * block (another may enter it with any stack), never in a region with MMX
+ * (which holds every register), and forgotten around any operation that
+ * changes the mask otherwise.
+ *
+ * @typedef {Object} Known
+ * @property {number} block    the block this knowledge is of, or -1
+ * @property {number} held     registers known held
+ * @property {number} empty    registers known empty
+ * @property {number} stale    registers whose bit in the empty-mask local is not yet written
+ * @property {number} dirty    registers known marked in the dirty-mask local
+ * @property {number} top      the top as the block's pushes and pops left it
+ * @property {boolean} topStale  the top local is not yet written
+ */
+
+/** @returns {Known} */
+const unknown = ()=>({ block: -1, held: 0, empty: 0, stale: 0, dirty: 0, top: 0, topStale: false });
 
 /**
  * Whether a region translates an MMX instruction: one with an mm operand that
@@ -366,6 +393,7 @@ export function prepareX87(e, entryTop){
         return {
             active: false, hasMmx: false, base: 0, form: -1, temp: 0, temp2: 0, temp3: 0,
             states: [], ends: [], cut: new Set(), current: null, controlWritten: false,
+            known: unknown(),
         };
     }
     const hasMmx = regionHasMmx(region, e.context.leaveOut);
@@ -383,7 +411,7 @@ export function prepareX87(e, entryTop){
     }
     return {
         active: true, hasMmx, base, form, temp: base + 8, temp2: base + 9, temp3: base + 10,
-        states, ends, cut, current: null, controlWritten: false,
+        states, ends, cut, current: null, controlWritten: false, known: unknown(),
     };
 }
 
@@ -506,6 +534,9 @@ export function x87BlockStart(e, index){
         return false;
     }
     x.current = x.states[index] === null ? null : cloneState(/** @type {StackState} */ (x.states[index]));
+    // Nothing is known of the stack a block is entered with; whatever a block
+    // before it left stale was written on its every way out.
+    x.known = unknown();
     if (x.current !== null)
     {
         e.b.i32const(x.current.top).localSet(Local.x87Top);
@@ -529,6 +560,7 @@ export function x87BlockStart(e, index){
  */
 export function x87Edge(e, targetIndex){
     const x = e.x87;
+    x87Flush(e, false);
     const to = x.states[targetIndex];
     if (!to || x.cut.has(targetIndex))
     {
@@ -550,10 +582,65 @@ export function x87Edge(e, targetIndex){
  */
 export function x87Normalise(e){
     const x = e.x87;
+    x87Flush(e, false);
     if (x.current !== null)
     {
         x87MoveTo(e, { top: x.current.top, slot: [0, 1, 2, 3, 4, 5, 6, 7] });
     }
+}
+
+/**
+ * Writes the empty-mask and top locals the block's plain forms left stale
+ * (see `Known`). `commit` says the write is on the block's straight path, so
+ * the locals are current from here; an exit's or an edge's write inside a
+ * branch leaves them stale for the path that goes on.
+ *
+ * @param {E} e @param {boolean} commit
+ */
+function x87Flush(e, commit){
+    const { b } = e;
+    const known = e.x87.known;
+    if (known.stale !== 0)
+    {
+        b.localGet(Local.x87Empty).i32const(~known.stale).op(I32.and);
+        if ((known.empty & known.stale) !== 0)
+        {
+            b.i32const(known.empty & known.stale).op(I32.or);
+        }
+        b.localSet(Local.x87Empty);
+    }
+    if (known.topStale)
+    {
+        b.i32const(known.top).localSet(Local.x87Top);
+    }
+    if (commit)
+    {
+        known.stale = 0;
+        known.topStale = false;
+    }
+}
+
+/**
+ * At a block's end, before its exit: the stale locals written on the
+ * straight path, so every way out of the block -- the fall-through too --
+ * leaves with them current.
+ *
+ * @param {E} e
+ */
+export function x87BlockEnd(e){
+    x87Flush(e, true);
+}
+
+/**
+ * Before an instruction of another class writes the stack words (an MMX
+ * instruction's hold, `emms`): the stale ones written first, so the flush
+ * does not later overwrite what it wrote, and nothing known after it.
+ *
+ * @param {E} e
+ */
+export function x87Forget(e){
+    x87Flush(e, true);
+    e.x87.known.block = -1;
 }
 
 /**
@@ -670,20 +757,16 @@ export function emitX87(e, instruction, flagsLive){
         e.x87RefusalReason = 'step-null';
         return false;
     }
-    // What this block's own x87 instructions have made of the empty mask, known
-    // while translating: a register an earlier push of the block filled is held
-    // and one it popped is empty, so the stack-fault checks on them are decided
-    // here. Known only within a block (another may enter it with any stack),
-    // never in a region with MMX (which holds every register), and forgotten
-    // after any operation that changes the mask otherwise.
-    const known = /** @type {{ block: number, held: number, empty: number }} */ (
-        /** @type {any} */ (x).known ??= { block: -1, held: 0, empty: 0 });
-    if (known.block !== e.blockIndex || x.hasMmx || !MASK_SAFE.has(op))
+    // What this block's own x87 instructions have made of the stack words (see
+    // `Known`). Any other form writes the stale locals first, works on them
+    // directly, and leaves nothing known for the next.
+    const safe = MASK_SAFE.has(op) && !x.hasMmx;
+    if (!safe || x.known.block !== e.blockIndex)
     {
-        known.block = x.hasMmx ? -1 : e.blockIndex;
-        known.held = 0;
-        known.empty = 0;
+        x87Flush(e, true);
+        x.known = { ...unknown(), block: e.blockIndex, top: state.top };
     }
+    const known = x.known;
     /** The local holding ST(i). @param {number} i */
     const st = i=>x.base + state.slot[(state.top + i) & 7];
     /**
@@ -703,11 +786,56 @@ export function emitX87(e, instruction, flagsLive){
         b.localGet(x.form).i32const(~(1 << physical)).op(I32.and).localSet(x.form);
     };
     /** Marks ST(i) written. @param {number} i */
-    const dirty = i=>{
-        const physical = (state.top + i) & 7;
+    /** Marks a physical register dirty, unless the block has already. @param {number} physical */
+    const markDirty = physical=>{
+        if (safe && (known.dirty & (1 << physical)) !== 0)
+        {
+            return;
+        }
         b.localGet(Local.x87Dirty).i32const(1 << physical).op(I32.or)
             .localSet(Local.x87Dirty);
+        if (safe)
+        {
+            known.dirty |= 1 << physical;
+        }
+    };
+    /** Marks ST(i) written. @param {number} i */
+    const dirty = i=>{
+        const physical = (state.top + i) & 7;
+        markDirty(physical);
         syncMm(physical, st(i));
+    };
+    /**
+     * A physical register becomes held (`held`) or empty: in the local at once,
+     * or in what the block knows, for the flush to write.
+     *
+     * @param {number} physical @param {boolean} held
+     */
+    const mark = (physical, held)=>{
+        const bit = 1 << physical;
+        if (safe)
+        {
+            known.stale |= bit;
+        }
+        else
+        {
+            b.localGet(Local.x87Empty).i32const(held ? ~bit : bit).op(held ? I32.and : I32.or)
+                .localSet(Local.x87Empty);
+        }
+        known.held = held ? known.held | bit : known.held & ~bit;
+        known.empty = held ? known.empty & ~bit : known.empty | bit;
+    };
+    /** The top local, now or at the flush. @param {number} top */
+    const setTop = top=>{
+        if (safe)
+        {
+            known.top = top;
+            known.topStale = true;
+        }
+        else
+        {
+            b.i32const(top).localSet(Local.x87Top);
+        }
     };
     const [dst, src] = operands;
     const push = ()=>{
@@ -715,12 +843,10 @@ export function emitX87(e, instruction, flagsLive){
         const top = (state.top - 1) & 7;
         const local = x.base + state.slot[top];
         b.localSet(local);
-        b.localGet(Local.x87Empty).i32const(~(1 << top)).op(I32.and).localSet(Local.x87Empty);
-        b.localGet(Local.x87Dirty).i32const(1 << top).op(I32.or).localSet(Local.x87Dirty);
+        mark(top, true);
+        markDirty(top);
         syncMm(top, local);
-        b.i32const(top).localSet(Local.x87Top);
-        known.held |= 1 << top;
-        known.empty &= ~(1 << top);
+        setTop(top);
     };
 
     /** @param {number} times */
@@ -728,15 +854,21 @@ export function emitX87(e, instruction, flagsLive){
         let top = state.top;
         for (let n = 0; n < times; n++)
         {
-            b.localGet(Local.x87Empty).i32const(1 << top).op(I32.or).localSet(Local.x87Empty);
-            known.empty |= 1 << top;
-            known.held &= ~(1 << top);
+            mark(top, false);
             top = (top + 1) & 7;
         }
-        b.i32const(top).localSet(Local.x87Top);
+        if (times > 0)
+        {
+            setTop(top);
+        }
     };
     const finish = ()=>{
         x.current = next;
+        if (!safe)
+        {
+            // Nothing is known after it: the next form starts afresh.
+            known.block = -1;
+        }
         return true;
     };
     /** Sets the status bits given. @param {number} mask */
@@ -745,6 +877,8 @@ export function emitX87(e, instruction, flagsLive){
     };
     /** Pushes the QNaN indefinite. */
     const indefinite = ()=>b.i64const(-0x0008000000000000n).op(F64.reinterpretI64);
+    /** The last guard decided while translating that nothing faults (t1 is 0). */
+    let clear = false;
     /**
      * The stack-fault check: t1 is set when a source ST(i) is empty or a
      * push finds its register held, and IE and SF are raised. The
@@ -757,6 +891,7 @@ export function emitX87(e, instruction, flagsLive){
      * @param {number[]} sources @param {boolean} pushes
      */
     const guard = (sources, pushes)=>{
+        clear = false;
         let read = 0;
         for (const i of sources)
         {
@@ -767,16 +902,26 @@ export function emitX87(e, instruction, flagsLive){
         read &= ~known.held;
         const into = 1 << ((state.top - 1) & 7);
         const overflowChecked = pushes && (known.empty & into) === 0;
+        if (pushes)
+        {
+            // C1 is a push's overflow indicator: cleared here, and set below
+            // when the register it would take is held -- the processor leaves
+            // C1 saying which way the last push faulted, so a later successful
+            // push clears an earlier overflow's mark.
+            b.localGet(Local.x87Status).i32const(~Status.C1).op(I32.and)
+                .localSet(Local.x87Status);
+        }
         if (read === 0 && !overflowChecked)
         {
+            // Nothing to check: no fault, and no indefinite to choose.
             b.i32const(0).localSet(Local.t1);
-            if (pushes)
-            {
-                // A push that cannot overflow clears C1, as the processor does.
-                b.localGet(Local.x87Status).i32const(~Status.C1).op(I32.and)
-                    .localSet(Local.x87Status);
-            }
+            clear = true;
             return;
+        }
+        if (((read | (overflowChecked ? into : 0)) & known.stale) !== 0)
+        {
+            // A bit the check reads is one the block has not written yet.
+            x87Flush(e, true);
         }
         if (read !== 0)
         {
@@ -795,27 +940,14 @@ export function emitX87(e, instruction, flagsLive){
         b.localGet(Local.t1);
         e.openIf('fault', EMPTY);
         setStatus(Status.IE | Status.SF);
-        e.close();
         if (overflowChecked)
         {
-            // C1 is this push's overflow indicator: set when the register it
-            // would take is held, cleared when the push succeeds -- the
-            // processor leaves C1 saying which way the last push faulted, so a
-            // later successful push clears an earlier overflow's mark.
-            b.localGet(Local.x87Empty).i32const(into).op(I32.and)
-                .op(I32.eqz);
+            b.localGet(Local.x87Empty).i32const(into).op(I32.and).op(I32.eqz);
             e.openIf('overflow', EMPTY);
             setStatus(Status.C1);
-            b.else();
-            b.localGet(Local.x87Status).i32const(~Status.C1).op(I32.and)
-                .localSet(Local.x87Status);
             e.close();
         }
-        else if (pushes)
-        {
-            b.localGet(Local.x87Status).i32const(~Status.C1).op(I32.and)
-                .localSet(Local.x87Status);
-        }
+        e.close();
     };
     /**
      * Rounds the f64 on the stack to a float when precision control says
@@ -844,12 +976,12 @@ export function emitX87(e, instruction, flagsLive){
         e.close();
         b.localGet(x.temp3);
     };
-    /** Rounds the f64 on the stack by the control word's rounding control. */
-    const byRounding = ()=>{
-        b.localGet(Local.x87Control).call(/** @type {number} */ (e.context.round));
-    };
     /** Replaces the f64 on the stack by the indefinite when the guard fired. */
     const orIndefinite = ()=>{
+        if (clear)
+        {
+            return;
+        }
         // select keeps the first value when the condition holds: the result
         // when the guard did not fire.
         indefinite();
@@ -864,10 +996,15 @@ export function emitX87(e, instruction, flagsLive){
      * them apart through a store. A NaN that came in as an operand is
      * propagated as it was.
      *
+     * With `invalid`, the same NaN out of operands that were not raises IE
+     * too: the arithmetic's invalid operation, found by the one compare.
+     *
      * @param {number[]} inputs  the locals holding the operands
+     * @param {boolean} [invalid]
      */
-    const hostNaN = inputs=>{
-        if (e.context.features.defaultNaNNegative)
+    const hostNaN = (inputs, invalid = false)=>{
+        const fix = !e.context.features.defaultNaNNegative;
+        if (!fix && !invalid)
         {
             return;
         }
@@ -875,14 +1012,21 @@ export function emitX87(e, instruction, flagsLive){
         b.localSet(x.temp3);
         b.localGet(x.temp3).localGet(x.temp3).op(F64.ne);
         e.openIf('nan', EMPTY);
-        b.localGet(x.temp3).f64const(-1).op(F64.copysign);
-        b.localGet(x.temp3);
         b.i32const(1);
         for (const input of inputs)
         {
             b.localGet(input).localGet(input).op(F64.eq).op(I32.and);
         }
-        b.select().localSet(x.temp3);
+        e.openIf('made', EMPTY);
+        if (fix)
+        {
+            b.localGet(x.temp3).f64const(-1).op(F64.copysign).localSet(x.temp3);
+        }
+        if (invalid)
+        {
+            setStatus(Status.IE);
+        }
+        e.close();
         e.close();
         b.localGet(x.temp3);
     };
@@ -947,8 +1091,7 @@ export function emitX87(e, instruction, flagsLive){
                 b.localSet(st(i));
                 dirty(i);
                 // The destination is held from here on, whatever it was.
-                b.localGet(Local.x87Empty).i32const(~(1 << ((state.top + i) & 7))).op(I32.and)
-                    .localSet(Local.x87Empty);
+                mark((state.top + i) & 7, true);
             }
             else
             {
@@ -1078,8 +1221,7 @@ export function emitX87(e, instruction, flagsLive){
             return finish();
         case 'frndint':
             guard([0], false);
-            b.localGet(st(0));
-            byRounding();
+            roundLocal(e, st(0));
             orIndefinite();
             b.localSet(st(0));
             dirty(0);
@@ -1349,34 +1491,26 @@ export function emitX87(e, instruction, flagsLive){
                 fadd: F64.add, fsub: F64.sub, fmul: F64.mul, fdiv: F64.div,
             }[kind]));
             byPrecision();
-            hostNaN([x.temp, x.temp2]);
+            // An invalid NaN out of inputs that were not NaN raises IE; a stack
+            // fault has raised it already, so the check needs no guard of its own.
+            hostNaN([x.temp, x.temp2], true);
             orIndefinite();
             b.localSet(st(target));
-            // The exceptions of a sound operation: a zero-divide of a finite
-            // nonzero, and an invalid NaN out of inputs that were not NaN.
-            b.localGet(Local.t1).op(I32.eqz);
-            e.openIf('sound', EMPTY);
             if (kind === 'fdiv')
             {
+                // A zero-divide of a finite nonzero, by a sound operation.
                 b.localGet(c).f64const(0).op(F64.eq);
                 b.localGet(a).f64const(0).op(F64.ne);
                 b.localGet(a).op(F64.abs).f64const(Infinity).op(F64.lt);
                 b.op(I32.and).op(I32.and);
+                if (!clear)
+                {
+                    b.localGet(Local.t1).op(I32.eqz).op(I32.and);
+                }
                 e.openIf('zero', EMPTY);
                 setStatus(Status.ZE);
                 e.close();
             }
-            // The result a NaN first -- one compare on the common path -- and
-            // only then whether the inputs were not.
-            b.localGet(st(target)).localGet(st(target)).op(F64.ne);
-            e.openIf('nan', EMPTY);
-            b.localGet(x.temp).localGet(x.temp).op(F64.eq);
-            b.localGet(x.temp2).localGet(x.temp2).op(F64.eq).op(I32.and);
-            e.openIf('invalid', EMPTY);
-            setStatus(Status.IE);
-            e.close();
-            e.close();
-            e.close();
             dirty(target);
             if (op.endsWith('p'))
             {
@@ -1469,6 +1603,8 @@ export function emitX87(e, instruction, flagsLive){
         {
             // C3 C2 C0: empty 101, NaN 001, infinity 011, zero 100, normal 010; C1 the sign.
             const v = st(0);
+            // It reads the empty mask: the block's stale bits written first.
+            x87Flush(e, true);
             b.localGet(Local.x87Status).i32const(~Status.CONDITION).op(I32.and)
                 .localSet(Local.x87Status);
             b.localGet(v).op(I64.reinterpretF64).i64const(0n).op(I64.ltS);
@@ -1714,6 +1850,24 @@ function storeFloat(e, operand, pushValue){
 }
 
 /**
+ * Pushes a local rounded to an integer by the control word's rounding
+ * control: to nearest (even) inline -- the control word every program runs
+ * its conversions under, `_ftol2`'s `fistp` among them -- and the other three
+ * modes through the module's helper.
+ *
+ * @param {E} e @param {number} local
+ */
+function roundLocal(e, local){
+    const { b } = e;
+    b.localGet(Local.x87Control).i32const(0xc00).op(I32.and).op(I32.eqz);
+    e.openIf('nearest', ValType.f64);
+    b.localGet(local).op(F64.nearest);
+    b.else();
+    b.localGet(local).localGet(Local.x87Control).call(/** @type {number} */ (e.context.round));
+    e.close();
+}
+
+/**
  * Stores the register as an integer of the operand's width, rounded to
  * nearest (or truncated); a NaN or a value out of range stores the integer
  * indefinite and raises IE.
@@ -1724,14 +1878,13 @@ function storeInt(e, operand, local, truncate){
     const { b } = e;
     prepare(e, operand);
     noteStore(e, operand.size);
-    b.localGet(local);
     if (truncate)
     {
-        b.op(F64.trunc);
+        b.localGet(local).op(F64.trunc);
     }
     else
     {
-        b.localGet(Local.x87Control).call(/** @type {number} */ (e.context.round));
+        roundLocal(e, local);
     }
     b.localSet(e.x87.temp);
     const rounded = e.x87.temp;
