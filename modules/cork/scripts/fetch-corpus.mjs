@@ -77,7 +77,7 @@ if (updateIndex !== -1)
     {
         throw new Error('usage: fetch-corpus.mjs --update <release-tag>');
     }
-    await update(process.env.V86_REPO ?? 'mrwayer/v86', tag);
+    await update(process.env.V86_REPO ?? 'bottlify/v86', tag);
 }
 else
 {

@@ -73,7 +73,7 @@ The controller `createApp()` returns also carries `stop()`, `dispose()`, `diagno
 
 ## Where the wasm comes from
 
-`v86.wasm` and `libv86.mjs` are built by [our v86 fork](https://github.com/mrwayer/v86) in its own
+`v86.wasm` and `libv86.mjs` are built by [our v86 fork](https://github.com/bottlify/v86) in its own
 CI; `video-decoder.wasm` is built from a fork of FFmpeg. Neither is compiled here and neither is
 committed: the build pulls a pinned release, verifies it against a checked-in lock, and copies it
 into `dist/vendor/`. `dist/vendor/manifest.json` records the SHA-256 and the release each artifact
@@ -81,7 +81,7 @@ came from, and `dist/checksums.json` covers everything in the package.
 
 ## Documentation
 
-[`docs/core/`](https://github.com/mrwayer/bottlify/tree/main/docs/core) documents the module
+[`docs/core/`](https://github.com/bottlify/bottlify/tree/main/docs/core) documents the module
 contract, the layer graph and the configuration shape — what each layer promises, and what a build
 with a layer switched off still does.
 

@@ -98,7 +98,7 @@ if (updateIndex !== -1)
     {
         throw new Error('usage: fetch-v86.mjs --update <release-tag>');
     }
-    const repo = process.env.V86_REPO ?? 'mrwayer/v86';
+    const repo = process.env.V86_REPO ?? 'bottlify/v86';
     await update(repo, tag);
     // A re-pin that left the old artifacts in place once ran a whole
     // evening's tests against a build without the exports under test, every

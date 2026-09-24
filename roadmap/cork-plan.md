@@ -426,7 +426,7 @@ instruction.
 like the emulator's binaries, loaded into our machine through the ROM, run to its `hlt`, and
 compared against the hardware fixture with the same masks the fork's runner uses.
 
-**Files.** Fork (one commit on `mrwayer/v86`, its own CI): a release asset
+**Files.** Fork (one commit on `bottlify/v86`, its own CI): a release asset
 `nasm-corpus.json.gz` — `{ cases: [{ name, image (base64 ELF32), fixture (the gdb text) }] }`,
 built by the existing `nasmtests` job. This repo: `modules/cork/corpus-lock.json` (the asset
 and its hash), `modules/cork/scripts/fetch-corpus.mjs` (fetches it into `modules/cork/vendor/`,
@@ -1036,7 +1036,7 @@ that has a translated entry, instead of running through cork's region on its own
 block boundary happens to coincide with the slice end. Without this the translated share is
 bounded by how often a slice *starts* inside a hot loop.
 
-**Files.** Fork (`mrwayer/v86`, one commit, its own test under the fork's `tests/`): an
+**Files.** Fork (`bottlify/v86`, one commit, its own test under the fork's `tests/`): an
 exported `bottlify_handoff_page(page: u32, on: u32)` and a per-page bit the dispatcher checks
 before entering a block at a new page: when set and the EIP is in the page, `run_slice`
 returns with the instructions retired so far. Then this repo: `vendor-lock.json` re-pinned to

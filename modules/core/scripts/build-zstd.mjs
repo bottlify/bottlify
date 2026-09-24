@@ -41,7 +41,7 @@ const LOCK_FILE = join(ROOT, 'zstd-lock.json');
 const IMAGE = 'bottlify-zstd-builder:0.1';
 const ARTIFACT = 'zstd.wasm';
 /** Where a dispatch of the vendor workflow publishes what it built. */
-const RELEASE_REPO = 'mrwayer/bottlify';
+const RELEASE_REPO = 'bottlify/bottlify';
 
 /** @param {string} path @returns {string} */
 function sha256Hex(path){
