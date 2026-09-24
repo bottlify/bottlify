@@ -929,6 +929,52 @@ test('ToUnicode reads the shift and caps-lock bits out of the caller\'s key-stat
         'a key with no character, such as an arrow, translates to nothing');
 });
 
+test('ToUnicode and ToAscii agree, answer nothing for a key going up, and know control', ()=>{
+    const { memory, fns } = setup();
+    const KEY_STATE = 0x11e00;
+    const CHAR_BUFFER = 0x11f00;
+    const state = new Uint8Array(256);
+    memory.writeMemory(KEY_STATE, state);
+
+    memory.writeMemory(CHAR_BUFFER, new Uint8Array([0xee, 0xee]));
+    assert.equal(fns.ToAscii.handler([0xbe, 0x34, KEY_STATE, CHAR_BUFFER, 0]), 1);
+    assert.deepEqual([...memory.bytes.subarray(CHAR_BUFFER, CHAR_BUFFER + 2)], [0x2e, 0],
+        'the period, in a WORD with its high byte clear');
+    assert.equal(fns.ToAsciiEx.handler([0xbe, 0x34, KEY_STATE, CHAR_BUFFER, 0, 0]), 1);
+    assert.equal(fns.ToUnicodeEx.handler([0xbe, 0x34, KEY_STATE, CHAR_BUFFER, 1, 0, 0]), 1);
+
+    assert.equal(fns.ToUnicode.handler([0x41, 0x801e, KEY_STATE, CHAR_BUFFER, 1, 0]), 0,
+        'the scan code\'s top bit says the key is going up');
+
+    state[0x11] = 0x80;
+    memory.writeMemory(KEY_STATE, state);
+    assert.equal(fns.ToAscii.handler([0x5a, 0x2c, KEY_STATE, CHAR_BUFFER, 0]), 1);
+    assert.equal(memory.bytes[CHAR_BUFFER], 0x1a, 'control and Z');
+});
+
+test('VkKeyScan names the key and the shift state that type a character', ()=>{
+    const { fns } = setup();
+
+    assert.equal(fns.VkKeyScanA.handler([0x61]), 0x0041, 'a: the A key alone');
+    assert.equal(fns.VkKeyScanA.handler([0x41]), 0x0141, 'A: with shift');
+    assert.equal(fns.VkKeyScanA.handler([0x3f]), 0x01bf, '?: shift and the slash key');
+    assert.equal(fns.VkKeyScanA.handler([0x35]), 0x0035,
+        'a digit is its own key, not the keypad\'s');
+    assert.equal(fns.VkKeyScanA.handler([0x03]), 0x0243, 'a control code: control and its letter');
+    assert.equal(fns.VkKeyScanA.handler([0x0a]), 0x020d, 'a line feed: control and enter');
+    assert.equal(fns.VkKeyScanW.handler([0x00e9]), 0xffff, 'nothing on this layout types é');
+    assert.equal(fns.VkKeyScanExW.handler([0x20, 0]), 0x0020);
+    assert.equal(fns.VkKeyScanExA.argBytes, 8);
+});
+
+test('the W spellings of MapVirtualKey are the A ones, and a keypad key has its character', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.MapVirtualKeyW.handler([0x41, 0]), 0x1e, 'MAPVK_VK_TO_VSC');
+    assert.equal(fns.MapVirtualKeyExW.handler([0x1e, 1, 0]), 0x41, 'MAPVK_VSC_TO_VK');
+    assert.equal(fns.MapVirtualKeyA.handler([0x67, 2]), 0x37, 'MAPVK_VK_TO_CHAR: keypad 7');
+    assert.equal(fns.MapVirtualKeyA.handler([0xbf, 2]), 0x2f);
+});
+
 test('capture is a pair: releasing clears what setting recorded', ()=>{
     const { memory, fns } = setup();
     const hwnd = makeWindow(memory, fns);

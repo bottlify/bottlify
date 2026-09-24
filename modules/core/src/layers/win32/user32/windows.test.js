@@ -235,6 +235,8 @@ function setup({
     const fills = [];
     /** @type {number[]} */
     const presents = [];
+    /** What GetKeyState answers for a key, as a test holds it. @type {Map<number, number>} */
+    const keys = new Map();
 
     /** @type {import('./windows.js').WindowService | null} */
     /** @type {import('./windows.js').WindowService | null} */
@@ -245,6 +247,7 @@ function setup({
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         handles,
         queue,
+        keyState: key=>keys.get(key) ?? 0,
         windowService: handed=>{
             service = handed;
         },
@@ -289,7 +292,7 @@ function setup({
         await Promise.resolve();
     };
 
-    return { memory, handles, queue, fns, dispatched, parked, tick, idlers, released,
+    return { memory, handles, queue, keys, fns, dispatched, parked, tick, idlers, released,
         called, divergences, errors, fills, presents,
         service: /** @type {import('./windows.js').WindowService} */ (
             /** @type {unknown} */ (service)) };
@@ -1124,6 +1127,29 @@ test('TranslateMessage turns a key down into a character message', ()=>{
     assert.equal(character?.wParam, 0x61, 'an unmodified letter key produces the lowercase form');
     assert.equal(character?.lParam, 0x001e0001, 'the key data travels with it');
     assert.equal(character?.hwnd, hwnd);
+});
+
+test('TranslateMessage makes the character the held modifiers make, as ToUnicode would', ()=>{
+    const { fns, memory, queue, keys, hwnd } = withWindow();
+    /** @param {number} vk */
+    const typed = vk=>{
+        memory.putU32s(MSG_BUFFER, [hwnd, WM_KEYDOWN, vk, 0x00020001, 0, 0, 0]);
+        fns.TranslateMessage.handler([MSG_BUFFER]);
+        return queue.peek({ hwnd: null, first: 0, last: 0, remove: true })?.wParam;
+    };
+
+    keys.set(0x10, 0x8000);
+    assert.equal(typed(0x41), 0x41, 'shift and a letter: the capital');
+    assert.equal(typed(0x31), 0x21, 'shift and 1: the exclamation mark');
+    keys.clear();
+    keys.set(0x14, 0x0001);
+    assert.equal(typed(0x41), 0x41, 'caps lock on');
+    keys.clear();
+    keys.set(0x11, 0x8000);
+    assert.equal(typed(0x43), 0x03, 'control and C: its control code');
+    keys.clear();
+    assert.equal(typed(0x6b), 0x2b, 'the keypad\'s plus');
+    assert.equal(typed(0xbf), 0x2f, 'and the slash key, which the old fallback had no row for');
 });
 
 test('TranslateMessage leaves alone what it cannot translate', ()=>{

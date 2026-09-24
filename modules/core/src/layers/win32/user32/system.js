@@ -23,7 +23,7 @@ import {
     ANSI_PAGE, LANGID_EN_US, OEM_PAGE, mapCaseAnsi, transcodeSingleByte,
 } from '../kernel32/locale.js';
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
-import { codeForScan, codeForVk, keyFor } from './keys.js';
+import { characterOf, codeForScan, codeForVk, keyFor, keyForCharacter } from './keys.js';
 import { REFRESH_HZ, displayModes } from './display.js';
 import {
     BORDER, CAPTION_HEIGHT, SCROLLBAR, SIZE_FRAME, WS_CHILD, WS_VISIBLE, frameOf,
@@ -167,58 +167,20 @@ const ERROR_INVALID_PARAMETER = 87;
 const HKL_EN_US = (LANGID_EN_US << 16 | LANGID_EN_US) >>> 0;
 
 /**
- * The character each key answers with, unshifted and shifted, for the one US
- * layout this build has. A letter key is not here: its case comes from
- * shift XOR caps lock rather than a fixed pair, computed where it is used.
- * A key absent from this table has no character, same as the real call
- * answers for one that does not produce one -- an arrow, a function key.
+ * The modifiers a 256-byte key state holds: shift and control down, caps lock
+ * toggled on -- all a key's character depends on for this layout.
  *
- * @type {Readonly<Record<number, readonly [string, string]>>}
+ * @param {Uint8Array | null} state
+ * @returns {import('./keys.js').Modifiers}
  */
-const CHAR_TABLE = Object.freeze({
-    0x30: ['0', ')'], 0x31: ['1', '!'], 0x32: ['2', '@'], 0x33: ['3', '#'],
-    0x34: ['4', '$'], 0x35: ['5', '%'], 0x36: ['6', '^'], 0x37: ['7', '&'],
-    0x38: ['8', '*'], 0x39: ['9', '('],
-    0x20: [' ', ' '],
-    0xbd: ['-', '_'], 0xbb: ['=', '+'],
-    0xdb: ['[', '{'], 0xdd: [']', '}'], 0xdc: ['\\', '|'],
-    0xba: [';', ':'], 0xde: ["'", '"'], 0xc0: ['`', '~'],
-    0xbc: [',', '<'], 0xbe: ['.', '>'], 0xbf: ['/', '?'],
+const modifiersIn = state=>({
+    shift: state ? (state[0x10] & 0x80) !== 0 : false,
+    capsLock: state ? (state[0x14] & 0x01) !== 0 : false,
+    control: state ? (state[0x11] & 0x80) !== 0 : false,
 });
 
-/**
- * A letter key's character, without a keyboard state: what MapVirtualKeyA's
- * MAPVK_VK_TO_CHAR answers, which never sees shift or caps lock and so has no
- * "unshifted" concept for a letter beyond the key's own code -- uppercase,
- * because a virtual key for a letter already is the uppercase ASCII value.
- *
- * @param {number} vk
- * @returns {string | null}
- */
-function baseCharForVk(vk){
-    if (vk >= 0x41 && vk <= 0x5a)
-    {
-        return String.fromCharCode(vk);
-    }
-    return CHAR_TABLE[vk]?.[0] ?? null;
-}
-
-/**
- * A key's character with a keyboard state applied: shift and caps lock flip a
- * letter's case (caps lock without shift still uppercases; both together
- * lowercase, same as a real keyboard), and shift alone picks a symbol key's
- * upper row -- what ToUnicode answers.
- *
- * @param {number} vk @param {boolean} shiftDown @param {boolean} capsLockOn
- * @returns {string | null}
- */
-function charForKeyState(vk, shiftDown, capsLockOn){
-    if (vk >= 0x41 && vk <= 0x5a)
-    {
-        return String.fromCharCode(shiftDown !== capsLockOn ? vk : vk + 0x20);
-    }
-    return CHAR_TABLE[vk]?.[shiftDown ? 1 : 0] ?? null;
-}
+/** A key-up, in the scan code ToUnicode and ToAscii are handed. */
+const SCAN_KEY_UP = 0x8000;
 
 const MAPVK_VK_TO_VSC = 0;
 const MAPVK_VSC_TO_VK = 1;
@@ -256,10 +218,10 @@ function mapVirtualKey(code, mapType){
             const mapping = mappingForScan(code & 0xff);
             return mapping ? mapping.vk : 0;
         }
-        case MAPVK_VK_TO_CHAR: {
-            const char = baseCharForVk(code);
-            return char ? char.charCodeAt(0) : 0;
-        }
+        case MAPVK_VK_TO_CHAR:
+            // No keyboard state: a letter is its key's own code, which is
+            // the uppercase letter, and anything else its unshifted character.
+            return code >= 0x41 && code <= 0x5a ? code : characterOf(code) ?? 0;
         case MAPVK_VSC_TO_VK_EX: {
             const mapping = mappingForScan(code & 0xff);
             return mapping ? mapping.vkSide : 0;
@@ -408,6 +370,32 @@ const messageBoxDefault = type=>{
  * @param {Map<string, any>} options.classes  Registered classes, by name.
  */
 export function createSystemFunctions({ host, live, windows, classes }){
+    /**
+     * ToUnicode and ToAscii, spelt once: the character the key makes under
+     * the caller's key state, written as a code unit of `unit` bytes.
+     *
+     * @param {number} vk @param {number} scan @param {number} keyState
+     * @param {number} buffer @param {number} count @param {1 | 2} unit
+     * @returns {number} how many characters were written
+     */
+    const translateKey = (vk, scan, keyState, buffer, count, unit)=>{
+        if ((scan & SCAN_KEY_UP) !== 0 || (count | 0) < 1 || (buffer >>> 0) === 0)
+        {
+            return 0;
+        }
+        const state = (keyState >>> 0) === 0 ? null : host.readMemory(keyState >>> 0, 256);
+        const character = characterOf(vk & 0xff, modifiersIn(state));
+        if (character === null)
+        {
+            return 0;
+        }
+        // A WORD either way: ToAscii's buffer is one, and its high byte is
+        // left clear rather than holding a stale half.
+        host.writeMemory(buffer >>> 0, new Uint8Array([character & 0xff,
+            unit === 2 ? character >>> 8 : 0]));
+        return 1;
+    };
+
     // Ids handed to a timer with no window, kept clear of the small numbers a
     // program picks for its own.
     let nextTimerId = 0x1000;
@@ -2533,27 +2521,98 @@ export function createSystemFunctions({ host, live, windows, classes }){
          *
          * The character a virtual key produces under a caller-supplied key
          * state, one UTF-16 code unit written to the buffer: 1 when there is
-         * one, 0 when the key names none (an arrow, a function key) -- this
-         * layout has no dead keys, so neither -1 nor a count above 1 is ever
-         * answered. The scan code is not read: nothing this build maps needs
-         * it to pick a character once the virtual key and the state are known.
+         * one, 0 when the key names none (an arrow, a function key) or the
+         * scan code says the key is going up -- this layout has no dead keys,
+         * so neither -1 nor a count above 1 is ever answered.
          */
         ToUnicode: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([vk, , keyState, buffer, cchBuff])=>{
-                const state = (keyState >>> 0) === 0 ? null : host.readMemory(keyState >>> 0, 256);
-                const shiftDown = state ? (state[0x10] & 0x80) !== 0 : false;
-                const capsLockOn = state ? (state[0x14] & 0x01) !== 0 : false;
-                const char = charForKeyState(vk >>> 0, shiftDown, capsLockOn);
-                if (!char || (cchBuff >>> 0) < 1)
-                {
-                    return 0;
-                }
-                const code = char.charCodeAt(0);
-                host.writeMemory(buffer >>> 0, new Uint8Array([code & 0xff, code >>> 8]));
-                return 1;
-            },
+            handler: ([vk, scan, keyState, buffer, count])=>
+                translateKey(vk, scan, keyState, buffer, count, 2),
+        },
+
+        /**
+         * int ToUnicodeEx(UINT wVirtKey, UINT wScanCode, const BYTE *lpKeyState,
+         *     LPWSTR pwszBuff, int cchBuff, UINT wFlags, HKL dwhkl)
+         */
+        ToUnicodeEx: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([vk, scan, keyState, buffer, count])=>
+                translateKey(vk, scan, keyState, buffer, count, 2),
+        },
+
+        /**
+         * int ToAscii(UINT uVirtKey, UINT uScanCode, const BYTE *lpKeyState,
+         *     LPWORD lpChar, UINT uFlags)
+         *
+         * ToUnicode's answer in the ANSI code page, written into a WORD.
+         */
+        ToAscii: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([vk, scan, keyState, buffer])=>
+                translateKey(vk, scan, keyState, buffer, 1, 1),
+        },
+
+        /**
+         * int ToAsciiEx(UINT uVirtKey, UINT uScanCode, const BYTE *lpKeyState,
+         *     LPWORD lpChar, UINT uFlags, HKL dwhkl)
+         */
+        ToAsciiEx: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([vk, scan, keyState, buffer])=>
+                translateKey(vk, scan, keyState, buffer, 1, 1),
+        },
+
+        /**
+         * SHORT VkKeyScanA(CHAR ch)
+         *
+         * The key that types a character and the shift state it needs: the
+         * virtual key in the low byte, 1 for shift and 2 for control in the
+         * high, -1 when no key on the layout types it.
+         */
+        VkKeyScanA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([character])=>keyForCharacter(character & 0xff) ?? 0xffff,
+        },
+
+        /** SHORT VkKeyScanW(WCHAR ch) */
+        VkKeyScanW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([character])=>keyForCharacter(character & 0xffff) ?? 0xffff,
+        },
+
+        /** SHORT VkKeyScanExA(CHAR ch, HKL dwhkl) */
+        VkKeyScanExA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([character])=>keyForCharacter(character & 0xff) ?? 0xffff,
+        },
+
+        /** SHORT VkKeyScanExW(WCHAR ch, HKL dwhkl) */
+        VkKeyScanExW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([character])=>keyForCharacter(character & 0xffff) ?? 0xffff,
+        },
+
+        /** UINT MapVirtualKeyW(UINT uCode, UINT uMapType) */
+        MapVirtualKeyW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([code, mapType])=>mapVirtualKey(code >>> 0, mapType >>> 0),
+        },
+
+        /** UINT MapVirtualKeyExW(UINT uCode, UINT uMapType, HKL dwhkl) */
+        MapVirtualKeyExW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([code, mapType])=>mapVirtualKey(code >>> 0, mapType >>> 0),
         },
 
         /**

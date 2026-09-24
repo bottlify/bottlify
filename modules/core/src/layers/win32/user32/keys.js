@@ -189,3 +189,131 @@ export function dikOf(mapping){
 
 /** Every physical key this build knows, for a diagnostic that wants to say. */
 export const KNOWN_KEYS = Object.freeze([...KEYS.keys()]);
+
+/**
+ * The character each key produces on the one US layout this build has,
+ * unshifted and shifted. A letter is not here: its case is shift XOR caps
+ * lock, not a fixed pair. A key absent from here and from the rules in
+ * `characterOf` produces no character -- an arrow, a function key -- which is
+ * what every call that asks answers for one.
+ *
+ * @type {ReadonlyMap<number, readonly [string, string]>}
+ */
+const LAYOUT = new Map(/** @type {[number, [string, string]][]} */ ([
+    [0x30, ['0', ')']], [0x31, ['1', '!']], [0x32, ['2', '@']], [0x33, ['3', '#']],
+    [0x34, ['4', '$']], [0x35, ['5', '%']], [0x36, ['6', '^']], [0x37, ['7', '&']],
+    [0x38, ['8', '*']], [0x39, ['9', '(']],
+    [0x20, [' ', ' ']],
+    [0xbd, ['-', '_']], [0xbb, ['=', '+']],
+    [0xdb, ['[', '{']], [0xdd, [']', '}']], [0xdc, ['\\', '|']],
+    [0xba, [';', ':']], [0xde, ["'", '"']], [0xc0, ['`', '~']],
+    [0xbc, [',', '<']], [0xbe, ['.', '>']], [0xbf, ['/', '?']],
+    // The numeric keypad, with num lock on -- the state a keyboard starts in
+    // and the one a program typing a number expects. Shift does not change
+    // them here, since nothing turns num lock off.
+    [0x60, ['0', '0']], [0x61, ['1', '1']], [0x62, ['2', '2']], [0x63, ['3', '3']],
+    [0x64, ['4', '4']], [0x65, ['5', '5']], [0x66, ['6', '6']], [0x67, ['7', '7']],
+    [0x68, ['8', '8']], [0x69, ['9', '9']],
+    [0x6a, ['*', '*']], [0x6b, ['+', '+']], [0x6d, ['-', '-']], [0x6e, ['.', '.']],
+    [0x6f, ['/', '/']],
+]));
+
+/**
+ * Keys whose virtual-key code is the character they produce: the control keys
+ * inherited their numbers from ASCII.
+ */
+const SELF_ENCODING = new Set([0x08, 0x09, 0x0d, 0x1b]);
+
+/** What control makes of the keys that make anything with it besides letters. */
+const WITH_CONTROL = new Map([[0xdb, 0x1b], [0xdc, 0x1c], [0xdd, 0x1d], [0x0d, 0x0a],
+    [0x08, 0x7f], [0x1b, 0x1b], [0x20, 0x20]]);
+
+/**
+ * @typedef {Object} Modifiers
+ * @property {boolean} [shift]
+ * @property {boolean} [capsLock]
+ * @property {boolean} [control]
+ */
+
+/**
+ * The character a key produces under a set of modifiers, as a code unit, or
+ * null when it produces none. The one answer TranslateMessage, ToUnicode,
+ * ToAscii and MapVirtualKey's character form all read, so a program that
+ * types a key and one that asks what the key would type cannot disagree.
+ *
+ * Control with a letter is the letter's control code (Ctrl+A is 1), as a
+ * terminal and every edit control read it; with most other keys it is
+ * nothing at all.
+ *
+ * @param {number} vk
+ * @param {Modifiers} [modifiers]
+ * @returns {number | null}
+ */
+export function characterOf(vk, { shift = false, capsLock = false, control = false } = {}){
+    const isLetter = vk >= 0x41 && vk <= 0x5a;
+    if (control)
+    {
+        return isLetter ? vk - 0x40 : WITH_CONTROL.get(vk) ?? null;
+    }
+    if (isLetter)
+    {
+        return shift !== capsLock ? vk : vk + 0x20;
+    }
+    if (SELF_ENCODING.has(vk))
+    {
+        return vk;
+    }
+    const pair = LAYOUT.get(vk);
+    return pair ? pair[shift ? 1 : 0].charCodeAt(0) : null;
+}
+
+/**
+ * The key and modifiers that type a character, the other way round from
+ * `characterOf` -- what VkKeyScan answers: the virtual key in the low byte
+ * and the shift state (1 shift, 2 control) in the high byte, or null for a
+ * character no key on this layout types. Where two keys type it, the main
+ * block's is answered, not the keypad's.
+ *
+ * @param {number} character
+ * @returns {number | null}
+ */
+export function keyForCharacter(character){
+    if (character >= 0x61 && character <= 0x7a)
+    {
+        return character - 0x20;
+    }
+    if (character >= 0x41 && character <= 0x5a)
+    {
+        return 0x100 | character;
+    }
+    if (SELF_ENCODING.has(character))
+    {
+        return character;
+    }
+    const typed = String.fromCharCode(character);
+    for (const [vk, [plain, shifted]] of LAYOUT)
+    {
+        if (plain === typed)
+        {
+            return vk;
+        }
+        if (shifted === typed)
+        {
+            return 0x100 | vk;
+        }
+    }
+    // Before the letters, so a line feed is control and enter, as Windows
+    // answers it, rather than control and J.
+    for (const [vk, code] of WITH_CONTROL)
+    {
+        if (code === character)
+        {
+            return 0x200 | vk;
+        }
+    }
+    if (character >= 0x01 && character <= 0x1a)
+    {
+        return 0x200 | (character + 0x40);
+    }
+    return null;
+}

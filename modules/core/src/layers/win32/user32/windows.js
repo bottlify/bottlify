@@ -17,6 +17,7 @@
  */
 
 import { ANY_WINDOW, WM_PAINT, WM_QUIT, WM_TIMER } from './messages.js';
+import { characterOf } from './keys.js';
 import { createPaintFunctions } from './paint.js';
 import { SYS_COLORS, createSystemFunctions } from './system.js';
 import { createObjectFunctions } from './objects.js';
@@ -269,35 +270,6 @@ const MAX_CLASS_NAME = 256;
 
 /** Nothing bounds a window title, so something has to. */
 const MAX_WINDOW_TEXT = 1 << 16;
-
-/**
- * Virtual keys whose code is the character they produce. The control keys
- * inherited their VK numbers from ASCII, so the mapping is the identity rather
- * than a table.
- */
-const SELF_ENCODING_KEYS = new Set([0x08, 0x09, 0x0d, 0x1b, 0x20]);
-
-/**
- * The character an unmodified key press produces.
- *
- * There is no keyboard state to consult: shift, caps lock and the layout belong
- * to the input layer. So a letter key yields its lowercase form, which is what
- * pressing it alone does, and anything that needs a modifier yields nothing.
- *
- * @param {number} key  A virtual-key code.
- * @returns {number | null}
- */
-function characterFor(key){
-    if (key >= 0x41 && key <= 0x5a)
-    {
-        return key + 0x20;
-    }
-    if (key >= 0x30 && key <= 0x39)
-    {
-        return key;
-    }
-    return SELF_ENCODING_KEYS.has(key) ? key : null;
-}
 
 /**
  * @typedef {Object} DispatchedMessage
@@ -2047,8 +2019,10 @@ export function createWindowFunctions(host){
      * What TranslateMessage does: a key press becomes the character the
      * host's own keyboard layout made of it, posted after the press. That is
      * where a layout, a dead key and an input method live, and none of them
-     * can be worked out from a virtual key here; the table is the fallback
-     * for a host that composes nothing -- a recorded session, a test.
+     * can be worked out from a virtual key here; for a host that composes
+     * nothing -- a recorded session, a test -- the character is the one
+     * layout table's (`keys.js`), under the modifiers held now: the same
+     * answer ToUnicode gives for the same key state.
      *
      * @param {{ hwnd: number, message: number, wParam: number, lParam: number }} message
      * @returns {number} nonzero for any of the four key messages, whether or
@@ -2061,7 +2035,11 @@ export function createWindowFunctions(host){
         }
         const isDown = message.message === WM_KEYDOWN || message.message === WM_SYSKEYDOWN;
         const character = isDown
-            ? host.queue.takeComposed?.(message.lParam) ?? characterFor(message.wParam)
+            ? host.queue.takeComposed?.(message.lParam) ?? characterOf(message.wParam & 0xff, {
+                shift: ((host.keyState?.(0x10) ?? 0) & 0x8000) !== 0,
+                capsLock: ((host.keyState?.(0x14) ?? 0) & 0x0001) !== 0,
+                control: ((host.keyState?.(0x11) ?? 0) & 0x8000) !== 0,
+            })
             : null;
         if (character !== null)
         {

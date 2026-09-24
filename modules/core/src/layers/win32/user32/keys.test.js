@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { keyFor, dikOf, codeForVk, codeForScan } from './keys.js';
+import {
+    characterOf, codeForScan, codeForVk, dikOf, keyFor, keyForCharacter,
+} from './keys.js';
 
 test('codeForVk finds the physical key a virtual key names', ()=>{
     const w = keyFor('KeyW');
@@ -50,4 +52,23 @@ test('an unknown virtual key or scan code resolves to nothing', ()=>{
 test('dikOf still folds the E0 prefix into bit 7', ()=>{
     const mapping = /** @type {any} */ (keyFor('ArrowUp'));
     assert.equal(dikOf(mapping), mapping.scan | 0x80);
+});
+
+test('every character a key types is typed by the key keyForCharacter names', ()=>{
+    // The two directions are one table read both ways, so each undoes the
+    // other for every printable character the layout has.
+    for (let character = 0x20; character < 0x7f; character++)
+    {
+        const key = keyForCharacter(character);
+        assert.ok(key !== null, `a key types 0x${character.toString(16)}`);
+        const typed = characterOf(key & 0xff,
+            { shift: (key & 0x100) !== 0, control: (key & 0x200) !== 0 });
+        assert.equal(typed, character);
+    }
+});
+
+test('caps lock and shift cancel on a letter, and do nothing to a symbol key', ()=>{
+    assert.equal(characterOf(0x41, { shift: true, capsLock: true }), 0x61);
+    assert.equal(characterOf(0x31, { capsLock: true }), 0x31);
+    assert.equal(characterOf(0x70), null, 'a function key types nothing');
 });
