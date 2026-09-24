@@ -451,17 +451,21 @@ export function createThreadingFunctions(host){
                             });
                         return host.park(thread);
                     }
-                    // A child process is never signalled while its parent can
-                    // look: it takes this process's place rather than running
-                    // beside it. So a poll says the child is still running,
-                    // which is true, and a real wait is the parent saying it
-                    // has nothing left to do -- the thread stops here for good,
-                    // and the replacement is what happens instead of the wait
-                    // ever returning.
+                    // A child process has not run while its parent can look:
+                    // it runs once the parent has nothing else to do. So a poll
+                    // says the child is still running, which is true, and a
+                    // real wait is the parent handing over to it. The waiter is
+                    // noted on the child: when the engine runs the child beside
+                    // this process and it exits, this thread is woken with the
+                    // wait's answer, and the parent goes on after its child as
+                    // on Windows. A timeout is not armed -- nothing of the
+                    // parent's runs while the child does, so no time of its
+                    // passes to run out.
                     if (wait === 0)
                     {
                         return WAIT_TIMEOUT;
                     }
+                    (target.waiters ??= []).push({ thread, result: WAIT_OBJECT_0 });
                     kernel.block(thread, `child process ${target.imagePath}`);
                     return host.park(thread);
                 }

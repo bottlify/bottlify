@@ -307,6 +307,8 @@ const MAX_WINDOW_TEXT = 1 << 16;
  * @property {() => number} active
  *           The active top-level window -- what GetForegroundWindow answers --
  *           or zero while there is none.
+ * @property {() => void} refresh
+ *           Repaints the desktop and every window shown on it.
  */
 
 /**
@@ -2290,6 +2292,23 @@ export function createWindowFunctions(host){
     host.windowService?.({
         /** The window GetForegroundWindow answers with, or zero. */
         active: ()=>activeWindow(),
+
+        /**
+         * The desktop and every window shown on it paint again: what the
+         * screen needs when this process's picture comes back after a child
+         * that ran beside it drew over the same canvas.
+         */
+        refresh(){
+            desktopPainted = false;
+            for (const record of windows.values())
+            {
+                if (!record.destroyed && !isChild(record) && shown(record))
+                {
+                    appear(record);
+                }
+            }
+            paintDesktop();
+        },
 
         /**
          * One window's client rectangle, or null for a handle that names no

@@ -388,12 +388,14 @@ test('CreateThread fills in the thread id when asked, and not when not', ()=>{
 });
 
 test('waiting on a child process is where the parent hands over', ()=>{
-    // Nothing in this process can ever signal a child: the child takes this
-    // process's place rather than running beside it. So the thread stops here
-    // for good, and the replacement is what happens instead of the wait
-    // returning. Left to the ordinary path, this would join a queue on an
-    // object with no signal and be reported as a deadlock.
+    // Nothing in this process can signal a child: it runs once the parent has
+    // nothing else to do. So the thread blocks outside every wait queue, and is
+    // noted on the child with its answer, for the engine to wake when the
+    // child it runs beside this process exits. Left to the ordinary path,
+    // this would join a queue on an object with no signal and be reported as
+    // a deadlock.
     const { kernel, fns, parked, current } = setup();
+    /** @type {any} */
     const child = { imagePath: 'C:\\App\\child.exe' };
     const handle = kernel.handles.open('process', child);
 
@@ -402,6 +404,8 @@ test('waiting on a child process is where the parent hands over', ()=>{
     assert.equal(kernel.state.blocked.length, 1);
     assert.equal(kernel.state.blocked[0].thread, current);
     assert.equal(kernel.state.waits.length, 0, 'and it never joined a wait queue');
+    assert.deepEqual(child.waiters, [{ thread: current, result: 0 }],
+        'the child knows who waits on it, and that the wait answers WAIT_OBJECT_0');
 });
 
 test('polling a child process says it is still running', ()=>{

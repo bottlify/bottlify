@@ -7,13 +7,14 @@
 /**
  * Child processes, as records rather than as machines.
  *
- * There is one address space and one emulator, so a child is not started
- * alongside its parent -- it is recorded here, and whoever drives the machine
- * tears the parent down and rebuilds on the child's image once the parent has
- * nothing left to do. Everything a child needs to exist between those two
- * moments is in the record: the image, the command line the parent chose for
- * it, the bytes the parent wrote into it before it was ever mapped, and an exit
- * code nobody can observe as anything but STILL_ACTIVE.
+ * A child is not started alongside its parent -- it is recorded here, and
+ * whoever drives the machine starts it once the parent has nothing left to
+ * do: on a machine of its own beside the parent's when the parent is waiting
+ * on it, so the parent goes on afterwards, or in the parent's place when the
+ * parent has exited. Everything a child needs to exist until then is in the
+ * record: the image, the command line the parent chose for it, the bytes the
+ * parent wrote into it before it was ever mapped, the parent's threads waiting
+ * on it, and an exit code that stays STILL_ACTIVE until it has run.
  *
  * Nothing here schedules or executes. That is deliberate -- this layer's job is
  * to hold the request so that the decision about when to honour it is made in
@@ -21,11 +22,8 @@
  */
 
 /**
- * What GetExitCodeProcess reports for a process that has not exited.
- *
- * A child of this engine never reports anything else: there is no moment at
- * which the parent is running and the child has finished, so any other answer
- * would be a fiction the parent could act on.
+ * What GetExitCodeProcess reports for a process that has not exited: every
+ * child until it has run and exited beside a parent that waited on it.
  */
 export const STILL_ACTIVE = 259;
 
@@ -50,6 +48,9 @@ export const STILL_ACTIVE = 259;
  *           Writes made into the child before its image exists, replayed once
  *           the PE is mapped. This is process hollowing implemented as a queue.
  * @property {number} exitCode
+ * @property {{ thread: any, result: number }[]} [waiters]
+ *           The parent's threads blocked on this child, each with what its
+ *           wait answers when the child exits.
  * @property {number} handle        Zero until the caller opens one.
  * @property {number} threadHandle
  */

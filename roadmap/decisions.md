@@ -378,6 +378,11 @@ that address. What it gives up: a parent that must run genuinely alongside its c
 suspended child are recorded as patches against an image that doesn't exist yet, and replayed once
 it is mapped — no cross-process memory needed. *2026-09-07, `c3e8db9b`; built `2026-09-08`,
 `6bb72c18`.*
+A parent that waits on its child now goes on after it: the child runs on a second machine built
+beside the parent's, which stays paused where it blocked, and the parent's wait is answered with
+the child's exit code once it exits, the files and registry the child wrote copied back. Only one
+of the two machines runs at a time, so this is still not two processes executing at once -- the
+Battlefield 2 installer's shape (run a stage, wait, go on) is what it covers. *2026-09-24.*
 
 **Only Windows system libraries are reimplemented; a redistributable middleware runtime is ours to
 reimplement too (§B above); anything else a game ships in its own directory is loaded and run as

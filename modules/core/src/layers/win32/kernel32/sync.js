@@ -357,6 +357,8 @@ export function createSyncFunctions(host){
                 let child = null;
                 /** Where a finished process sits in the caller's handle array. */
                 let finishedAt = -1;
+                /** And where the child still to run does. */
+                let childAt = -1;
                 for (let at = 0; at < total; at++)
                 {
                     const handle = view.getUint32(at * 4, true);
@@ -372,6 +374,7 @@ export function createSyncFunctions(host){
                             finishedAt = at;
                         }
                         child = target;
+                        childAt = at;
                         continue;
                     }
                     objects.push(target);
@@ -388,16 +391,22 @@ export function createSyncFunctions(host){
                     return WAIT_OBJECT_0 + finishedAt;
                 }
 
-                // A child process is in the set. It is never signalled while
-                // its parent can look -- it takes this process's place rather
-                // than running beside it -- so a real wait on a set containing
-                // one is the parent saying it has nothing left to do, and the
-                // thread stops here for good. What else is in the set belongs
-                // to a process that is about to cease to exist, which is the
-                // cost this design accepted: a parent does not run alongside
-                // its child.
+                // A child process is in the set. It has not run while its
+                // parent can look -- it runs once the parent has nothing else
+                // to do -- so a real wait on a set containing one is the parent
+                // handing over to it. A wait for any of the set is noted on
+                // the child and answered with the child's own index when it
+                // exits, the engine having run it beside this process; nothing
+                // else in the set can be signalled meanwhile, since nothing of
+                // the parent's runs. A wait for all of a set with more in it
+                // than the child cannot be satisfied by the child alone, and
+                // stays the old handover: the parent is replaced.
                 if (child !== null && (timeout >>> 0) !== 0)
                 {
+                    if (waitAll === 0 || objects.length === 0)
+                    {
+                        (child.waiters ??= []).push({ thread, result: WAIT_OBJECT_0 + childAt });
+                    }
                     kernel.block(thread, `child process ${child.imagePath}`);
                     return host.park(thread);
                 }

@@ -218,7 +218,7 @@ program calling a missing import in a loop cannot flood the page's queue; both e
 `origin`, `'system'` or `'program'` — and a call to an
 undecorated name of a system library ends the run as a `guest-fault` naming it), `divergence`, `message-box`, `clipboard` (`{ text }`, what a program copied, for the page to put on the browser clipboard), `library-loaded`, `library-missing`,
 `libraries`, `bundle`, `bundle-retry`, `bundle-prefetch`, `bundle-unavailable`, `session`,
-`process-create`, `process-replace`, `process-started`, `process-patched`, `hooks-bound`
+`process-create`, `process-replace`, `process-child` (`{ image, commandLine }`, a parent waiting on a child it started: the child is about to run beside it), `process-started`, `process-resumed` (`{ image, code }`, that child exited with `code` and its parent goes on), `process-patched`, `hooks-bound`
 (`{ image, bound, refused, pending }`, once per image the sidecar is bound against -- the
 program image, each shipped library, and each library loaded at run time as it is mapped:
 kernel names bound, refusal reasons by name, and the kernels still waiting for an image not yet
@@ -392,5 +392,7 @@ the first one's history and poll are gone with it.
   `SharedArrayBuffer` the worker still runs; a message waits for the next timed yield, at most
   `WORKER_YIELD_MS`, instead of being seen between two turns.
 - **Function-valued options do not cross** (section 2).
-- **One program per worker at a time.** A second `start` is refused; a child process the program
-  asks for replaces it inside the same engine.
+- **One program per worker at a time.** A second `start` is refused. A child process the program
+  asks for runs inside the same engine: on a machine of its own beside the parent's while the
+  parent waits on it, after which the parent goes on; in the parent's place once the parent has
+  exited. Two machines exist at once only in the first case, and only one of them runs.

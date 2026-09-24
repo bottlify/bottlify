@@ -534,10 +534,13 @@ test('a wait on a set holding a child process is where the parent hands over', (
     // is reported as a deadlock.
     const host = fakeHost();
     const fns = createSyncFunctions(host);
-    host.register(0x20, 'process', { imagePath: 'C:\\App\\war3.exe' });
+    /** @type {any} */
+    const child = { imagePath: 'C:\\App\\war3.exe' };
+    host.register(0x20, 'process', child);
     new DataView(host.bytes.buffer).setUint32(0x400, 0x20, true);
 
     assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, INFINITE]), PARKED);
+    assert.equal(child.waiters.length, 1, 'noted on the child, to be woken when it exits');
     assert.equal(host.kernel.state.blocked.length, 1);
     assert.match(host.kernel.state.blocked[0].reason, /child process/);
     assert.deepEqual(host.kernel.state.timed, [],
@@ -545,20 +548,26 @@ test('a wait on a set holding a child process is where the parent hands over', (
 });
 
 test('a child among other objects still hands over, waiting for all or any', ()=>{
-    // What else is in the set belongs to a process that is about to cease to
-    // exist, which is the cost this design accepted.
+    // Nothing of the parent's runs while the child does, so nothing else in
+    // the set can be signalled meanwhile. A wait for any is answered with the
+    // child's own place in the set when it exits; a wait for all cannot be
+    // satisfied by the child alone, and is left to the replacement.
     for (const all of [0, 1])
     {
         const host = fakeHost();
         const fns = createSyncFunctions(host);
+        /** @type {any} */
+        const child = { imagePath: 'C:\\App\\war3.exe' };
         host.register(0x10, 'event', host.kernel.createEvent({ signalled: true }));
-        host.register(0x20, 'process', { imagePath: 'C:\\App\\war3.exe' });
+        host.register(0x20, 'process', child);
         const view = new DataView(host.bytes.buffer);
         view.setUint32(0x400, 0x10, true);
         view.setUint32(0x404, 0x20, true);
 
         assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, all, INFINITE]), PARKED,
             `bWaitAll=${all}`);
+        assert.deepEqual(child.waiters?.map((/** @type {any} */ one)=>one.result),
+            all ? undefined : [1], `bWaitAll=${all}`);
     }
 });
 

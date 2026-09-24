@@ -49,10 +49,15 @@ const IMPORTS = {
             'CreateWaitableTimerA@12', 'SetWaitableTimer@24', 'GetCurrentThreadId@0',
             'GetCurrentThread@0', 'GetSystemInfo@4', 'IsProcessorFeaturePresent@4', 'GetVersion@0',
             'VirtualAlloc@16', 'VirtualFree@12', 'GetLastError@0', 'SetLastError@4',
+            'CreateProcessA@40', 'GetExitCodeProcess@8', 'CloseHandle@4', 'CreateFileA@28',
+            'ReadFile@20', 'GetCommandLineA@0', 'WaitForMultipleObjects@16',
         ],
     },
     'ADVAPI32.dll': {
-        undecorated: ['RegOpenKeyExA@20', 'RegQueryValueExA@24'],
+        undecorated: [
+            'RegOpenKeyExA@20', 'RegQueryValueExA@24', 'RegCreateKeyExA@36', 'RegSetValueExA@24',
+            'RegCloseKey@4',
+        ],
     },
     'msvcrt.dll': {
         undecorated: [
@@ -74,6 +79,8 @@ const PROGRAMS = [
     { name: 'processor', source: 'processor.c', cxx: false },
     { name: 'crtdata', source: 'crtdata.c', cxx: false },
     { name: 'virtual', source: 'virtual.c', cxx: false },
+    { name: 'spawn', source: 'spawn.c', cxx: false },
+    { name: 'spawn_child', source: 'spawn_child.c', cxx: false },
 ];
 
 /**

@@ -174,9 +174,10 @@ export const win32Module = {
         /** @type {{ list: () => any[], clientRect: (hwnd: number) => any,
          *     place: (hwnd: number, x: number, y: number, width: number,
          *     height: number, how?: { announce?: boolean }) => boolean,
-         *     active: () => number }} */
+         *     active: () => number, refresh: () => void }} */
         let windowService = {
             list: ()=>[], clientRect: ()=>null, place: ()=>false, active: ()=>0,
+            refresh: ()=>{},
         };
 
         /** @type {(handle: number, text: string) => void} */
@@ -1630,6 +1631,37 @@ export const win32Module = {
 
             /** The window the program is active through, as GetForegroundWindow answers. */
             activeWindow: ()=>windowService.active(),
+
+            /**
+             * Whether one of this process's threads is blocked waiting on a
+             * child it started: the parent that goes on once the child is
+             * done, which the engine then runs the child beside rather than
+             * replacing it.
+             *
+             * @param {any} child  The child's process record.
+             */
+            childWaitedOn: (/** @type {any} */ child)=>(child?.waiters?.length ?? 0) > 0,
+
+            /**
+             * A child run beside this process has exited: its record takes the
+             * exit code -- what GetExitCodeProcess and a later wait read --
+             * and every thread waiting on it wakes with its wait's answer.
+             *
+             * @param {any} child @param {number} code
+             */
+            childExited(child, code){
+                child.exitCode = code >>> 0;
+                child.completed = true;
+                const waiters = child.waiters ?? [];
+                child.waiters = [];
+                for (const { thread, result } of waiters)
+                {
+                    kernel.wake(thread, result);
+                }
+            },
+
+            /** Every window repaints: the process's desktop is shown again. */
+            refreshWindows: ()=>windowService.refresh(),
 
             /**
              * Places a window as the system would, telling the program with a

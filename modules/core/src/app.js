@@ -4881,8 +4881,19 @@ async function buildApp(options){
                         // that is not a deadlock but the handover: the parent's
                         // last thread has ended, or it is blocked on the child's
                         // own handle, which nothing in this process can signal.
+                        // A parent blocked on its child is not finished: the
+                        // child runs beside it and it goes on afterwards, which
+                        // the caller above arranges. Anything else is replaced.
                         if (replacing)
                         {
+                            if (win32.childWaitedOn(replacing))
+                            {
+                                events.emit('process-child', {
+                                    image: replacing.imagePath,
+                                    commandLine: replacing.commandLine,
+                                });
+                                return 0;
+                            }
                             handOver(replacing);
                             return 0;
                         }
@@ -5335,6 +5346,25 @@ async function buildApp(options){
         replacement: ()=>kernel.processes.pending(),
 
         /**
+         * Whether this process is waiting on that child rather than done
+         * with it: then the child runs beside it, and it goes on afterwards.
+         *
+         * @param {any} request
+         */
+        waitingOn: (/** @type {any} */ request)=>win32.childWaitedOn(request),
+
+        /**
+         * A child that ran beside this process has exited with this code: the
+         * threads waiting on it wake, and the picture is this process's again.
+         *
+         * @param {any} request @param {number} code
+         */
+        childExited(/** @type {any} */ request, /** @type {number} */ code){
+            win32.childExited(request, code);
+            win32.refreshWindows();
+        },
+
+        /**
          * A file off this process's volume, waited for if it is not here yet.
          * How the caller reads a child's image before this process -- and the
          * volume with it -- is torn down.
@@ -5413,12 +5443,13 @@ const REPLACEMENT_HISTORY = 16;
 /**
  * createApp — the consumer-facing entry point.
  *
- * One machine, one program at a time, and a process lifecycle over the top:
- * when the program starts a child and then has nothing left to do, the machine
- * is torn down and rebuilt on the child's image. That is what a child process
- * is here. A parent that genuinely runs alongside its child is not covered, and
- * the honest answer for a title that needs one is a second machine rather than
- * a second process inside this one.
+ * One machine running at a time, and a process lifecycle over the top: when
+ * the program starts a child and then waits on it, the child runs on a
+ * machine of its own built beside the parent's, and the parent goes on with
+ * the child's exit code and whatever it wrote; when the program starts a child
+ * and exits, the machine is torn down and rebuilt on the child's image. A
+ * parent that runs genuinely alongside its child -- both executing at once --
+ * is not covered.
  *
  * @param {AppOptions} options
  * @returns {Promise<any>} an AppController
@@ -5561,6 +5592,75 @@ export async function createApp(options){
         };
     };
 
+    /**
+     * The journal's sequence as the live machine has written it, for the
+     * machine built next to continue from.
+     */
+    const noteLogSequence = ()=>{
+        const written = current.diagnostics()
+            .find((/** @type {any} */ layer)=>layer.name === 'log')
+            ?.metrics?.journal?.written;
+        if (typeof written === 'number')
+        {
+            logSequence = written;
+        }
+    };
+
+    /**
+     * Runs a child on a machine of its own while its parent waits on it, and
+     * gives the parent back what the child left: the files it wrote, the
+     * registry it changed, and its exit code, which wakes the parent's wait.
+     *
+     * The parent's machine is left standing, paused where it blocked; the
+     * child's is built beside it, run through `own.run` -- so a child that
+     * starts children of its own is handled the same way -- and disposed.
+     * This is how a parent that goes on after its child works: an installer
+     * that runs a setup stage and then finishes, a launcher that waits for the
+     * game to close.
+     *
+     * @param {any} parent @param {any} request @param {any} runOptions
+     */
+    const runBeside = async(parent, request, runOptions)=>{
+        const image = await parent.readImage(request.imagePath);
+        if (!image)
+        {
+            throw new Error(`cannot start ${request.imagePath}: it is not on the volume`);
+        }
+        noteLogSequence();
+        mediaInstance = parent.media.instance() ?? mediaInstance;
+        current = await buildApp(machine({
+            executable: image,
+            imagePath: request.imagePath,
+            commandLine: request.commandLine,
+            patches: request.patches,
+            seed: parent.session.export(),
+        }));
+        replayLogLevels();
+        Object.assign(facade, current, own);
+        bindLogLevels();
+        events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence });
+
+        const code = await own.run(runOptions);
+
+        // Read while the child's machine stands, and put back into the
+        // parent's: what an installer's second stage laid down is what the
+        // first stage goes on to find.
+        const files = current.session.export();
+        const registry = current.registry().toJSON();
+        noteLogSequence();
+        mediaInstance = current.media.instance() ?? mediaInstance;
+        await current.dispose();
+
+        current = parent;
+        current.session.apply(files);
+        current.registry().fromJSON(registry);
+        replayLogLevels();
+        Object.assign(facade, current, own);
+        bindLogLevels();
+        current.childExited(request, code);
+        events.emit('process-resumed', { image: request.imagePath, code });
+    };
+
     const own = {
         /**
          * Runs the program, and whatever replaces it, to completion.
@@ -5577,6 +5677,12 @@ export async function createApp(options){
                 if (!request)
                 {
                     return code;
+                }
+
+                if (current.waitingOn(request))
+                {
+                    await runBeside(current, request, runOptions);
+                    continue;
                 }
 
                 // Read before the tear-down, because the volume it comes off

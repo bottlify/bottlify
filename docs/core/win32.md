@@ -298,8 +298,8 @@ returns exits with its `EAX` as the exit code. `WaitForSingleObject` / `WaitForM
 poll when the timeout is zero and otherwise hand the thread to `kernel.wait` with a deadline in
 guest time; the bridge parks the caller until it is woken. `Sleep(0)` yields; `Sleep(n)` sleeps on
 the kernel's clock. Events, mutexes and semaphores are kernel objects behind kernel handles.
-`SuspendThread`, `ResumeThread`, `TerminateThread`, `ExitThread` exist; a wait on a *process* handle
-never returns, because a child replaces its parent rather than running beside it (see
+`SuspendThread`, `ResumeThread`, `TerminateThread`, `ExitThread` exist; a wait on a child's
+*process* handle hands over to the child and returns when it exits (see below and
 `kernel32/spawn.js`). Critical sections are the exception to "every call crosses into the host":
 `kernel32/critical.js` emits the enter/leave/try-enter fast paths as guest x86 on the pre-Vista
 algorithm over the program's own `CRITICAL_SECTION` fields, and only a contended entry or an owed
@@ -502,8 +502,18 @@ Stated as the code states them.
   settings follow, the refresh rate is accepted as asked, `CDS_TEST` answers without switching, and
   a null mode returns to the display's own size -- and answer `DISP_CHANGE_BADMODE` for a size or
   depth the list does not carry. `EnumDisplayDevicesA` reports no devices.
-- **One process, no children.** `CreateProcess`/`WinExec`/`ShellExecute` record the request and
-  succeed; the child replaces the parent once the parent has nothing left to do. All three resolve
+- **One process running at a time.** `CreateProcess`/`WinExec`/`ShellExecute` record the request
+  and succeed; the child runs once the parent has nothing left to do. A parent **waiting on the
+  child** -- `WaitForSingleObject` on its process handle, or `WaitForMultipleObjects` for any of a
+  set holding it -- is noted on the child's record, and the engine (`createApp`'s `runBeside`)
+  builds the child a machine of its own beside the parent's, runs it (its own children the same
+  way), copies back the files it wrote and the registry it changed, and wakes the wait with
+  `WAIT_OBJECT_0` (or the child's place in the set); `GetExitCodeProcess` then answers the child's
+  exit code. `childWaitedOn`/`childExited`/`refreshWindows` on the win32 API are that seam. A parent
+  that exits, is idle for another reason, or waits for *all* of a set holding a child is replaced by
+  the child as before. While the child runs nothing of the parent's does -- no time passes for it,
+  so a wait's timeout is not armed -- and after it, layer diagnostics describe no instance (every
+  layer keeps one current instance, which the child's disposal clears). All three resolve
   the image the same way (`kernel32/spawn.js`), so a program started through the shell is the one
   that was named. A child's working directory is its own image's: `lpCurrentDirectory` and
   `lpDirectory` are accepted, reported as a divergence, and not carried. `ShellExecute` runs a file
