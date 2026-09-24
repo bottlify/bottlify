@@ -50,6 +50,36 @@ function machine(config = {}, ramSize = 4 << 20){
 // mov ecx, 1000; L: dec ecx; jnz L; hlt
 const COUNTDOWN = [0xb9, 0xe8, 0x03, 0, 0, 0x49, 0x75, 0xfd, 0xf4];
 
+test('a spent budget at an inlined return charges the callee once', async()=>{
+    const m = machine();
+    // mov ecx, 50; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret -- F is a
+    // leaf the region forms in, so its ret jumps back to the return block.
+    m.write(CODE, [0xb9, 50, 0, 0, 0, 0xe8, 0x04, 0, 0, 0, 0x49, 0x75, 0xf8, 0xf4, 0x42, 0xc3]);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE);
+    assert.ok(await m.runtime.translatePending() >= 1);
+    let eip = CODE;
+    let retired = 0;
+    let exits = 0;
+    for (let run = 0; run < 1000; run++)
+    {
+        const entry = m.runtime.entryOf(eip);
+        assert.ok(entry >= 0, `an entry at ${eip.toString(16)}`);
+        // Budgets that run out at every place in the five-instruction turn.
+        const exit = m.runtime.run(entry, 3 + run % 5);
+        retired += exit.retired;
+        eip = m.eip();
+        if (exit.kind === 'halt')
+        {
+            break;
+        }
+        exits++;
+    }
+    assert.ok(exits > 20, `${exits} budget exits`);
+    assert.equal(m.reg(2), 50, 'edx: the callee ran fifty times');
+    assert.equal(retired, 1 + 50 * 5 + 1, 'mov, fifty turns of call/inc/ret/dec/jnz, hlt');
+});
+
 test('translate: false keeps the translator off for the interpreter alone', async()=>{
     const m = machine({ translate: false });
     m.write(CODE, COUNTDOWN);
