@@ -39,6 +39,9 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @typedef {Object} Memory
  * @property {(address: number, size: number) => number} read   unsigned, little-endian
  * @property {(address: number, size: number, value: number) => void} write
+ * @property {(address: number, bytes: Uint8Array) => boolean} [same]  whether memory
+ *     still holds `bytes` at `address`, faulting as reading them would: the
+ *     interpreter's decode cache check, for a memory that answers it in place
  */
 
 /**
@@ -201,6 +204,32 @@ export function condition(cc, flags){
 }
 
 /**
+ * The linear address of a memory operand.
+ *
+ * @param {EvalState} state @param {import('./decode/decoder.js').Operand} operand
+ */
+export function operandAddress(state, operand){
+    let value = operand.disp ?? 0;
+    if ((operand.base ?? -1) >= 0)
+    {
+        value += state.reg[/** @type {number} */ (operand.base)];
+    }
+    if ((operand.index ?? -1) >= 0)
+    {
+        value += state.reg[/** @type {number} */ (operand.index)] * (operand.scale ?? 1);
+    }
+    if (operand.addressSize === 16)
+    {
+        value &= 0xffff;
+    }
+    if (operand.segment === 4)
+    {
+        value += state.fsBase;
+    }
+    return value >>> 0;
+}
+
+/**
  * Runs one decoded instruction on the state.
  *
  * @param {import('./decode/decoder.js').Instruction} instruction
@@ -214,26 +243,7 @@ export function evaluate(instruction, state){
     state.retired++;
 
     /** @param {import('./decode/decoder.js').Operand} operand */
-    const address = operand=>{
-        let value = operand.disp ?? 0;
-        if ((operand.base ?? -1) >= 0)
-        {
-            value += state.reg[/** @type {number} */ (operand.base)];
-        }
-        if ((operand.index ?? -1) >= 0)
-        {
-            value += state.reg[/** @type {number} */ (operand.index)] * (operand.scale ?? 1);
-        }
-        if (operand.addressSize === 16)
-        {
-            value &= 0xffff;
-        }
-        if (operand.segment === 4)
-        {
-            value += state.fsBase;
-        }
-        return value >>> 0;
-    };
+    const address = operand=>operandAddress(state, operand);
     /** @param {import('./decode/decoder.js').Operand} operand @returns {number} */
     const read = operand=>{
         switch (operand.kind)
@@ -899,14 +909,34 @@ export function evaluate(instruction, state){
  * @param {(flags: number, keep?: number) => void} setFlags
  */
 function shiftOrRotate(op, operands, size, state, read, write, setFlags){
+    const count = read(operands[1]);
+    const value = read(operands[0]);
+    const out = shift(op, value, count, state.eflags, size);
+    if (out !== null)
+    {
+        write(operands[0], out.result);
+        setFlags(out.flags, out.written);
+    }
+}
+
+/**
+ * A shift or rotate of `value` by `count` (masked to five bits here): the
+ * result, its flags and the flags it writes, or null for a count of zero, which
+ * writes nothing and leaves the flags.
+ *
+ * @param {string} op @param {number} value @param {number} count
+ * @param {number} eflags the flags before, for rcl/rcr's carry in
+ * @param {number} size
+ * @returns {{ result: number, flags: number, written: number } | null}
+ */
+export function shift(op, value, count, eflags, size){
     const bits = size * 8;
     const mask = MASK[size];
-    let count = read(operands[1]) & 31;
-    const value = read(operands[0]);
-    const cf = (state.eflags & CF) !== 0 ? 1 : 0;
+    count &= 31;
+    const cf = (eflags & CF) !== 0 ? 1 : 0;
     if (count === 0)
     {
-        return;
+        return null;
     }
     let result;
     let carry;
@@ -975,16 +1005,12 @@ function shiftOrRotate(op, operands, size, state, read, write, setFlags){
             carry = c;
         }
     }
-    write(operands[0], result);
     const flags = (carry ? CF : 0) | (overflow ? OF : 0);
     if (op === 'rol' || op === 'ror' || op === 'rcl' || op === 'rcr')
     {
-        setFlags(flags, CF | OF);
+        return { result, flags, written: CF | OF };
     }
-    else
-    {
-        setFlags(flags | resultFlags(result, size), ARITH);
-    }
+    return { result, flags: flags | resultFlags(result, size), written: ARITH };
 }
 
 /**
@@ -1009,12 +1035,31 @@ function imul(operands, size, state, read, write, setFlags){
         setFlags(fits ? 0 : CF | OF);
         return;
     }
-    const a = signed(read(operands[operands.length === 3 ? 1 : 0]));
-    const b = signed(read(operands[operands.length === 3 ? 2 : 1]));
-    const product = a * b;
-    const result = Number(BigInt.asUintN(bits, product));
+    const a = read(operands[operands.length === 3 ? 1 : 0]);
+    const b = read(operands[operands.length === 3 ? 2 : 1]);
+    const { result, flags } = imulTruncated(a, b, size);
     write(operands[0], result);
-    setFlags(BigInt.asIntN(bits, product) === product ? 0 : CF | OF);
+    setFlags(flags);
+}
+
+/**
+ * The two- and three-operand imul: the product of `a` and `b` as signed
+ * values of `size` bytes, truncated to that size, with CF and OF set when it
+ * did not fit. The double product is exact below 2^53 and on the right side of
+ * the limit above it, so the fit test needs no BigInt.
+ *
+ * @param {number} a @param {number} b @param {number} size
+ */
+export function imulTruncated(a, b, size){
+    const extend = 32 - size * 8;
+    const x = a << extend >> extend;
+    const y = b << extend >> extend;
+    const product = x * y;
+    const limit = 2 ** (size * 8 - 1);
+    return {
+        result: (Math.imul(x, y) & MASK[size]) >>> 0,
+        flags: product >= -limit && product < limit ? 0 : CF | OF,
+    };
 }
 
 /**

@@ -12,12 +12,18 @@
  * and classifies the instruction by a regular expression each time, which put
  * the interpreter at three hundred nanoseconds an instruction; a compiled one
  * runs the same arithmetic and flags (the same `addFlags`, `subFlags`,
- * `logicFlags` and `condition`) with none of that. Anything not compiled here
- * -- x87, SSE, strings, the rest -- answers null and runs through `evaluate`.
+ * `logicFlags`, `condition`, `shift` and `imulTruncated`) with none of that.
+ * An x87 instruction goes straight to the x87 model, skipping `evaluate`'s
+ * setup. Anything else -- SSE, strings, the rest -- answers null and runs
+ * through `evaluate`.
  */
 
 import { AF, CF, OF, PF, SF, ZF } from './decode/table.js';
-import { MASK, addFlags, condition, logicFlags, subFlags } from './ir.js';
+import {
+    MASK, Unsupported, addFlags, condition, imulTruncated, logicFlags, operandAddress, shift,
+    subFlags,
+} from './ir.js';
+import { evaluateX87, isX87Op } from './ir-x87.js';
 
 const ARITH = CF | PF | AF | ZF | SF | OF;
 
@@ -33,10 +39,16 @@ const ARITH = CF | PF | AF | ZF | SF | OF;
  * @returns {((state: EvalState) => number) | null}
  */
 function addressOf(operand){
-    if (operand.addressSize === 16 || operand.segment === 4)
+    if (operand.addressSize === 16)
     {
-        // The rare forms keep `evaluate`: a 16-bit address, an fs: operand.
+        // The rare form keeps `evaluate`.
         return null;
+    }
+    if (operand.segment === 4)
+    {
+        // fs: adds the thread block's base to the offset.
+        const offset = addressOf({ ...operand, segment: undefined });
+        return offset && (state=>(offset(state) + state.fsBase) >>> 0);
     }
     const disp = operand.disp ?? 0;
     const base = operand.base ?? -1;
@@ -149,33 +161,26 @@ function writer(operand){
 }
 
 /**
- * The compiled step of an instruction, or null to leave it to `evaluate`.
+ * The compiled step of an instruction, or null to leave it to `evaluate`. The
+ * step is the instruction's own work: the caller moves EIP to the next
+ * instruction and counts it first, as `evaluate` does before its work.
  *
  * @param {Instruction} instruction
  * @returns {Step | null}
  */
 export function compileFast(instruction){
-    const body = compileBody(instruction);
-    if (body === null)
-    {
-        return null;
-    }
-    const next = (instruction.eip + instruction.length) >>> 0;
-    return state=>{
-        state.eip = next;
-        state.retired++;
-        body(state);
-    };
-}
-
-/**
- * The instruction's own work, after EIP and the count have moved.
- *
- * @param {Instruction} instruction
- * @returns {Step | null}
- */
-function compileBody(instruction){
     const { op, operands, size } = instruction;
+    if (isX87Op(instruction))
+    {
+        // The x87 model itself, without `evaluate`'s integer closures and its
+        // classification of the instruction on every step.
+        return state=>{
+            if (!evaluateX87(instruction, state, operand=>operandAddress(state, operand)))
+            {
+                throw new Unsupported(op);
+            }
+        };
+    }
     const mask = MASK[size] ?? 0xffffffff;
     const written = (instruction.flagsWritten & ~instruction.flagsUndefined) >>> 0;
     /** @param {EvalState} state @param {number} flags @param {number} bits */
@@ -202,8 +207,8 @@ function compileBody(instruction){
         {
             const read = reader(src);
             const write = writer(dst);
-            const shift = 32 - src.size * 8;
-            return read && write && (state=>write(state, (read(state) << shift >> shift) >>> 0));
+            const extend = 32 - src.size * 8;
+            return read && write && (state=>write(state, (read(state) << extend >> extend) >>> 0));
         }
         case 'lea':
         {
@@ -290,6 +295,70 @@ function compileBody(instruction){
                 const { result, flags } = subFlags(0, read(state), 0, size);
                 write(state, result);
                 setFlags(state, flags, written);
+            };
+        }
+        case 'shl': case 'sal': case 'shr': case 'sar': case 'rol': case 'ror':
+        case 'rcl': case 'rcr':
+        {
+            const read = reader(dst);
+            const readCount = reader(src);
+            const write = writer(dst);
+            if (!read || !readCount || !write)
+            {
+                return null;
+            }
+            return state=>{
+                // The count is read first, as `evaluate` reads it.
+                const count = readCount(state);
+                const out = shift(op, read(state), count, state.eflags, size);
+                if (out !== null)
+                {
+                    write(state, out.result);
+                    setFlags(state, out.flags, out.written);
+                }
+            };
+        }
+        case 'imul':
+        {
+            if (operands.length === 1)
+            {
+                return null;
+            }
+            const three = operands.length === 3;
+            const readA = reader(three ? src : dst);
+            const readB = reader(three ? operands[2] : src);
+            const write = writer(dst);
+            if (!readA || !readB || !write)
+            {
+                return null;
+            }
+            return state=>{
+                const { result, flags } = imulTruncated(readA(state), readB(state), size);
+                write(state, result);
+                setFlags(state, flags, written);
+            };
+        }
+        case 'cdq':
+            return size === 4
+                ? state=>{
+                    state.reg[2] = (state.reg[0] & 0x80000000) !== 0 ? 0xffffffff : 0;
+                }
+                : null;
+        case 'xchg':
+        {
+            const readA = reader(dst);
+            const readB = reader(src);
+            const writeA = writer(dst);
+            const writeB = writer(src);
+            if (!readA || !readB || !writeA || !writeB)
+            {
+                return null;
+            }
+            return state=>{
+                const a = readA(state);
+                const b = readB(state);
+                writeA(state, b);
+                writeB(state, a);
             };
         }
         case 'push':
