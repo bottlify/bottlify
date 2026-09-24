@@ -185,6 +185,7 @@ function parse(argv){
         // functions -- translated regions by address, the interpreter, the
         // runtime, the layers -- the engine thread's time went to.
         cpuProfile: number('--cpu-profile', 0),
+        cpuProfileFrom: number('--cpu-profile-from', 0),
         // Which execution engine runs the program (`emulator`, the default,
         // or `hybrid` with the translator), so two runs differ by that alone.
         engine: argv.includes('--engine') ? argv[argv.indexOf('--engine') + 1] : undefined,
@@ -578,7 +579,8 @@ function describe(result, context, calls, symbols){
             + ` ${result.differential.divergences} diverged`
             + (result.differential.skipped
                 ? ` (not replayed: ${result.differential.skipped.hostCalls} called the host,`
-                    + ` ${result.differential.skipped.overran} overran the undo ring)`
+                    + ` ${result.differential.skipped.overran} overran the undo ring,`
+                    + ` ${result.differential.skipped.budget ?? 0} left on their budget)`
                 : ''));
         if (result.differential.first)
         {
@@ -1050,7 +1052,7 @@ export async function game(options){
         /** @type {Awaited<ReturnType<typeof profileWorkers>> | null} */
         const profiler = options.cpuProfile > 0 && options.worker
             ? await profileWorkers(cdp, sessionId) : null;
-        const profilingFrom = Date.now();
+        let profilingFrom = Date.now();
         /** @type {{ url: string, profile: any, windowMs: number }[] | null} */
         let cpuProfiles = null;
         const stopProfiling = async()=>{
@@ -1061,11 +1063,20 @@ export async function game(options){
             const windowMs = Date.now() - profilingFrom;
             cpuProfiles = (await profiler.stop()).map(one=>({ ...one, windowMs }));
         };
+        // A later window: the profilers restart after the load, and the window
+        // runs its length from there.
         const profileTimer = profiler === null
             ? null
             : setTimeout(()=>{
                 stopProfiling().catch(()=>{});
-            }, options.cpuProfile * 1000);
+            }, (options.cpuProfileFrom + options.cpuProfile) * 1000);
+        if (profiler !== null && options.cpuProfileFrom > 0)
+        {
+            setTimeout(()=>{
+                profilingFrom = Date.now();
+                profiler.restart().catch(()=>{});
+            }, options.cpuProfileFrom * 1000);
+        }
         /** @param {string} stampFor */
         const saveProfiles = stampFor=>{
             for (const [index, one] of (cpuProfiles ?? []).entries())

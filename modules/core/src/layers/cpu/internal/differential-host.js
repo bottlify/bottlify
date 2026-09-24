@@ -28,7 +28,9 @@
  * A region is not replayed when replaying it would not be the same run: it
  * called the host through the trap port (the handler would run a second time
  * -- an allocation made twice), or its stores overran the ring (it cannot be
- * rewound). Both are counted in `skipped`. A region that stopped on a trap or
+ * rewound), nor one that left on its budget (it leaves at a block of its own,
+ * which the emulator would reach on its first pass through a loop). All three
+ * are counted in `skipped`. A region that stopped on a trap or
  * a fault is not replayed either: the emulator would answer it inline.
  */
 
@@ -54,7 +56,7 @@ export function createDifferentialHost({ emulator, cork, engine, memory, layout 
     let replayed = 0;
     let divergences = 0;
     let handoffMisses = 0;
-    const skipped = { hostCalls: 0, overran: 0 };
+    const skipped = { hostCalls: 0, overran: 0, budget: 0 };
 
     // Every call translated code makes into the host passes here: a region
     // that made one is not replayed, so no handler runs twice.
@@ -114,8 +116,16 @@ export function createDifferentialHost({ emulator, cork, engine, memory, layout 
             const exit = runtime.run(entry, budget);
             const stores = storesOfRun();
             const subjectState = snapshot(emulator, stores.spans);
-            const clean = exit.kind === 'untranslated' || exit.kind === 'budget'
-                || exit.kind === 'halt';
+            const clean = exit.kind === 'untranslated' || exit.kind === 'halt';
+            if (exit.kind === 'budget')
+            {
+                // A budget exit leaves at a block of the region's own, a loop
+                // head it may have passed many times: the emulator would stop
+                // at the first pass, and no count lines the two up (they count
+                // a rep-prefixed instruction differently).
+                skipped.budget++;
+                return exit;
+            }
             if (!clean)
             {
                 return exit;

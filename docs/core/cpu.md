@@ -59,7 +59,9 @@ first, the emulator runs to the region's exit, and the two records are compared 
 emulator is the oracle -- over registers, flags, eip, the x87 block, XMM and the written
 bytes. The guest then carries on from the translator's registers and bytes. A region that
 called the host through the trap port is not replayed (the handler would run twice), nor one
-whose stores overran the ring (it cannot be rewound); `metrics.differential` counts both under
+whose stores overran the ring (it cannot be rewound), nor one that left on its budget (it leaves
+at a loop head of its own, which the emulator reaches on its first pass); `metrics.differential`
+counts all three under
 `skipped`, beside how many regions were replayed, how many diverged, and the first region that
 did with the fields that differed.
 

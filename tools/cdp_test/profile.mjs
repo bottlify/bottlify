@@ -121,6 +121,15 @@ export async function profileWorkers(cdp, pageSessionId, options = {}){
     });
     await attach(pageSessionId);
     return {
+        /** Drops what every profiler has so far and starts it again: the window
+         * then begins here, past a loading phase. */
+        async restart(){
+            for (const worker of sessions.keys())
+            {
+                await cdp.send('Profiler.stop', {}, worker).catch(()=>{});
+                await cdp.send('Profiler.start', {}, worker).catch(()=>{});
+            }
+        },
         /** @returns {Promise<{ url: string, profile: any }[]>} */
         async stop(){
             const out = [];

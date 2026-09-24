@@ -66,7 +66,7 @@ test('the differential host names itself', ()=>{
     assert.equal(host.engine(), 'differential');
     assert.deepEqual(host.differentialDiagnostics(),
         { replayed: 0, divergences: 0, handoffMisses: 0,
-            skipped: { hostCalls: 0, overran: 0 }, first: null });
+            skipped: { hostCalls: 0, overran: 0, budget: 0 }, first: null });
 });
 
 test('a region run is replayed and a divergence is recorded', ()=>{
@@ -94,7 +94,7 @@ test('an agreeing replay records no divergence', ()=>{
     host.runSlice(10);
     assert.deepEqual(host.differentialDiagnostics(),
         { replayed: 1, divergences: 0, handoffMisses: 0,
-            skipped: { hostCalls: 0, overran: 0 }, first: null });
+            skipped: { hostCalls: 0, overran: 0, budget: 0 }, first: null });
 });
 
 test('without the snapshot machinery the differential host refuses', ()=>{
@@ -187,7 +187,7 @@ test('a region that called the host is not replayed', ()=>{
     host.runSlice(1);
     const report = host.differentialDiagnostics();
     assert.equal(report.replayed, 0);
-    assert.deepEqual(report.skipped, { hostCalls: 1, overran: 0 });
+    assert.deepEqual(report.skipped, { hostCalls: 1, overran: 0, budget: 0 });
     assert.equal(emulator.hostCalls, 1, 'the handler ran once');
     assert.equal(emulator.mem[0x3000], 1);
 });
