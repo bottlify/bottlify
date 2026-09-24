@@ -578,8 +578,10 @@ export function evaluate(instruction, state){
         {
             const value = pop(size);
             // The reserved bit 1 always reads set; IF, IOPL and the rest of
-            // the system bits are not a user program's to change here.
-            const writable = 0xcd5 | DF | (1 << 11);
+            // the system bits are not a user program's to change here. AC
+            // and ID are: a program finds CPUID by flipping ID, and one that
+            // cannot sees no CPUID and takes its generic code.
+            const writable = 0xcd5 | DF | (1 << 11) | (1 << 18) | (1 << 21);
             state.eflags = ((state.eflags & ~writable) | (value & writable) | 2) >>> 0;
             return;
         }

@@ -390,7 +390,8 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         case 'popf':
         {
-            const writable = 0xcd5 | DF | 1 << 11;
+            // As the model's: AC and ID too, which the CPUID probe flips.
+            const writable = 0xcd5 | DF | 1 << 11 | 1 << 18 | 1 << 21;
             e.materialise();
             stackAccess(e, size);
             b.localGet(Local.addr)
