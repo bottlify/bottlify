@@ -21,7 +21,7 @@
  * Bumped whenever the emitter changes what it emits for the same bytes, or
  * the record's format changes: a record of another version is a miss.
  */
-export const CACHE_VERSION = 16;
+export const CACHE_VERSION = 17;
 
 const MAGIC = 0x4b524f43; // 'CORK'
 
@@ -35,8 +35,34 @@ export function cacheKey({ version, features, layoutId, bundleId, entry, hash })
 }
 
 /**
+ * The key a batch module's bytes are kept under: named by what they hash to,
+ * so every region record of the batch names the same bytes, and a batch of
+ * other regions later never takes a record's name.
+ *
+ * @param {{ version: number, features: { simd: boolean, tailCalls: boolean },
+ *     layoutId: string, bundleId: string }} of
+ * @param {Uint8Array} bytes
+ */
+export function moduleKey({ version, features, layoutId, bundleId }, bytes){
+    // FNV-1a over the bytes, with their length beside it.
+    // ponytail: 32 bits of hash; a wider one if a bundle ever keeps enough
+    // batches for a collision to be a real chance.
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < bytes.length; i++)
+    {
+        hash = Math.imul(hash ^ bytes[i], 0x01000193);
+    }
+    const flags = (features.simd ? 's' : '-') + (features.tailCalls ? 't' : '-');
+    return `cork/${version}${flags}/${layoutId}/${bundleId}/module/`
+        + `${(hash >>> 0).toString(16)}-${bytes.length.toString(16)}`;
+}
+
+/**
  * @typedef {Object} CachedRegion
- * @property {Uint8Array} module       the wasm module, exporting the region as `r0`
+ * @property {Uint8Array} module       the wasm module holding the region; empty in a
+ *     record whose module is a batch's, kept apart under `moduleKey`
+ * @property {string} [exportName]     the region's function in the module (`r0` when absent)
+ * @property {string} [moduleKey]      where the batch module's bytes are kept
  * @property {[number, number][]} labels  block start → label
  * @property {number[]} cut            labels of blocks that leave at once
  * @property {number} entryTop
@@ -48,6 +74,8 @@ export function packRegion(region){
     const header = new TextEncoder().encode(JSON.stringify({
         labels: region.labels, cut: region.cut, entryTop: region.entryTop,
         instructions: region.instructions,
+        ...(region.exportName === undefined ? {} : { exportName: region.exportName }),
+        ...(region.moduleKey === undefined ? {} : { moduleKey: region.moduleKey }),
     }));
     const out = new Uint8Array(12 + header.length + region.module.length);
     const view = new DataView(out.buffer);
@@ -90,6 +118,8 @@ export function unpackRegion(bytes){
         return {
             module: bytes.subarray(12 + length), labels: header.labels, cut: header.cut,
             entryTop: header.entryTop, instructions: header.instructions,
+            ...(typeof header.exportName === 'string' ? { exportName: header.exportName } : {}),
+            ...(typeof header.moduleKey === 'string' ? { moduleKey: header.moduleKey } : {}),
         };
     }
     catch {

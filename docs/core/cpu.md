@@ -145,14 +145,21 @@ answers the module bytes and the record, so the engine thread never waits: a bat
 is simply published on a later frame, and `workerMs` reports the worker's share apart from
 `translateMs`, which is the engine thread's own. A run with no frames (`feed: 'slice'`)
 translates inline whatever `cork.worker` says, since it has no frame to hide the round trip
-behind. Each region is its own
-module, the unit the translation cache keeps: a region's module is a pure function of its
-bytes, its entry, the x87 top it was compiled for, the layout and this emitter, so with a
-store (`cork.store`, `cork.bundleId`; `createApp` resolves `'local'` to the origin's private
-file system in the engine's own thread, a directory per bundle, as it does the block store)
-the second run of a program takes every region it ran before from the store -- the region
-is still formed, a decode, which gives its hash; what is saved is the emitting and the
-encoding, and the report says `cacheHits`/`cacheMisses`. The five helper functions every
+behind. A batch is one
+module, a function per region (`emitBatch`): V8's tail call into a function of another module
+costs more the more modules there are -- a chain of calls through 2000 regions ran at 219 ns a
+call with a module each and at 6 with one module, and a title's 68 000 region modules made
+its translated code slower per instruction than the emulator's. The translation cache keeps
+a record per region naming its function in the batch's module and the key the module's bytes
+are kept under (named by their hash); a region's function is a pure function of its bytes,
+its entry, the x87 top it was compiled for, the layout and this emitter, so with a store
+(`cork.store`, `cork.bundleId`; `createApp` resolves `'local'` to the origin's private file
+system in the engine's own thread, a directory per bundle, as it does the block store) the
+second run of a program takes every region it ran before from the store, each batch module
+instantiated once for all its regions -- the region is still formed, a decode, which gives its
+hash; what is saved is the emitting and the encoding, and the report says
+`cacheHits`/`cacheMisses`. A region dropped when its page is written leaves its batch's module
+in place for the batch's other regions. The five helper functions every
 region module needs (`materialise`, the 80-bit conversions, the rounding and the code-hit
 test) are defined once in a shared module instantiated with the same memory and imported by
 each region, not copied into every module -- a saving of about 3 KB a region, which on a

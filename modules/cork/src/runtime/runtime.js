@@ -29,13 +29,13 @@ import { mathImports } from '../emit/region.js';
 import { decode } from '../decode/decoder.js';
 import { isX87, trackRegion } from '../emit/x87.js';
 import { features as probeFeatures } from '../wasm/features.js';
-import { emitBuilt } from './emit-built.js';
+import { emitBatch } from './emit-built.js';
 import { buildHelpersModule } from '../emit/helpers.js';
 import { openTranslationWorker } from './translator.js';
 import { ANY_TOP, createEntries } from './entries.js';
 import { PageFlag, createPageTable } from './pages.js';
 import { Tables } from './layout.js';
-import { CACHE_VERSION, cacheKey, packRegion, unpackRegion } from './cache.js';
+import { CACHE_VERSION, cacheKey, moduleKey, packRegion, unpackRegion } from './cache.js';
 
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').EngineEnv} EngineEnv */
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').Runtime} Runtime */
@@ -513,7 +513,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     });
 
     /** Folds what the emitter left out into the run's refusal maps.
-     * @param {import('./emit-built.js').BuiltRegion} built */
+     * @param {{ unsupported?: [string, number][], refusals?: [string, number][] }} built */
     const foldTranslation = built=>{
         for (const [opcode, times] of built.unsupported ?? [])
         {
@@ -526,46 +526,64 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     };
 
     /**
-     * Instantiates a built or stored region, stamps it and publishes every
-     * block start as an entry. The whole of the publish half of the old
-     * batch loop, so a worker's answer and an inline emission take the same
-     * path.
+     * One instance of a module of regions -- a batch's, or a stored region's
+     * own -- or null when it is refused (the program then runs on as it did).
+     * The worker compiles what it emitted and sends the module along; bytes
+     * from the store, or a build made here, are compiled here.
      *
-     * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string }} one
-     * @param {import('./cache.js').CachedRegion} built
-     * @param {WebAssembly.Module | null} [compiled]  The module the worker compiled, when it did.
-     * @returns {number} 1 when a region was published, 0 when it was dropped
+     * @param {Uint8Array | WebAssembly.Module} module
+     * @returns {WebAssembly.Instance | null}
      */
-    const applyBuilt = (one, built, compiled = null)=>{
-        const { region } = one;
-        const eip = region.entry;
-        counts.moduleBytes += built.module.length;
+    const instantiate = module=>{
         const instantiateAt = performance.now();
-        /** @type {WebAssembly.Instance} */
-        let instance;
         try
         {
-            // The worker compiles what it emitted and sends the module along;
-            // a record from the store, or a build made here, is compiled here.
-            const module = compiled ?? new WebAssembly.Module(
-                /** @type {Uint8Array<ArrayBuffer>} */ (built.module));
-            instance = new WebAssembly.Instance(module, {
+            const compiled = module instanceof WebAssembly.Module
+                ? module
+                : new WebAssembly.Module(/** @type {Uint8Array<ArrayBuffer>} */ (module));
+            const instance = new WebAssembly.Instance(compiled, {
                 env: {
                     memory, getEflags: imports.getEflags, trap: imports.trap,
                     rdtsc: imports.rdtsc ?? (()=>0n),
                     ...mathImports(), ...helperImports(), ...(table ? { table } : {}),
                 },
             });
+            counts.modules++;
+            return instance;
         }
         catch (e){
-            // The region is refused: the program runs on as it did.
-            counts.instantiateMs += performance.now() - instantiateAt;
             refused.batch = (refused.batch ?? 0) + 1;
             refused[`batch: ${String(e).slice(0, 120)}`] = 1;
-            return 0;
+            return null;
         }
-        counts.instantiateMs += performance.now() - instantiateAt;
-        counts.modules++;
+        finally
+        {
+            counts.instantiateMs += performance.now() - instantiateAt;
+        }
+    };
+
+    /** Instances of the batch modules this run has, by their store key, so a
+     * stored region finds its batch's module already instantiated.
+     * ponytail: kept for the run; a batch whose regions are all dropped stays
+     * until the machine goes -- an eviction when a title's churn shows in memory.
+     * @type {Map<string, WebAssembly.Instance>} */
+    const batchInstances = new Map();
+
+    /**
+     * Stamps a built or stored region and publishes every block start as an
+     * entry: its function out of the instance of the module that holds it.
+     * The whole of the publish half of the old batch loop, so a worker's
+     * answer and an inline emission take the same path.
+     *
+     * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string }} one
+     * @param {{ labels: [number, number][], cut: number[], entryTop: number,
+     *     exportName?: string }} built
+     * @param {WebAssembly.Instance} instance
+     * @returns {number} 1 when a region was published, 0 when it was dropped
+     */
+    const applyBuilt = (one, built, instance)=>{
+        const { region } = one;
+        const eip = region.entry;
         const publishAt = performance.now();
         if (one.stamp !== stamp(region.pages))
         {
@@ -574,7 +592,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             counts.dropped++;
             return 0;
         }
-        const fn = /** @type {(label: number, budget: number) => number} */ (instance.exports.r0);
+        const fn = /** @type {(label: number, budget: number) => number} */ (
+            instance.exports[built.exportName ?? 'r0']);
         const cut = new Set(built.cut);
         // Entries for every block start but the cut ones; a region with x87
         // in it is keyed by the top it was compiled for.
@@ -647,47 +666,101 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         return 1;
     };
 
+    /** The store key of one formed region.
+     * @param {{ region: import('../region.js').Region, entryTop: number }} one */
+    const regionKey = one=>cacheKey({
+        version: CACHE_VERSION, features: found, layoutId: layout.id,
+        bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
+        hash: `${one.region.hash}-${one.entryTop}`,
+    });
+
     /**
-     * A worker's answer: fold what it left out, keep the records, instantiate
-     * and publish. Runs on the engine thread when the message arrives, which
-     * is between the frames the host asked for.
+     * An emitted batch: its module instantiated once, kept under its own key
+     * with a record per region naming it, and every region published from it.
      *
-     * @param {{ id: number, results: { ok: boolean, built?: any,
-     *     compiled?: WebAssembly.Module | null, message?: string }[] }} data
+     * @param {any[]} metas  the formed regions, in the batch's order
+     * @param {import('./emit-built.js').BuiltBatch} batch
+     * @param {WebAssembly.Module | null} compiled  the module, when the worker compiled it
+     * @param {any} store
+     * @returns {number} regions published
+     */
+    const publishBatch = (metas, batch, compiled, store)=>{
+        const built = batch.results.filter(result=>result.ok);
+        for (let i = 0; i < metas.length; i++)
+        {
+            const result = batch.results[i];
+            if (!result.ok)
+            {
+                refused[`emit at ${metas[i].region.entry.toString(16)}: ${result.message}`] = 1;
+            }
+        }
+        if (built.length === 0)
+        {
+            return 0;
+        }
+        counts.moduleBytes += batch.module.length;
+        const instance = instantiate(compiled ?? batch.module);
+        /** @type {string | undefined} */
+        let key;
+        if (store !== null)
+        {
+            const storeAt = performance.now();
+            key = moduleKey({ version: CACHE_VERSION, features: found, layoutId: layout.id,
+                bundleId: settings.bundleId ?? 'unknown' }, batch.module);
+            store.put(key, packRegion({ module: batch.module, labels: [], cut: [], entryTop: 0,
+                instructions: 0 })).catch(()=>{});
+            if (instance !== null)
+            {
+                batchInstances.set(key, instance);
+            }
+            counts.storeMs += performance.now() - storeAt;
+        }
+        let published = 0;
+        for (let i = 0; i < metas.length; i++)
+        {
+            const result = batch.results[i];
+            if (!result.ok)
+            {
+                continue;
+            }
+            foldTranslation(result.region);
+            if (store !== null)
+            {
+                const storeAt = performance.now();
+                store.put(regionKey(metas[i]), packRegion({ ...result.region,
+                    module: new Uint8Array(0), moduleKey: key })).catch(()=>{});
+                counts.storeMs += performance.now() - storeAt;
+            }
+            if (instance !== null)
+            {
+                published += applyBuilt(metas[i], result.region, instance);
+            }
+        }
+        return published;
+    };
+
+    /**
+     * A worker's answer: one module for the batch, published. Runs on the
+     * engine thread when the message arrives, which is between the frames the
+     * host asked for.
+     *
+     * @param {{ id: number, batch: import('./emit-built.js').BuiltBatch | null,
+     *     compiled?: WebAssembly.Module | null, message?: string }} data
      */
     const onWorkerResults = data=>{
-        const batch = outstanding;
-        if (batch === null || data?.id !== batch.id)
+        const pending = outstanding;
+        if (pending === null || data?.id !== pending.id)
         {
             return;
         }
         outstanding = null;
-        for (let i = 0; i < batch.metas.length; i++)
+        if (!data.batch)
         {
-            const one = batch.metas[i];
-            const result = data.results?.[i];
-            if (!result || result.ok !== true)
-            {
-                refused[`emit at ${one.region.entry.toString(16)}: `
-                    + `${result?.message ?? 'the worker failed'}`] = 1;
-                continue;
-            }
-            const built = result.built;
-            counts.workerMs += (built.emitMs ?? 0) + (built.encodeMs ?? 0);
-            foldTranslation(built);
-            if (batch.store !== null)
-            {
-                const storeAt = performance.now();
-                const key = cacheKey({
-                    version: CACHE_VERSION, features: found, layoutId: layout.id,
-                    bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
-                    hash: `${one.region.hash}-${one.entryTop}`,
-                });
-                batch.store.put(key, packRegion(built)).catch(()=>{});
-                counts.storeMs += performance.now() - storeAt;
-            }
-            applyBuilt(one, built, result.compiled ?? null);
+            refused[`emit: ${data.message ?? 'the worker failed'}`] = 1;
+            return;
         }
+        counts.workerMs += data.batch.emitMs + data.batch.encodeMs;
+        publishBatch(pending.metas, data.batch, data.compiled ?? null, pending.store);
     };
 
     if (workerUrl !== null)
@@ -724,9 +797,27 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         let published = 0;
         for (const one of formed)
         {
-            if (one.cached !== null)
+            if (one.cached === null)
             {
-                published += applyBuilt(one, one.cached);
+                continue;
+            }
+            // A stored region is a function of its batch's module, instantiated
+            // once for every region of it; a record with a module of its own
+            // is that module alone.
+            const key = one.cached.moduleKey;
+            let instance = key === undefined ? undefined : batchInstances.get(key);
+            if (instance === undefined)
+            {
+                instance = instantiate(key === undefined ? one.cached.module : one.moduleBytes)
+                    ?? undefined;
+                if (instance !== undefined && key !== undefined)
+                {
+                    batchInstances.set(key, instance);
+                }
+            }
+            if (instance !== undefined)
+            {
+                published += applyBuilt(one, one.cached, instance);
             }
         }
         const unbuilt = formed.filter(one=>one.cached === null);
@@ -742,39 +833,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }, []);
             return published;
         }
-        for (const one of unbuilt)
+        if (unbuilt.length > 0)
         {
-            // One module per region: the unit the store keeps, and the unit
-            // dropped when a page moves.
-            /** @type {import('./emit-built.js').BuiltRegion} */
-            let built;
-            try
-            {
-                built = emitBuilt(one.region, one.entryTop, layout, found, emitOptions());
-            }
-            catch (e){
-                // The emitter's own defect on this code: named in the report
-                // rather than lost in a rejected promise, and the program runs
-                // on without the region.
-                refused[`emit at ${one.region.entry.toString(16)}: `
-                    + `${String(e).slice(0, 120)}`] = 1;
-                continue;
-            }
-            counts.emitMs += built.emitMs;
-            counts.encodeMs += built.encodeMs;
-            foldTranslation(built);
-            if (store !== null)
-            {
-                const storeAt = performance.now();
-                const key = cacheKey({
-                    version: CACHE_VERSION, features: found, layoutId: layout.id,
-                    bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
-                    hash: `${one.region.hash}-${one.entryTop}`,
-                });
-                store.put(key, packRegion(built)).catch(()=>{});
-                counts.storeMs += performance.now() - storeAt;
-            }
-            published += applyBuilt(one, built);
+            // The batch in one module, as the worker would have made it; a
+            // region the emitter fails on is named in the report and the
+            // program runs on without it.
+            const jobs = unbuilt.map(one=>({ region: one.region, entryTop: one.entryTop }));
+            const batch = emitBatch(jobs, layout, found, emitOptions());
+            counts.emitMs += batch.emitMs;
+            counts.encodeMs += batch.encodeMs;
+            published += publishBatch(unbuilt, batch, null, store);
         }
         return published;
     };
@@ -977,7 +1045,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             const store = leaveOut.size > 0 || settings.undoLog ? null : (settings.store ?? null);
             const bundleId = settings.bundleId ?? 'unknown';
             /** @type {{ region: import('../region.js').Region, entryTop: number,
-             *     stamp: string, cached: import('./cache.js').CachedRegion | null }[]} */
+             *     stamp: string, cached: import('./cache.js').CachedRegion | null,
+             *     moduleBytes?: Uint8Array | null }[]} */
             const formed = [];
             const formedAt = performance.now();
             for (let i = 0; i < batch.length; i++)
@@ -1041,6 +1110,22 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // `lookupMs` is the engine thread's own time to start them.
             const lookupAt = performance.now();
             storePending = true;
+            // A batch module's bytes are read once for every record naming it.
+            /** @type {Map<string, Promise<Uint8Array | null>>} */
+            const modules = new Map();
+            /** @param {string} key */
+            const moduleBytes = key=>{
+                let pending = modules.get(key);
+                if (pending === undefined)
+                {
+                    /** @param {Uint8Array | null} bytes */
+                    const unpack = bytes=>(bytes === null
+                        ? null : unpackRegion(bytes)?.module ?? null);
+                    pending = /** @type {Promise<Uint8Array | null>} */ (store.get(key).then(unpack));
+                    modules.set(key, pending);
+                }
+                return pending;
+            };
             Promise.all(formed.map(async one=>{
                 const key = cacheKey({
                     version: CACHE_VERSION, features: found, layoutId: layout.id, bundleId,
@@ -1050,6 +1135,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 {
                     const bytes = await store.get(key);
                     one.cached = bytes === null ? null : unpackRegion(bytes);
+                    const batchKey = one.cached?.moduleKey;
+                    if (batchKey !== undefined && !batchInstances.has(batchKey))
+                    {
+                        // Its batch's module, unless this run instantiated it
+                        // already; a record whose module is gone is a miss.
+                        one.moduleBytes = await moduleBytes(batchKey);
+                        if (one.moduleBytes === null)
+                        {
+                            one.cached = null;
+                        }
+                    }
                 }
                 catch {
                     one.cached = null;

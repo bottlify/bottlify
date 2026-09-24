@@ -12,15 +12,16 @@
  *
  * The worker holds no machine state -- it reads the region the runtime
  * formed, the layout and the host's features out of the message and runs
- * `emitBuilt`, the same function the runtime uses when no worker is
- * attached. A region whose emission throws is answered as a failure, so the
- * engine names it in `refused` rather than losing it.
+ * `emitBatch`, the same function the runtime uses when no worker is
+ * attached: the whole batch in one module. A region whose emission throws is
+ * answered as a failure, so the engine names it in `refused` rather than
+ * losing it.
  *
  * The same file runs under a page's `Worker` and Node's `worker_threads`,
  * which differ only in how the scope receives and sends messages.
  */
 
-import { emitBuilt } from './emit-built.js';
+import { emitBatch } from './emit-built.js';
 
 /**
  * @param {{ id: number, jobs: { region: any, entryTop: number }[], layout: any,
@@ -29,36 +30,27 @@ import { emitBuilt } from './emit-built.js';
  */
 function handle(data, send){
     const { id, jobs, layout, features, options } = data;
-    /** @type {ArrayBufferLike[]} */
-    const transfer = [];
-    const results = jobs.map(job=>{
-        const began = performance.now();
+    try
+    {
+        const batch = emitBatch(jobs, layout, features, options);
+        // Compiled here too: a WebAssembly.Module travels in the message
+        // (structured clone shares the compiled code), so the engine thread
+        // only instantiates -- the compile was most of its cost on a loading
+        // phase.
+        let compiled = null;
         try
         {
-            const built = emitBuilt(job.region, job.entryTop, layout, features, options);
-            // Compiled here too: a WebAssembly.Module travels in the message
-            // (structured clone shares the compiled code), so the engine
-            // thread only instantiates -- the compile was most of its
-            // per-region cost on a loading phase.
-            let compiled = null;
-            try
-            {
-                compiled = new WebAssembly.Module(
-                    /** @type {Uint8Array<ArrayBuffer>} */ (built.module));
-            }
-            catch {
-                compiled = null;
-            }
-            transfer.push(built.module.buffer);
-            return { ok: true, built, compiled };
+            compiled = new WebAssembly.Module(/** @type {Uint8Array<ArrayBuffer>} */ (batch.module));
         }
-        catch (e){
-            const message = e instanceof Error ? e.message : String(e);
-            return { ok: false, message: message.slice(0, 160),
-                ms: performance.now() - began };
+        catch {
+            compiled = null;
         }
-    });
-    send({ id, results }, transfer);
+        send({ id, batch, compiled }, [batch.module.buffer]);
+    }
+    catch (e){
+        const message = e instanceof Error ? e.message : String(e);
+        send({ id, batch: null, message: message.slice(0, 160) }, []);
+    }
 }
 
 if (typeof self !== 'undefined' && typeof (/** @type {any} */ (self)).postMessage === 'function')

@@ -108,7 +108,7 @@ test('a hot address becomes a region after translatePending, and runs under a bu
     assert.ok(d.translateMs > 0 && d.moduleBytes > 100, 'the cost of translating is reported');
 });
 
-test('two regions land in one batch, each its own module, and both run; an entry is asked by'
+test('two regions land in one batch, in one module, and both run; an entry is asked by'
     + ' its own address', async()=>{
     const m = machine({ batchRegions: 8 });
     m.write(CODE, COUNTDOWN);
@@ -116,8 +116,8 @@ test('two regions land in one batch, each its own module, and both run; an entry
     m.runtime.noteHot(CODE);
     m.runtime.noteHot(CODE + 0x100);
     assert.equal(await m.runtime.translatePending(), 2);
-    assert.equal(m.runtime.diagnostics().modules, 2,
-        'one module per region, the unit the store keeps');
+    assert.equal(m.runtime.diagnostics().modules, 1,
+        'the batch in one module: a call between its regions stays inside it');
     assert.equal(m.runtime.diagnostics().regions, 2);
     const second = m.runtime.run(m.runtime.entryOf(CODE + 0x100), 1000);
     assert.equal(second.kind, 'halt');
@@ -453,7 +453,7 @@ test('with a store, a second runtime takes its regions from the store; a changed
         assert.ok(first.runtime.entryOf(CODE) >= 0, 'published when the bytes came back');
         assert.equal(first.runtime.diagnostics().cacheMisses, 1);
         assert.equal(first.runtime.diagnostics().cacheHits, 0);
-        assert.equal(store.size(), 1, 'the region is in the store');
+        assert.equal(store.size(), 2, 'the region\'s record and its batch\'s module');
         const second = machine({ store, bundleId: 'test' });
         second.write(CODE, COUNTDOWN);
         second.setReg(4, 0x80000);
@@ -475,7 +475,7 @@ test('with a store, a second runtime takes its regions from the store; a changed
         await third.runtime.translatePending();
         await settle();
         assert.equal(third.runtime.diagnostics().cacheMisses, 1);
-        assert.equal(store.size(), 2);
+        assert.equal(store.size(), 4);
         // Another bundle: its own namespace.
         const fourth = machine({ store, bundleId: 'other' });
         fourth.write(CODE, COUNTDOWN);
@@ -484,7 +484,7 @@ test('with a store, a second runtime takes its regions from the store; a changed
         await fourth.runtime.translatePending();
         await settle();
         assert.equal(fourth.runtime.diagnostics().cacheMisses, 1);
-        assert.equal(store.size(), 3);
+        assert.equal(store.size(), 6);
     });
 
 test('a flood of distinct misses does not stop a later address reaching the threshold',
