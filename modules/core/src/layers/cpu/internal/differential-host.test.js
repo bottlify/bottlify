@@ -191,3 +191,42 @@ test('a region that called the host is not replayed', ()=>{
     assert.equal(emulator.hostCalls, 1, 'the handler ran once');
     assert.equal(emulator.mem[0x3000], 1);
 });
+
+test('a replay that calls into translated code steps through the callee\'s entry', async()=>{
+    const { Tables, slotOf, readUndoLog, resetUndoLog, spansOf } = await import(
+        '../../../../../cork/src/index.js');
+    const memory = new WebAssembly.Memory({ initial: Math.ceil(Tables.SIZE / 65536) + 1 });
+    const layout = { tables: 0 };
+    const view = new DataView(memory.buffer);
+    const CALLEE = 0x1500;
+    const slotAt = Tables.HASH + slotOf(CALLEE) * Tables.HASH_SLOT;
+    view.setUint32(slotAt, CALLEE, true);
+    const emulator = /** @type {any} */ (fakeEmulator());
+    emulator.writePhysical = ()=>undefined;
+    // The emulator's handoff: standing on an address the hash holds, it
+    // returns without running anything.
+    emulator.runSlice = ()=>{
+        if (emulator.at === 0x1000)
+        {
+            emulator.at = CALLEE;
+            return 1;
+        }
+        if (emulator.at === CALLEE && view.getUint32(slotAt, true) !== CALLEE)
+        {
+            emulator.at = 0x2000;
+            return 1;
+        }
+        return 0;
+    };
+    const engine = {
+        ...fakeEngine([]), Tables, slotOf, readUndoLog, resetUndoLog, spansOf,
+    };
+    const host = createDifferentialHost({
+        emulator, cork: fakeCork(emulator), engine, memory, layout,
+    });
+    host.runSlice(10);
+    const report = host.differentialDiagnostics();
+    assert.equal(report.replayed, 1);
+    assert.equal(report.divergences, 0, 'the emulator reached the exit past the callee');
+    assert.equal(view.getUint32(slotAt, true), CALLEE, 'and the entry is back in the hash');
+});

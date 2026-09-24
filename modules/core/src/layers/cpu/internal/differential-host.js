@@ -99,6 +99,43 @@ export function createDifferentialHost({ emulator, cork, engine, memory, layout 
             return { ...log, spans };
         };
 
+        /** Hides an address from the entry hash the emulator hands off at, for
+         * one step of the replay: standing on a translated entry, the emulator
+         * returns at once to let the translator run it, so a replay that calls
+         * into translated code would stop at the callee. The slots holding the
+         * address read as removed (the probe goes on past them) until the
+         * returned function puts them back.
+         * @param {number} address @returns {() => void} */
+        const hideEntry = address=>{
+            const view = new DataView(/** @type {WebAssembly.Memory} */ (memory).buffer);
+            const base = layout.tables + engine.Tables.HASH;
+            const slots = engine.Tables.HASH_SLOTS;
+            /** @type {number[]} */
+            const hidden = [];
+            let slot = engine.slotOf(address);
+            for (let probed = 0; probed < slots; probed++)
+            {
+                const at = base + slot * engine.Tables.HASH_SLOT;
+                const key = view.getUint32(at, true);
+                if (key === 0)
+                {
+                    break;
+                }
+                if (key === address)
+                {
+                    view.setUint32(at, 0xffffffff, true);
+                    hidden.push(at);
+                }
+                slot = (slot + 1) & (slots - 1);
+            }
+            return ()=>{
+                for (const at of hidden)
+                {
+                    view.setUint32(at, address, true);
+                }
+            };
+        };
+
         /** Runs one region and replays it on the emulator, recording a
          * divergence the first time one is seen. Only a region whose exit is a
          * clean stop -- untranslated, budget or halt -- is replayed: a trap or
@@ -158,7 +195,13 @@ export function createDifferentialHost({ emulator, cork, engine, memory, layout 
             let guard = exit.retired + 64;
             while (guard > 0 && !emulator.halted() && emulator.eip() !== target)
             {
-                const stepped = emulator.runSlice(1);
+                let stepped = emulator.runSlice(1);
+                if (stepped === 0 && undo && typeof engine.slotOf === 'function')
+                {
+                    const unhide = hideEntry(emulator.eip());
+                    stepped = emulator.runSlice(1);
+                    unhide();
+                }
                 if (stepped === 0)
                 {
                     break;

@@ -32,6 +32,7 @@ export {
 export { interpret, blockState } from './interp.js';
 export { snapshot, restore, compare } from './testing/snapshot.js';
 export { readUndoLog, resetUndoLog, spansOf } from './emit/memory.js';
+export { slotOf } from './runtime/entries.js';
 export { replaySlice };
 
 /**
