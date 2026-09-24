@@ -24,12 +24,12 @@
 
 import { ValType, ModuleBuilder } from '../wasm/encoder.js';
 import { addMaterialiseHelper } from './flags.js';
-import { addBcdHelper, addF80Helpers, addRoundHelper } from './x87.js';
+import { addBcdHelper, addF80Helpers, addInvalidHelper, addRoundHelper } from './x87.js';
 import { addCodeHitHelper } from './memory.js';
 
 /** The imported helper names, in the order a region module imports them. */
 export const HELPER_NAMES = Object.freeze([
-    'materialise', 'f80ToF64', 'f64ToF80', 'round', 'codeHit', 'f64ToBcd',
+    'materialise', 'f80ToF64', 'f64ToF80', 'round', 'codeHit', 'f64ToBcd', 'x87Invalid',
 ]);
 
 /**
@@ -45,7 +45,8 @@ export function defineHelpers(m, layout){
     const round = addRoundHelper(m);
     const codeHit = addCodeHitHelper(m, layout);
     const f64ToBcd = addBcdHelper(m);
-    return { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd };
+    const x87Invalid = addInvalidHelper(m, layout);
+    return { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid };
 }
 
 /**
@@ -71,7 +72,7 @@ export function buildHelpersModule(layout){
  *
  * @param {ModuleBuilder} m
  * @returns {{ materialise: number, f80ToF64: number, f64ToF80: number,
- *     round: number, codeHit: number, f64ToBcd: number }}
+ *     round: number, codeHit: number, f64ToBcd: number, x87Invalid: number }}
  */
 export function importHelpers(m){
     const i32 = ValType.i32;
@@ -88,5 +89,7 @@ export function importHelpers(m){
         m.type({ params: [i32], results: [i32] }));
     const f64ToBcd = m.importFunction('env', 'f64ToBcd',
         m.type({ params: [f64, i32], results: [] }));
-    return { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd };
+    const x87Invalid = m.importFunction('env', 'x87Invalid',
+        m.type({ params: [f64, f64, i32, i32], results: [i32] }));
+    return { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid };
 }

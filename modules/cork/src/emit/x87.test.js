@@ -402,3 +402,38 @@ test('an emms between a push and a store empties what the block knew was held', 
     assert.equal(r.u32(DATA + 4) >>> 0, 0xfff80000, 'the indefinite, stored');
     assert.equal(r.status() & 0x41, 0x41, 'IE and SF');
 });
+
+test('a signalling NaN from memory raises IE and goes on quiet, a quiet one does not', ()=>{
+    const d = [DATA & 255, DATA >> 8, 0, 0];
+    const bits = (/** @type {ReturnType<typeof run>} */ r)=>r.view.getBigUint64(
+        r.m.layout.x87 + ((r.top() & 7) * 16), true);
+    const sNaN32 = [0x01, 0x00, 0x80, 0x7f];
+    const qNaN32 = [0x01, 0x00, 0xc0, 0x7f];
+    const sNaN64 = [1, 0, 0, 0, 0, 0, 0xf0, 0x7f];
+    const qNaN64 = [1, 0, 0, 0, 0, 0, 0xf8, 0x7f];
+    // fld dword / qword [DATA]
+    let r = run([0xd9, 0x05, ...d], { data: sNaN32 });
+    assert.equal(r.status() & 1, 1, 'fld m32 sNaN: IE');
+    assert.equal(bits(r), 0x7ff8000020000000n, 'quiet, payload kept');
+    r = run([0xd9, 0x05, ...d], { data: qNaN32 });
+    assert.equal(r.status() & 1, 0, 'fld m32 qNaN: no IE');
+    r = run([0xdd, 0x05, ...d], { data: sNaN64 });
+    assert.equal(r.status() & 1, 1, 'fld m64 sNaN: IE');
+    assert.equal(bits(r), 0x7ff8000000000001n, 'quiet, payload kept');
+    r = run([0xdd, 0x05, ...d], { data: qNaN64 });
+    assert.equal(r.status() & 1, 0, 'fld m64 qNaN: no IE');
+    // fld1; fmul dword [DATA] / fmul qword [DATA]
+    r = run([0xd9, 0xe8, 0xd8, 0x0d, ...d], { data: sNaN32 });
+    assert.equal(r.status() & 1, 1, 'fmul m32 sNaN: IE');
+    assert.ok(Number.isNaN(r.st(0)));
+    r = run([0xd9, 0xe8, 0xdc, 0x0d, ...d], { data: sNaN64 });
+    assert.equal(r.status() & 1, 1, 'fmul m64 sNaN: IE');
+    assert.equal(bits(r) & 0x0008000000000000n, 0x0008000000000000n, 'the result is quiet');
+    r = run([0xd9, 0xe8, 0xdc, 0x05, ...d], { data: qNaN64 });
+    assert.equal(r.status() & 1, 0, 'fadd m64 qNaN: no IE');
+    r = run([0xd9, 0xe8, 0xd8, 0x0d, ...d], { data: [0, 0, 0x80, 0x3f] });
+    assert.equal(r.status() & 1, 0, 'fmul m32 1.0: no IE');
+    // fld1; fcomp dword [DATA]: an ordered compare with a quiet NaN raises IE
+    r = run([0xd9, 0xe8, 0xd8, 0x1d, ...d], { data: qNaN32 });
+    assert.equal(r.status() & 0x4501, 0x4501, 'unordered, and IE');
+});
