@@ -287,7 +287,15 @@ known without two clock readings per call; `callPhases` adds a phase per handler
 call allocates nothing: the argument array, the frame and the ring's records are made once and
 written over, the answer is kept as a number and rendered as text only when a reader asks, and
 the last error is read only after a function that can have set it. A call that answers late
-keeps the array and frame it was given, and the next call is given new ones.
+keeps the array and frame it was given, and the next call is given new ones. A ring record's
+argument array is kept while the call's arity matches it and replaced by one of the right
+length when it does not: setting `length` on it every call was a trip into the runtime and a
+fifth of the crossing. The engine's own sink (`app.js`, `journalCall`) keeps each call name's
+trace answer until the journal's `revision` moves -- asking `enabled` by area on every call was a
+tenth of the crossing -- and the last error's reader looks the win32 layer up once. Under cork, a
+call of a function with no arguments (`GetCurrentThreadId` in a loop, alternating runs) went
+266 -> 217 ns, and `lstrlenA`, whose string read crosses the stack, the TEB and the image, 1219 ->
+834 with the memory layer's own share of it (`docs/core/memory.md`).
 `internal/crossing.test.js` times a million of each kind and prints the figure.
 
 ### Parking (`internal/parking.js`)

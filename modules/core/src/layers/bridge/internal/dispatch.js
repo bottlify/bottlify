@@ -660,7 +660,12 @@ export function createDispatcher(deps){
             // Copied, because a handler that writes through a pointer can
             // change what the arguments describe before anyone reads them.
             const kept = Math.min(args.length, 6);
-            record.args.length = kept;
+            // A fresh array only when the length differs: setting `length` is
+            // a trip into the runtime every time, a fifth of the crossing.
+            if (record.args.length !== kept)
+            {
+                record.args = new Array(kept);
+            }
             for (let i = 0; i < kept; i++)
             {
                 record.args[i] = args[i];

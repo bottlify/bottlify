@@ -109,7 +109,10 @@ nothing is published and nothing else changes.
 scans for overlap and throws — an overlap is a layout bug, and it is far cheaper to hear about
 it at registration than to debug a guest whose stack grew into its own code. Regions are only
 ever added; `protect` changes permissions in place. A `version` counter is bumped by both so a
-caller that cached a region can tell when the cache is stale.
+caller that cached a region can tell when the cache is stale. `version` and `scans` are plain
+fields of the map, not getters: a getter in that object literal put the whole map in V8's
+dictionary mode, and `version`, read on every host read of guest memory, was a tenth of a host
+call (`lstrlenA` in a loop under cork: 1219 -> 834 ns a call).
 
 `find` is asked on every host read and write, thousands of times a frame, nearly always in the
 region the last one hit, so the last hit is tried first and the fallback walk allocates nothing.
@@ -129,10 +132,11 @@ decisions shape it:
 - **Reads copy.** The emulator hands back a subarray of its own memory, and a caller holding two
   such windows and writing through one finds the other silently moved. `readBytes` slices;
   `window` is the explicit opt-out.
-- **Dword reads are cached by region.** A host call reads several dwords — arguments, the
-  fields behind them — almost all in one region; the accessor remembers the span and version of
-  the region the last read fell in and skips `assert` while the next read stays inside it.
-  Asking the map every time cost a fifth of a call.
+- **Dword reads are cached by region.** A host call reads several dwords — arguments on the
+  stack, the fields behind them, the thread's last error in the TEB — almost all in a handful
+  of regions; the accessor remembers the span and version of the last four regions reads fell
+  in and skips `assert` while a read stays inside one. Asking the map every time cost a fifth of
+  a call, and two entries missed on every read of the stack–TEB–data cycle a call makes.
 - **Writes that cannot be code skip the compiler.** `writeBytes` calls `cpu.writeData` unless
   the region is executable, in which case it calls `cpu.writePhysical`, which tells the
   emulator to discard compiled code on those pages. The cpu layer explains why the ordinary

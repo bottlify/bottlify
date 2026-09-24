@@ -2480,6 +2480,10 @@ async function buildApp(options){
     /** @type {Map<string, string>} */
     const areaCache = new Map();
     const areaOfCall = (/** @type {any} */ call)=>areaOf(call, areaCache);
+    /** @type {Map<string, { revision: number, area: string, on: boolean }>} */
+    const tracedCalls = new Map();
+    /** @type {any} */
+    let win32Api = null;
 
     /**
      * Writes one host call to the journal.
@@ -2487,13 +2491,23 @@ async function buildApp(options){
      * Every one of them, which is why the categories start switched off: a
      * short run makes tens of thousands of calls, and a reader who has not
      * asked for them should pay a map lookup and a comparison rather than a
-     * formatted line. Turning one on is what a filter does.
+     * formatted line. Turning one on is what a filter does. Even that was a
+     * tenth of a crossing, so the answer is kept per name until a level moves
+     * (the journal's `revision`).
      *
      * @param {any} call
      */
     const journalCall = call=>{
-        const category = areaOfCall(call);
-        if (!journal.enabled(category, journal.Level.TRACE))
+        const revision = journal.revision();
+        let traced = tracedCalls.get(call.name);
+        if (traced === undefined || traced.revision !== revision)
+        {
+            const area = areaOfCall(call);
+            traced = { revision, area, on: journal.enabled(area, journal.Level.TRACE) };
+            tracedCalls.set(call.name, traced);
+        }
+        const category = traced.area;
+        if (!traced.on)
         {
             return;
         }
@@ -2554,7 +2568,8 @@ async function buildApp(options){
             // win32 sits above the bridge and cannot be reached from it, so the
             // reader is handed down from here. It costs one call per traced
             // call and buys a trace that says which call left an error behind.
-            lastError: ()=>core.api('win32').lastError(),
+            // Looked up once: it is asked on every crossing.
+            lastError: ()=>(win32Api ??= core.api('win32')).lastError(),
             // Costly and off unless asked for; see the dispatcher.
             traceStrings: options.traceStrings ?? false,
             callPhases: options.profileCalls ?? false,

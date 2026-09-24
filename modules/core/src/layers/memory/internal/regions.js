@@ -74,8 +74,6 @@ export function createRegionMap(){
     let mostRecent;
     /** @type {Region | undefined} */
     let secondMostRecent;
-    /** Bumped only when a lookup falls through to the linear scan below. */
-    let scans = 0;
 
     /**
      * @param {number} base
@@ -85,17 +83,19 @@ export function createRegionMap(){
     const overlapping = (base, size)=>regions.find(
         region=>base < region.base + region.size && region.base < base + size);
 
-    /**
-     * Bumped whenever the table or a region's permissions change, so a caller
-     * that remembers the region an address fell in can tell when that memory
-     * is stale rather than asking again on every read.
-     */
-    let version = 0;
-
-    return {
-        get version(){
-            return version;
-        },
+    // Plain fields rather than getters over closed-over counters: a getter in
+    // this literal put the whole table in V8's dictionary mode, and `version`,
+    // read twice on every host read of guest memory, was a tenth of what a
+    // host call cost.
+    const table = {
+        /**
+         * Bumped whenever the table or a region's permissions change, so a
+         * caller that remembers the region an address fell in can tell when
+         * that memory is stale rather than asking again on every read.
+         */
+        version: 0,
+        /** How many lookups missed both cached regions. Diagnostics and tests only. */
+        scans: 0,
         /**
          * Records a region, refusing anything that collides with what is already
          * mapped. An overlap is a layout bug, and it is far cheaper to hear about
@@ -122,7 +122,7 @@ export function createRegionMap(){
                     + ` at 0x${clash.base.toString(16)}+0x${clash.size.toString(16)}`);
             }
             regions.push({ ...region });
-            version++;
+            table.version++;
             return region;
         },
 
@@ -147,7 +147,7 @@ export function createRegionMap(){
                 throw new Error(`Unknown access "${access}"`);
             }
             region.access = access;
-            version++;
+            table.version++;
         },
 
         /**
@@ -170,7 +170,7 @@ export function createRegionMap(){
                 [mostRecent, secondMostRecent] = [secondMostRecent, mostRecent];
                 return mostRecent;
             }
-            scans++;
+            table.scans++;
             for (let index = 0; index < regions.length; index++)
             {
                 const region = regions[index];
@@ -182,11 +182,6 @@ export function createRegionMap(){
                 }
             }
             return undefined;
-        },
-
-        /** How many lookups missed both cached regions. Diagnostics and tests only. */
-        get scans(){
-            return scans;
         },
 
         /**
@@ -267,4 +262,5 @@ export function createRegionMap(){
             return [...regions].sort((a, b)=>a.base - b.base);
         },
     };
+    return table;
 }

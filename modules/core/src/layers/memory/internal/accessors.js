@@ -59,17 +59,17 @@ const NO_BYTES = new Uint8Array(256);
  */
 export function createAccessors({ raw, regions, charge = null }){
     /**
-     * The last two regions a read validated, by span and the table's version.
-     * A host call reads several dwords -- its arguments, the fields behind
-     * them, and often the TEB beside its own stack -- and nearly all of them
-     * fall in one of the last two regions a read did; asking the table each
-     * time cost a fifth of what a call cost, and a stack/TEB alternation
-     * missed a one-entry cache on every single read.
-     * @type {{ from: number, to: number, version: number } | null}
+     * The last regions a read validated, by span and the table's version. A
+     * host call reads several dwords -- its arguments on the stack, the fields
+     * behind them, the TEB for the thread's last error -- and nearly all of
+     * them fall in one of a handful of regions; asking the table each time
+     * cost a fifth of what a call cost. Four, because a call's stack, its
+     * data and the TEB are three, and a two-entry cache missed on every read
+     * of that cycle.
+     * @type {{ from: number, to: number, version: number }[]}
      */
-    let mostRecentReadable = null;
-    /** @type {{ from: number, to: number, version: number } | null} */
-    let secondMostRecentReadable = null;
+    const readable = [];
+    let replace = 0;
 
     /**
      * Validates a span for reading and answers the cached region it fell in.
@@ -78,25 +78,26 @@ export function createAccessors({ raw, regions, charge = null }){
      * @param {number} length
      */
     const readableSpan = (address, length)=>{
-        if (mostRecentReadable && mostRecentReadable.version === regions.version
-            && address >= mostRecentReadable.from && address + length <= mostRecentReadable.to)
+        const version = regions.version;
+        for (let i = 0; i < readable.length; i++)
         {
-            return mostRecentReadable;
-        }
-        if (secondMostRecentReadable && secondMostRecentReadable.version === regions.version
-            && address >= secondMostRecentReadable.from
-            && address + length <= secondMostRecentReadable.to)
-        {
-            [mostRecentReadable, secondMostRecentReadable]
-                = [secondMostRecentReadable, mostRecentReadable];
-            return mostRecentReadable;
+            const span = readable[i];
+            if (span.version === version && address >= span.from && address + length <= span.to)
+            {
+                return span;
+            }
         }
         const region = regions.assert(address, length, 'read');
-        secondMostRecentReadable = mostRecentReadable;
-        mostRecentReadable = {
-            from: region.base, to: region.base + region.size, version: regions.version,
-        };
-        return mostRecentReadable;
+        const span = { from: region.base, to: region.base + region.size, version };
+        if (readable.length < 4)
+        {
+            readable.push(span);
+        }
+        else
+        {
+            readable[replace++ & 3] = span;
+        }
+        return span;
     };
 
     /**

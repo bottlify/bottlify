@@ -443,3 +443,48 @@ test('an unpacker-shaped program runs under cork',
         assert.ok(cork.cork.invalidations >= 1 || cork.cork.exits.stale >= 1,
             `the patch was seen: ${JSON.stringify(cork.cork)}`);
     });
+
+test('a call area switched on mid-run is traced from the next call on',
+    { timeout: 60000 }, async()=>{
+    // The journal's answer for a call's area is kept per name until a level
+    // moves; switching tracing on while the program runs must reach the very
+    // next call under that name.
+        const exe = buildExe({
+            imports: { 'KERNEL32.dll': ['GetCurrentThreadId', 'ExitProcess'] },
+            data: {},
+            codeSize: 0x40,
+            // mov esi, 5; L: call [GetCurrentThreadId]; dec esi; jnz L; push 0; call [ExitProcess]
+            code: ({ iat })=>[0xbe, ...u32(5),
+                0xff, 0x15, ...u32(iat('GetCurrentThreadId')), 0x4e, 0x75, 0xf7,
+                0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        });
+        /** @type {any} */
+        let app = null;
+        let calls = 0;
+        app = await createApp({
+            executable: exe,
+            engine: 'cork',
+            onCall: (/** @type {any} */ call)=>{
+                if (call.name === 'KERNEL32.dll!GetCurrentThreadId' && ++calls === 1)
+                {
+                    for (const area of app.log.areas())
+                    {
+                        app.log.setLevel(area, 'trace');
+                    }
+                }
+            },
+        });
+        try
+        {
+            await app.run({ timeoutMs: 30000 });
+            const traced = app.log.recent(1000)
+                .filter((/** @type {any} */ record)=>/GetCurrentThreadId/.test(record.text));
+            assert.equal(calls, 5);
+            assert.equal(traced.length, 4,
+                'the four calls after it, not the one that switched it on');
+        }
+        finally
+        {
+            await app.dispose();
+        }
+    });

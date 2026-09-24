@@ -38,10 +38,13 @@ test('a category keeps what its level admits and nothing quieter', ()=>{
     assert.equal(journal.enabled('loader', Level.DEBUG), false);
     assert.equal(journal.enabled('cpu', Level.DEBUG), true);
 
+    const revision = journal.revision();
     journal.setLevel('loader', Level.TRACE);
     assert.equal(journal.enabled('loader', Level.DEBUG), true);
+    assert.equal(journal.revision(), revision + 1, 'a level change moves the revision');
     journal.setDefaultLevel(Level.ERROR);
     assert.equal(journal.enabled('memory', Level.WARN), false);
+    assert.equal(journal.revision(), revision + 2, 'and so does the default');
 });
 
 test('the message stays a template until someone reads it', ()=>{
