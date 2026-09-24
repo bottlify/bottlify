@@ -42,7 +42,7 @@ const LOCK_FILE = join(ROOT, 'video-decoder-lock.json');
 const IMAGE = 'bottlify-video-decoder-builder:0.1';
 const ARTIFACT = 'video-decoder.wasm';
 /** Where a dispatch of the vendor workflow publishes what it built. */
-const RELEASE_REPO = 'mrwayer/bottlify';
+const RELEASE_REPO = 'bottlify/bottlify';
 const FFMPEG = {
     repo: 'https://github.com/FFmpeg/FFmpeg',
     tag: 'n6.1',

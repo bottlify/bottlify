@@ -1,5 +1,5 @@
 {
-  "repo": "mrwayer/bottlify",
+  "repo": "bottlify/bottlify",
   "tag": "video-decoder-83b157d",
   "artifacts": {
     "video-decoder.wasm": "sha256:179c64a43bea9e0160a1489dab11c31088921810a299cc8ba6fef04448d0f909"
