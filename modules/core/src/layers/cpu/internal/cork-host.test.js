@@ -127,10 +127,10 @@ test('the interpreter\'s retired instructions read back through instructionCount
 
 test('a slice that dies on a no-tier instruction still counts what it ran', ()=>{
     const h = host();
-    // Four nops, then fxsave [eax]: the model has no case for it.
-    load(h, 0x1000, [0x90, 0x90, 0x90, 0x90, 0x0f, 0xae, 0x00, 0xf4]);
+    // Four nops, then sldt [eax]: the model has no case for it.
+    load(h, 0x1000, [0x90, 0x90, 0x90, 0x90, 0x0f, 0x00, 0x00, 0xf4]);
     assert.throws(()=>h.runSlice(100), /no tier for 0x0f/);
-    assert.equal(h.instructionCount(), 5, 'the four nops and the one it stopped on');
+    assert.equal(h.instructionCount(), 4, 'the four nops it ran, not the one it stopped on');
 });
 
 test('the host boots a real runtime over cork\'s own memory', ()=>{
