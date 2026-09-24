@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    BRING_UP_PARK, DEAD_BOOT_CODE, FAULT_STUB_BYTES, FAULT_STUBS_OFFSET, GUEST_JUMP, IDT_OFFSET,
+    BRING_UP_PARK, DEAD_BOOT_CODE, FAULT_SAVED, FAULT_STUB_BYTES, FAULT_STUBS_OFFSET, GUEST_JUMP,
+    IDT_OFFSET,
     IDT_POINTER_OFFSET, VECTORS, buildBootRom, inDeadBootCode, ROM_BASE, ROM_SIZE, SEL_CODE32,
     SEL_DATA32,
 } from './boot-rom.js';
@@ -143,20 +144,25 @@ test('every processor exception has a gate, and each gate has its own stub', ()=
     assert.equal(VECTORS, 256, 'every vector, so no int reaches past the table');
 });
 
-test('a fault stub reports its own vector and then stops', ()=>{
+test('a fault stub keeps the two registers it needs, reports its vector, then stops', ()=>{
     const image = buildBootRom({ entryVector: 0x7000, initialStack: 0x300000, trapPort: 0xb077 });
     const stub = FAULT_STUBS_OFFSET + 13 * FAULT_STUB_BYTES;
 
-    assert.deepEqual([...image.subarray(stub, stub + 4)], [0x66, 0xba, 0x77, 0xb0],
+    // The report spends EAX and EDX; the faulting code's values are pushed
+    // first, where a handler shown the context can find them.
+    assert.deepEqual([...image.subarray(stub, stub + 2)], [0x50, 0x52], 'push eax, push edx');
+    assert.equal(FAULT_SAVED, 8);
+    assert.deepEqual([...image.subarray(stub + 2, stub + 6)], [0x66, 0xba, 0x77, 0xb0],
         'mov dx, trapPort');
-    assert.equal(image[stub + 4], 0xb8, 'mov eax, imm32');
-    const trap = image[stub + 5] | image[stub + 6] << 8
-        | image[stub + 7] << 16 | image[stub + 8] << 24;
+    assert.equal(image[stub + 6], 0xb8, 'mov eax, imm32');
+    const trap = image[stub + 7] | image[stub + 8] << 8
+        | image[stub + 9] << 16 | image[stub + 10] << 24;
     assert.equal(trap, 0xf000 + 13, 'the trap carries which exception this was');
-    assert.equal(image[stub + 9], 0xef, 'out dx, eax');
+    assert.equal(image[stub + 11], 0xef, 'out dx, eax');
     // It must not return: iret would resume at the faulting instruction and
     // take the same fault again, for ever.
-    assert.deepEqual([...image.subarray(stub + 10, stub + 13)], [0xf4, 0xeb, 0xfd]);
+    assert.deepEqual([...image.subarray(stub + 12, stub + 15)], [0xf4, 0xeb, 0xfd]);
+    assert.ok(15 <= FAULT_STUB_BYTES);
 });
 
 test('the interrupt table is loaded before the guest can fault', ()=>{

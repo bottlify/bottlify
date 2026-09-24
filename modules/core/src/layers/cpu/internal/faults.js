@@ -20,7 +20,7 @@
  * one is fixed by the architecture and is listed below rather than guessed at.
  */
 
-import { inDeadBootCode } from './boot-rom.js';
+import { FAULT_SAVED, inDeadBootCode } from './boot-rom.js';
 
 /** Vectors whose exception pushes an error code before the return frame. */
 const WITH_ERROR_CODE = new Set([8, 10, 11, 12, 13, 14, 17, 21]);
@@ -52,6 +52,10 @@ const NAMES = Object.freeze([
  *           The whole report, for a fault the host raised rather than read off
  *           the processor: what the machine knows about it is the sentence,
  *           not a vector and a frame.
+ * @property {number} [eax]    The faulting code's, which the stub saved.
+ * @property {number} [edx]
+ * @property {number} [stack]  ESP as the faulting instruction had it, before
+ *           the processor pushed anything.
  */
 
 /**
@@ -88,10 +92,10 @@ export function hostFault({ name, detail, eip, calledFrom = 0, vector = HOST_VEC
  * Reads the frame the processor pushed, given the stack pointer as the stub
  * found it.
  *
- * The stub reports before touching the stack, so ESP still points at the top of
- * that frame: the error code when there is one, then EIP, CS and EFLAGS. There
- * is no stack switch to account for -- the guest runs at ring zero, so the
- * processor pushes no SS:ESP.
+ * Above the two registers the stub saved sits that frame: the error code when
+ * there is one, then EIP, CS and EFLAGS. There is no stack switch to account
+ * for -- the guest runs at ring zero, so the processor pushes no SS:ESP, and
+ * the faulting code's own stack begins right after EFLAGS.
  *
  * @param {number} vector
  * @param {number} esp
@@ -100,7 +104,8 @@ export function hostFault({ name, detail, eip, calledFrom = 0, vector = HOST_VEC
  */
 export function readFault(vector, esp, readU32){
     const hasError = WITH_ERROR_CODE.has(vector);
-    const at = hasError ? esp + 4 : esp;
+    const frame = esp + FAULT_SAVED;
+    const at = hasError ? frame + 4 : frame;
     return {
         vector,
         // Past the processor's own: a software interrupt nothing here
@@ -108,11 +113,14 @@ export function readFault(vector, esp, readU32){
         name: NAMES[vector] ?? (vector < 32
             ? `exception ${vector}`
             : `int 0x${vector.toString(16)} with no handler`),
-        errorCode: hasError ? readU32(esp) >>> 0 : null,
+        errorCode: hasError ? readU32(frame) >>> 0 : null,
         eip: readU32(at) >>> 0,
         cs: readU32(at + 4) >>> 0,
         eflags: readU32(at + 8) >>> 0,
         calledFrom: readU32(at + 12) >>> 0,
+        edx: readU32(esp) >>> 0,
+        eax: readU32(esp + 4) >>> 0,
+        stack: (at + 12) >>> 0,
     };
 }
 

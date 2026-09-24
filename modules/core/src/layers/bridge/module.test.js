@@ -21,6 +21,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bridgeModule } from './module.js';
 
+/** Where a held thread spins. */
+const PARK = 0x00900000;
+
 /** Two stacks far enough apart that a write to the wrong one is unmistakable. */
 const MAIN = { top: 0x00300000, limit: 0x00200000 };
 const WORKER = { top: 0x00700000, limit: 0x00600000 };
@@ -66,6 +69,7 @@ async function bridge(){
             onTrap: fn=>{
                 onTrap = fn;
             },
+            parkAddress: ()=>PARK,
         },
         kernel: {
             currentThread: ()=>running,
@@ -115,6 +119,7 @@ async function bridge(){
         main,
         worker,
         resumed,
+        regs,
         /** Runs a registered function the way a guest `call` would. */
         /** @param {number} id @param {any} on @param {number} esp */
         trap: (id, on, esp)=>{
@@ -339,4 +344,48 @@ test('diagnostics answers for the live instance', async()=>{
         'diagnostics reports the second (most recent) instance');
 
     await bridgeModule.dispose();
+});
+
+test('a handler that answers with a continuation sends the thread there, not back', async()=>{
+    // An exception handler that found its block: the call it is answering, and
+    // the throw that led to it, never return.
+    const machine = await bridge();
+    machine.api.register('TEST.dll!Catches', {
+        argBytes: 4,
+        handler: ()=>Promise.resolve(machine.api.continueAt(
+            { eip: 0x00402200, esp: 0x002ff500, ebp: 0x002ff5a0 })),
+    });
+    machine.trap(machine.lastTrap(), machine.main, 0x002ff000);
+    await settle();
+
+    assert.deepEqual(machine.resumed.at(-1), {
+        thread: 'main', eip: 0x00402200, esp: 0x002ff500, registers: { ebp: 0x002ff5a0 },
+    });
+    assert.equal(machine.api.suspended(), 0, 'and the call it abandoned is no longer waiting');
+});
+
+test('a continuation must say where the stack is as well as where to go', async()=>{
+    const machine = await bridge();
+    assert.throws(()=>machine.api.continueAt({ eip: 0x401000 }), /eip and esp/);
+});
+
+test('a thread holding for its fault waits in the park loop and goes where it is told', async()=>{
+    const machine = await bridge();
+    /** @type {(value: any) => void} */
+    let answer = ()=>{};
+    machine.api.holdForFault(machine.main,
+        { name: '<divide error>', restingStack: 0x002ff000, hostReturn: 0x00401000 },
+        new Promise(resolve=>{
+            answer = resolve;
+        }));
+
+    assert.equal(machine.regs.eip, PARK, 'the stub\'s halt is never reached');
+    assert.equal(machine.api.suspended(), 1, 'the thread is waiting, as for a host call');
+
+    answer(machine.api.continueAt({ eip: 0x00401800, esp: 0x002ff100 }));
+    await settle();
+
+    assert.deepEqual(machine.resumed.at(-1),
+        { thread: 'main', eip: 0x00401800, esp: 0x002ff100 });
+    assert.equal(machine.api.suspended(), 0);
 });

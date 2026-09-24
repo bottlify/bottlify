@@ -94,3 +94,21 @@ test('diagnostics answers for the live instance', async()=>{
 
     await cpuModule.dispose();
 });
+
+test('a resume can carry the registers the code it enters reads first', async()=>{
+    // An exception handler's block addresses its function's locals through EBP
+    // from its first instruction; ESP and EAX keep their own rules.
+    const api = await open();
+    const context = { eip: 0, inHlt: 1, reg32: new Int32Array(8) };
+
+    api.resumeContextAt(context, {
+        eip: 0x401000, returnValue: 7, esp: 0x2ff000,
+        registers: { ebp: 0x2ff100, ebx: 0x11, esi: 0x22, edi: 0x33, esp: 0x1, unknown: 9 },
+    });
+
+    assert.equal(context.eip, 0x401000);
+    assert.deepEqual([...context.reg32], [7, 0, 0, 0x11, 0x2ff000, 0x2ff100, 0x22, 0x33],
+        'EAX from the return value, ESP from its own argument, the rest from the set given');
+    assert.equal(context.inHlt, 0);
+    await cpuModule.dispose();
+});

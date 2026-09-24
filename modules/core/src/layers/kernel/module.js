@@ -288,11 +288,15 @@ export const kernelModule = {
              * @param {number} where.eip
              * @param {number} [where.esp]           For a thread being sent somewhere new.
              * @param {number} [where.returnValue]
+             * @param {Record<string, number>} [where.registers]
+             *        The others it continues with, for code that reads them
+             *        before it sets them. EAX here wins over `returnValue`.
              */
-            scheduleResume(thread, { eip, esp, returnValue = 0 }){
+            scheduleResume(thread, { eip, esp, returnValue = 0, registers }){
                 thread.parkedReturn = eip;
                 thread.resumeStack = esp ?? null;
-                thread.waitResult = returnValue;
+                thread.waitResult = registers?.eax ?? returnValue;
+                thread.resumeRegisters = registers ?? null;
             },
             currentThread: ()=>live() ? state.scheduler.current() : null,
             threads: ()=>live() ? state.scheduler.all() : [],

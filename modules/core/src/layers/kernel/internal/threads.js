@@ -525,11 +525,15 @@ export function createScheduler(options){
                     eip: next.parkedReturn,
                     esp: next.resumeStack ?? null,
                     returnValue: next.waitResult ?? 0,
+                    // Only a thread sent into code that reads more than its
+                    // stack carries these: an exception handler's block.
+                    ...next.resumeRegisters ? { registers: next.resumeRegisters } : {},
                 };
                 onResume?.(next, next.lastWaitingOn ?? null, resume.returnValue >>> 0);
                 next.parkedReturn = null;
                 next.resumeStack = null;
                 next.waitResult = null;
+                next.resumeRegisters = null;
             }
             // Whatever `current` is, it is the thread whose state is on the CPU,
             // and it has to be saved before another one takes over -- including,

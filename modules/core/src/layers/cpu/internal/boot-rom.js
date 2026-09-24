@@ -55,8 +55,17 @@ const OFF_RESET = 0xfff0;
  */
 export const VECTORS = 256;
 
-/** Bytes each fault stub occupies. Eleven are used; the slot is a round number. */
+/** Bytes each fault stub occupies. Fifteen are used; the slot is a round number. */
 const FAULT_STUB_SIZE = 16;
+
+/**
+ * What a fault stub pushes before it reports: EAX, then EDX. The report needs
+ * both registers for itself, and they are the faulting code's -- a handler
+ * that is shown the context, or continues from it, has to find them as the
+ * program left them. So the processor's frame sits this many bytes above the
+ * stack pointer the report finds.
+ */
+export const FAULT_SAVED = 8;
 
 /**
  * The trap this ROM raises for vector 0; the rest follow it in order.
@@ -186,11 +195,13 @@ export function buildBootRom({ entryVector, initialStack, trapPort }){
             ...u16(handler >>> 16 & 0xffff),
         ]);
 
-        // The stub itself. It does not return: the fault is reported and the
-        // machine stops there, because iret would resume at the instruction
-        // that faulted and take the same fault again for ever. Where execution
-        // resumes is a decision for whoever is told, not for the ROM.
+        // The stub itself. It does not return: iret would resume at the
+        // instruction that faulted and take the same fault again for ever.
+        // Where execution goes next -- a handler the program registered, or
+        // nowhere -- is a decision for whoever is told, not for the ROM.
         put(OFF_FAULT_STUBS + vector * FAULT_STUB_SIZE, [
+            0x50, //                                     push eax
+            0x52, //                                     push edx
             0x66, 0xba, ...u16(trapPort), //             mov dx, trapPort
             0xb8, ...u32(FAULT_TRAP_BASE + vector), //   mov eax, trap
             0xef, //                                     out dx, eax

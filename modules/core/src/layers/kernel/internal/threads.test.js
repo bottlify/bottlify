@@ -544,6 +544,30 @@ test('each publish names the thread the machine was spent on and where its heavi
         assert.equal(column('frameAt'), 0x400000);
     });
 
+test('a thread sent on with registers of its own gets them at the switch, once', ()=>{
+    // What an exception handler's continuation carries: the frame pointer
+    // its block expects. A plain wait carries none, and its resume says so.
+    /** @type {any[]} */
+    const resumes = [];
+    const cpu = { ...fakeCpu(),
+        /** @param {any} context @param {any} where */
+        resumeContextAt: (context, where)=>resumes.push(where) };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+    const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    sched.block(a, 'catching');
+    sched.wake(a);
+    a.parkedReturn = 0x401200;
+    a.resumeStack = 0x2ff500;
+    a.waitResult = 0;
+    a.resumeRegisters = { ebp: 0x2ff5a0 };
+    sched.runOnce();
+
+    assert.deepEqual(resumes, [{
+        eip: 0x401200, esp: 0x2ff500, returnValue: 0, registers: { ebp: 0x2ff5a0 },
+    }]);
+    assert.equal(a.resumeRegisters, null, 'and they are not applied a second time');
+});
+
 test('a parked thread resumes on the resting stack it was parked with', ()=>{
     // The switch may catch a parking thread before its stub's `ret` has run,
     // with ESP still on the return address the kernel overwrote. The resume

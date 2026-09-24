@@ -268,3 +268,64 @@ test('what the guest was last sent to run is kept for a failure report', ()=>{
     assert.deepEqual(made.recentlyStarted(),
         [{ entry: 0x401000, by: 'USER32.dll!DispatchMessageA', thread: 'main' }]);
 });
+
+test('a callback can be sent in with the registers its code reads before setting them', ()=>{
+    // A funclet of an exception handler addresses its parent's locals through
+    // EBP from its first instruction.
+    const worker = thread('main');
+    const { made, resumed } = callbacks([worker]);
+    made.reserve();
+
+    made.call({
+        thread: worker, entry: 0x401000, args: [], stackAtRest: 0x2ff000,
+        registers: { ebp: 0x2ffe0c },
+    });
+
+    assert.deepEqual(resumed[0][1].registers, { ebp: 0x2ffe0c });
+});
+
+test('a transfer abandons every call below the line and keeps every one above it', ()=>{
+    // The catch is in a window procedure: the dispatch that called the
+    // procedure is above the line and still waiting, the throw and the frame
+    // handler it reached are below it and never come back.
+    const worker = thread('main');
+    const { made, resumed } = callbacks([worker]);
+    made.reserve();
+    made.suspended(worker, {
+        name: 'USER32.dll!DispatchMessageA', restingStack: 0x2ff800, hostReturn: 0x401000,
+    });
+    made.call({ thread: worker, entry: 0x402000, args: [1, 2, 3, 4], stackAtRest: 0x2ff7f0 });
+    made.suspended(worker, {
+        name: 'msvcrt.dll!_CxxThrowException', restingStack: 0x2ff400, hostReturn: 0x402100,
+    });
+    made.call({ thread: worker, entry: 0x403000, args: [1, 2, 3, 4], stackAtRest: 0x2ff100 });
+    made.suspended(worker, {
+        name: 'msvcrt.dll!__CxxFrameHandler3', restingStack: 0x2ff0c0, hostReturn: 0x403010,
+    });
+
+    made.transfer(worker, { eip: 0x402200, esp: 0x2ff500, ebp: 0x2ff5a0 }, 0x2ff500);
+
+    assert.deepEqual(made.diagnostics().suspendedCalls.map((/** @type {any} */ call)=>call.name),
+        ['USER32.dll!DispatchMessageA'], 'the dispatch the procedure runs under is still waiting');
+    assert.deepEqual(resumed.at(-1), ['main', {
+        eip: 0x402200, esp: 0x2ff500, registers: { ebp: 0x2ff5a0 },
+    }]);
+
+    // The procedure returns to its sentinel normally afterwards: the frame it
+    // pops is its own, not one of the abandoned ones.
+    assert.equal(made.returned(worker), true);
+    assert.equal(made.returned(worker), false, 'and there was only the one left');
+});
+
+test('a transfer with no line given draws it at the new stack pointer', ()=>{
+    const worker = thread('main');
+    const { made } = callbacks([worker]);
+    made.suspended(worker, { name: 'outer', restingStack: 0x2ff800, hostReturn: 0x401000 });
+    made.suspended(worker, { name: 'inner', restingStack: 0x2ff300, hostReturn: 0x401100 });
+
+    made.transfer(worker, { eip: 0x401200, esp: 0x2ff300 });
+
+    assert.deepEqual(made.diagnostics().suspendedCalls.map((/** @type {any} */ call)=>call.name),
+        ['outer'], 'a call resting exactly on the line returned into it, and is gone');
+    assert.equal(made.pendingCalls(), 1);
+});

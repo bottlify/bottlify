@@ -182,9 +182,13 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * @param {number[]} [call.args]
          * @param {number} [call.stackAtRest]    Where the stack is, when nothing else knows.
          * @param {string} [call.by]             Which host call is starting it.
+         * @param {Record<string, number>} [call.registers]
+         *        What the routine finds in the registers besides its stack --
+         *        a funclet reads its parent's frame through EBP before it has
+         *        set anything.
          * @returns {Promise<number>}
          */
-        call({ thread, entry, args = [], stackAtRest, by = 'somewhere' }){
+        call({ thread, entry, args = [], stackAtRest, by = 'somewhere', registers }){
             if (!thread)
             {
                 throw new Error('bridge: a guest callback needs a thread to run on');
@@ -274,7 +278,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             });
             frames.push({ frameBase, settle });
 
-            kernel.scheduleResume(thread, { eip: entry, esp: frameBase });
+            kernel.scheduleResume(thread, { eip: entry, esp: frameBase, registers });
             // Off to run guest code, whatever it was doing before.
             thread.awaitingHost = false;
             return answer;
@@ -324,6 +328,62 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                 eip: call.hostReturn,
                 esp: call.restingStack,
                 returnValue,
+            });
+        },
+
+        /**
+         * A host call has decided the thread does not come back to it at all:
+         * it continues at `registers`, wherever that is, and every host call
+         * and callback the thread was inside below that stack is abandoned.
+         *
+         * This is what an exception handler does when it finds its catch. The
+         * throw is a host call, the dispatch it started called the guest's
+         * frame handler, and that handler -- another host call -- chose a
+         * block in a frame well above all of them. None of those calls
+         * returns: on Windows the stack they stood on is simply discarded by
+         * the jump, and the same is true here. What is below the new stack
+         * pointer is gone; what is above it -- the window procedure the
+         * program was in when it threw, the dispatch that called it -- is
+         * still live and still waiting, and is kept.
+         *
+         * The line is `below` when given, and the new stack pointer when not.
+         * They differ for a C++ catch: the block ran on a stack deeper than
+         * the throw, and the function goes on at the stack pointer the block
+         * left -- so the line is where the function stood when the throw left
+         * it, which the handler read before running anything.
+         *
+         * The promises of the abandoned calls never settle. Nothing is left
+         * that would read their answer.
+         *
+         * @param {any} thread
+         * @param {Record<string, number>} registers  `eip` and `esp` at least.
+         * @param {number} [below]
+         */
+        transfer(thread, registers, below){
+            const target = (below ?? registers.esp) >>> 0;
+            const suspended = hostCalls(thread);
+            while (suspended.length > 0
+                && (suspended[suspended.length - 1].restingStack >>> 0) <= target)
+            {
+                suspended.pop();
+                pending--;
+            }
+            const frames = callbackFrames(thread);
+            while (frames.length > 0
+                && (frames[frames.length - 1].frameBase >>> 0) < target)
+            {
+                frames.pop();
+            }
+            thread.awaitingHost = false;
+            if (answered)
+            {
+                const open = answered.settle;
+                answered = null;
+                open();
+            }
+            const { eip, esp, ...rest } = registers;
+            kernel.scheduleResume(thread, {
+                eip, esp, ...Object.keys(rest).length > 0 ? { registers: rest } : {},
             });
         },
 

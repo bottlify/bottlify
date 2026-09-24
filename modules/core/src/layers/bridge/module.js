@@ -34,6 +34,31 @@ import { createVtables } from './internal/vtable.js';
  */
 let current = null;
 
+/** Marks an answer that is not a value but a place to continue. */
+const CONTINUATION = Symbol('continuation');
+
+/**
+ * @param {Record<string, number>} registers
+ * @param {number} [below]
+ * @returns {{ [CONTINUATION]: true, registers: Record<string, number>, below?: number }}
+ */
+const continuation = (registers, below)=>{
+    if (registers.eip === undefined || registers.esp === undefined)
+    {
+        throw new Error('bridge: a continuation needs both eip and esp');
+    }
+    return Object.freeze({
+        [CONTINUATION]: /** @type {true} */ (true), registers: { ...registers }, below,
+    });
+};
+
+/**
+ * @param {any} value
+ * @returns {value is { registers: Record<string, number>, below?: number }}
+ */
+const isContinuation = value=>typeof value === 'object' && value !== null
+    && value[CONTINUATION] === true;
+
 export const bridgeModule = {
     name: 'bridge',
     version: '0.1.0',
@@ -139,6 +164,11 @@ export const bridgeModule = {
             answer.then(
                 value=>{
                     record({ t: 'finish', name, thread: thread?.name });
+                    if (isContinuation(value))
+                    {
+                        state.callbacks.transfer(thread, value.registers, value.below);
+                        return;
+                    }
                     state.callbacks.finish(thread, value | 0);
                 },
                 // Nothing above is waiting on this promise, so a handler that
@@ -452,10 +482,13 @@ export const bridgeModule = {
              *   itself -- an exception record and context, handed to the
              *   routine it is about to run -- names the stack below that, or
              *   the routine's own frames grow down over what it was given.
+             * @param {Record<string, number>} [call.registers]
+             *   Registers the routine reads before it sets them -- the frame
+             *   pointer a funclet addresses its parent's locals through.
              * @returns {Promise<number>} resolves to 0 once this instance is
              *     disposed -- there is no guest left to call into.
              */
-            callGuest({ entry, args = [], thread, stackAtRest }){
+            callGuest({ entry, args = [], thread, stackAtRest, registers }){
                 if (!live())
                 {
                     return Promise.resolve(0);
@@ -492,7 +525,60 @@ export const bridgeModule = {
                     // thread's stack; otherwise the thread's own suspended call
                     // is the record of where it came to rest.
                     stackAtRest: stackAtRest ?? state.parking.freeStackFor(runOn),
+                    registers,
                 });
+            },
+
+            /**
+             * What an asynchronous handler resolves with when the call it is
+             * answering does not return: the thread continues at `registers`,
+             * and every host call and guest callback it was inside below the
+             * new stack pointer is abandoned. An exception handler that has
+             * found its catch answers this way; nothing else should.
+             *
+             * @param {Record<string, number>} registers  `eip` and `esp` at least.
+             * @param {{ below?: number }} [options]  Where the abandoned stack
+             *   ends, when that is not the new stack pointer: the catching
+             *   frame's own address, for a catch block that ran below the
+             *   throw and continues on the stack it ran on.
+             */
+            continueAt: (registers, options)=>continuation(registers, options?.below),
+
+            /**
+             * Holds the running thread while a processor exception it took is
+             * offered to its handlers, the way a host call holds it while it
+             * waits: the thread is sent to the park loop from the vector's
+             * stub, and `answer` decides where it goes next -- a continuation,
+             * or a plain value resuming it at `where.hostReturn`.
+             *
+             * Called from inside the trap that reported the fault, with the
+             * thread still on the processor.
+             *
+             * @param {any} thread
+             * @param {{ name: string, restingStack: number, hostReturn: number }} where
+             * @param {Promise<any>} answer
+             */
+            holdForFault(thread, where, answer){
+                if (!live())
+                {
+                    return;
+                }
+                cpu.writeReg32('eip', cpu.parkAddress());
+                record({ t: 'park', name: where.name, thread: thread?.name });
+                state.callbacks.suspended(thread, where);
+                answer.then(
+                    value=>{
+                        record({ t: 'finish', name: where.name, thread: thread?.name });
+                        if (isContinuation(value))
+                        {
+                            state.callbacks.transfer(thread, value.registers, value.below);
+                            return;
+                        }
+                        state.callbacks.finish(thread, value | 0);
+                    },
+                    (/** @type {Error} */ error)=>{
+                        state.failure ??= error;
+                    });
             },
 
             /**

@@ -43,6 +43,11 @@ export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
  */
 let current = null;
 
+/** Where each general register sits in a saved context, in the processor's own order. */
+const REGISTER_INDEX = Object.freeze({
+    eax: 0, ecx: 1, edx: 2, ebx: 3, esp: 4, ebp: 5, esi: 6, edi: 7,
+});
+
 /**
  * What this layer publishes as numbers, once a frame: the counters the
  * diagnostics table carries at the top level, and the emulator's own
@@ -110,12 +115,14 @@ export const cpuModule = {
          * @type {{ host: any, thunks: any, running: boolean, tableWritten: boolean,
          *          worstInterpreted: number, worstInterpretedAt: number,
          *          interpretedBefore: number, lastFault: any, disposed: boolean,
-         *          samples: ReturnType<typeof createSampleTable> }}
+         *          samples: ReturnType<typeof createSampleTable>,
+         *          faultHandler: ((fault: any) => boolean) | null }}
          */
         const state = {
             host: null, thunks: null, running: false, tableWritten: false,
             worstInterpreted: 0, worstInterpretedAt: 0, interpretedBefore: 0,
             lastFault: null, disposed: false, samples: createSampleTable(),
+            faultHandler: null,
         };
 
         // Always on, because the whole point is never having to reproduce a
@@ -279,6 +286,15 @@ export const cpuModule = {
                                     | bytes[2] << 16 | bytes[3] << 24;
                             },
                         );
+                        // Offered first to whoever can deliver it to the
+                        // program: a guest that faults on purpose -- probing
+                        // a pointer, catching its own divide by zero -- has a
+                        // handler for it, and one that claims the fault has
+                        // also decided where the thread goes next.
+                        if (state.faultHandler?.(fault) === true)
+                        {
+                            return 0;
+                        }
                         // Recorded and the machine stopped, never thrown. This
                         // runs inside the emulator's port write, and an
                         // exception raised there does not come back out -- it
@@ -325,6 +341,35 @@ export const cpuModule = {
                     return;
                 }
                 state.lastFault ??= hostFault(fault);
+            },
+
+            /**
+             * Who is offered a processor exception before it stops the
+             * machine. The handler runs inside the trap, with the processor
+             * standing in the vector's stub: it answers `true` only once it
+             * has sent the thread somewhere else to wait, since the stub
+             * itself goes on to nothing but a halt.
+             *
+             * @param {((fault: import('./internal/faults.js').GuestFault) => boolean) | null} handler
+             */
+            onFault(handler){
+                state.faultHandler = handler;
+            },
+
+            /**
+             * Stops the machine on a processor exception that was offered to
+             * the program and not taken -- reported exactly as one that was
+             * never offered, because to a reader it is the same failure.
+             *
+             * @param {import('./internal/faults.js').GuestFault} fault
+             */
+            stopWithFault(fault){
+                if (state.disposed || !state.host)
+                {
+                    return;
+                }
+                state.lastFault ??= fault;
+                state.host.stop();
             },
 
             run(){
@@ -507,15 +552,34 @@ export const cpuModule = {
              * host built below where the thread stopped. A wait resumes on its
              * own stack and leaves it alone.
              *
+             * A frame pointer and the rest come with it only when the thread
+             * is sent into code that reads them before it sets them: a funclet
+             * of an exception handler addresses its parent's locals through
+             * EBP, and the block a handler continues at expects every register
+             * the handler chose.
+             *
              * @param {any} context
              * @param {Object} options
              * @param {number} options.eip
              * @param {number} options.returnValue
              * @param {number | null} [options.esp]
+             * @param {Record<string, number> | null} [options.registers]
              */
-            resumeContextAt(context, { eip, returnValue, esp = null }){
+            resumeContextAt(context, { eip, returnValue, esp = null, registers = null }){
                 context.eip = eip;
                 context.reg32[0] = returnValue | 0; // EAX
+                if (registers !== null)
+                {
+                    for (const [name, value] of Object.entries(registers))
+                    {
+                        const index = REGISTER_INDEX[/** @type {keyof typeof REGISTER_INDEX} */
+                            (name)];
+                        if (index !== undefined)
+                        {
+                            context.reg32[index] = value | 0;
+                        }
+                    }
+                }
                 if (esp !== null)
                 {
                     context.reg32[4] = esp | 0; // ESP
