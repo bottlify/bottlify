@@ -17,6 +17,8 @@
  * plain JSON-able object and back.
  */
 
+import { PROCESSOR, PROCESSOR_IDENTIFIER } from '../kernel32/processor.js';
+
 /** The predefined roots. A guest names these by constant; it never opens them. */
 export const HKEY_CLASSES_ROOT = 0x80000000;
 export const HKEY_CURRENT_USER = 0x80000001;
@@ -163,16 +165,6 @@ function keyFromJSON(stored){
  */
 
 /**
- * The rate the time-stamp counter advances at, in MHz, which is what Windows
- * measures at boot and writes as the processor's speed. It is the emulated
- * counter's rate -- one tick per host nanosecond, which is also what the
- * emulated CPUID reports as the base frequency -- not the host's: a program
- * reads this to turn rdtsc deltas into seconds, and any other figure would
- * put its clocks out by that ratio.
- */
-const PROCESSOR_MHZ = 1000;
-
-/**
  * Where the shell keeps its folders, by the names the registry lists them
  * under. One table, because a program reads the same folder two ways -- the
  * registry value and the shell's own call -- and compares what it got.
@@ -252,9 +244,9 @@ const MACHINE_KEYS = Object.freeze(/** @type {MachineKey[]} */ ([
     // measures anything, and one that finds no key reports a 0 MHz machine.
     { root: HKEY_LOCAL_MACHINE, path: 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0',
         values: {
-            Identifier: 'x86 Family 6 Model 7 Stepping 3',
-            VendorIdentifier: 'GenuineIntel',
-            '~MHz': PROCESSOR_MHZ,
+            Identifier: PROCESSOR_IDENTIFIER,
+            VendorIdentifier: PROCESSOR.vendor,
+            '~MHz': PROCESSOR.mhz,
         } },
     // The DirectX this machine has, in the two forms its own setup library
     // reads back: the version string, and the binary pair an older setup

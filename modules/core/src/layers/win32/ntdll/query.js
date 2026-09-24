@@ -23,6 +23,7 @@
 
 import { PEB, TEB } from '../kernel32/teb.js';
 import { STATUS } from './status.js';
+import { PROCESSOR } from '../kernel32/processor.js';
 
 /** RTL_OSVERSIONINFOW, and the extended form that also carries the service pack. */
 const OSVERSIONINFOW_SIZE = 276;
@@ -89,9 +90,9 @@ const MAXIMUM_USER_ADDRESS = 0x7ffeffff;
  */
 const TIMER_RESOLUTION = 156250;
 
-/** One processor, and the mask that says which. */
-const PROCESSOR_COUNT = 1;
-const ACTIVE_PROCESSORS = 1;
+/** How many processors, and the mask that says which. */
+const PROCESSOR_COUNT = PROCESSOR.count;
+const ACTIVE_PROCESSORS = (1 << PROCESSOR.count) - 1;
 
 /** The priority a process started from the shell runs at. */
 const NORMAL_BASE_PRIORITY = 8;

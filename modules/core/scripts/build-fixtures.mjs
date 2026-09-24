@@ -46,8 +46,11 @@ const IMPORTS = {
             'CreateThread@24', 'WaitForSingleObject@8', 'Sleep@4', 'QueueUserAPC@12',
             'SleepEx@8', 'WaitForSingleObjectEx@12', 'CreateEventA@16', 'SetEvent@4',
             'CreateWaitableTimerA@12', 'SetWaitableTimer@24', 'GetCurrentThreadId@0',
-            'GetCurrentThread@0',
+            'GetCurrentThread@0', 'GetSystemInfo@4', 'IsProcessorFeaturePresent@4',
         ],
+    },
+    'ADVAPI32.dll': {
+        undecorated: ['RegOpenKeyExA@20', 'RegQueryValueExA@24'],
     },
     'msvcrt.dll': {
         undecorated: [
@@ -64,6 +67,7 @@ const PROGRAMS = [
     { name: 'cxxeh', source: 'cxxeh.cpp', cxx: true },
     { name: 'unhandled', source: 'unhandled.cpp', cxx: true },
     { name: 'apc', source: 'apc.c', cxx: false },
+    { name: 'processor', source: 'processor.c', cxx: false },
 ];
 
 /**

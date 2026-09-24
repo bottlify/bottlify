@@ -21,6 +21,10 @@
  * to do with rather than one that flatters the host.
  */
 
+import {
+    PROCESSOR, PROCESSOR_FEATURES, PROCESSOR_LEVEL, PROCESSOR_REVISION,
+} from './processor.js';
+
 /** Error codes this file can produce. */
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_INVALID_HANDLE = 6;
@@ -82,23 +86,6 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 /** No activation context has this section: what a process without a manifest is told. */
 
-/**
- * IsProcessorFeaturePresent's answers, for the processor this is: a 32-bit x86
- * with the SSE2 set and no execute-disable. A feature not listed is one the
- * program must not use, so the default answer is no.
- */
-const PROCESSOR_FEATURES = new Map([
-    [0, false],  // PF_FLOATING_POINT_PRECISION_ERRATA
-    [1, false],  // PF_FLOATING_POINT_EMULATED
-    [2, true],   // PF_COMPARE_EXCHANGE_DOUBLE
-    [3, true],   // PF_MMX_INSTRUCTIONS_AVAILABLE
-    [6, true],   // PF_XMMI_INSTRUCTIONS_AVAILABLE
-    [8, true],   // PF_RDTSC_INSTRUCTION_AVAILABLE
-    [10, true],  // PF_XMMI64_INSTRUCTIONS_AVAILABLE
-    [12, false], // PF_NX_ENABLED
-    [13, false], // PF_SSE3_INSTRUCTIONS_AVAILABLE
-    [14, false], // PF_COMPARE_EXCHANGE128
-]);
 
 /**
  * What FormatMessage says about a code, for the codes this build produces.
@@ -400,11 +387,13 @@ export function createSystemFunctions(host){
                 view.setUint32(4, PAGE_SIZE, true);
                 view.setUint32(8, MINIMUM_APPLICATION_ADDRESS, true);
                 view.setUint32(12, MAXIMUM_APPLICATION_ADDRESS, true);
-                view.setUint32(16, 1, true);   // one processor in the mask
-                view.setUint32(20, 1, true);   // and one processor
+                view.setUint32(16, (1 << PROCESSOR.count) - 1, true); // the mask
+                view.setUint32(20, PROCESSOR.count, true);
                 view.setUint32(24, PROCESSOR_INTEL_PENTIUM, true);
                 view.setUint32(28, ALLOCATION_GRANULARITY, true);
-                view.setUint16(32, 5, true);   // processor level: Pentium
+                // The family and the model and stepping, as CPUID gives them.
+                view.setUint16(32, PROCESSOR_LEVEL, true);
+                view.setUint16(34, PROCESSOR_REVISION, true);
                 host.writeMemory(info >>> 0, bytes);
                 return 0;
             },

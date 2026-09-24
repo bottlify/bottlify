@@ -360,6 +360,13 @@ implements).
 
 ### Small contracts, one paragraph each
 
+- **The processor is described once** (`kernel32/processor.js`): the emulated CPUID's leaf 1 --
+  GenuineIntel, family 6 model 7 stepping 3, its EDX and ECX feature bits -- and everything a
+  program can ask derives from it: `GetSystemInfo`'s level and revision, `IsProcessorFeaturePresent`
+  (SSE3 and RDRAND included, execute-disable and PAE answered no since nothing enforces or pages),
+  the registry's `CentralProcessor\0` identifier and speed, the process block's processor count
+  and `NtQuerySystemInformation`'s. `src/processor.itest.js` runs CPUID in a program and holds the
+  record to the answer.
 - **`SendInput`** inserts mouse events into the same stream a real device feeds: each one goes to
   the input layer through `sendInput`, so it turns into a `WM_MOUSEMOVE`/button message and a
   DirectInput delta both, exactly as a physical move or click would. `cbSize` must be
@@ -490,12 +497,12 @@ and the metrics in §2.
 ## 5. Tests
 
 Unit tests are colocated with each file, `node:test`, over `fakeMemory`
-(`src/layers/win32/msvcrt/harness.test.js`) or a stub host; there are 103 `*.test.js` files under
+(`src/layers/win32/msvcrt/harness.test.js`) or a stub host; there are 104 `*.test.js` files under
 `src/layers/win32/`. Run with `npm test` from `modules/core`.
 
 | area | files (all `src/layers/win32/…`) |
 |------|----------------------------------|
-| kernel32 | `apc`, `consoleio`, `critical`, `drives`, `environment`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `process`, `resources`, `seh`, `spawn`, `sync`, `system`, `teb`, `threading`, `vfs` `.test.js` |
+| kernel32 | `apc`, `consoleio`, `critical`, `drives`, `environment`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `process`, `processor`, `resources`, `seh`, `spawn`, `sync`, `system`, `teb`, `threading`, `vfs` `.test.js` |
 | msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `heap`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `strings`, `time` `.test.js` |
 | user32 | `controls`, `dialogs`, `display`, `messages`, `objects`, `structs`, `system`, `windows` `.test.js` — `controls.test.js` paints a dialog through the real drawing engine and compares it byte for byte with `controls.reference.png` |
 | gdi32 | `drawing`, `functions`, `objects` `.test.js` |

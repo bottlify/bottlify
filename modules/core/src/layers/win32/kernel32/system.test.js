@@ -89,6 +89,8 @@ test('the machine reported is one a program of the era knows what to do with', (
     assert.equal(host.view.getUint32(0x210, true), 1, 'one processor in the mask');
     assert.equal(host.view.getUint32(0x214, true), 1, 'and one processor');
     assert.equal(host.view.getUint32(0x21c, true), 0x10000, 'allocation granularity');
+    assert.equal(host.view.getUint16(0x220, true), 6, 'the level is CPUID\'s family');
+    assert.equal(host.view.getUint16(0x222, true), 0x0703, 'the revision its model and stepping');
 });
 
 test('the lstr family answers NULL to a pointer that faults, as the real one does', ()=>{
@@ -298,6 +300,7 @@ test('the processor features answered are the ones a 32-bit x86 with SSE2 has', 
     assert.equal(fns.IsProcessorFeaturePresent.handler([6]), 1, 'SSE');
     assert.equal(fns.IsProcessorFeaturePresent.handler([10]), 1, 'SSE2');
     assert.equal(fns.IsProcessorFeaturePresent.handler([12]), 0, 'no execute-disable');
+    assert.equal(fns.IsProcessorFeaturePresent.handler([13]), 1, 'SSE3, as CPUID says');
     assert.equal(fns.IsProcessorFeaturePresent.handler([99]), 0, 'and nothing unknown');
 });
 

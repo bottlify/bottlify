@@ -27,6 +27,8 @@
  * ones where they belong.
  */
 
+import { PROCESSOR } from './processor.js';
+
 /** Field offsets in the thread block, and the size a whole one occupies. */
 export const TEB = Object.freeze({
     EXCEPTION_LIST: 0x00,
@@ -54,6 +56,7 @@ export const PEB = Object.freeze({
     IMAGE_BASE_ADDRESS: 0x08,
     LDR: 0x0c,
     PROCESS_PARAMETERS: 0x10,
+    NUMBER_OF_PROCESSORS: 0x64,
     OS_MAJOR_VERSION: 0xa4,
     OS_MINOR_VERSION: 0xa8,
     OS_BUILD_NUMBER: 0xac,
@@ -198,6 +201,8 @@ export function createProcessBlocks(options){
     write(peb + PEB.OS_MINOR_VERSION, version.minor);
     write(peb + PEB.OS_BUILD_NUMBER, version.build);
     write(peb + PEB.OS_PLATFORM_ID, 2); // VER_PLATFORM_WIN32_NT
+    // Read directly by a runtime sizing its thread pool, without a call.
+    write(peb + PEB.NUMBER_OF_PROCESSORS, PROCESSOR.count);
 
     // Strings are laid out after the parameter block, in the same allocation.
     let strings = params + PARAMS.SIZE;
