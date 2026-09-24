@@ -14,7 +14,7 @@
 import { formRegion } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
 import { features } from '../wasm/features.js';
-import { emitRegion, prepareModule, mathImports } from '../emit/region.js';
+import { emitRegion, enterRegion, prepareModule, mathImports } from '../emit/region.js';
 import { buildHelpersModule } from '../emit/helpers.js';
 import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
 import { createPageTable } from '../runtime/pages.js';
@@ -145,7 +145,7 @@ export function createTestMachine(given = {}){
                     rdtsc: rdtsc ?? (()=>0n),
                 },
             });
-            const run = /** @type {(label: number, budget: number) => number} */ (
+            const run = /** @type {import('../runtime/entries.js').Entry['fn']} */ (
                 /** @type {any} */ (instance.exports).region);
             if (table && hash)
             {
@@ -177,7 +177,7 @@ export function createTestMachine(given = {}){
                     {
                         throw new Error(`no block starts at 0x${eip.toString(16)}`);
                     }
-                    const code = run(label, budget) >>> 0;
+                    const code = enterRegion(run, label, budget, view(), layout) >>> 0;
                     return { kind: code & 0xff, vector: code >>> 8 };
                 },
             };

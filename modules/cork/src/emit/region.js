@@ -7,10 +7,11 @@
 /**
  * A region becomes one wasm function.
  *
- * The function takes the label of the block to enter and the slice's
- * instruction budget, and answers how it left. Its shape:
+ * The function takes the label of the block to enter, the slice's
+ * instruction budget and -- under cork's own layout -- the machine state a
+ * transfer carries (`STATE_PARAMS`), and answers how it left. Its shape:
  *
- *     prologue      the eight registers and the flags word loaded into locals
+ *     prologue      what the parameters do not carry loaded into locals
  *     block $out
  *       loop $dispatch
  *         block … block   one nested block per basic block, innermost first
@@ -62,6 +63,32 @@ export const MATH_IMPORTS = Object.freeze([
     'sin', 'cos', 'tan', 'atan2', 'exp2m1', 'log2', 'log1p',
 ]);
 
+/**
+ * Enters a region function from the host: the state a transfer between
+ * regions carries in its parameters, read from the state block -- the eight
+ * registers, the flag record (zero under a layout with none), the flags word,
+ * and a count of nothing retired yet.
+ *
+ * @param {Function} fn  the region's function
+ * @param {number} label @param {number} budget
+ * @param {DataView} view  over the memory the state block is in
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @returns {number} the exit code
+ */
+export function enterRegion(fn, label, budget, view, layout){
+    const { regs } = layout;
+    const record = layout.flagRecord ?? -1;
+    /** @param {number} at */
+    const word = at=>view.getInt32(at, true);
+    /** @param {number} i */
+    const recorded = i=>(record >= 0 ? word(record + i * 4) : 0);
+    return fn(label, budget,
+        word(regs), word(regs + 4), word(regs + 8), word(regs + 12),
+        word(regs + 16), word(regs + 20), word(regs + 24), word(regs + 28),
+        recorded(0), recorded(1), recorded(2), recorded(3), recorded(4),
+        word(layout.eflags), 0);
+}
+
 /** The import object entries for `MATH_IMPORTS`. */
 export function mathImports(){
     return {
@@ -103,12 +130,17 @@ export const Local = Object.freeze({
 });
 /** The record's locals in the order the layout's `flagRecord` keeps them. */
 const RECORD_LOCALS = [Local.kind, Local.res, Local.op1, Local.op2, Local.cin];
+/**
+ * The function's parameters, locals 0..16: the label and the budget, then the
+ * state a transfer between regions carries rather than writing it to the state
+ * block and reading it back -- the eight registers, the flag record, the flags
+ * word, and the instructions the run has retired so far (the counter word is
+ * added to once, when the run leaves for the host). A region over a layout with
+ * no flag record (the emulator's) takes them and loads its state as before.
+ */
+export const STATE_PARAMS = 17;
 const LOCAL_TYPES = [
-    // the eight registers
-    ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32,
-    ValType.i32,
-    ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, // kind..flags
-    ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, // retired..addr
+    ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, // eip..addr
     ValType.i64, ValType.i64,
     ValType.i32, // count
     ValType.f32, ValType.f32, ValType.f64, ValType.f64, // f0 f1 d0 d1
@@ -122,7 +154,7 @@ const LOCAL_TYPES = [
  *
  * @typedef {Object} ModuleContext
  * @property {import('../wasm/encoder.js').ModuleBuilder} m
- * @property {number} regionType       the function type (i32, i32) → i32
+ * @property {number} regionType       the function type (`STATE_PARAMS` × i32) → i32
  * @property {number} materialise      the flag helper's function index
  * @property {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @property {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
@@ -197,7 +229,9 @@ export function prepareModule(m, layout, features, memory = {},
     {
         math[name] = m.importFunction('env', name, name === 'atan2' ? binary : unary);
     }
-    const regionType = m.type({ params: [ValType.i32, ValType.i32], results: [ValType.i32] });
+    const regionType = m.type({
+        params: new Array(STATE_PARAMS).fill(ValType.i32), results: [ValType.i32],
+    });
     // The five helpers are one shared module every region imports, rather
     // than a copy in each; the host instantiates it once with the same
     // memory (they are defined in `./helpers.js`).
@@ -365,7 +399,7 @@ export class RegionEmitter {
                     {
                         if (operand.kind === 'xmm' && !this.xmmLocals.has(/** @type {number} */ (operand.reg)))
                         {
-                            this.xmmLocals.set(/** @type {number} */ (operand.reg), this.localTypes.length + 2);
+                            this.xmmLocals.set(/** @type {number} */ (operand.reg), this.localTypes.length + STATE_PARAMS);
                             this.localTypes.push(ValType.v128);
                         }
                     }
@@ -375,7 +409,7 @@ export class RegionEmitter {
             {
                 for (let p = 0; p < 8; p++)
                 {
-                    this.mmLocals.set(p, this.localTypes.length + 2);
+                    this.mmLocals.set(p, this.localTypes.length + STATE_PARAMS);
                     this.localTypes.push(ValType.i64);
                 }
             }
@@ -389,7 +423,7 @@ export class RegionEmitter {
                         {
                             if (operand.kind === 'mm' && !this.mmLocals.has(/** @type {number} */ (operand.reg)))
                             {
-                                this.mmLocals.set(/** @type {number} */ (operand.reg), this.localTypes.length + 2);
+                                this.mmLocals.set(/** @type {number} */ (operand.reg), this.localTypes.length + STATE_PARAMS);
                                 this.localTypes.push(ValType.i64);
                             }
                         }
@@ -401,8 +435,9 @@ export class RegionEmitter {
         this.x87 = prepareX87(this, entryTop);
         /**
          * Where the registers' loads and stores go, filled once the body is
-         * written and the locals it uses are known (`fillDeferred`).
-         * @type {{ at: number, kind: 'load' | 'store' }[]}
+         * written and the locals it uses are known (`fillDeferred`): the
+         * integer registers, the x87 ones, or both.
+         * @type {{ at: number, kind: 'load' | 'store', regs: boolean, x87: boolean }[]}
          */
         this.deferred = [];
     }
@@ -523,15 +558,29 @@ export class RegionEmitter {
     }
 
     prologue(){
-        this.loadState();
-        this.resetRun();
+        this.loadState(this.flagRecord >= 0);
+        this.resetRun(this.flagRecord >= 0);
     }
 
-    /** The registers, the flags, the vector registers and the x87 block into the locals. */
-    loadState(){
+    /**
+     * The registers, the flags, the vector registers and the x87 block into the
+     * locals. `fromParams`: the registers, the record, the flags word and the
+     * count came in as parameters (cork's layout, on entry), so only what
+     * lives in the state block alone is loaded.
+     *
+     * @param {boolean} [fromParams]
+     */
+    loadState(fromParams = false){
         const { b, layout } = this;
-        b.i32const(0).load('i32', { offset: layout.eflags }).localSet(Local.flags);
-        if (this.flagRecord >= 0)
+        if (fromParams)
+        {
+            this.pending = null;
+        }
+        else
+        {
+            b.i32const(0).load('i32', { offset: layout.eflags }).localSet(Local.flags);
+        }
+        if (this.flagRecord >= 0 && !fromParams)
         {
             // The record the last region left, as it left it: its kind is not
             // known here, and a read folds it only when it must.
@@ -563,27 +612,50 @@ export class RegionEmitter {
             x87Prologue(this);
         }
         // The registers, after the x87 empty mask they are loaded under.
-        this.deferred.push({ at: b.bytes.length, kind: 'load' });
+        this.deferred.push({ at: b.bytes.length, kind: 'load', regs: !fromParams, x87: true });
     }
 
-    /** The run's own locals at their start: no record, nothing retired, nothing touched. */
-    resetRun(){
+    /**
+     * The run's own locals at their start: no record, nothing retired, nothing
+     * touched. `fromParams`: the count came in as a parameter and goes on.
+     *
+     * @param {boolean} [fromParams]
+     */
+    resetRun(fromParams = false){
         const { b } = this;
         if (this.flagRecord < 0)
         {
             b.i32const(0).localSet(Local.kind);
         }
-        b.i32const(0).localSet(Local.retired);
+        if (!fromParams)
+        {
+            b.i32const(0).localSet(Local.retired);
+        }
         b.i32const(0).localSet(Local.mmxTouched);
         b.i32const(0).localSet(Local.stale);
     }
 
-    /** Writes every local back and returns the kind in `t0`. */
+    /**
+     * Writes every local back and returns the kind in `t0`. Under cork's own
+     * layout a transfer to another region passes the registers, the record,
+     * the flags word and the count as its parameters, so only what lives in
+     * the state block alone is written before it, and the rest only when the
+     * run leaves for the host.
+     */
     epilogue(){
-        this.storeState();
-        if (this.context.hash)
+        if (this.flagRecord >= 0 && this.context.hash)
         {
+            this.storeMemoryState();
             this.transfer();
+            this.storeCarriedState();
+        }
+        else
+        {
+            this.storeState();
+            if (this.context.hash)
+            {
+                this.transfer();
+            }
         }
         this.b.localGet(Local.t0);
     }
@@ -595,6 +667,17 @@ export class RegionEmitter {
      * host reads it and as `loadState` takes it back.
      */
     storeState(){
+        this.storeCarriedState();
+        this.storeMemoryState();
+    }
+
+    /**
+     * What a transfer carries in its parameters, into the state block: the
+     * registers (all eight under cork's layout, whose unwritten ones came in
+     * as parameters and are not in the block), the record or the folded
+     * flags, EIP and the count.
+     */
+    storeCarriedState(){
         const { b, layout } = this;
         if (this.flagRecord >= 0)
         {
@@ -610,7 +693,7 @@ export class RegionEmitter {
         {
             this.materialise();
         }
-        this.deferred.push({ at: b.bytes.length, kind: 'store' });
+        this.deferred.push({ at: b.bytes.length, kind: 'store', regs: true, x87: false });
         b.i32const(0).localGet(Local.flags).store('i32', { offset: layout.eflags });
         if (layout.flagsChanged >= 0)
         {
@@ -624,6 +707,15 @@ export class RegionEmitter {
         b.i32const(0);
         b.i32const(0).load('i32', { offset: layout.counter }).localGet(Local.retired).op(I32.add);
         b.store('i32', { offset: layout.counter });
+    }
+
+    /**
+     * What lives in the state block alone, a transfer's callee loading it from
+     * there: the vector registers written and the x87 block.
+     */
+    storeMemoryState(){
+        const { b, layout } = this;
+        this.deferred.push({ at: b.bytes.length, kind: 'store', regs: false, x87: true });
         for (const index of this.xmmWritten)
         {
             b.i32const(0).localGet(this.xmmLocal(index))
@@ -690,22 +782,26 @@ export class RegionEmitter {
         const main = this.b;
         const { used, written } = main;
         const { layout } = this;
-        for (const { at, kind } of this.deferred.reverse())
+        // Under cork's layout the registers a region did not load came in as
+        // parameters, so the block does not hold them: every one is stored,
+        // and a reload (after a trap's handler) takes every one back.
+        const all = this.flagRecord >= 0;
+        for (const { at, kind, regs, x87 } of this.deferred.reverse())
         {
             const b = this.b = new Body();
-            for (let r = 0; r < 8; r++)
+            for (let r = 0; r < (regs ? 8 : 0); r++)
             {
                 const offset = layout.regs + r * 4;
-                if (kind === 'load' && used.has(Local.reg + r))
+                if (kind === 'load' && (all || used.has(Local.reg + r)))
                 {
                     b.i32const(0).load('i32', { offset }).localSet(Local.reg + r);
                 }
-                if (kind === 'store' && written.has(Local.reg + r))
+                if (kind === 'store' && (all || written.has(Local.reg + r)))
                 {
                     b.i32const(0).localGet(Local.reg + r).store('i32', { offset });
                 }
             }
-            if (this.x87.active && !this.x87.hasMmx)
+            if (x87 && this.x87.active && !this.x87.hasMmx)
             {
                 if (kind === 'load')
                 {
@@ -799,6 +895,20 @@ export class RegionEmitter {
         }
         b.localGet(Local.t2).load('i32_16u', { offset: 8 });
         b.localGet(Local.budget);
+        for (let local = Local.budget + 1; local < STATE_PARAMS; local++)
+        {
+            // A region over the emulator's layout loads its state from the
+            // block and takes none: zeros, so a register it never names is
+            // not counted as used and loaded for the call alone.
+            if (this.flagRecord >= 0)
+            {
+                b.localGet(local);
+            }
+            else
+            {
+                b.i32const(0);
+            }
+        }
         b.localGet(Local.t2).load('i32', { offset: 4 });
         b.returnCallIndirect(this.context.regionType, 0);
         this.close();

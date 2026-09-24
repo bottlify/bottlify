@@ -55,18 +55,18 @@ test('the interpreter tier runs what the translator has no entry for', ()=>{
 
 test('an instruction with no model is the engine\'s no-tier answer', ()=>{
     const h = host();
-    // fxsave [eax], left to the other executor.
-    load(h, 0x1000, [0x0f, 0xae, 0x00]);
+    // sldt [eax], which no user program runs and the model has no case for.
+    load(h, 0x1000, [0x0f, 0x00, 0x00]);
     assert.throws(()=>h.runSlice(1), /cpu: cork has no tier for 0x/);
 });
 
 test('the no-tier answer names the instruction met, not the range it started at', ()=>{
     const h = host();
-    // Three nops then fxsave [eax]: the run starts at 0x1000, the instruction
+    // Three nops then sldt [eax]: the run starts at 0x1000, the instruction
     // with no model is at 0x1003.
-    load(h, 0x1000, [0x90, 0x90, 0x90, 0x0f, 0xae, 0x00, 0xf4]);
+    load(h, 0x1000, [0x90, 0x90, 0x90, 0x0f, 0x00, 0x00, 0xf4]);
     assert.throws(()=>h.runSlice(100),
-        (/** @type {Error} */ e)=>/0x0f \(fxsave\) \(eip 0x00001003\)/.test(e.message));
+        (/** @type {Error} */ e)=>/0x0f \(0f 00\) \(eip 0x00001003\)/.test(e.message));
 });
 
 test('an interpreted trap reaches the call channel', ()=>{

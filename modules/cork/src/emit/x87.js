@@ -37,7 +37,7 @@
 import { CF, PF, ZF, AF, SF, OF } from '../decode/table.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { I32 } from './flags.js';
-import { Local, Exit } from './region.js';
+import { Local, Exit, STATE_PARAMS } from './region.js';
 import { prepare, writeReg, readOp } from './integer.js';
 import { noteStore } from './memory.js';
 import { inlineReturns } from '../region.js';
@@ -405,7 +405,7 @@ export function prepareX87(e, entryTop){
     }
     const hasMmx = regionHasMmx(region, e.context.leaveOut);
     const { states, cut, ends } = trackRegion(region, entryTop);
-    const base = e.localTypes.length + 2;
+    const base = e.localTypes.length + STATE_PARAMS;
     for (let k = 0; k < 11; k++)
     {
         e.localTypes.push(ValType.f64);
