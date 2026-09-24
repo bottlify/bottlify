@@ -1,7 +1,6 @@
 node_modules/**
 # The master plan stays private; the per-phase roadmaps are tracked.
 roadmap/00-*
-CLAUDE.md
 .ghidra/
 .ghidra-home/
 .claude/
