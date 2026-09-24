@@ -169,8 +169,14 @@ test('a small leaf callee is formed into its caller, and only its rets return in
         'the callee\'s ret comes back after the call; the caller\'s own ret is no edge');
     const off = regionOf([0xe8, 1, 0, 0, 0, 0xc3, 0x40, 0xc3], 0x1000, { leafCalls: false });
     assert.deepEqual(off.entries, [0x1000, 0x1005]);
-    // A callee that calls on is no leaf: the call stays an exit.
+    // A callee that calls on is formed one level deep: its own call stays an
+    // exit, and its ret comes back after the call into it.
     const nested = regionOf([0xe8, 1, 0, 0, 0, 0xc3, 0xe8, 0xf5, 0x0f, 0, 0, 0xc3]);
-    assert.deepEqual(nested.entries, [0x1000, 0x1005]);
-    assert.equal(inlineReturns(nested).size, 0);
+    assert.deepEqual(nested.entries, [0x1000, 0x1005, 0x1006, 0x100b]);
+    assert.deepEqual([...inlineReturns(nested)], [[0x100b, [0x1005]]]);
+    // Its callee that calls on in turn is not: 1006 F: call G; ret
+    // 100c G: call 2000; ret -- G stays a call out of the region.
+    const deeper = regionOf([0xe8, 1, 0, 0, 0, 0xc3, 0xe8, 1, 0, 0, 0, 0xc3,
+        0xe8, 0xef, 0x0f, 0, 0, 0xc3]);
+    assert.deepEqual(deeper.entries, [0x1000, 0x1005, 0x1006, 0x100b]);
 });

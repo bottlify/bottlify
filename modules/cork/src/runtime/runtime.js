@@ -54,7 +54,7 @@ const KINDS = /** @type {ExitKind[]} */ (
  */
 export function createCorkRuntime({ memory, layout, config = {}, read, imports, features }){
     const settings = {
-        hotThreshold: 2000, maxRegionBlocks: 64, maxRegionBytes: 8192, batchRegions: 32,
+        hotThreshold: 2000, maxRegionBlocks: 128, maxRegionBytes: 8192, batchRegions: 32,
         maxQueued: 8192, maxBatchRegions: 256,
         // Invalidations of one page before it is left to the other executor.
         volatileAfter: 8,

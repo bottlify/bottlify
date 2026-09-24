@@ -104,7 +104,7 @@
  * @typedef {Object} EngineConfig
  * @property {number} [hotThreshold]     Instructions a 64-byte bucket must have been
  *     credited before its address is a region candidate. Default 2000.
- * @property {number} [maxRegionBlocks]  Default 64.
+ * @property {number} [maxRegionBlocks]  Default 128.
  * @property {number} [maxRegionBytes]   Default 8192.
  * @property {number} [batchRegions]     Regions per wasm module. Default 32.
  * @property {number} [maxBatchRegions]  The most regions one batch takes when the queue is deep

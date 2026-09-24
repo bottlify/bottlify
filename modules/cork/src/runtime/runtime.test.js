@@ -80,6 +80,47 @@ test('a spent budget at an inlined return charges the callee once', async()=>{
     assert.equal(retired, 1 + 50 * 5 + 1, 'mov, fifty turns of call/inc/ret/dec/jnz, hlt');
 });
 
+test('a callee that calls on is formed in, and its callee\'s return comes back into it', async()=>{
+    const m = machine({ countTransfers: true });
+    // mov ecx, 50; L: call F; dec ecx; jnz L; hlt
+    // F: inc edx; call G; ret -- formed into the loop's region
+    // G: call H; ret -- calls on from inside F, so a region of its own
+    // H: inc eax; ret
+    m.write(CODE, [0xb9, 50, 0, 0, 0, 0xe8, 0x04, 0, 0, 0, 0x49, 0x75, 0xf8, 0xf4,
+        0x42, 0xe8, 0x01, 0, 0, 0, 0xc3,
+        0xe8, 0x01, 0, 0, 0, 0xc3,
+        0x40, 0xc3]);
+    m.setReg(4, 0x80000);
+    for (const at of [CODE, CODE + 0x15, CODE + 0x1b])
+    {
+        m.runtime.noteHot(at);
+    }
+    while (await m.runtime.translatePending() > 0);
+    let eip = CODE;
+    let retired = 0;
+    for (let run = 0; run < 5000; run++)
+    {
+        const entry = m.runtime.entryOf(eip);
+        assert.ok(entry >= 0, `an entry at ${eip.toString(16)}`);
+        const exit = m.runtime.run(entry, 3 + run % 7);
+        retired += exit.retired;
+        eip = m.eip();
+        if (exit.kind === 'halt')
+        {
+            break;
+        }
+    }
+    assert.equal(m.reg(2), 50, 'edx: F ran fifty times');
+    assert.equal(m.reg(0), 50, 'eax: so did H, through G');
+    assert.equal(m.reg(4), 0x80000, 'every call returned');
+    assert.equal(retired, 1 + 50 * 10 + 1,
+        'each turn: call, inc, call, call, inc, ret x3, dec, jnz');
+    // Into G and back a turn; F's call and return stay in the loop's region
+    // (four a turn when F is a region of its own).
+    const transfers = m.runtime.diagnostics().transfers ?? Infinity;
+    assert.ok(transfers <= 2 * 50, `${transfers} transfers through the hash`);
+});
+
 test('translate: false keeps the translator off for the interpreter alone', async()=>{
     const m = machine({ translate: false });
     m.write(CODE, COUNTDOWN);

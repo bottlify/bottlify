@@ -61,21 +61,24 @@ import { decode } from './decode/decoder.js';
 /** Exits that end a block and are not followed into another block of this region. */
 const TERMINAL = new Set(['ret', 'indirect', 'call', 'trap', 'hlt', 'refused', 'fault']);
 
-/** The callee a direct call is formed into its caller with, at most. */
-const LEAF_BLOCKS = 8;
-const LEAF_BYTES = 256;
+/** The callee a direct call is formed into its caller with, at most: a leaf,
+ * or one with direct calls of its own (formed one level deep). */
+const LEAF_BLOCKS = 16;
+const LEAF_BYTES = 512;
 
 /**
- * Whether the function at `target` is a small leaf: a few blocks reached by
- * direct branches alone, every way out of them a `ret`. Only a guess at the
- * shape -- a return is still checked against the return address at run time
- * -- so anything else (a call, an indirect jump, a trap, a refusal, a page
- * not to translate) answers no.
+ * Whether the function at `target` is small enough to form into its caller:
+ * a few blocks reached by direct branches alone, every way out of them a
+ * `ret`. Only a guess at the shape -- a return is still checked against the
+ * return address at run time -- so anything else (an indirect jump, a trap,
+ * a refusal, a page not to translate) answers no; so does a direct call in
+ * it unless `calls`, when the callee's own callees leave through the hash as
+ * any call does and come back to the block after their call.
  *
  * @param {(address: number) => number} read @param {number} target
- * @param {(eip: number) => boolean} translatable
+ * @param {(eip: number) => boolean} translatable @param {boolean} [calls]
  */
-function isLeaf(read, target, translatable){
+function isLeaf(read, target, translatable, calls = false){
     const seen = new Set();
     const work = [target];
     let bytes = 0;
@@ -117,6 +120,12 @@ function isLeaf(read, target, translatable){
             if (exit.kind === 'ret')
             {
                 break;
+            }
+            if (calls && exit.kind === 'call' && seen.size < LEAF_BLOCKS)
+            {
+                // The return lands after the call: a block of its own.
+                seen.add(eip);
+                continue;
             }
             return false;
         }
@@ -172,6 +181,11 @@ export function inlineReturns(region){
             {
                 work.push(...exit.targets, ...(exit.kind === 'jump' ? [] : [exit.next]));
             }
+            else if (exit.kind === 'call')
+            {
+                // A callee of the callee comes back after its call.
+                work.push(exit.next);
+            }
         }
     }
     return out;
@@ -186,12 +200,27 @@ export function inlineReturns(region){
  * @returns {Region}
  */
 export function formRegion(read, entry,
-    { maxBlocks = 64, maxBytes = 8192, translatable = ()=>true, leafCalls = true } = {})
+    { maxBlocks = 128, maxBytes = 8192, translatable = ()=>true, leafCalls = true } = {})
 {
     /** @type {Map<number, Block>} by start */
     const blocks = new Map();
-    /** @type {number[]} */
-    const pending = [entry];
+    /** The starts still to decode, by how many callees deep they were reached:
+     * the entry's own function first, so the callees formed into it take only
+     * what the caps leave rather than cutting the caller's own loops. A callee
+     * that makes calls of its own is formed into the entry's function alone,
+     * a leaf into that callee too. @type {number[][]} */
+    const pendingAt = [[entry], [], []];
+    /** @type {Map<number, number>} */
+    const depthOf = new Map([[entry, 0]]);
+    /** @param {number} at @param {number} depth */
+    const follow = (at, depth)=>{
+        pendingAt[Math.min(depth, 2)].push(at);
+        if (!((depthOf.get(at) ?? Infinity) <= depth))
+        {
+            depthOf.set(at, depth);
+        }
+    };
+    const next = ()=>pendingAt.find(queue=>queue.length > 0)?.shift();
     /** @type {Map<string, number>} */
     const refused = new Map();
     let bytes = 0;
@@ -235,9 +264,9 @@ export function formRegion(read, entry,
         return true;
     };
 
-    while (pending.length > 0)
+    for (let start = next(); start !== undefined; start = next())
     {
-        const start = /** @type {number} */ (pending.shift());
+        const depth = depthOf.get(start) ?? 0;
         if (blocks.has(start))
         {
             continue;
@@ -265,7 +294,7 @@ export function formRegion(read, entry,
             {
                 // Ran into a block already decoded: fall through to it.
                 block.exit = { kind: 'fallthrough', targets: [eip], next: eip, backEdge: false };
-                pending.push(eip);
+                follow(eip, depth);
                 break;
             }
             if (bytes >= maxBytes)
@@ -320,7 +349,7 @@ export function formRegion(read, entry,
                 // that follows in address order rather than a far target.
                 for (const target of [...exit.targets].reverse())
                 {
-                    pending.push(target);
+                    follow(target, depth);
                 }
             }
             else if (exit.kind === 'call' || exit.kind === 'trap'
@@ -330,14 +359,14 @@ export function formRegion(read, entry,
                 // a register or a table, and the host's trap resumes after
                 // the port write: a block there lets the return come back
                 // into translated code.
-                pending.push(exit.next);
+                follow(exit.next, depth);
                 if (leafCalls && exit.kind === 'call'
-                    && isLeaf(read, exit.targets[0], translatable))
+                    && isLeaf(read, exit.targets[0], translatable, depth === 0))
                 {
-                    // A small leaf callee is formed into its caller: the call
+                    // A small callee is formed into its caller: the call
                     // becomes a jump inside the region, and its return, when
                     // it comes back to this call's return address, one too.
-                    pending.push(exit.targets[0]);
+                    follow(exit.targets[0], depth + 1);
                 }
             }
             break;
