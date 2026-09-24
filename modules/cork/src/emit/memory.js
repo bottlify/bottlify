@@ -28,24 +28,47 @@ import { Exit, Local } from './region.js';
 /** @typedef {import('./region.js').RegionEmitter} E */
 
 /**
+ * Stores whose code note `checkAccess` already made, by the instruction they
+ * belong to: `noteStore` for that instruction only keeps the undo log.
+ *
+ * @type {WeakMap<E, object>}
+ */
+const noted = new WeakMap();
+
+/**
  * With the address of a `size`-byte access in `addr`: reads the page flags
  * of its first and its last byte into `pflags` and leaves with #GP, before
  * the instruction, when either page is inaccessible.
  *
+ * The common case is one test: the flags of the access's page and of the
+ * next one, read as a halfword (the last byte lies in one of the two),
+ * against INACCESSIBLE -- and for `store` against HAS_CODE too, the store's
+ * code note being made here rather than in a second test in `noteStore`.
+ * Only when a flag is up are the last byte's own flags read, so an access
+ * beside an unmapped page or a code page is neither a fault nor a note
+ * unless it reaches it.
+ *
  * @param {E} e @param {number} size
- * @param {{ counted?: boolean }} [options]  false inside a `rep` loop, where the
- *     instruction is not counted and a fault leaves at it without uncounting
+ * @param {{ counted?: boolean, store?: boolean }} [options]  `counted` false
+ *     inside a `rep` loop, where the instruction is not counted and a fault
+ *     leaves at it without uncounting; `store` when the access is only
+ *     written and its `noteStore` follows with no exit between
  */
-export function checkAccess(e, size, { counted = true } = {}){
+export function checkAccess(e, size, { counted = true, store = false } = {}){
     const { b } = e;
     const table = e.layout.tables + Tables.PAGE_FLAGS;
-    b.localGet(Local.addr).i32const(12).op(I32.shrU).load('i32_8u', { offset: table });
+    const noting = store && e.layout.codePages < 0 && size <= 16;
+    const bits = PageFlag.INACCESSIBLE | (noting ? PageFlag.HAS_CODE : 0);
+    b.localGet(Local.addr).i32const(12).op(I32.shrU)
+        .load(size > 1 ? 'i32_16u' : 'i32_8u', { offset: table })
+        .localTee(Local.pflags).i32const(size > 1 ? bits * 0x101 : bits).op(I32.and);
+    e.openIf('flagged', EMPTY);
     if (size > 1)
     {
+        b.localGet(Local.addr).i32const(12).op(I32.shrU).load('i32_8u', { offset: table });
         b.localGet(Local.addr).i32const(size - 1).op(I32.add).i32const(12).op(I32.shrU)
-            .load('i32_8u', { offset: table }).op(I32.or);
+            .load('i32_8u', { offset: table }).op(I32.or).localSet(Local.pflags);
     }
-    b.localSet(Local.pflags);
     b.localGet(Local.pflags).i32const(PageFlag.INACCESSIBLE).op(I32.and);
     e.openIf('inaccessible', EMPTY);
     if (counted)
@@ -55,6 +78,15 @@ export function checkAccess(e, size, { counted = true } = {}){
     else
     {
         e.exitAt(e.current.eip, Exit.FAULT, 13);
+    }
+    e.close();
+    if (noting)
+    {
+        b.localGet(Local.pflags).i32const(PageFlag.HAS_CODE).op(I32.and);
+        e.openIf('maybeCode', EMPTY);
+        noteCodeStore(e, size);
+        e.close();
+        noted.set(e, e.current);
     }
     e.close();
 }
@@ -74,6 +106,11 @@ export function noteStore(e, size){
     {
         b.localGet(Local.addr).i32const(size).call(e.context.undo);
     }
+    if (noted.get(e) === e.current)
+    {
+        noted.delete(e);
+        return;
+    }
     if (e.layout.codePages < 0)
     {
         // Only this engine's code to look for: `checkAccess` left both pages'
@@ -87,7 +124,8 @@ export function noteStore(e, size){
             b.localGet(Local.addr).i32const(size - 1).op(I32.add).i32const(12).op(I32.shrU)
                 .load('i32_8u', { offset: e.layout.tables + Tables.PAGE_FLAGS }).op(I32.or);
         }
-        b.i32const(PageFlag.HAS_CODE).op(I32.and);
+        // The next page's flag too: a wide access's halfword holds it.
+        b.i32const(PageFlag.HAS_CODE * 0x101).op(I32.and);
         e.openIf('maybeCode', EMPTY);
         noteCodeStore(e, size);
         e.close();

@@ -184,7 +184,14 @@ export function emitInstruction(e, instruction, flagsLive){
                 writeOp(e, target, ()=>b.i32const(SELECTORS[/** @type {number} */ (src.reg)]));
                 return true;
             }
-            prepare(e, dst.kind === 'mem' ? dst : src);
+            if (dst.kind === 'mem')
+            {
+                prepare(e, dst, { store: true });
+            }
+            else
+            {
+                prepare(e, src);
+            }
             writeOp(e, dst, ()=>readOp(e, src));
             return true;
         case 'movzx':
@@ -682,13 +689,15 @@ export function emitInstruction(e, instruction, flagsLive){
  * Computes a memory operand's address into the `addr` local, once.
  *
  * @param {E} e @param {Operand} operand
+ * @param {{ store?: boolean }} [options]  `store` when the operand is only
+ *     written and its `writeOp` follows with no exit between
  */
-export function prepare(e, operand){
+export function prepare(e, operand, options){
     if (operand.kind === 'mem')
     {
         emitAddress(e, operand, true);
         e.b.localSet(Local.addr);
-        checkAccess(e, operand.size);
+        checkAccess(e, operand.size, options);
     }
 }
 
@@ -862,7 +871,7 @@ export function push(e, size, pushValue){
     pushValue();
     b.localSet(Local.t2);
     b.localGet(Local.reg + 4).i32const(size).op(I32.sub).localSet(Local.addr);
-    checkAccess(e, size);
+    checkAccess(e, size, { store: true });
     noteStore(e, size);
     b.localGet(Local.addr).localGet(Local.t2)
         .store(storeKind(size), { offset: e.layout.ramBase });
@@ -1872,7 +1881,7 @@ function stringInstruction(e, instruction){
      */
     const checkedStore = (pointer, pushValue)=>{
         b.localGet(pointer).localSet(Local.addr);
-        checkAccess(e, size, { counted });
+        checkAccess(e, size, { counted, store: true });
         noteStore(e, size);
         b.localGet(Local.addr);
         pushValue();
