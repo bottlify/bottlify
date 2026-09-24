@@ -262,6 +262,7 @@ export const win32Module = {
         const queue = createMessageQueue({
             now: ()=>kernel.clock.virtualTime(),
             keyState: config?.keyState,
+            currentThread: ()=>kernel.currentThread(),
         });
 
         /**

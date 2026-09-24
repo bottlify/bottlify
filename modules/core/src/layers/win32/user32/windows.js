@@ -1101,6 +1101,14 @@ export function createWindowFunctions(host){
         // at all: the procedure is where it goes.
         if (message.message === WM_TIMER && message.lParam !== 0)
         {
+            // Only a procedure a live timer registered: anyone can post a
+            // WM_TIMER, and its lParam is otherwise an address to call that
+            // the poster chose. Windows drops such a message undispatched.
+            if (host.queue.isTimerProc
+                && !host.queue.isTimerProc(message.hwnd, message.wParam, message.lParam))
+            {
+                return 0;
+            }
             return host.dispatch(message.lParam >>> 0, {
                 ...message,
                 // A TIMERPROC takes the tick count where a window procedure

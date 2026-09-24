@@ -208,12 +208,14 @@ export function writeMessage(memory, address, message){
 
 /**
  * Reads back the part of a MSG that TranslateMessage and DispatchMessageA act
- * on. The timestamp and the cursor position are the queue's own bookkeeping and
- * nothing here decides anything by them.
+ * on: the four fields a window procedure takes, and the timestamp, which is
+ * what a TIMERPROC takes in their place. The cursor position is the queue's
+ * own bookkeeping and nothing here decides anything by it.
  *
  * @param {StructMemory} memory
  * @param {number} address
- * @returns {{ hwnd: number, message: number, wParam: number, lParam: number }}
+ * @returns {{ hwnd: number, message: number, wParam: number, lParam: number,
+ *             time: number }}
  */
 export function readMessage(memory, address){
     return {
@@ -221,6 +223,9 @@ export function readMessage(memory, address){
         message: readU32(memory, address + MSG.message),
         wParam: readU32(memory, address + MSG.wParam),
         lParam: readU32(memory, address + MSG.lParam),
+        // What a TIMERPROC is handed as its tick count when DispatchMessage
+        // calls it.
+        time: readU32(memory, address + MSG.time),
     };
 }
 

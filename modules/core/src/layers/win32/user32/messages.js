@@ -157,8 +157,13 @@ const classOf = message=>{
  *        with a combination and fires on the key alone, so the modifiers have
  *        to be read at the moment the press arrives -- from the input layer,
  *        which is above this one and is handed down as a thunk.
+ * @param {() => any} [options.currentThread]
+ *        The thread asking. A timer set with no window belongs to the thread
+ *        that set it: only that thread's pump is handed its ticks, and when the
+ *        thread is gone the timer is too.
  */
-export function createMessageQueue({ now = ()=>0, keyState = ()=>0 } = {}){
+export function createMessageQueue(options = {}){
+    const { now = ()=>0, keyState = ()=>0, currentThread = ()=>null } = options;
     /** @type {import('./structs.js').MessageFields[]} */
     const pending = [];
     /** @type {number | null} */
@@ -232,9 +237,47 @@ export function createMessageQueue({ now = ()=>0, keyState = ()=>0 } = {}){
      * reach anything else.
      *
      * @type {Map<string, { hwnd: number, id: number, elapse: number,
-     *                      proc: number, due: number }>}
+     *                      proc: number, due: number, thread: any }>}
      */
     const timers = new Map();
+
+    /**
+     * Whether a thread's pump may be handed this timer's tick. A window's
+     * timer goes to whoever pumps; a thread's own goes only to that thread.
+     * One whose thread has ended is dropped on sight: nothing is left that
+     * could ever retrieve it, and Windows destroys it with the thread.
+     *
+     * @param {string} key
+     * @param {{ thread: any }} timer
+     */
+    const deliverable = (key, timer)=>{
+        if (!timer.thread)
+        {
+            return true;
+        }
+        if (timer.thread.state === 'terminated')
+        {
+            timers.delete(key);
+            return false;
+        }
+        const asking = currentThread();
+        return !asking || asking === timer.thread;
+    };
+
+    /**
+     * Every timer something could still be handed, dropping those whose
+     * thread has ended: a wait that woke for one of those would wake for ever.
+     */
+    const livingTimers = ()=>{
+        for (const [key, timer] of timers)
+        {
+            if (timer.thread?.state === 'terminated')
+            {
+                timers.delete(key);
+            }
+        }
+        return timers.values();
+    };
 
     /**
      * The timer that is due, as the message it becomes.
@@ -289,9 +332,9 @@ export function createMessageQueue({ now = ()=>0, keyState = ()=>0 } = {}){
     /** @param {MessageFilter} filter */
     const takeTimer = filter=>{
         const at = now();
-        for (const timer of timers.values())
+        for (const [key, timer] of timers)
         {
-            if (timer.due > at)
+            if (timer.due > at || !deliverable(key, timer))
             {
                 continue;
             }
@@ -597,7 +640,7 @@ export function createMessageQueue({ now = ()=>0, keyState = ()=>0 } = {}){
          */
         nextTimerDue(){
             let soonest = null;
-            for (const timer of timers.values())
+            for (const timer of livingTimers())
             {
                 if (soonest === null || timer.due < soonest)
                 {
@@ -641,9 +684,9 @@ export function createMessageQueue({ now = ()=>0, keyState = ()=>0 } = {}){
                 inQueue |= QS_PAINT;
             }
             const at = now();
-            for (const timer of timers.values())
+            for (const [key, timer] of timers)
             {
-                if (timer.due <= at)
+                if (timer.due <= at && deliverable(key, timer))
                 {
                     inQueue |= QS_TIMER;
                     break;
@@ -675,7 +718,33 @@ export function createMessageQueue({ now = ()=>0, keyState = ()=>0 } = {}){
             timers.set(`${hwnd >>> 0}:${id >>> 0}`, {
                 hwnd: hwnd >>> 0, id: id >>> 0, elapse: period, proc: proc >>> 0,
                 due: now() + period,
+                thread: (hwnd >>> 0) === 0 ? currentThread() : null,
             });
+        },
+
+        /**
+         * Whether a timer of this window and id is set -- for a thread
+         * timer, one set by the thread asking.
+         *
+         * @param {number} hwnd @param {number} id
+         */
+        hasTimer(hwnd, id){
+            const key = `${hwnd >>> 0}:${id >>> 0}`;
+            const timer = timers.get(key);
+            return timer !== undefined && deliverable(key, timer);
+        },
+
+        /**
+         * Whether `proc` is the TIMERPROC of a timer set for this window and
+         * id. DispatchMessage asks before calling what a WM_TIMER's lParam
+         * names, because a WM_TIMER can be posted by anyone with any lParam,
+         * and calling it would run whatever address the poster chose.
+         *
+         * @param {number} hwnd @param {number} id @param {number} proc
+         */
+        isTimerProc(hwnd, id, proc){
+            const timer = timers.get(`${hwnd >>> 0}:${id >>> 0}`);
+            return timer !== undefined && timer.proc !== 0 && timer.proc === (proc >>> 0);
         },
 
         /** @param {number} hwnd @param {number} id */
@@ -701,7 +770,7 @@ export function createMessageQueue({ now = ()=>0, keyState = ()=>0 } = {}){
          */
         nextDue(){
             let earliest = null;
-            for (const timer of timers.values())
+            for (const timer of livingTimers())
             {
                 if (earliest === null || timer.due < earliest)
                 {

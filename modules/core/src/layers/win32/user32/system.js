@@ -2605,7 +2605,11 @@ export function createSystemFunctions({ host, live, windows, classes }){
             /** @param {number[]} args */
             handler: ([hwnd, id, elapse, proc])=>{
                 const window = hwnd >>> 0;
-                const timerId = window === 0 ? nextTimerId++ : id >>> 0;
+                // A thread timer named again by the id SetTimer gave it is
+                // retuned, as a window's is; any other id is a new timer.
+                const timerId = window === 0 && !host.queue.hasTimer?.(0, id >>> 0)
+                    ? nextTimerId++
+                    : id >>> 0;
                 host.queue.setTimer(window, timerId, elapse >>> 0, proc >>> 0);
                 return timerId === 0 ? 1 : timerId;
             },

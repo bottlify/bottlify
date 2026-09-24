@@ -106,8 +106,7 @@ test('a MSG round-trips through the fields a dispatcher reads back', ()=>{
     });
 
     assert.deepEqual(readMessage(memory, 0x80),
-        { hwnd: 0x40, message: 0x0100, wParam: 0x41, lParam: 0x001e0001 });
-    assert.equal(readU32(memory, 0x80 + MSG.time), 7);
+        { hwnd: 0x40, message: 0x0100, wParam: 0x41, lParam: 0x001e0001, time: 7 });
     assert.equal(readU32(memory, 0x80 + MSG.ptX), 3);
     assert.equal(readU32(memory, 0x80 + MSG.ptY), 4);
 });

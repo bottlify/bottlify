@@ -1170,11 +1170,11 @@ test('EnumChildWindows walks every descendant until the callback says stop', asy
 
 test('DispatchMessageA reports what it would have called, and its answer', ()=>{
     const { fns, memory, dispatched, hwnd } = withWindow();
-    memory.putU32s(MSG_BUFFER, [hwnd, WM_USER, 1, 2, 0, 0, 0]);
+    memory.putU32s(MSG_BUFFER, [hwnd, WM_USER, 1, 2, 5, 0, 0]);
 
     assert.equal(fns.DispatchMessageA.handler([MSG_BUFFER]), 0x1234);
     assert.deepEqual(dispatched,
-        [{ wndProc: WNDPROC, hwnd, message: WM_USER, wParam: 1, lParam: 2 }]);
+        [{ wndProc: WNDPROC, hwnd, message: WM_USER, wParam: 1, lParam: 2, time: 5 }]);
 });
 
 test('DispatchMessageA has nothing to call for a thread message or a stale window', ()=>{
@@ -1187,6 +1187,24 @@ test('DispatchMessageA has nothing to call for a thread message or a stale windo
     assert.equal(fns.DispatchMessageA.handler([MSG_BUFFER]), 0);
 
     assert.deepEqual(dispatched, [], 'neither one names a window procedure');
+});
+
+test('a WM_TIMER calls the TIMERPROC in its lParam only when a timer set it there', ()=>{
+    const { fns, memory, dispatched, hwnd, queue } = withWindow();
+    const TIMERPROC = 0x405500;
+    queue.setTimer(hwnd, 3, 50, TIMERPROC);
+
+    memory.putU32s(MSG_BUFFER, [hwnd, 0x0113, 3, TIMERPROC, 77, 0, 0]);
+    fns.DispatchMessageA.handler([MSG_BUFFER]);
+    assert.deepEqual(dispatched.map(call=>[call.wndProc, call.lParam]), [[TIMERPROC, 77]],
+        'the timer\'s own procedure, with the tick count');
+
+    // Posted by anyone, naming an address no timer registered.
+    memory.putU32s(MSG_BUFFER, [hwnd, 0x0113, 3, 0x0bad0000, 0, 0, 0]);
+    assert.equal(fns.DispatchMessageA.handler([MSG_BUFFER]), 0);
+    memory.putU32s(MSG_BUFFER, [hwnd, 0x0113, 4, TIMERPROC, 0, 0, 0]);
+    assert.equal(fns.DispatchMessageA.handler([MSG_BUFFER]), 0, 'nor one of another timer');
+    assert.equal(dispatched.length, 1, 'neither is called');
 });
 
 test('a subclassed window is dispatched to its new procedure', ()=>{

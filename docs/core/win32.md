@@ -243,7 +243,14 @@ gets its own heap, hive, queue and COM registry.
   `WM_TIMER` is never queued but synthesised when a program asks and a timer is due, with the due
   time moving only when the message is taken — a peek that does not remove leaves the tick.
   `nextTimerDue()` tells the driver when to look again, so a machine with nothing to run waits until
-  the earliest timer rather than polling. Timers are due against the guest clock.
+  the earliest timer rather than polling. Timers are due against the guest clock. The queue is the
+  process's, so a timer set with no window remembers the thread that set it: only that thread's
+  pump is handed its ticks, `SetTimer(NULL, id)` from it retunes the timer rather than making
+  another, and when the thread ends the timer goes with it (no wait wakes for it again). A
+  window's timer goes to whichever thread pumps. `DispatchMessage` calls a `WM_TIMER`'s lParam
+  only when it is the TIMERPROC a live timer of that window and id was set with, and hands it
+  the message's time; any other `WM_TIMER` with an lParam is dropped, as Windows drops it,
+  because anyone can post one.
 - **Registry** (`advapi32/registry.js`). A hive of keys and values; names compare without case,
   string types carry their terminator. It converts to and from JSON, and `onChanged` lets the
   session saver treat a registry write like a file write. Roots: `HKEY_CLASSES_ROOT`,

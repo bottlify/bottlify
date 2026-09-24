@@ -172,6 +172,60 @@ test('a slow handler does not build a backlog of ticks', ()=>{
     assert.equal(queue.peek(ALL), null);
 });
 
+/** A queue whose pump is run by one thread or another, as a test says. */
+function threaded(){
+    const clock = { at: 0 };
+    const first = { name: 'first', state: 'running' };
+    const second = { name: 'second', state: 'running' };
+    const running = { thread: /** @type {any} */ (first) };
+    const queue = createMessageQueue({ now: ()=>clock.at, currentThread: ()=>running.thread });
+    return { clock, queue, first, second, running };
+}
+
+test('a timer with no window is its thread\'s: another thread\'s pump is not handed it', ()=>{
+    const { clock, queue, first, second, running } = threaded();
+    queue.setTimer(0, 9, 50, 0);
+    clock.at = 50;
+
+    running.thread = second;
+    assert.equal(queue.peek(ALL), null);
+    assert.equal(queue.hasTimer(0, 9), false, 'nor does it see it as set');
+
+    running.thread = first;
+    assert.equal(queue.peek(ALL)?.wParam, 9, 'the thread that set it is');
+});
+
+test('a window\'s timer goes to whichever thread pumps', ()=>{
+    const { clock, queue, second, running } = threaded();
+    queue.setTimer(0x40, 1, 50, 0);
+    clock.at = 50;
+    running.thread = second;
+    assert.equal(queue.peek(ALL)?.hwnd, 0x40);
+});
+
+test('a thread\'s timer ends with the thread, and no wait wakes for it again', ()=>{
+    const { clock, queue, first } = threaded();
+    queue.setTimer(0, 9, 50, 0);
+    assert.equal(queue.nextDue(), 50);
+
+    first.state = 'terminated';
+    clock.at = 50;
+    assert.equal(queue.nextDue(), null);
+    assert.equal(queue.peek(ALL), null);
+    assert.equal(queue.diagnostics().timers, 0);
+});
+
+test('only the procedure a timer was set with is that timer\'s', ()=>{
+    const { queue } = threaded();
+    queue.setTimer(0x40, 1, 50, 0x401000);
+    queue.setTimer(0x40, 2, 50, 0);
+
+    assert.equal(queue.isTimerProc(0x40, 1, 0x401000), true);
+    assert.equal(queue.isTimerProc(0x40, 1, 0x402000), false);
+    assert.equal(queue.isTimerProc(0x40, 2, 0), false, 'a timer with none has none');
+    assert.equal(queue.isTimerProc(0x41, 1, 0x401000), false);
+});
+
 test('a queued message outranks a due timer', ()=>{
     const { clock, queue } = timed();
     queue.setTimer(0x40, 1, 10, 0);
