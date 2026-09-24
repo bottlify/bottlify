@@ -154,6 +154,13 @@ export function createSoundBuffer(
     let staleBytes = 0;
     let staleDrains = 0;
     /**
+     * When the last stale drains happened, host milliseconds (the engine
+     * thread's `performance.now`), so a repeat can be laid beside whatever
+     * held the thread at the time.
+     * @type {number[]}
+     */
+    const staleAt = [];
+    /**
      * Where the last unlock ended, for telling a lock that continues the
      * stream from one that jumped ahead of it.
      *
@@ -197,6 +204,11 @@ export function createSoundBuffer(
         {
             staleBytes += stale;
             staleDrains++;
+            if (staleAt.length === 64)
+            {
+                staleAt.shift();
+            }
+            staleAt.push(Math.round(performance.now()));
         }
     };
 
@@ -499,7 +511,7 @@ export function createSoundBuffer(
          * region played before it was ever filled. Heard as a short repeat.
          */
         get stale(){
-            return { bytes: staleBytes, drains: staleDrains };
+            return { bytes: staleBytes, drains: staleDrains, at: [...staleAt] };
         },
 
         /**

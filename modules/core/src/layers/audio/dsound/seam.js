@@ -1064,6 +1064,8 @@ export function createDirectSound(
             staleBytes: buffers.reduce((sum, buffer)=>sum + buffer.stale.bytes, 0),
             staleDrains: buffers.reduce((sum, buffer)=>sum + buffer.stale.drains, 0),
             staleByBuffer: buffers.map(buffer=>buffer.stale.bytes),
+            // The host times of the last ones, merged across buffers.
+            staleAt: buffers.flatMap(buffer=>buffer.stale.at).sort((a, b)=>a - b).slice(-64),
             // And the cause, counted where it happens: a refill that began
             // past where the previous one ended, leaving a lap-old region in
             // between for the mixer to play.

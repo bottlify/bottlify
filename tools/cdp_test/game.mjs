@@ -481,6 +481,12 @@ function describeCork(cork, say){
         + `  forced steps: ${cork.forcedSteps ?? 0}`
         + `  cache: ${cork.cacheHits ?? 0} hit / ${cork.cacheMisses ?? 0} miss`
         + ` (no record ${cork.missNoRecord ?? 0}, no module ${cork.missNoModule ?? 0})`);
+    if (cork.stalls?.length)
+    {
+        // The engine thread's long holds (host ms): laid beside the audio
+        // layer's staleAt, the stall a repeated sound sat through.
+        say(`    stalls: ${cork.stalls.map((/** @type {any} */ s)=>`${s.what}@${s.at}+${s.ms}`).join(' ')}`);
+    }
     const exits = cork.exits ?? {};
     say(`    exits: ${Object.entries(exits).map(([kind, count])=>`${kind}=${count}`).join(' ')}`
         + (cork.transfers ? `  transfers through the hash: ${cork.transfers}` : ''));

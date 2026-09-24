@@ -318,6 +318,25 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // costs stay legible.
         workerMs: 0,
     };
+    /**
+     * The engine thread's long holds, host milliseconds: what a guest thread
+     * waiting on a timer (a sound mixer) sat through. The last 64 over 5 ms.
+     * @type {{ at: number, ms: number, what: string }[]}
+     */
+    const stalls = [];
+    /** @param {string} what @param {number} since @param {number} [floorMs] */
+    const noteStall = (what, since, floorMs = 5)=>{
+        const ms = performance.now() - since;
+        if (ms < floorMs)
+        {
+            return;
+        }
+        if (stalls.length === 64)
+        {
+            stalls.shift();
+        }
+        stalls.push({ at: Math.round(since), ms: Math.round(ms), what });
+    };
     let nextTable = 0;
     /** @type {Record<ExitKind, number>} */
     const exits = { untranslated: 0, budget: 0, trap: 0, halt: 0, fault: 0, stale: 0 };
@@ -962,12 +981,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return;
         }
         counts.workerMs += data.batch.emitMs + data.batch.encodeMs;
+        const publishedAt = performance.now();
         if (pending.relink)
         {
             applyRelink(pending.relink, data.batch, data.compiled ?? null, pending.store);
-            return;
         }
-        publishBatch(pending.metas ?? [], data.batch, data.compiled ?? null, pending.store);
+        else
+        {
+            publishBatch(pending.metas ?? [], data.batch, data.compiled ?? null, pending.store);
+        }
+        noteStall(pending.relink ? 'relink' : 'publish', publishedAt);
     };
 
     if (workerUrl !== null)
@@ -1419,6 +1442,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return 0;
         },
         invalidatePage,
+        noteStall,
         /** @param {number} page */
         holdsPage: page=>(pages.get(page) & PageFlag.HAS_CODE) !== 0,
         /** One turn the host forced an interpreted instruction through, for
@@ -1471,6 +1495,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 cacheMisses: counts.cacheMisses,
                 missNoRecord: counts.missNoRecord,
                 missNoModule: counts.missNoModule,
+                stalls: [...stalls],
                 ...(settings.traceStore ? { storeTrace } : {}),
                 invalidations: counts.invalidations,
                 dropped: counts.dropped,

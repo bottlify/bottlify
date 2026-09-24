@@ -230,6 +230,8 @@
  * @property {() => Promise<void>} flush  Writes the store's own bookkeeping (a directory
  *     store's index) before a run ends.
  * @property {(page: number) => void} invalidatePage  A host or guest write into code.
+ * @property {(what: string, since: number, floorMs?: number) => void} [noteStall]
+ *     A hold of the engine thread since that `performance.now`, kept when over the floor.
  * @property {(page: number) => boolean} holdsPage  Whether a published region spans the page
  *     (the pages the emulator's handoff bit is set for).
  * @property {() => EngineDiagnostics} diagnostics  The whole snapshot, for a report: it

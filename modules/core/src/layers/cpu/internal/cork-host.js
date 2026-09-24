@@ -488,6 +488,7 @@ export function createCorkHost(config){
      * @returns {number}
      */
     const runSlice = maxInstructions=>{
+        const sliceAt = performance.now();
         stopped = false;
         feedDue = false;
         // A slice is the clock's tick. On the emulator a `hlt` holds the
@@ -587,6 +588,8 @@ export function createCorkHost(config){
         fold();
         recent.push({ at: startedAt, end: eip(), retired: ran, traps: trapCrossings - trapsBefore,
             halted });
+        // A slice is a few milliseconds; one of twenty holds a timer's thread.
+        runtime.noteStall?.('slice', sliceAt, 20);
         if (recent.length > RECENT)
         {
             recent.shift();
