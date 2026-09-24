@@ -74,6 +74,35 @@ export function noteStore(e, size){
     {
         b.localGet(Local.addr).i32const(size).call(e.context.undo);
     }
+    if (e.layout.codePages < 0)
+    {
+        // Only this engine's code to look for: `checkAccess` left both pages'
+        // flags in `pflags`, and a store to a page without code -- nearly
+        // every store -- goes on with no call.
+        b.localGet(Local.pflags);
+        if (size > 16)
+        {
+            // A state save (fsave, fnstenv): its access was checked at the
+            // operand's size, so its last page's flags are read here.
+            b.localGet(Local.addr).i32const(size - 1).op(I32.add).i32const(12).op(I32.shrU)
+                .load('i32_8u', { offset: e.layout.tables + Tables.PAGE_FLAGS }).op(I32.or);
+        }
+        b.i32const(PageFlag.HAS_CODE).op(I32.and);
+        e.openIf('maybeCode', EMPTY);
+        noteCodeStore(e, size);
+        e.close();
+        return;
+    }
+    noteCodeStore(e, size);
+}
+
+/**
+ * The granule test of a store and the `stale` note when it hits code.
+ *
+ * @param {E} e @param {number} size
+ */
+function noteCodeStore(e, size){
+    const { b } = e;
     // This engine's own code, to the granule: the page's flag and then its
     // range, for the store's first byte and its last.
     b.localGet(Local.addr).call(e.context.codeHit);
