@@ -266,6 +266,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     // is read for. Bounded like `misses`; the coldest target makes room.
     const exitTargets = new Map();
     const EXIT_TARGETS_CAP = 4096;
+    /** @type {Map<number, number>} target → the tops its exits were at, a bit each */
+    const exitTops = new Map();
+    /**
+     * How often the machine stood at an address that has a region for another
+     * top (or a block with no entry of its own), per key(eip, top): the heat a
+     * variant is noted with, so one the machine keeps arriving at climbs the
+     * queue rather than waiting in its bottom bucket behind a loader's cold
+     * starts while its code runs interpreted. Cleared past a cap.
+     * @type {Map<number, number>}
+     */
+    const variantHeat = new Map();
     // How many addresses the untranslated-exit count holds at once. A real
     // program leaves for millions of addresses and the map filled in seconds;
     // the old rule stopped recording new ones once it did, so no address
@@ -503,7 +514,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         {
             if (entries.entryOf(address, top) >= 0)
             {
-                return 'other-top';
+                // Every top it was left at has its region now: those exits
+                // were the wait for the translation, not a gap still open.
+                const tops = exitTops.get(address) ?? 0;
+                for (let t = 0; t < 8; t++)
+                {
+                    if ((tops >>> t & 1) !== 0 && entries.entryOf(address, t) < 0)
+                    {
+                        return 'other-top';
+                    }
+                }
+                return 'translated since';
             }
         }
         if (typeof read === 'function' && 'refused' in decode(byte=>read(byte), address))
@@ -1126,8 +1147,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // A region exists here for another top, or holds a block here
                 // it cannot enter itself (an x87 block with no known state, or
                 // one cut for a second top): one for this top is a candidate,
-                // translated with the next batch.
-                this.noteHot(eip, top);
+                // translated with the next batch -- as hot as the machine
+                // keeps standing here.
+                const key = keyOf(eip, top & 7);
+                const heat = (variantHeat.get(key) ?? 0) + 1;
+                if (variantHeat.size >= MISSES_CAP)
+                {
+                    variantHeat.clear();
+                }
+                variantHeat.set(key, heat);
+                this.noteHot(eip, top, heat);
             }
             return entry;
         },
@@ -1174,6 +1203,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             const at = top & 7;
             const target = (exitTargets.get(address) ?? 0) + 1;
             exitTargets.set(address, target);
+            exitTops.set(address, (exitTops.get(address) ?? 0) | 1 << at);
             if (exitTargets.size > EXIT_TARGETS_CAP)
             {
                 // The colder half goes at once: one pass for half the cap's

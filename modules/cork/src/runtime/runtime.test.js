@@ -710,3 +710,38 @@ test('a region loads and stores only the registers it names, and a register writ
     assert.equal(m.runtime.run(entry, 100).kind, 'halt');
     assert.equal(m.reg(0), 5, 'and the path that writes it stores it');
 });
+
+test('a variant for another x87 top the machine keeps reaching goes before cold starts', async()=>{
+    const m = machine({ batchRegions: 1, maxBatchRegions: 1 });
+    // fld1; fstp st0; hlt -- an x87 region, so its entry is kept for one top.
+    m.write(CODE, [0xd9, 0xe8, 0xdd, 0xd8, 0xf4]);
+    m.runtime.noteHot(CODE, 0);
+    assert.equal(await m.runtime.translatePending(), 1);
+    assert.ok(m.runtime.entryOf(CODE, 0) >= 0);
+    // Twenty cold starts wait first, each met once.
+    for (let i = 0; i < 20; i++)
+    {
+        m.write(0x3000 + i * 16, [0x90, 0xf4]);
+        m.runtime.noteHot(0x3000 + i * 16, 0);
+    }
+    // The machine stands at the region's address with top 1, again and
+    // again (each entryOf is a step or a turn that found no entry there).
+    for (let i = 0; i < 300; i++)
+    {
+        m.runtime.entryOf(CODE, 1);
+    }
+    assert.equal(await m.runtime.translatePending(), 1);
+    assert.ok(m.runtime.entryOf(CODE, 1) >= 0, 'the top-1 variant was the batch, not a cold start');
+    // An exit that went there at top 1 is now the wait for it, not a gap.
+    m.runtime.missAt(CODE, 1);
+    m.runtime.missAt(CODE, 2);
+    const reason = ()=>m.runtime.diagnostics().exitsByTarget
+        .find(target=>target.address === CODE)?.reason;
+    assert.equal(reason(), 'other-top', 'top 2 has no region yet');
+    for (let i = 0; i < 300; i++)
+    {
+        m.runtime.entryOf(CODE, 2);
+    }
+    await m.runtime.translatePending();
+    assert.equal(reason(), 'translated since');
+});
