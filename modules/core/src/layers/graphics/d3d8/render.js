@@ -3321,6 +3321,98 @@ export function createRenderer(options){
         {
             return prepareMixed(model, stride, topology, program);
         }
+        // Everything but the constants and the texture views depends only on
+        // state the device versions, so it is worked out once per change of
+        // that state -- a program that sets its constants and binds a texture
+        // before every draw, which is how a shader-drawn frame goes, changes
+        // none of it.
+        const version = model.stateVersionBesideTextures;
+        let pieces = version !== undefined && programPieces !== null
+            && programPieces.version === version
+            && programPieces.vertexShader === program.vertexShader
+            && programPieces.pixelShader === program.pixelShader
+            && programPieces.declarationId === program.declarationId
+            && programPieces.stride === stride && programPieces.topology === topology
+            ? programPieces.made
+            : null;
+        if (pieces === null)
+        {
+            pieces = programPiecesOf(model, stride, topology, program);
+            if (pieces === null)
+            {
+                return null;
+            }
+            programPieces = version === undefined ? null : {
+                version, vertexShader: program.vertexShader, pixelShader: program.pixelShader,
+                declarationId: program.declarationId, stride, topology, made: pieces,
+            };
+        }
+        const { pixel, vertex, samplerPlan, state, source } = pieces;
+        const samplerBindings = samplerPlan.map((/** @type {any} */ planned)=>{
+            const texture = model.textures.get(planned.stage);
+            return {
+                stage: planned.stage,
+                texture,
+                view: texture ? uploadIfDirty(texture).view : placeholderView(),
+                sampler: planned.sampler,
+                placeholder: !texture,
+            };
+        });
+        const take = ensureFrame().arena.take;
+        const vertexBlocks = program.vertex
+            ? constantBlocks(program.vertexConstants, vertex.constants, take)
+            : hybridBlocks(model, take);
+        const pixelBlocks = constantBlocks(program.pixelConstants, pixel.constants, take);
+        return {
+            version: undefined,
+            contentVersion: 0,
+            stride,
+            topology,
+            state,
+            uniforms: vertexBlocks[0],
+            template: null,
+            stageBindings: samplerBindings,
+            lighting: null,
+            fogSetting: '',
+            layout: null,
+            textures: [],
+            truncated: null,
+            pipelineFrame: null,
+            pipelineIndex: 0,
+            program: {
+                source,
+                declarationId: program.declarationId,
+                vertexBlocks,
+                pixelBlocks,
+                samplerBindings,
+            },
+        };
+    };
+
+    /**
+     * The last shader draw's state-dependent pieces and the state they were
+     * made for; see `prepareProgram`.
+     *
+     * @type {{ version: number, vertexShader: any, pixelShader: any, declarationId: number,
+     *          stride: number, topology: string, made: any } | null}
+     */
+    let programPieces = null;
+
+    /**
+     * The translations, layout, pipeline state and samplers of a shader draw:
+     * what `prepareProgram` keeps while the state holds still, or null when
+     * the draw cannot be built (reported here).
+     *
+     * @param {RenderModel} model
+     * @param {number} stride
+     * @param {string} topology
+     * @param {ProgramState} program
+     */
+    const programPiecesOf = (model, stride, topology, program)=>{
+        if (!program.declaration)
+        {
+            return null;
+        }
         const pixelShader = /** @type {object} */ (program.pixelShader);
         // The fixed-function fog stage runs after a pixel shader below model 3,
         // so a shader-drawn surface is fogged exactly as a fixed-function one
@@ -3415,21 +3507,10 @@ export function createRenderer(options){
                 `vertex stage of shader ${program.vertexId} was not drawn: ${vertex.error}`);
             return null;
         }
-        const samplerBindings = pixel.samplers.map((/** @type {any} */ entry)=>{
-            const texture = model.textures.get(entry.index);
-            return {
-                stage: entry.index,
-                texture,
-                view: texture ? uploadIfDirty(texture).view : placeholderView(),
-                sampler: programSamplerFor(model.stageStates(entry.index)),
-                placeholder: !texture,
-            };
-        });
-        const take = ensureFrame().arena.take;
-        const vertexBlocks = program.vertex
-            ? constantBlocks(program.vertexConstants, vertex.constants, take)
-            : hybridBlocks(model, take);
-        const pixelBlocks = constantBlocks(program.pixelConstants, pixel.constants, take);
+        const samplerPlan = pixel.samplers.map((/** @type {any} */ entry)=>({
+            stage: entry.index,
+            sampler: programSamplerFor(model.stageStates(entry.index)),
+        }));
         const state = {
             ...pipelineStateOf(model, {
                 fvf: 0, topology, ...formatsOf(model), stages: [], lighting: null,
@@ -3439,31 +3520,14 @@ export function createRenderer(options){
             pixelShader: program.pixelId,
         };
         return {
-            version: undefined,
-            contentVersion: 0,
-            stride,
-            topology,
+            pixel,
+            vertex,
+            samplerPlan,
             state,
-            uniforms: vertexBlocks[0],
-            template: null,
-            stageBindings: samplerBindings,
-            lighting: null,
-            fogSetting: '',
-            layout: null,
-            textures: [],
-            truncated: null,
-            pipelineFrame: null,
-            pipelineIndex: 0,
-            program: {
-                source: {
-                    key: `${state.vertexShader}/${state.pixelShader}/${program.declarationId}`
-                        + `/${shapes}/${stride}`,
-                    vertex, pixel, layout,
-                },
-                declarationId: program.declarationId,
-                vertexBlocks,
-                pixelBlocks,
-                samplerBindings,
+            source: {
+                key: `${state.vertexShader}/${state.pixelShader}/${program.declarationId}`
+                    + `/${shapes}/${stride}`,
+                vertex, pixel, layout,
             },
         };
     };
