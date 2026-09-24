@@ -61,6 +61,8 @@ otherwise.
 | `booted` | `() => boolean` | Whether `boot()` has completed. |
 | `fault` | `() => GuestFault \| null` | The fault that stopped the machine, with a `text` description, or null: a processor exception read off its frame, or one the host raised. |
 | `raiseFault` | `({ name, detail, eip, calledFrom? }) => void` | Records a fault of the host's own naming (`vector` -1, `detail` is the whole report), to be found by the same poll as an exception. Only the record: called from inside a trap, the caller sends the stub's return into the park loop, whose `hlt` is what ends the slice. |
+| `onFault` | `(handler: ((fault) => boolean) \| null) => void` | Who is offered a processor exception before it stops the machine. Called inside the trap with the fault read off its frame (`eax`, `edx` and `stack` included); answering `true` means the handler has claimed it and sent the thread elsewhere, and nothing is recorded. |
+| `stopWithFault` | `(fault) => void` | Stops the machine on a fault that was offered and not taken, recorded exactly as one never offered. |
 | `run` / `stop` | `() => void` | Free-running mode (the emulator's own loop). The scheduler does not use these; it uses `runSlice`. |
 | `readPhysical` | `(address, length) => Uint8Array` | A **window** on guest RAM — a subarray of the emulator's memory, not a copy. |
 | `writePhysical` | `(address, bytes) => void` | Writes through the emulator, which invalidates any compiled code on the pages touched. |
@@ -74,7 +76,7 @@ otherwise.
 | `runSlice` | `(maxInstructions) => number` | Runs at most that many instructions (to the end of the basic block the bound falls in) and returns how many retired. The scheduler's unit of progress. |
 | `captureContext` | `() => Context` | The running thread's complete CPU state as an opaque record. |
 | `restoreContext` | `(context, threadBase) => void` | Restores a context, pointing FS at `threadBase` (the TEB). The TEB is a parameter so a restore that forgets it is not expressible. |
-| `resumeContextAt` | `(context, { eip, returnValue, esp? }) => void` | Redirects a saved context: EIP, EAX and optionally ESP. |
+| `resumeContextAt` | `(context, { eip, returnValue, esp?, registers? }) => void` | Redirects a saved context: EIP, EAX, optionally ESP, and optionally any general register by name (`registers`) -- for code that reads a register before it sets one, such as an exception handler's block reading EBP. |
 | `newContext` | `({ entry, stackTop }) => Context` | A context for a thread that has not run: the current machine state as a template, positioned at its entry and stack. |
 | `decompressZstd` | `(packed, expectedLength) => Uint8Array` | Synchronous zstd decode through the emulator's own decoder. |
 | `instructionCount` | `() => number` | Instructions retired since boot, exact past the emulator's own 32-bit counter. |
@@ -148,9 +150,12 @@ the emulator, but the entry point is only known after the loader has mapped an i
 needs an emulator to write into. The entry vector breaks that cycle.
 
 The ROM also installs an IDT with a gate for each of the first 32 vectors. Each gate points at a
-sixteen-byte stub that writes `FAULT_TRAP_BASE + vector` (`0xf000 + n`) to the trap port and
-then halts. Without those gates the emulator has nowhere to send a fault and stops the machine
-with the same message for a divide by zero, a bad pointer and an illegal instruction.
+sixteen-byte stub that pushes EAX and EDX, writes `FAULT_TRAP_BASE + vector` (`0xf000 + n`) to
+the trap port and then halts. The two pushes (`FAULT_SAVED`, 8 bytes) keep the faulting code's
+own EAX and EDX, which the report itself needs: a handler shown the fault's context, or
+continuing from it, has to find them as the program left them. Without those gates the emulator
+has nowhere to send a fault and stops the machine with the same message for a divide by zero, a
+bad pointer and an illegal instruction.
 
 ### Bring-up before anyone sees the machine
 
@@ -223,9 +228,12 @@ sees the registers exactly as its caller set them.
 
 The trap port write handler in `v86-host.js` calls whatever `onTrap` installed. In
 `module.js` that handler first checks for a fault id (`0xf000..0xf01f`): if so it reads the
-exception frame (`internal/faults.js`), records it as `lastFault`, stops the machine and returns
-— never throws, because an exception raised inside the emulator's port write is lost crossing
-back into wasm. Every other id goes to the bridge's dispatcher.
+exception frame (`internal/faults.js`) and offers it to the `onFault` handler. One that claims it
+has already sent the thread somewhere to wait -- the application's handler hands it to the
+program's structured exception handlers, see [`win32.md`](./win32.md) -- and the trap simply
+returns. Otherwise the fault is recorded as `lastFault` and the machine stopped. Nothing here
+throws, because an exception raised inside the emulator's port write is lost crossing back into
+wasm. Every other id goes to the bridge's dispatcher.
 
 ### Contexts
 
@@ -280,8 +288,12 @@ ones).
 
 ## 4. Limitations and divergences
 
-- **A fault halts the machine.** A fault stub does not `iret` and there is no guest exception
-  dispatch in this layer. What `fault()` reports is for whoever drives the machine to act on.
+- **A fault the program does not handle halts the machine.** A fault stub does not `iret`; the
+  layer offers the fault through `onFault` and otherwise stops. What `fault()` reports is for
+  whoever drives the machine to act on.
+- **Without paging, a stray pointer does not fault.** Every address in RAM is readable and
+  writable, the null page included, so a program that probes a pointer or writes through null
+  and expects an access violation carries on instead.
 - **Only the first 32 vectors** have gates. Hardware interrupts are not delivered; the guest
   runs with `IF` clear from the ROM's `cli`.
 - **Ring 0, flat segments, no paging.** The guest runs at CPL 0 with two flat 4 GiB
@@ -308,8 +320,9 @@ Unit tests (no emulator; `npm test` runs `src/**/*.test.js`):
 
 | file | covers |
 |------|--------|
-| `internal/boot-rom.test.js` | ROM size and placement, reset vector, GDT/IDT contents, the indirect jump, every fault stub reporting its own vector and stopping, the retired boot code ending exactly at the guest jump. |
+| `internal/boot-rom.test.js` | ROM size and placement, reset vector, GDT/IDT contents, the indirect jump, every fault stub keeping EAX and EDX, reporting its own vector and stopping, the retired boot code ending exactly at the guest jump. |
 | `internal/faults.test.js` | A host-raised fault reads as its sentence, a stand-in for an undeliverable exception keeps its vector, a breakpoint in the retired boot code is an excursion, the live guest jump is not, processor exceptions read as before. |
+| `module.test.js` | Counters registered with the log, creation without a registry, instance isolation, disposal, diagnostics; a resume carrying registers sets each one it names, with EAX and ESP by their own rules. |
 | `internal/thunks.test.js` | Stub encoding per convention, forwarding stubs and their register save, a hook stub's single `push edx` and its held EIP (no `ret`, no `jmp`), refusal when the table is full, the default capacity. |
 | `internal/context.test.js` | Context round trips, lazy flags travelling together, x87 stack pointer/tag word, the TEB being part of the switch. |
 | `internal/fpu.test.js` | Double to extended conversion (sign of zero, explicit leading bit), push/pop, overflow refusal, control word. |

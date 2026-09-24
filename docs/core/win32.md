@@ -79,7 +79,8 @@ the module graph is built. All are optional.
 | `heap()` | The one allocator: `allocate`, `free`, `block`, `resize`, `diagnostics`. |
 | `mappings()`, `ioCompletionWaits()`, `waveDevices()`, `waveThread()`, `criticalSections()`, `messages()`, `windows()`, `windowProcedures()` | Live views of the state below, used by `diagnostics()`. |
 | `placeWindow(hwnd, x, y, width, height)` | Place a top-level window as the system would and tell the program with `WM_MOVE` and `WM_SIZE`. |
-| `exitCode()` | Set once the program has asked to terminate; `null` before. |
+| `dispatchFault(fault)` | Offers a processor exception the running thread took to its structured exception handlers. `null` when the vector is not one a program is handed (see "Exceptions"); otherwise a promise of where the thread goes on, or `null` once nothing took it. The application wires `cpu.onFault` to this. |
+| `exitCode()` | Set once the program has asked to terminate -- or once an exception nothing handled, or the C runtime's `abort`, ended it; `null` before. |
 
 ### `diagnostics()` metrics
 
@@ -258,6 +259,52 @@ owe a packet from every overlapped read or write on a bound handle. TLS slots ar
 tracked on the host, so what `TlsGetValue` answers cannot drift from what the guest reaches
 through `FS`.
 
+### Exceptions
+
+Structured exception handling is the chain a program keeps at `FS:[0]`, walked fresh on every
+dispatch (`kernel32/seh.js`): each frame's handler is called in chain order with the record, its
+frame and a context, all built on the program's own stack below where it stood. `RaiseException`
+dispatches; a processor exception does too -- divide error, overflow, bound, invalid opcode,
+breakpoint (reported at the `int3`, as the system reports one), protection and page faults as
+access violations, alignment and SIMD -- with the faulting code's registers in the context, the
+stub's two spent registers restored from what it saved. `RtlUnwind` calls each frame's handler with
+the unwinding flag and takes the frame off the chain as the handler returns, not all at the end, so
+a handler that raises while it runs starts from the chain as it now stands; an unwind to a frame
+that is not on the chain unwinds nothing. What nothing handles goes to the program's last-chance
+filter (`SetUnhandledExceptionFilter`) and then ends the process with the exception's code as its
+exit code; a processor exception in a program with no filter stops the machine with the fault
+report instead, since that report is the only account of it.
+
+The C runtime's half is what the compiler registers. `_except_handler3` (`msvcrt/seh.js`) reads
+the function's scope table and runs its blocks with EBP set to the frame plus `0x10`, as the
+compiler's code expects: a filter finds the exception pointers at `[EBP-0x14]`, `__finally`
+blocks nested inside an accepting level run innermost first with the level lowered before each,
+and the `__except` block is entered with ESP reloaded from `[EBP-0x18]`. `_local_unwind2` is the
+same walk for a `return` out of a `__try`, and `_abnormal_termination` answers whether the running
+`__finally` is one this runtime started. `setjmp`/`_setjmp3` mark where the call returns to, with
+the chain's head and -- for `_setjmp3` -- the routine and level that unwind the setting frame;
+`longjmp` unwinds every frame registered since the mark and calls that routine
+(`_seh_longjmp_unwind`, `__CxxLongjmpUnwind`) before going back.
+
+C++ exceptions (`msvcrt/eh.js`) are the same chain. `_CxxThrowException` raises `0xE06D7363`
+with the object and its type description; `__CxxFrameHandler`, `2` and `3` read the tables the
+compiler's stub hands over and answer for the frame: being unwound, they run the destructors of
+every object alive; otherwise they look for a catch among the try blocks around the frame's state,
+matching types by descriptor or by decorated name and by the thrown object's qualifiers. On a
+match the frames below are unwound, the catch object is built (a reference is a pointer to the
+thrown object, a class with a copy constructor is constructed by it), the try block's own objects
+are destroyed, and the catch block runs on the stack below the throw where the thrown object
+still lives; the function goes on at the address the block returns, on the stack the frame's slot
+held before the block wrote its own there, and the thrown object is destroyed unless the block
+threw it again. `throw;` rethrows the innermost catch's object; with none being handled it
+terminates. A structured exception reaches only a `catch (...)`, and not in code built with
+`/EHs`; `_set_se_translator`'s translator is called first when one is installed. `terminate` calls
+what `set_terminate` installed and then aborts; `abort` ends the process with exit code 3.
+
+Every handler that finds its block answers the host call it is with a continuation
+(`bridge.continueAt`, see [`bridge.md`](./bridge.md)): the throw, the dispatch and the handler
+never return, and whatever the thread was doing below the catching frame is abandoned.
+
 ### Files through the VFS
 
 `kernel32/vfs.js` translates the filesystem layer's named failures and handle objects into what
@@ -394,9 +441,12 @@ Stated as the code states them.
   enumerated (`IEnumIDList`), bound to, compared, named and parsed; every item id carries the full
   text of what it names, so a combined list turns back into a path. No view objects, no
   renaming, no storage binding (`E_NOTIMPL`).
-- **`__CxxFrameHandler` catches nothing.** It is declared with its four arguments and answers
-  `ExceptionContinueSearch` with a divergence notice; a C++ exception thrown through such a
-  frame is not caught by its `try` and the frame's destructors do not run.
+- **Exceptions: what is not modelled.** Exception specifications (`throw(...)` on a function)
+  are not checked, so `unexpected` is never called. `_except_handler4` is not provided: it
+  belongs to the static C runtime a program links into itself, which brings its own. A handler
+  that continues execution from a changed context gets its general registers and EIP back, not
+  EFLAGS. And with no paging, no stray pointer faults (see [`cpu.md`](./cpu.md)): a program
+  counting on an access violation from the null page carries on instead.
 - **No network, no HTTP, by default.** Winsock runs over a loopback adapter; WinInet without a
   transport fails with "cannot connect". Both libraries load so a program that imports and never
   uses them still starts.
@@ -430,13 +480,13 @@ and the metrics in §2.
 ## 5. Tests
 
 Unit tests are colocated with each file, `node:test`, over `fakeMemory`
-(`src/layers/win32/msvcrt/harness.test.js`) or a stub host; there are 69 `*.test.js` files under
+(`src/layers/win32/msvcrt/harness.test.js`) or a stub host; there are 102 `*.test.js` files under
 `src/layers/win32/`. Run with `npm test` from `modules/core`.
 
 | area | files (all `src/layers/win32/…`) |
 |------|----------------------------------|
-| kernel32 | `consoleio`, `critical`, `drives`, `environment`, `exceptions`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `process`, `resources`, `seh`, `spawn`, `sync`, `system`, `teb`, `threading`, `vfs` `.test.js` |
-| msvcrt | `convert`, `cxx`, `format`, `functions`, `heap`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `strings`, `time` `.test.js` |
+| kernel32 | `consoleio`, `critical`, `drives`, `environment`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `process`, `resources`, `seh`, `spawn`, `sync`, `system`, `teb`, `threading`, `vfs` `.test.js` |
+| msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `heap`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `strings`, `time` `.test.js` |
 | user32 | `controls`, `dialogs`, `display`, `messages`, `objects`, `structs`, `system`, `windows` `.test.js` — `controls.test.js` paints a dialog through the real drawing engine and compares it byte for byte with `controls.reference.png` |
 | gdi32 | `drawing`, `functions`, `objects` `.test.js` |
 | the rest | `advapi32/functions`, `advapi32/registry`, `comctl32/functions`, `comdlg32/functions`, `imm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{functions,guid,objects}`, `oleaut32/functions`, `quartz/graph`, `shell32/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,thread,timers}`, `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |
@@ -444,5 +494,8 @@ Unit tests are colocated with each file, `node:test`, over `fakeMemory`
 
 `kernel32/critical.itest.js` runs the hand-assembled critical-section fast paths on the real
 emulator (`npm run test:integration`), pinning that the bytes the unit test checks are x86 that
-does the job. End-to-end tests that drive a program through the whole surface live beside the
+does the job. `src/exceptions.itest.js` runs three compiled fixtures -- `seh.exe`, `cxxeh.exe`,
+`unhandled.exe`, built from `test/fixtures/src/` by `scripts/build-fixtures.mjs` with clang and
+lld against the MSVC ABI -- through every path above, processor faults and two threads throwing
+at once included. End-to-end tests that drive a program through the whole surface live beside the
 application entry point (`src/*.itest.js`) and in `tools/cdp_test/` (a real browser and GPU).

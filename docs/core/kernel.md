@@ -56,7 +56,7 @@ Threads and turns:
 | `createThread` | `({ entry, parameter?, stackTop?, stackLimit?, tebAddress?, name?, returnTo? }) => Thread` | A ready thread with a primed stack (parameter above a return address). Stack from the pool unless `stackTop` is given. `returnTo` defaults to the park loop. Opens a `'thread'` handle on it. |
 | `holdThread` | `() => number` | Replaces the return address at ESP with the park loop and returns what it was. For a stub about to `ret`. |
 | `parkThread` | `(thread, restingStack) => void` | The same, but remembers the address on `thread.parkedReturn` so the thread resumes where it left off. `restingStack` — where the stub's `ret` leaves ESP — is kept on `thread.resumeStack`, so the resume does not depend on whether that `ret` ran before the switch. |
-| `scheduleResume` | `(thread, { eip, esp?, returnValue? }) => void` | Where a stopped thread continues on its next turn; applied inside the switch. |
+| `scheduleResume` | `(thread, { eip, esp?, returnValue?, registers? }) => void` | Where a stopped thread continues on its next turn; applied inside the switch. `registers` names any others it continues with (EAX there wins over `returnValue`), for code that reads them before setting them -- an exception handler's block, entered with its function's EBP. |
 | `currentThread` / `threads` | `() => Thread \| null` / `() => Thread[]` | The thread on the CPU; every thread ever created. |
 | `writeThreadId` | `(address, id) => void` | Writes a thread id into guest memory (an out-parameter helper). |
 | `runOnce` | `() => { ran, instructions, switched }` | One turn. `ran: null` means nothing could run. |
@@ -237,7 +237,8 @@ resume pops the park address the kernel wrote over the return address and return
 whatever sat above it.
 The redirection is applied inside the switch (`cpu.resumeContextAt`) so it happens exactly once
 and after the thread's own state is saved — which matters most when the thread coming back is
-the one already on the CPU.
+the one already on the CPU. A resume that carries registers of its own passes them through the
+same call, and they are cleared with the rest once applied.
 
 ### The guest's clock (`internal/time.js`)
 

@@ -52,7 +52,9 @@ marshalling whatever bytes live at it.
 | `siteHook` | `(name, { trampoline, resume, stackAdjust?, handler }) => number` | A site hook: `handler(registers, frame)` sees all eight general registers as a plain object and answers `true` (moves EIP to `resume`, ESP to `registers.esp + stackAdjust`) or `false` (restores every register to what the site held, moves EIP to `trampoline`) -- see "Site hooks" below. Returns the guest address a code patch at the site should jump to; the caller (the loader's `bindHooks`) writes the patch, this layer only builds the stub and the dispatch. |
 | `reportHookMismatch` | `(name) => void` | Counts one of a hook's own comparisons against the guest as having disagreed. This layer does not know what was compared -- an oracle-mode kernel calls it once it has checked the guest's output against its own -- it only keeps the count, in `diagnostics().hooks`. |
 | `park` | `(thread?) => ParkedToken` | Parks the calling thread and returns the only value a handler may return instead of an answer. Throws outside a call. |
-| `callGuest` | `({ entry, args?, thread? }) => Promise<number>` | Runs a guest routine and resolves with EAX. A handler that awaited before calling must pass `thread`. |
+| `callGuest` | `({ entry, args?, thread?, stackAtRest?, registers? }) => Promise<number>` | Runs a guest routine and resolves with EAX. A handler that awaited before calling must pass `thread`. `registers` are set before the routine's first instruction -- the frame pointer a funclet reads its parent's locals through. |
+| `continueAt` | `(registers, { below? }?) => Continuation` | What an asynchronous handler resolves with when its call does not return: the thread continues at `registers` (`eip` and `esp` at least), and every host call and callback it was inside below `below` (default: the new ESP) is abandoned. An exception handler that found its block answers this way. |
+| `holdForFault` | `(thread, { name, restingStack, hostReturn }, answer) => void` | Holds the running thread while a processor exception it took is offered to its handlers: sends it to the park loop from the vector's stub and records it as a suspended call; `answer` settles with a continuation (or a value, resuming at `hostReturn`). Called from inside the fault's trap. |
 | `useHeap` | `({ allocate, free? }) => Vtables` | Wires COM publishing to a guest arena. |
 | `publishInterface` | `(object, interfaceId) => number` | The interface pointer for an object model record, or 0. Throws before `useHeap`. |
 | `suspended` | `() => number` | Host calls waiting on something right now. |
@@ -313,6 +315,16 @@ and `kernel.scheduleResume(thread, { eip: hostReturn, esp: restingStack, returnV
 rejected promise is kept in `failure()` — nothing above was awaiting it, and a thrown error
 would otherwise vanish and leave the guest parked for ever.
 
+A promise that settles with a continuation (`continueAt`) is a call that does not return.
+`callbacks.transfer(thread, registers, below)` pops, from the top of the thread's two stacks,
+every suspended host call resting at or below the line and every callback frame based below it,
+and schedules the thread at the registers given. This is what a catch does: the throw was a
+host call, the dispatch it started called the program's frame handler as a callback, and that
+handler -- a host call again -- chose a block in a frame above all of them. None of those calls
+returns; what is above the line (the window procedure the program threw in, and the dispatch
+that called it) is still waiting and is kept. The abandoned promises never settle; nothing is
+left that would read them.
+
 `suspended()` tells the driver a call may be waiting on something outside the microtask queue
 (a fetch, a file read), and `answered()` is what it waits on instead of a timer.
 
@@ -400,9 +412,11 @@ in `sessions/` and checks the refusals are exactly those the file lists.
   the ring wraps. A sink (`onCall`) is the way to keep everything.
 - **Stub slots are never freed**; `comInterfacesRefused` rising is the sign a run is spending
   the table.
-- **No guest exception unwinding across a callback.** A fault inside guest code started by
-  `callGuest` halts the machine (see [`cpu.md`](./cpu.md)); the suspended host call is never
-  answered.
+- **An abandoned host call's own code never finishes.** A handler awaiting a callback that an
+  exception left through a `continueAt` stays suspended in JavaScript for ever. It holds
+  nothing the guest can see, but any bookkeeping it meant to do after the `await` does not
+  happen -- which is why every handler that can be passed through does its bookkeeping before
+  it calls the guest.
 - **A suspended call that never answers stops the whole machine**; `suspendedCalls[].forMs` is
   the only sign.
 - **`callGuest` defaults the thread to the call in flight**, which is right only while the
@@ -422,11 +436,14 @@ Unit tests (`npm test`; filter with `node --test src/layers/bridge/internal/<fil
 | `internal/conventions.test.js` | contract | Cleanup per convention including fastcall, unknown convention refused, stack and ECX argument reads, signed arguments. |
 | `internal/dispatch.test.js` | unit | Marshal/invoke/EAX, negative results, forwarding stubs, fastcall's registers read from the saved block, a hook that answers vs. one that falls through (EIP/ESP either way), a hook's counters and a reported mismatch, parked calls leaving EAX, the parked token's identity, unimplemented/duplicate traps, a throwing handler, the bounded rings, the sampled `trap` phase, record reuse, the sink; a site hook: all eight registers read off the pushad block into a plain object, an answer writing back every edited register with ESP by `stackAdjust` and EIP to `resume`, a fallthrough restoring every register to the pristine reading even after the handler edited the object, counters and diagnostics shared with a slot hook, and the `call.hook` trace unchanged. |
 | `internal/parking.test.js` | unit | `freeStackFor` per thread, nothing in flight, the token only inside a call. |
-| `internal/callback.test.js` | unit | Suspended-call naming, `answered()`, nested frames below the stack in use, no call in flight, the right thread, address zero refused, `recentlyStarted`. |
+| `internal/callback.test.js` | unit | Suspended-call naming, `answered()`, nested frames below the stack in use, no call in flight, the right thread, address zero refused, `recentlyStarted`; a callback entered with registers of its own; a transfer abandoning every call and frame below its line and keeping the window procedure's above it, and drawing the line at the new ESP when none is given. |
 | `internal/vtable.test.js` | unit | Refusal when stubs or arena run out, pointer identity, guest-code slots, shared tables finding their object. |
-| `module.test.js` | unit | A handler calling back onto its own thread; a handler that awaited being refused without a thread and building on the named thread's stack; an off-stack frame refused; a second instance in one realm does not take the first one's traps; a disposed bridge answers harmlessly rather than throwing; `diagnostics()` answers for the most recently created instance. |
+| `module.test.js` | unit | A handler calling back onto its own thread; a handler that awaited being refused without a thread and building on the named thread's stack; an off-stack frame refused; a second instance in one realm does not take the first one's traps; a disposed bridge answers harmlessly rather than throwing; `diagnostics()` answers for the most recently created instance; a handler answering with a continuation sends the thread there and leaves nothing waiting; a continuation without ESP refused; a thread held for its fault spinning in the park loop until its answer sends it on. |
 | `replay.test.js` | replay | Three sessions built in the test replayed through the real module (unnamed-thread refusal, the same session named replays cleanly, address zero names its sender), plus every `*.json` in `sessions/` — none is checked in today. |
 
 Integration (`npm run test:integration`): `src/callbacks.itest.js` runs a real executable
 that asks the C runtime to sort six integers with a comparator of its own, and checks the
 order, that the comparator ran many times inside one host call, and determinism.
+`src/exceptions.itest.js` drives continuations end to end: compiled programs whose catches
+and `__except` blocks are reached through them, including a throw out of a comparator the
+runtime called back, and checks no host call is left waiting afterwards.
