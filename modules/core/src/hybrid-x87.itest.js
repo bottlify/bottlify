@@ -342,14 +342,15 @@ test('a transparent callee leaves the return block a region of its own',
         const exe = buildTransparentExe();
         const reference = await run(exe, 'emulator');
         assert.equal(reference.code, 7, 'the callee\'s sum, stored after the return');
-        const hybrid = await run(exe, 'hybrid');
+        // The callee a region of its own (no leaf calls): the caller's return
+        // block has no known state. Pre-fix it was a partial entry of the
+        // caller's region at the call site's top, and the x87 in it refused
+        // for the whole run; with the block a region of its own, compiled at
+        // the top the machine has, the loop is whole.
+        const hybrid = await run(exe, 'hybrid', { leafCalls: false });
         assert.equal(hybrid.code, reference.code, 'the same answer');
         const cork = hybrid.cork;
         assert.ok(cork, 'the translator reports');
-        // The caller's return block has no known state: pre-fix it is a
-        // partial entry of the caller's region at the call site's top, and
-        // the x87 in it is refused for the whole run. With the block a region
-        // of its own, compiled at the top the machine has, the loop is whole.
         assert.ok(cork.translatedShare > 0.9,
             `share ${cork.translatedShare}, exits ${JSON.stringify(cork.exits)}`);
         const why = Object.keys(/** @type {Record<string, number>} */ (cork.refusedWhy));
@@ -357,6 +358,14 @@ test('a transparent callee leaves the return block a region of its own',
             `the reason is named: ${JSON.stringify(why)}`);
         assert.ok(cork.exits.untranslated < 15000,
             `untranslated exits ${cork.exits.untranslated}`);
+        // The callee formed into the caller: the return is an edge that carries
+        // the stack, the return block's state is known and nothing is refused
+        // for it.
+        const leaf = await run(exe, 'hybrid');
+        assert.equal(leaf.code, reference.code, 'the same answer, formed in');
+        assert.ok(leaf.cork.translatedShare > 0.9, `share ${leaf.cork.translatedShare}`);
+        const leafWhy = Object.keys(/** @type {Record<string, number>} */ (leaf.cork.refusedWhy));
+        assert.ok(!leafWhy.some(key=>key.includes('call-return')), JSON.stringify(leafWhy));
     });
 
 test('the mixer shape runs its loop whole and no slower than the emulator under hybrid',

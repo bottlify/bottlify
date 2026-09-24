@@ -122,7 +122,8 @@ export function emitBatch(jobs, layout, features, options = {}){
  * is answered as a failure (`changed`) and keeps the function it has.
  *
  * @param {{ jobs: { entry: number, entryTop: number, hash: string }[],
- *     pages: [number, Uint8Array][], form: { maxBlocks: number, maxBytes: number } }} relink
+ *     pages: [number, Uint8Array][],
+ *     form: { maxBlocks: number, maxBytes: number, leafCalls?: boolean } }} relink
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {Parameters<typeof emitBatch>[3]} [options]

@@ -75,8 +75,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // a tail call into another module costs more the more modules there are.
         relinkAfter: 16,
         relinkRegions: 4096,
+        // A small leaf callee formed into its caller, the call and its return
+        // jumps inside the region (false: every call crosses regions).
+        leafCalls: true,
         ...config,
     };
+    /** How a region is formed, the same on this thread, in a batch and in a relink. */
+    const formOptions = { maxBlocks: settings.maxRegionBlocks,
+        maxBytes: settings.maxRegionBytes, leafCalls: settings.leafCalls };
     /** @type {Set<string>} instruction classes left to the other executor */
     const leaveOut = new Set(settings.leaveOut ?? []);
     if (layout.tables + Tables.SIZE > memory.buffer.byteLength)
@@ -925,7 +931,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             jobs: chunk.map(record=>({ entry: record.entry, entryTop: record.entryTop,
                 hash: record.hash })),
             pages: [...copies],
-            form: { maxBlocks: settings.maxRegionBlocks, maxBytes: settings.maxRegionBytes },
+            form: formOptions,
         };
         if (worker !== null)
         {
@@ -1044,8 +1050,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     jobs: unbuilt.map(one=>({ entry: one.region.entry, entryTop: one.entryTop,
                         hash: one.region.hash })),
                     pages: [...copies],
-                    form: { maxBlocks: settings.maxRegionBlocks,
-                        maxBytes: settings.maxRegionBytes },
+                    form: formOptions,
                 },
                 layout, features: found, options: emitOptions(),
             }, [...copies.values()].map(bytes=>bytes.buffer));
@@ -1297,10 +1302,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 const [key, eip] = batch[i];
                 const entryTop = key % 16;
-                const region = formRegion(read, eip, {
-                    maxBlocks: settings.maxRegionBlocks, maxBytes: settings.maxRegionBytes,
-                    translatable,
-                });
+                const region = formRegion(read, eip, { ...formOptions, translatable });
                 // What the region calls directly lands in the same batch, so
                 // the call and the return transfer without a miss -- each
                 // callee at the top the call site has, which the tracker
