@@ -167,7 +167,7 @@ function emitForm(e, instruction, flagsLive){
             const high = op === 'movhps' || op === 'movhpd';
             if (dst.kind === 'mem')
             {
-                prepareAddress(e, dst);
+                prepareAddress(e, dst, true);
                 noteStore(e, 8);
                 b.localGet(Local.addr);
                 readV(e, src, 16);
@@ -315,7 +315,7 @@ function emitForm(e, instruction, flagsLive){
             return true;
         }
         case 'stmxcsr':
-            prepareAddress(e, dst);
+            prepareAddress(e, dst, true);
             noteStore(e, 4);
             b.localGet(Local.addr);
             b.i32const(0).load('i32', { offset: e.layout.mxcsr });
@@ -933,15 +933,17 @@ function emitForm(e, instruction, flagsLive){
 
 /**
  * Computes a memory operand's address into `addr`; nothing for a register.
+ * `store` when the operand is only written and `noteStore` follows at once:
+ * the page test then covers code too, one test rather than two.
  *
- * @param {E} e @param {Operand} operand
+ * @param {E} e @param {Operand} operand @param {boolean} [store]
  */
-function prepareAddress(e, operand){
+function prepareAddress(e, operand, store = false){
     if (operand.kind === 'mem')
     {
         emitAddress(e, operand, true);
         e.b.localSet(Local.addr);
-        checkAccess(e, operand.size);
+        checkAccess(e, operand.size, { store });
     }
 }
 
@@ -997,7 +999,7 @@ function writeV(e, operand, pushValue, width = 16){
     }
     if (pushValue !== null)
     {
-        prepareAddress(e, operand);
+        prepareAddress(e, operand, true);
         noteStore(e, width);
         b.localGet(Local.addr);
         pushValue();
@@ -1005,7 +1007,7 @@ function writeV(e, operand, pushValue, width = 16){
     else
     {
         b.localSet(vecTemp(e));
-        prepareAddress(e, operand);
+        prepareAddress(e, operand, true);
         noteStore(e, width);
         b.localGet(Local.addr);
         b.localGet(vecTemp(e));
@@ -1056,7 +1058,7 @@ function writeM(e, operand, pushValue){
     }
     if (pushValue !== null)
     {
-        prepareAddress(e, operand);
+        prepareAddress(e, operand, true);
         noteStore(e, 8);
         b.localGet(Local.addr);
         pushValue();
@@ -1064,7 +1066,7 @@ function writeM(e, operand, pushValue){
     else
     {
         b.localSet(Local.t64);
-        prepareAddress(e, operand);
+        prepareAddress(e, operand, true);
         noteStore(e, 8);
         b.localGet(Local.addr);
         b.localGet(Local.t64);

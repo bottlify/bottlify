@@ -570,3 +570,22 @@ test('every access kind the groups take translates as the plan foresaw it', ()=>
     assert.equal(m.reg('edx'), 5);
     assert.equal(m.readU32(0x30c8), m.reg('eax'), 'the store and the load of one slot');
 });
+
+test('an SSE store checks its page and code in one test, exact at both edges', ()=>{
+    const code = /** @type {[number, number, number][]} */ ([[0x3000, 0x20, PageFlag.HAS_CODE]]);
+    // movups [eax], xmm0 -- sixteen bytes ending just before the code, then reaching into it
+    const store = [0x0f, 0x11, 0x00];
+    const before = run(store, { regs: { eax: 0x2ff0 }, mark: code });
+    assert.equal(before.exit.kind, Exit.HALT);
+    const into = run(store, { regs: { eax: 0x2ff1 }, mark: code });
+    assert.equal(into.exit.kind, Exit.STALE);
+    assert.equal(into.m.pages.staleAddress(), 0x2ff1);
+    assert.equal(into.exit.eip, CODE + 3, 'after the store');
+    // movss [eax], xmm0 beside an inaccessible page: inside runs, over the edge faults before
+    const near = /** @type {[number, number, number][]} */ ([[0x5000, 0x1000, PageFlag.INACCESSIBLE]]);
+    const movss = [0xf3, 0x0f, 0x11, 0x00];
+    assert.equal(run(movss, { regs: { eax: 0x4ffc }, mark: near }).exit.kind, Exit.HALT);
+    const over = run(movss, { regs: { eax: 0x4ffd }, mark: near });
+    assert.equal(over.exit.kind, Exit.FAULT);
+    assert.equal(over.exit.eip, CODE);
+});
