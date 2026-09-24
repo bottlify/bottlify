@@ -410,3 +410,19 @@ test('the slowest frames of the whole run are kept after the ring has lapped the
     assert.equal(slowestFrames[0].ms, 320);
     assert.deepEqual(slowestFrames[0].longest, { name: 'glCompressedTexImage2DARB', ms: 300 });
 });
+
+test('the recent frames\' guest and host time are averaged apart', ()=>{
+    const { profiler, at } = harness({ frames: 4 });
+    for (let index = 0; index < 4; index++)
+    {
+        at(index * 100).beginFrame();
+        at(index * 100 + 10).begin('run', PhaseKind.GUEST);
+        at(index * 100 + 40).end('run');
+        at(index * 100 + 50).begin('draw', PhaseKind.HOST);
+        at(index * 100 + 60).end('draw');
+        at(index * 100 + 100).endFrame();
+    }
+    const snapshot = profiler.snapshot();
+    assert.equal(snapshot.averageGuestMs, 30);
+    assert.equal(snapshot.averageHostMs, 10);
+});

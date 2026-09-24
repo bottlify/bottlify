@@ -340,8 +340,11 @@ export const logModule = {
                 openPhases: 0,
                 hostShare: 0,
                 averageFrameMs: 0,
+                averageGuestMs: 0,
+                averageHostMs: 0,
                 phases: [],
                 worstFrames: [],
+                slowestFrames: [],
                 recentFrames: [],
             },
         };
@@ -366,6 +369,8 @@ export const logModule = {
                 hostShare: profile.hostShare,
                 frames: profile.frames,
                 averageFrameMs: profile.averageFrameMs,
+                averageGuestMs: profile.averageGuestMs,
+                averageHostMs: profile.averageHostMs,
                 unbalancedPhases: profile.unbalanced,
                 // Which ones, for the first few: a count says the accounting is
                 // wrong somewhere, a name says where.

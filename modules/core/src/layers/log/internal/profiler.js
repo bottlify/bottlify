@@ -602,10 +602,12 @@ export function createProfiler(options){
             const recent = frames();
             let totalMs = 0;
             let hostMs = 0;
+            let guestMs = 0;
             for (const frame of recent)
             {
                 totalMs += frame.ms;
                 hostMs += frame.byKind.host + frame.sampled.host;
+                guestMs += frame.byKind.guest;
             }
             return {
                 frames: frameIndex,
@@ -617,6 +619,10 @@ export function createProfiler(options){
                 // also why the sampled estimate belongs here and not in a frame.
                 hostShare: totalMs > 0 ? hostMs / totalMs : 0,
                 averageFrameMs: recent.length > 0 ? totalMs / recent.length : 0,
+                // The program's own code a frame, over the same frames: the
+                // figure a translator is judged by, apart from a load's frames.
+                averageGuestMs: recent.length > 0 ? guestMs / recent.length : 0,
+                averageHostMs: recent.length > 0 ? hostMs / recent.length : 0,
                 phases: [...rows.values()].sort((one, two)=>two.selfMs - one.selfMs),
                 worstFrames: [...recent].sort((one, two)=>two.ms - one.ms).slice(0, worst),
                 slowestFrames: slowest.map(copyFrame),
