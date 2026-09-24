@@ -135,9 +135,9 @@ test('force runs the first instruction whatever shouldStop answers', ()=>{
 });
 
 test('an instruction with no model throws Unsupported', ()=>{
-    // A form the evaluator leaves to the other executor: fxsave.
+    // A form no user program runs and the evaluator has no case for: sldt.
     const m = machine();
-    m.ram.set([0x0f, 0xae, 0x00], 0x1000); // fxsave [eax]
+    m.ram.set([0x0f, 0x00, 0x00], 0x1000); // sldt [eax]
     // `evaluate` counts and advances before it decides it has no case; the
     // host answers the throw for the instruction, not for the count.
     assert.throws(()=>interpret(m.state, 1), /no model for/);
@@ -227,4 +227,28 @@ test('blockState keeps its fields fast and sees code rewritten in place', ()=>{
     state.halted = false;
     interpret(state, 10);
     assert.equal(state.reg[0], 7);
+});
+
+test('fxsave writes the x87 and SSE image and fxrstor reads it back', ()=>{
+    // fld1; movd xmm0, eax; fxsave [0x2000]; fstp st0; fxrstor [0x2000]; hlt
+    const m = machine();
+    m.ram.set([
+        0xd9, 0xe8, 0x66, 0x0f, 0x6e, 0xc0, 0x0f, 0xae, 0x05, 0x00, 0x20, 0, 0,
+        0xdd, 0xd8, 0x0f, 0xae, 0x0d, 0x00, 0x20, 0, 0, 0xf4,
+    ], 0x1000);
+    m.state.reg[0] = 0x12345678;
+    interpret(m.state, 100);
+    const view = new DataView(m.ram.buffer);
+    assert.equal(view.getUint16(0x2000, true), 0x37f, 'the control word');
+    assert.equal(view.getUint16(0x2002, true) >>> 11 & 7, 7, 'the top in the status word');
+    assert.equal(m.ram[0x2004], 0x80, 'physical register 7 held');
+    assert.equal(view.getUint32(0x2018, true), 0x1f80, 'MXCSR');
+    assert.equal(view.getUint32(0x201c, true), 0xffbf, 'the mask, without DAZ');
+    assert.equal(view.getBigUint64(0x2020, true), 0x8000000000000000n, 'ST(0) = 1.0, its mantissa');
+    assert.equal(view.getUint16(0x2028, true), 0x3fff, 'and its exponent');
+    assert.equal(view.getUint32(0x20a0, true), 0x12345678, 'XMM0');
+    assert.equal(m.state.top, 7, 'fxrstor put back the top fstp moved');
+    assert.equal(m.state.empty & 0x80, 0, 'and the register it emptied');
+    assert.equal(m.state.f80[7], 1);
+    assert.equal(m.state.halted, true);
 });

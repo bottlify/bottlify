@@ -22,7 +22,7 @@
 
 import { AF, CF, DF, OF, PF, SF, ZF, conditionReads } from './decode/table.js';
 import { cpuidLeaf } from './cpuid.js';
-import { evaluateX87, isX87Op } from './ir-x87.js';
+import { evaluateX87, fxrstor, fxsave, isX87Op } from './ir-x87.js';
 import { evaluateSimd, isSimdOp, mmxState } from './ir-simd.js';
 
 const ARITH = CF | PF | AF | ZF | SF | OF;
@@ -853,6 +853,12 @@ export function evaluate(instruction, state){
             state.reg[0] = (state.reg[0] & 0xffffff00 | state.memory.read(at, 1)) >>> 0;
             return;
         }
+        case 'fxsave':
+            fxsave(state, address(instruction.operands[0]));
+            return;
+        case 'fxrstor':
+            fxrstor(state, address(instruction.operands[0]));
+            return;
         case 'cpuid':
         {
             const answer = cpuidLeaf(state.reg[0]);
