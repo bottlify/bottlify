@@ -177,8 +177,11 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
     // DataView call and its bounds check; wider accesses keep the DataView.
     const ramBytes = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     const reg = new Uint32Array(memory.buffer, layout.regs, 8);
-    const flagAt = (/** @type {number} */ address)=>
-        view.getUint8(layout.tables + Tables.PAGE_FLAGS + (address >>> 12));
+    // The page flags as bytes: every access tests one or two, and a typed array
+    // is cheaper than a DataView call.
+    const pageFlags = new Uint8Array(memory.buffer, layout.tables + Tables.PAGE_FLAGS,
+        Tables.PAGE_FLAGS_SIZE);
+    const flagAt = (/** @type {number} */ address)=>pageFlags[address >>> 12];
     /** @param {number} address @param {number} size */
     const inaccessible = (address, size)=>{
         if ((flagAt(address) & PageFlag.INACCESSIBLE) !== 0)
@@ -243,13 +246,37 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
         }
     };
     // The x87 registers are one f64 every sixteen bytes in the block, which no
-    // typed array can stride; they are copied in and out around each run, as
-    // the XMM registers are. The words beside them are read and written
+    // typed array can stride; they are copied in and out around a run, as the
+    // XMM registers are -- on the run's first use of them, and back only when
+    // it used them: most runs of integer code touch neither, and the copy was
+    // most of a short run's cost. The words beside them are read and written
     // directly.
     const f80Bytes = new ArrayBuffer(64);
     const f80 = new Float64Array(f80Bytes);
     const f80bits = new BigInt64Array(f80Bytes);
     const xmm = new Uint32Array(32);
+    let x87In = false;
+    let xmmIn = false;
+    const loadX87 = ()=>{
+        if (!x87In)
+        {
+            for (let i = 0; i < 8; i++)
+            {
+                f80[i] = view.getFloat64(layout.x87 + i * 16, true);
+            }
+            x87In = true;
+        }
+    };
+    const loadXmm = ()=>{
+        if (!xmmIn)
+        {
+            for (let word = 0; word < 32; word++)
+            {
+                xmm[word] = view.getUint32(layout.xmm + word * 4, true);
+            }
+            xmmIn = true;
+        }
+    };
     return {
         reg,
         memory: { read, write },
@@ -257,9 +284,18 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
         retired: 0,
         trapped: [],
         rdtsc,
-        f80,
-        f80bits,
-        xmm,
+        get f80(){
+            loadX87();
+            return f80;
+        },
+        get f80bits(){
+            loadX87();
+            return f80bits;
+        },
+        get xmm(){
+            loadXmm();
+            return xmm;
+        },
         get top(){
             return view.getUint8(layout.x87Top) & 7;
         },
@@ -319,25 +355,27 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
         },
         /** Takes the block's x87 and XMM registers into the arrays. */
         syncIn(){
-            for (let i = 0; i < 8; i++)
-            {
-                f80[i] = view.getFloat64(layout.x87 + i * 16, true);
-            }
-            for (let word = 0; word < 32; word++)
-            {
-                xmm[word] = view.getUint32(layout.xmm + word * 4, true);
-            }
+            x87In = false;
+            xmmIn = false;
         },
         /** Writes the arrays back into the block. */
         syncOut(){
-            for (let i = 0; i < 8; i++)
+            if (x87In)
             {
-                view.setFloat64(layout.x87 + i * 16, f80[i], true);
+                for (let i = 0; i < 8; i++)
+                {
+                    view.setFloat64(layout.x87 + i * 16, f80[i], true);
+                }
             }
-            for (let word = 0; word < 32; word++)
+            if (xmmIn)
             {
-                view.setUint32(layout.xmm + word * 4, xmm[word], true);
+                for (let word = 0; word < 32; word++)
+                {
+                    view.setUint32(layout.xmm + word * 4, xmm[word], true);
+                }
             }
+            x87In = false;
+            xmmIn = false;
         },
     };
 }
