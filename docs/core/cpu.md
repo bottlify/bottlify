@@ -254,7 +254,25 @@ inaccessible -- and, for an access that is only written (`mov` to memory, a push
 against code too, so the store's code note needs no second test. Only when a flag is up are
 the last byte's own flags read, so an access beside an unmapped page or beside code faults
 or notes only when it reaches it. On a push/pop loop this took a third off (2.3 -> 1.5 ns an
-instruction), on a load/store copy a quarter (1.14 -> 0.86), on a call-heavy loop a tenth. The null page is *not* marked, because the emulator lets a program read
+instruction), on a load/store copy a quarter (1.14 -> 0.86), on a call-heavy loop a tenth.
+Most of a block's accesses need not even that. Those off one register the block does not change
+in between -- a frame through esp or ebp, a struct through one pointer, an array through a base
+and an index -- or off an address in the instruction form a group (`planBlock` in
+`emit/memory.js`, made from the decoded operands before the block is emitted; a push, a pop and
+an add, sub, inc, dec or lea of a register by a constant move it by a known amount, any other
+write starts it afresh, an operation not known there starts every register afresh). A group's
+accesses lie in a window known from the registers at its first access, and one of at most 4096
+bytes spans at most two pages, each touched by one of the accesses: the group is checked once,
+there -- both pages against inaccessible, and the stores' window against code, to the granule
+through `codeHit` only when a page is flagged -- and its accesses carry no test at all. A window
+that would fault, or a store that would land in code, leaves the region untranslated before the
+group's first access, and the interpreter runs the rest with a check on every access, so the
+fault is raised at its instruction and the note made at its store as they would be here. Two
+loads alone are not grouped (the window costs what their own tests do); three accesses, or two
+with a store, are. The emitter's own calls are held to the plan: an access it did not foresee,
+or a store it took for a load, is an error in translating rather than a test left out. A copy
+loop through one base 188 -> 113 ms (the no-test ceiling 107), a push/pop loop 245 -> 171 (at
+the ceiling), an indexed walk 161 -> 137 (ceiling 120). The null page is *not* marked, because the emulator lets a program read
 address 0 today and the two engines must agree; marking it, and projecting the memory
 layer's read-only regions into the table, is a policy switch this layer's owner throws when
 the emulator is no longer the reference for it.

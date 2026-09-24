@@ -196,6 +196,40 @@ test('blockState faults on an inaccessible page and reports a code write', ()=>{
     assert.deepEqual(writes, [[0x40000, 4], [0x3fffe, 4]]);
 });
 
+test('a push, a call, a leave and an SSE store that fault leave esp and memory as they were', ()=>{
+    const layout = ownLayout({ ramSize: 1 << 20 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
+    const flags = new Uint8Array(
+        memory.buffer, layout.tables + Tables.PAGE_FLAGS, Tables.PAGE_FLAGS_SIZE);
+    const reg32 = new Uint32Array(memory.buffer, layout.regs, 8);
+    flags[0x4] = PageFlag.INACCESSIBLE;
+    const state = blockState({ memory, layout });
+    /** @param {number[]} bytes @param {Record<number, number>} regs */
+    const faults = (bytes, regs)=>{
+        ram.set(bytes, 0x1000);
+        state.syncIn();
+        Object.entries(regs).forEach(([r, value])=>{
+            state.reg[Number(r)] = value;
+        });
+        state.eip = 0x1000;
+        assert.throws(()=>interpret(state, 1), e=>e instanceof Fault && e.vector === 13);
+        state.syncOut();
+    };
+    // push eax, call +0 with esp at the page's end: esp as before.
+    faults([0x50], { 4: 0x5000 });
+    assert.equal(reg32[4], 0x5000);
+    faults([0xe8, 0, 0, 0, 0], { 4: 0x5000 });
+    assert.equal(reg32[4], 0x5000);
+    // leave with ebp in the page: esp not moved to ebp.
+    faults([0xc9], { 4: 0x6000, 5: 0x4800 });
+    assert.equal(reg32[4], 0x6000);
+    // movss [ecx], xmm0 over the page's start: no byte of it before the page.
+    ram[0x3ffe] = 0x55;
+    faults([0xf3, 0x0f, 0x11, 0x01], { 1: 0x3ffe });
+    assert.equal(ram[0x3ffe], 0x55, 'nothing written');
+});
+
 test('blockState keeps its fields fast and sees code rewritten in place', ()=>{
     const layout = ownLayout({ ramSize: 1 << 20 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
