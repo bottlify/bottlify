@@ -80,8 +80,10 @@ Synchronisation (`internal/sync.js`):
 | `createMutex` | `({ name? }) => Mutex` | Recursive, owner-tracked, abandonment-aware. |
 | `createSemaphore` | `({ initial, maximum, name? }) => Semaphore` | Throws unless `0 <= initial <= maximum`. |
 | `createTimer` | `({ manualReset?, name? }) => Timer` | A waitable timer: the clock owns its signalled state. |
-| `armTimer` | `(timer, due, period) => boolean` | Sets the due time on the guest clock; a positive period re-arms it. A waiter that parked before this call is released at the due time. |
-| `cancelTimer` | `(timer) => void` | Disarms without signalling; signalled state and parked waiters are untouched. |
+| `armTimer` | `(timer, due, period, fired?) => boolean` | Sets the due time on the guest clock; a positive period re-arms it. A waiter that parked before this call is released at the due time. `fired(at)` is told of every expiry, with the time it came due -- how a completion routine is queued. |
+| `cancelTimer` | `(timer) => void` | Disarms without signalling; signalled state and parked waiters are untouched, and `fired` is not called again. |
+| `alertably` | `(thread, wait) => T` | Runs `wait` so that a block it makes is alertable: `alert` may end it. Whatever it answers without blocking is its own answer. |
+| `alert` | `(thread, result) => boolean` | Ends an alertable wait early: takes the thread off every queue it stands in and wakes it with `result` as what the waiting call answers. A thread not blocked alertably is left alone. What an APC does to a thread waiting for it. |
 | `wait` | `(object, thread, timed?) => number \| null` | Result now, or `null` after blocking the thread. |
 | `poll` | `(object, thread) => number \| null` | Takes the object if available; never queues. |
 | `waitAll` | `(objects, thread, timed?) => number \| null` | Takes nothing until everything is available. |
@@ -280,6 +282,9 @@ FIFO; choosing an order and keeping it makes a multithreaded program reproducibl
   periods past the current time, so a timer nobody observed signalled once, not once per period
   missed. `cancelTimer` removes the clock entry and leaves the signalled state and the waiters
   alone.
+- **Alertable waits**: a block made inside `alertably` sets `thread.alertable`, and any wake
+  clears it, so an APC queued during a later wait that is not alertable does not end that one.
+  `alert` is the only thing that reads it.
 
 `releaseTo(object)` hands a signalled object to the first waiter that can take it: a thread
 waiting for **all** of a set is passed over unless every member is signalled or already owned
@@ -349,13 +354,14 @@ Unit tests (`npm test`; filter with `node --test src/layers/kernel/internal/<fil
 
 | file | kind | covers |
 |------|------|--------|
-| `internal/threads.test.js` | unit | Turn order, priority order and starvation, blocking/waking, `awaitingHost` excluded from candidates, quantum bound, overrun and slow-slice accounting, per-thread and per-page reports, deadline ordering. |
+| `internal/threads.test.js` | unit | Turn order, priority order and starvation, blocking/waking, `awaitingHost` excluded from candidates, quantum bound, overrun and slow-slice accounting, per-thread and per-page reports, deadline ordering, a resume carrying registers applied once. |
+| `internal/timers.test.js` | unit | The clock-driven timer against the real scheduler: a waiter parked before the arm, periods with nobody waiting, a timeout leaving the queue, cancellation, a timer in a set; `fired` told of every expiry and never after a cancel; a block alertable only inside an alertable call and only until it wakes; a thread that stops waiting leaving every queue. |
 | `internal/switch.test.js` | unit | Save/restore, TEB travelling with the restore, first switch, self-switch as no-op, error on no thread. |
 | `internal/sync.test.js` | contract | Event/mutex/semaphore semantics per Win32: auto vs manual reset, recursion, owner-only release, abandonment, wait-all atomicity, wait-any index and base, poll never queueing, thread objects, expiry leaving only its queues. |
 | `internal/time.test.js` | unit | Advance, credit floor and ceiling, skip never past real time, diagnostics. |
 | `internal/handles.test.js` | unit | Alignment, type assertion, invalid/closed handles, deferred reuse. |
 | `internal/processes.test.js` | unit | Record contents, id spacing, suspended children not pending. |
-| `module.test.js` | unit | `createThread` priming: return address, park-loop default, headroom, pool registration, a caller-supplied stack; a second instance in one realm does not take the first one's threads; a disposed kernel answers harmlessly rather than throwing; `diagnostics()` answers for the most recently created instance. |
+| `module.test.js` | unit | `createThread` priming: return address, park-loop default, headroom, pool registration, a caller-supplied stack; a second instance in one realm does not take the first one's threads; a disposed kernel answers harmlessly rather than throwing; `diagnostics()` answers for the most recently created instance; `alert` ends an alertable wait with its answer, off the object's queue, and leaves every other wait alone. |
 
 Integration (`npm run test:integration`): `src/threads.itest.js` runs a real two-thread
 executable contending on a mutex and checks the Windows answer, that both threads took turns,

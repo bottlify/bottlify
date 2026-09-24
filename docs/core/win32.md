@@ -108,9 +108,9 @@ instantiation of the module reports (method in "Inventory" below):
 
 | library | directory | exports | what it covers |
 |---------|-----------|--------:|----------------|
-| `KERNEL32.dll` | `kernel32/` | 316 | Console, threads and waits, heap and virtual memory, process and TLS, modules, files and directories, critical sections, locale and code pages, environment and command line, system info and time, `CreateProcess`, exceptions and SEH, resources, drives, file mappings and pipes, completion ports, file times, console I/O. |
-| `USER32.dll` | `user32/` | 253 | Windows and classes, painting, system queries and display settings, objects (cursors, icons, menus, clipboard), dialogs, hot keys, `SendInput`, the keyboard-layout family (`GetKeyboardLayout`, `MapVirtualKeyA`/`Ex`, `ToUnicode`) over the one en-US layout this build has. |
-| `msvcrt.dll` | `msvcrt/` | 246 (195 without `fpu`) | The C runtime: strings, multibyte strings, conversion, formatting and scanning, heap, math, paths, streams (`stdio.js`: `fopen` and its family over the volume), threads (`threads.js`: `_beginthread`/`_beginthreadex` through kernel32's `CreateThread`), time, C++ support (`cxx.js`), CRT startup, CRT exception helpers. |
+| `KERNEL32.dll` | `kernel32/` | 331 | Console, threads and waits, heap and virtual memory, process and TLS, modules, files and directories, critical sections, locale and code pages, environment and command line, system info and time, `CreateProcess`, exceptions and SEH, resources, drives, file mappings and pipes, completion ports, file times, console I/O, APCs and the alertable waits (`apc.js`). |
+| `USER32.dll` | `user32/` | 254 | Windows and classes, painting, system queries and display settings, objects (cursors, icons, menus, clipboard), dialogs, hot keys, `SendInput`, the keyboard-layout family (`GetKeyboardLayout`, `MapVirtualKeyA`/`Ex`, `ToUnicode`) over the one en-US layout this build has. |
+| `msvcrt.dll` | `msvcrt/` | 268 (217 without `fpu`) | The C runtime: strings, multibyte strings, conversion, formatting and scanning, heap, math, paths, streams (`stdio.js`: `fopen` and its family over the volume), threads (`threads.js`: `_beginthread`/`_beginthreadex` through kernel32's `CreateThread`), time, C++ support (`cxx.js`), CRT startup, structured and C++ exceptions (`seh.js`, `eh.js`). |
 | `GDI32.dll` | `gdi32/` | 102 | Device contexts, objects and their lifetimes, metrics, drawing entry points. |
 | `ntdll.dll` | `ntdll/` | 96 | Counted strings, status translation, machine queries, 64-bit helpers — and 76 entries that are the same function object kernel32 or msvcrt already publish. |
 | `ADVAPI32.dll` | `advapi32/` | 71 | The registry API over the hive, `GetUserNameA`, SIDs, and a CryptoAPI provider (MD5, SHA-1, SHA-256, RC4, RSA signature verification). |
@@ -135,7 +135,7 @@ instantiation of the module reports (method in "Inventory" below):
 | `SHFOLDER.dll` | *(built in `module.js`)* | 2 | A two-export forwarder to shell32's `SHGetFolderPathA`/`SHGetFolderPathW`, sharing shell32's own function objects. |
 | *(no DLL)* | `quartz/` | — | The DirectShow filter graph, reached through `CoCreateInstance(CLSID_FilterGraph)`; registered on the COM registry, not as an import table. |
 
-Total: 1460 table entries across 28 libraries, 1332 distinct functions.
+Total: 1511 table entries across 28 libraries, 1378 distinct functions.
 
 **Inventory method.** `dbg/docs/count-dlls.mjs` (throwaway; not part of the build) creates the
 module against the same stub host `src/layers/win32/module.test.js` uses
@@ -258,6 +258,16 @@ wake traps. Completion ports (`kernel32/iocp.js`) block a worker with the schedu
 owe a packet from every overlapped read or write on a bound handle. TLS slots are read out of the running thread's own block through its TLS pointer rather than
 tracked on the host, so what `TlsGetValue` answers cannot drift from what the guest reaches
 through `FS`.
+
+Asynchronous procedure calls (`kernel32/apc.js`) are queued per thread -- by `QueueUserAPC`, or by a
+waitable timer at each expiry for the completion routine `SetWaitableTimer` was given, queued to
+the thread that set it -- and run only when that thread waits alertably: `SleepEx`,
+`WaitForSingleObjectEx`, `WaitForMultipleObjectsEx`, `SignalObjectAndWait` with `bAlertable`,
+`MsgWaitForMultipleObjectsEx` with `MWMO_ALERTABLE`. A thread that finds routines queued when it
+starts such a wait runs them all, including any they queue, and answers `WAIT_IO_COMPLETION`
+without waiting; one already waiting is taken off its objects' queues by `kernel.alert` and sent,
+instead of back to its caller, to a stub whose return lands on the caller's address -- the stub
+runs the routines on that thread and answers `WAIT_IO_COMPLETION` from the wait.
 
 ### Exceptions
 
@@ -480,12 +490,12 @@ and the metrics in §2.
 ## 5. Tests
 
 Unit tests are colocated with each file, `node:test`, over `fakeMemory`
-(`src/layers/win32/msvcrt/harness.test.js`) or a stub host; there are 102 `*.test.js` files under
+(`src/layers/win32/msvcrt/harness.test.js`) or a stub host; there are 103 `*.test.js` files under
 `src/layers/win32/`. Run with `npm test` from `modules/core`.
 
 | area | files (all `src/layers/win32/…`) |
 |------|----------------------------------|
-| kernel32 | `consoleio`, `critical`, `drives`, `environment`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `process`, `resources`, `seh`, `spawn`, `sync`, `system`, `teb`, `threading`, `vfs` `.test.js` |
+| kernel32 | `apc`, `consoleio`, `critical`, `drives`, `environment`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `process`, `resources`, `seh`, `spawn`, `sync`, `system`, `teb`, `threading`, `vfs` `.test.js` |
 | msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `heap`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `strings`, `time` `.test.js` |
 | user32 | `controls`, `dialogs`, `display`, `messages`, `objects`, `structs`, `system`, `windows` `.test.js` — `controls.test.js` paints a dialog through the real drawing engine and compares it byte for byte with `controls.reference.png` |
 | gdi32 | `drawing`, `functions`, `objects` `.test.js` |
@@ -497,5 +507,7 @@ emulator (`npm run test:integration`), pinning that the bytes the unit test chec
 does the job. `src/exceptions.itest.js` runs three compiled fixtures -- `seh.exe`, `cxxeh.exe`,
 `unhandled.exe`, built from `test/fixtures/src/` by `scripts/build-fixtures.mjs` with clang and
 lld against the MSVC ABI -- through every path above, processor faults and two threads throwing
-at once included. End-to-end tests that drive a program through the whole surface live beside the
+at once included. `src/apc.itest.js` runs `apc.exe`, built the same way: APCs to itself and to
+another thread's alertable sleep, one refused by a wait that is not alertable, a routine queued
+by a routine, and a timer's completion routine. End-to-end tests that drive a program through the whole surface live beside the
 application entry point (`src/*.itest.js`) and in `tools/cdp_test/` (a real browser and GPU).
