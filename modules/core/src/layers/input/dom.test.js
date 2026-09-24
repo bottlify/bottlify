@@ -123,6 +123,45 @@ test('a key press is both a key and the character the browser composed', ()=>{
     ]);
 });
 
+test('a paste gesture puts the text on the clipboard before the program sees Control-V', ()=>{
+    // The browser fires keydown before paste; a program reads the clipboard
+    // from the keydown. So the V is held until the paste has delivered its
+    // text, and a Command-V -- the page's own chord on a Mac -- reaches the
+    // program as the Control-V it pastes on.
+    const h = harness();
+    const down = h.canvas.fire('keydown', { code: 'KeyV', key: 'v', ctrlKey: true });
+    assert.equal(down.prevented, false, 'the browser must still fire the paste event');
+    assert.deepEqual(h.drain(), [], 'held');
+    const paste = h.canvas.fire('paste',
+        { clipboardData: { getData: (/** @type {string} */ type)=>(type === 'text/plain' ? 'hunter2' : '') } });
+    assert.equal(paste.prevented, true);
+    assert.deepEqual(h.drain(), [
+        { kind: 'paste', text: 'hunter2' },
+        { kind: 'key', code: 'KeyV', down: true },
+    ]);
+    h.canvas.fire('keyup', { code: 'KeyV', key: 'v', ctrlKey: true });
+    assert.deepEqual(h.drain(), [{ kind: 'key', code: 'KeyV', down: false }]);
+
+    h.canvas.fire('keydown', { code: 'KeyV', key: 'v', metaKey: true });
+    h.canvas.fire('paste', { clipboardData: { getData: ()=>'x' } });
+    assert.deepEqual(h.drain(), [
+        { kind: 'paste', text: 'x' },
+        { kind: 'key', code: 'ControlLeft', down: true },
+        { kind: 'key', code: 'KeyV', down: true },
+        { kind: 'key', code: 'KeyV', down: false },
+        { kind: 'key', code: 'ControlLeft', down: false },
+    ]);
+
+    // Nothing to paste: the key goes through on its release.
+    h.canvas.fire('keydown', { code: 'KeyV', key: 'v', ctrlKey: true });
+    assert.deepEqual(h.drain(), []);
+    h.canvas.fire('keyup', { code: 'KeyV', key: 'v', ctrlKey: true });
+    assert.deepEqual(h.drain(), [
+        { kind: 'key', code: 'KeyV', down: true },
+        { kind: 'key', code: 'KeyV', down: false },
+    ]);
+});
+
 test('a named key with no character produces no text', ()=>{
     const h = harness();
     h.canvas.fire('keydown', { code: 'ArrowUp', key: 'ArrowUp' });
@@ -183,6 +222,25 @@ test('a pointer is reported in the game\'s pixels, not the page\'s', ()=>{
     h.drain();
     h.canvas.fire('pointermove', { clientX: 740, clientY: 530, movementX: 2, movementY: 0 });
     assert.deepEqual(h.drain(), [{ kind: 'pointerMove', x: 320, y: 240, dx: 1, dy: 0 }]);
+});
+
+test('a move with Control held belongs to the person and never reaches the program', ()=>{
+    // The way out of a title that grabs the pointer: held, the pointer is
+    // free to leave; released, the next move starts afresh rather than
+    // delivering the distance travelled while held.
+    const h = harness({ canvas: {
+        width: 640, height: 480, rect: { left: 0, top: 0, width: 640, height: 480 },
+    } });
+    h.canvas.fire('focus', {});
+    h.drain();
+    h.canvas.fire('pointermove', { clientX: 10, clientY: 10, movementX: 0, movementY: 0 });
+    h.drain();
+    h.canvas.fire('pointermove', { clientX: 300, clientY: 300, movementX: 290, movementY: 290,
+        ctrlKey: true });
+    assert.deepEqual(h.drain(), [], 'nothing crossed');
+    h.canvas.fire('pointermove', { clientX: 301, clientY: 300, movementX: 1, movementY: 0 });
+    assert.deepEqual(h.drain(), [{ kind: 'pointerMove', x: 301, y: 300, dx: 1, dy: 0 }],
+        'the first free move is one pixel, not the whole way across');
 });
 
 test('motion too small to count is kept rather than dropped', ()=>{

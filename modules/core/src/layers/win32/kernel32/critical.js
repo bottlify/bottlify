@@ -320,7 +320,12 @@ export function createCriticalSections(host){
                 return 0;
             }
             queue.waiters.push(thread);
-            host.block(thread, `critical section 0x${address.toString(16)}`);
+            // The structure as the waiter saw it, for the report's blocked-thread
+            // line: a wait with no owner names a lost release, not contention.
+            host.block(thread, `critical section 0x${address.toString(16)}`
+                + ` (lock ${readU32(address + CS.LOCK_COUNT) | 0},`
+                + ` owner ${readU32(address + CS.OWNING_THREAD)},`
+                + ` recursion ${readU32(address + CS.RECURSION_COUNT) | 0}, me ${thread.id})`);
             return host.park(thread);
         },
 

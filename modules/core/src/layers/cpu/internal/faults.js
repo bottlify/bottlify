@@ -89,6 +89,21 @@ export function hostFault({ name, detail, eip, calledFrom = 0, vector = HOST_VEC
 }
 
 /**
+ * What a vector is called.
+ *
+ * Past the processor's own: a software interrupt nothing here answers, named by
+ * the number the program used.
+ *
+ * @param {number} vector
+ * @returns {string}
+ */
+export function exceptionName(vector){
+    return NAMES[vector] ?? (vector < 32
+        ? `exception ${vector}`
+        : `int 0x${vector.toString(16)} with no handler`);
+}
+
+/**
  * Reads the frame the processor pushed, given the stack pointer as the stub
  * found it.
  *
@@ -108,11 +123,7 @@ export function readFault(vector, esp, readU32){
     const at = hasError ? frame + 4 : frame;
     return {
         vector,
-        // Past the processor's own: a software interrupt nothing here
-        // answers, named by the number the program used.
-        name: NAMES[vector] ?? (vector < 32
-            ? `exception ${vector}`
-            : `int 0x${vector.toString(16)} with no handler`),
+        name: exceptionName(vector),
         errorCode: hasError ? readU32(frame) >>> 0 : null,
         eip: readU32(at) >>> 0,
         cs: readU32(at + 4) >>> 0,

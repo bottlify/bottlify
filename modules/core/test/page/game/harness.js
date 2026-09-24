@@ -759,6 +759,7 @@ export function scheduleKeyTimes(app, request){
  * @property {{ x: number, y: number }} pointerAt  Where the last click left it.
  * @property {number[]} gaps          Milliseconds between one present and the next.
  * @property {number} lastPresent     `performance.now()` at the previous present, or 0.
+ * @property {number} firstPresent    `performance.now()` at the first present, or 0.
  * @property {number} presents        How many frames this harness has presented, ever.
  */
 
@@ -769,10 +770,18 @@ export function scheduleKeyTimes(app, request){
  * on the harness rather than the run, so it keeps counting across a
  * `process-replace`: the frame after a handover is one more, not the first.
  *
+ * An action's `after` is a frame number, or -- given as `afterSeconds` --
+ * a time since the first presented frame, resolved to the first frame
+ * presented at or past it: a frame count drifts with the frame rate, so a
+ * route timed by frames stops reaching its screens when the program's
+ * frames come faster, while the screens themselves arrive on the clock.
+ *
  * @param {any} app
  * @param {{ pointer?: { x: number, y: number, dx?: number, dy?: number, down?: boolean },
- *           clicks?: { x: number, y: number, after: number }[],
- *           keys?: { code: string, after: number }[] }} request
+ *           clicks?: { x: number, y: number, after: number, afterSeconds?: number }[],
+ *           keys?: { code: string, after: number, afterSeconds?: number }[],
+ *           typed?: { text: string, after: number, afterSeconds?: number }[],
+ *           pasted?: { text: string, after: number, afterSeconds?: number }[] }} request
  * @param {PresentState} state
  * @param {any} frame
  */
@@ -784,7 +793,22 @@ export function presentFrame(app, request, state, frame){
     {
         state.gaps.push(now - state.lastPresent);
     }
+    if (state.firstPresent === 0)
+    {
+        state.firstPresent = now;
+    }
     state.lastPresent = now;
+    for (const timed of [request.clicks, request.keys, request.typed, request.pasted])
+    {
+        for (const action of timed ?? [])
+        {
+            if (action.afterSeconds !== undefined && action.after < 0
+                && now - state.firstPresent >= action.afterSeconds * 1000)
+            {
+                action.after = state.presents;
+            }
+        }
+    }
     // A pointer the run asked to hold somewhere, put there every frame: a
     // program that hit-tests the cursor against its own controls draws a
     // different cursor over one than over none, and this page has no mouse
@@ -836,6 +860,62 @@ export function presentFrame(app, request, state, frame){
             app.input.send({ kind: 'key', code: key.code, down: false });
         }
     }
+    // Typed text: one character a frame, each a key press with its character
+    // as the page's keyboard delivers one, released the frame after.
+    for (const typed of request.typed ?? [])
+    {
+        if (typed.after < 0)
+        {
+            continue;
+        }
+        const index = state.presents - typed.after;
+        if (index >= 0 && index < typed.text.length)
+        {
+            const character = typed.text[index];
+            app.input.send({ kind: 'key', code: codeOf(character), down: true });
+            app.input.send({ kind: 'text', text: character });
+        }
+        if (index >= 1 && index <= typed.text.length)
+        {
+            app.input.send({ kind: 'key', code: codeOf(typed.text[index - 1]), down: false });
+        }
+    }
+    // Pasted text: on the clipboard first, then the Control-V a program
+    // pastes on, released the frame after -- the order the page's own paste
+    // gesture arrives in.
+    for (const pasted of request.pasted ?? [])
+    {
+        if (state.presents === pasted.after)
+        {
+            app.input.send({ kind: 'paste', text: pasted.text });
+            app.input.send({ kind: 'key', code: 'ControlLeft', down: true });
+            app.input.send({ kind: 'key', code: 'KeyV', down: true });
+        }
+        else if (state.presents === pasted.after + 1)
+        {
+            app.input.send({ kind: 'key', code: 'KeyV', down: false });
+            app.input.send({ kind: 'key', code: 'ControlLeft', down: false });
+        }
+    }
+}
+
+/**
+ * The KeyboardEvent.code a character is typed with, for the letters, digits
+ * and the few punctuation marks a name or a password carries.
+ *
+ * @param {string} character
+ */
+function codeOf(character){
+    if (/^[a-z]$/i.test(character))
+    {
+        return `Key${character.toUpperCase()}`;
+    }
+    if (/^[0-9]$/.test(character))
+    {
+        return `Digit${character}`;
+    }
+    return { ' ': 'Space', '.': 'Period', '-': 'Minus', '_': 'Minus', '@': 'Digit2', '/': 'Slash',
+        ',': 'Comma', ':': 'Semicolon' }[character] ?? 'KeyA';
 }
 
 /**
@@ -896,6 +976,8 @@ export function scalars(layers){
  *     Drops what the call log holds, so a window measured after it is the
  *     window's own calls rather than whatever filled the cap getting there.
  * @property {() => string} frameReport
+ * @property {() => Promise<{ width: number, height: number, format: string,
+ *     pixels: string } | null>} frameShot
  *     Where a frame's time goes, asked while the run is still going. A report
  *     at the end of a run answers what a whole run cost; this answers what one
  *     frame costs, which is the question a frame rate is.
@@ -927,7 +1009,7 @@ export function createHarness(canvas, how = {}){
     /** @type {PresentState} */
     const presentState = {
         presented: null, pointerDown: false, pointerAt: { x: 0, y: 0 },
-        gaps: [], lastPresent: 0, presents: 0,
+        gaps: [], lastPresent: 0, firstPresent: 0, presents: 0,
     };
 
     /**
@@ -942,6 +1024,10 @@ export function createHarness(canvas, how = {}){
      *           screen?: { width: number, height: number, bitsPerPixel: number } | null,
      *           clicks?: { x: number, y: number, after: number }[],
      *           keys?: { code: string, after: number }[],
+     *           typed?: { text: string, after: number }[],
+     *           pasted?: { text: string, after: number }[],
+     *           logMatch?: string,
+     *           network?: { module: string, url: string, room: string },
      *           keyTimes?: { code: string, atMs: number, holdMs?: number }[],
      *           files?: { path: string, base64: string }[],
      *           wholeFiles?: boolean,
@@ -1035,6 +1121,8 @@ export function createHarness(canvas, how = {}){
                 // two and nothing else.
                 presenter: layers.graphics?.presenter ?? null,
                 media: layers.media ?? null,
+                // The translator's account, when the engine has one.
+                cork: layers.cpu?.cork ?? null,
                 // The whole path a sound takes, stage by stage. A silent run and a
                 // working one used to produce the same report.
                 audio: layers.audio ?? null,
@@ -1091,8 +1179,16 @@ export function createHarness(canvas, how = {}){
             });
         };
 
+        // The relay Winsock reaches the world through, opened here the way
+        // the launcher's worker opens its own: by the client module's URL.
+        const network = request.network
+            ? await (await import(/* @vite-ignore */ request.network.module))
+                .connectRelay({ url: request.network.url, room: request.network.room })
+            : null;
+        const logMatch = request.logMatch ? new RegExp(request.logMatch) : null;
         const app = await createApp({
             pacing: how.pacing,
+            win32: network ? { network } : undefined,
             executable: fromBase64(request.exe),
             // What the program believes it was started with, so a run can set
             // a command-line-only cvar without touching the bundle.
@@ -1138,7 +1234,14 @@ export function createHarness(canvas, how = {}){
                 ? (/** @type {any} */ call)=>{
                     if (callLog.length < (request.logLines || LIMITS.log))
                     {
-                        callLog.push(formatCall(call));
+                        const line = formatCall(call);
+                        // Only the calls a run asked about, when it named
+                        // them: a question about one family of calls should
+                        // not fill the log with the frame loop's.
+                        if (!logMatch || logMatch.test(line))
+                        {
+                            callLog.push(line);
+                        }
                     }
                 }
                 : undefined,
@@ -1146,6 +1249,11 @@ export function createHarness(canvas, how = {}){
             // something inside its own code makes no host call to record, and the
             // instruction pointer is then the only account of what it was doing --
             // which is exactly the situation once a game reaches its own main loop.
+            // Which execution engine runs the program, and the translator's
+            // own settings when it is one with a translator: a run compares
+            // engines on the same route by naming one here.
+            engine: request.engine || undefined,
+            cork: request.cork || undefined,
             jit: request.jit || undefined,
             sampling: request.sampling,
             quantum: request.quantum || undefined,
@@ -1243,6 +1351,9 @@ export function createHarness(canvas, how = {}){
             };
             result.colours = census(image);
             result.opacity = opacity(image);
+            // The frame itself, for the driver to write out as an image: a
+            // census says whether there is a picture, not what it is.
+            result.frameRgba = toBase64(image.pixels);
         }
         result.presents = presentState.presents;
 
@@ -1281,6 +1392,12 @@ export function createHarness(canvas, how = {}){
         result.profile = profile(layout);
         result.exact = exactProfile(running, layout);
         result.samples = guestSamples(metrics('cpu').samples, layout);
+        // Named rather than left to `scalars`: the translator's report is an
+        // object of objects (`exitsByTarget`, `refused`, `refusedWhy`), so the
+        // `[ready]` table drops it whole and a cork run would say nothing about
+        // why its loops stayed interpreted.
+        result.cork = metrics('cpu').cork ?? null;
+        result.differential = metrics('cpu').differential ?? null;
 
         // Named rather than left to `scalars`, which keeps only numbers and strings
         // -- every metric this layer reports is an object, so all of them were
@@ -1390,6 +1507,20 @@ export function createHarness(canvas, how = {}){
             return true;
         },
         frameReport: ()=>frameReport ? frameReport() : JSON.stringify({ ready: false }),
+        // The frame presented last, read back from the device while the run
+        // goes on: what a person sees at this present, so two runs can be
+        // compared at the same one. The pixels are the surface's own bytes,
+        // in its format, as base64.
+        frameShot: async()=>{
+            if (!running || !presentState.presented)
+            {
+                return null;
+            }
+            const surface = presentState.presented.surface;
+            const image = await readBack((await opened).device, surface);
+            return { width: image.width, height: image.height, format: surface.format,
+                pixels: toBase64(image.pixels) };
+        },
         // The tail of the engine's journal, formatted: what a category a run
         // switched on has recorded, read while the run is still going.
         /** @param {number} [count] */

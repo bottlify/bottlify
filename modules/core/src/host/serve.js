@@ -291,6 +291,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
     const contextOf = screenOf ?? ((/** @type {any} */ canvas)=>canvas.getContext('webgpu'));
     /** @type {any} */
     let app = null;
+    /** The relay transport opened for the run, closed with it. @type {any} */
+    let transport = null;
     let hidden = false;
     /** @type {import('./messages.js').Presented[]} */
     const presented = [];
@@ -319,6 +321,13 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
      */
     let reading = null;
 
+    /**
+     * Each distinct refusal of the device and how often it has been made. A
+     * frame that fails does so in a cycle of a few messages, so the count is
+     * by message rather than against the previous one.
+     * @type {Map<string, number>}
+     */
+    const gpuErrors = new Map();
     /** @param {import('./messages.js').FromEngine} message */
     const post = message=>port.postMessage(message);
     /** @param {string} name @param {unknown} payload */
@@ -350,9 +359,27 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             : [];
         const opened = await adapter.requestDevice({ requiredFeatures: features });
         // A validation error the engine did not catch drops the whole frame
-        // it was in, silently; the console is where a person looks for why.
+        // it was in, silently. It goes into the run's own journal, beside the
+        // frame it dropped, where the person reading the run looks; the
+        // console gets it only while there is no journal yet. The device
+        // repeats each refusal every frame, so a repeat is counted, not written.
         opened.addEventListener('uncapturederror', (/** @type {any} */ event)=>{
-            console.error('WebGPU:', event.error?.message ?? event.error);
+            const message = String(event.error?.message ?? event.error).replace(/\s+/g, ' ');
+            const seen = (gpuErrors.get(message) ?? 0) + 1;
+            gpuErrors.set(message, seen);
+            if (seen > 1 && seen % 256 !== 0)
+            {
+                return;
+            }
+            const line = seen > 1 ? `${message} (x${seen})` : message;
+            if (app)
+            {
+                app.log.write('error', 'gpu', line);
+            }
+            else
+            {
+                console.error('WebGPU:', line);
+            }
         });
         return {
             device: opened,
@@ -417,10 +444,19 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 throw Object.assign(new Error('the canvas would not give a WebGPU context'),
                     { reason: 'gpu' });
             }
-            const { bundle, storage, watch, hooks, device: knobs, signal: word, ...rest } = options;
+            const { bundle, storage, watch, hooks, device: knobs, signal: word, network: relay,
+                ...rest } = options;
             void word;
+            if (relay)
+            {
+                const { connectRelay } = await import(/* @vite-ignore */ relay.module);
+                transport = await connectRelay({
+                    url: relay.url, room: relay.room, token: relay.token,
+                });
+            }
             app = await createApp({
                 ...rest,
+                win32: { ...rest.win32, network: transport ?? rest.win32?.network },
                 // The page's pacing either way unless asked, with the signal
                 // word in both: a message the page posted is seen between
                 // two turns rather than at the next timed yield.
@@ -568,6 +604,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             started = null;
             reading = null;
             await ending?.dispose();
+            transport?.dispose?.();
+            transport = null;
             device?.destroy?.();
             device = null;
         },

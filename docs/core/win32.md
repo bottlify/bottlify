@@ -52,7 +52,7 @@ the module graph is built. All are optional.
 | `graphics` | thunks | none | Where GDI pixels go and which pixel formats exist. |
 | `output` | thunk | none | Where wave-out samples go. |
 | `video` | thunks | none | The decoder and the frame sink a filter graph uses. |
-| `network` | adapter `{ bind, unbind, find }` | loopback | The transport under Winsock. |
+| `network` | adapter `{ bind, unbind, find }` or a `NetworkTransport` | loopback | The transport under Winsock; `createApp` hands its own `win32.network` option here. |
 | `http` | request function | `null` | The transport under WinInet. |
 | `cursor`, `keyState`, `clipCursor` | thunks | nothing pressed, origin | The input layer, handed down. |
 | `commandLine`, `environment` | string, record | the quoted image path; `SystemRoot`, `TEMP`, `windir` under `C:\WINDOWS` | What the program is told it was started with. |
@@ -71,6 +71,7 @@ the module graph is built. All are optional.
 | `resolve(name)` | One export by name, whichever library publishes it. |
 | `gdi()` | `createSurfaceDc(attributes)` / `deleteSurfaceDc(handle)` — a DC over pixels GDI did not allocate, for the graphics layer. |
 | `queue()` | The message queue; the input layer and the driver post here. |
+| `paste(text)` | Text put on the clipboard from outside, as a paste on the page does: a program's `GetClipboardData` for `CF_TEXT`, `CF_OEMTEXT` or `CF_UNICODETEXT` answers with a copy laid down in guest memory in that format (`IsClipboardFormatAvailable`, `CountClipboardFormats` and `EnumClipboardFormats` list them), until the program empties the clipboard or the next paste replaces it. What the program set itself is answered first. |
 | `waveTick()` | Move every open wave device's play cursor; called by the driver, since nothing in the guest does. |
 | `videoTick(nowMs, soundOwedMs?)` | Advance every running filter graph and return the frame to show. |
 | `registry()` | The hive (`toJSON`/`fromJSON`/`onChanged`), whose contents outlive the process. |
@@ -78,7 +79,7 @@ the module graph is built. All are optional.
 | `com()` | The COM class registry; graphics and audio register their factories here. |
 | `heap()` | The one allocator: `allocate`, `free`, `block`, `resize`, `diagnostics`. |
 | `mappings()`, `ioCompletionWaits()`, `waveDevices()`, `waveThread()`, `criticalSections()`, `messages()`, `windows()`, `windowProcedures()` | Live views of the state below, used by `diagnostics()`. |
-| `placeWindow(hwnd, x, y, width, height)` | Place a top-level window as the system would and tell the program with `WM_MOVE` and `WM_SIZE`. |
+| `placeWindow(hwnd, x, y, width, height, how?)` | Place a top-level window as the system would and tell the program with `WM_MOVE` when it moved and `WM_SIZE` when its client size changed -- nothing for a placement that changed neither, as `DefWindowProc` says nothing for one, since a program that resets its device on `WM_SIZE` would otherwise be reset by its own reset's placement without end. `how.announce` says the size whether or not it changed: what a mode switch says to the window it lands in, which the graphics layer asks for once, at a fullscreen device's first frame, when both the window and the device exist to hear it -- a program of this era configures its viewport and its full-speed/background state on that message. |
 | `dispatchFault(fault)` | Offers a processor exception the running thread took to its structured exception handlers. `null` when the vector is not one a program is handed (see "Exceptions"); otherwise a promise of where the thread goes on, or `null` once nothing took it. The application wires `cpu.onFault` to this. |
 | `exitCode()` | Set once the program has asked to terminate -- or once an exception nothing handled, or the C runtime's `abort`, ended it; `null` before. |
 
@@ -220,7 +221,11 @@ gets its own heap, hive, queue and COM registry.
   `WM_SIZE` clips its cursor to the picture. A window has the frame its styles give it
   (`frame.js`: border, caption with title and close box, scroll bars), which `DefWindowProc`
   paints on `WM_NCPAINT` and which `GetClientRect`, `ClientToScreen` and `AdjustWindowRect` all
-  derive from the same metrics. Painting goes through the desktop surface the graphics layer
+  derive from the same metrics. `DestroyWindow` *sends* `WM_DESTROY`, then destroys the children,
+  then sends `WM_NCDESTROY`, and only then stops the handle resolving -- the procedure runs before
+  the call returns, while whatever the program keeps behind the window still exists; a window
+  whose CBT hook refused it hears nothing, one whose `WM_CREATE` answered -1 hears `WM_NCDESTROY`
+  alone. Painting goes through the desktop surface the graphics layer
   owns (`docs/core/graphics.md`): `BeginPaint` sends `WM_NCPAINT` and `WM_ERASEBKGND` first, a
   window's update area is one rectangle, a window that is invalidated marks every window painted
   after it that overlaps it, and the desktop is presented when the queue finds nothing left to
@@ -244,9 +249,16 @@ gets its own heap, hive, queue and COM registry.
   session saver treat a registry write like a file write. Roots: `HKEY_CLASSES_ROOT`,
   `HKEY_CURRENT_USER`, `HKEY_LOCAL_MACHINE`, `HKEY_USERS`.
 - **The display** (`user32/display.js`, `user32/system.js`). `displayModes(screen)` lists the sizes
-  of the era up to the display's own — 640×480, 800×600, 1024×768, 1280×720, 1920×1080, plus the
-  display's size and the current mode if not among them — at the screen's depth, every one at
-  `REFRESH_HZ = 60`. `EnumDisplaySettingsA` walks that list by index and answers the current mode
+  of the era whatever the display's own — 640×480, 800×600, 1024×768, 1280×720, 1280×800,
+  1280×832, 1440×900, 1512×982, 1600×900, 1680×1050, 1728×1117, 1920×1080, 1920×1200,
+  2560×1440, 2560×1600, 2560×1664, 2880×1800, 3024×1964, 3456×2234 (the widescreen standards
+  and the scaled and native sizes of today's laptop displays), plus the display's size and
+  the current mode if not among them — at the screen's depth, each size at 60 and at 120 Hz
+  (`REFRESH_RATES`), since a program that saved the rate of the display it was configured on
+  looks for a mode at exactly that rate; the mode in effect answers
+  `REFRESH_HZ = 60`. A mode larger than the display is not refused: the picture is a canvas the
+  page scales, so it is shown smaller, and a person on a small screen still gets the size a program
+  looks best at. `EnumDisplaySettingsA` walks that list by index and answers the current mode
   for `ENUM_CURRENT_SETTINGS` and `ENUM_REGISTRY_SETTINGS`; the enumeration ends. `GetSystemMetrics`
   and `GetDeviceCaps` answer from the same `screen`, so the desktop a program measures and the
   device it then creates agree.
@@ -405,7 +417,12 @@ implements).
 - **`SetCursorPos` moves the same cursor the input router owns**, through its `place()`: placing is
   not motion, so a relative device (DirectInput) sees nothing from it, but a real cursor warp is
   announced with `WM_MOUSEMOVE` when the position actually changes — what a mouse-look program that
-  reads its distance from the centre and warps back every frame needs to keep working.
+  reads its distance from the centre and warps back every frame needs to keep working. A placement
+  holds while the program holds the cursor — hidden, or with a button down, as in a drag that turns
+  a camera — and the pointer's positions are taken as motion from it; once the cursor is shown with
+  no button held, the pointer's next position is the cursor's again, since the page's pointer could
+  not be warped and the person is looking at it (the router's `shown()`, fed by both `cursor`
+  reporters).
 - **The `cursor` event is user32's own report.** `ShowCursor`'s display count and `SetCursor`'s
   null/non-null answer both derive one picture, `{ shown }`, reported to the page only on a change
   of that picture — a program that hides the cursor inside its frame loop does not flood the page's

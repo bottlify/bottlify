@@ -61,7 +61,14 @@ export const D3DTOP = Object.freeze({
     MODULATE4X: 6,
     ADD: 7,
     ADDSIGNED: 8,
+    ADDSIGNED2X: 9,
     SUBTRACT: 10,
+    ADDSMOOTH: 11,
+    BLENDDIFFUSEALPHA: 12,
+    BLENDTEXTUREALPHA: 13,
+    BLENDFACTORALPHA: 14,
+    BLENDTEXTUREALPHAPM: 15,
+    BLENDCURRENTALPHA: 16,
 });
 
 /** D3DTA, where a stage argument comes from. The low three bits select. */
@@ -78,9 +85,52 @@ export const D3DTA = Object.freeze({
 
 /**
  * The coordinate set D3DTSS_TEXCOORDINDEX names. The bits above it are the
- * D3DTSS_TCI_ generation modes, which this engine does not compute.
+ * D3DTSS_TCI_ generation modes (`TCI`).
  */
 export const COORD_SET_MASK = 0xffff;
+
+/**
+ * D3DTSS_TCI_*: a stage's coordinates computed from the vertex in camera
+ * space rather than read from a set it carries. The set in the low bits is
+ * then only where the result lands.
+ */
+export const TCI = Object.freeze({
+    CAMERASPACENORMAL: 0x10000,
+    CAMERASPACEPOSITION: 0x20000,
+    CAMERASPACEREFLECTIONVECTOR: 0x30000,
+    SPHEREMAP: 0x40000,
+});
+
+/** The generation mode of a D3DTSS_TEXCOORDINDEX value: zero for none. */
+export const generationOf = (/** @type {number} */ texCoordIndex)=>texCoordIndex & ~COORD_SET_MASK;
+
+/**
+ * Whether the vertex stage computes a stage's coordinates: the three
+ * camera-space modes. A sphere map is left to the set the vertex carries.
+ */
+export const generates = (/** @type {number} */ texCoordIndex)=>{
+    const mode = generationOf(texCoordIndex);
+    return mode === TCI.CAMERASPACENORMAL || mode === TCI.CAMERASPACEPOSITION
+        || mode === TCI.CAMERASPACEREFLECTIONVECTOR;
+};
+
+/**
+ * The WGSL for one generated coordinate, from the camera-space position and
+ * normal the vertex stage has in hand.
+ *
+ * @param {number} texCoordIndex @returns {string}
+ */
+export function generatedCoordinate(texCoordIndex){
+    switch (generationOf(texCoordIndex))
+    {
+        case TCI.CAMERASPACENORMAL:
+            return 'cameraNormal';
+        case TCI.CAMERASPACEREFLECTIONVECTOR:
+            return 'reflect(normalize(cameraPosition), cameraNormal)';
+        default:
+            return 'cameraPosition';
+    }
+}
 
 /** D3DFOG. */
 export const D3DFOG = Object.freeze({ NONE: 0, EXP: 1, EXP2: 2, LINEAR: 3 });
@@ -121,11 +171,22 @@ const LIGHT_STRUCT = `struct Light {
  * Direct3D defines and the direction the mix below expects. Linear fog is the
  * only mode with an end: the two exponential ones fade for ever and reach zero
  * only in the limit.
+ *
+ * The row the three numbers live in is the caller's: the fixed-function block
+ * keeps them in a row of its own, and a translated pixel shader keeps them in
+ * the block its fog binding names, and both are this one formula.
+ *
+ * @param {number} mode  D3DFOG; NONE is 0, which declares nothing.
+ * @param {string} [factors]  WGSL expression for the (start, end, density) row.
+ * @returns {string}
  */
-const FOG_FUNCTIONS = Object.freeze({
-    [D3DFOG.LINEAR]: `fn fogFactorOf(dist: f32) -> f32 {
-    let start = uniforms.fogFactors.x;
-    let end = uniforms.fogFactors.y;
+export function fogFunctionDeclaration(mode, factors = 'uniforms.fogFactors'){
+    switch (mode)
+    {
+        case D3DFOG.LINEAR:
+            return `fn fogFactorOf(dist: f32) -> f32 {
+    let start = ${factors}.x;
+    let end = ${factors}.y;
     // A range of nothing is a program asking for a step at that distance, not
     // a division by zero that erases the frame.
     if (end <= start)
@@ -134,17 +195,22 @@ const FOG_FUNCTIONS = Object.freeze({
     }
     return clamp((end - dist) / (end - start), 0.0, 1.0);
 }
-`,
-    [D3DFOG.EXP]: `fn fogFactorOf(dist: f32) -> f32 {
-    return clamp(exp(-uniforms.fogFactors.z * dist), 0.0, 1.0);
+`;
+        case D3DFOG.EXP:
+            return `fn fogFactorOf(dist: f32) -> f32 {
+    return clamp(exp(-${factors}.z * dist), 0.0, 1.0);
 }
-`,
-    [D3DFOG.EXP2]: `fn fogFactorOf(dist: f32) -> f32 {
-    let scaled = uniforms.fogFactors.z * dist;
+`;
+        case D3DFOG.EXP2:
+            return `fn fogFactorOf(dist: f32) -> f32 {
+    let scaled = ${factors}.z * dist;
     return clamp(exp(-scaled * scaled), 0.0, 1.0);
 }
-`,
-});
+`;
+        default:
+            return '';
+    }
+}
 
 /**
  * Distance attenuation, which a directional light does not have and the other
@@ -223,14 +289,14 @@ export function argumentsRead(op, arg1, arg2){
  *
  * @param {number} arg
  * @param {number} stageIndex
- * @param {number} coordSet  which coordinate set this stage samples with
+ * @param {string} coordinate  the expression this stage samples with
  * @returns {string}
  */
-function argument(arg, stageIndex, coordSet){
+function argument(arg, stageIndex, coordinate){
     const source = {
         [D3DTA.DIFFUSE]: 'input.diffuse',
         [D3DTA.CURRENT]: 'current',
-        [D3DTA.TEXTURE]: `sampleStage${stageIndex}(input.texCoord${coordSet})`,
+        [D3DTA.TEXTURE]: `sampleStage${stageIndex}(${coordinate})`,
         [D3DTA.TFACTOR]: 'uniforms.textureFactor',
         [D3DTA.SPECULAR]: 'input.specular',
     }[arg & D3DTA.SELECTMASK];
@@ -257,14 +323,14 @@ function argument(arg, stageIndex, coordSet){
  *
  * @param {number} op
  * @param {number} stageIndex
- * @param {number} coordSet
+ * @param {string} coordinate
  * @param {number} arg1 @param {number} arg2
  * @returns {string | null}
  */
-function combine(op, stageIndex, coordSet, arg1, arg2){
+function combine(op, stageIndex, coordinate, arg1, arg2){
     const read = argumentsRead(op, arg1, arg2);
-    const a = read.length > 0 ? argument(read[0], stageIndex, coordSet) : '';
-    const b = read.length > 1 ? argument(read[1], stageIndex, coordSet) : '';
+    const a = read.length > 0 ? argument(read[0], stageIndex, coordinate) : '';
+    const b = read.length > 1 ? argument(read[1], stageIndex, coordinate) : '';
     switch (op)
     {
         case D3DTOP.DISABLE:
@@ -282,8 +348,25 @@ function combine(op, stageIndex, coordSet, arg1, arg2){
             return `${a} + ${b}`;
         case D3DTOP.ADDSIGNED:
             return `${a} + ${b} - vec4f(0.5)`;
+        case D3DTOP.ADDSIGNED2X:
+            return `(${a} + ${b} - vec4f(0.5)) * 2.0`;
         case D3DTOP.SUBTRACT:
             return `${a} - ${b}`;
+        case D3DTOP.ADDSMOOTH:
+            return `${a} + ${b} - ${a} * ${b}`;
+        // The four blends: arg1 by an alpha, arg2 by its complement, the
+        // alpha from the vertex, this stage's texture, the factor or the
+        // running result. The premultiplied form adds arg1 unscaled.
+        case D3DTOP.BLENDDIFFUSEALPHA:
+            return `mix(${b}, ${a}, (input.diffuse).a)`;
+        case D3DTOP.BLENDTEXTUREALPHA:
+            return `mix(${b}, ${a}, (sampleStage${stageIndex}(${coordinate})).a)`;
+        case D3DTOP.BLENDFACTORALPHA:
+            return `mix(${b}, ${a}, (uniforms.textureFactor).a)`;
+        case D3DTOP.BLENDTEXTUREALPHAPM:
+            return `${a} + ${b} * (1.0 - (sampleStage${stageIndex}(${coordinate})).a)`;
+        case D3DTOP.BLENDCURRENTALPHA:
+            return `mix(${b}, ${a}, (current).a)`;
         default:
             throw new Error(`Unsupported texture operation ${op}`);
     }
@@ -493,6 +576,32 @@ export function generateFixedFunction(state, layout){
         assignments.push(`    out.texCoord${set} = vertex.texCoord${set}.xy;`);
     }
 
+    // A stage generating its coordinates from the vertex in camera space gets
+    // a varying of its own, with the stage's texture transform applied here
+    // as Direct3D applies it, in vertex processing, and not again at the
+    // sample. A pre-transformed vertex has no camera space: it gets zero.
+    const generated = state.stages.map(stage=>generates(stage.texCoordIndex));
+    if (generated.some(Boolean) && !layout.preTransformed)
+    {
+        assignments.push(
+            '    let cameraPosition = (uniforms.worldView * vec4f(vertex.position, 1.0)).xyz;',
+            `    let cameraNormal = ${has('normal')
+                ? 'normalize((uniforms.worldView * vec4f(vertex.normal, 0.0)).xyz)'
+                : 'vec3f(0.0, 0.0, 1.0)'};`);
+    }
+    for (const [index, stage] of state.stages.entries())
+    {
+        if (!generated[index])
+        {
+            continue;
+        }
+        varyings.push(`    @location(${location++}) generated${index}: vec4f,`);
+        assignments.push(layout.preTransformed
+            ? `    out.generated${index} = vec4f(0.0, 0.0, 1.0, 1.0);`
+            : `    out.generated${index} = ${transformedGeneration(index,
+                generatedCoordinate(stage.texCoordIndex))};`);
+    }
+
     if (state.fogMode !== D3DFOG.NONE)
     {
         varyings.push(`    @location(${location}) fogAmount: f32,`);
@@ -535,6 +644,104 @@ export function generateFixedFunction(state, layout){
             ? `    out.fogAmount = ${has('specular') ? 'vertex.specular.a' : '1.0'};`
             : '    out.fogAmount = fogFactorOf(out.position.w);'];
 
+    const lightCount = lighting === null ? 0 : lighting.lights.length;
+    const code = `${lightCount === 0 ? '' : LIGHT_STRUCT}${uniformStruct(lightCount)}
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+${functionDeclarations(lighting, state.fogMode)}${samplerDeclarations(state.stages.length, 0, 1)}
+${sampleFunctions(state.stages.length, state.stages.map((stage, index)=>(generated[index]
+        ? { projected: stage.projected ?? 0 } : null)))}
+struct VertexIn {
+${inputs}
+};
+
+struct VertexOut {
+    @builtin(position) position: vec4f,
+${varyings.join('\n')}
+};
+
+@vertex
+fn vertexMain(vertex: VertexIn) -> VertexOut {
+    var out: VertexOut;
+${position}
+${[...assignments, ...fogAmount].join('\n')}
+    return out;
+}
+
+@fragment
+fn fragmentMain(input: VertexOut) -> @location(0) vec4f {
+${fragmentBody(state, specularEnable)}
+    return current;
+}
+`;
+
+    return {
+        code,
+        label: `fixed-function:${state.fvf.toString(16)}:${state.stages.length}`
+            + (lighting === null ? '' : `:lit${lightCount}`),
+        textureCount: state.stages.length,
+    };
+}
+
+/**
+ * The block the fixed-function stages read, as WGSL declares it; the layout
+ * `UNIFORM_AT` in the renderer is this struct's.
+ *
+ * @param {number} lightCount
+ */
+function uniformStruct(lightCount){
+    return `struct Uniforms {
+    worldViewProjection: mat4x4f,
+    world: mat4x4f,
+    viewportOffset: vec2f,
+    viewportScale: vec2f,
+    textureFactor: vec4f,
+    fogColor: vec4f,
+    fogFactors: vec4f,
+    materialDiffuse: vec4f,
+    materialAmbient: vec4f,
+    materialSpecular: vec4f,
+    materialEmissive: vec4f,
+    ambient: vec4f,
+    eye: vec4f,
+    alphaRef: f32,
+    stage0: u32,
+    stage1: u32,
+    stage2: u32,
+    texTransform: array<vec4f, 32>,
+    worldView: mat4x4f,${lightCount === 0 ? '' : `
+    lights: array<Light, ${lightCount}>,`}
+};`;
+}
+
+/**
+ * A generated three-component coordinate through the stage's texture
+ * transform: (x, y, z, 1) against the four output rows the block carries,
+ * which is where a translation lands for three coordinates and where the
+ * component a projected sample divides by comes from.
+ *
+ * @param {number} index @param {string} coordinate
+ */
+function transformedGeneration(index, coordinate){
+    const row = index * 4;
+    return `vec4f(dot(uniforms.texTransform[${row}], vec4f(${coordinate}, 1.0)),`
+        + ` dot(uniforms.texTransform[${row + 1}], vec4f(${coordinate}, 1.0)),`
+        + ` dot(uniforms.texTransform[${row + 2}], vec4f(${coordinate}, 1.0)),`
+        + ` dot(uniforms.texTransform[${row + 3}], vec4f(${coordinate}, 1.0)))`;
+}
+
+/**
+ * The fragment half of the fixed function: the stage cascade over `input`'s
+ * diffuse, specular and coordinate sets, then the specular add, the fog and
+ * the alpha test, leaving the result in `current`.
+ *
+ * @param {import('./pipeline.js').PipelineState} state
+ * @param {boolean} specularEnable
+ * @param {boolean[]} [generated]  Which stages sample a coordinate the
+ *     vertex stage generated (`generated{n}`) rather than a carried set.
+ */
+function fragmentBody(state, specularEnable, generated = state.stages.map(
+    stage=>generates(stage.texCoordIndex)))
+{
     const stages = state.stages.length === 0
         ? '    var current = input.diffuse;'
         : ['    var current = input.diffuse;', ...state.stages.map((stage, index)=>{
@@ -542,15 +749,17 @@ export function generateFixedFunction(state, layout){
             // sharing one set is the ordinary way a detail or lightmap pass is
             // written, and reading set N for stage N samples a varying the
             // vertex never carried.
-            const coordSet = stage.texCoordIndex & COORD_SET_MASK;
+            const coordinate = generated[index]
+                ? `input.generated${index}`
+                : `input.texCoord${stage.texCoordIndex & COORD_SET_MASK}`;
             const color = combine(
-                stage.colorOp, index, coordSet, stage.colorArg1, stage.colorArg2);
+                stage.colorOp, index, coordinate, stage.colorArg1, stage.colorArg2);
             if (color === null)
             {
                 return `    // stage ${index} disabled`;
             }
             const alpha = combine(
-                stage.alphaOp, index, coordSet, stage.alphaArg1, stage.alphaArg2);
+                stage.alphaOp, index, coordinate, stage.alphaArg1, stage.alphaArg2);
             return `    current = vec4f((${color}).rgb, `
                 + `${alpha === null ? '(current).a' : `(${alpha}).a`});`;
         })].join('\n');
@@ -575,61 +784,93 @@ export function generateFixedFunction(state, layout){
         ? `\n    if (!(${compareExpression(state.alphaFunc, 'current.a', 'uniforms.alphaRef')}))`
             + '\n    {\n        discard;\n    }'
         : '';
-
-    const lightCount = lighting === null ? 0 : lighting.lights.length;
-    const code = `${lightCount === 0 ? '' : LIGHT_STRUCT}struct Uniforms {
-    worldViewProjection: mat4x4f,
-    world: mat4x4f,
-    viewportOffset: vec2f,
-    viewportScale: vec2f,
-    textureFactor: vec4f,
-    fogColor: vec4f,
-    fogFactors: vec4f,
-    materialDiffuse: vec4f,
-    materialAmbient: vec4f,
-    materialSpecular: vec4f,
-    materialEmissive: vec4f,
-    ambient: vec4f,
-    eye: vec4f,
-    alphaRef: f32,
-    stage0: u32,
-    stage1: u32,
-    stage2: u32,
-    texTransform: array<vec4f, 6>,${lightCount === 0 ? '' : `
-    lights: array<Light, ${lightCount}>,`}
-};
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
-${functionDeclarations(lighting, state.fogMode)}${samplerDeclarations(state.stages.length)}
-${sampleFunctions(state.stages.length)}
-struct VertexIn {
-${inputs}
-};
-
-struct VertexOut {
-    @builtin(position) position: vec4f,
-${varyings.join('\n')}
-};
-
-@vertex
-fn vertexMain(vertex: VertexIn) -> VertexOut {
-    var out: VertexOut;
-${position}
-${[...assignments, ...fogAmount].join('\n')}
-    return out;
+    return `${stages}${specular}${fog}${alphaTest}`;
 }
 
+/**
+ * A fragment stage for a draw that binds a vertex shader and no pixel
+ * shader: the fixed-function cascade, fog and alpha test over what the
+ * shader wrote -- its colours, its coordinate sets and its fog -- which is
+ * how a title of the shader-model-1 era draws nearly everything: transform
+ * and skin in a program, texture and blend in the stages.
+ *
+ * Bound as a programmable pixel stage is: the block above at group 1's first
+ * binding, the stages' textures and samplers at group 2. A varying the shader
+ * does not write is not declared -- a fragment input the vertex stage does
+ * not produce fails the pipeline -- and reads as the fixed function's own
+ * default: opaque white diffuse, black specular, zero coordinates, and no fog.
+ *
+ * @param {import('./pipeline.js').PipelineState} state
+ * @param {readonly number[]} written  The vertex stage's varying locations.
+ * @returns {{ wgsl: string, entry: string, samplers: { index: number, type: string }[],
+ *     inputs: never[], outputs: never[], reads: number[], constants: number,
+ *     error: string | null }}
+ */
+export function fixedFragmentStage(state, written){
+    const has = (/** @type {number} */ location)=>written.includes(location);
+    /** @type {string[]} */
+    const fields = ['    @builtin(position) position: vec4f,'];
+    /** @type {string[]} */
+    const carried = [];
+    // The programmable convention: colours at 0 and 1, coordinate set n at
+    // 2 + n, fog at 10 (`varyingLocation` in the translator).
+    carried.push(`    input.diffuse = ${has(0) ? 'in.v0' : 'vec4f(1.0)'};`);
+    if (has(0))
+    {
+        fields.push('    @location(0) v0: vec4f,');
+    }
+    carried.push(`    input.specular = ${has(1) ? 'in.v1' : 'vec4f(0.0)'};`);
+    if (has(1))
+    {
+        fields.push('    @location(1) v1: vec4f,');
+    }
+    const sets = state.stages.reduce(
+        (most, stage)=>Math.max(most, (stage.texCoordIndex & COORD_SET_MASK) + 1), 0);
+    for (let set = 0; set < sets; set++)
+    {
+        if (has(2 + set))
+        {
+            fields.push(`    @location(${2 + set}) t${set}: vec4f,`);
+        }
+        carried.push(`    input.texCoord${set} = `
+            + `${has(2 + set) ? `in.t${set}.xy` : 'vec2f(0.0)'};`);
+    }
+    if (state.fogMode !== D3DFOG.NONE)
+    {
+        if (has(10))
+        {
+            fields.push('    @location(10) fog: vec4f,');
+        }
+        carried.push(`    input.fogAmount = ${has(10) ? 'in.fog.x' : '1.0'};`);
+    }
+    const members = ['    diffuse: vec4f,', '    specular: vec4f,',
+        ...Array.from({ length: sets }, (_, set)=>`    texCoord${set}: vec2f,`),
+        ...(state.fogMode !== D3DFOG.NONE ? ['    fogAmount: f32,'] : [])];
+    const wgsl = `${uniformStruct(0)}
+@group(1) @binding(0) var<uniform> uniforms: Uniforms;
+${functionDeclarations(null, state.fogMode)}${samplerDeclarations(state.stages.length, 2, 0)}
+${sampleFunctions(state.stages.length)}
+struct PsIn {
+${fields.join('\n')}
+};
+
+struct Carried {
+${members.join('\n')}
+};
+
 @fragment
-fn fragmentMain(input: VertexOut) -> @location(0) vec4f {
-${stages}${specular}${fog}${alphaTest}
+fn ps_main(in: PsIn) -> @location(0) vec4f {
+    var input: Carried;
+${carried.join('\n')}
+${fragmentBody(state, state.specularEnable === true, [])}
     return current;
 }
 `;
-
     return {
-        code,
-        label: `fixed-function:${state.fvf.toString(16)}:${state.stages.length}`
-            + (lighting === null ? '' : `:lit${lightCount}`),
-        textureCount: state.stages.length,
+        wgsl, entry: 'ps_main',
+        samplers: state.stages.map((_, index)=>({ index, type: '2d' })),
+        inputs: [], outputs: [], reads: written.filter(location=>location <= 10),
+        constants: 0, error: null,
     };
 }
 
@@ -645,8 +886,7 @@ ${stages}${specular}${fog}${alphaTest}
 function functionDeclarations(lighting, fogMode){
     // Only for geometry that has a distance to fog by: a pre-transformed vertex
     // carries its factor already and would leave this declared and uncalled.
-    const curves = /** @type {Record<number, string>} */ (FOG_FUNCTIONS);
-    const fog = fogMode === D3DFOG.NONE ? '' : curves[fogMode] ?? '';
+    const fog = fogFunctionDeclaration(fogMode);
     if (lighting === null)
     {
         return fog;
@@ -685,9 +925,14 @@ const ADDRESS_FUNCTION = `fn addressCoordinate(t: f32, mode: u32, texels: f32) -
  * mip mode as an explicit level. The derivatives are taken from the raw
  * coordinate first, in uniform control flow, whatever the mode then does.
  *
- * @param {number} count @returns {string}
+ * @param {number} count
+ * @param {({ projected: number } | null)[]} [generated]
+ *     Stages whose coordinate the vertex stage generated and transformed
+ *     already, arriving as four components; `projected` names the one the
+ *     first two are divided by, or is zero.
+ * @returns {string}
  */
-function sampleFunctions(count){
+function sampleFunctions(count, generated = []){
     if (count === 0)
     {
         return '';
@@ -701,15 +946,20 @@ function sampleFunctions(count){
         // two-dimensional coordinate: (u, v, 1) through the first three rows,
         // so a translation is the third row and not the fourth. Identity rows
         // are carried for a stage without one, so the sample is one expression.
-        const transformed = index < 3
-            ? [
+        // A generated coordinate arrives transformed by the vertex stage,
+        // and a projected one is divided here, per pixel, as the rasteriser
+        // does it.
+        const generation = generated[index] ?? null;
+        const transformed = generation
+            ? `    let raw = ${generation.projected === 3 ? 'carried.xy / carried.z'
+                : generation.projected === 4 ? 'carried.xy / carried.w' : 'carried.xy'};\n`
+            : [
                 '    let extended = vec3f(carried, 1.0);',
-                `    let raw = vec2f(dot(uniforms.texTransform[${index * 2}].xyz, extended),`,
-                `        dot(uniforms.texTransform[${index * 2 + 1}].xyz, extended));`,
+                `    let raw = vec2f(dot(uniforms.texTransform[${index * 4}].xyz, extended),`,
+                `        dot(uniforms.texTransform[${index * 4 + 1}].xyz, extended));`,
                 '',
-            ].join('\n')
-            : '    let raw = carried;\n';
-        lines.push(`fn sampleStage${index}(carried: vec2f) -> vec4f {
+            ].join('\n');
+        lines.push(`fn sampleStage${index}(carried: ${generation ? 'vec4f' : 'vec2f'}) -> vec4f {
 ${transformed}    let flags = ${flags};
     let size = vec2f(textureDimensions(texture${index}, 0));
     let dx = dpdx(raw * size);
@@ -742,17 +992,21 @@ ${transformed}    let flags = ${flags};
 }
 
 /**
- * Texture and sampler bindings, one pair per stage, from binding 1 upward.
+ * Texture and sampler bindings, one pair per stage, from `first` upward in
+ * `group`: the fixed-function pipeline's own group after its block, or the
+ * programmable layout's sampler group from its start.
  *
- * @param {number} count @returns {string}
+ * @param {number} count @param {number} group @param {number} first @returns {string}
  */
-function samplerDeclarations(count){
+function samplerDeclarations(count, group, first){
     /** @type {string[]} */
     const lines = [];
     for (let index = 0; index < count; index++)
     {
-        lines.push(`@group(0) @binding(${1 + index * 2}) var texture${index}: texture_2d<f32>;`);
-        lines.push(`@group(0) @binding(${2 + index * 2}) var sampler${index}: sampler;`);
+        lines.push(`@group(${group}) @binding(${first + index * 2})`
+            + ` var texture${index}: texture_2d<f32>;`);
+        lines.push(`@group(${group}) @binding(${first + 1 + index * 2})`
+            + ` var sampler${index}: sampler;`);
     }
     return lines.join('\n');
 }

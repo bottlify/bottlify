@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
  *
  * Usage:
  *   node scripts/fetch-v86.mjs              download + verify against the lock
- *   node scripts/fetch-v86.mjs --update TAG  re-pin the lock to a release tag
+ *   node scripts/fetch-v86.mjs --update TAG  re-pin the lock to a release tag, then download
  */
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -100,6 +100,10 @@ if (updateIndex !== -1)
     }
     const repo = process.env.V86_REPO ?? 'mrwayer/v86';
     await update(repo, tag);
+    // A re-pin that left the old artifacts in place once ran a whole
+    // evening's tests against a build without the exports under test, every
+    // one of them skipping politely: the download is part of the re-pin.
+    await fetchPinned();
 }
 else
 {

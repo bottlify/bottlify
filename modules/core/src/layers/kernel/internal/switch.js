@@ -32,6 +32,9 @@
 export function createSwitcher({ cpu }){
     let switches = 0;
     let selfSwitches = 0;
+    /** The last resumes applied at a switch, newest last: which thread went where.
+     * @type {string[]} */
+    const applied = [];
 
     return {
         /**
@@ -40,7 +43,8 @@ export function createSwitcher({ cpu }){
          *
          * @param {any} outgoing  The thread currently on the CPU, or null at start-up.
          * @param {any} incoming  The thread to run.
-         * @param {Object | null} [resume]  Where it continues, if not where it stopped.
+         * @param {{ eip: number, esp?: number | null, returnValue?: number } | null} [resume]
+         *     Where it continues, if not where it stopped.
          * @returns {boolean} whether the CPU actually moved
          */
         switchTo(outgoing, incoming, resume = null){
@@ -67,6 +71,13 @@ export function createSwitcher({ cpu }){
             if (resume)
             {
                 cpu.resumeContextAt(incoming.context, resume);
+                applied.push(`${incoming.name}<-0x${(resume.eip >>> 0).toString(16)}`
+                    + (resume.esp !== null && resume.esp !== undefined
+                        ? `/0x${(resume.esp >>> 0).toString(16)}` : ''));
+                if (applied.length > 16)
+                {
+                    applied.shift();
+                }
             }
             cpu.restoreContext(incoming.context, incoming.tebAddress);
             switches++;
@@ -74,7 +85,7 @@ export function createSwitcher({ cpu }){
         },
 
         diagnostics(){
-            return { switches, selfSwitches };
+            return { switches, selfSwitches, recentResumes: applied.slice() };
         },
     };
 }

@@ -320,6 +320,15 @@ export const graphicsModule = {
                     : undefined,
                 allocate: config?.allocate,
                 free: config?.free,
+                // The same per-draw account and the same knobs Direct3D 8
+                // takes, for the same reason.
+                dumpDraws: device?.dumpDraws === true,
+                maxDraws: device?.maxDraws,
+                divergence: config?.divergence,
+                skipTexture: device?.skipTexture,
+                probeTexture: device?.probeTexture,
+                fog: device?.fog,
+                mips: device?.mips,
             }),
             // OpenGL asks for a device only when there is one, so it is the
             // one API here that a headless build can run to a finished frame.
@@ -667,6 +676,10 @@ export const graphicsModule = {
             // Told the resolution a device is created at, so the reported
             // screen becomes that resolution.
             resolution: config?.resolution,
+            // The client area of a window, which is the size a back buffer
+            // asked for as zero by zero takes. Only the layer that owns the
+            // windows can measure one, and only here is it asked for.
+            windowClientSize: config?.windowClientSize,
             // Absent in a build with no bridge behind it -- a test, an
             // inspection -- which then gets tables that refuse rather than
             // tables that publish into nowhere.
@@ -818,7 +831,7 @@ export const graphicsModule = {
                 const screen = desktop();
                 if (screen)
                 {
-                    state.presenter.present(screen);
+                    state.presenter.present({ ...screen, label: 'desktop' });
                 }
             },
         });

@@ -13,8 +13,12 @@
  * bug this project has (master plan §12.1).
  *
  * This lives in the cpu layer rather than the kernel because it is shaped by
- * the emulator's own representation. The kernel decides *when* to switch; what
+ * the executor's own representation. The kernel decides *when* to switch; what
  * a CPU context *is* belongs here, behind an opaque record.
+ *
+ * Cork alone keeps the whole register file in one 512-byte state block, so its
+ * record is a copy of that block plus the halted flag. The emulator's record
+ * stays beside it until the emulator path is retired.
  *
  * Every field was located and round-tripped against the vendored v86 before
  * being listed. Two of them are the traps:
@@ -129,6 +133,83 @@ export function restoreContext(cpu, context){
 }
 
 /**
+ * A cork-alone context: the whole state block, plus the fields the cpu module
+ * mutates on a saved context before restoring it.
+ *
+ * @typedef {Object} BlockContext
+ * @property {Uint8Array} block
+ * @property {number[]} reg32
+ * @property {number} eip
+ * @property {number} previousIp
+ * @property {number} inHlt
+ * @property {number} fsBase
+ * @property {import('../engine.js').StateLayout} layout
+ */
+
+/**
+ * Captures the running cork thread's context.
+ *
+ * The block is every register, the flags, x87, XMM and the thread's FS base,
+ * so the record is a copy of it. The retired-instruction word inside the block
+ * is the machine's rather than the thread's; a restore leaves the live word
+ * where it is, so a switch cannot make the global count go backward or count
+ * one instruction range twice.
+ *
+ * @param {any} host  A cork host.
+ * @returns {BlockContext}
+ */
+export function captureBlockContext(host){
+    const layout = host.blockLayout();
+    const block = /** @type {Uint8Array} */ (host.block().slice());
+    const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+    const registers = new Int32Array(block.buffer, block.byteOffset + layout.regs, 8);
+    return {
+        block,
+        reg32: copy(registers),
+        eip: view.getUint32(layout.eip, true) >>> 0,
+        previousIp: layout.previousIp >= 0
+            ? view.getUint32(layout.previousIp, true) >>> 0
+            : 0,
+        inHlt: host.haltedFlag(),
+        fsBase: layout.fsBase >= 0 ? view.getUint32(layout.fsBase, true) >>> 0 : 0,
+        layout,
+    };
+}
+
+/**
+ * Restores a captured cork context.
+ *
+ * @param {any} host
+ * @param {BlockContext} context
+ */
+export function restoreBlockContext(host, context){
+    const layout = context.layout;
+    const block = /** @type {Uint8Array} */ (host.block());
+    const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+    const counter = layout.counter >= 0 ? view.getUint32(layout.counter, true) >>> 0 : 0;
+    block.set(context.block);
+    const registers = new Int32Array(block.buffer, block.byteOffset + layout.regs, 8);
+    for (let index = 0; index < registers.length; index++)
+    {
+        registers[index] = context.reg32[index] | 0;
+    }
+    view.setUint32(layout.eip, context.eip >>> 0, true);
+    if (layout.previousIp >= 0)
+    {
+        view.setUint32(layout.previousIp, context.previousIp >>> 0, true);
+    }
+    if (layout.fsBase >= 0)
+    {
+        view.setUint32(layout.fsBase, context.fsBase >>> 0, true);
+    }
+    if (layout.counter >= 0)
+    {
+        view.setUint32(layout.counter, counter, true);
+    }
+    host.setHaltedFlag(context.inHlt);
+}
+
+/**
  * The TEB base the thread runs on. Kept next to the context because moving it
  * is part of switching threads, not a duty of whoever calls the switch (§12.5).
  *
@@ -136,6 +217,11 @@ export function restoreContext(cpu, context){
  * @param {number} tebAddress
  */
 export function setThreadBase(context, tebAddress){
+    if (context.block !== undefined)
+    {
+        context.fsBase = tebAddress >>> 0;
+        return;
+    }
     context.segmentOffsets[SEGMENT_FS] = tebAddress;
 }
 

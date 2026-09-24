@@ -115,6 +115,10 @@ function lookUp(table, value, what){
  * @property {number} alphaArg1
  * @property {number} alphaArg2
  * @property {number} texCoordIndex
+ * @property {number} [projected]
+ *     For a stage generating its coordinate: which component the transformed
+ *     coordinate is divided by at the sample -- 3 or 4 under
+ *     D3DTTFF_PROJECTED with that count, 0 or absent for no divide.
  */
 
 /**
@@ -180,7 +184,7 @@ export function pipelineKey(state){
         .map(stage=>[
             stage.colorOp, stage.colorArg1, stage.colorArg2,
             stage.alphaOp, stage.alphaArg1, stage.alphaArg2,
-            stage.texCoordIndex,
+            stage.texCoordIndex, stage.projected ?? 0,
         ].join(','))
         .join(';');
 

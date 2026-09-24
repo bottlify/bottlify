@@ -1,0 +1,7 @@
+{
+  "repo": "mrwayer/bottlify",
+  "tag": null,
+  "artifacts": {
+    "zstd.wasm": "sha256:0afd4fbd017a326926f7d44581195130098c2782ee2e6700d6e58ea710f80367"
+  }
+}

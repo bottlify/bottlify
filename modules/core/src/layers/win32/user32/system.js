@@ -30,6 +30,9 @@ import {
 } from './frame.js';
 import {
     DEVMODEA,
+    DISPLAY_DEVICEA,
+    DISPLAY_DEVICEW,
+    DISPLAY_DEVICE_CHARS,
     DM_BITSPERPEL,
     DM_DISPLAYFREQUENCY,
     DM_PELSHEIGHT,
@@ -106,6 +109,29 @@ export const SYS_COLORS = Object.freeze({
 /** MonitorFromRect and friends answer with this, there being one display. */
 const PRIMARY_MONITOR = 0x00010001;
 const MONITORINFOF_PRIMARY = 1;
+
+/**
+ * EnumDisplayDevices' state bits: the device carries the desktop, it is the
+ * one the desktop is carried on, and it is in use.
+ */
+const DISPLAY_DEVICE_ATTACHED_TO_DESKTOP = 0x00000001;
+const DISPLAY_DEVICE_PRIMARY_DEVICE = 0x00000004;
+const DISPLAY_DEVICE_ACTIVE = 0x20000000;
+
+/**
+ * The one adapter's name, spelled the way the drawing layer's adapter
+ * identifier spells it too: a program told the name here and the name there
+ * has to be told the same one twice, or the two halves of its display do not
+ * meet.
+ */
+const DISPLAY_ADAPTER_NAME = '\\\\.\\DISPLAY1';
+
+/**
+ * The identity a monitor that never reported one is listed under: the class
+ * every monitor belongs to and an instance of zero. It is longer than the
+ * name field and shorter than the identity field, which is where it goes.
+ */
+const DEFAULT_MONITOR_ID = 'MONITOR\\DEFAULT\\{4d36e96e-e325-11ce-bfc1-08002be10318}\\0000';
 
 /**
  * SendInput's contract: one INPUT per event, 28 bytes on 32-bit Windows --
@@ -915,6 +941,71 @@ export function createSystemFunctions({ host, live, windows, classes }){
     };
 
     /**
+     * The one implementation both EnumDisplayDevices spellings call.
+     *
+     * There is one display: asked for the devices with no name, the adapter it
+     * is on answers at index zero and nothing answers at any other index;
+     * asked for what hangs off a name, only the adapter's own name answers,
+     * with the monitor. The name given out is the one EnumDisplaySettings
+     * takes -- the pair is how a program walks from "there is a display" to
+     * the list of modes it offers, and a program refused the walk builds its
+     * resolution menu from a table of its own that no display was ever asked
+     * about.
+     *
+     * Every string field is written to its full length, zeros and all: the
+     * buffer is the caller's own stack, and a field written only as far as its
+     * text reaches leaves the rest as it was -- a program reading the state
+     * word of a structure nobody filled reads an answer out of the stack.
+     *
+     * @param {string | null} device The adapter asked about, or null for the adapters.
+     * @param {number} index Which device of the kind asked for.
+     * @param {number} out Where the caller's DISPLAY_DEVICE is.
+     * @param {boolean} wide Whether it is the wide structure.
+     */
+    const enumDisplayDevices = (device, index, out, wide)=>{
+        const layout = wide ? DISPLAY_DEVICEW : DISPLAY_DEVICEA;
+        if ((out >>> 0) === 0 || readU32(out + layout.cb) < layout.SIZE)
+        {
+            return 0;
+        }
+        const adapter = device === null;
+        const named = device !== null && device.toUpperCase() === DISPLAY_ADAPTER_NAME;
+        if ((index >>> 0) !== 0 || (!adapter && !named))
+        {
+            return 0;
+        }
+        const who = adapter
+            ? { name: DISPLAY_ADAPTER_NAME, description: 'Browser display adapter',
+                flags: DISPLAY_DEVICE_ATTACHED_TO_DESKTOP | DISPLAY_DEVICE_PRIMARY_DEVICE,
+                id: '' }
+            : { name: '', description: 'Default Monitor',
+                flags: DISPLAY_DEVICE_ATTACHED_TO_DESKTOP | DISPLAY_DEVICE_ACTIVE,
+                id: DEFAULT_MONITOR_ID };
+        /** @param {number} at @param {string} text @param {number} chars */
+        const writeField = (at, text, chars)=>{
+            const unit = wide ? 2 : 1;
+            const bytes = new Uint8Array(chars * unit);
+            const kept = text.slice(0, chars - 1);
+            for (let char = 0; char < kept.length; char++)
+            {
+                const code = kept.charCodeAt(char);
+                bytes[char * unit] = code & 0xff;
+                if (wide)
+                {
+                    bytes[char * unit + 1] = (code >>> 8) & 0xff;
+                }
+            }
+            host.writeMemory(at, bytes);
+        };
+        writeField(out + layout.DeviceName, who.name, DISPLAY_DEVICE_CHARS.DeviceName);
+        writeField(out + layout.DeviceString, who.description, DISPLAY_DEVICE_CHARS.DeviceString);
+        writeU32s(host, out + layout.StateFlags, [who.flags]);
+        writeField(out + layout.DeviceID, who.id, DISPLAY_DEVICE_CHARS.DeviceID);
+        writeField(out + layout.DeviceKey, '', DISPLAY_DEVICE_CHARS.DeviceKey);
+        return 1;
+    };
+
+    /**
      * The one implementation both AdjustWindowRect entry points call.
      *
      * Named rather than reached through `this` from inside the table below: an
@@ -1178,13 +1269,34 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * BOOL EnumDisplayDevicesA(LPCSTR lpDevice, DWORD iDevNum,
          *                         PDISPLAY_DEVICEA lpDisplayDevice, DWORD dwFlags)
          *
-         * Not implemented: DISPLAY_DEVICEA carries four fixed-length strings
-         * whose lengths differ between the ANSI and the wide form, and writing
-         * them wrong is worse than saying there are no devices to enumerate.
+         * The adapter's identity field stays empty: there is no plug-and-play
+         * device behind a page, and a made-up PCI path would hand a program's
+         * card database a vendor and model to key its choices by. Finding the
+         * field empty, a program that wants the card's numbers asks Direct3D's
+         * adapter identifier, which answers from the hardware that is there.
          */
         EnumDisplayDevicesA: {
             argBytes: 16,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([device, index, out])=>enumDisplayDevices(
+                (device >>> 0) === 0 ? null : host.readCString(device >>> 0, 32),
+                index >>> 0, out >>> 0, false),
+        },
+
+        /**
+         * BOOL EnumDisplayDevicesW(LPCWSTR lpDevice, DWORD iDevNum,
+         *                         PDISPLAY_DEVICEW lpDisplayDevice, DWORD dwFlags)
+         *
+         * The same enumeration with every string wide: twice the room, the
+         * state word moved along with it, and the size the caller declares
+         * saying which of the two structures it built.
+         */
+        EnumDisplayDevicesW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([device, index, out])=>enumDisplayDevices(
+                (device >>> 0) === 0 ? null : readWideString(device >>> 0),
+                index >>> 0, out >>> 0, true),
         },
 
         /**

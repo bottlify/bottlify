@@ -178,6 +178,52 @@ writing it never evicts compiled guest code sitting next to the routines that wr
 
 ## B. From measured optimisation work
 
+**The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
+project's own (cork), behind the unchanged `cpu` contract, migrated in a hybrid mode with the
+emulator as the fallback tier and the oracle.** Measured on a 2004 OpenGL title on an Apple M4
+Pro: 1–3 ns per guest instruction, 10–25× slower than the processor the title was written for,
+and 58 of a 92 ms frame in the emulator on a plain view. The cost is structural to an emulator
+built to boot an operating system (paging on every access, x87 as a stack in memory, one basic
+block per unit, an interpreter for the rest); per-title kernels that hand-replace hot loops buy
+one program a frame, not the engine a property. Graphics are on the GPU, so the processor side
+is the ceiling for every title; the target is 0.5–1 ns per instruction as an engine property.
+Design, scope and milestones: `roadmap/cork-x86-translator.md`. *2026-09-20.*
+
+**Translated code tests a page-flag table before every access instead of relying on the
+wasm bounds check alone.** The design's §5.1 named the browser's bounds check as the only
+check; a wasm trap, though, unwinds the region function and the registers held in its locals
+with it, so a precise fault after a trap would need every dirty local written back before
+every access — more stores than the test costs. The test is a shift, a byte load and a branch
+per access (a second load when the access may span a page); it is also what delivers
+self-modifying-code detection (a store into a page holding translated code leaves `stale`
+after the instruction), the null page and, later, the memory layer's protections, none of
+which the emulator gave a program. It stays measured: the plan's 2.9 reports the share the
+check holds on the target title, and elision for a base register already checked in the same
+block is the named follow-up if the share is material. *2026-09-20, cork 2.4.*
+
+**A call into the bridge from translated code is the `trap` import called from inside the
+region, as the design had it; a region holding x87 registers in its locals takes a `trap`
+exit instead.** The exit form came first (the same crossing count on paper, no writeback and
+reload machinery, no re-entrancy question), and the synthetic measurement showed why the
+design wanted the call: the exit and re-entry through the host's slice loop cost about
+0.6 µs per call on top of the bridge's own dispatch, and the import-calling loop ran slower
+under hybrid than on the emulator. The call writes the state block back and reads it again
+around the handler -- the prologue and epilogue halves the region already has -- so a
+callback's nested slices see a complete block and the region's locals are refreshed after;
+the x87 locals live in a per-block permutation those halves do not know, so a region with
+x87 in it keeps the exit, which the hybrid host answers through the same handler. *2026-09-20,
+cork 4.2, revised.*
+
+**Each translated region is its own wasm module, not one module per batch.** The design's
+2.6 put a batch of regions into one module to keep the module count down; the translation
+cache (2.8) keeps regions, since a batch is what the sampler happened to gather and is never
+the same twice, and a module per region is the record the store can hold and the unit a
+page write drops. The cost is the helpers repeated per module (a few kilobytes) and an
+instantiation per region rather than per batch, both measured small against the emitting a
+hit saves; the module count is bounded by the regions live, which the invalidation already
+bounds. *2026-09-20, cork 2.8.*
+
+
 **B12 — The audio pump, the DirectSound/waveOut/MSS buffer reads and the hosted MPEG provider's
 decoder callbacks stay on the engine's own thread rather than moving to a second worker, for
 now.** A split needs the buffer *writes* copied into a block an audio worker owns (the emulator's
@@ -299,6 +345,21 @@ issued zero range requests; across four cold starts, requests fell 38% for 60% m
 because misses stopped being served one block at a time. A block-fetch order recorded per bundle
 (bounded to 4096 entries) lets the next start's background filler bring in what was actually
 demanded last time, first. *2026-09-12, `9683fc51`.*
+
+**The emulator is an optional layer, and `cork` is the default engine.** What was a hard
+dependency of the package -- the emulator's artifacts in `dist/vendor/`, fetched and packed
+whether or not a launch used them -- is now selectable: a build with `vendor/prebuilt/` empty and
+the `vendor/v86` submodule absent builds, tests and runs the library's demos under `cork`, which
+loads none of it; the package still exports `./libv86.mjs` and `./v86.wasm` for a build that
+carries them, `check-package` accepts either and holds a present binary to a size floor, and a
+launch that selects `emulator` or `hybrid` without the layer is refused with
+`cpu: the emulator is not available in this build (engine "…" needs it)` rather than a fetch's
+error. `cpu.decompressZstd` left the api: the project's own decoder (step 5.0) replaced its one
+caller, and the emulator's decoder is reached directly by the differential test alone. The `jit`
+option and the `jit.*` counters stay -- the schema is the same on every engine -- and report `-1`
+under `cork`, which has no emulator compiler; the launcher's per-bundle engine selector is the
+owner's. The paired browser table (`--engine emulator` as the control) that would confirm the
+target ns per instruction is the owner's to run. *2026-09-22, cork 5.5.*
 
 ## C. Process model and porting
 

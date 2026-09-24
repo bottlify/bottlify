@@ -5,6 +5,10 @@
  */
 
 import { createV86Host } from './internal/v86-host.js';
+import { createHybridHost } from './internal/hybrid-host.js';
+import { createCorkHost } from './internal/cork-host.js';
+import { createDifferentialHost } from './internal/differential-host.js';
+import { TABLES_RESERVE } from './engine.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
 import { FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE, VECTORS } from './internal/boot-rom.js';
@@ -20,6 +24,21 @@ import { createSampleTable, creditSample, topSamples } from './internal/samples.
  * committed: the host pays only for what the guest touches.
  */
 export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
+
+/**
+ * The execution engines a launch may select (`engine.js` for the contract).
+ *
+ * `emulator` is the vendored emulator alone; `hybrid` runs the emulator with
+ * a translator taking the regions it has translated, on one register file;
+ * `cork` is the translator alone; `differential` is `hybrid` with every
+ * region replayed on the emulator and compared, for test builds. The last is
+ * named here so a configuration is refused for the right reason -- not built
+ * yet, rather than unknown -- until its step lands.
+ */
+export const ENGINES = Object.freeze(['emulator', 'hybrid', 'cork', 'differential']);
+
+/** The engines a launch can run today. */
+const BUILT_ENGINES = new Set(['emulator', 'hybrid', 'cork', 'differential']);
 
 /**
  * cpu — the guest CPU and the channel the guest calls us through.
@@ -86,6 +105,14 @@ export const CPU_COUNTERS = [
     'frameInterpreted', 'frameInterpretedAt',
 ];
 const FRAME_INTERPRETED = JIT_AT + JIT_FIELDS.length;
+// The translator's own figures, when one is attached: regions live, regions
+// discarded by a write, and the share of retired instructions it ran.
+const CORK_AT = FRAME_INTERPRETED + 2;
+CPU_COUNTERS.push('cork.regions', 'cork.invalidations', 'cork.share',
+    // And the frame's own: the share of its instructions the translator ran,
+    // the milliseconds it spent translating in it, the times translated code
+    // came back to the host in it -- what a heavy frame is read against.
+    'cork.frameShare', 'cork.frameTranslateMs', 'cork.frameLeaves');
 
 export const cpuModule = {
     name: 'cpu',
@@ -99,6 +126,20 @@ export const cpuModule = {
      */
     async create(config, moduleHost){
         const log = moduleHost?.requireApi('log');
+
+        // Refused here rather than at boot: a configuration naming an engine
+        // that does not exist is a configuration error, and the assembler
+        // reports those before any module has a machine to lose.
+        /** @type {string} */
+        const engine = config?.engine ?? 'emulator';
+        if (!ENGINES.includes(engine))
+        {
+            throw new Error(`cpu: unknown engine "${engine}" (${ENGINES.join(', ')})`);
+        }
+        if (!BUILT_ENGINES.has(engine))
+        {
+            throw new Error(`cpu: engine "${engine}" is not built yet`);
+        }
 
         /**
          * Everything this instance owns, and whether it is still open.
@@ -115,14 +156,50 @@ export const cpuModule = {
          * @type {{ host: any, thunks: any, running: boolean, tableWritten: boolean,
          *          worstInterpreted: number, worstInterpretedAt: number,
          *          interpretedBefore: number, lastFault: any, disposed: boolean,
-         *          samples: ReturnType<typeof createSampleTable>,
+         *          samples: ReturnType<typeof createSampleTable>, engine: string,
+         *          cork: import('./engine.js').Runtime | null,
+         *          corkFrame: { instructions: number, retired: number, translateMs: number,
+         *              leaves: number },
          *          faultHandler: ((fault: any) => boolean) | null }}
          */
         const state = {
             host: null, thunks: null, running: false, tableWritten: false,
             worstInterpreted: 0, worstInterpretedAt: 0, interpretedBefore: 0,
-            lastFault: null, disposed: false, samples: createSampleTable(),
+            lastFault: null, disposed: false, samples: createSampleTable(), engine,
+            cork: null,
             faultHandler: null,
+            // The translator's figures at the last frame, for the frame's own columns.
+            corkFrame: { instructions: 0, retired: 0, translateMs: 0, leaves: 0 },
+        };
+        /**
+         * Once a frame: every bucket the sampler has credited past the
+         * threshold becomes a candidate for the translator, and the pending
+         * batch is instantiated -- paced by frames, never inside a slice.
+         */
+        const feedTranslator = ()=>{
+            const cork = state.cork;
+            if (!cork)
+            {
+                return;
+            }
+            const hotThreshold = settings.cork.hotThreshold ?? 2000;
+            for (const bucket of state.samples.buckets.values())
+            {
+                // A hot bucket is handed over at the address its last slice
+                // ended on, every time that address is a new one: a bucket
+                // ends its slices at more than one place (a loop's head, the
+                // stub it calls), and the first of them said nothing about
+                // the others. The runtime keeps what it has an entry for,
+                // has queued, or found empty.
+                if (bucket.instructions >= hotThreshold && bucket.noted !== bucket.eip)
+                {
+                    bucket.noted = bucket.eip;
+                    cork.noteHot(bucket.eip, state.host.x87Top());
+                }
+            }
+            // Always: the translator queues candidates of its own (the
+            // addresses it keeps leaving for) between feeds.
+            cork.translatePending().catch(()=>{});
         };
 
         // Always on, because the whole point is never having to reproduce a
@@ -148,6 +225,25 @@ export const cpuModule = {
                 counters[4] = state.thunks ? state.thunks.capacity : 0;
                 counters[5] = state.host.eip();
                 counters[6] = state.host.trapCrossings();
+                feedTranslator();
+                if (state.cork)
+                {
+                    const cork = state.cork.counters();
+                    counters[CORK_AT] = cork.regions;
+                    counters[CORK_AT + 1] = cork.invalidations;
+                    counters[CORK_AT + 2] = cork.translatedShare;
+                    const leaves = cork.exits.untranslated + cork.exits.budget + cork.exits.trap
+                        + cork.exits.halt + cork.exits.fault + cork.exits.stale;
+                    const instructions = state.host.instructionCount();
+                    const last = state.corkFrame;
+                    const ran = instructions - last.instructions;
+                    counters[CORK_AT + 3] = ran > 0 ? (cork.retired - last.retired) / ran : 0;
+                    counters[CORK_AT + 4] = cork.translateMs - last.translateMs;
+                    counters[CORK_AT + 5] = leaves - last.leaves;
+                    state.corkFrame = {
+                        instructions, retired: cork.retired, translateMs: cork.translateMs, leaves,
+                    };
+                }
                 const jit = state.host.jitState();
                 // An emulator that refused to answer reports `-1` rather than a
                 // record, and reading fields off a number leaves every counter
@@ -159,6 +255,16 @@ export const cpuModule = {
                         const value = jit[JIT_FIELDS[field]];
                         counters[JIT_AT + field] = typeof value === 'number'
                             ? value : Number(value);
+                    }
+                }
+                else
+                {
+                    // No emulator compiler on this engine (`cork`): the columns
+                    // are kept and say `-1`, not the zero a never-read counter
+                    // would look like a dead compiler by.
+                    for (let field = 0; field < JIT_FIELDS.length; field++)
+                    {
+                        counters[JIT_AT + field] = -1;
                     }
                 }
                 counters[FRAME_INTERPRETED] = state.worstInterpreted;
@@ -177,6 +283,11 @@ export const cpuModule = {
             // hundreds of megabytes of it. Must stay a power of two -- the
             // emulator requires it.
             memorySize: config?.memorySize ?? DEFAULT_MEMORY_SIZE,
+            // The translator's module, imported at boot for `hybrid`; absent,
+            // hybrid runs with no translator attached.
+            engineUrl: config?.engineUrl ?? null,
+            /** @type {import('./engine.js').EngineConfig} */
+            cork: config?.cork ?? {},
             trapPort: config?.trapPort ?? 0xb077,
             entryVector: config?.entryVector ?? 0x7000,
             initialStack: config?.initialStack ?? 0x300000,
@@ -201,7 +312,7 @@ export const cpuModule = {
         /** @type {(id: number) => void} */
         let dispatch = ()=>{};
 
-        /** Every entry point that needs a running emulator goes through this. */
+        /** Every entry point that needs a running machine goes through this. */
         const started = ()=>{
             if (!state.host)
             {
@@ -210,7 +321,37 @@ export const cpuModule = {
             return state.host;
         };
 
-        const fpu = createFpu({ get wasm_memory(){ return started().cpu().wasm_memory; } });
+        const takeHostFault = ()=>{
+            if (state.lastFault === null && state.host
+                && typeof state.host.fault === 'function')
+            {
+                state.lastFault = state.host.fault();
+            }
+        };
+
+        const captureCurrentContext = ()=>{
+            const host = started();
+            return typeof host.captureContext === 'function'
+                ? host.captureContext()
+                : captureContext(host.cpu());
+        };
+
+        const emulatorFpu = createFpu({
+            get wasm_memory(){ return started().cpu().wasm_memory; },
+        });
+        const activeFpu = ()=>{
+            const host = started();
+            return typeof host.fpu === 'function' ? host.fpu() : emulatorFpu;
+        };
+        const fpu = {
+            /** @param {number} value */
+            setResult: value=>activeFpu().setResult(value),
+            /** @param {number} index */
+            get: index=>activeFpu().get(index),
+            pop: ()=>activeFpu().pop(),
+            depth: ()=>activeFpu().depth(),
+            controlWord: ()=>activeFpu().controlWord(),
+        };
 
         current = state;
         return {
@@ -224,19 +365,24 @@ export const cpuModule = {
                 // What anything placing an image has to fit inside. A base
                 // chosen without it is a guess about how much memory the
                 // machine was given, and a wrong guess writes past the end.
-                memorySize: settings.memorySize,
+                // Under hybrid the top of the emulator's RAM is the tables';
+                // cork allocates its state block and tables beside the guest's
+                // full RAM, so nothing is carved out of it.
+                memorySize: engine === 'cork'
+                    ? settings.memorySize
+                    : settings.memorySize - (engine === 'emulator' ? 0 : TABLES_RESERVE),
                 // Where our own boot ROM sits. Worth registering as a region
                 // by whoever lays out memory: a fault leaves the processor
                 // standing in the stub behind its vector, and a report that
                 // cannot name that address calls the engine's own code
                 // unmapped -- which is the one place a reader should not be
-                // sent to look for a guest's bug.
-                romBase: ROM_BASE,
-                romSize: ROM_SIZE,
+                // sent to look for a guest's bug. Cork has no ROM.
+                romBase: engine === 'cork' ? -1 : ROM_BASE,
+                romSize: engine === 'cork' ? 0 : ROM_SIZE,
             },
 
             /**
-             * Starts the emulator.
+             * Starts the selected engine.
              *
              * Separate from `create` on purpose: building the module graph should
              * be cheap and should not require the several megabytes of vendor
@@ -246,19 +392,101 @@ export const cpuModule = {
              * Throws if *this instance* has already booted. A different
              * instance that has booted -- the one a process replacement is
              * retiring, say -- has no bearing on this one: each keeps its own
-             * emulator, and only its own.
+             * machine, and only its own.
              *
-             * @param {Object} artifacts
-             * @param {string} artifacts.moduleUrl
-             * @param {ArrayBuffer} artifacts.wasmBytes
+             * Under `cork`, no emulator artifact is fetched or instantiated; the
+             * translator module named by `engineUrl` supplies the host's own
+             * memory and runtime.
+             *
+             * @param {Object} [artifacts]
+             * @param {string} [artifacts.moduleUrl]
+             * @param {ArrayBuffer} [artifacts.wasmBytes]
              */
-            async boot({ moduleUrl, wasmBytes }){
+            async boot(artifacts = {}){
                 if (state.host)
                 {
                     throw new Error('cpu: already booted');
                 }
                 state.lastFault = null;
-                state.host = await createV86Host({ ...settings, moduleUrl, wasmBytes });
+                if (engine === 'cork')
+                {
+                    if (!settings.engineUrl)
+                    {
+                        throw new Error('cpu: engine "cork" needs an engineUrl');
+                    }
+                    const engineModule = await import(settings.engineUrl);
+                    state.host = createCorkHost({
+                        engine: engineModule,
+                        memorySize: settings.memorySize,
+                        trapPort: settings.trapPort,
+                        entryVector: settings.entryVector,
+                        initialStack: settings.initialStack,
+                        cork: settings.cork,
+                    });
+                    state.cork = state.host.cork();
+                }
+                else
+                {
+                    const { moduleUrl, wasmBytes } = artifacts;
+                    if (!moduleUrl || !wasmBytes)
+                    {
+                        // A build without the emulator's artifacts, or a launch
+                        // that named none: the optional layer is not there.
+                        throw new Error('cpu: the emulator is not available in this'
+                            + ` build (engine "${engine}" needs it)`);
+                    }
+                    const emulator = await createV86Host({ ...settings, moduleUrl, wasmBytes });
+                    // Under `hybrid` the emulator's host is composed with the
+                    // translator's runtime, built over the emulator's own memory
+                    // and register file by the module the configuration names.
+                    // Without one the composition is the emulator's host under
+                    // another name, which runs a program exactly as the emulator
+                    // alone does. `differential` is the same composition plus a
+                    // replay of every region on the emulator, so it loads the
+                    // module's snapshot machinery too.
+                    let engineModule = null;
+                    const corkLayout = emulator.stateLayout(TABLES_RESERVE);
+                    if ((engine === 'hybrid' || engine === 'differential') && settings.engineUrl)
+                    {
+                        engineModule = await import(settings.engineUrl);
+                        const { createEngine } = engineModule;
+                        state.cork = createEngine({
+                            memory: emulator.wasmMemory(),
+                            layout: corkLayout,
+                            // A differential build logs every store's old bytes, so the
+                            // replay can rewind the translator's writes first.
+                            config: { trapPort: settings.trapPort, ...settings.cork,
+                                ...(engine === 'differential' ? { undoLog: true } : {}) },
+                            read: emulator.readByte,
+                            imports: {
+                                // The call channel from inside translated code:
+                                // the handler the port write reaches, on the
+                                // register file the region wrote back; 1 when it
+                                // moved EIP or stopped the machine, so the region
+                                // leaves rather than going on.
+                                trap: (/** @type {number} */ value)=>{
+                                    const at = emulator.eip();
+                                    emulator.raiseTrap(value);
+                                    return emulator.eip() !== at || emulator.halted() ? 1 : 0;
+                                },
+                                getEflags: emulator.getEflags,
+                                x87Read: ()=>0,
+                                rdtsc: ()=>emulator.readTsc(),
+                                handoffPage: emulator.handoffPage,
+                                handoffHash: emulator.handoffHash,
+                                dirtyCode: emulator.dirtyCode,
+                            },
+                        });
+                    }
+                    state.host = engine === 'hybrid'
+                        ? createHybridHost({ emulator, cork: state.cork })
+                        : engine === 'differential'
+                            ? createDifferentialHost({
+                                emulator, cork: state.cork, engine: engineModule,
+                                memory: emulator.wasmMemory(), layout: corkLayout,
+                            })
+                            : emulator;
+                }
                 state.thunks = createThunkTable({
                     base: settings.thunkBase,
                     port: settings.trapPort,
@@ -275,7 +503,7 @@ export const cpuModule = {
                     // would come back as "trap has no implementation" -- true,
                     // and the wrong thing to have been told.
                     const vector = id - FAULT_TRAP_BASE;
-                    if (vector >= 0 && vector < VECTORS)
+                    if (engine !== 'cork' && vector >= 0 && vector < VECTORS)
                     {
                         const fault = readFault(
                             vector,
@@ -319,8 +547,14 @@ export const cpuModule = {
              * look the same. Null once this instance is disposed, along with
              * everything else it never booted.
              */
-            fault: ()=>state.lastFault
-                && { ...state.lastFault, text: describeFault(state.lastFault) },
+            fault(){
+                if (!state.disposed)
+                {
+                    takeHostFault();
+                }
+                return state.lastFault
+                    && { ...state.lastFault, text: describeFault(state.lastFault) };
+            },
 
             /**
              * Stops the machine with a fault of the host's own naming, found
@@ -375,6 +609,7 @@ export const cpuModule = {
             run(){
                 state.running = true;
                 started().run();
+                takeHostFault();
             },
 
             stop(){
@@ -473,7 +708,7 @@ export const cpuModule = {
                 let instructions = 0;
                 try
                 {
-                    instructions = machine.cpu().run_slice(maxInstructions) >>> 0;
+                    instructions = machine.runSlice(maxInstructions) >>> 0;
                 }
                 catch (e){
                     // An exception the processor could not deliver. The
@@ -509,8 +744,9 @@ export const cpuModule = {
                     // vector would have ended on, had one been reached.
                     machine.halt();
                 }
-                // Folds the emulator's word into the count before it can wrap.
+                // Folds the machine's word into the count before it can wrap.
                 machine.instructionCount();
+                takeHostFault();
                 // One counter read and one comparison per slice, so that a
                 // frame can name the code the interpreter was in. The slice is
                 // already thousands of times more expensive than this.
@@ -531,12 +767,16 @@ export const cpuModule = {
                 if (samplingEnabled && instructions > 0)
                 {
                     creditSample(state.samples, machine.eip(), instructions);
+                    if (settings.cork.feed === 'slice')
+                    {
+                        feedTranslator();
+                    }
                 }
                 return instructions;
             },
 
             /** @returns {any} the running thread's full CPU state */
-            captureContext: ()=>captureContext(started().cpu()),
+            captureContext: captureCurrentContext,
 
             /**
              * Points a saved context at where a parked thread should carry on,
@@ -599,7 +839,13 @@ export const cpuModule = {
              */
             restoreContext(context, threadBase){
                 setThreadBase(context, threadBase);
-                restoreContext(started().cpu(), context);
+                const host = started();
+                if (typeof host.restoreContext === 'function')
+                {
+                    host.restoreContext(context);
+                    return;
+                }
+                restoreContext(host.cpu(), context);
             },
 
             /**
@@ -613,7 +859,7 @@ export const cpuModule = {
              * @returns {any}
              */
             newContext({ entry, stackTop }){
-                const context = captureContext(started().cpu());
+                const context = captureCurrentContext();
                 context.eip = entry;
                 context.reg32[4] = stackTop; // ESP
                 context.reg32[5] = stackTop; // EBP
@@ -621,23 +867,21 @@ export const cpuModule = {
                 return context;
             },
 
+            instructionCount: ()=>started().instructionCount(),
+            compiledModules: ()=>started().compiledModules(),
+            interpretedSteps: ()=>started().interpretedSteps(),
+            hostWrittenBytes: ()=>started().hostWrittenBytes(),
             /**
-             * Decompresses a zstd frame without awaiting anything.
-             *
-             * Here because the decoder is inside the emulator's wasm and this is
-             * the layer allowed to know that. What uses it is the bundle reader,
-             * which has to answer a guest's read while the CPU is stopped inside
-             * one instruction -- so a promise is not an option.
+             * The emulator's own zstd decoder, which a bundle read can use
+             * while the emulator is loaded: it answers synchronously, as a
+             * guest read needs, and is several times faster than this project's
+             * own. Under `cork` there is none -- the host has no such member --
+             * so the caller falls back to `modules/core/src/zstd.js`.
              *
              * @param {Uint8Array} packed @param {number} expectedLength
              */
             decompressZstd: (packed, expectedLength)=>
                 started().decompressZstd(packed, expectedLength),
-
-            instructionCount: ()=>started().instructionCount(),
-            compiledModules: ()=>started().compiledModules(),
-            interpretedSteps: ()=>started().interpretedSteps(),
-            hostWrittenBytes: ()=>started().hostWrittenBytes(),
             /**
              * The emulator's account of where the guest ran, by address and
              * weighted by instructions. Kept only between start and stop, and
@@ -676,18 +920,32 @@ export const cpuModule = {
         const instance = current;
         if (!instance || !instance.host)
         {
-            return { name: 'cpu', version: '0.1.0', status: 'created', metrics: {} };
+            return {
+                name: 'cpu', version: '0.1.0', status: 'created',
+                metrics: instance ? { engine: instance.engine } : {},
+            };
         }
         return {
             name: 'cpu',
             version: '0.1.0',
             status: 'ready',
             metrics: {
+                // Which execution engine this launch selected, so a report
+                // says what the figures below were measured on.
+                engine: instance.engine,
                 running: instance.running,
                 instructions: instance.host.instructionCount(),
                 protectedMode: instance.host.inProtectedMode(),
                 traps: instance.thunks ? instance.thunks.size : 0,
                 trapCapacity: instance.thunks ? instance.thunks.capacity : 0,
+                // How many traps the host has answered since boot, so a
+                // program stuck in a trap is visible as a count that grows
+                // with the turns.
+                trapCrossings: instance.host.trapCrossings(),
+                // Under cork, the last slices: where each began and ended and what
+                // it retired, so a run that makes no progress says where it sits.
+                recent: instance.host.recentSlices ? instance.host.recentSlices() : null,
+                recentStarts: instance.host.recentStarts ? instance.host.recentStarts() : null,
                 // Whether the emulator is compiling guest code at all, and
                 // how much of it runs compiled rather than interpreted.
                 //
@@ -717,6 +975,13 @@ export const cpuModule = {
                     overflow: instance.samples.overflow,
                     top: topSamples(instance.samples, 64),
                 },
+                // The translator's own report, or null when none is attached.
+                cork: instance.cork ? instance.cork.diagnostics() : null,
+                // The differential's own account, or null when the engine is
+                // not one with a replay.
+                differential: typeof instance.host?.differentialDiagnostics === 'function'
+                    ? instance.host.differentialDiagnostics()
+                    : null,
             },
         };
     },
@@ -724,6 +989,14 @@ export const cpuModule = {
     async dispose(){
         if (current)
         {
+            // The translator's own bookkeeping -- a directory store's index --
+            // lands before the machine goes away, so the next run finds this
+            // one's regions in it. Awaiting also keeps a put in flight from
+            // rejecting after the store is gone.
+            if (current.cork && typeof current.cork.flush === 'function')
+            {
+                await current.cork.flush();
+            }
             if (current.host)
             {
                 current.host.stop();

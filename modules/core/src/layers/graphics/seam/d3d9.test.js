@@ -153,24 +153,36 @@ function machine(){
 /**
  * The seam over a root, as the entry point would publish it.
  *
- * @param {{ caps?: object }} [options]
+ * @param {{ caps?: object,
+ *           windowClientSize?: ((window: number) => { width: number,
+ *               height: number } | null) | null }} [options]
  */
 function seamed(options = {}){
     const box = machine();
     /** @type {string[]} */
     const divergences = [];
-    /** @type {[number, number, number | undefined, boolean | undefined][]} */
+    /** @type {(number | boolean | string | undefined)[][]} */
     const resolutions = [];
     const publisher = createPublisher({ publishInterface: box.publishInterface });
+    // One measurable window, so a size asked for as zero has a client area to
+    // be answered with; a test that wants the unmeasurable path passes null.
+    /** @param {number} window */
+    const measure = window=>{
+        return window === HWND ? { width: 640, height: 480 } : null;
+    };
+    const windowClientSize = options.windowClientSize ?? measure;
     const seam = createDirect3D9Seam({
         publisher,
         memory: box.services,
         screen: ()=>SCREEN,
+        windowClientSize,
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         /** @param {number} w @param {number} h
-         *  @param {{ window?: number, fullscreen?: boolean }} [where] */
-        resolution: (w, h, where)=>resolutions.push([w, h, where?.window, where?.fullscreen]),
+         *  @param {{ window?: number, fullscreen?: boolean, announce?: boolean }} [where] */
+        resolution: (w, h, where)=>resolutions.push(where?.announce
+            ? [w, h, where?.window, where?.fullscreen, 'announced']
+            : [w, h, where?.window, where?.fullscreen]),
         identity: ()=>({ vendor: 'nvidia', architecture: 'ampere', description: '' }),
     });
     // The device reports its own divergences: the assembling caller hands
@@ -288,6 +300,25 @@ test('a fullscreen device names the window it takes with it', ()=>{
     assert.deepEqual(h.resolutions.at(-1), [64, 64, 0x777, true]);
 });
 
+test('a fullscreen device tells its window the mode at its first frame, once', ()=>{
+    // A mode switch resizes the window and the program hears WM_SIZE for it
+    // once its device exists. A window already at the mode's size hears
+    // nothing from the placement at creation, so the first frame says it.
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root, { Windowed: 0, hDeviceWindow: 0x777 });
+    assert.equal(h.resolutions.length, 1, 'creation placed the window');
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.deepEqual(h.resolutions.at(-1), [64, 64, 0x777, true, 'announced']);
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.equal(h.resolutions.length, 2, 'the second frame says nothing');
+
+    const windowed = h.createDevice(h.create()).device;
+    const before = h.resolutions.length;
+    assert.equal(h.device(windowed, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.equal(h.resolutions.length, before, 'a windowed device has no mode to announce');
+});
+
 test('a reset that changes the mode names the window it presents into', ()=>{
     // Leaving fullscreen resets to the windowed size, and the window has to be
     // named then too: a window left at the mode's size leaves the program
@@ -332,20 +363,65 @@ test('a device is refused for the behaviour a program must not ask with', ()=>{
     h.release(root);
 });
 
-test('a zero back buffer size windowed is filled in from the display and written back', ()=>{
+test('a zero back buffer size windowed is the window\'s client area, written back', ()=>{
+    // Zero means the client area of the device window, which is what the real
+    // device answers. Answered with the display instead, a program lays out and
+    // rasterises against a screen its window does not have -- and the size it is
+    // told is one no window can be placed at.
     const h = seamed();
     const root = h.create();
     const { hr, device, parameters } = h.createDevice(root, {
         BackBufferWidth: 0, BackBufferHeight: 0, BackBufferFormat: 0, BackBufferCount: 0,
     });
     assert.equal(hr, D3D_OK);
+    assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferWidth), 640);
+    assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferHeight), 480);
+    assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferFormat),
+        D3DFMT.X8R8G8B8);
+    assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferCount), 1);
+    assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, false],
+        'and the screen the program is told it has is its window');
+    assert.deepEqual(h.divergences, [], 'a window that was measured is not an assumption');
+    h.release(device);
+    h.release(root);
+});
+
+test('a zero back buffer size with no window to measure falls back to the display', ()=>{
+    // The window the parameters name is the focus window a creation was given;
+    // one that measures nothing leaves the display as the nearest size, which
+    // is an assumption and is reported as one.
+    const h = seamed({ windowClientSize: ()=>null });
+    const root = h.create();
+    const { hr, device, parameters } = h.createDevice(root, {
+        BackBufferWidth: 0, BackBufferHeight: 0,
+    });
+    assert.equal(hr, D3D_OK);
     assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferWidth),
         SCREEN.width);
     assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferHeight),
         SCREEN.height);
-    assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferFormat),
-        D3DFMT.X8R8G8B8);
-    assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferCount), 1);
+    assert.ok(h.divergences.some(line=>/zero by zero/.test(line)),
+        'the assumption is reported rather than made quietly');
+    h.release(device);
+    h.release(root);
+});
+
+test('a fullscreen device asked for zero by zero is not made at zero', ()=>{
+    // A fullscreen device's back buffer is the mode, and Direct3D refuses the
+    // creation outright rather than carrying a zero. The display stands for the
+    // mode here: a device made at zero leaves the program computing every
+    // layout against a screen that is not there.
+    const h = seamed();
+    const root = h.create();
+    const { hr, device, parameters } = h.createDevice(root, {
+        BackBufferWidth: 0, BackBufferHeight: 0, Windowed: 0, hDeviceWindow: 0x777,
+    });
+    assert.equal(hr, D3D_OK);
+    assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferWidth),
+        SCREEN.width);
+    assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferHeight),
+        SCREEN.height);
+    assert.deepEqual(h.resolutions.at(-1), [SCREEN.width, SCREEN.height, 0x777, true]);
     h.release(device);
     h.release(root);
 });
@@ -641,8 +717,8 @@ test('a query answers through its vtable, and a null pointer only asks whether i
     assert.equal(call('GetDataSize', []), 4);
     const data = 0x3100;
     h.fields.writeU32(data, 0xdeadbeef);
-    assert.equal(call('GetData', [data, 4, 1]), 1, 'S_FALSE before an issue');
-    assert.equal(h.fields.readU32(data), 0xdeadbeef, 'and nothing written');
+    assert.equal(call('GetData', [data, 4, 1]), D3D_OK, 'signalled as created, before any issue');
+    assert.equal(h.fields.readU32(data), 1, 'and the event reads as done');
     assert.equal(call('Issue', [1]), D3D_OK);
     assert.equal(call('GetData', [data, 4, 1]), D3D_OK);
     assert.equal(h.fields.readU32(data), 1);

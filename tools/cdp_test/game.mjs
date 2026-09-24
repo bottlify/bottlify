@@ -22,7 +22,7 @@
  *                                  [--command-line STRING]
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
- *                                  [--exact]
+ *                                  [--exact] [--cpu-profile SECONDS]
  */
 
 import { deflateSync } from 'node:zlib';
@@ -33,9 +33,27 @@ import { fileURLToPath } from 'node:url';
 import { launchWithGpu, shutdown } from './browser.mjs';
 import { CdpEndpoint } from './cdp.mjs';
 import { serveStatic } from './server.mjs';
+import { describeProfile, profileWorkers, summarise } from './profile.mjs';
 import { openBundle } from '../btl.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
+
+/**
+ * When an action happens: a presented-frame count (`120`), or a time since
+ * the first presented frame (`12s`) -- the clock, not the frame count, is
+ * what a program's screens arrive on, so a route timed in seconds survives
+ * a change in the frame rate. An unresolved time is a frame number of -1
+ * until the harness sees the clock pass it.
+ *
+ * @param {string | undefined} text
+ */
+const afterOf = text=>{
+    if (text !== undefined && /^\d+(\.\d+)?s$/.test(text))
+    {
+        return { after: -1, afterSeconds: Number(text.slice(0, -1)) };
+    }
+    return { after: Number(text) || 30 };
+};
 const REPO_ROOT = resolve(TOOL_ROOT, '..', '..');
 const PACKAGE_DIR = join(REPO_ROOT, 'modules', 'core');
 const BUNDLES_DIR = join(REPO_ROOT, 'bundles');
@@ -162,6 +180,21 @@ function parse(argv){
         // title that reaches its loop and would otherwise run out the turns
         // hours later. Zero means the turns alone decide.
         runSeconds: number('--run-seconds', 0),
+        // The browser's own sampling profiler on the engine's workers for
+        // this many seconds from the start (or until the run ends): which
+        // functions -- translated regions by address, the interpreter, the
+        // runtime, the layers -- the engine thread's time went to.
+        cpuProfile: number('--cpu-profile', 0),
+        cpuProfileFrom: number('--cpu-profile-from', 0),
+        // V8 flags for the browser ("--no-liftoff", "--liftoff-only"): how a run
+        // depends on the wasm tiers.
+        jsFlags: argv.includes('--js-flags') ? argv[argv.indexOf('--js-flags') + 1] : undefined,
+        // The translator's own settings as JSON ('{"countTransfers":true}').
+        corkConfig: argv.includes('--cork-config')
+            ? JSON.parse(argv[argv.indexOf('--cork-config') + 1]) : undefined,
+        // Which execution engine runs the program (`emulator`, the default,
+        // or `hybrid` with the translator), so two runs differ by that alone.
+        engine: argv.includes('--engine') ? argv[argv.indexOf('--engine') + 1] : undefined,
         // The display the program is told it has, as `WxH`. The launcher
         // names the person's own screen, which is rarely a size a program of
         // this era lists, so what a title does on one is a different path.
@@ -183,6 +216,9 @@ function parse(argv){
         // is where a program makes its decisions; something that only happens
         // once a title is up needs more than that.
         logLines: number('--log-lines', 0),
+        // Only the calls whose line matches this expression are kept, so a
+        // question about one family of calls is answered by the whole run.
+        logMatch: argv.includes('--log-match') ? argv[argv.indexOf('--log-match') + 1] : null,
         // Where every draw of the last frame landed, and under what state.
         // Off unless asked for: it transforms every vertex of every draw a
         // second time on the processor.
@@ -221,8 +257,8 @@ function parse(argv){
             {
                 return [];
             }
-            const [x, y, after] = argv[index + 1].split(',').map(Number);
-            return [{ x, y, after: after || 30 }];
+            const [x, y, after] = argv[index + 1].split(',');
+            return [{ x: Number(x), y: Number(y), ...afterOf(after) }];
         }),
         // Key taps in the program's own keyboard codes, after that many
         // presented frames each, as `Code,after`: pressed on one frame and
@@ -234,8 +270,36 @@ function parse(argv){
                 return [];
             }
             const [code, after] = argv[index + 1].split(',');
-            return [{ code, after: Number(after) || 30 }];
+            return [{ code, ...afterOf(after) }];
         }),
+        // Text typed into whatever has the focus, one character per presented
+        // frame from `after` on, as `text,after`: each character is a key
+        // press with its character, the way the page's own keyboard delivers
+        // one. The text may not contain a comma.
+        typed: argv.flatMap((flag, index)=>{
+            if (flag !== '--type')
+            {
+                return [];
+            }
+            const at = argv[index + 1].lastIndexOf(',');
+            return [{ text: argv[index + 1].slice(0, at),
+                ...afterOf(argv[index + 1].slice(at + 1)) }];
+        }),
+        // Text pasted into whatever has the focus at frame `after`, as
+        // `text,after`: onto the clipboard, then the Control-V a program
+        // pastes on, the way the page's paste gesture delivers one.
+        pasted: argv.flatMap((flag, index)=>{
+            if (flag !== '--paste')
+            {
+                return [];
+            }
+            const at = argv[index + 1].lastIndexOf(',');
+            return [{ text: argv[index + 1].slice(0, at),
+                ...afterOf(argv[index + 1].slice(at + 1)) }];
+        }),
+        // The relay the run's Winsock reaches the world through, as the
+        // launcher names it: `--network wss://host/relay` joins room `harness`.
+        network: argv.includes('--network') ? argv[argv.indexOf('--network') + 1] : null,
         fog: !argv.includes('--no-fog'),
         mips: !argv.includes('--no-mips'),
         // Fields of the graphics layer's configuration, as `createApp` takes
@@ -392,6 +456,65 @@ function symbolName(at, symbols){
 }
 
 /**
+ * The translator's own account, when an engine has one: the share of retired
+ * instructions it ran, why the rest ran interpreted (the refused opcodes and
+ * the untranslated exits by target), and how much translating cost. The
+ * loading-phase question -- is a loop left interpreted by a policy or by a
+ * decoder gap -- is answered by `exitsByTarget`'s reasons and `refusedWhy`,
+ * which the `[ready]` table drops because their shapes are not scalars.
+ *
+ * @param {any} cork
+ * @param {(text: string) => void} say
+ */
+function describeCork(cork, say){
+    const share = cork.translatedShare ?? 0;
+    say(`  cork: ${cork.regions} regions, ${cork.entries} entries, ${cork.modules} modules`
+        + `, share ${(share * 100).toFixed(1)}%`
+        + ` (retired ${cork.retired ?? 0})`
+        + (cork.relinks ? `, ${cork.relinked} regions relinked in ${cork.relinks} relinks` : ''));
+    say(`    volatile pages: ${cork.volatilePages ?? 0}`
+        + `  invalidations: ${cork.invalidations ?? 0}`
+        + `  dropped: ${cork.dropped ?? 0}`
+        + `  queued: ${cork.queued ?? 0}`
+        + `  barren: ${cork.barren ?? 0}`
+        + `  queueDrops: ${cork.queueDrops ?? 0}`
+        + `  forced steps: ${cork.forcedSteps ?? 0}`
+        + `  cache: ${cork.cacheHits ?? 0} hit / ${cork.cacheMisses ?? 0} miss`);
+    const exits = cork.exits ?? {};
+    say(`    exits: ${Object.entries(exits).map(([kind, count])=>`${kind}=${count}`).join(' ')}`
+        + (cork.transfers ? `  transfers through the hash: ${cork.transfers}` : ''));
+    if (typeof cork.translateMs === 'number')
+    {
+        say(`    translate ms: ${cork.translateMs.toFixed(1)}`
+            + ` (forming ${cork.formingMs?.toFixed(1)} lookup ${cork.lookupMs?.toFixed(1)}`
+            + ` emit ${cork.emitMs?.toFixed(1)} encode ${cork.encodeMs?.toFixed(1)}`
+            + ` store ${cork.storeMs?.toFixed(1)} instantiate ${cork.instantiateMs?.toFixed(1)}`
+            + ` publish ${cork.publishMs?.toFixed(1)} worker ${cork.workerMs?.toFixed(1)})`);
+    }
+    const refused = Object.entries(cork.refused ?? {});
+    if (refused.length > 0)
+    {
+        say(`    refused opcodes: ${refused.map(([opcode, count])=>`${opcode} x${count}`)
+            .join(', ')}`);
+        const why = Object.entries(cork.refusedWhy ?? {});
+        if (why.length > 0)
+        {
+            say(`      ${why.map(([reason, count])=>`${reason} x${count}`).join('; ')}`);
+        }
+    }
+    const byTarget = cork.exitsByTarget ?? [];
+    if (byTarget.length > 0)
+    {
+        say(`    untranslated exits by target:`);
+        for (const { address, count, reason } of byTarget)
+        {
+            say(`      0x${(address >>> 0).toString(16).padStart(8, '0')}`
+                + ` x${count}  ${reason}`);
+        }
+    }
+}
+
+/**
  * The whole run as text: what was asked, what answered, and where it stopped.
  *
  * @param {any} result
@@ -451,6 +574,37 @@ function describe(result, context, calls, symbols){
         say(`  ${layer.name} [${layer.status}] ${metrics}`);
     }
     say('');
+
+    if (result.cork)
+    {
+        describeCork(result.cork, say);
+        say('');
+    }
+
+    if (result.differential)
+    {
+        say(`  differential: ${result.differential.replayed} regions replayed,`
+            + ` ${result.differential.divergences} diverged`
+            + (result.differential.skipped
+                ? ` (not replayed: ${result.differential.skipped.hostCalls} called the host,`
+                    + ` ${result.differential.skipped.overran} overran the undo ring,`
+                    + ` ${result.differential.skipped.budget ?? 0} left on their budget)`
+                : ''));
+        for (const [field, kind] of Object.entries(result.differential.byField ?? {}))
+        {
+            say(`    ${field}: ${kind.count} (${kind.at.join(', ')})`);
+        }
+        if (result.differential.first)
+        {
+            say(`    first divergence at ${result.differential.first.at}:`);
+            for (const field of result.differential.first.diff)
+            {
+                say(`      ${field.name}: emulator=${field.expected} cork=${field.actual}`
+                    + (field.trail ? ` (emulator steps: ${field.trail})` : ''));
+            }
+        }
+        say('');
+    }
 
     const phases = result.phases;
     if (phases && phases.top.length > 0)
@@ -663,6 +817,18 @@ function describe(result, context, calls, symbols){
         const at = (/** @type {number} */ share)=>gaps[Math.min(gaps.length - 1,
             Math.floor(gaps.length * share))].toFixed(1);
         say(`  present gap ms: median ${at(0.5)}, p90 ${at(0.9)}, max ${at(1)}`);
+        // In order as well: a run that starts smooth and slows down, or one
+        // that stutters every few seconds, has a shape the quantiles hide.
+        const inOrder = /** @type {number[]} */ (result.presentGaps ?? []);
+        const bucket = Math.max(1, Math.ceil(inOrder.length / 24));
+        /** @type {string[]} */
+        const shape = [];
+        for (let from = 0; from < inOrder.length; from += bucket)
+        {
+            const slice = inOrder.slice(from, from + bucket);
+            shape.push((slice.reduce((sum, gap)=>sum + gap, 0) / slice.length).toFixed(0));
+        }
+        say(`  present gap ms in order (${bucket} presents a bucket): ${shape.join(' ')}`);
     }
     if (result.longTasks)
     {
@@ -709,6 +875,15 @@ function describe(result, context, calls, symbols){
     for (const line of result.errors ?? [])
     {
         say(`  [page] ${line}`);
+    }
+
+    for (const one of result.cpuProfiles ?? [])
+    {
+        say('');
+        for (const line of describeProfile(one.url, one.summary, one.windowMs))
+        {
+            say(line);
+        }
     }
 
     if (result.profile)
@@ -791,11 +966,18 @@ export async function game(options){
     const server = await serveStatic({
         sandboxDir: PACKAGE_DIR,
         srcDir: join(PACKAGE_DIR, 'src'),
-        extra: [{ prefix: '/bundle/', root: directory }],
+        extra: [
+            { prefix: '/bundle/', root: directory },
+            // The translator package beside core, where app.js resolves it.
+            { prefix: '/cork/', root: join(PACKAGE_DIR, '..', 'cork') },
+            // The networking client, for a run that names a relay.
+            { prefix: '/networking/', root: join(PACKAGE_DIR, '..', 'networking', 'src') },
+        ],
         coi: options.coi,
         port: options.port,
     });
-    const browser = await launchWithGpu({ profileDir: options.userDataDir ?? undefined });
+    const browser = await launchWithGpu({ profileDir: options.userDataDir ?? undefined,
+        extraFlags: options.jsFlags ? [`--js-flags=${options.jsFlags}`] : [] });
     mkdirSync(REPORTS_DIR, { recursive: true });
 
     const pageUrl = `http://127.0.0.1:${server.port}/sandbox/test/page/game/index.html`
@@ -847,6 +1029,8 @@ export async function game(options){
             sidecarHooks,
             maxTurns: options.turns,
             maxMs: options.runSeconds > 0 ? options.runSeconds * 1000 : null,
+            engine: options.engine,
+            cork: options.corkConfig ? { config: options.corkConfig } : undefined,
             screen: options.screen,
             quantum: options.quantum,
             log: Boolean(options.log),
@@ -862,6 +1046,16 @@ export async function game(options){
             trace: options.trace,
             pointer: options.pointer,
             clicks: options.clicks,
+            typed: options.typed,
+            pasted: options.pasted,
+            logMatch: options.logMatch,
+            network: options.network
+                ? {
+                    module: new URL('/networking/client/index.js', pageUrl).href,
+                    url: options.network,
+                    room: 'harness',
+                }
+                : undefined,
             keys: options.keys,
             files: options.files,
             wholeFiles: options.saveFiles,
@@ -870,6 +1064,42 @@ export async function game(options){
             bundleId: options.id,
             exact: options.exact,
         });
+        /** @type {Awaited<ReturnType<typeof profileWorkers>> | null} */
+        const profiler = options.cpuProfile > 0 && options.worker
+            ? await profileWorkers(cdp, sessionId) : null;
+        let profilingFrom = Date.now();
+        /** @type {{ url: string, profile: any, windowMs: number }[] | null} */
+        let cpuProfiles = null;
+        const stopProfiling = async()=>{
+            if (profiler === null || cpuProfiles !== null)
+            {
+                return;
+            }
+            const windowMs = Date.now() - profilingFrom;
+            cpuProfiles = (await profiler.stop()).map(one=>({ ...one, windowMs }));
+        };
+        // A later window: the profilers restart after the load, and the window
+        // runs its length from there.
+        const profileTimer = profiler === null
+            ? null
+            : setTimeout(()=>{
+                stopProfiling().catch(()=>{});
+            }, (options.cpuProfileFrom + options.cpuProfile) * 1000);
+        if (profiler !== null && options.cpuProfileFrom > 0)
+        {
+            setTimeout(()=>{
+                profilingFrom = Date.now();
+                profiler.restart().catch(()=>{});
+            }, options.cpuProfileFrom * 1000);
+        }
+        /** @param {string} stampFor */
+        const saveProfiles = stampFor=>{
+            for (const [index, one] of (cpuProfiles ?? []).entries())
+            {
+                writeFileSync(join(REPORTS_DIR, `game-${stampFor}-cpu-${index}.cpuprofile`),
+                    JSON.stringify(one.profile));
+            }
+        };
         await cdp.send('Runtime.evaluate',
             { expression: `window.__bottlify__.start(${request}); null`,
                 returnByValue: true },
@@ -911,10 +1141,21 @@ export async function game(options){
                 options.waitMs);
         }
         catch (e){
+            if (profileTimer !== null)
+            {
+                clearTimeout(profileTimer);
+            }
+            await stopProfiling().catch(()=>{});
             await drainLog();
             const onTimeout = await cdp.send(
                 'Page.captureScreenshot', { format: 'png' }, sessionId);
             const stampOut = new Date().toISOString().replace(/[:.]/g, '-');
+            saveProfiles(stampOut);
+            for (const one of cpuProfiles ?? [])
+            {
+                console.log(describeProfile(one.url, summarise(one.profile, one.windowMs),
+                    one.windowMs).join('\n'));
+            }
             writeFileSync(join(REPORTS_DIR, `game-${stampOut}.png`),
                 Buffer.from(onTimeout.data, 'base64'));
             return {
@@ -927,8 +1168,35 @@ export async function game(options){
         const stamp = new Date().toISOString().replace(/[:.]/g, '-');
         const shotPath = join(REPORTS_DIR, `game-${stamp}.png`);
         const reportPath = join(REPORTS_DIR, `game-${stamp}.txt`);
+        if (profileTimer !== null)
+        {
+            clearTimeout(profileTimer);
+        }
+        await stopProfiling().catch(()=>{});
+        saveProfiles(stamp);
+        result.cpuProfiles = (cpuProfiles ?? []).map(one=>({
+            url: one.url, windowMs: one.windowMs, summary: summarise(one.profile, one.windowMs),
+        }));
         const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
         writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));
+        // The last presented frame as the engine read it back, beside the
+        // page's screenshot: the screenshot is what the compositor showed at
+        // the moment of the stop, the frame is what the program drew.
+        if (result.frameRgba && result.frame)
+        {
+            const rgba = Buffer.from(result.frameRgba, 'base64');
+            const bgra = Buffer.alloc(rgba.length);
+            for (let at = 0; at < rgba.length; at += 4)
+            {
+                bgra[at] = rgba[at + 2];
+                bgra[at + 1] = rgba[at + 1];
+                bgra[at + 2] = rgba[at];
+                bgra[at + 3] = rgba[at + 3];
+            }
+            writeFileSync(join(REPORTS_DIR, `game-${stamp}-frame.png`),
+                toPng(result.frame.width, result.frame.height, bgra));
+            delete result.frameRgba;
+        }
 
         await drainLog();
 
@@ -952,6 +1220,14 @@ export async function game(options){
         }, options.calls, symbols);
         writeFileSync(reportPath, text);
 
+        // The graphics layer's whole account as JSON beside the report: the
+        // frame records, the presenter's copies by source, every counter --
+        // what a black or a frozen picture is read from.
+        if (result.graphics)
+        {
+            writeFileSync(join(REPORTS_DIR, `game-${stamp}-graphics.json`),
+                JSON.stringify(result.graphics, null, 1));
+        }
         // A file of its own: one line per draw is thousands of lines, which is
         // a thing to grep rather than a thing to read past.
         const drawn = result.graphics?.device?.lastDump ?? [];

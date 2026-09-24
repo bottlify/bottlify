@@ -19,7 +19,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { D3DFOG, D3DLIGHT, D3DMCS, D3DTA, D3DTOP, generateFixedFunction } from './fixedfunction.js';
+import {
+    D3DFOG, D3DLIGHT, D3DMCS, D3DTA, D3DTOP, TCI, generateFixedFunction,
+} from './fixedfunction.js';
 import { FVF, decodeFvf } from './vertexformat.js';
 
 /** The vertex format a lit draw needs at the very least. */
@@ -70,7 +72,106 @@ test('the same state generates the same source, byte for byte', ()=>{
     const second = generate(baseState()).code;
 
     assert.equal(first, second);
-    assert.equal(digest(first), 'e022536f5b267812');
+    assert.equal(digest(first), '6a0927659438da0f');
+});
+
+test('a stage generating its coordinates takes them from the vertex in camera space', ()=>{
+    // D3DTSS_TCI_CAMERASPACEPOSITION and its two siblings: the coordinate
+    // is the vertex through world and view, put through the stage's texture
+    // transform in the vertex stage -- where Direct3D applies it -- and
+    // sampled from a varying of its own, so a vertex carrying no set at all
+    // still textures, and the sample does not transform it a second time.
+    const stage = (/** @type {number} */ texCoordIndex)=>({
+        colorOp: D3DTOP.SELECTARG1,
+        colorArg1: D3DTA.TEXTURE,
+        colorArg2: D3DTA.SELECTMASK,
+        alphaOp: D3DTOP.SELECTARG1,
+        alphaArg1: D3DTA.DIFFUSE,
+        alphaArg2: D3DTA.SELECTMASK,
+        texCoordIndex,
+    });
+    const position = generate(baseState({
+        fvf: FVF.XYZ | FVF.DIFFUSE, stages: [stage(TCI.CAMERASPACEPOSITION)],
+    })).code;
+    assert.ok(position.includes(
+        'let cameraPosition = (uniforms.worldView * vec4f(vertex.position, 1.0)).xyz;'));
+    assert.ok(position.includes('@location(2) generated0: vec4f,'));
+    assert.ok(position.includes('out.generated0 = vec4f('
+        + 'dot(uniforms.texTransform[0], vec4f(cameraPosition, 1.0)),'
+        + ' dot(uniforms.texTransform[1], vec4f(cameraPosition, 1.0)),'
+        + ' dot(uniforms.texTransform[2], vec4f(cameraPosition, 1.0)),'
+        + ' dot(uniforms.texTransform[3], vec4f(cameraPosition, 1.0)));'));
+    assert.ok(position.includes('sampleStage0(input.generated0)'));
+    assert.ok(!position.includes('input.texCoord0'), 'no carried set is read');
+    // The sample function of a generated stage applies no transform of its
+    // own, and takes the coordinate's first two components.
+    const sampler = position.slice(position.indexOf('fn sampleStage0'));
+    assert.ok(sampler.startsWith('fn sampleStage0(carried: vec4f)'));
+    assert.ok(sampler.slice(0, sampler.indexOf('}')).includes('let raw = carried.xy;'));
+
+    // Projected: divided per pixel by the third component of the transformed
+    // coordinate for a three-coordinate transform, the fourth for four --
+    // which is how a texture is thrown onto the ground from a point.
+    const projected = generate(baseState({
+        fvf: FVF.XYZ | FVF.DIFFUSE,
+        stages: [{ ...stage(TCI.CAMERASPACEPOSITION), projected: 3 }],
+    })).code;
+    const projectedSampler = projected.slice(projected.indexOf('fn sampleStage0'));
+    assert.ok(projectedSampler.slice(0, projectedSampler.indexOf('}'))
+        .includes('let raw = carried.xy / carried.z;'));
+    const four = generate(baseState({
+        fvf: FVF.XYZ | FVF.DIFFUSE,
+        stages: [{ ...stage(TCI.CAMERASPACEPOSITION), projected: 4 }],
+    })).code;
+    assert.ok(four.includes('let raw = carried.xy / carried.w;'));
+
+    // Without a normal in the vertex the camera-space normal is the one the
+    // fixed function assumes, straight at the camera.
+    const normal = generate(baseState({
+        fvf: FVF.XYZ | FVF.DIFFUSE, stages: [stage(TCI.CAMERASPACENORMAL)],
+    })).code;
+    assert.ok(normal.includes('let cameraNormal = vec3f(0.0, 0.0, 1.0);'));
+    assert.ok(normal.includes('vec4f(cameraNormal, 1.0)'));
+    const lit = generate(baseState({
+        fvf: FVF.XYZ | FVF.NORMAL, stages: [stage(TCI.CAMERASPACEREFLECTIONVECTOR)],
+    })).code;
+    assert.ok(lit.includes(
+        'let cameraNormal = normalize((uniforms.worldView * vec4f(vertex.normal, 0.0)).xyz);'));
+    assert.ok(lit.includes('reflect(normalize(cameraPosition), cameraNormal)'));
+
+    // A pre-transformed vertex has no camera space to be taken in.
+    const flat = generate(baseState({
+        fvf: FVF.XYZRHW | FVF.DIFFUSE, stages: [stage(TCI.CAMERASPACEPOSITION)],
+    })).code;
+    assert.ok(flat.includes('out.generated0 = vec4f(0.0, 0.0, 1.0, 1.0);'));
+    assert.ok(!flat.includes('cameraPosition'));
+});
+
+test('the blending operations weigh the two arguments by an alpha', ()=>{
+    // D3DTOP_BLEND*ALPHA: arg1 by the alpha, arg2 by its complement, which
+    // WGSL's mix spells with the arguments the other way round. The
+    // premultiplied one adds arg1 whole.
+    const fvf = FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
+    const stage = (/** @type {number} */ colorOp)=>({
+        colorOp, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
+        alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.CURRENT, alphaArg2: D3DTA.CURRENT,
+        texCoordIndex: 0,
+    });
+    const codeOf = (/** @type {number} */ op)=>generate(baseState({ fvf, stages: [stage(op)] })).code;
+    assert.ok(codeOf(D3DTOP.BLENDDIFFUSEALPHA).includes(
+        'mix(current, sampleStage0(input.texCoord0), (input.diffuse).a)'));
+    assert.ok(codeOf(D3DTOP.BLENDTEXTUREALPHA).includes(
+        'mix(current, sampleStage0(input.texCoord0), (sampleStage0(input.texCoord0)).a)'));
+    assert.ok(codeOf(D3DTOP.BLENDFACTORALPHA).includes(
+        'mix(current, sampleStage0(input.texCoord0), (uniforms.textureFactor).a)'));
+    assert.ok(codeOf(D3DTOP.BLENDCURRENTALPHA).includes(
+        'mix(current, sampleStage0(input.texCoord0), (current).a)'));
+    assert.ok(codeOf(D3DTOP.BLENDTEXTUREALPHAPM).includes(
+        'sampleStage0(input.texCoord0) + current * (1.0 - (sampleStage0(input.texCoord0)).a)'));
+    assert.ok(codeOf(D3DTOP.ADDSMOOTH).includes(
+        'sampleStage0(input.texCoord0) + current - sampleStage0(input.texCoord0) * current'));
+    assert.ok(codeOf(D3DTOP.ADDSIGNED2X).includes(
+        '(sampleStage0(input.texCoord0) + current - vec4f(0.5)) * 2.0'));
 });
 
 test('a vertex colour is swizzled back from B,G,R,A', ()=>{
@@ -218,11 +319,11 @@ test('a stage puts its coordinate through its own texture transform before sampl
         stages: [textured, textured, textured, textured],
     })).code;
 
-    assert.match(code, /texTransform: array<vec4f, 6>,/);
+    assert.match(code, /texTransform: array<vec4f, 32>,/);
     for (const stage of [0, 1, 2])
     {
-        const rows = `${stage * 2}`;
-        const next = `${stage * 2 + 1}`;
+        const rows = `${stage * 4}`;
+        const next = `${stage * 4 + 1}`;
         assert.match(code, new RegExp(
             `fn sampleStage${stage}\\(carried: vec2f\\) -> vec4f \\{\\n`
             + ` {4}let extended = vec3f\\(carried, 1\\.0\\);\\n`
@@ -233,9 +334,9 @@ test('a stage puts its coordinate through its own texture transform before sampl
             + ` {4}let size = vec2f\\(textureDimensions\\(texture${stage}, 0\\)\\);`),
         `stage ${stage} transforms with its own two rows, then measures its level`);
     }
-    // The block carries rows for three stages; a fourth samples as carried.
-    assert.match(code, /fn sampleStage3\(carried: vec2f\) -> vec4f \{\n {4}let raw = carried;\n {4}let flags = 0u;/);
-    assert.doesNotMatch(code, /texTransform\[[6-9]\]/);
+    // The block carries rows for every stage; a fourth transforms with its
+    // own, though its sampler state is the default.
+    assert.match(code, /fn sampleStage3\(carried: vec2f\) -> vec4f \{\n {4}let extended = vec3f\(carried, 1\.0\);\n {4}let raw = vec2f\(dot\(uniforms\.texTransform\[12\]\.xyz, extended\),\n {8}dot\(uniforms\.texTransform\[13\]\.xyz, extended\)\);\n {4}let flags = 0u;/);
 });
 
 test('a disabled stage emits nothing, and the ones after it still run', ()=>{

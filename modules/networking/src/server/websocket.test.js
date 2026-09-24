@@ -15,6 +15,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { createServer } from 'node:http';
 import { createWebSocketServer } from './websocket.js';
 
 /**
@@ -230,4 +231,51 @@ test('writing to a closed connection is ignored rather than thrown', async t=>{
     connection.close();
     connection.sendBinary(new Uint8Array([1]));
     connection.sendText('x');
+});
+
+test('attached to a server that already exists, it answers upgrades on its path only', async t=>{
+    // A page served over TLS may only open wss://, and the server holding the
+    // certificate is the one to open it on: the relay rides on it at one
+    // path, and that server keeps serving its pages and stays its owner's to
+    // close.
+    const owner = createServer((request, response)=>{
+        response.writeHead(200, { 'content-type': 'text/plain' });
+        response.end('the page');
+    });
+    await new Promise(resolve=>owner.listen(0, '127.0.0.1', ()=>resolve(undefined)));
+    const address = /** @type {any} */ (owner.address());
+    /** @type {string[]} */
+    const seen = [];
+    const server = createWebSocketServer({ server: owner, path: '/relay' }, (made, request)=>{
+        seen.push(String(request.url));
+        made.on('message', (/** @type {any} */ data)=>made.sendText(`echo ${data}`));
+    });
+    assert.equal(await server.listen(), address.port, 'listening where the owner listens');
+    t.after(()=>new Promise(resolve=>owner.close(()=>resolve(undefined))));
+
+    const page = await fetch(`http://127.0.0.1:${address.port}/index.html`);
+    assert.match(await page.text(), /the page/, 'the owner still serves its pages');
+
+    const client = new WebSocket(`ws://127.0.0.1:${address.port}/relay?room=x`);
+    const answered = new Promise(resolve=>client.addEventListener('message',
+        event=>resolve(event.data), { once: true }));
+    await new Promise((resolve, reject)=>{
+        client.addEventListener('open', resolve, { once: true });
+        client.addEventListener('error', ()=>reject(new Error('never connected')),
+            { once: true });
+    });
+    client.send('hi');
+    assert.equal(await answered, 'echo hi');
+    assert.deepEqual(seen, ['/relay?room=x']);
+
+    const elsewhere = new WebSocket(`ws://127.0.0.1:${address.port}/other`);
+    await new Promise(resolve=>{
+        elsewhere.addEventListener('error', resolve, { once: true });
+        elsewhere.addEventListener('close', resolve, { once: true });
+    });
+    assert.deepEqual(seen, ['/relay?room=x'], 'an upgrade elsewhere is not answered here');
+
+    await server.close();
+    assert.ok(owner.listening, 'closing the attached server leaves the owner listening');
+    client.close();
 });

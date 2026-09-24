@@ -28,7 +28,8 @@ export const BUCKET_CAP = 16384;
 /** A fresh, empty sample table. */
 export function createSampleTable(){
     return {
-        /** @type {Map<number, { instructions: number, samples: number }>} */
+        /** @type {Map<number, { instructions: number, samples: number, eip: number,
+         *     noted: number }>} */
         buckets: new Map(),
         slices: 0,
         overflow: 0,
@@ -53,6 +54,7 @@ export function creditSample(table, eip, instructions){
     {
         bucket.instructions += instructions;
         bucket.samples++;
+        bucket.eip = eip >>> 0;
         return;
     }
     if (table.buckets.size >= BUCKET_CAP)
@@ -60,7 +62,9 @@ export function creditSample(table, eip, instructions){
         table.overflow++;
         return;
     }
-    table.buckets.set(key, { instructions, samples: 1 });
+    // The exact address as well as the bucket: a translator's region starts
+    // at an instruction, and the slice ended on one.
+    table.buckets.set(key, { instructions, samples: 1, eip: eip >>> 0, noted: -1 });
 }
 
 /**

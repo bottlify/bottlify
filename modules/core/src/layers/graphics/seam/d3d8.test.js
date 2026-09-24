@@ -29,6 +29,7 @@ import { BUFFER, SHADOW, STALE_POINTER, TEXTURE } from './shadow.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
 } from './vtables.js';
+import { REFRESH_HZ } from '../../win32/user32/display.js';
 import {
     D3DCAPS8, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS8,
     D3DSURFACE_DESC8, D3DVIEWPORT8, POINT, RECT, createFields,
@@ -184,10 +185,13 @@ function machine(){
 /**
  * The whole assembly, as a program reaches it: D3D8.dll and what it leads to.
  *
- * @param {{ shadow?: boolean }} [options]  Whether the device keeps a block in
- *     guest memory, as it does under a running processor.
+ * @param {{ shadow?: boolean,
+ *           windowClientSize?: (window: number) => { width: number,
+ *               height: number } | null }} [options]  Whether the device keeps a
+ *     block in guest memory, as it does under a running processor, and how a
+ *     window's client area is measured when a program asks for zero.
  */
-function seamed({ shadow = false } = {}){
+function seamed({ shadow = false, windowClientSize } = {}){
     const box = machine();
     /** @type {string[]} */
     const divergences = [];
@@ -198,6 +202,10 @@ function seamed({ shadow = false } = {}){
     const resolutions = [];
     /** @type {any[]} */
     const roots = [];
+    /** @param {number} window */
+    const measureWindow = window=>{
+        return window === HWND ? { width: 640, height: 480 } : null;
+    };
     const publisher = createPublisher({ publishInterface: box.publishInterface });
     const libraries = createGraphicsLibraries({
         graphics: {
@@ -217,6 +225,10 @@ function seamed({ shadow = false } = {}){
         memory: box.services,
         publishInterface: box.publishInterface,
         screen: ()=>SCREEN,
+        // One measurable window, so a size asked for as zero has a client area
+        // to be answered with; a test wanting the unmeasurable path passes a
+        // measurer of its own that answers nothing.
+        windowClientSize: windowClientSize ?? measureWindow,
         publisher,
         allocate: shadow ? box.allocate : undefined,
         /** @param {string} api @param {string} detail */
@@ -323,6 +335,9 @@ test('the interrogation a program does before it draws is answered from facts', 
     const mode = 0x3200;
     assert.equal(h.device(device, 'GetDisplayMode', [mode]), D3D_OK);
     assert.equal(h.fields.readU32(mode + D3DDISPLAYMODE.Width), SCREEN.width);
+    // At the rate the enumerated modes carry: a program listing the rates of
+    // a size and selecting the current one finds it in its own list.
+    assert.equal(h.fields.readU32(mode + D3DDISPLAYMODE.RefreshRate), REFRESH_HZ);
 
     assert.equal(h.release(device), 0, 'the device let go of everything it held');
     // And its pointer stops resolving. This used to assert the count through
@@ -382,10 +397,10 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
     const ask = (name, args)=>h.box.call(root, slot(IDIRECT3D8_SLOTS, name), args);
 
     assert.equal(ask('GetAdapterCount', []), 1);
-    // An 800x600 display offers 640x480 and 800x600, in 32-bit colour only:
-    // two modes, and a program builds its menu from them.
+    // Every size of the era whatever the display, in 32-bit colour only:
+    // five modes, and a program builds its menu from them.
     const count = ask('GetAdapterModeCount', [0]);
-    assert.equal(count, 2);
+    assert.equal(count, 38);
 
     const mode = 0x1200;
     const seen = [];
@@ -393,10 +408,16 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
     {
         assert.equal(ask('EnumAdapterModes', [0, index, mode]), D3D_OK);
         seen.push(`${h.fields.readU32(mode + D3DDISPLAYMODE.Width)}x${
-            h.fields.readU32(mode + D3DDISPLAYMODE.Height)}/${
+            h.fields.readU32(mode + D3DDISPLAYMODE.Height)}@${
+            h.fields.readU32(mode + D3DDISPLAYMODE.RefreshRate)}/${
             h.fields.readU32(mode + D3DDISPLAYMODE.Format)}`);
     }
-    assert.deepEqual(seen, ['640x480/22', '800x600/22'], 'every size, 32-bit, smallest first');
+    assert.deepEqual(seen,
+        ['640x480', '800x600', '1024x768', '1280x720', '1280x800', '1280x832', '1440x900',
+            '1512x982', '1600x900', '1680x1050', '1728x1117', '1920x1080', '1920x1200',
+            '2560x1440', '2560x1600', '2560x1664', '2880x1800', '3024x1964', '3456x2234']
+            .flatMap(size=>[`${size}@60/22`, `${size}@120/22`]),
+        'every size at both rates, 32-bit, smallest first');
     assert.equal(ask('EnumAdapterModes', [0, count, mode]), D3DERR_INVALIDCALL,
         'and the index past the end is refused, so a walk ends');
 
@@ -1290,6 +1311,17 @@ test('the cursor a program sets reaches whoever shows the frame, bitmap and hot 
     assert.equal(h.device(device, 'SetCursorProperties', [5, 5, surface]), D3DERR_INVALIDCALL,
         'a hot spot outside the bitmap is refused, and nobody is told');
     assert.equal(h.cursors.length, 3);
+
+    // The same cursor set again, as a program does every frame, crosses nothing.
+    assert.equal(h.device(device, 'SetCursorProperties', [1, 0, surface]), D3D_OK);
+    assert.equal(h.device(device, 'ShowCursor', [0]), 0);
+    assert.equal(h.cursors.length, 3, 'nothing changed, nobody is told');
+    assert.equal(h.surface(surface, 'LockRect', [locked, 0, 0]), D3D_OK);
+    h.box.services.writeMemory(bits, new Uint8Array([9, 9, 9, 255]));
+    assert.equal(h.surface(surface, 'UnlockRect', []), D3D_OK);
+    assert.equal(h.device(device, 'SetCursorProperties', [1, 0, surface]), D3D_OK);
+    assert.equal(h.cursors.length, 4, 'a repainted bitmap is a change');
+    assert.deepEqual([...h.cursors[3].bgra.slice(0, 4)], [9, 9, 9, 255]);
 });
 
 test('creating a device reports its resolution as the screen the program now has', ()=>{
@@ -1470,12 +1502,40 @@ test('a surface description fills every field, leaving no stack of the caller to
         h.release(root);
     });
 
-test('a back buffer asked for as zero by zero is the display, described and stored as one', ()=>{
-    // Windowed, zero means the size of the device window. Carried through as a
-    // zero it describes a surface with no rows and no storage, which the program
-    // then reads with its own idea of the mode -- and that read used to land in
-    // the slack of a fixed-megabyte allocation rather than in the next object.
+test('a back buffer asked for as zero by zero is the window, described and stored as one', ()=>{
+    // Windowed, zero means the size of the device window, which is what the
+    // real device answers. Carried through as a zero it describes a surface
+    // with no rows and no storage, which the program then reads with its own
+    // idea of the mode -- and that read used to land in the slack of a
+    // fixed-megabyte allocation rather than in the next object.
     const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root, {
+        BackBufferWidth: 0, BackBufferHeight: 0, Windowed: 1,
+        BackBufferFormat: D3DFMT.X8R8G8B8,
+    });
+
+    const back = 0xa100;
+    assert.equal(h.device(device, 'GetBackBuffer', [0, 0, back]), D3D_OK);
+    const surface = h.box.memory.readU32(back);
+
+    const desc = 0xa300;
+    assert.equal(h.surface(surface, 'GetDesc', [desc]), D3D_OK);
+    assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Width), 640);
+    assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Height), 480);
+    assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Size), 640 * 4 * 480,
+        'and its length is that surface, not nothing');
+
+    // Measured rather than assumed, so there is nothing to report.
+    assert.deepEqual(h.divergences, []);
+
+    assert.equal(h.release(surface), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('a back buffer asked for as zero by zero, with no window to measure, is the display', ()=>{
+    const h = seamed({ windowClientSize: ()=>null });
     const root = h.create();
     const device = h.createDevice(root, {
         BackBufferWidth: 0, BackBufferHeight: 0, Windowed: 1,
@@ -1490,8 +1550,6 @@ test('a back buffer asked for as zero by zero is the display, described and stor
     assert.equal(h.surface(surface, 'GetDesc', [desc]), D3D_OK);
     assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Width), SCREEN.width);
     assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Height), SCREEN.height);
-    assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Size),
-        SCREEN.width * 4 * SCREEN.height, 'and its length is that surface, not nothing');
 
     // And the program is told the size was not its own.
     assert.ok(h.divergences.some(line=>/zero by zero/.test(line)),

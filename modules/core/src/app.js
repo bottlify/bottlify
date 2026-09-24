@@ -24,8 +24,11 @@ import { synthesiseProcessInit, DLL_PROCESS_ATTACH }
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
 import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
+import { resolveTranslationStore } from './layers/cpu/internal/translation-store.js';
 import { createBlockCache, resolveBlockStore }
     from './layers/filesystem/internal/bundle/cache.js';
+import { decompressZstd } from './zstd.js';
+import { loadZstdWasm } from './zstd-wasm.js';
 
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
@@ -46,6 +49,16 @@ import { createBlockCache, resolveBlockStore }
  * @property {string} [v86.moduleUrl]     The emulator's module.
  * @property {string} [v86.wasmUrl]       Where its binary is fetched from.
  * @property {ArrayBuffer} [v86.wasmBytes]  Or the binary itself.
+ * @property {Object} [cork]              The translator, for `engine: 'hybrid'`.
+ * @property {string} [cork.moduleUrl]    Its entry module; the package beside core by default.
+ * @property {import('./layers/cpu/engine.js').EngineConfig} [cork.config]  Its settings;
+ *     `store` here is a request -- `'local'` (the default) for the origin's private file
+ *     system, a store of your own when the app runs in this thread, `null` for none.
+ * @property {Object} [zstd]              The bundle decoder's wasm build, when the package's
+ *           own is not wanted: `vendor/zstd.wasm` beside this module by default; absent
+ *           there, the JavaScript decoder (or the emulator's, while it is loaded) decodes.
+ * @property {string} [zstd.wasmUrl]      Where its binary is fetched from.
+ * @property {ArrayBuffer} [zstd.wasmBytes]  Or the binary itself.
  * @property {Object} [media]             Video decoding, when this build has it.
  * @property {ArrayBuffer} [media.wasmBytes]
  *           The decoder binary. Absent, the media layer comes up and reports
@@ -114,12 +127,21 @@ import { createBlockCache, resolveBlockStore }
  *     'function'`. `memory` is set by `createApp` on a rebuilt machine so the
  *     storage outlives the process that made it, and is not something a caller
  *     supplies.
+ * @property {{ network?: any }} [win32]
+ *     `network` is the transport under Winsock, in the shape the win32 layer's
+ *     `wsock32/transport.js` names: what a relay client hands back, or an
+ *     embedder's own. Absent, Winsock runs over the loopback adapter and
+ *     nothing outside this runtime is reachable, which is the default.
  * @property {(record: any) => void} [onCall]
  *           Every host call as it returns. The ring kept for a failure holds
  *           the end of a run; this holds all of it, for a tool willing to
  *           write it somewhere.
  * @property {Record<string, number>} [jit]
  *     The emulator's compiler budgets, by config index. For measurement.
+ * @property {'emulator' | 'hybrid' | 'cork' | 'differential'} [engine]
+ *     Which execution engine runs the program (`docs/core/cpu.md`'s "Engines").
+ *     Default `emulator`. Chosen per launch: a launcher passes the person's
+ *     choice for the bundle, or the bundle manifest's suggestion.
  * @property {boolean} [sampling]  The `cpu` layer's always-on guest sampler
  *     (`docs/core/cpu.md`'s "Sampling"). `false` turns it off, for a caller
  *     measuring the emulator's own compiler rather than the guest's code.
@@ -165,6 +187,11 @@ import { createBlockCache, resolveBlockStore }
  *           it wrote; `save` is handed both, and `load` may answer with both
  *           or with a bare list of files.
  * @property {string} [id]           Names the session when storage does not.
+ * @property {{ path: string, bytes: Uint8Array }[]} [files]
+ *           The person's own edits to the title's files, laid over the
+ *           session's at every start: a realm list, a line of configuration.
+ *           They win over what the program last saved, and the bundle itself
+ *           is never changed.
  * @property {Object} [bundle]       A .btl mounted as the volume's read-only source.
  * @property {(offset: number, length: number) => Promise<Uint8Array>} bundle.fetch
  *           Brings a byte range of the bundle in, from wherever it is kept.
@@ -514,6 +541,12 @@ export function describeEvent(payload){
             if (Array.isArray(value))
             {
                 return `${key}=[${value.join(' ')}]`;
+            }
+            // A picture's bytes are not a line: a cursor told every frame
+            // would fill the journal with its pixels.
+            if (ArrayBuffer.isView(value))
+            {
+                return `${key}=<${value.byteLength} bytes>`;
             }
             return `${key}=${typeof value === 'object' ? JSON.stringify(value) : value}`;
         })
@@ -1025,6 +1058,17 @@ export function clockCredit(source, clock, cap){
  */
 const VENDOR = /** @type {{ env?: { BOTTLIFY_VENDOR?: string } }} */ (import.meta).env?.BOTTLIFY_VENDOR
     ?? '../vendor/prebuilt/';
+
+/**
+ * The translator to load for `hybrid`: what the caller named, else the
+ * package installed beside this one.
+ *
+ * @param {{ moduleUrl?: string } | undefined} asked
+ * @param {string} [here]
+ */
+export function corkArtifacts(asked, here = import.meta.url){
+    return { moduleUrl: asked?.moduleUrl ?? new URL('../../cork/src/index.js', here).href };
+}
 
 /**
  * The emulator to boot: what the caller named, and the package's own for the
@@ -1575,6 +1619,57 @@ function expectIndex(expected){
 }
 
 /**
+ * The zstd decoder a bundle read uses, by engine. While the emulator is loaded
+ * its wasm decoder is several times faster than this project's own
+ * (`modules/core/src/zstd.js`), and a first bundle load decodes the whole
+ * bundle, so `emulator` and `hybrid` use it; `cork` has no emulator and uses
+ * the project's. Both answer synchronously, as a guest read needs. The choice
+ * is made once, when the bundle is mounted; when `zstd.js` is measured at the
+ * wasm decoder's speed it becomes the decoder for every engine.
+ *
+ * @param {string} engine
+ * @param {{ decompressZstd: (packed: Uint8Array, expectedLength: number) => Uint8Array }} cpu
+ * @param {import('./zstd-wasm.js').ZstdWasm | null} [wasm]  The wasm build, when carried.
+ * @returns {(packed: Uint8Array, expectedLength: number) => Uint8Array}
+ */
+export function chooseZstdDecoder(engine, cpu, wasm = null){
+    // The wasm build of the project's own decoder, when this build carries it,
+    // decodes for every engine at the emulator decoder's speed and with no
+    // emulator loaded.
+    if (wasm)
+    {
+        return wasm.decompress;
+    }
+    if (engine !== 'cork')
+    {
+        return (packed, expectedLength)=>cpu.decompressZstd(packed, expectedLength);
+    }
+    return decompressZstd;
+}
+
+/**
+ * The wasm decoder from the app's options or the package's vendor directory;
+ * null when the build carries none (the artifact is optional: a fetch that
+ * fails or a file that is absent is the JavaScript decoder's turn, not an
+ * error), so a package built without it still mounts every bundle.
+ *
+ * @param {AppOptions} options
+ * @param {string} [here]
+ * @returns {Promise<import('./zstd-wasm.js').ZstdWasm | null>}
+ */
+export async function zstdWasmFor(options, here = import.meta.url){
+    try
+    {
+        const bytes = options.zstd?.wasmBytes
+            ?? await bytesAt(options.zstd?.wasmUrl ?? new URL(`${VENDOR}zstd.wasm`, here).href);
+        return await loadZstdWasm(bytes);
+    }
+    catch {
+        return null;
+    }
+}
+
+/**
  * Mounts a bundle as the read-only half of the volume.
  *
  * The blocks that have been brought in are held here rather than inside the
@@ -1609,14 +1704,18 @@ async function mountBundle({ options, cpu, filesystem, events }){
         retry: options.bundle.retry,
     });
 
+    const zstdForEngine = chooseZstdDecoder(options.engine ?? 'emulator', cpu,
+        await zstdWasmFor(options));
     /**
      * A block, turned back into bytes, without awaiting anything.
      *
-     * zstd is decoded here because the emulator carries a decoder that answers
-     * synchronously. Deflate has no synchronous decoder in a browser at all, so
-     * a deflate block is inflated when it is *fetched* -- which is already an
-     * asynchronous step -- and by the time a read reaches it, it is plain. That
-     * is why codec 1 is passed through rather than refused.
+     * zstd is decoded by the engine's decoder (`chooseZstdDecoder` above): the
+     * emulator's wasm one under `emulator`/`hybrid`, this project's own
+     * (`zstd.js`) under `cork`. Both answer synchronously. Deflate has
+     * no synchronous decoder in a browser at all, so a deflate block is
+     * inflated when it is *fetched* -- which is already an asynchronous step --
+     * and by the time a read reaches it, it is plain. That is why codec 1 is
+     * passed through rather than refused.
      *
      * @param {number} codec
      * @param {Uint8Array} bytes
@@ -1625,7 +1724,7 @@ async function mountBundle({ options, cpu, filesystem, events }){
     const decode = (codec, bytes, expectedLength)=>{
         if (codec === 2)
         {
-            return cpu.decompressZstd(bytes, expectedLength ?? 0);
+            return zstdForEngine(bytes, expectedLength ?? 0);
         }
         return bytes;
     };
@@ -2410,7 +2509,21 @@ async function buildApp(options){
                 limit: STACK_POOL_BASE + STACK_POOL_SIZE,
             },
         },
-        cpu: { jit: options.jit, sampling: options.sampling, memorySize },
+        cpu: {
+            jit: options.jit, sampling: options.sampling, memorySize, engine: options.engine,
+            engineUrl: options.engine && options.engine !== 'emulator'
+                ? corkArtifacts(options.cork).moduleUrl : null,
+            // The translator's cache goes with the bundle's blocks: local by
+            // default, the bundle's name its namespace, resolved here in the
+            // engine's own thread as the block store is.
+            cork: {
+                ...options.cork?.config,
+                store: await resolveTranslationStore(
+                    options.cork?.config?.store === undefined ? 'local' : options.cork.config.store,
+                    options.bundle?.id ?? options.id ?? 'bundle'),
+                bundleId: options.bundle?.id ?? options.id ?? 'bundle',
+            },
+        },
         bridge: {
             // win32 sits above the bridge and cannot be reached from it, so the
             // reader is handed down from here. It costs one call per traced
@@ -2657,7 +2770,7 @@ async function buildApp(options){
             // one window is that resolution. The reported metrics follow it.
             /**
              * @param {number} width @param {number} height
-             * @param {{ window?: number, fullscreen?: boolean }} [where]
+             * @param {{ window?: number, fullscreen?: boolean, announce?: boolean }} [where]
              */
             resolution: (width, height, where = {})=>{
                 if (width > 0 && height > 0)
@@ -2671,7 +2784,8 @@ async function buildApp(options){
                     // picture -- the picture fills the mode, the window does not.
                     if (where.fullscreen && where.window)
                     {
-                        win32.placeWindow(where.window, 0, 0, width, height);
+                        win32.placeWindow(where.window, 0, 0, width, height,
+                            { announce: where.announce === true });
                     }
                 }
             },
@@ -2696,11 +2810,26 @@ async function buildApp(options){
             // not honour yet, and a state accepted in silence is the defect
             // class that produces a picture rather than an error.
             divergence: reportDivergence,
+            // A window's client area, which is the size a device's back buffer
+            // takes when the program asks for zero by zero. Only the window
+            // layer can measure one, and a device answered with the whole
+            // display instead lays out and rasterises against a screen its
+            // window does not have.
+            windowClientSize: (/** @type {number} */ hwnd)=>{
+                const rect = win32.clientRect(hwnd);
+                return rect ? {
+                    width: rect.right - rect.left,
+                    height: rect.bottom - rect.top,
+                } : null;
+            },
             // The cursor a program asks its device to draw. Nothing here
             // composites one over the frame; the host is told, with the
             // bitmap and the hot spot, and shows it the way its screen can.
             /** @param {any} cursor */
-            cursor: cursor=>events.emit('cursor', cursor),
+            cursor: cursor=>{
+                core.api('input')?.cursorShown?.(cursor.shown !== false);
+                events.emit('cursor', cursor);
+            },
         },
         win32: {
             // The one namespace a named mutex, event, semaphore, timer and
@@ -2710,6 +2839,8 @@ async function buildApp(options){
             // ring do, for the same reason -- a replacement rebuilds this
             // layer, and the name was never this process's to keep.
             namedObjects: options.namedObjects,
+            // The network beyond this runtime, when the embedder supplied one.
+            network: options.win32?.network,
             // What the program is told its display is, handed to the libraries
             // that answer for one as well as to the layer that draws on it.
             screen: display,
@@ -2718,7 +2849,10 @@ async function buildApp(options){
             // the Direct3D device methods emit above. Two producers, one
             // consumer, and the last report wins.
             /** @param {any} cursor */
-            reportCursor: cursor=>events.emit('cursor', cursor),
+            reportCursor: cursor=>{
+                core.api('input')?.cursorShown?.(cursor.shown !== false);
+                events.emit('cursor', cursor);
+            },
             // Sound leaves through the audio layer's mixer, and win32 sits
             // below it. Handed down as a thunk and asked for only when a
             // program opens a device: audio is created after win32, and a build
@@ -3099,11 +3233,38 @@ async function buildApp(options){
     const audio = core.api('audio');
     const input = core.api('input');
 
-    const emulator = emulatorArtifacts(options.v86);
-    await cpu.boot({
-        moduleUrl: emulator.moduleUrl,
-        wasmBytes: emulator.wasmBytes ?? await bytesAt(/** @type {string} */ (emulator.wasmUrl)),
-    });
+    if (options.engine === 'cork')
+    {
+        // Cork runs with nothing of the emulator loaded: its own host, its own
+        // memory, and the translator named by `engineUrl`.
+        await cpu.boot();
+    }
+    else
+    {
+        const chosen = options.engine ?? 'emulator';
+        const emulator = emulatorArtifacts(options.v86);
+        /** @type {ArrayBuffer} */
+        let wasmBytes;
+        if (emulator.wasmBytes)
+        {
+            wasmBytes = emulator.wasmBytes;
+        }
+        else
+        {
+            try
+            {
+                wasmBytes = await bytesAt(/** @type {string} */ (emulator.wasmUrl));
+            }
+            catch (e){
+                // A build without the emulator's artifacts: the layer is
+                // optional, and a launch that names it is told so rather than
+                // handed a fetch's error.
+                throw new Error('cpu: the emulator is not available in this build'
+                    + ` (engine "${chosen}" needs it)`, { cause: e });
+            }
+        }
+        await cpu.boot({ moduleUrl: emulator.moduleUrl, wasmBytes });
+    }
 
     // A processor exception goes to the handlers the program registered
     // before it stops the machine. The thread waits the way a host call does
@@ -3131,9 +3292,8 @@ async function buildApp(options){
         return true;
     });
 
-    // Mounted after the emulator is up, because the decoder for a compressed
-    // block is inside it: zstd is the only decompressor available here that
-    // answers a guest's read without a promise.
+    // Mounted after the machine is up. A zstd block is decoded by this
+    // project's own decoder now, so the mount no longer needs the emulator.
     blocks = await mountBundle({ options, cpu, filesystem, events });
 
     // The session's files go onto the volume once it is the one the program
@@ -3144,6 +3304,13 @@ async function buildApp(options){
     if (seeded.files.length > 0)
     {
         filesystem.apply(seeded.files);
+    }
+    // The person's own edits to the title's files -- a realm list, a config
+    // line -- laid over the session's, so they win over what the program
+    // last saved and never touch the bundle itself.
+    if (options.files && options.files.length > 0)
+    {
+        filesystem.apply(options.files);
     }
     // And what the process this one replaces had written. A self-extracting
     // installer unpacks its payload and then starts it; without this the
@@ -3197,11 +3364,15 @@ async function buildApp(options){
     // Our own boot ROM, so that a report can name it. A fault leaves the
     // processor standing in the stub behind its vector, and until this was here
     // that address came back as unmapped -- which sent every reader of a crash
-    // looking for a guest bug at an address belonging to the engine.
-    memory.register({
-        name: 'boot-rom', base: cpu.layout.romBase, size: cpu.layout.romSize,
-        kind: memory.RegionKind.LOW_MEM, access: memory.Access.READ_EXECUTE,
-    });
+    // looking for a guest bug at an address belonging to the engine. Cork has
+    // no ROM and so registers none.
+    if (cpu.layout.romSize > 0)
+    {
+        memory.register({
+            name: 'boot-rom', base: cpu.layout.romBase, size: cpu.layout.romSize,
+            kind: memory.RegionKind.LOW_MEM, access: memory.Access.READ_EXECUTE,
+        });
+    }
 
     // Every system module exists in guest memory before the program's first
     // instruction, not when something first asks for it. An address taken early
@@ -4901,6 +5072,15 @@ async function buildApp(options){
          * `setLevel` decides how much is kept, per category.
          */
         log: {
+            /**
+             * A record from outside the engine, into the same journal: what
+             * the host's own GPU device reported about a frame, which a reader
+             * of the run's log must see beside the frame it dropped.
+             *
+             * @param {'error' | 'warn' | 'info'} level
+             * @param {string} category @param {string} text
+             */
+            write: (level, category, text)=>core.api('log').write(level, category, '{0}', text),
             /** @param {number} [since] @param {number} [limit] */
             drain: (since, limit)=>core.api('log').drain(since, limit),
             /** @param {number} [count] */
@@ -4922,6 +5102,7 @@ async function buildApp(options){
                 ...['cpu', 'gpu', 'audio', 'video', 'input', 'net', 'com', 'hook']
                     .map(area=>`call.${area}`),
                 'input.press',
+                'input.message',
             ],
 
             /**

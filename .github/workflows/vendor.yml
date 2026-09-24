@@ -31,6 +31,9 @@ on:
       - 'modules/core/scripts/build-video-decoder.mjs'
       - 'modules/core/scripts/Dockerfile.video-decoder'
       - 'modules/core/scripts/video-decoder/**'
+      - 'modules/core/scripts/build-zstd.mjs'
+      - 'modules/core/scripts/Dockerfile.zstd'
+      - 'modules/core/scripts/zstd/**'
       - '.github/workflows/vendor.yml'
   pull_request:
     paths:
@@ -42,12 +45,59 @@ on:
       - 'modules/core/scripts/build-video-decoder.mjs'
       - 'modules/core/scripts/Dockerfile.video-decoder'
       - 'modules/core/scripts/video-decoder/**'
+      - 'modules/core/scripts/build-zstd.mjs'
+      - 'modules/core/scripts/Dockerfile.zstd'
+      - 'modules/core/scripts/zstd/**'
       - '.github/workflows/vendor.yml'
   schedule:
     - cron: '0 4 * * 1'
   workflow_dispatch:
 
 jobs:
+  zstd:
+    name: zstd (the bundle decoder to wasm in container)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:zstd
+        env:
+          BOTTLIFY_ZSTD_DOCKER: '1'
+      # The bytes must decode what Node's own zstd wrote, block for block, and
+      # twice through the same image the same way: the build is a function of
+      # the source and the pinned compiler, nothing else.
+      - run: node --test modules/core/src/zstd-wasm.test.js
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zstd
+          path: |
+            modules/core/dist/vendor/zstd.wasm
+            modules/core/dist/vendor/SHA256SUMS
+            modules/core/dist/vendor/zstd.manifest.json
+      - name: Publish release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="zstd-$(git rev-parse --short=7 HEAD)"
+          NOTES="This project's own decode-only zstd (modules/core/scripts/zstd/zstd.c, MPL-2.0) compiled to WebAssembly by modules/core/scripts/Dockerfile.zstd, from commit $(git rev-parse HEAD)."
+          cd modules/core/dist/vendor
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+              zstd.wasm SHA256SUMS zstd.manifest.json
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "zstd $TAG" --notes "$NOTES" \
+              zstd.wasm SHA256SUMS zstd.manifest.json
+          fi
+
   video-decoder:
     name: video-decoder (FFmpeg to wasm in container)
     runs-on: ubuntu-latest

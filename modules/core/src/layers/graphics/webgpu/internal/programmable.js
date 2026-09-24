@@ -251,7 +251,7 @@ export function createProgramCache({ backend }){
                 const bound = layoutsFor(program.pixel.samplers.length);
                 return {
                     bindGroupLayouts: bound.groups,
-                    gpu: backend.createRenderPipeline({
+                    gpu: await backend.createRenderPipelineAsync({
                         label: `programmable:${program.key}`,
                         layout: bound.pipeline,
                         vertex: {

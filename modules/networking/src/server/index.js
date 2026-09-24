@@ -24,8 +24,12 @@ export { createWebSocketServer, Connection } from './websocket.js';
  * @typedef {import('./relay.js').RelayOptions & {
  *     port?: number,
  *     host?: string,
+ *     server?: import('node:http').Server,
+ *     path?: string,
  *     origins?: string[],
  * }} RelayServerOptions
+ *     `server` and `path` attach the relay to an existing HTTP or HTTPS
+ *     server at one path instead of listening on a port of its own.
  */
 
 /**
@@ -38,6 +42,8 @@ export function createRelayServer(options = {}){
     const server = createWebSocketServer({
         port: options.port,
         host: options.host,
+        server: options.server,
+        path: options.path,
         // An unlisted origin is refused at the handshake rather than after
         // joining: a browser will happily open a WebSocket cross-origin, so the
         // only place to decide whose pages may use this relay is here.

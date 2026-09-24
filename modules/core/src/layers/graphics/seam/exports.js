@@ -75,7 +75,12 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @param {(api: string, detail: string) => void} [deps.divergence]
  * @param {(cursor: import('./d3d8.js').CursorNotice) => void} [deps.cursor]
  * @param {(width: number, height: number,
- *          where?: { window?: number, fullscreen?: boolean }) => void} [deps.resolution]
+ *          where?: { window?: number, fullscreen?: boolean, announce?: boolean },
+ *          ) => void} [deps.resolution]
+ * @param {(window: number) => { width: number, height: number } | null}
+ *     [deps.windowClientSize]
+ *        A window's client area, which is the size a back buffer asked for as
+ *        zero by zero takes.
  * @returns {{ libraries: Record<string, Record<string, any>>,
  *             opengl: { pixelFormat: { size: () => number, count: () => number,
  *                                      choose: (bytes: Uint8Array) => number,
@@ -92,17 +97,17 @@ export function createGraphicsLibraries(
     { graphics, memory, publishInterface, screen, gdi, present, publisher: shared, callGuest,
         free, exportAddress,
         currentThread,
-        scratch, render, allocate, divergence, cursor, resolution },
+        scratch, render, allocate, divergence, cursor, resolution, windowClientSize },
 )
 {
     const publisher = shared ?? createPublisher({ publishInterface });
     const fields = createFields(memory);
     const d3d8 = createDirect3D8Seam({
-        publisher, memory, screen, allocate, divergence, cursor, resolution,
+        publisher, memory, screen, allocate, divergence, cursor, resolution, windowClientSize,
         identity: ()=>graphics.adapter?.() ?? null,
     });
     const d3d9 = createDirect3D9Seam({
-        publisher, memory, screen, divergence, cursor, resolution,
+        publisher, memory, screen, divergence, cursor, resolution, windowClientSize,
         identity: ()=>graphics.adapter?.() ?? null,
     });
     const d3d10 = createDirect3D10Seam({

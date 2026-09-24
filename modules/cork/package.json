@@ -1,0 +1,25 @@
+{
+  "name": "@bottlify/cork",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MPL-2.0",
+  "description": "Cork: a user-mode x86-32 to WebAssembly translator, an execution engine @bottlify/core's cpu layer loads by URL when a launch selects it",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./wasm": "./src/wasm/encoder.js",
+    "./runtime": "./src/runtime/runtime.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test \"src/**/*.test.js\"",
+    "test:integration": "node --test \"src/**/*.itest.js\"",
+    "typecheck": "tsc -p jsconfig.json",
+    "fetch:corpus": "node scripts/fetch-corpus.mjs"
+  }
+}

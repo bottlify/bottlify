@@ -44,6 +44,9 @@ function parse(argv){
         // bundle -- a launcher is a different program from the game it starts,
         // and only running it says whether it runs.
         which: argv.includes('--which') ? argv[argv.indexOf('--which') + 1] : null,
+        // The execution engine (emulator by default), so a title's own code can
+        // be measured on the translator outside a browser.
+        engine: argv.includes('--engine') ? argv[argv.indexOf('--engine') + 1] : undefined,
         // Which calls to print with their arguments. A name, or a fragment of
         // one, narrows a long trace to the handful that answer the question.
         grep: argv.includes('--grep') ? argv[argv.indexOf('--grep') + 1] : null,
@@ -322,7 +325,7 @@ function report(app, { grep = null, calls = 24 } = {}){
 }
 
 async function main(){
-    const { id, turns, map, grep, calls, heap, profile, log, watch, peek, which }
+    const { id, turns, map, grep, calls, heap, profile, log, watch, peek, which, engine }
         = parse(process.argv.slice(2));
     if (!id)
     {
@@ -377,6 +380,10 @@ async function main(){
         // Where createApp mounts a bundle, so the program is told it was loaded
         // from inside its own installation rather than from the volume's root.
         imagePath: `C:\\App\\${manifest.entry}`,
+        engine,
+        // No frames here to feed the translator between: it takes its
+        // candidates inside the slice.
+        ...(engine === 'cork' ? { cork: { config: { feed: 'slice' } } } : {}),
         heapSize: heap,
         quantum: profile > 0 ? profile : undefined,
         sample: profile > 0 ? (/** @type {number} */ eip)=>samples.push(eip) : undefined,

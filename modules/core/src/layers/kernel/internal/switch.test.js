@@ -93,5 +93,5 @@ test('diagnostics count real switches separately from self-switches', ()=>{
     switcher.switchTo(a, b);
     switcher.switchTo(b, b);
 
-    assert.deepEqual(switcher.diagnostics(), { switches: 2, selfSwitches: 1 });
+    assert.deepEqual(switcher.diagnostics(), { switches: 2, selfSwitches: 1, recentResumes: [] });
 });

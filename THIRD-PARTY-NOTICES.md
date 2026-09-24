@@ -3,11 +3,16 @@
 This lists components not authored in this repository that are distributed with the product.
 Full license texts are kept alongside the corresponding component.
 
-## v86 — x86 PC emulator / x86-to-wasm JIT
+## v86 — x86 PC emulator / x86-to-wasm JIT (optional component)
 
 - Source: fork https://github.com/mrwayer/v86 (upstream: https://github.com/copy/v86)
 - Location in this repository: `modules/core/vendor/v86`
 - License: BSD-2-Clause
+- This component is optional. The default engine, `cork`, is this project's own
+  translator and loads nothing of v86; the emulator is selected per launch and its
+  artifacts are fetched on demand. A package built without `vendor/prebuilt/` carries
+  none of v86 and runs the library's demos under `cork`; a launch that selects
+  `emulator` or `hybrid` is refused with a message saying the layer is absent.
 
 ```
 Copyright (c) 2012, The v86 contributors
@@ -33,6 +38,20 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+
+## v86 nasm instruction corpus — test data for the translator
+
+- Source: the fork above, `tests/nasm/` (hand-written cases and `create_tests.js`'s generated
+  ones), assembled and recorded on real hardware by the fork's CI and published as
+  `nasm-corpus.json.gz` beside each release
+- Location in this repository: fetched into `modules/cork/vendor/` by `npm run fetch:corpus`
+  from the release pinned in `modules/cork/corpus-lock.json`; not committed, not distributed
+- License: BSD-2-Clause (the same text as above)
+- What is used: the assembled images and the recorded register and memory state, as inputs and
+  expected outputs of `@bottlify/cork`'s corpus and differential tests. The comparison rules
+  (which flags and status bits are compared, the seven-digit float tolerance, which state a
+  case that died is compared on) follow the fork's own `tests/nasm/run.js` so that a case
+  passes here for the reason it passes there; that runner's code is not copied.
 
 ## FFmpeg — video and audio decoding
 

@@ -58,7 +58,7 @@ system described in [`system.md`](./system.md). Each has a document of its own:
 
 | layer | one line | document |
 |---|---|---|
-| `cpu` | The vendored emulator behind an interface: boot from the package's own ROM, run for a quantum of instructions, registers, physical memory, the FPU, the I/O-port trap channel. The only layer that may import `vendor/`. | [`cpu.md`](./cpu.md) |
+| `cpu` | The vendored emulator behind an interface: boot from the package's own ROM, run for a quantum of instructions, registers, physical memory, the FPU, the I/O-port trap channel. The only layer that may import `vendor/`. Defines the executor contract a translator package (`@bottlify/cork`, in `modules/cork`) implements and is loaded through by URL, never imported. | [`cpu.md`](./cpu.md) |
 | `memory` | The guest address space as regions with permissions, and typed accessors every host read and write goes through. | [`memory.md`](./memory.md) |
 | `kernel` | Threads, a round-robin scheduler whose quantum is retired guest instructions, context switch, synchronisation objects with timed waits, the handle table, a virtual clock. | [`kernel.md`](./kernel.md) |
 | `bridge` | The trap channel's host half: calls marshalled by convention (`stdcall`, `cdecl`, `thiscall`), a caller parked when the answer is not ready, calls back into guest code, COM interfaces published into guest memory, recorded sessions replayed in tests. | [`bridge.md`](./bridge.md) |
@@ -98,6 +98,7 @@ From the repository root (`package.json` is an npm workspace over `modules/*`):
 | `node scripts/build-fixtures.mjs` (in `modules/core`) | Rebuilds the compiled fixtures (`seh.exe`, `cxxeh.exe`, `unhandled.exe`, `apc.exe`, `processor.exe`, `crtdata.exe`, `virtual.exe`) from `test/fixtures/src/` with clang, lld-link and llvm-dlltool against the MSVC ABI -- no Microsoft toolchain. Only after changing a source; the executables are committed, and the build is byte-reproducible. |
 | `npm run check:boundaries` | The layer graph and the acyclic import check. |
 | `npm run fetch:v86`, `npm run fetch:video-decoder` | Pull the pinned emulator and decoder binaries into `vendor/prebuilt/`, verified against their lock files. |
+| `npm run fetch:corpus` | Pull the nasm instruction corpus (every case as an image with the state real hardware recorded) into `modules/cork/vendor/`, for the translator package's differential tests; pinned by `modules/cork/corpus-lock.json`. |
 | `npm run build` | esbuild → `dist/core.js`, `dist/engine.worker.js`, `dist/worklet.js`, `dist/vendor/*`, `dist/checksums.json`. |
 | `npm run build:v86 -- --docker` and `npm run verify:reproducibility` | Rebuild the emulator from the submodule in a container and diff its hashes against the manifest. Not needed day to day. |
 | `npm run cdp:probe` | Launches a headless Chromium, boots the core in a worker, checks it answers a ping. |

@@ -236,7 +236,7 @@ const MAX_RESOURCE_NAME = 256;
  * @param {(hwnd: number) => any | null} options.live
  * @param {Map<number, any>} options.windows
  * @param {(fields: any) => any} options.makeWindow
- * @param {(hwnd: number) => number} options.destroyWindow
+ * @param {(hwnd: number, thread?: unknown) => number | Promise<number>} options.destroyWindow
  * @param {(message: import('./structs.js').MessageFields, thread?: unknown)
  *     => number | Promise<number>} options.deliver  Hands a retrieved message to its procedure.
  * @param {(name: string) => ({ wndProc: number, windowExtra: number } | null)} options.classNamed
@@ -854,7 +854,7 @@ export function createDialogFunctions(options){
             if (entry.message === WM_QUIT)
             {
                 host.queue.postQuit(entry.wParam | 0);
-                destroyWindow(hwnd);
+                await destroyWindow(hwnd, thread);
                 break;
             }
             const taken = dialogKey(hwnd, entry, thread);

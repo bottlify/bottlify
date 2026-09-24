@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, parseShader, versionToken } from './shader.js';
 import { HYBRID_CONSTANTS, fixedVertexStage, translateShader, varyingLocation } from './wgsl.js';
 import { D3DDECLUSAGE } from './declaration.js';
+import { D3DFOG } from './constants.js';
 
 /** @param {number} type @param {number} index @param {number} writeMask @param {number} result */
 const dst = (type, index, writeMask = 0xf, result = 0)=>(0x80000000 | ((type & 7) << 28)
@@ -377,6 +378,19 @@ test('a 1.x pixel shader\'s tex and texcoord translate, and its addressing modes
     assertLine(legacy.wgsl, 'out.oC0 = oC0;');
     assert.deepEqual(legacy.samplers, [{ index: 0, type: 'texture_2d<f32>' }]);
 
+    // Once filled, a 1.x texture register is written like a temporary: the
+    // write goes to the local, never to the stage's immutable input.
+    const rewritten = translateShader(parseShader([PS_1_1,
+        op(OPCODE.TEX, 0), dst(REGISTER.TEXTURE, 1),
+        op(OPCODE.MUL, 0), dst(REGISTER.TEXTURE, 2), src(REGISTER.TEXTURE, 1),
+        src(REGISTER.INPUT, 0),
+        op(OPCODE.MOV, 0), dst(REGISTER.TEMP, 0), src(REGISTER.TEXTURE, 2),
+        END_TOKEN]));
+    assert.equal(rewritten.error, null);
+    assertLine(rewritten.wgsl, 't2 = (t1 * in.v0);');
+    assert.ok(!rewritten.wgsl.includes('in.t2 ='), 'the input is never assigned');
+    assertLine(rewritten.wgsl, 'var t2: vec4f = vec4f(0.0);');
+
     const bumped = translateShader(parseShader([PS_1_1,
         op(OPCODE.TEXBEM, 0), dst(REGISTER.TEXTURE, 1), src(REGISTER.TEXTURE, 0),
         END_TOKEN]));
@@ -450,12 +464,49 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     assert.equal(stage.error, null);
     assert.equal(stage.entry, 'vs_main');
     assert.equal(stage.constants, HYBRID_CONSTANTS.COUNT);
-    assertLine(stage.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 5>;');
+    assertLine(stage.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 43>;');
     assertLine(stage.wgsl,
         'out.oPos = mat4x4f(c[0], c[1], c[2], c[3]) * vec4f(vec4f(in.v0, 1.0).xyz, 1.0);');
     assertLine(stage.wgsl, `out.o${varyingLocation(D3DDECLUSAGE.COLOR, 0)} = in.v1.zyxw;`);
     assertLine(stage.wgsl,
         `out.o${varyingLocation(D3DDECLUSAGE.TEXCOORD, 1)} = vec4f(in.v2, 0.0, 1.0);`);
+
+    // A set the stage of its number generates from the vertex in camera
+    // space is written from world-view (c5..c8) through the stage's
+    // transform rows (c9.. two per stage), and the carried set of that
+    // number is not what goes out.
+    const generated = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
+        { usage: D3DDECLUSAGE.NORMAL, usageIndex: 0, register: 1 },
+        { usage: D3DDECLUSAGE.TEXCOORD, usageIndex: 0, register: 2 },
+    ], new Map([
+        [0, { components: 3, scalar: 'f32', bgra: false }],
+        [1, { components: 3, scalar: 'f32', bgra: false }],
+        [2, { components: 2, scalar: 'f32', bgra: false }],
+    ]), [], [0x20000, 0x10000, 0, 0, 0x20000]);
+    assert.equal(generated.error, null);
+    const t0 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 0);
+    const t1 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 1);
+    const t4 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 4);
+    assert.deepEqual(generated.outputs, [t0, t1, t4]);
+    // A fifth set goes through the fifth stage's own rows: a terrain's
+    // blend map is that far along the cascade, and a coordinate left raw
+    // there moved with the camera.
+    assertLine(generated.wgsl, `out.o${t4} = vec4f(dot(c[25], vec4f(cameraPosition, 1.0)),`
+        + ' dot(c[26], vec4f(cameraPosition, 1.0)), dot(c[27], vec4f(cameraPosition, 1.0)),'
+        + ' dot(c[28], vec4f(cameraPosition, 1.0)));');
+    assertLine(generated.wgsl, 'let worldView = mat4x4f(c[5], c[6], c[7], c[8]);');
+    assertLine(generated.wgsl,
+        'let cameraPosition = (worldView * vec4f(vec4f(in.v0, 1.0).xyz, 1.0)).xyz;');
+    assertLine(generated.wgsl,
+        'let cameraNormal = normalize((worldView * vec4f(vec4f(in.v1, 1.0).xyz, 0.0)).xyz);');
+    assertLine(generated.wgsl, `out.o${t0} = vec4f(dot(c[9], vec4f(cameraPosition, 1.0)),`
+        + ' dot(c[10], vec4f(cameraPosition, 1.0)), dot(c[11], vec4f(cameraPosition, 1.0)),'
+        + ' dot(c[12], vec4f(cameraPosition, 1.0)));');
+    assertLine(generated.wgsl, `out.o${t1} = vec4f(dot(c[13], vec4f(cameraNormal, 1.0)),`
+        + ' dot(c[14], vec4f(cameraNormal, 1.0)), dot(c[15], vec4f(cameraNormal, 1.0)),'
+        + ' dot(c[16], vec4f(cameraNormal, 1.0)));');
+    assert.ok(!generated.wgsl.includes(`out.o${t0} = vec4f(in.v2`), 'the carried set is not sent');
 
     const transformed = fixedVertexStage([
         { usage: D3DDECLUSAGE.POSITIONT, usageIndex: 0, register: 0 },
@@ -469,4 +520,59 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
         { usage: D3DDECLUSAGE.COLOR, usageIndex: 0, register: 0 },
     ], new Map());
     assert.match(none.error ?? '', /no position/);
+
+    // Fogged, the stage computes the fixed function's factor from its own clip
+    // w and carries it, with the fog colour, in the oFog varying a fogged
+    // pixel shader reads.
+    const fogged = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
+    ], new Map([[0, { components: 3, scalar: 'f32', bgra: false }]]), [], [],
+    D3DFOG.EXP2);
+    assert.equal(fogged.error, null);
+    const fogLocation = varyingLocation(D3DDECLUSAGE.FOG, 0);
+    assert.ok(fogged.outputs.includes(fogLocation), 'the oFog varying is written');
+    assertLine(fogged.wgsl, `@location(${fogLocation}) o${fogLocation}: vec4f,`);
+    assertLine(fogged.wgsl, `out.o${fogLocation} = vec4f(fogFactorOf(out.oPos.w),`
+        + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
+    assertLine(fogged.wgsl, `let scaled = c[${HYBRID_CONSTANTS.FOG}].z * dist;`);
+});
+
+test('the fog stage after a pixel shader mixes the shaded colour by the varying', ()=>{
+    const parsed = parseShader([PS_2_0,
+        ...dclSampler(0),
+        op(OPCODE.DCL, 2), 0x80000000, dst(REGISTER.TEXTURE, 2),
+        op(OPCODE.TEX, 3), dst(REGISTER.TEMP, 0), src(REGISTER.TEXTURE, 2),
+        src(REGISTER.SAMPLER, 0),
+        op(OPCODE.MUL, 3), dst(REGISTER.COLOROUT, 0), src(REGISTER.TEMP, 0),
+        src(REGISTER.TEMP, 0),
+        END_TOKEN]);
+    assert.equal(parsed.error, null);
+
+    const fogged = translateShader(parsed, { fog: D3DFOG.LINEAR });
+    assert.equal(fogged.error, null);
+    assert.equal(fogged.entry, 'ps_main');
+    // The amount the vertex stage computed and the fog colour beside it, in
+    // the oFog varying: Direct3D applies its fog stage after the pixel shader,
+    // so the mix is the shader's own colour towards that colour.
+    const fogLocation = varyingLocation(D3DDECLUSAGE.FOG, 0);
+    assertLine(fogged.wgsl, `@location(${fogLocation}) fog: vec4f,`);
+    assertLine(fogged.wgsl, 'oC0 = vec4f(mix(in.fog.yzw, oC0.rgb,'
+        + ' clamp(in.fog.x, 0.0, 1.0)), oC0.a);');
+    assert.ok(fogged.reads.includes(fogLocation), 'and it is a varying it reads');
+
+    // The mix comes after the shader's own last instruction and before the
+    // colour is written out: fog on the shaded colour, which is where the
+    // fixed function applies it.
+    const lines = fogged.wgsl.split('\n').map(line=>line.trim());
+    const written = lines.indexOf('oC0 = (r0 * r0);');
+    const mixed = lines.indexOf('oC0 = vec4f(mix(in.fog.yzw, oC0.rgb,'
+        + ' clamp(in.fog.x, 0.0, 1.0)), oC0.a);');
+    const out = lines.indexOf('out.oC0 = oC0;');
+    assert.ok(written >= 0 && mixed > written, 'the mix is after the shader');
+    assert.ok(out > mixed, 'and before the colour is written out');
+
+    // A surface that is not fogged carries none of it.
+    const plain = translateShader(parsed);
+    assert.ok(!plain.wgsl.includes('fog: vec4f'), 'no fog varying');
+    assert.ok(!plain.wgsl.includes('in.fog'), 'and no mix');
 });

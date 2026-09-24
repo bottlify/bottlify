@@ -67,6 +67,15 @@ export const Codec = {
  */
 
 /**
+ * The decoder `openBundle` is given: it is awaited, because the index may be
+ * written with a codec that has no synchronous decoder here, so it may answer
+ * a promise. The block decoder `createBundleSource` keeps is synchronous.
+ *
+ * @typedef {(codec: number, bytes: Uint8Array,
+ *     expectedLength: number | null) => Uint8Array | Promise<Uint8Array>} IndexDecode
+ */
+
+/**
  * @typedef {Object} BundleFile
  * @property {string} path        Backslash-separated, relative to the root.
  * @property {number} size
@@ -110,7 +119,7 @@ export const Codec = {
  * Reads a container's header and index, and nothing else.
  *
  * @param {FetchRange} fetchRange
- * @param {Decode} decode
+ * @param {IndexDecode} decode
  * @param {Object} [options]
  * @param {(stored: Uint8Array) => Promise<string | null>} [options.verifyIndex]
  *        Given the index exactly as stored, answers with what is wrong with it

@@ -16,7 +16,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ANY_WINDOW, WM_TIMER, createMessageQueue } from './messages.js';
 import {
-    DEVMODEA, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH, PAINTSTRUCT, RECT,
+    DEVMODEA, DISPLAY_DEVICEA, DISPLAY_DEVICEW, DM_BITSPERPEL, DM_DISPLAYFREQUENCY,
+    DM_PELSHEIGHT, DM_PELSWIDTH, PAINTSTRUCT, RECT,
 } from './structs.js';
 import { createWindowFunctions } from './windows.js';
 import { createInputRouter } from '../../input/router.js';
@@ -32,6 +33,8 @@ const OUT_BUFFER = 0x11600;
 const DEVMODE_BUFFER = 0x11800;
 const INPUT_BUFFER = 0x11a00;
 const KEYBOARD_BUFFER = 0x11c00;
+const DEVICE_BUFFER = 0x12200;
+const DEVICE_NAME_BUFFER = 0x12600;
 
 const WNDPROC = 0x401000;
 const HINSTANCE = 0x400000;
@@ -487,11 +490,134 @@ test('the display enumeration ends', ()=>{
         index++;
         assert.ok(index < 1000, 'the enumeration did not terminate');
     }
-    // A 1024x768 display of the era offers 640x480, 800x600 and 1024x768; a
-    // program's resolution menu is built from exactly this walk.
-    assert.equal(index, 3, 'every size up to the display, and then the end');
+    // Every size of the era, whatever the display: a program's resolution
+    // menu is built from exactly this walk.
+    assert.equal(index, 38, 'every size of the era at both rates, and then the end');
     const last = memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth);
-    assert.equal(last, SCREEN.width, 'the largest listed is the display itself');
+    assert.equal(last, 3456, 'the largest listed is the largest of the era');
+    assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmDisplayFrequency), 120,
+        'the second rate of the last size ends the list');
+});
+
+test('the display device enumeration names the adapter and the monitor on it', ()=>{
+    // The walk a resolution menu is built from: the adapter's name, then every
+    // mode under it. A program refused the device has no name to ask modes by
+    // and serves a table of its own that no display was ever asked about.
+    const { memory, fns } = setup();
+
+    memory.fill(DEVICE_BUFFER, DISPLAY_DEVICEA.SIZE / 4);
+    memory.putU32s(DEVICE_BUFFER, [DISPLAY_DEVICEA.SIZE]);
+    assert.equal(fns.EnumDisplayDevicesA.argBytes, 16);
+    assert.equal(fns.EnumDisplayDevicesA.handler([0, 0, DEVICE_BUFFER, 0]), 1,
+        'the one adapter answers at index zero');
+    assert.equal(memory.readCString(DEVICE_BUFFER + DISPLAY_DEVICEA.DeviceName, 32),
+        '\\\\.\\DISPLAY1', 'the name the mode enumeration beside it is asked by');
+    assert.equal(memory.u32(DEVICE_BUFFER + DISPLAY_DEVICEA.StateFlags), 0x5,
+        'on the desktop, and the one the desktop is on');
+    assert.ok(memory.readCString(DEVICE_BUFFER + DISPLAY_DEVICEA.DeviceString, 128).length > 0,
+        'a description a program may show');
+    assert.equal(memory.readCString(DEVICE_BUFFER + DISPLAY_DEVICEA.DeviceID, 128), '',
+        'no plug-and-play path: a card database keyed by one asks Direct3D instead');
+    assert.equal(memory.bytes[DEVICE_BUFFER + DISPLAY_DEVICEA.DeviceName + 31], 0,
+        'the field is written whole, so the caller\'s own stack cannot answer through it');
+
+    assert.equal(fns.EnumDisplayDevicesA.handler([0, 1, DEVICE_BUFFER, 0]), 0,
+        'and the walk ends where the devices do');
+    assert.equal(fns.EnumDisplayDevicesA.handler([0, 0, 0, 0]), 0);
+
+    memory.fill(DEVICE_BUFFER, DISPLAY_DEVICEA.SIZE / 4);
+    memory.putU32s(DEVICE_BUFFER, [DISPLAY_DEVICEA.SIZE - 4]);
+    assert.equal(fns.EnumDisplayDevicesA.handler([0, 0, DEVICE_BUFFER, 0]), 0,
+        'a caller that declared less than the structure is refused');
+    assert.equal(memory.u32(DEVICE_BUFFER + DISPLAY_DEVICEA.DeviceName), UNTOUCHED,
+        'and nothing is written it made no room for');
+
+    memory.putString(DEVICE_NAME_BUFFER, '\\\\.\\DISPLAY1');
+    memory.fill(DEVICE_BUFFER, DISPLAY_DEVICEA.SIZE / 4);
+    memory.putU32s(DEVICE_BUFFER, [DISPLAY_DEVICEA.SIZE]);
+    assert.equal(fns.EnumDisplayDevicesA.handler([DEVICE_NAME_BUFFER, 0, DEVICE_BUFFER, 0]), 1,
+        'the adapter\'s own name asks for the monitor on it');
+    assert.equal(memory.u32(DEVICE_BUFFER + DISPLAY_DEVICEA.StateFlags), 0x20000001,
+        'attached, and in use');
+    assert.equal(memory.readCString(DEVICE_BUFFER + DISPLAY_DEVICEA.DeviceString, 128),
+        'Default Monitor', 'a monitor that never reported one');
+    assert.equal(memory.readCString(DEVICE_BUFFER + DISPLAY_DEVICEA.DeviceID, 128),
+        'MONITOR\\DEFAULT\\{4d36e96e-e325-11ce-bfc1-08002be10318}\\0000');
+
+    memory.putString(DEVICE_NAME_BUFFER, '\\\\.\\display1');
+    assert.equal(fns.EnumDisplayDevicesA.handler([DEVICE_NAME_BUFFER, 0, DEVICE_BUFFER, 0]), 1,
+        'a device name does not care about case');
+    memory.putString(DEVICE_NAME_BUFFER, '\\\\.\\DISPLAY2');
+    assert.equal(fns.EnumDisplayDevicesA.handler([DEVICE_NAME_BUFFER, 0, DEVICE_BUFFER, 0]), 0,
+        'a name that is not the adapter\'s names nothing');
+    assert.equal(fns.EnumDisplayDevicesA.handler([DEVICE_NAME_BUFFER, 1, DEVICE_BUFFER, 0]), 0);
+});
+
+test('the wide display device enumeration reads and writes UTF-16', ()=>{
+    const { memory, fns } = setup();
+    /** @param {number} at @param {string} text */
+    const putWide = (at, text)=>{
+        for (let i = 0; i <= text.length; i++)
+        {
+            const code = i < text.length ? text.charCodeAt(i) : 0;
+            memory.bytes[at + i * 2] = code & 0xff;
+            memory.bytes[at + i * 2 + 1] = code >>> 8;
+        }
+    };
+    /** @param {number} at */
+    const readWide = at=>{
+        let text = '';
+        for (let i = 0; ; i++)
+        {
+            const code = memory.bytes[at + i * 2] | memory.bytes[at + i * 2 + 1] << 8;
+            if (code === 0)
+            {
+                return text;
+            }
+            text += String.fromCharCode(code);
+        }
+    };
+
+    memory.fill(DEVICE_BUFFER, DISPLAY_DEVICEW.SIZE / 4);
+    memory.putU32s(DEVICE_BUFFER, [DISPLAY_DEVICEW.SIZE]);
+    assert.equal(fns.EnumDisplayDevicesW.handler([0, 0, DEVICE_BUFFER, 0]), 1);
+    assert.equal(readWide(DEVICE_BUFFER + DISPLAY_DEVICEW.DeviceName), '\\\\.\\DISPLAY1');
+    assert.equal(memory.u32(DEVICE_BUFFER + DISPLAY_DEVICEW.StateFlags), 0x5,
+        'the state word sits where the wide structure puts it');
+
+    putWide(DEVICE_NAME_BUFFER, '\\\\.\\DISPLAY1');
+    memory.fill(DEVICE_BUFFER, DISPLAY_DEVICEW.SIZE / 4);
+    memory.putU32s(DEVICE_BUFFER, [DISPLAY_DEVICEW.SIZE]);
+    assert.equal(fns.EnumDisplayDevicesW.handler([DEVICE_NAME_BUFFER, 0, DEVICE_BUFFER, 0]), 1,
+        'the monitor answers through the wide spelling too');
+    assert.equal(readWide(DEVICE_BUFFER + DISPLAY_DEVICEW.DeviceString), 'Default Monitor');
+    assert.equal(memory.u32(DEVICE_BUFFER + DISPLAY_DEVICEW.StateFlags), 0x20000001);
+
+    memory.fill(DEVICE_BUFFER, DISPLAY_DEVICEW.SIZE / 4);
+    memory.putU32s(DEVICE_BUFFER, [DISPLAY_DEVICEA.SIZE]);
+    assert.equal(fns.EnumDisplayDevicesW.handler([0, 0, DEVICE_BUFFER, 0]), 0,
+        'the ANSI size declares the ANSI structure, not this one');
+    assert.equal(memory.u32(DEVICE_BUFFER + DISPLAY_DEVICEW.DeviceName), UNTOUCHED);
+});
+
+test('the name the device enumeration gives is one the mode enumeration takes', ()=>{
+    // The pair a resolution menu is built from: the adapter's name, then every
+    // mode under it until the walk ends. The two answers have to agree on what
+    // the display is called, or the second walk is asked for a device nobody
+    // ever named and comes back empty.
+    const { memory, fns } = setup();
+    memory.putU32s(DEVICE_BUFFER, [DISPLAY_DEVICEA.SIZE]);
+    assert.equal(fns.EnumDisplayDevicesA.handler([0, 0, DEVICE_BUFFER, 0]), 1);
+    const name = DEVICE_BUFFER + DISPLAY_DEVICEA.DeviceName;
+
+    memory.putU32s(DEVMODE_BUFFER, new Array(40).fill(0));
+    let index = 0;
+    while (fns.EnumDisplaySettingsA.handler([name, index, DEVMODE_BUFFER]) !== 0)
+    {
+        index++;
+        assert.ok(index < 1000, 'the enumeration did not terminate');
+    }
+    assert.equal(index, 38, 'every mode the display offers answers under its own name');
 });
 
 test('AdjustWindowRectEx grows a client rectangle by the frame the style carries', ()=>{
@@ -907,7 +1033,7 @@ test('ChangeDisplaySettingsA sets any listed mode, and the screen follows it', (
     assert.equal(fns.EnumDisplaySettingsA.handler([0, 0xffffffff, DEVMODE_BUFFER]), 1);
     assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth), 640,
         'and the current settings answer the mode set');
-    assert.equal(fns.EnumDisplaySettingsA.handler([0, 2, DEVMODE_BUFFER]), 1,
+    assert.equal(fns.EnumDisplaySettingsA.handler([0, 4, DEVMODE_BUFFER]), 1,
         'while the list still offers the larger sizes of the display');
     assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth), 1024);
 

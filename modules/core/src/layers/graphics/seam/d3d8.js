@@ -44,7 +44,8 @@ import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
     D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
-import { expandTexels, vertexCountOf } from '../d3d8/render.js';
+import { vertexCountOf } from '../d3d8/render.js';
+import { createCursorTeller } from './cursor.js';
 import {
     createShadow, getSurfaceLevelCode, lockCode, materialFloats, materialOf, setIndicesCode,
     setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
@@ -230,14 +231,20 @@ const S_FALSE = 1;
  *        Where a value set in the guest that the device refuses is reported.
  * @param {(cursor: CursorNotice) => void} [deps.cursor]  A program cursor for the host.
  * @param {(width: number, height: number,
- *          where?: { window?: number, fullscreen?: boolean }) => void} [deps.resolution]
+ *          where?: { window?: number, fullscreen?: boolean, announce?: boolean },
+ *          ) => void} [deps.resolution]
  *        Told the resolution a device is created at, to report as the screen --
  *        and which window it presents into, so a fullscreen one can be placed.
  * @param {() => AdapterIdentity | null} [deps.identity]
  *        The hardware behind the device, as the assembling caller knows it.
+ * @param {(window: number) => { width: number, height: number } | null} [deps.windowClientSize]
+ *        The client area of a window, which is the size a back buffer asked
+ *        for as zero by zero takes. Without it the configured display is the
+ *        nearest size this layer knows.
  */
 export function createDirect3D8Seam(
-    { publisher, memory, screen, allocate, divergence, cursor, resolution, identity },
+    { publisher, memory, screen, allocate, divergence, cursor, resolution, identity,
+        windowClientSize },
 )
 {
     const fields = createFields(memory);
@@ -750,7 +757,7 @@ export function createDirect3D8Seam(
             {
                 return D3DERR_INVALIDCALL;
             }
-            const next = readPresentParameters(parameters >>> 0);
+            const next = readPresentParameters(parameters >>> 0, deviceWindow);
             const hr = device.Reset(next);
             writePresentParameters(parameters >>> 0, next);
             if (hr === D3D_OK)
@@ -1617,20 +1624,37 @@ export function createDirect3D8Seam(
      * zero has to be answered rather than carried.
      *
      * @param {number} address
+     * @param {number} [window]
+     *        The window the device presents into when the parameters name
+     *        none: the focus window a creation was given, or the window a
+     *        previous device was made into.
      */
-    const readPresentParameters = address=>{
+    const readPresentParameters = (address, window = 0)=>{
         const raw = fields.readStruct(address, D3DPRESENT_PARAMETERS8);
         const display = screen();
         const asked = { width: raw.BackBufferWidth >>> 0, height: raw.BackBufferHeight >>> 0 };
-        if (asked.width === 0 || asked.height === 0)
+        // A size asked for as zero by zero means the device window's client
+        // area, which is what the real device answers and what the program's
+        // own layout is measured against. Fullscreen has no window to measure
+        // -- its window is about to become the mode -- so the display stands
+        // for the mode there, and a windowed window this layer cannot measure
+        // falls back to the display and says so: the program then has a size
+        // its window does not, and every layout computed from it is for
+        // another screen.
+        const windowed = raw.Windowed !== 0;
+        const named = windowed ? ((raw.hDeviceWindow >>> 0) || (window >>> 0)) : 0;
+        const measured = named === 0 ? null : windowClientSize?.(named) ?? null;
+        if ((asked.width === 0 || asked.height === 0) && windowed && measured === null)
         {
             divergence?.('Direct3D 8',
                 'a back buffer asked for as zero by zero is the size of the device window,'
-                + ' which this layer cannot measure: the configured display is used instead');
+                + ' and that window could not be measured: the configured display is'
+                + ' used instead');
         }
+        const taken = measured ?? display;
         return {
-            backBufferWidth: asked.width === 0 ? display.width : asked.width,
-            backBufferHeight: asked.height === 0 ? display.height : asked.height,
+            backBufferWidth: asked.width === 0 ? taken.width : asked.width,
+            backBufferHeight: asked.height === 0 ? taken.height : asked.height,
             backBufferFormat: raw.BackBufferFormat,
             backBufferCount: raw.BackBufferCount,
             multiSampleType: raw.MultiSampleType,
@@ -1708,7 +1732,7 @@ export function createDirect3D8Seam(
         fields.writeStruct(address, D3DDISPLAYMODE, {
             Width: display.width,
             Height: display.height,
-            RefreshRate: 0,
+            RefreshRate: REFRESH_HZ,
             // D3DFMT_X8R8G8B8, which is what a 32-bit display reports.
             Format: 22,
         });
@@ -1726,11 +1750,11 @@ export function createDirect3D8Seam(
      * Every mode the adapter offers, in the order a program walks them: each
      * size in each format, sizes smallest first.
      *
-     * @returns {{ width: number, height: number, format: number }[]}
+     * @returns {{ width: number, height: number, refresh: number, format: number }[]}
      */
     const adapterModes = ()=>displayModes(screen())
         .flatMap(mode=>ADAPTER_FORMATS.map(format=>({
-            width: mode.width, height: mode.height, format,
+            width: mode.width, height: mode.height, refresh: mode.refresh, format,
         })));
 
     /**
@@ -1879,7 +1903,7 @@ export function createDirect3D8Seam(
             fields.writeStruct(out >>> 0, D3DDISPLAYMODE, {
                 Width: listed.width,
                 Height: listed.height,
-                RefreshRate: REFRESH_HZ,
+                RefreshRate: listed.refresh,
                 Format: listed.format,
             });
             return D3D_OK;
@@ -1920,7 +1944,7 @@ export function createDirect3D8Seam(
             {
                 return D3DERR_INVALIDCALL;
             }
-            const wanted = readPresentParameters(parameters >>> 0);
+            const wanted = readPresentParameters(parameters >>> 0, focus >>> 0);
             /** @type {{ device?: any }} */
             const held = {};
             // The first three arguments are kept rather than dropped: they are
@@ -1999,30 +2023,8 @@ export function createDirect3D8Seam(
         },
     };
 
-    /**
-     * What the device holds as its cursor, as the taker wants it: the bitmap
-     * read out of the surface's own bytes, in the order they lie.
-     *
-     * @param {any} device
-     */
-    const tellCursor = device=>{
-        const held = device.GetCursor();
-        if (!cursor || !held.surface)
-        {
-            return;
-        }
-        /** @type {{ desc?: any }} */
-        const out = {};
-        held.surface.GetDesc(out);
-        const { Width: width, Height: height, Format: format } = out.desc;
-        const bytes = memory.readMemory(held.surface.base, width * height * 4);
-        cursor({
-            width, height,
-            hotSpot: { ...held.hotSpot },
-            bgra: expandTexels(format, bytes, width * height),
-            shown: held.shown,
-        });
-    };
+    /** Tells the taker the cursor the device holds, when it changed. */
+    const tellCursor = cursor ? createCursorTeller(cursor, memory.readMemory) : ()=>{};
 
     const rootInterfaces = [describe(IID_IDirect3D8, IDIRECT3D8_SLOTS, rootMethods)];
 

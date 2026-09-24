@@ -54,6 +54,8 @@ export function createParking({ kernel, onBegin }){
     /** @type {CallFrame[]} */
     const inFlight = [];
     let parked = 0;
+    /** The call that parked last, by name: what a thread that never wakes was waiting in. */
+    let lastParked = '';
 
     return {
         /** @param {CallFrame} frame */
@@ -125,9 +127,10 @@ export function createParking({ kernel, onBegin }){
             }
             kernel.parkThread(which, frame.restingStack);
             parked++;
+            lastParked = frame.name;
             return PARKED;
         },
 
-        diagnostics: ()=>({ parked }),
+        diagnostics: ()=>({ parked, lastParked }),
     };
 }

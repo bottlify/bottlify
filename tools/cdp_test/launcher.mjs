@@ -24,6 +24,7 @@
 
 import { launchWithGpu, shutdown } from './browser.mjs';
 import { CdpEndpoint } from './cdp.mjs';
+import { summarise } from './profile.mjs';
 
 const argv = process.argv.slice(2);
 const bundleId = argv.find(arg=>!arg.startsWith('--')) ?? 'warcraft-iii-frozen-throne';
@@ -53,52 +54,6 @@ const options = {
 /** @param {number} ms */
 const sleep = ms=>new Promise(resolve=>setTimeout(resolve, ms));
 
-/**
- * Folds a CPU profile into the functions the thread spent its time in, by
- * self time, and into the files they live in.
- *
- * @param {any} profile  Profiler's Profile.
- * @param {number} windowMs
- */
-function summarise(profile, windowMs){
-    /** @type {Map<number, any>} */
-    const nodes = new Map(profile.nodes.map((/** @type {any} */ node)=>[node.id, node]));
-    /** @type {Map<number, number>} */
-    const selfMicros = new Map();
-    const samples = profile.samples ?? [];
-    const deltas = profile.timeDeltas ?? [];
-    for (let index = 0; index < samples.length; index++)
-    {
-        const id = samples[index];
-        selfMicros.set(id, (selfMicros.get(id) ?? 0) + (deltas[index] ?? 0));
-    }
-    /** @type {Map<string, number>} */
-    const byFunction = new Map();
-    /** @type {Map<string, number>} */
-    const byFile = new Map();
-    let total = 0;
-    for (const [id, micros] of selfMicros)
-    {
-        const node = nodes.get(id);
-        const frame = node?.callFrame ?? {};
-        const file = String(frame.url ?? '').split('/').pop()
-            || `(${frame.functionName || 'program'})`;
-        const line = (frame.lineNumber ?? -1) + 1;
-        const name = `${frame.functionName || '(anonymous)'} ${file}:${line}`;
-        byFunction.set(name, (byFunction.get(name) ?? 0) + micros);
-        byFile.set(file, (byFile.get(file) ?? 0) + micros);
-        total += micros;
-    }
-    const rows = (/** @type {Map<string, number>} */ map, /** @type {number} */ keep)=>
-        [...map].sort((left, right)=>right[1] - left[1]).slice(0, keep)
-            .map(([name, micros])=>({ name, ms: micros / 1000, share: micros / Math.max(1, total) }));
-    return {
-        sampledMs: total / 1000,
-        busyShare: total / 1000 / windowMs,
-        functions: rows(byFunction, 40),
-        files: rows(byFile, 16),
-    };
-}
 
 const browser = await launchWithGpu({ headed: options.headed });
 /** @type {CdpEndpoint | null} */

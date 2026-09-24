@@ -48,6 +48,7 @@
  * @property {(desc: any)=>any} createBindGroup
  * @property {(desc: any)=>any} createShaderModule
  * @property {(desc: any)=>any} createRenderPipeline
+ * @property {(desc: any)=>Promise<any>} createRenderPipelineAsync
  * @property {(desc?: any)=>GpuCommandEncoderLike} createCommandEncoder
  */
 

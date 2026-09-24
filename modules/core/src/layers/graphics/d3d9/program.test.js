@@ -18,7 +18,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from './constants.js';
-import { D3DPT, D3DTS } from '../d3d8/constants.js';
+import { D3DPT, D3DRS, D3DTS, D3DTSS } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from './declaration.js';
 import { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, versionToken } from './shader.js';
@@ -91,9 +91,9 @@ const ELEMENTS = [
 ];
 const STRIDE = 24;
 
-/** @param {{ dumpDraws?: boolean }} [options] */
+/** @param {{ dumpDraws?: boolean, refusePipeline?: (descriptor: any) => string | null }} [options] */
 function harness(options = {}){
-    const gpu = createFakeDevice();
+    const gpu = createFakeDevice({ refusePipeline: options.refusePipeline });
     /** @type {string[]} */
     const reports = [];
     const backend = createBackend({
@@ -397,24 +397,296 @@ test('a pixel shader over fixed-function vertices gets a vertex stage of its own
     assert.equal(h.device.release(), 0);
 });
 
-test('a vertex shader over the fixed-function pixel stage is declined and reported once',
+/**
+ * vs_2_0 for the fixed pixel stage: position through c0..c3, the colour and
+ * the coordinate set passed on.
+ *
+ *     dcl_position v0
+ *     dcl_color v1
+ *     dcl_texcoord v2
+ *     m4x4 oPos, v0, c0
+ *     mov oD0, v1
+ *     mov oT0, v2
+ */
+const TEXTURED_VERTEX_SHADER = [
+    versionToken(SHADER_KIND.VERTEX, 2, 0),
+    ...dclInput(D3DDECLUSAGE.POSITION, 0),
+    ...dclInput(D3DDECLUSAGE.COLOR, 1),
+    ...dclInput(D3DDECLUSAGE.TEXCOORD, 2),
+    op(OPCODE.M4x4, 3), dst(REGISTER.RASTOUT, 0), src(REGISTER.INPUT, 0), src(REGISTER.CONST, 0),
+    op(OPCODE.MOV, 2), dst(REGISTER.ATTROUT, 0), src(REGISTER.INPUT, 1),
+    op(OPCODE.MOV, 2), dst(REGISTER.TEXCRDOUT, 0), src(REGISTER.INPUT, 2),
+    END_TOKEN,
+];
+
+test('a vertex shader over the fixed-function pixel stage gets a fragment stage of its own',
+    async()=>{
+        // The shader-model-1 era's ordinary draw: transform in a program,
+        // texture and blend in the stages. The stage cascade, the fog and
+        // the alpha test in force become a fragment stage over what the
+        // shader wrote, bound the way a pixel shader would be.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        assert.equal(h.device.CreateVertexShader(TEXTURED_VERTEX_SHADER, vs), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetTexture(0, h.texture);
+        h.device.SetRenderState(D3DRS.ALPHATESTENABLE, 1);
+        h.device.SetRenderState(D3DRS.ALPHAREF, 0x80);
+        h.device.SetRenderState(D3DRS.ALPHAFUNC, 5);
+        h.device.SetRenderState(D3DRS.TEXTUREFACTOR, 0xff204060);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        const diagnostics = h.device.diagnostics();
+        assert.equal(diagnostics.programmable, 1);
+        assert.equal(diagnostics.skipped.program, 0);
+
+        const modules = h.gpu.of('createShaderModule').map(call=>call.descriptor);
+        const fragment = modules.find(module=>module.label.startsWith('ps:'));
+        assert.ok(fragment, 'a fragment stage was made for the shader');
+        // The cascade over the shader's colour and coordinate set, the
+        // block at the pixel stage's first binding, the texture in the
+        // sampler group, and the alpha test the render state asked for.
+        assert.ok(fragment.code.includes('@group(1) @binding(0) var<uniform> uniforms'));
+        assert.ok(fragment.code.includes('@group(2) @binding(0) var texture0'));
+        assert.ok(fragment.code.includes('input.diffuse = in.v0;'));
+        assert.ok(fragment.code.includes('input.texCoord0 = in.t0.xy;'));
+        assert.ok(fragment.code.includes('input.specular = vec4f(0.0);'),
+            'a varying the shader does not write is the fixed function default');
+        assert.ok(fragment.code.includes('sampleStage0(input.texCoord0)'));
+        assert.ok(fragment.code.includes('current.a > uniforms.alphaRef'));
+        assert.ok(!fragment.code.includes('@location(1) v1'),
+            'and is not declared as an input the vertex stage would have to supply');
+
+        // The block the fragment reads is the fixed-function block, with the
+        // render state's texture factor and alpha reference in it.
+        const groups = h.groupsOfDraw();
+        const block = new Float32Array(h.boundBytes(groups.get(1), 0).buffer);
+        assert.equal(block.length, 220);
+        assert.deepEqual([...block.subarray(36, 40)].map(v=>Math.round(v * 255)),
+            [0x20, 0x40, 0x60, 0xff]);
+        assert.equal(Math.round(block[72] * 255), 0x80);
+
+        h.device.SetTexture(0, null);
+        h.device.SetVertexShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        vs.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
+test('a vertex shader that writes no coordinate set ends the cascade before a sampling stage',
     async()=>{
         const h = harness();
         /** @type {{ shader?: any }} */
         const vs = {};
         assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
         h.device.SetVertexShader(vs.shader);
+        h.device.SetTexture(0, h.texture);
         await h.draw();
-        await h.draw();
-        const diagnostics = h.device.diagnostics();
-        assert.equal(diagnostics.programmable, 0);
-        assert.equal(diagnostics.skipped.program, 2);
-        assert.equal(h.reports.length, 1);
-        assert.match(h.reports[0], /fixed-function pixel stage/);
+        assert.equal(h.device.diagnostics().programmable, 1);
+        const fragment = h.gpu.of('createShaderModule').map(call=>call.descriptor)
+            .find(module=>module.label.startsWith('ps:'));
+        assert.ok(fragment);
+        assert.ok(!fragment.code.includes('sampleStage0'),
+            'stage zero wanted coordinate set zero, which the shader never wrote');
+        h.device.SetTexture(0, null);
         h.device.SetVertexShader(null);
         h.device.SetVertexDeclaration(null);
         h.device.SetStreamSource(0, null, 0, 0);
         vs.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
+/**
+ * vs_2_0 that writes its position and a coordinate set and no colour.
+ *
+ *     dcl_position v0
+ *     dcl_texcoord v2
+ *     m4x4 oPos, v0, c0
+ *     mov oT0, v2
+ */
+const COLOURLESS_VERTEX_SHADER = [
+    versionToken(SHADER_KIND.VERTEX, 2, 0),
+    ...dclInput(D3DDECLUSAGE.POSITION, 0),
+    ...dclInput(D3DDECLUSAGE.TEXCOORD, 2),
+    op(OPCODE.M4x4, 3), dst(REGISTER.RASTOUT, 0), src(REGISTER.INPUT, 0), src(REGISTER.CONST, 0),
+    op(OPCODE.MOV, 2), dst(REGISTER.TEXCRDOUT, 0), src(REGISTER.INPUT, 2),
+    END_TOKEN,
+];
+
+test('a varying the pixel shader reads and the vertex shader never writes is written as zero',
+    async()=>{
+        // Direct3D reads whatever was left in the register; a WebGPU fragment
+        // input with no vertex output fails the pipeline and, with it, the
+        // whole frame. So the vertex stage writes it, as zero.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreateVertexShader(COLOURLESS_VERTEX_SHADER, vs), D3D_OK);
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTexture(0, h.texture);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        assert.equal(h.device.diagnostics().programmable, 1);
+        const vertexModule = h.gpu.of('createShaderModule')
+            .map(call=>call.descriptor).find(module=>module.label.startsWith('vs:'));
+        assert.ok(vertexModule);
+        const colour = varyingLocation(D3DDECLUSAGE.COLOR, 0);
+        assert.ok(vertexModule.code.includes(`@location(${colour}) oX${colour}: vec4f`),
+            'the colour the pixel shader reads is an output');
+        assert.ok(vertexModule.code.includes(`out.oX${colour} = vec4f(0.0);`), 'written as zero');
+
+        h.device.SetTexture(0, null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        ps.shader.release();
+        vs.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
+test('a pixel shader over a declaration that carries only a position is given what it reads',
+    async()=>{
+        // The fixed-function pipeline hands a pixel shader white where the
+        // vertex has no colour and zero where it has no coordinate set; a
+        // fragment input the vertex stage does not write fails the pipeline.
+        const h = harness();
+        /** @type {{ declaration?: any }} */
+        const positionOnly = {};
+        assert.equal(h.device.CreateVertexDeclaration([ELEMENTS[0]], positionOnly), D3D_OK);
+        assert.equal(h.device.SetVertexDeclaration(positionOnly.declaration), D3D_OK);
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTexture(0, h.texture);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        assert.deepEqual(h.device.diagnostics().failures, []);
+        assert.equal(h.device.diagnostics().programmable, 1);
+        const vertexModule = h.gpu.of('createShaderModule')
+            .map(call=>call.descriptor).find(module=>module.label.startsWith('vs:'));
+        assert.ok(vertexModule);
+        const colour = varyingLocation(D3DDECLUSAGE.COLOR, 0);
+        const coordinates = varyingLocation(D3DDECLUSAGE.TEXCOORD, 0);
+        assert.ok(vertexModule.code.includes(`out.o${colour} = vec4f(1.0);`), 'colour white');
+        assert.ok(vertexModule.code.includes(`out.o${coordinates} = vec4f(0.0);`),
+            'coordinates zero');
+        const [pipeline] = h.gpu.of('createRenderPipeline').map(call=>call.descriptor);
+        assert.deepEqual(pipeline.vertex.buffers[0].attributes,
+            [{ shaderLocation: 0, offset: 0, format: 'float32x3' }]);
+
+        h.device.SetTexture(0, null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        ps.shader.release();
+        positionOnly.declaration.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
+test('a pixel shader over fixed-function vertices reads a coordinate the stages generate',
+    async()=>{
+        // Stage 0 set to D3DTSS_TCI_CAMERASPACEPOSITION with a three-coordinate
+        // transform: the vertex stage made for the pixel shader writes t0
+        // from the vertex through world-view and the transform, and its
+        // constants carry both, whatever set the declaration has.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTexture(0, h.texture);
+        h.device.SetTextureStageState(0, D3DTSS.TEXCOORDINDEX, 0x20000);
+        h.device.SetTextureStageState(0, D3DTSS.TEXTURETRANSFORMFLAGS, 3);
+        h.device.SetTransform(D3DTS.TEXTURE0, [
+            0.5, 0, 0, 0,
+            0, -0.5, 0, 0,
+            0, 0, 1, 0,
+            0.25, 0.75, 0, 1,
+        ]);
+        h.device.SetTransform(D3DTS.VIEW, [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 5, 1,
+        ]);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        assert.deepEqual(h.device.diagnostics().failures, []);
+        const vertexModule = h.gpu.of('createShaderModule')
+            .map(call=>call.descriptor).find(module=>module.label.startsWith('vs:'));
+        assert.ok(vertexModule);
+        const t0 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 0);
+        const row = HYBRID_CONSTANTS.TRANSFORMS;
+        assert.ok(vertexModule.code.includes(
+            `out.o${t0} = vec4f(dot(c[${row}], vec4f(cameraPosition, 1.0)),`),
+        'the set the pixel shader reads is generated');
+        assert.ok(!vertexModule.code.includes(`out.o${t0} = vec4f(in.v2`),
+            'the carried set is not sent');
+        const groups = h.groupsOfDraw();
+        const floats = new Float32Array(h.boundBytes(groups.get(0), 0).buffer);
+        assert.equal(floats.length, HYBRID_CONSTANTS.COUNT * 4);
+        assert.deepEqual([...floats.subarray(HYBRID_CONSTANTS.WORLD_VIEW * 4 + 12,
+            HYBRID_CONSTANTS.WORLD_VIEW * 4 + 16)], [0, 0, 5, 1]);
+        assert.deepEqual([...floats.subarray(HYBRID_CONSTANTS.TRANSFORMS * 4,
+            HYBRID_CONSTANTS.TRANSFORMS * 4 + 16)],
+        [0.5, 0, 0, 0.25, 0, -0.5, 0, 0.75, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+        h.device.SetTexture(0, null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        ps.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
+test('a pipeline the GPU refuses loses its draw and names the reason; the frame goes on',
+    async()=>{
+        // A pipeline handed back invalid fails every command buffer it is
+        // set on, and with it every frame from then on: the build has to
+        // reject instead, so that one draw is skipped and the failure read.
+        const h = harness({
+            refusePipeline: descriptor=>descriptor.label.startsWith('programmable:')
+                ? 'Fragment input at location 2 has no vertex output' : null,
+        });
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTexture(0, h.texture);
+        await h.draw();
+        assert.deepEqual(h.device.diagnostics().failures,
+            ['Fragment input at location 2 has no vertex output']);
+        assert.equal(h.gpu.count('submit'), 1, 'the frame is still submitted');
+        assert.equal(h.gpu.count('draw'), 0, 'without the draw');
+
+        h.device.SetTexture(0, null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        ps.shader.release();
         h.texture.release();
         h.declaration.release();
         h.vb.release();

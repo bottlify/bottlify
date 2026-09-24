@@ -77,6 +77,23 @@ test('BGRA, luminance and alpha expand to the components the format carries', ()
     assert.deepEqual([...alpha], [0, 0, 0, 9]);
 });
 
+test('an intensity upload is colour and alpha at once, not luminance with alpha one', ()=>{
+    // What a glow or a flare is stored as. A format with no layout is refused
+    // outright, so the level never exists and the stage draws the default
+    // texel: the opaque black quad a light was meant to be.
+    const bytes = Uint8Array.from([0, 64, 128, 255]);
+    assert.equal(imageBytes(2, 2, GL.INTENSITY, GL.UNSIGNED_BYTE, TIGHT), 4);
+    const texels = some(unpackImage(bytes, 2, 2, GL.INTENSITY, GL.UNSIGNED_BYTE, TIGHT));
+    assert.deepEqual([...texels], [
+        0, 0, 0, 0,
+        64, 64, 64, 64,
+        128, 128, 128, 128,
+        255, 255, 255, 255,
+    ], 'the one channel is every component, alpha included');
+    assert.equal(baseFormatOf(GL.INTENSITY8), GL.INTENSITY,
+        'and the internal format still reduces to intensity');
+});
+
 test('a packed 5-6-5 pixel unpacks its fields from the top bit down, scaled to bytes', ()=>{
     // 0xf800 is red only: five ones at the top. 0x07e0 is green only.
     const bytes = new Uint8Array(4);

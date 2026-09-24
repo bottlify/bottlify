@@ -566,7 +566,10 @@ test('event and occlusion queries are offered, the timings are not, and a null p
 
         /** @type {{ value?: number }} */
         const data = {};
-        assert.equal(query.GetData(data, 4), 1, 'S_FALSE before the query was issued');
+        // Signalled as created, as the real query is: a program that waits
+        // for the GPU by polling an event query it never issued would
+        // otherwise spin for ever on "not yet".
+        assert.equal(query.GetData(data, 4), D3D_OK, 'S_OK before the query was ever issued');
         assert.equal(query.Issue(D3DISSUE.BEGIN), D3DERR_INVALIDCALL, 'an event has no beginning');
         assert.equal(query.Issue(D3DISSUE.END), D3D_OK);
         assert.equal(query.GetData(data, 1), D3DERR_INVALIDCALL, 'too small a buffer');

@@ -91,7 +91,7 @@ const BUTTONS = Object.freeze({
 
 /**
  * @typedef {Object} HostInputEvent
- * @property {'key' | 'text' | 'pointerMove' | 'pointerButton' | 'wheel' | 'focus'
+ * @property {'key' | 'text' | 'paste' | 'pointerMove' | 'pointerButton' | 'wheel' | 'focus'
  *           | 'padAxis' | 'padButton'} kind
  * @property {string} [code]     For `key`: a `KeyboardEvent.code`.
  * @property {number} [vk]       For `key` with no `code`: a virtual key,
@@ -102,6 +102,7 @@ const BUTTONS = Object.freeze({
  * @property {boolean} [extended] Whether `scan` carries the E0 prefix.
  * @property {boolean} [down]    For `key`, `pointerButton` and `padButton`.
  * @property {string} [text]     For `text`: the character the browser composed.
+ *           For `paste`: what the person pasted, for the clipboard.
  * @property {number} [x]        For `pointerMove`: client coordinates.
  * @property {number} [y]
  * @property {number} [dx]       For `pointerMove`: relative motion, if known.
@@ -153,12 +154,15 @@ const BUTTONS = Object.freeze({
  * @property {() => number} [target]  The window input is for.
  * @property {(() => { width: number, height: number }) | null} [bounds]
  *     The client area the cursor is confined to, when the caller knows it.
+ * @property {(text: string) => void} [paste]
+ *     Where pasted text goes: the clipboard, for a program to read. Absent
+ *     in a build with no clipboard, where a paste is dropped.
  */
 
 /**
  * @param {RouterDeps} deps
  */
-export function createInputRouter({ post, device, now, target, bounds, compose, trace }){
+export function createInputRouter({ post, device, now, target, bounds, compose, trace, paste }){
     /** The configured screen, or nothing: what the cursor falls back to. */
     const screen = bounds ?? null;
     // Where the cursor may go. The configured screen until something wires a
@@ -208,11 +212,19 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
     // relative motion from when the host gives a position but no delta.
     let rawX = 0;
     let rawY = 0;
-    // Whether the program has placed the cursor itself. From then on the
-    // pointer's absolute position means nothing to it -- the cursor it reckons
-    // with is the one it put down plus what has moved since -- so a position
-    // the host reports is taken as the motion from the last one instead.
+    // Whether the program has placed the cursor itself. While it holds the
+    // cursor -- hidden, or with a button down as in a drag -- the pointer's
+    // absolute position means nothing to it: the cursor it reckons with is
+    // the one it put down plus what has moved since, so a position the host
+    // reports is taken as the motion from the last one instead. Once the
+    // cursor is shown again and no button is held, the pointer the person
+    // sees is the cursor, and its next position is where the cursor is: a
+    // real warp would have moved the pointer, and this one could not, so the
+    // two are brought together at the first chance instead of drifting apart
+    // by the width of the warp for the rest of the run.
     let placed = false;
+    // Whether the program shows the cursor, as it last told the page.
+    let cursorVisible = true;
     /** @type {number[]} */
     const padAxes = [];
     /** @type {number[]} */
@@ -425,6 +437,12 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
 
         // Where that leaves the cursor in the declared space: from an absolute
         // position when the host gives one, else advanced by the scaled step.
+        if (placed && cursorVisible && pressed.size === 0 && event.x !== undefined)
+        {
+            placed = false;
+            residualX = 0;
+            residualY = 0;
+        }
         const px = cursor.x;
         const py = cursor.y;
         let nx = event.x === undefined || placed
@@ -638,6 +656,17 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         },
 
         /**
+         * What the program last said about the cursor's visibility, from
+         * ShowCursor's count or a device cursor: what decides whether a
+         * placement it made outlives the pointer's next position.
+         *
+         * @param {boolean} visible
+         */
+        shown(visible){
+            cursorVisible = visible;
+        },
+
+        /**
          * Tells the program it is the active application, once it has a window
          * to be told through.
          *
@@ -677,6 +706,14 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
                     return key(event);
                 case 'text':
                     return text(event);
+                case 'paste':
+                    if (!paste || typeof event.text !== 'string')
+                    {
+                        dropped++;
+                        return false;
+                    }
+                    paste(event.text);
+                    return true;
                 case 'pointerMove':
                     return move(event);
                 case 'pointerButton':

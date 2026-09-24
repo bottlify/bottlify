@@ -47,6 +47,7 @@ import {
 
 /** Messages this layer has an opinion about. */
 const WM_DESTROY = 0x0002;
+const WM_NCDESTROY = 0x0082;
 const WM_MOVE = 0x0003;
 const WM_SIZE = 0x0005;
 /** WM_SIZE's wParam for a plain resize: not minimised, not maximised. */
@@ -316,7 +317,14 @@ function characterFor(key){
  *           Every live window, children included: a dialog is its controls, and
  *           a report that shows the frame and not the button under the pointer
  *           says nothing about what a click would reach.
- * @property {(hwnd: number, x: number, y: number, width: number, height: number) => boolean} place
+ * @property {(hwnd: number) => { left: number, top: number, right: number,
+ *     bottom: number } | null} clientRect
+ *           One window's client rectangle, or null for a handle that names
+ *           none: the measurement GetClientRect answers with, for the callers
+ *           outside this layer that must answer a size a program asked for as
+ *           zero -- a back buffer's, which means exactly this rectangle.
+ * @property {(hwnd: number, x: number, y: number, width: number, height: number,
+ *     how?: { announce?: boolean }) => boolean} place
  */
 
 /**
@@ -356,6 +364,12 @@ function characterFor(key){
  * @property {{ hwnd: number, message: number, at: number }[]} [dispatching]
  *           Where a window procedure that has not returned is noted, for
  *           whoever is measuring. Absent in a build that is not.
+ * @property {(message: DispatchedMessage) => void} [trace]
+ *           Told every message a window procedure is about to receive,
+ *           whoever sends it: the queue, a SendMessage, this layer itself.
+ *           What a program does on a message is decided in its procedure,
+ *           and its calls into this library say what it asked, never what
+ *           it was told.
  * @property {(wndProc: number, message: DispatchedMessage, thread?: unknown) => number} dispatch
  *           Runs a window procedure. One line from being the bridge's callback.
  *           A caller that has awaited names the thread whose call it answers.
@@ -384,6 +398,9 @@ function characterFor(key){
  * @property {(instance: number) => number} [moduleBase]
  *           Where a module is mapped, which with a resource's own offset is
  *           the address of its bytes -- a dialog template is read in place.
+ * @property {{ text: string | null, version: number }} [pasteboard]
+ *           What the host last pasted, with a version that rises on every
+ *           paste: the clipboard's contents until a program empties it.
  * @property {(hwnd: number) => void} [created]
  *           A window now exists. Whoever delivers input needs to know.
  * @property {(bytes: number) => number} [allocate]
@@ -583,6 +600,7 @@ export function createWindowFunctions(host){
      * @returns {number | Promise<number>}
      */
     const callProcedure = (address, message, thread)=>{
+        host.trace?.(message);
         const procedure = procedures.get(address >>> 0);
         if (procedure)
         {
@@ -922,10 +940,23 @@ export function createWindowFunctions(host){
      * Destroys a window and everything that hangs off it. A child outliving its
      * parent is a handle nobody is left to close.
      *
-     * @param {number} hwnd
-     * @returns {number} 1 when there was a window to destroy
+     * WM_DESTROY is *sent*: the window procedure runs before this returns,
+     * while whatever the program keeps behind the window still exists. A
+     * program that destroys its window and then frees the object the
+     * procedure reads through GWL_USERDATA is entitled to that order, and
+     * one handed the message later, from its queue, called into freed
+     * memory. Then the children go, then WM_NCDESTROY, the last message a
+     * window sees, and only then does the handle stop resolving.
+     *
+     * A window whose creation failed part way is taken down with less: one
+     * refused by the CBT hook never existed to its procedure and hears
+     * nothing; one whose WM_CREATE answered -1 hears WM_NCDESTROY alone.
+     *
+     * @param {number} hwnd @param {unknown} [thread]
+     * @param {'all' | 'ncdestroy' | 'none'} [told]  Which of the two it hears.
+     * @returns {number | Promise<number>} 1 when there was a window to destroy
      */
-    const destroyWindow = hwnd=>{
+    const destroyWindow = (hwnd, thread, told = 'all')=>{
         const record = live(hwnd);
         if (!record)
         {
@@ -938,45 +969,49 @@ export function createWindowFunctions(host){
         // So do its hot keys: one left registered would keep eating the
         // keystroke for a window that can no longer be delivered to.
         host.queue.unregisterHotKeysFor?.(record.hwnd);
-        // Windows *sends* WM_DESTROY, which means running the window procedure
-        // before this call returns, and that road goes through the bridge.
-        // Queuing it preserves the order the program observes and keeps the
-        // procedure reachable, which is why the record outlives the handle.
-        host.queue.post({ hwnd: record.hwnd, message: WM_DESTROY, wParam: 0, lParam: 0 });
         const covered = shown(record) ? geometry.windowRect(record) : null;
-        record.destroyed = true;
-        // A dialog's font is the dialog manager's, made from its template,
-        // and goes with the dialog.
-        if (record.dialogFont)
-        {
-            draw?.deleteFont?.(record.dialogFont);
-        }
-        host.handles.close(record.hwnd);
-        if (active === record.hwnd)
-        {
-            active = 0;
-        }
-        if (focus === record.hwnd)
-        {
-            focus = 0;
-        }
-        if (captured === record.hwnd)
-        {
-            captured = 0;
-        }
-
-        for (const child of windows.values())
-        {
-            if (child.parent === record.hwnd && !child.destroyed)
-            {
-                destroyWindow(child.hwnd);
-            }
-        }
-        if (covered)
-        {
-            uncover(covered);
-        }
-        return 1;
+        const on = thread ?? host.callerThread?.();
+        /** @param {number} message @returns {number | Promise<number>} */
+        const tell = message=>(told === 'all' || (told === 'ncdestroy' && message === WM_NCDESTROY)
+            ? send(record.hwnd, message, 0, 0, on)
+            : 0);
+        return andThen(tell(WM_DESTROY), ()=>{
+            const children = [...windows.values()]
+                .filter(child=>child.parent === record.hwnd && !child.destroyed);
+            /** @param {number} index @returns {number | Promise<number>} */
+            const destroyChildren = index=>(index < children.length
+                ? andThen(destroyWindow(children[index].hwnd, on, told),
+                    ()=>destroyChildren(index + 1))
+                : 1);
+            return andThen(destroyChildren(0),
+                ()=>andThen(tell(WM_NCDESTROY), ()=>{
+                    record.destroyed = true;
+                    // A dialog's font is the dialog manager's, made from its
+                    // template, and goes with the dialog.
+                    if (record.dialogFont)
+                    {
+                        draw?.deleteFont?.(record.dialogFont);
+                    }
+                    host.handles.close(record.hwnd);
+                    if (active === record.hwnd)
+                    {
+                        active = 0;
+                    }
+                    if (focus === record.hwnd)
+                    {
+                        focus = 0;
+                    }
+                    if (captured === record.hwnd)
+                    {
+                        captured = 0;
+                    }
+                    if (covered)
+                    {
+                        uncover(covered);
+                    }
+                    return 1;
+                }));
+        });
     };
 
     /** @param {any} record @param {number} index */
@@ -1267,8 +1302,7 @@ export function createWindowFunctions(host){
             }, host.callerThread?.()), created=>{
                 if ((created | 0) === -1)
                 {
-                    destroyWindow(record.hwnd);
-                    return 0;
+                    return andThen(destroyWindow(record.hwnd, undefined, 'ncdestroy'), ()=>0);
                 }
                 return record.hwnd;
             });
@@ -1336,16 +1370,29 @@ export function createWindowFunctions(host){
         return andThen(cbt, refused=>{
             if ((refused | 0) !== 0)
             {
-                destroyWindow(record.hwnd);
-                return done(0);
+                return andThen(destroyWindow(record.hwnd, thread, 'none'), ()=>done(0));
             }
             return andThen(tell(WM_CREATE), created=>{
                 if ((created | 0) === -1)
                 {
-                    destroyWindow(record.hwnd);
-                    return done(0);
+                    return andThen(destroyWindow(record.hwnd, thread, 'ncdestroy'), ()=>done(0));
                 }
-                return done(record.hwnd);
+                // A window created visible hears its own size and place inside
+                // this call, as the real CreateWindowEx sends them once
+                // WM_CREATE has been answered: a program that never calls
+                // ShowWindow measures the screen it lays itself out and
+                // rasterises its text for from the size it is told here.
+                if ((style & WS_VISIBLE) === 0)
+                {
+                    return done(record.hwnd);
+                }
+                const client = geometry.clientRect(record);
+                return andThen(send(record.hwnd, WM_SIZE, SIZE_RESTORED,
+                    ((((client.bottom - client.top) & 0xffff) << 16)
+                        | ((client.right - client.left) & 0xffff)) >>> 0, thread),
+                ()=>andThen(send(record.hwnd, WM_MOVE, 0,
+                    (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
+                ()=>done(record.hwnd)));
             });
         });
     };
@@ -1440,6 +1487,15 @@ export function createWindowFunctions(host){
     /**
      * The desktop itself, painted once in the desktop colour before the
      * first window goes on it. Nothing else ever paints the whole screen.
+     *
+     * It is painted and **not presented**: the desktop colour is the window
+     * manager's own background, not a picture the program drew, and the first
+     * frame a display is handed is what a launcher hides its loading screen
+     * on. Presenting this one showed a blank coloured screen as if it were
+     * the program's first frame, before the program had presented anything.
+     * What the program draws still reaches the screen -- a GDI draw presents
+     * the desktop itself, and a window's frame or the uncovering of one marks
+     * it painted below -- so nothing legitimate is lost.
      */
     let desktopPainted = false;
     const paintDesktop = ()=>{
@@ -1453,10 +1509,10 @@ export function createWindowFunctions(host){
             return;
         }
         desktopPainted = true;
-        draw?.fill(hdc, { left: 0, top: 0, right: host.screen.width, bottom: host.screen.height },
+        (draw?.fillBackground ?? draw?.fill)?.call(draw, hdc,
+            { left: 0, top: 0, right: host.screen.width, bottom: host.screen.height },
             sysColor(COLOR_BACKGROUND));
         host.dc?.()?.release(0, hdc);
-        painted();
     };
 
     /**
@@ -1844,8 +1900,7 @@ export function createWindowFunctions(host){
                 return 1;
             }
             case WM_CLOSE:
-                destroyWindow(record.hwnd);
-                return 0;
+                return andThen(destroyWindow(record.hwnd, thread), ()=>0);
             // Validates the window: a procedure that hands WM_PAINT here has
             // nothing to draw, and the area has to be cleared or the same
             // paint is retrieved for ever. The frame and background still
@@ -2150,6 +2205,18 @@ export function createWindowFunctions(host){
     });
 
     host.windowService?.({
+        /**
+         * One window's client rectangle, or null for a handle that names no
+         * window. Read by whoever has to answer a size a program asked for as
+         * zero -- a back buffer's, which means exactly this rectangle -- and
+         * the same measurement GetClientRect answers with.
+         *
+         * @param {number} hwnd
+         */
+        clientRect: hwnd=>{
+            const record = live(hwnd);
+            return record ? geometry.clientRect(record) : null;
+        },
         list: ()=>[...windows.values()]
             .filter(record=>!record.destroyed)
             .map(record=>({
@@ -2169,19 +2236,30 @@ export function createWindowFunctions(host){
             })),
         /**
          * Places a window the way SetWindowPos does, and tells the program the
-         * way DefWindowProc would: a move and a size. A program of this era
-         * re-reads its rectangle on WM_SIZE and clips its cursor to it, which
-         * is exactly what has to happen once the picture is another size.
+         * way DefWindowProc would: a move when it moved and a size when its
+         * size changed, and nothing for a placement that changed neither. A
+         * program of this era re-reads its rectangle on WM_SIZE and clips its
+         * cursor to it, which is exactly what has to happen once the picture
+         * is another size -- and one that resets its device on WM_SIZE would
+         * be reset by the size its own reset placed it at, without end, if
+         * the message came whether or not anything changed.
+         *
+         * `announce` says the size whether or not it changed: what a mode
+         * switch does to the window it lands in, which the program hears
+         * once its device exists and not before.
          *
          * @param {number} hwnd @param {number} x @param {number} y
          * @param {number} width @param {number} height
+         * @param {{ announce?: boolean }} [how]
          */
-        place: (hwnd, x, y, width, height)=>{
+        place: (hwnd, x, y, width, height, how = {})=>{
             const record = live(hwnd);
             if (!record)
             {
                 return false;
             }
+            const before = geometry.clientRect(record);
+            const moved = record.x !== (x | 0) || record.y !== (y | 0);
             record.x = x | 0;
             record.y = y | 0;
             record.width = width | 0;
@@ -2190,10 +2268,19 @@ export function createWindowFunctions(host){
             // its style describes takes no room, so the client area is the
             // whole mode and a program's cursor arithmetic sees the picture.
             record.frameless = true;
-            host.queue.post({ hwnd: record.hwnd, message: WM_MOVE, wParam: 0,
-                lParam: ((y & 0xffff) << 16 | x & 0xffff) >>> 0 });
-            host.queue.post({ hwnd: record.hwnd, message: WM_SIZE, wParam: SIZE_RESTORED,
-                lParam: ((height & 0xffff) << 16 | width & 0xffff) >>> 0 });
+            const after = geometry.clientRect(record);
+            if (moved)
+            {
+                host.queue.post({ hwnd: record.hwnd, message: WM_MOVE, wParam: 0,
+                    lParam: ((y & 0xffff) << 16 | x & 0xffff) >>> 0 });
+            }
+            if (how.announce === true
+                || after.right - after.left !== before.right - before.left
+                || after.bottom - after.top !== before.bottom - before.top)
+            {
+                host.queue.post({ hwnd: record.hwnd, message: WM_SIZE, wParam: SIZE_RESTORED,
+                    lParam: ((height & 0xffff) << 16 | width & 0xffff) >>> 0 });
+            }
             return true;
         },
     });
@@ -2210,15 +2297,19 @@ export function createWindowFunctions(host){
         const hide = cmdShow === SW_HIDE;
         const covered = wasVisible && hide && shown(record)
             ? geometry.windowRect(record) : null;
-        // Matches Wine's dlls/user32/tests/msg.c WmShowNormal sequence: sent
-        // before WS_VISIBLE actually changes, and only when this call changes
-        // it -- SW_SHOW on an already-visible window says nothing happened,
-        // because nothing did.
-        if (wasVisible === hide)
-        {
-            host.queue.post({ hwnd: record.hwnd, message: WM_SHOWWINDOW,
-                wParam: hide ? 0 : 1, lParam: 0 });
-        }
+        // Matches Wine's dlls/user32/tests/msg.c WmShowNormal sequence: the
+        // message is *sent* -- the procedure runs before this call returns --
+        // and only when this call changes the visibility, because SW_SHOW on
+        // an already-visible window says nothing happened and nothing did.
+        //
+        // Sent, and then chained onto whatever follows it: a procedure the
+        // bridge has to run answers with a promise, so returning this call's
+        // own result before it has answered hands the host call back to the
+        // guest while the guest's procedure is still pending -- and the guest
+        // reuses its own stack under it.
+        const greeting = wasVisible === hide
+            ? send(record.hwnd, WM_SHOWWINDOW, hide ? 0 : 1, 0, host.callerThread?.())
+            : 0;
         record.style = hide
             ? (record.style & ~WS_VISIBLE) >>> 0
             : (record.style | WS_VISIBLE) >>> 0;
@@ -2238,15 +2329,29 @@ export function createWindowFunctions(host){
             activate(record.hwnd);
             raise(record);
         }
+        /** The sent messages so far, for the result to wait on. */
+        let told = greeting;
         if (!wasVisible && !hide)
         {
             appear(record);
+            // A window that becomes visible hears its own size, as the real
+            // ShowWindow sends it: the message a program lays itself out by
+            // and rasterises every glyph of its text for. Without it a program
+            // keeps whatever default it started with, and its text stays
+            // scaled for that instead of for its window.
+            const client = geometry.clientRect(record);
+            told = andThen(greeting, ()=>send(record.hwnd, WM_SIZE, SIZE_RESTORED,
+                ((((client.bottom - client.top) & 0xffff) << 16)
+                    | ((client.right - client.left) & 0xffff)) >>> 0,
+                host.callerThread?.()));
         }
         if (covered)
         {
             uncover(covered);
         }
-        return wasVisible ? 1 : 0;
+        // The answer waits for the procedures that were sent to: returning it
+        // before they have run is the stack the guest reuses under itself.
+        return andThen(told, ()=>wasVisible ? 1 : 0);
     };
 
     // Named, because a message for a window with no procedure of its own is

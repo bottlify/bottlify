@@ -7,6 +7,7 @@
 import {
     buildBootRom, BRING_UP_PARK, GUEST_JUMP, ROM_BASE, DEAD_BOOT_CODE,
 } from './boot-rom.js';
+import { decodeRegister } from './fpu.js';
 
 /**
  * The only place in the codebase that knows the emulator underneath is v86.
@@ -222,13 +223,15 @@ export async function createV86Host(config){
      * @type {{ ram: Uint8Array, ramOffset: number,
      *     data: DataView, reg32: Int32Array, eip: Int32Array, flags: Int32Array,
      *     flagsChanged: Int32Array, cr: Int32Array, inHlt: Uint8Array,
-     *     counter: Uint32Array }}
+     *     counter: Uint32Array, xmm: Int32Array, mxcsr: Int32Array,
+     *     fpuStackPtr: Uint8Array }}
      */
     const views = {
         ram: new Uint8Array(0), ramOffset: 0, data: new DataView(new ArrayBuffer(0)),
         reg32: new Int32Array(0), eip: new Int32Array(0), flags: new Int32Array(0),
         flagsChanged: new Int32Array(0), cr: new Int32Array(0), inHlt: new Uint8Array(0),
-        counter: new Uint32Array(0),
+        counter: new Uint32Array(0), xmm: new Int32Array(0), mxcsr: new Int32Array(0),
+        fpuStackPtr: new Uint8Array(0),
     };
     const v = ()=>{
         // Whether the memory has moved since the views were taken is read off
@@ -254,6 +257,9 @@ export async function createV86Host(config){
         views.cr = take(cpu.cr, Int32Array);
         views.inHlt = take(cpu.in_hlt, Uint8Array);
         views.counter = take(cpu.instruction_counter, Uint32Array);
+        views.xmm = take(cpu.reg_xmm32s, Int32Array);
+        views.mxcsr = take(cpu.mxcsr, Int32Array);
+        views.fpuStackPtr = take(cpu.fpu_stack_ptr, Uint8Array);
         return views;
     };
     // How many compiled modules the emulator actually published, and the first
@@ -277,6 +283,7 @@ export async function createV86Host(config){
     let clearedFunctions = 0;
     let hostWrites = 0;
     let hostWrittenBytes = 0;
+    let handoffUnavailable = 0;
     /** @type {unknown} */
     let finaliseFailure = null;
     // The emulator counts instructions in a thirty-two-bit word, which a run
@@ -476,6 +483,136 @@ export async function createV86Host(config){
         stop: ()=>emulator.stop(),
 
         /**
+         * Runs at most `maxInstructions` and answers how many were retired.
+         * The emulator runs to a boundary of its own: the end of the page it
+         * is in, or a block end.
+         *
+         * @param {number} maxInstructions
+         */
+        runSlice: maxInstructions=>cpu.run_slice(maxInstructions) >>> 0,
+
+        /** One byte of guest memory, for an engine's decoder. @param {number} address */
+        readByte: address=>v().ram[address],
+
+        /** The emulator's memory, for an engine to run over. */
+        wasmMemory: ()=>cpu.wasm_memory,
+
+        /** The eager flags word with the emulator's lazy part folded in. */
+        getEflags: ()=>cpu.wm.exports.get_eflags() >>> 0,
+
+        /** The x87 stack's top, for an engine's entry lookup. */
+        // Off the view: the emulator's property is a proxy that makes a
+        // typed array per access, and the hybrid loop asks every turn.
+        x87Top: ()=>v().fpuStackPtr[0] & 7,
+
+        /**
+         * Flags a page a translator holds code for: a slice arriving there
+         * after retiring something returns, so the hybrid host can hand the
+         * guest over at once. Without the export (an older build) the flag
+         * is counted and the slice runs to a boundary of its own.
+         *
+         * @param {number} page @param {boolean} on
+         */
+        handoffPage(page, on){
+            const exported = cpu.wm.exports.bottlify_handoff_page;
+            if (typeof exported === 'function')
+            {
+                exported(page >>> 0, on ? 1 : 0);
+            }
+            else
+            {
+                handoffUnavailable++;
+            }
+        },
+        /** Whether the build has the handoff export. */
+        handoffAvailable: ()=>typeof cpu.wm.exports.bottlify_handoff_page === 'function',
+        /** The emulator's own time-stamp counter, the value its `rdtsc` reads,
+         * so translated code under hybrid reads the same clock. */
+        readTsc: ()=>{
+            const value = cpu.wm.exports.read_tsc();
+            return typeof value === 'bigint' ? value : BigInt(Math.floor(Number(value)));
+        },
+        /** Times a handoff flag was asked of a build without the export. */
+        handoffUnavailable: ()=>handoffUnavailable,
+
+        /**
+         * The translator's entry hash, as a physical address: with it the
+         * emulator's slice returns only at an address the hash holds, not
+         * anywhere in a flagged page. Counted with the page flag when the
+         * build lacks the export.
+         *
+         * @param {number} physical
+         */
+        handoffHash(physical){
+            const exported = cpu.wm.exports.bottlify_handoff_hash;
+            if (typeof exported === 'function')
+            {
+                exported(physical >>> 0);
+            }
+            else
+            {
+                handoffUnavailable++;
+            }
+        },
+
+        /**
+         * A store a translator made into a page this emulator compiled:
+         * its cache is dirtied as the emulator's own stores dirty it.
+         *
+         * @param {number} address @param {number} length
+         */
+        dirtyCode(address, length){
+            if (length > 0)
+            {
+                cpu.wm.exports.jit_dirty_cache(address >>> 0, (address + length) >>> 0);
+            }
+        },
+
+        /**
+         * Where every register lives in the emulator's memory, as the
+         * executor contract names them: read off the emulator's own typed
+         * views, so an engine's translated code addresses the emulator's
+         * register file directly and a switch between the two copies nothing.
+         * The top `reserve` bytes of RAM are the engine's tables.
+         *
+         * @param {number} reserve
+         * @returns {import('../engine.js').StateLayout}
+         */
+        stateLayout(reserve){
+            const ramBase = cpu.mem8.byteOffset;
+            const ramSize = config.memorySize - reserve;
+            const codePagesPtr = cpu.wm.exports.bottlify_page_has_code_ptr;
+            const fields = {
+                bits: /** @type {32} */ (32),
+                ramBase,
+                ramSize,
+                regs: cpu.reg32.byteOffset,
+                eip: cpu.instruction_pointer.byteOffset,
+                previousIp: cpu.previous_ip.byteOffset,
+                eflags: cpu.flags.byteOffset,
+                flagsChanged: cpu.flags_changed.byteOffset,
+                x87: cpu.fpu_st.byteOffset,
+                x87Format: /** @type {'tagged80'} */ ('tagged80'),
+                x87Top: cpu.fpu_stack_ptr.byteOffset,
+                x87Empty: cpu.fpu_stack_empty.byteOffset,
+                x87Control: cpu.fpu_control_word.byteOffset,
+                x87Status: cpu.fpu_status_word.byteOffset,
+                xmm: cpu.reg_xmm32s.byteOffset,
+                mxcsr: cpu.mxcsr.byteOffset,
+                // FS is the fifth segment register.
+                fsBase: cpu.segment_offsets.byteOffset + 4 * 4,
+                gsBase: -1,
+                counter: cpu.instruction_counter.byteOffset,
+                tables: ramBase + ramSize,
+                codePages: typeof codePagesPtr === 'function' ? codePagesPtr() >>> 0 : -1,
+                // The emulator's own handoff lookup probes the entry hash from
+                // this slot (the fork's formula), so the translator writes it so.
+                hashShift: 16,
+            };
+            return { ...fields, id: `v86:${Object.values(fields).join(',')}` };
+        },
+
+        /**
          * Puts the processor where a `hlt` would have: the next slice retires
          * nothing. What a fault stub does from inside the guest, done from
          * outside for a machine that must not execute another instruction.
@@ -484,12 +621,38 @@ export async function createV86Host(config){
             v().inHlt[0] = 1;
         },
 
+        /** Whether the processor is standing in a `hlt`, its own or ours. */
+        halted: ()=>v().inHlt[0] === 1,
+
+        /**
+         * The opposite: lets the next slice run again after a `hlt`, for a
+         * driver that reuses one machine for many programs (the corpus runner)
+         * and puts EIP somewhere new between them.
+         */
+        wake(){
+            v().inHlt[0] = 0;
+        },
+
         /** A control register. @param {number} index */
         controlRegister: index=>v().cr[index] >>> 0,
 
         /** @param {(value: number) => void} handler */
         onTrap(handler){
             trapHandler = handler;
+        },
+        /**
+         * The trap the port write reaches, raised by a co-executor that
+         * left at an `out` to the port instead of running it: the same
+         * handler, the same count.
+         *
+         * @param {number} value
+         */
+        raiseTrap(value){
+            trapCrossings++;
+            if (trapHandler)
+            {
+                trapHandler(value >>> 0);
+            }
         },
 
         /**
@@ -610,6 +773,71 @@ export async function createV86Host(config){
          * what the emulator underneath is.
          */
         cpu: ()=>cpu,
+
+        // The SSE and x87 state as a record, for the differential harness that
+        // compares this machine against a translator's: cold paths, read
+        // through the views like everything else, and nothing a slice pays for.
+
+        /** One XMM register's four lanes as u32 bit patterns. @param {number} index */
+        readXmm: index=>Uint32Array.from(v().xmm.subarray(index * 4, index * 4 + 4)),
+
+        /** @param {number} index @param {Uint32Array} words */
+        writeXmm(index, words){
+            v().xmm.set(Int32Array.from(words, word=>word | 0), index * 4);
+        },
+
+        readMxcsr: ()=>v().mxcsr[0] >>> 0,
+
+        /** @param {number} value */
+        writeMxcsr(value){
+            v().mxcsr[0] = value | 0;
+        },
+
+        /**
+         * The x87 block: the eight registers by physical index, decoded from
+         * whichever of the emulator's two forms each is in, with the raw bytes
+         * beside them so a restore puts back exactly what was there.
+         *
+         * @returns {{ top: number, empty: number, control: number, status: number,
+         *     registers: Float64Array, raw: Uint8Array }}
+         */
+        x87State(){
+            const words = new Int32Array(cpu.fpu_st);
+            const registers = new Float64Array(8);
+            for (let index = 0; index < 8; index++)
+            {
+                registers[index] = decodeRegister(
+                    words[index * 4] >>> 0, words[index * 4 + 1] >>> 0,
+                    words[index * 4 + 2] & 0xffff);
+            }
+            // The status word as the processor reads it: the emulator keeps
+            // the top of stack apart from the word, and its own `fnstsw`
+            // folds it back into bits 11..13 -- so does this.
+            const top = cpu.fpu_stack_ptr[0];
+            return {
+                top,
+                empty: cpu.fpu_stack_empty[0],
+                control: cpu.fpu_control_word[0],
+                status: (cpu.fpu_status_word[0] & ~0x3800 | top << 11) & 0xffff,
+                registers,
+                raw: new Uint8Array(words.buffer, words.byteOffset, words.byteLength),
+            };
+        },
+
+        /**
+         * @param {{ top: number, empty: number, control: number, status: number,
+         *     raw: Uint8Array }} state
+         */
+        restoreX87State(state){
+            cpu.fpu_st.set(new Int32Array(state.raw.buffer, state.raw.byteOffset, 32));
+            cpu.fpu_stack_ptr[0] = state.top;
+            cpu.fpu_stack_empty[0] = state.empty;
+            // Through the export, not the field: the fast arithmetic path
+            // reads a precision byte derived from the control word by it.
+            cpu.wm.exports.set_control_word(state.control);
+            // The top lives in its own byte; the word keeps the rest.
+            cpu.fpu_status_word[0] = state.status & ~0x3800;
+        },
 
         /** @returns {number} guest EIP */
         eip: ()=>v().eip[0] >>> 0,
