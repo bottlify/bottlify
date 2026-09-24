@@ -335,7 +335,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     // One view, taken again only when the memory grew (which detaches the
     // buffer it was on): a view per region run was a fifth of a call's cost.
     const view = ()=>{
-        if (cachedView === null || cachedView.buffer !== memory.buffer)
+        // A grown memory detaches the old buffer, whose length then reads 0:
+        // asked of the view's own buffer, not of `memory.buffer`, whose getter
+        // is a crossing into the engine on every run.
+        if (cachedView === null || cachedView.buffer.byteLength === 0)
         {
             cachedView = new DataView(memory.buffer);
         }
@@ -1096,17 +1099,18 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             exitTargets.set(address, target);
             if (exitTargets.size > EXIT_TARGETS_CAP)
             {
-                let least = -1;
-                let leastCount = Infinity;
+                // The colder half goes at once: one pass for half the cap's
+                // insertions, where a scan for the single coldest on every
+                // insertion past the cap was a third of a loading phase.
+                const heats = [...exitTargets.values()].sort((a, b)=>a - b);
+                const cold = heats[heats.length >> 1];
                 for (const [addr, count] of exitTargets)
                 {
-                    if (count < leastCount)
+                    if (count <= cold && exitTargets.size > EXIT_TARGETS_CAP >> 1)
                     {
-                        leastCount = count;
-                        least = addr;
+                        exitTargets.delete(addr);
                     }
                 }
-                exitTargets.delete(least);
             }
             const key = keyOf(address, at);
             const seen = (misses.get(key) ?? 0) + 1;

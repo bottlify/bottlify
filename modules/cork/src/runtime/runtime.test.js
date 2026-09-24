@@ -634,3 +634,23 @@ test('a relink gathers the running regions into one module; an entry another reg
     assert.equal(m.reg(3), 1);
     assert.equal(m.reg(1), 3);
 });
+
+test('exits to a flood of distinct addresses stay cheap and a hot one keeps its count', ()=>{
+    // A loading phase leaves for hundreds of thousands of addresses: the count of
+    // exits by target evicts the colder half at once when full, where a scan for
+    // the single coldest on every insertion past the cap was a third of the phase.
+    const m = machine();
+    const began = performance.now();
+    for (let i = 0; i < 200_000; i++)
+    {
+        m.runtime.missAt(0x100000 + i * 16, 0);
+        if (i % 100 === 0)
+        {
+            m.runtime.missAt(0x8000, 0);
+        }
+    }
+    const ms = performance.now() - began;
+    assert.ok(ms < 2000, `200 000 exits took ${ms.toFixed(0)} ms`);
+    const hot = m.runtime.diagnostics().exitsByTarget.find(one=>one.address === 0x8000);
+    assert.ok(hot && hot.count >= 1000, `the hot target kept ${hot?.count} exits`);
+});
