@@ -329,6 +329,25 @@ test('a push onto a full stack sets C1, and a push that fits clears it', ()=>{
     assert.equal(cleared.status() & 0x200, 0, 'a push that fits cleared C1');
 });
 
+test('the plain forms write the stack words once, on every way out of the block', ()=>{
+    // The pushes and pops of fld/fstp leave the empty mask and the top for the
+    // block's end, and a block's end is every way out of it: the loop's own
+    // back edge and its fall-through into the next block, whose fld reads a
+    // register the loop left held and must find it so (not a stack fault).
+    //   mov ecx, 3; L: fld1; fstp st1; dec ecx; jnz L; fld st0; hlt
+    // Each turn pushes, copies into ST(1) -- held from then on -- and pops.
+    const loop = run([
+        0xb9, 3, 0, 0, 0,
+        0xd9, 0xe8, 0xdd, 0xd9, 0x49, 0x75, 0xf9,
+        0xd9, 0xc0,
+    ]);
+    assert.equal(loop.exit.kind, 3, `left out ${[...loop.exit.unsupported]}`);
+    assert.equal(loop.status() & 0x241, 0, 'no stack fault: the fld found ST(0) held');
+    assert.equal(loop.top(), 7);
+    assert.equal(loop.empty(), 0x7e, 'the register the loop filled, and the fld');
+    assert.deepEqual([loop.st(0), loop.st(1)], [1, 1]);
+});
+
 test('an empty source register faults: IE and SF, the indefinite, the mask kept', ()=>{
     // fadd st0, st1 with both registers empty (a fresh FPU).
     const both = run([0xd8, 0xc1, 0xdf, 0xe0]);            // fadd; fnstsw ax
