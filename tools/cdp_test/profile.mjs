@@ -119,7 +119,24 @@ export async function profileWorkers(cdp, pageSessionId, options = {}){
     cdp.on('Target.detachedFromTarget', params=>{
         sessions.delete(String(params.sessionId));
     });
-    await attach(pageSessionId);
+    // A cross-origin-isolated page (`--coi`) is moved to a process of its own
+    // as it loads, and the page session answers "Internal error" meanwhile:
+    // ask again once it has settled.
+    for (let attempt = 0; ; attempt++)
+    {
+        try
+        {
+            await attach(pageSessionId);
+            break;
+        }
+        catch (e){
+            if (attempt >= 20)
+            {
+                throw e;
+            }
+            await new Promise(done=>setTimeout(done, 250));
+        }
+    }
     return {
         /** Drops what every profiler has so far and starts it again: the window
          * then begins here, past a loading phase. */
