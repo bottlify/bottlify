@@ -668,3 +668,24 @@ test('a candidate whose batch is still out is not queued again when it is met ag
     await new Promise(resolve=>setTimeout(resolve, 0));
     assert.ok(m.runtime.entryOf(CODE) >= 0, 'published when its batch came back');
 });
+
+test('a batch the worker forms from a copy of its pages runs as the one formed here', async()=>{
+    const m = machine({ worker: true });
+    m.write(CODE, COUNTDOWN);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE, 0, 2);
+    // The worker opens on its own turn; the batch goes once it is there.
+    let published = false;
+    for (let i = 0; i < 200 && !published; i++)
+    {
+        await m.runtime.translatePending();
+        await new Promise(resolve=>setTimeout(resolve, 10));
+        published = m.runtime.entryOf(CODE) >= 0;
+    }
+    assert.ok(published, 'published from the worker');
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+    assert.equal(exit.kind, 'halt');
+    assert.equal(m.reg(1), 0);
+    assert.equal(exit.retired, 1 + 2 * 1000 + 1);
+    await m.runtime.flush();
+});

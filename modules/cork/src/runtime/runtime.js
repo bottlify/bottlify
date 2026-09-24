@@ -846,6 +846,31 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     };
 
     /**
+     * A copy of every page the regions span, for the worker to form them
+     * from: a few kilobytes a page, where posting the formed regions cloned
+     * every decoded instruction (a seventh of a cold start's engine time).
+     *
+     * @param {Iterable<Set<number>>} pageSets
+     * @returns {Map<number, Uint8Array>}
+     */
+    const copyPages = pageSets=>{
+        /** @type {Map<number, Uint8Array>} */
+        const copies = new Map();
+        for (const set of pageSets)
+        {
+            for (const page of set)
+            {
+                if (!copies.has(page))
+                {
+                    const at = layout.ramBase + page * 4096;
+                    copies.set(page, new Uint8Array(memory.buffer.slice(at, at + 4096)));
+                }
+            }
+        }
+        return copies;
+    };
+
+    /**
      * One step of a relink, when the translator is otherwise idle: once enough
      * batch modules have gathered, the running regions go in chunks of
      * `relinkRegions` to be formed again from a copy of their pages and
@@ -877,19 +902,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         {
             return false;
         }
-        /** @type {Map<number, Uint8Array>} */
-        const copies = new Map();
-        for (const record of chunk)
-        {
-            for (const page of record.pages)
-            {
-                if (!copies.has(page))
-                {
-                    const at = layout.ramBase + page * 4096;
-                    copies.set(page, new Uint8Array(memory.buffer.slice(at, at + 4096)));
-                }
-            }
-        }
+        const copies = copyPages(chunk.map(record=>record.pages));
         const relink = {
             jobs: chunk.map(record=>({ entry: record.entry, entryTop: record.entryTop,
                 hash: record.hash })),
@@ -1002,12 +1015,22 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         {
             // Off the frame thread: post the batch and answer with it later.
             // The records are kept until then; nothing here waits.
+            // The worker forms the regions again from a copy of their pages, as
+            // a relink does, and keeps each one only when its bytes hash as they
+            // did here.
             outstanding = { id: ++workerRequest, metas: unbuilt, store };
+            const copies = copyPages(unbuilt.map(one=>one.region.pages));
             worker.post({
                 id: outstanding.id,
-                jobs: unbuilt.map(one=>({ region: one.region, entryTop: one.entryTop })),
+                relink: {
+                    jobs: unbuilt.map(one=>({ entry: one.region.entry, entryTop: one.entryTop,
+                        hash: one.region.hash })),
+                    pages: [...copies],
+                    form: { maxBlocks: settings.maxRegionBlocks,
+                        maxBytes: settings.maxRegionBytes },
+                },
                 layout, features: found, options: emitOptions(),
-            }, []);
+            }, [...copies.values()].map(bytes=>bytes.buffer));
             return published;
         }
         if (unbuilt.length > 0)
