@@ -537,33 +537,6 @@ function indexedWithDcs(){
     };
 }
 
-test('a DC on an indexed surface draws in the palette as it is now, not as it was at GetDC', ()=>{
-    const { made, palette, primary } = indexedWithDcs();
-    const colours = palette([0x000000ff, 0x0000ff00]);
-    primary.setPalette(colours);
-
-    const dc = primary.getDC();
-    assert.equal(dc.hr, DD_OK);
-    // PALETTEENTRY holds red low; a pixel holds it high.
-    assert.deepEqual(made[0].palette?.slice(0, 2), [0x00ff0000, 0x0000ff00]);
-
-    // A palette animated while the DC is out: GDI draws the next thing with it.
-    colours.setEntries(0, [0x00ff0000]);
-    assert.equal(made[0].palette?.[0], 0x000000ff);
-
-    // Another palette set on the surface is what the DC draws with from then on.
-    const other = palette([0x00123456]);
-    primary.setPalette(other);
-    assert.equal(made[0].palette?.[0], 0x00563412);
-    colours.setEntries(0, [0]);
-    assert.equal(made[0].palette?.[0], 0x00563412, 'and the palette it left no longer reaches it');
-
-    // Given back, the table is left alone.
-    primary.releaseDC(/** @type {number} */ (dc.dc));
-    other.setEntries(0, [0]);
-    assert.equal(made[0].palette?.[0], 0x00563412);
-});
-
 test('an indexed surface with no palette of its own draws in the primary\'s', ()=>{
     const { made, palette, primary, offscreen } = indexedWithDcs();
     const colours = palette([0x00000080]);
@@ -1128,6 +1101,36 @@ test('a device context is asked for over the surface\'s own pixels, and given ba
     assert.equal(surface.release(), 0);
     assert.equal(ddraw.release('IDirectDraw7'), 0);
     assert.ok(ddraw.destroyed);
+});
+
+test('a device context over an indexed surface sees the palette change while it is held', ()=>{
+    // A program that animates its palette while drawing text through the DC
+    // expects the new colours: the DC is given the palette's live table, not
+    // a copy made when it was asked for.
+    /** @type {any[]} */
+    const made = [];
+    const ddraw = createDirectDraw({
+        version: 7,
+        createDc: attributes=>{
+            made.push(attributes);
+            return 0x7700 + made.length;
+        },
+    });
+    ddraw.setCooperativeLevel(HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    assert.equal(ddraw.setDisplayMode(320, 240, 8), DD_OK);
+    const created = ddraw.createSurface({ flags: DDSD_CAPS, caps: DDSCAPS_PRIMARYSURFACE });
+    const primary = /** @type {NonNullable<typeof created.surface>} */ (created.surface);
+    const madePalette = ddraw.createPalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256, []);
+    const palette = /** @type {NonNullable<typeof madePalette.palette>} */ (madePalette.palette);
+    assert.equal(primary.setPalette(palette), DD_OK);
+
+    assert.equal(primary.getDC().hr, DD_OK);
+    const table = made[0].palette;
+    assert.equal(table[3], 0, 'an entry never written is black');
+    // A PALETTEENTRY is red in its low byte; the pixel is 0x00RRGGBB.
+    assert.equal(palette.setEntries(3, [0x00112233]), DD_OK);
+    assert.equal(made[0].palette[3], 0x00332211, 'the held DC reads the new entry');
+    assert.equal(made[0].palette, table, 'through the same table');
 });
 
 // --- what the object knows about its primary, and a surface about its changes ---

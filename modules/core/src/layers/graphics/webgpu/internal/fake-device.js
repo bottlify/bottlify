@@ -140,7 +140,8 @@ export function createFakeDevice(options = {}){
         // A dynamic binding resolves to the byte range the shader would read:
         // the offsets arrive in binding order, and the resource names the
         // buffer and the block's declared size. Recording that, not only the
-        // call, is what lets a test check the bytes a draw was given.
+        // call, is what lets a test check the bytes a draw was given -- as the
+        // buffer holds them once the frame is submitted.
         /**
          * @param {number} index
          * @param {any} group
@@ -155,9 +156,15 @@ export function createFakeDevice(options = {}){
                 const at = (offsets === undefined ? 0 : offsets[k]) + (resource.offset ?? 0);
                 const size = resource.size === undefined
                     ? resource.buffer.descriptor.size : resource.size;
-                const range = resource.buffer.bytes
-                    ? resource.buffer.bytes.slice(at, at + size) : null;
-                return { binding: entry.binding, buffer: resource.buffer, offset: at, size, range };
+                // Read when asked, not now: the bytes reach the buffer at the
+                // frame's submit, after the draws that name them are recorded.
+                return {
+                    binding: entry.binding, buffer: resource.buffer, offset: at, size,
+                    get range(){
+                        return resource.buffer.bytes
+                            ? resource.buffer.bytes.slice(at, at + size) : null;
+                    },
+                };
             });
             record('setBindGroup', { index, group, offsets, resolved });
         };

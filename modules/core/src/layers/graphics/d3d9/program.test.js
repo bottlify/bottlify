@@ -728,3 +728,38 @@ test('a declaration the GPU cannot deliver is declined with the reason', async()
     h.vb.release();
     assert.equal(h.device.release(), 0);
 });
+
+test('draws that change only their constants share a preparation and read their own', async()=>{
+    // The shape of a shader-drawn frame: constants set before every draw and
+    // nothing else. The translations and pipeline state are made once for the
+    // state; the constants are copied for each draw, so each still reads its own.
+    const h = harness();
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+    assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetPixelShader(ps.shader);
+    h.device.SetTexture(0, h.texture);
+    assert.equal(h.device.BeginScene(), D3D_OK);
+    for (let index = 0; index < 3; index++)
+    {
+        assert.equal(h.device.SetVertexShaderConstantF(5, [index, index, index, 1], 1), D3D_OK);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    }
+    // A render state changed is a new preparation, with a pipeline of its own.
+    h.device.SetRenderState(D3DRS.CULLMODE, 1);
+    assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.equal(h.device.EndScene(), D3D_OK);
+    assert.equal(h.device.Present(), D3D_OK);
+    await h.device.idle();
+
+    const colours = h.gpu.of('setBindGroup')
+        .filter((/** @type {any} */ call)=>call.index === 0)
+        .map((/** @type {any} */ call)=>[...new Float32Array(call.resolved[0].range.buffer)]
+            .slice(20, 24));
+    assert.deepEqual(colours, [[0, 0, 0, 1], [1, 1, 1, 1], [2, 2, 2, 1], [2, 2, 2, 1]]);
+    assert.equal(h.gpu.of('createRenderPipeline').length, 2, 'one pipeline per state');
+});

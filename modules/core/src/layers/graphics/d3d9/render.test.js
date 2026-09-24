@@ -25,12 +25,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3DUSAGE, D3D_OK } from './constants.js';
+import { D3DFMT, D3DPOOL, D3DRS, D3DSWAPEFFECT, D3DUSAGE, D3D_OK } from './constants.js';
 import { D3DCLEAR, D3DPT } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
+import { UNIFORM_AT } from '../d3d8/render.js';
+import { D3DDECLTYPE, D3DDECLUSAGE } from './declaration.js';
 import {
     blendPixel, clear as referenceClear, createReferenceSurface, toBase64,
 } from '../webgpu/internal/reference.js';
@@ -595,4 +597,122 @@ test('a lock reports guest memory, and a second lock of the same buffer is refus
     assert.equal(created.buffer.Lock(0, 16, second, 0), D3D_OK);
     assert.equal(second.pBits, /** @type {number} */ (first.pBits) - 64,
         'the range a lock reports is measured from the buffer, not from the last lock');
+});
+
+/** A triangle's three vertices, packed, for a DrawPrimitiveUP. */
+const triangleUP = ()=>{
+    const bytes = new Uint8Array(3 * TRIANGLE_STRIDE);
+    [[0, 0], [4, 0], [0, 4]].forEach(([x, y], index)=>
+        bytes.set(vertex(x, y, argb(255, 0, 0)), index * TRIANGLE_STRIDE));
+    return bytes;
+};
+
+test('draws that change no state are prepared once, and a value set again is no change', async()=>{
+    // Recorded commands. The device publishes its state version, so a run of
+    // draws of one state reuses the preparation, and a program setting the
+    // value already there -- which programs do constantly -- does not end it.
+    const h = harness();
+    const { device } = h;
+    const geometry = triangleUP();
+    assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    for (let index = 0; index < 20; index++)
+    {
+        assert.equal(device.SetRenderState(D3DRS.ALPHAREF, 0), D3D_OK);
+        assert.equal(device.SetTexture(0, null), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, geometry, TRIANGLE_STRIDE),
+            D3D_OK);
+    }
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    assert.deepEqual(device.diagnostics().prepared, { built: 1, reused: 19 });
+});
+
+test('a state block applied between two draws is a new preparation for the second', async()=>{
+    // Recorded commands. Apply writes the device's state behind the setters'
+    // backs, so it has to raise the version itself, or the second draw is
+    // served the first one's preparation.
+    const h = harness();
+    const { device } = h;
+    const geometry = triangleUP();
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.ALPHAREF, 5), D3D_OK);
+    /** @type {{ block?: any }} */
+    const recorded = {};
+    assert.equal(device.EndStateBlock(recorded), D3D_OK);
+    assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, geometry, TRIANGLE_STRIDE), D3D_OK);
+    assert.equal(recorded.block.Apply(), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, geometry, TRIANGLE_STRIDE), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    assert.equal(device.diagnostics().prepared.built, 2);
+    const refs = device.diagnostics().lastFrame
+        .filter((/** @type {any} */ command)=>command.kind === 'draw')
+        .map((/** @type {any} */ command)=>Math.round(command.uniforms[UNIFORM_AT.alphaRef] * 255));
+    assert.deepEqual(refs, [0, 5]);
+});
+
+/**
+ * A declaration of a colour before a pre-transformed position: legal, and no
+ * vertex format spells it, since a format puts the position first.
+ *
+ * @param {any} device @param {number} [colourStream]
+ */
+function colourFirstDeclaration(device, colourStream = 0){
+    /** @type {{ declaration?: any }} */
+    const made = {};
+    assert.equal(device.CreateVertexDeclaration([
+        { Stream: colourStream, Offset: 0, Type: D3DDECLTYPE.D3DCOLOR, Method: 0,
+            Usage: D3DDECLUSAGE.COLOR, UsageIndex: 0 },
+        { Stream: 0, Offset: 4, Type: D3DDECLTYPE.FLOAT4, Method: 0,
+            Usage: D3DDECLUSAGE.POSITIONT, UsageIndex: 0 },
+    ], made), D3D_OK);
+    assert.equal(device.SetVertexDeclaration(made.declaration), D3D_OK);
+}
+
+test('a fixed-function draw reads a declaration no format spells at its offsets', async()=>{
+    // Direct3D's fixed-function pipeline reads any declaration of the members
+    // it knows. The colour is at offset 0 and the position at 4 here, where a
+    // format would put them the other way round; the pipeline has to read
+    // them where the declaration says.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    colourFirstDeclaration(device);
+    const bytes = new DataView(new ArrayBuffer(60));
+    [[1, 1], [7, 1], [1, 4]].forEach(([x, y], index)=>{
+        bytes.setUint32(index * 20, argb(0, 0, 255), true);
+        bytes.setFloat32(index * 20 + 4, x, true);
+        bytes.setFloat32(index * 20 + 8, y, true);
+        bytes.setFloat32(index * 20 + 12, 0.5, true);
+        bytes.setFloat32(index * 20 + 16, 1, true);
+    });
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(bytes.buffer), 20),
+        D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const diagnostics = device.diagnostics();
+    assert.equal(diagnostics.skipped.layout, 0);
+    const layout = h.gpu.of('createRenderPipeline')
+        .map((/** @type {any} */ call)=>call.descriptor.vertex.buffers[0])
+        .find((/** @type {any} */ buffer)=>buffer && buffer.arrayStride === 20);
+    assert.ok(layout, 'a pipeline over the declared stride');
+    assert.deepEqual(layout.attributes.map((/** @type {any} */ attribute)=>
+        [attribute.offset, attribute.format]), [[0, 'unorm8x4'], [4, 'float32x4']]);
+});
+
+test('a declaration the fixed-function stage cannot read is dropped, not raised', async()=>{
+    // A colour in a second stream: this stage reads one stream. The draw must
+    // not throw into the program's thread; it is counted and said once.
+    const h = harness();
+    const { device } = h;
+    colourFirstDeclaration(device, 1);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    assert.equal(device.diagnostics().skipped.layout, 1);
 });

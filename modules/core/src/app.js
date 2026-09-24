@@ -946,6 +946,24 @@ export function idleWait({ fetching, idlers, suspended, spun }){
 }
 
 /**
+ * Whether a library is answered from this engine's table even when the program
+ * brought a file of that name: a KnownDLL, which Windows never looks for beside
+ * the program, or a redistributable runtime a layer stands in for -- a sound
+ * library's MPEG provider, a JPEG library -- which the decision in
+ * `roadmap/decisions.md` makes ours whoever's copy it is, since the program's
+ * copy found first runs the whole decoder as emulated x86. Every other name the
+ * program's own file wins, and the table is the fallback.
+ *
+ * @param {readonly string[]} knownDlls
+ * @param {readonly string[]} runtimes
+ * @returns {(name: string) => boolean}
+ */
+export function answeredByEngine(knownDlls, runtimes){
+    const keys = new Set([...knownDlls, ...runtimes].map(moduleKeyOf));
+    return name=>keys.has(moduleKeyOf(name));
+}
+
+/**
  * The key a module is known by: its file name, without directory, case or
  * the extension a program is free to leave off.
  *
@@ -3395,8 +3413,9 @@ async function buildApp(options){
         ...core.api('media').libraries?.() ?? {},
     };
     /**
-     * The names Windows maps out of the system directory and never looks for
-     * beside the program.
+     * The names answered from this engine's table even beside a file the
+     * program brought: the KnownDLLs, and the redistributable runtimes the
+     * layers stand in for (`answeredByEngine`).
      *
      * Everything else this engine provides -- `d3dx9_*`, `d3d9`, `ddraw`,
      * `dinput8`, `comctl32`, `version` -- is put aside when the program brought
@@ -3404,10 +3423,12 @@ async function buildApp(options){
      * Both the import walk and the run-time LoadLibrary path ask this question,
      * so they cannot disagree about which of the two wins.
      */
-    const knownDlls = new Set(
-        (/** @type {() => string[]} */ (win32.knownDlls)?.() ?? []).map(moduleKeyOf));
-    /** @param {string} name */
-    const isKnownDll = name=>knownDlls.has(moduleKeyOf(name));
+    const isKnownDll = answeredByEngine(
+        /** @type {() => string[]} */ (win32.knownDlls)?.() ?? [],
+        [
+            ...(/** @type {() => string[]} */ (audio.runtimes)?.() ?? []),
+            ...(/** @type {() => string[]} */ (core.api('media').runtimes)?.() ?? []),
+        ]);
     Object.entries(allLibraries).forEach(([name, table], index)=>{
         // A library imported by number has to be synthesised with the numbers
         // the program compiled against; one we assigned ourselves would bind to

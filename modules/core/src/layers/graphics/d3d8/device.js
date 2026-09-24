@@ -523,6 +523,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * draw -- and nothing else derived from it may be kept across draws.
      */
     let drawStateVersion = 1;
+    /**
+     * The share of `drawStateVersion` that texture bindings raised. The
+     * difference is a version of every other piece of that state, which is
+     * what a program that binds a new texture before most draws leaves still.
+     */
+    let textureBindingVersion = 0;
 
     /** @type {Map<number, Map<number, number>>} stage -> its states, made on first touch */
     let stageStates = new Map();
@@ -1154,6 +1160,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
         get drawStateVersion(){
             return drawStateVersion;
+        },
+        get stateVersionBesideTextures(){
+            return drawStateVersion - textureBindingVersion;
         },
         get material(){
             return material;
@@ -2047,6 +2056,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     textures.delete(stage);
                 }
                 drawStateVersion++;
+                textureBindingVersion++;
             }
             recordState(block=>block.textures, stage, texture ?? null);
             return D3D_OK;

@@ -41,7 +41,7 @@ import {
     D3DTSS, D3DUSAGE, D3DZB, D3D_OK, FORMAT_INFO, argumentsRead, dwordToFloat, isCompressed,
     surfaceBytes,
 } from './constants.js';
-import { FVF, decodeFvf } from '../webgpu/internal/vertexformat.js';
+import { FVF, POSITION_MASK, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { levelExtent } from '../d3d9/resources.js';
 import { resourceId } from '../webgpu/internal/bindings.js';
 import {
@@ -960,10 +960,18 @@ export function eyePosition(view){
  *     most draws, and a counter it raised would never hold still -- so whoever
  *     reads this owes the world matrix a fresh read on every draw. A device
  *     that does not offer it is prepared for on every draw, as before.
+ * @property {number} [stateVersionBesideTextures]
+ *     Raised by every change `drawStateVersion` counts except a texture
+ *     binding, so the part of a preparation's key that bindings do not reach is
+ *     built once per such change rather than once per draw.
  * @property {Material} material
  * @property {any} backBuffer                                What Present shows.
  * @property {{ vertexShader: number, fvf: number, pixelShader: number,
- *              program?: ProgramState | null }} stageProcessing
+ *              program?: ProgramState | null,
+ *              fixedFunctionLayout?: import('../d3d9/declaration.js').FixedFunctionLayout | null
+ *            }} stageProcessing
+ *     `fixedFunctionLayout` is how the fixed-function stage reads a bound
+ *     declaration that no vertex format spells (`fvf` is then zero).
  *     `program` is what a device that makes shader objects hands over: the
  *     parsed shaders, the declaration and the constant files. Absent, a bound
  *     shader is a draw this renderer declines.
@@ -1258,6 +1266,8 @@ export function fogModeOf(model, applied = true){
  * @param {RenderModel} model
  * @param {Object} shape
  * @param {number} shape.fvf
+ * @param {import('../webgpu/internal/vertexformat.js').VertexLayout} [shape.vertexLayout]
+ * @param {string} [shape.vertexLayoutKey]
  * @param {string} shape.topology
  * @param {string} shape.targetFormat
  * @param {boolean} [shape.targetHasAlpha]
@@ -1315,6 +1325,10 @@ export function pipelineStateOf(model, shape){
         // computed it or the program supplied it.
         specularEnable: rs('SPECULARENABLE') !== 0,
         lighting: shape.lighting ?? null,
+        ...(shape.vertexLayout ? {
+            vertexLayout: shape.vertexLayout,
+            vertexLayoutKey: shape.vertexLayoutKey,
+        } : {}),
     };
 }
 
@@ -1553,16 +1567,24 @@ export function createRenderer(options){
      */
     const uploaded = new Map();
     /**
-     * Every texture record in creation order.
+     * Every live texture record in creation order.
      *
      * `textures` is weak, so it cannot be walked, and a diagnostic that wants
-     * to show what a program made needs the list. The records are small and
-     * hold no pixels -- the texels stay in guest memory and are read only when
-     * something asks -- so keeping them costs a run nothing.
+     * to show what a program made needs the list. A record leaves it when the
+     * program releases its texture for the last time -- it holds the GPU
+     * texture, and a program that streams its textures in and out would keep
+     * every one it ever made.
      *
-     * @type {any[]}
+     * @type {Set<any>}
      */
-    const roster = [];
+    const roster = new Set();
+    /**
+     * Records whose texture the program released for the last time, waiting
+     * for a present that finds them bound on no stage.
+     *
+     * @type {Set<any>}
+     */
+    const released = new Set();
     let nextTextureId = 0;
     /** @type {any} */
     let placeholder = null;
@@ -1593,6 +1615,11 @@ export function createRenderer(options){
             texture: 0,
             /** A draw through shaders this renderer could not build a pipeline for. */
             program: 0,
+            /**
+             * A fixed-function draw whose vertex format names no position: a
+             * declaration the fixed-function path cannot read as a format.
+             */
+            layout: 0,
         },
         /** Draws that ran through a program rather than the fixed-function pipeline. */
         programmable: 0,
@@ -2574,6 +2601,46 @@ export function createRenderer(options){
     };
 
     /**
+     * The vertex layout of a declaration the fixed-function stage reads, for a
+     * stream of this stride, or null when a member would reach past the vertex.
+     *
+     * @param {import('../d3d9/declaration.js').FixedFunctionLayout} declared
+     * @param {number} stride
+     * @returns {import('../webgpu/internal/vertexformat.js').VertexLayout | null}
+     */
+    const layoutOfDeclaration = (declared, stride)=>{
+        if (declared.attributes.some(attribute=>attribute.offset + attribute.bytes > stride))
+        {
+            return null;
+        }
+        return {
+            stride,
+            attributes: declared.attributes.map((attribute, index)=>({
+                name: attribute.name,
+                offset: attribute.offset,
+                format: attribute.format,
+                shaderLocation: index,
+            })),
+            preTransformed: declared.preTransformed,
+            texCoordSets: declared.texCoordSets,
+            blendWeights: 0,
+        };
+    };
+
+    let layoutReported = false;
+    /** Says once that fixed-function draws were dropped for want of a format. */
+    const reportLayout = ()=>{
+        if (divergence && !layoutReported)
+        {
+            layoutReported = true;
+            divergence('Direct3D 8',
+                'a fixed-function draw over a vertex declaration the fixed-function stage'
+                + ' cannot read (a second stream, blend weights, a colour that is not a'
+                + ' D3DCOLOR, or a member past the vertex) is not drawn');
+        }
+    };
+
+    /**
      * Says once that a stage asked for coordinates this engine does not
      * generate. The set it names is used regardless, which is the coordinates
      * the vertex carried rather than the ones the program asked to be computed.
@@ -3254,6 +3321,98 @@ export function createRenderer(options){
         {
             return prepareMixed(model, stride, topology, program);
         }
+        // Everything but the constants and the texture views depends only on
+        // state the device versions, so it is worked out once per change of
+        // that state -- a program that sets its constants and binds a texture
+        // before every draw, which is how a shader-drawn frame goes, changes
+        // none of it.
+        const version = model.stateVersionBesideTextures;
+        let pieces = version !== undefined && programPieces !== null
+            && programPieces.version === version
+            && programPieces.vertexShader === program.vertexShader
+            && programPieces.pixelShader === program.pixelShader
+            && programPieces.declarationId === program.declarationId
+            && programPieces.stride === stride && programPieces.topology === topology
+            ? programPieces.made
+            : null;
+        if (pieces === null)
+        {
+            pieces = programPiecesOf(model, stride, topology, program);
+            if (pieces === null)
+            {
+                return null;
+            }
+            programPieces = version === undefined ? null : {
+                version, vertexShader: program.vertexShader, pixelShader: program.pixelShader,
+                declarationId: program.declarationId, stride, topology, made: pieces,
+            };
+        }
+        const { pixel, vertex, samplerPlan, state, source } = pieces;
+        const samplerBindings = samplerPlan.map((/** @type {any} */ planned)=>{
+            const texture = model.textures.get(planned.stage);
+            return {
+                stage: planned.stage,
+                texture,
+                view: texture ? uploadIfDirty(texture).view : placeholderView(),
+                sampler: planned.sampler,
+                placeholder: !texture,
+            };
+        });
+        const take = ensureFrame().arena.take;
+        const vertexBlocks = program.vertex
+            ? constantBlocks(program.vertexConstants, vertex.constants, take)
+            : hybridBlocks(model, take);
+        const pixelBlocks = constantBlocks(program.pixelConstants, pixel.constants, take);
+        return {
+            version: undefined,
+            contentVersion: 0,
+            stride,
+            topology,
+            state,
+            uniforms: vertexBlocks[0],
+            template: null,
+            stageBindings: samplerBindings,
+            lighting: null,
+            fogSetting: '',
+            layout: null,
+            textures: [],
+            truncated: null,
+            pipelineFrame: null,
+            pipelineIndex: 0,
+            program: {
+                source,
+                declarationId: program.declarationId,
+                vertexBlocks,
+                pixelBlocks,
+                samplerBindings,
+            },
+        };
+    };
+
+    /**
+     * The last shader draw's state-dependent pieces and the state they were
+     * made for; see `prepareProgram`.
+     *
+     * @type {{ version: number, vertexShader: any, pixelShader: any, declarationId: number,
+     *          stride: number, topology: string, made: any } | null}
+     */
+    let programPieces = null;
+
+    /**
+     * The translations, layout, pipeline state and samplers of a shader draw:
+     * what `prepareProgram` keeps while the state holds still, or null when
+     * the draw cannot be built (reported here).
+     *
+     * @param {RenderModel} model
+     * @param {number} stride
+     * @param {string} topology
+     * @param {ProgramState} program
+     */
+    const programPiecesOf = (model, stride, topology, program)=>{
+        if (!program.declaration)
+        {
+            return null;
+        }
         const pixelShader = /** @type {object} */ (program.pixelShader);
         // The fixed-function fog stage runs after a pixel shader below model 3,
         // so a shader-drawn surface is fogged exactly as a fixed-function one
@@ -3348,21 +3507,10 @@ export function createRenderer(options){
                 `vertex stage of shader ${program.vertexId} was not drawn: ${vertex.error}`);
             return null;
         }
-        const samplerBindings = pixel.samplers.map((/** @type {any} */ entry)=>{
-            const texture = model.textures.get(entry.index);
-            return {
-                stage: entry.index,
-                texture,
-                view: texture ? uploadIfDirty(texture).view : placeholderView(),
-                sampler: programSamplerFor(model.stageStates(entry.index)),
-                placeholder: !texture,
-            };
-        });
-        const take = ensureFrame().arena.take;
-        const vertexBlocks = program.vertex
-            ? constantBlocks(program.vertexConstants, vertex.constants, take)
-            : hybridBlocks(model, take);
-        const pixelBlocks = constantBlocks(program.pixelConstants, pixel.constants, take);
+        const samplerPlan = pixel.samplers.map((/** @type {any} */ entry)=>({
+            stage: entry.index,
+            sampler: programSamplerFor(model.stageStates(entry.index)),
+        }));
         const state = {
             ...pipelineStateOf(model, {
                 fvf: 0, topology, ...formatsOf(model), stages: [], lighting: null,
@@ -3372,31 +3520,14 @@ export function createRenderer(options){
             pixelShader: program.pixelId,
         };
         return {
-            version: undefined,
-            contentVersion: 0,
-            stride,
-            topology,
+            pixel,
+            vertex,
+            samplerPlan,
             state,
-            uniforms: vertexBlocks[0],
-            template: null,
-            stageBindings: samplerBindings,
-            lighting: null,
-            fogSetting: '',
-            layout: null,
-            textures: [],
-            truncated: null,
-            pipelineFrame: null,
-            pipelineIndex: 0,
-            program: {
-                source: {
-                    key: `${state.vertexShader}/${state.pixelShader}/${program.declarationId}`
-                        + `/${shapes}/${stride}`,
-                    vertex, pixel, layout,
-                },
-                declarationId: program.declarationId,
-                vertexBlocks,
-                pixelBlocks,
-                samplerBindings,
+            source: {
+                key: `${state.vertexShader}/${state.pixelShader}/${program.declarationId}`
+                    + `/${shapes}/${stride}`,
+                vertex, pixel, layout,
             },
         };
     };
@@ -3725,45 +3856,45 @@ export function createRenderer(options){
     };
 
     /**
-     * A stable name for the device state a preparation is built from.
+     * The targets and their formats, the transforms beside the world ones, the
+     * material, the enabled lights and the viewport, as a number: equal numbers
+     * are equal values. Printing their floats is most of what naming a state
+     * costs, and a program that flips a render state between draws changes
+     * none of them; so, for a device that replaces these objects rather than
+     * writing into them (one that offers `stateVersionBesideTextures`), the
+     * number is kept while every one of them is the same object and the lights
+     * have not changed.
      *
-     * The device raises `drawStateVersion` on every change, but a counter cannot
-     * name a state that comes back: two draws alternating between the same two
-     * states raise it twice per pair, so a one-entry cache keyed on it misses on
-     * every draw. This is the state itself -- the values, not the fact that they
-     * changed -- so a preparation can be kept per distinct state the frame draws
-     * with. The world transform is the one state left out, because it moves
-     * between most draws and the block is written afresh from it on every one.
-     *
-     * Surface identity is part of the key because a Reset rebuilds the implicit
+     * Surface identity is part of it because a Reset rebuilds the implicit
      * surfaces: two states that read alike across one are not the same
      * preparation, because the views they hold are of different things.
      *
      * @param {RenderModel} model
-     * @param {{ fvf: number }} processing
-     * @param {number} stride
-     * @param {string} topology
-     * @returns {string}
+     * @returns {number}
      */
-    const preparationKeyOf = (model, processing, stride, topology)=>{
-        /** @type {(string | number)[]} */
-        const parts = [processing.fvf, stride, topology];
-        const formats = formatsOf(model);
-        parts.push(formats.targetFormat, formats.targetHasAlpha ? 1 : 0,
-            formats.depthFormat ?? '-');
-        parts.push(surfaceIdOf(surfaceFor(model.renderTarget)));
-        parts.push(model.depthStencil ? surfaceIdOf(surfaceFor(model.depthStencil)) : '-');
-        for (const [state, value] of model.renderStates)
+    const slowStateOf = model=>{
+        const replaces = model.stateVersionBesideTextures !== undefined
+            && model.lightsVersion !== undefined;
+        /** @type {unknown[]} */
+        const sources = [model.renderTarget, model.depthStencil, model.material, model.viewport,
+            model.lightsVersion];
+        for (const [type, matrix] of model.transforms)
         {
-            parts.push(state, value);
-        }
-        for (let stage = 0; stage < STAGE_COUNT; stage++)
-        {
-            for (const [state, value] of model.stageStates(stage))
+            if (type < D3DTS.WORLD || type > D3DTS.WORLD_LAST)
             {
-                parts.push(stage, state, value);
+                sources.push(type, matrix);
             }
         }
+        if (replaces && sources.length === floatSources.length
+            && sources.every((source, index)=>source === floatSources[index]))
+        {
+            return slowNumber;
+        }
+        const formats = formatsOf(model);
+        /** @type {(string | number)[]} */
+        const parts = [formats.targetFormat, formats.targetHasAlpha ? 1 : 0,
+            formats.depthFormat ?? '-', surfaceIdOf(surfaceFor(model.renderTarget)),
+            model.depthStencil ? surfaceIdOf(surfaceFor(model.depthStencil)) : '-'];
         for (const [type, matrix] of model.transforms)
         {
             if (type >= D3DTS.WORLD && type <= D3DTS.WORLD_LAST)
@@ -3792,13 +3923,171 @@ export function createRenderer(options){
         parts.push(model.viewport.rect.x, model.viewport.rect.y,
             model.viewport.rect.width, model.viewport.rect.height,
             ...model.viewport.offset, ...model.viewport.scale);
+        const text = parts.join('|');
+        let number = slowNumbers.get(text);
+        if (number === undefined)
+        {
+            if (slowNumbers.size >= STATE_NUMBERS_LIMIT)
+            {
+                slowNumbers.clear();
+            }
+            number = nextStateNumber++;
+            slowNumbers.set(text, number);
+        }
+        slowNumber = number;
+        floatSources = replaces ? sources : [];
+        return slowNumber;
+    };
+    /** @type {Map<string, number>} */
+    const slowNumbers = new Map();
+    let slowNumber = -1;
+    /** @type {unknown[]} */
+    let floatSources = [];
+    /**
+     * Numbers name states for as long as the renderer lives and are never
+     * reused, so a key made before a table was cleared cannot name a different
+     * state after it.
+     */
+    let nextStateNumber = 0;
+    const STATE_NUMBERS_LIMIT = 1024;
+
+    /**
+     * A stable number for the device state a preparation is built from: equal
+     * numbers are equal values.
+     *
+     * The device raises `drawStateVersion` on every change, but a counter cannot
+     * name a state that comes back: two draws alternating between the same two
+     * states raise it twice per pair, so a one-entry cache keyed on it misses on
+     * every draw. This is the state itself -- the values, not the fact that they
+     * changed -- so a preparation can be kept per distinct state the frame draws
+     * with. The world transform is the one state left out, because it moves
+     * between most draws and the block is written afresh from it on every one.
+     *
+     * The render and stage states are laid out as words and looked up by
+     * their hash, with no string built: a program that flips one render state
+     * between draws names a state on every draw. Texture bindings and the
+     * draw's own shape are not in it: see `preparationKeyOf`, which adds them.
+     *
+     * @param {RenderModel} model
+     * @param {{ fvf: number, fixedFunctionLayout?: { id: number } | null }} processing
+     * @returns {number}
+     */
+    const stateNumberOf = (model, processing)=>{
+        let at = 0;
+        /** @param {number} value */
+        const put = value=>{
+            if (at === stateScratch.length)
+            {
+                const grown = new Int32Array(stateScratch.length * 2);
+                grown.set(stateScratch);
+                stateScratch = grown;
+            }
+            stateScratch[at++] = value;
+        };
+        put(slowStateOf(model));
+        put(processing.fvf);
+        // A declaration read without a format is told apart by its own id.
+        put(processing.fixedFunctionLayout?.id ?? 0);
+        put(model.renderStates.size);
+        for (const [state, value] of model.renderStates)
+        {
+            put(state);
+            put(value);
+        }
+        for (let stage = 0; stage < STAGE_COUNT; stage++)
+        {
+            const states = model.stageStates(stage);
+            put(states.size);
+            for (const [state, value] of states)
+            {
+                put(state);
+                put(value);
+            }
+        }
+        // FNV-1a over the words; a hit is compared in full, so a collision
+        // costs a comparison and never names two states alike.
+        let hash = 0x811c9dc5;
+        for (let index = 0; index < at; index++)
+        {
+            hash = Math.imul(hash ^ stateScratch[index], 0x01000193);
+        }
+        const bucket = intStates.get(hash);
+        if (bucket !== undefined)
+        {
+            for (const entry of bucket)
+            {
+                if (entry.values.length === at && sameWords(entry.values, stateScratch))
+                {
+                    return entry.number;
+                }
+            }
+        }
+        if (intStateCount >= STATE_NUMBERS_LIMIT)
+        {
+            intStates.clear();
+            intStateCount = 0;
+        }
+        const entry = { values: stateScratch.slice(0, at), number: nextStateNumber++ };
+        if (bucket !== undefined && intStates.has(hash))
+        {
+            bucket.push(entry);
+        }
+        else
+        {
+            intStates.set(hash, [entry]);
+        }
+        intStateCount++;
+        return entry.number;
+    };
+
+    /** @param {Int32Array} stored @param {Int32Array} scratch @returns {boolean} */
+    const sameWords = (stored, scratch)=>{
+        for (let index = 0; index < stored.length; index++)
+        {
+            if (stored[index] !== scratch[index])
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    let stateScratch = new Int32Array(2048);
+    /** @type {Map<number, { values: Int32Array, number: number }[]>} */
+    const intStates = new Map();
+    let intStateCount = 0;
+    let stateKey = '';
+    /** @type {number | undefined} */
+    let stateKeyVersion;
+
+    /**
+     * The whole key: the state beside textures, kept while
+     * `stateVersionBesideTextures` holds still -- a program that binds a new
+     * texture before most draws changes nothing else between them -- then the
+     * draw's own shape and every stage's texture with the generation of its
+     * bytes, which change without the device hearing of it.
+     *
+     * @param {RenderModel} model
+     * @param {{ fvf: number, fixedFunctionLayout?: { id: number } | null }} processing
+     * @param {number} stride
+     * @param {string} topology
+     * @returns {string}
+     */
+    const preparationKeyOf = (model, processing, stride, topology)=>{
+        const version = model.stateVersionBesideTextures;
+        if (version === undefined || version !== stateKeyVersion)
+        {
+            stateKey = `s${stateNumberOf(model, processing)}`;
+            stateKeyVersion = version;
+        }
+        let key = `${stateKey}|${stride}|${topology}`;
         for (let stage = 0; stage < STAGE_COUNT; stage++)
         {
             const texture = model.textures.get(stage);
             const held = texture ? textures.get(texture) : null;
-            parts.push(held ? `${held.id}:${held.soil}` : '-');
+            key += held ? `|${held.id}:${held.soil}` : '|-';
         }
-        return parts.join('|');
+        return key;
     };
 
     /**
@@ -3897,11 +4186,39 @@ export function createRenderer(options){
             preparedState = cached;
             return reuse(model, cached);
         }
-        const layout = decodeFvf(processing.fvf);
-        if (stride !== layout.stride)
+        /** @type {import('../webgpu/internal/vertexformat.js').VertexLayout} */
+        let layout;
+        /** @type {string | undefined} */
+        let vertexLayoutKey;
+        if ((processing.fvf & POSITION_MASK) === 0)
         {
-            skip('stride');
-            return null;
+            // A declaration no format spells: read through the layout the
+            // device worked out from its elements, when the fixed-function
+            // stage can read it at all. Otherwise the draw is dropped and
+            // counted -- the program was already told it succeeded -- and never
+            // raised into the program's thread.
+            const declared = processing.fixedFunctionLayout
+                ? layoutOfDeclaration(processing.fixedFunctionLayout, stride)
+                : null;
+            if (!declared)
+            {
+                skip('layout');
+                reportLayout();
+                return null;
+            }
+            layout = declared;
+            vertexLayoutKey = `d${stride}:${declared.attributes
+                .map(attribute=>`${attribute.name}@${attribute.offset}:${attribute.format}`)
+                .join(',')}`;
+        }
+        else
+        {
+            layout = decodeFvf(processing.fvf);
+            if (stride !== layout.stride)
+            {
+                skip('stride');
+                return null;
+            }
         }
         const cascade = stageCascade(model, layout);
         reportCascade(cascade);
@@ -3929,6 +4246,7 @@ export function createRenderer(options){
         counters.prepared.built++;
         const state = pipelineStateOf(model, {
             fvf: processing.fvf,
+            ...(vertexLayoutKey === undefined ? {} : { vertexLayout: layout, vertexLayoutKey }),
             topology,
             ...formatsOf(model),
             stages: cascade.stages,
@@ -4096,7 +4414,27 @@ export function createRenderer(options){
                 ...desc,
             };
             textures.set(texture, entry);
-            roster.push(entry);
+            roster.add(entry);
+
+            // The last release gives the texture's guest storage back. Its GPU
+            // texture outlives that for as long as a stage still binds it --
+            // a binding holds its texture without a public reference, and a
+            // program may release its own and go on drawing -- and goes at the
+            // first present that finds it bound nowhere, after that frame's
+            // replay.
+            const releaseTexture = texture.release;
+            if (typeof releaseTexture === 'function')
+            {
+                texture.release = ()=>{
+                    const left = releaseTexture();
+                    if (left === 0 && roster.has(entry))
+                    {
+                        roster.delete(entry);
+                        released.add(entry);
+                    }
+                    return left;
+                };
+            }
 
             /** @param {number} level */
             const soiled = level=>{
@@ -4636,6 +4974,22 @@ export function createRenderer(options){
             frameStats = blankFrameStats();
             counters.frames++;
             chain = chain.then(()=>replay(recorded, surface)).catch(failure);
+            if (released.size > 0)
+            {
+                const bound = new Set(model.textures.values());
+                for (const entry of released)
+                {
+                    if (!bound.has(entry.texture))
+                    {
+                        released.delete(entry);
+                        if (entry.gpu)
+                        {
+                            retiring.push(entry.gpu);
+                            entry.gpu = null;
+                        }
+                    }
+                }
+            }
             if (retiring.length > 0)
             {
                 const gone = retiring.splice(0);
@@ -4719,7 +5073,7 @@ export function createRenderer(options){
                 // rather than pixels: a reader that can read guest memory can
                 // fetch the ones it wants, and every texture at once would be
                 // tens of megabytes through a diagnostics call.
-                textureRecords: roster.map(entry=>({
+                textureRecords: [...roster].map(entry=>({
                     id: entry.id,
                     base: entry.base,
                     width: entry.width,

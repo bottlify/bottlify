@@ -66,7 +66,8 @@ import {
 import { SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters } from './validity.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import {
-    MAX_STREAMS, createVertexDeclaration, elementsOfFvf, fvfOfElements, validateElements,
+    MAX_STREAMS, createVertexDeclaration, elementsOfFvf, fixedFunctionLayoutOf, fvfOfElements,
+    validateElements,
 } from './declaration.js';
 import {
     CONSTANT_FILE, SHADER_KIND, createConstantFile, createShader, validateShader, versionOf,
@@ -585,6 +586,17 @@ function createDeviceObject(parameters, caps, services, identity){
     /** @type {Map<number, { light: Light, enabled: boolean }>} */
     let lights = new Map();
     let lightsVersion = 0;
+    /**
+     * Raised by every change of the state a draw's preparation is built from
+     * -- through `setState`, a state block applied, a reset, a target -- so a
+     * renderer prepares once per change rather than once per draw. The world
+     * transform is left out, as the Direct3D 8 device leaves it out: it moves
+     * between most draws, and whoever reads this owes it a fresh read on every
+     * draw. A texture binding raises `textureBindingVersion` too, so the
+     * difference versions everything beside the bindings.
+     */
+    let drawStateVersion = 1;
+    let textureBindingVersion = 0;
 
     /** @type {Map<number, Map<number, number>>} stage -> its states, made on first touch */
     let stageStates = new Map();
@@ -1021,6 +1033,28 @@ function createDeviceObject(parameters, caps, services, identity){
     };
 
     /**
+     * The layout the fixed-function pipeline reads the bound declaration
+     * through when no vertex format spells it, worked out once per declaration.
+     *
+     * @type {WeakMap<object, import('./declaration.js').FixedFunctionLayout | null>}
+     */
+    const fixedFunctionLayouts = new WeakMap();
+    const fixedFunctionLayout = ()=>{
+        const declaration = vertexDeclaration.declaration;
+        if (!declaration || vertexShader || effectiveFvf() !== 0)
+        {
+            return null;
+        }
+        let layout = fixedFunctionLayouts.get(declaration);
+        if (layout === undefined)
+        {
+            layout = fixedFunctionLayoutOf(declaration);
+            fixedFunctionLayouts.set(declaration, layout);
+        }
+        return layout;
+    };
+
+    /**
      * What the renderer reads at the moment of a draw. Live views, so that a
      * state set after this object was made is the state a later draw sees.
      *
@@ -1058,6 +1092,12 @@ function createDeviceObject(parameters, caps, services, identity){
         },
         get lightsVersion(){
             return lightsVersion;
+        },
+        get drawStateVersion(){
+            return drawStateVersion;
+        },
+        get stateVersionBesideTextures(){
+            return drawStateVersion - textureBindingVersion;
         },
         get material(){
             return material;
@@ -1376,8 +1416,9 @@ function createDeviceObject(parameters, caps, services, identity){
      *
      * @param {(record: import('./stateblock.js').StateBlockRecord) => void} record
      * @param {() => void} apply
+     * @param {boolean} [binding]  the value is a texture binding
      */
-    const setState = (record, apply)=>{
+    const setState = (record, apply, binding = false)=>{
         if (recording)
         {
             record(recording);
@@ -1385,6 +1426,11 @@ function createDeviceObject(parameters, caps, services, identity){
         else
         {
             apply();
+            drawStateVersion++;
+            if (binding)
+            {
+                textureBindingVersion++;
+            }
         }
         return D3D_OK;
     };
@@ -1576,6 +1622,7 @@ function createDeviceObject(parameters, caps, services, identity){
             const target = describe(backBuffers[0]);
             viewport = fullTarget({ width: target.Width, height: target.Height });
             scissor = wholeOf(target);
+            drawStateVersion++;
             return D3D_OK;
         },
 
@@ -1587,6 +1634,12 @@ function createDeviceObject(parameters, caps, services, identity){
             if (!renderStates.has(state))
             {
                 return D3DERR_INVALIDCALL;
+            }
+            // A program sets the value already there constantly; doing nothing
+            // keeps a renderer's preparation of the state it already has.
+            if (!recording && renderStates.get(state) === value >>> 0)
+            {
+                return D3D_OK;
             }
             return setState(
                 record=>record.renderStates.set(state, value >>> 0),
@@ -1690,6 +1743,10 @@ function createDeviceObject(parameters, caps, services, identity){
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (!recording && (textures.get(stage) ?? null) === (texture ?? null))
+            {
+                return D3D_OK;
+            }
             return setState(
                 record=>record.textures.set(stage, texture ?? null),
                 ()=>{
@@ -1701,7 +1758,7 @@ function createDeviceObject(parameters, caps, services, identity){
                     {
                         textures.delete(stage);
                     }
-                });
+                }, true);
         },
 
         /**
@@ -1739,6 +1796,10 @@ function createDeviceObject(parameters, caps, services, identity){
             {
                 return D3D_OK;
             }
+            if (!recording && stageStatesFor(stage).get(type) === value >>> 0)
+            {
+                return D3D_OK;
+            }
             return setState(
                 record=>record.stageStates.set((stage << 8) | type, value >>> 0),
                 ()=>stageStatesFor(stage).set(type, value >>> 0));
@@ -1771,6 +1832,11 @@ function createDeviceObject(parameters, caps, services, identity){
             if (!isSampler(sampler) || !SAMPLER_STATE_TYPES.has(type))
             {
                 return D3DERR_INVALIDCALL;
+            }
+            if (!recording
+                && stageStatesFor(sampler).get(SAMPLER_STATE_KEY[type]) === value >>> 0)
+            {
+                return D3D_OK;
             }
             return setState(
                 record=>record.samplerStates.set((sampler << 8) | type, value >>> 0),
@@ -2285,6 +2351,7 @@ function createDeviceObject(parameters, caps, services, identity){
             return {
                 vertexShader: vertexShader ? vertexShader.id : 0,
                 fvf: effectiveFvf(),
+                fixedFunctionLayout: fixedFunctionLayout(),
                 fixedFunctionVertex: !vertexShader,
                 pixelShader: pixelShader ? pixelShader.id : 0,
                 program: vertexShader || pixelShader
@@ -2592,6 +2659,7 @@ function createDeviceObject(parameters, caps, services, identity){
             // so that one left over from a smaller target cannot stay latched.
             viewport = fullTarget({ width: target.Width, height: target.Height });
             scissor = wholeOf(target);
+            drawStateVersion++;
             return D3D_OK;
         },
 
@@ -2705,6 +2773,7 @@ function createDeviceObject(parameters, caps, services, identity){
                 return D3DERR_INVALIDCALL;
             }
             depthStencil = surface ?? null;
+            drawStateVersion++;
             return D3D_OK;
         },
 
@@ -3347,6 +3416,7 @@ function createDeviceObject(parameters, caps, services, identity){
                 return D3DERR_INVALIDCALL;
             }
             applyRecord(record, view);
+            drawStateVersion++;
             return D3D_OK;
         },
     });

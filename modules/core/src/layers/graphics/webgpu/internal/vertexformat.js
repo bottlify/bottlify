@@ -26,7 +26,7 @@
  */
 
 /** Position, and the blend-weight counts that share its field. */
-const POSITION_MASK = 0x00e;
+export const POSITION_MASK = 0x00e;
 const POSITION = Object.freeze({
     XYZ: 0x002,
     XYZRHW: 0x004,

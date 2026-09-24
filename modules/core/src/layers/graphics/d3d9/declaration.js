@@ -348,6 +348,133 @@ export function fvfOfElements(elements){
 }
 
 /**
+ * @typedef {Object} FixedFunctionLayout
+ * @property {number} id           The declaration's, so two layouts are told apart.
+ * @property {{ name: string, offset: number, format: string, bytes: number }[]} attributes
+ * @property {boolean} preTransformed
+ * @property {number} texCoordSets
+ */
+
+/**
+ * What the fixed-function vertex stage reads each coordinate type as.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+const TEXCOORD_FORMATS = Object.freeze({
+    [D3DDECLTYPE.FLOAT1]: 'float32',
+    [D3DDECLTYPE.FLOAT2]: 'float32x2',
+    [D3DDECLTYPE.FLOAT3]: 'float32x3',
+    [D3DDECLTYPE.FLOAT4]: 'float32x4',
+    [D3DDECLTYPE.FLOAT16_2]: 'float16x2',
+    [D3DDECLTYPE.FLOAT16_4]: 'float16x4',
+});
+
+/**
+ * Usages the fixed-function pipeline has no use for, and ignores.
+ *
+ * @type {ReadonlySet<number>}
+ */
+const IGNORED_BY_FIXED_FUNCTION = new Set([
+    D3DDECLUSAGE.TANGENT, D3DDECLUSAGE.BINORMAL, D3DDECLUSAGE.TESSFACTOR,
+    D3DDECLUSAGE.FOG, D3DDECLUSAGE.DEPTH, D3DDECLUSAGE.SAMPLE,
+]);
+
+/**
+ * The layout the fixed-function pipeline reads a declaration through when no
+ * vertex format spells it -- members in another order, at other offsets, or
+ * beside ones only a shader reads -- or null when it reads something this
+ * stage cannot: a second stream, a tessellator method, blend weights, a
+ * colour that is not a D3DCOLOR, a position of another type, or coordinate
+ * sets with a gap.
+ *
+ * The names are the ones a decoded vertex format gives, so the stage that
+ * reads a format reads this the same way.
+ *
+ * @param {{ id: number, elements: readonly VertexElement[] }} declaration
+ * @returns {FixedFunctionLayout | null}
+ */
+export function fixedFunctionLayoutOf(declaration){
+    /** @type {FixedFunctionLayout['attributes']} */
+    const attributes = [];
+    /** @type {Set<number>} */
+    const sets = new Set();
+    let preTransformed = false;
+    let position = false;
+    for (const element of declaration.elements)
+    {
+        if (IGNORED_BY_FIXED_FUNCTION.has(element.Usage))
+        {
+            continue;
+        }
+        if (element.Stream !== 0 || element.Method !== D3DDECLMETHOD.DEFAULT)
+        {
+            return null;
+        }
+        const bytes = DECLTYPE_BYTES[element.Type];
+        /** @param {string} name @param {string} format */
+        const add = (name, format)=>
+            attributes.push({ name, offset: element.Offset, format, bytes });
+        switch (element.Usage)
+        {
+            case D3DDECLUSAGE.POSITION:
+            case D3DDECLUSAGE.POSITIONT: {
+                const transformed = element.Usage === D3DDECLUSAGE.POSITIONT;
+                if (position || element.UsageIndex !== 0 || element.Type
+                    !== (transformed ? D3DDECLTYPE.FLOAT4 : D3DDECLTYPE.FLOAT3))
+                {
+                    return null;
+                }
+                position = true;
+                preTransformed = transformed;
+                add('position', transformed ? 'float32x4' : 'float32x3');
+                break;
+            }
+            case D3DDECLUSAGE.NORMAL:
+                if (element.UsageIndex !== 0 || element.Type !== D3DDECLTYPE.FLOAT3)
+                {
+                    return null;
+                }
+                add('normal', 'float32x3');
+                break;
+            case D3DDECLUSAGE.PSIZE:
+                if (element.Type !== D3DDECLTYPE.FLOAT1)
+                {
+                    return null;
+                }
+                add('pointSize', 'float32');
+                break;
+            case D3DDECLUSAGE.COLOR:
+                // B, G, R, A bytes, which is what the stage swizzles a
+                // format's colours from; a UBYTE4N colour is R, G, B, A.
+                if (element.UsageIndex > 1 || element.Type !== D3DDECLTYPE.D3DCOLOR)
+                {
+                    return null;
+                }
+                add(element.UsageIndex === 0 ? 'diffuse' : 'specular', 'unorm8x4');
+                break;
+            case D3DDECLUSAGE.TEXCOORD: {
+                const format = TEXCOORD_FORMATS[element.Type];
+                if (format === undefined || element.UsageIndex > 7 || sets.has(element.UsageIndex))
+                {
+                    return null;
+                }
+                sets.add(element.UsageIndex);
+                add(`texCoord${element.UsageIndex}`, format);
+                break;
+            }
+            default:
+                return null;
+        }
+    }
+    const texCoordSets = sets.size;
+    if (!position || [...sets].some(set=>set >= texCoordSets))
+    {
+        return null;
+    }
+    return { id: declaration.id, attributes, preTransformed, texCoordSets };
+}
+
+/**
  * @typedef {Object} VertexDeclaration
  * @property {number} id   Distinct per declaration, for a pipeline key.
  * @property {readonly VertexElement[]} elements  Without the sentinel.

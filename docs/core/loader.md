@@ -150,6 +150,11 @@ dependency before what depends on it, cycles visited once, KnownDLL names skippe
 is not a KnownDLL is looked for on the volume, even when the engine has a table for it — that
 file is what a Windows loader maps, and the table is only the fallback when the program did not
 bring one (the set is `win32.knownDlls()`, from Wine's `[KnownDLLs]` registry defaults). The
+redistributable runtimes a layer stands in for -- `audio.runtimes()` (the MPEG provider a sound
+library loads by full path out of its own directory) and `media.runtimes()` (the JPEG library) --
+are answered from the table the same way, whoever's copy the program brought: that is the decision
+that such a runtime is ours (`roadmap/decisions.md`), and a copy found first runs the whole decoder
+as emulated x86 (`answeredByEngine` in `src/app.js`). The
 search order is `libraryCandidates` in `src/app.js`: the program's own directory first, then
 `C:\WINDOWS\system32\` and `C:\WINDOWS\`, which is where the engine mounts the DirectX runtime —
 so a title that imported `d3dx9_26.dll` without shipping one is bound to the real redistributable

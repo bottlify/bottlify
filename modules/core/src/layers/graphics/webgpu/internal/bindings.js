@@ -138,10 +138,14 @@ export const UNIFORM_ALIGNMENT = 256;
  *
  * A block is bound with a dynamic offset, so the bind group that names the
  * ring names nothing that changes per draw: one group serves every draw that
- * samples the same texture through the same sampler, frame after frame. The
- * ring is written with the queue's own ordering, which lands every write after
- * the submits before it, so a wrap overwrites only blocks whose frames have
- * finished; a frame needing more than the ring holds gets a larger ring.
+ * samples the same texture through the same sampler, frame after frame.
+ *
+ * The blocks are laid into a copy of the ring on this side and reach the GPU
+ * in one write per frame, at `flush` before the frame's submit, rather than a
+ * write per block: a frame of shader draws hands out several blocks a draw,
+ * and each write is a trip to the GPU process. The queue orders those writes
+ * after the submits before them, so a wrap overwrites only blocks whose frames
+ * have finished; what was laid before a wrap or a new ring is written first.
  *
  * @param {Object} options
  * @param {import('../contract.js').GpuDeviceLike} options.device
@@ -155,17 +159,38 @@ export function createUniformPool(options){
     let cursor = 0;
     let created = 0;
     let reused = 0;
+    let writes = 0;
     /** @type {any} */
     let ring = null;
+    /** @type {Uint8Array} */
+    let staging = new Uint8Array(0);
+    /** The laid bytes not yet written: [pendingFrom, pendingTo). */
+    let pendingFrom = 0;
+    let pendingTo = 0;
+
+    const flush = ()=>{
+        if (ring && pendingTo > pendingFrom)
+        {
+            options.queue.writeBuffer(ring, pendingFrom, staging, pendingFrom,
+                pendingTo - pendingFrom);
+            writes++;
+        }
+        pendingFrom = cursor;
+        pendingTo = cursor;
+    };
 
     const make = ()=>{
+        flush();
         ring = options.device.createBuffer({
             label: `uniforms#${created}`,
             size: capacity,
             usage: options.usage,
         });
+        staging = new Uint8Array(capacity);
         created++;
         cursor = 0;
+        pendingFrom = 0;
+        pendingTo = 0;
     };
 
     return {
@@ -186,7 +211,10 @@ export function createUniformPool(options){
             }
             else if (cursor + needed > capacity)
             {
+                flush();
                 cursor = 0;
+                pendingFrom = 0;
+                pendingTo = 0;
             }
             const at = cursor;
             cursor += needed;
@@ -194,18 +222,22 @@ export function createUniformPool(options){
             const bytes = block instanceof Uint8Array
                 ? block
                 : new Uint8Array(block.buffer, block.byteOffset, block.byteLength);
-            options.queue.writeBuffer(ring, at, bytes, 0, bytes.byteLength);
+            staging.set(bytes, at);
+            pendingTo = at + bytes.byteLength;
             // The binding covers one block at offset zero; the offset the draw
             // actually reads from travels beside it, for setBindGroup.
             return { buffer: ring, offset: 0, size: block.byteLength, dynamicOffset: at };
         },
+
+        /** Writes what was laid since the last write; before every submit. */
+        flush,
 
         /** Nothing to return: the ring is reused by wrapping. */
         endFrame(){
         },
 
         stats(){
-            return { created, reused };
+            return { created, reused, writes };
         },
     };
 }
