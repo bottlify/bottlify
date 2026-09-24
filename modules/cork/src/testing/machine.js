@@ -20,6 +20,7 @@ import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
 import { createPageTable } from '../runtime/pages.js';
 import { ANY_TOP, createEntries } from '../runtime/entries.js';
 import { isX87 } from '../emit/x87.js';
+import { eflagsOf, setEflags } from '../emit/flags.js';
 
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 
@@ -95,11 +96,11 @@ export function createTestMachine(given = {}){
             view().setUint32(layout.regs + REGISTERS.indexOf(name) * 4, value >>> 0, true);
         },
         eflags(){
-            return view().getUint32(layout.eflags, true);
+            return eflagsOf(view(), layout);
         },
         /** @param {number} value */
         setEflags(value){
-            view().setUint32(layout.eflags, value >>> 0, true);
+            setEflags(view(), layout, value);
         },
         eip(){
             return view().getUint32(layout.eip, true);

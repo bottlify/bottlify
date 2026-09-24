@@ -223,14 +223,15 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         case 'inc': case 'dec':
         {
-            // CF stays: with the flags live the word is made whole first and
-            // the record takes op1; with them dead a pending record (whose CF
-            // a later reader may still fold) must keep its operands, so the
-            // value goes through a scratch local instead.
+            // CF stays: with the flags live the word takes the CF of the record
+            // before (the rest the record replaces) and the record takes op1 --
+            // nothing between the two leaves; with them dead a pending record
+            // (whose CF a later reader may still fold) must keep its operands,
+            // so the value goes through a scratch local instead.
             const value = flagsLive ? Local.op1 : Local.t1;
             if (flagsLive)
             {
-                e.materialise();
+                e.carryIntoWord();
             }
             prepare(e, dst);
             readOp(e, dst);
