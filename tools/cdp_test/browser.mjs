@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
@@ -12,6 +12,36 @@ import { join, resolve as resolvePath } from 'node:path';
 /**
  * Finds and launches a Chromium-based browser with a CDP endpoint.
  */
+
+/**
+ * Ends a browser an earlier run left on this profile. A run whose node process
+ * was killed outright (the host reclaiming memory) cannot close its browser,
+ * and the orphan kept the profile's lock and seven gigabytes -- enough for the
+ * next run to be killed the same way. Best effort: nothing to end is fine.
+ *
+ * @param {string} profileRoot
+ */
+function closeLeftBehind(profileRoot){
+    try
+    {
+        if (process.platform === 'win32')
+        {
+            const needle = profileRoot.replace(/'/g, "''");
+            execFileSync('powershell', ['-NoProfile', '-Command',
+                `Get-CimInstance Win32_Process -Filter "Name='chrome.exe' OR Name='msedge.exe'"`
+                + ` | Where-Object { $_.CommandLine -like '*${needle}*' }`
+                + ' | ForEach-Object { Stop-Process -Id $_.ProcessId -Force'
+                + ' -ErrorAction SilentlyContinue }'], { stdio: 'ignore', timeout: 30_000 });
+        }
+        else
+        {
+            execFileSync('pkill', ['-f', `--user-data-dir=${profileRoot}`], { stdio: 'ignore' });
+        }
+    }
+    catch {
+        // Nothing left behind, or no way to ask: the launch goes on.
+    }
+}
 
 const CANDIDATES = [
     process.env.CDP_TEST_CHROME,
@@ -125,6 +155,10 @@ function start(browser, flags, headed = false, profileDir){
     const profileRoot = ownProfile
         ? mkdtempSync(join(tmpdir(), 'bottlify-cdp_test-'))
         : resolvePath(profileDir);
+    if (!ownProfile)
+    {
+        closeLeftBehind(profileRoot);
+    }
     const proc = spawn(
         browser,
         [
