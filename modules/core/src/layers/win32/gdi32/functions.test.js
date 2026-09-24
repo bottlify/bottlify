@@ -1206,3 +1206,50 @@ test('a region is readable and fillable from user32, and nothing else is', ()=>{
     assert.equal(gdi.regionBox(pen), null);
     assert.equal(gdi.setRegion(pen, { left: 0, top: 0, right: 1, bottom: 1 }), false);
 });
+
+test('LPtoDP and DPtoLP map through the origins and the extents the mode sets', ()=>{
+    const { fns, hdc, memory } = withDC();
+    const POINTS = 0x9000;
+    /** @param {number[]} values */
+    const put = values=>memory.writeMemory(POINTS,
+        new Uint8Array(new Int32Array(values).buffer));
+    const read = (/** @type {number} */ count)=>
+        [...new Int32Array(memory.readMemory(POINTS, count * 8).slice().buffer)];
+
+    // MM_TEXT: one to one, shifted by the window and viewport origins.
+    fns.SetWindowOrgEx.handler([hdc, 10, 20, 0]);
+    fns.SetViewportOrgEx.handler([hdc, 100, 200, 0]);
+    put([10, 20, 15, 25]);
+    assert.equal(fns.LPtoDP.handler([hdc, POINTS, 2]), 1);
+    assert.deepEqual(read(2), [100, 200, 105, 205]);
+    assert.equal(fns.DPtoLP.handler([hdc, POINTS, 2]), 1);
+    assert.deepEqual(read(2), [10, 20, 15, 25], 'and back');
+
+    // MM_LOENGLISH: a hundredth of an inch, y up, on a 96-dot inch.
+    fns.SetWindowOrgEx.handler([hdc, 0, 0, 0]);
+    fns.SetViewportOrgEx.handler([hdc, 0, 0, 0]);
+    fns.SetMapMode.handler([hdc, 4]);
+    put([100, 100]);
+    fns.LPtoDP.handler([hdc, POINTS, 1]);
+    assert.deepEqual(read(1), [96, -96], 'an inch right and an inch up');
+
+    fns.GetWindowExtEx.handler([hdc, OUT]);
+    assert.deepEqual([...new Int32Array(memory.readMemory(OUT, 8).slice().buffer)], [100, 100]);
+
+    // Back to MM_TEXT puts the extents back to one to one.
+    fns.SetMapMode.handler([hdc, 1]);
+    put([7, 7]);
+    fns.LPtoDP.handler([hdc, POINTS, 1]);
+    assert.deepEqual(read(1), [7, 7]);
+});
+
+test('OffsetWindowOrgEx moves the window origin and reports where it was', ()=>{
+    const { fns, hdc, memory } = withDC();
+    fns.SetWindowOrgEx.handler([hdc, 5, 6, 0]);
+
+    assert.equal(fns.OffsetWindowOrgEx.handler([hdc, 10, -2, OUT]), 1);
+    assert.deepEqual([...new Int32Array(memory.readMemory(OUT, 8).slice().buffer)], [5, 6]);
+    assert.equal(fns.OffsetWindowOrgEx.handler([0x9999, 1, 1, 0]), 0);
+    assert.equal(fns.OffsetWindowOrgEx.argBytes, 16);
+    assert.equal(fns.LPtoDP.argBytes, 12);
+});

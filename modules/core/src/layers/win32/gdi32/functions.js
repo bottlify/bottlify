@@ -91,6 +91,16 @@ const MM_ANISOTROPIC = 8;
 /** The two modes in which the program, not the mode, decides the extents. */
 const SCALABLE_MAP_MODES = new Set([MM_ISOTROPIC, MM_ANISOTROPIC]);
 
+/**
+ * The fixed modes, by how many logical units make an inch: MM_LOMETRIC's
+ * tenths of a millimetre through MM_TWIPS. Each maps that many logical units
+ * onto the device's inch with y growing upwards, which is what sets them apart
+ * from MM_TEXT's pixels growing down.
+ */
+const UNITS_PER_INCH = new Map([[2, 254], [3, 2540], [4, 100], [5, 1000], [6, 1440]]);
+/** MM_ISOTROPIC starts from MM_LOMETRIC's extents, as Windows starts it. */
+const MM_LOMETRIC = 2;
+
 /** What a function that should have returned a COLORREF says when it failed. */
 const CLR_INVALID = 0xffffffff;
 
@@ -595,6 +605,77 @@ export function createGdiFunctions(host){
         if (SCALABLE_MAP_MODES.has(dc.mapMode))
         {
             dc[field] = { cx: cx | 0, cy: cy | 0 };
+        }
+        return 1;
+    };
+
+    /**
+     * The extents a mapping mode fixes, or null for MM_ANISOTROPIC, which
+     * keeps whatever the DC had.
+     *
+     * @param {number} mode
+     * @returns {{ windowExt: { cx: number, cy: number },
+     *             viewportExt: { cx: number, cy: number } } | null}
+     */
+    const extentsOf = mode=>{
+        if (mode === MM_TEXT)
+        {
+            return { windowExt: { cx: 1, cy: 1 }, viewportExt: { cx: 1, cy: 1 } };
+        }
+        const units = UNITS_PER_INCH.get(mode === MM_ISOTROPIC ? MM_LOMETRIC : mode);
+        return units === undefined
+            ? null
+            : { windowExt: { cx: units, cy: units },
+                viewportExt: { cx: LOGICAL_DPI, cy: -LOGICAL_DPI } };
+    };
+
+    /**
+     * One coordinate through the window-to-viewport mapping, either way,
+     * rounded to the nearest device unit as GDI rounds it.
+     *
+     * @param {number} value @param {number} from @param {number} to
+     * @param {number} fromExt @param {number} toExt
+     */
+    const mapped = (value, from, to, fromExt, toExt)=>(fromExt === 0
+        ? to
+        : Math.round((value - from) * toExt / fromExt) + to);
+
+    /**
+     * A logical point as the device sees it, or a device point as the
+     * program's logical space names it: what LPtoDP and DPtoLP answer.
+     *
+     * @param {any} dc @param {{ x: number, y: number }} point
+     * @param {boolean} toDevice
+     */
+    const transform = (dc, point, toDevice)=>{
+        const [from, to, fromExt, toExt] = toDevice
+            ? [dc.windowOrg, dc.viewportOrg, dc.windowExt, dc.viewportExt]
+            : [dc.viewportOrg, dc.windowOrg, dc.viewportExt, dc.windowExt];
+        return {
+            x: mapped(point.x, from.x, to.x, fromExt.cx, toExt.cx),
+            y: mapped(point.y, from.y, to.y, fromExt.cy, toExt.cy),
+        };
+    };
+
+    /**
+     * LPtoDP and DPtoLP: every point of the array converted in place.
+     *
+     * @param {number[]} args @param {boolean} toDevice
+     */
+    const convertPoints = ([handle, points, count], toDevice)=>{
+        const dc = dcOf(handle);
+        if (!dc || (points >>> 0) === 0 || (count | 0) < 0)
+        {
+            return 0;
+        }
+        const bytes = host.readMemory(points >>> 0, (count | 0) * 8);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        for (let index = 0; index < (count | 0); index++)
+        {
+            const point = transform(dc, {
+                x: view.getInt32(index * 8, true), y: view.getInt32(index * 8 + 4, true),
+            }, toDevice);
+            writePoint(host, (points >>> 0) + index * 8, point);
         }
         return 1;
     };
@@ -1409,9 +1490,12 @@ export function createGdiFunctions(host){
         /**
          * int SetMapMode(HDC hdc, int iMode)
          *
-         * The mode is remembered, not applied: what a mapping mode does is turn
-         * logical coordinates into device ones, and there is nothing here that
-         * consumes a coordinate. The transform belongs with the drawing.
+         * The mode sets the extents it fixes -- one to one for MM_TEXT, the
+         * device's inch against the mode's units for the fixed ones, with y
+         * turned upwards; MM_ISOTROPIC starts from MM_LOMETRIC's and
+         * MM_ANISOTROPIC keeps what was there -- so LPtoDP, DPtoLP and the
+         * extent getters answer as the mode says. Drawing does not go through
+         * the mapping yet: it draws in device units whatever the mode.
          */
         SetMapMode: {
             argBytes: 8,
@@ -1424,6 +1508,12 @@ export function createGdiFunctions(host){
                 }
                 const previous = dc.mapMode;
                 dc.mapMode = mode | 0;
+                const extents = extentsOf(mode | 0);
+                if (extents)
+                {
+                    dc.windowExt = extents.windowExt;
+                    dc.viewportExt = extents.viewportExt;
+                }
                 return previous;
             },
         },
@@ -1440,6 +1530,41 @@ export function createGdiFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: args=>setOrigin(args, 'viewportOrg'),
+        },
+
+        /** BOOL LPtoDP(HDC hdc, LPPOINT lppt, int c) */
+        LPtoDP: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: args=>convertPoints(args, true),
+        },
+
+        /** BOOL DPtoLP(HDC hdc, LPPOINT lppt, int c) */
+        DPtoLP: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: args=>convertPoints(args, false),
+        },
+
+        /** BOOL OffsetWindowOrgEx(HDC hdc, int x, int y, LPPOINT lppt) */
+        OffsetWindowOrgEx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, x, y, out])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                if ((out >>> 0) !== 0)
+                {
+                    writePoint(host, out, dc.windowOrg);
+                }
+                dc.windowOrg = {
+                    x: (dc.windowOrg.x | 0) + (x | 0), y: (dc.windowOrg.y | 0) + (y | 0),
+                };
+                return 1;
+            },
         },
 
         /** BOOL SetWindowOrgEx(HDC hdc, int x, int y, LPPOINT lppt) */
