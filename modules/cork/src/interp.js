@@ -20,6 +20,7 @@
 import { decode } from './decode/decoder.js';
 import { Fault, Unsupported, createState, evaluate } from './ir.js';
 import { compileFast } from './fast.js';
+import { eflagsOf } from './emit/flags.js';
 import { Tables } from './runtime/layout.js';
 import { PageFlag } from './runtime/pages.js';
 
@@ -440,6 +441,8 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
         syncIn(){
             x87In = false;
             xmmIn = false;
+            // The record a region left is folded into the word the steps use.
+            eflagsOf(view, layout);
         },
         /** Writes the arrays back into the block. */
         syncOut(){

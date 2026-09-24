@@ -27,7 +27,7 @@
  */
 
 import { AF, CF, OF, PF, SF, ZF } from '../decode/table.js';
-import { Body, ValType } from '../wasm/encoder.js';
+import { Body, ModuleBuilder, ValType } from '../wasm/encoder.js';
 
 /** The operation kinds, before the width is folded in. */
 export const Kind = Object.freeze({
@@ -64,6 +64,9 @@ export function eagerFlagsOf(kind){
 }
 
 export const ARITH = CF | PF | AF | ZF | SF | OF;
+
+/** The unfolded kinds (a bit each) whose CF is in the word: EAGER, INC, DEC, SHIFT. */
+export const CARRY_IN_WORD = 1 << Kind.EAGER | 1 << Kind.INC | 1 << Kind.DEC | 1 << Kind.SHIFT;
 
 /** i32 opcodes the formulas use. */
 const OP = Object.freeze({
@@ -345,6 +348,76 @@ export function addMaterialiseHelper(m){
     }
     b.end();
     return m.function(type, [], b.toBytes());
+}
+
+/** @type {((...record: number[]) => number) | null} */
+let hostFold = null;
+
+/**
+ * The helper alone in a module of its own, for the host's side of a record:
+ * the same code a region folds with, so the two cannot disagree.
+ */
+function fold(){
+    if (hostFold === null)
+    {
+        const m = new ModuleBuilder();
+        const helper = addMaterialiseHelper(m);
+        const six = [ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32];
+        const type = m.type({ params: six, results: [ValType.i32] });
+        const b = new Body();
+        for (let i = 0; i < 6; i++)
+        {
+            b.localGet(i);
+        }
+        m.function(type, [], b.call(helper).toBytes(), { exportAs: 'fold' });
+        const instance = new WebAssembly.Instance(new WebAssembly.Module(m.toBytes()), {});
+        hostFold = /** @type {any} */ (instance.exports).fold;
+    }
+    return /** @type {(...record: number[]) => number} */ (hostFold);
+}
+
+/**
+ * The flags word of a state block, whole. A layout with a `flagRecord` keeps
+ * the last arithmetic result's record there between regions -- its kind, result,
+ * operands and carry in, as a region holds them in its locals -- rather than
+ * folding it into the word at every exit, where the next region mostly writes
+ * the flags again first. The record is folded here, in place, and cleared.
+ *
+ * @param {DataView} view  over the memory, from its start
+ * @param {{ eflags: number, flagRecord?: number }} layout
+ * @returns {number}
+ */
+export function eflagsOf(view, layout){
+    const word = view.getUint32(layout.eflags, true);
+    const at = layout.flagRecord ?? -1;
+    if (at < 0)
+    {
+        return word;
+    }
+    const kind = view.getUint32(at, true);
+    if (kind === 0)
+    {
+        return word;
+    }
+    const folded = fold()(kind, view.getUint32(at + 4, true), view.getUint32(at + 8, true),
+        view.getUint32(at + 12, true), view.getUint32(at + 16, true), word) >>> 0;
+    view.setUint32(layout.eflags, folded, true);
+    view.setUint32(at, 0, true);
+    return folded;
+}
+
+/**
+ * Writes the whole flags word, and clears the record it replaces.
+ *
+ * @param {DataView} view @param {{ eflags: number, flagRecord?: number }} layout
+ * @param {number} value
+ */
+export function setEflags(view, layout, value){
+    view.setUint32(layout.eflags, value >>> 0, true);
+    if ((layout.flagRecord ?? -1) >= 0)
+    {
+        view.setUint32(/** @type {number} */ (layout.flagRecord), 0, true);
+    }
 }
 
 /** The widths' masks, for the emitter. */

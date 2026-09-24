@@ -71,6 +71,9 @@ export function ownLayout({ ramSize }){
         eip: 32,
         previousIp: 36,
         eflags: 40,
+        // The lazy flag record a region leaves (kind, result, two operands,
+        // carry in), folded by whoever reads the word (`eflagsOf`).
+        flagRecord: 44,
         flagsChanged: -1,
         x87: 64,
         x87Format: /** @type {'f64'} */ ('f64'),

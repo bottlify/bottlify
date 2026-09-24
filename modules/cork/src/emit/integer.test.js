@@ -496,6 +496,76 @@ test('inc after a byte add keeps the carry the add left, folded before op1 is re
     agree(carried);
 });
 
+test('dec at a block start keeps the carry of a record it does not know, and of its own', ()=>{
+    // cmp eax, ebx (CF=1); jmp L; L: dec ecx; jnz L; hlt -- the loop head meets
+    // the cmp's record once and its own dec's after that.
+    const r = both([0x39, 0xd8, 0xeb, 0x00, 0x49, 0x75, 0xfd, 0xf4],
+        { regs: { eax: 1, ebx: 2, ecx: 3 } });
+    assert.equal(r.exit.kind, 3);
+    assert.equal(r.m.eflags() & CF, CF, 'the cmp\'s carry through three decs');
+    agree(r);
+    // xor eax, eax (CF=0) the same way, from a carry set before.
+    const clear = both([0x31, 0xc0, 0xeb, 0x00, 0x49, 0x75, 0xfd, 0xf4],
+        { regs: { ecx: 2 }, eflags: 2 | CF });
+    assert.equal(clear.m.eflags() & CF, 0);
+    agree(clear);
+});
+
+test('dec in the next block keeps the carry of every kind of record, at every width', ()=>{
+    // op eax, ebx (add adc sub sbb and, and neg eax) at 8, 16 and 32 bits;
+    // jmp +0; dec ecx; hlt -- the dec meets the record at its block's start.
+    const ops = [[0x01, 0xd8], [0x11, 0xd8], [0x29, 0xd8], [0x19, 0xd8], [0x21, 0xd8],
+        [0xf7, 0xd8]];
+    let seed = 12345;
+    const random = ()=>(seed = Math.imul(seed, 1103515245) + 12345 >>> 0);
+    for (const [opcode, modrm] of ops)
+    {
+        for (const width of [1, 2, 4])
+        {
+            const code = width === 1 ? [opcode - 1, modrm] : width === 2 ? [0x66, opcode, modrm]
+                : [opcode, modrm];
+            for (let i = 0; i < 12; i++)
+            {
+                const edge = [0, 1, 0x7f, 0x80, 0xff, 0xffff, 0x8000, 0x7fffffff, 0xffffffff];
+                const eax = i < 4 ? edge[random() % edge.length] : random();
+                const ebx = i % 3 === 0 ? eax : random();
+                const r = both([...code, 0xeb, 0x00, 0x49, 0xf4],
+                    { regs: { eax, ebx, ecx: 5 }, eflags: 2 | (random() & 1) });
+                agree(r);
+            }
+        }
+    }
+});
+
+test('a jcc at a block start reached with another kind than the block before left', ()=>{
+    // 1000 cmp eax, 5; jz 1009; 1005 test ebx, ebx; jmp 1009;
+    // 1009 jl 1010; mov ecx, 1; 1010 hlt -- the jl's block guesses the cmp's
+    // record, and on the way through the test it is a logic record instead.
+    const bytes = [0x83, 0xf8, 0x05, 0x74, 0x04, 0x85, 0xdb, 0xeb, 0x00, 0x7c, 0x05,
+        0xb9, 1, 0, 0, 0, 0xf4];
+    for (const [eax, ebx] of [[3, 0x80000000], [3, 1], [5, 0], [9, 0x80000000]])
+    {
+        const r = both(bytes, { regs: { eax, ebx } });
+        assert.equal(r.exit.kind, 3);
+        agree(r);
+    }
+});
+
+test('a region leaves its flag record in the block, and a read of the word folds it', ()=>{
+    // cmp eax, ebx; hlt -- the exit stores the record, not a folded word.
+    const r = both([0x39, 0xd8, 0xf4], { regs: { eax: 1, ebx: 2 } });
+    const view = new DataView(r.m.memory.buffer);
+    const at = /** @type {number} */ (r.m.layout.flagRecord);
+    assert.notEqual(view.getUint32(at, true), 0, 'the record is left');
+    assert.equal(r.m.eflags() & (CF | SF), CF | SF, 'folded when read: 1 - 2 borrows');
+    assert.equal(view.getUint32(at, true), 0, 'and cleared once folded');
+    agree(r);
+    // A write of the word replaces the record.
+    const w = both([0x39, 0xd8, 0xf4], { regs: { eax: 1, ebx: 2 } });
+    w.m.setEflags(2);
+    assert.equal(w.m.eflags(), 2);
+});
+
 test('pusha stores the esp it started with, and the 66 forms move words', ()=>{
     const r = both([
         0xb8, 0x11, 0, 0, 0,                      // mov eax, 0x11

@@ -184,6 +184,22 @@ test('only a jump target is a hot start, not where a slice stopped', ()=>{
     assert.deepEqual(noted, [0x1007], 'the loop head its jnz reached twice, and nothing else');
 });
 
+test('eflags read through the host folds the record a region left, a write replaces it',
+    async()=>{
+        const h = host();
+        // cmp eax, ebx; hlt -- translated, so the region leaves its record.
+        load(h, 0x1000, [0x39, 0xd8, 0xf4]);
+        h.cork().noteHot(0x1000, 0);
+        assert.ok(await h.cork().translatePending() >= 1);
+        h.writeReg32('eax', 1);
+        h.writeReg32('ebx', 2);
+        h.writeReg32('eip', 0x1000);
+        h.runSlice(100);
+        assert.equal(h.readReg32('eflags') & 0x81, 0x81, 'CF and SF of 1 - 2');
+        h.writeReg32('eflags', 0x202);
+        assert.equal(h.readReg32('eflags'), 0x202, 'the written word, no record over it');
+    });
+
 test('a hlt ends the slice and the next slice goes on after it, as the timer interrupt does',
     ()=>{
         const h = host();
