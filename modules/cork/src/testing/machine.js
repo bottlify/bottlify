@@ -20,6 +20,7 @@ import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
 import { createPageTable } from '../runtime/pages.js';
 import { ANY_TOP, createEntries } from '../runtime/entries.js';
 import { isX87 } from '../emit/x87.js';
+import { PRECISION } from '../emit/memory.js';
 import { eflagsOf, setEflags } from '../emit/flags.js';
 
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
@@ -118,17 +119,18 @@ export function createTestMachine(given = {}){
          *
          * @param {number} entry
          * @param {{ maxBlocks?: number, maxBytes?: number, undoLog?: boolean,
-         *     entryTop?: number, hash?: boolean, leafCalls?: boolean }} [options]
+         *     entryTop?: number, hash?: boolean, leafCalls?: boolean, wide?: boolean }} [options]
          *     hash: register the region's entries in the machine's hash, so a transfer from
-         *     another region finds them
+         *     another region finds them; wide: compiled for the wide precision controls
          */
         translate(entry, options = {}){
-            const { undoLog = false, entryTop = 0, hash = false, ...regionOptions } = options;
+            const { undoLog = false, entryTop = 0, hash = false, wide = false,
+                ...regionOptions } = options;
             const read = (/** @type {number} */ address)=>bytes()[layout.ramBase + address];
             const region = formRegion(read, entry, regionOptions);
             const m = new ModuleBuilder();
             const context = prepareModule(m, layout, found, {}, {
-                undoLog, hash: table !== null && hash,
+                undoLog, hash: table !== null && hash, wide,
                 ...(trapPort === undefined ? {} : { trapPort }), leaveOut: new Set(leaveOut),
             });
             const translation = emitRegion(context, region, { entryTop });
@@ -190,7 +192,9 @@ export function createTestMachine(given = {}){
          *
          * @param {number} entry
          * @param {{ budget?: number, maxRegions?: number, undoLog?: boolean,
-         *     leafCalls?: boolean }} [options]
+         *     leafCalls?: boolean, wide?: boolean }} [options]
+         *     wide: x87 regions compiled for the wide precision controls until one finds
+         *     single set, then everything again with the rounding -- as the runtime does
          * @returns {{ kind: number, vector: number, eip: number, regions: number, runs: number,
          *     unsupported: Map<string, number>, retired: number }}  runs: times a region
          *     function was called from here (a transfer between regions is not one)
@@ -198,6 +202,7 @@ export function createTestMachine(given = {}){
         runProgram(entry, options = {}){
             const { budget = 10_000_000, maxRegions = 2000, undoLog = false,
                 leafCalls = true } = options;
+            let wide = options.wide ?? true;
             /** @type {Map<number, ReturnType<typeof this.translate>>} */
             const translated = new Map();
             /** @type {Map<string, number>} */
@@ -220,7 +225,8 @@ export function createTestMachine(given = {}){
                             retired: budget - left,
                         };
                     }
-                    unit = this.translate(eip, { undoLog, entryTop: top, hash: true, leafCalls });
+                    unit = this.translate(eip, { undoLog, entryTop: top, hash: true, leafCalls,
+                        wide });
                     regions++;
                     for (const [opcode, count] of unit.translation.unsupported)
                     {
@@ -237,6 +243,13 @@ export function createTestMachine(given = {}){
                 runs++;
                 left -= this.counter() - before;
                 eip = this.eip();
+                if (exit.kind === 0 && exit.vector === PRECISION && wide)
+                {
+                    // Single precision seen: translated again with the rounding.
+                    wide = false;
+                    translated.clear();
+                    continue;
+                }
                 if (exit.kind !== 0 || left <= 0)
                 {
                     return { ...exit, eip, regions, runs, unsupported, retired: budget - left };

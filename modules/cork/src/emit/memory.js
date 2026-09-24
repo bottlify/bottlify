@@ -35,6 +35,14 @@ import { Exit, Local } from './region.js';
 export const HELD = 1;
 
 /**
+ * The vector of an untranslated exit a region compiled for the wide precision
+ * controls (`wide`) takes when it finds single precision set: back to the
+ * host, which runs the instruction and has the runtime translate with the
+ * rounding from then on.
+ */
+export const PRECISION = 2;
+
+/**
  * Stores whose code note `checkAccess` already made, by the instruction they
  * belong to: `noteStore` for that instruction only keeps the undo log.
  *

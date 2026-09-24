@@ -163,7 +163,9 @@ const LOCAL_TYPES = [
  * @property {number} [undo]           the undo helper's function index, in a differential build
  * @property {boolean} [countTransfers] each transfer through the hash adds one to the
  *     tables' transfer count (a diagnostic run)
- * @property {number} codeHit          the helper telling whether a byte lies in translated code
+ * @property {boolean} [wide]  compiled for the wide precision controls (double, extended):
+ *     no rounding to single, and a block leaves with `PRECISION` if it finds single set
+ * @property {number} codeHit         the helper telling whether a byte lies in translated code
  * @property {number} [getEflags]      the host's flag fold, imported when the layout keeps
  *                                     lazy flags (the emulator's `flags_changed`)
  * @property {number} rdtsc            the host's time-stamp counter, imported by every region
@@ -188,7 +190,7 @@ const LOCAL_TYPES = [
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
- *     countTransfers?: boolean }}
+ *     countTransfers?: boolean, wide?: boolean }}
  *     [options]  undoLog:
  *     record every store's old bytes (differential builds only; part of the cache key);
  *     hash: import the host's function table and transfer through the entry hash (needs
@@ -196,7 +198,8 @@ const LOCAL_TYPES = [
  * @returns {ModuleContext}
  */
 export function prepareModule(m, layout, features, memory = {},
-    { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false } = {})
+    { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
+        wide = false } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -259,6 +262,10 @@ export function prepareModule(m, layout, features, memory = {},
     if (countTransfers)
     {
         context.countTransfers = true;
+    }
+    if (wide)
+    {
+        context.wide = true;
     }
     return context;
 }

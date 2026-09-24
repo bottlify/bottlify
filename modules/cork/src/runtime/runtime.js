@@ -28,6 +28,7 @@ import { formRegion } from '../region.js';
 import { enterRegion, mathImports } from '../emit/region.js';
 import { decode } from '../decode/decoder.js';
 import { isX87, trackRegion } from '../emit/x87.js';
+import { PRECISION } from '../emit/memory.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { emitBatch, relinkBatch } from './emit-built.js';
 import { buildHelpersModule } from '../emit/helpers.js';
@@ -78,8 +79,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // A small leaf callee formed into its caller, the call and its return
         // jumps inside the region (false: every call crosses regions).
         leafCalls: true,
+        // x87 regions compiled for the wide precision controls (double,
+        // extended) until the program is seen with single set: a block tests
+        // precision control once rather than every operation rounding by it
+        // (false: the test on every operation from the start).
+        wideFirst: true,
         ...config,
     };
+    /** Whether new x87 regions are compiled for the wide precision controls. */
+    let wide = settings.wideFirst === true;
     /** How a region is formed, the same on this thread, in a batch and in a relink. */
     const formOptions = { maxBlocks: settings.maxRegionBlocks,
         maxBytes: settings.maxRegionBytes, leafCalls: settings.leafCalls };
@@ -311,6 +319,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @property {string} labels    its block starts and labels, which a relinked function
      *     must keep for the entries to stand
      * @property {boolean} [linked]  its function is in a relinked module already
+     * @property {boolean} [wide]  an x87 region compiled for the wide precision controls
      */
     /** @type {Set<RegionRecord>} */
     const regions = new Set();
@@ -323,7 +332,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const counts = {
         modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, moduleBytes: 0,
         queueDrops: 0, queueEvictions: 0,
-        cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0,
+        cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, precisionSwitches: 0,
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
         // always agree.
@@ -475,6 +484,27 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
     };
 
+    /**
+     * Single precision seen: x87 regions are compiled with the rounding from
+     * now on, and the wide ones go -- each would only leave at its first
+     * rounding block. Once: a program that sets single keeps it, as Direct3D
+     * does from CreateDevice on.
+     */
+    const precisionSeen = ()=>{
+        if (!wide)
+        {
+            return;
+        }
+        wide = false;
+        counts.precisionSwitches++;
+        const on = new Set([...regions].filter(record=>record.wide)
+            .flatMap(record=>[...record.pages]));
+        for (const page of on)
+        {
+            invalidatePage(page);
+        }
+    };
+
     /** @param {number} address */
     const translatable = address=>(pages.get(address >>> 12)
         & (PageFlag.VOLATILE | PageFlag.INACCESSIBLE)) === 0;
@@ -577,6 +607,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         undoLog: settings.undoLog,
         countTransfers: settings.countTransfers,
         hash: table !== null,
+        wide,
         leaveOut,
         ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
     });
@@ -656,7 +687,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * The whole of the publish half of the old batch loop, so a worker's
      * answer and an inline emission take the same path.
      *
-     * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string }} one
+     * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string,
+     *     wide?: boolean }} one
      * @param {{ labels: [number, number][], cut: number[], entryTop: number,
      *     exportName?: string, linked?: boolean }} built
      * @param {WebAssembly.Instance} instance
@@ -667,7 +699,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         inFlight.delete(keyOf(region.entry, one.entryTop));
         const eip = region.entry;
         const publishAt = performance.now();
-        if (one.stamp !== stamp(region.pages))
+        // A wide x87 region built before single precision was seen would
+        // only leave at once: its bytes are translated again with the rounding.
+        if (one.stamp !== stamp(region.pages) || (one.wide && !wide))
         {
             // A page of it was written while the batch was built.
             counts.publishMs += performance.now() - publishAt;
@@ -694,7 +728,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             entry: region.entry, pages: region.pages, slots: [], table: -1,
             spans: region.blocks.map(block=>[block.start, block.end]),
             entryTop: one.entryTop, hash: region.hash, labels: JSON.stringify(built.labels),
-            linked: built.linked === true,
+            linked: built.linked === true, wide: one.wide === true,
         };
         if (table)
         {
@@ -772,12 +806,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 + (spans ? `:${spans.join(',')}` : ''));
         }
     };
-    /** The store key of one formed region.
-     * @param {{ region: { entry: number, hash: string }, entryTop: number }} one */
+    /** The store key of one formed region: an x87 region compiled for the wide
+     * precision controls is another translation of the same bytes.
+     * @param {{ region: { entry: number, hash: string }, entryTop: number, wide?: boolean }} one */
     const regionKey = one=>cacheKey({
         version: CACHE_VERSION, features: found, layoutId: layout.id,
         bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
-        hash: `${one.region.hash}-${one.entryTop}`,
+        hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}`,
     });
 
     /**
@@ -903,7 +938,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             if (store !== null)
             {
                 store.put(regionKey({ region: { entry: record.entry, hash: record.hash },
-                    entryTop: record.entryTop }), packRegion({ ...result.region,
+                    entryTop: record.entryTop, wide: record.wide }), packRegion({ ...result.region,
                     module: new Uint8Array(0), moduleKey: key, linked: true })).catch(()=>{});
             }
         }
@@ -1079,6 +1114,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
         }
         const unbuilt = formed.filter(one=>one.cached === null);
+        // Built as the precision mode now says, whatever it said when formed.
+        for (const one of unbuilt)
+        {
+            one.wide = one.wide === true && wide;
+        }
         if (unbuilt.length > 0 && worker !== null)
         {
             // Off the frame thread: post the batch and answer with it later.
@@ -1171,7 +1211,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             corkRetired += retired;
             const kind = KINDS[code & 0xff] ?? 'untranslated';
             exits[kind]++;
-            if (kind === 'untranslated')
+            if (kind === 'untranslated' && code >>> 8 === PRECISION)
+            {
+                precisionSeen();
+            }
+            else if (kind === 'untranslated')
             {
                 this.missAt(view().getUint32(layout.eip, true), view().getUint8(layout.x87Top));
             }
@@ -1345,9 +1389,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // A diagnostic run with classes left out, or with an undo log the
             // stored modules were built without, keeps no translations.
             const store = leaveOut.size > 0 || settings.undoLog ? null : (settings.store ?? null);
-            const bundleId = settings.bundleId ?? 'unknown';
             /** @type {{ region: import('../region.js').Region, entryTop: number,
-             *     stamp: string, cached: import('./cache.js').CachedRegion | null,
+             *     stamp: string, cached: import('./cache.js').CachedRegion | null, wide?: boolean,
              *     moduleBytes?: Uint8Array | null }[]} */
             const formed = [];
             const formedAt = performance.now();
@@ -1395,7 +1438,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     barrenAdd(eip, entryTop);
                     continue;
                 }
-                formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null });
+                formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null,
+                    wide: wide && usesX87(region) });
             }
             counts.formingMs += performance.now() - formedAt;
             if (store === null)
@@ -1426,10 +1470,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 return pending;
             };
             Promise.all(formed.map(async one=>{
-                const key = cacheKey({
-                    version: CACHE_VERSION, features: found, layoutId: layout.id, bundleId,
-                    entry: one.region.entry, hash: `${one.region.hash}-${one.entryTop}`,
-                });
+                const key = regionKey(one);
                 try
                 {
                     const bytes = await store.get(key);
@@ -1527,6 +1568,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 cacheMisses: counts.cacheMisses,
                 missNoRecord: counts.missNoRecord,
                 missNoModule: counts.missNoModule,
+                // x87 regions compiled for the wide precision controls until this is 1.
+                precisionSwitches: counts.precisionSwitches,
+                wide,
                 stalls: [...stalls],
                 ...(settings.traceStore ? { storeTrace } : {}),
                 invalidations: counts.invalidations,

@@ -39,7 +39,7 @@ import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { I32 } from './flags.js';
 import { Local, Exit, STATE_PARAMS } from './region.js';
 import { prepare, writeReg, readOp } from './integer.js';
-import { noteStore } from './memory.js';
+import { PRECISION, noteStore } from './memory.js';
 import { inlineReturns } from '../region.js';
 
 /** @typedef {import('./region.js').RegionEmitter} E */
@@ -89,6 +89,13 @@ const LEFT_OUT = new Set([
 
 /** x87 operations whose only effect on the empty mask is their pushes and pops
  * (the emitter's push and popN), so what a block knows of the mask survives them. */
+/** The forms precision control rounds (`byPrecision`): the arithmetic and the square root. */
+const ROUNDS = new Set([
+    'fadd', 'fsub', 'fsubr', 'fmul', 'fdiv', 'fdivr',
+    'faddp', 'fsubp', 'fsubrp', 'fmulp', 'fdivp', 'fdivrp',
+    'fiadd', 'fisub', 'fisubr', 'fimul', 'fidiv', 'fidivr', 'fsqrt',
+]);
+
 const MASK_SAFE = new Set([
     'fld', 'fild', 'fld1', 'fldz', 'fldpi', 'fldl2e', 'fldln2', 'fldlg2', 'fldl2t',
     'fst', 'fstp', 'fist', 'fistp', 'fisttp',
@@ -339,6 +346,8 @@ export function trackRegion(region, entryTop){
  * @property {Set<number>} cut
  * @property {StackState | null} current   the state at the current point of emission
  * @property {boolean} controlWritten
+ * @property {number} checkedPrecision  the block whose precision control a `wide` region
+ *     has checked since the last write of the control word, or -1
  * @property {Known} known   what the current block's own x87 has made of the stack words
  */
 
@@ -400,7 +409,7 @@ export function prepareX87(e, entryTop){
         return {
             active: false, hasMmx: false, base: 0, form: -1, temp: 0, temp2: 0, temp3: 0,
             states: [], ends: [], cut: new Set(), current: null, controlWritten: false,
-            known: unknown(),
+            checkedPrecision: -1, known: unknown(),
         };
     }
     const hasMmx = regionHasMmx(region, e.context.leaveOut);
@@ -418,7 +427,8 @@ export function prepareX87(e, entryTop){
     }
     return {
         active: true, hasMmx, base, form, temp: base + 8, temp2: base + 9, temp3: base + 10,
-        states, ends, cut, current: null, controlWritten: false, known: unknown(),
+        states, ends, cut, current: null, controlWritten: false, checkedPrecision: -1,
+        known: unknown(),
     };
 }
 
@@ -793,6 +803,22 @@ export function emitX87(e, instruction, flagsLive){
         e.x87RefusalReason = 'step-null';
         return false;
     }
+    // A region compiled for the wide precision controls (double, extended)
+    // leaves before the block's first rounding instruction when single is set:
+    // one test a block rather than one an operation. Precision control changes
+    // in a block only by its own fldcw/fldenv/frstor/finit, which clear the
+    // check; an x87 region's host calls leave the region.
+    if (e.context.wide && ROUNDS.has(op) && x.checkedPrecision !== e.blockIndex)
+    {
+        b.localGet(Local.x87Control).i32const(0x300).op(I32.and).op(I32.eqz);
+        e.openIf('single', EMPTY);
+        // Not `exitBefore`: the exit is conditional, and the block stays an entry.
+        e.blockRetired--;
+        e.exitAt(instruction.eip, Exit.UNTRANSLATED, PRECISION);
+        e.blockRetired++;
+        e.close();
+        x.checkedPrecision = e.blockIndex;
+    }
     // What this block's own x87 instructions have made of the stack words (see
     // `Known`). Any other form writes the stale locals first, works on them
     // directly, and leaves nothing known for the next.
@@ -992,6 +1018,11 @@ export function emitX87(e, instruction, flagsLive){
      * and the square root are subject to it, as on the processor.
      */
     const byPrecision = ()=>{
+        if (e.context.wide)
+        {
+            // Checked at the block's first rounding instruction (`emitX87`).
+            return;
+        }
         // The mantissa rounded to 24 bits, to nearest even, in the double's
         // own bits: the exponent range stays the extended one, which a demote
         // would not keep. Infinity and NaN pass through.
@@ -1082,6 +1113,7 @@ export function emitX87(e, instruction, flagsLive){
             b.i32const(0).localSet(Local.x87Status);
             b.i32const(DEFAULT_CONTROL).localSet(Local.x87Control);
             x.controlWritten = true;
+            x.checkedPrecision = -1;
             return finish();
         case 'fld':
             if (src.kind === 'x87')
@@ -1254,6 +1286,7 @@ export function emitX87(e, instruction, flagsLive){
             b.localGet(Local.addr).load('i32_16u', { offset: e.layout.ramBase })
                 .localSet(Local.x87Control);
             x.controlWritten = true;
+            x.checkedPrecision = -1;
             return finish();
         case 'frndint':
             guard([0], false);
@@ -1744,6 +1777,7 @@ export function emitX87(e, instruction, flagsLive){
                 b.i32const(0).localSet(Local.x87Status);
                 b.i32const(DEFAULT_CONTROL).localSet(Local.x87Control);
                 x.controlWritten = true;
+                x.checkedPrecision = -1;
             }
             return finish();
         }
@@ -1759,6 +1793,7 @@ export function emitX87(e, instruction, flagsLive){
             const ram = e.layout.ramBase;
             b.localGet(Local.addr).load('i32_16u', { offset: ram }).localSet(Local.x87Control);
             x.controlWritten = true;
+            x.checkedPrecision = -1;
             b.localGet(Local.addr).load('i32_16u', { offset: ram + 4 }).localSet(Local.t1);
             b.localGet(Local.t1).i32const(~0x3800).op(I32.and).localSet(Local.x87Status);
             b.localGet(Local.t1).i32const(11).op(I32.shrU).i32const(7).op(I32.and)
