@@ -119,6 +119,9 @@ export class Body {
         /** @type {number[]} */
         this.bytes = [];
         this.depth = 0;
+        /** Every local the body reads or writes, and those it writes. */
+        this.used = new Set();
+        this.written = new Set();
     }
 
     /** @param {number} opcode @param {number[]} [immediates] */
@@ -246,16 +249,21 @@ export class Body {
 
     /** @param {number} index */
     localGet(index){
+        this.used.add(index);
         return this.op(0x20, leb128u(index));
     }
 
     /** @param {number} index */
     localSet(index){
+        this.used.add(index);
+        this.written.add(index);
         return this.op(0x21, leb128u(index));
     }
 
     /** @param {number} index */
     localTee(index){
+        this.used.add(index);
+        this.written.add(index);
         return this.op(0x22, leb128u(index));
     }
 

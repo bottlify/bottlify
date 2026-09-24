@@ -407,9 +407,26 @@ export function x87Prologue(e){
     if (x.hasMmx)
     {
         b.i32const(0).localSet(x.form);
+        x87LoadRegisters(e, ()=>true);
     }
+}
+
+/**
+ * The held registers the region names into their locals (in a region with
+ * MMX, every register); the region emitter places these once the body says
+ * which locals it uses.
+ *
+ * @param {E} e @param {(k: number) => boolean} needed
+ */
+export function x87LoadRegisters(e, needed){
+    const { b, layout } = e;
+    const x = e.x87;
     for (let k = 0; k < 8; k++)
     {
+        if (!needed(k))
+        {
+            continue;
+        }
         const at = layout.x87 + k * 16;
         // A region with MMX loads every register, not only the held ones: an
         // MMX instruction holds the whole stack, so the x87 after it may read a
@@ -470,12 +487,24 @@ export function x87Epilogue(e){
     {
         b.i32const(0).localGet(Local.x87Control).store('i32_16', { offset: layout.x87Control });
     }
-    if (x.hasMmx)
-    {
-        return;
-    }
+}
+
+/**
+ * Every dirty register back from its local, for the registers the region
+ * writes: a register dirty without its local written (an exchange with
+ * itself) holds what the state block already has.
+ *
+ * @param {E} e @param {(k: number) => boolean} written
+ */
+export function x87StoreRegisters(e, written){
+    const { b, layout } = e;
+    const x = e.x87;
     for (let k = 0; k < 8; k++)
     {
+        if (!written(k))
+        {
+            continue;
+        }
         const at = layout.x87 + k * 16;
         b.localGet(Local.x87Dirty).i32const(1 << k).op(I32.and);
         e.openIf(`dirty${k}`, EMPTY);

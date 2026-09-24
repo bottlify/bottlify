@@ -49,8 +49,8 @@ import { Tables } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
 import {
     isX87, prepareX87, regionHasMmx, sameState, x87BlockStart,
-    x87Edge, x87Epilogue, x87Normalise,
-    x87Prologue,
+    x87Edge, x87Epilogue, x87LoadRegisters, x87Normalise,
+    x87Prologue, x87StoreRegisters,
 } from './x87.js';
 
 /**
@@ -381,6 +381,12 @@ export class RegionEmitter {
         }
         /** The x87 emission state: the tracker's states per block and the locals. */
         this.x87 = prepareX87(this, entryTop);
+        /**
+         * Where the registers' loads and stores go, filled once the body is
+         * written and the locals it uses are known (`fillDeferred`).
+         * @type {{ at: number, kind: 'load' | 'store' }[]}
+         */
+        this.deferred = [];
     }
 
     /** The local an xmm register lives in. @param {number} index @param {boolean} [write] */
@@ -443,6 +449,7 @@ export class RegionEmitter {
         this.close(); // dispatch
         this.close(); // out
         this.epilogue();
+        this.fillDeferred();
         const functionIndex = this.context.m.function(
             this.context.regionType, this.localTypes, b.toBytes());
         return {
@@ -505,10 +512,6 @@ export class RegionEmitter {
     /** The registers, the flags, the vector registers and the x87 block into the locals. */
     loadState(){
         const { b, layout } = this;
-        for (let r = 0; r < 8; r++)
-        {
-            b.i32const(0).load('i32', { offset: layout.regs + r * 4 }).localSet(Local.reg + r);
-        }
         b.i32const(0).load('i32', { offset: layout.eflags }).localSet(Local.flags);
         if (layout.flagsChanged >= 0 && this.context.getEflags !== undefined)
         {
@@ -531,6 +534,8 @@ export class RegionEmitter {
         {
             x87Prologue(this);
         }
+        // The registers, after the x87 empty mask they are loaded under.
+        this.deferred.push({ at: b.bytes.length, kind: 'load' });
     }
 
     /** The run's own locals at their start: no record, nothing retired, nothing touched. */
@@ -561,10 +566,7 @@ export class RegionEmitter {
     storeState(){
         const { b, layout } = this;
         this.materialise();
-        for (let r = 0; r < 8; r++)
-        {
-            b.i32const(0).localGet(Local.reg + r).store('i32', { offset: layout.regs + r * 4 });
-        }
+        this.deferred.push({ at: b.bytes.length, kind: 'store' });
         b.i32const(0).localGet(Local.flags).store('i32', { offset: layout.eflags });
         if (layout.flagsChanged >= 0)
         {
@@ -628,6 +630,51 @@ export class RegionEmitter {
             b.i32const(0).i32const(0).store('i32_8', { offset: layout.x87Empty });
             b.end();
         }
+    }
+
+    /**
+     * The register loads and stores `loadState` and `storeState` left a place
+     * for, now that the whole body is written: a register the region never
+     * names is neither loaded nor stored, and one it only reads is not
+     * stored. A transfer between regions is a store and a load of the state
+     * block, so what a region leaves alone costs it nothing there. A
+     * register written is also loaded: a path that leaves before its write
+     * stores the value it came in with. The same for the x87 registers
+     * outside a region with MMX (whose two views need all eight).
+     */
+    fillDeferred(){
+        const main = this.b;
+        const { used, written } = main;
+        const { layout } = this;
+        for (const { at, kind } of this.deferred.reverse())
+        {
+            const b = this.b = new Body();
+            for (let r = 0; r < 8; r++)
+            {
+                const offset = layout.regs + r * 4;
+                if (kind === 'load' && used.has(Local.reg + r))
+                {
+                    b.i32const(0).load('i32', { offset }).localSet(Local.reg + r);
+                }
+                if (kind === 'store' && written.has(Local.reg + r))
+                {
+                    b.i32const(0).localGet(Local.reg + r).store('i32', { offset });
+                }
+            }
+            if (this.x87.active && !this.x87.hasMmx)
+            {
+                if (kind === 'load')
+                {
+                    x87LoadRegisters(this, k=>used.has(this.x87.base + k));
+                }
+                else
+                {
+                    x87StoreRegisters(this, k=>written.has(this.x87.base + k));
+                }
+            }
+            main.bytes.splice(at, 0, ...b.bytes);
+        }
+        this.b = main;
     }
 
     /**
@@ -734,11 +781,23 @@ export class RegionEmitter {
             return;
         }
         const { b } = this;
+        // Where the record is not known here (a block's or the epilogue's
+        // start) it is often whole already: then no call.
+        const unknown = this.pending === null;
+        if (unknown)
+        {
+            b.localGet(Local.kind);
+            this.openIf('lazyFlags');
+        }
         b.localGet(Local.kind).localGet(Local.res).localGet(Local.op1).localGet(Local.op2)
             .localGet(Local.cin).localGet(Local.flags);
         b.call(this.context.materialise);
         b.localSet(Local.flags);
         b.i32const(0).localSet(Local.kind);
+        if (unknown)
+        {
+            this.close();
+        }
         this.pending = { kind: Kind.EAGER, width: 2 };
     }
 
