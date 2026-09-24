@@ -207,6 +207,21 @@ test('the stack: push, pop, call, ret, enter, leave, pushad/popad, pushf/popf', 
     assert.equal(r.m.reg('esp'), STACK);
 });
 
+test('popf changes the ID and AC bits, so the CPUID probe finds CPUID', ()=>{
+    // pushfd; pop eax; mov ecx, eax; xor eax, 0x240000; push eax; popfd;
+    // pushfd; pop eax; hlt -- a program's test for CPUID (ID, bit 21) and a
+    // 486 (AC, bit 18): a bit that does not change is no CPUID, and a title
+    // that sees none falls back to its generic code (Doom 3's x87 SIMD).
+    const r = both([
+        0x9c, 0x58, 0x89, 0xc1, 0x35, 0x00, 0x00, 0x24, 0x00, 0x50, 0x9d,
+        0x9c, 0x58, 0xf4,
+    ]);
+    assert.equal(r.exit.kind, 3);
+    agree(r);
+    assert.equal((r.m.reg('eax') ^ r.m.reg('ecx')) >>> 0, 0x240000, 'translated');
+    assert.equal((r.state.reg[0] ^ r.state.reg[1]) >>> 0, 0x240000, 'the model');
+});
+
 test('ret imm16 pops the return and adds the immediate, model and emitter agreeing', ()=>{
     const r = both([
         0x6a, 0x00,                                     // push 0
