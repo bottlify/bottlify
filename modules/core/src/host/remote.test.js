@@ -195,8 +195,13 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
 function fakeGpu(){
     /** @type {Map<string, (event: any) => void>} */
     const listeners = new Map();
+    /** @type {(info: { reason: string, message: string }) => void} */
+    let lose = ()=>{};
     const device = {
         queue: { submit(){} },
+        lost: new Promise(resolve=>{
+            lose = resolve;
+        }),
         /** @param {string} type @param {(event: any) => void} handler */
         addEventListener(type, handler){
             listeners.set(type, handler);
@@ -208,6 +213,8 @@ function fakeGpu(){
         fail(message){
             listeners.get('uncapturederror')?.({ error: { message } });
         },
+        /** The device lost, as a driver reset or a GPU process crash loses it. */
+        lose: (/** @type {string} */ reason, /** @type {string} */ message)=>lose({ reason, message }),
         gpu: {
             requestAdapter: async()=>({
                 features: new Set(['texture-compression-bc']),
@@ -294,7 +301,7 @@ async function connect(options = {}, { journal, audioShared, duringBuild, ...dep
     const channel = new MessageChannel();
     const app = fakeApp({ ...journal, audioShared });
     const keeper = openTestKeeper();
-    const { gpu, canvas, screen, fail } = fakeGpu();
+    const { gpu, canvas, screen, fail, lose } = fakeGpu();
     /** @type {any} */
     let built = null;
     const serving = serveEngine(channel.port2, {
@@ -332,7 +339,7 @@ async function connect(options = {}, { journal, audioShared, duringBuild, ...dep
         },
         keeper: keeper.port,
     });
-    return { remote, app, worker, canvas, keeper, built: ()=>built, gpuFails: fail };
+    return { remote, app, worker, canvas, keeper, built: ()=>built, gpuFails: fail, gpuLost: lose };
 }
 
 test('start rebuilds on the worker what could not cross: fetch, device, watch, storage', async()=>{
@@ -843,6 +850,21 @@ test('what the GPU device refuses goes into the journal, a repeat counted rather
             ['error', 'another (x256)'],
         ]);
     });
+
+test('a GPU device lost says so in the journal, where a frozen picture is looked into', async()=>{
+    // Nothing else notices: the counters keep counting frames that reach a
+    // device that is gone. A device destroyed at the end of a run is its end,
+    // not a loss, and is not reported.
+    const { remote, gpuLost } = await connect();
+    gpuLost('unknown', 'the GPU process exited');
+    await until(async()=>(await remote.log.recent(8)).some((/** @type {any} */ r)=>
+        r.category === 'gpu'));
+    const records = (await remote.log.recent(8)).filter((/** @type {any} */ r)=>r.category === 'gpu');
+    assert.deepEqual(records.map((/** @type {any} */ r)=>[r.levelName, r.text]), [
+        ['error', 'the GPU device was lost (unknown): the GPU process exited -- nothing drawn'
+            + ' from here on reaches the screen'],
+    ]);
+});
 
 test('a network named at start is opened by the worker and closed with the run', async()=>{
     // A transport is a WebSocket and callbacks, neither of which crosses a

@@ -381,6 +381,26 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 console.error('WebGPU:', line);
             }
         });
+        // A lost device takes every frame after it with it, and nothing else
+        // notices: the engine keeps recording and counting. A device destroyed
+        // at the end of the run is its end, not a loss.
+        opened.lost?.then((/** @type {{ reason?: string, message?: string }} */ info)=>{
+            if (info?.reason === 'destroyed')
+            {
+                return;
+            }
+            const line = `the GPU device was lost (${info?.reason ?? 'unknown'}): `
+                + `${String(info?.message ?? '').replace(/\s+/g, ' ')} -- nothing drawn from here on`
+                + ' reaches the screen';
+            if (app)
+            {
+                app.log.write('error', 'gpu', line);
+            }
+            else
+            {
+                console.error('WebGPU:', line);
+            }
+        });
         return {
             device: opened,
             adapter: {

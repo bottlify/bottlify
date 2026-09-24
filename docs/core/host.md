@@ -107,7 +107,11 @@ The device is requested with `texture-compression-bc` when the adapter offers it
 WebGPU error (a validation failure, a texture the driver could not allocate) is written into the
 run's journal as an `error` record of category `gpu`, beside the frame it dropped; each distinct
 message the device repeats is counted and written again every 256th time with its count.
-Only before the program's journal exists does it go to the worker's console.
+Only before the program's journal exists does it go to the worker's console. A device that is lost
+(`GPUDevice.lost`, for any reason but its own destruction at the end of the run) is written the
+same way, once, with the reason and the browser's message: nothing drawn after it reaches the
+screen, and the device is not reacquired -- a lost device ends the picture for that run, and the
+guest's own device-lost states are not driven by it.
 
 ### `host: 'thread'`
 
