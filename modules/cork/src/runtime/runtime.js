@@ -129,6 +129,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * interpreter keeps counting it and notes it again should it get hot.
      * @type {Map<number, number>[]} */
     const buckets = Array.from({ length: 9 }, ()=>new Map());
+    /** The bucket from which a waiting candidate is hot (met eight times or more while it waits). */
+    const HOT_BUCKET = 3;
     /** @type {Map<number, number>} key → its bucket */
     const heatOf = new Map();
     /** @param {number} hotness */
@@ -591,8 +593,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** The running regions a relink still has to gather, or null between relinks.
      * @type {RegionRecord[] | null} */
     let relinkQueue = null;
-    /** Whether the relink has this call, when batches wait too. */
-    let relinkTurn = false;
+    /** Candidates taken into a batch that has not published yet, by when: noted
+     * again meanwhile they are not queued a second time (the interpreter keeps
+     * meeting them while the batch is with the worker). A batch that never
+     * comes back frees them after IN_FLIGHT_MS.
+     * @type {Map<number, number>} */
+    const inFlight = new Map();
+    const IN_FLIGHT_MS = 10_000;
 
     /**
      * Stamps a built or stored region and publishes every block start as an
@@ -608,6 +615,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      */
     const applyBuilt = (one, built, instance)=>{
         const { region } = one;
+        inFlight.delete(keyOf(region.entry, one.entryTop));
         const eip = region.entry;
         const publishAt = performance.now();
         if (one.stamp !== stamp(region.pages))
@@ -1147,6 +1155,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 return;
             }
             const key = keyOf(eip, top & 7);
+            const since = inFlight.get(key);
+            if (since !== undefined)
+            {
+                if (performance.now() - since < IN_FLIGHT_MS)
+                {
+                    return;
+                }
+                inFlight.delete(key);
+            }
             if (queue.has(key))
             {
                 // Noted again while it waits: the layer saw it run more, so
@@ -1197,11 +1214,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 return 0;
             }
-            // A relink's next chunk, taking turns with the candidates' batches
-            // while both have work, so neither waits on the other.
-            relinkTurn = !relinkTurn || queue.size === 0;
+            // A relink only while nothing hot waits: a chunk holds the worker for
+            // seconds, and code the interpreter keeps meeting runs interpreted
+            // until its own batch comes back. A title's queue is never empty --
+            // the cold starts met twice stay -- so the test is the heat, not the
+            // length.
             const keeps = leaveOut.size > 0 || settings.undoLog ? null : (settings.store ?? null);
-            if (relinkTurn && relinkStep(keeps))
+            if (!buckets.slice(HOT_BUCKET).some(bucket=>bucket.size > 0) && relinkStep(keeps))
             {
                 return 0;
             }
@@ -1217,10 +1236,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             const wanted = Math.min(settings.maxBatchRegions,
                 Math.max(settings.batchRegions, queue.size >> 2));
             const batch = hottest(wanted);
+            const takenAt = performance.now();
             for (const [key] of batch)
             {
                 unqueue(key);
                 dropKey(key);
+                inFlight.set(key, takenAt);
             }
             // A diagnostic run with classes left out, or with an undo log the
             // stored modules were built without, keeps no translations.

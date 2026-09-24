@@ -615,8 +615,8 @@ test('a relink gathers the running regions into one module; an entry another reg
     m.runtime.noteHot(CODE + 0x104);
     m.runtime.noteHot(CODE + 0x104);
     assert.equal(await m.runtime.translatePending(), 1, 'B');
-    m.runtime.noteHot(CODE + 0x100);
-    m.runtime.noteHot(CODE + 0x100);
+    // Hot, as the interpreter would note it after meeting it while it waited.
+    m.runtime.noteHot(CODE + 0x100, 0, 64);
     assert.equal(await m.runtime.translatePending(), 1, 'A');
     await m.runtime.translatePending();
     const d = m.runtime.diagnostics();
@@ -653,4 +653,18 @@ test('exits to a flood of distinct addresses stay cheap and a hot one keeps its 
     assert.ok(ms < 2000, `200 000 exits took ${ms.toFixed(0)} ms`);
     const hot = m.runtime.diagnostics().exitsByTarget.find(one=>one.address === 0x8000);
     assert.ok(hot && hot.count >= 1000, `the hot target kept ${hot?.count} exits`);
+});
+
+test('a candidate whose batch is still out is not queued again when it is met again', async()=>{
+    const { memoryTranslationStore } = await import('./cache.js');
+    const m = machine({ store: memoryTranslationStore(), bundleId: 'test' });
+    m.write(CODE, COUNTDOWN);
+    m.runtime.noteHot(CODE, 0, 2);
+    assert.equal(await m.runtime.translatePending(), 0, 'the batch waits on the store');
+    // The interpreter meets it again, and again, while the batch is out.
+    m.runtime.noteHot(CODE, 0, 4);
+    m.runtime.noteHot(CODE, 0, 8);
+    assert.equal(m.runtime.diagnostics().queued, 0, 'not a second translation of it');
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    assert.ok(m.runtime.entryOf(CODE) >= 0, 'published when its batch came back');
 });
