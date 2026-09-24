@@ -287,28 +287,43 @@ export function createDispatcher(deps){
     const describe = record=>record.kind === 'answered'
         ? `0x${(record.answer >>> 0).toString(16)}`
         : record.kind;
+    /** A record's `result`, made from its answer when read. */
+    const RESULT = {
+        /** @this {CallRecord} */
+        get(){
+            return describe(this);
+        },
+        enumerable: true,
+        configurable: true,
+    };
 
     /**
      * A ring record. The text of the answer is the one thing about a call that
      * costs an allocation to write down, and almost nobody reads it: so it is
      * made from the number when it is read, not when the call is made.
      *
+     * The getter is defined onto the record after its fields rather than
+     * written in the literal: a getter in an object literal puts the object in
+     * V8's dictionary mode, and every call writes seven of a record's fields
+     * -- each a hash lookup there. Defined, it stays an own enumerable
+     * property, so a sink's `{ ...record }` still carries it.
+     *
      * @returns {CallRecord}
      */
-    const makeRecord = ()=>({
-        name: '',
-        from: 0,
-        /** @type {number[]} */
-        args: [],
-        /** @type {(string | null)[] | null} */
-        strings: null,
-        error: 0,
-        answer: 0,
-        kind: 'threw',
-        get result(){
-            return describe(this);
-        },
-    });
+    const makeRecord = ()=>{
+        const record = {
+            name: '',
+            from: 0,
+            /** @type {number[]} */
+            args: [],
+            /** @type {(string | null)[] | null} */
+            strings: null,
+            error: 0,
+            answer: 0,
+            kind: 'threw',
+        };
+        return /** @type {CallRecord} */ (Object.defineProperty(record, 'result', RESULT));
+    };
 
     /**
      * The most-called names in the ring, with their counts, commonest first.

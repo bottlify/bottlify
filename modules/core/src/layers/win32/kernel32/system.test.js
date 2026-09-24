@@ -393,3 +393,29 @@ test('lstrcmpW compares wide strings by sign, folded or not', ()=>{
     assert.equal(fns.lstrcmpW.handler([0x200, 0x200]), 0);
     assert.equal(fns.lstrcmpW.argBytes, 8);
 });
+
+test('the lstr family reads a string a span at a time, and to the edge of mapped memory', ()=>{
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    let reads = 0;
+    const read = host.readMemory.bind(host);
+    host.readMemory = (/** @type {number} */ address, /** @type {number} */ length)=>{
+        reads++;
+        return read(address, length);
+    };
+    host.writeMemory(0x200, new Uint8Array(100).fill(0x41));
+    host.writeMemory(0x264, Uint8Array.from([0]));
+    assert.equal(fns.lstrlenA.handler([0x200]), 100);
+    assert.ok(reads <= 3, `a span at a time, not a read per character: ${reads}`);
+
+    // The last bytes of mapped memory: the span there cannot be read whole,
+    // and the string still reads as it did a character at a time.
+    host.writeMemory(0xff0, Uint8Array.from([0x42, 0x43, 0]));
+    assert.equal(fns.lstrlenA.handler([0xff0]), 2);
+    host.writeMemory(0xffa, Uint8Array.from([0x44, 0, 0x45, 0, 0, 0]));
+    assert.equal(fns.lstrlenW.handler([0xffa]), 2);
+    // One running into unmapped memory faults, NULL as before.
+    host.writeMemory(0xffc, Uint8Array.from([0x46, 0x46, 0x46, 0x46]));
+    assert.equal(fns.lstrlenA.handler([0xffc]), 0);
+    assert.equal(host.errors.at(-1), 87);
+});
