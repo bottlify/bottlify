@@ -180,7 +180,16 @@ load's tens of thousands of hits cost microseconds each rather than a file open 
 index is a log the batch's lines are appended to (a name that appears twice means the later
 place), one write in flight at a time and going round again when a put lands during it, the
 records flushed before it; a place the file does not reach (a torn write) or a line cut short
-is not a record; `flush` before the run ends and `close` after
+is not a record. The store is kept to what recent runs used, since appending alone grew a
+test profile to 29 GB (every re-put, every run's relinked modules, every translator version's
+records stayed): each opening is a session, marked in the index (`# <n>`), and a record read
+or written in it is named again in it, so each carries the last session that used it. On
+opening, a records file past 64 MB of which half is not live -- superseded by a later write of
+its name, or unused for four sessions, which is what an old translator version's records and a
+module no region names any more become -- is copied, live records only, into the next
+generation (`records.<g>`, `index.<g>`, named by a `current` file written last, so a page that
+goes away mid-copy leaves the old generation current and whole), and live records past 1 GiB go,
+the least recently used first (layout version 3); `flush` before the run ends and `close` after
 let go of the handle. A record of another emitter
 version, feature set or layout is a miss. A region with x87 instructions in it is compiled for the x87 stack top it is entered
 with, and its entries are keyed by address and top (`entryOf(eip, x87Top)`, the top read off

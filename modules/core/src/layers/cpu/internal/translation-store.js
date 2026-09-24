@@ -28,17 +28,64 @@
  */
 
 /** @typedef {import('../engine.js').TranslationStore} TranslationStore */
+/** @typedef {{ offset: number, length: number, session: number }} Place */
 
 /**
  * The store's own layout version: a bundle directory of another version is
  * not read, so a change to the record naming or the files does not mix old
  * bytes into the new set. (The records' own version is the emitter's.)
  */
-export const STORE_VERSION = 2;
+export const STORE_VERSION = 3;
 
 /** The file every record is appended to, and the one naming their places. */
 const RECORDS = 'records';
 const INDEX = 'index';
+/** Names the generation the two files above are: `records.<g>`, `index.<g>` (none: 0). */
+const CURRENT = 'current';
+
+/**
+ * The store is kept to what recent runs used. A session is one opening; the
+ * index marks each (`# <n>`) and names again a record read or written in it,
+ * so every record carries the last session that used it. On opening, a
+ * records file past `compactFloor` of which half is not live -- superseded by
+ * a later write of its name, or unused for `keepSessions` sessions, which is
+ * what a translator version's records become once the version changes and
+ * what a relink's module no region names any more becomes -- is copied, live
+ * records only, into the next generation; and live records past `cap` go, the
+ * least recently used first. Without it every run's relinked modules and every
+ * re-put stayed for ever: a profile reached 29 GB.
+ */
+const LIMITS = { keepSessions: 4, compactFloor: 64 << 20, cap: 1 << 30 };
+
+/** @param {string} base @param {number} generation */
+const generationName = (base, generation)=>(generation === 0 ? base : `${base}.${generation}`);
+
+/**
+ * Writes a whole file, replacing what was there.
+ *
+ * @param {any} directory @param {string} name @param {Uint8Array} bytes
+ */
+async function writeWhole(directory, name, bytes){
+    const handle = await directory.getFileHandle(name, { create: true });
+    if (typeof handle.createSyncAccessHandle === 'function')
+    {
+        const access = await handle.createSyncAccessHandle();
+        try
+        {
+            access.truncate(0);
+            access.write(bytes, { at: 0 });
+            access.flush();
+        }
+        finally
+        {
+            access.close();
+        }
+        return;
+    }
+    const writable = await handle.createWritable();
+    await writable.write(bytes);
+    await writable.close();
+}
 
 /**
  * A record name for a key.
@@ -119,9 +166,10 @@ async function appendAt(handle, at, bytes){
  *
  * @param {{ getDirectoryHandle: Function }} root  where the bundle's directory is made
  * @param {string} name  the bundle's, made safe for a directory name
+ * @param {typeof LIMITS} [limits]  the ages and sizes it is kept to (tests shrink them)
  * @returns {Promise<TranslationStore & { flush: () => Promise<void>, close: () => void }>}
  */
-export async function createDirectoryTranslationStore(root, name){
+export async function createDirectoryTranslationStore(root, name, limits = LIMITS){
     const safe = name.replace(/[^A-Za-z0-9._-]/g, '_') || 'bundle';
     const cork = await root.getDirectoryHandle('cork', { create: true });
     const directory = await cork.getDirectoryHandle(`${safe}.v${STORE_VERSION}`, { create: true });
@@ -130,9 +178,13 @@ export async function createDirectoryTranslationStore(root, name){
     // and stats every file in it on every start -- a version that kept a
     // file per record left tens of thousands, a minute of a launch.
     await sweepOtherVersions(cork, safe);
-    /** Each record's place in the records file, read once; null until then.
-     * @type {Map<string, { offset: number, length: number }> | null} */
+    /** Each record's place in the records file and the last session that
+     * used it, read once; null until then.
+     * @type {Map<string, Place> | null} */
     let places = null;
+    /** This opening's session, and the generation of the files. */
+    let session = 0;
+    let generation = 0;
     /** The records file's handle, and its synchronous access inside a worker. */
     /** @type {any} */
     let records = null;
@@ -147,34 +199,154 @@ export async function createDirectoryTranslationStore(root, name){
     /** Lines put since the last append. @type {string[]} */
     let pendingLines = [];
 
+    /** Opens the current generation's records file: its handle, access and size. */
+    const openRecords = async()=>{
+        records = await directory.getFileHandle(generationName(RECORDS, generation),
+            { create: true });
+        access = null;
+        if (typeof records.createSyncAccessHandle === 'function')
+        {
+            try
+            {
+                access = await records.createSyncAccessHandle();
+                end = access.getSize();
+            }
+            catch {
+                access = null;
+            }
+        }
+        if (access === null)
+        {
+            end = (await records.getFile()).size;
+        }
+    };
+
+    /** @param {number} offset @param {number} length */
+    const readAt = async(offset, length)=>{
+        if (access !== null)
+        {
+            const bytes = new Uint8Array(length);
+            return access.read(bytes, { at: offset }) === length ? bytes : null;
+        }
+        const file = await records.getFile();
+        return new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
+    };
+
+    /**
+     * Copies the live records into the next generation when the file is
+     * mostly dead weight or the live ones are past the cap. The generation is
+     * switched by the `current` file, written last: a page that goes away
+     * before it leaves the old generation current and whole.
+     */
+    const compact = async()=>{
+        const all = /** @type {Map<string, Place>} */ (places);
+        let live = [...all].filter(([, place])=>place.session >= session - limits.keepSessions);
+        let liveBytes = live.reduce((sum, [, place])=>sum + place.length, 0);
+        if (liveBytes <= limits.cap && (end < limits.compactFloor || liveBytes * 2 > end))
+        {
+            return;
+        }
+        if (liveBytes > limits.cap)
+        {
+            live.sort((a, b)=>b[1].session - a[1].session);
+            liveBytes = 0;
+            live = live.filter(([, place])=>(liveBytes += place.length) <= limits.cap);
+        }
+        const next = generation + 1;
+        const target = await directory.getFileHandle(generationName(RECORDS, next),
+            { create: true });
+        /** @type {Map<string, Place>} */
+        const moved = new Map();
+        let at = 0;
+        /** @param {(bytes: Uint8Array, at: number) => unknown} write */
+        const copy = async write=>{
+            for (const [recordName, place] of live)
+            {
+                const bytes = await readAt(place.offset, place.length);
+                if (bytes === null)
+                {
+                    continue;
+                }
+                await write(bytes, at);
+                moved.set(recordName, { offset: at, length: place.length, session: place.session });
+                at += place.length;
+            }
+        };
+        if (typeof target.createSyncAccessHandle === 'function')
+        {
+            const out = await target.createSyncAccessHandle();
+            try
+            {
+                out.truncate(0);
+                await copy((bytes, offset)=>out.write(bytes, { at: offset }));
+                out.flush();
+            }
+            finally
+            {
+                out.close();
+            }
+        }
+        else
+        {
+            const out = await target.createWritable();
+            await copy((bytes, offset)=>out.write(
+                { type: 'write', position: offset, data: bytes }));
+            await out.close();
+        }
+        // The index by session, so the next opening reads each record's age.
+        /** @type {Map<number, string[]>} */
+        const bySession = new Map();
+        for (const [recordName, place] of moved)
+        {
+            const lines = bySession.get(place.session) ?? [];
+            lines.push(`${recordName} ${place.offset} ${place.length}\n`);
+            bySession.set(place.session, lines);
+        }
+        const indexBytes = new TextEncoder().encode([...bySession].sort((a, b)=>a[0] - b[0])
+            .map(([number, lines])=>`# ${number}\n${lines.join('')}`).join(''));
+        await writeWhole(directory, generationName(INDEX, next), indexBytes);
+        await writeWhole(directory, CURRENT, new TextEncoder().encode(String(next)));
+        access?.close();
+        const old = generation;
+        generation = next;
+        places = moved;
+        indexEnd = indexBytes.length;
+        await openRecords();
+        if (typeof directory.removeEntry === 'function')
+        {
+            await directory.removeEntry(generationName(RECORDS, old)).catch(()=>{});
+            await directory.removeEntry(generationName(INDEX, old)).catch(()=>{});
+        }
+    };
+
     const open = ()=>{
         opening ??= (async()=>{
             places = new Map();
-            records = await directory.getFileHandle(RECORDS, { create: true });
-            if (typeof records.createSyncAccessHandle === 'function')
-            {
-                try
-                {
-                    access = await records.createSyncAccessHandle();
-                    end = access.getSize();
-                }
-                catch {
-                    access = null;
-                }
-            }
-            if (access === null)
-            {
-                end = (await records.getFile()).size;
-            }
             try
             {
-                const handle = await directory.getFileHandle(INDEX);
+                const text = await textOf(await (await directory.getFileHandle(CURRENT)).getFile());
+                generation = Number.isInteger(Number(text)) && Number(text) > 0 ? Number(text) : 0;
+            }
+            catch {
+                generation = 0;
+            }
+            await openRecords();
+            let last = 0;
+            try
+            {
+                const handle = await directory.getFileHandle(generationName(INDEX, generation));
                 const text = await textOf(await handle.getFile());
                 indexEnd = new TextEncoder().encode(text).length;
                 for (const line of text.split('\n'))
                 {
                     const parts = line.split(' ');
                     const [recordName, offsetText, lengthText] = parts;
+                    if (recordName === '#' && parts.length === 2)
+                    {
+                        // A session's mark: the lines after it are that session's.
+                        last = Math.max(last, Number(offsetText) || 0);
+                        continue;
+                    }
                     const offset = Number(offsetText);
                     const length = Number(lengthText);
                     // A place past the file's end is a write the index outran
@@ -184,13 +356,17 @@ export async function createDirectoryTranslationStore(root, name){
                         && Number.isInteger(offset) && Number.isInteger(length)
                         && length > 0 && offset + length <= end)
                     {
-                        places.set(recordName, { offset, length });
+                        places.set(recordName, { offset, length, session: last });
                     }
                 }
             }
             catch {
                 // No index yet: an empty bundle.
+                indexEnd = 0;
             }
+            session = last + 1;
+            await compact();
+            pendingLines.push(`# ${session}\n`);
         })();
         return opening;
     };
@@ -219,7 +395,8 @@ export async function createDirectoryTranslationStore(root, name){
                 pendingLines = [];
                 const at = indexEnd;
                 indexEnd += bytes.length;
-                await appendAt(await directory.getFileHandle(INDEX, { create: true }), at, bytes);
+                await appendAt(await directory.getFileHandle(generationName(INDEX, generation),
+                    { create: true }), at, bytes);
             }
             publishing = null;
         })().catch(()=>{
@@ -237,21 +414,24 @@ export async function createDirectoryTranslationStore(root, name){
     return {
         async get(key){
             await open();
-            const place = /** @type {Map<string, { offset: number, length: number }>} */ (places)
-                .get(fileNameOf(key));
+            const recordName = fileNameOf(key);
+            const place = /** @type {Map<string, Place>} */ (places).get(recordName);
             if (!place)
             {
                 return null;
             }
-            if (access !== null)
+            if (place.session !== session)
             {
-                const bytes = new Uint8Array(place.length);
-                const read = access.read(bytes, { at: place.offset });
-                return read === place.length ? bytes : null;
+                // Used in this session: named in it again, so it outlives the
+                // records nobody reads. Written with the next batch of lines.
+                place.session = session;
+                pendingLines.push(`${recordName} ${place.offset} ${place.length}\n`);
+                if (pendingLines.length >= 512)
+                {
+                    publish();
+                }
             }
-            const file = await records.getFile();
-            return new Uint8Array(
-                await file.slice(place.offset, place.offset + place.length).arrayBuffer());
+            return readAt(place.offset, place.length);
         },
         async put(key, bytes){
             await open();
@@ -271,8 +451,8 @@ export async function createDirectoryTranslationStore(root, name){
                 await appending;
             }
             const recordName = fileNameOf(key);
-            /** @type {Map<string, { offset: number, length: number }>} */ (places)
-                .set(recordName, { offset, length: bytes.length });
+            /** @type {Map<string, Place>} */ (places)
+                .set(recordName, { offset, length: bytes.length, session });
             pendingLines.push(`${recordName} ${offset} ${bytes.length}\n`);
             await publish();
         },
