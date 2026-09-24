@@ -95,6 +95,41 @@ test('a fault becomes the fault record and stops the machine', ()=>{
     assert.equal(h.haltedFlag(), 1);
 });
 
+test('a fault is offered to the handler first, and one it takes goes on where it says', ()=>{
+    const h = host();
+    // mov edx, 7; xor eax, eax; mov ecx, eax; div ecx -- #DE with edx and the stack known.
+    load(h, 0x1000, [0xba, 7, 0, 0, 0, 0x31, 0xc0, 0x89, 0xc1, 0xf7, 0xf1]);
+    // At 0x2000: mov eax, 0x55; hlt -- where the handler sends it.
+    h.writePhysical(0x2000, Uint8Array.from([0xb8, 0x55, 0, 0, 0, 0xf4]));
+    /** @type {any[]} */
+    const offered = [];
+    h.onFault((/** @type {any} */ fault)=>{
+        offered.push(fault);
+        h.writeReg32('eip', 0x2000);
+        return true;
+    });
+
+    h.runSlice(10);
+    assert.equal(offered.length, 1);
+    assert.equal(offered[0].vector, 0);
+    assert.equal(offered[0].eip, 0x1009, 'at the divide');
+    assert.equal(offered[0].edx, 7, 'with the registers a ROM stub would have saved');
+    assert.equal(offered[0].stack, 0x300000, 'and the faulting code\'s own stack');
+    assert.equal(h.fault(), null, 'a fault the handler took is not the machine\'s');
+
+    h.runSlice(10);
+    assert.equal(h.readReg32('eax') >>> 0, 0x55, 'the thread went on where the handler put it');
+});
+
+test('a fault the handler declines stops the machine as before', ()=>{
+    const h = host();
+    load(h, 0x1000, [0x31, 0xd2, 0x31, 0xc0, 0xf7, 0xf2]);
+    h.onFault(()=>false);
+    h.runSlice(10);
+    assert.equal(h.fault()?.vector, 0);
+    assert.equal(h.haltedFlag(), 1);
+});
+
 test('an interpreted access beyond RAM is a #GP at the instruction', ()=>{
     const h = host();
     // mov eax, [eax]; hlt -- eax points past the 1 MiB of guest RAM.

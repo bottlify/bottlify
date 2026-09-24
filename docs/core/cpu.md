@@ -257,13 +257,16 @@ reads `eip` from the entry vector at the first slice, the way the ROM's indirect
 The whole register file lives in the block, so a context is a copy of the block plus the halted
 flag and `fsBase` (`captureBlockContext`/`restoreBlockContext` in `internal/context.js`); a
 `fault` exit builds the fault record from the vector and the state the faulting instruction
-left, since there is no IDT and no frame to read. Where the translator has no entry for an
+left, since there is no IDT and no frame to read. Either tier's fault is first offered through the
+host's `onFault` -- with `stack`, `eax` and `edx` taken from the register file, what the ROM stub
+would have saved -- so the layer's `onFault` handler sees the same record under every engine and
+a program's exception handlers run under cork too; only one the handler declines is recorded and
+stops the machine. Where the translator has no entry for an
 address, the slice loop runs cork's own interpreter tier over the same state block
 (`interpret`/`blockState` in the engine module) for the slice's whole budget in one call,
 `syncIn`/`syncOut` bracketing the run rather than one per instruction; it stops at a halt, a
 trap the host has to answer, or an address the translator has an entry for, where translated
-code's own register file takes over. A fault it raises becomes the host's fault record and stops
-the machine; an instruction the evaluator has no model for is the engine's no-tier answer,
+code's own register file takes over. A fault it raises goes the same way; an instruction the evaluator has no model for is the engine's no-tier answer,
 `cpu: cork has no tier for 0x0f (fxsave) (eip 0x00001003)`: the byte and address are the
 instruction the interpreter actually met, not the address the slice started at.
 
@@ -327,7 +330,7 @@ otherwise.
 | `booted` | `() => boolean` | Whether `boot()` has completed. |
 | `fault` | `() => GuestFault \| null` | The fault that stopped the machine, with a `text` description, or null: a processor exception read off its frame, or one the host raised. |
 | `raiseFault` | `({ name, detail, eip, calledFrom? }) => void` | Records a fault of the host's own naming (`vector` -1, `detail` is the whole report), to be found by the same poll as an exception. Only the record: called from inside a trap, the caller sends the stub's return into the park loop, whose `hlt` is what ends the slice. |
-| `onFault` | `(handler: ((fault) => boolean) \| null) => void` | Who is offered a processor exception before it stops the machine. Called inside the trap with the fault read off its frame (`eax`, `edx` and `stack` included); answering `true` means the handler has claimed it and sent the thread elsewhere, and nothing is recorded. |
+| `onFault` | `(handler: ((fault) => boolean) \| null) => void` | Who is offered a processor exception before it stops the machine. Called inside the trap with the fault read off its frame (`eax`, `edx` and `stack` included) -- under `cork`, from the host's own fault exit with the same fields; answering `true` means the handler has claimed it and sent the thread elsewhere, and nothing is recorded. |
 | `stopWithFault` | `(fault) => void` | Stops the machine on a fault that was offered and not taken, recorded exactly as one never offered. |
 | `run` / `stop` | `() => void` | Free-running mode (the emulator's own loop). The scheduler does not use these; it uses `runSlice`. |
 | `readPhysical` | `(address, length) => Uint8Array` | A **window** on guest RAM — a subarray of the emulator's memory, not a copy. |

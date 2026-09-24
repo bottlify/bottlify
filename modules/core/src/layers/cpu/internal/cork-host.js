@@ -158,6 +158,13 @@ export function createCorkHost(config){
     let entered = false;
     /** @type {import('./faults.js').GuestFault | null} */
     let lastFault = null;
+    /**
+     * Who is offered a fault before it stops the machine: the layer, which
+     * hands it to the program's own exception handlers.
+     *
+     * @type {((fault: import('./faults.js').GuestFault) => boolean) | null}
+     */
+    let faultHandler = null;
     let hostWrites = 0;
     let hostWrittenBytes = 0;
     // The counter word folded the way the layer folds it: exact as long as reads
@@ -321,6 +328,30 @@ export function createCorkHost(config){
     };
 
     /**
+     * A fault either tier raised. Offered first to the handler, with what a
+     * handler needs that the emulator's ROM stub would have read off the
+     * frame -- the faulting code's own stack and the two registers the stub
+     * saves -- and, when the handler takes it, the machine goes on wherever
+     * the handler has put eip. Either way the slice ends here, as the
+     * emulator's fault stub ends it with a halt.
+     *
+     * @param {number} vector
+     */
+    const takeFault = vector=>{
+        const fault = {
+            ...buildFault(vector),
+            stack: reg32[4] >>> 0,
+            eax: reg32[0] >>> 0,
+            edx: reg32[2] >>> 0,
+        };
+        if (faultHandler?.(fault) !== true)
+        {
+            lastFault = fault;
+        }
+        halted = true;
+    };
+
+    /**
      * The interpreter tier over a whole budget: the decoder and evaluator run
      * over the block from `address` until it halts, faults, records a trap the
      * host must answer, or reaches an address the translator has an entry for
@@ -411,8 +442,7 @@ export function createCorkHost(config){
             const fault = /** @type {{ vector?: number, eip?: number, op?: string }} */ (thrown);
             if (typeof fault.vector === 'number')
             {
-                lastFault = buildFault(fault.vector);
-                halted = true;
+                takeFault(fault.vector);
                 return retired;
             }
             if (typeof fault.op === 'string')
@@ -491,8 +521,7 @@ export function createCorkHost(config){
                 }
                 if (exit.kind === 'fault')
                 {
-                    lastFault = buildFault(exit.vector);
-                    halted = true;
+                    takeFault(exit.vector);
                     break;
                 }
                 if (exit.kind === 'trap')
@@ -725,6 +754,15 @@ export function createCorkHost(config){
         blockLayout: ()=>layout,
         /** The host-built fault record, or null. */
         fault: ()=>lastFault,
+        /**
+         * Offers each fault to `handler` before recording it: one it answers
+         * true for is the handler's, and eip is wherever the handler left it.
+         *
+         * @param {(fault: import('./faults.js').GuestFault) => boolean} handler
+         */
+        onFault(handler){
+            faultHandler = handler;
+        },
         clearFault(){
             lastFault = null;
         },

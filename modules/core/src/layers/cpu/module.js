@@ -535,6 +535,10 @@ export const cpuModule = {
                     }
                     return dispatch(id);
                 });
+                // Cork has no interrupt table and no ROM to trap from: its
+                // tiers build the fault record themselves, and offer it here
+                // the way the ROM's stub offers one above.
+                state.host.onFault?.((/** @type {any} */ fault)=>state.faultHandler?.(fault) === true);
             },
 
             booted: ()=>state.host !== null,

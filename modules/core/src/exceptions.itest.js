@@ -25,14 +25,16 @@ const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 /**
  * @param {import('node:test').TestContext} t
  * @param {string} name
+ * @param {'emulator' | 'cork'} [engine]
  */
-async function run(t, name){
+async function run(t, name, engine = 'emulator'){
     const [wasm, exe] = await Promise.all([
         readFile(new URL('v86.wasm', PREBUILT)),
         readFile(new URL(`../test/fixtures/${name}.exe`, import.meta.url)),
     ]);
     const app = await createApp({
         executable: new Uint8Array(exe),
+        engine,
         v86: {
             moduleUrl: new URL('libv86.mjs', PREBUILT).href,
             wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
@@ -69,6 +71,19 @@ test('structured exceptions: raised, faulted, nested, and left by longjmp', { ti
         assert.equal(suspended, 0,
             'no host call is left waiting: each handler that found its block let go of the stack');
     });
+
+test('under cork, the same faults reach the same handlers', { timeout: 60000 }, async t=>{
+    // Cork has no interrupt table: its tiers build the fault record and offer
+    // it through the host, and the program cannot tell the difference.
+    const { code, text, suspended } = await run(t, 'seh', 'cork');
+    const lines = verdicts(text);
+
+    assert.deepEqual(lines.filter(line=>!line.ok).map(line=>line.property), [],
+        `every property holds:\n${text}`);
+    assert.equal(lines.length, 9);
+    assert.equal(code, 0);
+    assert.equal(suspended, 0);
+});
 
 test('C++ exceptions: catch, destroy, rethrow, across a callback and two threads',
     { timeout: 60000 }, async t=>{
