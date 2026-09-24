@@ -86,6 +86,18 @@ const LEFT_OUT = new Set([
     'fxsave', 'fxrstor', 'fbld',
 ]);
 
+/** x87 operations whose only effect on the empty mask is their pushes and pops
+ * (the emitter's push and popN), so what a block knows of the mask survives them. */
+const MASK_SAFE = new Set([
+    'fld', 'fild', 'fld1', 'fldz', 'fldpi', 'fldl2e', 'fldln2', 'fldlg2', 'fldl2t',
+    'fst', 'fstp', 'fist', 'fistp', 'fisttp',
+    'fadd', 'fsub', 'fsubr', 'fmul', 'fdiv', 'fdivr', 'faddp', 'fsubp', 'fsubrp', 'fmulp',
+    'fdivp', 'fdivrp', 'fiadd', 'fisub', 'fisubr', 'fimul', 'fidiv', 'fidivr',
+    'fcom', 'fcomp', 'fcompp', 'fucom', 'fucomp', 'fucompp', 'ftst', 'ficom', 'ficomp',
+    'fcomi', 'fcomip', 'fucomi', 'fucomip',
+    'fchs', 'fabs', 'fsqrt', 'frndint', 'fxam', 'fnstsw', 'fnstcw', 'fldcw', 'fwait', 'fnop',
+]);
+
 /**
  * @typedef {Object} StackState
  * @property {number} top
@@ -658,6 +670,20 @@ export function emitX87(e, instruction, flagsLive){
         e.x87RefusalReason = 'step-null';
         return false;
     }
+    // What this block's own x87 instructions have made of the empty mask, known
+    // while translating: a register an earlier push of the block filled is held
+    // and one it popped is empty, so the stack-fault checks on them are decided
+    // here. Known only within a block (another may enter it with any stack),
+    // never in a region with MMX (which holds every register), and forgotten
+    // after any operation that changes the mask otherwise.
+    const known = /** @type {{ block: number, held: number, empty: number }} */ (
+        /** @type {any} */ (x).known ??= { block: -1, held: 0, empty: 0 });
+    if (known.block !== e.blockIndex || x.hasMmx || !MASK_SAFE.has(op))
+    {
+        known.block = x.hasMmx ? -1 : e.blockIndex;
+        known.held = 0;
+        known.empty = 0;
+    }
     /** The local holding ST(i). @param {number} i */
     const st = i=>x.base + state.slot[(state.top + i) & 7];
     /**
@@ -693,6 +719,8 @@ export function emitX87(e, instruction, flagsLive){
         b.localGet(Local.x87Dirty).i32const(1 << top).op(I32.or).localSet(Local.x87Dirty);
         syncMm(top, local);
         b.i32const(top).localSet(Local.x87Top);
+        known.held |= 1 << top;
+        known.empty &= ~(1 << top);
     };
 
     /** @param {number} times */
@@ -701,6 +729,8 @@ export function emitX87(e, instruction, flagsLive){
         for (let n = 0; n < times; n++)
         {
             b.localGet(Local.x87Empty).i32const(1 << top).op(I32.or).localSet(Local.x87Empty);
+            known.empty |= 1 << top;
+            known.held &= ~(1 << top);
             top = (top + 1) & 7;
         }
         b.i32const(top).localSet(Local.x87Top);
@@ -732,6 +762,22 @@ export function emitX87(e, instruction, flagsLive){
         {
             read |= 1 << ((state.top + i) & 7);
         }
+        // Sources this block pushed are held; the push's register, if this
+        // block popped it, is empty: those checks are decided now.
+        read &= ~known.held;
+        const into = 1 << ((state.top - 1) & 7);
+        const overflowChecked = pushes && (known.empty & into) === 0;
+        if (read === 0 && !overflowChecked)
+        {
+            b.i32const(0).localSet(Local.t1);
+            if (pushes)
+            {
+                // A push that cannot overflow clears C1, as the processor does.
+                b.localGet(Local.x87Status).i32const(~Status.C1).op(I32.and)
+                    .localSet(Local.x87Status);
+            }
+            return;
+        }
         if (read !== 0)
         {
             b.localGet(Local.x87Empty).i32const(read).op(I32.and).i32const(0).op(I32.ne);
@@ -740,9 +786,9 @@ export function emitX87(e, instruction, flagsLive){
         {
             b.i32const(0);
         }
-        if (pushes)
+        if (overflowChecked)
         {
-            b.localGet(Local.x87Empty).i32const(1 << ((state.top - 1) & 7)).op(I32.and).op(I32.eqz)
+            b.localGet(Local.x87Empty).i32const(into).op(I32.and).op(I32.eqz)
                 .op(I32.or);
         }
         b.localSet(Local.t1);
@@ -750,13 +796,13 @@ export function emitX87(e, instruction, flagsLive){
         e.openIf('fault', EMPTY);
         setStatus(Status.IE | Status.SF);
         e.close();
-        if (pushes)
+        if (overflowChecked)
         {
             // C1 is this push's overflow indicator: set when the register it
             // would take is held, cleared when the push succeeds -- the
             // processor leaves C1 saying which way the last push faulted, so a
             // later successful push clears an earlier overflow's mark.
-            b.localGet(Local.x87Empty).i32const(1 << ((state.top - 1) & 7)).op(I32.and)
+            b.localGet(Local.x87Empty).i32const(into).op(I32.and)
                 .op(I32.eqz);
             e.openIf('overflow', EMPTY);
             setStatus(Status.C1);
@@ -764,6 +810,11 @@ export function emitX87(e, instruction, flagsLive){
             b.localGet(Local.x87Status).i32const(~Status.C1).op(I32.and)
                 .localSet(Local.x87Status);
             e.close();
+        }
+        else if (pushes)
+        {
+            b.localGet(Local.x87Status).i32const(~Status.C1).op(I32.and)
+                .localSet(Local.x87Status);
         }
     };
     /**
