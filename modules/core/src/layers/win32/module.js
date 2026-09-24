@@ -67,7 +67,7 @@ import { createWininetFunctions } from './wininet/functions.js';
 import { createOleFunctions, createTaskAllocator } from './ole32/functions.js';
 import { createAutomationFunctions, OLEAUT32_ORDINALS } from './oleaut32/functions.js';
 import { createNtdllFunctions } from './ntdll/functions.js';
-import { createComRegistry } from './ole32/objects.js';
+import { createComObject, createComRegistry } from './ole32/objects.js';
 import { registerQuartzClasses } from './quartz/graph.js';
 
 /**
@@ -1368,7 +1368,13 @@ export const win32Module = {
                     load: name=>libraries['KERNEL32.dll'].LoadLibraryW.handler([name]),
                     /** @param {number} module */
                     free: module=>libraries['KERNEL32.dll'].FreeLibrary.handler([module]),
+                    /** @param {number} name */
+                    loadAnsi: name=>libraries['KERNEL32.dll'].LoadLibraryA.handler([name]),
+                    /** @param {number} module @param {number} name */
+                    procAddress: (module, name)=>
+                        libraries['KERNEL32.dll'].GetProcAddress.handler([module, name]),
                 },
+                makeObject: createComObject,
             }),
 
             'RPCRT4.dll': createRpcFunctions({

@@ -130,7 +130,7 @@ function checkDescriptor(descriptor){
  * @param {ComClassDefinition} definition
  * @returns {ComObject}
  */
-function createComObject(clsid, definition){
+export function createComObject(clsid, definition){
     const declared = new Map(definition.interfaces.map(checkDescriptor));
     /** @type {Map<string, ComInterface>} */
     const published = new Map();

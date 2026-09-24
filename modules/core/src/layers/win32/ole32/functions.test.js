@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GUID_NULL, GUID_SIZE, formatGuid, parseGuid } from './guid.js';
-import { IID_IUNKNOWN, createComRegistry } from './objects.js';
+import { IID_IUNKNOWN, createComObject, createComRegistry } from './objects.js';
 import { createOleFunctions, createTaskAllocator } from './functions.js';
 
 const S_OK = 0x00000000;
@@ -715,6 +715,9 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoLoadLibrary: 8,
         CoFreeLibrary: 4,
         CoCreateInstance: 20,
+        CoGetClassObject: 20,
+        CoRegisterClassObject: 20,
+        CoRevokeClassObject: 4,
         CoCreateGuid: 4,
         CoTaskMemAlloc: 4,
         CoTaskMemFree: 4,
@@ -755,3 +758,166 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         assert.equal('convention' in table[name], false, name);
     }
 });
+
+// --- class objects ---
+
+const CLSID_GUEST = '{12345678-0000-0000-0000-00000000C0DE}';
+const GUEST_CLSID_ARG = 0x1060;
+/** A guest object: its vtable pointer, and a vtable whose slots are addresses by slot. */
+const GUEST_OBJECT = 0x3000;
+const GUEST_VTABLE = 0x3100;
+const METHOD_BASE = 0x5000;
+const CREATED = 0x4444;
+
+/**
+ * A host whose guest calls are recorded: each method of the guest object is
+ * named by its slot, and CreateInstance answers with CREATED.
+ *
+ * @param {Parameters<typeof setup>[0]} [options]
+ */
+function withGuestCalls(options){
+    const context = setup(options);
+    const { host } = context;
+    host.putGuid(GUEST_CLSID_ARG, CLSID_GUEST);
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(GUEST_OBJECT, GUEST_VTABLE, true);
+    for (let slot = 0; slot < 5; slot++)
+    {
+        view.setUint32(GUEST_VTABLE + slot * 4, METHOD_BASE + slot * 0x10, true);
+    }
+    /** @type {{ slot: number, args: number[] }[]} */
+    const calls = [];
+    /** @param {number} entry @param {number[]} args */
+    const answer = async(entry, args)=>{
+        const slot = (entry - METHOD_BASE) / 0x10;
+        calls.push({ slot, args });
+        if (slot === 3)
+        {
+            view.setUint32(args[3], CREATED, true);
+        }
+        return 0;
+    };
+    /** @type {any} */ (host).call = answer;
+    const fns = createOleFunctions(/** @type {any} */ (host));
+    initialize(fns, COINIT_APARTMENTTHREADED);
+    return { ...context, fns, calls, view };
+}
+
+test('a class object the program registers is what CoCreateInstance asks, outer and all', async()=>{
+    const { fns, host, calls } = withGuestCalls();
+    const COOKIE = 0x1400;
+
+    assert.equal(await fns.CoRegisterClassObject.handler(
+        [GUEST_CLSID_ARG, GUEST_OBJECT, 1, 0, COOKIE]), S_OK);
+    assert.deepEqual(calls.map(call=>call.slot), [1], 'the registration holds a reference');
+    const cookie = host.u32(COOKIE);
+
+    const OUTER = 0x6000;
+    assert.equal(await fns.CoCreateInstance.handler([GUEST_CLSID_ARG, OUTER, 1, IID_ARG, PPV]),
+        S_OK);
+    assert.deepEqual(calls[1], { slot: 3, args: [GUEST_OBJECT, OUTER, IID_ARG, PPV] },
+        'its own CreateInstance, with the outer unknown: aggregation is the class\'s to allow');
+    assert.equal(host.u32(PPV), CREATED);
+
+    assert.equal(await fns.CoRevokeClassObject.handler([cookie]), S_OK);
+    assert.equal(calls[2].slot, 2, 'revoking releases what the registration held');
+    assert.equal(await fns.CoRevokeClassObject.handler([cookie]), 0x800401fb, 'CO_E_OBJNOTREG');
+    assert.equal(fns.CoCreateInstance.handler([GUEST_CLSID_ARG, 0, 1, IID_ARG, PPV]),
+        REGDB_E_CLASSNOTREG);
+});
+
+test('the last CoUninitialize revokes the class objects its apartment registered', async()=>{
+    const { fns, calls } = withGuestCalls();
+    await fns.CoRegisterClassObject.handler([GUEST_CLSID_ARG, GUEST_OBJECT, 1, 0, 0x1400]);
+
+    await fns.CoUninitialize.handler();
+
+    assert.deepEqual(calls.map(call=>call.slot), [1, 2]);
+    initialize(fns, COINIT_APARTMENTTHREADED);
+    assert.equal(fns.CoCreateInstance.handler([GUEST_CLSID_ARG, 0, 1, IID_ARG, PPV]),
+        REGDB_E_CLASSNOTREG, 'and it is gone');
+});
+
+test('CoGetClassObject hands out a class factory over a class built in here', ()=>{
+    const { fns, host, log } = setup();
+    initialize(fns, COINIT_APARTMENTTHREADED);
+    host.putGuid(0x1080, '{00000001-0000-0000-C000-000000000046}');
+    /** @type {any} */ (host).makeObject = createComObject;
+    const factoryFns = createOleFunctions(/** @type {any} */ (host));
+    initialize(factoryFns, COINIT_APARTMENTTHREADED);
+
+    assert.equal(factoryFns.CoGetClassObject.handler([CLSID_ARG, 1, 0, 0x1080, PPV]), S_OK);
+    assert.notEqual(host.u32(PPV), 0);
+    const factory = log.created.at(-1);
+    const method = factory.interfaceFor('{00000001-0000-0000-C000-000000000046}').methods[3];
+    const INTO = 0x1500;
+    assert.equal(method.invoke(factory, [0, IID_ARG, INTO]), S_OK);
+    assert.notEqual(host.u32(INTO), 0, 'an object of the class');
+    assert.equal(method.invoke(factory, [0x6000, IID_ARG, INTO]), CLASS_E_NOAGGREGATION,
+        'and a built-in class still refuses to be aggregated');
+    void fns;
+});
+
+test('a class the registry names an InprocServer32 for is made by the server\'s class object',
+    async()=>{
+        const { fns, host, calls, view } = withGuestCalls();
+        const MODULE = 0x7000000;
+        const DLL_GET_CLASS_OBJECT = METHOD_BASE + 0x100;
+        const path = 'C:\\GAME\\FILTER.DLL';
+        /** @type {string[]} */
+        const loaded = [];
+        /** @type {any} */ (host).hive = {
+            root: ()=>'HKCR',
+            /** @param {any} _root @param {string} key */
+            open: (_root, key)=>(key.toUpperCase() === `CLSID\\${CLSID_GUEST}\\INPROCSERVER32`
+                ? key : null),
+            getValue: ()=>({
+                data: Uint8Array.from([...path].map(c=>c.charCodeAt(0)).concat([0])),
+            }),
+        };
+        /** @param {number} address */
+        const text = address=>{
+            let read = '';
+            for (let at = address; host.bytes[at] !== 0; at++)
+            {
+                read += String.fromCharCode(host.bytes[at]);
+            }
+            return read;
+        };
+        /** @type {any} */ (host).libraries = {
+            load: ()=>0,
+            free: ()=>0,
+            /** @param {number} name */
+            loadAnsi: name=>{
+                loaded.push(text(name));
+                return MODULE;
+            },
+            /** @param {number} module @param {number} name */
+            procAddress: (module, name)=>(module === MODULE && text(name) === 'DllGetClassObject'
+                ? DLL_GET_CLASS_OBJECT : 0),
+        };
+        const methods = /** @type {any} */ (host).call;
+        /** @param {number} entry @param {number[]} args */
+        const serve = async(entry, args)=>{
+            if (entry === DLL_GET_CLASS_OBJECT)
+            {
+                calls.push({ slot: -1, args });
+                view.setUint32(args[2], GUEST_OBJECT, true);
+                return 0;
+            }
+            return methods(entry, args);
+        };
+        /** @type {any} */ (host).call = serve;
+        const served = createOleFunctions(/** @type {any} */ (host));
+        initialize(served, COINIT_APARTMENTTHREADED);
+
+        assert.equal(await served.CoCreateInstance.handler([GUEST_CLSID_ARG, 0, 1, IID_ARG, PPV]),
+            S_OK);
+        assert.deepEqual(loaded, [path]);
+        assert.equal(calls[0].args[0], GUEST_CLSID_ARG,
+            'DllGetClassObject gets the program\'s CLSID');
+        assert.deepEqual(calls.slice(1).map(made=>made.slot), [3, 2],
+            'then CreateInstance on the class object, which is let go');
+        assert.equal(host.u32(PPV), CREATED);
+        void fns;
+    });

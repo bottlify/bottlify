@@ -44,6 +44,18 @@ const CLASS_E_CLASSNOTAVAILABLE = 0x80040111;
 const REGDB_E_CLASSNOTREG = 0x80040154;
 const CO_E_NOTINITIALIZED = 0x800401f0;
 const CO_E_CLASSSTRING = 0x800401f3;
+const CO_E_OBJNOTREG = 0x800401fb;
+const CO_E_DLLNOTFOUND = 0x800401f8;
+const CO_E_ERRORINDLL = 0x800401f9;
+
+/** IID_IClassFactory: what a class object answers to. */
+const IID_ICLASSFACTORY = '{00000001-0000-0000-C000-000000000046}';
+
+/** A guest object's vtable slots this file calls: IUnknown's three, then IClassFactory's. */
+const SLOT_QUERY_INTERFACE = 0;
+const SLOT_ADD_REF = 1;
+const SLOT_RELEASE = 2;
+const SLOT_CREATE_INSTANCE = 3;
 
 /**
  * The apartment models. COINIT_MULTITHREADED is zero, so the model is one bit
@@ -87,7 +99,9 @@ const MAX_PROGID = 255;
  *           The registry, for the class keys ProgIDFromCLSID reads. Absent,
  *           no class has a ProgID.
  * @property {{ load: (name: number) => number | Promise<number>,
- *              free: (module: number) => number }} [libraries]
+ *              free: (module: number) => number,
+ *              loadAnsi?: (name: number) => number | Promise<number>,
+ *              procAddress?: (module: number, name: number) => number }} [libraries]
  *           LoadLibraryW and FreeLibrary, for CoLoadLibrary and CoFreeLibrary:
  *           a library COM loads is the same mapping kernel32 makes, and a
  *           name it takes is a wide string. Absent, CoLoadLibrary answers 0.
@@ -98,6 +112,10 @@ const MAX_PROGID = 255;
  *           stream: its GetClassID and Save are the program's. The thread
  *           names whose call a second, awaited-after call answers.
  * @property {() => unknown} [callerThread]  Whose call is being handled.
+ * @property {(clsid: string, definition: import('./objects.js').ComClassDefinition)
+ *           => import('./objects.js').ComObject} [makeObject]
+ *           An object of our own that no CLSID produces: the class object
+ *           CoGetClassObject answers with for a class implemented here.
  * @property {{ publish: (object: import('./objects.js').ComObject,
  *                        interfaceId: string) => number }} vtables
  *           Puts an interface into guest memory and answers with the interface
@@ -252,6 +270,200 @@ export function createOleFunctions(host){
         host.writeMemory(address, bytes);
     };
 
+    /** @param {number} address */
+    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+        .getUint32(0, true);
+
+    /** @param {any} value @param {(answer: any) => any} then */
+    const andThen = (value, then)=>(typeof value?.then === 'function'
+        ? value.then(then)
+        : then(value));
+
+    /**
+     * Calls a method of a guest object through its vtable: `this` first, as
+     * a COM method takes it.
+     *
+     * @param {number} object @param {number} slot @param {number[]} args
+     * @param {unknown} [thread]
+     * @returns {Promise<number>}
+     */
+    const callMethod = (object, slot, args, thread)=>{
+        if (!host.call)
+        {
+            return Promise.resolve(E_NOINTERFACE);
+        }
+        const entry = readU32(readU32(object) + slot * 4);
+        return host.call(entry, [object >>> 0, ...args], thread);
+    };
+
+    /**
+     * The class objects a program registered with CoRegisterClassObject, by
+     * the cookie it was answered with. Each holds the reference the
+     * registration took; the thread is the apartment it belongs to, whose
+     * last CoUninitialize revokes it.
+     *
+     * @type {Map<number, { clsid: string, object: number, thread: any }>}
+     */
+    const classObjects = new Map();
+    let nextCookie = 1;
+    /** @param {string} clsid */
+    const registeredObject = clsid=>{
+        for (const entry of classObjects.values())
+        {
+            if (entry.clsid === clsid)
+            {
+                return entry;
+            }
+        }
+        return null;
+    };
+
+    /**
+     * Drops a registration and the reference it held.
+     *
+     * @param {number} cookie @param {unknown} [thread]
+     */
+    const revoke = (cookie, thread)=>{
+        const entry = classObjects.get(cookie);
+        if (!entry)
+        {
+            return null;
+        }
+        classObjects.delete(cookie);
+        return callMethod(entry.object, SLOT_RELEASE, [], thread);
+    };
+
+    /**
+     * A string value of the class's key under HKEY_CLASSES_ROOT\CLSID, or
+     * null.
+     *
+     * @param {string} clsid @param {string} subkey
+     */
+    const classKeyValue = (clsid, subkey)=>{
+        const root = host.hive?.root(HKEY_CLASSES_ROOT);
+        const key = root ? host.hive?.open(root, `CLSID\\${clsid}\\${subkey}`) : null;
+        const value = key ? host.hive?.getValue(key, '') : null;
+        if (!value)
+        {
+            return null;
+        }
+        let text = '';
+        for (const byte of value.data)
+        {
+            if (byte === 0)
+            {
+                break;
+            }
+            text += String.fromCharCode(byte);
+        }
+        return text.length > 0 ? text : null;
+    };
+
+    /**
+     * A string in task memory for as long as `use` needs it: the path and
+     * name a load and a lookup read out of guest memory.
+     *
+     * @template T
+     * @param {Uint8Array} bytes @param {(address: number) => T} use
+     */
+    const scratch = (bytes, use)=>{
+        const block = host.heap.allocate(Math.max(bytes.length, 4));
+        if (block === 0)
+        {
+            return null;
+        }
+        host.writeMemory(block, bytes);
+        return andThen(use(block), (/** @type {any} */ answer)=>{
+            host.heap.free(block);
+            return answer;
+        });
+    };
+    /** @param {string} text */
+    const ansi = text=>Uint8Array.from([...text].map(c=>c.charCodeAt(0) & 0xff).concat([0]));
+
+    /**
+     * The class object an in-process server exports for a class registered
+     * under InprocServer32: its DLL loaded and DllGetClassObject asked, with
+     * the program's own CLSID and IID pointers. Answers the HRESULT; null when
+     * the class names no server at all.
+     *
+     * @param {string} clsid @param {number} classId @param {number} interfaceId
+     * @param {number} out @param {unknown} thread
+     * @returns {number | Promise<number> | null}
+     */
+    const fromServer = (clsid, classId, interfaceId, out, thread)=>{
+        const path = classKeyValue(clsid, 'InprocServer32');
+        const libraries = host.libraries;
+        if (!path)
+        {
+            return null;
+        }
+        if (!libraries?.loadAnsi || !libraries.procAddress)
+        {
+            return CO_E_DLLNOTFOUND;
+        }
+        const loadAnsi = libraries.loadAnsi;
+        const procAddress = libraries.procAddress;
+        return andThen(scratch(ansi(path), loadAnsi), (/** @type {number | null} */ module)=>{
+            if (!module)
+            {
+                host.divergence?.('COM', `the server ${path} of ${clsid} did not load`);
+                return CO_E_DLLNOTFOUND;
+            }
+            return andThen(scratch(ansi('DllGetClassObject'),
+                name=>procAddress(module >>> 0, name)), (/** @type {number | null} */ entry)=>{
+                if (!entry || !host.call)
+                {
+                    return CO_E_ERRORINDLL;
+                }
+                return host.call(entry >>> 0, [classId >>> 0, interfaceId >>> 0, out >>> 0],
+                    thread);
+            });
+        });
+    };
+
+    /**
+     * An object of a class implemented here, handed out through `ppv` with
+     * the reference QueryInterface took: what CoCreateInstance and a built-in
+     * class object's CreateInstance both do.
+     *
+     * @param {string} clsid @param {number} outer @param {string} iid @param {number} out
+     */
+    const createBuiltIn = (clsid, outer, iid, out)=>{
+        if ((outer >>> 0) !== 0)
+        {
+            // Aggregation makes the outer object's IUnknown the one this
+            // object answers with, and nothing here can do that. Saying
+            // so is the documented answer; succeeding would hand back an
+            // object whose identity is wrong.
+            return CLASS_E_NOAGGREGATION;
+        }
+        const object = host.registry.create(clsid);
+        if (!object)
+        {
+            return CLASS_E_CLASSNOTAVAILABLE;
+        }
+        const record = object.queryInterface(iid);
+        if (!record)
+        {
+            object.release();
+            return E_NOINTERFACE;
+        }
+
+        const pointer = host.vtables.publish(object, iid) >>> 0;
+        if (pointer === 0)
+        {
+            object.release();
+            object.release();
+            return E_OUTOFMEMORY;
+        }
+        // The creation reference goes; what the guest holds is the one
+        // QueryInterface took, so the object comes back with exactly one.
+        object.release();
+        writeU32(out, pointer);
+        return S_OK;
+    };
+
     /**
      * Reads an LPCOLESTR that is supposed to be a GUID, or a ProgID. Only as
      * far as one can reach: a longer one is not one, and stopping there
@@ -325,14 +537,23 @@ export function createOleFunctions(host){
             return 0;
         }
         apartment.depth--;
-        if (apartment.depth === 0)
+        if (apartment.depth !== 0)
         {
-            // Windows also releases what the apartment still holds. That
-            // needs per-apartment ownership, which nothing tracks yet, so
-            // an object outliving its apartment stays alive here.
-            thread.ole32 = null;
+            return 0;
         }
-        return 0;
+        thread.ole32 = null;
+        // The apartment's class objects go with it: revoked, and the
+        // reference each registration held released, as the last
+        // CoUninitialize does on Windows. Objects of the classes built in
+        // here are not tracked by apartment and outlive it.
+        const mine = [...classObjects].filter(([, entry])=>entry.thread === thread)
+            .map(([cookie])=>cookie);
+        const caller = host.callerThread?.();
+        /** @param {number} index @returns {number | Promise<number>} */
+        const next = index=>(index >= mine.length
+            ? 0
+            : andThen(revoke(mine[index], caller), ()=>next(index + 1)));
+        return next(0);
     };
 
     /**
@@ -489,16 +710,35 @@ export function createOleFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                if ((outer >>> 0) !== 0)
+                const thread = host.callerThread?.();
+
+                // A class object the program registered itself comes first,
+                // as Windows looks there first: its CreateInstance is the
+                // program's, aggregation included.
+                const registered = registeredObject(clsid);
+                if (registered)
                 {
-                    // Aggregation makes the outer object's IUnknown the one this
-                    // object answers with, and nothing here can do that. Saying
-                    // so is the documented answer; succeeding would hand back an
-                    // object whose identity is wrong.
-                    return CLASS_E_NOAGGREGATION;
+                    return callMethod(registered.object, SLOT_CREATE_INSTANCE,
+                        [outer >>> 0, interfaceId >>> 0, out], thread);
                 }
-                if (!host.registry.isRegistered(clsid))
+                if (host.registry.isRegistered(clsid))
                 {
+                    return createBuiltIn(clsid, outer, iid, out);
+                }
+
+                // A server the registry names: its class object, asked for
+                // the instance and let go.
+                const factorySlot = host.heap.allocate(4 + GUID_SIZE);
+                if (factorySlot === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                writeU32(factorySlot, 0);
+                writeGuid(host, factorySlot + 4, IID_ICLASSFACTORY);
+                const served = fromServer(clsid, classId, factorySlot + 4, factorySlot, thread);
+                if (served === null)
+                {
+                    host.heap.free(factorySlot);
                     // Named, because the number alone is the whole question. A
                     // program that asks for a class and is refused takes a
                     // different path -- often a quieter one -- and which class
@@ -508,31 +748,130 @@ export function createOleFunctions(host){
                         `no class ${clsid} is registered, so CoCreateInstance refused it`);
                     return REGDB_E_CLASSNOTREG;
                 }
+                return andThen(served, (/** @type {number} */ hr)=>{
+                    const factory = readU32(factorySlot);
+                    host.heap.free(factorySlot);
+                    if ((hr | 0) < 0 || factory === 0)
+                    {
+                        return hr;
+                    }
+                    return callMethod(factory, SLOT_CREATE_INSTANCE,
+                        [outer >>> 0, interfaceId >>> 0, out], thread)
+                        .then(created=>callMethod(factory, SLOT_RELEASE, [], thread)
+                            .then(()=>created));
+                });
+            },
+        },
 
-                const object = host.registry.create(clsid);
-                if (!object)
+        /**
+         * HRESULT CoGetClassObject(REFCLSID rclsid, DWORD dwClsContext,
+         *   COSERVERINFO *pServerInfo, REFIID riid, LPVOID *ppv)
+         *
+         * The class object itself: one the program registered, a class
+         * factory of our own over a class built in here, or what the class's
+         * InprocServer32 exports.
+         */
+        CoGetClassObject: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([classId, , , interfaceId, ppv])=>{
+                const out = ppv >>> 0;
+                if (out === 0)
                 {
-                    return CLASS_E_CLASSNOTAVAILABLE;
+                    return E_POINTER;
                 }
-                const record = object.queryInterface(iid);
-                if (!record)
+                writeU32(out, 0);
+                const clsid = guidAt(classId);
+                const iid = guidAt(interfaceId);
+                if (clsid === null || iid === null)
                 {
-                    object.release();
-                    return E_NOINTERFACE;
+                    return E_INVALIDARG;
                 }
+                const thread = host.callerThread?.();
+                const registered = registeredObject(clsid);
+                if (registered)
+                {
+                    return callMethod(registered.object, SLOT_QUERY_INTERFACE,
+                        [interfaceId >>> 0, out], thread);
+                }
+                if (host.registry.isRegistered(clsid) && host.makeObject)
+                {
+                    const factory = host.makeObject(clsid, {
+                        interfaces: [{ id: IID_ICLASSFACTORY, methods: [
+                            { name: 'CreateInstance', argBytes: 16,
+                                /** @param {any} _object @param {number[]} args */
+                                invoke: (_object, [outer, wanted, into])=>{
+                                    const asked = guidAt(wanted);
+                                    if ((into >>> 0) === 0)
+                                    {
+                                        return E_POINTER;
+                                    }
+                                    writeU32(into >>> 0, 0);
+                                    return asked === null
+                                        ? E_INVALIDARG
+                                        : createBuiltIn(clsid, outer, asked, into >>> 0);
+                                } },
+                            // Nothing here is unloaded, so there is nothing to keep loaded.
+                            { name: 'LockServer', argBytes: 8, invoke: ()=>S_OK },
+                        ] }],
+                    });
+                    if (!factory.queryInterface(iid))
+                    {
+                        factory.release();
+                        return E_NOINTERFACE;
+                    }
+                    const pointer = host.vtables.publish(factory, iid) >>> 0;
+                    factory.release();
+                    if (pointer === 0)
+                    {
+                        return E_OUTOFMEMORY;
+                    }
+                    writeU32(out, pointer);
+                    return S_OK;
+                }
+                const served = fromServer(clsid, classId, interfaceId, out, thread);
+                return served ?? REGDB_E_CLASSNOTREG;
+            },
+        },
 
-                const pointer = host.vtables.publish(object, iid) >>> 0;
-                if (pointer === 0)
+        /**
+         * HRESULT CoRegisterClassObject(REFCLSID rclsid, LPUNKNOWN pUnk,
+         *   DWORD dwClsContext, DWORD flags, LPDWORD lpdwRegister)
+         *
+         * A program's own class object, found by CoCreateInstance and
+         * CoGetClassObject before anything the registry names -- how a
+         * program serves its own classes to itself and to the components it
+         * hosts. The registration holds a reference until it is revoked.
+         */
+        CoRegisterClassObject: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([classId, object, , , cookieOut])=>{
+                const thread = host.currentThread();
+                if (!thread.ole32)
                 {
-                    object.release();
-                    object.release();
-                    return E_OUTOFMEMORY;
+                    return CO_E_NOTINITIALIZED;
                 }
-                // The creation reference goes; what the guest holds is the one
-                // QueryInterface took, so the object comes back with exactly one.
-                object.release();
-                writeU32(out, pointer);
-                return S_OK;
+                const clsid = guidAt(classId);
+                if (clsid === null || (object >>> 0) === 0 || (cookieOut >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const cookie = nextCookie++;
+                classObjects.set(cookie, { clsid, object: object >>> 0, thread });
+                writeU32(cookieOut >>> 0, cookie);
+                return andThen(callMethod(object >>> 0, SLOT_ADD_REF, [], host.callerThread?.()),
+                    ()=>S_OK);
+            },
+        },
+
+        /** HRESULT CoRevokeClassObject(DWORD dwRegister) */
+        CoRevokeClassObject: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([cookie])=>{
+                const released = revoke(cookie >>> 0, host.callerThread?.());
+                return released === null ? CO_E_OBJNOTREG : andThen(released, ()=>S_OK);
             },
         },
 
