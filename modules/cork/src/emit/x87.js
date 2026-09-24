@@ -1066,12 +1066,19 @@ export function emitX87(e, instruction, flagsLive){
      * With `invalid`, the same NaN out of operands that were not raises IE
      * too: the arithmetic's invalid operation, found by the one compare.
      *
+     * With `memory`, that operand was loaded unchecked (`loadFloat`'s
+     * `unchecked`): a NaN in it makes the result a NaN, so the one compare
+     * here is also the load's, and the rare branch reads its bits again for
+     * the IE a signalling one raises. The host quiets it in the arithmetic
+     * as the processor does.
+     *
      * @param {number[]} inputs  the locals holding the operands
      * @param {boolean} [invalid]
+     * @param {Operand | null} [memory]
      */
-    const hostNaN = (inputs, invalid = false)=>{
+    const hostNaN = (inputs, invalid = false, memory = null)=>{
         const fix = !e.context.features.defaultNaNNegative;
-        if (!fix && !invalid)
+        if (!fix && !invalid && memory === null)
         {
             return;
         }
@@ -1079,6 +1086,40 @@ export function emitX87(e, instruction, flagsLive){
         b.localSet(x.temp3);
         b.localGet(x.temp3).localGet(x.temp3).op(F64.ne);
         e.openIf('nan', EMPTY);
+        if (!fix && invalid)
+        {
+            // The rare branch as one call, so the hot path around it stays
+            // the compare: its body inline cost half again what the compare did.
+            b.localGet(inputs[0]);
+            if (inputs.length > 1)
+            {
+                b.localGet(inputs[1]);
+            }
+            else
+            {
+                b.f64const(0);
+            }
+            if (memory === null)
+            {
+                b.i32const(0).i32const(0);
+            }
+            else
+            {
+                b.localGet(Local.addr).i32const(memory.size);
+            }
+            b.call(/** @type {number} */ (e.context.x87Invalid));
+            b.localGet(Local.x87Status).op(I32.or).localSet(Local.x87Status);
+            e.close();
+            b.localGet(x.temp3);
+            return;
+        }
+        if (memory !== null)
+        {
+            rawSignalling(e, memory);
+            e.openIf('signalling', EMPTY);
+            setStatus(Status.IE);
+            e.close();
+        }
         b.i32const(1);
         for (const input of inputs)
         {
@@ -1124,7 +1165,7 @@ export function emitX87(e, instruction, flagsLive){
             else
             {
                 guard([], true);
-                loadFloat(e, src);
+                loadFloat(e, src, 'quick');
             }
             orIndefinite();
             push();
@@ -1552,7 +1593,7 @@ export function emitX87(e, instruction, flagsLive){
             }
             else
             {
-                loadFloat(e, src);
+                loadFloat(e, src, 'unchecked');
             }
             b.localSet(x.temp2);
             const [a, c] = reversed ? [x.temp2, x.temp] : [x.temp, x.temp2];
@@ -1562,7 +1603,8 @@ export function emitX87(e, instruction, flagsLive){
             byPrecision();
             // An invalid NaN out of inputs that were not NaN raises IE; a stack
             // fault has raised it already, so the check needs no guard of its own.
-            hostNaN([x.temp, x.temp2], true);
+            hostNaN([x.temp, x.temp2], true,
+                src.kind === 'mem' && !op.startsWith('fi') && src.size !== 10 ? src : null);
             orIndefinite();
             b.localSet(st(target));
             if (kind === 'fdiv')
@@ -1616,7 +1658,9 @@ export function emitX87(e, instruction, flagsLive){
             else
             {
                 guard([0], false);
-                loadFloat(e, src);
+                // An ordered compare raises IE on any NaN, a signalling one
+                // included; the unordered one needs the load's own test.
+                loadFloat(e, src, op.startsWith('fu') ? 'checked' : 'unchecked');
                 b.localSet(x.temp2);
             }
             conditionBits(e, st(0), x.temp2, !op.startsWith('fu'));
@@ -1832,13 +1876,75 @@ export function emitX87(e, instruction, flagsLive){
 }
 
 /**
- * Pushes the f64 at a float memory operand: m32, m64 or m80.
+ * Pushes 1 when the float at `Local.addr` (m32 or m64) is a signalling NaN,
+ * from its bits: all-ones exponent, quiet bit clear, fraction not zero.
  *
  * @param {E} e @param {Operand} operand
  */
-function loadFloat(e, operand){
+function rawSignalling(e, operand){
+    const { b } = e;
+    const offset = e.layout.ramBase;
+    if (operand.size === 4)
+    {
+        b.localGet(Local.addr).load('i32', { offset }).i32const(0x7fc00000).op(I32.and)
+            .i32const(0x7f800000).op(I32.eq);
+        b.localGet(Local.addr).load('i32', { offset }).i32const(0x3fffff).op(I32.and)
+            .i32const(0).op(I32.ne).op(I32.and);
+        return;
+    }
+    b.localGet(Local.addr).load('i64', { offset }).i64const(0x7ff8000000000000n).op(I64.and)
+        .i64const(0x7ff0000000000000n).op(I64.eq);
+    b.localGet(Local.addr).load('i64', { offset }).i64const(0x0007ffffffffffffn).op(I64.and)
+        .i64const(0n).op(I64.ne).op(I32.and);
+}
+
+/**
+ * Pushes the f64 at a float memory operand: m32, m64 or m80.
+ *
+ * A signalling NaN read is an invalid operand: IE, and the value goes on
+ * quiet. `checked` tests the bits before the value is formed; `quick`
+ * (`fld`) loads it as a float and tests only a value that is a NaN at all --
+ * one compare on the common path, where the bit test was an integer load, a
+ * mask and a compare -- and `unchecked` leaves the test to the caller: an
+ * operation whose result is a NaN whenever the operand is (the arithmetic's
+ * `hostNaN`) or that raises IE on any NaN (an ordered compare).
+ *
+ * @param {E} e @param {Operand} operand
+ * @param {'checked' | 'quick' | 'unchecked'} [mode]
+ */
+function loadFloat(e, operand, mode = 'checked'){
     const { b } = e;
     prepare(e, operand);
+    if (mode !== 'checked' && operand.size !== 10)
+    {
+        // f32 -> f64 quiets a signalling NaN keeping its payload, as the
+        // processor's own conversion does; an f64 load keeps the bits.
+        b.localGet(Local.addr).load(operand.size === 4 ? 'f32' : 'f64',
+            { offset: e.layout.ramBase });
+        if (operand.size === 4)
+        {
+            b.op(F64.promoteF32);
+        }
+        if (mode === 'unchecked')
+        {
+            return;
+        }
+        const value = e.x87.temp3;
+        b.localTee(value).localGet(value).op(F64.ne);
+        e.openIf('nan', EMPTY);
+        rawSignalling(e, operand);
+        e.openIf('signalling', EMPTY);
+        b.localGet(Local.x87Status).i32const(Status.IE).op(I32.or).localSet(Local.x87Status);
+        if (operand.size === 8)
+        {
+            b.localGet(value).op(I64.reinterpretF64).i64const(0x0008000000000000n).op(I64.or)
+                .op(F64.reinterpretI64).localSet(value);
+        }
+        e.close();
+        e.close();
+        b.localGet(value);
+        return;
+    }
     // A signalling NaN read from memory is an invalid operand: IE, and the
     // value goes on quiet. The quiet bit is the top fraction bit of each width.
     if (operand.size === 10)
@@ -2041,6 +2147,45 @@ function signalling(e, a, c){
         b.op(I32.and);
     }
     b.op(I32.or);
+}
+
+/**
+ * The invalid-operation helper: `x87Invalid(a, c, address, size) -> IE`, for
+ * an arithmetic whose result is a NaN. IE when the NaN was made from operands
+ * that were not NaNs, or when the memory operand (`size` 4 or 8 at the wasm
+ * address; 0 for none) holds a signalling NaN; 0 otherwise.
+ *
+ * @param {import('../wasm/encoder.js').ModuleBuilder} m
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ */
+export function addInvalidHelper(m, layout){
+    const type = m.type({
+        params: [ValType.f64, ValType.f64, ValType.i32, ValType.i32], results: [ValType.i32],
+    });
+    const b = new Body();
+    const offset = layout.ramBase;
+    b.localGet(0).localGet(0).op(F64.eq).localGet(1).localGet(1).op(F64.eq).op(I32.and);
+    b.if(EMPTY);
+    b.i32const(Status.IE).op(0x0f); // return
+    b.end();
+    b.localGet(3).i32const(4).op(I32.eq);
+    b.if(EMPTY);
+    b.localGet(2).load('i32', { offset }).i32const(0x7fc00000).op(I32.and)
+        .i32const(0x7f800000).op(I32.eq);
+    b.localGet(2).load('i32', { offset }).i32const(0x3fffff).op(I32.and)
+        .i32const(0).op(I32.ne).op(I32.and);
+    b.op(0x0f);
+    b.end();
+    b.localGet(3).i32const(8).op(I32.eq);
+    b.if(EMPTY);
+    b.localGet(2).load('i64', { offset }).i64const(0x7ff8000000000000n).op(I64.and)
+        .i64const(0x7ff0000000000000n).op(I64.eq);
+    b.localGet(2).load('i64', { offset }).i64const(0x0007ffffffffffffn).op(I64.and)
+        .i64const(0n).op(I64.ne).op(I32.and);
+    b.op(0x0f);
+    b.end();
+    b.i32const(0);
+    return m.function(type, [], b.toBytes());
 }
 
 /**

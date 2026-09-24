@@ -230,7 +230,16 @@ and the runtime compiles x87 regions with the rounding from then on and drops th
 store keeps them under their own key, `-w`), once -- Direct3D sets single at `CreateDevice` and
 keeps it. The test machine does the same, so the corpora run the wide translation. An x87 dot
 loop 8.1 -> 7.3 ns a turn, a cull (the dot and `fcomp`/`fnstsw`) 10.2 -> 8.3; Doom 3's x87
-functions 60-63 -> 49-51 wasm operations an instruction; the SSE conversions that round
+functions 60-63 -> 49-51 wasm operations an instruction; a signalling NaN read from memory
+(IE, and the value goes on quiet) is no longer an integer load, a mask and a compare ahead of every
+float load: `fld` loads the float -- the f32-to-f64 promotion quiets a signalling NaN keeping its
+payload, as the processor's own conversion does -- and tests only a value that is a NaN at all, and
+an arithmetic with a memory operand or an ordered compare loads it unchecked, a NaN operand making a
+NaN result the arithmetic's one compare already catches (the unordered compare keeps the bit test,
+it raises IE for a signalling NaN alone); the rare branch after that compare is one call to the
+shared `x87Invalid` helper (IE for a NaN made from operands that were not NaNs, or for a signalling
+memory operand, read again from its bits) where its body inline cost half again what the compare
+did. A dot loop 6.3-7.0 -> 5.3-5.6 ns a turn, a cull 7.5-8.1 -> 6.7-6.9; the SSE conversions that round
 read the MXCSR rounding control the same way; a NaN an operation makes carries the
 processor's negative sign whatever the host's default NaN is; exception masks are not
 honoured, an exception behaves as masked. The transcendentals (`fsin`, `fcos`, `fsincos`,
