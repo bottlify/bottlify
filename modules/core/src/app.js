@@ -4279,6 +4279,9 @@ async function buildApp(options){
         })();
 
     memory.writeU32(entryVector, start);
+    // The first thread starts with the floating-point environment Windows
+    // gives every thread, not the processor's reset one.
+    cpu.freshFpu();
 
     // What FS points at. A program reaches this in code its compiler emitted
     // rather than code anybody wrote -- a thread-local variable is an index off

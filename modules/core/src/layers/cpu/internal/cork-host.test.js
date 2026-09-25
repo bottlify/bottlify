@@ -14,6 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from './cork-host.js';
+import { freshThreadFpu } from './context.js';
 import * as engine from '../../../../../cork/src/index.js';
 
 const MEMORY = 4 << 20;
@@ -340,4 +341,22 @@ test('a slow slice accounts for itself only when the translator\'s timings are a
         assert.deepEqual(stalls.map((/** @type {{ what: string }} */ one)=>one.what.split(' ')[0]),
             timings ? ['slice'] : [], `timings ${timings}`);
     }
+});
+
+test('a fresh thread\'s block starts at 0x27f and MXCSR 0x1f80, not its creator\'s modes', ()=>{
+    const h = host();
+    h.restoreX87State({ top: 5, empty: 0x1f, control: 0x007f, status: 0x21,
+        raw: new Uint8Array(128).fill(0x40) });
+    h.writeMxcsr(0x9fc0); // flush to zero and denormals are zero
+    h.writeReg32('ebx', 0x1234);
+    const context = h.captureContext();
+    freshThreadFpu(context);
+    h.restoreContext(context);
+    const x87 = h.x87State();
+    assert.equal(x87.control, 0x27f);
+    assert.equal(x87.top, 0);
+    assert.equal(x87.empty, 0xff);
+    assert.equal(x87.status, 0);
+    assert.equal(h.readMxcsr(), 0x1f80);
+    assert.equal(h.readReg32('ebx'), 0x1234, 'the rest of the template stays');
 });

@@ -13,7 +13,9 @@ import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
 import { FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE, VECTORS } from './internal/boot-rom.js';
 import { readFault, describeFault, hostFault } from './internal/faults.js';
-import { captureContext, restoreContext, setThreadBase } from './internal/context.js';
+import {
+    captureContext, freshThreadFpu, restoreContext, setThreadBase,
+} from './internal/context.js';
 import { createSampleTable, creditSample, topSamples } from './internal/samples.js';
 
 /**
@@ -853,9 +855,27 @@ export const cpuModule = {
             },
 
             /**
+             * Gives the running thread the floating-point environment a thread
+             * starts with (`freshThreadFpu`): the process's first thread, before
+             * its first instruction, starts as every thread it creates does.
+             */
+            freshFpu(){
+                const context = captureCurrentContext();
+                freshThreadFpu(context);
+                const host = started();
+                if (typeof host.restoreContext === 'function')
+                {
+                    host.restoreContext(context);
+                    return;
+                }
+                restoreContext(host.cpu(), context);
+            },
+
+            /**
              * A context for a thread that has not run yet: the current CPU state
-             * as a template -- segments, control words and the rest of the process
-             * environment -- positioned at its own entry point and stack.
+             * as a template -- segments and the rest of the process environment
+             * -- positioned at its own entry point and stack, with the
+             * floating-point environment a new thread starts with.
              *
              * @param {Object} options
              * @param {number} options.entry
@@ -864,6 +884,7 @@ export const cpuModule = {
              */
             newContext({ entry, stackTop }){
                 const context = captureCurrentContext();
+                freshThreadFpu(context);
                 context.eip = entry;
                 context.reg32[4] = stackTop; // ESP
                 context.reg32[5] = stackTop; // EBP
