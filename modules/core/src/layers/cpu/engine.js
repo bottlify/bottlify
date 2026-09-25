@@ -109,6 +109,10 @@
  * @property {boolean} [blockProfile]    A diagnostic: every block counts its executions.
  * @property {number} [blockProfileFrom]  With `blockProfile`: seconds after start at which the
  *           counts start over.
+ * @property {boolean} [timings]         A diagnostic: the host clock read around the translator's
+ *     phases and the host's slices, for the milliseconds of `EngineDiagnostics` and the record of
+ *     long holds. Default false -- a shipped build reads no clock for its own account, and those
+ *     figures stay 0.
  * @property {number} [batchRegions]     Regions per wasm module. Default 32.
  * @property {number} [maxBatchRegions]  The most regions one batch takes when the queue is deep
  *     (a quarter of the queue past `batchRegions`). Default 256.
@@ -214,7 +218,8 @@
  * @property {number} forcedSteps      Turns that retired nothing and were forced to interpret one
  *     instruction, so no slice of translated-plus-interpreted code stops moving.
  * @property {number} translateMs      Milliseconds spent translating: the sum of the seven
- *     parts below, so a whole figure and its split always agree.
+ *     parts below, so a whole figure and its split always agree. It and every other
+ *     millisecond figure here are 0 unless the engine was configured with `timings`.
  * @property {number} formingMs        Of it: forming the batch's regions, a decode each.
  * @property {number} lookupMs         Of it: the store's lookups, awaited.
  * @property {number} emitMs           Of it: emitting the regions the store did not hold.

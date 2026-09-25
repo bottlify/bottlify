@@ -1078,7 +1078,9 @@ export async function game(options){
             maxTurns: options.turns,
             maxMs: options.runSeconds > 0 ? options.runSeconds * 1000 : null,
             engine: options.engine,
-            cork: options.corkConfig ? { config: options.corkConfig } : undefined,
+            // A harness run is a diagnostic one: the translator's timings and its
+            // record of long holds are on unless the run turns them off.
+            cork: { config: { timings: true, ...options.corkConfig } },
             screen: options.screen,
             quantum: options.quantum,
             log: Boolean(options.log),

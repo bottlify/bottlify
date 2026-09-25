@@ -347,7 +347,8 @@ test('a call in the hot loop: the callee, the call and the return all stay in wa
 test('a second boot with the same store takes every region from it', async()=>{
     const { memoryTranslationStore } = await import('../../../../../cork/src/runtime/cache.js');
     const store = memoryTranslationStore();
-    const config = { engine: 'hybrid', engineUrl: ENGINE, cork: { store, bundleId: 'itest' } };
+    const config = { engine: 'hybrid', engineUrl: ENGINE,
+        cork: { store, bundleId: 'itest', timings: true } };
     const first = await booted(PROGRAM, GUEST_CODE, config);
     await runToHalt(first);
     const before = metricsOf().cork;
@@ -381,7 +382,8 @@ test('with the translation worker the emitting leaves the engine thread', async(
     const expectedCount = inline.api.instructionCount();
     await cpuModule.dispose();
 
-    const hybrid = await booted(PROGRAM, GUEST_CODE, { ...config, cork: { worker: true } });
+    const hybrid = await booted(PROGRAM, GUEST_CODE,
+        { ...config, cork: { worker: true, timings: true } });
     // Let the worker open before the first candidates are formed.
     await new Promise(resolve=>setTimeout(resolve, 50));
     const slices = await runToHalt(hybrid);
@@ -490,7 +492,8 @@ test('the directory store takes the second run from its index and records', asyn
     const { createDirectoryTranslationStore } = await import('./translation-store.js');
     const counter = { probes: 0 };
     const store = await createDirectoryTranslationStore(fakeRoot(counter), 'itest');
-    const config = { engine: 'hybrid', engineUrl: ENGINE, cork: { store, bundleId: 'itest' } };
+    const config = { engine: 'hybrid', engineUrl: ENGINE,
+        cork: { store, bundleId: 'itest', timings: true } };
     const first = await booted(PROGRAM, GUEST_CODE, config);
     await runToHalt(first);
     const before = metricsOf().cork;

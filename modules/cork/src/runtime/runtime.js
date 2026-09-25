@@ -106,8 +106,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // a frame (5.9 -> 10.1 ms) while it made play 3% faster, and the cause
         // is not yet known.
         structure: false,
+        // Diagnostic: the host clock read around the translator's phases -- the
+        // milliseconds of forming, lookups, emitting, encoding, storing,
+        // instantiating and publishing, and the record of long holds. Off, as a
+        // shipped build runs, the clock is read only where the translator needs
+        // it (a batch that never comes back is freed after a time).
+        timings: false,
         ...config,
     };
+    /** The host clock for a diagnostic timing, or zero when timings are off. */
+    const clock = settings.timings === true ? ()=>performance.now() : ()=>0;
     /** Whether new x87 regions are compiled for the wide precision controls. */
     let wide = settings.wideFirst === true;
     /** How a region is formed, the same on this thread, in a batch and in a relink. */
@@ -381,6 +389,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const stalls = [];
     /** @param {string} what @param {number} since @param {number} [floorMs] */
     const noteStall = (what, since, floorMs = 5)=>{
+        if (settings.timings !== true)
+        {
+            return;
+        }
         const ms = performance.now() - since;
         if (ms < floorMs)
         {
@@ -749,6 +761,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         wide,
         structure: settings.structure,
         leaveOut,
+        timings: settings.timings === true,
         ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
     });
 
@@ -775,7 +788,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @returns {WebAssembly.Instance | null}
      */
     const instantiate = module=>{
-        const instantiateAt = performance.now();
+        const instantiateAt = clock();
         try
         {
             const compiled = module instanceof WebAssembly.Module
@@ -798,7 +811,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
         finally
         {
-            counts.instantiateMs += performance.now() - instantiateAt;
+            counts.instantiateMs += clock() - instantiateAt;
         }
     };
 
@@ -838,7 +851,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         const { region } = one;
         inFlight.delete(keyOf(region.entry, one.entryTop));
         const eip = region.entry;
-        const publishAt = performance.now();
+        const publishAt = clock();
         // A wide x87 region built before single precision was seen would
         // only leave at once: its bytes are translated again with the rounding.
         // So would one built to test the stack's shape once its test had failed.
@@ -846,7 +859,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             || (one.checked !== true && checkedAt(region, one.entryTop)))
         {
             // A page of it was written while the batch was built.
-            counts.publishMs += performance.now() - publishAt;
+            counts.publishMs += clock() - publishAt;
             counts.dropped++;
             return 0;
         }
@@ -861,7 +874,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         {
             // Every block leaves at once (an instruction the other executor's
             // first): nothing to enter, nothing to keep.
-            counts.publishMs += performance.now() - publishAt;
+            counts.publishMs += clock() - publishAt;
             barrenAdd(eip, top);
             return 0;
         }
@@ -932,7 +945,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             set.add(record);
         }
         regions.add(record);
-        counts.publishMs += performance.now() - publishAt;
+        counts.publishMs += clock() - publishAt;
         return 1;
     };
 
@@ -991,7 +1004,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         let key;
         if (store !== null)
         {
-            const storeAt = performance.now();
+            const storeAt = clock();
             key = moduleKey({ version: CACHE_VERSION, features: found, layoutId: layout.id,
                 bundleId: settings.bundleId ?? 'unknown' }, batch.module);
             store.put(key, packRegion({ module: batch.module, labels: [], cut: [], entryTop: 0,
@@ -1000,7 +1013,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 batchInstances.set(key, instance);
             }
-            counts.storeMs += performance.now() - storeAt;
+            counts.storeMs += clock() - storeAt;
         }
         let published = 0;
         for (let i = 0; i < metas.length; i++)
@@ -1013,11 +1026,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             foldTranslation(result.region);
             if (store !== null)
             {
-                const storeAt = performance.now();
+                const storeAt = clock();
                 trace(storeTrace.put, metas[i]);
                 store.put(regionKey(metas[i]), packRegion({ ...result.region,
                     module: new Uint8Array(0), moduleKey: key })).catch(()=>{});
-                counts.storeMs += performance.now() - storeAt;
+                counts.storeMs += clock() - storeAt;
             }
             if (instance !== null)
             {
@@ -1189,7 +1202,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return;
         }
         counts.workerMs += data.batch.emitMs + data.batch.encodeMs;
-        const publishedAt = performance.now();
+        const publishedAt = clock();
         if (pending.relink)
         {
             applyRelink(pending.relink, data.batch, data.compiled ?? null, pending.store);
@@ -1568,7 +1581,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
              *     stamp: string, cached: import('./cache.js').CachedRegion | null, wide?: boolean,
              *     checked?: boolean, moduleBytes?: Uint8Array | null }[]} */
             const formed = [];
-            const formedAt = performance.now();
+            const formedAt = clock();
             // The block starts of the regions this batch formed with no x87 in
             // them, each an entry at any top once published: a candidate among
             // them is already translated by one (a loop's head and its cases
@@ -1635,7 +1648,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     }
                 }
             }
-            counts.formingMs += performance.now() - formedAt;
+            counts.formingMs += clock() - formedAt;
             if (store === null)
             {
                 return finishBatch(formed, null);
@@ -1645,7 +1658,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // when the bytes are back -- between frames, as instantiation
             // already is -- and a region not back is not published this frame.
             // `lookupMs` is the engine thread's own time to start them.
-            const lookupAt = performance.now();
+            const lookupAt = clock();
             storePending = true;
             // A batch module's bytes are read once for every record naming it.
             /** @type {Map<string, Promise<Uint8Array | null>>} */
@@ -1705,7 +1718,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 storePending = false;
                 finishBatch(formed, store);
             });
-            counts.lookupMs += performance.now() - lookupAt;
+            counts.lookupMs += clock() - lookupAt;
             return 0;
         },
         invalidatePage,

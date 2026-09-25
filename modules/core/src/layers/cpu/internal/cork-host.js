@@ -213,6 +213,11 @@ export function createCorkHost(config){
     // host was made, monotonic, at the scale the emulator's counter has.
     const tscBase = performance.now();
     const readTsc = ()=>BigInt(Math.floor((performance.now() - tscBase) * 1e6));
+    // A slow slice's account of itself reads the clock around every range the
+    // interpreter runs -- a tenth of a crossing's cost -- so only a run that
+    // asked for the translator's timings keeps one.
+    const timings = corkConfig?.timings === true;
+    const clock = timings ? ()=>performance.now() : ()=>0;
 
     const runtime = createEngine({
         memory,
@@ -515,7 +520,7 @@ export function createCorkHost(config){
      * @returns {number}
      */
     const runSlice = maxInstructions=>{
-        const sliceAt = performance.now();
+        const sliceAt = clock();
         stopped = false;
         feedDue = false;
         // A slice is the clock's tick. On the emulator a `hlt` holds the
@@ -553,9 +558,9 @@ export function createCorkHost(config){
                 translateDue = false;
                 notedSinceFeed = false;
                 retiredAtFeed = interpreter?.retired ?? 0;
-                const formAt = performance.now();
+                const formAt = clock();
                 runtime.translatePending().catch(()=>{});
-                formMs += performance.now() - formAt;
+                formMs += clock() - formAt;
             }
             const at = eip();
             const entry = runtime.entryOf(at, x87Top());
@@ -604,9 +609,9 @@ export function createCorkHost(config){
                 }
                 continue;
             }
-            const interpretAt = performance.now();
+            const interpretAt = clock();
             const stepped = interpretRange(at, remaining, false, jumpedIn);
-            interpretMs += performance.now() - interpretAt;
+            interpretMs += clock() - interpretAt;
             interpreted += stepped;
             jumpedIn = false;
             remaining -= stepped;
@@ -630,9 +635,12 @@ export function createCorkHost(config){
             halted });
         // A slice is a few milliseconds; one of twenty holds a timer's thread,
         // and says what it spent them on.
-        runtime.noteStall?.(`slice i${interpreted}/${Math.round(interpretMs)}ms`
-            + ` f${Math.round(formMs)}ms t${ran - interpreted} h${trapCrossings - trapsBefore}`,
-        sliceAt, 20);
+        if (timings)
+        {
+            runtime.noteStall?.(`slice i${interpreted}/${Math.round(interpretMs)}ms`
+                + ` f${Math.round(formMs)}ms t${ran - interpreted} h${trapCrossings - trapsBefore}`,
+            sliceAt, 20);
+        }
         if (recent.length > RECENT)
         {
             recent.shift();

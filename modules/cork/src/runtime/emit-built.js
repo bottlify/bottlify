@@ -67,11 +67,13 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
- *     blockProfile?: boolean,
+ *     blockProfile?: boolean, timings?: boolean,
  *     leaveOut?: Set<string> | string[], wide?: boolean, structure?: boolean }} [options]
+ *     timings: `emitMs` and `encodeMs` are measured (the runtime's `timings`), else 0
  * @returns {BuiltBatch}
  */
 export function emitBatch(jobs, layout, features, options = {}){
+    const clock = options.timings === true ? ()=>performance.now() : ()=>0;
     const leaveOut = options.leaveOut instanceof Set
         ? options.leaveOut
         : new Set(options.leaveOut ?? []);
@@ -86,7 +88,7 @@ export function emitBatch(jobs, layout, features, options = {}){
         leaveOut,
         ...(options.trapPort === undefined ? {} : { trapPort: options.trapPort }),
     });
-    const emitAt = performance.now();
+    const emitAt = clock();
     /** @type {BuiltBatch['results']} */
     const results = jobs.map(({ region, entryTop, checked }, index)=>{
         try
@@ -116,9 +118,9 @@ export function emitBatch(jobs, layout, features, options = {}){
                 message: (e instanceof Error ? e.message : String(e)).slice(0, 160) };
         }
     });
-    const encodedAt = performance.now();
+    const encodedAt = clock();
     const module = m.toBytes();
-    return { module, results, emitMs: encodedAt - emitAt, encodeMs: performance.now() - encodedAt };
+    return { module, results, emitMs: encodedAt - emitAt, encodeMs: clock() - encodedAt };
 }
 
 /**

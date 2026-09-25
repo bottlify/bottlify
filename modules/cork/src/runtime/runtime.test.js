@@ -171,7 +171,7 @@ test('a forced step is counted in the diagnostics', ()=>{
 });
 
 test('a hot address becomes a region after translatePending, and runs under a budget', async()=>{
-    const m = machine();
+    const m = machine({ timings: true });
     m.write(CODE, COUNTDOWN);
     m.setReg(4, 0x80000);
     assert.equal(m.runtime.entryOf(CODE), -1);
@@ -209,6 +209,34 @@ test('a hot address becomes a region after translatePending, and runs under a bu
     assert.equal(d.exits.halt, 1);
     assert.equal(d.translatedShare, 1, 'everything retired so far was in cork');
     assert.ok(d.translateMs > 0 && d.moduleBytes > 100, 'the cost of translating is reported');
+});
+
+test('the translator reads the clock for its own account only when asked (timings)', async()=>{
+    // A shipped build leaves the timings off: its milliseconds stay 0 and no
+    // long hold is recorded. A diagnostic run asks for both.
+    for (const timings of [false, true])
+    {
+        const m = machine({ timings });
+        m.write(CODE, COUNTDOWN);
+        m.runtime.noteHot(CODE);
+        assert.equal(await m.runtime.translatePending(), 1);
+        m.runtime.noteStall?.('held', 0, 0);
+        const d = /** @type {any} */ (m.runtime.diagnostics());
+        if (timings)
+        {
+            assert.ok(d.formingMs > 0 && d.emitMs > 0 && d.translateMs > 0, JSON.stringify(d));
+            assert.deepEqual(d.stalls.map((/** @type {{ what: string }} */ one)=>one.what), ['held']);
+        }
+        else
+        {
+            for (const key of ['translateMs', 'formingMs', 'lookupMs', 'emitMs', 'encodeMs',
+                'storeMs', 'instantiateMs', 'publishMs', 'workerMs'])
+            {
+                assert.equal(d[key], 0, key);
+            }
+            assert.deepEqual(d.stalls, []);
+        }
+    }
 });
 
 test('two regions land in one batch, in one module, and both run; an entry is asked by'
