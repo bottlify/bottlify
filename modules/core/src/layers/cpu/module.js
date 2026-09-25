@@ -855,23 +855,6 @@ export const cpuModule = {
             },
 
             /**
-             * Gives the running thread the floating-point environment a thread
-             * starts with (`freshThreadFpu`): the process's first thread, before
-             * its first instruction, starts as every thread it creates does.
-             */
-            freshFpu(){
-                const context = captureCurrentContext();
-                freshThreadFpu(context);
-                const host = started();
-                if (typeof host.restoreContext === 'function')
-                {
-                    host.restoreContext(context);
-                    return;
-                }
-                restoreContext(host.cpu(), context);
-            },
-
-            /**
              * A context for a thread that has not run yet: the current CPU state
              * as a template -- segments and the rest of the process environment
              * -- positioned at its own entry point and stack, with the
