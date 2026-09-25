@@ -47,13 +47,20 @@ const F64 = Object.freeze({
  * @typedef {import('../decode/decoder.js').Operand} Operand
  */
 
-/** A lane-0 mask: the low four bytes set. */
 /** The processor's default NaN in every lane: sign set, quiet bit set. */
 const DEFAULT_NAN_32 = [0, 0, 0xc0, 0xff, 0, 0, 0xc0, 0xff, 0, 0, 0xc0, 0xff, 0, 0, 0xc0, 0xff];
 const DEFAULT_NAN_64 = [0, 0, 0, 0, 0, 0, 0xf8, 0xff, 0, 0, 0, 0, 0, 0, 0xf8, 0xff];
-const LANE0_32 = [0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 /** A lane-0 mask: the low eight bytes set. */
 const LANE0_64 = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0];
+/**
+ * The shuffles that take the low dword (qword) of their first operand and the rest of
+ * their second: a scalar form's merge into its destination, one blend where the mask
+ * constant and a bitselect were four operations and a constant built in registers. The
+ * operation itself stays packed: TurboFan swaps a scalar add's or multiply's operands,
+ * and the NaN kept when both are NaNs would be the source's rather than the destination's.
+ */
+const LOW_LANE_32 = [0, 1, 2, 3, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31];
+const LOW_LANE_64 = [0, 1, 2, 3, 4, 5, 6, 7, 24, 25, 26, 27, 28, 29, 30, 31];
 
 /** @param {number[]} bytes @returns {number[]} a 16-byte pattern */
 const pattern = bytes=>bytes;
@@ -148,8 +155,7 @@ function emitForm(e, instruction, flagsLive){
                 // The low lane from the source, the rest kept.
                 readV(e, src, 16);
                 readV(e, dst, 16);
-                constant(width === 4 ? LANE0_32 : LANE0_64);
-                simd(SIMD.bitselect);
+                shuffle(width === 4 ? LOW_LANE_32 : LOW_LANE_64);
                 writeV(e, dst, null);
                 return true;
             }
@@ -1176,8 +1182,7 @@ function binary(e, dst, src, operation, scalar, floatWidth = 0){
     if (scalar)
     {
         readV(e, dst, 16);
-        b.v128const(scalar === 4 ? LANE0_32 : LANE0_64);
-        b.simd(SIMD.bitselect);
+        b.op(0xfd, [SIMD.shuffle, ...(scalar === 4 ? LOW_LANE_32 : LOW_LANE_64)]);
     }
     writeV(e, dst, null);
 }
@@ -1204,8 +1209,7 @@ function unary(e, dst, src, operation, scalar, floatWidth = 0){
     if (scalar)
     {
         readV(e, dst, 16);
-        b.v128const(scalar === 4 ? LANE0_32 : LANE0_64);
-        b.simd(SIMD.bitselect);
+        b.op(0xfd, [SIMD.shuffle, ...(scalar === 4 ? LOW_LANE_32 : LOW_LANE_64)]);
     }
     writeV(e, dst, null);
 }

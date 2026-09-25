@@ -299,7 +299,14 @@ unchanged. What stays exact is every value, C0 C2 C3, the stack and its faults, 
 and rounding control; a precise module's code is the one before, byte for byte, but for the
 rounding below. The four rounding modes of an integer store and `frndint` are inline (nearest,
 then toward zero, down and up): a C cast compiled for the x87 sets truncation with `fldcw` around
-its `fistp`, and the helper it called spilled the registers around every conversion. The transcendentals (`fsin`, `fcos`, `fsincos`,
+its `fistp`, and the helper it called spilled the registers around every conversion. A scalar
+SSE form (`addss` .. `divsd`, `sqrtss`, `minss`, `cmpss`, `rcpss`, `movss` and `movsd` between
+registers) merges its low lane into the destination with one shuffle, a blend, where a mask
+constant and a bitselect were four operations with the constant built in registers every time;
+the operation stays packed, since TurboFan swaps a scalar add's or multiply's operands and the
+NaN kept when both are NaNs would be the source's, not the destination's: cork-bench's SSE
+transform loop 145.5 -> 126.4 us an iteration (1.15x; 128.0 -> 109.9 in a second run), the SSE
+entity update within noise. The transcendentals (`fsin`, `fcos`, `fsincos`,
 `fptan`, `fpatan`, `f2xm1`, `fyl2x`, `fyl2xp1`) go through the host's `Math`, imported by every
 translated module, as the emulator's do, so the two agree on one engine. `fnstenv` and
 `fnsave` write the protected-mode environment as the emulator does (the instruction and data
