@@ -610,6 +610,16 @@ export function x87Edge(e, targetIndex){
     const to = x.states[targetIndex];
     if (!to || x.cut.has(targetIndex))
     {
+        // A block with no tracked state -- cut, or reached with none -- reads
+        // register k from local k, on the machine's own top: the registers go
+        // back to their own locals first, or a permutation this block made
+        // (an fxch) is read there as the wrong registers. A call into a
+        // formed-in leaf that two call sites reach with different tops is
+        // such an edge.
+        if (x.current !== null)
+        {
+            x87MoveTo(e, { top: x.current.top, slot: [0, 1, 2, 3, 4, 5, 6, 7] });
+        }
         return true;
     }
     if (x.current !== null && to.top !== x.current.top)
