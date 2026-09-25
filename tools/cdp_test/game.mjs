@@ -18,6 +18,7 @@
  *
  *     node tools/cdp_test/game.mjs <bundle-id> [--turns N] [--wait SECONDS] [--run-seconds N]
  *                                  [--dump-draws] [--skip-texture tN] [--no-video] [--no-hooks]
+ *                                  [--keep-images N,M]
  *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
  *                                  [--command-line STRING]
  *                                  [--file HOST=GUEST] [--save-files]
@@ -251,6 +252,10 @@ function parse(argv){
         maxDraws: number('--max-draws', -1),
         // A texture id from a draws dump, e.g. "t4". Every draw sampling it is
         // dropped, so two runs differ by that draw and nothing else.
+        // Upload indices (as the report's imageDigests count them) whose
+        // texels are written beside the report as PNGs.
+        keepImages: argv.includes('--keep-images')
+            ? argv[argv.indexOf('--keep-images') + 1].split(',').map(Number) : [],
         skipTexture: argv.includes('--skip-texture')
             ? argv[argv.indexOf('--skip-texture') + 1]
             : null,
@@ -1119,6 +1124,7 @@ export async function game(options){
             profileCalls: options.profileCalls,
             maxDraws: options.maxDraws,
             skipTexture: options.skipTexture,
+            keepImages: options.keepImages,
             probeTexture: options.probeTexture,
             fog: options.fog,
             graphics: options.graphics,
@@ -1346,8 +1352,20 @@ export async function game(options){
         // The graphics layer's whole account as JSON beside the report: the
         // frame records, the presenter's copies by source, every counter --
         // what a black or a frozen picture is read from.
+        for (const kept of result.graphics?.keptImages ?? [])
+        {
+            const rgba = Buffer.from(kept.rgba, 'base64');
+            // toPng takes BGRA.
+            for (let at = 0; at < rgba.length; at += 4)
+            {
+                [rgba[at], rgba[at + 2]] = [rgba[at + 2], rgba[at]];
+            }
+            writeFileSync(join(REPORTS_DIR, `game-${stamp}-image-${kept.index}.png`),
+                toPng(kept.width, kept.height, rgba));
+        }
         if (result.graphics)
         {
+            delete result.graphics.keptImages;
             writeFileSync(join(REPORTS_DIR, `game-${stamp}-graphics.json`),
                 JSON.stringify(result.graphics, null, 1));
         }

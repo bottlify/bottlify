@@ -48,6 +48,15 @@ export const compressedDigest = { count: 0, bytes: 0, hash: 0x811c9dc5 };
  */
 export const imageDigests = [];
 
+/**
+ * The texels of chosen uploads, by their index in `imageDigests`: which ones
+ * a run asked for, and those it got. A digest says two images differ; this
+ * is what shows how.
+ * @type {{ at: Set<number>,
+ *     images: { index: number, width: number, height: number, texels: Uint8Array }[] }}
+ */
+export const keptImages = { at: new Set(), images: [] };
+
 /** @param {Uint8Array} bytes */
 const hashOf = bytes=>{
     let hash = 0x811c9dc5;
@@ -534,6 +543,11 @@ export function installTextureCalls(context, kernel){
         const texels = readPixels(pixels, width, height, format, type);
         if (texels instanceof Uint8Array && imageDigests.length < 4000)
         {
+            if (keptImages.at.has(imageDigests.length))
+            {
+                keptImages.images.push({ index: imageDigests.length, width, height,
+                    texels: texels.slice() });
+            }
             imageDigests.push(
                 `${target.toString(16)}:${level}:${width}x${height}:${hashOf(texels)}`);
         }

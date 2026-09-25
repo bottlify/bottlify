@@ -1357,6 +1357,7 @@ export function createHarness(canvas, how = {}){
                 // Fog off is the other half of a pair of runs: a wash that goes
                 // with it was fog, and one that stays was not.
                 probeTexture: request.probeTexture ?? null,
+                keepImages: request.keepImages ?? [],
                 fog: request.fog !== false,
                 mips: request.mips !== false,
                 /** @param {any} frame */
@@ -1534,6 +1535,7 @@ export function createHarness(canvas, how = {}){
             // count:bytes:hash of every compressed block handed to OpenGL.
             compressedTextures: graphics.seam?.compressedTextures ?? null,
             imageDigests: graphics.seam?.imageDigests ?? [],
+            keptImages: graphics.seam?.keptImages ?? [],
             libraries: graphics.libraries ?? [],
             // `lastFrame` is dropped: it is the recorded commands, kept for a test
             // that replays them here, and it holds backend objects and a uniform

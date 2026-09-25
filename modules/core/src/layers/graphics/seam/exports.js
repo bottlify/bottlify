@@ -367,6 +367,7 @@ export function createGraphicsLibraries(
             // Every compressed block the program handed OpenGL, as a digest.
             compressedTextures: opengl ? opengl.diagnostics().compressed : null,
             imageDigests: opengl ? opengl.diagnostics().images : [],
+            keptImages: opengl ? opengl.diagnostics().kept : [],
             vulkan: vulkan.diagnostics(),
         }),
 
