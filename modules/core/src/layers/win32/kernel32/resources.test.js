@@ -68,7 +68,7 @@ test('FindResourceExA is FindResource with the type and name swapped in order', 
     assert.notEqual(found, 0);
     assert.deepEqual(asked.at(-1), { instance: 0, type: RT_BITMAP, name: 101, language: 0x409 },
         'the language asked for is the language looked up');
-    assert.equal(fns.LockResource.handler([found]), 0x00402000,
+    assert.equal(fns.LoadResource.handler([0, found]), 0x00402000,
         'and it lands where FindResourceA would');
     assert.equal(fns.FindResourceExA.argBytes, 16, 'four arguments, so the stack stays whole');
     assert.equal(fns.FindResourceExA.handler([0, RT_BITMAP, 999, 0]), 0);
@@ -91,20 +91,34 @@ test('a found resource can be sized and locked, and a missing one cannot', ()=>{
     assert.notEqual(found, 0);
 
     assert.equal(fns.SizeofResource.handler([0, found]), 1234);
-    // LockResource is arithmetic: the bytes came in with the image and have not
+    // LoadResource is arithmetic: the bytes came in with the image and have not
     // moved, so this is the module base plus the resource RVA.
-    assert.equal(fns.LoadResource.handler([0, found]), found);
-    assert.equal(fns.LockResource.handler([found]), 0x00402000);
+    assert.equal(fns.LoadResource.handler([0, found]), 0x00402000);
+    assert.equal(fns.LockResource.handler([0x00402000]), 0x00402000);
     assert.equal(fns.FreeResource.handler(), 1);
 
     assert.equal(fns.FindResourceA.handler([0, 999, RT_BITMAP]), 0);
     assert.ok(errors.length > 0, 'and the failure is reported through the error slot');
 });
 
+test('LoadResource answers the address of the data, and LockResource hands back its argument', ()=>{
+    // A program that skips LockResource and reads straight through what
+    // LoadResource returned is relying on Win32, not on a quirk: the HGLOBAL is
+    // the pointer. So is one that locks a handle it never got from us.
+    const { fns } = setup();
+    const found = fns.FindResourceA.handler([0, 101, RT_BITMAP]);
+    const loaded = fns.LoadResource.handler([0, found]);
+
+    assert.equal(loaded, 0x00402000, 'module base plus the resource RVA');
+    assert.equal(fns.LockResource.handler([loaded]), loaded);
+    assert.equal(fns.LockResource.handler([0x00350000]), 0x00350000);
+    assert.equal(fns.LoadResource.handler([0, 0]), 0, 'no HRSRC, nothing loaded');
+});
+
 test('a handle nobody was given is not a resource', ()=>{
     const { fns } = setup();
     assert.equal(fns.SizeofResource.handler([0, 0x1234]), 0);
-    assert.equal(fns.LockResource.handler([0x1234]), 0);
+    assert.equal(fns.LoadResource.handler([0, 0x1234]), 0);
 });
 
 test('FindResourceExA takes the type before the name, and the language after both', ()=>{
