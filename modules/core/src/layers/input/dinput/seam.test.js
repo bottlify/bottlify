@@ -13,9 +13,9 @@ import {
     createDirectInput, createPublisher, describe,
     DI_OK, DI_BUFFEROVERFLOW, DIENUM_STOP,
     GUID_SysKeyboard, GUID_SysMouse,
-    IID_IDirectInputA, IID_IDirectInput7A,
-    IID_IDirectInput8A, IID_IDirectInput8W, IID_IDirectInputDeviceA,
-    IID_IDirectInputDevice2A, IID_IDirectInputDevice8A,
+    IID_IDirectInputA, IID_IDirectInputW, IID_IDirectInput7A,
+    IID_IDirectInput8A, IID_IDirectInput8W, IID_IDirectInputDeviceA, IID_IDirectInputDeviceW,
+    IID_IDirectInputDevice2A, IID_IDirectInputDevice8A, IID_IDirectInputDevice8W,
     IDIRECTINPUT_SLOTS, IDIRECTINPUT7_SLOTS, IDIRECTINPUT8_SLOTS,
     IDIRECTINPUTDEVICE_SLOTS, IDIRECTINPUTDEVICE2_SLOTS, IDIRECTINPUTDEVICE8_SLOTS,
     DIDEVICEOBJECTDATA, DIDEVICEINSTANCE, DIPROPDWORD_DATA, DIPROP_BUFFERSIZE, DIDEVCAPS,
@@ -323,6 +323,30 @@ test('CreateDevice refuses a GUID that names no device it has', ()=>{
     assert.equal(f.bridge.call(f.root, 'CreateDevice', [AT.guid, AT.out, 0]),
         DIERR_DEVICENOTREG);
     assert.equal(f.memory.u32(AT.out), 0, 'and zeroes the pointer it refused to fill');
+});
+
+test('CreateDevice hands back the device interface its root is declared with', ()=>{
+    // dinput.h: IDirectInput8A::CreateDevice fills an LPDIRECTINPUTDEVICE8A,
+    // each earlier root an LPDIRECTINPUTDEVICEA, and a W root the W of either.
+    const f = fixture();
+    const adapter = f.bridge.recordAt(f.root).object;
+    const rootW = f.bridge.publishInterface(adapter, IID_IDirectInputW);
+    const root7 = f.bridge.publishInterface(adapter, IID_IDirectInput7A);
+    const cases = [
+        [f.root, IID_IDirectInputDeviceA, IDIRECTINPUTDEVICE_SLOTS],
+        [rootW, IID_IDirectInputDeviceW, IDIRECTINPUTDEVICE_SLOTS],
+        [root7, IID_IDirectInputDeviceA, IDIRECTINPUTDEVICE_SLOTS],
+        [directInput8(f, false), IID_IDirectInputDevice8A, IDIRECTINPUTDEVICE8_SLOTS],
+        [directInput8(f, true), IID_IDirectInputDevice8W, IDIRECTINPUTDEVICE8_SLOTS],
+    ];
+    for (const [root, id, slots] of /** @type {[number, string, any[]][]} */ (cases))
+    {
+        writeGuid(f.memory, AT.guid, GUID_SysMouse);
+        assert.equal(f.bridge.call(root, 'CreateDevice', [AT.guid, AT.out, 0]), DI_OK);
+        const pointer = f.memory.u32(AT.out);
+        assert.equal(f.bridge.recordAt(pointer).id, id);
+        assert.equal(f.bridge.methodsOf(pointer).length, 3 + slots.length, id);
+    }
 });
 
 test('CreateDeviceEx hands back the interface the caller named', ()=>{
@@ -900,6 +924,25 @@ test('a method reaches the arguments the guest pushed, at the offsets it pushed 
     assert.equal(g.call(device, slotOf(IDIRECTINPUTDEVICE_SLOTS, 'GetDeviceState'),
         [256, AT.state]), DI_OK);
     assert.equal(g.memory.bytes[AT.state + DIK_A], KEY_DOWN);
+});
+
+test('a device made by IDirectInput8 answers Poll from its own slot', ()=>{
+    const g = guestMachine();
+    writeGuid(g.memory, AT.iid, IID_IDirectInput8A);
+    assert.equal(g.dinput.libraries['DINPUT8.dll']
+        .DirectInput8Create.handler([0, 0x0800, AT.iid, AT.out, 0]), DI_OK);
+    const root = g.memory.u32(AT.out);
+    writeGuid(g.memory, AT.guid, GUID_SysMouse);
+    assert.equal(g.call(root, slotOf(IDIRECTINPUT8_SLOTS, 'CreateDevice'),
+        [AT.guid, AT.out, 0]), DI_OK);
+    const device = g.memory.u32(AT.out);
+    assert.equal(g.call(device, slotOf(IDIRECTINPUTDEVICE8_SLOTS, 'SetDataFormat'),
+        [dataFormat(g.memory, 16)]), DI_OK);
+    assert.equal(g.call(device, slotOf(IDIRECTINPUTDEVICE8_SLOTS, 'Acquire')), DI_OK);
+    // Slot 25, ten past the end of an IDirectInputDevice's table: a program
+    // holding what IDirectInput8 promised calls it without asking for it.
+    assert.equal(slotOf(IDIRECTINPUTDEVICE8_SLOTS, 'Poll'), 25);
+    assert.equal(g.call(device, 25), DI_OK);
 });
 
 test('diagnostics report what a run actually did', ()=>{

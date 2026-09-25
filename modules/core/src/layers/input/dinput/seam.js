@@ -793,8 +793,19 @@ export function createDirectInput(
 
     /** @type {Record<string, (target: any, args: number[], descriptor?: any) => any>} */
     const rootMethods = {
-        /** HRESULT CreateDevice(REFGUID, LPDIRECTINPUTDEVICE*, LPUNKNOWN) */
-        CreateDevice(root, [guid, out]){
+        /**
+         * HRESULT CreateDevice(REFGUID, LPDIRECTINPUTDEVICE*, LPUNKNOWN)
+         *
+         * What comes back is the device interface the root is declared with:
+         * IDirectInputDevice8 from IDirectInput8, IDirectInputDevice from
+         * every earlier root, each in the root's width. A program holding an
+         * IDirectInput8 calls Poll at slot 25 of what it is given without
+         * asking for anything, so the shorter table is a call past its end.
+         *
+         * @param {any} root @param {number[]} args
+         * @param {{ wide?: boolean, legacy?: boolean }} [descriptor]
+         */
+        CreateDevice(root, [guid, out], descriptor){
             if ((out >>> 0) === 0 || (guid >>> 0) === 0)
             {
                 return DIERR_INVALIDPARAM;
@@ -805,8 +816,11 @@ export function createDirectInput(
                 writeU32(out, 0);
                 return DIERR_DEVICENOTREG;
             }
-            writeU32(out, publisher.publish(
-                device, deviceInterfaces(), IID_IDirectInputDeviceA));
+            const wide = descriptor?.wide === true;
+            const id = descriptor?.legacy === false
+                ? (wide ? IID_IDirectInputDevice8W : IID_IDirectInputDevice8A)
+                : (wide ? IID_IDirectInputDeviceW : IID_IDirectInputDeviceA);
+            writeU32(out, publisher.publish(device, deviceInterfaces(), id));
             return DI_OK;
         },
 
