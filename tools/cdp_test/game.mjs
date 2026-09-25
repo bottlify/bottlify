@@ -506,6 +506,10 @@ function describeCork(cork, say){
         // layer's staleAt, the stall a repeated sound sat through.
         say(`    stalls: ${cork.stalls.map((/** @type {any} */ s)=>`${s.what}@${s.at}+${s.ms}`).join(' ')}`);
     }
+    if (cork.staleAt?.length)
+    {
+        say(`    repeated sound at: ${cork.staleAt.join(' ')}`);
+    }
     const exits = cork.exits ?? {};
     say(`    exits: ${Object.entries(exits).map(([kind, count])=>`${kind}=${count}`).join(' ')}`
         + (cork.transfers ? `  transfers through the hash: ${cork.transfers}` : ''));
@@ -603,7 +607,7 @@ function describe(result, context, calls, symbols){
 
     if (result.cork)
     {
-        describeCork(result.cork, say);
+        describeCork({ ...result.cork, staleAt: result.staleAt }, say);
         say('');
     }
 
