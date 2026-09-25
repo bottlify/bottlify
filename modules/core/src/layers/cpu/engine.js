@@ -139,6 +139,9 @@
  * @property {string} [bundleId]         The cache's namespace.
  * @property {boolean} [translate]       Test-only: false keeps the translator off, so a run
  *     is the interpreter tier's alone. Default true.
+ * @property {boolean} [precise]         Translated code leaves what the emulator leaves even
+ *     where no program can tell (the flags an instruction leaves undefined), as the hardware
+ *     corpus is judged. Default false: there, what the cheapest code leaves.
  */
 
 /**
@@ -215,6 +218,9 @@
  * @property {{ address: number, count: number, reason: string }[]} exitsByTarget
  *     The top untranslated-exit targets and why each has no entry.
  * @property {Record<string, number>} refused  Opcode ("0f 2e", "f3 0f 10") → times met.
+ * @property {Record<string, number>} [relaxedFlagReads]  Opcode → translated instructions that
+ *     read a flag an instruction before them in their block left undefined, which without
+ *     `precise` holds whatever the cheapest code left there.
  * @property {number} forcedSteps      Turns that retired nothing and were forced to interpret one
  *     instruction, so no slice of translated-plus-interpreted code stops moving.
  * @property {number} translateMs      Milliseconds spent translating: the sum of the seven

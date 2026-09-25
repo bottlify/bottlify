@@ -359,6 +359,101 @@ test('inc keeps the carry for an adc in the next block', ()=>{
     assert.equal(m.reg('ebx'), 1, 'the carry stc set, through the inc');
 });
 
+test('a record no later block reads is not folded, with the backward jumps through the dispatch',
+    ()=>{
+        // mov ecx, 5; L: add eax, 3; stc; jmp M; M: sub ecx, 1; jnz L; hlt -- the sub
+        // writes every flag before anything reads one, so neither the stc nor the add
+        // before it is computed, and the stc's partial write folds nothing.
+        const program = [0xb9, 5, 0, 0, 0, 0x83, 0xc0, 0x03, 0xf9, 0xeb, 0x00,
+            0x83, 0xe9, 0x01, 0x75, 0xf5, 0xf4];
+        for (const precise of [false, true])
+        {
+            const m = createTestMachine({ precise });
+            m.write(CODE, program);
+            const unit = m.translate(CODE);
+            assert.equal(unit.translation.folds, 0, `no fold (precise: ${precise})`);
+            assert.equal(unit.run(CODE, 1000).kind, Exit.HALT);
+            assert.equal(m.reg('eax'), 15);
+            assert.equal(m.reg('ecx'), 0);
+        }
+    });
+
+test('a spent budget on a jump back leaves the flags its target reads', ()=>{
+    // mov ecx, 6; clc; H: jnc S; add eax, 100; S: add eax, 1; cmp ecx, 4; dec ecx;
+    // jnz H; hlt -- the head reads the CF the cmp left through the dec, across the
+    // jump back, which leaves there whenever the budget is spent.
+    const program = [0xb9, 6, 0, 0, 0, 0xf8, 0x73, 0x03, 0x83, 0xc0, 0x64, 0x83, 0xc0, 0x01,
+        0x83, 0xf9, 0x04, 0x49, 0x75, 0xf2, 0xf4];
+    for (const precise of [false, true])
+    {
+        for (let budget = 1; budget <= 30; budget++)
+        {
+            const m = createTestMachine({ precise });
+            m.write(CODE, program);
+            const unit = m.translate(CODE);
+            let exit = unit.run(CODE, budget);
+            for (let runs = 0; exit.kind === Exit.BUDGET && runs < 100; runs++)
+            {
+                exit = unit.run(m.eip(), budget);
+            }
+            assert.equal(exit.kind, Exit.HALT);
+            assert.equal(m.reg('eax'), 206, `budget ${budget} (precise: ${precise})`);
+            assert.equal(m.counter(), 35);
+        }
+    }
+});
+
+test('the fast default leaves an undefined flag as the cheapest code does, and every defined one',
+    ()=>{
+        // An FNV-1a loop: L: inc edx; xor ecx, eax; movzx eax, byte [edx];
+        // imul ecx, ecx, 0x1000193; test al, al; jnz L; hlt. The imul leaves SF, ZF, AF
+        // and PF undefined and the test does not define AF: exactly, the xor's record
+        // stays alive through both and the imul folds it every turn; in the fast default
+        // nothing reads a flag the two define, and no record is folded.
+        const loop = [0xba, ...u32(DATA - 1), 0xb9, ...u32(0x811c9dc5), 0x31, 0xc0,
+            0x42, 0x31, 0xc1, 0x0f, 0xb6, 0x02, 0x69, 0xc9, ...u32(0x1000193), 0x84, 0xc0,
+            0x75, 0xf0, 0xf4];
+        /** @param {boolean} precise */
+        const hashOf = precise=>{
+            const m = createTestMachine({ precise });
+            m.write(CODE, loop);
+            m.write(DATA, [...'textures/wall_7919'].map(c=>c.charCodeAt(0)).concat([0]));
+            const unit = m.translate(CODE);
+            assert.equal(unit.run(CODE, 10_000).kind, Exit.HALT);
+            // test al, al of a zero: ZF and PF set, CF, OF and SF clear.
+            assert.equal(m.eflags() & 0x8c5, 0x44,
+                `the flags the test defines (precise: ${precise})`);
+            return { hash: m.reg('ecx'), folds: unit.translation.folds };
+        };
+        const fast = hashOf(false);
+        const exact = hashOf(true);
+        assert.equal(fast.hash, exact.hash);
+        assert.equal(fast.folds, 0);
+        assert.ok(exact.folds > 0, 'the precise loop folds the xor for the imul');
+
+        // cmp eax, eax; bt ebx, 0; setz cl; mov eax, 0x40000000; imul eax, eax, 4;
+        // seto dl; setc dh; hlt -- bt leaves ZF alone and defines CF, imul defines CF
+        // and OF: the fast default keeps all three.
+        const m = createTestMachine();
+        m.write(CODE, [0x39, 0xc0, 0x0f, 0xa3, 0xc3, 0x0f, 0x94, 0xc1,
+            0xb8, ...u32(0x40000000), 0x6b, 0xc0, 0x04, 0x0f, 0x90, 0xc2, 0x0f, 0x92, 0xc6, 0xf4]);
+        m.setReg('ebx', 0);
+        assert.equal(m.translate(CODE).run(CODE, 1000).kind, Exit.HALT);
+        assert.equal(m.reg('ecx') & 0xff, 1, 'ZF of the cmp, through the bt');
+        assert.equal(m.reg('edx') & 0xffff, 0x0101, 'OF and CF of the imul');
+
+        // imul eax, eax, 3; pushf; pop edx; hlt -- the pushf reads the flags the imul
+        // left undefined, which the translation counts outside `precise`.
+        for (const precise of [false, true])
+        {
+            const n = createTestMachine({ precise });
+            n.write(CODE, [0x6b, 0xc0, 0x03, 0x9c, 0x5a, 0xf4]);
+            n.setReg('esp', 0x80000);
+            const unit = n.translate(CODE);
+            assert.deepEqual([...unit.translation.relaxedReads.keys()], precise ? [] : ['9c']);
+        }
+    });
+
 test('loops that overlap are widened until they nest', ()=>{
     /** @param {number} start @param {string} kind @param {number[]} targets @param {number} next */
     const block = (start, kind, targets, next)=>/** @type {any} */ ({

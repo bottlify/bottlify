@@ -107,6 +107,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // a frame (5.9 -> 10.1 ms) while it made play 3% faster, and the cause
         // is not yet known.
         structure: false,
+        // Exact where no program can tell: off, what translated code leaves in a
+        // place that is architecturally undefined (the flags an instruction leaves
+        // undefined) is what the cheapest code leaves there. On, it is what the
+        // emulator leaves, as the hardware corpus is judged.
+        precise: false,
         // Diagnostic: the host clock read around the translator's phases -- the
         // milliseconds of forming, lookups, emitting, encoding, storing,
         // instantiating and publishing, and the record of long holds. Off, as a
@@ -415,6 +420,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const refused = {};
     /** @type {Record<string, number>} why an instruction was left out, with its block */
     const refusedWhy = {};
+    /** By opcode, translated instructions that read a flag the fast default left undefined.
+     * @type {Record<string, number>} */
+    const relaxedFlagReads = {};
     let corkRetired = 0;
     // Turns the host retired nothing in and forced one interpreted
     // instruction through, so a slice always moves (the progress guarantee).
@@ -705,14 +713,21 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         hash: table !== null,
         wide,
         structure: settings.structure,
+        precise: settings.precise === true,
         leaveOut,
         timings: import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.timings === true,
         ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
     });
 
-    /** Folds what the emitter left out into the run's refusal maps.
-     * @param {{ unsupported?: [string, number][], refusals?: [string, number][] }} built */
+    /** Folds what the emitter left out into the run's refusal maps, and the reads of
+     * flags the fast default leaves undefined into their count.
+     * @param {{ unsupported?: [string, number][], refusals?: [string, number][],
+     *     relaxedReads?: [string, number][] }} built */
     const foldTranslation = built=>{
+        for (const [opcode, times] of built.relaxedReads ?? [])
+        {
+            relaxedFlagReads[opcode] = (relaxedFlagReads[opcode] ?? 0) + times;
+        }
         for (const [opcode, times] of built.unsupported ?? [])
         {
             refused[opcode] = (refused[opcode] ?? 0) + times;
@@ -915,7 +930,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const regionKey = one=>cacheKey({
         version: CACHE_VERSION, features: found, layoutId: layout.id,
         bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
-        hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}${one.checked ? '-c' : ''}`,
+        hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}${one.checked ? '-c' : ''}`
+            + (settings.precise === true ? '-p' : ''),
     });
 
     /**
@@ -1749,6 +1765,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     .map(([address, { count }])=>({ address, count, reason: missReason(address) })),
                 refused: { ...refused },
                 refusedWhy: { ...refusedWhy },
+                // Where a program reads what `precise: false` leaves: a title that
+                // misbehaves only without `precise` is looked for here first.
+                relaxedFlagReads: { ...relaxedFlagReads },
                 forcedSteps,
                 handoffMisses: 0,
             };

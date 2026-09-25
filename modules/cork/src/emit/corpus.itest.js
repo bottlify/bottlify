@@ -53,7 +53,8 @@ test('translated code leaves what the hardware left, on every case it translates
         const started = Date.now();
         for (const one of selected)
         {
-            const m = createTestMachine({ ramSize: 2 << 20 });
+            // Judged against the hardware, so exact where the fast default is not.
+            const m = createTestMachine({ ramSize: 2 << 20, precise: true });
             for (const { address, bytes } of one.segments)
             {
                 m.write(address, bytes);

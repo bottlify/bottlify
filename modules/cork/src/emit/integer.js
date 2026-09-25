@@ -412,20 +412,37 @@ export function emitInstruction(e, instruction, flagsLive){
             b.localGet(Local.flags).i32const(0xd5).op(I32.and).i32const(2).op(I32.or);
             writeReg(e, 0, 1, true);
             return true;
+        // The four below write flags and nothing else, so with none of theirs read
+        // they emit nothing: a write of some flags folds the record into the word first.
         case 'sahf':
+            if (!flagsLive)
+            {
+                return true;
+            }
             e.eagerWrite(0xd5);
             b.localGet(Local.reg).i32const(8).op(I32.shrU).i32const(0xd5).op(I32.and)
                 .localGet(Local.flags).op(I32.or).localSet(Local.flags);
             return true;
         case 'clc':
-            e.eagerWrite(CF);
+            if (flagsLive)
+            {
+                e.eagerWrite(CF);
+            }
             return true;
         case 'stc':
+            if (!flagsLive)
+            {
+                return true;
+            }
             e.eagerWrite(CF);
             b.i32const(1);
             e.orFlag(CF);
             return true;
         case 'cmc':
+            if (!flagsLive)
+            {
+                return true;
+            }
             e.materialise();
             b.localGet(Local.flags).i32const(CF).op(I32.xor).localSet(Local.flags);
             return true;
@@ -540,16 +557,25 @@ export function emitInstruction(e, instruction, flagsLive){
         case 'jecxz':
             return true;
         case 'bt': case 'bts': case 'btr': case 'btc':
-            return bitTest(e, instruction);
+            return bitTest(e, instruction, flagsLive);
         case 'bsf': case 'bsr':
             prepare(e, src);
             readOp(e, src);
             b.localSet(Local.t1);
-            e.eagerWrite(ZF);
-            b.localGet(Local.t1).op(I32.eqz);
-            e.openIf('zero', EMPTY);
-            b.localGet(Local.flags).i32const(ZF).op(I32.or).localSet(Local.flags);
-            b.op(0x05); // else
+            if (flagsLive)
+            {
+                e.eagerWrite(ZF);
+                b.localGet(Local.t1).op(I32.eqz);
+                e.openIf('zero', EMPTY);
+                b.localGet(Local.flags).i32const(ZF).op(I32.or).localSet(Local.flags);
+                b.op(0x05); // else
+            }
+            else
+            {
+                // A zero source leaves the destination as it was.
+                b.localGet(Local.t1);
+                e.openIf('nonzero', EMPTY);
+            }
             writeOp(e, dst, ()=>{
                 b.localGet(Local.t1);
                 if (op === 'bsf')
@@ -1643,9 +1669,9 @@ function wideResult(e, size, pushValue){
  * immediate offset. A memory destination with a register offset addresses
  * beyond the operand and is left to the other executor for now.
  *
- * @param {E} e @param {Instruction} instruction
+ * @param {E} e @param {Instruction} instruction @param {boolean} flagsLive
  */
-function bitTest(e, instruction){
+function bitTest(e, instruction, flagsLive){
     const { b } = e;
     const { op, operands, size } = instruction;
     const [dst, offset] = operands;
@@ -1674,9 +1700,12 @@ function bitTest(e, instruction){
     }
     readOp(e, dst);
     b.localSet(Local.t1);
-    e.eagerWrite(CF);
-    b.localGet(Local.t1).localGet(Local.count).op(I32.shrU).i32const(1).op(I32.and);
-    e.orFlag(CF);
+    if (flagsLive)
+    {
+        e.eagerWrite(CF);
+        b.localGet(Local.t1).localGet(Local.count).op(I32.shrU).i32const(1).op(I32.and);
+        e.orFlag(CF);
+    }
     if (op !== 'bt')
     {
         writeOp(e, dst, ()=>{

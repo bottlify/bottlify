@@ -31,6 +31,7 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @property {number} instructions
  * @property {[string, number][]} unsupported
  * @property {[string, number][]} refusals
+ * @property {[string, number][]} relaxedReads
  * @property {number} emitMs       milliseconds the emitter took
  * @property {number} encodeMs     milliseconds `toBytes` took
  */
@@ -44,6 +45,7 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @property {number} instructions
  * @property {[string, number][]} unsupported
  * @property {[string, number][]} refusals
+ * @property {[string, number][]} relaxedReads
  */
 
 /**
@@ -68,7 +70,8 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
  *     blockProfile?: boolean, timings?: boolean,
- *     leaveOut?: Set<string> | string[], wide?: boolean, structure?: boolean }} [options]
+ *     leaveOut?: Set<string> | string[], wide?: boolean, structure?: boolean,
+ *     precise?: boolean }} [options]
  *     timings: `emitMs` and `encodeMs` are measured (the runtime's `timings`), else 0
  * @returns {BuiltBatch}
  */
@@ -86,6 +89,7 @@ export function emitBatch(jobs, layout, features, options = {}){
         blockProfile: options.blockProfile === true,
         wide: options.wide === true,
         structure: options.structure === true,
+        precise: options.precise === true,
         leaveOut,
         ...(options.trapPort === undefined ? {} : { trapPort: options.trapPort }),
     });
@@ -112,6 +116,7 @@ export function emitBatch(jobs, layout, features, options = {}){
                 instructions: translation.instructions,
                 unsupported: [...translation.unsupported],
                 refusals: [...translation.refusals],
+                relaxedReads: [...translation.relaxedReads],
             } };
         }
         catch (e){
