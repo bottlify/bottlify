@@ -271,6 +271,22 @@ test('the mouse buttons are virtual keys the key state reads', ()=>{
     assert.equal(h.router.keyState(VK_XBUTTON2), 0x8000);
 });
 
+test('SetKeyboardState is the logical state only: GetAsyncKeyState still reads the keys', ()=>{
+    // A table set with A down does not make A physically down, and one set
+    // with A up while A is held does not lift it.
+    const h = harness();
+    const table = new Uint8Array(256);
+    table[0x41] = 0x80;
+    h.router.setKeyboardState(table);
+    assert.equal(h.router.keyState(0x41), 0x8000, 'the logical state is what was set');
+    assert.equal(h.router.asyncKeyState(0x41) & 0x8000, 0, 'the key is not down');
+
+    h.send({ kind: 'key', code: 'KeyA', down: true });
+    h.router.setKeyboardState(new Uint8Array(256));
+    assert.equal(h.router.keyState(0x41), 0);
+    assert.equal(h.router.asyncKeyState(0x41) & 0x8000, 0x8000, 'and a held key stays held');
+});
+
 test('the async low bit is a press the next read clears', ()=>{
     const h = harness();
     h.send({ kind: 'key', code: 'KeyA', down: true });

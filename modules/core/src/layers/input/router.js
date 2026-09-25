@@ -175,8 +175,18 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
     const targetWindow = target ?? (()=>0);
     const composeCharacter = compose ?? (()=>{});
 
-    /** Virtual keys that are down. Indexed by VK, both the paired and the sided. */
+    /**
+     * Virtual keys that are down as the thread sees them: what GetKeyState
+     * and GetKeyboardState read, and what SetKeyboardState rewrites. Indexed
+     * by VK, both the paired and the sided.
+     */
     const keys = new Uint8Array(256);
+    /**
+     * Virtual keys that are physically down: what GetAsyncKeyState reads.
+     * SetKeyboardState leaves this alone -- a table that says A is down does
+     * not press A.
+     */
+    const physical = new Uint8Array(256);
     /**
      * Whether a toggle key is toggled on, the low bit GetKeyboardState and
      * GetKeyState report for CapsLock, NumLock and ScrollLock.
@@ -322,8 +332,8 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         if (event.down)
         {
             held.set(code, mapping);
-            keys[mapping.vk] = 1;
-            keys[mapping.vkSide] = 1;
+            keys[mapping.vk] = physical[mapping.vk] = 1;
+            keys[mapping.vkSide] = physical[mapping.vkSide] = 1;
             // A repeat is the same press still held, not a new one: the
             // async low bit is owed on the transition only.
             if (!wasDown)
@@ -339,10 +349,11 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         else
         {
             held.delete(code);
-            keys[mapping.vkSide] = 0;
+            keys[mapping.vkSide] = physical[mapping.vkSide] = 0;
             // A modifier is two keys and one virtual key: letting go of the
             // left shift while the right is down does not mean shift is up.
-            keys[mapping.vk] = [...held.values()].some(other=>other.vk === mapping.vk) ? 1 : 0;
+            keys[mapping.vk] = physical[mapping.vk] =
+                [...held.values()].some(other=>other.vk === mapping.vk) ? 1 : 0;
         }
 
         // ALT decides which of the two pairs of messages this is; F10 is a
@@ -489,16 +500,16 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         // GetAsyncKeyState and GetKeyboardState read.
         if (event.down)
         {
-            if (!keys[vk])
+            if (!physical[vk])
             {
                 pressedSinceRead[vk] = 1;
             }
-            keys[vk] = 1;
+            keys[vk] = physical[vk] = 1;
             pressed.add(String(event.button));
         }
         else
         {
-            keys[vk] = 0;
+            keys[vk] = physical[vk] = 0;
             pressed.delete(String(event.button));
         }
 
@@ -762,7 +773,7 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
          */
         asyncKeyState(vk){
             const index = vk & 0xff;
-            const answer = (keys[index] ? 0x8000 : 0) | (pressedSinceRead[index] ? 1 : 0);
+            const answer = (physical[index] ? 0x8000 : 0) | (pressedSinceRead[index] ? 1 : 0);
             pressedSinceRead[index] = 0;
             return answer;
         },
@@ -787,7 +798,8 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
 
         /**
          * Makes the 256-byte table the synchronous state: the down bits and
-         * the toggle bits in it become what GetKeyState answers.
+         * the toggle bits in it become what GetKeyState answers. The physical
+         * state GetAsyncKeyState reads is not the thread's to set.
          *
          * @param {Uint8Array} bytes
          */
