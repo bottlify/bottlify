@@ -61,6 +61,10 @@ test('the interpreter leaves what the hardware left, on every case it models',
             const view = new DataView(ram.buffer);
             /** @type {import('./ir.js').EvalState} */
             let state;
+            // The run being interpreted, so a store into it ends the run as
+            // `blockState`'s memory does: the cases run a run at a time.
+            let watchStart = 0;
+            let watchEnd = 0;
             const memory = {
                 /** @param {number} address @param {number} size */
                 read: (address, size)=>{
@@ -90,7 +94,18 @@ test('the interpreter leaves what the hardware left, on every case it models',
                     {
                         view.setUint32(address, value, true);
                     }
+                    if (address < watchEnd && address + size > watchStart)
+                    {
+                        memory.hit = true;
+                    }
                 },
+                /** @param {number} start @param {number} end */
+                watch: (start, end)=>{
+                    watchStart = start;
+                    watchEnd = end;
+                    memory.hit = false;
+                },
+                hit: false,
             };
             for (const { address, bytes } of one.segments)
             {

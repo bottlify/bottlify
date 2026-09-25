@@ -26,27 +26,32 @@ import { PageFlag } from './runtime/pages.js';
 
 export { Fault, Unsupported, createState };
 
-/** Decoded instructions per state, by address, with the bytes they were decoded
- * from. A hit is checked byte for byte against memory, so code rewritten in
- * place (by the guest or the host) is decoded again without any invalidation;
- * the check is a few byte reads where a decode builds the whole record.
- * The entry keeps the instruction's compiled step too (`compileFast`), null for
- * one `evaluate` runs.
- * @type {WeakMap<object, Map<number, CachedStep>>} */
-const decodedBy = new WeakMap();
+/** Decoded runs per state, by their first address, with the bytes they were
+ * decoded from. A hit is checked byte for byte against memory, so code
+ * rewritten in place (by the guest or the host) is decoded again without any
+ * invalidation; the check is a few byte reads where a decode builds every
+ * instruction's record.
+ * @type {WeakMap<object, Map<number, Run>>} */
+const runsBy = new WeakMap();
 // ponytail: cleared whole when full; an LRU if a title's cold set churns it.
-const DECODED_CAP = 1 << 16;
+const RUNS_CAP = 1 << 15;
+/** The most instructions one run holds. */
+const RUN_LENGTH = 64;
 const NO_BYTES = new Uint8Array(0);
 
 /**
- * An instruction's entry: where it starts and where the next one does, and its
- * compiled step. A refusal is an entry of the same shape with no bytes, not
- * kept.
+ * Instructions that fall through from one to the next, decoded and compiled
+ * once: the unit the interpreter looks up, checks and reports, rather than
+ * one instruction at a time. A run ends after a jump, a call, a return, a
+ * `hlt` and anything that traps or faults by design, and before an
+ * instruction that does not decode; a conditional branch does not end it,
+ * and a taken one leaves it midway. A refusal is a run of its own with no
+ * instructions, not kept.
  *
- * @typedef {{ decoded: import('./decode/decoder.js').Instruction
- *         | import('./decode/decoder.js').Refusal,
- *     bytes: Uint8Array, start: number, next: number,
- *     step: ((state: import('./ir.js').EvalState) => void) | null }} CachedStep
+ * @typedef {{ start: number, bytes: Uint8Array, count: number, starts: number[],
+ *     nexts: number[], steps: (((state: import('./ir.js').EvalState) => void) | null)[],
+ *     decoded: import('./decode/decoder.js').Instruction[],
+ *     refused: import('./decode/decoder.js').Refusal | null }} Run
  */
 
 /**
@@ -68,12 +73,85 @@ function sameBytes(memory, address, bytes){
     return true;
 }
 
+/** @param {import('./decode/decoder.js').Instruction} instruction */
+const endsRun = ({ op, faults })=>faults === 'halt' || faults === 'trap' || faults === 'invalid'
+    || op === 'jmp' || op === 'call' || op === 'ret';
+
+/**
+ * Decodes the run at `eip`. The first instruction is decoded as the processor
+ * fetches it -- a fault there is the fetch's own -- and each one after it only
+ * as far as it decodes: a later instruction that would fault or be refused
+ * starts a run of its own, reached when execution gets there. A memory that
+ * cannot say when a run's own bytes are written (`watch`) gets runs of one.
+ *
+ * @param {import('./ir.js').EvalState} state @param {number} eip
+ * @returns {Run}
+ */
+function formRun(state, eip){
+    const { memory } = state;
+    /** @param {number} address */
+    const read = address=>memory.read(address, 1);
+    const limit = memory.watch === undefined ? 1 : RUN_LENGTH;
+    /** @type {Run} */
+    const run = {
+        start: eip, bytes: NO_BYTES, count: 0, starts: [], nexts: [], steps: [], decoded: [],
+        refused: null,
+    };
+    let at = eip;
+    while (run.count < limit)
+    {
+        /** @type {import('./decode/decoder.js').Instruction
+         *     | import('./decode/decoder.js').Refusal} */
+        let decoded;
+        if (run.count === 0)
+        {
+            decoded = decode(read, at);
+        }
+        else
+        {
+            try
+            {
+                decoded = decode(read, at);
+            }
+            catch {
+                break;
+            }
+        }
+        if ('refused' in decoded)
+        {
+            if (run.count === 0)
+            {
+                run.refused = decoded;
+            }
+            break;
+        }
+        const next = (at + decoded.length) >>> 0;
+        run.starts.push(at);
+        run.nexts.push(next);
+        run.steps.push(compileFast(decoded));
+        run.decoded.push(decoded);
+        run.count++;
+        at = next;
+        if (endsRun(decoded))
+        {
+            break;
+        }
+    }
+    const bytes = new Uint8Array((at - eip) >>> 0);
+    for (let i = 0; i < bytes.length; i++)
+    {
+        bytes[i] = memory.read(eip + i, 1);
+    }
+    run.bytes = bytes;
+    return run;
+}
+
 /**
  * @param {import('./ir.js').EvalState} state
- * @param {Map<number, CachedStep>} cache
- * @returns {CachedStep}
+ * @param {Map<number, Run>} cache
+ * @returns {Run}
  */
-function decodeCached(state, cache){
+function runAt(state, cache){
     const { memory, eip } = state;
     const hit = cache.get(eip);
     if (hit !== undefined && (memory.same !== undefined
@@ -81,28 +159,18 @@ function decodeCached(state, cache){
     {
         return hit;
     }
-    const decoded = decode(address=>memory.read(address, 1), eip);
-    if ('refused' in decoded)
+    // A fetch fault is raised at the instruction being fetched.
+    state.faultEip = eip;
+    const run = formRun(state, eip);
+    if (run.refused === null)
     {
-        return { decoded, bytes: NO_BYTES, start: eip, next: 0, step: null };
-    }
-    {
-        if (cache.size >= DECODED_CAP)
+        if (cache.size >= RUNS_CAP)
         {
             cache.clear();
         }
-        const bytes = new Uint8Array(decoded.length);
-        for (let i = 0; i < bytes.length; i++)
-        {
-            bytes[i] = memory.read(eip + i, 1);
-        }
-        const entry = {
-            decoded, bytes, start: eip, next: (eip + decoded.length) >>> 0,
-            step: compileFast(decoded),
-        };
-        cache.set(eip, entry);
-        return entry;
+        cache.set(eip, run);
     }
+    return run;
 }
 
 /**
@@ -111,16 +179,17 @@ function decodeCached(state, cache){
  *
  * The host tier hands a whole slice's budget to one call. Two hooks make that
  * possible without giving up the boundary the translator needs: `shouldStop`
- * is asked before each instruction and ends the run there (the host stops when
- * the next address has an entry, or when a trap has been recorded and only the
- * host can answer it), and `onStep` is told each instruction's start before it
- * runs, with whether it was reached by a jump rather than by falling through
- * from the instruction before (the host counts hotness at those starts only).
- * `entered` says the first instruction is itself such a start -- a jump's
- * target the run begins at -- rather than a place an earlier run stopped
- * midway through a block. Both hooks are optional, so the tight
- * one-instruction loop the corpus and tests use is unchanged. `force` runs the
- * first instruction whatever `shouldStop` answers: the host's progress
+ * is asked before each run of instructions (`Run`) and ends the call there
+ * (the host stops when the next address has an entry, or when a trap has been
+ * recorded and only the host can answer it), and `onStep` is told each run's
+ * start before it runs, with whether it was reached by a jump rather than by
+ * falling through from the instruction before (the host counts hotness at
+ * those starts only). A jump's target always starts a run, so every start a
+ * jump reaches is told. `entered` says the first instruction is itself such a
+ * start -- a jump's target the call begins at -- rather than a place an
+ * earlier call stopped midway through a block. Both hooks are optional, so
+ * the tight loop the corpus and tests use is unchanged. `force` runs the
+ * first instruction whatever `shouldStop` answers, alone: the host's progress
  * guarantee, for a turn that would otherwise retire nothing.
  *
  * @param {import('./ir.js').EvalState} state
@@ -132,59 +201,77 @@ function decodeCached(state, cache){
 export function interpret(state, maxInstructions = 1, options = {}){
     const { shouldStop, onStep, force, entered } = options;
     const before = state.retired;
+    const end = before + maxInstructions;
+    const { memory } = state;
     // Where falling through from the last instruction lands.
     let fallthrough = entered === true ? -1 : state.eip;
     let first = force === true;
-    let cache = decodedBy.get(state);
+    let cache = runsBy.get(state);
     if (cache === undefined)
     {
         cache = new Map();
-        decodedBy.set(state, cache);
+        runsBy.set(state, cache);
     }
-    while (state.retired - before < maxInstructions && !state.halted)
+    try
     {
-        if (!first && shouldStop !== undefined && shouldStop())
+        while (state.retired < end && !state.halted)
         {
-            break;
+            if (!first && shouldStop !== undefined && shouldStop())
+            {
+                break;
+            }
+            const run = runAt(state, cache);
+            if (run.refused !== null)
+            {
+                throw new Unsupported(run.refused.opcode, run.refused.eip);
+            }
+            onStep?.(run.start, run.start !== fallthrough);
+            const count = first ? 1 : run.count;
+            first = false;
+            // A store into the run's own bytes ends it after the instruction
+            // that made it, so what follows is decoded again as written.
+            memory.watch?.(run.start, run.start + run.bytes.length);
+            const { starts, nexts, steps } = run;
+            for (let i = 0; i < count && state.retired < end; i++)
+            {
+                const next = nexts[i];
+                const step = steps[i];
+                // The instruction's own address, for a page fault raised from
+                // inside the step after eip has moved to the next instruction.
+                state.faultEip = starts[i];
+                fallthrough = next;
+                if (step !== null)
+                {
+                    // A compiled step finds eip and the count already moved, as
+                    // `evaluate` moves them before its work.
+                    state.eip = next;
+                    state.retired++;
+                    step(state);
+                }
+                else
+                {
+                    evaluate(run.decoded[i], state);
+                }
+                if (state.eip !== next || memory.hit === true)
+                {
+                    break;
+                }
+            }
         }
-        first = false;
-        // Every entry has the one shape, and the decoded record (whose shape
-        // varies with the instruction) is not touched on a compiled step.
-        const { decoded, start, next, step } = decodeCached(state, cache);
-        if (step === null && 'refused' in decoded)
+    }
+    catch (e){
+        // The no-tier answer carries the address of the instruction the
+        // model could not run, not the one the run started at: the host
+        // names what it actually met.
+        if (e instanceof Unsupported && e.eip === undefined)
         {
-            throw new Unsupported(decoded.opcode, decoded.eip);
+            e.eip = state.faultEip;
         }
-        // The instruction's own address, for a page fault raised from inside
-        // `evaluate` after it has moved eip to the next instruction.
-        state.faultEip = start;
-        onStep?.(start, start !== fallthrough);
-        fallthrough = next;
-        try
-        {
-            if (step !== null)
-            {
-                // A compiled step finds eip and the count already moved, as
-                // `evaluate` moves them before its work.
-                state.eip = next;
-                state.retired++;
-                step(state);
-            }
-            else
-            {
-                evaluate(/** @type {import('./decode/decoder.js').Instruction} */ (decoded), state);
-            }
-        }
-        catch (e){
-            // The no-tier answer carries the address of the instruction the
-            // model could not run, not the one the run started at: the host
-            // names what it actually met.
-            if (e instanceof Unsupported && e.eip === undefined)
-            {
-                e.eip = start;
-            }
-            throw e;
-        }
+        throw e;
+    }
+    finally
+    {
+        memory.watch?.(0, 0);
     }
     return state.retired - before;
 }
@@ -245,6 +332,10 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
             && granule(address) < view.getUint8(range + 1);
     };
     const fault = ()=>new Fault(13, state.faultEip);
+    // The bytes of the run being interpreted (`watch`): a store into them sets
+    // `hit`, and the run ends after the instruction that made it.
+    let watchStart = 0;
+    let watchEnd = 0;
     // An access within one page tests that page's flag once; one that crosses
     // a page tests both, as `inaccessible` does.
     /** @param {number} address @param {number} size */
@@ -278,6 +369,10 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
             {
                 view.setUint32(layout.ramBase + address, value, true);
             }
+            if (address < watchEnd && address + size > watchStart)
+            {
+                memoryApi.hit = true;
+            }
             return;
         }
         if (inaccessible(address, size))
@@ -296,6 +391,10 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
         else
         {
             view.setUint32(offset, value, true);
+        }
+        if (address < watchEnd && address + size > watchStart)
+        {
+            memoryApi.hit = true;
         }
         if ((codeHit(address) || (size > 1 && codeHit(address + size - 1)))
             && onCodeWrite !== undefined)
@@ -467,7 +566,17 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
     const state = /** @type {import('./ir.js').EvalState & typeof accessors} */ (
         Object.create(accessors));
     state.reg = reg;
-    state.memory = { read, write, same };
+    const memoryApi = {
+        read, write, same,
+        /** @param {number} start @param {number} end */
+        watch(start, end){
+            watchStart = start;
+            watchEnd = end;
+            memoryApi.hit = false;
+        },
+        hit: false,
+    };
+    state.memory = memoryApi;
     state.halted = false;
     state.retired = 0;
     state.trapped = [];

@@ -286,3 +286,42 @@ test('fxsave writes the x87 and SSE image and fxrstor reads it back', ()=>{
     assert.equal(m.state.f80[7], 1);
     assert.equal(m.state.halted, true);
 });
+
+test('a run of instructions sees a store into its own later bytes', ()=>{
+    const layout = ownLayout({ ramSize: 1 << 20 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
+    // mov byte [0x1008], 9; mov eax, 5; hlt -- the first store rewrites the
+    // second's immediate, which the processor then executes as written.
+    ram.set([0xc6, 0x05, 0x08, 0x10, 0, 0, 0x09, 0xb8, 5, 0, 0, 0, 0xf4], 0x1000);
+    const state = blockState({ memory, layout });
+    /** @type {number[]} */
+    const starts = [];
+    state.eip = 0x1000;
+    assert.equal(interpret(state, 10, { onStep: at=>starts.push(at) }), 3);
+    assert.equal(state.reg[0], 9, 'the immediate as the store left it');
+    assert.deepEqual(starts, [0x1000, 0x1007], 'the run ended after the store and resumed');
+});
+
+test('a run is reported once, at its start, and a fetch from an inaccessible page faults there',
+    ()=>{
+        const layout = ownLayout({ ramSize: 1 << 20 });
+        const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+        const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
+        const flags = new Uint8Array(
+            memory.buffer, layout.tables + Tables.PAGE_FLAGS, Tables.PAGE_FLAGS_SIZE);
+        // mov ecx, 2; L: dec ecx; jnz L; jmp 0x5000 -- the page there inaccessible.
+        ram.set([0xb9, 2, 0, 0, 0, 0x49, 0x75, 0xfd, 0xe9, ...[0xf3, 0x3f, 0, 0]], 0x1000);
+        flags[0x5] = PageFlag.INACCESSIBLE;
+        const state = blockState({ memory, layout });
+        /** @type {string[]} */
+        const seen = [];
+        state.eip = 0x1000;
+        assert.throws(()=>interpret(state, 100, {
+            onStep: (at, jumped)=>seen.push(`${at.toString(16)}${jumped ? '*' : ''}`),
+        }), e=>e instanceof Fault && e.vector === 13 && e.eip === 0x5000);
+        // The loop's head is a jump's target; the not-taken branch falls
+        // through within the run it heads.
+        assert.deepEqual(seen, ['1000', '1005*']);
+        assert.equal(state.reg[1], 0);
+    });

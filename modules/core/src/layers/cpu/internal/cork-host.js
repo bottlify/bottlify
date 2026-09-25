@@ -127,8 +127,8 @@ export function createCorkHost(config){
      * @type {{ at: number, end: number, retired: number, traps: number, halted: boolean }[]} */
     const recent = [];
     const RECENT = 16;
-    /** The last instruction starts the interpreter ran, a ring: the path a run
-     * took into wherever it sits. */
+    /** The last run starts the interpreter ran, a ring: the path a run took
+     * into wherever it sits. */
     const starts = new Uint32Array(256);
     let startAt = 0;
     // The park loop (hlt; jmp at the thunk base) is where a thread waits, not
@@ -145,9 +145,10 @@ export function createCorkHost(config){
     // with what is left of the budget. A loading phase is one long frame, so a
     // frame-boundary feed alone would run the whole load interpreted.
     let translateDue = false;
-    // Interpreted steps since the last in-slice feed, so a loader that meets a
-    // new start every few instructions does not translate on every one.
-    let stepsSinceFeed = 0;
+    // The interpreter's count at the last in-slice feed: a feed waits for
+    // FEED_MIN_STEPS interpreted instructions after it, so a loader that meets
+    // a new start every few instructions does not translate on every one.
+    let retiredAtFeed = 0;
     const FEED_MIN_STEPS = 2048;
     // Read through these in a loop condition: `stopped` is set by `stop()` and
     // `halted` by a nested slice, which the static check cannot see.
@@ -292,7 +293,7 @@ export function createCorkHost(config){
             {
                 feedDue = true;
             }
-            else if (stepsSinceFeed >= FEED_MIN_STEPS)
+            else if ((interpreter?.retired ?? 0) - retiredAtFeed >= FEED_MIN_STEPS)
             {
                 translateDue = true;
             }
@@ -406,8 +407,8 @@ export function createCorkHost(config){
         try
         {
             interpret(state, budget, {
-                // Answered before each instruction: the runs the host owns the
-                // far side of. A recorded trap has to leave so the handler can
+                // Answered before each run of instructions: the runs the host
+                // owns the far side of. A recorded trap has to leave so the handler can
                 // move eip or stop the machine; an address with an entry is
                 // translated code and a different register file.
                 shouldStop: ()=>state.trapped.length > 0 || feedDue || translateDue
@@ -421,7 +422,6 @@ export function createCorkHost(config){
                     {
                         starts[startAt++ & 255] = at;
                     }
-                    stepsSinceFeed++;
                     if (jumped)
                     {
                         countHot(at);
@@ -526,7 +526,7 @@ export function createCorkHost(config){
                 // of the budget: the slice's count is unchanged, so a loader
                 // that never presents a frame still translates.
                 translateDue = false;
-                stepsSinceFeed = 0;
+                retiredAtFeed = interpreter?.retired ?? 0;
                 const formAt = performance.now();
                 runtime.translatePending().catch(()=>{});
                 formMs += performance.now() - formAt;
@@ -856,8 +856,9 @@ export function createCorkHost(config){
         inProtectedMode: ()=>true,
         eip,
         trapCrossings: ()=>trapCrossings,
-        /** The last thirty-two interpreted instruction starts with their first bytes,
-         * oldest first, two per string. */
+        /** The last thirty-two interpreted run starts (a jump's target, or where
+         * straight-line code resumed) with their first bytes, oldest first, two
+         * per string. */
         recentStarts: ()=>{
             const out = [];
             for (let i = 224; i < 256; i += 2)

@@ -368,8 +368,16 @@ code's own register file takes over. A fault it raises goes the same way; an ins
 `cpu: cork has no tier for 0x0f (fxsave) (eip 0x00001003)`: the byte and address are the
 instruction the interpreter actually met, not the address the slice started at.
 
-The interpreter keeps each decoded instruction by address, checked against RAM byte for byte on
-every hit so code rewritten in place is decoded again, with a step compiled for it once
+The interpreter keeps decoded runs by their first address -- the instructions that fall through
+from one to the next, up to a jump, a call, a return, a `hlt` or anything that traps, and through
+a conditional branch, which a taken one leaves midway -- checked against RAM byte for byte on
+every hit so code rewritten in place is decoded again; a store into the run being interpreted
+ends it after the storing instruction (the memory's `watch`), so an instruction a program
+patches just ahead of itself runs as written. The stop test, the hotness count and the ring of
+recent starts are per run rather than per instruction, and a jump's target always starts one,
+so every start a jump reaches is still counted (a call-heavy program 87 -> 59 ms interpreted,
+a CRC 53 -> 38, a tree walk 123 -> 84); a fetch from an inaccessible page faults at the address
+fetched. Each instruction of a run has a step compiled for it once
 (`fast.js`): the common integer instructions, shifts and two- and three-operand `imul` included,
 become a function of the state with their operands resolved, and an x87 instruction goes
 straight to the x87 model; the rest runs through `evaluate`. `blockState` keeps the fields a

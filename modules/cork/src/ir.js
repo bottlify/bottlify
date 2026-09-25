@@ -42,6 +42,11 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @property {(address: number, bytes: Uint8Array) => boolean} [same]  whether memory
  *     still holds `bytes` at `address`, faulting as reading them would: the
  *     interpreter's decode cache check, for a memory that answers it in place
+ * @property {(start: number, end: number) => void} [watch]  the bytes [start, end) of
+ *     the instructions being interpreted: a store into them sets `hit` (cleared here).
+ *     A memory with it is interpreted a run of instructions at a time, one without it
+ *     an instruction at a time
+ * @property {boolean} [hit]
  */
 
 /**
