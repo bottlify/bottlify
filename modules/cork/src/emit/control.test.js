@@ -288,16 +288,26 @@ test('a formed-in callee that returns elsewhere leaves by the address it popped'
 });
 
 test('a call into a formed-in callee whose push lands in code leaves stale at the callee', ()=>{
+    // The callee's `and esp, -1` gives its return's pop a window of its own,
+    // so the push is tested, and noted, alone.
     const m = machine([
         0xe8, ...u32(1),            //     call F
         0xf4,                       //     hlt
-        0xc3,                       // F:  ret
+        0x83, 0xe4, 0xff,           // F:  and esp, -1
+        0xc3,                       //     ret
     ]);
     m.pages.markCode(STACK - 4, 4);
     const r = m.runProgram(CODE);
     assert.equal(r.kind, 5, 'stale');
     assert.equal(m.eip(), CODE + 6, 'past the call, at the callee');
     assert.equal(m.reg('esp'), STACK - 4, 'with the return address pushed');
+    // A pop off the esp the push left is in the push's window, which leaves
+    // before the call: the other executor runs it.
+    const n = machine([0xe8, ...u32(1), 0xf4, 0xc3]);
+    n.pages.markCode(STACK - 4, 4);
+    assert.equal(n.runProgram(CODE).kind, -2, 'held at the call');
+    assert.equal(n.eip(), CODE);
+    assert.equal(n.reg('esp'), STACK, 'nothing pushed');
 });
 
 /**

@@ -8,8 +8,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../testing/machine.js';
 import { PageFlag } from '../runtime/pages.js';
-import { readUndoLog, resetUndoLog, spansOf } from './memory.js';
-import { Exit } from './region.js';
+import { planLoop, planRegion, readUndoLog, resetUndoLog, spansOf } from './memory.js';
+import { Exit, emitRegion, enterRegion, mathImports, prepareModule } from './region.js';
+import { buildHelpersModule } from './helpers.js';
+import { formRegion, inlineReturns } from '../region.js';
+import { ModuleBuilder } from '../wasm/encoder.js';
+import { features } from '../wasm/features.js';
 import { blockState, interpret } from '../interp.js';
 import { Fault } from '../ir.js';
 
@@ -588,4 +592,519 @@ test('an SSE store checks its page and code in one test, exact at both edges', (
     const over = run(movss, { regs: { eax: 0x4ffd }, mark: near });
     assert.equal(over.exit.kind, Exit.FAULT);
     assert.equal(over.exit.eip, CODE);
+});
+
+/** The region formed at CODE over `bytes`, a `hlt` past them. @param {number[]} bytes */
+function regionOf(bytes){
+    return formRegion(a=>(a >= CODE && a < CODE + bytes.length ? bytes[a - CODE] : 0xf4), CODE);
+}
+
+/**
+ * Translates the region at `entry` over a test machine's memory, with the
+ * region's structure (its loops as wasm loops) on or off, and answers a
+ * runner from any of its block starts.
+ *
+ * @param {ReturnType<typeof createTestMachine>} m @param {number} entry
+ * @param {boolean} structure
+ */
+function translateWith(m, entry, structure){
+    const bytes = new Uint8Array(m.memory.buffer);
+    const region = formRegion(a=>bytes[m.layout.ramBase + a], entry);
+    const builder = new ModuleBuilder();
+    const context = prepareModule(builder, m.layout, features(), {}, { structure });
+    const translation = emitRegion(context, region);
+    builder.exportFunction('region', translation.functionIndex);
+    const helpers = new WebAssembly.Instance(new WebAssembly.Module(
+        /** @type {Uint8Array<ArrayBuffer>} */ (buildHelpersModule(m.layout))),
+    { env: { memory: m.memory } }).exports;
+    const instance = new WebAssembly.Instance(new WebAssembly.Module(
+        /** @type {Uint8Array<ArrayBuffer>} */ (builder.toBytes())),
+    { env: { memory: m.memory, ...mathImports(), ...helpers, rdtsc: ()=>0n } });
+    const fn = /** @type {Function} */ (instance.exports.region);
+    return {
+        translation,
+        /** @param {number} eip */
+        run(eip){
+            const label = /** @type {number} */ (translation.labels.get(eip));
+            const code = enterRegion(fn, label, 1_000_000, new DataView(m.memory.buffer),
+                m.layout) >>> 0;
+            return { kind: code & 0xff, vector: code >>> 8 };
+        },
+    };
+}
+
+/**
+ * Runs the interpreter from the state a machine holds until it halts or
+ * faults, and says which.
+ *
+ * @param {ReturnType<typeof createTestMachine>} m
+ */
+function interpretRest(m){
+    const state = blockState({ memory: m.memory, layout: m.layout });
+    state.syncIn();
+    try
+    {
+        interpret(state, 5000);
+    }
+    catch (e){
+        if (!(e instanceof Fault))
+        {
+            throw e;
+        }
+        state.syncOut();
+        return `fault ${e.vector} at ${e.eip.toString(16)}`;
+    }
+    state.syncOut();
+    return `halt at ${state.eip.toString(16)}`;
+}
+
+/**
+ * A program run translated from `entry` (in the region formed at CODE when
+ * it holds `entry`) and finished by the interpreter where it leaves, against
+ * the interpreter alone from the same state: the end, the registers and the
+ * bytes over `[0x4000, 0x8000)` agree.
+ *
+ * @param {(m: ReturnType<typeof createTestMachine>) => void} setup
+ * @param {number} entry @param {boolean} structure @param {string} what
+ * @returns {{ kind: number, vector: number }} the translated run's exit
+ */
+function againstInterpreter(setup, entry, structure, what){
+    const names = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
+    const alone = createTestMachine();
+    setup(alone);
+    new DataView(alone.memory.buffer).setUint32(alone.layout.eip, entry, true);
+    const expected = interpretRest(alone);
+    const machine = createTestMachine();
+    setup(machine);
+    const unit = translateWith(machine, CODE, structure);
+    const exit = (unit.translation.labels.has(entry) ? unit
+        : translateWith(machine, entry, structure)).run(entry);
+    const ended = exit.kind === Exit.FAULT
+        ? `fault ${exit.vector} at ${machine.eip().toString(16)}`
+        : exit.kind === Exit.HALT ? `halt at ${machine.eip().toString(16)}`
+            : interpretRest(machine);
+    assert.equal(ended, expected, what);
+    for (const name of names)
+    {
+        assert.equal(machine.reg(name), alone.reg(name), `${what}: ${name}`);
+    }
+    assert.deepEqual(machine.read(0x4000, 0x4000), alone.read(0x4000, 0x4000), `${what}: memory`);
+    return exit;
+}
+
+test('a window reaches a block only its block leads to, tested there only when entered elsewhere',
+    ()=>{
+        const bytes = [
+            0x8b, 0x03,                         // mov eax, [ebx]
+            0x85, 0xc9,                         // test ecx, ecx
+            0x74, 0x07,                         // jz B2
+            0x8b, 0x93, 0xfc, 0x07, 0, 0,       // B1: mov edx, [ebx+0x7fc]
+            0xf4,                               // hlt
+            0xf4,                               // B2: hlt
+        ];
+        const plan = planRegion(regionOf(bytes).blocks, { entry: CODE });
+        assert.deepEqual(plan.inherit, [-1, 0, 0]);
+        const [window] = /** @type {import('./memory.js').Planned} */ (plan.blocks[0].get(0)).checks;
+        assert.deepEqual([window.lo, window.width], [0, 0x800], 'B0 tests both loads\' window');
+        const load = /** @type {import('./memory.js').Planned} */ (plan.blocks[1].get(0));
+        assert.ok(load.access !== null && load.checks.length === 0, 'B1\'s load has no test');
+        assert.deepEqual(plan.entry[1].map(w=>[w.base, w.lo, w.width]), [[3, 0x7fc, 4]],
+            'entered elsewhere, B1 tests its own load\'s part');
+        assert.equal(plan.entry[2].length, 0);
+        for (const structure of [false, true])
+        {
+            for (const [ebx, ecx, entry] of [[0x4a00, 0, CODE], [0x4a00, 1, CODE],
+                [0x4a00, 1, CODE + 6], [0x4000, 1, CODE + 6], [0x4000, 1, CODE]])
+            {
+                const exit = againstInterpreter(m=>{
+                    m.write(CODE, bytes);
+                    m.setReg('esp', STACK);
+                    m.setReg('ebx', ebx);
+                    m.setReg('ecx', ecx);
+                    m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
+                }, entry, structure, `ebx ${ebx.toString(16)} ecx ${ecx} at ${entry.toString(16)}`
+                    + ` structure ${structure}`);
+                assert.equal(exit.kind === Exit.HALT, ebx === 0x4000,
+                    'a window reaching the page leaves, the path through it taken or not');
+            }
+        }
+    });
+
+test('a frame through esp and ebp, with the leave and ret closing it, is one window', ()=>{
+    const bytes = [
+        0x55,                               // push ebp
+        0x89, 0xe5,                         // mov ebp, esp
+        0x83, 0xec, 0x08,                   // sub esp, 8
+        0x89, 0x45, 0xfc,                   // mov [ebp-4], eax
+        0x89, 0x0c, 0x24,                   // mov [esp], ecx
+        0x8b, 0x45, 0x08,                   // mov eax, [ebp+8]
+        0xc9,                               // leave
+        0xc3,                               // ret
+    ];
+    const plan = planRegion(regionOf(bytes).blocks, { entry: CODE });
+    const planned = [...plan.blocks[0].entries()];
+    assert.deepEqual(planned.map(([i, p])=>[i, p.checks.length, p.access !== null]), [
+        [0, 1, true], [3, 0, true], [4, 0, true], [5, 0, true], [6, 0, true], [7, 0, true]]);
+    const [frame] = planned[0][1].checks;
+    assert.deepEqual([frame.base, frame.lo, frame.width], [4, -12, 20]);
+    // [esp] lands on the inaccessible page, or in code: the interpreter
+    // faults or stores there, and the window leaves before the push.
+    for (const [esp, shut] of /** @type {[number, boolean][]} */ ([[0x5008, true],
+        [0x5010, true], [0x5008, false]]))
+    {
+        const exit = againstInterpreter(m=>{
+            m.write(CODE, bytes);
+            m.write(CODE + 0x100, [0xf4]);
+            m.setReg('esp', esp);
+            m.writeU32(esp, CODE + 0x100);
+            m.setReg('ebp', 0x4f00);
+            if (shut)
+            {
+                m.pages.markRange(0x4000, 0x1000, PageFlag.INACCESSIBLE);
+            }
+            else
+            {
+                m.pages.markCode(0x4ff0, 0x10);
+            }
+        }, CODE, false, `esp ${esp.toString(16)} ${shut ? 'inaccessible' : 'code'}`);
+        assert.equal(exit.kind === Exit.UNTRANSLATED && exit.vector === 1, esp === 0x5008,
+            'held before the push where the window is not clean');
+    }
+});
+
+test('two registers made one value before a block are not one window in it', ()=>{
+    const bytes = [
+        0x8d, 0x42, 0xd4,                   // lea eax, [edx-0x2c]
+        0x85, 0xc9,                         // test ecx, ecx
+        0x74, 0x0a,                         // jz B2
+        0x8b, 0x72, 0xc0,                   // B1: mov esi, [edx-0x40]
+        0x89, 0x48, 0x08,                   // mov [eax+8], ecx
+        0x8b, 0x7a, 0xe0,                   // mov edi, [edx-0x20]
+        0xf4,                               // hlt
+        0xf4,                               // B2: hlt
+    ];
+    const plan = planRegion(regionOf(bytes).blocks, { entry: CODE });
+    assert.deepEqual(plan.inherit, [-1, 0, 0]);
+    // Entered by the dispatch, B1's eax need not be edx - 0x2c: the store
+    // keeps its own test, and the loads through edx are one window.
+    const planned = [...plan.blocks[1].entries()];
+    assert.deepEqual(planned.map(([i, p])=>[i, p.checks.length, p.access !== null]),
+        [[0, 1, true], [2, 0, true]]);
+    for (const structure of [false, true])
+    {
+        for (const [eax, edx, entry] of [[0, 0x4f00, CODE], [0x4ffc, 0x4f00, CODE + 7],
+            [0x4e00, 0x4f00, CODE + 7], [0x4e00, 0x5040, CODE + 7]])
+        {
+            againstInterpreter(m=>{
+                m.write(CODE, bytes);
+                m.setReg('esp', STACK);
+                m.setReg('eax', eax);
+                m.setReg('ecx', 1);
+                m.setReg('edx', edx);
+                m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
+            }, entry, structure, `eax ${eax.toString(16)} edx ${edx.toString(16)} at `
+                + `${entry.toString(16)} structure ${structure}`);
+        }
+    }
+});
+
+test('a trap carries no window, a call and a formed-in return do; a join takes the block before',
+    ()=>{
+        const bytes = [
+            0x8b, 0x03,                         // mov eax, [ebx]
+            0x8b, 0x53, 0x04,                   // mov edx, [ebx+4]
+            0xcd, 0x21,                         // int 0x21
+            0x8b, 0x4b, 0x08,                   // B1: mov ecx, [ebx+8]
+            0x85, 0xc9,                         // test ecx, ecx
+            0x74, 0x05,                         // jz B3
+            0x8b, 0x73, 0x0c,                   // B2: mov esi, [ebx+12]
+            0xeb, 0x00,                         // jmp B3
+            0x8b, 0x7b, 0x10,                   // B3: mov edi, [ebx+16]
+            0xe8, 0x01, 0, 0, 0,                // call B5
+            0xf4,                               // B4: hlt
+            0x8b, 0x43, 0x14,                   // B5: mov eax, [ebx+20]
+            0xc3,                               // ret
+        ];
+        const region = regionOf(bytes);
+        const { blocks } = region;
+        assert.deepEqual(blocks.map(block=>block.start - CODE), [0, 7, 14, 19, 27, 28]);
+        const plan = planRegion(blocks, { entry: CODE, backward: true,
+            returns: inlineReturns(region) });
+        assert.deepEqual(plan.inherit, [-1, -1, 1, 2, 5, 3], 'B1 past the trap from none;'
+            + ' B2 from B1, its one way in; B3 from B2, the block before it, not B1; the'
+            + ' callee B5 from its call; B4 from the return');
+        // The join's own load and the callee's are B1's window's: B1's way into
+        // B3 goes through B3's test of them.
+        assert.deepEqual(plan.entry[3].map(w=>[w.lo, w.width]), [[16, 8]]);
+        for (const structure of [false, true])
+        {
+            for (const [ebx, ecx] of [[0x4fe8, 0], [0x4fe8, 1], [0x4fec, 1], [0x4fec, 0],
+                [0x4ff0, 0]])
+            {
+                againstInterpreter(m=>{
+                    m.write(CODE, bytes);
+                    m.setReg('esp', 0x4800);
+                    m.setReg('ebx', ebx);
+                    m.setReg('ecx', ecx);
+                    m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
+                }, CODE + 7, structure,
+                `ebx ${ebx.toString(16)} ecx ${ecx} structure ${structure}`);
+            }
+        }
+    });
+
+test('an entry test that leaves hands the x87 stack over as the block starts with it', ()=>{
+    // S takes its windows from Q; P, which moved ebx, goes into S through S's
+    // test, whose window -- U's load -- reaches the inaccessible page from
+    // there: S leaves before it runs, and the interpreter goes on to T, which
+    // stores the two registers the stack holds. The block emitted before S's
+    // test, R, ends with the stack emptied.
+    const bytes = [
+        0xd9, 0x05, 0x00, 0x60, 0, 0,       // fld dword [0x6000]
+        0xd9, 0x05, 0x04, 0x60, 0, 0,       // fld dword [0x6004]
+        0x8b, 0x03,                         // mov eax, [ebx]
+        0x85, 0xc9,                         // test ecx, ecx
+        0x75, 0x05,                         // jnz P
+        0x8b, 0x43, 0x04,                   // Q: mov eax, [ebx+4]
+        0xeb, 0x13,                         // jmp S
+        0x81, 0xc3, 0xf0, 0x07, 0, 0,       // P: add ebx, 0x7f0
+        0x85, 0xff,                         // test edi, edi
+        0x75, 0x09,                         // jnz S
+        0xdd, 0xd8,                         // R: fstp st0
+        0xd9, 0x1d, 0x18, 0x60, 0, 0,       // fstp dword [0x6018]
+        0xf4,                               // hlt
+        0x85, 0xf6,                         // S: test esi, esi
+        0x74, 0x07,                         // jz T
+        0x8b, 0x93, 0xfc, 0x07, 0, 0,       // U: mov edx, [ebx+0x7fc]
+        0xf4,                               // hlt
+        0xd9, 0x1d, 0x10, 0x60, 0, 0,       // T: fstp dword [0x6010]
+        0xd9, 0x1d, 0x14, 0x60, 0, 0,       // fstp dword [0x6014]
+        0xf4,                               // hlt
+    ];
+    const plan = planRegion(regionOf(bytes).blocks, { entry: CODE, backward: true });
+    assert.deepEqual(plan.inherit, [-1, 0, 0, 2, 1, 4, 4]);
+    assert.deepEqual(plan.entry[4].map(w=>[w.lo, w.width]), [[0x7fc, 4], [0x6010, 8]],
+        'U\'s load off ebx, and T\'s stores into the window B0\'s loads opened');
+    for (const structure of [false, true])
+    {
+        for (const [ecx, edi, ebx] of [[1, 1, 0x4020], [1, 1, 0x4000], [0, 1, 0x4020],
+            [1, 0, 0x4020]])
+        {
+            const exit = againstInterpreter(m=>{
+                m.write(CODE, bytes);
+                m.write(0x6000, [0, 0, 0x80, 0x3f, 0, 0, 0, 0x40]);  // 1.0, 2.0
+                m.setReg('esp', STACK);
+                m.setReg('ebx', ebx);
+                m.setReg('ecx', ecx);
+                m.setReg('edi', edi);
+                m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
+            }, CODE, structure, `ecx ${ecx} edi ${edi} ebx ${ebx.toString(16)}`
+                + ` structure ${structure}`);
+            assert.equal(exit.kind === Exit.UNTRANSLATED && exit.vector === 1,
+                ecx === 1 && edi === 1 && ebx === 0x4020, 'left at S\'s test');
+        }
+    }
+});
+
+test('a jump back carries a window only where the dispatch takes it past the test', ()=>{
+    const bytes = [
+        0xeb, 0x07,                         // jmp B2
+        0x8b, 0x43, 0x04,                   // B1: mov eax, [ebx+4]
+        0x8b, 0x53, 0x08,                   // mov edx, [ebx+8]
+        0xf4,                               // hlt
+        0x8b, 0x0b,                         // B2: mov ecx, [ebx]
+        0x85, 0xc9,                         // test ecx, ecx
+        0x75, 0xf3,                         // jnz B1
+        0xf4,                               // hlt
+    ];
+    const blocks = regionOf(bytes).blocks;
+    const back = planRegion(blocks, { entry: CODE, backward: true });
+    assert.deepEqual(back.inherit, [-1, 2, 0, 2]);
+    assert.deepEqual(back.entry[1].map(w=>[w.lo, w.width]), [[4, 8]]);
+    assert.equal(back.blocks[1].get(0)?.checks.length, 0);
+    const not = planRegion(blocks, { entry: CODE, backward: false });
+    assert.deepEqual(not.inherit, [-1, -1, 0, 2]);
+    for (const structure of [false, true])
+    {
+        for (const [ebx, value] of [[0x4ff8, 1], [0x4f00, 1], [0x4ff8, 0], [0x4000, 1]])
+        {
+            againstInterpreter(m=>{
+                m.write(CODE, bytes);
+                m.setReg('esp', STACK);
+                m.setReg('ebx', ebx);
+                m.writeU32(ebx, value);
+                m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
+            }, CODE, structure, `ebx ${ebx.toString(16)} [ebx] ${value} structure ${structure}`);
+            againstInterpreter(m=>{
+                m.write(CODE, bytes);
+                m.setReg('esp', STACK);
+                m.setReg('ebx', ebx);
+                m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
+            }, CODE + 2, structure,
+            `entered at B1, ebx ${ebx.toString(16)} structure ${structure}`);
+        }
+    }
+});
+
+test('random programs of several blocks, entered at any block, match the interpreter', ()=>{
+    // Blocks of accesses and register moves by a page edge -- off esp, off
+    // registers copied and moved, pushes through memory, x87 loads and
+    // stores in some programs -- joined by fall-throughs, forward branches
+    // and jumps, jumps back (a block's to itself among them) that ebp counts
+    // down, and calls of callees formed into the region: the translated run,
+    // from the region's entry or from any block, finished by the interpreter
+    // where it leaves, against the interpreter alone.
+    let seed = Number(process.env.REGION_SEED ?? 0x5eed7);
+    const next = (/** @type {number} */ n)=>{
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+        return (seed >>> 8) % n;
+    };
+    // ebp counts the jumps back and nothing else writes it.
+    const GPR = [0, 1, 2, 3, 6, 7];
+    const pick = ()=>GPR[next(GPR.length)];
+    const disp = ()=>(next(33) - 16) * 4 & 0xff;
+    const modrm = (/** @type {number} */ r, /** @type {number} */ b)=>0x40 | r << 3 | b;
+    /** Forms that leave esp where they found it: a callee's, which returns. */
+    const balanced = [
+        ()=>[0x8b, modrm(pick(), pick()), disp()],                 // mov r, [b+d]
+        ()=>[0x89, modrm(pick(), pick()), disp()],                 // mov [b+d], r
+        ()=>[0x01, modrm(pick(), pick()), disp()],                 // add [b+d], r
+        ()=>[0x8b, modrm(pick(), 4), 0x24, disp()],                // mov r, [esp+d]
+        ()=>[0x89, modrm(pick(), 4), 0x24, 4 + next(16) * 4],      // mov [esp+d], r: not the return
+        ()=>[0x83, 0xc0 | pick(), next(64) - 32 & 0xff],           // add r, imm8
+        ()=>[0x40 | pick()], ()=>[0x48 | pick()],                   // inc r, dec r
+        ()=>[0x8d, modrm(pick(), pick()), disp()],                 // lea r, [r2+d]
+        ()=>[0x89, 0xc0 | pick() << 3 | pick()],                   // mov r, r2
+        ()=>[0x87, 0xc0 | pick() << 3 | pick()],                   // xchg r, r2
+        ()=>[0xf7, 0xe9],                                           // imul ecx
+    ];
+    const moving = [
+        ...balanced,
+        ()=>[0x89, modrm(pick(), 4), 0x24, disp()],                // mov [esp+d], r
+        ()=>[0xff, modrm(6, pick()), disp()],                      // push [b+d]
+        ()=>[0x50 | pick()], ()=>[0x58 | pick()],                   // push r, pop r
+    ];
+    // fld dword [b+d]; fstp dword [b+d]: the stack as it was.
+    const x87Form = ()=>[0xd9, modrm(0, pick()), disp(), 0xd9, modrm(3, pick()), disp()];
+    const names = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
+    for (let round = 0; round < Number(process.env.REGION_ROUNDS ?? 400); round++)
+    {
+        const x87 = next(4) === 0;
+        /** @param {(() => number[])[]} forms @param {number} most */
+        const body = (forms, most)=>{
+            /** @type {number[]} */
+            const bytes = [];
+            for (let k = 1 + next(most); k > 0; k--)
+            {
+                bytes.push(...(x87 && next(4) === 0 ? x87Form() : forms[next(forms.length)]()));
+            }
+            return bytes;
+        };
+        const count = 2 + next(4);
+        const callees = Array.from({ length: 1 + next(2) }, ()=>[...body(balanced, 4), 0xc3]);
+        const bodies = Array.from({ length: count }, ()=>body(moving, 6));
+        // The way out of each block: 0 falls through, 1 branches forward on
+        // al, 2 jumps forward, 3 jumps back (to itself, or before) while ebp
+        // stays above zero, 4 calls a callee and goes on after; the last
+        // halts. The callees lie past it.
+        const exits = bodies.map((_, k)=>(k === count - 1 ? -1 : next(5)));
+        const sizes = exits.map(kind=>[1, 0, 8, 5, 7, 5][kind + 1]);
+        /** @type {number[]} */
+        const starts = [];
+        let at = CODE;
+        for (let k = 0; k < count; k++)
+        {
+            starts.push(at);
+            at += bodies[k].length + sizes[k];
+        }
+        /** @type {number[]} */
+        const entries = [];
+        for (const callee of callees)
+        {
+            entries.push(at);
+            at += callee.length;
+        }
+        /** @type {number[]} */
+        const bytes = [];
+        bodies.forEach((one, k)=>{
+            bytes.push(...one);
+            const end = starts[k] + one.length + sizes[k];
+            const to = (/** @type {number} */ target)=>le(target - end);
+            const later = starts[k + 1 + next(Math.max(1, count - k - 1))];
+            if (exits[k] === -1)
+            {
+                bytes.push(0xf4);
+            }
+            else if (exits[k] === 1)
+            {
+                bytes.push(0xa8, next(256), 0x0f, 0x84 + next(2), ...to(later));
+            }
+            else if (exits[k] === 2)
+            {
+                bytes.push(0xe9, ...to(later));
+            }
+            else if (exits[k] === 3)
+            {
+                bytes.push(0x4d, 0x0f, 0x8f, ...to(starts[next(k + 1)]));
+            }
+            else if (exits[k] === 4)
+            {
+                bytes.push(0xe8, ...to(entries[next(entries.length)]));
+            }
+        });
+        callees.forEach(callee=>bytes.push(...callee));
+        const regs = names.map(()=>0x4f00 + next(0x180));
+        regs[4] = 0x6f00 + next(0x180);
+        regs[5] = 1 + next(3);
+        const shut = [0x4000, 0x5000, 0x7000][next(3)];
+        const code = next(3) === 0;
+        const fill = Array.from({ length: 0x4000 }, ()=>next(256));
+        const entry = next(2) === 0 ? CODE : starts[next(count)];
+        const structure = next(2) === 0;
+        const what = `round ${round}: ${bytes.map(x=>x.toString(16).padStart(2, '0')).join(' ')}`
+            + ` regs ${JSON.stringify(regs)} shut ${shut} code ${code} entry ${entry.toString(16)}`
+            + ` structure ${structure}`;
+        againstInterpreter(m=>{
+            m.write(CODE, bytes);
+            m.write(0x4000, fill);
+            names.forEach((name, r)=>m.setReg(name, regs[r]));
+            m.pages.markRange(shut, 0x1000, PageFlag.INACCESSIBLE);
+            if (code)
+            {
+                m.pages.markCode(0x4f80, 0x20);
+                m.pages.markCode(0x6f80, 0x20);
+            }
+        }, entry, structure, what);
+    }
+});
+
+/** @param {number} value */
+function le(value){
+    return [value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24 & 255];
+}
+
+test('a self-loop of string instructions streams its pointers while DF is clear', ()=>{
+    const loop = planLoop(regionOf([
+        0xa4,                               // movsb
+        0x39, 0xc7,                         // cmp edi, eax
+        0x75, 0xfb,                         // jne back
+    ]).blocks[0].instructions);
+    assert.ok(loop !== null && loop.forward, 'planned for DF clear');
+    assert.deepEqual(loop.streams.map(s=>[s.base, s.stride, s.store]).sort(),
+        [[6, 1, false], [7, 1, true]]);
+    assert.ok(loop.plan.get(0)?.store, 'the movs is planned, its store with it');
+    assert.equal(loop.turns, 4097);
+    // A loop that writes DF itself is planned for no direction.
+    const flips = planLoop(regionOf([0xfd, 0xa5, 0x39, 0xc7, 0x75, 0xfa]).blocks[0].instructions);
+    assert.ok(flips === null || !flips.plan.has(1));
+    // A register copied from a pointer moves with it: lea ecx, [ebx+1];
+    // mov ebx, ecx is ebx moved by one a turn.
+    const copied = planLoop(regionOf([
+        0x0f, 0xb6, 0x43, 0x01,             // movzx eax, byte [ebx+1]
+        0x8d, 0x4b, 0x01,                   // lea ecx, [ebx+1]
+        0x89, 0xcb,                         // mov ebx, ecx
+        0x84, 0xc0,                         // test al, al
+        0x75, 0xf3,                         // jnz back
+    ]).blocks[0].instructions);
+    assert.deepEqual(copied?.streams.map(s=>[s.base, s.stride, s.lo]), [[3, 1, 1]]);
 });

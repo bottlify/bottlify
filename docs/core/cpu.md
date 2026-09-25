@@ -334,38 +334,82 @@ against code too, so the store's code note needs no second test. Only when a fla
 the last byte's own flags read, so an access beside an unmapped page or beside code faults
 or notes only when it reaches it. On a push/pop loop this took a third off (2.3 -> 1.5 ns an
 instruction), on a load/store copy a quarter (1.14 -> 0.86), on a call-heavy loop a tenth.
-Most of a block's accesses need not even that. Those off one register the block does not change
-in between -- a frame through esp or ebp, a struct through one pointer, an array through a base
-and an index -- or off an address in the instruction form a group (`planBlock` in
-`emit/memory.js`, made from the decoded operands before the block is emitted; a push, a pop and
-an add, sub, inc, dec or lea of a register by a constant move it by a known amount, any other
-write starts it afresh, an operation not known there starts every register afresh). A group's
-accesses lie in a window known from the registers at its first access, and one of at most 4096
-bytes spans at most two pages, each touched by one of the accesses: the group is checked once,
-there -- both pages against inaccessible, and the stores' window against code, to the granule
-through `codeHit` only when a page is flagged -- and its accesses carry no test at all. A window
-that would fault, or a store that would land in code, leaves the region untranslated before the
-group's first access, and the interpreter runs the rest with a check on every access, so the
-fault is raised at its instruction and the note made at its store as they would be here. Two
-loads alone are not grouped (the window costs what their own tests do); three accesses, or two
-with a store, are. The emitter's own calls are held to the plan: an access it did not foresee,
-or a store it took for a load, is an error in translating rather than a test left out. A copy
-loop through one base 188 -> 113 ms (the no-test ceiling 107), a push/pop loop 245 -> 171 (at
-the ceiling), an indexed walk 161 -> 137 (ceiling 120). That leave is *held* (its exit carries
-vector `HELD`): an untranslated exit with budget left goes through the epilogue's hash probe,
-which found this very address's entry and tail-called it, whose check left again with nothing
-retired -- a loop spinning for ever with the budget untouched the moment its window met a page it
-could not use. Held, it returns to the host, which interprets the instruction.
+Most accesses need not even that. Those off a register whose value the planner can follow -- a
+frame through esp or ebp, a struct through one pointer, an array through a base and an index --
+or off an address in the instruction form a group (`planRegion` in `emit/memory.js`, made from
+the decoded operands before the region is emitted). The planner follows each register as a value
+and an offset from it: a push, a pop, a call, a return and an add, sub, inc or dec by a constant
+move a register by a known amount; a `mov` from another register, a `lea` off one and a `leave`
+copy a value with its offset, and an `xchg` swaps two; any other write gives the register a
+value of its own, and an operation not known there gives every register one. So a frame's
+`push ebp; mov ebp, esp`, its reads through ebp and esp, its `leave` and its `ret` are one group.
+A group's accesses lie in a window known from the registers at its first access, and one of at
+most 4096 bytes spans at most two pages, each touched by one of the accesses: the group is
+checked once, there, as one access is -- the flags of its first page and the next as one
+halfword, against inaccessible and, for a group with a store, against code; only when a flag is
+up are the window's own pages and the stores' granules (`codeHit`) looked at -- and its accesses
+carry no test at all. Two accesses make a group, then, since its test costs what one access's
+does. A window that would fault, or a store that would land in code, leaves the region
+untranslated before the group's first access, and the interpreter runs the rest with a check on
+every access, so the fault is raised at its instruction and the note made at its store as they
+would be here. The emitter's own calls are held to the plan: an access it did not foresee, or a
+store it took for a load, is an error in translating rather than a test left out. Groups within
+a block took a copy loop through one base 188 -> 113 ms (the no-test ceiling 107), a push/pop
+loop 245 -> 171 (at the ceiling), an indexed walk 161 -> 137 (ceiling 120).
+
+A group reaches past its block. Each block takes the windows still open at the end of one block
+that leads to it -- its one way in, where it has one; else, unless a jump back reaches it too
+(a loop's head, whose every turn would pay the test), the block before it or the first block
+before it that jumps there -- along a fall-through, a jump, a branch, a call into a callee formed
+into the region and a return formed back to the block after its call. The way on past a trap
+(whose host call may change what is accessible) and a switch's jump through its table carry
+none; the region's entry, a structured region's loop heads and a block that loops onto itself
+take none. Every other way into a block that takes windows -- the dispatch, another region, a
+block of the region other than the one it takes from -- goes through the block's entry test:
+windows over the accesses the block and the blocks taking from it rely on, placed from the
+registers at the block's own start, found by following the code from that start alone rather
+than from what the chosen way put in them, so the test holds however the block was entered; a
+window not clean leaves at the block's start with nothing of it run. The chosen way branches
+past the test, a jump back through an inner label of the dispatch's table (in a flat region,
+where every jump back goes through the dispatch). An access no register at the block's start
+leads to keeps its own test. Registers holding one value at the start of a block that takes
+windows were made so before it, which an entry from elsewhere does not keep: a group begun in
+the block or after it follows all but one of them as values of their own, while a group begun
+before it still takes them all (its accesses there are the entry test's). The page tests an
+iteration of `tools/cork-bench`'s programs makes, before -> with this planner's groups kept
+within their block -> reaching past it: sort 440 263 -> 147 106 -> 102 418, the tree 286 308 -> 220 183 -> 135 136,
+virtual calls 236 810 -> 202 756 -> 188 072, the game's entity update 44 165 -> 41 179 -> 35 703,
+SSE float math 38 930 -> 30 736 -> 24 587, the switch 33 031 -> 27 582 -> 23 486, the loading
+phase's fifteen hundred small functions 104 983 -> 102 526 -> 102 493. In time (the best of
+five reps, the median of nine processes, `node --no-liftoff`) sort went 815 -> 474 us an
+iteration, the strings 512 -> 421, SSE float math 150 -> 136; the rest moved within the five to
+ten per cent a process's figure moves by. The first iteration, which pays for the planning, came
+out 2 per cent slower in the geometric mean (the median of seven processes), and the loading
+phase's, bound by translation, 1 per cent faster: the planner takes about half as long again as
+the block-by-block one did, and the modules it gives are a few per cent smaller.
+
+The leave for a window not clean, at a group's first access or at an entry test, is *held* (its
+exit carries vector `HELD`): an untranslated exit with budget left goes through the epilogue's
+hash probe, which found this very address's entry and tail-called it, whose check left again
+with nothing retired -- a loop spinning for ever with the budget untouched the moment its window
+met a page it could not use. Held, it returns to the host, which interprets the instruction.
+All the windows tested at one place share one such exit.
 
 A block that loops onto itself is taken further (`planLoop` and `emitStreamWindow` in
-`emit/memory.js`, `emitHoistedLoop` in `emit/region.js`): when the registers its accesses go
-off change only by push, pop and constant add, sub, inc or dec, each access group moves by a
-fixed stride a turn -- a stream. The turns a stride of at most 4096 bytes takes span at most
-three pages beyond the window, so before the turns the pages every stream reaches in them are
-tested once -- against inaccessible, and against code at the page for a stream with a store --
-and those turns run a second copy of the body with no test on the streams' accesses; the
-back edge counts the turns down and goes back to the test when they are spent. A test that
-finds a page not clean runs the checked copy (the per-block groups above) to the loop's end.
+`emit/memory.js`, `emitHoistedLoop` in `emit/region.js`): when a register its accesses go off
+holds at the end of a turn the value it held at the start moved by a constant (the planner's
+values above), each access group moves by a fixed stride a turn -- a stream. The turns a stride
+of at most 4096 bytes takes span at most three pages beyond the window, so before the turns the
+pages every stream reaches in them are tested once -- against inaccessible, and against code at
+the page for a stream with a store -- and those turns run a second copy of the body with no test
+on the streams' accesses; the back edge counts the turns down and goes back to the test when
+they are spent. A test that finds a page not clean runs the checked copy (the groups above) to
+the loop's end. A string instruction with no repeat (`movs`, `stos`, `lods`, `cmps`, `scas`)
+moves its pointers by its size a turn while DF is clear, and a loop of them whose body does not
+write DF is planned so: the test before the turns reads DF with the pages, and DF set runs the
+checked copy. That took the benchmark's sort, which moves its elements with a loop of `movsb`,
+from 354 538 page tests an iteration to 102 418 and 722 -> 480 us, and its strings 134 990 ->
+101 608 and 451 -> 377.
 An access off a register the block changes otherwise keeps its own test in both copies. A
 pointer walk of loads and a store (`mov`/`add`/`mov`, `add esi, 12`) 125 -> 79 ms, an SSE
 dot over an array (`movups`, `mulps`, `add esi, 16`) 157 -> 110, CPU time, best of five
