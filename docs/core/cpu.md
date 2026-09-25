@@ -161,7 +161,7 @@ hash; what is saved is the emitting and the encoding, and the report says
 `cacheHits`/`cacheMisses`. A region dropped when its page is written leaves its batch's module
 in place for the batch's other regions. Batches stay small while a title keeps finding code, so
 once `relinkAfter` batch modules (16) have gathered the running regions not relinked yet go, in
-chunks of `relinkRegions` (4096), to the worker with a copy of their pages: each is formed there
+chunks of `relinkRegions` (512: the engine thread instantiates each chunk's module whole, and 4096 of a real title's regions held it for 160 ms where 512 hold it for about 23), to the worker with a copy of their pages: each is formed there
 again, kept only when its bytes hash as they did, emitted into one module per chunk, and
 switched in place -- its table slot and the entries it made take the new function, the labels
 being the same. A title's regions then live in tens of modules rather than hundreds; the
