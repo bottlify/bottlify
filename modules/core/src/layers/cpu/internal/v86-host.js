@@ -224,7 +224,7 @@ export async function createV86Host(config){
      *     data: DataView, reg32: Int32Array, eip: Int32Array, flags: Int32Array,
      *     flagsChanged: Int32Array, cr: Int32Array, inHlt: Uint8Array,
      *     counter: Uint32Array, xmm: Int32Array, mxcsr: Int32Array,
-     *     fpuStackPtr: Uint8Array, fpuControl: Uint16Array }}
+     *     fpuStackPtr: Uint8Array, fpuControl: Uint16Array, codePages: Uint8Array }}
      */
     const views = {
         ram: new Uint8Array(0), ramOffset: 0, data: new DataView(new ArrayBuffer(0)),
@@ -232,6 +232,7 @@ export async function createV86Host(config){
         flagsChanged: new Int32Array(0), cr: new Int32Array(0), inHlt: new Uint8Array(0),
         counter: new Uint32Array(0), xmm: new Int32Array(0), mxcsr: new Int32Array(0),
         fpuStackPtr: new Uint8Array(0), fpuControl: new Uint16Array(0),
+        codePages: new Uint8Array(0),
     };
     const v = ()=>{
         // Whether the memory has moved since the views were taken is read off
@@ -261,8 +262,39 @@ export async function createV86Host(config){
         views.mxcsr = take(cpu.mxcsr, Int32Array);
         views.fpuStackPtr = take(cpu.fpu_stack_ptr, Uint8Array);
         views.fpuControl = take(cpu.fpu_control_word, Uint16Array);
+        // A byte per physical page, set while the emulator's compiler holds
+        // code for it (a build without the export has none to consult).
+        const codePages = cpu.wm.exports.bottlify_page_has_code_ptr;
+        views.codePages = typeof codePages === 'function'
+            ? new Uint8Array(buffer, codePages() >>> 0, 0x100000) : new Uint8Array(0);
         return views;
     };
+    /**
+     * A data write the emulator's compiler has code under: "never executed" is
+     * the caller's word for the region -- the heap is one read-write region --
+     * and a program may still run what it placed there (unpacked code, a
+     * routine it generates), so a page the compiler holds code for is dirtied
+     * as a guest store would dirty it. One byte read a page otherwise.
+     *
+     * @param {number} address @param {number} length
+     */
+    const dirtyCompiled = (address, length)=>{
+        const codePages = v().codePages;
+        if (length <= 0 || codePages.length === 0)
+        {
+            return;
+        }
+        const last = (address + length - 1) >>> 12;
+        for (let page = address >>> 12; page <= last; page++)
+        {
+            if (codePages[page] !== 0)
+            {
+                cpu.wm.exports.jit_dirty_cache(address >>> 0, (address + length) >>> 0);
+                return;
+            }
+        }
+    };
+
     // How many compiled modules the emulator actually published, and the first
     // reason one was refused. `codegen_finalize` instantiates asynchronously and
     // its promise has no rejection handler, so a compiler that cannot publish
@@ -713,6 +745,7 @@ export async function createV86Host(config){
             hostWrites++;
             hostWrittenBytes += bytes.length;
             v().ram.set(bytes, address);
+            dirtyCompiled(address, bytes.length);
         },
 
         /**
@@ -730,6 +763,7 @@ export async function createV86Host(config){
             hostWrites++;
             hostWrittenBytes += length;
             v().ram.fill(value, address, address + length);
+            dirtyCompiled(address, length);
         },
 
         /** @param {string} name @returns {number} */

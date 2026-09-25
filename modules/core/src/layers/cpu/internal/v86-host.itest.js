@@ -513,6 +513,50 @@ test('generated code goes on into the next module, and the slice still bounds it
     host.stop();
 });
 
+test('a data write over code the emulator compiled runs as the new code', async()=>{
+    // The heap is one read-write region, so a host write there goes in as
+    // data; a program can still have run code from it -- a routine it placed
+    // or unpacked -- and its next call must see the bytes written since.
+    const host = await boot();
+    const N = 300000;
+    const routine = GUEST_CODE + 0x4000;
+    host.writePhysical(routine, new Uint8Array([0xb8, ...u32(1), 0xc3]));    // mov eax, 1; ret
+    const code = [0x31, 0xdb, 0xb9, ...u32(N)];         // xor ebx, ebx; mov ecx, N
+    const loopAt = GUEST_CODE + code.length;
+    code.push(0xe8, ...u32(routine - (loopAt + 5)));                         // call routine
+    code.push(0x01, 0xc3, 0x49);                        // add ebx, eax; dec ecx
+    const jnzAt = GUEST_CODE + code.length;
+    code.push(0x0f, 0x85, ...u32(loopAt - (jnzAt + 6)), 0xf4);               // jnz loop; hlt
+    host.writePhysical(GUEST_CODE, new Uint8Array(code));
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+    const run = async()=>{
+        host.cpu().in_hlt[0] = 0;
+        host.cpu().instruction_pointer[0] = GUEST_CODE;
+        host.writeReg32('esp', INITIAL_STACK);
+        for (let slices = 0; !host.cpu().in_hlt[0] && slices < 20000; slices++)
+        {
+            host.cpu().run_slice(10000);
+            if (slices % 20 === 0)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 0));
+            }
+        }
+        assert.ok(host.cpu().in_hlt[0], 'the loop ran to its end');
+        return host.readReg32('ebx');
+    };
+    assert.equal(await run(), N);
+    const pointer = host.cpu().wm.exports.bottlify_page_has_code_ptr;
+    if (typeof pointer !== 'function')
+    {
+        return; // a build without the table dirties nothing it could not see
+    }
+    const codePages = new Uint8Array(host.wasmMemory().buffer, pointer() >>> 0, 0x100000);
+    assert.notEqual(codePages[routine >>> 12], 0, 'the routine\'s page was compiled');
+    host.writeData(routine + 1, new Uint8Array(u32(2)));                     // mov eax, 2
+    assert.equal(await run(), 2 * N, 'every call ran the routine as written');
+    host.stop();
+});
+
 test('a return into the module it left from stays in it, chained or not', async()=>{
     // A loop calling four routines in its own page: every return lands in
     // the module that made the call, and the one lookup an exit makes says

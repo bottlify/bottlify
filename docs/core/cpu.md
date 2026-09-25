@@ -577,7 +577,7 @@ otherwise.
 | `readPhysical` | `(address, length) => Uint8Array` | A **window** on guest RAM — a subarray of the emulator's memory, not a copy. |
 | `writePhysical` | `(address, bytes) => void` | Writes through the emulator, which invalidates any compiled code on the pages touched. |
 | `readU32` | `(address) => number` | One dword, with nothing allocated. |
-| `writeData` | `(address, bytes) => void` | Writes straight into RAM without telling the compiler. Only for memory the guest can never execute; the caller is responsible for that being true. |
+| `writeData` | `(address, bytes) => void` | Writes straight into RAM without the emulator's device checks. Meant for memory the guest does not execute; a page the compiler holds code for is still dirtied (see "Host writes and the compiler"). |
 | `readReg32` / `writeReg32` | `(name[, value])` | `eax ecx edx ebx esp ebp esi edi`, plus `eip` and `eflags` (the latter read through the emulator's accessor so lazy arithmetic flags are folded in). Unknown names throw. |
 | `registerTrap` | `(name, popBytes, { preserveResult?, forwardTo?, saveRegisters?, pushEdx?, holdEip? }) => { id, address }` | Takes a stub slot; written into guest memory immediately if the table has already been laid down. Throws when the table is full. `saveRegisters` (`pushad`) or `pushEdx` (just EDX) run before the trap even without `forwardTo`; `holdEip` emits neither `ret` nor a jump, for a caller that decides EIP itself while handling the trap (the bridge's `hook`, EDX alone, or its `siteHook`, every register, together with `saveRegisters`). |
 | `thunkImage` | `() => Uint8Array` | The stub table so far, to be written at `layout.thunkBase`. Marks the table as written. |
@@ -775,6 +775,11 @@ Every `writePhysical` goes through the emulator's `write_memory`, which discards
 for the pages written. That is the right price for mapping an image and the wrong one for a
 handler writing a structure field, so `writeData` writes straight into RAM; the memory layer
 decides between the two by asking its region map whether the target could ever be executed.
+The map's answer is per region and the heap is one read-write region, yet a program may run code
+it placed there (a routine it unpacked or generates), so `writeData` and `fillData` also read the
+fork's has-code table (`bottlify_page_has_code_ptr`, a byte a page) and dirty the compiler's code
+for the range when a page they wrote holds some (`jit_dirty_cache`) -- a call into a routine the
+host had rewritten ran the old compiled code. One byte read a page otherwise.
 `hostWrittenBytes` and `jit.discarded` say how much that costs in a run.
 
 ### zstd
@@ -850,7 +855,8 @@ to its end: tens of microseconds each, which ran a title's scene at 240 ns an in
   out-of-memory answer to the guest.
 - **`readPhysical` is a window**, not a copy; a caller that keeps it keeps a value that
   changes under it.
-- **`writeData` trusts its caller** that the target is not executable.
+- **`writeData` trusts its caller** that the target is not executable, except where the
+  emulator's compiler holds code for a page it writes, which it dirties.
 - **One machine per process.** State lives on the module object; a second concurrent build
   would need it hoisted into a per-instance record.
 - **The FPU offsets are the emulator's**, not an architectural fact; a change in the vendored
