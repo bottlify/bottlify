@@ -11,7 +11,9 @@ import { createDifferentialHost } from './internal/differential-host.js';
 import { TABLES_RESERVE } from './engine.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
-import { FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE, VECTORS } from './internal/boot-rom.js';
+import {
+    FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE, THREAD_DESCRIPTOR, VECTORS,
+} from './internal/boot-rom.js';
 import { readFault, describeFault, hostFault } from './internal/faults.js';
 import {
     captureContext, freshThreadFpu, restoreContext, setThreadBase,
@@ -852,6 +854,14 @@ export const cpuModule = {
                     return;
                 }
                 restoreContext(host.cpu(), context);
+                // The emulator loads a segment's base from its descriptor, so
+                // FS's follows the thread too: a program reloading FS finds its
+                // own TEB. Bytes 2..7 of the descriptor: the base's low three
+                // bytes, the access and flags as the ROM wrote them, the high.
+                host.writePhysical(THREAD_DESCRIPTOR + 2, new Uint8Array([
+                    threadBase & 0xff, threadBase >>> 8 & 0xff, threadBase >>> 16 & 0xff,
+                    0x92, 0xcf, threadBase >>> 24 & 0xff,
+                ]));
             },
 
             /**

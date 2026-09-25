@@ -87,9 +87,10 @@ export const FAULT_STUB_BYTES = FAULT_STUB_SIZE;
 
 /**
  * Bytes of the protected-mode entry before its last instruction: one `mov eax,
- * imm32`, five segment loads, one `mov esp, imm32`.
+ * imm32`, four segment loads, `mov al, imm8` and the load of FS, one `mov esp,
+ * imm32`.
  */
-const PM_PROLOGUE_SIZE = 5 + 5 * 2 + 5;
+const PM_PROLOGUE_SIZE = 5 + 4 * 2 + 2 + 2 + 5;
 
 /**
  * The ROM's last instruction: the jump into guest code.
@@ -140,6 +141,15 @@ export const BRING_UP_PARK = ROM_BASE + OFF_PARK;
 /** Selectors in the GDT built below. */
 export const SEL_CODE32 = 0x08;
 export const SEL_DATA32 = 0x10;
+/**
+ * FS: a flat data segment whose base is the running thread's TEB, as Windows'
+ * FS descriptor is. The switch keeps the descriptor's base on the thread it
+ * restores (`THREAD_DESCRIPTOR`), so a program that reloads FS -- `push fs;
+ * pop fs`, `mov fs, ax` -- finds its TEB again rather than address 0.
+ */
+export const SEL_THREAD = 0x18;
+/** The linear address of the FS descriptor, whose base a thread switch writes. */
+export const THREAD_DESCRIPTOR = ROM_BASE + OFF_GDT + SEL_THREAD;
 
 /**
  * A flat 4 GiB segment descriptor: base 0, limit 0xFFFFF, granularity 4 KiB,
@@ -169,15 +179,17 @@ export function buildBootRom({ entryVector, initialStack, trapPort }){
     const rom = new Uint8Array(ROM_SIZE);
     const put = (/** @type {number} */ offset, /** @type {number[]} */ bytes)=>rom.set(bytes, offset);
 
-    // GDT: null, flat 32-bit code, flat 32-bit data.
+    // GDT: null, flat 32-bit code, flat 32-bit data, and FS's -- flat as well
+    // until the first thread switch gives it a TEB.
     put(OFF_GDT, [
         ...[0, 0, 0, 0, 0, 0, 0, 0],
         ...flatDescriptor(0x9a),
         ...flatDescriptor(0x92),
+        ...flatDescriptor(0x92),
     ]);
 
-    // GDT pointer: limit (3 descriptors - 1), then the GDT's linear base.
-    put(OFF_GDT_PTR, [...u16(3 * 8 - 1), ...u32(ROM_BASE + OFF_GDT)]);
+    // GDT pointer: limit (4 descriptors - 1), then the GDT's linear base.
+    put(OFF_GDT_PTR, [...u16(4 * 8 - 1), ...u32(ROM_BASE + OFF_GDT)]);
 
     // One interrupt gate per processor exception, each to its own stub.
     //
@@ -233,8 +245,9 @@ export function buildBootRom({ entryVector, initialStack, trapPort }){
         0x8e, 0xd8,                // mov ds, ax
         0x8e, 0xc0,                // mov es, ax
         0x8e, 0xd0,                // mov ss, ax
-        0x8e, 0xe0,                // mov fs, ax
         0x8e, 0xe8,                // mov gs, ax
+        0xb0, SEL_THREAD,          // mov al, SEL_THREAD
+        0x8e, 0xe0,                // mov fs, ax
         0xbc, ...u32(initialStack), // mov esp, initialStack
         0xff, 0x25, ...u32(entryVector), // jmp dword [entryVector]
     ]);

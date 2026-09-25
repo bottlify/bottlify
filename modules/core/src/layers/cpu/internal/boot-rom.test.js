@@ -10,7 +10,7 @@ import {
     BRING_UP_PARK, DEAD_BOOT_CODE, FAULT_SAVED, FAULT_STUB_BYTES, FAULT_STUBS_OFFSET, GUEST_JUMP,
     IDT_OFFSET,
     IDT_POINTER_OFFSET, VECTORS, buildBootRom, inDeadBootCode, ROM_BASE, ROM_SIZE, SEL_CODE32,
-    SEL_DATA32,
+    SEL_DATA32, SEL_THREAD, THREAD_DESCRIPTOR,
 } from './boot-rom.js';
 
 const ENTRY_VECTOR = 0x7000;
@@ -37,14 +37,14 @@ test('reset vector is a far jump to the 16-bit init stub', ()=>{
     assert.equal(image[0xfff3] | image[0xfff4] << 8, 0xf000, 'segment = the ROM itself');
 });
 
-test('GDT holds a null descriptor plus flat 4 GiB code and data segments', ()=>{
+test('GDT holds a null descriptor plus flat 4 GiB code, data and thread segments', ()=>{
     const image = rom();
     const gdt = 0x100;
 
     assert.deepEqual([...image.subarray(gdt, gdt + 8)],
         [0, 0, 0, 0, 0, 0, 0, 0], 'null descriptor');
 
-    for (const [selector, access] of [[SEL_CODE32, 0x9a], [SEL_DATA32, 0x92]])
+    for (const [selector, access] of [[SEL_CODE32, 0x9a], [SEL_DATA32, 0x92], [SEL_THREAD, 0x92]])
     {
         const at = gdt + selector;
         assert.equal(image[at] | image[at + 1] << 8, 0xffff, 'limit low');
@@ -56,10 +56,11 @@ test('GDT holds a null descriptor plus flat 4 GiB code and data segments', ()=>{
     }
 });
 
-test("GDT pointer covers three descriptors and points at the GDT's linear address", ()=>{
+test("GDT pointer covers four descriptors and points at the GDT's linear address", ()=>{
     const image = rom();
     const ptr = 0x120;
-    assert.equal(image[ptr] | image[ptr + 1] << 8, 3 * 8 - 1, 'limit is size-1');
+    assert.equal(image[ptr] | image[ptr + 1] << 8, 4 * 8 - 1, 'limit is size-1');
+    assert.equal(THREAD_DESCRIPTOR, ROM_BASE + 0x100 + SEL_THREAD, 'the switch writes FS\'s');
     assert.equal(readU32(image, ptr + 2), ROM_BASE + 0x100, 'base is the GDT, as a linear address');
 });
 
@@ -78,6 +79,9 @@ test('protected-mode entry sets a stack and jumps indirectly through the entry v
     assert.notEqual(jmp, -1, 'indirect jmp present');
     assert.equal(readU32(image, pm + jmp + 2), ENTRY_VECTOR);
     assert.ok(movEsp < jmp, 'stack is set before control leaves the ROM');
+    // FS is loaded with the thread's selector, the other four with flat data.
+    const fs = bytes.findIndex((b, i)=>b === 0x8e && bytes[i + 1] === 0xe0);
+    assert.deepEqual(bytes.slice(fs - 2, fs), [0xb0, SEL_THREAD], 'mov al, SEL_THREAD; mov fs, ax');
 });
 
 test('GUEST_JUMP names the jump into guest code, and BRING_UP_PARK a spin', ()=>{
