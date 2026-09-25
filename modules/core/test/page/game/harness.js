@@ -803,8 +803,15 @@ export function presentFrame(app, request, state, frame){
         // starts over at every such stall, so the averages taken at it cover
         // the same frames of play in every run of a program that advances one
         // step a frame.
-        state.sinceStall = state.lastPresent > 0 && now - state.lastPresent >= 1500
-            ? 0 : (state.sinceStall ?? 0) + 1;
+        const stalled = state.lastPresent > 0 && now - state.lastPresent >= 1500;
+        state.sinceStall = stalled ? 0 : (state.sinceStall ?? 0) + 1;
+        if (stalled)
+        {
+            // A load's own screens can draw that many frames before the map
+            // loads: whatever was taken before the last stall is taken again.
+            state.steady = undefined;
+            state.steadyFrom = undefined;
+        }
         // The translator's counters at both ends of the same 240 frames the
         // log's averages cover: what those frames retired, left for the host
         // by and transferred through, a frame.
