@@ -92,9 +92,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // (false: the test on every operation from the start).
         wideFirst: true,
         // A region's loops as wasm loops and its flags' liveness over its
-        // blocks (false: every backward jump through the dispatch, and every
-        // flag live at every block's end -- for telling a defect apart).
-        structure: true,
+        // blocks. Off by default: in Doom 3's menu it doubled the guest's time
+        // a frame (5.9 -> 10.1 ms) while it made play 3% faster, and the cause
+        // is not yet known.
+        structure: false,
         ...config,
     };
     /** Whether new x87 regions are compiled for the wide precision controls. */
@@ -1473,7 +1474,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // A diagnostic run with classes left out, or with an undo log the
             // stored modules were built without, keeps no translations.
             const store = leaveOut.size > 0 || settings.undoLog || profiling
-                || settings.structure === false ? null : (settings.store ?? null);
+                ? null : (settings.store ?? null);
             /** @type {{ region: import('../region.js').Region, entryTop: number,
              *     stamp: string, cached: import('./cache.js').CachedRegion | null, wide?: boolean,
              *     moduleBytes?: Uint8Array | null }[]} */

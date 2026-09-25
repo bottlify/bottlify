@@ -81,7 +81,7 @@ export function emitBatch(jobs, layout, features, options = {}){
         countTransfers: options.countTransfers === true,
         blockProfile: options.blockProfile === true,
         wide: options.wide === true,
-        structure: options.structure !== false,
+        structure: options.structure === true,
         leaveOut,
         ...(options.trapPort === undefined ? {} : { trapPort: options.trapPort }),
     });

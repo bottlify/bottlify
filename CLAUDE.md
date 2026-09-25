@@ -205,6 +205,20 @@ arrays out of each `module.js` rather than trusting a separately-maintained rule
   against `dist/vendor/manifest.json` — anything but a byte-for-byte match fails the build. This is
   the enforcement of "Phase 0 acceptance: a clean clone builds reproducibly", not a nice-to-have.
 
+5a. Optimisation Discipline
+
+- **An optimisation works on a test before it touches the engine.** First a test that reproduces
+  a scenario that really occurs -- in node, on the instructions a title actually runs (a block
+  profile, the bytes from the bundle) -- then a proposed solution, and only when the solution
+  works on that test is the engine changed, and the game run confirms it afterwards. A browser
+  A/B run of a guess is not a diagnosis: a game's frame varies by a quarter from one run to the
+  next.
+- **Judge a change on more than one scenario** (play, menu, load): a change that made Doom 3's
+  play 3% faster doubled the guest's time in its menu.
+- **No hacks and no per-title hooks while another way exists.** The first lever is the translator
+  itself -- more caching, larger and more complex blocks and regions -- because it speeds up every
+  title at once. Small gains count when they are generic.
+
 6. Comment Discipline
 
 - Comments explain WHY — a non-obvious invariant, a workaround, something that would surprise a

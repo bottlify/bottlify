@@ -206,7 +206,7 @@ const LOCAL_TYPES = [
  */
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
-        wide = false, blockProfile = false, structure = true } = {})
+        wide = false, blockProfile = false, structure = false } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
