@@ -136,7 +136,11 @@ emulator's own compiler leaves alone: what it compiled there is dropped when the
 and the page is not compiled again while flagged, since generated code runs a page's blocks
 without returning to the slice loop where the handoff is checked -- the emulator interprets
 it, and its interpreter's own loop returns at an entry as the slice loop does, until the
-translator takes it. Without tail calls the map
+translator takes it. A region writes the x87 control word in place, where the emulator keeps
+its rounding and precision decoded apart from the word (set by its own `fldcw` and the
+`set_control_word` export), so the hybrid and differential loops compare the word around a
+region and, when it changed, have the emulator decode it again (`syncX87Control`): a
+`fistp` the emulator ran after a region's `fldcw` rounded by the word before it. Without tail calls the map
 alone answers and the slice loop crosses between regions as before. The translator's layout is the emulator's
 own register file, read off its typed views at boot (`stateLayout`), and its tables take the
 top of the guest RAM (`engine.js`'s `TABLES_RESERVE`; the layer reports the RAM below it as

@@ -224,14 +224,14 @@ export async function createV86Host(config){
      *     data: DataView, reg32: Int32Array, eip: Int32Array, flags: Int32Array,
      *     flagsChanged: Int32Array, cr: Int32Array, inHlt: Uint8Array,
      *     counter: Uint32Array, xmm: Int32Array, mxcsr: Int32Array,
-     *     fpuStackPtr: Uint8Array }}
+     *     fpuStackPtr: Uint8Array, fpuControl: Uint16Array }}
      */
     const views = {
         ram: new Uint8Array(0), ramOffset: 0, data: new DataView(new ArrayBuffer(0)),
         reg32: new Int32Array(0), eip: new Int32Array(0), flags: new Int32Array(0),
         flagsChanged: new Int32Array(0), cr: new Int32Array(0), inHlt: new Uint8Array(0),
         counter: new Uint32Array(0), xmm: new Int32Array(0), mxcsr: new Int32Array(0),
-        fpuStackPtr: new Uint8Array(0),
+        fpuStackPtr: new Uint8Array(0), fpuControl: new Uint16Array(0),
     };
     const v = ()=>{
         // Whether the memory has moved since the views were taken is read off
@@ -260,6 +260,7 @@ export async function createV86Host(config){
         views.xmm = take(cpu.reg_xmm32s, Int32Array);
         views.mxcsr = take(cpu.mxcsr, Int32Array);
         views.fpuStackPtr = take(cpu.fpu_stack_ptr, Uint8Array);
+        views.fpuControl = take(cpu.fpu_control_word, Uint16Array);
         return views;
     };
     // How many compiled modules the emulator actually published, and the first
@@ -504,6 +505,20 @@ export async function createV86Host(config){
         // Off the view: the emulator's property is a proxy that makes a
         // typed array per access, and the hybrid loop asks every turn.
         x87Top: ()=>v().fpuStackPtr[0] & 7,
+
+        /** The x87 control word, as a translator's region leaves it. */
+        x87Control: ()=>v().fpuControl[0],
+
+        /**
+         * Decodes the control word again after an engine wrote it in place:
+         * the emulator keeps its rounding and precision apart from the word,
+         * set only by its own `fldcw` and the export, so a word a region
+         * loaded would otherwise round the emulator's next instructions by
+         * the one before it.
+         */
+        syncX87Control: ()=>{
+            cpu.wm.exports.set_control_word(v().fpuControl[0]);
+        },
 
         /**
          * Flags a page a translator holds code for: a slice arriving there

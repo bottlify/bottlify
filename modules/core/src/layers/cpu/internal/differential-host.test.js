@@ -26,6 +26,8 @@ function fakeEmulator(){
         halted: ()=>machine.stopped,
         eip: ()=>machine.at,
         x87Top: ()=>0,
+        x87Control: ()=>0x37f,
+        syncX87Control: ()=>{},
         raiseTrap: ()=>undefined,
         handoffAvailable: ()=>false,
     };

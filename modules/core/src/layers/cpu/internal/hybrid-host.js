@@ -119,7 +119,12 @@ export function createHybridHost({ emulator, cork }){
                 emulatorNext = false;
                 if (entry >= 0)
                 {
+                    const control = emulator.x87Control();
                     const exit = runtime.run(entry, remaining);
+                    if (emulator.x87Control() !== control)
+                    {
+                        emulator.syncX87Control();
+                    }
                     remaining -= exit.retired;
                     ran += exit.retired;
                     if (exit.kind === 'halt')

@@ -80,6 +80,8 @@ function fakeMachine(){
         },
         halted: ()=>machine.stopped,
         x87Top: ()=>0,
+        x87Control: ()=>0x37f,
+        syncX87Control: ()=>{},
         eip: ()=>machine.at,
     };
     return machine;
@@ -220,6 +222,8 @@ function scriptedMachine(turns, { handoff = true } = {}){
         halted: ()=>machine.stopped,
         eip: ()=>machine.at,
         x87Top: ()=>0,
+        x87Control: ()=>0x37f,
+        syncX87Control: ()=>{},
         handoffAvailable: ()=>handoff,
     };
     return machine;
