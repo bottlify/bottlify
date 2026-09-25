@@ -313,6 +313,22 @@ export function createBackend(options){
         /** @type {any} */
         let pipeline = null;
 
+        /**
+         * A scissor rectangle kept on the attachment. The viewport may reach
+         * past the target, the scissor may not: one past it invalidates the
+         * encoder, and a negative origin is refused before it gets there --
+         * either way the frame is lost rather than the part off the target.
+         *
+         * @param {{ x: number, y: number, width: number, height: number }} rect
+         */
+        const scissor = rect=>{
+            const x0 = Math.min(Math.max(Math.floor(rect.x), 0), target.width);
+            const y0 = Math.min(Math.max(Math.floor(rect.y), 0), target.height);
+            const x1 = Math.min(Math.max(Math.ceil(rect.x + rect.width), x0), target.width);
+            const y1 = Math.min(Math.max(Math.ceil(rect.y + rect.height), y0), target.height);
+            raw.setScissorRect(x0, y0, x1 - x0, y1 - y0);
+        };
+
         const pass = {
             target,
             get viewport(){
@@ -325,14 +341,13 @@ export function createBackend(options){
                 raw.setViewport(viewport.rect.x, viewport.rect.y,
                     viewport.rect.width, viewport.rect.height,
                     viewport.rect.minDepth, viewport.rect.maxDepth);
-                raw.setScissorRect(viewport.rect.x, viewport.rect.y,
-                    viewport.rect.width, viewport.rect.height);
+                scissor(viewport.rect);
                 return viewport;
             },
 
             /** @param {{ x: number, y: number, width: number, height: number }} rect */
             setScissor(rect){
-                raw.setScissorRect(rect.x, rect.y, rect.width, rect.height);
+                scissor(rect);
             },
 
             /**

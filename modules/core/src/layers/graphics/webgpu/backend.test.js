@@ -116,6 +116,34 @@ test('the two halves of the viewport travel together', ()=>{
     assert.deepEqual(pass.viewport.scale, [2 / 64, -2 / 32]);
 });
 
+test('a viewport past the target keeps its mapping, and its scissor stays on the target', ()=>{
+    // A viewport may reach past the attachment -- WebGPU allows it, and so do
+    // the APIs above -- but a scissor may not: one past the attachment
+    // invalidates the encoder, and a negative origin is refused outright, so
+    // either would lose the whole frame instead of the part off the target.
+    const { gpu, backend } = harness();
+
+    const frame = backend.beginFrame();
+    const pass = frame.beginPass({ target: target(backend, 256) });
+    pass.setViewport({ x: 0, y: 0, width: 512, height: 384 });
+    pass.setViewport({ x: -64, y: -32, width: 256, height: 256 });
+    pass.setViewport({ x: 300, y: 0, width: 64, height: 64 });
+    pass.setScissor({ x: -8, y: 200, width: 64, height: 100 });
+    frame.end();
+
+    assert.deepEqual(gpu.of('setViewport').map(call=>call.rect).slice(1), [
+        [0, 0, 512, 384, 0, 1],
+        [-64, -32, 256, 256, 0, 1],
+        [300, 0, 64, 64, 0, 1],
+    ], 'the viewport itself is passed as the program set it');
+    assert.deepEqual(gpu.of('setScissorRect').map(call=>call.rect).slice(1), [
+        [0, 0, 256, 256],
+        [0, 0, 192, 224],
+        [256, 0, 0, 64],
+        [0, 200, 56, 56],
+    ]);
+});
+
 test('the binding cache survives a pass boundary and a frame boundary', ()=>{
     // A group names a layout, a view, a sampler and the uniform ring: nothing
     // that changes per draw, so the one made in the first pass is the one
