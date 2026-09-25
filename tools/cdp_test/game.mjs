@@ -32,6 +32,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchWithGpu, shutdown } from './browser.mjs';
 import { CdpEndpoint } from './cdp.mjs';
+import { reportTimeout } from './timeout-report.mjs';
 import { serveStatic } from './server.mjs';
 import { describeProfile, profileWorkers, summarise } from './profile.mjs';
 import { openBundle } from '../btl.mjs';
@@ -1210,22 +1211,24 @@ export async function game(options){
             }
             await stopProfiling().catch(()=>{});
             await drainLog();
-            const onTimeout = await cdp.send(
-                'Page.captureScreenshot', { format: 'png' }, sessionId);
             const stampOut = new Date().toISOString().replace(/[:.]/g, '-');
-            saveProfiles(stampOut);
-            for (const one of cpuProfiles ?? [])
-            {
-                console.log(describeProfile(one.url, summarise(one.profile, one.windowMs),
-                    one.windowMs).join('\n'));
-            }
-            writeFileSync(join(REPORTS_DIR, `game-${stampOut}.png`),
-                Buffer.from(onTimeout.data, 'base64'));
-            return {
-                ok: false, measured: false, pageUrl, events: thrown,
+            const reason = await reportTimeout({
                 reason: `${e instanceof Error ? e.message : String(e)}`
                     + `${options.log ? ` -- call log drained to ${options.log}` : ''}`,
-            };
+                save(){
+                    saveProfiles(stampOut);
+                    for (const one of cpuProfiles ?? [])
+                    {
+                        console.log(describeProfile(one.url,
+                            summarise(one.profile, one.windowMs), one.windowMs).join('\n'));
+                    }
+                },
+                capture: async()=>(await cdp.send(
+                    'Page.captureScreenshot', { format: 'png' }, sessionId)).data,
+                write: data=>writeFileSync(join(REPORTS_DIR, `game-${stampOut}.png`),
+                    Buffer.from(data, 'base64')),
+            });
+            return { ok: false, measured: false, pageUrl, events: thrown, reason };
         }
 
         const stamp = new Date().toISOString().replace(/[:.]/g, '-');
