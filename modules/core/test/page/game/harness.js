@@ -1457,6 +1457,8 @@ export function createHarness(canvas, how = {}){
         // list longer than the table keeps, read beside the translator's stalls.
         result.staleAt = layers.find((/** @type {any} */ one)=>one.name === 'audio')
             ?.metrics?.staleAt ?? [];
+        result.staleTrail = layers.find((/** @type {any} */ one)=>one.name === 'audio')
+            ?.metrics?.staleTrail ?? [];
         result.instructions = metrics('cpu').instructions ?? null;
         result.threads = {
             byState: metrics('kernel').byState ?? {},

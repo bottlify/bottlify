@@ -510,6 +510,11 @@ function describeCork(cork, say){
     {
         say(`    repeated sound at: ${cork.staleAt.join(' ')}`);
     }
+    if (cork.staleTrail?.length)
+    {
+        // kind:time:offset:bytes:play:write -- u an unlock, s a repeat.
+        say(`    before the last repeat: ${cork.staleTrail.join(' ')}`);
+    }
     const exits = cork.exits ?? {};
     say(`    exits: ${Object.entries(exits).map(([kind, count])=>`${kind}=${count}`).join(' ')}`
         + (cork.transfers ? `  transfers through the hash: ${cork.transfers}` : ''));
@@ -607,7 +612,8 @@ function describe(result, context, calls, symbols){
 
     if (result.cork)
     {
-        describeCork({ ...result.cork, staleAt: result.staleAt }, say);
+        describeCork({ ...result.cork, staleAt: result.staleAt, staleTrail: result.staleTrail },
+            say);
         say('');
     }
 

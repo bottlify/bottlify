@@ -161,6 +161,25 @@ export function createSoundBuffer(
      */
     const staleAt = [];
     /**
+     * The buffer's last unlocks and repeats, as `[kind, time, offset, bytes,
+     * play, write]` -- `u` an unlock, `s` a drain that handed over bytes not
+     * written since their last lap -- and the stretch of it that led up to the
+     * last repeat: what the program wrote where, against where the cursors
+     * stood, is the only thing that says why the refill came late.
+     * @type {(string | number)[][]}
+     */
+    const trail = [];
+    /** @type {(string | number)[][]} */
+    let staleTrail = [];
+    /** @param {(string | number)[]} entry */
+    const note = entry=>{
+        if (trail.length === 24)
+        {
+            trail.shift();
+        }
+        trail.push(entry);
+    };
+    /**
      * Where the last unlock ended, for telling a lock that continues the
      * stream from one that jumped ahead of it.
      *
@@ -202,6 +221,10 @@ export function createSoundBuffer(
         }
         if (stale > 0)
         {
+            const { play, write } = cursorsNow();
+            note(['s', Math.round(now()), ranges[0]?.from ?? 0,
+                ranges.reduce((sum, range)=>sum + range.bytes, 0), play, write]);
+            staleTrail = trail.slice();
             staleBytes += stale;
             staleDrains++;
             if (staleAt.length === 64)
@@ -255,6 +278,13 @@ export function createSoundBuffer(
         Math.max(format.blockAlign, alignDown(Math.floor(byteRate() * milliseconds / 1000))),
         alignDown(Math.floor(bytes / 2)),
     );
+
+    /** Both cursors, as `cursors()` answers them to the program. */
+    const cursorsNow = ()=>{
+        const play = playCursor();
+        const lead = playing ? span(WRITE_LEAD_MS) : bytes - span(STOPPED_MARGIN_MS);
+        return { play, write: alignDown((play + lead) % bytes) };
+    };
 
     /**
      * The bytes playback has passed since this was last asked, as the one or
@@ -363,9 +393,7 @@ export function createSoundBuffer(
          * @returns {{ play: number, write: number }}
          */
         cursors(){
-            const play = playCursor();
-            const lead = playing ? span(WRITE_LEAD_MS) : bytes - span(STOPPED_MARGIN_MS);
-            return { play, write: alignDown((play + lead) % bytes) };
+            return cursorsNow();
         },
 
         status(){
@@ -511,7 +539,8 @@ export function createSoundBuffer(
          * region played before it was ever filled. Heard as a short repeat.
          */
         get stale(){
-            return { bytes: staleBytes, drains: staleDrains, at: [...staleAt] };
+            return { bytes: staleBytes, drains: staleDrains, at: [...staleAt],
+                trail: staleTrail.map(entry=>entry.join(':')) };
         },
 
         /**
@@ -582,6 +611,8 @@ export function createSoundBuffer(
                 // between, and what is heard is what was there when it let go.
                 markWritten(held.offset, held.first);
                 markWritten(0, held.second);
+                const { play, write } = cursorsNow();
+                note(['u', Math.round(now()), held.offset, held.first + held.second, play, write]);
                 streamEnd = (held.offset + held.first + held.second) % bytes;
             }
             return held;
