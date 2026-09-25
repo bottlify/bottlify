@@ -402,3 +402,87 @@ test('the thread locale is the one locale, and the default placeholders resolve 
     assert.equal(fns.ConvertDefaultLocale.handler([0x0407]), 0x0407, 'a real locale is itself');
     assert.equal(fns.ConvertDefaultLocale.argBytes, 4);
 });
+
+const LOCALE_RETURN_NUMBER = 0x20000000;
+const LOCALE_RETURN_GENITIVE_NAMES = 0x10000000;
+const ERROR_INVALID_FLAGS = 1004;
+
+test('LOCALE_RETURN_NUMBER answers the value itself, counted in the form\'s characters', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    const ILANGUAGE = 0x0001;
+    const IDEFAULTANSICODEPAGE = 0x1004;
+
+    assert.equal(fns.GetLocaleInfoA.handler([0x409, ILANGUAGE | LOCALE_RETURN_NUMBER, 0x100, 4]),
+        4, 'four bytes in the narrow form');
+    assert.equal(view.getUint32(0x100, true), 0x0409, 'the language, not the text "0409"');
+    assert.equal(fns.GetLocaleInfoW.handler([0x409, ILANGUAGE | LOCALE_RETURN_NUMBER, 0x200, 2]),
+        2, 'two characters in the wide form');
+    assert.equal(view.getUint32(0x200, true), 0x0409);
+    assert.equal(fns.GetLocaleInfoA.handler(
+        [0x400, IDEFAULTANSICODEPAGE | LOCALE_RETURN_NUMBER, 0x300, 4]), 4);
+    assert.equal(view.getUint32(0x300, true), 1252, 'a decimal value is decimal');
+
+    assert.equal(fns.GetLocaleInfoA.handler([0x409, ILANGUAGE | LOCALE_RETURN_NUMBER, 0, 0]), 4,
+        'a count of zero measures');
+    assert.equal(
+        fns.GetLocaleInfoA.handler([0x409, ILANGUAGE | LOCALE_RETURN_NUMBER, 0x100, 2]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+});
+
+test('a type the locale lacks, or a flag the call cannot take, is ERROR_INVALID_FLAGS', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const SDECIMAL = 0x000E;
+    const SMONTHNAME1 = 0x0038;
+
+    assert.equal(fns.GetLocaleInfoA.handler([0x409, SDECIMAL | LOCALE_RETURN_NUMBER, 0x100, 4]), 0,
+        'a string has no number to return');
+    assert.equal(host.errors.at(-1), ERROR_INVALID_FLAGS);
+    assert.equal(fns.GetLocaleInfoA.handler([0x409, 0x7ffe, 0x100, 64]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_FLAGS);
+
+    host.bytes[0x100] = 0x61;
+    assert.equal(fns.GetLocaleInfoA.handler(
+        [0x409, SMONTHNAME1 | LOCALE_RETURN_GENITIVE_NAMES, 0x100, 64]), 0,
+    'the narrow form has no genitive names');
+    assert.equal(host.errors.at(-1), ERROR_INVALID_FLAGS);
+    assert.equal(host.bytes[0x100], 0x61, 'and writes nothing');
+    assert.equal(fns.GetLocaleInfoW.handler([0x409, LOCALE_RETURN_GENITIVE_NAMES, 0x100, 64]), 0,
+        'the flag alone names no type');
+    assert.equal(host.errors.at(-1), ERROR_INVALID_FLAGS);
+
+    assert.equal(fns.GetLocaleInfoW.handler(
+        [0x409, SMONTHNAME1 | LOCALE_RETURN_GENITIVE_NAMES, 0x100, 64]), 8,
+    'an English month is its own genitive');
+    assert.equal(host.readWide(0x100, 7), 'January');
+
+    host.errors.length = 0;
+    assert.equal(fns.GetLocaleInfoA.handler([0x419, SDECIMAL, 0x100, 64]), 0);
+    assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER],
+        'a locale we do not carry is still that');
+});
+
+test('the abbreviated names, the digit grouping and the currency are answered', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    /** @param {number} type */
+    const ask = type=>{
+        const length = fns.GetLocaleInfoA.handler([0x409, type, 0x100, 64]);
+        assert.ok(length > 0, `LCTYPE 0x${type.toString(16)} is answered`);
+        return String.fromCharCode(...host.bytes.slice(0x100, 0x100 + length - 1));
+    };
+
+    assert.equal(ask(0x0031), 'Mon', 'SABBREVDAYNAME1');
+    assert.equal(ask(0x0037), 'Sun', 'SABBREVDAYNAME7');
+    assert.equal(ask(0x0044), 'Jan', 'SABBREVMONTHNAME1');
+    assert.equal(ask(0x004F), 'Dec', 'SABBREVMONTHNAME12');
+    assert.equal(ask(0x0010), '3;0', 'SGROUPING');
+    assert.equal(ask(0x0011), '2', 'IDIGITS');
+    assert.equal(ask(0x0012), '1', 'ILZERO');
+    assert.equal(ask(0x0005), '1', 'ICOUNTRY');
+    assert.equal(ask(0x0014), '$', 'SCURRENCY');
+    assert.equal(ask(0x0001), '0409', 'ILANGUAGE stays four hex digits as text');
+    assert.equal(ask(0x000B), '437', 'IDEFAULTCODEPAGE');
+});
