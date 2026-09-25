@@ -1469,6 +1469,12 @@ function comparison(e, dst, src, double, flagsLive){
     const a = double ? Local.d0 : Local.f0;
     const c = double ? Local.d1 : Local.f1;
     const [feq, flt, fne] = double ? [0x61, 0x63, 0x62] : [F32.eq, F32.lt, F32.ne];
+    // Read by the branch right after it alone: the branch compares f0 and f1.
+    if (e.fusesCompare(e.region.blocks[e.blockIndex].instructions.indexOf(e.current), ()=>false))
+    {
+        e.fcmp = { a, c, double };
+        return;
+    }
     e.eagerWrite(CF | PF | AF | ZF | SF | OF);
     // unordered: ZF = PF = CF = 1
     b.localGet(a).localGet(a).op(fne);
