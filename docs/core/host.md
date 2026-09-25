@@ -180,7 +180,7 @@ JSON cost the engine's thread tens of milliseconds per call.
 | `dispose()` | `Promise` | Ends the program and its device. With a canvas the worker stays alive for the next program in the same canvas; without one it is terminated. |
 | `diagnostics(layer?)` | `Promise<ModuleDiagnostics[]>` | Every layer's table, or one layer's. The **cold** description: a request to the engine's thread, and the only way to see a layer that publishes no table of its own. Not for a poll — what a poll wants is under `log` below. |
 | `trace()` | `Promise<string>` | Where the guest was: registers, a stack scan, the host calls in flight. |
-| `presented()` | `Promise<{ count, history: Presented[] }>` | The last 600 presented frames: `{ index, at, ms, w, h, failed }`. |
+| `presented()` | `Promise<{ count, history: Presented[] }>` | The last 600 presented frames: `{ index, at, ms, w, h, failed }`. A diagnostic: a production bundle keeps no history and answers it empty. |
 | `frames()` | `number` | Frames shown as of the last `frame` event. Synchronous. |
 | `traffic()` | `{ input, request, visibility, answer, event }` | Messages by kind since start, both ways. Synchronous. |
 | `guestProfile.available()` | `Promise<boolean>` | Whether the emulator was built with the by-address account. |
@@ -341,7 +341,9 @@ every diagnostic instrument -- each guarded by `import.meta.BOTTLIFY_DIAGNOSTICS
 away and is left out of the bundle: the phase profiler and its frame and phase tables (`log.profile`
 and `log.frames` answer empty), the GPU backend's profiler and its surface-write and present logs,
 the bridge's timed crossings and per-call phases, the scheduler's slow-slice clock, the translator's
-timings, block profile, store trace and transfer count, and the time stamps only a report reads.
+timings, block profile, store trace and transfer count, the presenter's history of presents (a
+`device.onPresented` the embedder passed still gets every record), and the time stamps only a
+report reads.
 What the machine does by a clock stays: the guest's time, its time-stamp counter, the page's pacing
 and the frame cap; and so does the frame's sampling, which feeds the translator. The source, which
 the tests, the harness and a development page run as it is, has no such define and keeps them all.
