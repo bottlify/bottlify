@@ -159,6 +159,26 @@ test('a negative destination size is an invalid parameter, and nothing is writte
     }
 });
 
+test('MB_ERR_INVALID_CHARS refuses a malformed UTF-8 sequence instead of replacing it', ()=>{
+    const MB_ERR_INVALID_CHARS = 0x8;
+    const ERROR_NO_UNICODE_TRANSLATION = 1113;
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.bytes.set([0x41, 0xff, 0x42, 0], 0x100);
+
+    assert.equal(fns.MultiByteToWideChar.handler(
+        [CP_UTF8, MB_ERR_INVALID_CHARS, 0x100, -1, 0x200, 16]), 0);
+    assert.deepEqual(host.errors, [ERROR_NO_UNICODE_TRANSLATION]);
+    assert.equal(fns.MultiByteToWideChar.handler(
+        [CP_UTF8, MB_ERR_INVALID_CHARS, 0x100, -1, 0, 0]), 0, 'measuring refuses it too');
+
+    assert.equal(fns.MultiByteToWideChar.handler([CP_UTF8, 0, 0x100, -1, 0x200, 16]), 4,
+        'without the flag the byte is replaced and the call succeeds');
+    host.bytes.set([0xc3, 0xa9, 0], 0x100);
+    assert.equal(fns.MultiByteToWideChar.handler(
+        [CP_UTF8, MB_ERR_INVALID_CHARS, 0x100, -1, 0x200, 16]), 2, 'a well-formed one converts');
+});
+
 test('a NULL source is an invalid parameter, not a read of address zero', ()=>{
     const host = fakeHost();
     const fns = createLocaleFunctions(host);

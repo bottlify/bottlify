@@ -35,6 +35,10 @@ const OEM_CODE_PAGE = CP_OEM_437;
 /** Error codes this file can produce. */
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
+const ERROR_NO_UNICODE_TRANSLATION = 1113;
+
+/** MultiByteToWideChar's flag that turns a malformed sequence into a failure. */
+const MB_ERR_INVALID_CHARS = 0x8;
 
 /** sizeof(CPINFO): MaxCharSize, DefaultChar[2], LeadByte[12]. */
 const CPINFO_SIZE = 18;
@@ -981,7 +985,6 @@ export function createLocaleFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([page, flags, source, sourceBytes, destination, destinationChars])=>{
-                void flags;
                 const resolved = resolvePage(page);
                 // A NULL source is refused before it is measured: measuring
                 // reads it, and a read of address zero is a fault where
@@ -996,9 +999,26 @@ export function createLocaleFunctions(host){
                     return 0;
                 }
                 const raw = host.readMemory(source >>> 0, span.length);
-                const text = resolved === CP_UTF8
-                    ? new TextDecoder().decode(raw)
-                    : decodeSingleByte(raw, resolved);
+                let text;
+                if (resolved === CP_UTF8)
+                {
+                    // With MB_ERR_INVALID_CHARS a malformed sequence fails the
+                    // call rather than becoming U+FFFD, measuring included.
+                    try
+                    {
+                        text = new TextDecoder('utf-8',
+                            { fatal: (flags & MB_ERR_INVALID_CHARS) !== 0 }).decode(raw);
+                    }
+                    catch (e){
+                        void e;
+                        host.setLastError(ERROR_NO_UNICODE_TRANSLATION);
+                        return 0;
+                    }
+                }
+                else
+                {
+                    text = decodeSingleByte(raw, resolved);
+                }
 
                 // Zero is the measuring call, and it must not write.
                 if ((destinationChars | 0) === 0)
