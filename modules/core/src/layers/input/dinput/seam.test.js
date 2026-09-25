@@ -17,7 +17,8 @@ import {
     IID_IDirectInput8A, IID_IDirectInput8W, IID_IDirectInputDeviceA, IID_IDirectInputDeviceW,
     IID_IDirectInputDevice2A, IID_IDirectInputDevice8A, IID_IDirectInputDevice8W,
     IDIRECTINPUT_SLOTS, IDIRECTINPUT7_SLOTS, IDIRECTINPUT8_SLOTS,
-    IDIRECTINPUTDEVICE_SLOTS, IDIRECTINPUTDEVICE2_SLOTS, IDIRECTINPUTDEVICE8_SLOTS,
+    IDIRECTINPUTDEVICE_SLOTS, IDIRECTINPUTDEVICE2_SLOTS, IDIRECTINPUTDEVICE7_SLOTS,
+    IDIRECTINPUTDEVICE8_SLOTS,
     DIDEVICEOBJECTDATA, DIDEVICEINSTANCE, DIPROPDWORD_DATA, DIPROP_BUFFERSIZE, DIDEVCAPS,
 } from './seam.js';
 import { KEY_DOWN, DIMOUSE_OFS } from './devices.js';
@@ -943,6 +944,43 @@ test('a device made by IDirectInput8 answers Poll from its own slot', ()=>{
     // holding what IDirectInput8 promised calls it without asking for it.
     assert.equal(slotOf(IDIRECTINPUTDEVICE8_SLOTS, 'Poll'), 25);
     assert.equal(g.call(device, 25), DI_OK);
+});
+
+test('QueryInterface finds each device generation by the IID the header defines', ()=>{
+    const g = guestMachine();
+    assert.equal(g.dinput.libraries['DINPUT.dll']
+        .DirectInputCreateA.handler([0, 0x0500, AT.out, 0]), DI_OK);
+    const root = g.memory.u32(AT.out);
+    writeGuid(g.memory, AT.guid, GUID_SysMouse);
+    assert.equal(g.call(root, slotOf(IDIRECTINPUT_SLOTS, 'CreateDevice'),
+        [AT.guid, AT.out, 0]), DI_OK);
+    const device = g.memory.u32(AT.out);
+    // dinput.h:45-52, spelled out rather than taken from the module under test.
+    const header = [
+        ['{5944E680-C92E-11CF-BFC7-444553540000}', IDIRECTINPUTDEVICE_SLOTS],
+        ['{5944E681-C92E-11CF-BFC7-444553540000}', IDIRECTINPUTDEVICE_SLOTS],
+        ['{5944E682-C92E-11CF-BFC7-444553540000}', IDIRECTINPUTDEVICE2_SLOTS],
+        ['{5944E683-C92E-11CF-BFC7-444553540000}', IDIRECTINPUTDEVICE2_SLOTS],
+        ['{57D7C6BC-2356-11D3-8E9D-00C04F6844AE}', IDIRECTINPUTDEVICE7_SLOTS],
+        ['{57D7C6BD-2356-11D3-8E9D-00C04F6844AE}', IDIRECTINPUTDEVICE7_SLOTS],
+        ['{54D41080-DC15-4833-A41B-748F73A38179}', IDIRECTINPUTDEVICE8_SLOTS],
+        ['{54D41081-DC15-4833-A41B-748F73A38179}', IDIRECTINPUTDEVICE8_SLOTS],
+    ];
+    for (const [iid, slots] of /** @type {[string, [string, number][]][]} */ (header))
+    {
+        writeGuid(g.memory, AT.iid, iid);
+        g.memory.setU32(AT.state, 0);
+        assert.equal(g.call(device, 0, [AT.iid, AT.state]), 0, `QueryInterface ${iid}`);
+        const asked = g.memory.u32(AT.state);
+        assert.notEqual(asked, 0, iid);
+        // The table behind the answer is the one that IID names, down to its
+        // last slot, which the generation before it does not have.
+        assert.equal(g.call(asked, 3 + slots.length - 1), DIERR_UNSUPPORTED, iid);
+        if (slots !== IDIRECTINPUTDEVICE_SLOTS)
+        {
+            assert.equal(g.call(asked, slotOf(slots, 'Poll')), DI_OK, iid);
+        }
+    }
 });
 
 test('diagnostics report what a run actually did', ()=>{
