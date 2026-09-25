@@ -890,16 +890,46 @@ test('a block profile counts each block\'s executions: a loop\'s body its iterat
 });
 
 test('a block profile with blockProfileFrom counts only what ran after that moment', async()=>{
-    const m = machine({ blockProfile: true, blockProfileFrom: 0.001 });
-    m.write(CODE, COUNTDOWN);
+    const now = performance.now;
+    let clock = 0;
+    performance.now = ()=>clock;
+    try
+    {
+        const m = machine({ blockProfile: true, blockProfileFrom: 1 });
+        m.write(CODE, COUNTDOWN);
+        m.runtime.noteHot(CODE);
+        await m.runtime.translatePending();
+        m.runtime.run(m.runtime.entryOf(CODE), 100_000);
+        clock = 1000;
+        m.runtime.run(m.runtime.entryOf(CODE), 100_000);
+        const { blockCounts } = /** @type {any} */ (m.runtime.diagnostics());
+        const count = blockCounts.find((/** @type {number[]} */ [at])=>at === CODE + 5)?.[1];
+        assert.equal(count, 1000, 'the second run alone; the first was counted before the moment');
+    }
+    finally
+    {
+        performance.now = now;
+    }
+});
+
+test('a forward jump inside a region is a direct branch: the budget is looked at only on a'
+    + ' backward one', async()=>{
+    const m = machine();
+    // inc eax; jmp +1; nop; inc eax; hlt -- the jump skips the nop into a block
+    // further on, with the budget spent by the time it is taken.
+    m.write(CODE, [0x40, 0xeb, 0x01, 0x90, 0x40, 0xf4]);
     m.runtime.noteHot(CODE);
     await m.runtime.translatePending();
-    m.runtime.run(m.runtime.entryOf(CODE), 100_000);
-    await new Promise(resolve=>setTimeout(resolve, 5));
-    m.runtime.run(m.runtime.entryOf(CODE), 100_000);
-    const { blockCounts } = /** @type {any} */ (m.runtime.diagnostics());
-    const count = blockCounts.find((/** @type {number[]} */ [at])=>at === CODE + 5)?.[1];
-    assert.equal(count, 1000, 'the second run alone; the first was counted before the moment');
+    const forward = m.runtime.run(m.runtime.entryOf(CODE), 1);
+    assert.equal(forward.kind, 'halt', 'went on past the spent budget to the hlt');
+    assert.equal(m.reg(0), 2);
+    // L: inc eax; jmp M; M: jmp L -- a loop of two blocks, whose backward
+    // jump leaves once the budget is spent.
+    m.write(CODE + 0x40, [0x40, 0xeb, 0x00, 0xeb, 0xfb]);
+    m.runtime.noteHot(CODE + 0x40);
+    await m.runtime.translatePending();
+    const backward = m.runtime.run(m.runtime.entryOf(CODE + 0x40), 10);
+    assert.equal(backward.kind, 'budget');
 });
 
 test('without a block profile a run counts nothing and says nothing of blocks', async()=>{

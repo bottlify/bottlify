@@ -22,11 +22,12 @@
  *     end
  *     epilogue      locals written back to the state block; the exit kind returned
  *
- * A jump to another block of the region sets the label and branches back to
- * the dispatch loop, charging the instructions retired since the last
- * charge against the budget and leaving with `budget` when it is spent. A
- * block that falls through to the block emitted right after it does nothing
- * at all. Anything the region cannot continue -- a return, an indirect
+ * A jump forward to another block of the region is a branch out of that
+ * block's wasm block, whose end its code follows. A jump backward sets the
+ * label and branches back to the dispatch loop, charging the instructions
+ * retired since the last charge against the budget and leaving with `budget`
+ * when it is spent: only a backward jump can close a loop. A block that falls
+ * through to the block emitted right after it does nothing at all. Anything the region cannot continue -- a return, an indirect
  * jump, a call, an instruction the emitter does not translate -- writes the
  * next address into the state and leaves with `untranslated`, for the host
  * to run on the other executor or to dispatch to another region.
@@ -1697,9 +1698,17 @@ export class RegionEmitter {
             this.exitAt(target, Exit.UNTRANSLATED);
             return;
         }
-        // The budget is checked on every jump through the dispatch: only a
-        // backward edge can make a loop, but a forward one costs the same
-        // three operations and needs no analysis to tell apart.
+        if (label > this.blockIndex)
+        {
+            // A forward edge cannot close a loop, and the block it reaches
+            // starts right after the end of its own wasm block, which is still
+            // open here: a direct branch, with no budget test and no trip
+            // through the dispatch's one shared indirect jump.
+            b.br(this.depthOf(`b${label}`));
+            return;
+        }
+        // A backward edge goes through the dispatch, the budget checked on
+        // the way: only it can close a loop.
         b.localGet(Local.budget).i32const(0).op(I32.leS);
         this.openIf('spent');
         this.exitAt(target, Exit.BUDGET);
