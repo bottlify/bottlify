@@ -122,6 +122,21 @@ export const Exit = Object.freeze({
 export const MMX_HELD = 1;
 export const MMX_TOP = 2;
 
+/**
+ * The `if`s whose body is a slow path -- a way out of the region, a fault, a
+ * page flagged, a spent budget, an exception the processor would raise --
+ * hinted rarely taken (`Body.hint`): the engine lays them out of the way and
+ * keeps the registers for the path that goes on, where it had spilled around
+ * them. By the name each is opened with; a name also opened for a branch that
+ * data decides (`zero` in `bsf`, `taken`) is not here.
+ */
+const UNLIKELY = new Set([
+    'spent', 'bulkSpent', 'flagged', 'window', 'windowFaults', 'windowCode', 'storeCode',
+    'inaccessible', 'maybeCode', 'code', 'stale', 'streamsFlagged', 'fault', 'overflow',
+    'unshaped', 'single', 'nan', 'signalling', 'made', 'invalid', 'negative', 'underflow',
+    'indefinite', 'unordered',
+]);
+
 /** Local indices every region function shares. */
 export const Local = Object.freeze({
     label: 0, budget: 1,
@@ -590,7 +605,7 @@ export class RegionEmitter {
         this.epilogue();
         this.fillDeferred();
         const functionIndex = this.context.m.function(
-            this.context.regionType, this.localTypes, b.toBytes());
+            this.context.regionType, this.localTypes, b.toBytes(), { hints: b.hints });
         return {
             functionIndex, labels: this.labels, unsupported: this.unsupported,
             refusals: this.refusals,
@@ -619,6 +634,10 @@ export class RegionEmitter {
     /** @param {string} name @param {number} type */
     openIf(name, type = EMPTY){
         this.controls.push(name);
+        if (UNLIKELY.has(name))
+        {
+            this.b.hint(false);
+        }
         this.b.if(type);
     }
 

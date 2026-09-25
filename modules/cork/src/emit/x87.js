@@ -1538,7 +1538,8 @@ export function emitX87(e, instruction, flagsLive){
         // every operation.
         b.localSet(x.temp3);
         b.localGet(Local.x87Control).i32const(0x300).op(I32.and).op(I32.eqz);
-        e.openIf('single', EMPTY);
+        // Not `single`, the wide regions' way out: under Direct3D this one is taken.
+        e.openIf('narrow', EMPTY);
         b.localGet(x.temp3).op(I64.reinterpretF64).localSet(Local.t64);
         b.localGet(Local.t64).localGet(Local.t64).i64const(29n).op(I64.shrU).i64const(1n)
             .op(I64.and).op(I64.add).i64const(0x0fffffffn).op(I64.add)

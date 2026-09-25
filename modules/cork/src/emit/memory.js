@@ -1152,7 +1152,7 @@ export function emitGroupChecks(e, checks, at = -1){
     const leaveIf = name=>{
         if (shared)
         {
-            b.brIf(e.depthOf('windowHeld'));
+            b.hint(false).brIf(e.depthOf('windowHeld'));
             return;
         }
         e.openIf(name, EMPTY);
