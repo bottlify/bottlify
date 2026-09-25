@@ -184,6 +184,9 @@ function parse(argv){
         // long stall (a load): with a program that advances one step a frame,
         // the same frames of play in every run (0: not taken).
         steadyFrames: number('--steady-frames', 0),
+        // The frame this many frames after the last long stall, written beside
+        // the report as game-<stamp>-snap.png: a demo's frame N in every run.
+        snapFrame: number('--snap-frame', 0),
         // The browser's own sampling profiler on the engine's workers for
         // this many seconds from the start (or until the run ends): which
         // functions -- translated regions by address, the interpreter, the
@@ -1087,6 +1090,7 @@ export async function game(options){
             trace: options.trace,
             pointer: options.pointer,
             steadyFrames: options.steadyFrames || undefined,
+            snapFrame: options.snapFrame || undefined,
             clicks: options.clicks,
             typed: options.typed,
             pasted: options.pasted,
@@ -1233,9 +1237,8 @@ export async function game(options){
         // The last presented frame as the engine read it back, beside the
         // page's screenshot: the screenshot is what the compositor showed at
         // the moment of the stop, the frame is what the program drew.
-        if (result.frameRgba && result.frame)
-        {
-            const rgba = Buffer.from(result.frameRgba, 'base64');
+        /** The engine's RGBA read-back as the BGRA the PNG writer takes. @param {Buffer} rgba */
+        const toBgra = rgba=>{
             const bgra = Buffer.alloc(rgba.length);
             for (let at = 0; at < rgba.length; at += 4)
             {
@@ -1244,8 +1247,18 @@ export async function game(options){
                 bgra[at + 2] = rgba[at];
                 bgra[at + 3] = rgba[at + 3];
             }
-            writeFileSync(join(REPORTS_DIR, `game-${stamp}-frame.png`),
-                toPng(result.frame.width, result.frame.height, bgra));
+            return bgra;
+        };
+        if (result.snap)
+        {
+            writeFileSync(join(REPORTS_DIR, `game-${stamp}-snap.png`), toPng(result.snap.width,
+                result.snap.height, toBgra(Buffer.from(result.snap.rgba, 'base64'))));
+            delete result.snap;
+        }
+        if (result.frameRgba && result.frame)
+        {
+            writeFileSync(join(REPORTS_DIR, `game-${stamp}-frame.png`), toPng(result.frame.width,
+                result.frame.height, toBgra(Buffer.from(result.frameRgba, 'base64'))));
             delete result.frameRgba;
         }
 

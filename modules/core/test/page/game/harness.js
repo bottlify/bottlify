@@ -789,7 +789,7 @@ export function scheduleKeyTimes(app, request){
  *           keys?: { code: string, after: number, afterSeconds?: number }[],
  *           typed?: { text: string, after: number, afterSeconds?: number }[],
  *           pasted?: { text: string, after: number, afterSeconds?: number }[],
- *           steadyFrames?: number }} request
+ *           steadyFrames?: number, snapFrame?: number }} request
  * @param {PresentState} state
  * @param {any} frame
  */
@@ -797,7 +797,7 @@ export function presentFrame(app, request, state, frame){
     state.presented = frame;
     state.presents++;
     const now = performance.now();
-    if (request.steadyFrames)
+    if (request.steadyFrames || request.snapFrame)
     {
         // A load stalls for seconds at a time and play does not: the count
         // starts over at every such stall, so the averages taken at it cover
@@ -1068,6 +1068,8 @@ export function createHarness(canvas, how = {}){
     let frameReport = null;
     /** @type {any} */
     let running = null;
+    /** The frame `snapFrame` asked for, being read back. @type {Promise<any> | null} */
+    let snap = null;
     /** @type {PresentState} */
     const presentState = {
         presented: null, pointerDown: false, pointerAt: { x: 0, y: 0 },
@@ -1343,7 +1345,20 @@ export function createHarness(canvas, how = {}){
                 fog: request.fog !== false,
                 mips: request.mips !== false,
                 /** @param {any} frame */
-                presentTo: frame=>presentFrame(app, request, presentState, frame),
+                presentTo: frame=>{
+                    presentFrame(app, request, presentState, frame);
+                    // The frame `snapFrame` frames after the last long stall, read
+                    // back as it was presented; a later stall takes it again, so a
+                    // demo's frame N is the same frame in every run.
+                    if (request.snapFrame && presentState.sinceStall === 0)
+                    {
+                        snap = null;
+                    }
+                    if (request.snapFrame && presentState.sinceStall === request.snapFrame)
+                    {
+                        snap = readBack(handle.device, frame.surface);
+                    }
+                },
             },
             bundle: {
                 fetch: rangeFetcher(request.bundleUrl),
@@ -1401,6 +1416,12 @@ export function createHarness(canvas, how = {}){
         }
         result.elapsedMs = Math.round(performance.now() - started);
 
+        if (snap)
+        {
+            const image = await snap;
+            result.snap = { width: image.width, height: image.height,
+                rgba: toBase64(image.pixels) };
+        }
         if (presentState.presented)
         {
             const image = await readBack(handle.device, presentState.presented.surface);
