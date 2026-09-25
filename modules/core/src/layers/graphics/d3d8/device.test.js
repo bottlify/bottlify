@@ -18,6 +18,8 @@ import { DEFAULT_STAGE_STATES } from './stagestates.js';
 import { D3DRS as D3DRS9 } from '../d3d9/constants.js';
 import { DEFAULT_RENDER_STATES, resolveRenderStateDefault } from './renderstates.js';
 import { DEVICE_STATE, LIGHT_ENABLED, createDirect3D8 } from './device.js';
+import { createBackend } from '../webgpu/backend.js';
+import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 
 /** Distinguishes "the call wrote nothing" from "the call wrote a zero". */
 const UNTOUCHED = Symbol('untouched');
@@ -1410,8 +1412,6 @@ test('Clear refuses a depth or stencil clear it has no buffer for', ()=>{
     assert.equal(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.STENCIL, 0, 1, 0),
         D3DERR_INVALIDCALL);
     assert.equal(device.Clear(0, null, 0, 0, 1, 0), D3DERR_INVALIDCALL, 'nothing to clear');
-    assert.equal(device.Clear(2, null, D3DCLEAR.TARGET, 0, 1, 0), D3DERR_INVALIDCALL,
-        'two rectangles and no rectangles');
 
     /** @type {{ surface?: any }} */
     const depth = {};
@@ -1424,6 +1424,26 @@ test('Clear refuses a depth or stencil clear it has no buffer for', ()=>{
     depth.surface.release();
     assertFullyReleased(device);
 });
+
+test('Clear takes the rectangle count at its word and the missing array as the whole target',
+    ()=>{
+        // Wine's visual tests on d3d8: Clear(0, rects) succeeds and leaves the
+        // target as it was, Clear(1, NULL) succeeds and clears all of it.
+        const gpu = createFakeDevice();
+        const backend = createBackend({
+            device: gpu.device, queue: gpu.queue, presentTo: ()=>{}, now: ()=>0,
+        });
+        const device = createDevice({ caps: { backend, readMemory: ()=>new Uint8Array(0) } });
+        const everything = [{ x1: 0, y1: 0, x2: WIDTH, y2: HEIGHT }];
+
+        assert.equal(device.Clear(0, everything, D3DCLEAR.TARGET, 0xffff0000, 0, 0), D3D_OK);
+        assert.equal(device.diagnostics().clears, 0, 'no rectangles counted, none cleared');
+        assert.equal(device.Clear(1, null, D3DCLEAR.TARGET, 0xff00ff00, 0, 0), D3D_OK);
+        assert.equal(device.diagnostics().clears, 1, 'a count without an array is the whole');
+        assert.equal(device.Clear(2, null, D3DCLEAR.TARGET, 0, 1, 0), D3D_OK);
+        assert.equal(device.diagnostics().clears, 2);
+        assertFullyReleased(device);
+    });
 
 test('a back buffer is lockable exactly when the program asked for one', ()=>{
     // The flag was read out of the parameters and then looked at by nothing, so

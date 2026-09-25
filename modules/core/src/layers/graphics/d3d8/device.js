@@ -1622,7 +1622,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
         /**
          * Clears the viewport, or the given rectangles within it: a viewport
-         * smaller than the target leaves everything outside it alone.
+         * smaller than the target leaves everything outside it alone. An array
+         * with a count of zero names no rectangle and clears nothing; a count
+         * without an array is the whole viewport.
          *
          * @param {number} rectCount
          * @param {readonly { x1: number, y1: number, x2: number, y2: number }[] | null} rects
@@ -1632,8 +1634,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {number} stencil
          */
         Clear(rectCount, rects, flags, color, z, stencil){
-            if ((flags & (D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER | D3DCLEAR.STENCIL)) === 0
-                || (rectCount > 0 && !rects))
+            if ((flags & (D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER | D3DCLEAR.STENCIL)) === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -1649,9 +1650,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     return D3DERR_INVALIDCALL;
                 }
             }
+            if (rects && rectCount === 0)
+            {
+                return D3D_OK;
+            }
             if (renderer)
             {
-                renderer.clear(model, rectCount > 0 ? (rects ?? []).slice(0, rectCount) : [],
+                renderer.clear(model, rects ? rects.slice(0, rectCount) : [],
                     flags, color >>> 0, z, stencil);
             }
             return D3D_OK;

@@ -263,6 +263,17 @@ test('byte-exact: a cleared frame is that colour in every pixel, blue byte first
         'the whole image, every pixel of which the clear decides');
 });
 
+test('Clear with a count of zero clears nothing, and with no array clears the whole', ()=>{
+    // Wine's d3d9 visual tests: Clear(0, rects) and Clear(1, NULL) both
+    // succeed; the first leaves the target alone, the second clears all of it.
+    const h = harness();
+    const everything = [{ x1: 0, y1: 0, x2: 4, y2: 4 }];
+    assert.equal(h.device.Clear(0, everything, D3DCLEAR.TARGET, argb(255, 0, 0), 0, 0), D3D_OK);
+    assert.equal(h.device.diagnostics().clears, 0);
+    assert.equal(h.device.Clear(1, null, D3DCLEAR.TARGET, argb(0, 255, 0), 0, 0), D3D_OK);
+    assert.equal(h.device.diagnostics().clears, 1);
+});
+
 test('byte-exact: a triangle from a locked vertex buffer covers the pixels it names',
     async()=>{
         const h = harness({ width: 8, height: 8 });

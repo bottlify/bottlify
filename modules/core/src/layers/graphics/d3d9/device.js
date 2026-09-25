@@ -2375,7 +2375,8 @@ function createDeviceObject(parameters, caps, services, identity){
          * Clears the viewport, or the given rectangles within it, and within
          * the scissor rectangle when the scissor test is on: a viewport smaller
          * than the target leaves everything outside it alone, and so does the
-         * scissor.
+         * scissor. An array with a count of zero names no rectangle and clears
+         * nothing; a count without an array is the whole viewport.
          *
          * @param {number} rectCount
          * @param {readonly { x1: number, y1: number, x2: number, y2: number }[] | null} rects
@@ -2385,8 +2386,7 @@ function createDeviceObject(parameters, caps, services, identity){
          * @param {number} stencil
          */
         Clear(rectCount, rects, flags, color, z, stencil){
-            if ((flags & (D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER | D3DCLEAR.STENCIL)) === 0
-                || (rectCount > 0 && !rects))
+            if ((flags & (D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER | D3DCLEAR.STENCIL)) === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -2402,7 +2402,11 @@ function createDeviceObject(parameters, caps, services, identity){
                     return D3DERR_INVALIDCALL;
                 }
             }
-            let areas = rectCount > 0 ? (rects ?? []).slice(0, rectCount) : [];
+            if (rects && rectCount === 0)
+            {
+                return D3D_OK;
+            }
+            let areas = rects ? rects.slice(0, rectCount) : [];
             if ((renderStates.get(D3DRS.SCISSORTESTENABLE) ?? 0) !== 0)
             {
                 const box = { x1: scissor.left, y1: scissor.top, x2: scissor.right,
