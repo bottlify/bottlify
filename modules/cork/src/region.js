@@ -354,6 +354,20 @@ export function formRegion(read, entry,
     const refused = new Map();
     /** The switch tables the region's jumps go through, read as data. @type {SwitchTable[]} */
     const tables = [];
+    /** `isLeaf` by callee and form, once a region: a function called from many
+     * places is decoded once. @type {Map<string, boolean>} */
+    const leaves = new Map();
+    /** @param {number} target @param {boolean} calls */
+    const leafAt = (target, calls)=>{
+        const key = `${target}:${calls}`;
+        let leaf = leaves.get(key);
+        if (leaf === undefined)
+        {
+            leaf = isLeaf(read, target, translatable, calls);
+            leaves.set(key, leaf);
+        }
+        return leaf;
+    };
     let bytes = 0;
 
     /** The block that contains an address, if any. @param {number} address */
@@ -505,8 +519,7 @@ export function formRegion(read, entry,
                 // the port write: a block there lets the return come back
                 // into translated code.
                 follow(exit.next, depth);
-                if (leafCalls && exit.kind === 'call'
-                    && isLeaf(read, exit.targets[0], translatable, depth === 0))
+                if (leafCalls && exit.kind === 'call' && leafAt(exit.targets[0], depth === 0))
                 {
                     // A small callee is formed into its caller: the call
                     // becomes a jump inside the region, and its return, when

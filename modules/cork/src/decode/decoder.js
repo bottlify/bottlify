@@ -75,6 +75,22 @@ export const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
  * @property {string} reason
  */
 
+/** Whether each table entry's forms need a modrm byte, worked out once an entry.
+ * @type {WeakMap<object, boolean>} */
+const modrmForms = new WeakMap();
+/** Forms that name a fixed register (AL, DX, ES…), by form, worked out once a form. */
+const fixedForms = new Map();
+/** @param {string} form */
+function isFixed(form){
+    let fixed = fixedForms.get(form);
+    if (fixed === undefined)
+    {
+        fixed = /^[A-Z][A-Z]$|^eAX$|^1$|^Xlat$/.test(form);
+        fixedForms.set(form, fixed);
+    }
+    return fixed;
+}
+
 /**
  * @param {(address: number) => number} read   one byte of guest memory
  * @param {number} eip
@@ -244,15 +260,22 @@ function decodeAt(byte, eip, consumed){
     let mainSize = 0;
     // The forms that live in a modrm byte, and only those: a fixed segment
     // register (ES, GS) shares its first letter with the r/m and reg forms.
-    const needsModrm = entry.forms.some(form=>
-        /^(E[a-z]?$|G[a-z]$|M[a-z]*$|Q[a-z]$|W[a-z]+$|U[a-z]+$|N[a-z]$|V[a-z]+$|P[a-z]$|Sw$|STi$)/
-            .test(form) || /^m\d/.test(form));
+    let needsModrm = modrmForms.get(entry);
+    if (needsModrm === undefined)
+    {
+        needsModrm = entry.forms.some(form=>
+            /^(E[a-z]?$|G[a-z]$|M[a-z]*$|Q[a-z]$|W[a-z]+$|U[a-z]+$|N[a-z]$|V[a-z]+$|P[a-z]$|Sw$|STi$)/
+                .test(form) || /^m\d/.test(form));
+        modrmForms.set(entry, needsModrm);
+    }
     if (needsModrm)
     {
         fetchModrm();
     }
     /** @type {Operand | null} */
     let rmOperand = null;
+    /** A relative operand's displacement, until the instruction's end is known. */
+    let relative = 0;
     /** @param {number} size @param {'reg' | 'mm' | 'xmm'} regKind @param {boolean} memoryOnly */
     const resolveRm = (size, regKind, memoryOnly)=>{
         const m = fetchModrm();
@@ -293,7 +316,7 @@ function decodeAt(byte, eip, consumed){
         {
             operand = resolveRm(x87Size(form), 'reg', true);
         }
-        else if (/^[A-Z][A-Z]$|^eAX$|^1$|^Xlat$/.test(form))
+        else if (isFixed(form))
         {
             // A fixed register (AL, DX, ES…): the segment names start with
             // the letters of the r/m and segment-field forms.
@@ -331,7 +354,7 @@ function decodeAt(byte, eip, consumed){
                 operand = { kind: 'rel', size: 4, target: 0 };
                 // The target is relative to the end of the instruction, which
                 // is known only once every byte is consumed: patched below.
-                operand.value = displacement.value;
+                relative = /** @type {number} */ (displacement.value);
                 break;
             }
             case 'O':
@@ -405,8 +428,7 @@ function decodeAt(byte, eip, consumed){
     {
         if (operand.kind === 'rel')
         {
-            operand.target = (eip + length + (operand.value ?? 0)) >>> 0;
-            delete operand.value;
+            operand.target = (eip + length + relative) >>> 0;
         }
     }
     if (prefixes.lock && !memory)
@@ -428,16 +450,22 @@ function decodeAt(byte, eip, consumed){
         memory,
         prefixes,
         opcode: opcodeText,
-        ...(entry.cc === undefined ? {} : { cc: entry.cc }),
     };
+    if (entry.cc !== undefined)
+    {
+        /** @type {Instruction} */ (instruction).cc = entry.cc;
+    }
     return instruction;
 }
 
+const STRING_OPS = new Set(['movs', 'cmps', 'stos', 'lods', 'scas']);
 /** @param {string} op */
-const isString = op=>['movs', 'cmps', 'stos', 'lods', 'scas'].includes(op);
+const isString = op=>STRING_OPS.has(op);
 
+/** Every byte as two hex digits, for the opcode text a record carries. */
+const HEX = Array.from({ length: 256 }, (_, value)=>value.toString(16).padStart(2, '0'));
 /** @param {number} value */
-const hex = value=>value.toString(16).padStart(2, '0');
+const hex = value=>HEX[value];
 
 /**
  * @param {'reg' | 'mm' | 'xmm'} kind @param {number} index @param {number} size
