@@ -1143,6 +1143,19 @@ test('the capabilities a device reports are answers, not gaps', ()=>{
     h.release(root);
 });
 
+test('the fog the raster caps claim is named by the bit d3d8caps.h gives it', ()=>{
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const at = 0x3200;
+    assert.equal(h.device(device, 'GetDeviceCaps', [at]), D3D_OK);
+    const raster = h.fields.readU32(at + D3DCAPS8.RasterCaps);
+    assert.ok((raster & 0x00200000) !== 0, 'D3DPRASTERCAPS_ZFOG');
+    assert.equal(raster & 0x00100000, 0, 'D3DPRASTERCAPS_WFOG is a different claim');
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
 test('a create with nowhere to put the interface fails instead of answering success', ()=>{
     // Publishing an interface takes guest memory for the vtable and a stub per
     // method, and both run out. What the publisher answers then is a null
