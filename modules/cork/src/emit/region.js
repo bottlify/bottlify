@@ -167,6 +167,8 @@ const LOCAL_TYPES = [
  *     tables' transfer count (a diagnostic run)
  * @property {boolean} [blockProfile] each block counts its executions in the block
  *     profile past the tables (a diagnostic run, in a memory sized for it)
+ * @property {boolean} [flat]  every backward jump through the dispatch and every flag live at
+ *     every block's end, rather than the loops and liveness the region's structure gives
  * @property {boolean} [wide]  compiled for the wide precision controls (double, extended):
  *     no rounding to single, and a block leaves with `PRECISION` if it finds single set
  * @property {number} codeHit         the helper telling whether a byte lies in translated code
@@ -195,7 +197,7 @@ const LOCAL_TYPES = [
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
- *     countTransfers?: boolean, wide?: boolean, blockProfile?: boolean }}
+ *     countTransfers?: boolean, wide?: boolean, blockProfile?: boolean, structure?: boolean }}
  *     [options]  undoLog:
  *     record every store's old bytes (differential builds only; part of the cache key);
  *     hash: import the host's function table and transfer through the entry hash (needs
@@ -204,7 +206,7 @@ const LOCAL_TYPES = [
  */
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
-        wide = false, blockProfile = false } = {})
+        wide = false, blockProfile = false, structure = true } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -272,6 +274,10 @@ export function prepareModule(m, layout, features, memory = {},
     if (wide)
     {
         context.wide = true;
+    }
+    if (!structure)
+    {
+        context.flat = true;
     }
     if (blockProfile)
     {
@@ -373,6 +379,18 @@ export class RegionEmitter {
         this.trapped = false;
         /** Blocks emitted as loops onto themselves. */
         this.loops = 0;
+        /** The flags live at each block's end (`liveFlagsOut`). @type {number[]} */
+        this.flagsOut = [];
+        /** The flags live after each instruction of the block being emitted. @type {number[]} */
+        this.flagsAfterEach = [];
+        /** The flags live after the instruction being emitted. */
+        this.flagsAfter = ARITH_FLAGS | DF;
+        /** Each loop head's last block (`planLoops`). @type {Map<number, number>} */
+        this.loopEnds = new Map();
+        /** The ranges being emitted, innermost last (`emitRange`).
+         * @type {{ lo: number, hi: number, loop: boolean,
+         *     items: { start: number, end: number, loop: boolean }[] }[]} */
+        this.ranges = [];
         /** Whether the current block's remaining instructions are unreachable. */
         this.dead = false;
         /** Instructions retired in the current block so far, to charge at its end. */
@@ -503,17 +521,12 @@ export class RegionEmitter {
         this.open('out', EMPTY);
         this.openLoop('dispatch');
         const blocks = this.region.blocks;
-        for (let i = blocks.length - 1; i >= 0; i--)
-        {
-            this.open(`b${i}`, EMPTY);
-        }
-        b.localGet(Local.label);
-        b.brTable(blocks.map((block, i)=>i), 0);
-        for (let i = 0; i < blocks.length; i++)
-        {
-            this.close();
-            this.emitBlock(blocks[i], i);
-        }
+        const flat = this.context.flat === true;
+        this.loopEnds = flat ? new Map() : planLoops(blocks);
+        this.flagsOut = flat ? blocks.map(()=>ARITH_FLAGS | DF)
+            : liveFlagsOut(blocks, new Set(this.labels.keys()));
+        this.ranges = [];
+        this.emitRange(0, blocks.length - 1, false);
         // Falling out of the last block cannot happen: every block ends with
         // explicit control. If it did, the dispatch would loop on the same
         // label forever, so leave instead.
@@ -1198,6 +1211,94 @@ export class RegionEmitter {
     }
 
     /**
+     * The blocks `lo` to `hi` as the region's structure has them: each a wasm
+     * block the code after its end follows, a loop among them as one item
+     * whose blocks are a range of their own inside a wasm loop. A branch
+     * forward is a branch out of its target's item; a branch back to the head
+     * of a loop around it is a branch to that loop. The dispatch at the head
+     * of the range takes an entry to any of its blocks: at the function's own
+     * head always, at a loop's only when the label is not the loop's head --
+     * an entry into the middle of the loop from outside it, rather than a turn.
+     *
+     * @param {number} lo @param {number} hi
+     * @param {boolean} loop  the range is a loop's, `lo` its head
+     */
+    emitRange(lo, hi, loop){
+        const { b } = this;
+        const blocks = this.region.blocks;
+        /** @type {{ start: number, end: number, loop: boolean }[]} */
+        const items = [];
+        for (let i = loop ? lo + 1 : lo; i <= hi;)
+        {
+            const end = this.loopEnds.get(i);
+            if (end !== undefined && end <= hi)
+            {
+                items.push({ start: i, end, loop: true });
+                i = end + 1;
+            }
+            else
+            {
+                items.push({ start: i, end: i, loop: false });
+                i++;
+            }
+        }
+        const range = { lo, hi, loop, items };
+        this.ranges.push(range);
+        for (let k = items.length - 1; k >= 0; k--)
+        {
+            this.open(`b${items[k].start}`, EMPTY);
+        }
+        /** The depth of the item holding each label, `fallback` for the rest. @param {number} fallback */
+        const table = fallback=>blocks.map((block, t)=>{
+            const item = items.find(one=>one.start <= t && t <= one.end);
+            return item ? this.depthOf(`b${item.start}`) : fallback;
+        });
+        if (loop)
+        {
+            b.localGet(Local.label).i32const(lo).op(I32.ne);
+            this.openIf(`enter${lo}`);
+            // Any label not of an item here is the head's: out of the `if`.
+            b.localGet(Local.label);
+            b.brTable(table(0), 0);
+            this.close();
+            this.emitBlock(blocks[lo], lo);
+        }
+        else
+        {
+            b.localGet(Local.label);
+            b.brTable(table(0), 0);
+        }
+        for (const item of items)
+        {
+            this.close();
+            if (item.loop)
+            {
+                this.openLoop(`L${item.start}`);
+                this.emitRange(item.start, item.end, true);
+                this.close();
+            }
+            else
+            {
+                this.emitBlock(blocks[item.start], item.start);
+            }
+        }
+        this.ranges.pop();
+    }
+
+    /**
+     * Before falling through into the block after this one: a loop's head is
+     * entered with its own label, which its dispatch tells from an entry.
+     *
+     * @param {number} index  the block fallen into
+     */
+    fallInto(index){
+        if (this.loopEnds.has(index))
+        {
+            this.b.i32const(index).localSet(Local.label);
+        }
+    }
+
+    /**
      * @param {import('../region.js').Block} block
      * @param {number} index
      */
@@ -1254,7 +1355,8 @@ export class RegionEmitter {
             && block.exit.targets[0] === block.start && block.instructions.length > 0
             && (!x.active || (x.states[index] !== null && x.ends[index] !== null
                 && sameState(x.states[index], x.ends[index])));
-        const live = deadFlagPass(block);
+        this.flagsAfterEach = [];
+        const live = deadFlagPass(block, this.flagsOut[index], this.flagsAfterEach);
         const streams = this.selfLoop && !x.active && this.layout.codePages < 0
             ? planLoop(block.instructions) : null;
         if (streams !== null)
@@ -1411,6 +1513,7 @@ export class RegionEmitter {
         {
             const instruction = block.instructions[i];
             const flagsLive = live[i];
+            this.flagsAfter = this.flagsAfterEach[i];
             this.current = instruction;
             this.staleCheck = false;
             this.x87RefusalReason = null;
@@ -1546,6 +1649,10 @@ export class RegionEmitter {
                         // fall-through): leave before entering it.
                         this.exitAt(exit.targets[0], Exit.UNTRANSLATED);
                     }
+                    else
+                    {
+                        this.fallInto(index + 1);
+                    }
                     return;
                 }
                 this.jumpTo(exit.targets[0]);
@@ -1577,6 +1684,7 @@ export class RegionEmitter {
                     this.closeSelfLoop();
                     if (next && next.start === notTaken)
                     {
+                        this.fallInto(index + 1);
                         return;
                     }
                     this.jumpTo(notTaken);
@@ -1588,6 +1696,7 @@ export class RegionEmitter {
                 this.close();
                 if (next && next.start === notTaken)
                 {
+                    this.fallInto(index + 1);
                     return;
                 }
                 this.jumpTo(notTaken);
@@ -1701,21 +1810,35 @@ export class RegionEmitter {
         }
         if (label > this.blockIndex)
         {
-            // A forward edge cannot close a loop, and the block it reaches
-            // starts right after the end of its own wasm block, which is still
-            // open here: a direct branch, with no budget test and no trip
-            // through the dispatch's one shared indirect jump.
-            b.br(this.depthOf(`b${label}`));
-            return;
+            // A forward edge cannot close a loop: a branch out of the item that
+            // holds the target, in the innermost range holding it, which is
+            // still open here -- with no budget test and no trip through a
+            // dispatch. A target in a loop enters the loop with its label.
+            for (let k = this.ranges.length - 1; k >= 0; k--)
+            {
+                const range = this.ranges[k];
+                const item = range.items.find(one=>one.start <= label && label <= one.end);
+                if (label >= range.lo && label <= range.hi && item)
+                {
+                    if (item.loop)
+                    {
+                        b.i32const(label).localSet(Local.label);
+                    }
+                    b.br(this.depthOf(`b${item.start}`));
+                    return;
+                }
+            }
         }
-        // A backward edge goes through the dispatch, the budget checked on
-        // the way: only it can close a loop.
+        // A backward edge is looked at against the budget: only it can close
+        // a loop. To the head of a loop around this block it is a branch to
+        // that loop; any other goes through the function's dispatch.
+        const around = this.ranges.some(range=>range.loop && range.lo === label);
         b.localGet(Local.budget).i32const(0).op(I32.leS);
         this.openIf('spent');
         this.exitAt(target, Exit.BUDGET);
         this.close();
         b.i32const(label).localSet(Local.label);
-        b.br(this.depthOf('dispatch'));
+        b.br(this.depthOf(around ? `L${label}` : 'dispatch'));
     }
 
     /**
@@ -1785,17 +1908,126 @@ export class RegionEmitter {
 }
 
 /**
+ * The flags live at each block's end, over the region: the union of what its
+ * successors inside the region read before they write, and all of them where
+ * a way out of the block leaves the region -- the host, or another region,
+ * reads the whole word. A block's own exits before its end continue the same
+ * code the analysis followed, or leave at an instruction the host runs from.
+ *
+ * @param {import('../region.js').Block[]} blocks
+ * @param {Set<number>} starts  the region's block starts
+ * @returns {number[]}
+ */
+export function liveFlagsOut(blocks, starts){
+    const ALL = ARITH_FLAGS | DF;
+    const index = new Map(blocks.map((block, i)=>[block.start, i]));
+    /** @type {(number[] | null)[]} the successors inside the region, null when one leaves */
+    const successors = blocks.map(block=>{
+        const { kind, targets, next } = block.exit;
+        const edges = kind === 'jump' ? [...targets]
+            : kind === 'jcc' || kind === 'loop' || kind === 'fallthrough' ? [...targets, next]
+                : null;
+        if (edges === null || edges.some(target=>!starts.has(target)))
+        {
+            return null;
+        }
+        return edges.map(target=>/** @type {number} */ (index.get(target)));
+    });
+    const liveIn = blocks.map(()=>0);
+    const out = blocks.map(()=>ALL);
+    for (let changed = true; changed;)
+    {
+        changed = false;
+        for (let i = blocks.length - 1; i >= 0; i--)
+        {
+            const next = successors[i];
+            out[i] = next === null ? ALL : next.reduce((flags, j)=>flags | liveIn[j], 0);
+            const after = /** @type {number[]} */ ([]);
+            deadFlagPass(blocks[i], out[i], after);
+            let flags = out[i];
+            // What the block reads before it writes: the pass's own walk, to the top.
+            for (let k = blocks[i].instructions.length - 1; k >= 0; k--)
+            {
+                const instruction = blocks[i].instructions[k];
+                const count = shiftCount(instruction);
+                if (count === 0)
+                {
+                    continue;
+                }
+                const written = count === -1 ? 0
+                    : instruction.flagsWritten & ~instruction.flagsUndefined;
+                flags = (flags & ~written) | instruction.flagsRead;
+            }
+            if (flags !== liveIn[i])
+            {
+                liveIn[i] = flags;
+                changed = true;
+            }
+        }
+    }
+    return out;
+}
+
+/**
+ * The loops of a region as wasm can hold them: each head (the target of a
+ * branch back from a block at or after it) with the last block of its loop,
+ * widened until any two loops are nested or apart. A loop of one block is left
+ * out: the block's own loop onto itself (`selfLoop`) takes it.
+ *
+ * @param {import('../region.js').Block[]} blocks  in address order
+ * @returns {Map<number, number>} the head's index -> the loop's last block's
+ */
+export function planLoops(blocks){
+    const index = new Map(blocks.map((block, i)=>[block.start, i]));
+    /** @type {Map<number, number>} */
+    const ends = new Map();
+    blocks.forEach((block, source)=>{
+        const { kind, targets, next } = block.exit;
+        const edges = kind === 'jump' || kind === 'call' ? [...targets]
+            : kind === 'jcc' || kind === 'loop' || kind === 'fallthrough'
+                ? [...targets, next] : [];
+        for (const target of edges)
+        {
+            const head = index.get(target);
+            if (head !== undefined && head < source)
+            {
+                ends.set(head, Math.max(ends.get(head) ?? head, source));
+            }
+        }
+    });
+    for (let changed = true; changed;)
+    {
+        changed = false;
+        for (const [one, oneEnd] of ends)
+        {
+            for (const [two, twoEnd] of ends)
+            {
+                if (one < two && two <= oneEnd && oneEnd < twoEnd)
+                {
+                    ends.set(one, twoEnd);
+                    changed = true;
+                }
+            }
+        }
+    }
+    return ends;
+}
+
+/**
  * Which instructions of a block need their flag record: an instruction's
  * flags are needed when some flag it writes is read before the next
  * instruction that writes it -- or by whatever follows the block, which is
  * assumed to read everything.
  *
  * @param {import('../region.js').Block} block
+ * @param {number} [liveOut]  the flags live after the block: all of them unless the
+ *     region's own analysis (`liveFlagsOut`) says fewer
+ * @param {number[]} [after]  filled with the flags live after each instruction
  * @returns {boolean[]}  per instruction: whether its written flags are live
  */
-export function deadFlagPass(block){
+export function deadFlagPass(block, liveOut = ARITH_FLAGS | DF, after = []){
     const live = new Array(block.instructions.length).fill(true);
-    let liveAfter = ARITH_FLAGS | DF;
+    let liveAfter = liveOut;
     for (let i = block.instructions.length - 1; i >= 0; i--)
     {
         const instruction = block.instructions[i];
@@ -1803,6 +2035,7 @@ export function deadFlagPass(block){
         // count in cl it may or may not, so it kills nothing an earlier
         // record holds, though its own writes are live when read later.
         const count = shiftCount(instruction);
+        after[i] = liveAfter;
         if (count === 0)
         {
             live[i] = false;

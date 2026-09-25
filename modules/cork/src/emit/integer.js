@@ -231,7 +231,8 @@ export function emitInstruction(e, instruction, flagsLive){
             // (whose CF a later reader may still fold) must keep its operands,
             // so the value goes through a scratch local instead.
             const value = flagsLive ? Local.op1 : Local.t1;
-            if (flagsLive)
+            // Only when CF itself is read before something writes it again.
+            if (flagsLive && (e.flagsAfter & CF) !== 0)
             {
                 e.carryIntoWord();
             }

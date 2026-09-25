@@ -67,7 +67,7 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
  *     blockProfile?: boolean,
- *     leaveOut?: Set<string> | string[], wide?: boolean }} [options]
+ *     leaveOut?: Set<string> | string[], wide?: boolean, structure?: boolean }} [options]
  * @returns {BuiltBatch}
  */
 export function emitBatch(jobs, layout, features, options = {}){
@@ -81,6 +81,7 @@ export function emitBatch(jobs, layout, features, options = {}){
         countTransfers: options.countTransfers === true,
         blockProfile: options.blockProfile === true,
         wide: options.wide === true,
+        structure: options.structure !== false,
         leaveOut,
         ...(options.trapPort === undefined ? {} : { trapPort: options.trapPort }),
     });

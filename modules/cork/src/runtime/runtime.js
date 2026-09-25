@@ -91,6 +91,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // precision control once rather than every operation rounding by it
         // (false: the test on every operation from the start).
         wideFirst: true,
+        // A region's loops as wasm loops and its flags' liveness over its
+        // blocks (false: every backward jump through the dispatch, and every
+        // flag live at every block's end -- for telling a defect apart).
+        structure: true,
         ...config,
     };
     /** Whether new x87 regions are compiled for the wide precision controls. */
@@ -681,6 +685,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         blockProfile: profiling,
         hash: table !== null,
         wide,
+        structure: settings.structure,
         leaveOut,
         ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
     });
@@ -1468,7 +1473,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // A diagnostic run with classes left out, or with an undo log the
             // stored modules were built without, keeps no translations.
             const store = leaveOut.size > 0 || settings.undoLog || profiling
-                ? null : (settings.store ?? null);
+                || settings.structure === false ? null : (settings.store ?? null);
             /** @type {{ region: import('../region.js').Region, entryTop: number,
              *     stamp: string, cached: import('./cache.js').CachedRegion | null, wide?: boolean,
              *     moduleBytes?: Uint8Array | null }[]} */

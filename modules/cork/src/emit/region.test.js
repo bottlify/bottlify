@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../testing/machine.js';
-import { Exit } from './region.js';
+import { Exit, planLoops } from './region.js';
 
 const CODE = 0x1000;
 const DATA = 0x3000;
@@ -302,3 +302,70 @@ test('a call return is named and gets no entry of its own', ()=>{
         JSON.stringify([...t.translation.refusals.keys()]));
 });
 
+
+/**
+ * mov ecx, 5; L: add eax, 2; cmp eax, 6; jl S; inc edx; S: dec ecx; jnz L; hlt -- a
+ * loop of three blocks, its back edge a branch to the loop and its jl one forward.
+ */
+const LOOP = [0xb9, 5, 0, 0, 0, 0x83, 0xc0, 0x02, 0x83, 0xf8, 0x06, 0x7c, 0x01, 0x42, 0x49,
+    0x75, 0xf4, 0xf4];
+const HEAD = CODE + 5;
+const S = CODE + 0x0e;
+
+test('a loop of several blocks runs as a wasm loop to its halt', ()=>{
+    const m = createTestMachine();
+    m.write(CODE, LOOP);
+    const exit = m.translate(CODE).run(CODE, 1000);
+    assert.equal(exit.kind, Exit.HALT);
+    assert.equal(m.reg('eax'), 10);
+    assert.equal(m.reg('edx'), 3, 'inc edx once eax is 6 or more: at 6, 8 and 10');
+    assert.equal(m.reg('ecx'), 0);
+    // The mov, two turns of five (the jl taken), three of six, the hlt.
+    assert.equal(m.counter(), 1 + 5 + 5 + 6 + 6 + 6 + 1);
+});
+
+test('a loop is entered in its middle through its head, by the label', ()=>{
+    const m = createTestMachine();
+    m.write(CODE, LOOP);
+    m.setReg('ecx', 1);
+    const exit = m.translate(CODE).run(S, 1000);
+    assert.equal(exit.kind, Exit.HALT);
+    assert.equal(m.reg('ecx'), 0);
+    assert.equal(m.counter(), 3, 'dec, jnz not taken, hlt');
+});
+
+test('a spent budget leaves on the back edge of a loop at its head, and the rest carries on', ()=>{
+    const m = createTestMachine();
+    m.write(CODE, LOOP);
+    const unit = m.translate(CODE);
+    const exit = unit.run(CODE, 8);
+    assert.equal(exit.kind, Exit.BUDGET);
+    assert.equal(m.eip(), HEAD);
+    // The mov and two turns of five: the first turn leaves budget, the second spends it.
+    assert.equal(m.counter(), 11);
+    const rest = unit.run(HEAD, 1000);
+    assert.equal(rest.kind, Exit.HALT);
+    assert.equal(m.counter(), 30);
+    assert.equal(m.reg('eax'), 10);
+    assert.equal(m.reg('edx'), 3);
+});
+
+test('inc keeps the carry for an adc in the next block', ()=>{
+    // stc; jmp +0; inc eax; adc ebx, 0; hlt
+    const m = createTestMachine();
+    m.write(CODE, [0xf9, 0xeb, 0x00, 0x40, 0x83, 0xd3, 0x00, 0xf4]);
+    m.translate(CODE).run(CODE, 1000);
+    assert.equal(m.reg('eax'), 1);
+    assert.equal(m.reg('ebx'), 1, 'the carry stc set, through the inc');
+});
+
+test('loops that overlap are widened until they nest', ()=>{
+    /** @param {number} start @param {string} kind @param {number[]} targets @param {number} next */
+    const block = (start, kind, targets, next)=>/** @type {any} */ ({
+        start, exit: { kind, targets, next },
+    });
+    // 0; 1: jump 0; 2: jcc 1 else 3; 3: hlt -- [0, 1] and [1, 2] overlap.
+    const loops = planLoops([block(0, 'fallthrough', [1], 1), block(1, 'jump', [0], 2),
+        block(2, 'jcc', [1], 3), block(3, 'hlt', [], 4)]);
+    assert.deepEqual([...loops].sort(), [[0, 2], [1, 2]]);
+});
