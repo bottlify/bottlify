@@ -760,8 +760,11 @@ function fragmentBody(state, specularEnable, generated = state.stages.map(
             }
             const alpha = combine(
                 stage.alphaOp, index, coordinate, stage.alphaArg1, stage.alphaArg2);
-            return `    current = vec4f((${color}).rgb, `
-                + `${alpha === null ? '(current).a' : `(${alpha}).a`});`;
+            // Each stage's result is held to [0, 1] before the next reads it,
+            // as the fixed function's registers hold it: a sum past one or a
+            // difference below zero is not carried into the stage after.
+            return `    current = vec4f(saturate((${color}).rgb), `
+                + `${alpha === null ? '(current).a' : `saturate((${alpha}).a)`});`;
         })].join('\n');
 
     // The specular colour is added after the cascade and before the fog, which

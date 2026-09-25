@@ -242,6 +242,35 @@ test('each stage emits its own sample and reads the one before it', ()=>{
     assert.equal((code.match(/current = vec4f/g) || []).length, 2, 'one assignment per stage');
 });
 
+test('each stage saturates its result before the next stage reads it', ()=>{
+    // Wine's d3d9 test_color_clamping: stage 0 adds diffuse and specular,
+    // both white, and stage 1 modulates that by a texture factor of 0x40.
+    // Windows draws 0x404040 -- the sum is held at one before the modulate --
+    // and so does reference.js. An unsaturated sum of two reaches the second
+    // stage and draws 0x808080; an ADDSIGNED or SUBTRACT below zero goes on
+    // as a negative the same way.
+    const stage = (/** @type {number} */ colorOp, /** @type {number} */ colorArg1,
+        /** @type {number} */ colorArg2)=>({
+        colorOp, colorArg1, colorArg2,
+        alphaOp: D3DTOP.ADD, alphaArg1: D3DTA.DIFFUSE, alphaArg2: D3DTA.SPECULAR,
+        texCoordIndex: 0,
+    });
+    const code = generate(baseState({
+        fvf: FVF.XYZ | FVF.DIFFUSE | FVF.SPECULAR,
+        stages: [
+            stage(D3DTOP.ADD, D3DTA.DIFFUSE, D3DTA.SPECULAR),
+            stage(D3DTOP.MODULATE, D3DTA.TFACTOR, D3DTA.CURRENT),
+        ],
+    })).code;
+    const assignments = code.split('\n').filter(line=>/^ {4}current = /.test(line));
+    assert.deepEqual(assignments, [
+        '    current = vec4f(saturate((input.diffuse + input.specular).rgb),'
+            + ' saturate((input.diffuse + input.specular).a));',
+        '    current = vec4f(saturate((uniforms.textureFactor * current).rgb),'
+            + ' saturate((input.diffuse + input.specular).a));',
+    ]);
+});
+
 test('an argument slot the operation does not read is never built', ()=>{
     // Stage state persists across draws, so the unread slot holds whatever an
     // earlier operation put there. Building it anyway sampled a texture the
@@ -274,7 +303,7 @@ test('an argument slot the operation does not read is never built', ()=>{
             alphaArg2: D3DTA.DIFFUSE,
         })],
     })).code;
-    assert.match(selected, /current = vec4f\(\(uniforms\.textureFactor\)\.rgb/,
+    assert.match(selected, /current = vec4f\(saturate\(\(uniforms\.textureFactor\)\.rgb/,
         'argument two is what a select-two selects');
 });
 
