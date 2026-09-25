@@ -353,7 +353,7 @@ export const ID3D10DEVICE_SLOTS = /** @type {[string, number][]} */ ([
     ['CreateInputLayout', 5],
     ['CreateVertexShader', 3],
     ['CreateGeometryShader', 3],
-    ['CreateGeometryShaderWithStreamOutput', 7],
+    ['CreateGeometryShaderWithStreamOutput', 6],
     ['CreatePixelShader', 3],
     ['CreateBlendState', 2],
     ['CreateDepthStencilState', 2],
@@ -1901,7 +1901,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             CreateGeometryShader: shaderCreate('CreateGeometryShader', geometryShaderInterfaces,
                 IID.ID3D10GeometryShader),
             /** @param {any} device @param {number[]} args */
-            CreateGeometryShaderWithStreamOutput: (device, [, , , , , , out])=>{
+            CreateGeometryShaderWithStreamOutput: (device, [, , , , , out])=>{
                 if ((out >>> 0) !== 0)
                 {
                     fields.writeU32(out, 0);

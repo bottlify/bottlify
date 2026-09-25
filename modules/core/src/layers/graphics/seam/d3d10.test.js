@@ -230,6 +230,9 @@ test('the device vtable has ninety-five slots after IUnknown, each with its argu
         assert.equal(h.box.argBytesOf(device, slot(ID3D10DEVICE_SLOTS, 'CopySubresourceRegion')),
             36);
         assert.equal(h.box.argBytesOf(device, slot(ID3D10DEVICE_SLOTS, 'GetTextFilterSize')), 12);
+        assert.equal(h.box.argBytesOf(device,
+            slot(ID3D10DEVICE_SLOTS, 'CreateGeometryShaderWithStreamOutput')), 28,
+        'bytecode, its length, the declaration, its entry count, the stride and the out');
         assert.equal(slot(ID3D10DEVICE_SLOTS, 'CreateBuffer'), 3 + 68);
         assert.equal(slot(ID3D10DEVICE_SLOTS, 'GetTextFilterSize'), 3 + 94);
     });
@@ -527,8 +530,12 @@ test('what this build cannot do says so in the slot rather than in a crash', ()=
     assert.equal(h.device(device, 'OpenSharedResource',
         [1, h.box.placeGuid(IID.ID3D10Texture2D), out]), E_NOTIMPL);
     assert.equal(h.box.memory.readU32(out), 0);
+    const outAndBeyond = h.box.place([0xdeadbeef, 0xfeedface]);
     assert.equal(h.device(device, 'CreateGeometryShaderWithStreamOutput',
-        [0, 0, 0, 0, 0, 0, out]), E_NOTIMPL);
+        [0, 0, 0, 0, 32, outAndBeyond, outAndBeyond + 4]), E_NOTIMPL);
+    assert.equal(h.box.memory.readU32(outAndBeyond), 0, 'the sixth argument is the out');
+    assert.equal(h.box.memory.readU32(outAndBeyond + 4), 0xfeedface,
+        'the caller\'s next stack word is not an argument');
     assert.equal(h.swapChain(swapChain, 'GetContainingOutput', [out]), 0x887a0022);
     assert.equal(h.box.memory.readU32(out), 0);
     const modes = h.box.place([7]);
