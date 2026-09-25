@@ -17,7 +17,7 @@
  * put in a repository. Without that bundle it says so and stops.
  *
  *     node tools/cdp_test/game.mjs <bundle-id> [--turns N] [--wait SECONDS] [--run-seconds N]
- *                                  [--dump-draws] [--skip-texture tN] [--no-video]
+ *                                  [--dump-draws] [--skip-texture tN] [--no-video] [--no-hooks]
  *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
  *                                  [--command-line STRING]
  *                                  [--file HOST=GUEST] [--save-files]
@@ -187,6 +187,7 @@ function parse(argv){
         // The frame this many frames after the last long stall, written beside
         // the report as game-<stamp>-snap.png: a demo's frame N in every run.
         snapFrame: number('--snap-frame', 0),
+        snapFromStart: argv.includes('--snap-from-start'),
         // With it, this many frames from it, --snap-every apart, each written
         // as game-<stamp>-snap-<frame>.png.
         snapCount: number('--snap-count', 1),
@@ -238,6 +239,9 @@ function parse(argv){
         // assembled without a decoder, which is an ordinary machine and the
         // one every run had before there was one.
         video: !argv.includes('--no-video'),
+        // The bundle's sidecar hooks left unbound, for a pair of runs that
+        // differ by them and nothing else.
+        hooks: !argv.includes('--no-hooks'),
         dumpDraws: argv.includes('--dump-draws'),
         // Every host call timed as a phase of its own, so the report's phase
         // table says which API a frame's host time went to, not only that it
@@ -280,8 +284,18 @@ function parse(argv){
             {
                 return [];
             }
-            const [code, after] = argv[index + 1].split(',');
-            return [{ code, ...afterOf(after) }];
+            const [code, after, frames] = argv[index + 1].split(',');
+            return [{ code, ...afterOf(after), frames: frames ? Number(frames) : 1 }];
+        }),
+        // Mouse motion without a button, `dx,dy,after,frames`: that much each
+        // presented frame for that many frames -- how a view is turned.
+        looks: argv.flatMap((flag, index)=>{
+            if (flag !== '--turn')
+            {
+                return [];
+            }
+            const [dx, dy, after, frames] = argv[index + 1].split(',');
+            return [{ dx: Number(dx), dy: Number(dy), ...afterOf(after), frames: Number(frames) }];
         }),
         // Text typed into whatever has the focus, one character per presented
         // frame from `after` on, as `text,after`: each character is a key
@@ -657,6 +671,13 @@ function describe(result, context, calls, symbols){
     if (graphics)
     {
         say(`  graphics: created=[${graphics.created.join(' ')}]`);
+        if (graphics.compressedTextures)
+        {
+            // count:bytes:hash of every compressed block the program handed
+            // over: two runs of a deterministic load that differ here were
+            // given different data by the program itself.
+            say(`    compressed textures handed over: ${graphics.compressedTextures}`);
+        }
         if (graphics.uploads)
         {
             say(`    texture uploads=${graphics.uploads.textures}`
@@ -997,7 +1018,7 @@ export async function game(options){
     // inside the bundle: read here, the same way this driver already reads
     // the manifest, and handed to createApp as `sidecarHooks`.
     const hooksJsonPath = join(directory, 'hooks.json');
-    const sidecarHooks = existsSync(hooksJsonPath)
+    const sidecarHooks = options.hooks && existsSync(hooksJsonPath)
         ? {
             spec: JSON.parse(await readFile(hooksJsonPath, 'utf8')),
             source: await readFile(join(directory, 'hooks.mjs'), 'utf8'),
@@ -1105,10 +1126,12 @@ export async function game(options){
             pointer: options.pointer,
             steadyFrames: options.steadyFrames || undefined,
             snapFrame: options.snapFrame || undefined,
+            snapFromStart: options.snapFromStart,
             snapCount: options.snapCount,
             snapEvery: options.snapEvery,
             clicks: options.clicks,
             typed: options.typed,
+            looks: options.looks,
             pasted: options.pasted,
             logMatch: options.logMatch,
             network: options.network

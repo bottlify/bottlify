@@ -30,6 +30,46 @@ import {
     imageBytes, unpackImage,
 } from './texture.js';
 
+
+/**
+ * A digest of every compressed block a program has handed over, in order. A
+ * program that loads the same images the same way hands over the same bytes,
+ * so two runs whose digests differ were given different data -- which puts a
+ * corrupt texture on the side that produced it, not on the side that drew it.
+ */
+export const compressedDigest = { count: 0, bytes: 0, hash: 0x811c9dc5 };
+
+/**
+ * The same for the uncompressed images, one entry an upload in order --
+ * `target:level:widthxheight:hash` -- up to a few thousand: the images a
+ * program computes for itself (a normalisation cube, a lookup table) are
+ * among them, and one that differs between two engines names itself.
+ * @type {string[]}
+ */
+export const imageDigests = [];
+
+/** @param {Uint8Array} bytes */
+const hashOf = bytes=>{
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < bytes.length; i++)
+    {
+        hash = Math.imul(hash ^ bytes[i], 16777619);
+    }
+    return (hash >>> 0).toString(16);
+};
+
+/** @param {Uint8Array} bytes */
+function digestBlocks(bytes){
+    let hash = compressedDigest.hash;
+    for (let i = 0; i < bytes.length; i++)
+    {
+        hash = Math.imul(hash ^ bytes[i], 16777619);
+    }
+    compressedDigest.hash = hash >>> 0;
+    compressedDigest.count++;
+    compressedDigest.bytes += bytes.length;
+}
+
 /** The targets a unit can have textures bound to, lowest priority first. */
 const TARGETS = [GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_CUBE_MAP];
 
@@ -492,6 +532,11 @@ export function installTextureCalls(context, kernel){
         // The data is read before the list decides anything: a compiled
         // glTexImage2D holds the pixels as they were, not the pointer.
         const texels = readPixels(pixels, width, height, format, type);
+        if (texels instanceof Uint8Array && imageDigests.length < 4000)
+        {
+            imageDigests.push(
+                `${target.toString(16)}:${level}:${width}x${height}:${hashOf(texels)}`);
+        }
         if (texels === 'refused')
         {
             diverge(`glTexImage2D with format ${format} and type ${type} was accepted and`
@@ -950,6 +995,10 @@ export function installTextureCalls(context, kernel){
             return;
         }
         const bytes = guestBytes(data, size);
+        if (bytes)
+        {
+            digestBlocks(bytes);
+        }
         const texels = bytes && width > 0 && height > 0
             ? decodeS3tc(bytes, internal, width, height)
             : null;

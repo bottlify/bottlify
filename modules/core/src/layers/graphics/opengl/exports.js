@@ -50,6 +50,7 @@ import {
 } from './pixelformat.js';
 import { createWgl } from './wgl.js';
 import { createGpuRenderer } from './gpu.js';
+import { compressedDigest, imageDigests } from './context-textures.js';
 import { imageBytes, unpackImage } from './texture.js';
 import { packImage } from './context-pixels.js';
 import { PFD } from './constants.js';
@@ -1734,6 +1735,9 @@ export function createOpengl(services){
             // thing this layer can say about a run that drew nothing.
             unimplemented: Object.fromEntries(unimplemented),
             gpu: gpu ? gpu.diagnostics() : null,
+            compressed: `${compressedDigest.count}:${compressedDigest.bytes}:`
+                + compressedDigest.hash.toString(16),
+            images: imageDigests.slice(),
         }),
     };
 }

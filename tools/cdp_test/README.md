@@ -33,7 +33,7 @@ Reports land in `tools/cdp_test/reports/` (gitignored).
 node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 40]
     [--log FILE [--log-lines N]] [--profile [QUANTUM]]
     [--dump-draws] [--max-draws N] [--skip-texture tN] [--probe tN]
-    [--pointer x,y[,down]] [--click x,y[,after]] [--key Code[,after]] [--screen WxH]
+    [--pointer x,y[,down]] [--click x,y[,after]] [--key Code[,after[,frames]]] [--turn dx,dy,after,frames] [--screen WxH]
     [--run-seconds N] [--command-line STRING] [--file HOST=GUEST] [--save-files]
     [--profile-calls] [--no-video] [--no-fog] [--no-mips] [--trace]
     [--worker [--pacing page|event]] [--coi]
@@ -58,6 +58,8 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--screen WxH` | 640x480 | the display the program is told it has. The launcher names the person's own screen, which is rarely a size a program of this era lists, and what a title does on one is a path of its own |
 | `--run-seconds N` | off | how long the engine itself runs before it stops and reports. A title that reaches its loop runs out the turns hours later; this ends the run while the page can still be asked |
 | `--snap-frame N` | off | the frame presented N frames after the last stall of 1.5 s or more, written as `game-<stamp>-snap.png` and taken again after any later stall; with `--snap-count C --snap-every K`, C frames K apart from it, each also as `-snap-<frame>.png` -- a series tells a scene that changes by itself from one drawn wrong |
+| `--no-hooks` | off | leave the bundle's `hooks.json`/`hooks.mjs` unbound, so two runs differ by the hooks and nothing else |
+| `--snap-from-start` | off | count `--snap-frame` from the first presented frame instead of the last stall: a program whose clock steps once per frame (Doom 3's `com_fixedTic 1`) is then caught at the same game moment on two engines whose stalls differ |
 | `--steady-frames N` | off | the log's frame averages (frame, guest, host, over its last 240 frames) taken once N frames came after the last stall of 1.5 s or more, printed as `steady`. For a program that advances one step a frame and is given no input (Doom 3's `com_fixedTic 1`) those are the same frames of play in every run, so the guest milliseconds of two builds compare; a load draws a few hundred frames of its own before the map, so N is taken past them |
 | `--cpu-profile N` | off | with `--worker`: the browser's own sampling profiler on the engine's workers for N seconds from the start (or until the run ends). The report gets self time by file and by function -- a translated region is a function named by its address (`r004ea329`), the interpreter, the runtime and the layers are their own functions -- and the raw `.cpuprofile` lands beside the report for the browser's Performance panel. This is how "translated code is slow" is told apart from "the interpreter is slow" or "the runtime is" |
 | `--profile-calls` | off | every host call timed as a phase of its own, so the phase table says which API a frame's host time went to rather than only that it went to the crossing |
@@ -66,7 +68,8 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--js-flags FLAGS` | none | V8 flags for the browser (`--no-liftoff`), for a question about the wasm tiers |
 | `--no-video` | video on | assemble the engine without a decoder, so a run is not measured through a cinematic |
 | `--no-fog`, `--no-mips` | on | render as if fog, or mipmaps, were off, so a run differs from an ordinary one by that and nothing else |
-| `--key Code[,after]` | off | a key tap in `KeyboardEvent.code` names (`Enter`, `Escape`, `KeyA`) after that many presented frames: pressed on one frame, released on the next. Repeatable |
+| `--key Code[,after[,frames]]` | off | a key in `KeyboardEvent.code` names (`Enter`, `Escape`, `KeyA`) pressed after that many presented frames and released `frames` later (default 1) -- a held `KeyW` walks. Repeatable |
+| `--turn dx,dy,after,frames` | off | relative mouse motion of dx,dy on every presented frame from `after` for `frames` frames -- how a first-person view is turned. Repeatable |
 | `after` as `12s` | frames | any `after` above may be a time since the first presented frame instead of a frame count (`--click 520,400,12s`); a route timed in seconds survives a change in the frame rate, since the program's screens arrive on the clock |
 | `--command-line STRING` | the bundle's manifest | what the program believes it was started with, image path first: `'"C:\App\Game.exe" +set r_mode 3'`. The manifest's `commandLine` is the default, so a title's usual arguments need not be repeated |
 | `--file HOST=GUEST` | none | a file put on the volume before the program's first instruction, from a host path to a guest one (`dbg/bench.demo=C:\App\base\demos\bench.demo`): what one run wrote, handed to the next. Repeatable |
