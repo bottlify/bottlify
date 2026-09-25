@@ -194,7 +194,9 @@ function runAt(state, cache){
  * @param {import('./ir.js').EvalState} state
  * @param {number} [maxInstructions]
  * @param {{ shouldStop?: () => boolean, onStep?: (eip: number, jumped: boolean) => void,
- *     force?: boolean, entered?: boolean, asked?: boolean }} [options]
+ *     force?: boolean, entered?: boolean, asked?: boolean, jumped?: boolean }} [options]
+ *     jumped: set on return, whether the address the call stopped at was reached by a
+ *     jump -- a start a caller going on from there counts as `onStep` would have
  * @returns {number}
  */
 export function interpret(state, maxInstructions = 1, options = {}){
@@ -281,6 +283,7 @@ export function interpret(state, maxInstructions = 1, options = {}){
     finally
     {
         memory.watch?.(0, 0);
+        options.jumped = state.eip !== fallthrough;
     }
     return state.retired - before;
 }

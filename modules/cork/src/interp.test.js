@@ -103,6 +103,17 @@ test('onStep says which starts a jump reached, and a resumed run starts mid-bloc
     assert.deepEqual(entered, [true], 'a run entered at a jump target counts its first start');
 });
 
+test('xadd writes the sum where its destination was before the source register changed', ()=>{
+    // mov ebx, 0x2010; mov byte [ebx], 5; xadd [ebx], bh; hlt -- bh (0x20) takes the old
+    // byte, which moves ebx; the sum still lands at 0x2010.
+    const m = machine();
+    m.ram.set([0xbb, 0x10, 0x20, 0, 0, 0xc6, 0x03, 5, 0x0f, 0xc0, 0x3b, 0xf4], 0x1000);
+    interpret(m.state, 100);
+    assert.equal(m.ram[0x2010], 0x25);
+    assert.equal(m.state.reg[3], 0x0510);
+    assert.equal(m.ram[0x0510], 0, 'nothing written where ebx points now');
+});
+
 test('xorps xors the two XMM operands and movd reaches a register', ()=>{
     // movd xmm0, eax; movd xmm1, ecx; xorps xmm0, xmm1; movd eax, xmm0; hlt
     const m = machine();
