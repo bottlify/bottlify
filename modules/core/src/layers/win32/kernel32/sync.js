@@ -79,6 +79,8 @@ const MAXIMUM_WAIT_OBJECTS = 64;
  *           The queues behind contended sections, and the counters the fast
  *           paths keep.
  * @property {(bytes: number) => number} allocate
+ * @property {(bytes: number) => number} [allocateCode]  pages of their own for the fast
+ *           paths' code (`code-arena.js`), where a store beside it cannot invalidate it
  *           Guest memory the processor executes, for the fast paths.
  * @property {(milliseconds: number) => void} [advanceClock]
  *   Credits the guest clock for time a wait was supposed to spend. See the
@@ -138,7 +140,7 @@ export function createSyncFunctions(host){
         const place = code=>{
             // Sized by a throwaway rendering: the bytes depend on where they
             // land only through relative jumps, never in length.
-            const at = host.allocate(code(0).length);
+            const at = (host.allocateCode ?? host.allocate)(code(0).length);
             host.writeMemory(at, code(at));
             return at;
         };

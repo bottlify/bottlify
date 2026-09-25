@@ -14,6 +14,7 @@ import { TEB } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions } from './kernel32/files.js';
 import { createSyncFunctions } from './kernel32/sync.js';
+import { createCodeArena } from './kernel32/code-arena.js';
 import { createCriticalSections } from './kernel32/critical.js';
 import { createLocaleFunctions } from './kernel32/locale.js';
 import { createEnvironmentFunctions } from './kernel32/environment.js';
@@ -375,9 +376,14 @@ export const win32Module = {
         const allocator = createHeapAllocator(arena);
         // Counted by the mapping calls as they go.
         const mappings = { views: 0, waited: 0, failed: 0 };
+        // The guest code the engine writes itself, on pages nothing else is
+        // handed (`code-arena.js`).
+        const placeCode = createCodeArena(bytes=>allocator.allocate(bytes));
         const heap = {
             /** @param {number} bytes */
             allocate: bytes=>allocator.allocate(bytes),
+            /** @param {number} bytes */
+            allocateCode: bytes=>placeCode(bytes),
             /** @param {number} address */
             free: address=>allocator.free(address),
             /** @param {number} address */
@@ -770,6 +776,8 @@ export const win32Module = {
                     allThreads: ()=>kernel.threads(),
                     /** @param {number} bytes */
                     allocate: bytes=>heap.allocate(bytes),
+                    /** @param {number} bytes */
+                    allocateCode: bytes=>heap.allocateCode(bytes),
                 }),
                 ...createSyncFunctions({
                     kernel,
@@ -780,6 +788,8 @@ export const win32Module = {
                     critical,
                     /** @param {number} bytes */
                     allocate: bytes=>heap.allocate(bytes),
+                    /** @param {number} bytes */
+                    allocateCode: bytes=>heap.allocateCode(bytes),
                     advanceClock: (/** @type {number} */ ms)=>kernel.clock.advance(ms),
                 }),
                 ...createLocaleFunctions({

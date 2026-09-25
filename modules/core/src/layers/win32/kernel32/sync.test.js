@@ -296,6 +296,27 @@ test('entering, leaving and trying a section are guest code, placed once', ()=>{
     assert.equal('handler' in fns.EnterCriticalSection, false, 'nothing to trap into');
 });
 
+test('the fast paths are placed where the host keeps code, not in the heap beside data',
+    ()=>{
+        // Code beside data a program writes is code a translator keeps finding
+        // stored into: in one title the entry ran interpreted thirty-two million
+        // times in two minutes, because the counters sat eight bytes before it.
+        const host = fakeHost();
+        /** @type {number[]} */
+        const placed = [];
+        /** @type {any} */ (host).allocateCode = (/** @type {number} */ size)=>{
+            const at = 0x400 + placed.length * 0x80;
+            placed.push(at);
+            return at;
+        };
+        const fns = createSyncFunctions(/** @type {any} */ (host));
+        const builder = fakeBuilder();
+        const enter = fns.EnterCriticalSection.guest(builder);
+        const leave = fns.LeaveCriticalSection.guest(builder);
+        const attempt = fns.TryEnterCriticalSection.guest(builder);
+        assert.deepEqual([enter, leave, attempt], placed, 'every fast path from the code pages');
+    });
+
 test('the traps behind the fast paths queue a loser and hand the section to it', ()=>{
     const host = fakeHost();
     const fns = createSyncFunctions(host);

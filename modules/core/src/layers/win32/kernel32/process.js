@@ -128,6 +128,8 @@ const NORMAL_PRIORITY_CLASS = 0x20;
  * @property {() => any[]} [allThreads]  Every thread, for what has to reach all
  *           of their blocks.
  * @property {(bytes: number) => number} [allocate]
+ * @property {(bytes: number) => number} [allocateCode]  pages of their own for the fast
+ *           paths' code (`code-arena.js`), where a store beside it cannot invalidate it
  *           Guest memory the processor executes, for the fast paths.
  * @property {(refresh: () => void) => void} [publishClock]
  *           Handed a function that copies the guest's clock into a block in
@@ -379,7 +381,7 @@ export function createProcessFunctions(host){
         {
             throw new Error('kernel32: guest-side paths need memory to be placed in');
         }
-        const allocate = host.allocate;
+        const allocate = host.allocateCode ?? host.allocate;
         const getTrap = builder.register('<tls-get>', {
             argBytes: 4,
             /** @param {number[]} args */
@@ -458,7 +460,7 @@ export function createProcessFunctions(host){
             return clocks;
         }
         const block = clockBlock();
-        const allocate = host.allocate;
+        const allocate = host.allocateCode ?? host.allocate;
         /**
          * One routine, or the trap it would have fallen back to when there is
          * nowhere to put it: an export whose address is zero is no export.

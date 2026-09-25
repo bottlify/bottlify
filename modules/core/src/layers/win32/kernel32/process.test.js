@@ -590,3 +590,22 @@ test('a build with nowhere to publish a clock keeps every clock export a trap', 
     assert.equal(fns.QueryPerformanceFrequency.guest, undefined);
     assert.equal(fns.GetTickCount.guest, undefined);
 });
+
+test('the thread-state and clock routines are placed where the host keeps code', ()=>{
+    // Code beside data a program writes is code a translator keeps finding
+    // stored into; the heap hands out both, the code pages only code.
+    const { host, fns } = setup({ arena: 0x4000 });
+    /** @type {number[]} */
+    const placed = [];
+    /** @type {any} */ (host).allocateCode = (/** @type {number} */ size)=>{
+        const at = 0x3000 + placed.reduce((sum, one)=>sum + 0x40, 0);
+        placed.push(at);
+        assert.ok(size <= 0x40);
+        return at;
+    };
+    const builder = { register: ()=>0x105000 };
+    const lastError = boundTo(fns.GetLastError, builder);
+    const ticks = boundTo(fns.GetTickCount, builder);
+    assert.ok(placed.includes(lastError), 'GetLastError from the code pages');
+    assert.ok(placed.includes(ticks), 'GetTickCount from the code pages');
+});

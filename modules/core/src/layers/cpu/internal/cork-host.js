@@ -509,6 +509,13 @@ export function createCorkHost(config){
         let ran = 0;
         const startedAt = eip();
         const trapsBefore = trapCrossings;
+        // What the slice spent on the interpreter, for a slow slice's account of
+        // itself: the instructions it took and the time they cost.
+        let interpreted = 0;
+        let interpretMs = 0;
+        // And on forming regions, which the call below does before it hands
+        // the batch to the worker.
+        let formMs = 0;
         // The last region left through an untranslated exit: `eip` is a jump's target.
         let jumpedIn = false;
         while (remaining > 0 && !isHalted() && !isStopped() && !isFeedDue())
@@ -520,7 +527,9 @@ export function createCorkHost(config){
                 // that never presents a frame still translates.
                 translateDue = false;
                 stepsSinceFeed = 0;
+                const formAt = performance.now();
                 runtime.translatePending().catch(()=>{});
+                formMs += performance.now() - formAt;
             }
             const at = eip();
             const entry = runtime.entryOf(at, x87Top());
@@ -569,7 +578,10 @@ export function createCorkHost(config){
                 }
                 continue;
             }
+            const interpretAt = performance.now();
             const stepped = interpretRange(at, remaining, false, jumpedIn);
+            interpretMs += performance.now() - interpretAt;
+            interpreted += stepped;
             jumpedIn = false;
             remaining -= stepped;
             ran += stepped;
@@ -590,8 +602,11 @@ export function createCorkHost(config){
         fold();
         recent.push({ at: startedAt, end: eip(), retired: ran, traps: trapCrossings - trapsBefore,
             halted });
-        // A slice is a few milliseconds; one of twenty holds a timer's thread.
-        runtime.noteStall?.('slice', sliceAt, 20);
+        // A slice is a few milliseconds; one of twenty holds a timer's thread,
+        // and says what it spent them on.
+        runtime.noteStall?.(`slice i${interpreted}/${Math.round(interpretMs)}ms`
+            + ` f${Math.round(formMs)}ms t${ran - interpreted} h${trapCrossings - trapsBefore}`,
+        sliceAt, 20);
         if (recent.length > RECENT)
         {
             recent.shift();
