@@ -8,6 +8,7 @@
  * The dynamic instruction mix of a cork run, and what each part of it costs.
  *
  *   node tools/cork-mix.mjs <game-...-blocks.json> [--bundle id] [--top 30]
+ *       [--image gamex86.dll@0x5500000]...
  *
  * The blocks file is what `tools/cdp_test/game.mjs` writes beside its report
  * for a run with `--cork-config '{"blockProfile":true}'`: every executed block
@@ -18,7 +19,7 @@
  * wasm operations cork emits for that form alone (the instruction formed into
  * a region of its own, less an empty one: a static count, cold paths
  * included), so `weighted ops` ranks where translated code spends its work.
- * Blocks outside the entry image (a DLL's) are listed by address only.
+ * Blocks outside the entry image and the `--image` ones are counted only.
  */
 
 import { readFileSync } from 'node:fs';
@@ -38,24 +39,38 @@ const top = Number(flag('--top', '30'));
 
 const directory = join('bundles', bundleId);
 const manifest = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8'));
+// The entry image at its own preferred base, and any other image named as
+// `--image gamex86.dll@0x5500000`: a DLL is placed where the run put it, which
+// only the run knows (its report names the address).
+const extra = args.flatMap((one, at)=>(one === '--image' ? [args[at + 1]] : []));
 const opened = await openBundle(join(directory, manifest.bundle?.file ?? 'bundle.btl'));
-const exe = await opened.read(manifest.entry);
-await opened.close();
-const pe = exe.readUInt32LE(0x3c);
-const imageBase = exe.readUInt32LE(pe + 52);
-const optional = exe.readUInt16LE(pe + 20);
+/** @type {{ va: number, size: number, raw: number, bytes: Buffer }[]} */
 const sections = [];
-for (let i = 0, at = pe + 24 + optional; i < exe.readUInt16LE(pe + 6); i++, at += 40)
+/** @param {string} path @param {number | null} base */
+const place = async(path, base)=>{
+    const bytes = await opened.read(path);
+    const pe = bytes.readUInt32LE(0x3c);
+    const imageBase = base ?? bytes.readUInt32LE(pe + 52);
+    const optional = bytes.readUInt16LE(pe + 20);
+    for (let i = 0, at = pe + 24 + optional; i < bytes.readUInt16LE(pe + 6); i++, at += 40)
+    {
+        sections.push({ va: imageBase + bytes.readUInt32LE(at + 12),
+            size: bytes.readUInt32LE(at + 16), raw: bytes.readUInt32LE(at + 20), bytes });
+    }
+};
+await place(manifest.entry, null);
+for (const one of extra)
 {
-    sections.push({ va: imageBase + exe.readUInt32LE(at + 12),
-        size: exe.readUInt32LE(at + 16), raw: exe.readUInt32LE(at + 20) });
+    const [path, base] = one.split('@');
+    await place(path, Number(base));
 }
+await opened.close();
 /** @param {number} address */
 const section = address=>sections.find(one=>address >= one.va && address < one.va + one.size);
 /** @param {number} address */
 const read = address=>{
     const one = section(address);
-    return one ? exe[one.raw + address - one.va] : 0;
+    return one ? one.bytes[one.raw + address - one.va] : 0;
 };
 
 /** Static wasm operations of a byte sequence formed into a region, then halted. */
@@ -120,7 +135,8 @@ for (const row of mix.values())
 }
 const rows = [...mix].sort((one, two)=>two[1].executions * two[1].cost
     - one[1].executions * one[1].cost);
-console.log(`${profile.blocks.length} blocks, ${executed} instructions in ${manifest.entry}`
+const images = [manifest.entry, ...extra].join(', ');
+console.log(`${profile.blocks.length} blocks, ${executed} instructions in ${images}`
     + `, ${outside} block executions outside it`);
 console.log('share  ops-share  ops/insn  form');
 for (const [key, row] of rows.slice(0, top))

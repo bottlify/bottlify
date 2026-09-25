@@ -107,6 +107,8 @@
  * @property {number} [maxRegionBlocks]  Default 128.
  * @property {number} [maxRegionBytes]   Default 8192.
  * @property {boolean} [blockProfile]    A diagnostic: every block counts its executions.
+ * @property {number} [blockProfileFrom]  With `blockProfile`: seconds after start at which the
+ *           counts start over.
  * @property {number} [batchRegions]     Regions per wasm module. Default 32.
  * @property {number} [maxBatchRegions]  The most regions one batch takes when the queue is deep
  *     (a quarter of the queue past `batchRegions`). Default 256.

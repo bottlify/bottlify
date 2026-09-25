@@ -72,6 +72,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // the tables -- only in a memory the host sized for it (cork's own layout)
         // -- and the diagnostics name the counts. Such a run keeps no store.
         blockProfile: false,
+        // With `blockProfile`: seconds after the runtime is made at which the
+        // counts start over, so a profile holds a steady state and not the load.
+        blockProfileFrom: 0,
         // Diagnostic: every store key put and every one missed, as
         // `entry:hash:top`, in the diagnostics -- what tells two runs' keys apart.
         traceStore: false,
@@ -625,6 +628,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
         }
         return out.sort((one, two)=>two[1] - one[1]);
+    };
+    let profileResetAt = profiling && settings.blockProfileFrom > 0
+        ? performance.now() + settings.blockProfileFrom * 1000 : null;
+    const resetBlockCounts = ()=>{
+        const data = view();
+        const base = layout.tables + Tables.BLOCK_PROFILE;
+        for (let slot = 0; slot < Tables.BLOCK_SLOTS; slot++)
+        {
+            data.setUint32(base + slot * Tables.BLOCK_SLOT + 4, 0, true);
+        }
     };
     /** The forty most executed, with the region each is in. @param {[number, number, number][]} blocks */
     const topBlocks = blocks=>blocks.slice(0, 40).map(([address, count, shared])=>{
@@ -1244,6 +1257,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         },
         run(entry, budget){
             const { fn, label } = entries.at(entry);
+            if (profileResetAt !== null && performance.now() >= profileResetAt)
+            {
+                profileResetAt = null;
+                resetBlockCounts();
+            }
             // One record, rewritten per run: a call-heavy program leaves
             // and re-enters per call, and an object per leave was the
             // collector's share of the cost.

@@ -889,6 +889,19 @@ test('a block profile counts each block\'s executions: a loop\'s body its iterat
     assert.equal(topBlocks[0].shared, false);
 });
 
+test('a block profile with blockProfileFrom counts only what ran after that moment', async()=>{
+    const m = machine({ blockProfile: true, blockProfileFrom: 0.001 });
+    m.write(CODE, COUNTDOWN);
+    m.runtime.noteHot(CODE);
+    await m.runtime.translatePending();
+    m.runtime.run(m.runtime.entryOf(CODE), 100_000);
+    await new Promise(resolve=>setTimeout(resolve, 5));
+    m.runtime.run(m.runtime.entryOf(CODE), 100_000);
+    const { blockCounts } = /** @type {any} */ (m.runtime.diagnostics());
+    const count = blockCounts.find((/** @type {number[]} */ [at])=>at === CODE + 5)?.[1];
+    assert.equal(count, 1000, 'the second run alone; the first was counted before the moment');
+});
+
 test('without a block profile a run counts nothing and says nothing of blocks', async()=>{
     const m = machine();
     m.write(CODE, COUNTDOWN);
