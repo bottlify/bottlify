@@ -628,6 +628,28 @@ export function createOleFunctions(host){
          * hint and do nothing with it, which is also what Windows does when
          * every server says it is still needed.
          */
+        /**
+         * HRESULT CoSetProxyBlanket(IUnknown *pProxy, DWORD dwAuthnSvc,
+         *     DWORD dwAuthzSvc, OLECHAR *pServerPrincName, DWORD dwAuthnLevel,
+         *     DWORD dwImpLevel, RPC_AUTH_IDENTITY_HANDLE pAuthInfo, DWORD dwCapabilities)
+         * HRESULT CoInitializeSecurity(PSECURITY_DESCRIPTOR pSecDesc, LONG cAuthSvc,
+         *     SOLE_AUTHENTICATION_SERVICE *asAuthSvc, void *pReserved1, DWORD dwAuthnLevel,
+         *     DWORD dwImpLevel, void *pAuthList, DWORD dwCapabilities, void *pReserved3)
+         *
+         * Security for calls that cross a process. Every object here lives in
+         * the caller's process, so there is nothing to secure, and a program
+         * that sets a blanket on the WMI services it was handed goes on to
+         * use them only if this succeeds.
+         */
+        CoSetProxyBlanket: {
+            argBytes: 32,
+            handler: ()=>0,
+        },
+        CoInitializeSecurity: {
+            argBytes: 36,
+            handler: ()=>0,
+        },
+
         CoFreeUnusedLibraries: {
             argBytes: 0,
             handler: ()=>0,

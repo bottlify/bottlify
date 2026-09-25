@@ -54,6 +54,7 @@ import { COMCTL32_ORDINALS, createComctlFunctions } from './comctl32/functions.j
 import { createCommonControls } from './comctl32/controls.js';
 import { createShellFunctions } from './shell32/functions.js';
 import { registerShellLinkClasses } from './shell32/shelllink.js';
+import { registerWbemClasses } from './ole32/wbem.js';
 import { createRpcFunctions } from './rpcrt4/functions.js';
 import { createVersionFunctions } from './version/functions.js';
 import { createLzFunctions } from './lz32/functions.js';
@@ -656,6 +657,12 @@ export const win32Module = {
             /** @param {number} bytes */
             allocate: bytes=>heap.allocate(bytes),
             files: volume,
+            divergence: config?.divergence,
+        });
+
+        // WMI's locator, which a program asks for its video memory.
+        registerWbemClasses({
+            registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
             divergence: config?.divergence,
         });
 
