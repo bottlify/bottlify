@@ -187,11 +187,12 @@ function machine(){
  *
  * @param {{ shadow?: boolean,
  *           windowClientSize?: (window: number) => { width: number,
- *               height: number } | null }} [options]  Whether the device keeps a
+ *               height: number } | null,
+ *           allocateCode?: (bytes: number) => number }} [options]  Whether the device keeps a
  *     block in guest memory, as it does under a running processor, and how a
  *     window's client area is measured when a program asks for zero.
  */
-function seamed({ shadow = false, windowClientSize } = {}){
+function seamed({ shadow = false, windowClientSize, allocateCode } = {}){
     const box = machine();
     /** @type {string[]} */
     const divergences = [];
@@ -231,6 +232,7 @@ function seamed({ shadow = false, windowClientSize } = {}){
         windowClientSize: windowClientSize ?? measureWindow,
         publisher,
         allocate: shadow ? box.allocate : undefined,
+        allocateCode,
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         cursor: (/** @type {any} */ notice)=>cursors.push(notice),
@@ -1559,3 +1561,22 @@ test('a back buffer asked for as zero by zero, with no window to measure, is the
     assert.equal(h.release(device), 0);
     h.release(root);
 });
+
+test('the guest routines a device writes come from the code pages, not the heap beside its state',
+    ()=>{
+        // Code beside state the program writes is code a translator keeps
+        // finding stored into, and leaves to its interpreter for good.
+        /** @type {[number, number][]} */
+        const code = [];
+        const h = seamed({ shadow: true, allocateCode: (/** @type {number} */ size)=>{
+            const at = 0xf000 + code.length * 0x100;
+            code.push([at, size]);
+            return at;
+        } });
+        const device = h.createDevice(h.create());
+        const out = 0xe500;
+        assert.equal(h.device(device,
+            'CreateTexture', [8, 8, 2, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out]), D3D_OK);
+        assert.ok(code.length > 0, 'a guest routine was placed');
+        assert.ok(code.every(([, size])=>size > 0 && size <= 0x100));
+    });

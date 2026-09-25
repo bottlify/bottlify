@@ -2836,6 +2836,8 @@ async function buildApp(options){
             // reach -- an address invented for the purpose is one the program
             // writes into nothing and we read nothing out of.
             allocate: (/** @type {number} */ bytes)=>win32.heap().allocate(bytes),
+            // The guest code the seams write, on pages nothing else is handed.
+            allocateCode: (/** @type {number} */ bytes)=>win32.heap().allocateCode(bytes),
             // What wglGetProcAddress answers for a name OPENGL32 exports
             // itself: the export's own address, the one an import bound to.
             /** @param {string} name */

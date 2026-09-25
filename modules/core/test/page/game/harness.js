@@ -1453,6 +1453,12 @@ export function createHarness(canvas, how = {}){
         const metrics = name=>layers.find((/** @type {any} */ entry)=>entry.name === name)
             ?.metrics ?? {};
         result.layers = scalars(layers);
+        // When the sound played a lap it had played before, host times: a
+        // list longer than the table keeps, read beside the translator's stalls.
+        result.staleAt = layers.find((/** @type {any} */ one)=>one.name === 'audio')
+            ?.metrics?.staleAt ?? [];
+        result.staleTrail = layers.find((/** @type {any} */ one)=>one.name === 'audio')
+            ?.metrics?.staleTrail ?? [];
         result.instructions = metrics('cpu').instructions ?? null;
         result.threads = {
             byState: metrics('kernel').byState ?? {},

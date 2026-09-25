@@ -1066,6 +1066,10 @@ export function createDirectSound(
             staleByBuffer: buffers.map(buffer=>buffer.stale.bytes),
             // The host times of the last ones, merged across buffers.
             staleAt: buffers.flatMap(buffer=>buffer.stale.at).sort((a, b)=>a - b).slice(-64),
+            // The last repeat of the buffer that repeated most, with the
+            // unlocks that led up to it (`buffers.js`, `trail`).
+            staleTrail: [...buffers].sort((a, b)=>b.stale.bytes - a.stale.bytes)[0]
+                ?.stale.trail ?? [],
             // And the cause, counted where it happens: a refill that began
             // past where the previous one ended, leaving a lap-old region in
             // between for the mixer to play.
