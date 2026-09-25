@@ -156,7 +156,7 @@ const bracketPlacement = context=>{
 };
 
 /** The body of an `if` belongs on its own line. */
-const onelineIfs = context =>({
+const onelineIfs = context=>({
     IfStatement: node=>{
         if (node.loc.start.line === node.loc.end.line)
         {
@@ -196,9 +196,12 @@ const arrowSpaces = context=>{
     const src = context.sourceCode;
     return {
         ArrowFunctionExpression: node=>{
-            const arrow = src.getTokenBefore(node.body);
+            // The arrow itself, not a parenthesis around the body (a JSDoc cast
+            // puts one there, with the comment before it).
+            const arrow = src.getTokenBefore(node.body,
+                { filter: token=>token.type === 'Punctuator' && token.value === '=>' });
             const before = src.getTokenBefore(arrow);
-            const after = src.getTokenAfter(arrow);
+            const after = src.getTokenAfter(arrow, { includeComments: true });
             if (arrow.range[0] - before.range[1] > 0)
             {
                 context.report({
@@ -220,7 +223,7 @@ const arrowSpaces = context=>{
 };
 
 /** Non-ASCII is fine in strings and comments, not in code. */
-const nonAscii = context =>({
+const nonAscii = context=>({
     Program: ()=>{
         const src = context.sourceCode;
         const text = src.getText();

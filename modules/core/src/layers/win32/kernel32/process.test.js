@@ -598,7 +598,7 @@ test('the thread-state and clock routines are placed where the host keeps code',
     /** @type {number[]} */
     const placed = [];
     /** @type {any} */ (host).allocateCode = (/** @type {number} */ size)=>{
-        const at = 0x3000 + placed.reduce((sum, one)=>sum + 0x40, 0);
+        const at = 0x3000 + placed.length * 0x40;
         placed.push(at);
         assert.ok(size <= 0x40);
         return at;

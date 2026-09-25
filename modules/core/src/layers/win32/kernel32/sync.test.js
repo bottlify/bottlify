@@ -304,7 +304,7 @@ test('the fast paths are placed where the host keeps code, not in the heap besid
         const host = fakeHost();
         /** @type {number[]} */
         const placed = [];
-        /** @type {any} */ (host).allocateCode = (/** @type {number} */ size)=>{
+        /** @type {any} */ (host).allocateCode = ()=>{
             const at = 0x400 + placed.length * 0x80;
             placed.push(at);
             return at;
