@@ -758,9 +758,14 @@ export function scheduleKeyTimes(app, request){
  * @property {boolean} pointerDown    Whether the held pointer's button is down.
  * @property {{ x: number, y: number }} pointerAt  Where the last click left it.
  * @property {number[]} gaps          Milliseconds between one present and the next.
+ * @property {number[]} times         Each present's wall-clock time (ms since the epoch), so a
+ *                                    driver can count the frames inside a window of its own.
  * @property {number} lastPresent     `performance.now()` at the previous present, or 0.
  * @property {number} firstPresent    `performance.now()` at the first present, or 0.
  * @property {number} presents        How many frames this harness has presented, ever.
+ * @property {number} [sinceStall]    Frames presented since the last gap of 1.5 s or more.
+ * @property {any} [steady]            The log's frame averages, taken once `sinceStall` first
+ *                                    reached the request's `steadyFrames`.
  */
 
 /**
@@ -781,7 +786,8 @@ export function scheduleKeyTimes(app, request){
  *           clicks?: { x: number, y: number, after: number, afterSeconds?: number }[],
  *           keys?: { code: string, after: number, afterSeconds?: number }[],
  *           typed?: { text: string, after: number, afterSeconds?: number }[],
- *           pasted?: { text: string, after: number, afterSeconds?: number }[] }} request
+ *           pasted?: { text: string, after: number, afterSeconds?: number }[],
+ *           steadyFrames?: number }} request
  * @param {PresentState} state
  * @param {any} frame
  */
@@ -789,9 +795,29 @@ export function presentFrame(app, request, state, frame){
     state.presented = frame;
     state.presents++;
     const now = performance.now();
+    if (request.steadyFrames)
+    {
+        // A load stalls for seconds at a time and play does not: the count
+        // starts over at every such stall, so the averages taken at it cover
+        // the same frames of play in every run of a program that advances one
+        // step a frame.
+        state.sinceStall = state.lastPresent > 0 && now - state.lastPresent >= 1500
+            ? 0 : (state.sinceStall ?? 0) + 1;
+        if (!state.steady && state.sinceStall === request.steadyFrames)
+        {
+            const log = app.diagnostics().find((/** @type {any} */ one)=>one.name === 'log');
+            const { averageFrameMs, averageGuestMs, averageHostMs } = log?.metrics ?? {};
+            state.steady = { frames: request.steadyFrames, averageFrameMs, averageGuestMs,
+                averageHostMs };
+        }
+    }
     if (state.lastPresent > 0 && state.gaps.length < LIMITS.samples)
     {
         state.gaps.push(now - state.lastPresent);
+    }
+    if (state.times.length < LIMITS.samples)
+    {
+        state.times.push(performance.timeOrigin + now);
     }
     if (state.firstPresent === 0)
     {
@@ -1009,7 +1035,7 @@ export function createHarness(canvas, how = {}){
     /** @type {PresentState} */
     const presentState = {
         presented: null, pointerDown: false, pointerAt: { x: 0, y: 0 },
-        gaps: [], lastPresent: 0, firstPresent: 0, presents: 0,
+        gaps: [], times: [], lastPresent: 0, firstPresent: 0, presents: 0,
     };
 
     /**
@@ -1481,6 +1507,8 @@ export function createHarness(canvas, how = {}){
         result.events = collected.events;
         result.errors = errors;
         result.presentGaps = presentState.gaps.slice();
+        result.presentTimes = presentState.times.slice();
+        result.steady = presentState.steady ?? null;
 
         await app.dispose();
         // Nothing is running any more, and a report asked for now must say

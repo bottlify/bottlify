@@ -180,6 +180,10 @@ function parse(argv){
         // title that reaches its loop and would otherwise run out the turns
         // hours later. Zero means the turns alone decide.
         runSeconds: number('--run-seconds', 0),
+        // The frame averages taken once this many frames came after the last
+        // long stall (a load): with a program that advances one step a frame,
+        // the same frames of play in every run (0: not taken).
+        steadyFrames: number('--steady-frames', 0),
         // The browser's own sampling profiler on the engine's workers for
         // this many seconds from the start (or until the run ends): which
         // functions -- translated regions by address, the interpreter, the
@@ -824,6 +828,14 @@ function describe(result, context, calls, symbols){
     }
 
     say(`  frames presented: ${result.presents ?? 0}`);
+    if (result.steady)
+    {
+        const steady = result.steady;
+        say(`  steady, ${steady.frames} frames after the load, over the last 240:`
+            + ` frame ${steady.averageFrameMs.toFixed(1)} ms,`
+            + ` guest ${steady.averageGuestMs.toFixed(1)} ms,`
+            + ` host ${steady.averageHostMs.toFixed(1)} ms`);
+    }
     // The gaps between presents are the shape a stutter has, and the page's
     // long tasks say whether the thread the person's browser lives on was held.
     const gaps = [...result.presentGaps ?? []].sort((left, right)=>left - right);
@@ -898,6 +910,11 @@ function describe(result, context, calls, symbols){
         for (const line of describeProfile(one.url, one.summary, one.windowMs))
         {
             say(line);
+        }
+        if (one.frames > 0)
+        {
+            say(`  frames presented in the window: ${one.frames}`
+                + `, ${(one.windowMs / one.frames).toFixed(1)} ms a frame`);
         }
     }
 
@@ -1060,6 +1077,7 @@ export async function game(options){
             graphics: options.graphics,
             trace: options.trace,
             pointer: options.pointer,
+            steadyFrames: options.steadyFrames || undefined,
             clicks: options.clicks,
             typed: options.typed,
             pasted: options.pasted,
@@ -1083,7 +1101,7 @@ export async function game(options){
         const profiler = options.cpuProfile > 0 && options.worker
             ? await profileWorkers(cdp, sessionId) : null;
         let profilingFrom = Date.now();
-        /** @type {{ url: string, profile: any, windowMs: number }[] | null} */
+        /** @type {{ url: string, profile: any, windowMs: number, from: number }[] | null} */
         let cpuProfiles = null;
         const stopProfiling = async()=>{
             if (profiler === null || cpuProfiles !== null)
@@ -1091,7 +1109,8 @@ export async function game(options){
                 return;
             }
             const windowMs = Date.now() - profilingFrom;
-            cpuProfiles = (await profiler.stop()).map(one=>({ ...one, windowMs }));
+            const from = profilingFrom;
+            cpuProfiles = (await profiler.stop()).map(one=>({ ...one, windowMs, from }));
         };
         // A later window: the profilers restart after the load, and the window
         // runs its length from there.
@@ -1189,8 +1208,16 @@ export async function game(options){
         }
         await stopProfiling().catch(()=>{});
         saveProfiles(stamp);
+        // Every present's wall-clock time, for comparing two runs over the same
+        // frames rather than the same seconds (tools/frame-span.mjs).
+        writeFileSync(join(REPORTS_DIR, `game-${stamp}-presents.json`),
+            JSON.stringify(result.presentTimes ?? []));
         result.cpuProfiles = (cpuProfiles ?? []).map(one=>({
             url: one.url, windowMs: one.windowMs, summary: summarise(one.profile, one.windowMs),
+            // The frames the program presented inside the window, so a profile's
+            // milliseconds divide into a frame's.
+            frames: (result.presentTimes ?? []).filter((/** @type {number} */ at)=>at >= one.from
+                && at < one.from + one.windowMs).length,
         }));
         const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
         writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));

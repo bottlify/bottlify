@@ -61,7 +61,7 @@ test('a presented frame increments the counter and records the gap', ()=>{
     const app = fakeApp();
     /** @type {import('./harness.js').PresentState} */
     const state = { presented: null, pointerDown: false, pointerAt: { x: 0, y: 0 },
-        gaps: [], lastPresent: 0, presents: 0 };
+        gaps: [], times: [], lastPresent: 0, presents: 0 };
     const first = { frameIndex: 0 };
 
     presentFrame(app, {}, state, first);
@@ -79,7 +79,7 @@ test('a held pointer and a scheduled click and key are forwarded per frame', ()=
     const app = fakeApp();
     /** @type {import('./harness.js').PresentState} */
     const state = { presented: null, pointerDown: false, pointerAt: { x: 0, y: 0 },
-        gaps: [], lastPresent: 0, presents: 0 };
+        gaps: [], times: [], lastPresent: 0, presents: 0 };
     const request = {
         pointer: { x: 12, y: 34 },
         clicks: [{ x: 50, y: 60, after: 1 }],

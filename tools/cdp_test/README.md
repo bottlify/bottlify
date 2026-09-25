@@ -57,6 +57,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--click x,y[,after]` | off | a click in the program's own pixels after that many presented frames (30 by default): pressed on one frame, released on the next, with the motion that brings a pointer there from where the last click left it, for a program that reads the mouse as relative motion. Repeatable, for a path through several screens |
 | `--screen WxH` | 640x480 | the display the program is told it has. The launcher names the person's own screen, which is rarely a size a program of this era lists, and what a title does on one is a path of its own |
 | `--run-seconds N` | off | how long the engine itself runs before it stops and reports. A title that reaches its loop runs out the turns hours later; this ends the run while the page can still be asked |
+| `--steady-frames N` | off | the log's frame averages (frame, guest, host, over its last 240 frames) taken once N frames came after the last stall of 1.5 s or more, printed as `steady`. For a program that advances one step a frame and is given no input (Doom 3's `com_fixedTic 1`) those are the same frames of play in every run, so the guest milliseconds of two builds compare; a load draws a few hundred frames of its own before the map, so N is taken past them |
 | `--cpu-profile N` | off | with `--worker`: the browser's own sampling profiler on the engine's workers for N seconds from the start (or until the run ends). The report gets self time by file and by function -- a translated region is a function named by its address (`r004ea329`), the interpreter, the runtime and the layers are their own functions -- and the raw `.cpuprofile` lands beside the report for the browser's Performance panel. This is how "translated code is slow" is told apart from "the interpreter is slow" or "the runtime is" |
 | `--profile-calls` | off | every host call timed as a phase of its own, so the phase table says which API a frame's host time went to rather than only that it went to the crossing |
 | `--cpu-profile-from S` | 0 | with `--cpu-profile`: the window starts S seconds into the run instead of at the start, so a scene is profiled without the load in front of it |
@@ -173,6 +174,17 @@ bundle: a gigabyte that must never be read whole to answer one block.
 dumped, one PNG per texture the engine uploaded (and its device-side copy),
 and every file the program itself wrote. A game's own crash report is its
 account of what went wrong and beats any trace taken from outside it.
+
+`game-<stamp>-presents.json` holds every present's wall-clock time. Two runs are
+compared over the same frames rather than the same seconds with
+`node tools/frame-span.mjs <presents.json>... [--skip N] [--frames N]`: the span
+starts after the load's last long stall, and for a program whose simulation
+advances one step a frame (Doom 3's `com_fixedTic 1`) and is given no input it
+is the same work in every run. With `--cpu-profile`, the report also says how
+many frames were presented inside the profile's window and how long each took,
+so the profile's milliseconds divide into a frame's. Runs on one machine vary by
+a quarter from one to the next: a difference is only a measurement across
+several runs of each side.
 
 The report, in the order it answers questions:
 
