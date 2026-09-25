@@ -227,6 +227,9 @@ const S_FALSE = 1;
  * @param {(bytes: number) => number} [deps.allocate]
  *        Guest memory for the state a program sets without crossing into the
  *        host; without it every setter stays a trap.
+ * @param {(bytes: number) => number} [deps.allocateCode]
+ *        Pages of their own for the guest code this seam writes, where a store
+ *        into the state beside it cannot invalidate it; `allocate` without it.
  * @param {(api: string, detail: string) => void} [deps.divergence]
  *        Where a value set in the guest that the device refuses is reported.
  * @param {(cursor: CursorNotice) => void} [deps.cursor]  A program cursor for the host.
@@ -243,7 +246,7 @@ const S_FALSE = 1;
  *        nearest size this layer knows.
  */
 export function createDirect3D8Seam(
-    { publisher, memory, screen, allocate, divergence, cursor, resolution, identity,
+    { publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution, identity,
         windowClientSize },
 )
 {
@@ -295,7 +298,7 @@ export function createDirect3D8Seam(
         }
         // Sized by a throwaway rendering: the bytes depend on where they
         // land only through relative jumps, never in length.
-        const at = allocate(code(0).length);
+        const at = (allocateCode ?? allocate)(code(0).length);
         memory.writeMemory(at, code(at));
         return at;
     };

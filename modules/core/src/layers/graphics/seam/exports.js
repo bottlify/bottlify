@@ -66,6 +66,8 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @param {() => import('../d3d7/device.js').RenderServices} [deps.render]
  *        What a Direct3D 7 device draws with, reached when one is first made.
  * @param {(bytes: number) => number} [deps.allocate]
+ * @param {(bytes: number) => number} [deps.allocateCode]  pages of their own for the guest
+ *        code a seam writes, where a store beside it cannot invalidate it
  *        Guest memory for the state a program sets without crossing into the host.
  * @param {(address: number) => void} [deps.free]
  *        And the way to give it back, for a map a program has finished with.
@@ -97,13 +99,14 @@ export function createGraphicsLibraries(
     { graphics, memory, publishInterface, screen, gdi, present, publisher: shared, callGuest,
         free, exportAddress,
         currentThread,
-        scratch, render, allocate, divergence, cursor, resolution, windowClientSize },
+        scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize },
 )
 {
     const publisher = shared ?? createPublisher({ publishInterface });
     const fields = createFields(memory);
     const d3d8 = createDirect3D8Seam({
-        publisher, memory, screen, allocate, divergence, cursor, resolution, windowClientSize,
+        publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution,
+        windowClientSize,
         identity: ()=>graphics.adapter?.() ?? null,
     });
     const d3d9 = createDirect3D9Seam({

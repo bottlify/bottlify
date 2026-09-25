@@ -666,6 +666,7 @@ export const graphicsModule = {
             // and where to say when what it set there is not what the device
             // would have accepted.
             allocate: config?.allocate,
+            allocateCode: config?.allocateCode,
             free: config?.free,
             divergence: config?.divergence,
             // The address of one of OPENGL32's own exports, which only the
