@@ -48,6 +48,7 @@ import {
 import { emitInstruction } from './integer.js';
 import {
     addUndoHelper, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock, planLoop,
+    planRegion,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
 import { Tables, blockSlot } from '../runtime/layout.js';
@@ -377,11 +378,17 @@ export class RegionEmitter {
         /** Whether the current block is a wasm loop onto itself (see `emitBlock`). */
         this.selfLoop = false;
         /**
-         * The current instruction's place in its block's access groups
-         * (`planBlock`), or null.
+         * The current instruction's place in the access groups (`planRegion`,
+         * `planBlock` in a loop's checked copy), or null.
          * @type {import('./memory.js').Planned | null}
          */
         this.memPlan = null;
+        /**
+         * The region's access groups (`planRegion`), or null where every
+         * access is tested (a hybrid layout).
+         * @type {import('./memory.js').RegionPlan | null}
+         */
+        this.memoryPlan = null;
         /** Whether the block's port write called the host from here and went on. */
         this.trapped = false;
         /** Blocks emitted as loops onto themselves. */
@@ -536,6 +543,15 @@ export class RegionEmitter {
         this.loopEnds = flat ? new Map() : planLoops(blocks);
         this.flagsOut = flat ? blocks.map(()=>ARITH_FLAGS | DF)
             : liveFlagsOut(blocks, new Set(this.labels.keys()));
+        // The other executor's code table in a hybrid layout is a second
+        // thing a store is noted against: that layout tests each access. A
+        // jump back carries windows only through the flat dispatch; a block
+        // the x87 plan cuts runs nothing to take them for.
+        this.memoryPlan = this.layout.codePages < 0
+            ? planRegion(blocks, { entry: this.region.entry, backward: flat,
+                heads: new Set([...this.loopEnds.keys(), ...this.x87.cut]),
+                returns: this.returns })
+            : null;
         this.ranges = [];
         this.emitRange(0, blocks.length - 1, false);
         // Falling out of the last block cannot happen: every block ends with
@@ -1258,12 +1274,29 @@ export class RegionEmitter {
         for (let k = items.length - 1; k >= 0; k--)
         {
             this.open(`b${items[k].start}`, EMPTY);
+            if (!items[k].loop && this.entryTested(items[k].start))
+            {
+                // The block's own entry, before its test of the windows it
+                // takes from the block before (`emitEntryTests`).
+                this.open(`p${items[k].start}`, EMPTY);
+            }
         }
         /** The depth of the item holding each label, `fallback` for the rest. @param {number} fallback */
-        const table = fallback=>blocks.map((block, t)=>{
-            const item = items.find(one=>one.start <= t && t <= one.end);
-            return item ? this.depthOf(`b${item.start}`) : fallback;
-        });
+        const table = fallback=>{
+            const past = blocks.map((block, t)=>{
+                const item = items.find(one=>one.start <= t && t <= one.end);
+                return item ? this.depthOf(`b${item.start}`) : fallback;
+            });
+            if (this.memoryPlan === null || !this.memoryPlan.entry.some(tests=>tests.length > 0))
+            {
+                return past;
+            }
+            // A label past the blocks is the block's from the one it takes
+            // windows from: past their test (`takesFrom`).
+            const own = past.map((depth, t)=>(this.entryTested(t)
+                && items.some(one=>one.start === t && !one.loop) ? this.depthOf(`p${t}`) : depth));
+            return [...own, ...past];
+        };
         if (loop)
         {
             b.localGet(Local.label).i32const(lo).op(I32.ne);
@@ -1290,6 +1323,11 @@ export class RegionEmitter {
             }
             else
             {
+                if (this.entryTested(item.start))
+                {
+                    this.emitEntryTests(item.start);
+                    this.close();
+                }
                 this.emitBlock(blocks[item.start], item.start);
             }
         }
@@ -1297,8 +1335,53 @@ export class RegionEmitter {
     }
 
     /**
+     * Whether a block tests, when entered from anywhere but the block it
+     * takes windows from, the windows that block tested for it.
+     *
+     * @param {number} index
+     */
+    entryTested(index){
+        return this.memoryPlan !== null && this.memoryPlan.entry[index].length > 0;
+    }
+
+    /**
+     * Whether the current block goes on into `index` with the windows that
+     * block takes from it tested: then past that block's entry test.
+     *
+     * @param {number} index
+     */
+    takesFrom(index){
+        return this.entryTested(index)
+            && /** @type {import('./memory.js').RegionPlan} */ (this.memoryPlan).inherit[index]
+                === this.blockIndex;
+    }
+
+    /**
+     * A block's entry test: the windows it takes from the block before it,
+     * tested where it is entered otherwise -- by the dispatch, from another
+     * region, from the host -- and left untranslated at its start when one is
+     * not clean, with nothing of it run.
+     *
+     * @param {number} index
+     */
+    emitEntryTests(index){
+        const block = this.region.blocks[index];
+        this.blockRetired = 0;
+        this.staleCheck = false;
+        this.current = block.instructions[0];
+        if (this.x87.active)
+        {
+            // Its way out leaves the stack as the block's own start has it.
+            x87BlockStart(this, index);
+        }
+        emitGroupChecks(this, /** @type {import('./memory.js').RegionPlan} */ (this.memoryPlan)
+            .entry[index], block.start);
+    }
+
+    /**
      * Before falling through into the block after this one: a loop's head is
-     * entered with its own label, which its dispatch tells from an entry.
+     * entered with its own label, which its dispatch tells from an entry; a
+     * block that takes windows from this one past its entry test.
      *
      * @param {number} index  the block fallen into
      */
@@ -1306,6 +1389,10 @@ export class RegionEmitter {
         if (this.loopEnds.has(index))
         {
             this.b.i32const(index).localSet(Local.label);
+        }
+        else if (this.takesFrom(index))
+        {
+            this.b.br(this.depthOf(`b${index}`));
         }
     }
 
@@ -1383,9 +1470,7 @@ export class RegionEmitter {
             // block's count, so the budget exit inside it charges nothing twice.
             this.blockDepth = this.controls.length;
         }
-        // The other executor's code table in a hybrid layout is a second
-        // thing a store is noted against: that layout checks each access.
-        const plan = this.layout.codePages < 0 ? planBlock(block.instructions) : new Map();
+        const plan = this.memoryPlan?.blocks[index] ?? new Map();
         if (!this.emitInstructions(block, index, live, plan))
         {
             this.closeSelfLoop();
@@ -1415,7 +1500,7 @@ export class RegionEmitter {
      * @param {import('../region.js').Block} block @param {number} index
      * @param {boolean[]} live
      * @param {{ plan: Map<number, any>, streams: import('./memory.js').Stream[],
-     *     turns: number }} streams
+     *     turns: number, forward: boolean }} streams
      */
     emitHoistedLoop(block, index, live, streams){
         const { b } = this;
@@ -1427,7 +1512,7 @@ export class RegionEmitter {
         this.loops++;
         this.open(`selfDone${index}`, EMPTY);
         this.openLoop(`self${index}`);
-        emitStreamWindow(this, streams.streams, streams.turns);
+        emitStreamWindow(this, streams.streams, streams.turns, streams.forward);
         b.op(I32.eqz);
         this.openIf('streamsFlagged');
         // The checked copy, to the loop's end.
@@ -1482,6 +1567,7 @@ export class RegionEmitter {
         const next = this.region.blocks[index + 1];
         if (next && next.start === notTaken)
         {
+            this.fallInto(index + 1);
             return;
         }
         this.jumpTo(notTaken);
@@ -1833,9 +1919,10 @@ export class RegionEmitter {
                 {
                     if (item.loop)
                     {
-                        b.i32const(label).localSet(Local.label);
+                        b.i32const(this.labelFor(label)).localSet(Local.label);
                     }
-                    b.br(this.depthOf(`b${item.start}`));
+                    b.br(this.depthOf(item.loop || this.takesFrom(label)
+                        || !this.entryTested(label) ? `b${item.start}` : `p${label}`));
                     return;
                 }
             }
@@ -1848,8 +1935,19 @@ export class RegionEmitter {
         this.openIf('spent');
         this.exitAt(target, Exit.BUDGET);
         this.close();
-        b.i32const(label).localSet(Local.label);
+        b.i32const(this.labelFor(label)).localSet(Local.label);
         b.br(this.depthOf(around ? `L${label}` : 'dispatch'));
+    }
+
+    /**
+     * The label a jump from the current block into `index` goes through a
+     * dispatch with: past the block's entry test when the block takes its
+     * windows from this one (the labels past the blocks), its own otherwise.
+     *
+     * @param {number} index
+     */
+    labelFor(index){
+        return this.takesFrom(index) ? index + this.region.blocks.length : index;
     }
 
     /**

@@ -14,12 +14,13 @@
  * page test is what makes a fault precise (a wasm trap unwinds the function
  * and the registers held in locals with it), what makes a store into
  * translated code visible, and what will carry the memory layer's
- * protections. The test is a shift, a byte load and a branch per access
- * (two loads when the access may span a page); `roadmap/cork-plan.md` 2.9
- * measures its share.
+ * protections. The test is a shift, a halfword load and a branch per access,
+ * or per window of accesses (see the groups below); `roadmap/cork-plan.md`
+ * 2.9 measures its share.
  */
 
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
+import { DF } from '../decode/table.js';
 import { Tables } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { I32 } from './flags.js';
@@ -225,25 +226,36 @@ export function addCodeHitHelper(m, layout){
     return m.function(type, [ValType.i32, ValType.i32], b.toBytes());
 }
 
-// --- the block's access groups ---
+// --- the region's access groups ---
 //
-// Most of a block's accesses go off a register the block does not change in
-// between -- a frame through esp or ebp, a struct through one pointer, an
-// array through a base and an index -- or off an address in the instruction.
-// Such a group's accesses lie in a window known from the register values at
-// its first access, and a window of at most 4096 bytes spans at most two
-// pages, each touched by one of the accesses. So the group is checked once,
-// at its first access: both pages' flags against INACCESSIBLE, and the
-// stores' own window against code -- to the granule, through `codeHit`,
-// only when a page is flagged. A clean window leaves every access of the
-// group with no test at all. A window that would fault or note a store into
-// code leaves the region before that first access, untranslated, and the
-// interpreter runs the block's rest with a check on every access: the fault
-// is raised at its instruction and the note made at its store, as they
-// would be here. The plan is made from the decoded operands before the block
-// is emitted, and the emitter's own calls are held to it -- an access the
-// plan did not foresee, or a store it took for a load, is an error rather
-// than a check left out.
+// Most accesses go off a register the code does not change in between -- a
+// frame through esp or ebp, a struct through one pointer, an array through a
+// base and an index -- or off an address in the instruction. Such a group's
+// accesses lie in a window known from the register values at its first
+// access, and a window of at most 4096 bytes spans at most two pages. So the
+// group is checked once, at its first access: the flags of its page and the
+// next against INACCESSIBLE and, for a group that stores, HAS_CODE -- then,
+// only when one is up, the window's own pages and the stores' granules,
+// through `codeHit`. A clean window leaves every access of the group with no
+// test at all. A window that would fault or note a store into code leaves
+// the region before that first access, untranslated, and the interpreter
+// runs on from there with a check on every access: the fault is raised at
+// its instruction and the note made at its store, as they would be here.
+//
+// A group reaches past its block into the blocks that take their windows
+// from it (`planRegion`): what is accessible changes inside a run only in the
+// host's trap, which no such edge crosses, and a store into code leaves at
+// once. The planner follows what each register holds -- a value it cannot
+// see into, moved by known amounts, copied by `mov` and `lea` -- so a frame
+// through esp and ebp is one window, and so is a struct whose pointer moved
+// to another register. A block entered any other way -- the dispatch,
+// another region, the host -- tests, before its first instruction, the part
+// of those windows it and the blocks after it reach, placed from what the
+// registers hold at its start, and leaves untranslated there when it is not
+// clean. The plan is made from the decoded operands before the region is
+// emitted, and the emitter's own calls are held to it -- an access the plan
+// did not foresee, or a store it took for a load, is an error rather than a
+// check left out.
 
 const X87_OPCODE = /^(9b$|d[89a-f] )/;
 /** Integer operations whose memory destination is read and written. */
@@ -272,13 +284,49 @@ const SSE_STORE = new Set([
     'movaps', 'movups', 'movapd', 'movupd', 'movdqa', 'movdqu', 'movss', 'movsd',
     'movlps', 'movlpd', 'movhps', 'movhpd', 'movq', 'movd', 'movntps', 'movntpd', 'movntdq',
 ]);
+/** The string instructions by the pointers they move. */
+const STRING_POINTERS = new Map([
+    ['movs', [6, 7]], ['cmps', [6, 7]], ['lods', [6]], ['stos', [7]], ['scas', [7]],
+]);
+/**
+ * The accesses each string instruction makes through its pointers, in the
+ * order the emitter makes them: `[register, store]`.
+ *
+ * @type {Map<string, [number, boolean][]>}
+ */
+const STRING_ACCESSES = new Map([
+    ['movs', [[6, false], [7, true]]], ['cmps', [[6, false], [7, false]]], ['lods', [[6, false]]],
+    ['stos', [[7, true]]], ['scas', [[7, false]]],
+]);
+/** What `leave` reads: the saved ebp the frame pointer points at. */
+const SAVED_EBP = /** @type {import('../decode/decoder.js').Operand} */ ({
+    kind: 'mem', size: 4, base: 5, index: -1, scale: 1, disp: 0, segment: 3, addressSize: 32,
+});
 
 /**
- * @typedef {{ i: number, off: number, size: number, store: boolean }} Access
+ * @typedef {{ block: number, i: number, off: number, size: number, store: boolean }} Access
+ *     the access of instruction `i` of a block: `off` from the values the
+ *     group's registers held where the group began
  * @typedef {{ base: number, index: number, scale: number, db: number, di: number,
  *     first: number, list: Access[], lo: number, width: number }} Group
+ *     a window as tested: `base` and `index` the registers it is computed from
+ *     there, `db` and `di` their offsets from those values
+ * @typedef {Group & { block: number, depth: number, baseSym: number, indexSym: number,
+ *     hi: number }} Growing
+ *     a group being planned: the block it begins in, that block's depth in
+ *     the tree of blocks taking windows, and the values it follows
  * @typedef {{ checks: Group[], access: Access | null, size: number, store: boolean,
  *     used: boolean }} Planned
+ * @typedef {{ blocks: Map<number, Planned>[], entry: Group[][], inherit: number[] }} RegionPlan
+ *     per block: its instructions' plans, the windows tested when it is entered
+ *     other than from the block it takes them from, and that block (-1 for none)
+ * @typedef {{ base: number, index: number, scale: number, disp: number, size: number,
+ *     store: boolean }} Place
+ * @typedef {Map<number, { group: Growing, access: Access }[]>} Joined
+ *     a block's accesses by instruction, each with the group it joined
+ * @typedef {{ sym: number[], delta: number[], next: { n: number } }} Values
+ *     what each register holds: a value the planner cannot see into (`sym`),
+ *     moved by a known amount (`delta`)
  */
 
 /**
@@ -292,6 +340,22 @@ const SSE_STORE = new Set([
 function accessOf(ins){
     const { op, operands } = ins;
     const [dst] = operands;
+    if (ins.prefixes.operand && (op === 'call' || op === 'ret' || op === 'leave'))
+    {
+        return null;
+    }
+    if (op === 'call' && (dst.kind === 'rel' || dst.kind === 'reg'))
+    {
+        return { operand: null, size: 4, store: true, stack: -4 };
+    }
+    if (op === 'ret')
+    {
+        return { operand: null, size: 4, store: false, stack: 0 };
+    }
+    if (op === 'leave')
+    {
+        return { operand: SAVED_EBP, size: 4, store: false, stack: 0 };
+    }
     if (op === 'push' && ins.size === 4
         && (dst.kind === 'imm' || dst.kind === 'reg' && dst.size === 4))
     {
@@ -344,100 +408,579 @@ function accessOf(ins){
 }
 
 /**
- * The access groups of a block's instructions, by the instruction each
+ * The accesses of an instruction a group can take: `accessOf`'s one, or the
+ * two of a `push`, `call` or `jmp` through memory -- the operand read, then
+ * the push.
+ *
+ * @param {import('../decode/decoder.js').Instruction} ins
+ * @returns {Place[]}
+ */
+function groupAccessesOf(ins){
+    const { op, operands, prefixes } = ins;
+    if (!ins.memory && !STACK_OPS.has(op))
+    {
+        return NO_PLACES;
+    }
+    const [dst] = operands;
+    if ((op === 'push' || op === 'call' || op === 'jmp') && dst?.kind === 'mem' && dst.size === 4
+        && !prefixes.operand && dst.addressSize !== 16 && dst.segment !== 4 && dst.segment !== 5)
+    {
+        const read = placeOf({ operand: dst, size: 4, store: false, stack: 0 });
+        return op === 'jmp' ? [read]
+            : [read, placeOf({ operand: null, size: 4, store: true, stack: -4 })];
+    }
+    const access = accessOf(ins);
+    return access === null ? NO_PLACES : [placeOf(access)];
+}
+
+/** The operations that reach the stack with no memory operand. */
+const STACK_OPS = new Set(['push', 'pop', 'call', 'ret', 'leave']);
+/** @type {Place[]} */
+const NO_PLACES = [];
+
+/**
+ * Where an access lies: its registers, scale and displacement.
+ *
+ * @param {{ operand: import('../decode/decoder.js').Operand | null, size: number,
+ *     store: boolean, stack: number }} access
+ * @returns {Place}
+ */
+function placeOf({ operand, size, store, stack }){
+    if (operand === null)
+    {
+        return { base: 4, index: -1, scale: 1, disp: stack, size, store };
+    }
+    const index = operand.index ?? -1;
+    return { base: operand.base ?? -1, index, scale: index < 0 ? 1 : operand.scale ?? 1,
+        disp: operand.disp ?? 0, size, store };
+}
+
+/**
+ * The access groups of a region's blocks (see the section's head): per
+ * block, the plan of each instruction -- the groups checked before it and
+ * its own access -- and the windows to test when the block is entered other
+ * than from the block it takes them from.
+ *
+ * @param {import('../region.js').Block[]} blocks  in address order
+ * @param {{ entry?: number, backward?: boolean, heads?: Set<number>,
+ *     returns?: Map<number, number[]>, reach?: boolean }} [options]  entry: the
+ *     region's entry; backward: a jump back can carry windows (the dispatch
+ *     takes an inner label for it); heads: blocks that take none (a
+ *     structured region's loop heads); returns: by ret block, the return
+ *     addresses it jumps to (`inlineReturns`); reach: false keeps every group
+ *     within its block
+ * @returns {RegionPlan}
+ */
+export function planRegion(blocks, options = {}){
+    const { entry = blocks[0]?.start ?? 0, backward = false, heads = new Set(),
+        returns = new Map(), reach = true } = options;
+    const inherit = reach ? inheritance(blocks, entry, backward, heads, returns)
+        : blocks.map(()=>-1);
+    // Most blocks take nothing and give nothing: what each keeps is made
+    // only when it has something to keep.
+    /** @type {(number[] | undefined)[]} */
+    const children = [];
+    inherit.forEach((p, s)=>{
+        if (p >= 0)
+        {
+            (children[p] ??= []).push(s);
+        }
+    });
+    const next = { n: 0 };
+    /** @type {Growing[]} */
+    const groups = [];
+    /** @type {(Joined | undefined)[]} by block: each instruction's accesses and their groups */
+    const joined = [];
+    /**
+     * Values split off at a block's start (`split`): the value each was, the
+     * amount it was moved by, and that block's depth.
+     * @type {Map<number, { sym: number, delta: number, depth: number }>}
+     */
+    const aliases = new Map();
+    // Two registers holding one value at the start of a block that takes
+    // windows were made so before it, which an entry from elsewhere does not
+    // keep: a group begun in the block or after it that took both would be
+    // tested from one and trusted for the other. All but the first are given
+    // values of their own, aliases of what they held, and a group begun
+    // before the block is still reached through an alias (its accesses there
+    // are the entry test's).
+    /** @param {Values} values @param {number} depth */
+    const split = (values, depth)=>{
+        const { sym, delta } = values;
+        for (let r = 1; r < 8; r++)
+        {
+            for (let q = 0; q < r; q++)
+            {
+                if (sym[q] === sym[r])
+                {
+                    const own = values.next.n++;
+                    aliases.set(own, { sym: sym[r], delta: delta[r], depth });
+                    sym[r] = own;
+                    delta[r] = 0;
+                    break;
+                }
+            }
+        }
+    };
+    /**
+     * @param {number} s @param {Values} values @param {Map<number, Growing>} open
+     * @param {number} depth
+     */
+    const walk = (s, values, open, depth)=>{
+        if (depth > 0)
+        {
+            split(values, depth);
+        }
+        const { instructions } = blocks[s];
+        for (let i = 0; i < instructions.length; i++)
+        {
+            const ins = instructions[i];
+            const places = groupAccessesOf(ins);
+            for (let k = 0; k < places.length; k++)
+            {
+                const { base, index, scale, disp, size, store } = places[k];
+                const baseSym = base < 0 ? -1 : values.sym[base];
+                const indexSym = index < 0 ? -1 : values.sym[index];
+                const db = base < 0 ? 0 : values.delta[base];
+                const di = index < 0 ? 0 : values.delta[index];
+                let off = disp + db + di * scale;
+                const key = groupKey(baseSym, indexSym, scale);
+                let group = open.get(key);
+                if (group === undefined && aliases.size > 0)
+                {
+                    // A group begun before the block that split the value off.
+                    let by = off;
+                    for (let alias = aliases.get(baseSym); alias !== undefined;
+                        alias = aliases.get(alias.sym))
+                    {
+                        by += alias.delta;
+                        const older = open.get(groupKey(alias.sym, indexSym, scale));
+                        if (older !== undefined && older.depth < alias.depth)
+                        {
+                            group = older;
+                            off = by;
+                            break;
+                        }
+                    }
+                }
+                if (group === undefined
+                    || Math.max(group.hi, off + size) - Math.min(group.lo, off) > 4096)
+                {
+                    off = disp + db + di * scale;
+                    group = { base, index, scale, db, di, first: i, block: s, depth, baseSym,
+                        indexSym, list: [], lo: off, hi: off + size, width: 0 };
+                    groups.push(group);
+                    open.set(key, group);
+                }
+                group.lo = Math.min(group.lo, off);
+                group.hi = Math.max(group.hi, off + size);
+                const access = { block: s, i, off, size, store };
+                group.list.push(access);
+                const rows = joined[s] ??= new Map();
+                const row = rows.get(i);
+                if (row === undefined)
+                {
+                    rows.set(i, [{ group, access }]);
+                }
+                else
+                {
+                    row.push({ group, access });
+                }
+            }
+            effect(ins, values);
+        }
+        // The last child goes on with the values and groups themselves:
+        // nothing after it needs them.
+        const kids = children[s] ?? [];
+        for (let k = 0; k < kids.length; k++)
+        {
+            const last = k === kids.length - 1;
+            walk(kids[k], last ? values : copyValues(values), last ? open : new Map(open),
+                depth + 1);
+        }
+    };
+    inherit.forEach((p, s)=>{
+        if (p < 0)
+        {
+            walk(s, freshValues(next), new Map(), 0);
+        }
+    });
+    // A window's test costs what one access's does.
+    const kept = new Set(groups.filter(group=>group.list.length >= 2));
+    // What each block's entry test covers: every access of a kept group in
+    // the block or after it whose window was opened before it.
+    /** @type {(Set<Access> | undefined)[]} */
+    const reached = [];
+    for (const group of kept)
+    {
+        for (const access of group.list)
+        {
+            for (let s = access.block; s !== group.block && s >= 0; s = inherit[s])
+            {
+                (reached[s] ??= new Set()).add(access);
+            }
+        }
+    }
+    /** @type {Set<Access>} accesses left to their own test (`entryTests`) */
+    const dropped = new Set();
+    const entries = blocks.map((_, s)=>{
+        const covered = reached[s];
+        return covered === undefined ? NO_TESTS
+            : entryTests({ blocks, children, joined, next }, s, covered, dropped);
+    });
+    /** @type {(Map<number, Planned> | undefined)[]} */
+    const plans = [];
+    /** @param {number} s @param {number} i */
+    const at = (s, i)=>{
+        const plan = plans[s] ??= new Map();
+        let slot = plan.get(i);
+        if (slot === undefined)
+        {
+            slot = { checks: [], access: null, size: 0, store: false, used: false };
+            plan.set(i, slot);
+        }
+        return slot;
+    };
+    for (const group of kept)
+    {
+        group.width = group.hi - group.lo;
+        at(group.block, group.first).checks.push(group);
+    }
+    joined.forEach((rows, s)=>rows?.forEach((pairs, i)=>{
+        // Every access of the instruction in a kept group, of one size: the
+        // plan cannot tell two of them apart, so it takes all or none.
+        if (pairs.every(({ group, access })=>kept.has(group)
+            && !dropped.has(access) && access.size === pairs[0].access.size))
+        {
+            const slot = at(s, i);
+            slot.access = pairs[0].access;
+            slot.size = pairs[0].access.size;
+            slot.store = pairs.some(({ access })=>access.store);
+        }
+    }));
+    return { blocks: blocks.map((_, s)=>plans[s] ?? NO_PLAN), entry: entries, inherit };
+}
+
+/** The plan of a block with no access planned; read, never written. */
+/** @type {Map<number, Planned>} */
+const NO_PLAN = new Map();
+/** @type {Group[]} */
+const NO_TESTS = [];
+/** @type {number[]} */
+const NO_TARGETS = [];
+
+/**
+ * A group's key: the values its base and index hold, and its scale.
+ *
+ * @param {number} baseSym @param {number} indexSym @param {number} scale
+ */
+function groupKey(baseSym, indexSym, scale){
+    return ((baseSym + 1) * 0x1000000 + indexSym + 1) * 4 + (31 - Math.clz32(scale));
+}
+
+/**
+ * The access groups of one block's instructions, by the instruction each
  * group is checked at and the instruction each access belongs to.
  *
  * @param {import('../decode/decoder.js').Instruction[]} instructions
  * @returns {Map<number, Planned>}
  */
 export function planBlock(instructions){
-    // Each register's version (a write it cannot follow starts a new one)
-    // and its offset from the version's value (push, pop, add/sub/inc/dec).
-    const version = new Array(8).fill(0);
-    const delta = new Array(8).fill(0);
-    /** @param {number} r */
-    const bump = r=>{
-        version[r]++;
-        delta[r] = 0;
-    };
-    /** @type {Map<string, Group>} */
-    const groups = new Map();
-    instructions.forEach((ins, i)=>{
-        const access = accessOf(ins);
-        if (access !== null)
-        {
-            const mem = access.operand;
-            const base = mem === null ? 4 : mem.base ?? -1;
-            const index = mem === null ? -1 : mem.index ?? -1;
-            const scale = mem === null ? 1 : mem.scale ?? 1;
-            const db = base >= 0 ? delta[base] : 0;
-            const di = index >= 0 ? delta[index] : 0;
-            const off = (mem === null ? access.stack : mem.disp ?? 0) + db + di * scale;
-            const key = `${base}.${base >= 0 ? version[base] : 0}.${index}.`
-                + `${index >= 0 ? version[index] : 0}.${scale}`;
-            let group = groups.get(key);
-            if (group === undefined)
-            {
-                group = { base, index, scale, db, di, first: i, list: [], lo: 0, width: 0 };
-                groups.set(key, group);
-            }
-            group.list.push({ i, off, size: access.size, store: access.store });
-        }
-        effect(ins, delta, bump);
-    });
-    /** @type {Map<number, Planned>} */
-    const plan = new Map();
-    /** @param {number} i */
-    const at = i=>{
-        let entry = plan.get(i);
-        if (entry === undefined)
-        {
-            entry = { checks: [], access: null, size: 0, store: false, used: false };
-            plan.set(i, entry);
-        }
-        return entry;
-    };
-    for (const group of groups.values())
-    {
-        // Two loads cost their own checks what the window's costs; a store
-        // among them has its code test folded in too.
-        if (group.list.length < (group.list.some(access=>access.store) ? 2 : 3))
-        {
-            continue;
-        }
-        const lo = Math.min(...group.list.map(a=>a.off));
-        const hi = Math.max(...group.list.map(a=>a.off + a.size));
-        if (hi - lo > 4096)
-        {
-            continue;
-        }
-        group.lo = lo;
-        group.width = hi - lo;
-        at(group.first).checks.push(group);
-        for (const access of group.list)
-        {
-            const entry = at(access.i);
-            entry.access = access;
-            entry.size = access.size;
-            entry.store = access.store;
-        }
-    }
-    return plan;
+    const block = { start: 0, end: 0, instructions,
+        exit: { kind: /** @type {'cut'} */ ('cut'), targets: [], next: 0, backEdge: false } };
+    return planRegion([block], { reach: false }).blocks[0];
 }
 
 /**
- * What an instruction does to the registers the groups follow: a push, a
+ * Which block each block takes windows from, or -1. Every other way into
+ * the block -- the dispatch, another region, the way on past a trap, another
+ * block of the region -- goes through its entry test, so the choice is only
+ * of the way in the test is spared: the one way in where there is one; else,
+ * unless a jump back reaches the block too, the block before it, else the
+ * first block before it that jumps there. A call carries windows into its
+ * callee with its push, and a formed-in return back to the block after the
+ * call; a switch's jump carries none (it is taken from within its
+ * instruction), nor a trap's way on, whose host call may change what is
+ * accessible. The entry and a block that loops onto itself take none, and the
+ * latter gives none either (its registers at its end are many turns'); a
+ * jump back carries windows only where `backward` says the dispatch can take
+ * it.
+ *
+ * @param {import('../region.js').Block[]} blocks @param {number} entry
+ * @param {boolean} backward @param {Set<number>} heads
+ * @param {Map<number, number[]>} returns  by ret block's start: the return
+ *     addresses it jumps to inside the region
+ * @returns {number[]}
+ */
+function inheritance(blocks, entry, backward, heads, returns){
+    const count = blocks.length;
+    /** @type {number[]} */
+    const inherit = new Array(count).fill(-1);
+    if (count < 2)
+    {
+        return inherit;
+    }
+    /** @type {Map<number, number>} */
+    const index = new Map();
+    const loops = new Uint8Array(count);
+    for (let s = 0; s < count; s++)
+    {
+        index.set(blocks[s].start, s);
+        loops[s] = loopsOnto(blocks[s]) ? 1 : 0;
+    }
+    // Each block's ways in: `2 * p + 1` for one that carries windows, `2 * p`
+    // for one that does not.
+    /** @type {number[][]} */
+    const into = blocks.map(()=>[]);
+    /** @param {number} p @param {number | undefined} target @param {boolean} carries */
+    const edge = (p, target, carries)=>{
+        const s = target === undefined ? undefined : index.get(target);
+        if (s !== undefined)
+        {
+            into[s].push(2 * p + (carries ? 1 : 0));
+        }
+    };
+    for (let p = 0; p < count; p++)
+    {
+        const block = blocks[p];
+        const { kind, targets, next, table } = block.exit;
+        if (kind === 'fallthrough' || kind === 'jump' || kind === 'call')
+        {
+            // The block after a call is reached by the callee's return.
+            edge(p, targets[0], true);
+        }
+        else if (kind === 'jcc' || kind === 'loop')
+        {
+            edge(p, targets[0], true);
+            edge(p, targets[1] ?? next, true);
+        }
+        else if (kind === 'trap')
+        {
+            edge(p, next, false);
+        }
+        for (const target of returns.get(block.start) ?? NO_TARGETS)
+        {
+            edge(p, target, true);
+        }
+        for (const target of table?.entries ?? NO_TARGETS)
+        {
+            edge(p, target, false);
+        }
+    }
+    /** Whether a block takes its windows from its one way in. */
+    const sole = new Uint8Array(count);
+    for (let s = 0; s < count; s++)
+    {
+        const ways = into[s];
+        if (ways.length === 0 || loops[s] === 1 || heads.has(s) || blocks[s].start === entry)
+        {
+            continue;
+        }
+        let one = true;
+        let later = false;
+        let before = -1;
+        let lowest = -1;
+        for (const way of ways)
+        {
+            const p = way >> 1;
+            one &&= p === ways[0] >> 1;
+            later ||= p >= s;
+            if ((way & 1) === 1 && p !== s && loops[p] === 0 && (p < s || backward))
+            {
+                before = p === s - 1 ? p : before;
+                lowest = lowest < 0 || p < lowest ? p : lowest;
+            }
+        }
+        if (lowest < 0)
+        {
+            continue;
+        }
+        if (one)
+        {
+            sole[s] = 1;
+            inherit[s] = lowest;
+        }
+        // A block a jump back reaches besides may be a loop's head, whose
+        // turns would all pay the test, or the join of a way that comes back
+        // rarely: it chooses none.
+        else if (!later)
+        {
+            inherit[s] = before >= 0 ? before : lowest;
+        }
+    }
+    // A chain that closes on itself (a loop whose blocks each take from the
+    // one before) is cut at a block that had a choice: the one that took its
+    // windows from a single way in keeps them.
+    // Only a block taking from one after it can close one.
+    // 1: on the chain being followed, 2: followed before.
+    const seen = new Uint8Array(count);
+    for (let s = inherit.some((p, t)=>p > t) ? 0 : count; s < count; s++)
+    {
+        /** @type {number[]} */
+        const path = [];
+        let t = s;
+        while (t >= 0 && seen[t] === 0)
+        {
+            seen[t] = 1;
+            path.push(t);
+            t = inherit[t];
+        }
+        if (t >= 0 && seen[t] === 1)
+        {
+            const cycle = path.slice(path.indexOf(t));
+            inherit[cycle.find(c=>!sole[c]) ?? cycle[0]] = -1;
+        }
+        path.forEach(p=>{
+            seen[p] = 2;
+        });
+    }
+    return inherit;
+}
+
+/**
+ * Whether a block's branch goes back to its own start: a loop onto itself,
+ * whose turns come back past its entry (a wasm loop of its own, `emitBlock`).
+ *
+ * @param {import('../region.js').Block} block
+ */
+function loopsOnto(block){
+    return block.exit.targets[0] === block.start
+        && (block.exit.kind === 'jcc' || block.exit.kind === 'loop' || block.exit.kind === 'jump');
+}
+
+/**
+ * A block's entry test: windows over the accesses `reached` names, in the
+ * block and the blocks that take their windows from it, each placed from
+ * what a register holds at the block's start -- found by following the code
+ * from that start alone, never from what the block's way in from the one it
+ * takes from put in the registers, so the test holds however the block was
+ * entered. An access no register at the start leads to is `dropped` to its
+ * own test.
+ *
+ * @param {{ blocks: import('../region.js').Block[], children: (number[] | undefined)[],
+ *     joined: (Joined | undefined)[], next: { n: number } }} walked
+ *     the region's blocks, which take from which, the group of each access
+ * @param {number} s @param {Set<Access>} reached @param {Set<Access>} dropped
+ * @returns {Group[]}
+ */
+function entryTests({ blocks, children, joined, next }, s, reached, dropped){
+    const values = freshValues(next);
+    const first = values.sym[0];
+    /** The register a value was in at the start, or -1. @param {number} sym */
+    const held = sym=>(sym >= first && sym < first + 8 ? sym - first : -1);
+    /** One window per group and register: each within its group's 4096 bytes. */
+    /** @type {Map<Growing, Map<string, Group & { hi: number }>>} */
+    const windows = new Map();
+    /** @param {number} t @param {Values} at */
+    const visit = (t, at)=>{
+        blocks[t].instructions.forEach((ins, i)=>{
+            groupAccessesOf(ins).forEach(({ base, index, scale, disp, size, store }, k)=>{
+                // The walk joined every access of every block to a group.
+                const { group, access } = /** @type {{ group: Growing, access: Access }[]} */ (
+                    /** @type {Joined} */ (joined[t]).get(i))[k];
+                if (!reached.has(access))
+                {
+                    return;
+                }
+                const from = base < 0 ? -1 : held(at.sym[base]);
+                const by = index < 0 ? -1 : held(at.sym[index]);
+                if ((base >= 0 && from < 0) || (index >= 0 && by < 0))
+                {
+                    dropped.add(access);
+                    return;
+                }
+                const off = disp + (base < 0 ? 0 : at.delta[base])
+                    + (index < 0 ? 0 : at.delta[index] * scale);
+                const own = windows.get(group) ?? new Map();
+                windows.set(group, own);
+                const key = `${from}.${by}.${scale}`;
+                const window = own.get(key) ?? { base: from, index: by, scale, db: 0, di: 0,
+                    first: 0, list: [], lo: off, hi: off + size, width: 0 };
+                own.set(key, window);
+                window.list.push({ block: t, i, off, size, store });
+                window.lo = Math.min(window.lo, off);
+                window.hi = Math.max(window.hi, off + size);
+                window.width = window.hi - window.lo;
+            });
+            effect(ins, at);
+        });
+        for (const child of children[t] ?? [])
+        {
+            visit(child, copyValues(at));
+        }
+    };
+    visit(s, values);
+    return [...windows.values()].flatMap(own=>[...own.values()]);
+}
+
+/**
+ * Eight registers holding values of their own.
+ *
+ * @param {{ n: number }} next  the count the values are numbered from
+ * @returns {Values}
+ */
+function freshValues(next){
+    const n = next.n;
+    next.n += 8;
+    return { sym: [n, n + 1, n + 2, n + 3, n + 4, n + 5, n + 6, n + 7],
+        delta: [0, 0, 0, 0, 0, 0, 0, 0], next };
+}
+
+/** @param {Values} values @returns {Values} */
+function copyValues(values){
+    return { sym: values.sym.slice(), delta: values.delta.slice(), next: values.next };
+}
+
+/** Operations that write no general register. */
+const FLAGS_ONLY = new Set(['cld', 'std', 'clc', 'stc', 'cmc', 'sahf']);
+/** By operation, whether `effect` knows what it writes from the operation alone. */
+/** @type {Map<string, boolean>} */
+const KNOWN_OPS = new Map();
+
+/**
+ * What an instruction does to the registers the planner follows: a push, a
  * pop and an add, sub, inc or dec of a register by a constant move it by a
- * known amount; a write they cannot follow starts the register afresh; an
- * operation not known here starts every register afresh.
+ * known amount; a `mov` from another register and a `lea` off one copy that
+ * register's value with the offset; a write it cannot follow gives the
+ * register a value of its own; an operation not known here gives every
+ * register one.
  *
  * @param {import('../decode/decoder.js').Instruction} ins
- * @param {number[]} delta @param {(r: number) => void} bump
+ * @param {Values} values
+ * @param {boolean} [forward]  DF is known clear: a string instruction with no
+ *     repeat moves its pointers by its size rather than starting them afresh
  */
-function effect(ins, delta, bump){
-    const { op, operands } = ins;
+function effect(ins, values, forward = false){
+    const { op, operands, prefixes } = ins;
     const [dst, src] = operands;
+    const { sym, delta } = values;
     const reg32 = dst?.kind === 'reg' && dst.size === 4 ? /** @type {number} */ (dst.reg) : -1;
+    const from = src?.kind === 'reg' && src.size === 4 ? /** @type {number} */ (src.reg) : -1;
+    const pointers = STRING_POINTERS.get(op);
+    if (pointers !== undefined && !prefixes.address)
+    {
+        const repeat = prefixes.rep || prefixes.repne;
+        for (const r of pointers)
+        {
+            if (forward && !repeat)
+            {
+                delta[r] += ins.size;
+            }
+            else
+            {
+                bumpReg(values, r);
+            }
+        }
+        if (repeat)
+        {
+            bumpReg(values, 1);
+        }
+        if (op === 'lods')
+        {
+            bumpReg(values, 0);
+        }
+        return;
+    }
     if (op === 'push' && (ins.size === 4 || ins.size === 2) && dst.kind !== 'seg')
     {
         delta[4] -= ins.size;
@@ -446,7 +989,20 @@ function effect(ins, delta, bump){
     if (op === 'pop' && reg32 >= 0)
     {
         delta[4] += 4;
-        bump(reg32);
+        bumpReg(values, reg32);
+        return;
+    }
+    if ((op === 'pushf' || op === 'popf' || op === 'call' || op === 'ret') && !prefixes.operand)
+    {
+        // A call pushes its return address; a return pops it, and imm16 more.
+        delta[4] += op === 'pushf' || op === 'call' ? -4
+            : 4 + (op === 'ret' && dst?.kind === 'imm' ? /** @type {number} */ (dst.value) : 0);
+        return;
+    }
+    if (op === 'leave' && !prefixes.operand)
+    {
+        copyReg(values, 4, 5, 4);
+        bumpReg(values, 5);
         return;
     }
     if ((op === 'add' || op === 'sub') && reg32 >= 0 && src.kind === 'imm')
@@ -459,55 +1015,112 @@ function effect(ins, delta, bump){
         delta[reg32] += op === 'inc' ? 1 : -1;
         return;
     }
+    if (op === 'mov' && reg32 >= 0 && from >= 0)
+    {
+        copyReg(values, reg32, from, 0);
+        return;
+    }
+    if (op === 'xchg' && reg32 >= 0 && from >= 0)
+    {
+        const [held, by] = [sym[reg32], delta[reg32]];
+        copyReg(values, reg32, from, 0);
+        sym[from] = held;
+        delta[from] = by;
+        return;
+    }
     if (op === 'lea' && reg32 >= 0)
     {
-        if (src.base === reg32 && (src.index ?? -1) < 0 && src.addressSize !== 16)
+        if ((src.base ?? -1) >= 0 && (src.index ?? -1) < 0 && src.addressSize !== 16)
         {
-            delta[reg32] += src.disp ?? 0;
+            copyReg(values, reg32, /** @type {number} */ (src.base), src.disp ?? 0);
         }
         else
         {
-            bump(reg32);
+            bumpReg(values, reg32);
         }
         return;
     }
     if (op === 'cdq' || op === 'cwde')
     {
-        bump(op === 'cdq' ? 2 : 0);
+        bumpReg(values, op === 'cdq' ? 2 : 0);
         return;
     }
-    if (op === 'imul' && operands.length === 1)
+    if ((op === 'imul' && operands.length === 1) || op === 'mul' || op === 'div'
+        || op === 'idiv' || op === 'rdtsc')
     {
-        // The widening form: edx:eax.
-        bump(0);
-        bump(2);
+        // edx:eax.
+        bumpReg(values, 0);
+        bumpReg(values, 2);
         return;
     }
-    const known = X87_OPCODE.test(ins.opcode) || operands.some(o=>o.kind === 'xmm')
-        || INT_WRITE_DST.has(op) || INT_PURE.has(op) || op.startsWith('set')
-        || op.startsWith('cmov') || op.startsWith('j');
+    if (op === 'loop' || op === 'loope' || op === 'loopne')
+    {
+        if (prefixes.address)
+        {
+            bumpReg(values, 1);
+        }
+        else
+        {
+            delta[1]--;
+        }
+        return;
+    }
+    if (FLAGS_ONLY.has(op))
+    {
+        return;
+    }
+    let byOp = KNOWN_OPS.get(op);
+    if (byOp === undefined)
+    {
+        byOp = INT_WRITE_DST.has(op) || INT_PURE.has(op) || op.startsWith('j')
+            || op.startsWith('set') || op.startsWith('cmov');
+        KNOWN_OPS.set(op, byOp);
+    }
+    const known = byOp || X87_OPCODE.test(ins.opcode) || operands.some(o=>o.kind === 'xmm');
     if (!known || op === 'push' || op === 'pop')
     {
         for (let r = 0; r < 8; r++)
         {
-            bump(r);
+            bumpReg(values, r);
         }
         return;
     }
     if (dst?.kind === 'reg' && !INT_PURE.has(op))
     {
-        bump(/** @type {number} */ (dst.reg));
+        bumpReg(values, /** @type {number} */ (dst.reg));
     }
+}
+
+/**
+ * A register given a value of its own.
+ *
+ * @param {Values} values @param {number} r
+ */
+function bumpReg(values, r){
+    values.sym[r] = values.next.n++;
+    values.delta[r] = 0;
+}
+
+/**
+ * A register given another's value, moved by `by`.
+ *
+ * @param {Values} values @param {number} r @param {number} from @param {number} by
+ */
+function copyReg(values, r, from, by){
+    values.sym[r] = values.sym[from];
+    values.delta[r] = values.delta[from] + by;
 }
 
 /**
  * The groups checked at the instruction about to be emitted: each window's
  * pages tested once, and the instruction left untranslated when one would
- * fault or a store would land in code.
+ * fault or a store would land in code. With `at`, the windows a block takes
+ * from the one before it, tested at its start when it is entered otherwise:
+ * a window not clean leaves there, with nothing of the block run.
  *
- * @param {E} e @param {Group[]} checks
+ * @param {E} e @param {Group[]} checks @param {number} [at]
  */
-export function emitGroupChecks(e, checks){
+export function emitGroupChecks(e, checks, at = -1){
     const { b } = e;
     const table = e.layout.tables + Tables.PAGE_FLAGS;
     const flagsOf = (/** @type {number} */ offset)=>{
@@ -521,11 +1134,36 @@ export function emitGroupChecks(e, checks){
     // Held: the epilogue's hash probe would find this very address's entry
     // and tail-call it, whose check leaves again with nothing retired -- for
     // ever, the budget untouched. Back at the host, the interpreter runs it.
-    const leave = ()=>{
+    const exit = ()=>{
+        if (at >= 0)
+        {
+            e.exitAt(at, Exit.UNTRANSLATED, HELD);
+            return;
+        }
         e.blockRetired--;
         e.exitAt(e.current.eip, Exit.UNTRANSLATED, HELD);
         e.blockRetired++;
     };
+    // Every window here leaves the same way: where there would be more than
+    // one such exit, each window not clean branches to a single one (an exit
+    // is the larger part of a test, the x87 stack's write-back with it).
+    const shared = checks.length > 1 || checks.some(group=>group.list.some(access=>access.store));
+    /** Leaves when the condition on the stack is not zero. @param {string} name */
+    const leaveIf = name=>{
+        if (shared)
+        {
+            b.brIf(e.depthOf('windowHeld'));
+            return;
+        }
+        e.openIf(name, EMPTY);
+        exit();
+        e.close();
+    };
+    if (shared)
+    {
+        e.open('windowsClean', EMPTY);
+        e.open('windowHeld', EMPTY);
+    }
     for (const group of checks)
     {
         // The window's first byte: the registers now are their version's
@@ -544,37 +1182,49 @@ export function emitGroupChecks(e, checks){
         }
         b.i32const((group.lo - group.db - group.di * group.scale) | 0).op(I32.add)
             .localSet(Local.addr);
+        // The common case is one test, as for a single access: the flags of
+        // the window's page and the next, read as a halfword (the window lies
+        // in the two), against INACCESSIBLE -- and against HAS_CODE for a
+        // group that stores. Only when a flag is up are the window's own
+        // pages and the stores' granules looked at.
+        const stores = group.list.filter(access=>access.store);
+        const bits = PageFlag.INACCESSIBLE | (stores.length > 0 ? PageFlag.HAS_CODE : 0);
+        b.localGet(Local.addr).i32const(12).op(I32.shrU).load('i32_16u', { offset: table })
+            .i32const(bits * 0x101).op(I32.and);
+        e.openIf('window', EMPTY);
         flagsOf(0);
         flagsOf(group.width - 1);
         b.op(I32.or).i32const(PageFlag.INACCESSIBLE).op(I32.and);
-        e.openIf('window', EMPTY);
-        leave();
-        e.close();
-        const stores = group.list.filter(access=>access.store);
-        if (stores.length === 0)
+        leaveIf('windowFaults');
+        if (stores.length > 0)
         {
-            continue;
-        }
-        const first = Math.min(...stores.map(a=>a.off)) - group.lo;
-        const last = Math.max(...stores.map(a=>a.off + a.size)) - 1 - group.lo;
-        flagsOf(first);
-        flagsOf(last);
-        b.op(I32.or).i32const(PageFlag.HAS_CODE).op(I32.and);
-        e.openIf('windowCode', EMPTY);
-        stores.forEach((access, k)=>{
-            for (const end of access.size > 1 ? [0, access.size - 1] : [0])
-            {
-                b.localGet(Local.addr).i32const(access.off - group.lo + end).op(I32.add)
-                    .call(e.context.codeHit);
-                if (k > 0 || end > 0)
+            const first = Math.min(...stores.map(a=>a.off)) - group.lo;
+            const last = Math.max(...stores.map(a=>a.off + a.size)) - 1 - group.lo;
+            flagsOf(first);
+            flagsOf(last);
+            b.op(I32.or).i32const(PageFlag.HAS_CODE).op(I32.and);
+            e.openIf('windowCode', EMPTY);
+            stores.forEach((access, k)=>{
+                for (const end of access.size > 1 ? [0, access.size - 1] : [0])
                 {
-                    b.op(I32.or);
+                    b.localGet(Local.addr).i32const(access.off - group.lo + end).op(I32.add)
+                        .call(e.context.codeHit);
+                    if (k > 0 || end > 0)
+                    {
+                        b.op(I32.or);
+                    }
                 }
-            }
-        });
-        e.openIf('storeCode', EMPTY);
-        leave();
+            });
+            leaveIf('storeCode');
+            e.close();
+        }
         e.close();
+    }
+    if (shared)
+    {
+        b.br(e.depthOf('windowsClean'));
+        e.close();
+        exit();
         e.close();
     }
 }
@@ -582,10 +1232,12 @@ export function emitGroupChecks(e, checks){
 // --- a loop's access streams ---
 //
 // A block that loops onto itself moves the registers its accesses go off by
-// the same amount every turn when it changes them only by push, pop and a
-// constant add, sub, inc or dec. Each such group of accesses (one base, one
-// index, one scale) is then a stream: its window moves by a fixed stride a
-// turn. The turns a stride of at most 4096 bytes takes span at most three
+// the same amount every turn when it changes them only by push, pop, a
+// constant add, sub, inc or dec, a copy from one that moves so, or a string
+// instruction's element (by its size: the loop is planned for DF clear, and
+// its test finds DF set not clean). Each such group of accesses (one base,
+// one index, one scale) is then a stream: its window moves by a fixed stride
+// a turn. The turns a stride of at most 4096 bytes takes span at most three
 // pages beyond the window, so the pages the next `turns` of every stream
 // reach are tested once, before them -- against INACCESSIBLE, and against
 // code, at the page, for a stream with a store -- and those turns run a copy
@@ -606,39 +1258,44 @@ export function emitGroupChecks(e, checks){
  * when no access qualifies.
  *
  * @param {import('../decode/decoder.js').Instruction[]} instructions
- * @returns {{ plan: Map<number, Planned>, streams: Stream[], turns: number } | null}
+ * @returns {{ plan: Map<number, Planned>, streams: Stream[], turns: number,
+ *     forward: boolean } | null}  `forward`: planned for DF clear
  */
 export function planLoop(instructions){
-    const version = new Array(8).fill(0);
-    const delta = new Array(8).fill(0);
-    /** @param {number} r */
-    const bump = r=>{
-        version[r]++;
-        delta[r] = 0;
-    };
+    // A string instruction moves its pointers by its size a turn while DF is
+    // clear, and a loop that writes no DF keeps it as it was found: such a
+    // loop is planned for DF clear, and its window test takes DF too.
+    const forward = instructions.every(ins=>(ins.flagsWritten & DF) === 0);
+    const values = freshValues({ n: 0 });
+    const { sym: initial } = copyValues(values);
+    const { delta } = values;
     /** @type {{ i: number, base: number, index: number, scale: number, off: number,
      *     size: number, store: boolean }[]} */
     const found = [];
+    /** How many accesses each instruction makes that a stream could take. */
+    const made = instructions.map(()=>0);
     instructions.forEach((ins, i)=>{
-        const access = accessOf(ins);
-        if (access !== null)
+        const accesses = loopAccessesOf(ins, forward);
+        made[i] = accesses.length;
+        for (const { base, index, scale, disp, size, store } of accesses)
         {
-            const mem = access.operand;
-            const base = mem === null ? 4 : mem.base ?? -1;
-            const index = mem === null ? -1 : mem.index ?? -1;
-            const scale = mem === null ? 1 : mem.scale ?? 1;
-            // Off the registers as the turn found them, moved by known amounts.
-            if ((base < 0 || version[base] === 0) && (index < 0 || version[index] === 0))
+            // Off the values registers held as the turn found them, moved by
+            // known amounts -- each by the register that held it then.
+            const from = base < 0 ? -1 : initial.indexOf(values.sym[base]);
+            const by = index < 0 ? -1 : initial.indexOf(values.sym[index]);
+            if ((base < 0 || from >= 0) && (index < 0 || by >= 0))
             {
-                const off = (mem === null ? access.stack : mem.disp ?? 0)
-                    + (base >= 0 ? delta[base] : 0) + (index >= 0 ? delta[index] * scale : 0);
-                found.push({ i, base, index, scale, off, size: access.size, store: access.store });
+                const off = disp + (base >= 0 ? delta[base] : 0)
+                    + (index >= 0 ? delta[index] * scale : 0);
+                found.push({ i, base: from, index: by, scale, off, size, store });
             }
         }
-        effect(ins, delta, bump);
+        effect(ins, values, forward);
     });
-    /** @param {number} r */
-    const fixed = r=>r < 0 || version[r] === 0;
+    /** A register holding its own value of the turn's start, moved by `delta`. @param {number} r */
+    const fixed = r=>r < 0 || values.sym[r] === initial[r];
+    /** @param {{ base: number, index: number, scale: number }} a */
+    const keyOf = a=>`${a.base}.${a.index}.${a.scale}`;
     /** @type {Map<string, Stream>} */
     const streams = new Map();
     /** @type {Map<number, Planned>} */
@@ -649,22 +1306,22 @@ export function planLoop(instructions){
         {
             continue;
         }
-        const key = `${access.base}.${access.index}.${access.scale}`;
         const stride = (access.base >= 0 ? delta[access.base] : 0)
             + (access.index >= 0 ? delta[access.index] * access.scale : 0);
-        let stream = streams.get(key);
+        let stream = streams.get(keyOf(access));
         if (stream === undefined)
         {
             stream = { base: access.base, index: access.index, scale: access.scale,
                 lo: access.off, hi: access.off + access.size, stride, store: false };
-            streams.set(key, stream);
+            streams.set(keyOf(access), stream);
         }
         stream.lo = Math.min(stream.lo, access.off);
         stream.hi = Math.max(stream.hi, access.off + access.size);
         stream.store ||= access.store;
-        plan.set(access.i, { checks: [], access: { i: access.i, off: access.off,
-            size: access.size, store: access.store }, size: access.size, store: access.store,
-        used: false });
+        const entry = plan.get(access.i);
+        plan.set(access.i, { checks: [], access: entry?.access ?? { block: 0, i: access.i,
+            off: access.off, size: access.size, store: access.store }, size: access.size,
+        store: access.store || entry?.store === true, used: false });
     }
     const kept = [...streams.values()].filter(stream=>stream.hi - stream.lo <= 4096
         && Math.abs(stream.stride) <= 4096);
@@ -672,18 +1329,47 @@ export function planLoop(instructions){
     {
         return null;
     }
+    const keptKeys = new Set(kept.map(keyOf));
     for (const i of [...plan.keys()])
     {
-        const access = found.find(a=>a.i === i);
-        if (!kept.some(s=>s.base === access?.base && s.index === access.index
-            && s.scale === access.scale))
+        // Every access of the instruction in a kept stream: the plan cannot
+        // tell the two of a movs or a cmps apart, so it takes both or neither.
+        const mine = found.filter(a=>a.i === i);
+        if (mine.length !== made[i] || !mine.every(a=>fixed(a.base) && fixed(a.index)
+            && keptKeys.has(keyOf(a))))
         {
             plan.delete(i);
         }
     }
     const widest = Math.max(...kept.map(stream=>Math.abs(stream.stride)));
     const turns = widest === 0 ? 1 << 16 : 1 + Math.floor(4096 / widest);
-    return { plan, streams: kept, turns };
+    const strings = forward && instructions.some(ins=>STRING_POINTERS.has(ins.op));
+    return { plan, streams: kept, turns, forward: strings };
+}
+
+/**
+ * The accesses of an instruction a loop's streams can take: those a group
+ * takes (`groupAccessesOf`), or with DF known clear the element accesses of
+ * a string instruction with no repeat, off esi and edi.
+ *
+ * @param {import('../decode/decoder.js').Instruction} ins
+ * @param {boolean} forward
+ * @returns {Place[]}
+ */
+function loopAccessesOf(ins, forward){
+    const strings = STRING_ACCESSES.get(ins.op);
+    if (strings !== undefined)
+    {
+        const { prefixes } = ins;
+        if (!forward || prefixes.rep || prefixes.repne || prefixes.lock || prefixes.address
+            || ins.operands.some(o=>o.kind === 'mem' && (o.segment === 4 || o.segment === 5)))
+        {
+            return [];
+        }
+        return strings.map(([base, store])=>({ base, index: -1, scale: 1, disp: 0,
+            size: ins.size, store }));
+    }
+    return groupAccessesOf(ins);
 }
 
 /**
@@ -693,11 +1379,20 @@ export function planLoop(instructions){
  * the one 4096 bytes on and its last cover it.
  *
  * @param {E} e @param {Stream[]} streams @param {number} turns
+ * @param {boolean} [forward]  the streams move as they do with DF clear: 0
+ *     when it is set
  */
-export function emitStreamWindow(e, streams, turns){
+export function emitStreamWindow(e, streams, turns, forward = false){
     const { b } = e;
     const table = e.layout.tables + Tables.PAGE_FLAGS;
-    b.i32const(0);
+    if (forward)
+    {
+        b.localGet(Local.flags).i32const(DF).op(I32.and);
+    }
+    else
+    {
+        b.i32const(0);
+    }
     for (const stream of streams)
     {
         const span = (turns - 1) * stream.stride;

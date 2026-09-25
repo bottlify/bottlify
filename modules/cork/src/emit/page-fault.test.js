@@ -378,6 +378,89 @@ test('loops whose pointers move by fixed strides agree with the interpreter by p
     }
 });
 
+test('loops of string instructions with no repeat agree with the interpreter, DF clear or set, '
+    + 'by pages clean, inaccessible and holding code', ()=>{
+    // A loop of movs, stos, lods, cmps and scas elements, with DF clear or
+    // set as it is entered -- or written inside it -- and a page along the
+    // way inaccessible or holding code, or none: the translated run (whose
+    // loop, entered with DF clear, tests the pages the next turns reach once)
+    // must fault, note the store into code or finish exactly where and as
+    // the interpreter does.
+    let seed = Number(process.env.STRING_SEED ?? 0x5171);
+    const random = (/** @type {number} */ n)=>{
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+        return (seed >>> 8) % n;
+    };
+    const strings = [
+        [0xa4], [0xa5], [0x66, 0xa5], [0xaa], [0xab], [0xac], [0xad], [0xa6], [0xa7], [0xae],
+        [0xaf],
+        [0x8b, 0x46, 0x10], [0x89, 0x47, 0xf0],     // mov eax, [esi+16]; mov [edi-16], eax
+    ];
+    const low = 0x10000;
+    const span = 0x40000;
+    for (let round = 0; round < Number(process.env.STRING_ROUNDS ?? 200); round++)
+    {
+        const body = [];
+        for (let k = 1 + random(3); k > 0; k--)
+        {
+            body.push(...strings[random(strings.length)]);
+        }
+        if (random(8) === 0)
+        {
+            body.push(random(2) === 0 ? 0xfc : 0xfd);           // cld or std inside the loop
+        }
+        body.push(0x49, 0x75, (-(body.length + 3)) & 255);      // dec ecx; jnz back
+        const set = random(2) === 0;
+        const esi = low + 0x10000 + random(0x10000) * 4 + random(4);
+        const edi = low + 0x10000 + random(0x10000) * 4 + random(4);
+        const count = 1 + random(3000);
+        const program = [0xbe, ...le(esi), 0xbf, ...le(edi), 0xb9, ...le(count),
+            set ? 0xfd : 0xfc, ...body, 0xfc, 0xf4];
+        // A page the pointers reach, whichever way they go, as often as not.
+        const near = [esi, edi][random(2)] + (random(2) === 0 ? -1 : 1) * random(0x2000);
+        const page = (random(2) === 0 ? near : low + random(span)) & ~0xfff;
+        const flag = [0, PageFlag.INACCESSIBLE, PageFlag.HAS_CODE][random(3)];
+        const r = both(program, { mark: flag === 0 ? [] : [[page, 0x1000, flag]] });
+        const what = `round ${round}: esi ${esi.toString(16)} edi ${edi.toString(16)} ecx ${count}`
+            + ` df ${set} page ${page.toString(16)} flag ${flag}`
+            + ` body ${body.map(x=>x.toString(16)).join(' ')}`;
+        if (r.exit.kind === Exit.STALE || r.exit.kind === -2)
+        {
+            const model = createTestMachine();
+            model.write(CODE, program);
+            model.setReg('esp', STACK);
+            const state = blockState({ memory: model.memory, layout: model.layout });
+            state.eip = CODE;
+            state.syncIn();
+            interpret(state, r.exit.retired);
+            for (let i = 0; i < 8; i++)
+            {
+                assert.equal(r.machine.reg(REGISTERS[i]), state.reg[i], `${what}: ${REGISTERS[i]}`);
+            }
+            assert.equal(r.exit.eip, state.eip, `${what}: eip`);
+            continue;
+        }
+        for (let i = 0; i < 8; i++)
+        {
+            assert.equal(r.machine.reg(REGISTERS[i]), r.state.reg[i], `${what}: ${REGISTERS[i]}`);
+        }
+        if (r.exit.kind === Exit.FAULT)
+        {
+            assert.ok(r.fault !== null, `${what}: the interpreter faulted too`);
+            assert.equal(r.fault.eip, r.exit.eip, `${what}: the fault's address`);
+        }
+        else
+        {
+            assert.equal(r.exit.kind, Exit.HALT, what);
+            assert.equal(r.fault, null, `${what}: the interpreter did not fault`);
+            assert.equal(r.machine.eflags() >>> 0, r.state.eflags >>> 0, `${what}: eflags`);
+        }
+        const theirs = new Uint8Array(r.model.memory.buffer, r.model.layout.ramBase + low, span);
+        assert.equal(Buffer.compare(Buffer.from(r.machine.read(low, span)), Buffer.from(theirs)), 0,
+            `${what}: the bytes`);
+    }
+});
+
 /** @param {number} value */
 function le(value){
     return [value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24 & 255];
