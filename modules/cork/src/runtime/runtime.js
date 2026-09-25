@@ -80,9 +80,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         traceStore: false,
         // Batch modules published before the running regions are gathered into
         // big ones (0: never), and how many regions go into each of those:
-        // a tail call into another module costs more the more modules there are.
+        // a tail call into another module costs more the more modules there are,
+        // but the engine thread instantiates each one whole -- 4096 regions of
+        // a real title held it for 160 ms, 512 for 23 -- and a stall that long is
+        // a frame lost and a sound mixer late.
         relinkAfter: 16,
-        relinkRegions: 4096,
+        relinkRegions: 512,
         // A small leaf callee formed into its caller, the call and its return
         // jumps inside the region (false: every call crosses regions).
         leafCalls: true,
