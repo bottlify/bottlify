@@ -152,6 +152,7 @@ test('blockState runs over cork\'s own state block', ()=>{
     const state = blockState({ memory, layout });
     state.eip = 0x1000;
     const retired = interpret(state, 100);
+    state.syncOut();
     assert.equal(retired, 3);
     const reg32 = new Int32Array(memory.buffer, layout.regs, 8);
     assert.equal(reg32[0] >>> 0, 0x1235);
@@ -237,8 +238,8 @@ test('blockState keeps its fields fast and sees code rewritten in place', ()=>{
     const state = blockState({ memory, layout });
     // The step's fields are the object's own and the accessors its
     // prototype's: one literal holding both fell into V8's dictionary mode.
-    assert.deepEqual(Object.keys(state).sort(),
-        ['faultEip', 'halted', 'memory', 'rdtsc', 'reg', 'retired', 'trapped']);
+    assert.deepEqual(Object.keys(state).sort(), ['eflags', 'eip', 'faultEip', 'halted',
+        'memory', 'rdtsc', 'reg', 'retired', 'trapped']);
     // mov eax, imm32 across a page boundary, then hlt; run, rewrite the
     // immediate's byte in the second page, run again.
     const at = 0x1ffe;
@@ -287,20 +288,27 @@ test('fxsave writes the x87 and SSE image and fxrstor reads it back', ()=>{
     assert.equal(m.state.halted, true);
 });
 
-test('a run of instructions sees a store into its own later bytes', ()=>{
+test('a run of instructions sees a store into its own bytes decoded before it', ()=>{
     const layout = ownLayout({ ramSize: 1 << 20 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
     const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
-    // mov byte [0x1008], 9; mov eax, 5; hlt -- the first store rewrites the
-    // second's immediate, which the processor then executes as written.
-    ram.set([0xc6, 0x05, 0x08, 0x10, 0, 0, 0x09, 0xb8, 5, 0, 0, 0, 0xf4], 0x1000);
+    // mov [0x100a], al; nop; nop; add ecx, imm8; hlt -- the store rewrites the
+    // add's immediate. The first run decodes the add after the store; the
+    // second finds the run decoded already and must see the store all the same.
+    ram.set([0x88, 0x05, 0x0a, 0x10, 0, 0, 0x90, 0x90, 0x83, 0xc1, 0, 0xf4], 0x1000);
     const state = blockState({ memory, layout });
+    state.reg[0] = 3;
+    state.eip = 0x1000;
+    interpret(state, 10);
+    assert.equal(state.reg[1], 3);
     /** @type {number[]} */
     const starts = [];
+    state.reg[0] = 5;
     state.eip = 0x1000;
-    assert.equal(interpret(state, 10, { onStep: at=>starts.push(at) }), 3);
-    assert.equal(state.reg[0], 9, 'the immediate as the store left it');
-    assert.deepEqual(starts, [0x1000, 0x1007], 'the run ended after the store and resumed');
+    state.halted = false;
+    interpret(state, 10, { onStep: at=>starts.push(at) });
+    assert.equal(state.reg[1], 8, 'the immediate as the second store left it');
+    assert.deepEqual(starts, [0x1000, 0x1006], 'the run ended after the store and resumed');
 });
 
 test('a run is reported once, at its start, and a fetch from an inaccessible page faults there',

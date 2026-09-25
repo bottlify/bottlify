@@ -28,9 +28,9 @@ import { evaluateSimd, isSimdOp, mmxState } from './ir-simd.js';
 const ARITH = CF | PF | AF | ZF | SF | OF;
 
 /** The width masks by operand size. @type {Readonly<Record<number, number>>} */
-const MASK = Object.freeze({ 1: 0xff, 2: 0xffff, 4: 0xffffffff });
+const MASK = [0, 0xff, 0xffff, 0, 0xffffffff];
 /** The sign bit by operand size. @type {Readonly<Record<number, number>>} */
-const SIGN = Object.freeze({ 1: 0x80, 2: 0x8000, 4: 0x80000000 });
+const SIGN = [0, 0x80, 0x8000, 0, 0x80000000];
 
 /** The eight general registers' names, by index. */
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];

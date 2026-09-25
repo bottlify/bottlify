@@ -371,13 +371,18 @@ instruction the interpreter actually met, not the address the slice started at.
 The interpreter keeps decoded runs by their first address -- the instructions that fall through
 from one to the next, up to a jump, a call, a return, a `hlt` or anything that traps, and through
 a conditional branch, which a taken one leaves midway -- checked against RAM byte for byte on
-every hit so code rewritten in place is decoded again; a store into the run being interpreted
-ends it after the storing instruction (the memory's `watch`), so an instruction a program
-patches just ahead of itself runs as written. The stop test, the hotness count and the ring of
-recent starts are per run rather than per instruction, and a jump's target always starts one,
-so every start a jump reaches is still counted (a call-heavy program 87 -> 59 ms interpreted,
-a CRC 53 -> 38, a tree walk 123 -> 84); a fetch from an inaccessible page faults at the address
-fetched. Each instruction of a run has a step compiled for it once
+every hit so code rewritten in place is decoded again. A run grows as execution first reaches its
+end, so only what ran is decoded, and a store into the run being interpreted ends it after the
+storing instruction (the memory's `watch`), so an instruction a program patches in a run
+already decoded runs as written. The stop test, the hotness count and the ring of recent starts
+are per run rather than per instruction, and a jump's target always starts one, so every start a
+jump reaches is still counted; a fetch from an inaccessible page faults at the address fetched.
+`blockState` keeps eip and the flags word as fields of its own between `syncIn` and `syncOut`
+(which write them back), and the width and sign tables the flag arithmetic reads per instruction
+are arrays -- frozen objects with numeric keys are dictionaries to V8. Measured on compiled C
+programs with translation off, each in a process of its own: a call-heavy program 42 -> 22 ms an
+iteration, a CRC 53 -> 29, a tree walk 54 -> 31, a sort 98 -> 59, x87 math 66 -> 51, 1.55x
+geomean over ten. Each instruction of a run has a step compiled for it once
 (`fast.js`): the common integer instructions, shifts and two- and three-operand `imul` included,
 become a function of the state with their operands resolved, and an x87 instruction goes
 straight to the x87 model; the rest runs through `evaluate`. `blockState` keeps the fields a

@@ -43,13 +43,15 @@ const NO_BYTES = new Uint8Array(0);
  * Instructions that fall through from one to the next, decoded and compiled
  * once: the unit the interpreter looks up, checks and reports, rather than
  * one instruction at a time. A run ends after a jump, a call, a return, a
- * `hlt` and anything that traps or faults by design, and before an
- * instruction that does not decode; a conditional branch does not end it,
- * and a taken one leaves it midway. A refusal is a run of its own with no
- * instructions, not kept.
+ * `hlt` and anything that traps or faults by design (`closed`); a conditional
+ * branch does not end it, and a taken one leaves it midway. It grows as
+ * execution first reaches its end, so what is decoded is what ran: cold code
+ * runs once or twice, and decoding ahead of it was most of its cost. A
+ * refusal is a run of its own with no instructions, not kept.
  *
- * @typedef {{ start: number, bytes: Uint8Array, count: number, starts: number[],
- *     nexts: number[], steps: (((state: import('./ir.js').EvalState) => void) | null)[],
+ * @typedef {{ start: number, bytes: Uint8Array, count: number, closed: boolean,
+ *     starts: number[], nexts: number[],
+ *     steps: (((state: import('./ir.js').EvalState) => void) | null)[],
  *     decoded: import('./decode/decoder.js').Instruction[],
  *     refused: import('./decode/decoder.js').Refusal | null }} Run
  */
@@ -78,72 +80,61 @@ const endsRun = ({ op, faults })=>faults === 'halt' || faults === 'trap' || faul
     || op === 'jmp' || op === 'call' || op === 'ret';
 
 /**
- * Decodes the run at `eip`. The first instruction is decoded as the processor
- * fetches it -- a fault there is the fetch's own -- and each one after it only
- * as far as it decodes: a later instruction that would fault or be refused
- * starts a run of its own, reached when execution gets there. A memory that
- * cannot say when a run's own bytes are written (`watch`) gets runs of one.
+ * Decodes the instruction at the run's end onto it, with its bytes. The first
+ * instruction of a run is decoded as the processor fetches it -- a fault there
+ * is the fetch's own -- and a later one only if it decodes: one that would
+ * fault or be refused is left for a run of its own, reached when execution
+ * gets there. A memory that cannot say when a run's own bytes are written
+ * (`watch`) gets runs of one.
  *
- * @param {import('./ir.js').EvalState} state @param {number} eip
- * @returns {Run}
+ * @param {import('./ir.js').EvalState} state @param {Run} run
+ * @returns {boolean} whether an instruction was added
  */
-function formRun(state, eip){
+function extendRun(state, run){
     const { memory } = state;
+    const at = run.count === 0 ? run.start : run.nexts[run.count - 1];
     /** @param {number} address */
     const read = address=>memory.read(address, 1);
-    const limit = memory.watch === undefined ? 1 : RUN_LENGTH;
-    /** @type {Run} */
-    const run = {
-        start: eip, bytes: NO_BYTES, count: 0, starts: [], nexts: [], steps: [], decoded: [],
-        refused: null,
-    };
-    let at = eip;
-    while (run.count < limit)
+    /** @type {import('./decode/decoder.js').Instruction
+     *     | import('./decode/decoder.js').Refusal} */
+    let decoded;
+    if (run.count === 0)
     {
-        /** @type {import('./decode/decoder.js').Instruction
-         *     | import('./decode/decoder.js').Refusal} */
-        let decoded;
-        if (run.count === 0)
+        decoded = decode(read, at);
+    }
+    else
+    {
+        try
         {
             decoded = decode(read, at);
         }
-        else
-        {
-            try
-            {
-                decoded = decode(read, at);
-            }
-            catch {
-                break;
-            }
-        }
-        if ('refused' in decoded)
-        {
-            if (run.count === 0)
-            {
-                run.refused = decoded;
-            }
-            break;
-        }
-        const next = (at + decoded.length) >>> 0;
-        run.starts.push(at);
-        run.nexts.push(next);
-        run.steps.push(compileFast(decoded));
-        run.decoded.push(decoded);
-        run.count++;
-        at = next;
-        if (endsRun(decoded))
-        {
-            break;
+        catch {
+            return false;
         }
     }
-    const bytes = new Uint8Array((at - eip) >>> 0);
-    for (let i = 0; i < bytes.length; i++)
+    if ('refused' in decoded)
     {
-        bytes[i] = memory.read(eip + i, 1);
+        if (run.count === 0)
+        {
+            run.refused = decoded;
+        }
+        return false;
+    }
+    const next = (at + decoded.length) >>> 0;
+    run.starts.push(at);
+    run.nexts.push(next);
+    run.steps.push(compileFast(decoded));
+    run.decoded.push(decoded);
+    run.count++;
+    run.closed = endsRun(decoded) || run.count >= (memory.watch === undefined ? 1 : RUN_LENGTH);
+    const bytes = new Uint8Array(run.bytes.length + decoded.length);
+    bytes.set(run.bytes);
+    for (let i = 0; i < decoded.length; i++)
+    {
+        bytes[run.bytes.length + i] = memory.read(at + i, 1);
     }
     run.bytes = bytes;
-    return run;
+    return true;
 }
 
 /**
@@ -159,9 +150,14 @@ function runAt(state, cache){
     {
         return hit;
     }
+    /** @type {Run} */
+    const run = {
+        start: eip, bytes: NO_BYTES, count: 0, closed: false, starts: [], nexts: [], steps: [],
+        decoded: [], refused: null,
+    };
     // A fetch fault is raised at the instruction being fetched.
     state.faultEip = eip;
-    const run = formRun(state, eip);
+    extendRun(state, run);
     if (run.refused === null)
     {
         if (cache.size >= RUNS_CAP)
@@ -226,14 +222,22 @@ export function interpret(state, maxInstructions = 1, options = {}){
                 throw new Unsupported(run.refused.opcode, run.refused.eip);
             }
             onStep?.(run.start, run.start !== fallthrough);
-            const count = first ? 1 : run.count;
+            const alone = first;
             first = false;
             // A store into the run's own bytes ends it after the instruction
             // that made it, so what follows is decoded again as written.
             memory.watch?.(run.start, run.start + run.bytes.length);
             const { starts, nexts, steps } = run;
-            for (let i = 0; i < count && state.retired < end; i++)
+            for (let i = 0; state.retired < end; i++)
             {
+                if (i === run.count)
+                {
+                    if (alone || run.closed || !extendRun(state, run))
+                    {
+                        break;
+                    }
+                    memory.watch?.(run.start, run.start + run.bytes.length);
+                }
                 const next = nexts[i];
                 const step = steps[i];
                 // The instruction's own address, for a page fault raised from
@@ -296,11 +300,6 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
     // DataView call and its bounds check; wider accesses keep the DataView.
     const ramBytes = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     const reg = new Uint32Array(memory.buffer, layout.regs, 8);
-    // Every step writes eip and most read and write eflags: a word array is
-    // cheaper than a DataView call where the block keeps them aligned.
-    const words = new Uint32Array(memory.buffer, 0, memory.buffer.byteLength >>> 2);
-    const eipWord = layout.eip % 4 === 0 ? layout.eip >>> 2 : -1;
-    const eflagsWord = layout.eflags % 4 === 0 ? layout.eflags >>> 2 : -1;
     // The page flags as bytes: every access tests one or two, and a typed array
     // is cheaper than a DataView call.
     const pageFlags = new Uint8Array(memory.buffer, layout.tables + Tables.PAGE_FLAGS,
@@ -501,32 +500,6 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
         set mxcsr(value){
             view.setUint32(layout.mxcsr, value >>> 0, true);
         },
-        get eip(){
-            return eipWord >= 0 ? words[eipWord] : view.getUint32(layout.eip, true);
-        },
-        set eip(value){
-            if (eipWord >= 0)
-            {
-                words[eipWord] = value;
-            }
-            else
-            {
-                view.setUint32(layout.eip, value >>> 0, true);
-            }
-        },
-        get eflags(){
-            return eflagsWord >= 0 ? words[eflagsWord] : view.getUint32(layout.eflags, true);
-        },
-        set eflags(value){
-            if (eflagsWord >= 0)
-            {
-                words[eflagsWord] = value;
-            }
-            else
-            {
-                view.setUint32(layout.eflags, value >>> 0, true);
-            }
-        },
         get fsBase(){
             return layout.fsBase >= 0 ? view.getUint32(layout.fsBase, true) : 0;
         },
@@ -536,15 +509,18 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
                 view.setUint32(layout.fsBase, value >>> 0, true);
             }
         },
-        /** Takes the block's x87 and XMM registers into the arrays. */
+        /** Takes the block's flags word into the state, and its x87 and XMM
+         * registers into the arrays on their first use. */
         syncIn(){
             x87In = false;
             xmmIn = false;
             // The record a region left is folded into the word the steps use.
-            eflagsOf(view, layout);
+            state.eflags = eflagsOf(view, layout);
         },
-        /** Writes the arrays back into the block. */
+        /** Writes eip, the flags word and the arrays back into the block. */
         syncOut(){
+            view.setUint32(layout.eip, state.eip >>> 0, true);
+            view.setUint32(layout.eflags, state.eflags >>> 0, true);
             if (x87In)
             {
                 for (let i = 0; i < 8; i++)
@@ -566,6 +542,11 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
     const state = /** @type {import('./ir.js').EvalState & typeof accessors} */ (
         Object.create(accessors));
     state.reg = reg;
+    // eip and the flags word are the state's own between `syncIn` and
+    // `syncOut`: every step writes eip and most read and write the flags, and a
+    // field is cheaper than an accessor over the block.
+    state.eip = view.getUint32(layout.eip, true);
+    state.eflags = view.getUint32(layout.eflags, true);
     const memoryApi = {
         read, write, same,
         /** @param {number} start @param {number} end */
