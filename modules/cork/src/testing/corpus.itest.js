@@ -24,6 +24,7 @@ import { createV86Host } from '../../../core/src/layers/cpu/internal/v86-host.js
 import { readFault } from '../../../core/src/layers/cpu/internal/faults.js';
 import { FAULT_TRAP_BASE } from '../../../core/src/layers/cpu/internal/boot-rom.js';
 import { restore, snapshot } from './snapshot.js';
+import { features } from '../wasm/features.js';
 import {
     BSS, BSS_SIZE, HEADER, HEADER_SIZE, TEXT, TEXT_SIZE, diffFixture, loadCorpus, runCase,
 } from './corpus.js';
@@ -44,18 +45,20 @@ const ONLY = new RegExp(process.env.CORPUS_ONLY ?? '', 'i');
  * are its own divergences, found by this very run, each named with what it
  * is. A case listed here may diverge on the field named and on nothing else;
  * a case not listed may not diverge at all. A fixed emulator makes an entry
- * here obsolete, which the run reports so the entry can go.
+ * here obsolete, which the run reports so the entry can go; `seen` says
+ * whether this host shows it at all.
  */
 const EMULATOR_KNOWN = [
     // sqrtps/sqrtpd/sqrtss/sqrtsd of a negative: the hardware answers the
     // negative "real indefinite" NaN (0xffc00000 / 0xfff80000…), the
-    // emulator a positive quiet NaN. Same value, other sign bit.
+    // emulator the host's default NaN -- positive where the host's is (arm64),
+    // the hardware's own where it is not (x86-64). Same value, other sign bit.
     { cases: /^(gen_(0f|660f|f30f|f20f)51_0_\d+|sse-packed-edge)$/, fields: /^xmm\d\.int32\[\d\]$/,
-        reason: 'sqrt of a negative: the NaN\'s sign' },
+        reason: 'sqrt of a negative: the NaN\'s sign', seen: !features().defaultNaNNegative },
     // fild qword of an integer beyond 53 bits: the hardware holds it to 64
     // bits, the emulator's x87 is an f64 and rounds it.
     { cases: /^gen_df_5_(40|42|43)$/, fields: /^st0$/,
-        reason: 'fild m64 past 53 bits: f64 x87' },
+        reason: 'fild m64 past 53 bits: f64 x87', seen: true },
 ];
 
 const missing = [PREBUILT.href + 'v86.wasm', CORPUS.href]
@@ -134,7 +137,7 @@ test('the corpus passes on the emulator through the harness',
         {
             // Every known divergence is still there; one that has gone is an
             // entry to remove, not a pass to enjoy quietly.
-            for (const entry of EMULATOR_KNOWN)
+            for (const entry of EMULATOR_KNOWN.filter(one=>one.seen))
             {
                 assert.ok(known.some(name=>entry.cases.test(name)),
                     `no case diverged as "${entry.reason}" any more: remove the entry`);
