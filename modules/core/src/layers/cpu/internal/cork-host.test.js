@@ -317,11 +317,11 @@ test('a tight loop run with no frame to feed the translator is translated in its
     // note of the loop's head falls in its first 2048 interpreted instructions,
     // and only slices of the scheduler's quantum run it, as a loader's do.
     load(h, 0x1000, [0xb9, 0x80, 0x1a, 0x06, 0x00, 0x01, 0xc8, 0x31, 0xc3, 0x49, 0x75, 0xf9, 0xf4]);
-    let retired = 0;
-    do
+    let retired = h.runSlice(100_000);
+    while (!h.halted())
     {
         retired += h.runSlice(100_000);
-    } while (!h.halted());
+    }
     assert.equal(retired, 1 + 400_000 * 4 + 1);
     assert.ok(h.cork().counters().translatedShare > 0.99,
         `translated share ${h.cork().counters().translatedShare}`);
