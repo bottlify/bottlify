@@ -43,6 +43,7 @@ const ERROR_FILE_NOT_FOUND = 2;
 const MAX_NAME = 260;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_SUPPORTED = 50;
+const ERROR_INVALID_PARAMETER = 87;
 
 /** DuplicateHandle's one option that changes what it does. */
 const DUPLICATE_CLOSE_SOURCE = 0x00000001;
@@ -352,6 +353,7 @@ export function createThreadingFunctions(host){
             const limit = maximum | 0;
             if (limit <= 0 || start < 0 || start > limit)
             {
+                host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
         }

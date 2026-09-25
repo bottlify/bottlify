@@ -12,6 +12,7 @@ import { createNamedObjects } from './named-objects.js';
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_INVALID_PARAMETER = 87;
 const ERROR_ALREADY_EXISTS = 183;
 
 /**
@@ -542,9 +543,15 @@ test('a named semaphore is found by a second create, and by OpenSemaphore', ()=>
 });
 
 test('an unnamed CreateSemaphore still validates its counts', ()=>{
-    const { fns } = setup();
+    const { fns, errors } = setup();
     assert.equal(fns.CreateSemaphoreA.handler([0, 0, 0, 0]), 0, 'a maximum of zero is refused');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER, 'and says why');
+    errors.length = 0;
     assert.equal(fns.CreateSemaphoreA.handler([0, 5, 4, 0]), 0, 'initial above maximum is refused');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    errors.length = 0;
+    assert.equal(fns.CreateSemaphoreW.handler([0, -1, 4, 0]), 0, 'a negative initial is refused');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
     assert.notEqual(fns.CreateSemaphoreA.handler([0, 1, 4, 0]), 0);
 });
 
