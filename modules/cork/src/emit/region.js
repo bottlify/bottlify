@@ -177,6 +177,9 @@ const LOCAL_TYPES = [
  *     every block's end, rather than the loops and liveness the region's structure gives
  * @property {boolean} [wide]  compiled for the wide precision controls (double, extended):
  *     no rounding to single, and a block leaves with `PRECISION` if it finds single set
+ * @property {boolean} [precise]  every relaxation off: the x87 exception flags, the
+ *     signalling-NaN tests, the underflow test and C1 kept as the processor keeps them
+ *     (the runtime's `precise`); without it they are not computed
  * @property {number} codeHit         the helper telling whether a byte lies in translated code
  * @property {number} [getEflags]      the host's flag fold, imported when the layout keeps
  *                                     lazy flags (the emulator's `flags_changed`)
@@ -203,7 +206,8 @@ const LOCAL_TYPES = [
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
- *     countTransfers?: boolean, wide?: boolean, blockProfile?: boolean, structure?: boolean }}
+ *     countTransfers?: boolean, wide?: boolean, blockProfile?: boolean, structure?: boolean,
+ *     precise?: boolean }}
  *     [options]  undoLog:
  *     record every store's old bytes (differential builds only; part of the cache key);
  *     hash: import the host's function table and transfer through the entry hash (needs
@@ -212,7 +216,7 @@ const LOCAL_TYPES = [
  */
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
-        wide = false, blockProfile = false, structure = false } = {})
+        wide = false, blockProfile = false, structure = false, precise = false } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -282,6 +286,10 @@ export function prepareModule(m, layout, features, memory = {},
     {
         context.wide = true;
     }
+    if (precise)
+    {
+        context.precise = true;
+    }
     if (!structure)
     {
         context.flat = true;
@@ -306,6 +314,8 @@ export function prepareModule(m, layout, features, memory = {},
  * @property {number} entryTop      the x87 top the function was compiled for
  * @property {number} loops         blocks emitted as wasm loops onto themselves
  * @property {number} x87Guards     x87 stack-fault checks left to run time
+ * @property {number} x87RelaxedReads  status-word reads that may see what a module that is
+ *     not `precise` does not keep (`readsRelaxed` in `x87.js`)
  */
 
 /**
@@ -572,6 +582,7 @@ export class RegionEmitter {
             cut: new Set([...this.x87.cut, ...this.unknownBlocks(), ...this.leaving,
                 ...this.shapedBlocks()]),
             entryTop: this.entryTop, loops: this.loops, x87Guards: this.x87.guards,
+            x87RelaxedReads: this.x87.relaxedReads,
         };
     }
 

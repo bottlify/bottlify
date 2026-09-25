@@ -107,6 +107,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // a frame (5.9 -> 10.1 ms) while it made play 3% faster, and the cause
         // is not yet known.
         structure: false,
+        // Everything the translator relaxes for speed kept exact instead: the x87
+        // exception flags and their tests, signalling NaNs, underflow and C1
+        // (docs/core/cpu.md lists what else). Off, as games run: the tests and
+        // the hardware corpus turn it on.
+        precise: false,
         // Diagnostic: the host clock read around the translator's phases -- the
         // milliseconds of forming, lookups, emitting, encoding, storing,
         // instantiating and publishing, and the record of long holds. Off, as a
@@ -371,7 +376,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, moduleBytes: 0,
         queueDrops: 0, queueEvictions: 0,
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, precisionSwitches: 0,
-        shapeMisses: 0, shapeChecked: 0,
+        shapeMisses: 0, shapeChecked: 0, relaxedReads: 0,
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
         // always agree.
@@ -705,14 +710,18 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         hash: table !== null,
         wide,
         structure: settings.structure,
+        precise: settings.precise === true,
         leaveOut,
         timings: import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.timings === true,
         ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
     });
 
-    /** Folds what the emitter left out into the run's refusal maps.
-     * @param {{ unsupported?: [string, number][], refusals?: [string, number][] }} built */
+    /** Folds what the emitter left out into the run's refusal maps, and the
+     * status-word reads it let see what it relaxed into their count.
+     * @param {{ unsupported?: [string, number][], refusals?: [string, number][],
+     *     relaxedReads?: number }} built */
     const foldTranslation = built=>{
+        counts.relaxedReads += built.relaxedReads ?? 0;
         for (const [opcode, times] of built.unsupported ?? [])
         {
             refused[opcode] = (refused[opcode] ?? 0) + times;
@@ -909,13 +918,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
     };
     /** The store key of one formed region: an x87 region compiled for the wide
-     * precision controls, or checked, is another translation of the same bytes.
+     * precision controls, or checked, or a `precise` run's, is another
+     * translation of the same bytes.
      * @param {{ region: { entry: number, hash: string }, entryTop: number, wide?: boolean,
      *     checked?: boolean }} one */
     const regionKey = one=>cacheKey({
         version: CACHE_VERSION, features: found, layoutId: layout.id,
         bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
-        hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}${one.checked ? '-c' : ''}`,
+        hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}${one.checked ? '-c' : ''}`
+            + (settings.precise === true ? '-p' : ''),
     });
 
     /**
@@ -1732,6 +1743,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // block's, and the regions translated checked for it.
                 shapeMisses: counts.shapeMisses,
                 shapeChecked: counts.shapeChecked,
+                // Translated x87 status-word reads that may see what `precise`
+                // alone keeps: where a strange result is worth a run with it.
+                relaxedReads: counts.relaxedReads,
                 stalls: [...stalls],
                 ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.traceStore
                     ? { storeTrace } : {}),

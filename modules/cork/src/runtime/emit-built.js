@@ -44,6 +44,8 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @property {number} instructions
  * @property {[string, number][]} unsupported
  * @property {[string, number][]} refusals
+ * @property {number} relaxedReads  x87 status-word reads that may see what a module that is
+ *     not `precise` does not keep
  */
 
 /**
@@ -68,8 +70,10 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
  *     blockProfile?: boolean, timings?: boolean,
- *     leaveOut?: Set<string> | string[], wide?: boolean, structure?: boolean }} [options]
- *     timings: `emitMs` and `encodeMs` are measured (the runtime's `timings`), else 0
+ *     leaveOut?: Set<string> | string[], wide?: boolean, structure?: boolean,
+ *     precise?: boolean }} [options]
+ *     timings: `emitMs` and `encodeMs` are measured (the runtime's `timings`), else 0;
+ *     precise: nothing relaxed (the runtime's `precise`)
  * @returns {BuiltBatch}
  */
 export function emitBatch(jobs, layout, features, options = {}){
@@ -86,6 +90,7 @@ export function emitBatch(jobs, layout, features, options = {}){
         blockProfile: options.blockProfile === true,
         wide: options.wide === true,
         structure: options.structure === true,
+        precise: options.precise === true,
         leaveOut,
         ...(options.trapPort === undefined ? {} : { trapPort: options.trapPort }),
     });
@@ -112,6 +117,7 @@ export function emitBatch(jobs, layout, features, options = {}){
                 instructions: translation.instructions,
                 unsupported: [...translation.unsupported],
                 refusals: [...translation.refusals],
+                relaxedReads: translation.x87RelaxedReads,
             } };
         }
         catch (e){

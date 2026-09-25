@@ -619,6 +619,38 @@ test('with a store, a second runtime takes its regions from the store; a changed
         assert.equal(store.size(), 6);
     });
 
+test('precise keeps the x87 exception flags, in a store entry of its own; the default counts'
+    + ' the status reads that may see them', async()=>{
+    const { memoryTranslationStore } = await import('./cache.js');
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const store = memoryTranslationStore();
+    // fld1; fldz; fdivp st1, st0 (1 / 0: ZE); fnstsw [0x2000]; fstp st0; hlt
+    const program = [0xd9, 0xe8, 0xd9, 0xee, 0xde, 0xf9, 0xdd, 0x3d, 0x00, 0x20, 0, 0,
+        0xdd, 0xd8, 0xf4];
+    /** @param {boolean} precise */
+    const status = async precise=>{
+        const m = machine({ store, bundleId: 'test', precise });
+        new DataView(m.memory.buffer).setUint16(m.layout.x87Control, 0x37f, true);
+        m.write(CODE, program);
+        m.setReg(4, 0x80000);
+        m.runtime.noteHot(CODE, 0);
+        await m.runtime.translatePending();
+        await settle();
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
+        const d = m.runtime.diagnostics();
+        return { word: new DataView(m.memory.buffer).getUint16(m.layout.ramBase + 0x2000, true),
+            hits: d.cacheHits, reads: d.relaxedReads };
+    };
+    const fast = await status(false);
+    assert.equal(fast.word & 4, 0, 'fast: no ZE');
+    assert.equal(fast.reads, 1, 'the fnstsw into memory is counted');
+    const precise = await status(true);
+    assert.equal(precise.hits, 0, 'the fast translation is not taken from the store');
+    assert.equal(precise.word & 4, 4, 'precise: ZE');
+    assert.equal(precise.reads, 0);
+    assert.equal((await status(false)).hits, 1, 'the fast one is, for a fast run');
+});
+
 test('a flood of distinct misses does not stop a later address reaching the threshold',
     async()=>{
         const m = machine({ missThreshold: 64 });
