@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { launchWithGpu, shutdown } from './browser.mjs';
 import { CdpEndpoint } from './cdp.mjs';
 import { serveStatic } from './server.mjs';
+import { frameSpread } from './frame-window.mjs';
 import { openBundle } from '../btl.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -90,16 +91,6 @@ function parse(argv){
 /** @param {number} value */
 const asMs = value=>`${value.toFixed(2)}ms`;
 
-/** @param {number[]} values @param {number} share */
-function quantile(values, share){
-    if (values.length === 0)
-    {
-        return 0;
-    }
-    const sorted = [...values].sort((one, two)=>one - two);
-    return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * share))];
-}
-
 /**
  * Folds a sampling heap profile into the functions that allocated most, by
  * self size, with the caller that reached each so a helper is not blamed for
@@ -154,7 +145,7 @@ function describe(before, after, windowMs){
 
     say(`watched ${seconds.toFixed(1)}s and saw ${frames} frames`);
     say(`  ${(frames / seconds).toFixed(1)} frames per second`
-        + `, ${asMs(frames > 0 ? windowMs / frames : 0)} per frame`);
+        + (frames > 0 ? `, ${asMs(windowMs / frames)} per frame` : ''));
     say(`  ${(instructions / seconds / 1e6).toFixed(1)}M guest instructions per second`);
     if (after.jit && after.jit.compiledSteps >= 0)
     {
@@ -179,12 +170,8 @@ function describe(before, after, windowMs){
     }
     say('');
 
-    /** @type {number[]} */
-    const spread = after.recentFrames.map((/** @type {any} */ frame)=>frame.ms);
     say('one frame, as the engine measured it:');
-    say(`  median ${asMs(quantile(spread, 0.5))}`
-        + `   ninety-fifth ${asMs(quantile(spread, 0.95))}`
-        + `   worst ${asMs(quantile(spread, 1))}`);
+    frameSpread(before, after).lines.forEach(say);
     // The share is what says which side to change. Mostly the guest means the
     // answer is the emulator; mostly ours means it is our own code.
     say(`  ours ${(after.hostShare * 100).toFixed(1)}% of a frame,`
