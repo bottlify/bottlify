@@ -187,6 +187,10 @@ function parse(argv){
         // The frame this many frames after the last long stall, written beside
         // the report as game-<stamp>-snap.png: a demo's frame N in every run.
         snapFrame: number('--snap-frame', 0),
+        // With it, this many frames from it, --snap-every apart, each written
+        // as game-<stamp>-snap-<frame>.png.
+        snapCount: number('--snap-count', 1),
+        snapEvery: number('--snap-every', 1),
         // The browser's own sampling profiler on the engine's workers for
         // this many seconds from the start (or until the run ends): which
         // functions -- translated regions by address, the interpreter, the
@@ -1091,6 +1095,8 @@ export async function game(options){
             pointer: options.pointer,
             steadyFrames: options.steadyFrames || undefined,
             snapFrame: options.snapFrame || undefined,
+            snapCount: options.snapCount,
+            snapEvery: options.snapEvery,
             clicks: options.clicks,
             typed: options.typed,
             pasted: options.pasted,
@@ -1249,12 +1255,17 @@ export async function game(options){
             }
             return bgra;
         };
-        if (result.snap)
+        for (const [index, one] of (result.snaps ?? []).entries())
         {
-            writeFileSync(join(REPORTS_DIR, `game-${stamp}-snap.png`), toPng(result.snap.width,
-                result.snap.height, toBgra(Buffer.from(result.snap.rgba, 'base64'))));
-            delete result.snap;
+            // The first as -snap.png as before, every one also by its frame.
+            const image = toPng(one.width, one.height, toBgra(Buffer.from(one.rgba, 'base64')));
+            if (index === 0)
+            {
+                writeFileSync(join(REPORTS_DIR, `game-${stamp}-snap.png`), image);
+            }
+            writeFileSync(join(REPORTS_DIR, `game-${stamp}-snap-${one.frame}.png`), image);
         }
+        delete result.snaps;
         if (result.frameRgba && result.frame)
         {
             writeFileSync(join(REPORTS_DIR, `game-${stamp}-frame.png`), toPng(result.frame.width,

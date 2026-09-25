@@ -789,7 +789,8 @@ export function scheduleKeyTimes(app, request){
  *           keys?: { code: string, after: number, afterSeconds?: number }[],
  *           typed?: { text: string, after: number, afterSeconds?: number }[],
  *           pasted?: { text: string, after: number, afterSeconds?: number }[],
- *           steadyFrames?: number, snapFrame?: number }} request
+ *           steadyFrames?: number, snapFrame?: number, snapEvery?: number,
+ *           snapCount?: number }} request
  * @param {PresentState} state
  * @param {any} frame
  */
@@ -1068,8 +1069,8 @@ export function createHarness(canvas, how = {}){
     let frameReport = null;
     /** @type {any} */
     let running = null;
-    /** The frame `snapFrame` asked for, being read back. @type {Promise<any> | null} */
-    let snap = null;
+    /** The frames `snapFrame` asked for, being read back, by frame. @type {Map<number, Promise<any>>} */
+    const snaps = new Map();
     /** @type {PresentState} */
     const presentState = {
         presented: null, pointerDown: false, pointerAt: { x: 0, y: 0 },
@@ -1352,11 +1353,17 @@ export function createHarness(canvas, how = {}){
                     // demo's frame N is the same frame in every run.
                     if (request.snapFrame && presentState.sinceStall === 0)
                     {
-                        snap = null;
+                        snaps.clear();
                     }
-                    if (request.snapFrame && presentState.sinceStall === request.snapFrame)
+                    // `snapCount` frames from it, `snapEvery` apart: a series
+                    // tells a scene that changes by itself from one drawn wrong.
+                    const since = (presentState.sinceStall ?? 0) - (request.snapFrame ?? 0);
+                    const every = request.snapEvery ?? 1;
+                    if (request.snapFrame && since >= 0 && since % every === 0
+                        && since / every < (request.snapCount ?? 1))
                     {
-                        snap = readBack(handle.device, frame.surface);
+                        snaps.set(presentState.sinceStall ?? 0,
+                            readBack(handle.device, frame.surface));
                     }
                 },
             },
@@ -1416,11 +1423,12 @@ export function createHarness(canvas, how = {}){
         }
         result.elapsedMs = Math.round(performance.now() - started);
 
-        if (snap)
+        result.snaps = [];
+        for (const [frameAfter, pending] of snaps)
         {
-            const image = await snap;
-            result.snap = { width: image.width, height: image.height,
-                rgba: toBase64(image.pixels) };
+            const image = await pending;
+            result.snaps.push({ frame: frameAfter, width: image.width, height: image.height,
+                rgba: toBase64(image.pixels) });
         }
         if (presentState.presented)
         {
