@@ -579,7 +579,7 @@ export class RegionEmitter {
         this.epilogue();
         this.fillDeferred();
         const functionIndex = this.context.m.function(
-            this.context.regionType, this.localTypes, b.toBytes());
+            this.context.regionType, this.localTypes, b.toBytes(), { hints: b.hints });
         return {
             functionIndex, labels: this.labels, unsupported: this.unsupported,
             refusals: this.refusals, relaxedReads: this.relaxedReads,
@@ -609,6 +609,18 @@ export class RegionEmitter {
     openIf(name, type = EMPTY){
         this.controls.push(name);
         this.b.if(type);
+    }
+
+    /**
+     * An `if` whose body is a way out rarely taken -- a spent budget, a page
+     * not clean, a store into code, a fault -- marked unlikely for the engine,
+     * so the code it guards goes out of line and its spills with it.
+     *
+     * @param {string} name @param {number} type
+     */
+    openGuard(name, type = EMPTY){
+        this.controls.push(name);
+        this.b.unlikely().if(type);
     }
 
     close(){
@@ -1538,7 +1550,7 @@ export class RegionEmitter {
         this.openLoop(`self${index}`);
         emitStreamWindow(this, streams.streams, streams.turns, streams.forward);
         b.op(I32.eqz);
-        this.openIf('streamsFlagged');
+        this.openGuard('streamsFlagged');
         // The checked copy, to the loop's end.
         this.openLoop(`checked${index}`);
         this.blockDepth = this.controls.length;
@@ -1557,7 +1569,7 @@ export class RegionEmitter {
             this.pushBranchCondition(last);
             this.openIf('taken');
             b.localGet(Local.budget).i32const(0).op(I32.leS);
-            this.openIf('spent');
+            this.openGuard('spent');
             this.exitAt(block.start, Exit.BUDGET);
             this.close();
             taken();
@@ -1797,7 +1809,7 @@ export class RegionEmitter {
                     this.pushBranchCondition(last);
                     this.openIf('taken');
                     this.b.localGet(Local.budget).i32const(0).op(I32.leS);
-                    this.openIf('spent');
+                    this.openGuard('spent');
                     this.exitAt(block.start, Exit.BUDGET);
                     this.close();
                     this.b.br(this.depthOf(`self${index}`));
@@ -1956,7 +1968,7 @@ export class RegionEmitter {
         // that loop; any other goes through the function's dispatch.
         const around = this.ranges.some(range=>range.loop && range.lo === label);
         b.localGet(Local.budget).i32const(0).op(I32.leS);
-        this.openIf('spent');
+        this.openGuard('spent');
         this.exitAt(target, Exit.BUDGET);
         this.close();
         b.i32const(this.labelFor(label)).localSet(Local.label);

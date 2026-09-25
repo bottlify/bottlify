@@ -192,6 +192,30 @@ test('a named function is in the name section a profiler reads', ()=>{
     assert.equal(/** @type {any} */ (new WebAssembly.Instance(module).exports).f(), 7);
 });
 
+test('a branch marked unlikely is named in the branch-hint section, at its offset past the locals',
+    ()=>{
+        // (x) => x ? 7 : 5, its `if` marked unlikely and code put in before it afterwards,
+        // as a region's register loads are.
+        const m = new ModuleBuilder();
+        const type = m.type({ params: [ValType.i32], results: [ValType.i32] });
+        const b = new Body().i32const(5).localSet(1);
+        const at = b.length;
+        b.localGet(0).unlikely().if(EMPTY).i32const(7).localSet(1).end().localGet(1);
+        b.insert(at, new Body().i32const(0).drop());
+        const body = b.toBytes();
+        m.function(type, [ValType.i32], body, { exportAs: 'f', hints: b.hints });
+        const bytes = m.toBytes();
+        const module = new WebAssembly.Module(bytes);
+        const [section] = WebAssembly.Module.customSections(module, 'metadata.code.branch_hint');
+        // One function (index 0) with one hint: its offset, a size of 1, and 0 for unlikely.
+        const [functions, index, hints, offset, size, value] = new Uint8Array(section);
+        assert.deepEqual([functions, index, hints, size, value], [1, 0, 1, 1, 0]);
+        // The offset counts the local declarations: one run, of one i32.
+        assert.equal(body[offset - 3], 0x04, 'an if');
+        const { f } = /** @type {any} */ (new WebAssembly.Instance(module).exports);
+        assert.deepEqual([f(0), f(1)], [5, 7]);
+    });
+
 test('a body with a block left open is refused with its depth', ()=>{
     const b = new Body().block(EMPTY).i32const(1).drop();
     assert.throws(()=>b.toBytes(), { message: 'encoder: block left open (1 deep)' });

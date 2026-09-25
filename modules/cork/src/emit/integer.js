@@ -1535,7 +1535,7 @@ function divide(e, instruction){
     b.localSet(Local.t1);
     // Divisor zero: the fault is raised at the instruction, state untouched.
     b.localGet(Local.t1).op(I32.eqz);
-    e.openIf('zero', EMPTY);
+    e.openGuard('zero', EMPTY);
     e.exitBefore(instruction.eip, Exit.FAULT, 0);
     e.close();
     if (size !== 4)
@@ -1549,7 +1549,7 @@ function divide(e, instruction){
         b.localGet(Local.t64).localGet(Local.t1).op(I64.extendU).op(I64.divU).localSet(Local.t64b);
         // A quotient past 32 bits is a fault too.
         b.localGet(Local.t64b).i64const(0xffffffffn).op(I64.gtU);
-        e.openIf('overflow', EMPTY);
+        e.openGuard('overflow', EMPTY);
         e.exitBefore(instruction.eip, Exit.FAULT, 0);
         e.close();
         b.localGet(Local.t64).localGet(Local.t1).op(I64.extendU).op(I64.remU).op(I64.wrap)
@@ -1560,13 +1560,13 @@ function divide(e, instruction){
         // INT64_MIN / -1 would trap in wasm; on the processor it is a fault as well.
         b.localGet(Local.t1).i32const(-1).op(I32.eq);
         b.localGet(Local.t64).i64const(-0x8000000000000000n).op(I64.eq).op(I32.and);
-        e.openIf('overflow', EMPTY);
+        e.openGuard('overflow', EMPTY);
         e.exitBefore(instruction.eip, Exit.FAULT, 0);
         e.close();
         b.localGet(Local.t64).localGet(Local.t1).op(I64.extendS).op(I64.divS).localSet(Local.t64b);
         // The quotient must fit a signed dword.
         b.localGet(Local.t64b).localGet(Local.t64b).op(I64.wrap).op(I64.extendS).op(I64.ne);
-        e.openIf('overflow', EMPTY);
+        e.openGuard('overflow', EMPTY);
         e.exitBefore(instruction.eip, Exit.FAULT, 0);
         e.close();
         b.localGet(Local.t64).localGet(Local.t1).op(I64.extendS).op(I64.remS).op(I64.wrap)
@@ -1614,7 +1614,7 @@ function divideNarrow(e, instruction){
             // quotient does not fit either way.
             b.localGet(Local.t1).i32const(-1).op(I32.eq);
             b.localGet(Local.t2).i32const(-0x80000000).op(I32.eq).op(I32.and);
-            e.openIf('overflow', EMPTY);
+            e.openGuard('overflow', EMPTY);
             e.exitBefore(instruction.eip, Exit.FAULT, 0);
             e.close();
         }
@@ -1631,7 +1631,7 @@ function divideNarrow(e, instruction){
     {
         b.i32const(MASKS[widthCode(size)]).op(I32.gtU);
     }
-    e.openIf('overflow', EMPTY);
+    e.openGuard('overflow', EMPTY);
     e.exitBefore(instruction.eip, Exit.FAULT, 0);
     e.close();
     b.localGet(Local.t2).localGet(Local.t1).op(signed ? I32_EXTRA.remS : I32_EXTRA.remU)
@@ -1983,7 +1983,7 @@ function bulkString(e, instruction){
     b.localGet(Local.retired).localGet(Local.t0).op(I32.add).localSet(Local.retired);
     b.localGet(Local.budget).localGet(Local.t0).op(I32.sub).localSet(Local.budget);
     b.localGet(Local.budget).i32const(0).op(I32.leS);
-    e.openIf('bulkSpent', EMPTY);
+    e.openGuard('bulkSpent', EMPTY);
     e.exitAt(instruction.eip, Exit.BUDGET);
     e.close();
     b.br(e.depthOf('again'));
@@ -2111,7 +2111,7 @@ function stringInstruction(e, instruction){
         b.localGet(Local.retired).i32const(1).op(I32.add).localSet(Local.retired);
         b.localGet(Local.budget).i32const(1).op(I32.sub).localSet(Local.budget);
         b.localGet(Local.budget).i32const(0).op(I32.leS);
-        e.openIf('spent', EMPTY);
+        e.openGuard('spent', EMPTY);
         e.exitAt(instruction.eip, Exit.BUDGET);
         e.close();
         if (compare)

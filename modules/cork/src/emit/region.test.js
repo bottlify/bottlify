@@ -454,6 +454,77 @@ test('the fast default leaves an undefined flag as the cheapest code does, and e
         }
     });
 
+/**
+ * The opcode at each branch a module's branch-hint section names, in its one
+ * defined function's body.
+ *
+ * @param {Uint8Array} bytes
+ */
+function hintedOpcodes(bytes){
+    let at = 8;
+    const leb = ()=>{
+        let value = 0;
+        for (let shift = 0; ; shift += 7)
+        {
+            const byte = bytes[at++];
+            value |= (byte & 0x7f) << shift;
+            if ((byte & 0x80) === 0)
+            {
+                return value >>> 0;
+            }
+        }
+    };
+    /** @type {number[]} */
+    let offsets = [];
+    /** @type {Uint8Array} */
+    let body = new Uint8Array(0);
+    while (at < bytes.length)
+    {
+        const id = bytes[at++];
+        const size = leb();
+        const end = at + size;
+        if (id === 0)
+        {
+            const length = leb();
+            const title = new TextDecoder().decode(bytes.subarray(at, at + length));
+            at += length;
+            if (title === 'metadata.code.branch_hint')
+            {
+                leb(); // one function
+                leb(); // its index
+                offsets = Array.from({ length: leb() }, ()=>{
+                    const offset = leb();
+                    at += 2; // size 1, the hint
+                    return offset;
+                });
+            }
+        }
+        else if (id === 10)
+        {
+            leb(); // one function
+            const length = leb();
+            body = bytes.subarray(at, at + length);
+        }
+        at = end;
+    }
+    return offsets.map(offset=>body[offset]);
+}
+
+test('the ways out a loop rarely takes are branches hinted unlikely', ()=>{
+    // mov ecx, 1000; L: add eax, [DATA]; dec ecx; jnz L; hlt -- the page test of the
+    // load, the budget on the back edge: every hint names an `if` or a `br_if`.
+    const m = createTestMachine();
+    m.write(CODE, [0xb9, ...u32(1000), 0x03, 0x05, ...u32(DATA), 0x49, 0x75, 0xf7, 0xf4]);
+    m.writeU32(DATA, 3);
+    const unit = m.translate(CODE);
+    const opcodes = hintedOpcodes(unit.bytes);
+    assert.ok(opcodes.length >= 2, `hinted: ${opcodes.length}`);
+    assert.ok(opcodes.every(opcode=>opcode === 0x04 || opcode === 0x0d),
+        opcodes.map(opcode=>opcode.toString(16)).join(' '));
+    assert.equal(unit.run(CODE, 1_000_000).kind, Exit.HALT);
+    assert.equal(m.reg('eax'), 3000);
+});
+
 test('loops that overlap are widened until they nest', ()=>{
     /** @param {number} start @param {string} kind @param {number[]} targets @param {number} next */
     const block = (start, kind, targets, next)=>/** @type {any} */ ({

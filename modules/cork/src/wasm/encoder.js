@@ -17,6 +17,13 @@
  * Only what the translator emits is here; nothing is generated from a table
  * of every instruction. Numbers are LEB128 as the format wants them, and
  * every helper that takes a signed constant encodes it signed.
+ *
+ * A branch can be marked unlikely (`Body.unlikely`): the module then carries
+ * the `metadata.code.branch_hint` custom section, which an engine that reads
+ * it (Chromium 141's V8 does by default, node 22's behind
+ * `--experimental-wasm-branch-hinting`) takes to lay the branch's code out of
+ * line and to spill there rather than on the path taken; one that does not
+ * skips the section.
  */
 
 /** Value types, by their byte. */
@@ -140,6 +147,14 @@ export class Body {
         /** Every local the body reads or writes, and those it writes. */
         this.used = new Set();
         this.written = new Set();
+        /** Where the branches marked unlikely start, in bytes. @type {number[]} */
+        this.hints = [];
+    }
+
+    /** The next instruction, an `if` or a `br_if`, is a branch rarely taken. */
+    unlikely(){
+        this.hints.push(this.length);
+        return this;
     }
 
     /** Room for `count` more bytes. @param {number} count */
@@ -205,6 +220,11 @@ export class Body {
         this.buffer.copyWithin(at + other.length, at, this.length);
         this.buffer.set(other.buffer.subarray(0, other.length), at);
         this.length += other.length;
+        if (this.hints.length > 0 || other.hints.length > 0)
+        {
+            this.hints = this.hints.map(hint=>(hint >= at ? hint + other.length : hint))
+                .concat(other.hints.map(hint=>hint + at));
+        }
         return this;
     }
 
@@ -461,7 +481,7 @@ export class ModuleBuilder {
         this.imports = [];
         this.importedFunctions = 0;
         this.importedGlobals = 0;
-        /** @type {{ typeIndex: number, locals: number[], body: Uint8Array }[]} */
+        /** @type {{ typeIndex: number, locals: number[], body: Uint8Array, hints: number[] }[]} */
         this.functions = [];
         /** @type {number[][]} */
         this.globals = [];
@@ -585,12 +605,12 @@ export class ModuleBuilder {
      * @param {number} typeIndex
      * @param {number[]} locals  value types, one entry per local
      * @param {Uint8Array} body  from `Body.toBytes()`
-     * @param {{ exportAs?: string }} [options]
+     * @param {{ exportAs?: string, hints?: number[] }} [options]  hints: the body's `hints`
      * @returns {number} the function index
      */
-    function(typeIndex, locals, body, { exportAs } = {}){
+    function(typeIndex, locals, body, { exportAs, hints = [] } = {}){
         const index = this.importedFunctions + this.functions.length;
-        this.functions.push({ typeIndex, locals, body });
+        this.functions.push({ typeIndex, locals, body, hints });
         if (exportAs !== undefined)
         {
             this.exports.push([...name(exportAs), 0x00, ...leb128u(index)]);
@@ -665,7 +685,10 @@ export class ModuleBuilder {
             }
             return out;
         };
-        const codes = this.functions.map(({ locals, body })=>{
+        /** The branch hints by function: its index, then offset, size 1 and 0 (unlikely) each.
+         * @type {number[][]} */
+        const hinted = [];
+        const codes = this.functions.map(({ locals, body, hints }, at)=>{
             // Runs of one type are one entry: "3 × i32, 1 × f64".
             /** @type {number[][]} */
             const runs = [];
@@ -683,8 +706,21 @@ export class ModuleBuilder {
             }
             const declared = vector(
                 runs.flatMap(([count, type])=>[...leb128u(count), type]), runs.length);
+            if (hints.length > 0)
+            {
+                // An offset counts from the body's start, its local declarations included.
+                const offsets = [...new Set(hints)].sort((a, b)=>a - b);
+                hinted.push([...leb128u(this.importedFunctions + at), ...vector(
+                    offsets.flatMap(offset=>[...leb128u(declared.length + offset), 1, 0]),
+                    offsets.length)]);
+            }
             return concat([leb128u(declared.length + body.length), declared, body]);
         });
+        // Custom, but before the code section: an engine reads it while it compiles.
+        const hintSection = hinted.length === 0 ? [] : (()=>{
+            const content = [...name('metadata.code.branch_hint'), ...entries(hinted)];
+            return [0x00, ...leb128u(content.length), ...content];
+        })();
         const codeSection = codes.length === 0 ? new Uint8Array(0) : (()=>{
             const content = concat([leb128u(codes.length), ...codes]);
             return concat([[10], leb128u(content.length), content]);
@@ -717,6 +753,7 @@ export class ModuleBuilder {
             section(6, entries(this.globals)),
             section(7, entries(this.exports)),
             section(9, entries(elements)),
+            hintSection,
             codeSection,
             nameSection,
         ]);
