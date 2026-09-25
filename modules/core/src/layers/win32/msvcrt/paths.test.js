@@ -122,6 +122,30 @@ test('_getcwd fills the buffer and answers it', ()=>{
     assert.equal(memory.text(buffer), 'C:\\game');
 });
 
+test('_getcwd with no buffer allocates at least the size it was given', ()=>{
+    // "A buffer of at least size maxlen (more only if necessary)": a caller
+    // that passes 260 appends a file name to the directory in place, into the
+    // room it asked for.
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const sizes = [];
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory,
+        files: fakeVolume(),
+        allocate: (/** @type {number} */ bytes)=>{
+            sizes.push(bytes);
+            return memory.allocate(bytes);
+        },
+    }));
+
+    const roomy = table._getcwd.handler([0, 260]);
+    assert.equal(memory.text(roomy), 'C:\\game');
+    assert.equal(sizes.at(-1), 260);
+
+    table._getcwd.handler([0, 0]);
+    assert.equal(sizes.at(-1), 'C:\\game'.length + 1, 'and never less than the path needs');
+});
+
 test('the operations answer zero for success and -1 for failure', ()=>{
     const { memory, files, table } = build();
     assert.equal(table._chdir.handler([memory.put('C:\\game')]), 0);

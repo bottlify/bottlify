@@ -202,7 +202,13 @@ export function createPathFunctions(host){
             },
         },
 
-        /** char *_getcwd(char *buffer, int size) */
+        /**
+         * char *_getcwd(char *buffer, int size)
+         *
+         * With no buffer the one allocated is at least `size` bytes, larger
+         * only if the path needs it: a caller asks for room to append a file
+         * name to the directory and does so in place.
+         */
         _getcwd: {
             convention: 'cdecl',
             argBytes: 8,
@@ -211,7 +217,7 @@ export function createPathFunctions(host){
                 const text = host.files.currentDirectory();
                 if ((buffer >>> 0) === 0)
                 {
-                    const allocated = host.allocate(text.length + 1);
+                    const allocated = host.allocate(Math.max(text.length + 1, size | 0));
                     writeString(allocated, text);
                     return allocated;
                 }
