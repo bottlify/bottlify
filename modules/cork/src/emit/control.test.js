@@ -299,3 +299,59 @@ test('a call into a formed-in callee whose push lands in code leaves stale at th
     assert.equal(m.eip(), CODE + 6, 'past the call, at the callee');
     assert.equal(m.reg('esp'), STACK - 4, 'with the return address pushed');
 });
+
+/**
+ * A switch over `ecx & 3` in a loop, as a compiler lays it out: `cmp eax, 2;
+ * ja default; jmp [DATA + eax*4]` with three cases in the table at DATA, the
+ * fourth value to the default.
+ * @param {number} count
+ */
+function switchLoop(count){
+    return [
+        0xb9, ...u32(count),                // 00     mov ecx, count
+        0x89, 0xc8,                         // 05 L:  mov eax, ecx
+        0x83, 0xe0, 0x03,                   // 07     and eax, 3
+        0x83, 0xf8, 0x02,                   // 0a     cmp eax, 2
+        0x77, 0x14,                         // 0d     ja D
+        0xff, 0x24, 0x85, ...u32(DATA),     // 0f     jmp [DATA + eax*4]
+        0x43,                               // 16 C0: inc ebx
+        0xeb, 0x0d,                         // 17     jmp N
+        0x83, 0xc3, 0x02,                   // 19 C1: add ebx, 2
+        0xeb, 0x08,                         // 1c     jmp N
+        0x83, 0xc3, 0x03,                   // 1e C2: add ebx, 3
+        0xeb, 0x03,                         // 21     jmp N
+        0x83, 0xc3, 0x04,                   // 23 D:  add ebx, 4
+        0x49,                               // 26 N:  dec ecx
+        0x75, 0xdc,                         // 27     jnz L
+        0xf4,                               // 29     hlt
+    ];
+}
+
+test('a switch\'s jump through its table is a branch among its cases, in one region', ()=>{
+    const table = [...u32(CODE + 0x16), ...u32(CODE + 0x19), ...u32(CODE + 0x1e)];
+    const m = machine(switchLoop(8), table);
+    const r = m.runProgram(CODE);
+    assert.equal(r.kind, 3);
+    // ecx & 3 over 8..1 is 0 3 2 1 0 3 2 1: cases 1 4 3 2 twice.
+    assert.equal(m.reg('ebx'), 20);
+    assert.equal(r.regions, 1, 'the cases are the region\'s own blocks');
+    assert.equal(r.runs, 1, 'no jump left the region');
+    // Six case turns of nine instructions, two default turns of seven.
+    assert.equal(r.retired, 1 + 6 * 9 + 2 * 7 + 1);
+});
+
+test('a switch whose table is rewritten after forming goes where the table now says', ()=>{
+    const table = [...u32(CODE + 0x16), ...u32(CODE + 0x19), ...u32(CODE + 0x1e)];
+    const m = machine(switchLoop(8), table);
+    const unit = m.translate(CODE);
+    assert.deepEqual(unit.run(CODE), { kind: 3, vector: 0 });
+    assert.equal(m.reg('ebx'), 20);
+    // Case 0 now goes to the default's code: the jump leaves for it -- by
+    // the entry hash, back into the same region -- rather than taking the
+    // branch it was formed with.
+    m.writeU32(DATA, CODE + 0x23);
+    m.setReg('ebx', 0);
+    const r = m.runProgram(CODE);
+    assert.equal(r.kind, 3);
+    assert.equal(m.reg('ebx'), 20 - 2 * 1 + 2 * 4);
+});

@@ -441,6 +441,7 @@ export function emitInstruction(e, instruction, flagsLive){
             prepare(e, dst);
             readOp(e, dst);
             b.localSet(Local.eip);
+            switchCases(e);
             e.exitDynamic(Exit.UNTRANSLATED);
             e.dead = true;
             return true;
@@ -2104,3 +2105,48 @@ function stringInstruction(e, instruction){
 }
 
 export { AF, PF, SF, ValType };
+
+/**
+ * A switch's jump (`SwitchTable`, the target already in `eip`): the index picks
+ * its case by a `br_table`, and a case whose table entry still names the
+ * target it was formed with is a jump inside the region. Anything else -- an
+ * index past the table, an entry written since, a case the region did not
+ * take in -- falls out to the jump's own exit.
+ *
+ * @param {E} e
+ */
+function switchCases(e){
+    const { b } = e;
+    const table = e.region.blocks[e.blockIndex].exit.table;
+    if (table === undefined)
+    {
+        return;
+    }
+    const cases = [...new Set(table.entries)].filter(target=>e.labels.has(target));
+    if (cases.length === 0)
+    {
+        return;
+    }
+    // Charged once, at the block's depth, for every way out below.
+    e.charge();
+    e.open('switchOut', EMPTY);
+    for (let k = cases.length - 1; k >= 0; k--)
+    {
+        e.open(`case${k}`, EMPTY);
+    }
+    b.localGet(Local.reg + table.index);
+    b.brTable(table.entries.map(target=>{
+        const k = cases.indexOf(target);
+        return k < 0 ? e.depthOf('switchOut') : e.depthOf(`case${k}`);
+    }), e.depthOf('switchOut'));
+    for (let k = 0; k < cases.length; k++)
+    {
+        e.close();
+        b.localGet(Local.eip).i32const(cases[k]).op(I32.eq);
+        e.openIf('case');
+        e.jumpTo(cases[k]);
+        e.close();
+        b.br(e.depthOf('switchOut'));
+    }
+    e.close();
+}

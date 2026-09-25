@@ -180,3 +180,51 @@ test('a small leaf callee is formed into its caller, and only its rets return in
         0xe8, 0xef, 0x0f, 0, 0, 0xc3]);
     assert.deepEqual(deeper.entries, [0x1000, 0x1005, 0x1006, 0x100b]);
 });
+
+test('a jump through a bounded table takes the table\'s cases into the region', ()=>{
+    // cmp eax, 2; ja D; jmp [0x3000 + eax*4]; C0: ret; C1: ret; C2: ret; D: hlt
+    const table = [0x100e, 0x100f, 0x1010];
+    const memory = new Map([
+        ...[0x83, 0xf8, 0x02, 0x77, 0x0a, 0xff, 0x24, 0x85, 0x00, 0x30, 0x00, 0x00,
+            0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xf4].map((byte, i)=>/** @type {[number, number]} */ (
+            [0x1000 + i, byte])),
+        ...table.flatMap((target, i)=>[0, 1, 2, 3].map(k=>/** @type {[number, number]} */ (
+            [0x3000 + i * 4 + k, target >>> (k * 8) & 0xff]))),
+    ]);
+    const region = formRegion(address=>memory.get(address) ?? 0, 0x1000);
+    const jump = region.blocks.find(block=>block.start === 0x1005);
+    assert.ok(jump);
+    assert.deepEqual(jump.exit.table, { index: 0, address: 0x3000, entries: table });
+    assert.deepEqual(jump.exit.targets, table);
+    for (const target of table)
+    {
+        assert.ok(region.blocks.some(block=>block.start === target), `case ${target.toString(16)}`);
+    }
+    assert.ok(region.pages.has(3), 'the table\'s page is the region\'s');
+    // Without the bound the jump is an indirect exit like any other.
+    memory.set(0x1003, 0x75);
+    const unbounded = formRegion(address=>memory.get(address) ?? 0, 0x1000);
+    const plain = unbounded.blocks.find(block=>block.start === 0x1005);
+    assert.equal(plain?.exit.table, undefined);
+    assert.deepEqual(plain?.exit.targets, []);
+});
+
+test('a switch whose index is loaded after the bound test of the memory it comes from', ()=>{
+    // cmp dword [eax], 1; lea ebx, [ebx*3]; ja D; mov edx, [eax]; jmp [0x3000 + edx*4];
+    // C0: ret; C1: ret; D: hlt -- as a compiler lays out a switch on a field.
+    const code = [0x83, 0x38, 0x01, 0x8d, 0x1c, 0x5b, 0x77, 0x0b, 0x8b, 0x10,
+        0xff, 0x24, 0x95, 0x00, 0x30, 0x00, 0x00, 0xc3, 0xc3, 0xf4];
+    const table = [0x1011, 0x1012];
+    const memory = new Map([
+        ...code.map((byte, i)=>/** @type {[number, number]} */ ([0x1000 + i, byte])),
+        ...table.flatMap((target, i)=>[0, 1, 2, 3].map(k=>/** @type {[number, number]} */ (
+            [0x3000 + i * 4 + k, target >>> (k * 8) & 0xff]))),
+    ]);
+    const region = formRegion(address=>memory.get(address) ?? 0, 0x1000);
+    const jump = region.blocks.find(block=>block.start === 0x1008);
+    assert.deepEqual(jump?.exit.table, { index: 2, address: 0x3000, entries: table });
+    // A write to the tested register between the test and the branch undoes it.
+    memory.set(0x1004, 0x04); // lea eax, [ebx + ebx*2]: eax written
+    const moved = formRegion(address=>memory.get(address) ?? 0, 0x1000);
+    assert.equal(moved.blocks.find(block=>block.start === 0x1008)?.exit.table, undefined);
+});

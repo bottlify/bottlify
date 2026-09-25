@@ -43,7 +43,20 @@ import { decode } from './decode/decoder.js';
  * @property {number} end                [start, end)
  * @property {import('./decode/decoder.js').Instruction[]} instructions
  * @property {{ kind: ExitKind, targets: number[], next: number, backEdge: boolean,
- *              refusal?: import('./decode/decoder.js').Refusal }} exit
+ *              refusal?: import('./decode/decoder.js').Refusal,
+ *              table?: SwitchTable }} exit
+ *   an `indirect` exit through a switch's table of addresses carries the table,
+ *   and its distinct targets as `targets`
+ */
+
+/**
+ * A `jmp [table + r*4]` whose index a `cmp r, n` and an unsigned branch bound
+ * before it, as compilers lay out a switch: the table's entries as they were
+ * when the region was formed. The jump still loads its target and compares it
+ * with the entry, so a table written since leaves the region as any indirect
+ * jump does.
+ *
+ * @typedef {{ index: number, address: number, entries: number[] }} SwitchTable
  */
 
 /**
@@ -53,7 +66,7 @@ import { decode } from './decode/decoder.js';
  *                                       is not guaranteed -- find it by `entry`
  * @property {number[]} entries          every block start
  * @property {number} bytes
- * @property {Set<number>} pages         4 KiB pages the code spans
+ * @property {Set<number>} pages         4 KiB pages the code and its switch tables span
  * @property {string} hash               of the decoded bytes, for the cache
  * @property {Map<string, number>} refused   opcode → times a refusal cut a block
  */
@@ -191,6 +204,122 @@ export function inlineReturns(region){
     return out;
 }
 
+/** The most entries a switch's table is read for. */
+const SWITCH_ENTRIES = 1024;
+
+/** What may stand between a switch's bound test and its branch: a write to a
+ * register the instruction names, and nothing else. */
+const PLAIN_WRITES = new Set([
+    'mov', 'movzx', 'movsx', 'lea', 'add', 'sub', 'and', 'or', 'xor', 'inc', 'dec', 'not', 'neg',
+    'shl', 'shr', 'sar', 'imul',
+]);
+
+/** @param {import('./decode/decoder.js').Operand} a @param {import('./decode/decoder.js').Operand} b */
+const sameOperand = (a, b)=>a.kind === b.kind && a.size === b.size && a.reg === b.reg
+    && (a.base ?? -1) === (b.base ?? -1) && (a.index ?? -1) === (b.index ?? -1)
+    && (a.scale ?? 1) === (b.scale ?? 1) && (a.disp ?? 0) === (b.disp ?? 0)
+    && a.segment === b.segment && a.addressSize === b.addressSize && a.high === b.high;
+
+/**
+ * The table a block's jump goes through: `jmp [table + r*4]`, alone in its
+ * block or after the `mov r, x` that loads its index, where the branch into
+ * the block bounds the index as compilers lay out a switch -- the last flag
+ * writer before it `cmp x, n` (x the register r, or the memory the index is
+ * loaded from), then `ja`/`jae` falling through to the block or `jbe`/`jb`
+ * taken to it, with only register writes that leave x alone between. The
+ * bound holds on that edge only; another way into the block reaches the same
+ * code, whose index test sends an index past the table out of the region.
+ *
+ * @param {(address: number) => number} read @param {Block} block
+ * @param {Iterable<Block>} blocks
+ * @returns {SwitchTable | null}
+ */
+function switchTable(read, block, blocks){
+    const { instructions } = block;
+    const jump = instructions[instructions.length - 1];
+    const [operand] = jump.operands;
+    if (jump.op !== 'jmp' || operand.kind !== 'mem' || operand.size !== 4
+        || (operand.base ?? -1) >= 0 || (operand.index ?? -1) < 0 || operand.scale !== 4
+        || operand.addressSize === 16 || operand.segment === 4 || operand.segment === 5)
+    {
+        return null;
+    }
+    const index = /** @type {number} */ (operand.index);
+    // What the bound test must have compared: the index register itself, or
+    // the memory a `mov` at the block's start loads it from.
+    /** @type {import('./decode/decoder.js').Operand} */
+    let tested = { kind: 'reg', size: 4, reg: index };
+    if (instructions.length === 2)
+    {
+        const [load] = instructions;
+        const [into, from] = load.operands;
+        if (load.op !== 'mov' || into.kind !== 'reg' || into.size !== 4 || into.reg !== index
+            || from.kind !== 'mem')
+        {
+            return null;
+        }
+        tested = from;
+    }
+    else if (instructions.length !== 1)
+    {
+        return null;
+    }
+    // The registers the tested operand is made of, which nothing between the
+    // test and the jump may write.
+    const held = new Set(tested.kind === 'reg' ? [tested.reg]
+        : [tested.base ?? -1, tested.index ?? -1].filter(r=>r >= 0));
+    for (const guard of blocks)
+    {
+        const { kind, targets, next } = guard.exit;
+        const branch = guard.instructions[guard.instructions.length - 1];
+        if (kind !== 'jcc')
+        {
+            continue;
+        }
+        const bounding = (branch.op === 'ja' || branch.op === 'jae') && next === block.start
+            || (branch.op === 'jbe' || branch.op === 'jb') && targets[0] === block.start;
+        if (!bounding)
+        {
+            continue;
+        }
+        let at = guard.instructions.length - 2;
+        while (at >= 0 && guard.instructions[at].flagsWritten === 0)
+        {
+            at--;
+        }
+        const compare = guard.instructions[at];
+        if (compare?.op !== 'cmp' || compare.operands[1].kind !== 'imm'
+            || !sameOperand(compare.operands[0], tested))
+        {
+            continue;
+        }
+        const between = guard.instructions.slice(at + 1, -1);
+        if (!between.every(one=>PLAIN_WRITES.has(one.op) && one.operands[0]?.kind === 'reg'
+            && !held.has(/** @type {number} */ (one.operands[0].reg))
+            && !(one.op === 'imul' && one.operands.length === 1)))
+        {
+            continue;
+        }
+        const bound = /** @type {number} */ (compare.operands[1].value) >>> 0;
+        const count = branch.op === 'ja' || branch.op === 'jbe' ? bound + 1 : bound;
+        if (count === 0 || count > SWITCH_ENTRIES)
+        {
+            continue;
+        }
+        const address = (operand.disp ?? 0) >>> 0;
+        /** @type {number[]} */
+        const entries = [];
+        for (let i = 0; i < count; i++)
+        {
+            const entry = address + i * 4;
+            entries.push((read(entry) | read(entry + 1) << 8 | read(entry + 2) << 16
+                | read(entry + 3) << 24) >>> 0);
+        }
+        return { index, address, entries };
+    }
+    return null;
+}
+
 /**
  * @param {(address: number) => number} read
  * @param {number} entry
@@ -223,6 +352,8 @@ export function formRegion(read, entry,
     const next = ()=>pendingAt.find(queue=>queue.length > 0)?.shift();
     /** @type {Map<string, number>} */
     const refused = new Map();
+    /** The switch tables the region's jumps go through, read as data. @type {SwitchTable[]} */
+    const tables = [];
     let bytes = 0;
 
     /** The block that contains an address, if any. @param {number} address */
@@ -343,7 +474,21 @@ export function formRegion(read, entry,
                 continue;
             }
             block.exit = exit;
-            if (!TERMINAL.has(exit.kind))
+            const table = exit.kind === 'indirect' ? switchTable(read, block, blocks.values())
+                : null;
+            if (table !== null)
+            {
+                // The cases join the region in the table's order: a switch's
+                // jump becomes a branch among them.
+                exit.table = table;
+                exit.targets = [...new Set(table.entries)];
+                tables.push(table);
+                for (const target of exit.targets)
+                {
+                    follow(target, depth);
+                }
+            }
+            else if (!TERMINAL.has(exit.kind))
             {
                 // The fall-through first, so a capped region keeps the code
                 // that follows in address order rather than a far target.
@@ -386,6 +531,18 @@ export function formRegion(read, entry,
             }
         }
         for (let address = block.start; address < block.end; address++)
+        {
+            hash = Math.imul(hash ^ read(address), 0x01000193) >>> 0;
+            pages.add(address >>> 12);
+        }
+    }
+    // A table's entries decide the region's blocks: they are hashed with the
+    // code, and their pages are the region's, so a region is formed again --
+    // on a worker, from copies of its pages -- from the same entries.
+    for (const table of tables)
+    {
+        const end = table.address + table.entries.length * 4;
+        for (let address = table.address; address < end; address++)
         {
             hash = Math.imul(hash ^ read(address), 0x01000193) >>> 0;
             pages.add(address >>> 12);
