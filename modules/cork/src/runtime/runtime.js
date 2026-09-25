@@ -1560,10 +1560,22 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
              *     checked?: boolean, moduleBytes?: Uint8Array | null }[]} */
             const formed = [];
             const formedAt = performance.now();
+            // The block starts of the regions this batch formed with no x87 in
+            // them, each an entry at any top once published: a candidate among
+            // them is already translated by one (a loop's head and its cases
+            // were all hot at once, and each formed the whole loop again). It
+            // is noted again should its block get no entry after all.
+            /** @type {Set<number>} */
+            const covered = new Set();
             for (let i = 0; i < batch.length; i++)
             {
                 const [key, eip] = batch[i];
                 const entryTop = key % 16;
+                if (covered.has(eip))
+                {
+                    inFlight.delete(key);
+                    continue;
+                }
                 const region = formRegion(read, eip, { ...formOptions, translatable });
                 // What the region calls directly lands in the same batch, so
                 // the call and the return transfer without a miss -- each
@@ -1606,6 +1618,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 }
                 formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null,
                     wide: wide && usesX87(region), checked: checkedAt(region, entryTop) });
+                if (!usesX87(region))
+                {
+                    for (const block of region.blocks)
+                    {
+                        covered.add(block.start);
+                    }
+                }
             }
             counts.formingMs += performance.now() - formedAt;
             if (store === null)

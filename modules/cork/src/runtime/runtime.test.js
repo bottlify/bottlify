@@ -402,7 +402,8 @@ test('the runtime refuses a memory that has no room for its tables', ()=>{
 });
 
 test('a hot region\'s direct callee lands in the same batch, and the call transfers', async()=>{
-    const m = machine();
+    // The callee kept out of its caller, so the call is a transfer.
+    const m = machine({ leafCalls: false });
     // mov ecx, 1000; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret
     m.write(CODE, [
         0xb9, 0xe8, 0x03, 0, 0,
@@ -943,4 +944,27 @@ test('without a block profile a run counts nothing and says nothing of blocks', 
     await m.runtime.translatePending();
     m.runtime.run(m.runtime.entryOf(CODE), 100_000);
     assert.equal(/** @type {any} */ (m.runtime.diagnostics()).blockCounts, undefined);
+});
+
+test('a candidate a region of the same batch already holds is not formed again', async()=>{
+    const m = machine();
+    // mov ecx, 1000; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret -- the
+    // callee is formed into the loop, and a candidate at it finds it there.
+    m.write(CODE, [
+        0xb9, 0xe8, 0x03, 0, 0,
+        0xe8, 0x04, 0, 0, 0,
+        0x49, 0x75, 0xf8,
+        0xf4,
+        0x42, 0xc3,
+    ]);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE);
+    m.runtime.noteHot(CODE + 14);
+    m.runtime.noteHot(CODE + 5);
+    assert.equal(await m.runtime.translatePending(), 1, 'the loop, with its callee in it');
+    assert.ok(m.runtime.entryOf(CODE + 14) >= 0, 'the callee is an entry of the loop\'s region');
+    assert.ok(m.runtime.entryOf(CODE + 5) >= 0);
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+    assert.equal(exit.kind, 'halt');
+    assert.equal(m.reg(2), 1000);
 });
