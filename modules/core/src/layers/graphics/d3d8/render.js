@@ -1293,6 +1293,10 @@ export function pipelineStateOf(model, shape){
         destBlend = D3DBLEND.SRCALPHA;
     }
     const fogMode = fogModeOf(model, shape.fog !== false);
+    // Direct3D ties the depth write to the test: with ZENABLE off nothing is
+    // written, whatever ZWRITEENABLE says. WebGPU writes under 'always', so
+    // the write goes off with the test here, where the API's rule is known.
+    const depthTest = shape.depthFormat !== undefined && rs('ZENABLE') !== D3DZB.FALSE;
 
     return {
         fvf: shape.fvf,
@@ -1301,8 +1305,8 @@ export function pipelineStateOf(model, shape){
         targetFormat: shape.targetFormat,
         depthFormat: shape.depthFormat,
         topology: shape.topology,
-        depthTest: shape.depthFormat !== undefined && rs('ZENABLE') !== D3DZB.FALSE,
-        depthWrite: shape.depthFormat !== undefined && rs('ZWRITEENABLE') !== 0,
+        depthTest,
+        depthWrite: depthTest && rs('ZWRITEENABLE') !== 0,
         depthFunc: rs('ZFUNC'),
         cullMode: rs('CULLMODE'),
         blend: rs('ALPHABLENDENABLE') !== 0,

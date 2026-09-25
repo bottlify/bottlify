@@ -679,6 +679,36 @@ test('a sub-image write into a kept level falls that texture back to the decoded
             'the rewritten level has no blocks to keep, so the whole texture falls back');
     });
 
+test('with the depth test off a draw writes no depth, whatever the depth mask', async()=>{
+    // glEnable(GL_DEPTH_TEST): "even if the depth buffer exists and the depth
+    // mask is non-zero, the depth buffer is not updated if the depth test is
+    // disabled". WebGPU writes under an 'always' compare, so the write has to
+    // go off with the test.
+    /** @param {boolean} tested */
+    const drawWith = async tested=>{
+        const r = rig();
+        const { context } = r;
+        if (tested)
+        {
+            context.glEnable(GL.DEPTH_TEST);
+        }
+        context.glDepthMask(1);
+        context.glBegin(GL.TRIANGLES);
+        context.glVertex2f(0, 0);
+        context.glVertex2f(8, 0);
+        context.glVertex2f(8, 8);
+        context.glEnd();
+        await r.swap();
+        return r.gpu.of('createRenderPipeline')[0].descriptor.depthStencil;
+    };
+
+    const off = await drawWith(false);
+    assert.equal(off.depthCompare, 'always');
+    assert.equal(off.depthWriteEnabled, false);
+    assert.equal((await drawWith(true)).depthWriteEnabled, true,
+        'with the test on, the write is the mask');
+});
+
 test('a clear is a triangle under the scissor with the masks in its pipeline', async()=>{
     const r = rig();
     const { context } = r;

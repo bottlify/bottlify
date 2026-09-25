@@ -1263,6 +1263,31 @@ test('mips can be switched off for a run, and every sample comes from the top le
         'the top level alone, whatever the program asked');
 });
 
+test('recorded: with ZENABLE off no depth is written, whatever ZWRITEENABLE says', async()=>{
+    // Direct3D ties the write to the test: ZENABLE=FALSE with ZWRITEENABLE=TRUE
+    // leaves the depth buffer as it was. WebGPU writes under an 'always'
+    // compare, so the write has to be switched off with the test.
+    /** @param {number} zenable */
+    const drawWith = async zenable=>{
+        const h = harness();
+        const { device, gpu } = h;
+        assert.equal(device.SetRenderState(D3DRS.ZENABLE, zenable), D3D_OK);
+        assert.equal(device.SetRenderState(D3DRS.ZWRITEENABLE, 1), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        return gpu.of('createRenderPipeline')[0].descriptor.depthStencil;
+    };
+
+    const off = await drawWith(0);
+    assert.equal(off.depthCompare, 'always');
+    assert.equal(off.depthWriteEnabled, false);
+    const on = await drawWith(1);
+    assert.equal(on.depthWriteEnabled, true, 'and with the test on, the write is ZWRITEENABLE');
+});
+
 test('recorded: a whole clear is a clearing pass, a partial clear a scissored quad', async()=>{
     const h = harness();
     const { device, gpu } = h;

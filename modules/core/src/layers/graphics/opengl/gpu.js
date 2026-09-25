@@ -1094,7 +1094,9 @@ export function createGpuRenderer(services){
             depth: {
                 test: operations.depthTest !== undefined,
                 func: operations.depthFunc ?? GL.LESS,
-                write: operations.depthWrite,
+                // The depth buffer is not updated while the test is disabled,
+                // whatever the mask; WebGPU would write under 'always'.
+                write: operations.depthTest !== undefined && operations.depthWrite,
             },
             stencil: scene.stencil,
             stencilBack: scene.stencilBack,
