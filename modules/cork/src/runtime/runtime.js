@@ -293,11 +293,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     // The untranslated exits by target address over the whole run, for the
     // diagnostics' histogram: the misses are forgotten when they become
     // candidates, but what the translator never reached is exactly what this
-    // is read for. Bounded like `misses`; the coldest target makes room.
+    // is read for. Bounded like `misses`; the coldest target makes room. With
+    // the count, the tops its exits were at, a bit each.
+    /** @type {Map<number, { count: number, tops: number }>} */
     const exitTargets = new Map();
     const EXIT_TARGETS_CAP = 4096;
-    /** @type {Map<number, number>} target → the tops its exits were at, a bit each */
-    const exitTops = new Map();
     /**
      * How often the machine stood at an address that has a region for another
      * top (or a block with no entry of its own), per key(eip, top): the heat a
@@ -619,7 +619,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 // Every top it was left at has its region now: those exits
                 // were the wait for the translation, not a gap still open.
-                const tops = exitTops.get(address) ?? 0;
+                const tops = exitTargets.get(address)?.tops ?? 0;
                 for (let t = 0; t < 8; t++)
                 {
                     if ((tops >>> t & 1) !== 0 && entries.entryOf(address, t) < 0)
@@ -1409,19 +1409,27 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
          */
         missAt(address, top = 0){
             const at = top & 7;
-            const target = (exitTargets.get(address) ?? 0) + 1;
-            exitTargets.set(address, target);
-            exitTops.set(address, (exitTops.get(address) ?? 0) | 1 << at);
+            // One record a target, changed in place: a call into a page left
+            // to the interpreter exits once a call, and a map read and write
+            // for each of two counts was a tenth of the crossing.
+            let target = exitTargets.get(address);
+            if (target === undefined)
+            {
+                target = { count: 0, tops: 0 };
+                exitTargets.set(address, target);
+            }
+            target.count++;
+            target.tops |= 1 << at;
             if (exitTargets.size > EXIT_TARGETS_CAP)
             {
                 // The colder half goes at once: one pass for half the cap's
                 // insertions, where a scan for the single coldest on every
                 // insertion past the cap was a third of a loading phase.
-                const heats = [...exitTargets.values()].sort((a, b)=>a - b);
+                const heats = [...exitTargets.values()].map(one=>one.count).sort((a, b)=>a - b);
                 const cold = heats[heats.length >> 1];
-                for (const [addr, count] of exitTargets)
+                for (const [addr, one] of exitTargets)
                 {
-                    if (count <= cold && exitTargets.size > EXIT_TARGETS_CAP >> 1)
+                    if (one.count <= cold && exitTargets.size > EXIT_TARGETS_CAP >> 1)
                     {
                         exitTargets.delete(addr);
                     }
@@ -1438,10 +1446,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // the interpreter met twice -- a candidate noted cold sat in the
                 // queue's bottom bucket behind a loader's thousands while
                 // twelve million exits went to it.
-                this.noteHot(address, at, target);
+                this.noteHot(address, at, target.count);
                 return;
             }
-            if (!misses.has(key) && misses.size >= MISSES_CAP)
+            // A count is never below one, so a first sight is a new key.
+            if (seen === 1 && misses.size >= MISSES_CAP)
             {
                 const oldest = misses.keys().next().value;
                 if (oldest !== undefined)
@@ -1774,8 +1783,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 exits: { ...exits },
                 // The top untranslated-exit targets over the whole run, and
                 // why each has no entry: what a loading phase leaves behind.
-                exitsByTarget: [...exitTargets].sort((a, b)=>b[1] - a[1]).slice(0, 32)
-                    .map(([address, count])=>({ address, count, reason: missReason(address) })),
+                exitsByTarget: [...exitTargets].sort((a, b)=>b[1].count - a[1].count).slice(0, 32)
+                    .map(([address, { count }])=>({ address, count, reason: missReason(address) })),
                 refused: { ...refused },
                 refusedWhy: { ...refusedWhy },
                 forcedSteps,

@@ -80,17 +80,22 @@ export const MATH_IMPORTS = Object.freeze([
  * @returns {number} the exit code
  */
 export function enterRegion(fn, label, budget, view, layout){
+    // The reads are written out rather than put in helpers: the closures a
+    // helper takes were most of the garbage a call into a page left to the
+    // interpreter made, entered again once per call.
     const { regs } = layout;
     const record = layout.flagRecord ?? -1;
-    /** @param {number} at */
-    const word = at=>view.getInt32(at, true);
-    /** @param {number} i */
-    const recorded = i=>(record >= 0 ? word(record + i * 4) : 0);
     return fn(label, budget,
-        word(regs), word(regs + 4), word(regs + 8), word(regs + 12),
-        word(regs + 16), word(regs + 20), word(regs + 24), word(regs + 28),
-        recorded(0), recorded(1), recorded(2), recorded(3), recorded(4),
-        word(layout.eflags), 0);
+        view.getInt32(regs, true), view.getInt32(regs + 4, true),
+        view.getInt32(regs + 8, true), view.getInt32(regs + 12, true),
+        view.getInt32(regs + 16, true), view.getInt32(regs + 20, true),
+        view.getInt32(regs + 24, true), view.getInt32(regs + 28, true),
+        record >= 0 ? view.getInt32(record, true) : 0,
+        record >= 0 ? view.getInt32(record + 4, true) : 0,
+        record >= 0 ? view.getInt32(record + 8, true) : 0,
+        record >= 0 ? view.getInt32(record + 12, true) : 0,
+        record >= 0 ? view.getInt32(record + 16, true) : 0,
+        view.getInt32(layout.eflags, true), 0);
 }
 
 /** The import object entries for `MATH_IMPORTS`. */

@@ -20,6 +20,6 @@ build(){ # workload variant flags
     objcopy -O binary "$OUT/$1-$2.elf" "images/$1-$2.bin"
     echo "images/$1-$2.bin: $(wc -c < "images/$1-$2.bin") bytes"
 }
-for w in vm tree vcall sort str crc switch load; do build $w x87 "$X87"; done
+for w in vm tree vcall sort str crc switch load patch; do build $w x87 "$X87"; done
 for w in fmath game; do build $w x87 "$X87"; build $w sse "$SSE"; done
 rm -r "$OUT"

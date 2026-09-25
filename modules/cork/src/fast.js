@@ -226,18 +226,28 @@ export function compileFast(instruction){
                 return null;
             }
             const carrying = op === 'adc' || op === 'sbb';
-            const adding = op === 'add' || op === 'adc';
-            return state=>{
-                const carry = carrying ? state.eflags & CF : 0;
-                const { result, flags } = adding
-                    ? addFlags(readA(state), readB(state), carry, size)
-                    : subFlags(readA(state), readB(state), carry, size);
-                if (write)
-                {
-                    write(state, result);
+            // One step for each sum, so the record each answers is made in the
+            // step it is read in and the engine keeps it out of the heap; a
+            // choice between the two at every step allocated it every time.
+            return op === 'add' || op === 'adc'
+                ? state=>{
+                    const { result, flags } = addFlags(readA(state), readB(state),
+                        carrying ? state.eflags & CF : 0, size);
+                    if (write)
+                    {
+                        write(state, result);
+                    }
+                    setFlags(state, flags, written);
                 }
-                setFlags(state, flags, written);
-            };
+                : state=>{
+                    const { result, flags } = subFlags(readA(state), readB(state),
+                        carrying ? state.eflags & CF : 0, size);
+                    if (write)
+                    {
+                        write(state, result);
+                    }
+                    setFlags(state, flags, written);
+                };
         }
         case 'and': case 'or': case 'xor': case 'test':
         {
@@ -268,14 +278,17 @@ export function compileFast(instruction){
             {
                 return null;
             }
-            const adding = op === 'inc';
-            return state=>{
-                const { result, flags } = adding
-                    ? addFlags(read(state), 1, 0, size)
-                    : subFlags(read(state), 1, 0, size);
-                write(state, result);
-                setFlags(state, flags, written);
-            };
+            return op === 'inc'
+                ? state=>{
+                    const { result, flags } = addFlags(read(state), 1, 0, size);
+                    write(state, result);
+                    setFlags(state, flags, written);
+                }
+                : state=>{
+                    const { result, flags } = subFlags(read(state), 1, 0, size);
+                    write(state, result);
+                    setFlags(state, flags, written);
+                };
         }
         case 'not':
         {

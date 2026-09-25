@@ -61,6 +61,23 @@ test('an entry compiled for an x87 top is found at that top, or under any top', 
     assert.equal(entries.entryOf(0x2000, 0), zero);
 });
 
+test('an entry just found is found again, and an add or a removal there is seen', ()=>{
+    // The interpreter stops where it finds an entry and the host asks for the
+    // same one next: the second answer is kept, and has to change with the map.
+    const entries = createEntries();
+    const any = entries.add(0x3000, fn, 0);
+    assert.equal(entries.entryOf(0x3000, 5), any);
+    assert.equal(entries.entryOf(0x3000, 5), any, 'asked again at once');
+    const five = entries.add(0x3000, fn, 1, 5);
+    assert.equal(entries.entryOf(0x3000, 5), five, 'one for the top alone comes first');
+    assert.equal(entries.entryOf(0x3000, 4), any, 'another top still has the one for any');
+    entries.remove(five);
+    assert.equal(entries.entryOf(0x3000, 5), any);
+    entries.removePage(3);
+    assert.equal(entries.entryOf(0x3000, 5), -1, 'nor one kept past its page');
+    assert.equal(entries.entryOf(0x3000, 4), -1);
+});
+
 /** A memory with room for the hash at its start. */
 function hashed(){
     const memory = new WebAssembly.Memory({

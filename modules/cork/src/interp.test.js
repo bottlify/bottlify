@@ -134,6 +134,29 @@ test('force runs the first instruction whatever shouldStop answers', ()=>{
     assert.equal(m.state.reg[0] >>> 0, 8);
 });
 
+test('asked runs the first run without the question and asks from the next on', ()=>{
+    // mov eax, 7; inc eax; mov ecx, 1; hlt
+    const m = machine();
+    m.ram.set([0xb8, 7, 0, 0, 0, 0x40, 0xb9, 1, 0, 0, 0, 0xf4], 0x1000);
+    /** @type {number[]} */
+    const asked = [];
+    const shouldStop = ()=>{
+        asked.push(m.state.eip);
+        return m.state.eip === 0x1006;
+    };
+    // The host has just looked at 0x1000 itself: the first run goes ahead
+    // without the question, and it is asked again from the next run on.
+    assert.equal(interpret(m.state, 100, { shouldStop, asked: true }), 2);
+    assert.equal(asked[0], 0x1005);
+    assert.equal(asked.at(-1), 0x1006);
+    assert.equal(m.state.reg[0] >>> 0, 8);
+    assert.equal(m.state.reg[1], 0, 'the stop held');
+    // Not asked, the first run is asked like any other.
+    asked.length = 0;
+    assert.equal(interpret(m.state, 100, { shouldStop }), 0);
+    assert.deepEqual(asked, [0x1006]);
+});
+
 test('an instruction with no model throws Unsupported', ()=>{
     // A form no user program runs and the evaluator has no case for: sldt.
     const m = machine();

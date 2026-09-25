@@ -364,6 +364,38 @@ export function createCorkHost(config){
         halted = true;
     };
 
+    // Where the last run the interpreter stepped began, so a no-tier answer
+    // names the instruction it actually met rather than the address the range
+    // started at.
+    let lastStart = 0;
+    // The interpreter's hooks, one object for every range: where translated
+    // code calls into a page left to the interpreter, a range is one run long,
+    // and new closures and options for each were a tenth of the crossing.
+    const hooks = {
+        // Answered before each run of instructions: the runs the host owns the
+        // far side of. A recorded trap has to leave so the handler can move
+        // eip or stop the machine; an address with an entry is translated code
+        // and a different register file.
+        shouldStop: ()=>interpreter.trapped.length > 0 || feedDue || translateDue
+            || runtime.entryOf(interpreter.eip, x87Top()) >= 0,
+        onStep: (/** @type {number} */ at, /** @type {boolean} */ jumped)=>{
+            lastStart = at;
+            // Neither the park loop nor a slide through zero-filled memory
+            // (add [eax], al, twice a step) is a path: the ring keeps the code
+            // that led there.
+            if (((at - parkBase) >>> 0) > 2 && (ram[at] !== 0 || ram[at + 1] !== 0))
+            {
+                starts[startAt++ & 255] = at;
+            }
+            if (jumped)
+            {
+                countHot(at);
+            }
+        },
+        force: false,
+        entered: false,
+        asked: false,
+    };
     /**
      * The interpreter tier over a whole budget: the decoder and evaluator run
      * over the block from `address` until it halts, faults, records a trap the
@@ -408,38 +440,18 @@ export function createCorkHost(config){
         // the machine is awake for clears it, as the host's own flag is.
         state.halted = false;
         const before = state.retired;
-        // Where the last instruction the interpreter stepped began, so a
-        // no-tier answer names the instruction it actually met rather than the
-        // address the range started at.
-        let lastStart = address;
+        lastStart = address;
         /** @type {unknown} */
         let thrown = null;
         try
         {
-            interpret(state, budget, {
-                // Answered before each run of instructions: the runs the host
-                // owns the far side of. A recorded trap has to leave so the handler can
-                // move eip or stop the machine; an address with an entry is
-                // translated code and a different register file.
-                shouldStop: ()=>state.trapped.length > 0 || feedDue || translateDue
-                    || runtime.entryOf(state.eip, x87Top()) >= 0,
-                onStep: (/** @type {number} */ at, /** @type {boolean} */ jumped)=>{
-                    lastStart = at;
-                    // Neither the park loop nor a slide through zero-filled
-                    // memory (add [eax], al, twice a step) is a path: the ring
-                    // keeps the code that led there.
-                    if (((at - parkBase) >>> 0) > 2 && (ram[at] !== 0 || ram[at + 1] !== 0))
-                    {
-                        starts[startAt++ & 255] = at;
-                    }
-                    if (jumped)
-                    {
-                        countHot(at);
-                    }
-                },
-                force,
-                entered: jumpedIn,
-            });
+            hooks.force = force;
+            hooks.entered = jumpedIn;
+            // The slice loop calls with no entry at the address and no feed
+            // due, so only a trap still recorded -- one a fault cut the last
+            // range short of raising -- leaves the first start's question open.
+            hooks.asked = state.trapped.length === 0;
+            interpret(state, budget, hooks);
         }
         catch (e){
             const fault = /** @type {{ vector?: number, eip?: number }} */ (e);
@@ -475,9 +487,12 @@ export function createCorkHost(config){
             }
             throw thrown;
         }
-        for (const value of state.trapped.splice(0))
+        if (state.trapped.length > 0)
         {
-            raiseTrap(value);
+            for (const value of state.trapped.splice(0))
+            {
+                raiseTrap(value);
+            }
         }
         if (state.halted)
         {

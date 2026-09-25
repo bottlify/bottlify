@@ -459,6 +459,23 @@ handler only returns, and this host has no timer, so the layer's next slice is t
 guest goes on at the instruction after the `hlt` -- the idle loop a scheduler parks the processor
 in (`hlt; jmp`) costs one slice per turn, as it does there.
 
+A call from translated code into a page left to the interpreter (a volatile one, or code the
+translator refuses) crosses twice, and the crossing is the host's own work: the region's exit, the
+exit's count, a range of the interpreter, and the entry lookups on each side. The host keeps one
+object of hooks for every range rather than new closures per range; the interpreter is told the
+host has just looked for an entry at the range's start (`asked`), so its first run goes without
+the question; the entry map remembers the last entry it found, which is the one the host asks for
+next when the interpreter stops at it; `enterRegion` reads the state without helper closures;
+the untranslated exits keep one record per target, its count and its tops (the tops were a second
+map, and one never trimmed); and an arithmetic step of the interpreter has one closure per sum,
+so the record the flags come back in is not allocated. `tools/cork-bench`'s `patch` workload is
+this shape -- a loop calling a routine that writes its own immediate when its argument changes,
+as the era's span drawers did -- and went 10.0 -> 8.9 ms an iteration; a loop doing nothing but
+the crossing 500 -> 340 ns a turn. Two clock reads around each interpreted range, for a slow
+slice's account of itself, are about 100 ns of what is left under node; a routine that rewrites
+its own code on every call is decoded and compiled again on every call, which costs more than the
+crossing.
+
 ## 2. Contract
 
 | field      | value                    |

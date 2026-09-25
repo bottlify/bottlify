@@ -186,22 +186,26 @@ function runAt(state, cache){
  * earlier call stopped midway through a block. Both hooks are optional, so
  * the tight loop the corpus and tests use is unchanged. `force` runs the
  * first instruction whatever `shouldStop` answers, alone: the host's progress
- * guarantee, for a turn that would otherwise retire nothing.
+ * guarantee, for a turn that would otherwise retire nothing. `asked` says the
+ * caller has just put `shouldStop`'s question to the first start itself -- the
+ * host looks for an entry there before it calls -- so the first run goes
+ * ahead without it.
  *
  * @param {import('./ir.js').EvalState} state
  * @param {number} [maxInstructions]
  * @param {{ shouldStop?: () => boolean, onStep?: (eip: number, jumped: boolean) => void,
- *     force?: boolean, entered?: boolean }} [options]
+ *     force?: boolean, entered?: boolean, asked?: boolean }} [options]
  * @returns {number}
  */
 export function interpret(state, maxInstructions = 1, options = {}){
-    const { shouldStop, onStep, force, entered } = options;
+    const { shouldStop, onStep, force, entered, asked } = options;
     const before = state.retired;
     const end = before + maxInstructions;
     const { memory } = state;
     // Where falling through from the last instruction lands.
     let fallthrough = entered === true ? -1 : state.eip;
     let first = force === true;
+    let unasked = first || asked === true;
     let cache = runsBy.get(state);
     if (cache === undefined)
     {
@@ -212,10 +216,11 @@ export function interpret(state, maxInstructions = 1, options = {}){
     {
         while (state.retired < end && !state.halted)
         {
-            if (!first && shouldStop !== undefined && shouldStop())
+            if (!unasked && shouldStop !== undefined && shouldStop())
             {
                 break;
             }
+            unasked = false;
             const run = runAt(state, cache);
             if (run.refused !== null)
             {
