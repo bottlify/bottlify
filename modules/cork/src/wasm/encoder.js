@@ -60,7 +60,19 @@ export function leb128u(value){
  * @returns {number[]}
  */
 export function leb128s32(value){
-    return leb128s64(BigInt(value | 0));
+    const out = [];
+    let rest = value | 0;
+    for (;;)
+    {
+        const byte = rest & 0x7f;
+        rest >>= 7;
+        const done = (rest === 0 && (byte & 0x40) === 0) || (rest === -1 && (byte & 0x40) !== 0);
+        out.push(done ? byte : byte | 0x80);
+        if (done)
+        {
+            return out;
+        }
+    }
 }
 
 /**
@@ -113,31 +125,111 @@ const SIMD_STORE = 11;
 
 /**
  * An instruction stream, with the block nesting checked as it is written.
+ *
+ * The bytes go straight into a buffer that grows by doubling, each number
+ * LEB128-encoded in place: a region's body is thousands of instructions, and
+ * building each one's bytes as an array of its own was most of emitting it.
  */
 export class Body {
     constructor(){
-        /** @type {number[]} */
-        this.bytes = [];
+        /** @type {Uint8Array} */
+        this.buffer = new Uint8Array(256);
+        /** Bytes written. */
+        this.length = 0;
         this.depth = 0;
         /** Every local the body reads or writes, and those it writes. */
         this.used = new Set();
         this.written = new Set();
     }
 
+    /** Room for `count` more bytes. @param {number} count */
+    reserve(count){
+        if (this.length + count > this.buffer.length)
+        {
+            let size = this.buffer.length * 2;
+            while (size < this.length + count)
+            {
+                size *= 2;
+            }
+            const grown = new Uint8Array(size);
+            grown.set(this.buffer.subarray(0, this.length));
+            this.buffer = grown;
+        }
+    }
+
+    /** @param {number} value */
+    byte(value){
+        this.reserve(1);
+        this.buffer[this.length++] = value;
+        return this;
+    }
+
+    /** Unsigned LEB128, 0 .. 2^32 - 1. @param {number} value */
+    u32(value){
+        this.reserve(5);
+        let rest = value >>> 0;
+        while (rest >= 0x80)
+        {
+            this.buffer[this.length++] = rest & 0x7f | 0x80;
+            rest >>>= 7;
+        }
+        this.buffer[this.length++] = rest;
+        return this;
+    }
+
+    /** Signed LEB128 of a 32-bit pattern. @param {number} value */
+    s32(value){
+        this.reserve(5);
+        let rest = value | 0;
+        for (;;)
+        {
+            const byte = rest & 0x7f;
+            rest >>= 7;
+            if ((rest === 0 && (byte & 0x40) === 0) || (rest === -1 && (byte & 0x40) !== 0))
+            {
+                this.buffer[this.length++] = byte;
+                return this;
+            }
+            this.buffer[this.length++] = byte | 0x80;
+        }
+    }
+
+    /**
+     * Another body's bytes put in at `at`, a place this one kept for them
+     * (the locals they name are not added to this one's).
+     *
+     * @param {number} at @param {Body} other
+     */
+    insert(at, other){
+        this.reserve(other.length);
+        this.buffer.copyWithin(at + other.length, at, this.length);
+        this.buffer.set(other.buffer.subarray(0, other.length), at);
+        this.length += other.length;
+        return this;
+    }
+
     /** @param {number} opcode @param {number[]} [immediates] */
-    op(opcode, immediates = []){
+    op(opcode, immediates){
         if (!Number.isInteger(opcode))
         {
             // A misspelt name would otherwise encode as byte 0: unreachable.
             throw new Error(`encoder: no such opcode (${String(opcode)})`);
         }
-        this.bytes.push(opcode, ...immediates);
+        this.byte(opcode);
+        if (immediates !== undefined)
+        {
+            this.reserve(immediates.length);
+            for (const value of immediates)
+            {
+                this.buffer[this.length++] = value;
+            }
+        }
         return this;
     }
 
     /** A SIMD instruction by its number in the 0xfd space. @param {number} opcode */
     simd(opcode){
-        return this.op(0xfd, leb128u(opcode));
+        return this.byte(0xfd).u32(opcode);
     }
 
     /**
@@ -148,38 +240,34 @@ export class Body {
      * @param {{ align: number, offset: number, lane?: number }} memarg  align as its log2
      */
     simdMem(opcode, { align, offset, lane }){
-        const bytes = [...leb128u(opcode), ...leb128u(align), ...leb128u(offset)];
-        if (lane !== undefined)
-        {
-            bytes.push(lane);
-        }
-        return this.op(0xfd, bytes);
+        this.byte(0xfd).u32(opcode).u32(align).u32(offset);
+        return lane === undefined ? this : this.byte(lane);
     }
 
     unreachable(){
-        return this.op(0x00);
+        return this.byte(0x00);
     }
 
     nop(){
-        return this.op(0x01);
+        return this.byte(0x01);
     }
 
     /** @param {number} type  A value type, or EMPTY. */
     block(type = EMPTY){
         this.depth++;
-        return this.op(0x02, [type]);
+        return this.byte(0x02).byte(type);
     }
 
     /** @param {number} type */
     loop(type = EMPTY){
         this.depth++;
-        return this.op(0x03, [type]);
+        return this.byte(0x03).byte(type);
     }
 
     /** @param {number} type */
     if(type = EMPTY){
         this.depth++;
-        return this.op(0x04, [type]);
+        return this.byte(0x04).byte(type);
     }
 
     else(){
@@ -187,7 +275,7 @@ export class Body {
         {
             throw new Error('encoder: else outside any if');
         }
-        return this.op(0x05);
+        return this.byte(0x05);
     }
 
     end(){
@@ -196,85 +284,89 @@ export class Body {
             throw new Error('encoder: end with no block open');
         }
         this.depth--;
-        return this.op(0x0b);
+        return this.byte(0x0b);
     }
 
     /** @param {number} depth */
     br(depth){
-        return this.op(0x0c, leb128u(depth));
+        return this.byte(0x0c).u32(depth);
     }
 
     /** @param {number} depth */
     brIf(depth){
-        return this.op(0x0d, leb128u(depth));
+        return this.byte(0x0d).u32(depth);
     }
 
     /** @param {number[]} depths @param {number} fallback */
     brTable(depths, fallback){
-        const targets = depths.flatMap(depth=>leb128u(depth));
-        return this.op(0x0e, [...vector(targets, depths.length), ...leb128u(fallback)]);
+        this.byte(0x0e).u32(depths.length);
+        for (const depth of depths)
+        {
+            this.u32(depth);
+        }
+        return this.u32(fallback);
     }
 
     return(){
-        return this.op(0x0f);
+        return this.byte(0x0f);
     }
 
     /** @param {number} functionIndex */
     call(functionIndex){
-        return this.op(0x10, leb128u(functionIndex));
+        return this.byte(0x10).u32(functionIndex);
     }
 
     /** @param {number} typeIndex @param {number} table */
     callIndirect(typeIndex, table = 0){
-        return this.op(0x11, [...leb128u(typeIndex), ...leb128u(table)]);
+        return this.byte(0x11).u32(typeIndex).u32(table);
     }
 
     /** A tail call. @param {number} functionIndex */
     returnCall(functionIndex){
-        return this.op(0x12, leb128u(functionIndex));
+        return this.byte(0x12).u32(functionIndex);
     }
 
     /** @param {number} typeIndex @param {number} table */
     returnCallIndirect(typeIndex, table = 0){
-        return this.op(0x13, [...leb128u(typeIndex), ...leb128u(table)]);
+        return this.byte(0x13).u32(typeIndex).u32(table);
     }
 
     drop(){
-        return this.op(0x1a);
+        return this.byte(0x1a);
     }
 
     select(){
-        return this.op(0x1b);
+        return this.byte(0x1b);
     }
 
     /** @param {number} index */
     localGet(index){
         this.used.add(index);
-        return this.op(0x20, leb128u(index));
+        return this.byte(0x20).u32(index);
     }
 
     /** @param {number} index */
     localSet(index){
         this.used.add(index);
         this.written.add(index);
-        return this.op(0x21, leb128u(index));
+        return this.byte(0x21).u32(index);
     }
 
     /** @param {number} index */
     localTee(index){
         this.used.add(index);
         this.written.add(index);
-        return this.op(0x22, leb128u(index));
+        return this.byte(0x22).u32(index);
     }
 
     /** @param {number} index */
     globalGet(index){
-        return this.op(0x23, leb128u(index));
+        return this.byte(0x23).u32(index);
     }
 
     /** @param {number} index */
     globalSet(index){
-        return this.op(0x24, leb128u(index));
+        return this.byte(0x24).u32(index);
     }
 
     /**
@@ -283,7 +375,7 @@ export class Body {
      */
     load(kind, { offset = 0, align } = {}){
         const [opcode, natural] = LOADS[kind];
-        return this.op(opcode, [...leb128u(align ?? natural), ...leb128u(offset)]);
+        return this.byte(opcode).u32(align ?? natural).u32(offset);
     }
 
     /**
@@ -292,22 +384,22 @@ export class Body {
      */
     store(kind, { offset = 0, align } = {}){
         const [opcode, natural] = STORES[kind];
-        return this.op(opcode, [...leb128u(align ?? natural), ...leb128u(offset)]);
+        return this.byte(opcode).u32(align ?? natural).u32(offset);
     }
 
     /** @param {{ offset?: number, align?: number }} [options] */
     loadV128({ offset = 0, align = 4 } = {}){
-        return this.op(0xfd, [...leb128u(SIMD_LOAD), ...leb128u(align), ...leb128u(offset)]);
+        return this.byte(0xfd).u32(SIMD_LOAD).u32(align).u32(offset);
     }
 
     /** @param {{ offset?: number, align?: number }} [options] */
     storeV128({ offset = 0, align = 4 } = {}){
-        return this.op(0xfd, [...leb128u(SIMD_STORE), ...leb128u(align), ...leb128u(offset)]);
+        return this.byte(0xfd).u32(SIMD_STORE).u32(align).u32(offset);
     }
 
     /** @param {number} value */
     i32const(value){
-        return this.op(0x41, leb128s32(value));
+        return this.byte(0x41).s32(value);
     }
 
     /** @param {bigint} value */
@@ -335,7 +427,12 @@ export class Body {
         {
             throw new Error('encoder: a v128 constant is sixteen bytes');
         }
-        return this.op(0xfd, [...leb128u(12), ...lanes]);
+        return this.byte(0xfd).u32(12).op(lanes[0], [...lanes].slice(1));
+    }
+
+    /** The bytes written so far, a copy. */
+    get bytes(){
+        return this.buffer.slice(0, this.length);
     }
 
     /** The finished body's instructions, `end` included. @returns {Uint8Array<ArrayBuffer>} */
@@ -344,7 +441,10 @@ export class Body {
         {
             throw new Error(`encoder: block left open (${this.depth} deep)`);
         }
-        return Uint8Array.from([...this.bytes, 0x0b]);
+        const out = new Uint8Array(this.length + 1);
+        out.set(this.buffer.subarray(0, this.length));
+        out[this.length] = 0x0b;
+        return out;
     }
 }
 

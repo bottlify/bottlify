@@ -650,7 +650,7 @@ export class RegionEmitter {
             x87Prologue(this);
         }
         // The registers, after the x87 empty mask they are loaded under.
-        this.deferred.push({ at: b.bytes.length, kind: 'load', regs: !fromParams, x87: true });
+        this.deferred.push({ at: b.length, kind: 'load', regs: !fromParams, x87: true });
     }
 
     /**
@@ -731,7 +731,7 @@ export class RegionEmitter {
         {
             this.materialise();
         }
-        this.deferred.push({ at: b.bytes.length, kind: 'store', regs: true, x87: false });
+        this.deferred.push({ at: b.length, kind: 'store', regs: true, x87: false });
         b.i32const(0).localGet(Local.flags).store('i32', { offset: layout.eflags });
         if (layout.flagsChanged >= 0)
         {
@@ -753,7 +753,7 @@ export class RegionEmitter {
      */
     storeMemoryState(){
         const { b, layout } = this;
-        this.deferred.push({ at: b.bytes.length, kind: 'store', regs: false, x87: true });
+        this.deferred.push({ at: b.length, kind: 'store', regs: false, x87: true });
         for (const index of this.xmmWritten)
         {
             b.i32const(0).localGet(this.xmmLocal(index))
@@ -850,7 +850,7 @@ export class RegionEmitter {
                     x87StoreRegisters(this, k=>written.has(this.x87.base + k));
                 }
             }
-            main.bytes.splice(at, 0, ...b.bytes);
+            main.insert(at, b);
         }
         this.b = main;
     }

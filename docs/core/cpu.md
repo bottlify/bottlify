@@ -153,7 +153,11 @@ where a
 `cork.workerUrl` names the file), which takes the formed region out of the message and
 answers the module bytes and the record, so the engine thread never waits: a batch not back
 is simply published on a later frame, and `workerMs` reports the worker's share apart from
-`translateMs`, which is the engine thread's own. A run with no frames (`feed: 'slice'`)
+`translateMs`, which is the engine thread's own. The encoder writes a body's bytes straight
+into a buffer that grows by doubling, each number LEB128-encoded in place (a signed constant
+without a BigInt): building each instruction's bytes as an array of its own was half of
+emitting, and a program of 1 500 small functions run a few times each emitted in 531 ms where
+it took 1 168, with the same bytes out. A run with no frames (`feed: 'slice'`)
 translates inline whatever `cork.worker` says, since it has no frame to hide the round trip
 behind. A batch is one
 module, a function per region (`emitBatch`): V8's tail call into a function of another module
