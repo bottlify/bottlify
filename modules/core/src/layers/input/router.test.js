@@ -233,6 +233,44 @@ test('SetKeyboardState makes the table GetKeyboardState would read', ()=>{
     assert.equal(h.router.keyboardState()[0x14], 0x01);
 });
 
+test('GetKeyState\'s low bit is the toggle, as GetKeyboardState\'s is', ()=>{
+    // "If the low-order bit is 1, the key is toggled": CapsLock on reads 0x0001
+    // with the key up, and the two calls agree on it.
+    const h = harness();
+    h.send({ kind: 'key', code: 'CapsLock', down: true });
+    assert.equal(h.router.keyState(0x14), 0x8001, 'down and toggled on');
+    h.send({ kind: 'key', code: 'CapsLock', down: false });
+    assert.equal(h.router.keyState(0x14), 0x0001, 'up and still on');
+    h.send({ kind: 'key', code: 'CapsLock', down: true });
+    h.send({ kind: 'key', code: 'CapsLock', down: false });
+    assert.equal(h.router.keyState(0x14), 0, 'the second press turns it off');
+
+    const table = new Uint8Array(256);
+    table[0x90] = 0x01;
+    h.router.setKeyboardState(table);
+    assert.equal(h.router.keyState(0x90), 0x0001, 'a toggle set through the table is read back');
+});
+
+test('the mouse buttons are virtual keys the key state reads', ()=>{
+    // GetAsyncKeyState "works with mouse buttons", and VK_LBUTTON is a slot of
+    // the same table GetKeyState and GetKeyboardState read.
+    const VK_LBUTTON = 0x01;
+    const VK_RBUTTON = 0x02;
+    const VK_XBUTTON2 = 0x06;
+    const h = harness();
+    h.send({ kind: 'pointerButton', button: 'left', down: true });
+    assert.equal(h.router.keyState(VK_LBUTTON), 0x8000);
+    assert.equal(h.router.asyncKeyState(VK_LBUTTON), 0x8001);
+    assert.equal(h.router.keyboardState()[VK_LBUTTON], 0x80);
+    assert.equal(h.router.keyState(VK_RBUTTON), 0);
+    h.send({ kind: 'pointerButton', button: 'left', down: false });
+    assert.equal(h.router.keyState(VK_LBUTTON), 0);
+    assert.equal(h.router.asyncKeyState(VK_LBUTTON), 0);
+
+    h.send({ kind: 'pointerButton', button: 'x2', down: true });
+    assert.equal(h.router.keyState(VK_XBUTTON2), 0x8000);
+});
+
 test('the async low bit is a press the next read clears', ()=>{
     const h = harness();
     h.send({ kind: 'key', code: 'KeyA', down: true });

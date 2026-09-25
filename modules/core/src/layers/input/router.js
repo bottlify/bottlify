@@ -73,20 +73,20 @@ const MK = Object.freeze({
 /**
  * Buttons, named rather than numbered.
  *
- * A number would be three different numbers at once: a browser calls the middle
- * button 1, a mouse message pairs it with 0x0207, and DirectInput puts it at
- * index 2. Naming the button is what keeps a caller from having to know which
- * of the three it is holding.
+ * A number would be four different numbers at once: a browser calls the middle
+ * button 1, a mouse message pairs it with 0x0207, DirectInput puts it at index
+ * 2 and the key state at VK_MBUTTON, 4. Naming the button is what keeps a
+ * caller from having to know which of them it is holding.
  *
- * @type {Readonly<Record<string, readonly [number, number, number, number, number]>>}
+ * @type {Readonly<Record<string, readonly [number, number, number, number, number, number]>>}
  */
 const BUTTONS = Object.freeze({
-    // down message, up message, wParam bit, DirectInput index, XBUTTON id
-    left: [0x0201, 0x0202, MK.LBUTTON, 0, 0],
-    right: [0x0204, 0x0205, MK.RBUTTON, 1, 0],
-    middle: [0x0207, 0x0208, MK.MBUTTON, 2, 0],
-    x1: [0x020b, 0x020c, MK.XBUTTON1, 3, 1],
-    x2: [0x020b, 0x020c, MK.XBUTTON2, 4, 2],
+    // down message, up message, wParam bit, DirectInput index, XBUTTON id, virtual key
+    left: [0x0201, 0x0202, MK.LBUTTON, 0, 0, 0x01],
+    right: [0x0204, 0x0205, MK.RBUTTON, 1, 0, 0x02],
+    middle: [0x0207, 0x0208, MK.MBUTTON, 2, 0, 0x04],
+    x1: [0x020b, 0x020c, MK.XBUTTON1, 3, 1, 0x05],
+    x2: [0x020b, 0x020c, MK.XBUTTON2, 4, 2, 0x06],
 });
 
 /**
@@ -484,13 +484,21 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
             dropped++;
             return false;
         }
-        const [downMessage, upMessage, , index, extra] = entry;
+        const [downMessage, upMessage, , index, extra, vk] = entry;
+        // A button is a virtual key too, in the table GetKeyState,
+        // GetAsyncKeyState and GetKeyboardState read.
         if (event.down)
         {
+            if (!keys[vk])
+            {
+                pressedSinceRead[vk] = 1;
+            }
+            keys[vk] = 1;
             pressed.add(String(event.button));
         }
         else
         {
+            keys[vk] = 0;
             pressed.delete(String(event.button));
         }
 
@@ -736,12 +744,13 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
 
         /**
          * Whether a virtual key is down, in the form GetKeyState answers with:
-         * the high bit set while it is held. This is the synchronous state the
-         * queue also reads, never the async one.
+         * the high bit set while it is held and the low bit while it is toggled
+         * on, the same two bits GetKeyboardState reports. This is the
+         * synchronous state the queue also reads, never the async one.
          *
          * @param {number} vk
          */
-        keyState: vk=>(keys[vk & 0xff] ? 0x8000 : 0),
+        keyState: vk=>(keys[vk & 0xff] ? 0x8000 : 0) | toggles[vk & 0xff],
 
         /**
          * Whether a virtual key is down and whether it went down since the
