@@ -472,6 +472,8 @@ function describeCork(cork, say){
         + `, share ${(share * 100).toFixed(1)}%`
         + ` (retired ${cork.retired ?? 0})`
         + (cork.relinks ? `, ${cork.relinked} regions relinked in ${cork.relinks} relinks` : ''));
+    say(`    x87 precision: ${cork.wide ? 'wide' : 'rounding'}`
+        + `, switched ${cork.precisionSwitches ?? 0} times`);
     say(`    volatile pages: ${cork.volatilePages ?? 0}`
         + `  invalidations: ${cork.invalidations ?? 0}`
         + `  dropped: ${cork.dropped ?? 0}`
