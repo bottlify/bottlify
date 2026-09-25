@@ -192,6 +192,9 @@
  * @property {number} cacheMisses
  * @property {number} [precisionSwitches]  Times x87 regions went from wide precision to rounding.
  * @property {boolean} [wide]  Whether x87 regions are still compiled for wide precision.
+ * @property {number} [shapeMisses]  Entries that found the x87 stack in another shape than
+ *     their block was compiled for, and left for the host.
+ * @property {number} [shapeChecked]  x87 regions translated again checked for it.
  * @property {[number, number, number, number][]} [blockCounts]  With `blockProfile`: every
  *     counted block as [address, executions, shared slot, the entry of a region it is in
  *     or -1], most executed first.

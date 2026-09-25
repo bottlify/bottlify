@@ -62,7 +62,8 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * modules there are -- 2000 regions a module each ran a chain of calls at
  * 219 ns a call where one module of them ran it at 6.
  *
- * @param {{ region: import('../region.js').Region, entryTop: number }[]} jobs
+ * @param {{ region: import('../region.js').Region, entryTop: number, checked?: boolean }[]} jobs
+ *     checked: an x87 region whose entries test nothing of the stack's shape
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
@@ -87,12 +88,13 @@ export function emitBatch(jobs, layout, features, options = {}){
     });
     const emitAt = performance.now();
     /** @type {BuiltBatch['results']} */
-    const results = jobs.map(({ region, entryTop }, index)=>{
+    const results = jobs.map(({ region, entryTop, checked }, index)=>{
         try
         {
             // The emitter adds the function only once the region is written,
             // so a region it fails on leaves the module as it was.
-            const translation = emitRegion(context, region, { entryTop });
+            const translation = emitRegion(context, region,
+                { entryTop, checked: checked === true });
             const exportName = `r${index}`;
             m.exportFunction(exportName, translation.functionIndex);
             // Named by its address, so a browser's CPU profile of the engine
@@ -125,7 +127,7 @@ export function emitBatch(jobs, layout, features, options = {}){
  * modules into a few big ones. A region whose bytes no longer hash as they did
  * is answered as a failure (`changed`) and keeps the function it has.
  *
- * @param {{ jobs: { entry: number, entryTop: number, hash: string }[],
+ * @param {{ jobs: { entry: number, entryTop: number, hash: string, checked?: boolean }[],
  *     pages: [number, Uint8Array][],
  *     form: { maxBlocks: number, maxBytes: number, leafCalls?: boolean } }} relink
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
@@ -143,7 +145,8 @@ export function relinkBatch({ jobs, pages, form }, layout, features, options = {
     const translatable = address=>byPage.has(address >>> 12);
     const formed = jobs.map(job=>{
         const region = formRegion(read, job.entry, { ...form, translatable });
-        return region.hash === job.hash ? { region, entryTop: job.entryTop } : null;
+        return region.hash === job.hash
+            ? { region, entryTop: job.entryTop, checked: job.checked === true } : null;
     });
     const batch = emitBatch(/** @type {{ region: any, entryTop: number }[]} */ (
         formed.filter(one=>one !== null)), layout, features, options);

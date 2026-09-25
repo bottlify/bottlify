@@ -27,7 +27,7 @@
 import { formRegion } from '../region.js';
 import { enterRegion, mathImports } from '../emit/region.js';
 import { decode } from '../decode/decoder.js';
-import { isX87, trackRegion } from '../emit/x87.js';
+import { SHAPE, isX87, trackRegion } from '../emit/x87.js';
 import { PRECISION } from '../emit/memory.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { emitBatch, relinkBatch } from './emit-built.js';
@@ -94,6 +94,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // precision control once rather than every operation rounding by it
         // (false: the test on every operation from the start).
         wideFirst: true,
+        // x87 regions compiled for the stack's shape at their entries -- which
+        // registers are held and which empty -- tested once at an entry rather
+        // than at every instruction; a region whose test fails `checkedAfter`
+        // times is translated again with no test and the checks inside
+        // (false: every region so from the start).
+        x87Shapes: true,
+        checkedAfter: 4,
         // A region's loops as wasm loops and its flags' liveness over its
         // blocks. Off by default: in Doom 3's menu it doubled the guest's time
         // a frame (5.9 -> 10.1 ms) while it made play 3% faster, and the cause
@@ -335,9 +342,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      *     must keep for the entries to stand
      * @property {boolean} [linked]  its function is in a relinked module already
      * @property {boolean} [wide]  an x87 region compiled for the wide precision controls
+     * @property {boolean} [checked]  an x87 region whose entries test nothing of the stack's shape
+     * @property {number} [shapeMisses]  its entries' tests that failed
      */
     /** @type {Set<RegionRecord>} */
     const regions = new Set();
+    /** @type {Map<number, RegionRecord>} entry index → the region that made it */
+    const recordOf = new Map();
+    /** key(entry, top) of the x87 regions whose shape test kept failing: formed checked. */
+    const checkedKeys = new Set();
     /** @type {Map<number, Set<RegionRecord>>} page → regions on it */
     const byPage = new Map();
     /** @type {Map<number, number>} page → times invalidated, the stamp a batch checks */
@@ -348,6 +361,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, moduleBytes: 0,
         queueDrops: 0, queueEvictions: 0,
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, precisionSwitches: 0,
+        shapeMisses: 0, shapeChecked: 0,
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
         // always agree.
@@ -420,56 +434,68 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** @param {Set<number>} of */
     const stamp = of=>[...of].map(page=>generation.get(page) ?? 0).join(',');
 
+    /**
+     * Takes regions out: their entries, their function-table slots, and the
+     * code marks of their pages, which keep the range of the regions still on
+     * each.
+     *
+     * @param {RegionRecord[]} records
+     */
+    const unpublish = records=>{
+        // The pages the dropped regions spanned, taken before the records
+        // leave their sets.
+        const touched = new Set(records.flatMap(record=>[...record.pages]));
+        for (const record of records)
+        {
+            for (const slot of record.slots)
+            {
+                entries.remove(slot);
+                recordOf.delete(slot);
+            }
+            if (table && record.table >= 0)
+            {
+                // The entries are out of the hash first: nothing finds
+                // the slot before it is emptied.
+                table.set(record.table, null);
+                freeTable.push(record.table);
+            }
+            for (const p of record.pages)
+            {
+                byPage.get(p)?.delete(record);
+            }
+            regions.delete(record);
+        }
+        for (const p of touched)
+        {
+            const left = byPage.get(p);
+            pages.clearCode(p);
+            if (!left?.size)
+            {
+                imports.handoffPage?.(p, false);
+                continue;
+            }
+            // The page's range from the regions still on it.
+            for (const record of left)
+            {
+                for (const [start, end] of record.spans)
+                {
+                    if ((start >>> 12) <= p && ((end - 1) >>> 12) >= p)
+                    {
+                        pages.markCode(start, end - start);
+                    }
+                }
+            }
+        }
+    };
+
     /** @param {number} page */
     const invalidatePage = page=>{
         const on = byPage.get(page);
         const cost = on ? on.size : 0;
         if (on)
         {
-            // The pages the dropped regions spanned, taken before the records
-            // leave their sets.
-            const touched = new Set([...on].flatMap(record=>[...record.pages]));
-            for (const record of [...on])
-            {
-                for (const slot of record.slots)
-                {
-                    entries.remove(slot);
-                }
-                if (table && record.table >= 0)
-                {
-                    // The entries are out of the hash first: nothing finds
-                    // the slot before it is emptied.
-                    table.set(record.table, null);
-                    freeTable.push(record.table);
-                }
-                for (const p of record.pages)
-                {
-                    byPage.get(p)?.delete(record);
-                }
-                regions.delete(record);
-                counts.invalidations++;
-            }
-            for (const p of touched)
-            {
-                const left = byPage.get(p);
-                pages.clearCode(p);
-                if (!left?.size)
-                {
-                    imports.handoffPage?.(p, false);
-                    continue;
-                }
-                // The page's range from the regions still on it.
-                for (const record of left)
-                {
-                    for (const [start, end] of record.spans)
-                    {
-                        if ((start >>> 12) <= p && ((end - 1) >>> 12) >= p)
-                        {
-                            pages.markCode(start, end - start);
-                        }
-                    }
-                }
-            }
+            unpublish([...on]);
+            counts.invalidations += cost;
         }
         const notes = pageKeys.get(page);
         if (notes)
@@ -519,6 +545,38 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             invalidatePage(page);
         }
     };
+
+    /**
+     * An entry found the machine's x87 stack in another shape than its block
+     * was compiled for, and the host's interpreter runs the block. A region
+     * that keeps finding it -- code that faults on purpose, or a function
+     * entered with the stack in more than one shape -- is dropped, to be
+     * formed again checked; answers it then.
+     *
+     * @param {number} eip @param {number} top
+     * @returns {RegionRecord | null}
+     */
+    const shapeMissed = (eip, top)=>{
+        counts.shapeMisses++;
+        const record = recordOf.get(entries.entryOf(eip, top));
+        if (record === undefined || record.checked)
+        {
+            return null;
+        }
+        record.shapeMisses = (record.shapeMisses ?? 0) + 1;
+        if (record.shapeMisses < settings.checkedAfter)
+        {
+            return null;
+        }
+        checkedKeys.add(keyOf(record.entry, record.entryTop));
+        counts.shapeChecked++;
+        unpublish([record]);
+        return record;
+    };
+    /** Whether a formed x87 region is to be translated checked.
+     * @param {import('../region.js').Region} region @param {number} entryTop */
+    const checkedAt = (region, entryTop)=>usesX87(region)
+        && (!settings.x87Shapes || checkedKeys.has(keyOf(region.entry, entryTop)));
 
     /** @param {number} address */
     const translatable = address=>(pages.get(address >>> 12)
@@ -770,7 +828,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * answer and an inline emission take the same path.
      *
      * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string,
-     *     wide?: boolean }} one
+     *     wide?: boolean, checked?: boolean }} one
      * @param {{ labels: [number, number][], cut: number[], entryTop: number,
      *     exportName?: string, linked?: boolean }} built
      * @param {WebAssembly.Instance} instance
@@ -783,7 +841,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         const publishAt = performance.now();
         // A wide x87 region built before single precision was seen would
         // only leave at once: its bytes are translated again with the rounding.
-        if (one.stamp !== stamp(region.pages) || (one.wide && !wide))
+        // So would one built to test the stack's shape once its test had failed.
+        if (one.stamp !== stamp(region.pages) || (one.wide && !wide)
+            || (one.checked !== true && checkedAt(region, one.entryTop)))
         {
             // A page of it was written while the batch was built.
             counts.publishMs += performance.now() - publishAt;
@@ -811,6 +871,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             spans: region.blocks.map(block=>[block.start, block.end]),
             entryTop: one.entryTop, hash: region.hash, labels: JSON.stringify(built.labels),
             linked: built.linked === true, wide: one.wide === true,
+            checked: one.checked === true,
         };
         if (table)
         {
@@ -836,6 +897,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             if (entries.at(slot).fn === fn)
             {
                 record.slots.push(slot);
+                recordOf.set(slot, record);
             }
         }
         // A cut block start has no entry here: an address the runtime must
@@ -889,12 +951,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
     };
     /** The store key of one formed region: an x87 region compiled for the wide
-     * precision controls is another translation of the same bytes.
-     * @param {{ region: { entry: number, hash: string }, entryTop: number, wide?: boolean }} one */
+     * precision controls, or checked, is another translation of the same bytes.
+     * @param {{ region: { entry: number, hash: string }, entryTop: number, wide?: boolean,
+     *     checked?: boolean }} one */
     const regionKey = one=>cacheKey({
         version: CACHE_VERSION, features: found, layoutId: layout.id,
         bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
-        hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}`,
+        hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}${one.checked ? '-c' : ''}`,
     });
 
     /**
@@ -1019,8 +1082,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             counts.relinked++;
             if (store !== null)
             {
-                store.put(regionKey({ region: { entry: record.entry, hash: record.hash },
-                    entryTop: record.entryTop, wide: record.wide }), packRegion({ ...result.region,
+                const one = { region: { entry: record.entry, hash: record.hash },
+                    entryTop: record.entryTop, wide: record.wide, checked: record.checked };
+                store.put(regionKey(one), packRegion({ ...result.region,
                     module: new Uint8Array(0), moduleKey: key, linked: true })).catch(()=>{});
             }
         }
@@ -1086,7 +1150,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         const copies = copyPages(chunk.map(record=>record.pages));
         const relink = {
             jobs: chunk.map(record=>({ entry: record.entry, entryTop: record.entryTop,
-                hash: record.hash })),
+                hash: record.hash, checked: record.checked === true })),
             pages: [...copies],
             form: formOptions,
         };
@@ -1196,10 +1260,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
         }
         const unbuilt = formed.filter(one=>one.cached === null);
-        // Built as the precision mode now says, whatever it said when formed.
+        // Built as the precision mode and the shape tests now say, whatever
+        // they said when formed.
         for (const one of unbuilt)
         {
             one.wide = one.wide === true && wide;
+            one.checked = checkedAt(one.region, one.entryTop);
         }
         if (unbuilt.length > 0 && worker !== null)
         {
@@ -1214,7 +1280,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 id: outstanding.id,
                 relink: {
                     jobs: unbuilt.map(one=>({ entry: one.region.entry, entryTop: one.entryTop,
-                        hash: one.region.hash })),
+                        hash: one.region.hash, checked: one.checked })),
                     pages: [...copies],
                     form: formOptions,
                 },
@@ -1227,7 +1293,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // The batch in one module, as the worker would have made it; a
             // region the emitter fails on is named in the report and the
             // program runs on without it.
-            const jobs = unbuilt.map(one=>({ region: one.region, entryTop: one.entryTop }));
+            const jobs = unbuilt.map(one=>({ region: one.region, entryTop: one.entryTop,
+                checked: one.checked }));
             const batch = emitBatch(jobs, layout, found, emitOptions());
             counts.emitMs += batch.emitMs;
             counts.encodeMs += batch.encodeMs;
@@ -1301,6 +1368,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             if (kind === 'untranslated' && code >>> 8 === PRECISION)
             {
                 precisionSeen();
+            }
+            else if (kind === 'untranslated' && code >>> 8 === SHAPE)
+            {
+                const record = shapeMissed(view().getUint32(layout.eip, true),
+                    view().getUint8(layout.x87Top));
+                if (record !== null)
+                {
+                    // Its code is hot: formed again, checked, with the next batch.
+                    this.noteHot(record.entry, record.entryTop, 256);
+                }
             }
             else if (kind === 'untranslated')
             {
@@ -1480,7 +1557,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 ? null : (settings.store ?? null);
             /** @type {{ region: import('../region.js').Region, entryTop: number,
              *     stamp: string, cached: import('./cache.js').CachedRegion | null, wide?: boolean,
-             *     moduleBytes?: Uint8Array | null }[]} */
+             *     checked?: boolean, moduleBytes?: Uint8Array | null }[]} */
             const formed = [];
             const formedAt = performance.now();
             for (let i = 0; i < batch.length; i++)
@@ -1528,7 +1605,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     continue;
                 }
                 formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null,
-                    wide: wide && usesX87(region) });
+                    wide: wide && usesX87(region), checked: checkedAt(region, entryTop) });
             }
             counts.formingMs += performance.now() - formedAt;
             if (store === null)
@@ -1662,6 +1739,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // x87 regions compiled for the wide precision controls until this is 1.
                 precisionSwitches: counts.precisionSwitches,
                 wide,
+                // Entries that found the x87 stack in another shape than their
+                // block's, and the regions translated checked for it.
+                shapeMisses: counts.shapeMisses,
+                shapeChecked: counts.shapeChecked,
                 stalls: [...stalls],
                 ...(settings.traceStore ? { storeTrace } : {}),
                 invalidations: counts.invalidations,

@@ -55,7 +55,7 @@ import { ANY_TOP } from '../runtime/entries.js';
 import { inlineReturns } from '../region.js';
 import {
     isX87, prepareX87, regionHasMmx, sameState, x87BlockEnd, x87BlockStart,
-    x87Edge, x87Epilogue, x87LoadRegisters, x87Normalise,
+    x87Edge, x87EntryCheck, x87Epilogue, x87LoadRegisters, x87Normalise,
     x87Prologue, x87StoreRegisters,
 } from './x87.js';
 
@@ -298,6 +298,7 @@ export function prepareModule(m, layout, features, memory = {},
  *     and ones compiled for the x87 stack in another shape than the entry's
  * @property {number} entryTop      the x87 top the function was compiled for
  * @property {number} loops         blocks emitted as wasm loops onto themselves
+ * @property {number} x87Guards     x87 stack-fault checks left to run time
  */
 
 /**
@@ -305,7 +306,8 @@ export function prepareModule(m, layout, features, memory = {},
  *
  * @param {ModuleContext} context
  * @param {import('../region.js').Region} region
- * @param {{ entryTop?: number }} [options]  the x87 top the entry is compiled for
+ * @param {{ entryTop?: number, checked?: boolean }} [options]  the x87 top the entry is
+ *     compiled for; checked: the entries test nothing of the x87 stack's shape (`planStack`)
  * @returns {Translation}
  */
 export function emitRegion(context, region, options = {}){
@@ -318,9 +320,9 @@ export class RegionEmitter {
     /**
      * @param {ModuleContext} context
      * @param {import('../region.js').Region} region
-     * @param {{ entryTop?: number }} [options]
+     * @param {{ entryTop?: number, checked?: boolean }} [options]
      */
-    constructor(context, region, { entryTop = 0 } = {}){
+    constructor(context, region, { entryTop = 0, checked = false } = {}){
         this.context = context;
         this.layout = context.layout;
         /** Where the layout keeps the flag record between regions, or -1. */
@@ -469,7 +471,7 @@ export class RegionEmitter {
             }
         }
         /** The x87 emission state: the tracker's states per block and the locals. */
-        this.x87 = prepareX87(this, entryTop);
+        this.x87 = prepareX87(this, entryTop, checked);
         /**
          * Where the registers' loads and stores go, filled once the body is
          * written and the locals it uses are known (`fillDeferred`): the
@@ -519,6 +521,10 @@ export class RegionEmitter {
         const { b } = this;
         this.prologue();
         this.open('out', EMPTY);
+        if (this.x87.active)
+        {
+            x87EntryCheck(this);
+        }
         this.openLoop('dispatch');
         const blocks = this.region.blocks;
         const flat = this.context.flat === true;
@@ -543,7 +549,7 @@ export class RegionEmitter {
             instructions: this.instructions,
             cut: new Set([...this.x87.cut, ...this.unknownBlocks(), ...this.leaving,
                 ...this.shapedBlocks()]),
-            entryTop: this.entryTop, loops: this.loops,
+            entryTop: this.entryTop, loops: this.loops, x87Guards: this.x87.guards,
         };
     }
 

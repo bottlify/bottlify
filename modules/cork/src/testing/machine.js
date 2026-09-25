@@ -19,7 +19,7 @@ import { buildHelpersModule } from '../emit/helpers.js';
 import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
 import { createPageTable } from '../runtime/pages.js';
 import { ANY_TOP, createEntries } from '../runtime/entries.js';
-import { isX87 } from '../emit/x87.js';
+import { SHAPE, isX87 } from '../emit/x87.js';
 import { PRECISION } from '../emit/memory.js';
 import { eflagsOf, setEflags } from '../emit/flags.js';
 
@@ -119,12 +119,16 @@ export function createTestMachine(given = {}){
          *
          * @param {number} entry
          * @param {{ maxBlocks?: number, maxBytes?: number, undoLog?: boolean,
-         *     entryTop?: number, hash?: boolean, leafCalls?: boolean, wide?: boolean }} [options]
+         *     entryTop?: number, hash?: boolean, leafCalls?: boolean, wide?: boolean,
+         *     speculate?: boolean }} [options]
          *     hash: register the region's entries in the machine's hash, so a transfer from
-         *     another region finds them; wide: compiled for the wide precision controls
+         *     another region finds them; wide: compiled for the wide precision controls;
+         *     speculate: an x87 region's entries test the stack's shape its blocks were
+         *     compiled for, and leave with `SHAPE` when it is not the machine's -- off, the
+         *     region is the `checked` one, which runs from any stack
          */
         translate(entry, options = {}){
-            const { undoLog = false, entryTop = 0, hash = false, wide = false,
+            const { undoLog = false, entryTop = 0, hash = false, wide = false, speculate = false,
                 ...regionOptions } = options;
             const read = (/** @type {number} */ address)=>bytes()[layout.ramBase + address];
             const region = formRegion(read, entry, regionOptions);
@@ -133,7 +137,7 @@ export function createTestMachine(given = {}){
                 undoLog, hash: table !== null && hash, wide,
                 ...(trapPort === undefined ? {} : { trapPort }), leaveOut: new Set(leaveOut),
             });
-            const translation = emitRegion(context, region, { entryTop });
+            const translation = emitRegion(context, region, { entryTop, checked: !speculate });
             m.exportFunction('region', translation.functionIndex);
             const built = m.toBytes();
             if (!WebAssembly.validate(built))
@@ -149,6 +153,8 @@ export function createTestMachine(given = {}){
             });
             const run = /** @type {import('../runtime/entries.js').Entry['fn']} */ (
                 /** @type {any} */ (instance.exports).region);
+            /** @type {number[]} the hash entries this region made */
+            const slots = [];
             if (table && hash)
             {
                 const index = table.grow(1);
@@ -160,7 +166,11 @@ export function createTestMachine(given = {}){
                 {
                     if (!translation.cut.has(label))
                     {
-                        entries.add(eip, run, label, top, index);
+                        const slot = entries.add(eip, run, label, top, index);
+                        if (entries.at(slot).fn === run)
+                        {
+                            slots.push(slot);
+                        }
                     }
                 }
             }
@@ -168,6 +178,13 @@ export function createTestMachine(given = {}){
                 region,
                 translation,
                 bytes: built,
+                /** Takes the region's entries out of the hash. */
+                drop(){
+                    for (const slot of slots.splice(0))
+                    {
+                        entries.remove(slot);
+                    }
+                },
                 /**
                  * Runs from a block start with a budget; answers the exit.
                  *
@@ -192,9 +209,13 @@ export function createTestMachine(given = {}){
          *
          * @param {number} entry
          * @param {{ budget?: number, maxRegions?: number, undoLog?: boolean,
-         *     leafCalls?: boolean, wide?: boolean }} [options]
+         *     leafCalls?: boolean, wide?: boolean, speculate?: boolean }} [options]
          *     wide: x87 regions compiled for the wide precision controls until one finds
-         *     single set, then everything again with the rounding -- as the runtime does
+         *     single set, then everything again with the rounding -- as the runtime does;
+         *     speculate: x87 regions compiled for the stack's shape at their entries until
+         *     an entry finds another, then everything again `checked` (the runtime counts
+         *     such exits per region and leaves the block to its interpreter meanwhile; with
+         *     no interpreter here, the checked translation runs it)
          * @returns {{ kind: number, vector: number, eip: number, regions: number, runs: number,
          *     unsupported: Map<string, number>, retired: number }}  runs: times a region
          *     function was called from here (a transfer between regions is not one)
@@ -203,8 +224,11 @@ export function createTestMachine(given = {}){
             const { budget = 10_000_000, maxRegions = 2000, undoLog = false,
                 leafCalls = true } = options;
             let wide = options.wide ?? true;
+            let speculate = options.speculate ?? true;
             /** @type {Map<number, ReturnType<typeof this.translate>>} */
             const translated = new Map();
+            /** @type {ReturnType<typeof this.translate>[]} */
+            const made = [];
             /** @type {Map<string, number>} */
             const unsupported = new Map();
             let eip = entry;
@@ -226,7 +250,8 @@ export function createTestMachine(given = {}){
                         };
                     }
                     unit = this.translate(eip, { undoLog, entryTop: top, hash: true, leafCalls,
-                        wide });
+                        wide, speculate });
+                    made.push(unit);
                     regions++;
                     for (const [opcode, count] of unit.translation.unsupported)
                     {
@@ -248,6 +273,17 @@ export function createTestMachine(given = {}){
                     // Single precision seen: translated again with the rounding.
                     wide = false;
                     translated.clear();
+                    continue;
+                }
+                if (exit.kind === 0 && exit.vector === SHAPE && speculate)
+                {
+                    // Out of the hash too, so a transfer finds the checked ones.
+                    speculate = false;
+                    translated.clear();
+                    for (const one of made)
+                    {
+                        one.drop();
+                    }
                     continue;
                 }
                 if (exit.kind !== 0 || left <= 0)

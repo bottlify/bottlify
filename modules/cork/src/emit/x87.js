@@ -22,6 +22,15 @@
  * layout, as the emulator's tagged double in its. A register read at entry
  * that the emulator kept as a true 80-bit value is converted inline.
  *
+ * The stack-fault checks are decided at translation wherever the mask is
+ * known there (`planStack`): what a block's predecessors in the region left
+ * of it, and at a block the region can be entered at, the shape the block
+ * and what follows it need -- which the entry tests once, leaving for the
+ * host (`SHAPE`) when the machine's stack is not in it. Compiled code keeps
+ * the stack in one shape at each place, so the test passes and the blocks
+ * run with no check; a region whose test keeps failing is translated again
+ * `checked`, its entries needing nothing.
+ *
  * Every arithmetic result is the f64 result; where the processor's 80-bit
  * arithmetic would differ the difference is the `x87.precision` class the
  * plan names and counts (the emulator computes in f64 as well). The control
@@ -76,6 +85,15 @@ const DEFAULT_CONTROL = 0x37f;
 
 /** The x87 opcodes: the eight escape bytes and the wait. */
 const X87_OPCODE = /^(9b$|d[89a-f] )/;
+
+/**
+ * The vector of an untranslated exit a region takes at its entry when the
+ * machine's stack is not in the shape the entered block was compiled for:
+ * back to the host, as `HELD` and `PRECISION` (`memory.js`) go, whose
+ * interpreter runs the block and raises its stack fault; the runtime counts
+ * it against the region.
+ */
+export const SHAPE = 3;
 
 /** @param {Instruction} instruction */
 export function isX87(instruction){
@@ -328,6 +346,408 @@ export function trackRegion(region, entryTop){
 }
 
 /**
+ * What is known of the stack words at a point of a region: the physical
+ * registers known held and known empty, and whether C1 is known clear.
+ *
+ * @typedef {{ held: number, empty: number, c1: boolean }} Shape
+ */
+
+/** @type {Shape} */
+const NOTHING = Object.freeze({ held: 0, empty: 0, c1: false });
+
+/**
+ * What one x87 instruction does to the stack words, as its lowering has it:
+ * the ST(i) it reads (checked for an empty register, `guard`), whether it
+ * pushes (checked for a held one, C1 cleared), and the physical registers it
+ * leaves held (1), empty (0) or either (-1), in order.
+ *
+ * @typedef {Object} StackUse
+ * @property {number[]} sources
+ * @property {boolean} pushes
+ * @property {[number, number][]} marks
+ * @property {'empty' | 'unknown' | null} whole  every register left empty, or unknown
+ * @property {'keep' | 'clear' | 'lost'} c1  C1 after it, beside its push's clear
+ */
+
+/**
+ * @param {Instruction} instruction @param {StackState} state
+ * @returns {StackUse}
+ */
+export function stackUse(instruction, state){
+    const { op, operands } = instruction;
+    const [dst, src] = operands;
+    const at = (/** @type {number} */ i)=>(state.top + i) & 7;
+    /** @type {StackUse} */
+    const use = { sources: [], pushes: false, marks: [], whole: null, c1: 'keep' };
+    const push = (held = 1)=>{
+        use.pushes = true;
+        use.marks.push([at(-1), held]);
+    };
+    const pop = (times = 1)=>{
+        for (let k = 0; k < times; k++)
+        {
+            use.marks.push([at(k), 0]);
+        }
+    };
+    const reg = (/** @type {Operand} */ operand)=>Number(operand.reg);
+    switch (op)
+    {
+        case 'fwait': case 'fnop': case 'fnclex': case 'fldcw': case 'fnstsw': case 'fnstcw':
+        case 'fnstenv': case 'fincstp': case 'fdecstp':
+            return use;
+        case 'fninit': case 'fnsave':
+            use.whole = 'empty';
+            use.c1 = 'clear';
+            return use;
+        case 'fld':
+            use.sources = src.kind === 'x87' ? [reg(src)] : [];
+            push();
+            return use;
+        case 'fild': case 'fld1': case 'fldz': case 'fldpi': case 'fldl2e': case 'fldln2':
+        case 'fldlg2': case 'fldl2t':
+            push();
+            return use;
+        case 'fst': case 'fstp':
+            use.sources = [0];
+            if (dst.kind === 'x87')
+            {
+                use.marks.push([at(reg(dst)), 1]);
+            }
+            pop(op === 'fstp' ? 1 : 0);
+            return use;
+        case 'fist': case 'fistp': case 'fisttp':
+            use.sources = [0];
+            pop(op === 'fist' ? 0 : 1);
+            return use;
+        case 'fbstp':
+            use.sources = [0];
+            pop();
+            return use;
+        case 'fxch': case 'fcmovb': case 'fcmove': case 'fcmovbe': case 'fcmovu':
+        case 'fcmovnb': case 'fcmovne': case 'fcmovnbe': case 'fcmovnu':
+            use.sources = [0, reg(src)];
+            return use;
+        case 'ffree': case 'ffreep':
+            use.marks.push([at(reg(dst)), 0]);
+            pop(op === 'ffreep' ? 1 : 0);
+            return use;
+        case 'fchs': case 'fabs': case 'fsqrt': case 'frndint': case 'f2xm1': case 'fsin':
+        case 'fcos':
+            use.sources = [0];
+            return use;
+        case 'fsincos': case 'fptan':
+            // The push is on the paths that compute; out of the reduction
+            // range the register is left as it was.
+            use.sources = [0];
+            push(-1);
+            return use;
+        case 'fxtract':
+            use.sources = [0];
+            push();
+            return use;
+        case 'fscale':
+            use.sources = [0, 1];
+            return use;
+        case 'fprem': case 'fprem1':
+            use.sources = [0, 1];
+            use.c1 = 'lost';
+            return use;
+        case 'fpatan': case 'fyl2x': case 'fyl2xp1':
+            use.sources = [0, 1];
+            pop();
+            return use;
+        case 'fadd': case 'fsub': case 'fsubr': case 'fmul': case 'fdiv': case 'fdivr':
+        case 'faddp': case 'fsubp': case 'fsubrp': case 'fmulp': case 'fdivp': case 'fdivrp':
+        case 'fiadd': case 'fisub': case 'fisubr': case 'fimul': case 'fidiv': case 'fidivr':
+        {
+            const target = dst.kind === 'x87' ? reg(dst) : 0;
+            use.sources = src.kind === 'x87' ? [target, reg(src)] : [target];
+            pop(op.endsWith('p') ? 1 : 0);
+            return use;
+        }
+        case 'fcom': case 'fcomp': case 'fcompp': case 'fucom': case 'fucomp': case 'fucompp':
+        case 'ftst': case 'ficom': case 'ficomp':
+            use.sources = op === 'fcompp' || op === 'fucompp' ? [0, 1]
+                : op !== 'ftst' && op !== 'ficom' && op !== 'ficomp' && src.kind === 'x87'
+                    ? [0, reg(src)] : [0];
+            pop(op.endsWith('pp') ? 2 : op.endsWith('p') ? 1 : 0);
+            use.c1 = 'clear';
+            return use;
+        case 'fcomi': case 'fcomip': case 'fucomi': case 'fucomip':
+            use.sources = [0, reg(src)];
+            pop(op.endsWith('p') ? 1 : 0);
+            use.c1 = 'clear';
+            return use;
+        case 'fxam':
+            use.c1 = 'lost';
+            return use;
+        default:
+            // fldenv, frstor, and whatever else: nothing is known after it.
+            use.whole = 'unknown';
+            use.c1 = 'lost';
+            return use;
+    }
+}
+
+/**
+ * What is known after an instruction of the given use, from what was known
+ * before it. A push leaves C1 clear unless its overflow was checked, whose
+ * failing path sets it; a check that fails leaves the registers it read as
+ * they were, so a read teaches nothing.
+ *
+ * @param {Shape} known @param {StackUse} use @param {StackState} state
+ * @returns {Shape}
+ */
+export function advance(known, use, state){
+    let { held, empty, c1 } = known;
+    if (use.pushes)
+    {
+        c1 = (empty & 1 << ((state.top - 1) & 7)) !== 0;
+    }
+    for (const [k, mark] of use.marks)
+    {
+        held &= ~(1 << k);
+        empty &= ~(1 << k);
+        held |= mark === 1 ? 1 << k : 0;
+        empty |= mark === 0 ? 1 << k : 0;
+    }
+    if (use.whole !== null)
+    {
+        held = 0;
+        empty = use.whole === 'empty' ? 0xff : 0;
+    }
+    c1 = use.c1 === 'clear' ? true : use.c1 === 'lost' ? false : c1;
+    return { held, empty, c1 };
+}
+
+/** @param {Shape} a @param {Shape} b @returns {Shape} */
+const meet = (a, b)=>({ held: a.held & b.held, empty: a.empty & b.empty, c1: a.c1 && b.c1 });
+/** @param {Shape} a @param {Shape} b */
+const sameShape = (a, b)=>a.held === b.held && a.empty === b.empty && a.c1 === b.c1;
+
+/**
+ * Whether an instruction of another class changes the stack words: an MMX
+ * instruction holds every register, `emms` empties them.
+ *
+ * @param {Instruction} instruction
+ */
+const movesMask = instruction=>instruction.op === 'emms'
+    || instruction.operands.some(operand=>operand.kind === 'mm');
+
+/**
+ * The stack words over a region, for the checks translation can decide.
+ *
+ * A block is entered from outside only through the function's head (the
+ * host, or another region through the entry hash), and only at a block
+ * compiled for the entry's shape (`shapedBlocks` in `region.js`); from inside
+ * the region, only along its edges. So what is known at a block's start is
+ * what every predecessor in the region left, met with -- where the block can
+ * be entered -- what the entry tests: nothing when `speculate` is off, and
+ * otherwise the shape the block needs on every path from it before the
+ * path itself pushes or pops the register (read: held; pushed into: empty).
+ * Compiled code keeps the stack in one shape at each place, so that test
+ * passes; a program that faults on purpose fails it before the block and is
+ * run by the host.
+ *
+ * @param {import('../region.js').Region} region
+ * @param {(StackState | null)[]} states  the tracker's, a cut block's null
+ * @param {Set<number>} cut
+ * @param {boolean} speculate
+ * @returns {{ known: Shape[], needs: (Shape | null)[] }}  `known`: at each block's start;
+ *     `needs`: what each block the region can be entered at tests, null where it tests nothing
+ */
+export function planStack(region, states, cut, speculate){
+    const blocks = region.blocks;
+    const index = new Map(blocks.map((block, i)=>[block.start, i]));
+    const entryState = states[index.get(region.entry) ?? 0];
+    const returns = inlineReturns(region);
+    // The edges `trackRegion` follows, which are every way the emitter goes
+    // from one block to another without leaving the function.
+    const successors = blocks.map(block=>{
+        const { kind, targets, next } = block.exit;
+        const to = [...targets];
+        if (kind === 'fallthrough' || kind === 'jcc' || kind === 'loop')
+        {
+            to.push(next);
+        }
+        else if (kind === 'ret')
+        {
+            to.push(...returns.get(block.start) ?? []);
+        }
+        return [...new Set(to.map(target=>index.get(target) ?? -1))];
+    });
+    /** @type {number[][]} */
+    const predecessors = blocks.map(()=>[]);
+    successors.forEach((to, i)=>{
+        for (const j of to)
+        {
+            if (j >= 0)
+            {
+                predecessors[j].push(i);
+            }
+        }
+    });
+    /**
+     * Walks a block's instructions from its tracked state: what it leaves
+     * known from `known`, what it reads or pushes into that it has not set
+     * itself (`need`), what it sets (`set`), and the state it ends in -- null
+     * where the block never gets to its end: its state is not known (no x87
+     * of it is emitted, and nothing reaches it but through a block that
+     * leaves), or the tracking stops in it, which the emitter leaves at.
+     *
+     * @param {number} i @param {Shape} known
+     */
+    const walk = (i, known)=>{
+        let state = states[i];
+        const need = { held: 0, empty: 0 };
+        let set = 0;
+        if (state === null)
+        {
+            return { after: NOTHING, need, set: 0xff, end: null };
+        }
+        for (const instruction of blocks[i].instructions)
+        {
+            if (!isX87(instruction))
+            {
+                if (movesMask(instruction))
+                {
+                    known = NOTHING;
+                    set = 0xff;
+                }
+                state = /** @type {StackState} */ (step(instruction, state));
+                continue;
+            }
+            const next = step(instruction, state);
+            if (next === null)
+            {
+                return { after: NOTHING, need, set: 0xff, end: null };
+            }
+            const use = stackUse(instruction, state);
+            for (const source of use.sources)
+            {
+                need.held |= 1 << ((state.top + source) & 7) & ~set;
+            }
+            if (use.pushes)
+            {
+                need.empty |= 1 << ((state.top - 1) & 7) & ~set;
+            }
+            for (const [k] of use.marks)
+            {
+                set |= 1 << k;
+            }
+            set |= use.whole === null ? 0 : 0xff;
+            known = advance(known, use, state);
+            state = next;
+        }
+        return { after: known, need, set, end: state };
+    };
+    const own = blocks.map((_, i)=>walk(i, NOTHING));
+    const entries = blocks.map((_, i)=>{
+        const state = states[i];
+        return state !== null && !cut.has(i) && entryState !== null
+            && sameState(state, entryState);
+    });
+    /** @type {(Shape | null)[]} */
+    const needs = blocks.map(()=>null);
+    if (speculate)
+    {
+        // What an entry tests: what a path from the block needs before the
+        // path itself sets the register -- read: held, pushed into: empty --
+        // on any path that stays in the region (an edge into a block compiled
+        // for another top leaves). Compiled code keeps the stack in one shape
+        // at each place, so what one path from a place needs every run
+        // through it has, and a branch that does no x87 on one side does not
+        // take the need away from the other.
+        const along = successors.map((to, i)=>{
+            const end = own[i].end;
+            return end === null ? [] : to.filter(j=>j >= 0 && states[j]?.top === end.top);
+        });
+        const ahead = blocks.map(()=>({ held: 0, empty: 0 }));
+        for (let changed = true; changed;)
+        {
+            changed = false;
+            for (let i = blocks.length - 1; i >= 0; i--)
+            {
+                let held = 0;
+                let empty = 0;
+                for (const j of along[i])
+                {
+                    held |= ahead[j].held;
+                    empty |= ahead[j].empty;
+                }
+                const { need, set } = own[i];
+                held = need.held | held & ~set;
+                empty = need.empty | empty & ~set;
+                if (held !== ahead[i].held || empty !== ahead[i].empty)
+                {
+                    ahead[i] = { held, empty };
+                    changed = true;
+                }
+            }
+        }
+        blocks.forEach((_, i)=>{
+            // A register one path needs held and another empty is not in
+            // one shape here: its checks stay.
+            const { held, empty } = ahead[i];
+            const both = held & empty;
+            if (entries[i] && (held | empty) !== both)
+            {
+                needs[i] = { held: held & ~both, empty: empty & ~both, c1: false };
+            }
+        });
+    }
+    // The blocks that run: the entries, and what a block that gets to its end
+    // goes on to. Only those are predecessors.
+    const runs = entries.slice();
+    for (let changed = true; changed;)
+    {
+        changed = false;
+        blocks.forEach((_, i)=>{
+            if (!runs[i] && predecessors[i].some(p=>runs[p] && own[p].end !== null))
+            {
+                runs[i] = true;
+                changed = true;
+            }
+        });
+    }
+    const arriving = predecessors.map(from=>from.filter(p=>runs[p] && own[p].end !== null));
+    // What is known at each block's start: the greatest fixed point, every
+    // block starting from everything, so a loop keeps what its body keeps.
+    /** @type {Shape} */
+    const everything = { held: 0xff, empty: 0xff, c1: true };
+    const known = blocks.map(()=>everything);
+    const after = blocks.map(()=>everything);
+    for (let changed = true; changed;)
+    {
+        changed = false;
+        for (let i = 0; i < blocks.length; i++)
+        {
+            let shape = entries[i] ? needs[i] ?? NOTHING : runs[i] ? everything : NOTHING;
+            for (const p of arriving[i])
+            {
+                shape = meet(shape, after[p]);
+            }
+            if (!sameShape(shape, known[i]))
+            {
+                known[i] = shape;
+                changed = true;
+            }
+            const left = walk(i, shape).after;
+            if (!sameShape(left, after[i]))
+            {
+                after[i] = left;
+                changed = true;
+            }
+        }
+    }
+    // A block no run reaches may be left knowing a register both ways.
+    const sure = known.map(({ held, empty, c1 })=>({
+        held: held & ~empty, empty: empty & ~held, c1,
+    }));
+    return { known: sure, needs };
+}
+
+/**
  * The emitter's x87 state for one region.
  *
  * @typedef {Object} X87Emit
@@ -349,20 +769,23 @@ export function trackRegion(region, entryTop){
  * @property {number} checkedPrecision  the block whose precision control a `wide` region
  *     has checked since the last write of the control word, or -1
  * @property {Known} known   what the current block's own x87 has made of the stack words
+ * @property {Shape[]} shapes  what is known of the stack words at each block's start (`planStack`)
+ * @property {(Shape | null)[]} needs  what each entry tests of the stack words, or null
+ * @property {Shape} stack   what is known of them at the current point of emission
+ * @property {number} guards  stack-fault checks emitted, for the tests
  */
 
 /**
  * What the current block's own x87 instructions have made of the empty mask
- * and the top, known while translating. A register an earlier push of the
- * block filled is held and one it popped is empty, so the stack-fault checks
- * on them are decided here; and the pushes and pops of the plain forms
- * (`MASK_SAFE`) leave the mask and top locals stale, written once where they
- * are read -- before a check that needs a stale bit, at every exit and edge
- * (`x87Flush`), and at the block's end -- rather than at each. A register the
- * block has already marked dirty is not marked again. Known only within a
- * block (another may enter it with any stack), never in a region with MMX
- * (which holds every register), and forgotten around any operation that
- * changes the mask otherwise.
+ * and the top, known while translating: the pushes and pops of the plain
+ * forms (`MASK_SAFE`) leave the mask and top locals stale, written once where
+ * they are read -- before a check that needs a stale bit, at every exit and
+ * edge (`x87Flush`), and at the block's end -- rather than at each, and the
+ * bits they leave are `held` and `empty` here. A register the block has
+ * already marked dirty is not marked again. Known only within a block, never
+ * in a region with MMX (which holds every register), and forgotten around any
+ * operation that changes the mask otherwise. (Which checks are decided is
+ * `X87Emit.stack`'s, which knows more.)
  *
  * @typedef {Object} Known
  * @property {number} block    the block this knowledge is of, or -1
@@ -397,10 +820,14 @@ export function regionHasMmx(region, leaveOut){
  * registers, reconciled at every write (see `hasMmx`) -- rather than leaving
  * x87 to the other executor at the first instruction that has both.
  *
- * @param {E} e @param {number} entryTop
+ * A region with MMX in it knows nothing of the stack words across its
+ * instructions (every register's two views meet there), and a `checked` one
+ * tests nothing at its entries.
+ *
+ * @param {E} e @param {number} entryTop @param {boolean} [checked]
  * @returns {X87Emit}
  */
-export function prepareX87(e, entryTop){
+export function prepareX87(e, entryTop, checked = false){
     const region = e.region;
     const uses = !e.context.leaveOut.has('x87')
         && region.blocks.some(block=>block.instructions.some(isX87));
@@ -409,11 +836,15 @@ export function prepareX87(e, entryTop){
         return {
             active: false, hasMmx: false, base: 0, form: -1, temp: 0, temp2: 0, temp3: 0,
             states: [], ends: [], cut: new Set(), current: null, controlWritten: false,
-            checkedPrecision: -1, known: unknown(),
+            checkedPrecision: -1, known: unknown(), shapes: [], needs: [], stack: NOTHING,
+            guards: 0,
         };
     }
     const hasMmx = regionHasMmx(region, e.context.leaveOut);
     const { states, cut, ends } = trackRegion(region, entryTop);
+    const { known: shapes, needs } = hasMmx
+        ? { known: region.blocks.map(()=>NOTHING), needs: [] }
+        : planStack(region, states, cut, !checked);
     const base = e.localTypes.length + STATE_PARAMS;
     for (let k = 0; k < 11; k++)
     {
@@ -428,8 +859,62 @@ export function prepareX87(e, entryTop){
     return {
         active: true, hasMmx, base, form, temp: base + 8, temp2: base + 9, temp3: base + 10,
         states, ends, cut, current: null, controlWritten: false, checkedPrecision: -1,
-        known: unknown(),
+        known: unknown(), shapes, needs, stack: NOTHING, guards: 0,
     };
+}
+
+/**
+ * At the head of the function, before its dispatch: an entry into a block
+ * that needs the stack words in a shape (`needs`) tests them once, and leaves
+ * before the block with `SHAPE` when they are not in it. A jump inside the
+ * region comes back through the dispatch alone and tests nothing.
+ *
+ * @param {E} e
+ */
+export function x87EntryCheck(e){
+    const x = e.x87;
+    /** @type {{ label: number, need: Shape }[]} */
+    const tests = [];
+    x.needs.forEach((need, label)=>{
+        if (need !== null)
+        {
+            tests.push({ label, need });
+        }
+    });
+    if (tests.length === 0)
+    {
+        return;
+    }
+    const { b } = e;
+    e.open('shaped', EMPTY);
+    for (let k = tests.length - 1; k >= 0; k--)
+    {
+        e.open(`shape${k}`, EMPTY);
+    }
+    const depths = e.region.blocks.map((_, label)=>{
+        const k = tests.findIndex(test=>test.label === label);
+        return e.depthOf(k < 0 ? 'shaped' : `shape${k}`);
+    });
+    b.localGet(Local.label).brTable(depths, e.depthOf('shaped'));
+    tests.forEach(({ label, need }, k)=>{
+        e.close();
+        // A held register's bit is 0 and an empty one's 1: whatever is not
+        // as needed survives the xor.
+        b.localGet(Local.x87Empty);
+        if (need.empty !== 0)
+        {
+            b.i32const(need.empty).op(I32.xor);
+        }
+        b.i32const(need.held | need.empty).op(I32.and);
+        e.openIf('unshaped', EMPTY);
+        e.exitAt(e.region.blocks[label].start, Exit.UNTRANSLATED, SHAPE);
+        e.close();
+        if (k < tests.length - 1)
+        {
+            b.br(e.depthOf('shaped'));
+        }
+    });
+    e.close();
 }
 
 
@@ -580,9 +1065,10 @@ export function x87BlockStart(e, index){
         return false;
     }
     x.current = x.states[index] === null ? null : cloneState(/** @type {StackState} */ (x.states[index]));
-    // Nothing is known of the stack a block is entered with; whatever a block
-    // before it left stale was written on its every way out.
+    // Whatever a block before it left stale was written on its every way out;
+    // what is known of the stack words there is the plan's.
     x.known = unknown();
+    x.stack = x.shapes[index] ?? NOTHING;
     if (x.current !== null)
     {
         e.b.i32const(x.current.top).localSet(Local.x87Top);
@@ -687,6 +1173,7 @@ export function x87BlockEnd(e){
 export function x87Forget(e){
     x87Flush(e, true);
     e.x87.known.block = -1;
+    e.x87.stack = NOTHING;
 }
 
 /**
@@ -802,6 +1289,11 @@ export function emitX87(e, instruction, flagsLive){
         // The tracker cannot follow this form (`fxsave`/`fbld` and kin).
         e.x87RefusalReason = 'step-null';
         return false;
+    }
+    const use = stackUse(instruction, state);
+    if (x.hasMmx)
+    {
+        x.stack = NOTHING;
     }
     // A region compiled for the wide precision controls (double, extended)
     // leaves before the block's first rounding instruction when single is set:
@@ -931,6 +1423,7 @@ export function emitX87(e, instruction, flagsLive){
             // Nothing is known after it: the next form starts afresh.
             known.block = -1;
         }
+        x.stack = x.hasMmx ? NOTHING : advance(x.stack, use, state);
         return true;
     };
     /** Sets the status bits given. @param {number} mask */
@@ -948,23 +1441,23 @@ export function emitX87(e, instruction, flagsLive){
      * push that overflowed -- its register already held -- also sets C1, as
      * the processor does to say which way the stack faulted; a region that
      * translated an MMX instruction meets it, since MMX holds every register
-     * and the x87 push after it overflows.
-     *
-     * @param {number[]} sources @param {boolean} pushes
+     * and the x87 push after it overflows. What reads and pushes is the
+     * instruction's `use`.
      */
-    const guard = (sources, pushes)=>{
+    const guard = ()=>{
+        const { sources, pushes } = use;
         clear = false;
         let read = 0;
         for (const i of sources)
         {
             read |= 1 << ((state.top + i) & 7);
         }
-        // Sources this block pushed are held; the push's register, if this
-        // block popped it, is empty: those checks are decided now.
-        read &= ~known.held;
+        // A source known held and a push's register known empty (see
+        // `planStack`) are decided now.
+        read &= ~x.stack.held;
         const into = 1 << ((state.top - 1) & 7);
-        const overflowChecked = pushes && (known.empty & into) === 0;
-        if (pushes)
+        const overflowChecked = pushes && (x.stack.empty & into) === 0;
+        if (pushes && !x.stack.c1)
         {
             // C1 is a push's overflow indicator: cleared here, and set below
             // when the register it would take is held -- the processor leaves
@@ -980,6 +1473,7 @@ export function emitX87(e, instruction, flagsLive){
             clear = true;
             return;
         }
+        x.guards++;
         if (((read | (overflowChecked ? into : 0)) & known.stale) !== 0)
         {
             // A bit the check reads is one the block has not written yet.
@@ -1159,19 +1653,19 @@ export function emitX87(e, instruction, flagsLive){
         case 'fld':
             if (src.kind === 'x87')
             {
-                guard([Number(src.reg)], true);
+                guard();
                 b.localGet(st(/** @type {number} */ (src.reg)));
             }
             else
             {
-                guard([], true);
+                guard();
                 loadFloat(e, src, 'quick');
             }
             orIndefinite();
             push();
             return finish();
         case 'fild':
-            guard([], true);
+            guard();
             prepare(e, src);
             b.localGet(Local.addr);
             b.load(src.size === 2 ? 'i64_16s' : src.size === 4 ? 'i64_32s' : 'i64',
@@ -1182,7 +1676,7 @@ export function emitX87(e, instruction, flagsLive){
             return finish();
         case 'fld1': case 'fldz': case 'fldpi': case 'fldl2e': case 'fldln2': case 'fldlg2':
         case 'fldl2t':
-            guard([], true);
+            guard();
             b.f64const({
                 fld1: 1, fldz: 0, fldpi: Math.PI, fldl2e: Math.LOG2E, fldln2: Math.LN2,
                 fldlg2: Math.log10(2), fldl2t: Math.log2(10),
@@ -1191,7 +1685,7 @@ export function emitX87(e, instruction, flagsLive){
             push();
             return finish();
         case 'fst': case 'fstp':
-            guard([0], false);
+            guard();
             if (dst.kind === 'x87')
             {
                 const i = /** @type {number} */ (dst.reg);
@@ -1215,7 +1709,7 @@ export function emitX87(e, instruction, flagsLive){
             }
             return finish();
         case 'fist': case 'fistp': case 'fisttp':
-            guard([0], false);
+            guard();
             b.localGet(st(0));
             orIndefinite();
             b.localSet(x.temp2);
@@ -1227,7 +1721,7 @@ export function emitX87(e, instruction, flagsLive){
             return finish();
         case 'fbstp':
         {
-            guard([0], false);
+            guard();
             prepare(e, dst);
             noteStore(e, 10);
             b.localGet(st(0));
@@ -1260,7 +1754,7 @@ export function emitX87(e, instruction, flagsLive){
             const a = state.top;
             const c = (state.top + i) & 7;
             // An empty register faults, and the registers keep their values.
-            guard([0, i], false);
+            guard();
             b.localGet(Local.x87Dirty).i32const((1 << a) | (1 << c)).op(I32.or)
                 .localSet(Local.x87Dirty);
             if (x.hasMmx)
@@ -1295,21 +1789,21 @@ export function emitX87(e, instruction, flagsLive){
             b.i32const(next.top).localSet(Local.x87Top);
             return finish();
         case 'fchs':
-            guard([0], false);
+            guard();
             b.localGet(st(0)).op(F64.neg);
             orIndefinite();
             b.localSet(st(0));
             dirty(0);
             return finish();
         case 'fabs':
-            guard([0], false);
+            guard();
             b.localGet(st(0)).op(F64.abs);
             orIndefinite();
             b.localSet(st(0));
             dirty(0);
             return finish();
         case 'fsqrt':
-            guard([0], false);
+            guard();
             // A negative other than -0 is invalid: IE, and the result is a NaN.
             b.localGet(st(0)).f64const(0).op(F64.lt);
             e.openIf('negative', EMPTY);
@@ -1330,7 +1824,7 @@ export function emitX87(e, instruction, flagsLive){
             x.checkedPrecision = -1;
             return finish();
         case 'frndint':
-            guard([0], false);
+            guard();
             roundLocal(e, st(0));
             orIndefinite();
             b.localSet(st(0));
@@ -1340,7 +1834,7 @@ export function emitX87(e, instruction, flagsLive){
         {
             // ST0 * 2^trunc(ST1), the power applied in two clamped steps so an
             // exponent past a double's range still lands where it should.
-            guard([0, 1], false);
+            guard();
             // The guard's flag is t1: the scratch here is t0 and count.
             // n = trunc(ST1) clamped to ±2100 (a NaN becomes 0 through the saturation).
             b.localGet(st(1)).op(F64.trunc).f64const(2100).op(0xa4).f64const(-2100).op(0xa5)
@@ -1367,7 +1861,7 @@ export function emitX87(e, instruction, flagsLive){
             // ST0 becomes the exponent and the significand is pushed: for a
             // normal, from the double's fields; zero gives -inf and ZE; a
             // denormal is scaled up first.
-            guard([0], true);
+            guard();
             b.localGet(st(0)).localSet(x.temp);
             b.localGet(x.temp).f64const(0).op(F64.eq);
             e.openIf('zero', EMPTY);
@@ -1410,7 +1904,7 @@ export function emitX87(e, instruction, flagsLive){
             // and C2 says so; the emulator has no such limit, and a program
             // that meets it is past the point of a meaningful answer.
             const math = e.context.math;
-            guard([0], op === 'fsincos' || op === 'fptan');
+            guard();
             b.localGet(Local.x87Status).i32const(~Status.C2).op(I32.and).localSet(Local.x87Status);
             b.localGet(st(0)).localSet(x.temp);
             b.localGet(x.temp).op(F64.abs).f64const(2 ** 63).op(F64.lt);
@@ -1467,7 +1961,7 @@ export function emitX87(e, instruction, flagsLive){
         case 'fpatan':
         {
             // ST1 = atan2(ST1, ST0), then a pop.
-            guard([0, 1], false);
+            guard();
             b.localGet(st(1)).localGet(st(0)).call(e.context.math.atan2);
             orIndefinite();
             b.localSet(st(1));
@@ -1476,7 +1970,7 @@ export function emitX87(e, instruction, flagsLive){
             return finish();
         }
         case 'f2xm1':
-            guard([0], false);
+            guard();
             b.localGet(st(0)).call(e.context.math.exp2m1);
             orIndefinite();
             b.localSet(st(0));
@@ -1487,7 +1981,7 @@ export function emitX87(e, instruction, flagsLive){
             // ST1 = ST1 * log2(ST0) (or of ST0 + 1), then a pop: a zero
             // argument is a zero-divide, a negative one invalid.
             const math = e.context.math;
-            guard([0, 1], false);
+            guard();
             b.localGet(st(0)).localSet(x.temp);
             if (op === 'fyl2x')
             {
@@ -1524,7 +2018,7 @@ export function emitX87(e, instruction, flagsLive){
             // toward zero (fprem) or to nearest (fprem1); when the quotient
             // would not fit 64 bits only a partial reduction is done and C2
             // says so. C0, C3 and C1 carry the quotient's bits 2, 1 and 0.
-            guard([0, 1], false);
+            guard();
             b.localGet(st(0)).localSet(x.temp);
             b.localGet(st(1)).localSet(x.temp2);
             // Invalid: a NaN, an infinite dividend, a zero divisor: the
@@ -1576,7 +2070,7 @@ export function emitX87(e, instruction, flagsLive){
             const reversed = base.endsWith('r');
             const kind = reversed ? base.slice(0, -1) : base;
             const target = dst.kind === 'x87' ? /** @type {number} */ (dst.reg) : 0;
-            guard(src.kind === 'x87' ? [target, /** @type {number} */ (src.reg)] : [target], false);
+            guard();
             // Operands: the destination register, and the source (a register,
             // a float in memory, or an integer in memory).
             b.localGet(st(target)).localSet(x.temp);
@@ -1634,7 +2128,7 @@ export function emitX87(e, instruction, flagsLive){
         {
             if (op === 'ficom' || op === 'ficomp')
             {
-                guard([0], false);
+                guard();
                 prepare(e, src);
                 b.localGet(Local.addr);
                 b.load(src.size === 2 ? 'i32_16s' : 'i32', { offset: e.layout.ramBase });
@@ -1642,22 +2136,22 @@ export function emitX87(e, instruction, flagsLive){
             }
             else if (op === 'ftst')
             {
-                guard([0], false);
+                guard();
                 b.f64const(0).localSet(x.temp2);
             }
             else if (op === 'fcompp' || op === 'fucompp')
             {
-                guard([0, 1], false);
+                guard();
                 b.localGet(st(1)).localSet(x.temp2);
             }
             else if (src.kind === 'x87')
             {
-                guard([0, /** @type {number} */ (src.reg)], false);
+                guard();
                 b.localGet(st(/** @type {number} */ (src.reg))).localSet(x.temp2);
             }
             else
             {
-                guard([0], false);
+                guard();
                 // An ordered compare raises IE on any NaN, a signalling one
                 // included; the unordered one needs the load's own test.
                 loadFloat(e, src, op.startsWith('fu') ? 'checked' : 'unchecked');
@@ -1669,7 +2163,7 @@ export function emitX87(e, instruction, flagsLive){
         }
         case 'fcomi': case 'fcomip': case 'fucomi': case 'fucomip':
         {
-            guard([0, /** @type {number} */ (src.reg)], false);
+            guard();
             b.localGet(st(/** @type {number} */ (src.reg))).localSet(x.temp2);
             const a = st(0);
             const c = x.temp2;
@@ -1703,7 +2197,7 @@ export function emitX87(e, instruction, flagsLive){
         }
         case 'fcmovb': case 'fcmove': case 'fcmovbe': case 'fcmovu':
         case 'fcmovnb': case 'fcmovne': case 'fcmovnbe': case 'fcmovnu':
-            guard([0, /** @type {number} */ (src.reg)], false);
+            guard();
             b.localGet(st(/** @type {number} */ (src.reg)));
             b.localGet(st(0));
             e.pushCondition(/** @type {number} */ (instruction.cc));
