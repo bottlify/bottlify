@@ -765,7 +765,9 @@ export function scheduleKeyTimes(app, request){
  * @property {number} presents        How many frames this harness has presented, ever.
  * @property {number} [sinceStall]    Frames presented since the last gap of 1.5 s or more.
  * @property {any} [steady]            The log's frame averages, taken once `sinceStall` first
- *                                    reached the request's `steadyFrames`.
+ *                                    reached the request's `steadyFrames`, and the
+ *                                    translator's counters a frame over the same frames.
+ * @property {any} [steadyFrom]        The translator's counters 240 frames before that.
  */
 
 /**
@@ -803,12 +805,39 @@ export function presentFrame(app, request, state, frame){
         // step a frame.
         state.sinceStall = state.lastPresent > 0 && now - state.lastPresent >= 1500
             ? 0 : (state.sinceStall ?? 0) + 1;
+        // The translator's counters at both ends of the same 240 frames the
+        // log's averages cover: what those frames retired, left for the host
+        // by and transferred through, a frame.
+        const counters = ()=>{
+            const cpu = app.diagnostics().find((/** @type {any} */ one)=>one.name === 'cpu');
+            const cork = cpu?.metrics?.cork;
+            return cork ? { retired: cork.retired, transfers: cork.transfers, exits: cork.exits }
+                : null;
+        };
+        if (!state.steady && state.sinceStall === request.steadyFrames - 240)
+        {
+            state.steadyFrom = counters();
+        }
         if (!state.steady && state.sinceStall === request.steadyFrames)
         {
-            const log = app.diagnostics().find((/** @type {any} */ one)=>one.name === 'log');
+            const diagnostics = app.diagnostics();
+            const log = diagnostics.find((/** @type {any} */ one)=>one.name === 'log');
             const { averageFrameMs, averageGuestMs, averageHostMs } = log?.metrics ?? {};
             state.steady = { frames: request.steadyFrames, averageFrameMs, averageGuestMs,
                 averageHostMs };
+            const from = state.steadyFrom;
+            const to = counters();
+            if (from && to)
+            {
+                /** @param {number} a @param {number} b */
+                const per = (a, b)=>(a - b) / 240;
+                state.steady.cork = {
+                    retired: per(to.retired, from.retired),
+                    transfers: per(to.transfers ?? 0, from.transfers ?? 0),
+                    exits: Object.fromEntries(Object.keys(to.exits ?? {}).map(kind=>[kind,
+                        per(to.exits[kind], from.exits?.[kind] ?? 0)])),
+                };
+            }
         }
     }
     if (state.lastPresent > 0 && state.gaps.length < LIMITS.samples)

@@ -883,6 +883,8 @@ test('a block profile counts each block\'s executions: a loop\'s body its iterat
     const count = (/** @type {number} */ address)=>blockCounts
         .find((/** @type {number[]} */ [at])=>at === address)?.[1];
     assert.equal(count(CODE + 5), 1000, 'dec ecx; jnz -- the loop body, once a turn');
+    assert.equal(blockCounts.find((/** @type {number[]} */ [at])=>at === CODE + 5)[3], CODE,
+        'in the region entered at the start');
     assert.equal(count(CODE), 1, 'the entry block, once');
     assert.equal(topBlocks[0].address, CODE + 5);
     assert.equal(topBlocks[0].entry, CODE, 'in the region entered at the start');

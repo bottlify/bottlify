@@ -835,6 +835,15 @@ function describe(result, context, calls, symbols){
             + ` frame ${steady.averageFrameMs.toFixed(1)} ms,`
             + ` guest ${steady.averageGuestMs.toFixed(1)} ms,`
             + ` host ${steady.averageHostMs.toFixed(1)} ms`);
+        if (steady.cork)
+        {
+            const exits = Object.entries(steady.cork.exits)
+                .filter(([, count])=>count > 0)
+                .map(([kind, count])=>`${kind} ${Math.round(count)}`).join(', ');
+            say(`    a frame: ${(steady.cork.retired / 1e6).toFixed(1)} M instructions,`
+                + ` ${Math.round(steady.cork.transfers)} transfers through the hash`
+                + ` (countTransfers), exits to the host: ${exits}`);
+        }
     }
     // The gaps between presents are the shape a stutter has, and the page's
     // long tasks say whether the thread the person's browser lives on was held.

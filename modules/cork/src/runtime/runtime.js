@@ -612,11 +612,27 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     // The block profile is past cork's own tables, in a memory sized for it;
     // the hybrid layout's tables are carved from the emulator's RAM.
     const profiling = settings.blockProfile === true && (layout.codePages ?? -1) < 0;
-    /** Every counted block as [address, executions, shared], by the slot table. */
+    /**
+     * Every counted block as [address, executions, shared, region entry], by the
+     * slot table: the entry of a region the block is in (-1 when none is), so a
+     * profile of the regions' functions divides by the instructions they ran.
+     */
     const blockCounts = ()=>{
         const data = view();
         const base = layout.tables + Tables.BLOCK_PROFILE;
-        /** @type {[number, number, number][]} */
+        /** @type {Map<number, number>} */
+        const regionOf = new Map();
+        for (const record of regions)
+        {
+            for (const [start] of record.spans)
+            {
+                if (!regionOf.has(start))
+                {
+                    regionOf.set(start, record.entry);
+                }
+            }
+        }
+        /** @type {[number, number, number, number][]} */
         const out = [];
         for (let slot = 0; slot < Tables.BLOCK_SLOTS; slot++)
         {
@@ -624,7 +640,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             const count = data.getUint32(at + 4, true);
             if (count > 0)
             {
-                out.push([data.getUint32(at, true), count, data.getUint32(at + 8, true)]);
+                const address = data.getUint32(at, true);
+                out.push([address, count, data.getUint32(at + 8, true), regionOf.get(address) ?? -1]);
             }
         }
         return out.sort((one, two)=>two[1] - one[1]);
@@ -639,7 +656,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             data.setUint32(base + slot * Tables.BLOCK_SLOT + 4, 0, true);
         }
     };
-    /** The forty most executed, with the region each is in. @param {[number, number, number][]} blocks */
+    /** The forty most executed, with the region each is in. @param {[number, number, number, number][]} blocks */
     const topBlocks = blocks=>blocks.slice(0, 40).map(([address, count, shared])=>{
         let entry = -1;
         let size = 0;

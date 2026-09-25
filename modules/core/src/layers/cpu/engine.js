@@ -192,8 +192,9 @@
  * @property {number} cacheMisses
  * @property {number} [precisionSwitches]  Times x87 regions went from wide precision to rounding.
  * @property {boolean} [wide]  Whether x87 regions are still compiled for wide precision.
- * @property {[number, number, number][]} [blockCounts]  With `blockProfile`: every counted
- *     block as [address, executions, shared slot], most executed first.
+ * @property {[number, number, number, number][]} [blockCounts]  With `blockProfile`: every
+ *     counted block as [address, executions, shared slot, the entry of a region it is in
+ *     or -1], most executed first.
  * @property {{ address: number, count: number, shared: boolean, entry: number,
  *     bytes: number }[]} [topBlocks]  The forty most executed, with the region each is in.
  * @property {number} invalidations    Regions discarded by a write.
