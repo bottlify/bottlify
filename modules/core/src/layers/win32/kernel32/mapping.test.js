@@ -93,6 +93,8 @@ function setup(names = {}){
             },
             /** @param {any} node */
             size: node=>node.data.length,
+            retain: ()=>{},
+            close: ()=>{},
         },
     });
 

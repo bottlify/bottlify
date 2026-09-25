@@ -727,6 +727,8 @@ export const win32Module = {
                     threadBlock: config?.threadBlock,
                     /** @param {number} handle */
                     handleType: handle=>kernel.handles.typeOf(handle),
+                    /** @param {any} node */
+                    retainNode: node=>volume.retain(node),
                     queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
                 }),
                 ...apcs.table,
@@ -850,6 +852,10 @@ export const win32Module = {
                         write: (node, offset, bytes)=>volume.write(node, offset, bytes),
                         /** @param {any} node */
                         size: node=>filesystem.size(node),
+                        /** @param {any} node */
+                        retain: node=>volume.retain(node),
+                        /** @param {any} node */
+                        close: node=>volume.close(node),
                     },
                     currentThread: ()=>kernel.currentThread(),
                     setLastErrorFor: setErrorOn,

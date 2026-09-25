@@ -73,6 +73,10 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  * @property {number} [processId]      What the running process is numbered.
  * @property {() => string} [imagePath]  Where its image is, for a snapshot's entry.
  * @property {(handle: number) => string | null} [handleType]
+ * @property {(node: any) => void} [retainNode]
+ *           One more hold on an open file's node, given back when the handle
+ *           that holds it is closed: what a duplicate of a file or mapping
+ *           handle takes, so closing its source leaves the file open.
  * @property {(thread: any, routine: number, args: number[]) => void} [queueApc]
  *           Queues a routine to a thread, to run when it next waits alertably:
  *           what a waitable timer's completion routine becomes at each expiry.
@@ -596,6 +600,12 @@ export function createThreadingFunctions(host){
                 // duplicate onto a mutex is a real handle onto it, the same
                 // as the one DuplicateHandle was given.
                 host.namedObjects.reference(held);
+                const closesSource = (options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0
+                    && !pseudo(source);
+                if (held.node && (kind === 'file' || kind === 'mapping') && !closesSource)
+                {
+                    host.retainNode?.(held.node);
+                }
                 const duplicate = kernel.handles.open(kind, held);
                 host.writeMemory(target >>> 0, new Uint8Array([
                     duplicate & 0xff, duplicate >>> 8 & 0xff,
@@ -603,7 +613,7 @@ export function createThreadingFunctions(host){
                 ]));
                 // A pseudo-handle cannot be closed: duplicating one and closing
                 // the source leaves both usable, as it does on Windows.
-                if ((options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0 && !pseudo(source))
+                if (closesSource)
                 {
                     kernel.handles.close(source >>> 0);
                     host.namedObjects.forget(held);

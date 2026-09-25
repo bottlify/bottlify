@@ -1272,13 +1272,14 @@ export function createFileFunctions(host){
             handler: ([handle])=>{
                 try
                 {
-                    // Only a file handle owns its node. A mapping over the
-                    // file carries the same node, and closing the mapping
-                    // must leave the file open, or the program's own close
-                    // of the file fails as an invalid handle afterwards.
+                    // A file handle and a mapping over the file each hold
+                    // the node, and closing either gives back its own hold:
+                    // the node closes with the last of them, in whichever
+                    // order the program closes them.
                     const type = host.handles.typeOf?.(handle >>> 0);
                     const closed = host.handles.close(handle >>> 0);
-                    if (closed && closed.node && (type === undefined || type === 'file'))
+                    if (closed && closed.node
+                        && (type === undefined || type === 'file' || type === 'mapping'))
                     {
                         files.close(closed.node);
                     }
@@ -1786,13 +1787,14 @@ export function createFileFunctions(host){
             handler: ([handle])=>{
                 try
                 {
-                    // Only a file handle owns its node. A mapping over the
-                    // file carries the same node, and closing the mapping
-                    // must leave the file open, or the program's own close
-                    // of the file fails as an invalid handle afterwards.
+                    // A file handle and a mapping over the file each hold
+                    // the node, and closing either gives back its own hold:
+                    // the node closes with the last of them, in whichever
+                    // order the program closes them.
                     const type = host.handles.typeOf?.(handle >>> 0);
                     const closed = host.handles.close(handle >>> 0);
-                    if (closed && closed.node && (type === undefined || type === 'file'))
+                    if (closed && closed.node
+                        && (type === undefined || type === 'file' || type === 'mapping'))
                     {
                         files.close(closed.node);
                     }

@@ -65,6 +65,19 @@ export function createVolume(fs, fetchBlocks = null){
     };
 
     /**
+     * How many holders an open file has beyond the handle that opened it.
+     *
+     * On Windows a file mapping holds the file it maps and a view holds its
+     * mapping, so a program may close the three in any order. Here each of
+     * them shares the one open node, and `close` gives back one hold rather
+     * than closing it outright: the node is closed when the last holder lets
+     * go, whichever that is.
+     *
+     * @type {WeakMap<any, number>}
+     */
+    const holds = new WeakMap();
+
+    /**
      * The disposition names the two layers use for the same five behaviours.
      *
      * @param {any} mode
@@ -174,8 +187,29 @@ export function createVolume(fs, fetchBlocks = null){
             fs.setEndOfFile(node);
         },
 
-        /** @param {any} node */
-        close: node=>fs.close(node),
+        /**
+         * One more holder of an open node, given back by a `close` of its own.
+         *
+         * @param {any} node
+         */
+        retain(node){
+            holds.set(node, (holds.get(node) ?? 0) + 1);
+        },
+
+        /**
+         * Gives back one hold, and closes the node when it was the last.
+         *
+         * @param {any} node
+         */
+        close(node){
+            const extra = holds.get(node) ?? 0;
+            if (extra > 0)
+            {
+                holds.set(node, extra - 1);
+                return;
+            }
+            fs.close(node);
+        },
 
         /**
          * Removes a file or an empty directory; the surface above already knows

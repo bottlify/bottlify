@@ -74,10 +74,15 @@ const FILE_MAP_ALL_ACCESS = 0xf001f;
  * @property {{ read: (node: any, offset: number, length: number) =>
  *                  Uint8Array | Promise<Uint8Array>,
  *              write: (node: any, offset: number, bytes: Uint8Array) => number,
- *              size?: (node: any) => number }} files
+ *              size?: (node: any) => number,
+ *              retain: (node: any) => void,
+ *              close: (node: any) => void }} files
  *           A promise when the bytes are not resident yet; the map then
  *           answers when they are, the caller parked meanwhile, as a read is.
  *           The size is what a mapping made without one is as large as.
+ *           Every mapping handle and every view holds the file's node with
+ *           `retain` and gives it back with `close`, which closes the node
+ *           once nothing -- the file's own handle included -- holds it.
  */
 
 /**
@@ -168,6 +173,10 @@ export function createMappingFunctions(host){
             if (found)
             {
                 host.namedObjects.remember(name, 'mapping', found, true, host.setLastError);
+                if (found.node)
+                {
+                    host.files.retain(found.node);
+                }
                 return host.handles.open('mapping', found);
             }
             if (sizeHigh !== 0)
@@ -203,6 +212,10 @@ export function createMappingFunctions(host){
                 return fail(ERROR_FILE_INVALID);
             }
             const mapping = { node, writable, size };
+            if (node)
+            {
+                host.files.retain(node);
+            }
             host.namedObjects.remember(name, 'mapping', mapping, false, host.setLastError);
             return host.handles.open('mapping', mapping);
         },
@@ -269,7 +282,20 @@ export function createMappingFunctions(host){
                 {
                     return deliver(new Uint8Array(0));
                 }
-                const bytes = host.files.read(mapping.node, offset, wanted);
+                // The view holds the file from here to its unmap, so closing the
+                // mapping and the file handle first leaves it a file to be
+                // written back to.
+                host.files.retain(mapping.node);
+                let bytes;
+                try
+                {
+                    bytes = host.files.read(mapping.node, offset, wanted);
+                }
+                catch (e){
+                    host.files.close(mapping.node);
+                    host.release(address);
+                    throw e;
+                }
                 if (typeof (/** @type {any} */ (bytes))?.then !== 'function')
                 {
                     return deliver(/** @type {Uint8Array} */ (bytes));
@@ -285,6 +311,7 @@ export function createMappingFunctions(host){
                 }
                 const arriving = /** @type {Promise<Uint8Array>} */ (bytes);
                 return /** @type {any} */ (arriving.then(deliver, ()=>{
+                    host.files.close(mapping.node);
                     host.release(address);
                     host.setLastErrorFor?.(owner, ERROR_IO_DEVICE);
                     if (metrics)
@@ -317,6 +344,10 @@ export function createMappingFunctions(host){
                 {
                     host.files.write(view.mapping.node, view.offset,
                         host.readMemory(address >>> 0, view.length));
+                }
+                if (view.mapping.node)
+                {
+                    host.files.close(view.mapping.node);
                 }
                 views.delete(address >>> 0);
                 host.release(address >>> 0);
