@@ -209,10 +209,35 @@ formed at, whatever other path reaches it, so a join two tops meet at still publ
 for each -- the edge that arrives at the entry with the other top leaves, and the runtime forms
 a region there for the top the machine has. The translator keeps every x87 value as a double, as the emulator does; the
 emulator's tagged-double form is read and written directly, a true 80-bit register it left is
-converted inline. Within a block the emitter knows what the block's own pushes and pops made
-of the empty mask, so the stack-fault checks they decide cost nothing, and the plain forms
-(loads, stores, arithmetic, compares) leave the empty mask and the top in their locals stale:
-they are written once, where something reads them -- a check on a register the block changed,
+converted inline. The stack-fault checks -- a register read that is empty, a push into one
+that is held: IE and SF (and C1 for the push), and the indefinite for the value -- are decided
+at translation wherever the empty mask is known there (`planStack` in `emit/x87.js`). A
+region's function is entered from outside only through its head (the host, or another region
+through the hash) and only at a block compiled for the entry's shape; from inside, only along
+the region's edges, which the dispatch takes without the head. So what is known at a block's
+start is what every predecessor in the region left of it -- a push or an `fst` into a register
+leaves it held, a pop or `ffree` empty, and a read leaves it as it was, as a failing check does
+-- met, where the block can be entered, with what the head tests there: the registers a path
+from the block reads before setting them, held, and pushes into, empty. Compiled code keeps the
+stack in one shape at each place, so what one path from a place needs every run through it
+has, and the test -- a `br_table` on the label, then an xor and an and on the empty mask --
+passes; the blocks run with no check and no indefinite to choose, and C1, which a push clears,
+is cleared only where it is not known clear already. An entry whose test fails leaves before
+the block with an untranslated exit of vector `SHAPE`, which goes to the host rather than the
+hash, and the host's interpreter runs the block and raises the fault as before; a region whose
+entries fail four times (`checkedAfter`) is dropped and formed again checked, under a store key
+of its own (`-c`): its entries test nothing, and a block checks what no predecessor decides.
+`x87Shapes: false` in the translator's settings compiles every x87 region so; a region with MMX
+in it knows only what each instruction's own pushes and pops decide. The test machine
+translates checked unless asked, and its `runProgram` translates everything checked from the
+first `SHAPE` exit on, so the corpora run both. On gcc -O2 C built for x87 under the cork host
+alone (the fastest of nine runs, three runs each), a transform, normalise and cull loop went
+281-283 -> 217-238 µs an iteration and a game's entity update 264-273 -> 221-248 (232-269 and
+236-256 checked, with only what the region's own edges carry), their hot regions 36.9 -> 33.5
+and 35.3 -> 31.3 wasm operations an x86 instruction (32.5 and 30.8 with no check at all); the
+SSE builds and the integer workloads emit the same code as before. The plain
+forms (loads, stores, arithmetic, compares) leave the empty mask and the top in their locals
+stale: they are written once, where something reads them -- a check on a register the block changed,
 `fxam`, an MMX instruction or `emms`, every exit and edge, and the block's end -- rather than at
 every push and pop; a register the block has marked dirty is not marked again. An arithmetic
 result is tested for a NaN once: the host's NaN sign fixed and IE raised in that branch. The

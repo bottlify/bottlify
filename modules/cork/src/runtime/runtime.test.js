@@ -19,6 +19,8 @@ function machine(config = {}, ramSize = 4 << 20){
         Tables.SIZE + (/** @type {any} */ (config).blockProfile ? Tables.BLOCK_PROFILE_SIZE : 0)) });
     const bytes = ()=>new Uint8Array(memory.buffer);
     const view = ()=>new DataView(memory.buffer);
+    // The x87 as a fresh processor has it: every register empty.
+    view().setUint8(layout.x87Empty, 0xff);
     const runtime = createCorkRuntime({
         memory, layout, config,
         read: address=>bytes()[layout.ramBase + address],
