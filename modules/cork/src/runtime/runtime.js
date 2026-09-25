@@ -641,7 +641,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             if (count > 0)
             {
                 const address = data.getUint32(at, true);
-                out.push([address, count, data.getUint32(at + 8, true), regionOf.get(address) ?? -1]);
+                out.push([address, count, data.getUint32(at + 8, true),
+                    regionOf.get(address) ?? -1]);
             }
         }
         return out.sort((one, two)=>two[1] - one[1]);

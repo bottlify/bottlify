@@ -27,7 +27,8 @@
  * label and branches back to the dispatch loop, charging the instructions
  * retired since the last charge against the budget and leaving with `budget`
  * when it is spent: only a backward jump can close a loop. A block that falls
- * through to the block emitted right after it does nothing at all. Anything the region cannot continue -- a return, an indirect
+ * through to the block emitted right after it does nothing at all. Anything
+ * the region cannot continue -- a return, an indirect
  * jump, a call, an instruction the emitter does not translate -- writes the
  * next address into the state and leaves with `untranslated`, for the host
  * to run on the other executor or to dispatch to another region.
