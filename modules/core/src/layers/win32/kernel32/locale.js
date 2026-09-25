@@ -985,10 +985,12 @@ export function createLocaleFunctions(host){
                 const resolved = resolvePage(page);
                 // A NULL source is refused before it is measured: measuring
                 // reads it, and a read of address zero is a fault where
-                // Windows answers with an error code.
+                // Windows answers with an error code. A negative destination
+                // size is refused with it, before anything is written: unlike
+                // the source's, it has no "up to the terminator" meaning.
                 const span = (source >>> 0) === 0
                     ? { length: 0 } : sourceSpan(source >>> 0, sourceBytes, 1);
-                if (span.length === 0)
+                if (span.length === 0 || (destinationChars | 0) < 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -1035,7 +1037,7 @@ export function createLocaleFunctions(host){
                 const resolved = resolvePage(page);
                 const span = (source >>> 0) === 0
                     ? { length: 0 } : sourceSpan(source >>> 0, sourceChars, 2);
-                if (span.length === 0)
+                if (span.length === 0 || (destinationBytes | 0) < 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;

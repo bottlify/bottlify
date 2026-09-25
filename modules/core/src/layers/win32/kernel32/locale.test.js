@@ -136,6 +136,29 @@ test('a zero destination measures and writes nothing at all', ()=>{
     assert.equal(host.bytes[0x200], 0xee, 'the destination was not touched');
 });
 
+test('a negative destination size is an invalid parameter, and nothing is written', ()=>{
+    // -1 and -1000 alike: the destination length is a count, not the "up to
+    // the terminator" a negative source length means.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.plantAnsi(0x100, 'foobar');
+    host.plantWide(0x300, 'foobar');
+
+    for (const size of [-1, -1000])
+    {
+        host.bytes.fill(0xee, 0x200, 0x220);
+        host.errors.length = 0;
+        assert.equal(fns.MultiByteToWideChar.handler([CP_ACP, 0, 0x100, -1, 0x200, size]), 0);
+        assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER]);
+        assert.equal(host.bytes[0x200], 0xee, 'the destination was not touched');
+
+        host.errors.length = 0;
+        assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0, 0x300, -1, 0x200, size, 0, 0]), 0);
+        assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER]);
+        assert.equal(host.bytes[0x200], 0xee);
+    }
+});
+
 test('a NULL source is an invalid parameter, not a read of address zero', ()=>{
     const host = fakeHost();
     const fns = createLocaleFunctions(host);
