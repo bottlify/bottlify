@@ -310,7 +310,8 @@ that batches those wakes, and is not the default until a measurement says it sho
 
 `scripts/build.mjs` runs one esbuild pass with three entry points, `src/index.js`,
 `src/host/engine.worker.js` and `src/host/log.worker.js`, bundled separately because a worker is
-loaded by URL rather than imported and each has to carry what it needs. The outputs:
+loaded by URL rather than imported and each has to carry what it needs, and a second over the
+translator (`@bottlify/cork`), which the cpu layer loads by URL too. The outputs:
 
 | file | from | exported as |
 |---|---|---|
@@ -318,6 +319,7 @@ loaded by URL rather than imported and each has to carry what it needs. The outp
 | `dist/engine.worker.js` | `src/host/engine.worker.js` | `@bottlify/core/engine.worker.js` |
 | `dist/log.worker.js` | `src/host/log.worker.js` | loaded by URL from `createApp` |
 | `dist/worklet.js` | copied from `src/layers/audio/output/worklet.js` | `@bottlify/core/worklet.js` |
+| `dist/cork/index.js`, `dist/cork/translator.worker.js` | `modules/cork/src/index.js` and its translation worker | loaded by URL for `engine: 'cork'` or `'hybrid'` |
 | `dist/vendor/libv86.mjs`, `v86.wasm` | copied from `vendor/prebuilt/` | `@bottlify/core/libv86.mjs`, `@bottlify/core/v86.wasm` |
 | `dist/vendor/video-decoder.wasm` | copied from `vendor/prebuilt/` | `@bottlify/core/video-decoder.wasm` |
 | `dist/vendor/directx/*.dll` | copied from `vendor/prebuilt/directx/`, when fetched | the DirectX runtime, handed to `createApp` as `system.files` |
@@ -330,8 +332,19 @@ there, verified against `vendor-lock.json` and `video-decoder-lock.json`). The D
 the one optional artifact: `npm run fetch:directx-runtime` fills `vendor/prebuilt/directx/` and
 the build then copies it into `dist/vendor/directx/`, verified against
 `directx-runtime-lock.json`; absent, the build still succeeds and the package simply has no system
-volume. `import.meta.env.BOTTLIFY_VENDOR` is defined as `./vendor/` so the built module finds its
-emulator beside itself.
+volume. `import.meta.env.BOTTLIFY_VENDOR` is defined as `./vendor/` and
+`import.meta.env.BOTTLIFY_CORK` as `./cork/index.js`, so the built module finds its emulator and its
+translator beside itself.
+
+The build is a production bundle: it defines `import.meta.BOTTLIFY_DIAGNOSTICS` as `false`, and
+every diagnostic instrument -- each guarded by `import.meta.BOTTLIFY_DIAGNOSTICS !== false` -- folds
+away and is left out of the bundle: the phase profiler and its frame and phase tables (`log.profile`
+and `log.frames` answer empty), the GPU backend's profiler and its surface-write and present logs,
+the bridge's timed crossings and per-call phases, the scheduler's slow-slice clock, the translator's
+timings, block profile, store trace and transfer count, and the time stamps only a report reads.
+What the machine does by a clock stays: the guest's time, its time-stamp counter, the page's pacing
+and the frame cap; and so does the frame's sampling, which feeds the translator. The source, which
+the tests, the harness and a development page run as it is, has no such define and keeps them all.
 `createApp` finds `engine.worker.js` the same way, relative to `import.meta.url`; `workerUrl`
 overrides that. `npm run check:package` (run by `prepublishOnly`) asserts the tarball carries every
 file `exports` names and that the binaries are not stubs.

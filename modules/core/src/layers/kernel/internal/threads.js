@@ -125,7 +125,8 @@ export function createScheduler(options){
     const starvation = options.starvation ?? 4000;
     /** Turns given to a thread because it had been passed over too long. */
     let boosts = 0;
-    const wall = options.wall ?? (()=>performance.now());
+    const wall = import.meta.BOTTLIFY_DIAGNOSTICS !== false
+        ? options.wall ?? (()=>performance.now()) : ()=>0;
     /**
      * Told what a parked thread is about to be resumed with: which wait it
      * was in and the value the call answers. The only record of that answer
@@ -555,9 +556,11 @@ export function createScheduler(options){
             // would report every faulting thread as having left its stack.
             watchStack(next);
             const from = cpu.eip?.() ?? 0;
-            const began = wall();
+            // How long it held the machine is a report's alone, and a
+            // production bundle reads no clock for it.
+            const began = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? wall() : 0;
             const instructions = cpu.runSlice(quantum);
-            const held = wall() - began;
+            const held = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? wall() - began : 0;
             next.instructions += instructions;
             next.sincePublished += instructions;
             // Where the heaviest slice of the interval began: one page names
@@ -571,7 +574,7 @@ export function createScheduler(options){
             }
             const slowest = slowSlices[slowSlices.length - 1];
             const kept = slowSlices.length < SLOW_SLICES_KEPT || held > slowest.ms;
-            if (held >= SLOW_SLICE_MS && kept)
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && held >= SLOW_SLICE_MS && kept)
             {
                 slowSlices.push({
                     ms: held, instructions, from, at: cpu.eip?.() ?? 0, thread: next.name ?? null,

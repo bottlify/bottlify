@@ -1084,14 +1084,21 @@ const VENDOR = /** @type {{ env?: { BOTTLIFY_VENDOR?: string } }} */ (import.met
     ?? '../vendor/prebuilt/';
 
 /**
- * The translator to load for `hybrid`: what the caller named, else the
- * package installed beside this one.
+ * Where the translator is, relative to this module: built beside a package,
+ * the workspace's own source otherwise.
+ */
+const CORK = /** @type {{ env?: { BOTTLIFY_CORK?: string } }} */ (import.meta).env?.BOTTLIFY_CORK
+    ?? '../../cork/src/index.js';
+
+/**
+ * The translator to load for `hybrid` or `cork`: what the caller named, else
+ * the one built beside this module (see `CORK`).
  *
  * @param {{ moduleUrl?: string } | undefined} asked
  * @param {string} [here]
  */
 export function corkArtifacts(asked, here = import.meta.url){
-    return { moduleUrl: asked?.moduleUrl ?? new URL('../../cork/src/index.js', here).href };
+    return { moduleUrl: asked?.moduleUrl ?? new URL(CORK, here).href };
 }
 
 /**
@@ -2777,13 +2784,17 @@ async function buildApp(options){
                             // interpreter ran: a frame of ordinary slices that
                             // all ran slowly is a compiler that had thrown its
                             // code away, and nothing else in the frame says so.
-                            journal.note('instructions',
-                                cpu.instructionCount() - retiredAtFrameStart);
-                            journal.note('interpreted',
-                                cpu.interpretedSteps() - interpretedAtFrameStart);
-                            journal.note('hostWrittenBytes',
-                                cpu.hostWrittenBytes() - writtenAtFrameStart);
-                            journal.note('heapDelta', heapUsed() - heapAtFrameStart);
+                            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+                            {
+                                journal.note('instructions',
+                                    cpu.instructionCount() - retiredAtFrameStart);
+                                journal.note('interpreted',
+                                    cpu.interpretedSteps() - interpretedAtFrameStart);
+                                journal.note('hostWrittenBytes',
+                                    cpu.hostWrittenBytes() - writtenAtFrameStart);
+                                journal.note('heapDelta', heapUsed() - heapAtFrameStart);
+                            }
+                            // Run in every build: the frame's samplers feed the translator.
                             journal.endFrame();
                         }
                         // The run's presenter owns the canvas copy; a build
@@ -2798,10 +2809,13 @@ async function buildApp(options){
                             options.device.presentTo?.(frame);
                         }
                         journal.beginFrame();
-                        retiredAtFrameStart = cpu.instructionCount();
-                        interpretedAtFrameStart = cpu.interpretedSteps();
-                        writtenAtFrameStart = cpu.hostWrittenBytes();
-                        heapAtFrameStart = heapUsed();
+                        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+                        {
+                            retiredAtFrameStart = cpu.instructionCount();
+                            interpretedAtFrameStart = cpu.interpretedSteps();
+                            writtenAtFrameStart = cpu.hostWrittenBytes();
+                            heapAtFrameStart = heapUsed();
+                        }
                         framed = true;
                     },
                 }
@@ -4867,11 +4881,15 @@ async function buildApp(options){
                         // time is the guest actually executing -- which is the
                         // number every question about speed starts from.
                         journal.begin('guest', journal.PhaseKind.GUEST);
-                        const compiledBefore = cpu.compiledModules();
+                        const compiledBefore = import.meta.BOTTLIFY_DIAGNOSTICS !== false
+                            ? cpu.compiledModules() : 0;
                         step = kernel.runOnce();
                         // Compiling happens inside the slice, on the way to a
                         // hot page, and is the guest's time only by position.
-                        journal.compiled(cpu.compiledModules() - compiledBefore);
+                        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+                        {
+                            journal.compiled(cpu.compiledModules() - compiledBefore);
+                        }
                         // Where the guest stood when its slice ran out. Sampled
                         // here because this is the only boundary the host owns: a
                         // program that decides something inside its own code makes

@@ -221,17 +221,21 @@ export function createSoundBuffer(
         }
         if (stale > 0)
         {
-            const { play, write } = cursorsNow();
-            note(['s', Math.round(now()), ranges[0]?.from ?? 0,
-                ranges.reduce((sum, range)=>sum + range.bytes, 0), play, write]);
-            staleTrail = trail.slice();
             staleBytes += stale;
             staleDrains++;
-            if (staleAt.length === 64)
+            // What led up to it, for a report; a production bundle keeps none.
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
             {
-                staleAt.shift();
+                const { play, write } = cursorsNow();
+                note(['s', Math.round(now()), ranges[0]?.from ?? 0,
+                    ranges.reduce((sum, range)=>sum + range.bytes, 0), play, write]);
+                staleTrail = trail.slice();
+                if (staleAt.length === 64)
+                {
+                    staleAt.shift();
+                }
+                staleAt.push(Math.round(performance.now()));
             }
-            staleAt.push(Math.round(performance.now()));
         }
     };
 
@@ -611,8 +615,12 @@ export function createSoundBuffer(
                 // between, and what is heard is what was there when it let go.
                 markWritten(held.offset, held.first);
                 markWritten(0, held.second);
-                const { play, write } = cursorsNow();
-                note(['u', Math.round(now()), held.offset, held.first + held.second, play, write]);
+                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+                {
+                    const { play, write } = cursorsNow();
+                    note(['u', Math.round(now()), held.offset, held.first + held.second,
+                        play, write]);
+                }
                 streamEnd = (held.offset + held.first + held.second) % bytes;
             }
             return held;

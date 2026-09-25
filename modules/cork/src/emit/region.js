@@ -273,7 +273,8 @@ export function prepareModule(m, layout, features, memory = {},
     {
         context.undo = addUndoHelper(m, layout);
     }
-    if (countTransfers)
+    // A production bundle emits no diagnostic count, whatever it is asked.
+    if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && countTransfers)
     {
         context.countTransfers = true;
     }
@@ -285,7 +286,7 @@ export function prepareModule(m, layout, features, memory = {},
     {
         context.flat = true;
     }
-    if (blockProfile)
+    if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && blockProfile)
     {
         context.blockProfile = true;
     }
@@ -946,7 +947,7 @@ export class RegionEmitter {
         b.localGet(Local.addr).i32const(0).load('i32_8u', { offset: layout.x87Top }).op(I32.eq);
         b.op(I32.or);
         this.openIf('top');
-        if (this.context.countTransfers)
+        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.countTransfers)
         {
             const at = layout.tables + Tables.TRANSFERS;
             b.i32const(0).i32const(0).load('i32', { offset: at }).i32const(1).op(I32.add)
@@ -1602,7 +1603,7 @@ export class RegionEmitter {
      * @param {boolean[]} live @param {Map<number, any>} plan
      */
     emitInstructions(block, index, live, plan){
-        if (this.context.blockProfile)
+        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.blockProfile)
         {
             this.countBlock(block.start);
         }

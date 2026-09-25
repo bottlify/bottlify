@@ -310,7 +310,7 @@ export function createIjlLibrary({ readMemory, writeMemory, allocate, warn }){
                 {
                     return IJL.INVALID_JPEG_PROPERTIES;
                 }
-                const started = performance.now();
+                const started = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? performance.now() : 0;
                 try
                 {
                     const image = decodeJpeg(bytes);
@@ -326,7 +326,10 @@ export function createIjlLibrary({ readMemory, writeMemory, allocate, warn }){
                 }
                 finally
                 {
-                    decodeMs += performance.now() - started;
+                    if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+                    {
+                        decodeMs += performance.now() - started;
+                    }
                 }
             }
             case IO.JFILE_READPARAMS:

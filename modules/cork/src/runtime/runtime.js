@@ -36,6 +36,7 @@ import { openTranslationWorker } from './translator.js';
 import { ANY_TOP, createEntries } from './entries.js';
 import { PageFlag, createPageTable } from './pages.js';
 import { Tables } from './layout.js';
+import { blockCounts, resetBlockCounts, topBlocks } from './block-profile.js';
 import { CACHE_VERSION, cacheKey, moduleKey, packRegion, unpackRegion } from './cache.js';
 
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').EngineEnv} EngineEnv */
@@ -115,7 +116,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         ...config,
     };
     /** The host clock for a diagnostic timing, or zero when timings are off. */
-    const clock = settings.timings === true ? ()=>performance.now() : ()=>0;
+    const clock = import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.timings === true
+        ? ()=>performance.now() : ()=>0;
     /** Whether new x87 regions are compiled for the wide precision controls. */
     let wide = settings.wideFirst === true;
     /** How a region is formed, the same on this thread, in a batch and in a relink. */
@@ -389,7 +391,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const stalls = [];
     /** @param {string} what @param {number} since @param {number} [floorMs] */
     const noteStall = (what, since, floorMs = 5)=>{
-        if (settings.timings !== true)
+        if (import.meta.BOTTLIFY_DIAGNOSTICS === false || settings.timings !== true)
         {
             return;
         }
@@ -689,79 +691,22 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
 
     // The block profile is past cork's own tables, in a memory sized for it;
     // the hybrid layout's tables are carved from the emulator's RAM.
-    const profiling = settings.blockProfile === true && (layout.codePages ?? -1) < 0;
-    /**
-     * Every counted block as [address, executions, shared, region entry], by the
-     * slot table: the entry of a region the block is in (-1 when none is), so a
-     * profile of the regions' functions divides by the instructions they ran.
-     */
-    const blockCounts = ()=>{
-        const data = view();
-        const base = layout.tables + Tables.BLOCK_PROFILE;
-        /** @type {Map<number, number>} */
-        const regionOf = new Map();
-        for (const record of regions)
-        {
-            for (const [start] of record.spans)
-            {
-                if (!regionOf.has(start))
-                {
-                    regionOf.set(start, record.entry);
-                }
-            }
-        }
-        /** @type {[number, number, number, number][]} */
-        const out = [];
-        for (let slot = 0; slot < Tables.BLOCK_SLOTS; slot++)
-        {
-            const at = base + slot * Tables.BLOCK_SLOT;
-            const count = data.getUint32(at + 4, true);
-            if (count > 0)
-            {
-                const address = data.getUint32(at, true);
-                out.push([address, count, data.getUint32(at + 8, true),
-                    regionOf.get(address) ?? -1]);
-            }
-        }
-        return out.sort((one, two)=>two[1] - one[1]);
-    };
-    let profileResetAt = profiling && settings.blockProfileFrom > 0
+    const profiling = import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.blockProfile === true
+        && (layout.codePages ?? -1) < 0;
+    let profileResetAt = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiling
+        && settings.blockProfileFrom > 0
         ? performance.now() + settings.blockProfileFrom * 1000 : null;
-    const resetBlockCounts = ()=>{
-        const data = view();
-        const base = layout.tables + Tables.BLOCK_PROFILE;
-        for (let slot = 0; slot < Tables.BLOCK_SLOTS; slot++)
-        {
-            data.setUint32(base + slot * Tables.BLOCK_SLOT + 4, 0, true);
-        }
-    };
-    /** The forty most executed, with the region each is in. @param {[number, number, number, number][]} blocks */
-    const topBlocks = blocks=>blocks.slice(0, 40).map(([address, count, shared])=>{
-        let entry = -1;
-        let size = 0;
-        for (const record of regions)
-        {
-            const span = record.spans.find(([start])=>start === address);
-            if (span)
-            {
-                entry = record.entry;
-                size = span[1] - span[0];
-                break;
-            }
-        }
-        return { address, count, shared: shared !== 0, entry, bytes: size };
-    });
-
     /** The options both the inline emitter and the worker's take. */
     const emitOptions = ()=>({
         undoLog: settings.undoLog,
-        countTransfers: settings.countTransfers,
+        countTransfers: import.meta.BOTTLIFY_DIAGNOSTICS !== false
+            && settings.countTransfers === true,
         blockProfile: profiling,
         hash: table !== null,
         wide,
         structure: settings.structure,
         leaveOut,
-        timings: settings.timings === true,
+        timings: import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.timings === true,
         ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
     });
 
@@ -955,7 +900,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @param {{ region: { entry: number, hash: string, blocks?: { start: number, end: number }[] },
      *     entryTop: number }} one */
     const trace = (list, one)=>{
-        if (settings.traceStore)
+        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.traceStore)
         {
             const spans = one.region.blocks
                 ?.map(block=>`${block.start.toString(16)}-${block.end.toString(16)}`);
@@ -1364,10 +1309,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         },
         run(entry, budget){
             const { fn, label } = entries.at(entry);
-            if (profileResetAt !== null && performance.now() >= profileResetAt)
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && profileResetAt !== null
+                && performance.now() >= profileResetAt)
             {
                 profileResetAt = null;
-                resetBlockCounts();
+                resetBlockCounts(view(), layout.tables);
             }
             // One record, rewritten per run: a call-heavy program leaves
             // and re-enters per call, and an object per leave was the
@@ -1750,9 +1696,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         },
         diagnostics(){
             fold();
-            const blocks = profiling ? blockCounts() : null;
+            const blocks = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiling
+                ? blockCounts(view(), layout.tables, regions) : null;
             return {
-                ...(blocks ? { blockCounts: blocks, topBlocks: topBlocks(blocks) } : {}),
+                ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false && blocks
+                    ? { blockCounts: blocks, topBlocks: topBlocks(blocks, regions) } : {}),
                 regions: regions.size,
                 // Counted only by a run that asked (`countTransfers`), else 0.
                 transfers: view().getUint32(layout.tables + Tables.TRANSFERS, true),
@@ -1785,7 +1733,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 shapeMisses: counts.shapeMisses,
                 shapeChecked: counts.shapeChecked,
                 stalls: [...stalls],
-                ...(settings.traceStore ? { storeTrace } : {}),
+                ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.traceStore
+                    ? { storeTrace } : {}),
                 invalidations: counts.invalidations,
                 dropped: counts.dropped,
                 queued: queue.size,

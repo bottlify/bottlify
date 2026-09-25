@@ -92,8 +92,9 @@ export function createCorkHost(config){
     // hybrid carves the tables from the top of the emulator's RAM.
     const layout = ownLayout({ ramSize: memorySize });
     // A profiling run (`blockProfile`) has the block profile past the tables.
-    const pages = pagesFor(layout,
-        Tables.SIZE + (corkConfig?.blockProfile ? Tables.BLOCK_PROFILE_SIZE : 0));
+    const pages = pagesFor(layout, Tables.SIZE
+        + (import.meta.BOTTLIFY_DIAGNOSTICS !== false && corkConfig?.blockProfile
+            ? Tables.BLOCK_PROFILE_SIZE : 0));
     const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
 
     // The memory is fixed (initial === maximum), so the buffer never detaches
@@ -215,9 +216,11 @@ export function createCorkHost(config){
     const readTsc = ()=>BigInt(Math.floor((performance.now() - tscBase) * 1e6));
     // A slow slice's account of itself reads the clock around every range the
     // interpreter runs -- a tenth of a crossing's cost -- so only a run that
-    // asked for the translator's timings keeps one.
-    const timings = corkConfig?.timings === true;
-    const clock = timings ? ()=>performance.now() : ()=>0;
+    // asked for the translator's timings keeps one, and a production bundle
+    // has none.
+    const timings = import.meta.BOTTLIFY_DIAGNOSTICS !== false && corkConfig?.timings === true;
+    const clock = import.meta.BOTTLIFY_DIAGNOSTICS !== false && timings
+        ? ()=>performance.now() : ()=>0;
 
     const runtime = createEngine({
         memory,
@@ -635,7 +638,7 @@ export function createCorkHost(config){
             halted });
         // A slice is a few milliseconds; one of twenty holds a timer's thread,
         // and says what it spent them on.
-        if (timings)
+        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && timings)
         {
             runtime.noteStall?.(`slice i${interpreted}/${Math.round(interpretMs)}ms`
                 + ` f${Math.round(formMs)}ms t${ran - interpreted} h${trapCrossings - trapsBefore}`,

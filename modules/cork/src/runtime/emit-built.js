@@ -73,7 +73,8 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @returns {BuiltBatch}
  */
 export function emitBatch(jobs, layout, features, options = {}){
-    const clock = options.timings === true ? ()=>performance.now() : ()=>0;
+    const clock = import.meta.BOTTLIFY_DIAGNOSTICS !== false && options.timings === true
+        ? ()=>performance.now() : ()=>0;
     const leaveOut = options.leaveOut instanceof Set
         ? options.leaveOut
         : new Set(options.leaveOut ?? []);
