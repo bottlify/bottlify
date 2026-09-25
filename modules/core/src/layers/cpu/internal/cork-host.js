@@ -150,6 +150,8 @@ export function createCorkHost(config){
     // a new start every few instructions does not translate on every one.
     let retiredAtFeed = 0;
     const FEED_MIN_STEPS = 2048;
+    // A candidate was noted since that feed.
+    let notedSinceFeed = false;
     // Read through these in a loop condition: `stopped` is set by `stop()` and
     // `halted` by a nested slice, which the static check cannot see.
     const isHalted = ()=>halted;
@@ -293,10 +295,18 @@ export function createCorkHost(config){
             {
                 feedDue = true;
             }
-            else if ((interpreter?.retired ?? 0) - retiredAtFeed >= FEED_MIN_STEPS)
+            else
             {
-                translateDue = true;
+                notedSinceFeed = true;
             }
+        }
+        // A candidate noted too soon after the last feed is fed once the
+        // spacing allows, here at a later start: a tight loop is noted for the
+        // last time on its 128th turn, and with no frame to feed it -- a
+        // loader's long stretch -- it ran interpreted to its end.
+        if (notedSinceFeed && (interpreter?.retired ?? 0) - retiredAtFeed >= FEED_MIN_STEPS)
+        {
+            translateDue = true;
         }
     };
 
@@ -526,6 +536,7 @@ export function createCorkHost(config){
                 // of the budget: the slice's count is unchanged, so a loader
                 // that never presents a frame still translates.
                 translateDue = false;
+                notedSinceFeed = false;
                 retiredAtFeed = interpreter?.retired ?? 0;
                 const formAt = performance.now();
                 runtime.translatePending().catch(()=>{});

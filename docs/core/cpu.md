@@ -448,7 +448,12 @@ executor to carry the code in the meantime. A title's loader runs millions of in
 met once or twice, so the candidates are many; the runtime drains its queue hottest first -- the
 interpreter keeps counting a waiting candidate and hands it over again at every power of two with
 the count as its heat -- so the loop met forty thousand times is formed before the code met twice,
-and a long queue costs memory, not the hot loop's place. A `hlt` under `cork` ends the slice and
+and a long queue costs memory, not the hot loop's place. With no frame to feed the translator (a
+loader's long stretch) the host feeds it inside the slice, at most once every 2 048 interpreted
+instructions; a candidate noted sooner than that is fed at the first start the interpreter meets
+once the spacing allows -- a tight loop's last note is on its 128th turn, and when all of them fell
+within the spacing the loop ran interpreted to its end (eight million instructions of a
+four-instruction loop in 81 slices: 259 ms interpreted, 17 ms now translated). A `hlt` under `cork` ends the slice and
 not the machine: on the emulator a halt holds the processor until its timer interrupt, whose ROM
 handler only returns, and this host has no timer, so the layer's next slice is the tick and the
 guest goes on at the instruction after the `hlt` -- the idle loop a scheduler parks the processor
