@@ -298,7 +298,11 @@ a guess. A name that is not a decorated function answers `null`.
 and `listResources` read the three-level resource tree. Two traps the code names: every offset
 within the tree is directory-relative but the leaf's `OffsetToData` is an RVA; and a named entry
 is a counted UTF-16 string with no terminator. Strings live in bundles of sixteen under
-`RT_STRING`.
+`RT_STRING`. A language named is that language alone; none named is LANG_NEUTRAL, the search
+Windows makes: `UI_LANGUAGE` (0x0409, the answer `GetUserDefaultUILanguage` gives, read from here),
+its primary language with `SUBLANG_NEUTRAL`, 0x0000, 0x0400, English, and only then the first
+entry -- so a program carrying its dialogs and strings in many languages gets en-US rather than
+whichever sorts first. `FindResource`, `LoadString`, dialogs and menus all look up this way.
 
 ## 4. Limitations and divergences
 

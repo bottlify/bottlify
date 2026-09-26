@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { UI_LANGUAGE } from '../../loader/internal/resources.js';
+
 /**
  * Code pages and the string conversions built on them.
  *
@@ -866,9 +868,10 @@ export function createLocaleFunctions(host){
          *
          * The language the system's own resources are in, which here is the
          * only one there is: a program that picks its strings by this must
-         * land on the same table it picks its formats by.
+         * land on the same table it picks its formats by. It is the loader's,
+         * the one a resource lookup naming no language prefers.
          */
-        GetSystemDefaultUILanguage: { argBytes: 0, handler: ()=>LANGID_EN_US },
+        GetSystemDefaultUILanguage: { argBytes: 0, handler: ()=>UI_LANGUAGE },
 
         /**
          * LANGID GetUserDefaultUILanguage(VOID)
@@ -878,7 +881,7 @@ export function createLocaleFunctions(host){
          * Wine's kernel32 locale tests (test_GetLocaleInfoA,
          * test_ConvertDefaultLocale) require of the pair.
          */
-        GetUserDefaultUILanguage: { argBytes: 0, handler: ()=>LANGID_EN_US },
+        GetUserDefaultUILanguage: { argBytes: 0, handler: ()=>UI_LANGUAGE },
 
         /**
          * BOOL IsValidCodePage(UINT CodePage)
