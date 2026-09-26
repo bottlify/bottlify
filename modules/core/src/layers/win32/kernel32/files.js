@@ -47,6 +47,12 @@ const ERROR_DIR_NOT_EMPTY = 145;
 const ERROR_ALREADY_EXISTS = 183;
 const ERROR_DIRECTORY = 267;
 const ERROR_IO_DEVICE = 1117;
+const ERROR_HANDLE_EOF = 38;
+
+/** Where an OVERLAPPED keeps its status, its count and its starting offset. */
+const OVERLAPPED_INTERNAL = 0;
+const OVERLAPPED_INTERNAL_HIGH = 4;
+const OVERLAPPED_OFFSET = 8;
 
 /** The failure value of each of the four APIs that has its own. */
 const INVALID_HANDLE_VALUE = 0xffffffff;
@@ -232,6 +238,9 @@ export const WIN32_FIND_DATAA = Object.freeze({
  *              closed: (handle: number, object: any) => void }} [ports]
  *           Completion ports. Absent, overlapped I/O still reads and writes;
  *           what it does not do is tell anyone it finished.
+ * @property {(thread: any, routine: number, args: number[]) => void} [queueApc]
+ *           Queues a routine to a thread, to run at its next alertable wait:
+ *           how ReadFileEx and WriteFileEx deliver their completion routines.
  * @property {() => string} [imagePath]
  *           The running program, whose directory is the first place a search
  *           with no path of its own looks. Absent, the search starts at the
@@ -322,6 +331,25 @@ export function createFileFunctions(host){
     const readDword = address=>{
         const bytes = host.readMemory(address, 4);
         return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
+    };
+
+    /**
+     * The end of a ReadFileEx or WriteFileEx: the OVERLAPPED says it finished
+     * and how much moved, and the completion routine is queued to the thread
+     * that asked.
+     *
+     * @param {any} thread @param {number} overlapped @param {number} routine
+     * @param {number} transferred
+     */
+    const completeWith = (thread, overlapped, routine, transferred)=>{
+        writeDword(overlapped + OVERLAPPED_INTERNAL, ERROR_SUCCESS);
+        writeDword(overlapped + OVERLAPPED_INTERNAL_HIGH, transferred >>> 0);
+        if ((routine >>> 0) !== 0)
+        {
+            host.queueApc?.(thread, routine >>> 0,
+                [ERROR_SUCCESS, transferred >>> 0, overlapped >>> 0]);
+        }
+        return 1;
     };
 
     /** @param {string} text */
@@ -1149,6 +1177,108 @@ export function createFileFunctions(host){
                     host.ports?.completed(handle >>> 0, stored, pointer);
                 }
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL ReadFileEx(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead,
+         *   LPOVERLAPPED lpOverlapped, LPOVERLAPPED_COMPLETION_ROUTINE)
+         *
+         * Overlapped I/O that reports through a completion routine instead of
+         * an event or a port: the transfer is done at the OVERLAPPED's offset,
+         * its status and count are written for GetOverlappedResult, and the
+         * routine is queued to the calling thread with (error, count,
+         * OVERLAPPED) -- it runs at that thread's next alertable wait, never
+         * before this returns. hEvent is the program's own to use. A read that
+         * starts at the end of the file fails with ERROR_HANDLE_EOF and queues
+         * nothing.
+         */
+        ReadFileEx: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, buffer, length, overlapped, routine])=>{
+                const file = object(handle, 'file');
+                if (!file)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if (!file.read)
+                {
+                    return fail(ERROR_ACCESS_DENIED);
+                }
+                const pointer = overlapped >>> 0;
+                if (pointer === 0 || !host.queueApc)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const thread = host.currentThread?.() ?? null;
+                /** @param {Uint8Array} bytes */
+                const deliver = bytes=>{
+                    if (bytes.length === 0 && (length >>> 0) > 0)
+                    {
+                        // On the thread that asked, which after a wait for
+                        // the bytes is no longer the one running.
+                        if (thread && host.setLastErrorFor)
+                        {
+                            host.setLastErrorFor(thread, ERROR_HANDLE_EOF);
+                        }
+                        else
+                        {
+                            host.setLastError(ERROR_HANDLE_EOF);
+                        }
+                        return 0;
+                    }
+                    if (bytes.length > 0)
+                    {
+                        host.writeMemory(buffer >>> 0, bytes);
+                    }
+                    return completeWith(thread, pointer, routine, bytes.length);
+                };
+                const bytes = files.read(file.node, readDword(pointer + OVERLAPPED_OFFSET),
+                    length >>> 0);
+                if (typeof (/** @type {any} */ (bytes))?.then !== 'function')
+                {
+                    return deliver(/** @type {any} */ (bytes));
+                }
+                return /** @type {any} */ (bytes).then(deliver, ()=>{
+                    host.setLastErrorFor?.(thread, ERROR_IO_DEVICE);
+                    return 0;
+                });
+            },
+        },
+
+        /**
+         * BOOL WriteFileEx(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite,
+         *   LPOVERLAPPED lpOverlapped, LPOVERLAPPED_COMPLETION_ROUTINE)
+         *
+         * ReadFileEx's counterpart: written at the OVERLAPPED's offset, and the
+         * routine queued the same way.
+         */
+        WriteFileEx: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, buffer, length, overlapped, routine])=>{
+                const file = object(handle, 'file');
+                if (!file)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if (!file.write)
+                {
+                    return fail(ERROR_ACCESS_DENIED);
+                }
+                const pointer = overlapped >>> 0;
+                if (pointer === 0 || !host.queueApc)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const count = length >>> 0;
+                const bytes = count === 0
+                    ? new Uint8Array(0)
+                    : host.readMemory(buffer >>> 0, count).slice();
+                const stored = files.write(file.node, readDword(pointer + OVERLAPPED_OFFSET),
+                    bytes);
+                return completeWith(host.currentThread?.() ?? null, pointer, routine, stored);
             },
         },
 

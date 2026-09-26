@@ -293,7 +293,8 @@ function fakeHandles(){
     };
 }
 
-function setup(){
+/** @param {Record<string, any>} [extra]  More of the host, for the calls that need it. */
+function setup(extra = {}){
     const memory = fakeMemory();
     const files = fakeFiles();
     const handles = fakeHandles();
@@ -327,6 +328,7 @@ function setup(){
         },
         writeConsole: (handle, text)=>console.push({ handle, text }),
         handles,
+        ...extra,
     });
 
     /**
@@ -870,6 +872,87 @@ test('LockFileEx and UnlockFileEx take a range out of an OVERLAPPED, as LockFile
     assert.equal(error.code, ERROR_INVALID_HANDLE);
     assert.equal(fns.LockFileEx.argBytes, 24);
     assert.equal(fns.UnlockFileEx.argBytes, 20);
+});
+
+test('ReadFileEx reads at the OVERLAPPED\'s offset and queues its routine to the caller', ()=>{
+    // Wine's file and pipe tests: the completion routine is not called before
+    // ReadFileEx returns -- it is an APC, run at the thread's next alertable
+    // wait -- with the error, the count and the OVERLAPPED; Internal and
+    // InternalHigh are already written for GetOverlappedResult, and hEvent is
+    // the program's own and left alone.
+    const OVERLAPPED = 0x700;
+    const ROUTINE = 0x401000;
+    const thread = { id: 1 };
+    /** @type {any[][]} */
+    const queued = [];
+    const { memory, files, fns, open } = setup({
+        currentThread: ()=>thread,
+        queueApc: (/** @type {any} */ to, /** @type {number} */ routine,
+            /** @type {number[]} */ args)=>queued.push([to, routine, args]),
+    });
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdef');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    memory.putDword(OVERLAPPED, 0xdeadbeef);
+    memory.putDword(OVERLAPPED + 4, 0xdeadbeef);
+    memory.putDword(OVERLAPPED + 8, 2);
+    memory.putDword(OVERLAPPED + 12, 0);
+    memory.putDword(OVERLAPPED + 16, 0x1234);
+
+    assert.equal(fns.ReadFileEx.handler([handle, BUFFER, 3, OVERLAPPED, ROUTINE]), 1);
+    assert.equal(String.fromCharCode(...memory.bytes.subarray(BUFFER, BUFFER + 3)), 'cde');
+    assert.deepEqual(queued, [[thread, ROUTINE, [0, 3, OVERLAPPED]]]);
+    assert.equal(memory.dword(OVERLAPPED), 0, 'Internal: the status');
+    assert.equal(memory.dword(OVERLAPPED + 4), 3, 'InternalHigh: the count');
+    assert.equal(memory.dword(OVERLAPPED + 16), 0x1234, 'hEvent untouched');
+    assert.equal(fns.ReadFileEx.argBytes, 20);
+});
+
+test('ReadFileEx at the end of the file fails and queues nothing', ()=>{
+    // The loop in Wine's file test reads until ReadFileEx fails, and checks the
+    // routine ran only for the reads that succeeded.
+    const ERROR_HANDLE_EOF = 38;
+    const OVERLAPPED = 0x700;
+    /** @type {any[][]} */
+    const queued = [];
+    const { memory, files, error, fns, open } = setup({
+        currentThread: ()=>({}),
+        queueApc: (/** @type {any[]} */ ...args)=>queued.push(args),
+    });
+    files.put('C:\\GAME\\SAVE.DAT', 'abcd');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    memory.putDword(OVERLAPPED + 8, 4);
+
+    assert.equal(fns.ReadFileEx.handler([handle, BUFFER, 16, OVERLAPPED, 0x401000]), 0);
+    assert.equal(error.code, ERROR_HANDLE_EOF);
+    assert.deepEqual(queued, []);
+    assert.equal(fns.ReadFileEx.handler([0x1234, BUFFER, 16, OVERLAPPED, 0x401000]), 0);
+    assert.equal(error.code, ERROR_INVALID_HANDLE);
+    assert.equal(fns.ReadFileEx.handler([handle, BUFFER, 16, 0, 0x401000]), 0,
+        'there is no offset without an OVERLAPPED');
+    assert.equal(error.code, ERROR_INVALID_PARAMETER);
+});
+
+test('WriteFileEx writes at the OVERLAPPED\'s offset and queues its routine', ()=>{
+    const OVERLAPPED = 0x700;
+    const ROUTINE = 0x401000;
+    const thread = { id: 1 };
+    /** @type {any[][]} */
+    const queued = [];
+    const { memory, files, fns, open } = setup({
+        currentThread: ()=>thread,
+        queueApc: (/** @type {any} */ to, /** @type {number} */ routine,
+            /** @type {number[]} */ args)=>queued.push([to, routine, args]),
+    });
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdef');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    memory.putString(BUFFER, 'XY');
+    memory.putDword(OVERLAPPED + 8, 4);
+
+    assert.equal(fns.WriteFileEx.handler([handle, BUFFER, 2, OVERLAPPED, ROUTINE]), 1);
+    assert.equal(files.text('C:\\GAME\\SAVE.DAT'), 'abcdXY');
+    assert.deepEqual(queued, [[thread, ROUTINE, [0, 2, OVERLAPPED]]]);
+    assert.equal(memory.dword(OVERLAPPED + 4), 2);
+    assert.equal(fns.WriteFileEx.argBytes, 20);
 });
 
 test('a search handle is not a file handle', ()=>{

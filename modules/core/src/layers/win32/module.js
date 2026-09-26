@@ -968,6 +968,7 @@ export const win32Module = {
                     namedObjects,
                     currentThread: ()=>kernel.currentThread(),
                     setLastErrorFor: setErrorOn,
+                    queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
                     ports: {
                         /** @param {number} overlapped */
                         offsetOf: overlapped=>ports.offsetOf(overlapped),
