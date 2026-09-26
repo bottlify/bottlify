@@ -187,6 +187,13 @@ const MAPVK_VSC_TO_VK = 1;
 const MAPVK_VK_TO_CHAR = 2;
 const MAPVK_VSC_TO_VK_EX = 3;
 
+/**
+ * The ANSI page as text, for the calls that classify one of its characters.
+ * Its five unassigned bytes decode as C1 controls, which no category but a
+ * control's claims.
+ */
+const ANSI_TEXT = new TextDecoder('windows-1252');
+
 /** @param {number} vk @returns {import('./keys.js').KeyMapping | null} */
 function mappingForVk(vk){
     const physical = codeForVk(vk);
@@ -410,6 +417,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
     let cursorIsNull = false;
     /** The last picture handed up, so only a change is ever reported. */
     let cursorShown = true;
+    /** What SetMessageExtraInfo last set, for GetMessageExtraInfo. */
+    let messageExtraInfo = 0;
 
     /**
      * The cursor as the page should show it, derived from the two facts Windows
@@ -581,6 +590,22 @@ export function createSystemFunctions({ host, live, windows, classes }){
             host.writeMemory(at, mapCaseAnsi(host.readMemory(at, length), upper));
             return length;
         },
+    });
+
+    /**
+     * The IsChar family's one test: the character, as the ANSI page or UTF-16
+     * reads it, against a Unicode category -- the classification CharUpper
+     * and CharLower already work from, so the two never disagree about a
+     * letter.
+     *
+     * @param {RegExp} category @param {boolean} wide
+     */
+    const isCharacter = (category, wide)=>({
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([code])=>(category.test(wide
+            ? String.fromCharCode(code & 0xffff)
+            : ANSI_TEXT.decode(new Uint8Array([code & 0xff]))) ? 1 : 0),
     });
 
     /** @param {number} hwnd @returns {any | null} the class a window was made from */
@@ -1022,6 +1047,22 @@ export function createSystemFunctions({ host, live, windows, classes }){
         return 1;
     };
 
+    /**
+     * SystemParametersInfo, both spellings: the work area, and a refusal for
+     * everything else.
+     *
+     * @param {number} action @param {number} value
+     */
+    const systemParameter = (action, value)=>{
+        const SPI_GETWORKAREA = 0x0030;
+        if ((action >>> 0) !== SPI_GETWORKAREA || (value >>> 0) === 0)
+        {
+            return 0;
+        }
+        writeRect(host, value, { left: 0, top: 0, right: screen.width, bottom: screen.height });
+        return 1;
+    };
+
     /** @param {number} index */
     const metric = index=>{
         switch (index | 0){
@@ -1152,16 +1193,19 @@ export function createSystemFunctions({ host, live, windows, classes }){
         SystemParametersInfoA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([action, , value])=>{
-                const SPI_GETWORKAREA = 0x0030;
-                if ((action >>> 0) !== SPI_GETWORKAREA || (value >>> 0) === 0)
-                {
-                    return 0;
-                }
-                writeRect(host, value,
-                    { left: 0, top: 0, right: screen.width, bottom: screen.height });
-                return 1;
-            },
+            handler: ([action, , value])=>systemParameter(action, value),
+        },
+
+        /**
+         * BOOL SystemParametersInfoW(UINT uiAction, UINT uiParam, PVOID pvParam,
+         *                            UINT fWinIni)
+         *
+         * The same answers: the work area is a RECT in either spelling.
+         */
+        SystemParametersInfoW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([action, , value])=>systemParameter(action, value),
         },
 
         /** HWND GetDesktopWindow(void) */
@@ -1722,6 +1766,22 @@ export function createSystemFunctions({ host, live, windows, classes }){
         CharUpperBuffA: caseOfBuffer(true),
 
         /**
+         * BOOL IsCharAlphaA(CHAR ch) / IsCharAlphaNumericA / IsCharLowerA /
+         * IsCharUpperA, and the W spellings over a WCHAR
+         *
+         * A letter, a letter or a digit, a lowercase letter, an uppercase one:
+         * an accented letter of the page counts, as it does to CharUpper.
+         */
+        IsCharAlphaA: isCharacter(/\p{L}/u, false),
+        IsCharAlphaNumericA: isCharacter(/[\p{L}\p{Nd}]/u, false),
+        IsCharLowerA: isCharacter(/\p{Ll}/u, false),
+        IsCharUpperA: isCharacter(/\p{Lu}/u, false),
+        IsCharAlphaW: isCharacter(/\p{L}/u, true),
+        IsCharAlphaNumericW: isCharacter(/[\p{L}\p{Nd}]/u, true),
+        IsCharLowerW: isCharacter(/\p{Ll}/u, true),
+        IsCharUpperW: isCharacter(/\p{Lu}/u, true),
+
+        /**
          * LPSTR CharPrevA(LPCSTR lpszStart, LPCSTR lpszCurrent)
          *
          * The previous character, never before the start: at the start the
@@ -2242,6 +2302,31 @@ export function createSystemFunctions({ host, live, windows, classes }){
         GetCursor: {
             argBytes: 0,
             handler: ()=>currentCursor,
+        },
+
+        /**
+         * BOOL GetCursorInfo(PCURSORINFO pci)
+         *
+         * The cursor, whether ShowCursor's count has it showing, and where it
+         * is. cbSize is the caller's declaration of the structure and a wrong
+         * one is refused, as Windows refuses it.
+         */
+        GetCursorInfo: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([info])=>{
+                const CURSORINFO_SIZE = 20;
+                const CURSOR_SHOWING = 0x1;
+                if ((info >>> 0) === 0 || readU32(info >>> 0) !== CURSORINFO_SIZE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const at = host.cursor?.() ?? { x: 0, y: 0 };
+                writeU32s(host, (info >>> 0) + 4, [cursorShowCount >= 0 ? CURSOR_SHOWING : 0,
+                    currentCursor, at.x, at.y]);
+                return 1;
+            },
         },
 
         /**
@@ -3111,6 +3196,28 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: ()=>{
                 const at = host.queue.last?.();
                 return at ? (at.x & 0xffff) | (at.y & 0xffff) << 16 : 0;
+            },
+        },
+
+        /**
+         * LPARAM GetMessageExtraInfo(VOID) and LPARAM SetMessageExtraInfo(LPARAM)
+         *
+         * The thread's extra message information: what a program set, read
+         * back until it sets another, the setter answering with the value it
+         * replaced. No input here carries any of its own.
+         */
+        GetMessageExtraInfo: {
+            argBytes: 0,
+            handler: ()=>messageExtraInfo,
+        },
+
+        SetMessageExtraInfo: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([value])=>{
+                const previous = messageExtraInfo;
+                messageExtraInfo = value >>> 0;
+                return previous;
             },
         },
 

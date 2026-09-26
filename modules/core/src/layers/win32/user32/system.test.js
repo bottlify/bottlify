@@ -895,6 +895,75 @@ test('CharLowerA and CharUpperA convert a string in place, or a character by val
     assert.equal(fns.CharLowerBuffA.handler([0, 4]), 0);
 });
 
+test('the IsChar family classifies a character of the ANSI page, or a UTF-16 one', ()=>{
+    const { fns } = setup();
+    /** @param {string} name @param {number} code */
+    const ask = (name, code)=>fns[name].handler([code]);
+
+    for (const name of ['IsCharAlphaA', 'IsCharAlphaNumericA', 'IsCharLowerA', 'IsCharUpperA',
+        'IsCharAlphaW', 'IsCharAlphaNumericW', 'IsCharLowerW', 'IsCharUpperW'])
+    {
+        assert.equal(fns[name].argBytes, 4, `${name} pops its one argument`);
+    }
+    assert.equal(ask('IsCharAlphaA', 0x61), 1, 'a letter');
+    assert.equal(ask('IsCharAlphaA', 0x31), 0, 'a digit is not');
+    assert.equal(ask('IsCharAlphaNumericA', 0x31), 1, 'but is alphanumeric');
+    assert.equal(ask('IsCharAlphaNumericA', 0x2d), 0, 'and a dash is neither');
+    assert.equal(ask('IsCharAlphaA', 0xe9), 1, 'an accented letter of the page counts');
+    assert.equal(ask('IsCharUpperA', 0xc9), 1, 'and has a case');
+    assert.equal(ask('IsCharLowerA', 0xc9), 0);
+    assert.equal(ask('IsCharLowerA', 0xdf), 1, 'sharp s is a lowercase letter');
+    assert.equal(ask('IsCharUpperA', 0x8a), 1, 'S caron sits among the page\'s own additions');
+    assert.equal(ask('IsCharAlphaA', 0xffffff41), 1, 'a CHAR widened with its sign is still A');
+    assert.equal(ask('IsCharLowerW', 0x0431), 1, 'a Cyrillic small letter, read as UTF-16');
+    assert.equal(ask('IsCharUpperW', 0x0411), 1);
+    assert.equal(ask('IsCharAlphaW', 0x3000), 0, 'an ideographic space is no letter');
+});
+
+test('GetCursorInfo reports the cursor, whether it shows and where, for a declared size', ()=>{
+    const { memory, fns, errors } = setup({ cursor: { x: 12, y: 34 } });
+    const CURSORINFO_SIZE = 20;
+    const CURSOR_SHOWING = 1;
+    const ERROR_INVALID_PARAMETER = 87;
+    fns.SetCursor.handler([0x300]);
+    memory.putU32s(OUT_BUFFER, [CURSORINFO_SIZE, UNTOUCHED, UNTOUCHED, UNTOUCHED, UNTOUCHED]);
+
+    assert.equal(fns.GetCursorInfo.handler([OUT_BUFFER]), 1);
+    assert.deepEqual([0, 4, 8, 12, 16].map(at=>memory.u32(OUT_BUFFER + at)),
+        [CURSORINFO_SIZE, CURSOR_SHOWING, 0x300, 12, 34]);
+
+    fns.ShowCursor.handler([0]);
+    fns.GetCursorInfo.handler([OUT_BUFFER]);
+    assert.equal(memory.u32(OUT_BUFFER + 4), 0, 'a count below zero is not showing');
+
+    memory.putU32s(OUT_BUFFER, [CURSORINFO_SIZE - 1]);
+    assert.equal(fns.GetCursorInfo.handler([OUT_BUFFER]), 0, 'a wrong cbSize is refused');
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
+});
+
+test('SystemParametersInfoW answers the work area as the A spelling does', ()=>{
+    const { memory, fns } = setup();
+    const SPI_GETWORKAREA = 0x0030;
+    memory.fill(RECT_BUFFER, 4);
+
+    assert.equal(fns.SystemParametersInfoW.argBytes, 16);
+    assert.equal(fns.SystemParametersInfoW.handler([SPI_GETWORKAREA, 0, RECT_BUFFER, 0]), 1);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)),
+        [0, 0, SCREEN.width, SCREEN.height]);
+    assert.equal(fns.SystemParametersInfoW.handler([0x0068, 0, RECT_BUFFER, 0]), 0,
+        'and refuses what the A spelling refuses');
+});
+
+test('SetMessageExtraInfo answers with the value it replaced, which GetMessageExtraInfo read', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.GetMessageExtraInfo.handler([]), 0, 'nothing set yet');
+    assert.equal(fns.SetMessageExtraInfo.handler([0xdeadbeef]), 0);
+    assert.equal(fns.GetMessageExtraInfo.handler([]), 0xdeadbeef);
+    assert.equal(fns.SetMessageExtraInfo.handler([7]), 0xdeadbeef);
+    assert.equal(fns.SetMessageExtraInfo.argBytes, 4);
+    assert.equal(fns.GetMessageExtraInfo.argBytes, 0);
+});
+
 test('wsprintfA reads its arguments off the stack and pops none of them', ()=>{
     // cdecl: the caller cleans up, so the count declared here says how many
     // slots to read. Declaring too few is a conversion that gets nothing.

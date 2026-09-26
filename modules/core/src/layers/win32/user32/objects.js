@@ -89,6 +89,8 @@ const MF_OWNERDRAW = 0x0100;
 const MF_SEPARATOR = 0x0800;
 /** The check mark of the default menu font, in pixels each way. */
 const CHECK_MARK_SIZE = 13;
+/** What a call handed a handle that names no menu leaves for GetLastError. */
+const ERROR_INVALID_MENU_HANDLE = 1401;
 
 /**
  * The system menu every window has by default: the commands the frame's own
@@ -809,6 +811,26 @@ export function createObjectFunctions({ host, live }){
                 menus.delete(menu.handle);
                 host.handles.close(menu.handle);
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL IsMenu(HMENU hMenu)
+         *
+         * Whether the handle names a menu that has not been destroyed; a
+         * handle that does not is refused with the reason, as Windows refuses
+         * it.
+         */
+        IsMenu: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                if (menuOf(handle))
+                {
+                    return 1;
+                }
+                host.setLastError?.(ERROR_INVALID_MENU_HANDLE);
+                return 0;
             },
         },
 
