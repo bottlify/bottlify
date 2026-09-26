@@ -377,6 +377,23 @@ test('an item\'s text and param round-trip through GETITEM and SETITEM', async()
     assert.equal(context.memory.readCString(OUT + 96, 32), 'renamed');
 });
 
+test('an item\'s text in the upper half of the ANSI page reads back as its bytes', async()=>{
+    // TVM_INSERTITEMA's text is read as Windows-1252, where 0x80 is the euro
+    // sign, 0x99 the trade mark and 0x97 an em dash, and TVM_GETITEMA writes
+    // it back in that page.
+    const context = setup();
+    await context.makeHost();
+    const tree = await context.tree(0);
+    const item = context.insert(tree, TVI_ROOT, { text: '\x80\x99\x97\xe9' });
+    context.memory.put32(OUT + TVITEM.hItem, item);
+    context.memory.put32(OUT + TVITEM.mask, TVIF_TEXT);
+    context.memory.put32(OUT + TVITEM.pszText, OUT + 64);
+    context.memory.put32(OUT + TVITEM.cchTextMax, 32);
+    assert.equal(context.fns.SendMessageA.handler([tree, TVM_GETITEMA, 0, OUT]), 1);
+    assert.deepEqual([...context.memory.bytes.subarray(OUT + 64, OUT + 69)],
+        [0x80, 0x99, 0x97, 0xe9, 0]);
+});
+
 test('a callback text is asked of the parent with TVN_GETDISPINFO', async()=>{
     const context = setup();
     await context.makeHost();
