@@ -44,7 +44,9 @@ export function createFakeDevice(options = {}){
 
     /** @param {any} descriptor */
     const createTexture = descriptor=>{
-        const texture = object('texture', { descriptor });
+        // What a GPUTexture says of itself, read by whoever decides how to use one.
+        const texture = object('texture', { descriptor, usage: descriptor.usage ?? 0,
+            format: descriptor.format, sampleCount: descriptor.sampleCount ?? 1 });
         const kept = KEPT_FORMATS[descriptor.format];
         if (kept)
         {
@@ -387,6 +389,11 @@ export function createFakeDevice(options = {}){
      * first frame of the run and never again.
      */
     const screenTexture = object('canvasTexture');
+    screenTexture.createView = (/** @type {any} */ viewDescriptor)=>{
+        const view = object('view', { texture: screenTexture, viewDescriptor });
+        calls.push({ op: 'createView', texture: screenTexture, view });
+        return view;
+    };
     const canvas = { width: 0, height: 0, getContext: ()=>screen };
     const screen = {
         canvas,

@@ -16,7 +16,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createBackend } from '../backend.js';
 import { createFakeDevice } from './fake-device.js';
-import { createPresenter, expandRow } from './presenter.js';
+import {
+    GAMMA_ENTRIES, GAMMA_WGSL, createPresenter, expandRow, gammaTable, isIdentityRamp,
+} from './presenter.js';
 
 /** Guest memory is a flat buffer; surfaces are wherever the test puts them. */
 function harness(){
@@ -151,8 +153,9 @@ test('recorded: a burst of changes is one upload, one frame and one present', ()
     assert.equal(h.presented.length, 1);
     assert.equal(h.presented[0].surface.format, 'bgra8unorm');
     assert.deepEqual(h.presenter.diagnostics(), {
-        presents: 3, uploads: 1, bytes: 64, shownByOwner: 0, shown: 0, shownBy: {},
-        lastBuffer: 0x1000, pending: false, claimed: 0, failures: [], disposed: false,
+        presents: 3, uploads: 1, bytes: 64, shownByOwner: 0, shown: 0, gammaShown: 0,
+        shownBy: {}, lastBuffer: 0x1000, pending: false, claimed: 0, gamma: false,
+        failures: [], disposed: false,
     });
 
     h.presenter.present(surface);
@@ -340,4 +343,131 @@ test('every canvas copy is recorded under the label of what was shown', ()=>{
     assert.deepEqual(presenter.diagnostics().shownBy, { desktop: 1, 'guest bytes': 1, target: 1 });
     assert.deepEqual(presenter.presented().history.map(record=>record.label),
         ['desktop', 'guest bytes', 'target']);
+});
+
+// --- the gamma ramp, on the way to the canvas ---
+
+/** @param {(index: number) => number} entry @returns {any} one ramp, the same on every channel */
+const rampOf = entry=>{
+    const channel = Uint16Array.from({ length: GAMMA_ENTRIES }, (_, index)=>entry(index));
+    return { red: channel, green: channel.slice(), blue: channel.slice() };
+};
+
+/** A presenter over the recording device's canvas, and a backend presenting through it. */
+function canvasHarness(){
+    const gpu = createFakeDevice();
+    const ram = new Uint8Array(0x1000);
+    const presenter = createPresenter({
+        device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+        now: ()=>0,
+    });
+    const backend = createBackend({
+        device: gpu.device, queue: gpu.queue,
+        presentTo: frame=>presenter.show(frame), now: ()=>0,
+    });
+    presenter.attach({
+        backend: ()=>backend,
+        readMemory: (address, length)=>ram.slice(address, address + length),
+    });
+    return {
+        gpu, presenter, backend,
+        /** Shows a one-pixel primary through the whole path. */
+        show(){
+            presenter.present({ buffer: 0x100, width: 1, height: 1, pitch: 4, bitCount: 32,
+                palette: null });
+            presenter.flush();
+        },
+    };
+}
+
+test('a ramp counts by the high byte of each entry, so both identities show values as they are',
+    ()=>{
+        assert.ok(isIdentityRamp(rampOf(index=>index * 257)), 'each index times 257');
+        assert.ok(isIdentityRamp(rampOf(index=>index << 8)), 'each index shifted up by eight');
+        assert.ok(!isIdentityRamp(rampOf(index=>(255 - index) * 257)));
+
+        const table = gammaTable({ ...rampOf(index=>index * 257),
+            green: Uint16Array.from({ length: GAMMA_ENTRIES }, (_, index)=>(255 - index) << 8) });
+        assert.equal(table.length, GAMMA_ENTRIES * 4, 'four floats a row: a uniform array stride');
+        assert.deepEqual([...table.subarray(0, 4)], [0, 1, 0, 0]);
+        assert.deepEqual([...table.subarray(255 * 4, 256 * 4)], [1, 0, 1, 0]);
+        assert.equal(table[128 * 4], Math.fround(128 / 255));
+    });
+
+test('recorded: with a ramp in effect a frame is drawn onto the canvas through it', ()=>{
+    const h = canvasHarness();
+    h.show();
+    assert.equal(h.gpu.count('copyTextureToTexture'), 1, 'no ramp: the frame is copied');
+    assert.equal(h.presenter.diagnostics().gamma, false);
+
+    const inverted = rampOf(index=>(255 - index) * 257);
+    h.presenter.setGammaRamp('program', inverted);
+    h.gpu.reset();
+    h.show();
+
+    assert.equal(h.gpu.count('copyTextureToTexture'), 0, 'not copied');
+    const [module] = h.gpu.of('createShaderModule');
+    assert.equal(module.descriptor.code, GAMMA_WGSL);
+    const [pipeline] = h.gpu.of('createRenderPipeline');
+    assert.deepEqual(pipeline.descriptor.fragment.targets, [{ format: 'bgra8unorm' }],
+        'the canvas is drawn in the frame\'s own format');
+    const pass = h.gpu.of('beginRenderPass').find(call=>call.descriptor.label === 'present-gamma');
+    assert.ok(pass, 'a pass onto the canvas');
+    assert.equal(pass.descriptor.colorAttachments[0].view.texture,
+        h.gpu.screen.getCurrentTexture());
+    const draws = h.gpu.of('draw').filter(call=>call.pass === pass.pass);
+    assert.deepEqual(draws.map(call=>call.args), [[3]], 'one triangle over the canvas');
+    const [written] = h.gpu.of('writeBuffer').filter(call=>call.buffer.descriptor.label
+        === 'present-gamma');
+    assert.deepEqual([...new Float32Array(written.bytes.buffer)], [...gammaTable(inverted)],
+        'the table is the ramp');
+    assert.equal(h.presenter.diagnostics().gammaShown, 1);
+
+    h.gpu.reset();
+    h.show();
+    assert.equal(h.gpu.of('writeBuffer').filter(call=>call.buffer.descriptor.label
+        === 'present-gamma').length, 0, 'an unchanged ramp is not written again');
+    assert.equal(h.gpu.count('createRenderPipeline'), 0, 'nor is the pass built again');
+});
+
+test('the latest ramp set is in effect, and taking it back shows the one before', ()=>{
+    const h = canvasHarness();
+    const dim = rampOf(index=>(index >> 1) * 257);
+    const inverted = rampOf(index=>(255 - index) * 257);
+    h.presenter.setGammaRamp('display', dim);
+    h.presenter.setGammaRamp('device', inverted);
+    assert.deepEqual([...(h.presenter.gammaRamp()?.red ?? [])], [...inverted.red]);
+    h.presenter.setGammaRamp('device', null);
+    assert.deepEqual([...(h.presenter.gammaRamp()?.red ?? [])], [...dim.red],
+        'a device that goes gives the display back its ramp');
+    h.show();
+    const [written] = h.gpu.of('writeBuffer').filter(call=>call.buffer.descriptor.label
+        === 'present-gamma');
+    assert.deepEqual([...new Float32Array(written.bytes.buffer)], [...gammaTable(dim)]);
+
+    h.presenter.setGammaRamp('display', rampOf(index=>index * 257));
+    h.gpu.reset();
+    h.show();
+    assert.equal(h.gpu.count('copyTextureToTexture'), 1, 'the identity is copied, not drawn');
+    h.presenter.setGammaRamp('display', null);
+    assert.equal(h.presenter.gammaRamp(), null);
+});
+
+test('a frame the pass cannot read is copied as it is', ()=>{
+    const h = canvasHarness();
+    h.presenter.setGammaRamp('program', rampOf(index=>(255 - index) * 257));
+    const target = h.backend.createSurface({ width: 1, height: 1, format: 'bgra8unorm',
+        label: 'target', usage: h.backend.TextureUsage.RENDER_ATTACHMENT
+            | h.backend.TextureUsage.COPY_SRC });
+    const frame = h.backend.beginFrame();
+    frame.present(target);
+    frame.end();
+    assert.equal(h.gpu.count('copyTextureToTexture'), 1);
+    assert.equal(h.presenter.diagnostics().gammaShown, 0);
+});
+
+test('without a canvas no ramp reaches the picture, and the presenter says so', ()=>{
+    const h = harness();
+    assert.equal(h.presenter.appliesGamma(), false);
+    assert.equal(canvasHarness().presenter.appliesGamma(), true);
 });
