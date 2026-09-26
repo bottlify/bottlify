@@ -218,6 +218,117 @@ test('the guest code around a sleep takes the lock back, and says when the time 
     assert.deepEqual([...cs.subarray(-4)], [0x58, 0xc2, 0x0c, 0x00], 'pop eax; ret 12');
 });
 
+const ONCE = 0x200;
+const PENDING = 0x210;
+const CONTEXT = 0x220;
+const INIT_ONCE_CHECK_ONLY = 1;
+const INIT_ONCE_ASYNC = 2;
+const INIT_ONCE_INIT_FAILED = 4;
+const ERROR_INVALID_PARAMETER = 87;
+const ERROR_GEN_FAILURE = 31;
+
+test('a one-time initialisation begins once and completes once, as Wine\'s sync test has it', ()=>{
+    const { bytes, fns, errors, word } = setup();
+    const view = new DataView(bytes.buffer);
+    /** @param {number} flags */
+    const begin = flags=>fns.InitOnceBeginInitialize.handler([ONCE, flags, PENDING, CONTEXT]);
+    /** @param {number} flags @param {number} context */
+    const complete = (flags, context)=>fns.InitOnceComplete.handler([ONCE, flags, context]);
+    /** @param {number} result @param {number} code */
+    const refused = (result, code)=>{
+        assert.equal(result, 0);
+        assert.equal(errors.at(-1), code);
+    };
+
+    view.setUint32(ONCE, 0xdeadbeef, true);
+    fns.InitOnceInitialize.handler([ONCE]);
+    assert.equal(word(ONCE), 0);
+    assert.equal(begin(0), 1);
+    assert.equal(word(PENDING), 1, 'this caller is the one to do it');
+    assert.equal(word(ONCE), 1);
+    refused(begin(INIT_ONCE_CHECK_ONLY), ERROR_GEN_FAILURE);
+    refused(complete(INIT_ONCE_INIT_FAILED, 0xdeadbee0), ERROR_INVALID_PARAMETER);
+    assert.equal(complete(0, 0xdeadbee0), 1);
+    assert.equal(word(ONCE), 0xdeadbee2, 'done, with its context above the state');
+    assert.equal(begin(INIT_ONCE_CHECK_ONLY), 1);
+    assert.equal(word(PENDING), 0);
+    assert.equal(word(CONTEXT), 0xdeadbee0);
+
+    fns.InitOnceInitialize.handler([ONCE]);
+    refused(complete(INIT_ONCE_INIT_FAILED, 0), ERROR_GEN_FAILURE);
+    refused(complete(INIT_ONCE_INIT_FAILED | INIT_ONCE_ASYNC, 0), ERROR_INVALID_PARAMETER);
+    assert.equal(begin(0), 1);
+    refused(begin(INIT_ONCE_ASYNC), ERROR_INVALID_PARAMETER);
+    refused(complete(0, 0xdeadbeef), ERROR_INVALID_PARAMETER);
+    assert.equal(complete(INIT_ONCE_INIT_FAILED, 0), 1);
+    assert.equal(word(ONCE), 0, 'failed, it may be begun again');
+
+    assert.equal(begin(INIT_ONCE_ASYNC), 1);
+    assert.equal(word(ONCE), 3);
+    refused(begin(0), ERROR_INVALID_PARAMETER);
+    assert.equal(begin(INIT_ONCE_ASYNC), 1, 'others begin beside it without waiting');
+    refused(complete(INIT_ONCE_INIT_FAILED, 0), ERROR_INVALID_PARAMETER);
+    refused(complete(INIT_ONCE_ASYNC, 0xdeadbeef), ERROR_INVALID_PARAMETER);
+    assert.equal(complete(INIT_ONCE_ASYNC, 0xdeadbee0), 1);
+    assert.equal(word(ONCE), 0xdeadbee2);
+    refused(complete(INIT_ONCE_INIT_FAILED | INIT_ONCE_ASYNC, 0), ERROR_INVALID_PARAMETER);
+    refused(begin(INIT_ONCE_CHECK_ONLY | INIT_ONCE_ASYNC), ERROR_INVALID_PARAMETER);
+});
+
+test('a caller that finds initialisation under way waits for it, and is told how it went', ()=>{
+    const { fns, threads, blocked, woken, run, word } = setup();
+    /** @param {number} pending @param {number} context */
+    const begin = (pending, context)=>
+        fns.InitOnceBeginInitialize.handler([ONCE, 0, pending, context]);
+
+    assert.equal(begin(PENDING, CONTEXT), 1);
+    run(threads.b);
+    assert.equal(begin(PENDING + 4, CONTEXT + 4), PARKED);
+    run(threads.c);
+    assert.equal(begin(PENDING + 8, CONTEXT + 8), PARKED);
+    assert.deepEqual(blocked.map(entry=>entry.thread), [threads.b, threads.c]);
+
+    run(threads.a);
+    fns.InitOnceComplete.handler([ONCE, INIT_ONCE_INIT_FAILED, 0]);
+    assert.deepEqual(woken, [{ thread: threads.b, result: 1 }],
+        'a failure passes it to the next, who is now the one to do it');
+    assert.equal(word(PENDING + 4), 1);
+    assert.equal(word(ONCE), 1);
+
+    run(threads.b);
+    fns.InitOnceComplete.handler([ONCE, 0, 0x5550]);
+    assert.deepEqual(woken.at(-1), { thread: threads.c, result: 1 });
+    assert.equal(word(PENDING + 8), 0, 'done: not pending');
+    assert.equal(word(CONTEXT + 8), 0x5550, 'and here is the context');
+});
+
+test('ExecuteOnce runs the function in the first caller only, and hands out its context', ()=>{
+    const { fns, threads, woken, run, word, builder, trap, bytes } = setup();
+    fns.InitOnceExecuteOnce.guest(builder);
+    const begin = trap('<init-once-begin>');
+    const end = trap('<init-once-end>');
+    const view = new DataView(bytes.buffer);
+
+    assert.equal(begin.handler([ONCE, CONTEXT]), 1, 'run the function');
+    run(threads.b);
+    assert.equal(begin.handler([ONCE, CONTEXT + 4]), PARKED, 'wait for the one running it');
+    run(threads.a);
+    view.setUint32(CONTEXT, 0xfffffff0, true);
+    assert.equal(end.handler([ONCE, 1, CONTEXT]), 1, 'TRUE, as the function answered');
+    assert.equal(word(ONCE), 0xfffffff2);
+    assert.deepEqual(woken, [{ thread: threads.b, result: 0 }], 'done: nothing left to run');
+    assert.equal(word(CONTEXT + 4), 0xfffffff0);
+    assert.equal(begin.handler([ONCE, CONTEXT + 8]), 0);
+    assert.equal(word(CONTEXT + 8), 0xfffffff0);
+
+    fns.InitOnceInitialize.handler([ONCE]);
+    assert.equal(begin.handler([ONCE, CONTEXT]), 1);
+    assert.equal(end.handler([ONCE, 0, CONTEXT]), 0, 'FALSE, as the function answered');
+    assert.equal(word(ONCE), 0, 'and it may be run again');
+    fns.InitOnceBeginInitialize.handler([ONCE, INIT_ONCE_ASYNC, PENDING, CONTEXT]);
+    assert.equal(begin.handler([ONCE, CONTEXT]), 2, 'an asynchronous one is not waited on');
+});
+
 test('argument sizes match what the guest compiled against', ()=>{
     const { fns } = setup();
     assert.deepEqual(Object.fromEntries(
@@ -226,5 +337,7 @@ test('argument sizes match what the guest compiled against', ()=>{
         TryAcquireSRWLockExclusive: 4, TryAcquireSRWLockShared: 4, ReleaseSRWLockExclusive: 4,
         ReleaseSRWLockShared: 4, InitializeConditionVariable: 4, WakeConditionVariable: 4,
         WakeAllConditionVariable: 4, SleepConditionVariableSRW: 16, SleepConditionVariableCS: 12,
+        InitOnceInitialize: 4, InitOnceBeginInitialize: 16, InitOnceComplete: 12,
+        InitOnceExecuteOnce: 16,
     });
 });

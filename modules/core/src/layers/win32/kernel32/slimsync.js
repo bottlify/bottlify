@@ -7,10 +7,10 @@
 import { CS } from './critical.js';
 
 /**
- * Slim reader/writer locks and condition variables: the synchronisation a
- * program built for Vista and later reaches for instead of critical sections
- * and events. Both are one pointer-sized word the program allocated and
- * zeroed, and neither needs a handle.
+ * Slim reader/writer locks, condition variables and one-time initialisation:
+ * the synchronisation a program built for Vista and later reaches for instead
+ * of critical sections and events. Each is one pointer-sized word the program
+ * allocated and zeroed, and none needs a handle.
  *
  * What a thread waits for is kept here, by the word's address, and the word
  * itself is kept true -- zero while an SRW lock is free, its low bit set while
@@ -24,6 +24,24 @@ import { CS } from './critical.js';
  * wait returns -- exactly what the wait promises, and something that may
  * itself have to wait.
  */
+
+/** InitOnceBeginInitialize's and InitOnceComplete's flags. */
+const INIT_ONCE_CHECK_ONLY = 0x1;
+const INIT_ONCE_ASYNC = 0x2;
+const INIT_ONCE_INIT_FAILED = 0x4;
+
+/**
+ * An INIT_ONCE's word: nobody has begun, one thread is initialising, some
+ * are initialising without waiting on each other, or done -- then with the
+ * context in the bits above the state.
+ */
+const ONCE_FRESH = 0;
+const ONCE_RUNNING = 1;
+const ONCE_DONE = 2;
+const ONCE_RUNNING_ASYNC = 3;
+
+const ERROR_INVALID_PARAMETER = 87;
+const ERROR_GEN_FAILURE = 31;
 
 /** SleepConditionVariableSRW's flag: the lock is held, and taken back, shared. */
 const CONDITION_VARIABLE_LOCKMODE_SHARED = 0x1;
@@ -111,6 +129,48 @@ export function sleepCsCode(at, { sleep, timedOut, enter }){
         ...call(at + 31, enter),
         0x58, //                                  pop eax
         0xc2, 0x0c, 0x00, //                      ret 12
+    ]);
+}
+
+/**
+ * BOOL InitOnceExecuteOnce(PINIT_ONCE, PINIT_ONCE_FN, PVOID Parameter,
+ * LPVOID *Context), as guest code: the host says whether this thread is the
+ * one to initialise, the program's own function does it, and the host is told
+ * how it went.
+ *
+ *     push Context; push InitOnce; call <init-once-begin>
+ *     cmp eax, 1; je run
+ *     test eax, eax; sete al; movzx eax, al; ret 16    ; done: TRUE, refused: FALSE
+ *   run:
+ *     push Context; push Parameter; push InitOnce; call [InitFn]
+ *     push Context; push eax; push InitOnce; call <init-once-end>
+ *     ret 16
+ *
+ * @param {number} at
+ * @param {{ begin: number, end: number }} traps
+ * @returns {Uint8Array}
+ */
+export function executeOnceCode(at, { begin, end }){
+    return new Uint8Array([
+        0xff, 0x74, 0x24, 0x10, //                push [esp+16]   Context
+        0xff, 0x74, 0x24, 0x08, //                push [esp+8]    InitOnce
+        ...call(at + 8, begin),
+        0x83, 0xf8, 0x01, //                      cmp eax, 1
+        0x74, 0x0b, //                            je run (+11)
+        0x85, 0xc0, //                            test eax, eax
+        0x0f, 0x94, 0xc0, //                      sete al
+        0x0f, 0xb6, 0xc0, //                      movzx eax, al
+        0xc2, 0x10, 0x00, //                      ret 16
+        // run:
+        0xff, 0x74, 0x24, 0x10, //                push [esp+16]   Context
+        0xff, 0x74, 0x24, 0x10, //                push [esp+16]   Parameter
+        0xff, 0x74, 0x24, 0x0c, //                push [esp+12]   InitOnce
+        0xff, 0x54, 0x24, 0x14, //                call [esp+20]   InitFn
+        0xff, 0x74, 0x24, 0x10, //                push [esp+16]   Context
+        0x50, //                                  push eax
+        0xff, 0x74, 0x24, 0x0c, //                push [esp+12]   InitOnce
+        ...call(at + 54, end),
+        0xc2, 0x10, 0x00, //                      ret 16
     ]);
 }
 
@@ -391,6 +451,130 @@ export function createSlimSync(host, enterCritical){
     /** @param {number} address */
     const clear = address=>host.writeMemory(address, new Uint8Array(4));
 
+    /** @param {number} address */
+    const readWord = address=>new DataView(
+        host.readMemory(address, 4).slice().buffer).getUint32(0, true);
+    /** @param {number} address @param {number} value */
+    const writeWord = (address, value)=>{
+        if (address !== 0)
+        {
+            host.writeMemory(address, new Uint8Array(dword(value >>> 0)));
+        }
+    };
+
+    /**
+     * Threads blocked until an initialisation someone else began is over:
+     * BeginInitialize's callers with where to say whether it is theirs now,
+     * and ExecuteOnce's with where its context goes.
+     *
+     * @type {Map<number, { thread: any, execute: boolean, pending: number,
+     *     context: number }[]>}
+     */
+    const onceWaiters = new Map();
+
+    /** @param {number} code */
+    const refuse = code=>{
+        host.setLastError?.(code);
+        return 0;
+    };
+
+    /**
+     * An initialisation is over: done, and everyone waiting is told the
+     * context; or failed, and the first waiting becomes the one to do it.
+     *
+     * @param {number} once @param {boolean} succeeded @param {number} context
+     */
+    const settle = (once, succeeded, context)=>{
+        const waiters = onceWaiters.get(once) ?? [];
+        if (succeeded)
+        {
+            writeWord(once, (context & ~3) | ONCE_DONE);
+            onceWaiters.delete(once);
+            for (const waiter of waiters)
+            {
+                writeWord(waiter.context, context & ~3);
+                if (!waiter.execute)
+                {
+                    writeWord(waiter.pending, 0);
+                }
+                kernel.wake(waiter.thread, waiter.execute ? 0 : 1);
+            }
+            return;
+        }
+        const next = waiters.shift();
+        writeWord(once, next ? ONCE_RUNNING : ONCE_FRESH);
+        if (next)
+        {
+            if (!next.execute)
+            {
+                writeWord(next.pending, 1);
+            }
+            kernel.wake(next.thread, 1);
+        }
+    };
+
+    /**
+     * The caller waits for the thread initialising to finish.
+     *
+     * @param {number} once @param {{ execute: boolean, pending: number, context: number }} how
+     */
+    const awaitOnce = (once, how)=>{
+        const thread = host.currentThread();
+        const waiters = onceWaiters.get(once) ?? [];
+        waiters.push({ thread, ...how });
+        onceWaiters.set(once, waiters);
+        kernel.block(thread, `one-time initialisation 0x${once.toString(16)}`);
+        return host.park(thread);
+    };
+
+    /** @type {number | null} */
+    let executeOnce = null;
+    /** @param {any} builder */
+    const executeOnceAt = builder=>{
+        if (executeOnce !== null)
+        {
+            return executeOnce;
+        }
+        const begin = builder.register('<init-once-begin>', {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([pointer, context])=>{
+                const once = pointer >>> 0;
+                const word = readWord(once);
+                switch (word & 3)
+                {
+                    case ONCE_DONE:
+                        writeWord(context >>> 0, word & ~3);
+                        return 0;
+                    case ONCE_FRESH:
+                        writeWord(once, ONCE_RUNNING);
+                        return 1;
+                    case ONCE_RUNNING:
+                        return awaitOnce(once,
+                            { execute: true, pending: 0, context: context >>> 0 });
+                    default:
+                        // Begun without waiting by someone who will finish it
+                        // the same way; a caller that waits has no part in it.
+                        host.setLastError?.(ERROR_INVALID_PARAMETER);
+                        return 2;
+                }
+            },
+        });
+        const end = builder.register('<init-once-end>', {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([pointer, succeeded, context])=>{
+                const value = (context >>> 0) === 0 ? 0 : readWord(context >>> 0);
+                settle(pointer >>> 0, succeeded !== 0, value);
+                return succeeded !== 0 ? 1 : 0;
+            },
+        });
+        const code = (/** @type {number} */ at)=>executeOnceCode(at, { begin, end });
+        executeOnce = (host.allocateCode ?? host.allocate)(code(0).length);
+        host.writeMemory(executeOnce, code(executeOnce));
+        return executeOnce;
+    };
+
     return {
         /** VOID InitializeSRWLock(PSRWLOCK) */
         InitializeSRWLock: {
@@ -500,6 +684,114 @@ export function createSlimSync(host, enterCritical){
             argBytes: 12,
             /** @param {any} builder */
             guest: builder=>placed(builder).cs,
+        },
+
+        /** VOID InitOnceInitialize(PINIT_ONCE) */
+        InitOnceInitialize: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                onceWaiters.delete(pointer >>> 0);
+                clear(pointer >>> 0);
+                return 0;
+            },
+        },
+
+        /**
+         * BOOL InitOnceBeginInitialize(LPINIT_ONCE, DWORD dwFlags,
+         *                              PBOOL fPending, LPVOID *lpContext)
+         *
+         * Whether the caller is the one to initialise (pending) or it is done
+         * and here is the context. A synchronous begin while another thread is
+         * initialising waits for it; an asynchronous one runs beside the
+         * others, and the two kinds do not mix.
+         */
+        InitOnceBeginInitialize: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([pointer, flags, pending, context])=>{
+                const once = pointer >>> 0;
+                const asked = flags >>> 0;
+                if ((asked & ~(INIT_ONCE_CHECK_ONLY | INIT_ONCE_ASYNC)) !== 0
+                    || asked === (INIT_ONCE_CHECK_ONLY | INIT_ONCE_ASYNC))
+                {
+                    return refuse(ERROR_INVALID_PARAMETER);
+                }
+                const async = (asked & INIT_ONCE_ASYNC) !== 0;
+                const word = readWord(once);
+                const state = word & 3;
+                if (state === ONCE_DONE)
+                {
+                    writeWord(pending >>> 0, 0);
+                    writeWord(context >>> 0, word & ~3);
+                    return 1;
+                }
+                if ((asked & INIT_ONCE_CHECK_ONLY) !== 0)
+                {
+                    return refuse(ERROR_GEN_FAILURE);
+                }
+                if (state === ONCE_FRESH)
+                {
+                    writeWord(once, async ? ONCE_RUNNING_ASYNC : ONCE_RUNNING);
+                    writeWord(pending >>> 0, 1);
+                    return 1;
+                }
+                if (async !== (state === ONCE_RUNNING_ASYNC))
+                {
+                    return refuse(ERROR_INVALID_PARAMETER);
+                }
+                if (async)
+                {
+                    writeWord(pending >>> 0, 1);
+                    return 1;
+                }
+                return awaitOnce(once,
+                    { execute: false, pending: pending >>> 0, context: context >>> 0 });
+            },
+        },
+
+        /**
+         * BOOL InitOnceComplete(LPINIT_ONCE, DWORD dwFlags, LPVOID lpContext)
+         *
+         * The context keeps its two low bits clear -- they are the state --
+         * and a failure has none to keep.
+         */
+        InitOnceComplete: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([pointer, flags, context])=>{
+                const once = pointer >>> 0;
+                const asked = flags >>> 0;
+                const failed = (asked & INIT_ONCE_INIT_FAILED) !== 0;
+                const async = (asked & INIT_ONCE_ASYNC) !== 0;
+                if ((asked & ~(INIT_ONCE_ASYNC | INIT_ONCE_INIT_FAILED)) !== 0
+                    || (failed && async) || ((context >>> 0) & 3) !== 0
+                    || (failed && context !== 0))
+                {
+                    return refuse(ERROR_INVALID_PARAMETER);
+                }
+                const state = readWord(once) & 3;
+                if (state === ONCE_FRESH || state === ONCE_DONE)
+                {
+                    return refuse(ERROR_GEN_FAILURE);
+                }
+                if (async !== (state === ONCE_RUNNING_ASYNC))
+                {
+                    return refuse(ERROR_INVALID_PARAMETER);
+                }
+                settle(once, !failed, context >>> 0);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL InitOnceExecuteOnce(PINIT_ONCE, PINIT_ONCE_FN InitFn,
+         *                          PVOID Parameter, LPVOID *Context)
+         */
+        InitOnceExecuteOnce: {
+            argBytes: 16,
+            /** @param {any} builder */
+            guest: builder=>executeOnceAt(builder),
         },
     };
 }

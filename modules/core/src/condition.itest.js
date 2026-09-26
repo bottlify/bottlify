@@ -78,6 +78,72 @@ function buildConditionExe(){
     });
 }
 
+/**
+ * Runs InitOnceExecuteOnce twice with a guest function that counts its calls
+ * and leaves a context. Exit code bits: both answered TRUE (1, 2), the
+ * function ran once (4), the context came back (8), and the INIT_ONCE holds it
+ * above the done state (16).
+ */
+function buildOnceExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['InitOnceExecuteOnce', 'ExitProcess'] },
+        data: { once: [0, 0, 0, 0], context: [0, 0, 0, 0], calls: [0, 0, 0, 0] },
+        codeSize: 0x100,
+        code: ({ iat, at, code })=>{
+            /** @param {number} callback */
+            const execute = callback=>[
+                0x68, ...u32(at('context')), //            push &context
+                0x68, ...u32(0x1234), //                   push parameter
+                0x68, ...u32(callback), //                 push callback
+                0x68, ...u32(at('once')), //               push &once
+                0xff, 0x15, ...u32(iat('InitOnceExecuteOnce')),
+            ];
+            /** @param {string} name @param {number} value @param {number} bit */
+            const expect = (name, value, bit)=>[
+                0xa1, ...u32(at(name)), //                 mov eax, [name]
+                0x3d, ...u32(value), //                    cmp eax, value
+                0x75, 0x03, 0x80, 0xcb, bit, //            jne; or bl, bit
+            ];
+            /** @param {number} callback */
+            const main = callback=>[
+                0x31, 0xdb, //                             xor ebx, ebx
+                ...execute(callback),
+                0x85, 0xc0, 0x74, 0x03, 0x80, 0xcb, 1, //  test eax, eax; jz; or bl, 1
+                ...execute(callback),
+                0x85, 0xc0, 0x74, 0x03, 0x80, 0xcb, 2,
+                ...expect('calls', 1, 4),
+                ...expect('context', 0x50, 8),
+                ...expect('once', 0x52, 16),
+                0x53, //                                   push ebx
+                0xff, 0x15, ...u32(iat('ExitProcess')),
+            ];
+            const callback = [
+                0xff, 0x05, ...u32(at('calls')), //        inc dword [calls]
+                0x8b, 0x44, 0x24, 0x0c, //                 mov eax, [esp+12]   Context
+                0xc7, 0x00, ...u32(0x50), //               mov dword [eax], 0x50
+                0xb8, ...u32(1), //                        mov eax, 1
+                0xc2, 0x0c, 0x00, //                       ret 12
+            ];
+            return [...main(code(main(0).length)), ...callback];
+        },
+    });
+}
+
+test('InitOnceExecuteOnce runs the program\'s function once and hands back its context',
+    { timeout: 30000 }, async t=>{
+        const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+        const app = await createApp({
+            executable: buildOnceExe(),
+            v86: {
+                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+            },
+        });
+        t.after(()=>app.dispose());
+
+        assert.equal(await app.run({ timeoutMs: 20000 }), 1 | 2 | 4 | 8 | 16);
+    });
+
 test('a timed sleep on a condition variable answers FALSE and holds the lock again',
     { timeout: 30000 }, async t=>{
         const wasm = await readFile(new URL('v86.wasm', PREBUILT));
