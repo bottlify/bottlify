@@ -10,9 +10,12 @@
  * cork and the emulator agree bit for bit without a crossing: leaf 0 the vendor
  * and the highest standard leaf, 1 the family, model, stepping and features,
  * 2 the cache descriptors, 4 the cache parameters (by subleaf), 5 the monitor
- * line sizes, 7 the extended features (subleaf 0), 0x15 and 0x16 the clocks,
- * 0x40000000 the hypervisor's name, 0x80000000 the highest extended leaf. A
- * leaf with no entry, or a subleaf a leaf does not list, answers four zeros.
+ * line sizes, 7 the extended features (subleaf 0), 0x40000000 the hypervisor's
+ * name, 0x80000000 the highest extended leaf -- except the clock leaves, 0x15
+ * (a 1 GHz crystal times 3/1) and 0x16 (base and maximum), which state the
+ * 3000 MHz cork's host counts rdtsc at (`CORK_TSC_MHZ`; the emulator's counter
+ * and its leaves run at 1000). A leaf with no entry, or a subleaf a leaf does
+ * not list, answers four zeros.
  * The hypervisor bit in leaf 1 and the VMware name at 0x40000000 are the
  * emulator's too: a real processor of this signature has neither, but the two
  * engines must answer alike, and the emulator's answer is compiled into it.
@@ -39,8 +42,8 @@ export const CPUID_LEAVES = Object.freeze({
     }),
     0x00000005: { eax: 0x00000040, ebx: 0x00000040, ecx: 0x00000003, edx: 0x00142120 },
     0x00000007: Object.freeze({ 0: { eax: 0, ebx: 0x00000200, ecx: 0, edx: 0 } }),
-    0x00000015: { eax: 0x00000001, ebx: 0x00000001, ecx: 0x3b9aca00, edx: 0 },
-    0x00000016: { eax: 0x000003e8, ebx: 0x000003e8, ecx: 0x0000000a, edx: 0 },
+    0x00000015: { eax: 0x00000001, ebx: 0x00000003, ecx: 0x3b9aca00, edx: 0 },
+    0x00000016: { eax: 0x00000bb8, ebx: 0x00000bb8, ecx: 0x0000000a, edx: 0 },
     0x40000000: { eax: 0, ebx: 0x61774d56, ecx: 0x4d566572, edx: 0x65726177 },
     0x80000000: { eax: 0x00000005, ebx: 0, ecx: 0, edx: 0 },
 });

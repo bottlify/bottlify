@@ -83,6 +83,15 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  */
 
 /**
+ * The rate cork's time-stamp counter advances at, in MHz, which is the speed
+ * the machine reports everywhere else too -- the registry's `~MHz` and CPUID
+ * leaves 0x15 and 0x16 -- because a program turns rdtsc deltas into seconds with it. A
+ * machine's era is read off this figure: a program that finds 1 GHz picks the
+ * settings it ships for the slowest machine it supports.
+ */
+export const CORK_TSC_MHZ = 3000;
+
+/**
  * Builds the cork host over a memory of its own.
  *
  * @param {CorkHostConfig} config
@@ -257,15 +266,16 @@ export function createCorkHost(config){
      */
     let interpreter = null;
 
-    // Cork's own time-stamp counter, at the 1 GHz CPUID's leaves 0x15 and 0x16
-    // state: nanoseconds of the guest's clock once one is given (`useGuestClock`,
+    // Cork's own time-stamp counter, at CORK_TSC_MHZ, the rate CPUID's leaves
+    // 0x15 and 0x16 state: ticks of the guest's clock once one is given (`useGuestClock`,
     // the clock QueryPerformanceCounter and GetTickCount read), so a program
-    // that calibrates the counter against them measures 1 GHz whatever the host
-    // did meanwhile; the page's clock since the host was made until then. The
+    // that calibrates the counter against them measures that rate whatever the
+    // host did meanwhile; the page's clock since the host was made until then. The
     // guest's clock moves between slices, so within one the counter goes on at
     // the page's rate from its last move, at most a credit's worth, and never
     // backward.
     const tscBase = performance.now();
+    const TICKS_PER_MS = CORK_TSC_MHZ * 1000;
     /** @type {(() => number) | null} milliseconds of guest time */
     let guestClock = null;
     let guestMs = 0;
@@ -273,7 +283,7 @@ export function createCorkHost(config){
     let lastTsc = 0;
     const readTsc = ()=>{
         const now = performance.now();
-        let ns = (now - tscBase) * 1e6;
+        let ticks = (now - tscBase) * TICKS_PER_MS;
         if (guestClock !== null)
         {
             const ms = guestClock();
@@ -282,9 +292,9 @@ export function createCorkHost(config){
                 guestMs = ms;
                 guestMovedAt = now;
             }
-            ns = (guestMs + Math.min(now - guestMovedAt, TSC_DRIFT_MS)) * 1e6;
+            ticks = (guestMs + Math.min(now - guestMovedAt, TSC_DRIFT_MS)) * TICKS_PER_MS;
         }
-        lastTsc = Math.max(lastTsc + 1, Math.floor(ns));
+        lastTsc = Math.max(lastTsc + 1, Math.floor(ticks));
         return BigInt(lastTsc);
     };
     // A slow slice's account of itself reads the clock around every range the

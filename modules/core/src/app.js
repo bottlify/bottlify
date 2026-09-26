@@ -10,6 +10,7 @@ import { createEvents } from './events.js';
 import { captureTrace, describeAddress, formatTrace } from './trace.js';
 import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
 import { DEFAULT_ENGINE, DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
+import { CORK_TSC_MHZ } from './layers/cpu/internal/cork-host.js';
 import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports, rvaToFileOffset } from './layers/loader/internal/pe.js';
@@ -2890,6 +2891,9 @@ async function buildApp(options){
             },
         },
         win32: {
+            // The speed the registry reports: the rate the engine's rdtsc
+            // advances at. The emulator's counter keeps the default.
+            processorMhz: options.engine === 'cork' ? CORK_TSC_MHZ : undefined,
             // The one namespace a named mutex, event, semaphore, timer and
             // file mapping all share, carried in from outside this build so a
             // name a parent registered is one a child still finds: the table
