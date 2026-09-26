@@ -13,8 +13,8 @@
  * of the claim would have sent it down a slow path to a right one. So the
  * lists below are what the shader generator and pipeline actually implement
  * today -- the cull modes, the depth compares, the blend factors, the stage
- * operations, the filters and address modes, range fog -- and grow as the
- * renderer grows, not ahead of it. No stencil, no lighting, no bump mapping,
+ * operations, the filters and address modes, range fog, eight lights -- and
+ * grow as the renderer grows, not ahead of it. No stencil, no bump mapping,
  * no cube maps, no W-buffer, because none of those draws yet.
  *
  * Three devices are offered, in the order DirectX 7 offers them with a
