@@ -604,7 +604,8 @@ export function createDevice(options = {}){
      * Every draw, as the queries count it and the renderer records it.
      *
      * @param {{ vertexCount: number, startVertex: number, instanceCount?: number,
-     *           indexCount?: number, startIndex?: number, baseVertex?: number }} request
+     *           indexCount?: number, startIndex?: number, baseVertex?: number,
+     *           startInstance?: number }} request
      */
     const draw = request=>{
         const bound = snapshot();
@@ -1292,11 +1293,7 @@ export function createDevice(options = {}){
          * @param {number} startVertex @param {number} startInstance
          */
         DrawInstanced(vertexCount, instanceCount, startVertex, startInstance){
-            if (startInstance !== 0)
-            {
-                diverge('an instanced draw starts at instance zero whatever was asked');
-            }
-            draw({ vertexCount, startVertex, instanceCount });
+            draw({ vertexCount, startVertex, instanceCount, startInstance });
         },
 
         /**
@@ -1304,12 +1301,8 @@ export function createDevice(options = {}){
          * @param {number} baseVertex @param {number} startInstance
          */
         DrawIndexedInstanced(indexCount, instanceCount, startIndex, baseVertex, startInstance){
-            if (startInstance !== 0)
-            {
-                diverge('an instanced draw starts at instance zero whatever was asked');
-            }
             draw({ vertexCount: 0, startVertex: 0, indexCount, startIndex, baseVertex,
-                instanceCount });
+                instanceCount, startInstance });
         },
 
         DrawAuto(){

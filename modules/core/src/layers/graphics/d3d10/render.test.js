@@ -35,8 +35,9 @@ import { defaultSwapChainDesc } from './dxgi.js';
 import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
 import { SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 import {
-    assemble, cb, dclConstantBuffer, dclInputPs, dclOutput, dclResource, dclSampler, ld, mov, o,
-    passThroughVertexShader, r, ret, s, sample, solidPixelShader, t, v,
+    assemble, cb, colouredPixelShader, colouredVertexShader, dclConstantBuffer, dclInputPs,
+    dclOutput, dclResource, dclSampler, ld, mov, o, passThroughVertexShader, r, ret, s, sample,
+    solidPixelShader, t, v,
 } from './shader-fixtures.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
@@ -1078,6 +1079,76 @@ test('an unbound or mistyped slot is fed a texture of the type and shape the sha
         assert.equal(bound(17).texture.descriptor.size.depthOrArrayLayers, 6);
         assert.ok(diverged(h, 'where the shader reads a uint one'), h.divergences.join('\n'));
     });
+
+test('an instanced draw starts its per-instance streams at the first instance asked for',
+    async()=>{
+        // After Wine's d3d10core test_instanced_draw: the second draw starts at
+        // instance four, and SV_InstanceID still counts from zero.
+        const h = harness();
+        const { device } = h;
+        const { vertices } = bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+        /** @type {{ resource?: any }} */
+        const colours = {};
+        assert.equal(device.CreateBuffer({
+            ByteWidth: 8 * 16, Usage: D3D10_USAGE.IMMUTABLE, BindFlags: D3D10_BIND.VERTEX_BUFFER,
+            CPUAccessFlags: 0, MiscFlags: 0,
+        }, { pSysMem: new Uint8Array(8 * 16) }, colours), S_OK);
+        /** @param {number} stepRate */
+        const layoutStepping = stepRate=>{
+            /** @type {{ layout?: any }} */
+            const layout = {};
+            assert.equal(device.CreateInputLayout([POSITION_ELEMENT, {
+                SemanticName: 'COLOR', SemanticIndex: 0, Format: DXGI_FORMAT.R32G32B32A32_FLOAT,
+                InputSlot: 1, AlignedByteOffset: 0, InputSlotClass: 1,
+                InstanceDataStepRate: stepRate,
+            }], colouredVertexShader(), layout), S_OK);
+            return layout.layout;
+        };
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        assert.equal(device.CreateVertexShader(colouredVertexShader(), vs), S_OK);
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(device.CreatePixelShader(colouredPixelShader(), ps), S_OK);
+        device.VSSetShader(vs.shader);
+        device.PSSetShader(ps.shader);
+        device.IASetInputLayout(layoutStepping(1));
+        device.IASetVertexBuffers(0, [vertices, colours.resource], [16, 16], [0, 0]);
+        device.DrawInstanced(3, 4, 0, 0);
+        device.DrawInstanced(3, 4, 0, 4);
+        device.IASetInputLayout(layoutStepping(0));
+        device.DrawIndexedInstanced(3, 2, 0, 0, 2);
+        await h.present();
+
+        const draws = h.gpu.of('draw').map((/** @type {any} */ call)=>call.args);
+        assert.deepEqual(draws, [[3, 4, 0, 0], [3, 4, 0, 0]],
+            'WebGPU draws from instance zero, as SV_InstanceID counts');
+        const streams = h.gpu.of('setVertexBuffer')
+            .filter((/** @type {any} */ call)=>call.slot === 1)
+            .map((/** @type {any} */ call)=>call.offset);
+        assert.deepEqual(streams.slice(0, 2), [0, 64],
+            'the second draw reads its per-instance data from the fifth element');
+        const pipelines = h.gpu.of('createRenderPipeline');
+        assert.equal(pipelines.at(-1).descriptor.vertex.buffers[1].arrayStride, 0,
+            'a step rate of zero feeds every instance one element');
+        assert.equal(pipelines[0].descriptor.vertex.buffers[1].stepMode, 'instance');
+        assert.ok(!diverged(h, 'instance zero'));
+    });
+
+test('the stencil reference reaches the pass, once per change', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    device.OMSetDepthStencilState(null, 5);
+    device.Draw(3, 0);
+    device.Draw(3, 0);
+    device.OMSetDepthStencilState(null, 0);
+    device.Draw(3, 0);
+    await h.present();
+    assert.deepEqual(h.gpu.of('setStencilReference').map((/** @type {any} */ call)=>
+        call.reference), [5, 0]);
+    assert.ok(!diverged(h, 'stencil reference'));
+});
 
 // --- queries ---
 

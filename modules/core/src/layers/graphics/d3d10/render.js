@@ -242,6 +242,8 @@ const DEFAULT_BLEND = Object.freeze({
  * @property {number} vertexCount
  * @property {number} startVertex
  * @property {number} instanceCount
+ * @property {number} startInstance
+ * @property {number} stencilRef
  * @property {number | null} indexCount   Null for a non-indexed draw.
  * @property {number} startIndex
  * @property {number} baseVertex
@@ -915,8 +917,16 @@ export function createRenderer(services){
             {
                 const perInstance = element.InputSlotClass
                     === D3D10_INPUT_CLASSIFICATION.PER_INSTANCE_DATA;
+                const stepRate = perInstance ? element.InstanceDataStepRate ?? 1 : 1;
+                if (stepRate > 1)
+                {
+                    diverge('per-instance data stepping once every several instances steps'
+                        + ' every instance: WebGPU steps an instance buffer by one');
+                }
                 buffer = {
-                    arrayStride: strides[slot] ?? 0,
+                    // A rate of zero feeds every instance the same element,
+                    // which a stride of zero is.
+                    arrayStride: stepRate === 0 ? 0 : strides[slot] ?? 0,
                     stepMode: perInstance ? 'instance' : 'vertex',
                     attributes: [],
                 };
@@ -1103,7 +1113,10 @@ export function createRenderer(services){
                 alphaToCoverageEnabled: !!blend.AlphaToCoverageEnable,
             },
         });
-        return { gpu, program, groupLayouts, slots: layout.slots };
+        return {
+            gpu, program, groupLayouts, slots: layout.slots,
+            steps: layout.buffers.map((/** @type {any} */ buffer)=>buffer.stepMode),
+        };
     };
 
     /** @param {any} state */
@@ -1504,7 +1517,8 @@ export function createRenderer(services){
         /**
          * @param {PipelineSnapshot} pipeline
          * @param {{ vertexCount: number, startVertex: number, instanceCount?: number,
-         *           indexCount?: number, startIndex?: number, baseVertex?: number }} draw
+         *           indexCount?: number, startIndex?: number, baseVertex?: number,
+         *           startInstance?: number }} draw
          */
         draw(pipeline, draw){
             if (!backend)
@@ -1571,11 +1585,6 @@ export function createRenderer(services){
                 diverge('a blend factor other than white is not applied: the backend'
                     + ' exposes no blend constant');
             }
-            if (pipeline.stencilRef !== 0)
-            {
-                diverge('a stencil reference other than zero is not applied: the backend'
-                    + ' exposes no stencil reference');
-            }
             const rasterizer = pipeline.rasterizerState
                 ? stateDesc(pipeline.rasterizerState)
                 : DEFAULT_RASTERIZER;
@@ -1633,6 +1642,8 @@ export function createRenderer(services){
                 vertexCount: draw.vertexCount,
                 startVertex: draw.startVertex,
                 instanceCount: draw.instanceCount ?? 1,
+                startInstance: draw.startInstance ?? 0,
+                stencilRef: pipeline.stencilRef,
                 indexCount: draw.indexCount ?? null,
                 startIndex: draw.startIndex ?? 0,
                 baseVertex: draw.baseVertex ?? 0,
@@ -1724,6 +1735,7 @@ export function createRenderer(services){
         let passTarget = null;
         /** @type {any} */
         let passDepth = null;
+        let passStencil = 0;
         let built = 0;
 
         const closePass = ()=>{
@@ -1779,6 +1791,8 @@ export function createRenderer(services){
             });
             passTarget = target;
             passDepth = depth;
+            // What a new pass compares against until a draw says otherwise.
+            passStencil = 0;
             return pass;
         };
 
@@ -1830,11 +1844,22 @@ export function createRenderer(services){
                         current.setBindings(index, layout, command.groups[index],
                             `d3d10:${index === 0 ? 'vs' : 'ps'}`);
                     });
+                if (passStencil !== command.stencilRef)
+                {
+                    current.setStencilReference(command.stencilRef);
+                    passStencil = command.stencilRef;
+                }
                 pipeline.slots.forEach((/** @type {number} */ slot, /** @type {number} */ index)=>{
                     const buffer = command.vertexBuffers[slot];
                     if (buffer)
                     {
-                        current.setVertexBuffer(index, buffer.gpu, buffer.offset);
+                        // SV_InstanceID counts from zero whatever the first
+                        // instance, where WebGPU's instance index counts from
+                        // it: the per-instance streams start there instead.
+                        const skipped = pipeline.steps[index] === 'instance'
+                            ? command.startInstance * buffer.stride
+                            : 0;
+                        current.setVertexBuffer(index, buffer.gpu, buffer.offset + skipped);
                     }
                 });
                 if (command.indexCount !== null)
