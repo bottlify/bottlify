@@ -14,9 +14,11 @@
  * variable is published as the interface its type makes it, which extends
  * ID3D10EffectVariable, so one pointer serves both.
  *
- * Every name an effect hands out points into a copy of its unstructured
- * block kept in guest memory for the effect's life; the runtime's own
- * strings ("$Anonymous", "cbuffer") are constants of the process.
+ * Every name, string, bytecode and signature an effect hands out points
+ * into a copy of its image -- the unstructured block, then its shaders'
+ * input signatures -- kept in guest memory for the effect's life; the
+ * runtime's own strings ("$Anonymous", "cbuffer") are constants of the
+ * process.
  */
 
 import { S_OK, IID } from '../d3d10/constants.js';
@@ -137,7 +139,15 @@ const AS = Object.freeze({
  * @property {(text: string) => number} constantString
  * @property {(address: number) => string} readCString
  * @property {(object: any, interfaces: any[], id: string, out: number) => number} handBack
+ * @property {(address: number, objects: any[], interfaces: any[], id: string) => void}
+ *     writeObjects  Objects that already carry the caller's reference, as pointers.
  * @property {() => any[]} deviceInterfaces
+ * @property {Record<string, [any[], string]>} children  The device's interfaces and
+ *     interface id for each kind of object an effect hands out: buffer,
+ *     shaderResourceView, renderTargetView, depthStencilView, vertex, pixel,
+ *     geometry, blend, depthStencil, rasterizer and sampler.
+ * @property {Record<string, (desc: any, out: number) => void>} writeStateDesc  Each
+ *     state block's description, by variable kind, as its state object writes it.
  */
 
 /**
@@ -145,7 +155,7 @@ const AS = Object.freeze({
  */
 export function createEffectSeam(context){
     const { publisher, fields, memory, allocate, free, report, constantString, readCString,
-        handBack } = context;
+        handBack, writeObjects, children, writeStateDesc } = context;
 
     /**
      * @param {string} id
@@ -315,15 +325,384 @@ export function createEffectSeam(context){
         GetParentConstantBuffer: variable=>publishVariable(variable.GetParentConstantBuffer()),
         ...Object.fromEntries(Object.entries(AS).map(([method, kind])=>[method,
             (/** @type {any} */ variable)=>publishVariable(variable.As(kind))])),
+        /** @param {any} variable @param {number[]} args */
+        SetRawValue: (variable, [data, offset, count])=>{
+            if (variable.invalid)
+            {
+                return E_FAIL;
+            }
+            if ((data >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            return variable.SetRawValue(memory.readMemory(data >>> 0, count >>> 0), offset >>> 0);
+        },
+        /** @param {any} variable @param {number[]} args */
+        GetRawValue: (variable, [data, offset, count])=>{
+            const bytes = variable.invalid ? null : variable.GetRawValue(offset >>> 0, count >>> 0);
+            if (!bytes)
+            {
+                return E_FAIL;
+            }
+            if ((data >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            memory.writeMemory(data >>> 0, bytes);
+            return S_OK;
+        },
+    };
+
+    // --- each kind's typed views ---
+
+    /**
+     * @typedef {(variable: any, args: number[]) => number} KindMethod
+     */
+
+    /**
+     * A method only a variable of the kind answers; the invalid one of the
+     * kind fails, and leaves the program's out pointer as it was.
+     *
+     * @param {KindMethod} method
+     * @returns {KindMethod}
+     */
+    const valid = method=>(variable, args)=>(variable.invalid ? E_FAIL : method(variable, args));
+
+    /** @param {number} at @param {number} count */
+    const readDwords = (at, count)=>Array.from({ length: count },
+        (_, index)=>fields.readU32((at >>> 0) + index * 4));
+
+    /** @param {number} pointer */
+    const objectOf = pointer=>((pointer >>> 0) === 0
+        ? null
+        : publisher.objectAt(pointer) ?? null);
+
+    /** @type {Readonly<Record<string, string>>} */
+    const GIVEN_NAME = Object.freeze({ float: 'Float', int: 'Int', bool: 'Bool' });
+
+    /** A dword a program passed, as the number its type reads it as. @param {string} given */
+    const reader = given=>(given === 'float'
+        ? (/** @type {number} */ bits)=>fields.asFloat(bits)
+        : (/** @type {number} */ bits)=>bits | 0);
+    /** @param {string} given */
+    const writer = given=>(given === 'float'
+        ? (/** @type {number} */ at, /** @type {number} */ value)=>fields.writeF32(at, value)
+        : (/** @type {number} */ at, /** @type {number} */ value)=>fields.writeU32(at, value >>> 0));
+
+    /**
+     * Elements of a scalar or vector from or into the program's array,
+     * each as many dwords as the type has components.
+     *
+     * @param {any} variable @param {'float' | 'int' | 'bool'} given
+     * @param {number} at @param {number} first @param {number} count
+     */
+    const setNumbers = (variable, given, at, first, count)=>{
+        if ((at >>> 0) === 0)
+        {
+            return E_INVALIDARG;
+        }
+        const components = variable.kind === VARIABLE_KIND.VECTOR
+            ? variable.shape.fxType.columns
+            : 1;
+        return variable.SetValues(given, readDwords(at, count * components).map(reader(given)),
+            first, count);
+    };
+    /**
+     * @param {any} variable @param {'float' | 'int' | 'bool'} given
+     * @param {number} at @param {number} first @param {number} count
+     */
+    const getNumbers = (variable, given, at, first, count)=>{
+        if ((at >>> 0) === 0)
+        {
+            return E_INVALIDARG;
+        }
+        const write = writer(given);
+        variable.GetValues(given, first, count).forEach((/** @type {number} */ value,
+            /** @type {number} */ index)=>write((at >>> 0) + index * 4, value));
+        return S_OK;
+    };
+
+    /** @param {'float' | 'int' | 'bool'} given @returns {Record<string, KindMethod>} */
+    const scalarMethods = given=>{
+        const name = GIVEN_NAME[given];
+        return {
+            [`Set${name}`]: valid((variable, [bits])=>variable.SetValues(given,
+                [reader(given)(bits)], 0, 1)),
+            [`Get${name}`]: valid((variable, [out])=>getNumbers(variable, given, out, 0, 1)),
+            // A scalar array's offset goes unused: it is set and read from its
+            // first element on (Wine's test_scalar_array_methods).
+            [`Set${name}Array`]: valid((variable, [at, , count])=>
+                setNumbers(variable, given, at, 0, count >>> 0)),
+            [`Get${name}Array`]: valid((variable, [at, , count])=>
+                getNumbers(variable, given, at, 0, count >>> 0)),
+        };
+    };
+
+    /** @param {'float' | 'int' | 'bool'} given @returns {Record<string, KindMethod>} */
+    const vectorMethods = given=>{
+        const name = GIVEN_NAME[given];
+        return {
+            [`Set${name}Vector`]: valid((variable, [at])=>setNumbers(variable, given, at, 0, 1)),
+            [`Get${name}Vector`]: valid((variable, [at])=>getNumbers(variable, given, at, 0, 1)),
+            // Unlike a scalar array's, the offset is honoured
+            // (test_vector_array_methods).
+            [`Set${name}VectorArray`]: valid((variable, [at, offset, count])=>
+                setNumbers(variable, given, at, offset >>> 0, count >>> 0)),
+            [`Get${name}VectorArray`]: valid((variable, [at, offset, count])=>
+                getNumbers(variable, given, at, offset >>> 0, count >>> 0)),
+        };
     };
 
     /**
-     * What each kind adds after ID3D10EffectVariable's methods, as it is
-     * built; a slot with nothing here answers E_NOTIMPL from the bridge.
+     * Matrices from or into the program's float[4][4]s; only the entries
+     * the type has are read into it or written back.
      *
-     * @type {Record<string, Record<string, (target: any, args: number[]) => number>>}
+     * @param {boolean} transposed
+     * @returns {Record<string, KindMethod>}
      */
-    const kindMethods = {};
+    const matrixMethods = transposed=>{
+        const name = transposed ? 'MatrixTranspose' : 'Matrix';
+        /** @param {any} variable @param {number} at @param {number} first @param {number} count */
+        const set = (variable, at, first, count)=>((at >>> 0) === 0
+            ? E_INVALIDARG
+            : variable.SetMatrices(readDwords(at, count * 16), first, count, transposed));
+        /** @param {any} variable @param {number} at @param {number} first @param {number} count */
+        const get = (variable, at, first, count)=>{
+            if ((at >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            /** @type {(number | undefined)[]} */
+            const dwords = variable.GetMatrices(first, count, transposed);
+            dwords.forEach((dword, index)=>{
+                if (dword !== undefined)
+                {
+                    fields.writeU32((at >>> 0) + index * 4, dword);
+                }
+            });
+            return S_OK;
+        };
+        return {
+            [`Set${name}`]: valid((variable, [at])=>set(variable, at, 0, 1)),
+            [`Get${name}`]: valid((variable, [at])=>get(variable, at, 0, 1)),
+            [`Set${name}Array`]: valid((variable, [at, offset, count])=>
+                set(variable, at, offset >>> 0, count >>> 0)),
+            [`Get${name}Array`]: valid((variable, [at, offset, count])=>
+                get(variable, at, offset >>> 0, count >>> 0)),
+        };
+    };
+
+    /**
+     * A view variable's four methods: one view or an array of them, set with
+     * a reference the variable keeps and got with one the caller owns.
+     *
+     * @param {string} child  Which of `children` the views are.
+     * @param {string} name   'Resource', 'RenderTarget' or 'DepthStencil'.
+     * @returns {Record<string, KindMethod>}
+     */
+    const viewMethods = (child, name)=>{
+        const [interfaces, id] = children[child];
+        return {
+            [`Set${name}`]: valid((variable, [view])=>variable.SetViews([objectOf(view)], 0)),
+            [`Get${name}`]: valid((variable, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeObjects(out, variable.GetViews(0, 1), interfaces, id);
+                return S_OK;
+            }),
+            [`Set${name}Array`]: valid((variable, [at, offset, count])=>((at >>> 0) === 0
+                ? E_INVALIDARG
+                : variable.SetViews(readDwords(at, count >>> 0).map(objectOf), offset >>> 0))),
+            [`Get${name}Array`]: valid((variable, [at, offset, count])=>{
+                if ((at >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeObjects(at, variable.GetViews(offset >>> 0, count >>> 0), interfaces, id);
+                return S_OK;
+            }),
+        };
+    };
+
+    /**
+     * A texture buffer's view: a constant buffer is not one, and a texture
+     * buffer's is not made here.
+     *
+     * @param {'Set' | 'Get'} verb
+     * @returns {KindMethod}
+     */
+    const textureBufferMethod = verb=>valid((variable, [out])=>{
+        if (!variable.textureBuffer())
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        report(`${verb}TextureBuffer: an effect's texture buffer has no view here`);
+        if (verb === 'Get' && (out >>> 0) !== 0)
+        {
+            fields.writeU32(out, 0);
+        }
+        return E_NOTIMPL;
+    });
+
+    /**
+     * @param {'vertex' | 'pixel' | 'geometry'} stage
+     * @returns {KindMethod}
+     */
+    const shaderGetter = stage=>valid((variable, [index, out])=>{
+        const { hr, shader } = variable.GetShader(stage, index >>> 0);
+        if ((out >>> 0) === 0)
+        {
+            shader?.release?.();
+            return hr === S_OK ? E_INVALIDARG : hr;
+        }
+        const [interfaces, id] = children[stage];
+        writeObjects(out, [shader], interfaces, id);
+        return hr;
+    });
+
+    /**
+     * D3D10_SIGNATURE_PARAMETER_DESC: the name, four dwords, and the two
+     * masks as bytes.
+     *
+     * @param {'inputs' | 'outputs'} which
+     * @returns {KindMethod}
+     */
+    const signatureElement = which=>valid((variable, [index, element, out])=>{
+        /** @type {{ entry?: import('../d3d10/reflection.js').ReflectedParameter }} */
+        const held = {};
+        const hr = variable.GetSignatureElement(which, index >>> 0, element >>> 0,
+            (out >>> 0) === 0 ? null : held);
+        const entry = held.entry;
+        if (hr === S_OK && entry)
+        {
+            [pointerOf(variable.owner, { at: entry.nameAt }), entry.index, entry.register,
+                entry.systemValue, entry.componentType,
+                entry.mask | (entry.readWriteMask << 8)]
+                .forEach((value, position)=>fields.writeU32(out + position * 4, value >>> 0));
+        }
+        return hr;
+    });
+
+    /**
+     * A state variable's state object and backing store at an index.
+     *
+     * @param {string} kind
+     * @param {string} getter
+     * @returns {Record<string, KindMethod>}
+     */
+    const stateMethods = (kind, getter)=>{
+        const [interfaces, id] = children[kind];
+        return {
+            [getter]: valid((variable, [index, out])=>{
+                const { hr, state } = variable.GetState(index >>> 0);
+                if ((out >>> 0) === 0)
+                {
+                    state?.release?.();
+                    return hr === S_OK ? E_INVALIDARG : hr;
+                }
+                writeObjects(out, [state], interfaces, id);
+                return hr;
+            }),
+            GetBackingStore: valid((variable, [index, out])=>{
+                /** @type {{ desc?: any }} */
+                const held = {};
+                const hr = variable.GetBackingStore(index >>> 0, (out >>> 0) === 0 ? null : held);
+                if (hr === S_OK && held.desc)
+                {
+                    writeStateDesc[kind](held.desc, out >>> 0);
+                }
+                return hr;
+            }),
+        };
+    };
+
+    /**
+     * What each kind adds after ID3D10EffectVariable's methods.
+     *
+     * @type {Record<string, Record<string, KindMethod>>}
+     */
+    const kindMethods = {
+        [VARIABLE_KIND.SCALAR]: {
+            ...scalarMethods('float'), ...scalarMethods('int'), ...scalarMethods('bool'),
+        },
+        [VARIABLE_KIND.VECTOR]: {
+            ...vectorMethods('float'), ...vectorMethods('int'), ...vectorMethods('bool'),
+        },
+        [VARIABLE_KIND.MATRIX]: { ...matrixMethods(false), ...matrixMethods(true) },
+        [VARIABLE_KIND.STRING]: {
+            GetString: valid((variable, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                fields.writeU32(out, pointerOf(variable.owner, variable.GetStrings(0, 1)[0]));
+                return S_OK;
+            }),
+            GetStringArray: valid((variable, [at, offset, count])=>{
+                if ((at >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                variable.GetStrings(offset >>> 0, count >>> 0).forEach((/** @type {any} */ text,
+                    /** @type {number} */ index)=>fields.writeU32((at >>> 0) + index * 4,
+                    pointerOf(variable.owner, text)));
+                return S_OK;
+            }),
+        },
+        [VARIABLE_KIND.SHADER_RESOURCE]: viewMethods('shaderResourceView', 'Resource'),
+        [VARIABLE_KIND.RENDER_TARGET_VIEW]: viewMethods('renderTargetView', 'RenderTarget'),
+        [VARIABLE_KIND.DEPTH_STENCIL_VIEW]: viewMethods('depthStencilView', 'DepthStencil'),
+        [VARIABLE_KIND.CONSTANT_BUFFER]: {
+            SetConstantBuffer: valid((variable, [buffer])=>(variable.textureBuffer()
+                ? D3DERR_INVALIDCALL
+                : variable.SetConstantBuffer(objectOf(buffer)))),
+            GetConstantBuffer: valid((variable, [out])=>{
+                if (variable.textureBuffer())
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const [interfaces, id] = children.buffer;
+                writeObjects(out, [variable.GetConstantBuffer()], interfaces, id);
+                return S_OK;
+            }),
+            SetTextureBuffer: textureBufferMethod('Set'),
+            GetTextureBuffer: textureBufferMethod('Get'),
+        },
+        [VARIABLE_KIND.SHADER]: {
+            GetShaderDesc: valid((variable, [index, out])=>{
+                /** @type {{ desc?: Record<string, any> }} */
+                const held = {};
+                const hr = variable.GetShaderDesc(index >>> 0, (out >>> 0) === 0 ? null : held);
+                const desc = held.desc;
+                if (hr === S_OK && desc)
+                {
+                    [pointerOf(variable.owner, desc.InputSignature), bool(desc.IsInline),
+                        pointerOf(variable.owner, desc.Bytecode), desc.BytecodeLength,
+                        pointerOf(variable.owner, desc.SODecl), desc.NumInputSignatureEntries,
+                        desc.NumOutputSignatureEntries]
+                        .forEach((value, position)=>fields.writeU32(out + position * 4,
+                            value >>> 0));
+                }
+                return hr;
+            }),
+            GetVertexShader: shaderGetter('vertex'),
+            GetGeometryShader: shaderGetter('geometry'),
+            GetPixelShader: shaderGetter('pixel'),
+            GetInputSignatureElementDesc: signatureElement('inputs'),
+            GetOutputSignatureElementDesc: signatureElement('outputs'),
+        },
+        [VARIABLE_KIND.BLEND]: stateMethods(VARIABLE_KIND.BLEND, 'GetBlendState'),
+        [VARIABLE_KIND.DEPTH_STENCIL]: stateMethods(VARIABLE_KIND.DEPTH_STENCIL,
+            'GetDepthStencilState'),
+        [VARIABLE_KIND.RASTERIZER]: stateMethods(VARIABLE_KIND.RASTERIZER, 'GetRasterizerState'),
+        [VARIABLE_KIND.SAMPLER]: stateMethods(VARIABLE_KIND.SAMPLER, 'GetSampler'),
+    };
 
     // --- passes and techniques ---
 
@@ -493,14 +872,7 @@ export function createEffectSeam(context){
             clear();
             return E_FAIL;
         }
-        const block = parsed.effect.unstructured;
-        const copy = allocate ? allocate(Math.max(block.length, 4)) : 0;
-        if (!copy)
-        {
-            clear();
-            return E_OUTOFMEMORY;
-        }
-        memory.writeMemory(copy, block);
+        let copy = 0;
         /** @type {any} */
         let effect = null;
         effect = createEffect(parsed.effect, {
@@ -511,9 +883,21 @@ export function createEffectSeam(context){
                 {
                     publisher.unpublish(child);
                 }
-                free?.(copy);
+                if (copy)
+                {
+                    free?.(copy);
+                }
             },
         });
+        const image = effect.image();
+        copy = allocate ? allocate(Math.max(image.length, 4)) : 0;
+        if (!copy)
+        {
+            effect.release();
+            clear();
+            return E_OUTOFMEMORY;
+        }
+        memory.writeMemory(copy, image);
         blocks.set(effect, copy);
         return handBack(effect, effectInterfaces, IID.ID3D10Effect, out);
     };

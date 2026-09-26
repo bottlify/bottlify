@@ -1531,7 +1531,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         });
     };
 
-    const blendStateInterfaces = stateInterfaces(IID.ID3D10BlendState, (desc, out)=>{
+    /** @param {any} desc @param {number} out */
+    const writeBlendDesc = (desc, out)=>{
         fields.writeStruct(out, D3D10_BLEND_DESC, {
             AlphaToCoverageEnable: desc.AlphaToCoverageEnable ? 1 : 0,
             SrcBlend: desc.SrcBlend,
@@ -1548,8 +1549,9 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         }
         memory.writeMemory(out + D3D10_BLEND_DESC.RenderTargetWriteMask,
             Uint8Array.from(desc.RenderTargetWriteMask));
-    }, [[IID.ID3D10BlendState1, ID3D10BLENDSTATE1_SLOTS]]);
-    const depthStencilStateInterfaces = stateInterfaces(IID.ID3D10DepthStencilState, (desc, out)=>{
+    };
+    /** @param {any} desc @param {number} out */
+    const writeDepthStencilDesc = (desc, out)=>{
         fields.writeStruct(out, D3D10_DEPTH_STENCIL_DESC, {
             DepthEnable: desc.DepthEnable ? 1 : 0,
             DepthWriteMask: desc.DepthWriteMask,
@@ -1560,8 +1562,9 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             Uint8Array.from([desc.StencilReadMask, desc.StencilWriteMask, 0, 0]));
         fields.writeStruct(out + D3D10_DEPTH_STENCIL_DESC.FrontFace, STENCIL_FACE, desc.FrontFace);
         fields.writeStruct(out + D3D10_DEPTH_STENCIL_DESC.BackFace, STENCIL_FACE, desc.BackFace);
-    });
-    const rasterizerStateInterfaces = stateInterfaces(IID.ID3D10RasterizerState, (desc, out)=>{
+    };
+    /** @param {any} desc @param {number} out */
+    const writeRasterizerDesc = (desc, out)=>{
         fields.writeStruct(out, D3D10_RASTERIZER_DESC, {
             FillMode: desc.FillMode,
             CullMode: desc.CullMode,
@@ -1574,8 +1577,9 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             MultisampleEnable: desc.MultisampleEnable ? 1 : 0,
             AntialiasedLineEnable: desc.AntialiasedLineEnable ? 1 : 0,
         }, ['DepthBiasClamp', 'SlopeScaledDepthBias']);
-    });
-    const samplerStateInterfaces = stateInterfaces(IID.ID3D10SamplerState, (desc, out)=>{
+    };
+    /** @param {any} desc @param {number} out */
+    const writeSamplerDesc = (desc, out)=>{
         fields.writeStruct(out, D3D10_SAMPLER_DESC, {
             Filter: desc.Filter,
             AddressU: desc.AddressU,
@@ -1590,7 +1594,14 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         desc.BorderColor.forEach((/** @type {number} */ value, /** @type {number} */ index)=>{
             fields.writeF32(out + D3D10_SAMPLER_DESC.BorderColor + index * 4, value);
         });
-    });
+    };
+    const blendStateInterfaces = stateInterfaces(IID.ID3D10BlendState, writeBlendDesc,
+        [[IID.ID3D10BlendState1, ID3D10BLENDSTATE1_SLOTS]]);
+    const depthStencilStateInterfaces = stateInterfaces(IID.ID3D10DepthStencilState,
+        writeDepthStencilDesc);
+    const rasterizerStateInterfaces = stateInterfaces(IID.ID3D10RasterizerState,
+        writeRasterizerDesc);
+    const samplerStateInterfaces = stateInterfaces(IID.ID3D10SamplerState, writeSamplerDesc);
 
     const childMethods = { GetDevice: getDevice, ...privateDataMethods };
     const childBase = describe(IID.ID3D10DeviceChild, ID3D10DEVICECHILD_SLOTS, childMethods);
@@ -3032,7 +3043,24 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
 
     const effects = createEffectSeam({
         publisher, fields, memory, allocate, free, report, constantString, readCString, handBack,
-        deviceInterfaces: ()=>deviceInterfaces,
+        writeObjects, deviceInterfaces: ()=>deviceInterfaces,
+        children: {
+            buffer: [bufferInterfaces, IID.ID3D10Buffer],
+            shaderResourceView: [shaderResourceViewInterfaces, IID.ID3D10ShaderResourceView],
+            renderTargetView: [renderTargetViewInterfaces, IID.ID3D10RenderTargetView],
+            depthStencilView: [depthStencilViewInterfaces, IID.ID3D10DepthStencilView],
+            vertex: [vertexShaderInterfaces, IID.ID3D10VertexShader],
+            pixel: [pixelShaderInterfaces, IID.ID3D10PixelShader],
+            geometry: [geometryShaderInterfaces, IID.ID3D10GeometryShader],
+            blend: [blendStateInterfaces, IID.ID3D10BlendState],
+            depthStencil: [depthStencilStateInterfaces, IID.ID3D10DepthStencilState],
+            rasterizer: [rasterizerStateInterfaces, IID.ID3D10RasterizerState],
+            sampler: [samplerStateInterfaces, IID.ID3D10SamplerState],
+        },
+        writeStateDesc: {
+            blend: writeBlendDesc, depthStencil: writeDepthStencilDesc,
+            rasterizer: writeRasterizerDesc, sampler: writeSamplerDesc,
+        },
     });
 
     // --- state blocks ---

@@ -44,7 +44,9 @@ import {
 } from '../d3d10/shader-fixtures.js';
 import { createBackend } from '../webgpu/backend.js';
 import { FX_KIND, effectBinary } from '../d3d10/effect-fixtures.js';
+import { CONSTANT_TYPE } from '../d3d10/effect.js';
 import { D3D10_DST, STATE_BLOCK_MASK_SIZE, stateBlockMask } from '../d3d10/stateblock.js';
+import { containerOf } from '../d3d10/reflection.js';
 import {
     EFFECT_VARIABLE_INTERFACES, ID3D10EFFECTPASS_SLOTS, ID3D10EFFECTTECHNIQUE_SLOTS,
     ID3D10EFFECTTYPE_SLOTS, ID3D10EFFECTVARIABLE_SLOTS, ID3D10EFFECT_SLOTS,
@@ -1496,9 +1498,10 @@ test('an effect is made on a device and walked through its interfaces', ()=>{
     assert.equal(pass(p1, 'GetDesc', [desc]), S_OK);
     assert.equal(text(h.box.memory.readU32(desc)), 'P1');
     const signature = h.box.memory.readU32(desc + 8);
-    assert.deepEqual([...h.box.services.readMemory(signature, 4)], [0x44, 0x58, 0x42, 0x43],
-        'the vertex shader\'s own bytecode');
-    assert.equal(h.box.memory.readU32(desc + 12), vs.length);
+    const size = h.box.memory.readU32(desc + 12);
+    assert.deepEqual([...h.box.services.readMemory(signature, size)],
+        [.../** @type {Uint8Array} */ (containerOf(vs, ['ISGN']))],
+        'the vertex shader\'s input signature, in a container of its own');
     assert.equal(pass(p1, 'GetVertexShaderDesc', [desc]), S_OK);
     const anonymous = h.box.memory.readU32(desc);
     assert.equal(variable(anonymous, 'GetDesc', [desc]), S_OK);
@@ -1535,4 +1538,168 @@ test('an effect is made on a device and walked through its interfaces', ()=>{
     assert.equal(variable(none, 'IsValid'), 0, 'the invalid objects stay');
     assert.equal(h.d3d10.D3D10CreateEffectFromMemory.handler([e.at, e.bytes.length, 0, e.device,
         0, e.outAt]) >>> 0, E_NOTIMPL, 'the entry point still refuses');
+});
+
+test('an effect variable\'s typed views are called through its vtable', ()=>{
+    // Wine's effect tests for each kind of variable, through the slots a
+    // program calls.
+    const E_FAIL = 0x80004005;
+    const D3DERR_INVALIDCALL = 0x8876086c;
+    const vs = passThroughVertexShader();
+    const e = effectOn({
+        buffers: [{ name: 'cb', size: 112, variables: [
+            { name: 'f', offset: 0, type: { name: 'float',
+                numeric: { layout: 'scalar', base: 'float' } } },
+            { name: 'i_a', offset: 16, type: { name: 'int', elements: 2,
+                numeric: { layout: 'scalar', base: 'int' } } },
+            { name: 'v_a', offset: 48, type: { name: 'float2', elements: 2,
+                numeric: { layout: 'vector', base: 'float', columns: 2 } } },
+            { name: 'm', offset: 80, type: { name: 'float2x2',
+                numeric: { layout: 'matrix', base: 'float', rows: 2, columns: 2 } } },
+        ] }, { name: 'tb', size: 16, textureBuffer: true, variables: [{ name: 'g', offset: 0,
+            type: { name: 'float', numeric: { layout: 'scalar', base: 'float' } } }] }],
+        objects: [
+            { name: 's', type: { name: 'String', object: FX_KIND.STRING },
+                elements: [{ string: 'STRING' }] },
+            { name: 'tex', type: { name: 'Texture2D', object: FX_KIND.TEXTURE2D, elements: 2 } },
+            { name: 'v', type: { name: 'VertexShader', object: FX_KIND.VERTEXSHADER },
+                elements: [{ shader: vs }] },
+            { name: 'bs', type: { name: 'BlendState', object: FX_KIND.BLEND },
+                elements: [{ assignments: [
+                    { state: 0x25, constant: [[CONSTANT_TYPE.BOOL, 1]] },
+                    { state: 0x26, constant: [[CONSTANT_TYPE.INT, 2]] }] }] },
+        ],
+    });
+    const { h, fx, variable, named, dwords } = e;
+    const read = (/** @type {number} */ at)=>h.box.memory.readU32(at);
+    const out = h.box.allocate(64);
+    const raw = h.box.allocate(32);
+
+    const scalar = e.kind('scalar');
+    const f = fx('GetVariableByName', [named('f')]);
+    assert.equal(scalar(f, 'SetFloat', floatBits([5])), S_OK, 'a float passed as its bits');
+    assert.equal(scalar(f, 'GetFloat', [out]), S_OK);
+    assert.equal(read(out), floatBits([5])[0]);
+    assert.equal(scalar(f, 'GetInt', [out]), S_OK);
+    assert.equal(read(out), 5);
+    assert.equal(scalar(f, 'SetBool', [1]), S_OK);
+    assert.equal(scalar(f, 'GetBool', [out]), S_OK);
+    assert.equal(read(out), 0xffffffff);
+    assert.equal(scalar(f, 'GetFloat', [0]), E_INVALIDARG);
+    const array = fx('GetVariableByName', [named('i_a')]);
+    assert.equal(scalar(array, 'SetIntArray', [h.box.place([7, 8]), 1, 2]), S_OK);
+    assert.equal(scalar(array, 'GetIntArray', [out, 1, 2]), S_OK);
+    assert.deepEqual(dwords(out, 2), [7, 8], 'a scalar array\'s offset goes unused');
+    assert.equal(variable(array, 'GetRawValue', [raw, 0, 20]), S_OK);
+    assert.deepEqual(dwords(raw, 5), [7, 0, 0, 0, 8]);
+
+    const vector = e.kind('vector');
+    const vectors = fx('GetVariableByName', [named('v_a')]);
+    assert.equal(vector(vectors, 'SetFloatVectorArray', [h.box.place(floatBits([1, 2])), 1, 1]),
+        S_OK);
+    assert.equal(vector(vectors, 'SetIntVector', [h.box.place([3, 4])]), S_OK);
+    assert.equal(vector(vectors, 'GetFloatVectorArray', [out, 0, 2]), S_OK);
+    assert.deepEqual(dwords(out, 4), floatBits([3, 4, 1, 2]), 'a vector array\'s is honoured');
+
+    const matrix = e.kind('matrix');
+    const m = fx('GetVariableByName', [named('m')]);
+    assert.equal(matrix(m, 'SetMatrix', [h.box.place(floatBits([1, 2, 0, 0, 3, 4, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0]))]), S_OK);
+    const back = h.box.place(new Array(16).fill(0xdeadbeef));
+    assert.equal(matrix(m, 'GetMatrixTranspose', [back]), S_OK);
+    assert.deepEqual([0, 1, 4, 5, 2].map(at=>read(back + at * 4)),
+        [...floatBits([1, 3, 2, 4]), 0xdeadbeef], 'the entries it has, and no others');
+    assert.equal(variable(m, 'GetRawValue', [raw, 0, 24]), S_OK);
+    assert.deepEqual(dwords(raw, 6), [...floatBits([1, 3]), 0, 0, ...floatBits([2, 4])],
+        'a column a register');
+
+    const string = e.kind('string');
+    const s = fx('GetVariableByName', [named('s')]);
+    assert.equal(string(s, 'GetString', [0]), E_INVALIDARG);
+    assert.equal(string(s, 'GetString', [out]), S_OK);
+    assert.equal(e.text(read(out)), 'STRING');
+    h.box.memory.writeU32(out, 0xdeadbeef);
+    assert.equal(string(variable(f, 'AsString'), 'GetString', [out]), E_FAIL);
+    assert.equal(read(out), 0xdeadbeef, 'the invalid variable leaves the pointer');
+
+    const resource = e.kind('shaderResource');
+    const tex = fx('GetVariableByName', [named('tex')]);
+    const textureAt = h.box.place([0]);
+    assert.equal(h.device(e.device, 'CreateTexture2D', [h.box.place([4, 4, 1, 1,
+        DXGI_FORMAT.R8G8B8A8_UNORM, 1, 0, D3D10_USAGE.DEFAULT, D3D10_BIND.SHADER_RESOURCE, 0, 0]),
+    0, textureAt]), S_OK);
+    const viewAt = h.box.place([0]);
+    assert.equal(h.device(e.device, 'CreateShaderResourceView', [read(textureAt), 0, viewAt]),
+        S_OK);
+    const view = read(viewAt);
+    assert.equal(resource(tex, 'SetResourceArray', [h.box.place([view]), 1, 1]), S_OK);
+    const views = h.box.place([0xdeadbeef, 0xdeadbeef]);
+    assert.equal(resource(tex, 'GetResourceArray', [views, 0, 2]), S_OK);
+    assert.deepEqual(dwords(views, 2), [0, view], 'the program\'s own pointer, at the offset');
+    assert.equal(h.box.call(view, 2), 2, 'handed out with a reference; the effect holds one');
+    assert.equal(resource(variable(tex, 'GetElement', [1]), 'GetResource', [out]), S_OK);
+    assert.equal(read(out), view);
+    h.box.call(view, 2);
+
+    const cbuffer = e.kind('constantBuffer');
+    const cb = fx('GetConstantBufferByName', [named('cb')]);
+    assert.equal(cbuffer(cb, 'GetConstantBuffer', [out]), S_OK);
+    const buffer = read(out);
+    const bufferDesc = h.box.allocate(20);
+    h.box.call(buffer, slot(ID3D10BUFFER_SLOTS, 'GetDesc'), [bufferDesc]);
+    assert.deepEqual(dwords(bufferDesc, 5), [112, D3D10_USAGE.DEFAULT,
+        D3D10_BIND.CONSTANT_BUFFER, 0, 0]);
+    h.box.call(buffer, 2);
+    assert.equal(cbuffer(cb, 'GetTextureBuffer', [out]), D3DERR_INVALIDCALL);
+    const tb = fx('GetConstantBufferByName', [named('tb')]);
+    assert.equal(cbuffer(tb, 'GetConstantBuffer', [out]), D3DERR_INVALIDCALL);
+    const noBuffer = fx('GetConstantBufferByIndex', [100]);
+    assert.equal(cbuffer(noBuffer, 'GetConstantBuffer', [out]), E_FAIL);
+    assert.equal(cbuffer(noBuffer, 'GetTextureBuffer', [out]), E_FAIL);
+
+    const shader = e.kind('shader');
+    const v = fx('GetVariableByName', [named('v')]);
+    const shaderDesc = h.box.allocate(28);
+    assert.equal(shader(v, 'GetShaderDesc', [0, shaderDesc]), S_OK);
+    const [signature, inline, bytecode, length, streamOutput, inputs, outputs] =
+        dwords(shaderDesc, 7);
+    assert.deepEqual([inline, length, streamOutput, inputs, outputs], [0, vs.length, 0, 1, 1]);
+    assert.deepEqual([...h.box.services.readMemory(bytecode, vs.length)], [...vs]);
+    const isgn = /** @type {Uint8Array} */ (containerOf(vs, ['ISGN']));
+    assert.deepEqual([...h.box.services.readMemory(signature, isgn.length)], [...isgn]);
+    const shaderAt = h.box.place([0xdeadbeef]);
+    assert.equal(shader(v, 'GetPixelShader', [0, shaderAt]), D3DERR_INVALIDCALL);
+    assert.equal(read(shaderAt), 0);
+    assert.equal(shader(v, 'GetVertexShader', [0, shaderAt]), S_OK);
+    assert.notEqual(read(shaderAt), 0);
+    h.box.call(read(shaderAt), 2);
+    const parameter = h.box.allocate(24);
+    assert.equal(shader(v, 'GetOutputSignatureElementDesc', [0, 0, parameter]), S_OK);
+    assert.equal(e.text(read(parameter)), 'SV_POSITION');
+    assert.equal(read(parameter + 12), 1, 'D3D10_NAME_POSITION');
+
+    const blend = e.kind('blend');
+    const bs = fx('GetVariableByName', [named('bs')]);
+    const store = h.box.allocate(0x44);
+    assert.equal(blend(bs, 'GetBackingStore', [0, store]), S_OK);
+    assert.deepEqual(dwords(store + 36, 2), [2, 6],
+        'its own source blend, and the effect\'s default destination');
+    const stateAt = h.box.place([0]);
+    assert.equal(blend(bs, 'GetBlendState', [0, stateAt]), S_OK);
+    const state = read(stateAt);
+    const described = h.box.allocate(0x44);
+    h.box.call(state, slot(ID3D10STATE_SLOTS, 'GetDesc'), [described]);
+    assert.deepEqual([...h.box.services.readMemory(described, 0x44)],
+        [...h.box.services.readMemory(store, 0x44)], 'the state made from the store');
+    h.box.call(state, 2);
+    assert.equal(blend(bs, 'GetBlendState', [1, stateAt]), E_FAIL);
+
+    const nothing = fx('GetVariableByName', [named('nothing')]);
+    assert.equal(variable(nothing, 'GetRawValue', [raw, 0, 4]), E_FAIL);
+    assert.equal(variable(nothing, 'SetRawValue', [raw, 0, 4]), E_FAIL);
+
+    h.box.call(view, 2);
+    h.box.call(read(textureAt), 2);
+    assert.equal(h.box.call(e.effect, 2), 0);
+    assert.equal(e.references(), e.baseline, 'every reference handed out came back');
 });

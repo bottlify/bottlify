@@ -13,16 +13,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    D3D10_DRIVER_TYPE, D3D10_SDK_VERSION, E_FAIL, E_INVALIDARG, S_OK,
+    D3D10_BIND, D3D10_DRIVER_TYPE, D3D10_SDK_VERSION, E_FAIL, E_INVALIDARG, S_OK,
 } from './constants.js';
 import { D3D10CreateDevice } from './device.js';
+import { SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 import { CONSTANT_TYPE, D3D10_SVC, D3D10_SVT, parseEffect } from './effect.js';
 import { FX_KIND, effectBinary } from './effect-fixtures.js';
 import {
     D3D10_EFFECT_VARIABLE, INVALID, PASS_STATE, VARIABLE_KIND, createEffect,
 } from './effect-object.js';
+import { D3DERR_INVALIDCALL, containerOf } from './reflection.js';
 import {
-    passThroughVertexShader, resourceDefinitions, solidPixelShader, withChunks,
+    assemble, colouredVertexShader, passThroughVertexShader, resourceDefinitions, ret,
+    solidPixelShader, withChunks,
 } from './shader-fixtures.js';
 import { D3D10_DST, STATE_BLOCK_MASK_SIZE, stateBlockMask } from './stateblock.js';
 
@@ -344,7 +347,9 @@ test('a technique finds its passes, and a pass says which shaders and values it 
     const inline = shaderOf(p1, PASS_STATE.VERTEX_SHADER).variable;
     assert.notEqual(inline, anonymous);
     assert.equal(text(descOf(inline.GetType()).TypeName), 'vertexshader');
-    assert.equal(descOf(p1).IAInputSignatureSize, vs.length, 'the vertex shader\'s bytecode');
+    assert.equal(descOf(p1).IAInputSignatureSize, 88,
+        'the vertex shader\'s one-element input signature in a container of its own, as Wine\'s'
+        + ' test_effect_resource_variable measures it');
     assert.deepEqual(shaderOf(p1, PASS_STATE.GEOMETRY_SHADER).variable, INVALID.variables.shader);
     assert.ok(reports.some(line=>line.includes('index expression')), reports.join('\n'));
 
@@ -631,7 +636,7 @@ test('a pass sets its shaders and binds what each reads by the effect\'s names',
     /** @type {{ view?: any }} */
     const view = {};
     assert.equal(device.CreateShaderResourceView(texture.resource, null, view), S_OK);
-    effect.GetVariableByName('tex').shape.slots[1].resource = view.view;
+    effect.GetVariableByName('tex').GetElement(1).SetViews([view.view], 0);
 
     const named = technique.GetPassByName('named');
     named.Apply(0);
@@ -666,4 +671,467 @@ test('a pass sets its shaders and binds what each reads by the effect\'s names',
     assert.ok(stateBlockMask.GetSetting(mask, D3D10_DST.PS_SHADER_RESOURCES, 3));
     assert.ok(stateBlockMask.GetSetting(mask, D3D10_DST.PS_SAMPLERS, 1));
     assert.ok(!stateBlockMask.GetSetting(mask, D3D10_DST.VS_SHADER_RESOURCES, 2));
+});
+
+// --- the typed views ---
+
+/**
+ * @param {'float' | 'int' | 'uint' | 'bool'} base
+ * @param {'scalar' | 'vector' | 'matrix'} [layout]
+ * @param {{ rows?: number, columns?: number, rowMajor?: boolean, elements?: number }} [shape]
+ * @returns {import('./effect-fixtures.js').FixtureEffectType}
+ */
+const numberType = (base, layout = 'scalar', shape = {})=>({
+    name: base, elements: shape.elements ?? 0,
+    numeric: { layout, base, rows: shape.rows, columns: shape.columns, rowMajor: shape.rowMajor },
+});
+
+/** @param {number} value */
+const bitsOf = value=>new Uint32Array(Float32Array.of(value).buffer)[0];
+
+test('a scalar converts what it is given as the effect framework does, by its own type', ()=>{
+    // Wine's test_effect_scalar_variable: TRUE given to a number is -1, a
+    // number read as a bool is -1, and only a bool keeps what a bool gave it.
+    const layout = /** @type {[string, 'float' | 'int' | 'uint' | 'bool', number, number][]} */ ([
+        ['f0', 'float', 0, 0], ['f_a', 'float', 16, 2], ['i0', 'int', 36, 0],
+        ['i_a', 'int', 48, 2], ['b0', 'bool', 68, 0], ['b_a', 'bool', 80, 2],
+        ['u0', 'uint', 100, 0], ['u_a', 'uint', 112, 2],
+    ]);
+    const { effect } = made({ buffers: [{ name: 'cb', size: 144, variables: layout.map(
+        ([name, base, offset, elements])=>({ name, offset,
+            type: numberType(base, 'scalar', { elements }) })) }] });
+    for (const [name, base, , elements] of layout)
+    {
+        const variable = effect.GetVariableByName(name).As(VARIABLE_KIND.SCALAR);
+        assert.equal(variable.IsValid(), true, name);
+        const bool = base === 'bool';
+        const read = (count = 1)=>[variable.GetValues('float', 0, count),
+            variable.GetValues('int', 0, count), variable.GetValues('bool', 0, count)];
+        assert.equal(variable.SetValues('float', [5], 0, 1), S_OK);
+        assert.deepEqual(read(), bool ? [[-1], [-1], [-1]] : [[5], [5], [-1]], name);
+        variable.SetValues('int', [2], 0, 1);
+        assert.deepEqual(read(), bool ? [[-1], [-1], [-1]] : [[2], [2], [-1]], name);
+        variable.SetValues('bool', [1], 0, 1);
+        assert.deepEqual(read(), [[-1], [-1], [bool ? 1 : -1]], name);
+        variable.SetValues('bool', [32], 0, 1);
+        assert.deepEqual(read(), [[-1], [-1], [bool ? 32 : -1]], name);
+        if (elements)
+        {
+            variable.SetValues('float', [10, 20], 0, 2);
+            assert.deepEqual(read(2), bool
+                ? [[-1, -1], [-1, -1], [-1, -1]]
+                : [[10, 20], [10, 20], [-1, -1]], name);
+            variable.SetValues('bool', [10, 20], 0, 2);
+            assert.deepEqual(read(2)[2], bool ? [10, 20] : [-1, -1], name);
+        }
+    }
+
+    // An array's elements are a register apart, each its array's bytes,
+    // and what follows the array is left alone.
+    const [buffer] = effect.buffers();
+    buffer.dirty = false;
+    const f0 = effect.GetVariableByName('f0');
+    f0.SetValues('float', [1], 0, 1);
+    assert.equal(buffer.dirty, true, 'sent to the GPU again before its next use');
+    const fa = effect.GetVariableByName('f_a');
+    fa.GetElement(0).SetValues('float', [2], 0, 1);
+    const i0 = effect.GetVariableByName('i0').GetValues('int', 0, 1);
+    fa.GetElement(1).SetValues('float', [7], 0, 1);
+    assert.deepEqual(fa.GetValues('float', 0, 2), [2, 7]);
+    assert.deepEqual(f0.GetValues('float', 0, 1), [1]);
+    assert.deepEqual(effect.GetVariableByName('i0').GetValues('int', 0, 1), i0);
+});
+
+test('a vector takes as many components as it has, and its array honours an offset', ()=>{
+    // Wine's test_effect_vector_variable.
+    const layout = /** @type {[string, 'float' | 'int' | 'bool', number, number, number][]} */ ([
+        ['v_f', 'float', 4, 0, 0], ['v_i', 'int', 3, 16, 0], ['v_b', 'bool', 2, 32, 0],
+        ['v_f_a', 'float', 4, 48, 2], ['v_i_a', 'int', 3, 80, 3], ['v_b_a', 'bool', 2, 128, 3],
+    ]);
+    const { effect } = made({ buffers: [{ name: 'cb', size: 176, variables: layout.map(
+        ([name, base, columns, offset, elements])=>({ name, offset,
+            type: numberType(base, 'vector', { columns, elements }) })) }] });
+    for (const [name, base, columns, , elements] of layout)
+    {
+        const variable = effect.GetVariableByName(name).As(VARIABLE_KIND.VECTOR);
+        const bool = base === 'bool';
+        /** @param {number[]} values */
+        const first = values=>values.slice(0, columns);
+        variable.SetValues('float', [1, 2, 3, 4], 0, 1);
+        assert.deepEqual(variable.GetValues('float', 0, 1), bool ? first([-1, -1, -1, -1])
+            : first([1, 2, 3, 4]), name);
+        variable.SetValues('bool', [1, 0, 1, 0], 0, 1);
+        assert.deepEqual(variable.GetValues('float', 0, 1), first([-1, 0, -1, 0]), name);
+        assert.deepEqual(variable.GetValues('bool', 0, 1), bool ? first([1, 0, 1, 0])
+            : first([-1, 0, -1, 0]), name);
+        if (!elements)
+        {
+            continue;
+        }
+        const all = columns * elements;
+        variable.SetValues('int', Array.from({ length: all }, (_, index)=>10 + index), 0,
+            elements);
+        assert.deepEqual(variable.GetValues('int', 0, elements), Array.from({ length: all },
+            (_, index)=>(bool ? -1 : 10 + index)), `${name}: its components packed`);
+        variable.SetValues('bool', new Array(all).fill(0), 0, elements);
+        variable.SetValues('bool', [1, 1, 1, 1], 1, 1);
+        assert.deepEqual(variable.GetValues('float', 0, 1), new Array(columns).fill(0), name);
+        assert.deepEqual(variable.GetValues('float', 1, 1), new Array(columns).fill(-1), name);
+        assert.deepEqual(variable.GetValues('bool', 1, 1), new Array(columns).fill(bool ? 1 : -1),
+            name);
+    }
+});
+
+test('a matrix is laid out by columns or by rows, and read back either way round', ()=>{
+    // Wine's test_effect_matrix_variable, and test_effect_raw_value for how
+    // each layout sits in the buffer.
+    const { effect } = made({ buffers: [{ name: 'cb', size: 144, variables: [
+        { name: 'm1', offset: 0, type: numberType('uint', 'matrix', { rows: 2, columns: 3 }) },
+        { name: 'm2', offset: 48,
+            type: numberType('uint', 'matrix', { rows: 2, columns: 3, rowMajor: true }) },
+        { name: 'm_a', offset: 80,
+            type: numberType('float', 'matrix', { rows: 3, columns: 2, elements: 2 }) },
+    ] }] });
+    const set = [1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0, 0, 0, 0, 0];
+    /** @param {any} variable @param {number} from @param {number} dwords */
+    const raw = (variable, from, dwords)=>[...new Uint32Array(
+        variable.GetRawValue(from, dwords * 4).buffer)];
+    const m1 = effect.GetVariableByName('m1').As(VARIABLE_KIND.MATRIX);
+    assert.equal(m1.SetMatrices(set, 0, 1, false), S_OK);
+    assert.deepEqual(raw(m1, 0, 10), [1, 4, 0, 0, 2, 5, 0, 0, 3, 6], 'a column a register');
+    const m2 = effect.GetVariableByName('m2').As(VARIABLE_KIND.MATRIX);
+    m2.SetMatrices(set, 0, 1, false);
+    assert.deepEqual(raw(m2, 0, 7), [1, 2, 3, 0, 4, 5, 6], 'a row a register');
+    for (const variable of [m1, m2])
+    {
+        const got = variable.GetMatrices(0, 1, false);
+        assert.deepEqual([0, 1, 2, 4, 5, 6].map(at=>got[at]), [1, 2, 3, 4, 5, 6]);
+        assert.equal(got[3], undefined, 'no entry the type has none for');
+        const transposed = variable.GetMatrices(0, 1, true);
+        assert.deepEqual([0, 4, 8, 1, 5, 9].map(at=>transposed[at]), [1, 2, 3, 4, 5, 6]);
+        variable.SetMatrices(set, 0, 1, true);
+        const back = variable.GetMatrices(0, 1, false);
+        assert.deepEqual([0, 1, 2, 4, 5, 6].map(at=>back[at]), [1, 4, 7, 2, 5, 8],
+            'entry [row][column] taken from [column][row]');
+    }
+    const array = effect.GetVariableByName('m_a');
+    array.SetMatrices(new Array(32).fill(0), 0, 2, false);
+    array.SetMatrices(set, 1, 1, false);
+    /** @type {(number | undefined)[]} */
+    const untouched = array.GetMatrices(0, 1, false);
+    assert.deepEqual(untouched.filter(entry=>entry !== undefined), [0, 0, 0, 0, 0, 0],
+        'the offset is honoured');
+    assert.deepEqual([0, 1, 4, 5, 8, 9].map(at=>array.GetMatrices(1, 1, false)[at]),
+        [1, 2, 4, 5, 7, 8]);
+    assert.deepEqual(raw(array, 32, 7), [1, 4, 7, 0, 2, 5, 8], 'the second a stride on');
+    assert.deepEqual(raw(array.GetElement(1), 0, 7), [1, 4, 7, 0, 2, 5, 8]);
+});
+
+test('raw values run on past a variable into its neighbours', ()=>{
+    // Wine's test_effect_raw_value.
+    const float = /** @param {number} columns */ columns=>numberType('float', 'vector',
+        { columns });
+    const { effect } = made({
+        buffers: [{ name: 'cb', size: 64, variables: [
+            { name: 'f4', offset: 0, type: float(4), defaultValue: [1, 2, 3, 4].map(bitsOf) },
+            { name: 'f2', offset: 16, type: float(2), defaultValue: [1, 2].map(bitsOf) },
+            { name: 'i2', offset: 32, type: numberType('int', 'scalar', { elements: 2 }),
+                defaultValue: [9, 12] },
+            { name: 'f', offset: 52, type: FLOAT, defaultValue: [bitsOf(0.2)] },
+        ] }],
+        objects: [{ name: 'tex', type: { name: 'Texture2D', object: FX_KIND.TEXTURE2D } }],
+    });
+    /** @param {Uint8Array} bytes */
+    const floats = bytes=>[...new Float32Array(bytes.buffer)];
+    /** @param {Uint8Array} bytes */
+    const ints = bytes=>[...new Int32Array(bytes.buffer)];
+    const f4 = effect.GetVariableByName('f4');
+    assert.deepEqual([0, 4, 8, 12].map(at=>floats(f4.GetRawValue(at, 4))[0]), [1, 2, 3, 4]);
+    assert.deepEqual(floats(f4.GetRawValue(16, 8)), [1, 2], 'f2\'s, next to it');
+    const i2 = effect.GetVariableByName('i2');
+    assert.deepEqual(ints(i2.GetRawValue(0, 20)), [9, 0, 0, 0, 12], 'a register apart');
+    assert.deepEqual(floats(i2.GetRawValue(20, 4)), [Math.fround(0.2)]);
+    assert.deepEqual(floats(effect.GetConstantBufferByIndex(0).GetRawValue(16, 8)), [1, 2]);
+
+    const [buffer] = effect.buffers();
+    buffer.dirty = false;
+    const f2 = effect.GetVariableByName('f2');
+    assert.equal(f2.SetRawValue(new Uint8Array(Float32Array.of(5).buffer), 4), S_OK);
+    assert.deepEqual(f2.GetValues('float', 0, 1), [1, 5]);
+    assert.equal(buffer.dirty, true);
+    const tex = effect.GetVariableByName('tex');
+    assert.equal(tex.SetRawValue(new Uint8Array(4), 0), E_FAIL, 'nothing numeric to hold it');
+    assert.equal(tex.GetRawValue(0, 4), null);
+});
+
+/**
+ * A 4x4 texture and a view of it.
+ *
+ * @param {any} device
+ */
+function viewOn(device){
+    /** @type {{ resource?: any }} */
+    const texture = {};
+    assert.equal(device.CreateTexture2D({ Width: 4, Height: 4, MipLevels: 1, ArraySize: 1,
+        Format: 28, SampleDesc: { Count: 1, Quality: 0 }, Usage: 0,
+        BindFlags: D3D10_BIND.SHADER_RESOURCE, CPUAccessFlags: 0, MiscFlags: 0 }, null, texture),
+    S_OK);
+    /** @type {{ view?: any }} */
+    const view = {};
+    assert.equal(device.CreateShaderResourceView(texture.resource, null, view), S_OK);
+    texture.resource.release();
+    return view.view;
+}
+
+test('views set on a variable are held by it, bound by a pass, and given back with it', ()=>{
+    // Wine's test_effect_resource_variable: an element is its array's slot,
+    // and an array's offset is honoured.
+    const ps = withChunks(solidPixelShader([1, 1, 1, 1]), [{ name: 'RDEF',
+        bytes: resourceDefinitions({ target: 0xffff0400, flags: 0, bindings: [
+            { name: 't0', type: 2, returnType: 5, dimension: 4, bindPoint: 0 },
+            { name: 't_a', type: 2, returnType: 5, dimension: 4, bindPoint: 1, bindCount: 2 },
+        ] }) }]);
+    const { effect, device } = made({
+        objects: [
+            { name: 't0', type: { name: 'Texture2D', object: FX_KIND.TEXTURE2D } },
+            { name: 't_a', type: { name: 'Texture2D', object: FX_KIND.TEXTURE2D, elements: 2 } },
+        ],
+        techniques: [{ name: 'rsrc_test', passes: [{ name: 'p0',
+            assignments: [{ state: PASS_STATE.PIXEL_SHADER, shader: ps }] }] }],
+    });
+    const [srv0, srvA0, srvA1] = [0, 1, 2].map(()=>viewOn(device));
+    const t0 = effect.GetVariableByName('t0').As(VARIABLE_KIND.SHADER_RESOURCE);
+    assert.equal(t0.SetViews([srv0], 0), S_OK);
+    const array = effect.GetVariableByName('t_a');
+    assert.equal(array.SetViews([srvA0, srvA1], 0), S_OK);
+    const pass = effect.GetTechniqueByName('rsrc_test').GetPassByName('p0');
+    /** @param {number} first @param {number} count */
+    const bound = (first, count)=>{
+        /** @type {{ views?: any[] }} */
+        const out = {};
+        device.PSGetShaderResources(first, count, out);
+        const views = /** @type {any[]} */ (out.views);
+        views.forEach(view=>view?.release());
+        return views;
+    };
+    assert.equal(pass.Apply(0), S_OK);
+    assert.deepEqual(bound(0, 3), [srv0, srvA0, srvA1]);
+    array.GetElement(1).SetViews([srv0], 0);
+    pass.Apply(0);
+    assert.deepEqual(bound(1, 2), [srvA0, srv0]);
+    array.SetViews([srvA0], 1);
+    pass.Apply(0);
+    assert.deepEqual(bound(1, 2), [srvA0, srvA0]);
+    const got = array.GetViews(0, 2);
+    assert.deepEqual(got, [srvA0, srvA0]);
+    got.forEach((/** @type {any} */ view)=>view.release());
+
+    device.PSSetShaderResources(0, [null, null, null]);
+    device.PSSetShader(null);
+    for (const view of [srv0, srvA0, srvA1])
+    {
+        view.release();
+    }
+    assert.equal(effect.release(), 0);
+    assert.equal(device.release(), 0, 'the effect gave back every view it held');
+});
+
+/** A geometry shader that declares a position in and out, and does nothing. */
+function geometryShader(){
+    const position = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
+    return assemble({ kind: SHADER_KIND.GEOMETRY, inputs: [position], outputs: [position],
+        instructions: [ret()] });
+}
+
+test('a shader variable counts on through every shader of the effect from its own', ()=>{
+    // Wine's test_effect_shader_description, test_effect_shader_object and
+    // the signature checks of test_effect_local_shader: the global shaders
+    // in order, then those the passes compile in place; NULL is one
+    // variable per stage, and is not counted.
+    const vs = passThroughVertexShader();
+    const vs2 = colouredVertexShader();
+    const ps = solidPixelShader([1, 1, 0, 1]);
+    const gs = geometryShader();
+    const VS = { name: 'VertexShader', object: FX_KIND.VERTEXSHADER };
+    const PS = { name: 'PixelShader', object: FX_KIND.PIXELSHADER };
+    const GS = { name: 'GeometryShader', object: FX_KIND.GEOMETRYSHADER };
+    /** @type {import('./effect-fixtures.js').FixtureAssignment[]} */
+    const none = [PASS_STATE.PIXEL_SHADER, PASS_STATE.VERTEX_SHADER, PASS_STATE.GEOMETRY_SHADER]
+        .map(state=>({ state, constant: [[CONSTANT_TYPE.INT, 0]] }));
+    const reports = /** @type {string[]} */ ([]);
+    const { effect, device, text } = made({
+        objects: [
+            { name: 'v0', type: VS, elements: [{ shader: null }] },
+            { name: 'p0', type: PS, elements: [{ shader: null }] },
+            { name: 'g0', type: GS, elements: [{ shader: null }] },
+            { name: 'v', type: { ...VS, elements: 2 },
+                elements: [{ shader: vs }, { shader: vs2 }] },
+            { name: 'p', type: PS, elements: [{ shader: ps }] },
+            { name: 'g', type: GS, elements: [{ shader: gs }] },
+            { name: 'g_so', type: { name: 'GeometryShader', object: FX_KIND.GEOMETRYSHADER_SO },
+                elements: [{ shader: gs,
+                    streamOutput: 'SV_POSITION.x; $Skip.x; SV_POSITION.gb' }] },
+        ],
+        techniques: [{ name: 'Render', passes: [
+            { name: 'P1', assignments: none },
+            { name: 'P2', assignments: none },
+            { name: 'P3', assignments: [{ state: PASS_STATE.PIXEL_SHADER, shader: ps },
+                { state: PASS_STATE.VERTEX_SHADER, shader: vs },
+                { state: PASS_STATE.GEOMETRY_SHADER, shader: gs }] },
+        ] }],
+    }, reports);
+    const v0 = effect.GetVariableByName('v0').As(VARIABLE_KIND.SHADER);
+    /** @param {any} variable @param {number} index */
+    const described = (variable, index)=>{
+        /** @type {{ desc?: any }} */
+        const out = {};
+        const hr = variable.GetShaderDesc(index, out);
+        return hr === S_OK ? out.desc : hr;
+    };
+    assert.deepEqual(Array.from({ length: 12 }, (_, index)=>described(v0, index).BytecodeLength
+        ?? described(v0, index)), [0, 0, 0, vs.length, vs2.length, ps.length, gs.length,
+        gs.length, ps.length, vs.length, gs.length, E_FAIL]);
+    assert.equal(v0.GetShaderDesc(0, null), E_INVALIDARG);
+    const withStreamOutput = described(v0, 7);
+    assert.equal(text(withStreamOutput.SODecl), 'SV_POSITION.x; $Skip.x; SV_POSITION.gb');
+    assert.deepEqual([withStreamOutput.IsInline, described(v0, 8).IsInline], [false, true]);
+    assert.equal(described(v0, 6).SODecl, null);
+    const image = effect.image();
+    const first = described(effect.GetVariableByName('v'), 0);
+    assert.deepEqual([...image.subarray(first.Bytecode.at, first.Bytecode.at + vs.length)],
+        [...vs]);
+    const signature = /** @type {Uint8Array} */ (containerOf(vs, ['ISGN']));
+    assert.deepEqual([...image.subarray(first.InputSignature.at,
+        first.InputSignature.at + signature.length)], [...signature],
+    'its input signature, a container of its own in the effect\'s image');
+    assert.deepEqual([first.NumInputSignatureEntries, first.NumOutputSignatureEntries], [1, 1]);
+    const second = described(effect.GetVariableByName('v').GetElement(1), 0);
+    assert.deepEqual([second.BytecodeLength, second.NumInputSignatureEntries], [vs2.length, 2]);
+
+    /** @param {'vertex' | 'pixel' | 'geometry'} stage @param {number} index */
+    const shaderAt = (stage, index)=>{
+        const { hr, shader } = v0.GetShader(stage, index);
+        shader?.release();
+        return [hr, shader !== null];
+    };
+    assert.deepEqual([shaderAt('vertex', 0), shaderAt('vertex', 1), shaderAt('vertex', 3)],
+        [[S_OK, false], [D3DERR_INVALIDCALL, false], [S_OK, true]]);
+    assert.deepEqual([shaderAt('pixel', 1), shaderAt('pixel', 5), shaderAt('pixel', 6)],
+        [[S_OK, false], [S_OK, true], [D3DERR_INVALIDCALL, false]]);
+    assert.deepEqual([shaderAt('geometry', 2), shaderAt('geometry', 6), shaderAt('geometry', 12)],
+        [[S_OK, false], [S_OK, true], [E_FAIL, false]]);
+
+    /** @param {any} variable @param {'inputs' | 'outputs'} which @param {number} index */
+    const element = (variable, which, index)=>{
+        /** @type {{ entry?: any }} */
+        const out = {};
+        const hr = variable.GetSignatureElement(which, index, 0, out);
+        return hr === S_OK ? text({ at: out.entry.nameAt }) : hr;
+    };
+    const p = effect.GetVariableByName('p');
+    assert.equal(element(p, 'outputs', 0), 'SV_TARGET');
+    assert.deepEqual([element(p, 'inputs', 4), element(p, 'outputs', 4)],
+        ['POSITION', 'SV_POSITION'], 'four on from p: the vertex shader P3 compiles');
+    assert.deepEqual([0, 1, 2].map(index=>element(v0, 'outputs', index)),
+        new Array(3).fill(D3DERR_INVALIDCALL), 'a NULL shader has no signature');
+    assert.equal(element(v0, 'inputs', 3), 'POSITION');
+    assert.equal(p.GetSignatureElement('outputs', 0, 5, {}), E_INVALIDARG);
+
+    const technique = effect.GetTechniqueByName('Render');
+    const [p1, p2, p3] = [0, 1, 2].map(index=>technique.GetPassByIndex(index));
+    /** @param {any} pass @param {number} state */
+    const shaderOf = (pass, state)=>{
+        /** @type {{ desc?: any }} */
+        const out = {};
+        assert.equal(pass.GetShaderDesc(state, out), S_OK);
+        return out.desc.variable;
+    };
+    assert.equal(shaderOf(p1, PASS_STATE.VERTEX_SHADER), shaderOf(p2, PASS_STATE.VERTEX_SHADER));
+    assert.notEqual(shaderOf(p1, PASS_STATE.VERTEX_SHADER), shaderOf(p1, PASS_STATE.PIXEL_SHADER));
+    assert.notEqual(shaderOf(p3, PASS_STATE.VERTEX_SHADER), shaderOf(p1, PASS_STATE.VERTEX_SHADER));
+    assert.equal(described(shaderOf(p1, PASS_STATE.VERTEX_SHADER), 0).BytecodeLength, 0);
+    const passDesc = descOf(p3);
+    assert.deepEqual([...image.subarray(passDesc.IAInputSignature.at,
+        passDesc.IAInputSignature.at + passDesc.IAInputSignatureSize)], [...signature]);
+    assert.ok(reports.some(line=>line.includes('stream output')), reports.join('\n'));
+    assert.equal(effect.release(), 0);
+    assert.equal(device.release(), 0);
+});
+
+test('a state variable hands out its state objects and backing stores by index', ()=>{
+    // Wine's test_effect_state_groups: an index counts on through every
+    // state of the kind, from the variable's own first element.
+    const { effect, device } = made({ objects: STATE_GROUPS });
+    const rast = effect.GetVariableByName('rast_state').As(VARIABLE_KIND.RASTERIZER);
+    /** @param {any} variable @param {number} index */
+    const store = (variable, index)=>{
+        /** @type {{ desc?: any }} */
+        const out = {};
+        const hr = variable.GetBackingStore(index, out);
+        return hr === S_OK ? out.desc : hr;
+    };
+    assert.deepEqual([store(rast, 0).CullMode, store(rast, 1).CullMode, store(rast, 2).CullMode],
+        [2, 3, 3], 'the second element, then defaults_rast');
+    assert.equal(store(rast, 3), E_FAIL);
+    assert.equal(rast.GetBackingStore(0, null), E_INVALIDARG);
+    assert.equal(store(rast.GetElement(1), 0).CullMode, 3, 'an element counts from itself');
+    store(rast, 0).CullMode = 1;
+    assert.equal(store(rast, 0).CullMode, 2, 'a copy of the store');
+    const sampler = effect.GetVariableByName('sampler0');
+    assert.deepEqual([store(sampler, 0).Filter, store(sampler, 2).MaxAnisotropy], [0x15, 16]);
+
+    const { hr, state } = rast.GetState(1);
+    assert.equal(hr, S_OK);
+    assert.equal(state, effect.GetVariableByName('rast_state').shape.slots[1].made);
+    state.release();
+    assert.deepEqual(rast.GetState(3), { hr: E_FAIL, state: null });
+    assert.equal(effect.release(), 0);
+    assert.equal(device.release(), 0, 'every reference handed out came back');
+});
+
+test('a constant buffer can be one of the program\'s own, which a pass then binds', ()=>{
+    // Wine's test_effect_constant_buffer_type: the effect's own is a
+    // default-usage constant buffer the size of the buffer; a texture
+    // buffer is not a constant buffer.
+    const ps = withChunks(solidPixelShader([1, 1, 1, 1]), [{ name: 'RDEF',
+        bytes: resourceDefinitions({ target: 0xffff0400, flags: 0,
+            bindings: [{ name: 'cb', type: 0, bindPoint: 3 }] }) }]);
+    const { effect, device } = made({
+        buffers: [{ name: 'cb', size: 32, variables: [{ name: 'f', offset: 0, type: FLOAT }] },
+            { name: 'tb', size: 16, textureBuffer: true,
+                variables: [{ name: 'g', offset: 0, type: FLOAT }] }],
+        techniques: [{ name: 't', passes: [{ name: 'p',
+            assignments: [{ state: PASS_STATE.PIXEL_SHADER, shader: ps }] }] }],
+    });
+    const cb = effect.GetConstantBufferByName('cb').As(VARIABLE_KIND.CONSTANT_BUFFER);
+    const own = cb.GetConstantBuffer();
+    const ownDesc = descOf(own);
+    assert.deepEqual(['ByteWidth', 'Usage', 'BindFlags', 'CPUAccessFlags', 'MiscFlags']
+        .map(field=>ownDesc[field]), [32, 0, D3D10_BIND.CONSTANT_BUFFER, 0, 0]);
+    own.release();
+    assert.deepEqual([cb.textureBuffer(), effect.GetConstantBufferByName('tb').textureBuffer()],
+        [false, true]);
+
+    /** @type {{ resource?: any }} */
+    const mine = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 32, Usage: 0,
+        BindFlags: D3D10_BIND.CONSTANT_BUFFER, CPUAccessFlags: 0, MiscFlags: 0 }, null, mine),
+    S_OK);
+    assert.equal(cb.SetConstantBuffer(mine.resource), S_OK);
+    const got = cb.GetConstantBuffer();
+    assert.equal(got, mine.resource);
+    got.release();
+    effect.GetTechniqueByIndex(0).GetPassByIndex(0).Apply(0);
+    /** @type {{ buffers?: any[] }} */
+    const slots = {};
+    device.PSGetConstantBuffers(3, 1, slots);
+    const [bound] = /** @type {any[]} */ (slots.buffers);
+    assert.equal(bound, mine.resource, 'the program\'s buffer in place of the effect\'s');
+    bound.release();
+
+    device.PSSetConstantBuffers(3, [null]);
+    device.PSSetShader(null);
+    mine.resource.release();
+    assert.equal(effect.release(), 0);
+    assert.equal(device.release(), 0, 'the effect gave back the buffer it was given');
 });

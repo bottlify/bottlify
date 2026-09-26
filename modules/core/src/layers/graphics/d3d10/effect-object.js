@@ -28,15 +28,20 @@
  * buffer is, registers padded; a default value, stored packed, is spread
  * into that layout when the effect is made.
  *
- * Names are `{ at }`, an offset into the effect's unstructured block, or
- * `{ text }`, a string of the runtime's own ("$Anonymous", "cbuffer").
+ * Names are `{ at }`, an offset into the effect's image -- its unstructured
+ * block, then the input signature of each of its shaders cut out of the
+ * shader -- or `{ text }`, a string of the runtime's own ("$Anonymous",
+ * "cbuffer").
  */
 
 import { attachCom } from './com.js';
 import { D3D10_BIND, D3D10_USAGE, E_FAIL, E_INVALIDARG, IID, S_OK } from './constants.js';
 import { ASSIGNMENT, CONSTANT_TYPE, D3D10_SVC, D3D10_SVT } from './effect.js';
 import { stateDesc } from './effect-states.js';
-import { reflectShader } from './reflection.js';
+import {
+    getComponents, getMatrices, setComponents, setMatrices,
+} from './effect-values.js';
+import { D3DERR_INVALIDCALL, containerOf, reflectShader } from './reflection.js';
 import { D3D10_DST, stateBlockMask } from './stateblock.js';
 
 /** D3D10_EFFECT_VARIABLE flags. */
@@ -461,8 +466,297 @@ export function createEffect(data, services){
             GetParentConstantBuffer: ()=>shape.buffer ?? INVALID.variables.constantBuffer,
             /** @param {string} kind */
             As: kind=>(kind === shape.kind ? variable : INVALID.variables[kind]),
+            /**
+             * Bytes of the buffer from the variable's start on; past the
+             * variable they are its neighbours', as the runtime's are.
+             *
+             * @param {Uint8Array} bytes @param {number} offset
+             */
+            SetRawValue(bytes, offset){
+                const storage = shape.storage;
+                if (!storage)
+                {
+                    return E_FAIL;
+                }
+                const at = storage.at + offset;
+                storage.bytes.set(bytes.subarray(0, Math.max(0, storage.bytes.length - at)), at);
+                markChanged(shape);
+                return S_OK;
+            },
+            /** @param {number} offset @param {number} count @returns {Uint8Array | null} */
+            GetRawValue(offset, count){
+                const storage = shape.storage;
+                if (!storage)
+                {
+                    return null;
+                }
+                const out = new Uint8Array(count);
+                const at = storage.at + offset;
+                out.set(storage.bytes.subarray(at, Math.min(at + count, storage.bytes.length)));
+                return out;
+            },
         });
+        Object.assign(variable, typedMethods(variable));
         return variable;
+    };
+
+    /** A numeric variable's bytes changed: its buffer is uploaded before its next use. */
+    const markChanged = (/** @type {any} */ shape)=>{
+        if (shape.buffer)
+        {
+            shape.buffer.dirty = true;
+        }
+        else if (shape.kind === VARIABLE_KIND.CONSTANT_BUFFER)
+        {
+            buffers.find(buffer=>buffer.shape === shape).dirty = true;
+        }
+    };
+
+    /**
+     * Where an object variable's element sits among every object of its
+     * kind in the effect. An index a program gives a variable counts on
+     * from its own first element through the rest, as the runtime's does
+     * (Wine's test_effect_shader_description, test_effect_state_groups).
+     *
+     * @type {Record<string, any[]>}
+     */
+    const flat = {
+        [VARIABLE_KIND.SHADER]: [], [VARIABLE_KIND.BLEND]: [],
+        [VARIABLE_KIND.DEPTH_STENCIL]: [], [VARIABLE_KIND.RASTERIZER]: [],
+        [VARIABLE_KIND.SAMPLER]: [],
+    };
+    /** @param {any} shape @param {number} index */
+    const flatSlot = (shape, index)=>{
+        const own = shape.slots?.[shape.slot >= 0 ? shape.slot : 0];
+        if (index === 0)
+        {
+            return own ?? null;
+        }
+        const list = flat[shape.kind];
+        const at = own && own.flat !== undefined ? own.flat + index : -1;
+        return list && at >= 0 && at < list.length ? list[at] : null;
+    };
+
+    /** @type {Readonly<Record<string, string>>} */
+    const SHADER_STAGE = Object.freeze({
+        vertex: 'vertexshader', pixel: 'pixelshader', geometry: 'geometryshader',
+    });
+
+    /**
+     * What each kind of variable adds: its typed views of what it holds.
+     *
+     * @param {any} variable
+     * @returns {Record<string, Function>}
+     */
+    const typedMethods = variable=>{
+        const shape = variable.shape;
+        const place = ()=>({ bytes: shape.storage.bytes, at: shape.storage.at,
+            type: shape.fxType });
+        /** An element count and where it starts, among the variable's own slots. */
+        const own = (/** @type {number} */ first)=>(shape.slot >= 0 ? shape.slot : 0) + first;
+        switch (shape.kind)
+        {
+            case VARIABLE_KIND.SCALAR:
+            case VARIABLE_KIND.VECTOR:
+                return {
+                    /**
+                     * @param {import('./effect-values.js').Given} given
+                     * @param {number[]} values @param {number} first @param {number} count
+                     */
+                    SetValues(given, values, first, count){
+                        setComponents(place(), values, given, first, count);
+                        markChanged(shape);
+                        return S_OK;
+                    },
+                    /**
+                     * @param {import('./effect-values.js').Given} wanted
+                     * @param {number} first @param {number} count
+                     */
+                    GetValues: (wanted, first, count)=>getComponents(place(), wanted, first, count),
+                };
+            case VARIABLE_KIND.MATRIX:
+                return {
+                    /**
+                     * @param {number[]} dwords @param {number} first @param {number} count
+                     * @param {boolean} transposed
+                     */
+                    SetMatrices(dwords, first, count, transposed){
+                        setMatrices(place(), dwords, first, count, transposed);
+                        markChanged(shape);
+                        return S_OK;
+                    },
+                    /** @param {number} first @param {number} count @param {boolean} transposed */
+                    GetMatrices: (first, count, transposed)=>
+                        getMatrices(place(), first, count, transposed),
+                };
+            case VARIABLE_KIND.STRING:
+                return {
+                    /** @param {number} first @param {number} count @returns {EffectString[]} */
+                    GetStrings: (first, count)=>Array.from({ length: count }, (_, index)=>{
+                        const slot = shape.slots[own(first + index)];
+                        return slot?.stringAt !== undefined ? { at: slot.stringAt } : { text: '' };
+                    }),
+                };
+            case VARIABLE_KIND.SHADER_RESOURCE:
+            case VARIABLE_KIND.RENDER_TARGET_VIEW:
+            case VARIABLE_KIND.DEPTH_STENCIL_VIEW:
+                return {
+                    /** @param {any[]} views @param {number} first */
+                    SetViews(views, first){
+                        views.forEach((view, index)=>{
+                            const slot = shape.slots[own(first + index)];
+                            if (!slot)
+                            {
+                                return;
+                            }
+                            view?.addRef?.();
+                            slot.resource?.release?.();
+                            slot.resource = view ?? null;
+                        });
+                        return S_OK;
+                    },
+                    /** @param {number} first @param {number} count */
+                    GetViews: (first, count)=>Array.from({ length: count }, (_, index)=>{
+                        const view = shape.slots[own(first + index)]?.resource ?? null;
+                        view?.addRef?.();
+                        return view;
+                    }),
+                };
+            case VARIABLE_KIND.CONSTANT_BUFFER:
+                return {
+                    /**
+                     * A buffer of the program's own, bound in place of the
+                     * effect's, which the effect then leaves alone.
+                     *
+                     * @param {any} buffer
+                     */
+                    SetConstantBuffer(buffer){
+                        const target = buffers.find(entry=>entry.shape === shape);
+                        buffer?.addRef?.();
+                        target.override?.release?.();
+                        target.override = buffer ?? null;
+                        return S_OK;
+                    },
+                    GetConstantBuffer(){
+                        const target = buffers.find(entry=>entry.shape === shape);
+                        const buffer = target.override ?? target.gpu ?? null;
+                        buffer?.addRef?.();
+                        return buffer;
+                    },
+                    textureBuffer: ()=>buffers.find(entry=>entry.shape === shape).fx.textureBuffer,
+                };
+            case VARIABLE_KIND.SHADER:
+                return {
+                    /**
+                     * D3D10_EFFECT_SHADER_DESC of the shader at an index, a
+                     * NULL one with no bytecode.
+                     *
+                     * @param {number} index
+                     * @param {{ desc?: Record<string, any> } | null} out
+                     */
+                    GetShaderDesc(index, out){
+                        const slot = flatSlot(shape, index);
+                        if (!slot)
+                        {
+                            return E_FAIL;
+                        }
+                        return describeInto(out, ()=>{
+                            /** @type {import('./effect.js').FxShader | null} */
+                            const shader = slot.shader ?? null;
+                            const signature = shader ? signatures.get(shader) : null;
+                            const reflected = shader ? reflectionOf(shader) : null;
+                            return {
+                                InputSignature: signature ? { at: signature.at } : null,
+                                IsInline: Boolean(slot.inline),
+                                Bytecode: shader ? { at: shader.at } : null,
+                                BytecodeLength: shader ? shader.bytecode.length : 0,
+                                SODecl: shader && shader.streamOutputAt >= 0
+                                    ? { at: shader.streamOutputAt }
+                                    : null,
+                                NumInputSignatureEntries: reflected?.inputs.length ?? 0,
+                                NumOutputSignatureEntries: reflected?.outputs.length ?? 0,
+                            };
+                        });
+                    },
+                    /**
+                     * The shader of a stage, or D3DERR_INVALIDCALL when the
+                     * one at that index is of another.
+                     *
+                     * @param {'vertex' | 'pixel' | 'geometry'} stage
+                     * @param {number} index
+                     */
+                    GetShader(stage, index){
+                        const slot = flatSlot(shape, index);
+                        if (!slot)
+                        {
+                            return { hr: E_FAIL, shader: null };
+                        }
+                        if (slot.stage !== SHADER_STAGE[stage])
+                        {
+                            return { hr: D3DERR_INVALIDCALL, shader: null };
+                        }
+                        slot.made?.addRef?.();
+                        return { hr: S_OK, shader: slot.made ?? null };
+                    },
+                    /**
+                     * One element of a shader's input or output signature,
+                     * its name an offset into the image; a NULL shader has
+                     * none, D3DERR_INVALIDCALL.
+                     *
+                     * @param {'inputs' | 'outputs'} which
+                     * @param {number} index @param {number} element
+                     * @param {{ entry?: import('./reflection.js').ReflectedParameter } | null} out
+                     */
+                    GetSignatureElement(which, index, element, out){
+                        const slot = flatSlot(shape, index);
+                        if (!slot)
+                        {
+                            return E_FAIL;
+                        }
+                        const shader = slot.shader ?? null;
+                        const reflected = shader ? reflectionOf(shader) : null;
+                        if (!shader || !reflected)
+                        {
+                            return D3DERR_INVALIDCALL;
+                        }
+                        const entry = reflected[which][element];
+                        if (!entry || !out)
+                        {
+                            return E_INVALIDARG;
+                        }
+                        out.entry = { ...entry, nameAt: shader.at + entry.nameAt };
+                        return S_OK;
+                    },
+                };
+            case VARIABLE_KIND.BLEND:
+            case VARIABLE_KIND.DEPTH_STENCIL:
+            case VARIABLE_KIND.RASTERIZER:
+            case VARIABLE_KIND.SAMPLER:
+                return {
+                    /** @param {number} index */
+                    GetState(index){
+                        const slot = flatSlot(shape, index);
+                        if (!slot)
+                        {
+                            return { hr: E_FAIL, state: null };
+                        }
+                        slot.made?.addRef?.();
+                        return { hr: S_OK, state: slot.made ?? null };
+                    },
+                    /** @param {number} index @param {{ desc?: any } | null} out */
+                    GetBackingStore(index, out){
+                        const slot = flatSlot(shape, index);
+                        if (!slot || !out)
+                        {
+                            return out ? E_FAIL : E_INVALIDARG;
+                        }
+                        out.desc = structuredClone(slot.desc);
+                        return S_OK;
+                    },
+                };
+            default:
+                return {};
+        }
     };
 
     /**
@@ -676,6 +970,44 @@ export function createEffect(data, services){
         buffer.dirty = true;
     }
 
+    /** @type {WeakMap<object, import('./reflection.js').ShaderReflection | null>} */
+    const reflections = new WeakMap();
+    /** @param {import('./effect.js').FxShader} shader */
+    const reflectionOf = shader=>{
+        if (!reflections.has(shader))
+        {
+            reflections.set(shader, reflectShader(shader.bytecode));
+        }
+        return reflections.get(shader) ?? null;
+    };
+
+    /**
+     * Each shader's input signature, cut out of it into a container of its
+     * own as the runtime hands one out, laid after the unstructured block in
+     * the effect's image. Every shader is made with the effect, so the image
+     * is whole before anyone copies it.
+     */
+    const imageBase = Math.ceil(data.unstructured.length / 4) * 4;
+    /** @type {Uint8Array[]} */
+    const appendix = [];
+    let imageLength = imageBase;
+    /** @type {Map<import('./effect.js').FxShader, { at: number, size: number } | null>} */
+    const signatures = new Map();
+    /** @param {import('./effect.js').FxShader} shader */
+    const cutSignature = shader=>{
+        if (signatures.has(shader))
+        {
+            return;
+        }
+        const bytes = containerOf(shader.bytecode, ['ISGN']);
+        signatures.set(shader, bytes ? { at: imageLength, size: bytes.length } : null);
+        if (bytes)
+        {
+            appendix.push(bytes);
+            imageLength += Math.ceil(bytes.length / 4) * 4;
+        }
+    };
+
     /**
      * A shader an effect holds, made on the device when the effect is. A
      * geometry shader built with stream output is made without it, which the
@@ -690,6 +1022,7 @@ export function createEffect(data, services){
         {
             return null;
         }
+        cutSignature(shader);
         if (streamOutput || shader.streamOutput)
         {
             report('an effect\'s geometry shader with stream output is made without it: nothing'
@@ -739,8 +1072,14 @@ export function createEffect(data, services){
             }
             else if (kind === VARIABLE_KIND.SHADER)
             {
+                slot.stage = fx.type.object;
                 slot.made = makeShader(/** @type {string} */ (fx.type.object), slot.shader ?? null,
                     fx.type.streamOutput);
+            }
+            if (flat[kind])
+            {
+                slot.flat = flat[kind].length;
+                flat[kind].push(slot);
             }
         }
         return objectVariable(fx, slots, -1);
@@ -772,20 +1111,30 @@ export function createEffect(data, services){
     };
     /**
      * A shader a pass names without a variable -- compiled in place, or
-     * NULL -- is a variable of its own named "$Anonymous".
+     * NULL -- is a variable of its own named "$Anonymous". One compiled in
+     * place counts among the effect's shaders after the global ones, in the
+     * order the passes give them; NULL does not count, and is one variable
+     * per stage however many passes assign it (Wine's
+     * test_effect_local_shader).
      *
      * @param {string} stage
      * @param {import('./effect.js').FxShader | null} shader
      */
     const anonymousShader = (stage, shader)=>{
         /** @type {any} */
+        const slot = { shader, stage, inline: shader !== null,
+            made: makeShader(stage, shader, false) };
+        if (shader)
+        {
+            slot.flat = flat.shader.length;
+            flat.shader.push(slot);
+        }
+        /** @type {any} */
         const variable = variableObject({
             kind: VARIABLE_KIND.SHADER, name: { text: '$Anonymous' }, semantic: null,
             semanticAt: -1, flags: 0, bufferOffset: 0, explicitBindPoint: 0,
             type: ()=>anonymousTypeOf(stage), fxType: null, fxAnnotations: [], annotations: [],
-            buffer: null, storage: null,
-            slots: [{ shader, made: makeShader(stage, shader, false) }], slot: 0, members: null,
-            element: null,
+            buffer: null, storage: null, slots: [slot], slot: 0, members: null, element: null,
         });
         variable.shape.memberName = '$Anonymous';
         variable.shape.stage = stage;
@@ -798,6 +1147,40 @@ export function createEffect(data, services){
         [PASS_STATE.PIXEL_SHADER]: 'pixelshader',
         [PASS_STATE.GEOMETRY_SHADER]: 'geometryshader',
     });
+
+    /** @type {Map<string, any>} */
+    const nullShaders = new Map();
+    /** @param {string} stage */
+    const nullShaderOf = stage=>{
+        let variable = nullShaders.get(stage);
+        if (!variable)
+        {
+            variable = anonymousShader(stage, null);
+            nullShaders.set(stage, variable);
+        }
+        return variable;
+    };
+    /**
+     * The shaders passes compile in place, made with the effect so that
+     * their places among its shaders are those of the passes' order.
+     *
+     * @type {Map<import('./effect.js').FxAssignment, any>}
+     */
+    const inlineShaders = new Map();
+    for (const technique of data.techniques)
+    {
+        for (const pass of technique.passes)
+        {
+            for (const assignment of pass.assignments)
+            {
+                const stage = STAGES[assignment.state];
+                if (stage && assignment.kind === ASSIGNMENT.ANONYMOUS_SHADER && assignment.shader)
+                {
+                    inlineShaders.set(assignment, anonymousShader(stage, assignment.shader));
+                }
+            }
+        }
+    }
 
     /** @param {string} name */
     const variableNamed = name=>globals().find(variable=>variable.shape.memberName === name)
@@ -893,23 +1276,13 @@ export function createEffect(data, services){
         }
     };
 
-    /** @type {WeakMap<object, import('./reflection.js').ReflectedBinding[]>} */
-    const bindings = new WeakMap();
     /**
      * What a shader reads and at which slots, from its own resource
      * definitions.
      *
      * @param {import('./effect.js').FxShader} shader
      */
-    const bindingsOf = shader=>{
-        let known = bindings.get(shader);
-        if (!known)
-        {
-            known = reflectShader(shader.bytecode)?.bindings ?? [];
-            bindings.set(shader, known);
-        }
-        return known;
-    };
+    const bindingsOf = shader=>reflectionOf(shader)?.bindings ?? [];
 
     /** @param {import('./effect.js').FxPass} fx */
     const passObject = fx=>{
@@ -929,11 +1302,12 @@ export function createEffect(data, services){
             found = { variable: INVALID.variables.shader, index: 0 };
             if (assignment?.kind === ASSIGNMENT.CONSTANT)
             {
-                found = { variable: anonymousShader(stage, null), index: 0 };
+                found = { variable: nullShaderOf(stage), index: 0 };
             }
             else if (assignment?.kind === ASSIGNMENT.ANONYMOUS_SHADER)
             {
-                found = { variable: anonymousShader(stage, assignment.shader ?? null), index: 0 };
+                found = { variable: inlineShaders.get(assignment) ?? nullShaderOf(stage),
+                    index: 0 };
             }
             else if (assignment?.kind === ASSIGNMENT.VARIABLE
                 || assignment?.kind === ASSIGNMENT.CONSTANT_INDEX)
@@ -1013,7 +1387,11 @@ export function createEffect(data, services){
                 if (binding.type === SHADER_INPUT.CBUFFER)
                 {
                     const buffer = buffers.find(entry=>entry.shape.memberName === binding.name);
-                    if (buffer?.gpu)
+                    if (buffer?.override)
+                    {
+                        device[`${stage}SetConstantBuffers`](binding.bindPoint, [buffer.override]);
+                    }
+                    else if (buffer?.gpu)
                     {
                         upload(buffer);
                         device[`${stage}SetConstantBuffers`](binding.bindPoint, [buffer.gpu]);
@@ -1077,13 +1455,13 @@ export function createEffect(data, services){
             return S_OK;
         };
 
-        /** The vertex shader's bytecode, which is its input signature's container. */
+        /** The vertex shader's input signature, a container of its own. */
         const inputSignature = ()=>{
             const { variable, index } = shaderOf(PASS_STATE.VERTEX_SHADER);
             const slots = variable.shape?.slots;
             const shader = slots ? slots[variable.shape.slot >= 0 ? variable.shape.slot : index]
                 ?.shader : null;
-            return shader ?? null;
+            return shader ? signatures.get(shader) ?? null : null;
         };
         return kept({
             invalid: false,
@@ -1098,7 +1476,7 @@ export function createEffect(data, services){
                     Name: { at: fx.nameAt },
                     Annotations: fx.annotations.length,
                     IAInputSignature: signature ? { at: signature.at } : null,
-                    IAInputSignatureSize: signature ? signature.bytecode.length : 0,
+                    IAInputSignatureSize: signature ? signature.size : 0,
                     StencilRef: convert(stateValues(PASS_STATE.STENCIL_REF, 1)?.[0], 'uint'),
                     SampleMask: convert(stateValues(PASS_STATE.SAMPLE_MASK, 1)?.[0], 'uint'),
                     BlendFactor: [0, 1, 2, 3].map(index=>convert(factor?.[index], 'float')),
@@ -1284,11 +1662,34 @@ export function createEffect(data, services){
         IsOptimized: ()=>optimized,
         /** Every object made for the effect so far, not counting the invalid ones. */
         children: ()=>[...made],
+        /** What every `{ at }` the effect hands out is an offset into. */
+        image: ()=>{
+            const bytes = new Uint8Array(imageLength);
+            bytes.set(data.unstructured);
+            let at = imageBase;
+            for (const part of appendix)
+            {
+                bytes.set(part, at);
+                at += Math.ceil(part.length / 4) * 4;
+            }
+            return bytes;
+        },
         /** The constant buffers, with their bytes. */
         buffers: ()=>buffers,
     }), {
         interfaces: [IID.ID3D10Effect],
         onLastRef: ()=>{
+            for (const buffer of buffers)
+            {
+                buffer.override?.release?.();
+            }
+            for (const variable of objects)
+            {
+                for (const slot of variable.shape.slots)
+                {
+                    slot.resource?.release?.();
+                }
+            }
             for (const object of owned.splice(0))
             {
                 object.release?.();
