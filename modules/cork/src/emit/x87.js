@@ -918,7 +918,7 @@ export function x87EntryCheck(e){
             b.i32const(need.empty).op(I32.xor);
         }
         b.i32const(need.held | need.empty).op(I32.and);
-        e.openIf('unshaped', EMPTY);
+        e.openGuard('unshaped', EMPTY);
         e.exitAt(e.region.blocks[label].start, Exit.UNTRANSLATED, SHAPE);
         e.close();
         if (k < tests.length - 1)
@@ -1316,7 +1316,7 @@ export function emitX87(e, instruction, flagsLive){
     if (e.context.wide && ROUNDS.has(op) && x.checkedPrecision !== e.blockIndex)
     {
         b.localGet(Local.x87Control).i32const(0x300).op(I32.and).op(I32.eqz);
-        e.openIf('single', EMPTY);
+        e.openGuard('single', EMPTY);
         // Not `exitBefore`: the exit is conditional, and the block stays an entry.
         e.blockRetired--;
         e.exitAt(instruction.eip, Exit.UNTRANSLATED, PRECISION);
@@ -1507,12 +1507,12 @@ export function emitX87(e, instruction, flagsLive){
         }
         b.localSet(Local.t1);
         b.localGet(Local.t1);
-        e.openIf('fault', EMPTY);
+        e.openGuard('fault', EMPTY);
         setStatus(Status.IE | Status.SF);
         if (overflowChecked)
         {
             b.localGet(Local.x87Empty).i32const(into).op(I32.and).op(I32.eqz);
-            e.openIf('overflow', EMPTY);
+            e.openGuard('overflow', EMPTY);
             setStatus(Status.C1);
             e.close();
         }
@@ -1600,7 +1600,7 @@ export function emitX87(e, instruction, flagsLive){
         // Only when the result is a NaN at all: the common path is one compare.
         b.localSet(x.temp3);
         b.localGet(x.temp3).localGet(x.temp3).op(F64.ne);
-        e.openIf('nan', EMPTY);
+        e.openGuard('nan', EMPTY);
         if (!fix && invalid)
         {
             // The rare branch as one call, so the hot path around it stays
@@ -1631,7 +1631,7 @@ export function emitX87(e, instruction, flagsLive){
         if (memory !== null)
         {
             rawSignalling(e, memory);
-            e.openIf('signalling', EMPTY);
+            e.openGuard('signalling', EMPTY);
             setStatus(Status.IE);
             e.close();
         }
@@ -1640,7 +1640,7 @@ export function emitX87(e, instruction, flagsLive){
         {
             b.localGet(input).localGet(input).op(F64.eq).op(I32.and);
         }
-        e.openIf('made', EMPTY);
+        e.openGuard('made', EMPTY);
         if (fix)
         {
             b.localGet(x.temp3).f64const(-1).op(F64.copysign).localSet(x.temp3);
@@ -1753,7 +1753,7 @@ export function emitX87(e, instruction, flagsLive){
             // too.
             b.localGet(x.temp2).op(F64.abs).f64const(1e18).op(F64.ge);
             b.localGet(x.temp2).localGet(x.temp2).op(F64.ne).op(I32.or);
-            e.openIf('invalid', EMPTY);
+            e.openGuard('invalid', EMPTY);
             setStatus(Status.IE);
             e.close();
             b.localGet(x.temp2);
@@ -1829,7 +1829,7 @@ export function emitX87(e, instruction, flagsLive){
             {
                 // A negative other than -0 is invalid: IE, and the result is a NaN.
                 b.localGet(st(0)).f64const(0).op(F64.lt);
-                e.openIf('negative', EMPTY);
+                e.openGuard('negative', EMPTY);
                 setStatus(Status.IE);
                 e.close();
             }
@@ -1961,7 +1961,7 @@ export function emitX87(e, instruction, flagsLive){
             // A NaN or an empty register: the indefinite in ST0 (and a push of
             // it); out of range: C2 and nothing else.
             b.localGet(x.temp).localGet(x.temp).op(F64.ne).localGet(Local.t1).op(I32.or);
-            e.openIf('invalid', EMPTY);
+            e.openGuard('invalid', EMPTY);
             indefinite();
             b.localSet(st(0));
             dirty(0);
@@ -2018,7 +2018,7 @@ export function emitX87(e, instruction, flagsLive){
                     setStatus(Status.ZE);
                     e.close();
                     b.localGet(x.temp).f64const(0).op(F64.lt);
-                    e.openIf('negative', EMPTY);
+                    e.openGuard('negative', EMPTY);
                     setStatus(Status.IE);
                     e.close();
                 }
@@ -2029,7 +2029,7 @@ export function emitX87(e, instruction, flagsLive){
                 if (precise)
                 {
                     b.localGet(x.temp).f64const(-1).op(F64.lt);
-                    e.openIf('negative', EMPTY);
+                    e.openGuard('negative', EMPTY);
                     setStatus(Status.IE);
                     e.close();
                 }
@@ -2058,7 +2058,7 @@ export function emitX87(e, instruction, flagsLive){
             b.localGet(x.temp).op(F64.abs).f64const(Infinity).op(F64.eq).op(I32.or);
             b.localGet(x.temp2).f64const(0).op(F64.eq).op(I32.or);
             b.localGet(Local.t1).op(I32.or);
-            e.openIf('invalid', EMPTY);
+            e.openGuard('invalid', EMPTY);
             setStatus(Status.IE);
             indefinite();
             b.localSet(st(0));
@@ -2230,7 +2230,7 @@ export function emitX87(e, instruction, flagsLive){
                     signalling(e, a, c);
                     b.op(I32.and);
                 }
-                e.openIf('invalid', EMPTY);
+                e.openGuard('invalid', EMPTY);
                 setStatus(Status.IE);
                 e.close();
                 b.localGet(Local.x87Status).i32const(~Status.C1).op(I32.and)
@@ -2259,7 +2259,7 @@ export function emitX87(e, instruction, flagsLive){
             b.localGet(Local.x87Status).i32const(~Status.CONDITION).op(I32.and)
                 .localSet(Local.x87Status);
             b.localGet(v).op(I64.reinterpretF64).i64const(0n).op(I64.ltS);
-            e.openIf('negative', EMPTY);
+            e.openGuard('negative', EMPTY);
             setStatus(Status.C1);
             e.close();
             b.localGet(Local.x87Empty).i32const(1 << state.top).op(I32.and);
@@ -2267,7 +2267,7 @@ export function emitX87(e, instruction, flagsLive){
             setStatus(Status.C3 | Status.C0);
             b.else();
             b.localGet(v).localGet(v).op(F64.ne);
-            e.openIf('nan', EMPTY);
+            e.openGuard('nan', EMPTY);
             setStatus(Status.C0);
             b.else();
             b.localGet(v).op(F64.abs).f64const(Infinity).op(F64.eq);
@@ -2583,9 +2583,9 @@ function loadFloat(e, operand, mode = 'checked'){
         }
         const value = e.x87.temp3;
         b.localTee(value).localGet(value).op(F64.ne);
-        e.openIf('nan', EMPTY);
+        e.openGuard('nan', EMPTY);
         rawSignalling(e, operand);
-        e.openIf('signalling', EMPTY);
+        e.openGuard('signalling', EMPTY);
         b.localGet(Local.x87Status).i32const(Status.IE).op(I32.or).localSet(Local.x87Status);
         if (operand.size === 8)
         {
@@ -2606,7 +2606,7 @@ function loadFloat(e, operand, mode = 'checked'){
         b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase })
             .i64const(0x7fffffffffffffffn).op(I64.and).i64const(0x4000000000000000n)
             .op(I64.gtS).op(I32.and);
-        e.openIf('signalling', EMPTY);
+        e.openGuard('signalling', EMPTY);
         b.localGet(Local.x87Status).i32const(Status.IE).op(I32.or).localSet(Local.x87Status);
         e.close();
         b.localGet(Local.addr).i32const(e.layout.ramBase).op(I32.add)
@@ -2619,9 +2619,9 @@ function loadFloat(e, operand, mode = 'checked'){
         // signalling NaN), one compare on the common path; the fraction after.
         b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase }).localSet(Local.t2);
         b.localGet(Local.t2).i32const(0x7fc00000).op(I32.and).i32const(0x7f800000).op(I32.eq);
-        e.openIf('signalling', EMPTY);
+        e.openGuard('signalling', EMPTY);
         b.localGet(Local.t2).i32const(0x3fffff).op(I32.and);
-        e.openIf('nan', EMPTY);
+        e.openGuard('nan', EMPTY);
         b.localGet(Local.x87Status).i32const(Status.IE).op(I32.or).localSet(Local.x87Status);
         b.localGet(Local.t2).i32const(0x400000).op(I32.or).localSet(Local.t2);
         e.close();
@@ -2632,9 +2632,9 @@ function loadFloat(e, operand, mode = 'checked'){
     b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase }).localSet(Local.t64);
     b.localGet(Local.t64).i64const(0x7ff8000000000000n).op(I64.and)
         .i64const(0x7ff0000000000000n).op(I64.eq);
-    e.openIf('signalling', EMPTY);
+    e.openGuard('signalling', EMPTY);
     b.localGet(Local.t64).i64const(0x0007ffffffffffffn).op(I64.and).i64const(0n).op(I64.ne);
-    e.openIf('nan', EMPTY);
+    e.openGuard('nan', EMPTY);
     b.localGet(Local.x87Status).i32const(Status.IE).op(I32.or).localSet(Local.x87Status);
     b.localGet(Local.t64).i64const(0x0008000000000000n).op(I64.or).localSet(Local.t64);
     e.close();
@@ -2666,7 +2666,7 @@ function storeFloat(e, operand, pushValue){
         b.localSet(e.x87.temp);
         b.localGet(e.x87.temp).op(F64.abs).f64const(2 ** -126).op(F64.lt);
         b.localGet(e.x87.temp).f64const(0).op(F64.ne).op(I32.and);
-        e.openIf('underflow', EMPTY);
+        e.openGuard('underflow', EMPTY);
         b.localGet(Local.x87Status).i32const(Status.UE).op(I32.or).localSet(Local.x87Status);
         e.close();
         b.localGet(Local.addr).localGet(e.x87.temp).op(F32.demoteF64)
@@ -2765,7 +2765,7 @@ function storeInt(e, operand, local, truncate){
     }
     inRange();
     b.op(I32.eqz);
-    e.openIf('indefinite', EMPTY);
+    e.openGuard('indefinite', EMPTY);
     b.localGet(Local.x87Status).i32const(Status.IE).op(I32.or).localSet(Local.x87Status);
     b.localGet(Local.addr);
     if (operand.size === 8)
@@ -2816,7 +2816,7 @@ function conditionBits(e, a, c, ordered){
     }
     b.localSet(Local.t1);
     b.localGet(Local.t1);
-    e.openIf('unordered', EMPTY);
+    e.openGuard('unordered', EMPTY);
     b.localGet(Local.x87Status).i32const(Status.C3 | Status.C2 | Status.C0).op(I32.or)
         .localSet(Local.x87Status);
     if (ordered)
@@ -2826,7 +2826,7 @@ function conditionBits(e, a, c, ordered){
     else
     {
         signalling(e, a, c);
-        e.openIf('signalling', EMPTY);
+        e.openGuard('signalling', EMPTY);
         b.localGet(Local.x87Status).i32const(Status.IE).op(I32.or).localSet(Local.x87Status);
         e.close();
     }

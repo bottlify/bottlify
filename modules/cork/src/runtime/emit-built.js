@@ -31,6 +31,8 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @property {number} instructions
  * @property {[string, number][]} unsupported
  * @property {[string, number][]} refusals
+ * @property {[string, number][]} relaxedReads
+ * @property {number} x87RelaxedReads
  * @property {number} emitMs       milliseconds the emitter took
  * @property {number} encodeMs     milliseconds `toBytes` took
  */
@@ -44,7 +46,9 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @property {number} instructions
  * @property {[string, number][]} unsupported
  * @property {[string, number][]} refusals
- * @property {number} relaxedReads  x87 status-word reads that may see what a module that is
+ * @property {[string, number][]} relaxedReads  by opcode, the reads of a flag an instruction
+ *     before them left undefined, outside `precise`
+ * @property {number} x87RelaxedReads  x87 status-word reads that may see what a module that is
  *     not `precise` does not keep
  */
 
@@ -117,7 +121,8 @@ export function emitBatch(jobs, layout, features, options = {}){
                 instructions: translation.instructions,
                 unsupported: [...translation.unsupported],
                 refusals: [...translation.refusals],
-                relaxedReads: translation.x87RelaxedReads,
+                relaxedReads: [...translation.relaxedReads],
+                x87RelaxedReads: translation.x87RelaxedReads,
             } };
         }
         catch (e){

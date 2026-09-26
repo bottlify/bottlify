@@ -17,14 +17,15 @@ const STACK = 0x80000;
 /**
  * Runs a program on translated code and on the model from the same start,
  * and answers both, so a test can assert on the one and know the other
- * agrees.
+ * agrees -- translated `precise`, so the flags an instruction leaves
+ * undefined agree too, unless `start.precise` is false.
  *
  * @param {number[]} bytes
  * @param {{ regs?: Record<string, number>, eflags?: number,
- *     memory?: [number, number[]][] }} [start]
+ *     memory?: [number, number[]][], precise?: boolean }} [start]
  */
 function both(bytes, start = {}){
-    const m = createTestMachine();
+    const m = createTestMachine({ precise: start.precise ?? true });
     m.write(CODE, bytes);
     m.setReg('esp', STACK);
     for (const [address, data] of start.memory ?? [])

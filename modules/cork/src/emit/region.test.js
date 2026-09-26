@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../testing/machine.js';
-import { Exit, planLoops } from './region.js';
+import { Exit, deadFlagPass, liveFlagsOut, planLoops } from './region.js';
 
 const CODE = 0x1000;
 const DATA = 0x3000;
@@ -357,6 +357,284 @@ test('inc keeps the carry for an adc in the next block', ()=>{
     m.translate(CODE).run(CODE, 1000);
     assert.equal(m.reg('eax'), 1);
     assert.equal(m.reg('ebx'), 1, 'the carry stc set, through the inc');
+});
+
+test('a record no later block reads is not folded, with the backward jumps through the dispatch',
+    ()=>{
+        // mov ecx, 5; L: add eax, 3; stc; jmp M; M: sub ecx, 1; jnz L; hlt -- the sub
+        // writes every flag before anything reads one, so neither the stc nor the add
+        // before it is computed, and the stc's partial write folds nothing.
+        const program = [0xb9, 5, 0, 0, 0, 0x83, 0xc0, 0x03, 0xf9, 0xeb, 0x00,
+            0x83, 0xe9, 0x01, 0x75, 0xf5, 0xf4];
+        for (const precise of [false, true])
+        {
+            const m = createTestMachine({ precise });
+            m.write(CODE, program);
+            const unit = m.translate(CODE);
+            assert.equal(unit.translation.folds, 0, `no fold (precise: ${precise})`);
+            assert.equal(unit.run(CODE, 1000).kind, Exit.HALT);
+            assert.equal(m.reg('eax'), 15);
+            assert.equal(m.reg('ecx'), 0);
+        }
+    });
+
+test('a shift by cl whose flags nothing reads folds no record, whatever the count', ()=>{
+    // add ebx, 1; sar eax, cl; shld esi, edi, cl; test al, 2; setz dl; hlt -- the test
+    // writes every flag the shifts would (its undefined AF too, outside `precise`), so
+    // neither folds the add's record first.
+    for (const count of [0, 3])
+    {
+        const m = createTestMachine({ precise: false });
+        m.write(CODE, [0x83, 0xc3, 0x01, 0xd3, 0xf8, 0x0f, 0xa5, 0xfe, 0xa8, 0x02,
+            0x0f, 0x94, 0xc2, 0xf4]);
+        m.setReg('eax', 0x80000010);
+        m.setReg('ecx', count);
+        m.setReg('esi', 0x1);
+        m.setReg('edi', 0xf0000000);
+        const unit = m.translate(CODE);
+        assert.equal(unit.translation.folds, 0);
+        assert.equal(unit.run(CODE, 1000).kind, Exit.HALT);
+        assert.equal(m.reg('eax'), count === 0 ? 0x80000010 : 0xf0000002);
+        assert.equal(m.reg('esi'), count === 0 ? 0x1 : 0xf);
+        assert.equal(m.reg('edx') & 0xff, count === 0 ? 1 : 0, 'ZF of the test');
+    }
+});
+
+test('a loop head reads the flags its latch left, and those it is entered with', ()=>{
+    // A tree's find: mov eax, DATA; mov edx, key; jmp C; B: mov edi, [eax];
+    // cmovae edi, [eax+4]; test edi, edi; mov eax, edi; je out; C: cmp edx, [eax+8];
+    // jne B; out: hlt -- the head's cmovae reads the CF of the latch's cmp, the record
+    // it expects there; entered at the head from outside, it reads whatever came in.
+    const program = [0xb8, ...u32(DATA), 0xba, ...u32(0), 0xeb, 0x0c,
+        0x8b, 0x38, 0x0f, 0x43, 0x78, 0x04, 0x85, 0xff, 0x89, 0xf8, 0x74, 0x05,
+        0x3b, 0x50, 0x08, 0x75, 0xef, 0xf4];
+    const B = CODE + 0x0c;
+    /** Nodes of {left, right, key}: 0 is 50 over 1 (20) and 2 (80); 3 (90) right of 2. */
+    const nodes = [[1, 2, 50], [-1, -1, 20], [-1, 3, 80], [-1, -1, 90]];
+    const machine = ()=>{
+        const m = createTestMachine();
+        m.write(CODE, program);
+        nodes.forEach(([left, right, key], i)=>{
+            m.writeU32(DATA + i * 16, left < 0 ? 0 : DATA + left * 16);
+            m.writeU32(DATA + i * 16 + 4, right < 0 ? 0 : DATA + right * 16);
+            m.writeU32(DATA + i * 16 + 8, key);
+        });
+        return m;
+    };
+    for (const [key, found] of [[50, 0], [20, 1], [90, 3], [85, -1], [10, -1]])
+    {
+        const m = machine();
+        m.write(CODE + 6, u32(key));
+        assert.equal(m.translate(CODE).run(CODE, 1000).kind, Exit.HALT);
+        assert.equal(m.reg('eax'), found < 0 ? 0 : DATA + found * 16, `key ${key}`);
+    }
+    for (const carry of [0, 1])
+    {
+        // At the head from outside, with CF in the flags word: left when set, right when not.
+        const m = machine();
+        m.setReg('eax', DATA);
+        m.setReg('edx', 20);
+        m.setEflags(2 | carry);
+        m.translate(CODE).run(B, 3);
+        assert.equal(m.reg('edi'), DATA + (carry ? 1 : 2) * 16, `entered with CF ${carry}`);
+    }
+});
+
+test('a spent budget on a jump back leaves the flags its target reads', ()=>{
+    // mov ecx, 6; clc; H: jnc S; add eax, 100; S: add eax, 1; cmp ecx, 4; dec ecx;
+    // jnz H; hlt -- the head reads the CF the cmp left through the dec, across the
+    // jump back, which leaves there whenever the budget is spent.
+    const program = [0xb9, 6, 0, 0, 0, 0xf8, 0x73, 0x03, 0x83, 0xc0, 0x64, 0x83, 0xc0, 0x01,
+        0x83, 0xf9, 0x04, 0x49, 0x75, 0xf2, 0xf4];
+    for (const precise of [false, true])
+    {
+        for (let budget = 1; budget <= 30; budget++)
+        {
+            const m = createTestMachine({ precise });
+            m.write(CODE, program);
+            const unit = m.translate(CODE);
+            let exit = unit.run(CODE, budget);
+            for (let runs = 0; exit.kind === Exit.BUDGET && runs < 100; runs++)
+            {
+                exit = unit.run(m.eip(), budget);
+            }
+            assert.equal(exit.kind, Exit.HALT);
+            assert.equal(m.reg('eax'), 206, `budget ${budget} (precise: ${precise})`);
+            assert.equal(m.counter(), 35);
+        }
+    }
+});
+
+test('the fast default leaves an undefined flag as the cheapest code does, and every defined one',
+    ()=>{
+        // An FNV-1a loop: L: inc edx; xor ecx, eax; movzx eax, byte [edx];
+        // imul ecx, ecx, 0x1000193; test al, al; jnz L; hlt. The imul leaves SF, ZF, AF
+        // and PF undefined and the test does not define AF: exactly, the xor's record
+        // stays alive through both and the imul folds it every turn; in the fast default
+        // nothing reads a flag the two define, and no record is folded.
+        const loop = [0xba, ...u32(DATA - 1), 0xb9, ...u32(0x811c9dc5), 0x31, 0xc0,
+            0x42, 0x31, 0xc1, 0x0f, 0xb6, 0x02, 0x69, 0xc9, ...u32(0x1000193), 0x84, 0xc0,
+            0x75, 0xf0, 0xf4];
+        /** @param {boolean} precise */
+        const hashOf = precise=>{
+            const m = createTestMachine({ precise });
+            m.write(CODE, loop);
+            m.write(DATA, [...'textures/wall_7919'].map(c=>c.charCodeAt(0)).concat([0]));
+            const unit = m.translate(CODE);
+            assert.equal(unit.run(CODE, 10_000).kind, Exit.HALT);
+            // test al, al of a zero: ZF and PF set, CF, OF and SF clear.
+            assert.equal(m.eflags() & 0x8c5, 0x44,
+                `the flags the test defines (precise: ${precise})`);
+            return { hash: m.reg('ecx'), folds: unit.translation.folds };
+        };
+        const fast = hashOf(false);
+        const exact = hashOf(true);
+        assert.equal(fast.hash, exact.hash);
+        assert.equal(fast.folds, 0);
+        assert.ok(exact.folds > 0, 'the precise loop folds the xor for the imul');
+
+        // cmp eax, eax; bt ebx, 0; setz cl; mov eax, 0x40000000; imul eax, eax, 4;
+        // seto dl; setc dh; hlt -- bt leaves ZF alone and defines CF, imul defines CF
+        // and OF: the fast default keeps all three.
+        const m = createTestMachine();
+        m.write(CODE, [0x39, 0xc0, 0x0f, 0xa3, 0xc3, 0x0f, 0x94, 0xc1,
+            0xb8, ...u32(0x40000000), 0x6b, 0xc0, 0x04, 0x0f, 0x90, 0xc2, 0x0f, 0x92, 0xc6, 0xf4]);
+        m.setReg('ebx', 0);
+        assert.equal(m.translate(CODE).run(CODE, 1000).kind, Exit.HALT);
+        assert.equal(m.reg('ecx') & 0xff, 1, 'ZF of the cmp, through the bt');
+        assert.equal(m.reg('edx') & 0xffff, 0x0101, 'OF and CF of the imul');
+
+        // imul eax, eax, 3; pushf; pop edx; hlt -- the pushf reads the flags the imul
+        // left undefined, which the translation counts outside `precise`.
+        for (const precise of [false, true])
+        {
+            const n = createTestMachine({ precise });
+            n.write(CODE, [0x6b, 0xc0, 0x03, 0x9c, 0x5a, 0xf4]);
+            n.setReg('esp', 0x80000);
+            const unit = n.translate(CODE);
+            assert.deepEqual([...unit.translation.relaxedReads.keys()], precise ? [] : ['9c']);
+        }
+    });
+
+/**
+ * The opcode at each branch a module's branch-hint section names, in its one
+ * defined function's body.
+ *
+ * @param {Uint8Array} bytes
+ */
+function hintedOpcodes(bytes){
+    let at = 8;
+    const leb = ()=>{
+        let value = 0;
+        for (let shift = 0; ; shift += 7)
+        {
+            const byte = bytes[at++];
+            value |= (byte & 0x7f) << shift;
+            if ((byte & 0x80) === 0)
+            {
+                return value >>> 0;
+            }
+        }
+    };
+    /** @type {number[]} */
+    let offsets = [];
+    /** @type {Uint8Array} */
+    let body = new Uint8Array(0);
+    while (at < bytes.length)
+    {
+        const id = bytes[at++];
+        const size = leb();
+        const end = at + size;
+        if (id === 0)
+        {
+            const length = leb();
+            const title = new TextDecoder().decode(bytes.subarray(at, at + length));
+            at += length;
+            if (title === 'metadata.code.branch_hint')
+            {
+                leb(); // one function
+                leb(); // its index
+                offsets = Array.from({ length: leb() }, ()=>{
+                    const offset = leb();
+                    at += 2; // size 1, the hint
+                    return offset;
+                });
+            }
+        }
+        else if (id === 10)
+        {
+            leb(); // one function
+            const length = leb();
+            body = bytes.subarray(at, at + length);
+        }
+        at = end;
+    }
+    return offsets.map(offset=>body[offset]);
+}
+
+test('the ways out a loop rarely takes are branches hinted unlikely', ()=>{
+    // mov ecx, 1000; L: add eax, [DATA]; dec ecx; jnz L; hlt -- the page test of the
+    // load, the budget on the back edge: every hint names an `if` or a `br_if`.
+    const m = createTestMachine();
+    m.write(CODE, [0xb9, ...u32(1000), 0x03, 0x05, ...u32(DATA), 0x49, 0x75, 0xf7, 0xf4]);
+    m.writeU32(DATA, 3);
+    const unit = m.translate(CODE);
+    const opcodes = hintedOpcodes(unit.bytes);
+    assert.ok(opcodes.length >= 2, `hinted: ${opcodes.length}`);
+    assert.ok(opcodes.every(opcode=>opcode === 0x04 || opcode === 0x0d),
+        opcodes.map(opcode=>opcode.toString(16)).join(' '));
+    assert.equal(unit.run(CODE, 1_000_000).kind, Exit.HALT);
+    assert.equal(m.reg('eax'), 3000);
+});
+
+test('the flag liveness over a region is the walk of every instruction to a fixed point', ()=>{
+    // Each block's kills and early reads are taken once; the answer is the one a
+    // walk of every instruction on every round gives, `deadFlagPass`'s own: with
+    // a nop put first, what it finds live after that nop is the block's live-in.
+    const nop = { op: 'nop', operands: [], flagsWritten: 0, flagsUndefined: 0, flagsRead: 0 };
+    /** @param {import('../region.js').Block[]} blocks @param {boolean} precise */
+    const walked = (blocks, precise)=>{
+        const labels = new Map(blocks.map((block, i)=>[block.start, i]));
+        const liveIn = blocks.map(()=>0);
+        const out = blocks.map(()=>0);
+        for (let changed = true; changed;)
+        {
+            changed = false;
+            for (let i = blocks.length - 1; i >= 0; i--)
+            {
+                const { kind, targets, next } = blocks[i].exit;
+                const edges = kind === 'jump' ? targets
+                    : ['jcc', 'loop', 'fallthrough'].includes(kind) ? [...targets, next] : null;
+                // A way out of the region reads every arithmetic flag and DF.
+                out[i] = edges === null || edges.some(t=>!labels.has(t)) ? 0xcd5
+                    : edges.reduce((f, t)=>f | liveIn[/** @type {number} */ (labels.get(t))], 0);
+                /** @type {number[]} */
+                const after = [];
+                deadFlagPass(/** @type {any} */ ({ ...blocks[i],
+                    instructions: [nop, ...blocks[i].instructions] }), out[i], after, precise);
+                if (after[0] !== liveIn[i])
+                {
+                    liveIn[i] = after[0];
+                    changed = true;
+                }
+            }
+        }
+        return out;
+    };
+    const hash = [0xba, ...u32(DATA - 1), 0xb9, ...u32(0x811c9dc5), 0x31, 0xc0, 0x42, 0x31, 0xc1,
+        0x0f, 0xb6, 0x02, 0x69, 0xc9, ...u32(0x1000193), 0x84, 0xc0, 0x75, 0xf0, 0xf4];
+    for (const program of [LOOP, hash])
+    {
+        const m = createTestMachine();
+        m.write(CODE, program);
+        const { region } = m.translate(CODE);
+        const labels = new Map(region.blocks.map((block, i)=>[block.start, i]));
+        for (const precise of [false, true])
+        {
+            assert.deepEqual(liveFlagsOut(region.blocks, labels, precise),
+                walked(region.blocks, precise));
+        }
+    }
 });
 
 test('loops that overlap are widened until they nest', ()=>{

@@ -82,7 +82,7 @@ export function checkAccess(e, size, { counted = true, store = false } = {}){
     b.localGet(Local.addr).i32const(12).op(I32.shrU)
         .load(size > 1 ? 'i32_16u' : 'i32_8u', { offset: table })
         .localTee(Local.pflags).i32const(size > 1 ? bits * 0x101 : bits).op(I32.and);
-    e.openIf('flagged', EMPTY);
+    e.openGuard('flagged', EMPTY);
     if (size > 1)
     {
         b.localGet(Local.addr).i32const(12).op(I32.shrU).load('i32_8u', { offset: table });
@@ -90,7 +90,7 @@ export function checkAccess(e, size, { counted = true, store = false } = {}){
             .load('i32_8u', { offset: table }).op(I32.or).localSet(Local.pflags);
     }
     b.localGet(Local.pflags).i32const(PageFlag.INACCESSIBLE).op(I32.and);
-    e.openIf('inaccessible', EMPTY);
+    e.openGuard('inaccessible', EMPTY);
     if (counted)
     {
         e.exitBefore(e.current.eip, Exit.FAULT, 13);
@@ -103,7 +103,7 @@ export function checkAccess(e, size, { counted = true, store = false } = {}){
     if (noting)
     {
         b.localGet(Local.pflags).i32const(PageFlag.HAS_CODE).op(I32.and);
-        e.openIf('maybeCode', EMPTY);
+        e.openGuard('maybeCode', EMPTY);
         noteCodeStore(e, size);
         e.close();
         noted.set(e, e.current);
@@ -157,7 +157,7 @@ export function noteStore(e, size){
         }
         // The next page's flag too: a wide access's halfword holds it.
         b.i32const(PageFlag.HAS_CODE * 0x101).op(I32.and);
-        e.openIf('maybeCode', EMPTY);
+        e.openGuard('maybeCode', EMPTY);
         noteCodeStore(e, size);
         e.close();
         return;
@@ -186,7 +186,7 @@ function noteCodeStore(e, size){
         b.localGet(Local.addr).i32const(12).op(I32.shrU)
             .load('i32_8u', { offset: e.layout.codePages }).op(I32.or);
     }
-    e.openIf('code', EMPTY);
+    e.openGuard('code', EMPTY);
     b.i32const(1).localSet(Local.stale);
     b.i32const(0).localGet(Local.addr)
         .store('i32', { offset: e.layout.tables + Tables.STALE_ADDRESS });
@@ -1152,10 +1152,10 @@ export function emitGroupChecks(e, checks, at = -1){
     const leaveIf = name=>{
         if (shared)
         {
-            b.hint(false).brIf(e.depthOf('windowHeld'));
+            b.unlikely().brIf(e.depthOf('windowHeld'));
             return;
         }
-        e.openIf(name, EMPTY);
+        e.openGuard(name, EMPTY);
         exit();
         e.close();
     };
@@ -1191,7 +1191,7 @@ export function emitGroupChecks(e, checks, at = -1){
         const bits = PageFlag.INACCESSIBLE | (stores.length > 0 ? PageFlag.HAS_CODE : 0);
         b.localGet(Local.addr).i32const(12).op(I32.shrU).load('i32_16u', { offset: table })
             .i32const(bits * 0x101).op(I32.and);
-        e.openIf('window', EMPTY);
+        e.openGuard('window', EMPTY);
         flagsOf(0);
         flagsOf(group.width - 1);
         b.op(I32.or).i32const(PageFlag.INACCESSIBLE).op(I32.and);
@@ -1203,7 +1203,7 @@ export function emitGroupChecks(e, checks, at = -1){
             flagsOf(first);
             flagsOf(last);
             b.op(I32.or).i32const(PageFlag.HAS_CODE).op(I32.and);
-            e.openIf('windowCode', EMPTY);
+            e.openGuard('windowCode', EMPTY);
             stores.forEach((access, k)=>{
                 for (const end of access.size > 1 ? [0, access.size - 1] : [0])
                 {
@@ -1471,7 +1471,7 @@ export function stackAccess(e, size){
  */
 export function emitStaleExit(e, next){
     e.b.localGet(Local.stale);
-    e.openIf('stale', EMPTY);
+    e.openGuard('stale', EMPTY);
     e.exitAt(next, Exit.STALE);
     e.close();
 }

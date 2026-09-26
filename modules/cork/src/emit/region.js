@@ -122,21 +122,6 @@ export const Exit = Object.freeze({
 export const MMX_HELD = 1;
 export const MMX_TOP = 2;
 
-/**
- * The `if`s whose body is a slow path -- a way out of the region, a fault, a
- * page flagged, a spent budget, an exception the processor would raise --
- * hinted rarely taken (`Body.hint`): the engine lays them out of the way and
- * keeps the registers for the path that goes on, where it had spilled around
- * them. By the name each is opened with; a name also opened for a branch that
- * data decides (`zero` in `bsf`, `taken`) is not here.
- */
-const UNLIKELY = new Set([
-    'spent', 'bulkSpent', 'flagged', 'window', 'windowFaults', 'windowCode', 'storeCode',
-    'inaccessible', 'maybeCode', 'code', 'stale', 'streamsFlagged', 'fault', 'overflow',
-    'unshaped', 'single', 'nan', 'signalling', 'made', 'invalid', 'negative', 'underflow',
-    'indefinite', 'unordered',
-]);
-
 /** Local indices every region function shares. */
 export const Local = Object.freeze({
     label: 0, budget: 1,
@@ -188,14 +173,16 @@ const LOCAL_TYPES = [
  *     tables' transfer count (a diagnostic run)
  * @property {boolean} [blockProfile] each block counts its executions in the block
  *     profile past the tables (a diagnostic run, in a memory sized for it)
- * @property {boolean} [flat]  every backward jump through the dispatch and every flag live at
- *     every block's end, rather than the loops and liveness the region's structure gives -- but
- *     for a float compare's flags, whose liveness decides its fusion with its branch either way
+ * @property {boolean} [flat]  every backward jump through the dispatch rather than the loops
+ *     the region's structure gives
  * @property {boolean} [wide]  compiled for the wide precision controls (double, extended):
  *     no rounding to single, and a block leaves with `PRECISION` if it finds single set
- * @property {boolean} [precise]  every relaxation off: the x87 exception flags, the
- *     signalling-NaN tests, the underflow test and C1 kept as the processor keeps them
- *     (the runtime's `precise`); without it they are not computed
+ * @property {boolean} [precise]  every relaxation off (the runtime's `precise`): the x87
+ *     exception flags, the signalling-NaN tests, the underflow test and C1 kept as the processor
+ *     keeps them, and the flags an instruction leaves undefined keeping the values the emulator
+ *     gives them, which costs the record before it; without it the x87 bookkeeping is not
+ *     computed and an undefined flag is as the cheapest code leaves it, which no program can
+ *     rely on (real processors differ there)
  * @property {number} codeHit         the helper telling whether a byte lies in translated code
  * @property {number} [getEflags]      the host's flag fold, imported when the layout keeps
  *                                     lazy flags (the emulator's `flags_changed`)
@@ -223,8 +210,7 @@ const LOCAL_TYPES = [
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
  *     countTransfers?: boolean, wide?: boolean, blockProfile?: boolean, structure?: boolean,
- *     precise?: boolean }}
- *     [options]  undoLog:
+ *     precise?: boolean }} [options]  undoLog:
  *     record every store's old bytes (differential builds only; part of the cache key);
  *     hash: import the host's function table and transfer through the entry hash (needs
  *     tail calls); trapPort: `out dx, eax` to it leaves with a trap exit
@@ -270,7 +256,7 @@ export function prepareModule(m, layout, features, memory = {},
     const regionType = m.type({
         params: new Array(STATE_PARAMS).fill(ValType.i32), results: [ValType.i32],
     });
-    // The five helpers are one shared module every region imports, rather
+    // The helpers are one shared module every region imports, rather
     // than a copy in each; the host instantiates it once with the same
     // memory (they are defined in `./helpers.js`).
     const { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid } =
@@ -323,6 +309,9 @@ export function prepareModule(m, layout, features, memory = {},
  * @property {Map<number, number>} labels     block start eip → label
  * @property {Map<string, number>} unsupported  opcode → instructions the emitter left out
  * @property {Map<string, number>} refusals  `opcode (reason; entry kinds; entry x87)` → count
+ * @property {Map<string, number>} relaxedReads  by opcode, the instructions that read a flag an
+ *     instruction before them in their block left undefined, outside `precise`: what a program
+ *     sees there is the fast default's (`relaxedFlagReads`)
  * @property {number} instructions
  * @property {Set<number>} cut      labels of blocks with no entry of their own: ones that
  *     leave at once (an x87 state conflict, nothing decoded, the first instruction left out)
@@ -334,6 +323,7 @@ export function prepareModule(m, layout, features, memory = {},
  *     themselves, the flags never made (`fusesCompare`)
  * @property {number} x87RelaxedReads  status-word reads that may see what a module that is
  *     not `precise` does not keep (`readsRelaxed` in `x87.js`)
+ * @property {number} folds         calls of the flag helper the function makes
  */
 
 /**
@@ -382,8 +372,9 @@ export class RegionEmitter {
         /** The record at each emitted block's end, and the guess for this one's start.
          * @type {({ kind: number, width: number } | null)[]} */
         this.ends = [];
-        /** @type {{ kind: number, width: number } | null} */
-        this.hint = null;
+        /** The guess for this block's start once worked out (`blockHint`).
+         * @type {{ kind: number, width: number } | null | undefined} */
+        this.hint = undefined;
         /** @type {Map<string, number>} */
         this.unsupported = new Map();
         /**
@@ -393,6 +384,8 @@ export class RegionEmitter {
          * @type {Map<string, number>}
          */
         this.refusals = new Map();
+        /** @type {Map<string, number>} */
+        this.relaxedReads = new Map();
         /** The x87 emitter's reason for the current instruction being left out.
          * @type {string | null} */
         this.x87RefusalReason = null;
@@ -422,12 +415,11 @@ export class RegionEmitter {
         this.trapped = false;
         /** Blocks emitted as loops onto themselves. */
         this.loops = 0;
-        /** The flags live at each block's end as the dead-flag pass takes them:
-         * `liveOut`, or all of them in a flat region. @type {number[]} */
+        /** Calls of the flag helper emitted. */
+        this.folds = 0;
+        /** The flags live at each block's end (`liveFlagsOut`), which the dead-flag pass
+         * takes and which decides a fused compare. @type {number[]} */
         this.flagsOut = [];
-        /** The flags live at each block's end over the region (`liveFlagsOut`), which
-         * decides a fused compare in either shape. @type {number[]} */
-        this.liveOut = [];
         /** The flags live after each instruction of the block being emitted. @type {number[]} */
         this.flagsAfterEach = [];
         /** The flags live after the instruction being emitted. */
@@ -441,6 +433,9 @@ export class RegionEmitter {
         this.fcmp = null;
         /** Branches that compared a float compare's operands themselves, for the tests. */
         this.fusedCompares = 0;
+        /** By block, the blocks whose way on goes there, in order, once a guess needs them.
+         * @type {number[][] | null} */
+        this.flowsInto = null;
         /** Each loop head's last block (`planLoops`). @type {Map<number, number>} */
         this.loopEnds = new Map();
         /** The ranges being emitted, innermost last (`emitRange`).
@@ -583,8 +578,8 @@ export class RegionEmitter {
         const blocks = this.region.blocks;
         const flat = this.context.flat === true;
         this.loopEnds = flat ? new Map() : planLoops(blocks);
-        this.liveOut = liveFlagsOut(blocks, new Set(this.labels.keys()));
-        this.flagsOut = flat ? blocks.map(()=>ARITH_FLAGS | DF) : this.liveOut;
+        this.flowsInto = null;
+        this.flagsOut = liveFlagsOut(blocks, this.labels, this.context.precise === true);
         // The other executor's code table in a hybrid layout is a second
         // thing a store is noted against: that layout tests each access. A
         // jump back carries windows only through the flat dispatch; a block
@@ -608,12 +603,13 @@ export class RegionEmitter {
             this.context.regionType, this.localTypes, b.toBytes(), { hints: b.hints });
         return {
             functionIndex, labels: this.labels, unsupported: this.unsupported,
-            refusals: this.refusals,
+            refusals: this.refusals, relaxedReads: this.relaxedReads,
             instructions: this.instructions,
             cut: new Set([...this.x87.cut, ...this.unknownBlocks(), ...this.leaving,
                 ...this.shapedBlocks()]),
             entryTop: this.entryTop, loops: this.loops, x87Guards: this.x87.guards,
             x87RelaxedReads: this.x87.relaxedReads, fusedCompares: this.fusedCompares,
+            folds: this.folds,
         };
     }
 
@@ -634,11 +630,22 @@ export class RegionEmitter {
     /** @param {string} name @param {number} type */
     openIf(name, type = EMPTY){
         this.controls.push(name);
-        if (UNLIKELY.has(name))
-        {
-            this.b.hint(false);
-        }
         this.b.if(type);
+    }
+
+    /**
+     * An `if` whose body is a slow path rarely taken -- a spent budget, a page
+     * not clean, a store into code, a fault, an x87 stack shape or precision
+     * control other than the region's, an exception the processor would raise
+     * -- marked unlikely for the engine, so the code it guards goes out of line
+     * and its spills with it, where they sat on the path that goes on. A branch
+     * that data decides (`zero` in `bsf`, `taken`) is an `openIf`.
+     *
+     * @param {string} name @param {number} type
+     */
+    openGuard(name, type = EMPTY){
+        this.controls.push(name);
+        this.b.unlikely().if(type);
     }
 
     close(){
@@ -1052,6 +1059,7 @@ export class RegionEmitter {
         b.localGet(Local.kind).localGet(Local.res).localGet(Local.op1).localGet(Local.op2)
             .localGet(Local.cin).localGet(Local.flags);
         b.call(this.context.materialise);
+        this.folds++;
         b.localSet(Local.flags);
         b.i32const(0).localSet(Local.kind);
         if (unknown)
@@ -1114,6 +1122,48 @@ export class RegionEmitter {
     }
 
     /**
+     * The guess at the record the current block is entered with, worked out
+     * at its first read: what an earlier block that goes on here left, or else
+     * what a later one that jumps back here is expected to leave -- a loop's
+     * head reading the flags its latch set. Only a guess -- the block is
+     * entered from elsewhere too -- so a read checks it.
+     *
+     * @returns {{ kind: number, width: number } | null}
+     */
+    blockHint(){
+        if (this.hint !== undefined)
+        {
+            return this.hint;
+        }
+        const index = this.blockIndex;
+        const blocks = this.region.blocks;
+        this.flowsInto ??= flowsInto(blocks, this.labels);
+        const from = this.flowsInto[index];
+        this.hint = null;
+        for (const i of from)
+        {
+            const end = this.ends[i];
+            if (i < index && end && end.kind !== Kind.EAGER)
+            {
+                this.hint = end;
+                return end;
+            }
+        }
+        for (const i of from)
+        {
+            if (i >= index)
+            {
+                this.hint = recordAtEnd(blocks[i]);
+                if (this.hint !== null)
+                {
+                    return this.hint;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
      * Pushes 0/1 for a flag, from the record when its kind is known here and
      * from the word otherwise.
      *
@@ -1161,7 +1211,7 @@ export class RegionEmitter {
                 return false;
             }
         }
-        return (this.liveOut[this.blockIndex] & ARITH_FLAGS) === 0;
+        return (this.flagsOut[this.blockIndex] & ARITH_FLAGS) === 0;
     }
 
     /**
@@ -1173,7 +1223,7 @@ export class RegionEmitter {
      * @param {(kind: number, width: number) => void} read
      */
     pushRead(read){
-        const hint = this.pending === null ? this.hint : null;
+        const hint = this.pending === null ? this.blockHint() : null;
         if (hint !== null)
         {
             const { b } = this;
@@ -1184,6 +1234,7 @@ export class RegionEmitter {
             b.localGet(Local.kind).localGet(Local.res).localGet(Local.op1).localGet(Local.op2)
                 .localGet(Local.cin).localGet(Local.flags);
             b.call(this.context.materialise);
+            this.folds++;
             b.localSet(Local.flags);
             b.i32const(0).localSet(Local.kind);
             read(Kind.EAGER, 2);
@@ -1484,27 +1535,13 @@ export class RegionEmitter {
      * @param {number} index
      */
     emitBlock(block, index){
-        // The record's kind at the end of the block before, and the hint for
-        // this one: what an earlier block that goes on here left. Only a guess
-        // -- the block is entered from elsewhere too -- so a read checks it.
+        // The record's kind at the end of the block before, which a later
+        // block's read at its start may take as its guess (`blockHint`).
         if (index > 0)
         {
             this.ends[index - 1] = this.pending;
         }
-        this.hint = null;
-        const blocks = this.region.blocks;
-        for (let i = 0; i < index && this.hint === null; i++)
-        {
-            const end = this.ends[i];
-            const { kind, next, targets } = blocks[i].exit;
-            const flows = kind === 'fallthrough' || kind === 'jcc' || kind === 'loop'
-                ? next === block.start || targets.includes(block.start)
-                : kind === 'jump' && targets[0] === block.start;
-            if (flows && end && end.kind !== Kind.EAGER)
-            {
-                this.hint = end;
-            }
-        }
+        this.hint = undefined;
         this.pending = null;
         this.fcmp = null;
         this.dead = false;
@@ -1538,7 +1575,12 @@ export class RegionEmitter {
             && (!x.active || (x.states[index] !== null && x.ends[index] !== null
                 && sameState(x.states[index], x.ends[index])));
         this.flagsAfterEach = [];
-        const live = deadFlagPass(block, this.flagsOut[index], this.flagsAfterEach);
+        const live = deadFlagPass(block, this.flagsOut[index], this.flagsAfterEach,
+            this.context.precise === true);
+        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.precise !== true)
+        {
+            relaxedFlagReads(block, this.relaxedReads);
+        }
         const streams = this.selfLoop && !x.active && this.layout.codePages < 0
             ? planLoop(block.instructions) : null;
         if (streams !== null)
@@ -1588,7 +1630,6 @@ export class RegionEmitter {
      */
     emitHoistedLoop(block, index, live, streams){
         const { b } = this;
-        const hint = this.hint;
         const last = block.instructions[block.instructions.length - 1];
         const turns = this.localTypes.length + STATE_PARAMS;
         this.localTypes.push(ValType.i32);
@@ -1598,7 +1639,7 @@ export class RegionEmitter {
         this.openLoop(`self${index}`);
         emitStreamWindow(this, streams.streams, streams.turns, streams.forward);
         b.op(I32.eqz);
-        this.openIf('streamsFlagged');
+        this.openGuard('streamsFlagged');
         // The checked copy, to the loop's end.
         this.openLoop(`checked${index}`);
         this.blockDepth = this.controls.length;
@@ -1617,7 +1658,7 @@ export class RegionEmitter {
             this.pushBranchCondition(last);
             this.openIf('taken');
             b.localGet(Local.budget).i32const(0).op(I32.leS);
-            this.openIf('spent');
+            this.openGuard('spent');
             this.exitAt(block.start, Exit.BUDGET);
             this.close();
             taken();
@@ -1634,7 +1675,6 @@ export class RegionEmitter {
         this.blockRetired = 0;
         this.pending = null;
         this.dead = false;
-        this.hint = hint;
         const counted = this.instructions;
         this.emitInstructions(block, index, live, streams.plan);
         this.instructions = counted;
@@ -1857,7 +1897,7 @@ export class RegionEmitter {
                     this.pushBranchCondition(last);
                     this.openIf('taken');
                     this.b.localGet(Local.budget).i32const(0).op(I32.leS);
-                    this.openIf('spent');
+                    this.openGuard('spent');
                     this.exitAt(block.start, Exit.BUDGET);
                     this.close();
                     this.b.br(this.depthOf(`self${index}`));
@@ -2016,7 +2056,7 @@ export class RegionEmitter {
         // that loop; any other goes through the function's dispatch.
         const around = this.ranges.some(range=>range.loop && range.lo === label);
         b.localGet(Local.budget).i32const(0).op(I32.leS);
-        this.openIf('spent');
+        this.openGuard('spent');
         this.exitAt(target, Exit.BUDGET);
         this.close();
         b.i32const(this.labelFor(label)).localSet(Local.label);
@@ -2105,26 +2145,63 @@ export class RegionEmitter {
  * successors inside the region read before they write, and all of them where
  * a way out of the block leaves the region -- the host, or another region,
  * reads the whole word. A block's own exits before its end continue the same
- * code the analysis followed, or leave at an instruction the host runs from.
+ * code the analysis followed, or leave at an instruction the host runs from:
+ * a jump back that finds the budget spent leaves at its target, which reads
+ * what it reads when the jump is taken.
  *
  * @param {import('../region.js').Block[]} blocks
- * @param {Set<number>} starts  the region's block starts
+ * @param {Map<number, number>} labels  the region's block starts, to their indices
+ * @param {boolean} [precise]  undefined flags as the emulator leaves them (`killedBy`)
  * @returns {number[]}
  */
-export function liveFlagsOut(blocks, starts){
+export function liveFlagsOut(blocks, labels, precise = true){
     const ALL = ARITH_FLAGS | DF;
-    const index = new Map(blocks.map((block, i)=>[block.start, i]));
     /** @type {(number[] | null)[]} the successors inside the region, null when one leaves */
     const successors = blocks.map(block=>{
         const { kind, targets, next } = block.exit;
-        const edges = kind === 'jump' ? [...targets]
-            : kind === 'jcc' || kind === 'loop' || kind === 'fallthrough' ? [...targets, next]
-                : null;
-        if (edges === null || edges.some(target=>!starts.has(target)))
+        if (kind !== 'jump' && kind !== 'jcc' && kind !== 'loop' && kind !== 'fallthrough')
         {
             return null;
         }
-        return edges.map(target=>/** @type {number} */ (index.get(target)));
+        /** @type {number[]} */
+        const to = [];
+        for (const target of targets)
+        {
+            const label = labels.get(target);
+            if (label === undefined)
+            {
+                return null;
+            }
+            to.push(label);
+        }
+        if (kind !== 'jump')
+        {
+            const label = labels.get(next);
+            if (label === undefined)
+            {
+                return null;
+            }
+            to.push(label);
+        }
+        return to;
+    });
+    // A block's live-in is (out & ~killed) | read, what it kills and what it reads
+    // before it writes taken once over its instructions -- the pass's own walk.
+    const killed = blocks.map(()=>0);
+    const read = blocks.map(()=>0);
+    blocks.forEach((block, i)=>{
+        for (let k = block.instructions.length - 1; k >= 0; k--)
+        {
+            const instruction = block.instructions[k];
+            const count = shiftCount(instruction);
+            if (count === 0)
+            {
+                continue;
+            }
+            const kills = killedBy(instruction, precise, count);
+            killed[i] |= kills;
+            read[i] = (read[i] & ~kills) | instruction.flagsRead;
+        }
     });
     const liveIn = blocks.map(()=>0);
     const out = blocks.map(()=>ALL);
@@ -2135,22 +2212,7 @@ export function liveFlagsOut(blocks, starts){
         {
             const next = successors[i];
             out[i] = next === null ? ALL : next.reduce((flags, j)=>flags | liveIn[j], 0);
-            const after = /** @type {number[]} */ ([]);
-            deadFlagPass(blocks[i], out[i], after);
-            let flags = out[i];
-            // What the block reads before it writes: the pass's own walk, to the top.
-            for (let k = blocks[i].instructions.length - 1; k >= 0; k--)
-            {
-                const instruction = blocks[i].instructions[k];
-                const count = shiftCount(instruction);
-                if (count === 0)
-                {
-                    continue;
-                }
-                const written = count === -1 ? 0
-                    : instruction.flagsWritten & ~instruction.flagsUndefined;
-                flags = (flags & ~written) | instruction.flagsRead;
-            }
+            const flags = (out[i] & ~killed[i]) | read[i];
             if (flags !== liveIn[i])
             {
                 liveIn[i] = flags;
@@ -2216,9 +2278,10 @@ export function planLoops(blocks){
  * @param {number} [liveOut]  the flags live after the block: all of them unless the
  *     region's own analysis (`liveFlagsOut`) says fewer
  * @param {number[]} [after]  filled with the flags live after each instruction
+ * @param {boolean} [precise]  undefined flags as the emulator leaves them (`killedBy`)
  * @returns {boolean[]}  per instruction: whether its written flags are live
  */
-export function deadFlagPass(block, liveOut = ARITH_FLAGS | DF, after = []){
+export function deadFlagPass(block, liveOut = ARITH_FLAGS | DF, after = [], precise = true){
     const live = new Array(block.instructions.length).fill(true);
     let liveAfter = liveOut;
     for (let i = block.instructions.length - 1; i >= 0; i--)
@@ -2234,14 +2297,110 @@ export function deadFlagPass(block, liveOut = ARITH_FLAGS | DF, after = []){
             live[i] = false;
             continue;
         }
-        // Only a defined write kills a flag: an instruction leaves its undefined
-        // flags as they were (the model and the emitter agree on that), so an
-        // earlier record may still be what a later reader sees.
-        const written = count === -1 ? 0 : instruction.flagsWritten & ~instruction.flagsUndefined;
         live[i] = ((instruction.flagsWritten | instruction.flagsUndefined) & liveAfter) !== 0;
-        liveAfter = (liveAfter & ~written) | instruction.flagsRead;
+        liveAfter = (liveAfter & ~killedBy(instruction, precise, count)) | instruction.flagsRead;
     }
     return live;
+}
+
+/**
+ * The flags an instruction leaves no earlier record's value in. A shift or
+ * rotate by cl may write none. Precisely, only a defined write: the emulator
+ * leaves an undefined flag as it was, and the emitter with it, so an earlier
+ * record may still be what a later reader sees. Otherwise an undefined flag is
+ * killed as well -- whatever the code left there, no program can rely on it,
+ * and an `imul` in a hash loop no longer keeps the `xor` before it alive and
+ * folds it every turn to leave SF, ZF, AF and PF untouched.
+ *
+ * @param {import('../decode/decoder.js').Instruction} instruction
+ * @param {boolean} precise @param {number | null} count  its `shiftCount`
+ */
+function killedBy(instruction, precise, count){
+    if (count === -1)
+    {
+        return 0;
+    }
+    return precise ? instruction.flagsWritten & ~instruction.flagsUndefined
+        : instruction.flagsWritten | instruction.flagsUndefined;
+}
+
+/**
+ * By block, the blocks that go on to it -- falling through, by a conditional
+ * branch or a jump -- in address order: where a guess at the record it is
+ * entered with comes from.
+ *
+ * @param {import('../region.js').Block[]} blocks @param {Map<number, number>} labels
+ * @returns {number[][]}
+ */
+function flowsInto(blocks, labels){
+    /** @type {number[][]} */
+    const into = blocks.map(()=>[]);
+    blocks.forEach((block, i)=>{
+        const { kind, next, targets } = block.exit;
+        const to = kind === 'fallthrough' || kind === 'jcc' || kind === 'loop' ? [next, ...targets]
+            : kind === 'jump' ? [targets[0]] : [];
+        for (const target of to)
+        {
+            const label = labels.get(target);
+            const list = label === undefined ? null : into[label];
+            if (list !== null && list[list.length - 1] !== i)
+            {
+                list.push(i);
+            }
+        }
+    });
+    return into;
+}
+
+/** The kinds the instructions that leave a record of their own record, by op. */
+const RECORDED = new Map([
+    ['add', Kind.ADD], ['xadd', Kind.ADD], ['adc', Kind.ADC], ['sub', Kind.SUB], ['cmp', Kind.SUB],
+    ['sbb', Kind.SBB], ['and', Kind.LOGIC], ['or', Kind.LOGIC], ['xor', Kind.LOGIC],
+    ['test', Kind.LOGIC], ['inc', Kind.INC], ['dec', Kind.DEC], ['neg', Kind.NEG],
+]);
+
+/**
+ * The record a block is expected to end with, before it is emitted: that of its
+ * last instruction to write a flag, when that one leaves a record of its own.
+ *
+ * @param {import('../region.js').Block} block
+ * @returns {{ kind: number, width: number } | null}
+ */
+function recordAtEnd(block){
+    for (let k = block.instructions.length - 1; k >= 0; k--)
+    {
+        const instruction = block.instructions[k];
+        if ((instruction.flagsWritten | instruction.flagsUndefined) !== 0)
+        {
+            const kind = RECORDED.get(instruction.op);
+            return kind === undefined ? null : { kind, width: widthCode(instruction.size) };
+        }
+    }
+    return null;
+}
+
+/**
+ * Counts, by opcode, the instructions of a block that read a flag an earlier
+ * one of the block left undefined: where the fast default's value of it is
+ * what the program sees. A static count, of reads within a block only.
+ *
+ * @param {import('../region.js').Block} block @param {Map<string, number>} into
+ */
+function relaxedFlagReads(block, into){
+    let undefinedNow = 0;
+    for (const instruction of block.instructions)
+    {
+        if ((instruction.flagsRead & undefinedNow) !== 0)
+        {
+            into.set(instruction.opcode, (into.get(instruction.opcode) ?? 0) + 1);
+        }
+        const count = shiftCount(instruction);
+        if (count === 0 || count === -1)
+        {
+            continue;
+        }
+        undefinedNow = (undefinedNow & ~instruction.flagsWritten) | instruction.flagsUndefined;
+    }
 }
 
 const SHIFT_OPS = new Set(['rol', 'ror', 'rcl', 'rcr', 'shl', 'shr', 'sal', 'sar', 'shld', 'shrd']);

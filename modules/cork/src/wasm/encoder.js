@@ -17,6 +17,13 @@
  * Only what the translator emits is here; nothing is generated from a table
  * of every instruction. Numbers are LEB128 as the format wants them, and
  * every helper that takes a signed constant encodes it signed.
+ *
+ * A branch can be marked unlikely (`Body.unlikely`): the module then carries
+ * the `metadata.code.branch_hint` custom section, which an engine that reads
+ * it (Chromium 141's V8 does by default, node 22's behind
+ * `--experimental-wasm-branch-hinting`) takes to lay the branch's code out of
+ * line and to spill there rather than on the path taken; one that does not
+ * skips the section.
  */
 
 /** Value types, by their byte. */
@@ -140,23 +147,13 @@ export class Body {
         /** Every local the body reads or writes, and those it writes. */
         this.used = new Set();
         this.written = new Set();
-        /**
-         * Branch hints: each the offset of an `if` or `br_if` and whether it is
-         * likely taken (1) or not (0), for the module's `metadata.code.branch_hint`.
-         * @type {[number, number][]}
-         */
+        /** Where the branches marked unlikely start, in bytes. @type {number[]} */
         this.hints = [];
     }
 
-    /**
-     * Hints the branch written next (an `if` or a `br_if`): `likely` false says
-     * it is rarely taken, so the engine lays its body out of the way and keeps
-     * the registers for the path that goes on.
-     *
-     * @param {boolean} likely
-     */
-    hint(likely){
-        this.hints.push([this.length, likely ? 1 : 0]);
+    /** The next instruction, an `if` or a `br_if`, is a branch rarely taken. */
+    unlikely(){
+        this.hints.push(this.length);
         return this;
     }
 
@@ -219,17 +216,24 @@ export class Body {
      * @param {number} at @param {Body} other
      */
     insert(at, other){
-        for (const one of this.hints)
-        {
-            if (one[0] >= at)
-            {
-                one[0] += other.length;
-            }
-        }
         this.reserve(other.length);
         this.buffer.copyWithin(at + other.length, at, this.length);
         this.buffer.set(other.buffer.subarray(0, other.length), at);
         this.length += other.length;
+        if (other.hints.length > 0)
+        {
+            // In order still: the ones before, the other's, the ones moved on.
+            this.hints = [...this.hints.filter(hint=>hint < at),
+                ...other.hints.map(hint=>hint + at),
+                ...this.hints.filter(hint=>hint >= at).map(hint=>hint + other.length)];
+        }
+        else
+        {
+            for (let i = this.hints.length - 1; i >= 0 && this.hints[i] >= at; i--)
+            {
+                this.hints[i] += other.length;
+            }
+        }
         return this;
     }
 
@@ -486,7 +490,7 @@ export class ModuleBuilder {
         this.imports = [];
         this.importedFunctions = 0;
         this.importedGlobals = 0;
-        /** @type {{ typeIndex: number, locals: number[], body: Uint8Array, hints: [number, number][] }[]} */
+        /** @type {{ typeIndex: number, locals: number[], body: Uint8Array, hints: number[] }[]} */
         this.functions = [];
         /** @type {number[][]} */
         this.globals = [];
@@ -610,8 +614,7 @@ export class ModuleBuilder {
      * @param {number} typeIndex
      * @param {number[]} locals  value types, one entry per local
      * @param {Uint8Array} body  from `Body.toBytes()`
-     * @param {{ exportAs?: string, hints?: [number, number][] }} [options]  hints: the
-     *     body's branch hints (`Body.hint`), by their offsets in it
+     * @param {{ exportAs?: string, hints?: number[] }} [options]  hints: the body's `hints`
      * @returns {number} the function index
      */
     function(typeIndex, locals, body, { exportAs, hints = [] } = {}){
@@ -691,12 +694,12 @@ export class ModuleBuilder {
             }
             return out;
         };
-        // The branch hints, by function: each hint's offset counts from the
-        // start of the function's body, its local declarations included.
-        /** @type {number[]} */
-        const hinted = [];
-        let hintedFunctions = 0;
-        const codes = this.functions.map(({ locals, body, hints }, k)=>{
+        // The branch hints, by function: its index and count, then an offset, a size of
+        // 1 and 0 (unlikely) each -- written into one buffer, as a region can have
+        // hundreds and a batch hundreds of regions.
+        const hints = new Body();
+        let hinted = 0;
+        const codes = this.functions.map(({ locals, body, hints: marked }, at)=>{
             // Runs of one type are one entry: "3 × i32, 1 × f64".
             /** @type {number[][]} */
             const runs = [];
@@ -714,22 +717,26 @@ export class ModuleBuilder {
             }
             const declared = vector(
                 runs.flatMap(([count, type])=>[...leb128u(count), type]), runs.length);
-            if (hints.length > 0)
+            if (marked.length > 0)
             {
-                hintedFunctions++;
-                hinted.push(...leb128u(this.importedFunctions + k), ...leb128u(hints.length));
-                for (const [offset, likely] of [...hints].sort((a, c)=>a[0] - c[0]))
+                // In the order the body was written, which inserts keep; an offset
+                // counts from the body's start, its local declarations included.
+                hinted++;
+                hints.u32(this.importedFunctions + at).u32(marked.length);
+                for (const offset of marked)
                 {
-                    hinted.push(...leb128u(declared.length + offset), 1, likely);
+                    hints.u32(declared.length + offset).byte(1).byte(0);
                 }
             }
             return concat([leb128u(declared.length + body.length), declared, body]);
         });
-        // Before the code section, as the engine reads it.
-        const hintSection = hintedFunctions === 0 ? new Uint8Array(0) : (()=>{
-            const content = [...name('metadata.code.branch_hint'), ...leb128u(hintedFunctions),
-                ...hinted];
-            return concat([[0x00], leb128u(content.length), content]);
+        // Custom, but before the code section: an engine reads it while it compiles.
+        const hintSection = hinted === 0 ? new Uint8Array(0) : (()=>{
+            const title = name('metadata.code.branch_hint');
+            const count = leb128u(hinted);
+            const content = hints.buffer.subarray(0, hints.length);
+            return concat([[0x00], leb128u(title.length + count.length + content.length), title,
+                count, content]);
         })();
         const codeSection = codes.length === 0 ? new Uint8Array(0) : (()=>{
             const content = concat([leb128u(codes.length), ...codes]);

@@ -639,7 +639,7 @@ test('precise keeps the x87 exception flags, in a store entry of its own; the de
         assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
         const d = m.runtime.diagnostics();
         return { word: new DataView(m.memory.buffer).getUint16(m.layout.ramBase + 0x2000, true),
-            hits: d.cacheHits, reads: d.relaxedReads };
+            hits: d.cacheHits, reads: d.x87RelaxedReads };
     };
     const fast = await status(false);
     assert.equal(fast.word & 4, 0, 'fast: no ZE');

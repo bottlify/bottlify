@@ -107,8 +107,10 @@
  * @property {number} [maxRegionBlocks]  Default 128.
  * @property {number} [maxRegionBytes]   Default 8192.
  * @property {boolean} [precise]         Nothing relaxed for speed: the x87 exception flags,
- *     signalling NaNs, underflow and C1 kept as the processor keeps them (`docs/core/cpu.md`
- *     lists every relaxation). Default false, as games run; the corpora run with it.
+ *     signalling NaNs, underflow and C1 kept as the processor keeps them, and the flags an
+ *     instruction leaves undefined left as the emulator leaves them rather than as the cheapest
+ *     code does (`docs/core/cpu.md` lists every relaxation). Default false, as games run; the
+ *     corpora run with it.
  * @property {boolean} [blockProfile]    A diagnostic: every block counts its executions.
  * @property {number} [blockProfileFrom]  With `blockProfile`: seconds after start at which the
  *           counts start over.
@@ -205,7 +207,7 @@
  * @property {number} [shapeMisses]  Entries that found the x87 stack in another shape than
  *     their block was compiled for, and left for the host.
  * @property {number} [shapeChecked]  x87 regions translated again checked for it.
- * @property {number} [relaxedReads]  Translated x87 status-word reads (`fnstsw` into memory or
+ * @property {number} [x87RelaxedReads]  Translated x87 status-word reads (`fnstsw` into memory or
  *     into AX not read as C0 C2 C3 alone, `fnstenv`, `fnsave`) that may see the exception flags
  *     or C1, which only a `precise` run keeps: a strange result there is worth one.
  * @property {[number, number, number, number][]} [blockCounts]  With `blockProfile`: every
@@ -224,6 +226,9 @@
  * @property {{ address: number, count: number, reason: string }[]} exitsByTarget
  *     The top untranslated-exit targets and why each has no entry.
  * @property {Record<string, number>} refused  Opcode ("0f 2e", "f3 0f 10") → times met.
+ * @property {Record<string, number>} [relaxedFlagReads]  Opcode → translated instructions that
+ *     read a flag an instruction before them in their block left undefined, which without
+ *     `precise` holds whatever the cheapest code left there.
  * @property {number} forcedSteps      Turns that retired nothing and were forced to interpret one
  *     instruction, so no slice of translated-plus-interpreted code stops moving.
  * @property {number} translateMs      Milliseconds spent translating: the sum of the seven

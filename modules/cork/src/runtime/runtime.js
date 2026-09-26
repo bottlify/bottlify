@@ -108,9 +108,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // is not yet known.
         structure: false,
         // Everything the translator relaxes for speed kept exact instead: the x87
-        // exception flags and their tests, signalling NaNs, underflow and C1
-        // (docs/core/cpu.md lists what else). Off, as games run: the tests and
-        // the hardware corpus turn it on.
+        // exception flags and their tests, signalling NaNs, underflow and C1, and
+        // the flags an instruction leaves undefined -- off, what the cheapest code
+        // leaves there; on, what the emulator leaves (docs/core/cpu.md lists every
+        // relaxation). Off, as games run: the tests and the hardware corpus turn it on.
         precise: false,
         // Diagnostic: the host clock read around the translator's phases -- the
         // milliseconds of forming, lookups, emitting, encoding, storing,
@@ -376,7 +377,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, moduleBytes: 0,
         queueDrops: 0, queueEvictions: 0,
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, precisionSwitches: 0,
-        shapeMisses: 0, shapeChecked: 0, relaxedReads: 0,
+        shapeMisses: 0, shapeChecked: 0, x87RelaxedReads: 0,
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
         // always agree.
@@ -420,6 +421,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const refused = {};
     /** @type {Record<string, number>} why an instruction was left out, with its block */
     const refusedWhy = {};
+    /** By opcode, translated instructions that read a flag the fast default left undefined.
+     * @type {Record<string, number>} */
+    const relaxedFlagReads = {};
     let corkRetired = 0;
     // Turns the host retired nothing in and forced one interpreted
     // instruction through, so a slice always moves (the progress guarantee).
@@ -717,12 +721,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
     });
 
-    /** Folds what the emitter left out into the run's refusal maps, and the
-     * status-word reads it let see what it relaxed into their count.
+    /** Folds what the emitter left out into the run's refusal maps, the reads of
+     * flags the fast default leaves undefined into theirs, and the x87 status-word
+     * reads it let see what it relaxed into their count.
      * @param {{ unsupported?: [string, number][], refusals?: [string, number][],
-     *     relaxedReads?: number }} built */
+     *     relaxedReads?: [string, number][], x87RelaxedReads?: number }} built */
     const foldTranslation = built=>{
-        counts.relaxedReads += built.relaxedReads ?? 0;
+        counts.x87RelaxedReads += built.x87RelaxedReads ?? 0;
+        for (const [opcode, times] of built.relaxedReads ?? [])
+        {
+            relaxedFlagReads[opcode] = (relaxedFlagReads[opcode] ?? 0) + times;
+        }
         for (const [opcode, times] of built.unsupported ?? [])
         {
             refused[opcode] = (refused[opcode] ?? 0) + times;
@@ -919,19 +928,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
     };
     // The settings that change emitted code but not a region's bytes, in the
-    // store's keys: structure, the transfer count, the trap port.
-    const variant = (settings.structure ? 'S' : '') + (settings.countTransfers ? 'T' : '')
-        + `p${(settings.trapPort ?? 0).toString(16)}`;
+    // store's keys: structure, precise, the transfer count, the trap port.
+    const variant = (settings.structure ? 'S' : '') + (settings.precise === true ? 'P' : '')
+        + (settings.countTransfers ? 'T' : '') + `p${(settings.trapPort ?? 0).toString(16)}`;
     /** The store key of one formed region: an x87 region compiled for the wide
-     * precision controls, or checked, or a `precise` run's, is another
-     * translation of the same bytes.
+     * precision controls, or checked, is another translation of the same bytes.
      * @param {{ region: { entry: number, hash: string }, entryTop: number, wide?: boolean,
      *     checked?: boolean }} one */
     const regionKey = one=>cacheKey({
         version: CACHE_VERSION, features: found, variant, layoutId: layout.id,
         bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
-        hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}${one.checked ? '-c' : ''}`
-            + (settings.precise === true ? '-p' : ''),
+        hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}${one.checked ? '-c' : ''}`,
     });
 
     /**
@@ -1773,7 +1780,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 shapeChecked: counts.shapeChecked,
                 // Translated x87 status-word reads that may see what `precise`
                 // alone keeps: where a strange result is worth a run with it.
-                relaxedReads: counts.relaxedReads,
+                x87RelaxedReads: counts.x87RelaxedReads,
                 stalls: [...stalls],
                 ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.traceStore
                     ? { storeTrace } : {}),
@@ -1791,6 +1798,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     .map(([address, { count }])=>({ address, count, reason: missReason(address) })),
                 refused: { ...refused },
                 refusedWhy: { ...refusedWhy },
+                // Where a program reads what `precise: false` leaves: a title that
+                // misbehaves only without `precise` is looked for here first.
+                relaxedFlagReads: { ...relaxedFlagReads },
                 forcedSteps,
                 handoffMisses: 0,
             };
