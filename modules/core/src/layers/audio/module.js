@@ -223,6 +223,10 @@ export const audioModule = {
             if (!drained)
             {
                 refusedFills++;
+                // No tracks are ever opened here, so a released buffer has
+                // nothing to close first; it still has to leave the walk
+                // above, or that walk grows with every buffer ever made.
+                dsound.pruneReleased();
                 return;
             }
             for (const buffer of dsound.buffers())
