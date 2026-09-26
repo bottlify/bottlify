@@ -30,6 +30,7 @@ import {
     createWideFunctions, createWideClassificationFunctions, createMultiByteFunctions,
 } from './mbstring.js';
 import { createCxxFunctions } from './cxx.js';
+import { QSORT_CODE } from './guest-code.js';
 import { createMathFunctions } from './math.js';
 import { createStartupFunctions } from './startup.js';
 import { createStdioFunctions } from './stdio.js';
@@ -565,52 +566,12 @@ export function createMsvcrtFunctions(host){
         /**
          * void qsort(void *base, size_t num, size_t width, int (*cmp)(const void*, const void*))
          *
-         * The first function here that runs guest code: the comparator belongs
-         * to the program, and every ordering decision is its to make. So the
-         * handler is asynchronous, and each comparison suspends it while the
-         * guest runs -- which is exactly what the bridge's callbacks are for.
-         *
-         * Insertion sort, and deliberately so. The elements are swapped in guest
-         * memory as they move, so the comparator always sees the array as it
-         * actually is at that moment, and the addresses it is handed are the
-         * real ones. Sorting a copy and writing it back would be quicker and
-         * would lie to any comparator that looks at anything but its two
-         * arguments. It is quadratic in comparisons, which is worth revisiting
-         * when something sorts more than a screenful.
+         * Code in the guest's own msvcrt (`QSORT_CODE`): the comparator is the
+         * program's, and a sort on the host ran the guest from the host once a
+         * comparison -- a hundred milliseconds a frame for Warcraft III's two
+         * hundred translucent objects, sorted every frame by depth.
          */
-        qsort: {
-            convention: 'cdecl',
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: async([base, num, width, comparator])=>{
-                const count = num >>> 0;
-                const size = width >>> 0;
-                // Whose call this is, read before the first await. Every one of
-                // these calls the guest back more than once, and only the first
-                // is made while this handler still holds the processor: the
-                // loop turns between them and hands the machine to somebody
-                // else, whose stack the rest would otherwise be built on.
-                const asked = host.currentThread?.();
-                for (let index = 1; index < count; index++)
-                {
-                    for (let at = index; at > 0; at--)
-                    {
-                        const left = base + (at - 1) * size;
-                        const right = base + at * size;
-                        if (await host.callGuest(comparator, [left, right], asked) <= 0)
-                        {
-                            break;
-                        }
-                        // Copied out, not viewed: the first write below lands in
-                        // the same memory a view would still be pointing at.
-                        const first = copyOf(left, size);
-                        host.writeMemory(left, host.readMemory(right, size));
-                        host.writeMemory(right, first);
-                    }
-                }
-                return 0; // void: the guest reads nothing back
-            },
-        },
+        qsort: { data: ()=>QSORT_CODE },
 
         /**
          * int sprintf(char *buffer, const char *format, ...)

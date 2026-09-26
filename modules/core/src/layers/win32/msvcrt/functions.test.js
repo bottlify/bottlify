@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMsvcrtFunctions } from './functions.js';
+import { QSORT_CODE } from './guest-code.js';
 import { fakeMemory } from './harness.test.js';
 
 /**
@@ -464,46 +465,13 @@ test('every function is cdecl and declares the stack its arguments occupy', ()=>
     assert.ok(fns._snprintf.argBytes >= 12 + 4 * 4, '_snprintf reads a tail');
 });
 
-test('qsort orders through the comparator the program brought', async()=>{
-    const { host, fns } = setup();
-    const base = 0x100;
-    const values = [7, 3, 9, 1, 8, 2];
-    values.forEach((value, index)=>host.writeMemory(base + index * 4, new Uint8Array([
-        value, 0, 0, 0,
-    ])));
-
-    // The comparator is the program's, so the ordering is its decision and not
-    // ours: this one sorts descending, and the result has to follow it rather
-    // than what a sort would "normally" do.
-    /** @type {number[][]} */
-    const asked = [];
-    const read = (/** @type {number} */ at)=>host.bytes[at];
-    host.guests.set(0x9000, ([left, right])=>{
-        asked.push([left, right]);
-        return read(right) - read(left);
-    });
-
-    await fns.qsort.handler([base, values.length, 4, 0x9000]);
-
-    const sorted = values.map((_, index)=>read(base + index * 4));
-    assert.deepEqual(sorted, [9, 8, 7, 3, 2, 1]);
-    assert.ok(asked.length >= values.length - 1, 'it really asked, repeatedly');
-    // Every comparison is handed real addresses inside the array, not indices.
-    for (const [left, right] of asked)
-    {
-        assert.ok(left >= base && left < base + values.length * 4);
-        assert.equal(right - left, 4, 'adjacent elements, one width apart');
-    }
-});
-
-test('qsort of nothing asks nothing', async()=>{
-    const { host, fns } = setup();
-    host.guests.set(0x9000, ()=>{
-        throw new Error('a comparator was called for an empty array');
-    });
-
-    assert.equal(await fns.qsort.handler([0x100, 0, 4, 0x9000]), 0);
-    assert.equal(await fns.qsort.handler([0x100, 1, 4, 0x9000]), 0);
+test('qsort is code in the guest\'s msvcrt, which calls the comparator itself', ()=>{
+    // What it sorts, and how, is held in crt-inguest.itest.js on both engines.
+    const fns = /** @type {any} */ (createMsvcrtFunctions({ ...fakeMemory(), write: ()=>{},
+        callGuest: async()=>0 }));
+    assert.equal('handler' in fns.qsort, false, 'no crossing into the host');
+    assert.deepEqual(fns.qsort.data(), QSORT_CODE);
+    assert.equal(QSORT_CODE[QSORT_CODE.length - 1], 0xc3, 'a function: it returns');
 });
 
 test('_set_error_mode hands back what was put in, and refuses a mode it has not got', ()=>{
