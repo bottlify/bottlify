@@ -2666,3 +2666,28 @@ test('a registered keyboard follows the focus, and only a sink hears it in the b
     service.rawInput({ device: 'key', scan: 0x1e, vk: 0x41, down: true });
     assert.deepEqual(next().slice(0, 2), [hwnd, RIM_INPUTSINK], 'unless it is a sink');
 });
+
+test('the service says the application is deactivated from WM_ACTIVATEAPP(0) until '
+    + 'WM_ACTIVATEAPP(1)', ()=>{
+    // What a layer outside this one asks when its own state follows the
+    // application's activation: DirectDraw's exclusive mode is lost when the
+    // application is told it is no longer the active one (ddraw's
+    // test_coop_level_mode_set and test_lost_device), not when the program
+    // activates another window of its own.
+    const context = setup();
+    const { fns, memory, service } = context;
+    assert.equal(service.deactivated(), false, 'nothing has told it otherwise yet');
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+    const other = createWindow(fns, memory, { style: WS_VISIBLE });
+    fns.SetForegroundWindow.handler([hwnd]);
+    assert.equal(service.deactivated(), false);
+    fns.SetForegroundWindow.handler([other]);
+    assert.equal(service.deactivated(), false, 'another of its own windows keeps it active');
+
+    fns.SetForegroundWindow.handler([fns.GetDesktopWindow.handler()]);
+    assert.equal(service.deactivated(), true, 'the desktop took the activation');
+    fns.SetForegroundWindow.handler([hwnd]);
+    assert.equal(service.deactivated(), false, 'and it came back');
+});

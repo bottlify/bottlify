@@ -358,6 +358,10 @@ const MAX_WINDOW_TEXT = 1 << 16;
  * @property {() => number} active
  *           The active top-level window -- what GetForegroundWindow answers --
  *           or zero while there is none.
+ * @property {() => boolean} deactivated
+ *           Whether the application was last told WM_ACTIVATEAPP(0): from
+ *           then until WM_ACTIVATEAPP(1) it is not the active application,
+ *           whichever of its windows the program activates meanwhile.
  * @property {() => void} refresh
  *           Repaints the desktop and every window shown on it.
  * @property {(event: import('./rawinput.js').RawInputEvent) => void} rawInput
@@ -960,6 +964,8 @@ export function createWindowFunctions(host){
      * sliding in, the camera settling -- so the picture never stops arriving.
      */
     let active = 0;
+    /** What WM_ACTIVATEAPP last told the application: false once it went. */
+    let applicationActive = true;
     const activeWindow = ()=>{
         if (active !== 0 && live(active))
         {
@@ -1032,6 +1038,7 @@ export function createWindowFunctions(host){
         const programs = which=>which !== 0 && which !== desktop?.hwnd;
         if (programs(previous) !== programs(gained))
         {
+            applicationActive = programs(gained);
             for (const top of [...windows.values()]
                 .filter(each=>!each.destroyed && !isChild(each)).reverse())
             {
@@ -2950,6 +2957,7 @@ export function createWindowFunctions(host){
     host.windowService?.({
         /** The window GetForegroundWindow answers with, or zero. */
         active: ()=>activeWindow(),
+        deactivated: ()=>!applicationActive,
 
         modalLoop: (hwnd, { thread, first })=>(runModal
             ? runModal(hwnd >>> 0, thread, first) : 0),

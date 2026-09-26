@@ -191,12 +191,12 @@ export const win32Module = {
         /** @type {{ list: () => any[], clientRect: (hwnd: number) => any,
          *     place: (hwnd: number, x: number, y: number, width: number,
          *     height: number, how?: { announce?: boolean }) => boolean,
-         *     active: () => number, refresh: () => void,
+         *     active: () => number, deactivated: () => boolean, refresh: () => void,
          *     rawInput: (report: import('./user32/rawinput.js').RawInputEvent) => void,
          *     modalLoop: import('./user32/windows.js').WindowService['modalLoop'] }} */
         let windowService = {
             list: ()=>[], clientRect: ()=>null, place: ()=>false, active: ()=>0,
-            refresh: ()=>{}, rawInput: ()=>{}, modalLoop: ()=>0,
+            deactivated: ()=>false, refresh: ()=>{}, rawInput: ()=>{}, modalLoop: ()=>0,
         };
 
         /** @type {(handle: number, text: string) => void} */
@@ -1851,6 +1851,13 @@ export const win32Module = {
 
             /** The window the program is active through, as GetForegroundWindow answers. */
             activeWindow: ()=>windowService.active(),
+
+            /**
+             * Whether the application has been told it is no longer the
+             * active one (WM_ACTIVATEAPP(0)) and not told otherwise since:
+             * what DirectDraw's exclusive mode is lost on.
+             */
+            applicationDeactivated: ()=>windowService.deactivated(),
 
             /**
              * One event of the mouse or the keyboard as the device reported
