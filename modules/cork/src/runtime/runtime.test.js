@@ -1651,6 +1651,102 @@ test('callTargets and dispatch are off unless a run asks for them', async()=>{
     assert.equal(modules.runtime.diagnostics().crossings, 0, 'no module placed');
 });
 
+test('an indirect call sampled only now and then is not formed again; one sampled now is',
+    async()=>{
+        if (!probeFeatures().tailCalls)
+        {
+            return;
+        }
+        const m = machine({ callTargets: true });
+        const { code, table, slots, f, g, h } = dispatchLoop(1600);
+        m.write(CODE, code);
+        m.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
+        for (const at of [f, g, h, CODE])
+        {
+            m.runtime.noteHot(at);
+        }
+        await m.runtime.translatePending();
+        const profile = new DataView(m.memory.buffer);
+        /** The loop run with the profile on, and the reading after it: sixteen samples. */
+        const sampled = async()=>{
+            if (profile.getUint32(/** @type {number} */ (m.layout.callProfile), true) === 0)
+            {
+                await m.runtime.translatePending();
+            }
+            m.setReg(1, 1600);
+            m.setReg(2, 0);
+            m.setReg(4, 0x80000);
+            assert.equal(m.runtime.run(m.runtime.entryOf(CODE + 5), 1_000_000).kind, 'halt');
+            await m.runtime.translatePending();
+        };
+        // Sixteen samples, then seventy readings of none: the call's 48th sample
+        // comes in a phase of the program that leaves it cold between.
+        for (let round = 0; round < 4; round++)
+        {
+            await sampled();
+            for (let i = 0; i < 140; i++)
+            {
+                await m.runtime.translatePending();
+            }
+        }
+        assert.equal(m.runtime.diagnostics().reforms, 0, 'sampled too seldom');
+        for (let round = 0; round < 4; round++)
+        {
+            await sampled();
+        }
+        assert.equal(m.runtime.diagnostics().reforms, 1, 'sampled in a stretch');
+    });
+
+test('the regions of every indirect call sampled enough are formed again in one batch',
+    async()=>{
+        if (!probeFeatures().tailCalls)
+        {
+            return;
+        }
+        const m = machine({ callTargets: true });
+        // mov ecx, n; L: mov eax, ecx; and eax, 15; call [TA + eax*4]; call B; dec ecx;
+        // jnz L; hlt; B: mov eax, ecx; and eax, 15; call [TB + eax*4]; ret -- B a region
+        // of its own (an indirect call is no leaf's), each call site's table two small
+        // callees in turn, so every reading of the profile samples both sites.
+        const [ta, tb] = [CODE + 0x100, CODE + 0x140];
+        /** @param {number} table */
+        const callThrough = table=>[0x89, 0xc8, 0x83, 0xe0, 0x0f,
+            0xff, 0x14, 0x85, table & 0xff, table >>> 8 & 0xff, 0, 0];
+        const n = 1600;
+        const code = [0xb9, n & 0xff, n >>> 8, 0, 0, ...callThrough(ta),
+            0xe8, 4, 0, 0, 0, 0x49, 0x75, 0xec, 0xf4, ...callThrough(tb), 0xc3,
+            0x83, 0xc2, 1, 0xc3, 0x83, 0xc2, 3, 0xc3, 0x83, 0xc2, 5, 0xc3, 0x83, 0xc2, 7, 0xc3];
+        const b = CODE + 26;
+        const [f1, g1, f2, g2] = [CODE + 39, CODE + 43, CODE + 47, CODE + 51];
+        /** @param {number} at @param {number[]} callees */
+        const fill = (at, callees)=>m.write(at, Array.from({ length: 16 },
+            (_, k)=>callees[k % 2]).flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
+        m.write(CODE, code);
+        fill(ta, [f1, g1]);
+        fill(tb, [f2, g2]);
+        for (const at of [f1, g1, f2, g2, b, CODE])
+        {
+            m.runtime.noteHot(at);
+        }
+        await m.runtime.translatePending();
+        const run = ()=>{
+            m.setReg(2, 0);
+            m.setReg(4, 0x80000);
+            assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+            assert.equal(m.reg(2), 8 * n);
+        };
+        const modules = m.runtime.diagnostics().modules;
+        for (let i = 0; i < 16 && m.runtime.diagnostics().reforms === 0; i++)
+        {
+            run();
+            await m.runtime.translatePending();
+        }
+        const d = m.runtime.diagnostics();
+        assert.equal(d.reforms, 2, 'the loop and B');
+        assert.equal(d.modules, modules + 1, 'in one module');
+        run();
+    });
+
 test('a transfer that finds no entry leaves with the carried state written back', async()=>{
     const m = machine();
     // mov ebx, 7; mov edx, -1; add edx, 1; mov eax, CODE+0x800; jmp eax -- nothing is

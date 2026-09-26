@@ -524,8 +524,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
     };
     /** By the address of an indirect call in translated code, its targets sampled and how
-     * often. @type {Map<number, Map<number, number>>} */
+     * often, and its samples in all. @type {Map<number, { total: number,
+     *     targets: Map<number, number> }>} */
     const callSamples = new Map();
+    /** The calls sampled `PREDICT_AFTER` times, whose callees are looked at next: what was
+     * a pass over every call sampled at each `translatePending`. @type {Set<number>} */
+    const callsDue = new Set();
     /** By indirect call, the callees its regions were formed again with or failed to take,
      * not tried again while those regions run. @type {Map<number, Set<number>>} */
     const callTried = new Map();
@@ -1640,6 +1644,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const PREDICT_SHARE = 8;
     const PREDICT_CALLEES = 4;
     const REFORMS = 3;
+    // Readings a call's samples are kept for unless it is due by then: a
+    // region formed again is built, compiled and run on the baseline tier
+    // again, which only a call hot now pays back, not one that gathers its
+    // samples a few at a time over a long run.
+    const CALL_WINDOW = 64;
+    let readings = 0;
     const profileAt = settings.callTargets === true && table !== null
         ? layout.callProfile ?? -1 : -1;
     /**
@@ -1657,6 +1667,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return;
         }
         words.setUint32(profileAt, 0, true);
+        if (++readings % CALL_WINDOW === 0)
+        {
+            for (const site of callSamples.keys())
+            {
+                if (!callsDue.has(site))
+                {
+                    callSamples.delete(site);
+                }
+            }
+        }
         const count = Math.min(words.getUint32(profileAt + 4, true), 16);
         for (let i = 0; i < count; i++)
         {
@@ -1668,38 +1688,49 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 if (callSamples.size >= CALL_SITES_CAP)
                 {
                     callSamples.clear();
+                    callsDue.clear();
                 }
-                seen = new Map();
+                seen = { total: 0, targets: new Map() };
                 callSamples.set(site, seen);
             }
-            seen.set(target, (seen.get(target) ?? 0) + 1);
+            seen.targets.set(target, (seen.targets.get(target) ?? 0) + 1);
+            if (++seen.total === PREDICT_AFTER)
+            {
+                callsDue.add(site);
+            }
         }
     };
 
     /**
-     * The first indirect call sampled `PREDICT_AFTER` times whose callees
-     * are not yet in the regions holding it: each such region formed again
-     * with the callees that took a share of its samples (`callTargets`), and
-     * published over the one it replaces when it comes back -- only when one
-     * of them was formed in, a small leaf; the others' regions are left as
-     * they are.
+     * The indirect calls sampled `PREDICT_AFTER` times whose callees are not
+     * yet in the regions holding them: each such region formed again with the
+     * callees that took a share of its calls' samples (`callTargets`), all in
+     * one batch of up to `batchRegions`, and published over the one it
+     * replaces when it comes back -- only when one of them was formed in, a
+     * small leaf; the others' regions are left as they are. One batch rather
+     * than one a call: each is a module the engine thread instantiates, and a
+     * round trip through the worker that new code waits behind.
      *
      * @param {any} store
      * @returns {boolean} whether a batch was taken this call
      */
     const reformStep = store=>{
-        for (const [site, seen] of callSamples)
+        /** Each region to form again: its calls' callees, and the ones new to it.
+         * @type {Map<RegionRecord, { targets: Map<number, number[]>, added: number[] }>} */
+        const wanted = new Map();
+        for (const site of callsDue)
         {
-            let total = 0;
-            for (const times of seen.values())
+            if (wanted.size >= settings.batchRegions)
             {
-                total += times;
+                break;
             }
-            if (total < PREDICT_AFTER)
+            callsDue.delete(site);
+            const seen = callSamples.get(site);
+            callSamples.delete(site);
+            if (seen === undefined)
             {
                 continue;
             }
-            callSamples.delete(site);
             let tried = callTried.get(site);
             if (tried === undefined)
             {
@@ -1710,18 +1741,19 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 tried = new Set();
                 callTried.set(site, tried);
             }
-            const fresh = [...seen].filter(([target, times])=>times * PREDICT_SHARE >= total
-                && !tried.has(target)).sort((a, b)=>b[1] - a[1]).map(([target])=>target);
+            const fresh = [...seen.targets].filter(([target, times])=>
+                times * PREDICT_SHARE >= seen.total && !tried.has(target))
+                .sort((a, b)=>b[1] - a[1]).map(([target])=>target);
             if (fresh.length === 0)
             {
                 continue;
             }
             fresh.forEach(target=>tried.add(target));
-            const formed = [];
             for (const record of byPage.get(site >>> 12) ?? [])
             {
-                const targets = new Map(record.targets ?? []);
-                const had = targets.get(site) ?? [];
+                const one = wanted.get(record)
+                    ?? { targets: new Map(record.targets ?? []), added: [] };
+                const had = one.targets.get(site) ?? [];
                 const added = fresh.filter(target=>!had.includes(target))
                     .slice(0, PREDICT_CALLEES - had.length);
                 if (added.length === 0 || (record.reforms ?? 0) >= REFORMS
@@ -1729,27 +1761,33 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 {
                     continue;
                 }
-                targets.set(site, [...had, ...added]);
-                const region = formRegion(read, record.entry,
-                    { ...formOptions, translatable, callTargets: targets });
-                if (!region.blocks.some(block=>added.includes(block.start)))
-                {
-                    continue;
-                }
-                formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
-                    cached: null, wide: record.wide === true && precision === 'wide',
-                    narrow: record.narrow === true && precision === 'narrow',
-                    checked: record.checked === true, copies: record.copies === true,
-                    replaces: record, targets: [...targets] });
-            }
-            if (formed.length > 0)
-            {
-                counts.reforms += formed.length;
-                finishBatch(formed, store);
-                return true;
+                one.targets.set(site, [...had, ...added]);
+                one.added.push(...added);
+                wanted.set(record, one);
             }
         }
-        return false;
+        const formed = [];
+        for (const [record, { targets, added }] of wanted)
+        {
+            const region = formRegion(read, record.entry,
+                { ...formOptions, translatable, callTargets: targets });
+            if (!region.blocks.some(block=>added.includes(block.start)))
+            {
+                continue;
+            }
+            formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
+                cached: null, wide: record.wide === true && precision === 'wide',
+                narrow: record.narrow === true && precision === 'narrow',
+                checked: record.checked === true, copies: record.copies === true,
+                replaces: record, targets: [...targets] });
+        }
+        if (formed.length === 0)
+        {
+            return false;
+        }
+        counts.reforms += formed.length;
+        finishBatch(formed, store);
+        return true;
     };
 
     /**
