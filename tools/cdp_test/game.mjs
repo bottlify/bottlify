@@ -203,8 +203,8 @@ function parse(argv){
         // The translator's own settings as JSON ('{"countTransfers":true}').
         corkConfig: argv.includes('--cork-config')
             ? JSON.parse(argv[argv.indexOf('--cork-config') + 1]) : undefined,
-        // Which execution engine runs the program (`emulator`, the default,
-        // or `hybrid` with the translator), so two runs differ by that alone.
+        // Which execution engine runs the program (`cork`, the default, or
+        // `emulator` / `hybrid`), so two runs differ by that alone.
         engine: argv.includes('--engine') ? argv[argv.indexOf('--engine') + 1] : undefined,
         // The display the program is told it has, as `WxH`. The launcher
         // names the person's own screen, which is rarely a size a program of
