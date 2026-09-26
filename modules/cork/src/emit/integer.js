@@ -666,7 +666,7 @@ export function emitInstruction(e, instruction, flagsLive){
             writeOp(e, dst, ()=>readOp(e, src));
             return true;
         case 'cmpxchg8b':
-            return cmpxchg8b(e, instruction);
+            return cmpxchg8b(e, instruction, flagsLive);
         case 'arpl':
         {
             // If the destination selector's RPL is below the source's, it is
@@ -1032,19 +1032,22 @@ function shift(e, instruction, flagsLive){
     }
     prepare(e, dst);
     const arith = op === 'sar';
-    if (staticCount < 0)
+    if (staticCount < 0 && flagsLive)
     {
         // A count of zero at run time leaves the pending record to be folded
         // later, so its operands must survive: the word is made whole first.
+        // With the flags dead, the record is left alone and the value kept
+        // apart from it.
         e.materialise();
     }
+    const value = flagsLive ? Local.op1 : Local.t1;
     // The value, sign-extended for sar.
     readOp(e, dst);
     if (arith && size < 4)
     {
         b.op(size === 1 ? I32_EXTRA.extend8s : I32_EXTRA.extend16s);
     }
-    b.localSet(Local.op1);
+    b.localSet(value);
     if (staticCount < 0)
     {
         readOp(e, count);
@@ -1058,7 +1061,7 @@ function shift(e, instruction, flagsLive){
     }
     const pushCount = ()=>b.localGet(Local.count);
     writeOp(e, dst, ()=>{
-        b.localGet(Local.op1);
+        b.localGet(value);
         pushCount();
         if (op === 'shl' || op === 'sal')
         {
@@ -1118,8 +1121,11 @@ function shift(e, instruction, flagsLive){
     if (staticCount < 0)
     {
         e.close();
-        // Whether the shift happened is dynamic: the record is unknown here.
-        e.pending = null;
+        if (flagsLive)
+        {
+            // Whether the shift happened is dynamic: the record is unknown here.
+            e.pending = null;
+        }
     }
     return true;
 }
@@ -1320,8 +1326,12 @@ function shiftDouble(e, instruction, flagsLive){
     const dynamic = count.kind !== 'imm';
     if (dynamic)
     {
-        // As in `shift`: whole word before the branch, record unknown after it.
-        e.materialise();
+        // As in `shift`: whole word before the branch, record unknown after it,
+        // unless the flags are dead and the record is left alone.
+        if (flagsLive)
+        {
+            e.materialise();
+        }
         b.localGet(Local.count).i32const(0).op(I32.ne);
         e.openIf('shifting', EMPTY);
     }
@@ -1380,7 +1390,10 @@ function shiftDouble(e, instruction, flagsLive){
     if (dynamic)
     {
         e.close();
-        e.pending = null;
+        if (flagsLive)
+        {
+            e.pending = null;
+        }
     }
     return true;
 }
@@ -1732,15 +1745,18 @@ function bitTest(e, instruction, flagsLive){
  * cmpxchg8b m64: edx:eax compared with the qword; equal, ecx:ebx is stored
  * and ZF set; otherwise the qword is loaded into edx:eax and ZF cleared.
  *
- * @param {E} e @param {Instruction} instruction
+ * @param {E} e @param {Instruction} instruction @param {boolean} flagsLive
  */
-function cmpxchg8b(e, instruction){
+function cmpxchg8b(e, instruction, flagsLive){
     const { b } = e;
     const [dst] = instruction.operands;
     prepare(e, dst);
     b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase }).localSet(Local.t1);
     b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase + 4 }).localSet(Local.t2);
-    e.eagerWrite(ZF);
+    if (flagsLive)
+    {
+        e.eagerWrite(ZF);
+    }
     b.localGet(Local.t1).localGet(Local.reg).op(I32.eq);
     b.localGet(Local.t2).localGet(Local.reg + 2).op(I32.eq);
     b.op(I32.and);
@@ -1748,7 +1764,10 @@ function cmpxchg8b(e, instruction){
     noteStore(e, 8);
     b.localGet(Local.addr).localGet(Local.reg + 3).store('i32', { offset: e.layout.ramBase });
     b.localGet(Local.addr).localGet(Local.reg + 1).store('i32', { offset: e.layout.ramBase + 4 });
-    b.localGet(Local.flags).i32const(ZF).op(I32.or).localSet(Local.flags);
+    if (flagsLive)
+    {
+        b.localGet(Local.flags).i32const(ZF).op(I32.or).localSet(Local.flags);
+    }
     b.op(0x05); // else
     b.localGet(Local.t1).localSet(Local.reg);
     b.localGet(Local.t2).localSet(Local.reg + 2);

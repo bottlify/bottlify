@@ -253,7 +253,7 @@ export function prepareModule(m, layout, features, memory = {},
     const regionType = m.type({
         params: new Array(STATE_PARAMS).fill(ValType.i32), results: [ValType.i32],
     });
-    // The five helpers are one shared module every region imports, rather
+    // The helpers are one shared module every region imports, rather
     // than a copy in each; the host instantiates it once with the same
     // memory (they are defined in `./helpers.js`).
     const { materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid } =
@@ -2090,8 +2090,6 @@ export function liveFlagsOut(blocks, starts, precise = true){
         {
             const next = successors[i];
             out[i] = next === null ? ALL : next.reduce((flags, j)=>flags | liveIn[j], 0);
-            const after = /** @type {number[]} */ ([]);
-            deadFlagPass(blocks[i], out[i], after, precise);
             let flags = out[i];
             // What the block reads before it writes: the pass's own walk, to the top.
             for (let k = blocks[i].instructions.length - 1; k >= 0; k--)

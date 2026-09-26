@@ -378,6 +378,27 @@ test('a record no later block reads is not folded, with the backward jumps throu
         }
     });
 
+test('a shift by cl whose flags nothing reads folds no record, whatever the count', ()=>{
+    // add ebx, 1; sar eax, cl; shld esi, edi, cl; test al, 2; setz dl; hlt -- the test
+    // writes every flag the shifts would, so neither folds the add's record first.
+    for (const count of [0, 3])
+    {
+        const m = createTestMachine();
+        m.write(CODE, [0x83, 0xc3, 0x01, 0xd3, 0xf8, 0x0f, 0xa5, 0xfe, 0xa8, 0x02,
+            0x0f, 0x94, 0xc2, 0xf4]);
+        m.setReg('eax', 0x80000010);
+        m.setReg('ecx', count);
+        m.setReg('esi', 0x1);
+        m.setReg('edi', 0xf0000000);
+        const unit = m.translate(CODE);
+        assert.equal(unit.translation.folds, 0);
+        assert.equal(unit.run(CODE, 1000).kind, Exit.HALT);
+        assert.equal(m.reg('eax'), count === 0 ? 0x80000010 : 0xf0000002);
+        assert.equal(m.reg('esi'), count === 0 ? 0x1 : 0xf);
+        assert.equal(m.reg('edx') & 0xff, count === 0 ? 1 : 0, 'ZF of the test');
+    }
+});
+
 test('a spent budget on a jump back leaves the flags its target reads', ()=>{
     // mov ecx, 6; clc; H: jnc S; add eax, 100; S: add eax, 1; cmp ecx, 4; dec ecx;
     // jnz H; hlt -- the head reads the CF the cmp left through the dec, across the
