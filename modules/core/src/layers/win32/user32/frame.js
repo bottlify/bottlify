@@ -49,6 +49,8 @@ export const DIALOG_FRAME = 3;
 export const SCROLLBAR = 16;
 /** A tool window's caption is shorter than an ordinary one's. */
 export const TOOL_CAPTION_HEIGHT = 12;
+/** A menu bar's height, which a top-level window with a menu takes below its caption. */
+export const MENU_HEIGHT = 19;
 
 /**
  * @typedef {Object} Rect
@@ -61,11 +63,12 @@ export const TOOL_CAPTION_HEIGHT = 12;
 /**
  * @typedef {Object} Frame
  * @property {number} left     Pixels of frame on the left.
- * @property {number} top      On the top, the caption included.
+ * @property {number} top      On the top, the caption and the menu bar included.
  * @property {number} right    On the right, a vertical scroll bar included.
  * @property {number} bottom   On the bottom, a horizontal one included.
  * @property {number} edge     The border alone, without caption or bars.
  * @property {number} caption  The caption's height, or zero without one.
+ * @property {number} menu     The menu bar's height, or zero without one.
  */
 
 /**
@@ -77,9 +80,11 @@ export const TOOL_CAPTION_HEIGHT = 12;
  * edge a dialog or sizing frame already has, not width of its own.
  *
  * @param {number} style @param {number} [exStyle]
+ * @param {boolean} [menu]  Whether it has a menu bar, which only a window that
+ *        is not a child can.
  * @returns {Frame}
  */
-export function frameOf(style, exStyle = 0){
+export function frameOf(style, exStyle = 0, menu = false){
     const thick = (style & WS_THICKFRAME) !== 0;
     const border = (style & (WS_BORDER | WS_DLGFRAME)) !== 0;
     const modal = (exStyle & WS_EX_DLGMODALFRAME) !== 0;
@@ -98,18 +103,22 @@ export function frameOf(style, exStyle = 0){
     const caption = captioned
         ? ((exStyle & WS_EX_TOOLWINDOW) !== 0 ? TOOL_CAPTION_HEIGHT : CAPTION_HEIGHT)
         : 0;
+    const bar = menu && (style & WS_CHILD) === 0 ? MENU_HEIGHT : 0;
     return {
         left: edge,
-        top: edge + caption,
+        top: edge + caption + bar,
         right: edge + ((style & WS_VSCROLL) !== 0 ? SCROLLBAR : 0),
         bottom: edge + ((style & WS_HSCROLL) !== 0 ? SCROLLBAR : 0),
         edge,
         caption,
+        menu: bar,
     };
 }
 
 /** No frame at all: what a window covering the display is given. */
-const NO_FRAME = Object.freeze({ left: 0, top: 0, right: 0, bottom: 0, edge: 0, caption: 0 });
+const NO_FRAME = Object.freeze({
+    left: 0, top: 0, right: 0, bottom: 0, edge: 0, caption: 0, menu: 0,
+});
 
 /**
  * @typedef {Object} PlacedWindow
@@ -124,6 +133,7 @@ const NO_FRAME = Object.freeze({ left: 0, top: 0, right: 0, bottom: 0, edge: 0, 
  * @property {boolean} [frameless]
  *           A window a fullscreen device took over: it covers the display,
  *           and the frame its style describes is not drawn and takes no room.
+ * @property {number} [menu]  The menu a window that is not a child has, or zero.
  */
 
 /**
@@ -134,7 +144,8 @@ const NO_FRAME = Object.freeze({ left: 0, top: 0, right: 0, bottom: 0, edge: 0, 
  */
 export function createGeometry(windowOf){
     /** @param {PlacedWindow} record @returns {Frame} */
-    const frame = record=>(record.frameless ? NO_FRAME : frameOf(record.style, record.exStyle));
+    const frame = record=>(record.frameless ? NO_FRAME
+        : frameOf(record.style, record.exStyle, (record.menu ?? 0) !== 0));
 
     /**
      * The window a child is placed inside. An owned top-level window names

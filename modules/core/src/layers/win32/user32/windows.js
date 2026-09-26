@@ -89,6 +89,7 @@ const WM_KEYLAST = 0x0108;
 const WM_CAPTURECHANGED = 0x0215;
 /** Hit-test answers for the frame. */
 const HTCAPTION = 2;
+const HTMENU = 5;
 const HTBORDER = 18;
 const HTCLOSE = 20;
 const HTVSCROLL = 7;
@@ -107,6 +108,7 @@ const SC_CLOSE = 0xf060;
 const COLOR_BACKGROUND = 1;
 const COLOR_ACTIVECAPTION = 2;
 const COLOR_INACTIVECAPTION = 3;
+const COLOR_MENU = 4;
 const COLOR_CAPTIONTEXT = 9;
 const COLOR_INACTIVECAPTIONTEXT = 19;
 /** A system colour plus one, as a class background names it. */
@@ -1361,10 +1363,11 @@ export function createWindowFunctions(host){
             exStyle: exStyle >>> 0,
             parent: parent >>> 0,
             instance: instance >>> 0,
-            // For a child window hMenu is its control id; for a top-level one it
-            // is a menu handle, which the menu bookkeeping hangs on to.
-            id: parent === 0 ? 0 : menu >>> 0,
-            menu: parent === 0 ? menu >>> 0 : 0,
+            // For a child window hMenu is its control id; for any other --
+            // an owned popup included -- it is a menu handle, which the menu
+            // bookkeeping hangs on to and the frame makes room for.
+            id: (style & WS_CHILD) !== 0 ? menu >>> 0 : 0,
+            menu: (style & WS_CHILD) !== 0 ? 0 : menu >>> 0,
             wndProc: cls.wndProc,
             x: coordinate(x, DEFAULT_ORIGIN),
             y: coordinate(y, DEFAULT_ORIGIN),
@@ -1744,6 +1747,13 @@ export function createWindowFunctions(host){
                     bottom: y + 1 }, ink);
             }
         }
+        if (frame.menu > 0)
+        {
+            // The bar's room, in the menu colour: nothing lays its items out.
+            draw.fill(hdc, { left: frame.edge, top: frame.edge + frame.caption,
+                right: width - frame.edge, bottom: frame.edge + frame.caption + frame.menu },
+            sysColor(COLOR_MENU));
+        }
         if (frame.right > frame.edge)
         {
             const bar = scrollBarRect(record, true);
@@ -1817,6 +1827,12 @@ export function createWindowFunctions(host){
         {
             const box = closeBox(record);
             return contains(box, local.x, local.y) ? HTCLOSE : HTCAPTION;
+        }
+        const barTop = frame.edge + frame.caption;
+        if (frame.menu > 0 && local.y >= barTop && local.y < barTop + frame.menu
+            && local.x >= frame.edge && local.x < record.width - frame.edge)
+        {
+            return HTMENU;
         }
         if (frame.right > frame.edge && contains(scrollBarRect(record, true), local.x, local.y))
         {
@@ -2618,9 +2634,31 @@ export function createWindowFunctions(host){
             }),
             live, windows, classes,
         }),
-        ...createObjectFunctions({ host, live, clipboardService: service=>{
-            clipboardAccess = service;
-        } }),
+        ...createObjectFunctions({ host, live,
+            clipboardService: service=>{
+                clipboardAccess = service;
+            },
+            // A menu bar that comes or goes moves the client area, and the
+            // window hears its new size as it would from the frame change.
+            menuChanged: (record, previous)=>{
+                const now = record.menu;
+                record.menu = previous;
+                const before = geometry.clientSize(record);
+                record.menu = now;
+                const after = geometry.clientSize(record);
+                if (shown(record))
+                {
+                    appear(record);
+                }
+                if (after.width === before.width && after.height === before.height)
+                {
+                    return 1;
+                }
+                return andThen(send(record.hwnd, WM_SIZE, SIZE_RESTORED,
+                    ((after.height & 0xffff) << 16 | after.width & 0xffff) >>> 0,
+                    host.callerThread?.()), ()=>1);
+            },
+        }),
         ...createDialogFunctions({
             host: Object.assign(Object.create(host), {
                 focus: focusWindow, setFocus, send, callProcedure, geometry, children: childrenOf,

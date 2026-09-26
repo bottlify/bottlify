@@ -642,6 +642,46 @@ test('ShowWindow answers with the visibility it found, not the one it set', ()=>
     assert.equal(fns.ShowWindow.handler([0x9999, SW_SHOW]), 0, 'no window, nothing to report');
 });
 
+test('a top-level window\'s menu bar comes out of its client area, as AdjustWindowRect adds it',
+    ()=>{
+        // user32's window tests: the client rectangle mapped to the screen
+        // and grown by AdjustWindowRectEx -- with a menu when the window is
+        // not a child and GetMenu names one -- is the window rectangle.
+        const WS_OVERLAPPEDWINDOW = 0x00cf0000;
+        const WS_POPUP = 0x80000000;
+        const HTMENU = 5;
+        const WM_NCHITTEST = 0x0084;
+        const { fns, memory, dispatched } = withWindow();
+        const menu = fns.CreateMenu.handler();
+        memory.putU32s(RECT_BUFFER, [0, 0, 640, 480]);
+        fns.AdjustWindowRect.handler([RECT_BUFFER, WS_OVERLAPPEDWINDOW, 1]);
+        const [left, top, right, bottom] = [0, 4, 8, 12]
+            .map(at=>memory.u32(RECT_BUFFER + at) | 0);
+        const hwnd = createWindow(fns, memory, { style: WS_OVERLAPPEDWINDOW | WS_VISIBLE, menu,
+            x: 0, y: 0, width: right - left, height: bottom - top });
+        assert.equal(fns.GetMenu.handler([hwnd]), menu);
+        /** @returns {number[]} */
+        const client = ()=>{
+            fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
+            return [memory.u32(RECT_BUFFER + RECT.right), memory.u32(RECT_BUFFER + RECT.bottom)];
+        };
+        assert.deepEqual(client(), [640, 480], 'the client area asked for');
+        const frame = -left;
+        const inMenu = ((frame + 19 + 5) << 16 | 100) >>> 0;
+        assert.equal(fns.DefWindowProcA.handler([hwnd, WM_NCHITTEST, 0, inMenu]), HTMENU,
+            'the bar is the menu\'s part of the frame');
+
+        dispatched.length = 0;
+        assert.equal(fns.SetMenu.handler([hwnd, 0]), 1);
+        assert.deepEqual(client(), [640, 499], 'a window whose menu goes gets the bar back');
+        assert.deepEqual(dispatched.filter(m=>m.message === WM_SIZE).map(m=>m.lParam),
+            [(499 << 16 | 640) >>> 0], 'and is told its new size');
+
+        const owned = createWindow(fns, memory, { style: WS_POPUP, parent: hwnd, menu });
+        assert.equal(fns.GetMenu.handler([owned]), menu,
+            'an owned window is not a child, and its hMenu is a menu');
+    });
+
 test('SW_SHOWNA tells a visible window it is shown, where SW_SHOW tells it nothing', ()=>{
     // user32's message tests: WmSHOWNATopVisible is WM_SHOWWINDOW(1) for a
     // top-level window that was already visible, with no activation.

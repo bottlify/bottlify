@@ -26,8 +26,8 @@ import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js
 import { characterOf, codeForScan, codeForVk, keyFor, keyForCharacter } from './keys.js';
 import { REFRESH_HZ, displayModes } from './display.js';
 import {
-    BORDER, CAPTION_HEIGHT, DIALOG_FRAME, SCROLLBAR, SIZE_FRAME, TOOL_CAPTION_HEIGHT, WS_CHILD,
-    WS_VISIBLE, frameOf,
+    BORDER, CAPTION_HEIGHT, DIALOG_FRAME, MENU_HEIGHT, SCROLLBAR, SIZE_FRAME, TOOL_CAPTION_HEIGHT,
+    WS_CHILD, WS_VISIBLE, frameOf,
 } from './frame.js';
 import {
     DEVMODEA,
@@ -111,9 +111,6 @@ const FIXED_METRICS = new Map([
     [81, 1],                  // SM_SAMEDISPLAYFORMAT: one display
     [83, 1], [84, 1],         // SM_CXFOCUSBORDER, SM_CYFOCUSBORDER
 ]);
-
-/** A menu bar's height; the rest of the frame is the window geometry's. */
-const MENU_HEIGHT = 19;
 
 /**
  * The system colours, as a program reads them: COLORREF, 0x00BBGGRR. The
@@ -1113,7 +1110,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
         }
         const bounds = readRect(host, rect);
         // Scroll bars are not counted, as documented: the client rectangle
-        // a program grows here is the one inside the frame alone.
+        // a program grows here is the one inside the frame alone. The menu
+        // bar is counted whenever the caller says there is one.
         const frame = frameOf(style >>> 0, exStyle >>> 0);
         writeRect(host, rect, {
             left: bounds.left - frame.edge,

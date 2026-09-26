@@ -381,8 +381,11 @@ const parseMenuTemplate = bytes=>{
  * @param {(hwnd: number) => any | null} options.live
  * @param {(service: ClipboardService) => void} [options.clipboardService]
  *        Handed the clipboard for the controls' own use.
+ * @param {(record: any, previous: number) => number | Promise<number>} [options.menuChanged]
+ *        Told a window's menu changed, which moves its client area when a bar
+ *        comes or goes; answers what SetMenu answers once the window is told.
  */
-export function createObjectFunctions({ host, live, clipboardService }){
+export function createObjectFunctions({ host, live, clipboardService, menuChanged }){
     /** @type {Map<number, any>} */
     const menus = new Map();
     /** @type {Map<number, any>} */
@@ -1297,8 +1300,9 @@ export function createObjectFunctions({ host, live, clipboardService }){
                 {
                     return 0;
                 }
+                const previous = record.menu;
                 record.menu = menu >>> 0;
-                return 1;
+                return menuChanged?.(record, previous) ?? 1;
             },
         },
 
