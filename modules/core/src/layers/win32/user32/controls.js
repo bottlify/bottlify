@@ -248,6 +248,9 @@ const LBS_SORT = 0x0002;
 const LBS_MULTIPLESEL = 0x0008;
 const LBS_EXTENDEDSEL = 0x0800;
 const LBS_NOSEL = 0x4000;
+/** An owner-drawn list box, and one that still keeps the strings it is handed. */
+const LBS_OWNERDRAW = 0x0030;
+const LBS_HASSTRINGS = 0x0040;
 const LB_ADDSTRING = 0x0180;
 const LB_INSERTSTRING = 0x0181;
 const LB_DELETESTRING = 0x0182;
@@ -282,6 +285,8 @@ const CBS_TYPEMASK = 0x0003;
 const CBS_SIMPLE = 0x0001;
 const CBS_DROPDOWN = 0x0002;
 const CBS_SORT = 0x0100;
+const CBS_OWNERDRAW = 0x0030;
+const CBS_HASSTRINGS = 0x0200;
 const CB_GETEDITSEL = 0x0140;
 const CB_LIMITTEXT = 0x0141;
 const CB_SETEDITSEL = 0x0142;
@@ -2125,6 +2130,47 @@ export function createControlProcedures(host){
     };
 
     /**
+     * Whether a list keeps strings: every list does but an owner-drawn one
+     * made without LBS_HASSTRINGS (CBS_HASSTRINGS for a combo box), whose
+     * items are the values handed to LB_ADDSTRING, which its owner draws.
+     *
+     * @param {any} record
+     */
+    const keepsStrings = record=>(record.className === 'ComboBox'
+        ? (record.style & CBS_OWNERDRAW) === 0 || (record.style & CBS_HASSTRINGS) !== 0
+        : (record.style & LBS_OWNERDRAW) === 0 || (record.style & LBS_HASSTRINGS) !== 0);
+
+    /**
+     * An item added to a list without strings: the value is its data, and
+     * it goes at the end or where it was asked for -- the owner, not the
+     * list, is what could compare two of them.
+     *
+     * @param {any} record @param {number} data @param {number} [at]
+     */
+    const addData = (record, data, at)=>{
+        const index = addItem(record, false, '', at);
+        listState(record).items[index].data = data >>> 0;
+        return index;
+    };
+
+    /**
+     * @param {any} record @param {number} index @param {number} data
+     * @returns {number} the first item after `index` holding the value, wrapping, or -1
+     */
+    const findData = (record, index, data)=>{
+        const items = listState(record).items;
+        for (let step = 1; step <= items.length; step++)
+        {
+            const at = (index + step) % items.length;
+            if (items[at].data === (data >>> 0))
+            {
+                return at;
+            }
+        }
+        return -1;
+    };
+
+    /**
      * The messages a list box and a combo box share, by the list box's
      * numbers; the combo box translates its own before calling this.
      *
@@ -2134,14 +2180,17 @@ export function createControlProcedures(host){
     const listMessage = (record, sorted, message)=>{
         const state = listState(record);
         const items = state.items;
+        const strings = keepsStrings(record);
         const text = ()=>((message.lParam >>> 0) === 0
             ? '' : host.readCString(message.lParam >>> 0, MAX_TEXT));
         switch (message.message){
             case LB_ADDSTRING:
-                return addItem(record, sorted, text());
-            case LB_INSERTSTRING:
-                return addItem(record, sorted, text(),
-                    (message.wParam | 0) === -1 ? items.length : message.wParam | 0);
+                return strings ? addItem(record, sorted, text()) : addData(record, message.lParam);
+            case LB_INSERTSTRING: {
+                const at = (message.wParam | 0) === -1 ? items.length : message.wParam | 0;
+                return strings ? addItem(record, sorted, text(), at)
+                    : addData(record, message.lParam, at);
+            }
             case LB_DELETESTRING: {
                 const at = message.wParam | 0;
                 if (at < 0 || at >= items.length)
@@ -2193,11 +2242,16 @@ export function createControlProcedures(host){
                 {
                     return LB_ERR;
                 }
+                if (!strings)
+                {
+                    writeU32(message.lParam, item.data);
+                    return 4;
+                }
                 return writeString(message.lParam, item.text);
             }
             case LB_GETTEXTLEN: {
                 const item = items[message.wParam | 0];
-                return item ? item.text.length : LB_ERR;
+                return item ? (strings ? item.text.length : 4) : LB_ERR;
             }
             case LB_GETITEMDATA: {
                 const item = items[message.wParam | 0];
@@ -2213,9 +2267,11 @@ export function createControlProcedures(host){
                 return 1;
             }
             case LB_FINDSTRING:
-                return findItem(record, message.wParam | 0, false, text());
             case LB_FINDSTRINGEXACT:
-                return findItem(record, message.wParam | 0, true, text());
+                return strings
+                    ? findItem(record, message.wParam | 0, message.message === LB_FINDSTRINGEXACT,
+                        text())
+                    : findData(record, message.wParam | 0, message.lParam);
             case LB_GETTOPINDEX:
                 return state.top;
             case LB_SETTOPINDEX:

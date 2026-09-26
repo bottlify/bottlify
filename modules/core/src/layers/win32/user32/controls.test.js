@@ -1247,6 +1247,50 @@ test('a list box keeps its items and a click selects one with LBN_SELCHANGE', as
         [[400, LBN_SELCHANGE, list]]);
 });
 
+test('an owner-drawn list without strings keeps what LB_ADDSTRING is given as item data', async()=>{
+    // As documented for LB_ADDSTRING and LB_GETTEXT: in an owner-drawn list
+    // box without LBS_HASSTRINGS, lParam is the item's data, not a string,
+    // and LB_GETTEXT hands back that value; LB_FINDSTRING looks for it; the
+    // same for a combo box's CB_ADDSTRING and CB_GETLBTEXT without
+    // CBS_HASSTRINGS. With LBS_HASSTRINGS lParam is a string again.
+    const LBS_OWNERDRAWFIXED = 0x0010;
+    const LBS_HASSTRINGS = 0x0040;
+    const LB_GETITEMDATA = 0x0199;
+    const LB_FINDSTRING = 0x018f;
+    const CBS_OWNERDRAWFIXED = 0x0010;
+    const CB_GETLBTEXTLEN = 0x0149;
+    const DATA = 0xdeadbeef;
+    const context = setup();
+    const dialog = await openDialog(context);
+    /** @param {string} className @param {number} style @param {number} id */
+    const make = (className, style, id)=>{
+        context.memory.putString(TEXT, className);
+        return context.fns.CreateWindowExA.handler([0, TEXT, 0, WS_CHILD | style,
+            8, 60, 100, 60, dialog, id, HINSTANCE, 0]);
+    };
+    const list = make('ListBox', LBS_OWNERDRAWFIXED, 400);
+    assert.equal(context.fns.SendMessageA.handler([list, LB_ADDSTRING, 0, 0x1234]), 0);
+    assert.equal(context.fns.SendMessageA.handler([list, LB_ADDSTRING, 0, DATA]), 1);
+    assert.equal(context.fns.SendMessageA.handler([list, LB_GETITEMDATA, 1, 0]), DATA);
+    assert.equal(context.fns.SendMessageA.handler([list, LB_GETTEXTLEN, 1, 0]), 4);
+    context.memory.writeMemory(OUT, new Uint8Array(4));
+    assert.equal(context.fns.SendMessageA.handler([list, LB_GETTEXT, 1, OUT]), 4);
+    assert.equal(context.memory.u32(OUT), DATA, 'the item data, in the text\'s place');
+    assert.equal(context.fns.SendMessageA.handler([list, LB_FINDSTRING, -1 >>> 0, DATA]), 1);
+
+    const combo = make('ComboBox', 0x0003 | CBS_OWNERDRAWFIXED, 500);
+    assert.equal(context.fns.SendMessageA.handler([combo, CB_ADDSTRING, 0, DATA]), 0);
+    assert.equal(context.fns.SendMessageA.handler([combo, CB_GETLBTEXTLEN, 0, 0]), 4);
+    context.memory.writeMemory(OUT, new Uint8Array(4));
+    assert.equal(context.fns.SendMessageA.handler([combo, CB_GETLBTEXT, 0, OUT]), 4);
+    assert.equal(context.memory.u32(OUT), DATA);
+
+    const named = make('ListBox', LBS_OWNERDRAWFIXED | LBS_HASSTRINGS, 401);
+    context.memory.putString(TEXT, 'Alpha');
+    context.fns.SendMessageA.handler([named, LB_ADDSTRING, 0, TEXT]);
+    assert.equal(context.fns.SendMessageA.handler([named, LB_GETTEXTLEN, 0, 0]), 5);
+});
+
 test('a combo box shows its selection and the arrow keys change it with CBN_SELCHANGE',
     async()=>{
         const context = setup();
