@@ -166,11 +166,20 @@ test('a seed made with other features, another layout or another emitting settin
         // Without tail calls there is no entry hash, and no tier resumed from it.
         ['no tail calls', { module: withFeatures({ tailCalls: false }) }, {}],
         ['another layout', { memorySize: 32 << 20 }, {}],
-        ['structure off', { cork: { structure: false } }, {}],
+        // Each setting named on both sides, so a default that moves leaves
+        // every case a pair of different settings.
+        ['structure off, against on', { cork: { structure: false } },
+            { cork: { structure: true } }],
         ['structure unset, against off', { cork: { structure: undefined } },
             { cork: { structure: false } }],
-        ['precise', { cork: { precise: true } }, {}],
-        ['another trap port', { cork: { trapPort: 0xb078 } }, {}],
+        ['precise, against not', { cork: { precise: true } }, { cork: { precise: false } }],
+        ['dispatch, against none', { cork: { dispatch: true } }, { cork: { dispatch: false } }],
+        ['no dispatch, against it', { cork: { dispatch: false } }, { cork: { dispatch: true } }],
+        ['call targets, against none', { cork: { callTargets: true } },
+            { cork: { callTargets: false } }],
+        ['no call targets, against them', { cork: { callTargets: false } },
+            { cork: { callTargets: true } }],
+        ['another trap port', { cork: { trapPort: 0xb078 } }, { cork: { trapPort: 0xb077 } }],
     ]))
     {
         const seeded = await firstIteration(image, await capture(image, made), run);
@@ -190,13 +199,14 @@ test('a seed made under another precision control answers no x87 region', { time
         assert.equal(same.eax, (100_000).toString(16));
         assert.ok(same.cork.cacheHits > 0, 'the same control: from the seed');
         const mixed = { cork: { wideFirst: false } };
+        const first = { cork: { wideFirst: true } };
         for (const [what, from, made, to, run] of
             /** @type {[string, Uint8Array, HostOptions, Uint8Array, HostOptions][]} */ ([
-                ['wide, against narrow', extended, {}, single, {}],
-                ['narrow, against wide', single, {}, extended, {}],
-                ['wide, against mixed', extended, {}, extended, mixed],
-                ['narrow, against mixed', single, {}, single, mixed],
-                ['mixed, against wide', extended, mixed, extended, {}],
+                ['wide, against narrow', extended, first, single, first],
+                ['narrow, against wide', single, first, extended, first],
+                ['wide, against mixed', extended, first, extended, mixed],
+                ['narrow, against mixed', single, first, single, mixed],
+                ['mixed, against wide', extended, mixed, extended, first],
             ]))
         {
             const seeded = await firstIteration(to, await capture(from, made), run);
