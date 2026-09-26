@@ -133,12 +133,19 @@ machine with no codec installed answers. The graph's `tick` then decodes as far 
 and `src/app.js` copies each frame into the guest-owned surface the graph presents through
 `graphics.present` and writes each audio block into a mixer track of the clip's own rate, holding
 the picture back by how much of the film's sound is still owed when the audio ring is drained,
-and not at all otherwise. Each frame carries the graph's video window -- its rectangle in its owner
-and whether it shows -- and a frame whose window the program has hidden is counted (`film.hidden`)
-and not drawn, while its sound and its clock go on. The window starts hidden, as quartz's video
-renderer does, and `AutoShow` (on by default) shows it when the graph pauses or runs. Where the
-window sits is carried but not used: the picture is still fitted to the whole screen, placing it in
-the owner's client area needing a window-geometry query this layer does not have.
+and not at all otherwise. Each frame carries the graph's video window -- its rectangle in its owner,
+whether it shows and whether the program asked for full-screen mode -- and a frame whose window the
+program has hidden is counted (`film.hidden`) and not drawn, while its sound and its clock go on.
+The window starts hidden, as quartz's video renderer does, and `AutoShow` (on by default) shows it
+when the graph pauses or runs. A window with an owner is a child of it, so `src/letterbox.js` moves
+its rectangle by where the owner's client area begins on the screen (`win32.clientRect`), cuts it to
+that client area and to the screen, and stretches the picture over the whole rectangle on both axes,
+as a video renderer fills its window; the frame is presented as the owner's picture, and one with
+nothing of its window on the screen is counted (`film.offScreen`) and not drawn. A film with no
+owner, one in full-screen mode, or one whose owner names no window has the screen to itself: fitted,
+centred, the margins black. The rest of the owner's client area is black while frames arrive, since
+the frame covers the whole of it; the rectangle is taken as the picture's, with no frame of the
+video window's own style subtracted.
 
 ### The hosted JPEG library
 

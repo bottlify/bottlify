@@ -594,7 +594,7 @@ export function createQuartz(host){
      *        nothing holds the picture back and the graph says so.
      * @returns {{ hwnd: number, width: number, height: number,
      *             window: { left: number, top: number, width: number, height: number,
-     *                       visible: boolean },
+     *                       visible: boolean, fullScreen: boolean },
      *             bgra: Uint8Array | null, audio: Int16Array[],
      *             sampleRate: number, channels: number,
      *             positionMs: number, film: number } | null}
@@ -723,6 +723,9 @@ export function createQuartz(host){
                         width: graph.window.Width | 0,
                         height: graph.window.Height | 0,
                         visible: graph.window.Visible !== OAFALSE,
+                        // Full-screen mode covers the screen whatever the
+                        // rectangle says, which is left as it was for after.
+                        fullScreen: graph.window.FullScreenMode !== OAFALSE,
                     },
                     bgra: frame,
                     audio,

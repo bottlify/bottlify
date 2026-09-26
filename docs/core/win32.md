@@ -718,9 +718,10 @@ Stated as the code states them.
   graph with no decoder for a file answers `VFW_E_CANNOT_RENDER` and raises `EC_ERRORABORT` — the
   answer a machine without the codec gives. `IVideoWindow` starts hidden (`SW_HIDE`, `Visible`
   `OAFALSE`, `AutoShow` `OATRUE`), is shown by `Pause` and `Run` under `AutoShow`, and each frame
-  carries its rectangle and visibility; a hidden window's frames are not drawn, but a shown one's
-  are fitted to the whole screen rather than placed where `SetWindowPosition` put the window
-  ([`media.md`](./media.md)).
+  carries its rectangle, visibility and full-screen mode; a hidden window's frames are not drawn, an
+  owned one's are stretched over the rectangle `SetWindowPosition` gave inside the owner's client
+  area, and the rest of that client area shows black while they arrive; one with no owner, or in
+  full-screen mode, is fitted to the whole screen ([`media.md`](./media.md)).
 - **The `double`-returning CRT functions exist only with an `fpu` host**; without one an import of
   `sin` is reported missing rather than bound to a function that never sets the result register.
 - **The C runtime's Unicode text stops at the descriptor calls.** `_read`, `_write`, `fread` and
