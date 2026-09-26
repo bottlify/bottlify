@@ -666,12 +666,51 @@ test('_fdopen keeps the descriptor\'s own translation, whatever the mode says', 
     assert.equal(memory.text(buffer).slice(0, 3), 'a\nb');
 });
 
+test('_fcloseall closes every stream but the standard three and counts them', ()=>{
+    // Wine's msvcrt test_fopen_fclose_fcloseall.
+    const { memory, fns, open, files, console } = runtime({});
+    const stream1 = open('C:\\empty1', 'w+');
+    const stream2 = open('C:\\empty2', 'w ');
+    const stream3 = open('C:\\empty3', 'w+');
+    assert.equal(fns.fclose.handler([stream2]), 0);
+    assert.equal(fns.fclose.handler([stream3]), 0);
+    fns.fputc.handler([0x61, IOB + 32]);
+    const log = fns.freopen.handler([memory.put('C:\\log'), memory.put('w'), IOB + 64]);
+
+    assert.equal(fns._fcloseall.handler([]), 1);
+    assert.equal(fns._fcloseall.handler([]), 0);
+    assert.deepEqual(files.closed, ['C:\\empty2', 'C:\\empty3', 'C:\\empty1']);
+    assert.equal(fns.fputc.handler([0x62, stream1]), -1, 'the one left open is closed');
+    assert.equal(fns.fputc.handler([0x63, IOB + 32]), 0x63, 'stdout is not');
+    assert.equal(fns.fputc.handler([0x64, log]), 0x64, 'nor stderr, wherever it was moved');
+    assert.deepEqual(console, [[2, 'a'], [2, 'c']]);
+});
+
+test('_flushall forgets what ungetc gave back and counts the streams open', ()=>{
+    // Wine's msvcrt test_fflush: _flushall clears what a stream holds for
+    // reading, so the next read comes from where the descriptor now is.
+    const { memory, fns, open } = runtime({ 'C:\\a.bin': 'abc', 'C:\\b.bin': 'xyz' });
+    const a = open('C:\\a.bin', 'rb');
+    const b = open('C:\\b.bin', 'rb');
+    fns.fgetc.handler([a]);
+    fns.ungetc.handler([0x5a, a]);
+    fns.ungetc.handler([0x5a, b]);
+    assert.equal(fns._flushall.handler([]), 5, 'the standard three and the two opened');
+    assert.equal(fns.fgetc.handler([a]), 0x62);
+    assert.equal(fns.fgetc.handler([b]), 0x78);
+
+    fns.fclose.handler([b]);
+    assert.equal(fns._flushall.handler([]), 4);
+    fns.fputs.handler([memory.put('still open'), IOB + 32]);
+    assert.equal(fns._flushall.handler([]), 4);
+});
+
 test('the stream calls are cdecl with the argument count each reads', ()=>{
     const { fns } = runtime({});
     const expected = {
         fflush: 4, feof: 4, ferror: 4, clearerr: 4, fgetc: 4, getc: 4, _filbuf: 4,
         fgets: 12, fputc: 8, putc: 8, _flsbuf: 8, fputs: 8, ungetc: 8, rewind: 4, _fileno: 4,
-        fgetpos: 8, fsetpos: 8, freopen: 12, _fdopen: 8,
+        fgetpos: 8, fsetpos: 8, freopen: 12, _fdopen: 8, _fcloseall: 0, _flushall: 0,
     };
     for (const [name, argBytes] of Object.entries(expected))
     {

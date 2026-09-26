@@ -571,6 +571,36 @@ export function createStdioFunctions(host){
         }),
 
         /**
+         * int _fcloseall(void)
+         *
+         * fclose on every stream but stdin, stdout and stderr, and the count
+         * of them (Wine's msvcrt test_fopen_fclose_fcloseall).
+         */
+        _fcloseall: cdecl(0, ()=>{
+            const opened = [...streams.values()].filter(stream=>standardIndex(stream.record) < 0);
+            opened.forEach(release);
+            return opened.length;
+        }),
+
+        /**
+         * int _flushall(void)
+         *
+         * fflush on every stream: nothing waits to be written, and what
+         * ungetc gave back is forgotten, so the next read comes from where
+         * the descriptor is (Wine's msvcrt test_fflush). The answer is the
+         * count of streams open, the standard three always among them.
+         */
+        _flushall: cdecl(0, ()=>{
+            let opened = (host.iob?.() ?? 0) === 0 ? 0 : STANDARD_STREAMS;
+            for (const stream of streams.values())
+            {
+                stream.pushback.length = 0;
+                opened += standardIndex(stream.record) < 0 ? 1 : 0;
+            }
+            return opened;
+        }),
+
+        /**
          * size_t fread(void *buffer, size_t size, size_t count, FILE *stream)
          *
          * The count of whole elements read; every byte read is delivered and
