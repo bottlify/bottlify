@@ -65,8 +65,20 @@ const PAGE_SIZE = 4096;
  */
 const ALLOCATION_GRANULARITY = 64 * 1024;
 
+/** HeapCreate's option that leaves a heap unserialised. */
+const HEAP_NO_SERIALIZE = 0x00000001;
+
+/** The HEAP_INFORMATION_CLASS values, and the one compatibility value there is. */
+const HEAP_COMPATIBILITY_INFORMATION = 0;
+const HEAP_ENABLE_TERMINATION_ON_CORRUPTION = 1;
+const LOW_FRAGMENTATION_HEAP = 2;
+
 /** Codes this surface reports. */
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_INVALID_HANDLE = 6;
+const ERROR_GEN_FAILURE = 31;
+const ERROR_INSUFFICIENT_BUFFER = 122;
+const ERROR_NOACCESS = 998;
 /** What VirtualAlloc reports for an address outside anything it reserved. */
 const ERROR_INVALID_ADDRESS = 487;
 const ERROR_NO_MORE_ITEMS = 259;
@@ -604,6 +616,10 @@ export function createHeapFunctions(host){
 
     const processHeap = newHandle();
     const heaps = new Set([processHeap]);
+    /** Heaps made with HEAP_NO_SERIALIZE, which cannot take the low-fragmentation heap. */
+    const unserialized = new Set();
+    /** Heaps the program turned the low-fragmentation heap on for. */
+    const lowFragmentation = new Set();
 
     /**
      * An allocation the arena could not serve, said with what was asked and
@@ -615,6 +631,12 @@ export function createHeapFunctions(host){
         const state = allocator.diagnostics();
         host.divergence?.(api, `${size} bytes refused: ${state.largestFree} largest free`
             + ` of ${state.free} free, ${state.used} used in ${state.blocks} blocks`);
+    };
+
+    /** @param {number} address */
+    const readDword = address=>{
+        const bytes = host.readMemory(address, 4);
+        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
 
     /** @param {number} address @param {number} value */
@@ -904,10 +926,103 @@ export function createHeapFunctions(host){
         /** HANDLE HeapCreate(DWORD flOptions, SIZE_T dwInitialSize, SIZE_T dwMaximumSize) */
         HeapCreate: {
             argBytes: 12,
-            handler: ()=>{
+            /** @param {number[]} [args] */
+            handler: ([options] = [0])=>{
                 const heap = newHandle();
                 heaps.add(heap);
+                if ((options & HEAP_NO_SERIALIZE) !== 0)
+                {
+                    unserialized.add(heap);
+                }
                 return heap;
+            },
+        },
+
+        /**
+         * BOOL HeapSetInformation(HANDLE, HEAP_INFORMATION_CLASS, PVOID, SIZE_T)
+         *
+         * The low-fragmentation heap is a promise about how the heap lays out
+         * small blocks, which this allocator keeps whatever it is told; what
+         * is kept is the answer, since a program turns it on and later asks.
+         * It cannot be turned off again, and a heap without serialisation
+         * cannot have it. Ending the process on corruption is asked of no heap
+         * in particular and accepted.
+         */
+        HeapSetInformation: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, kind, information, length])=>{
+                const heap = handle >>> 0;
+                if (kind === HEAP_ENABLE_TERMINATION_ON_CORRUPTION)
+                {
+                    return 1;
+                }
+                if (kind !== HEAP_COMPATIBILITY_INFORMATION || (length >>> 0) < 4
+                    || information === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if (!heaps.has(heap))
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                const value = readDword(information >>> 0);
+                if (lowFragmentation.has(heap))
+                {
+                    if (value === LOW_FRAGMENTATION_HEAP)
+                    {
+                        return 1;
+                    }
+                    host.setLastError(ERROR_GEN_FAILURE);
+                    return 0;
+                }
+                if (value === 0)
+                {
+                    return 1;
+                }
+                if (value !== LOW_FRAGMENTATION_HEAP || unserialized.has(heap))
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                lowFragmentation.add(heap);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL HeapQueryInformation(HANDLE, HEAP_INFORMATION_CLASS, PVOID,
+         *                           SIZE_T, PSIZE_T ReturnLength)
+         */
+        HeapQueryInformation: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, kind, information, length, returned])=>{
+                const heap = handle >>> 0;
+                if (!heaps.has(heap))
+                {
+                    host.setLastError(ERROR_NOACCESS);
+                    return 0;
+                }
+                if (kind !== HEAP_COMPATIBILITY_INFORMATION)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if (returned !== 0)
+                {
+                    writeDword(returned >>> 0, 4);
+                }
+                if ((length >>> 0) < 4 || information === 0)
+                {
+                    host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+                    return 0;
+                }
+                writeDword(information >>> 0,
+                    lowFragmentation.has(heap) ? LOW_FRAGMENTATION_HEAP : 0);
+                return 1;
             },
         },
 
@@ -929,6 +1044,8 @@ export function createHeapFunctions(host){
                     allocator.free(address);
                 }
                 heaps.delete(heap);
+                unserialized.delete(heap);
+                lowFragmentation.delete(heap);
                 return 1;
             },
         },

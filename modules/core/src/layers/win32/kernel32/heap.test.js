@@ -491,6 +491,54 @@ test('the process heap cannot be destroyed out from under the program', ()=>{
     assert.equal(fns.HeapSize.handler([heap, 0, address]), 32);
 });
 
+test('a heap turns the low-fragmentation heap on once and reports it, as Wine\'s heap test has it',
+    ()=>{
+        const ERROR_GEN_FAILURE = 31;
+        const ERROR_INSUFFICIENT_BUFFER = 122;
+        const ERROR_NOACCESS = 998;
+        const HEAP_NO_SERIALIZE = 0x1;
+        /** @type {number[]} */
+        const errors = [];
+        const host = { ...fakeHost(), setLastError: (/** @type {number} */ e)=>errors.push(e) };
+        const fns = createHeapFunctions(host);
+        const view = new DataView(host.bytes.buffer);
+        const INFO = 0x10;
+        const SIZE = 0x20;
+        /** @param {number} heap @param {number} length */
+        const query = (heap, length)=>
+            fns.HeapQueryInformation.handler([heap, 0, INFO, length, SIZE]);
+        /** @param {number} heap @param {number} value */
+        const set = (heap, value)=>{
+            view.setUint32(INFO, value, true);
+            return fns.HeapSetInformation.handler([heap, 0, INFO, 4]);
+        };
+
+        const heap = fns.HeapCreate.handler([0, 0, 0]);
+        assert.equal(query(heap, 4), 1);
+        assert.equal(view.getUint32(INFO, true), 0, 'not on to begin with');
+        assert.equal(view.getUint32(SIZE, true), 4);
+        assert.equal(query(heap, 0), 0);
+        assert.equal(errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+        assert.equal(query(0, 4), 0, 'no heap');
+        assert.equal(errors.at(-1), ERROR_NOACCESS);
+
+        assert.equal(set(heap, 2), 1);
+        assert.equal(query(heap, 4), 1);
+        assert.equal(view.getUint32(INFO, true), 2);
+        assert.equal(set(heap, 0), 0, 'and cannot be undone');
+        assert.equal(errors.at(-1), ERROR_GEN_FAILURE);
+
+        const unserialized = fns.HeapCreate.handler([HEAP_NO_SERIALIZE, 0, 0]);
+        assert.equal(set(unserialized, 2), 0);
+        assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+
+        const HeapEnableTerminationOnCorruption = 1;
+        assert.equal(fns.HeapSetInformation.handler([0, HeapEnableTerminationOnCorruption, 0, 0]),
+            1, 'asked of no heap in particular, as a runtime asks at startup');
+        assert.equal(fns.HeapSetInformation.argBytes, 16);
+        assert.equal(fns.HeapQueryInformation.argBytes, 20);
+    });
+
 test('VirtualAlloc commits granular, zeroed memory', ()=>{
     const { host, fns } = setup(RESERVING_ARENA);
 
