@@ -676,6 +676,24 @@ test('ProgIDFromCLSID reads the class key, and an unregistered class has none', 
     assert.equal(String.fromCharCode(...units), 'Test.Class.1');
 });
 
+test('ProgIDFromCLSID widens the registry\'s bytes as the ANSI page reads them', ()=>{
+    // The registry keeps a string in the ANSI page, where 0x80 is the euro
+    // sign and 0x99 the trade mark, and the wide ProgID is what
+    // MultiByteToWideChar(CP_ACP) makes of those bytes.
+    const { host } = setup();
+    const progId = Uint8Array.of(0x41, 0x80, 0x99, 0);
+    host.hive = {
+        root: ()=>({}),
+        open: (key, path)=>(path === `CLSID\\${CLSID_TEST}\\ProgID` ? { progId } : null),
+        getValue: key=>({ data: key.progId }),
+    };
+    const fns = createOleFunctions(host);
+    assert.equal(fns.ProgIDFromCLSID.handler([CLSID_ARG, PPV]), 0);
+    const block = host.u32(PPV);
+    assert.equal(String.fromCharCode(...new Uint16Array(host.bytes.slice(block, block + 6).buffer)),
+        'A€™');
+});
+
 test('CLSIDFromProgID reads the ProgID key, and an unknown ProgID is not a class', ()=>{
     const { host, fns } = setup();
     host.putWide(STRING_BUFFER, 'Test.Class.1');

@@ -31,6 +31,7 @@ import { GUID_NULL, GUID_SIZE, GUID_STRING_LENGTH, readGuid, writeGuid } from '.
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { createStorageFunctions } from './storage.js';
 import { createPropVariantFunctions } from './propvariant.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 /** HRESULTs this file produces. */
 const S_OK = 0x00000000;
@@ -1181,15 +1182,11 @@ export function createOleFunctions(host){
                 {
                     return REGDB_E_CLASSNOTREG;
                 }
-                let progId = '';
-                for (const byte of value.data)
-                {
-                    if (byte === 0)
-                    {
-                        break;
-                    }
-                    progId += String.fromCharCode(byte);
-                }
+                // The registry's bytes are the ANSI page's, widened as
+                // MultiByteToWideChar(CP_ACP) widens them.
+                const end = value.data.indexOf(0);
+                const progId = decodeAnsi(
+                    value.data.subarray(0, end < 0 ? value.data.length : end));
                 const block = host.heap.allocate((progId.length + 1) * 2);
                 if (block === 0)
                 {
