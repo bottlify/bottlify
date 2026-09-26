@@ -370,8 +370,45 @@ export function formRegion(read, entry,
     };
     let bytes = 0;
 
+    /** The block starts in address order, for `containing`'s search. @type {number[]} */
+    const sorted = [];
+    /** Where `at` goes in `sorted`: the first start not below it. @param {number} at */
+    const place = at=>{
+        let lo = 0;
+        let hi = sorted.length;
+        while (lo < hi)
+        {
+            const mid = (lo + hi) >> 1;
+            if (sorted[mid] < at)
+            {
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+        return lo;
+    };
+    /** @param {number} at */
+    const addStart = at=>{
+        sorted.splice(place(at), 0, at);
+    };
+    // Whether two blocks share a byte: a target inside an instruction another
+    // block decoded, or an instruction running into a block after it. Until
+    // they do, the blocks are disjoint and the one holding an address is the
+    // last to start at or below it; once they do, the first block made that
+    // holds it answers, as the scan in insertion order always did.
+    let overlapping = false;
+
     /** The block that contains an address, if any. @param {number} address */
     const containing = address=>{
+        if (!overlapping)
+        {
+            const at = place(address + 1) - 1;
+            const block = at < 0 ? undefined : blocks.get(sorted[at]);
+            return block !== undefined && address < block.end ? block : null;
+        }
         for (const block of blocks.values())
         {
             if (address >= block.start && address < block.end)
@@ -406,6 +443,7 @@ export function formRegion(read, entry,
         block.instructions = block.instructions.slice(0, index);
         block.exit = { kind: 'fallthrough', targets: [at], next: at, backEdge: false };
         blocks.set(at, tail);
+        addStart(at);
         return true;
     };
 
@@ -421,6 +459,10 @@ export function formRegion(read, entry,
         {
             continue;
         }
+        if (inside)
+        {
+            overlapping = true;
+        }
         if (blocks.size >= maxBlocks || !translatable(start))
         {
             // Not followed: whoever jumps here exits to the runtime.
@@ -432,6 +474,7 @@ export function formRegion(read, entry,
             exit: { kind: 'cut', targets: [], next: start, backEdge: false },
         };
         blocks.set(start, block);
+        addStart(start);
         let eip = start;
         for (;;)
         {
@@ -480,6 +523,12 @@ export function formRegion(read, entry,
             }
             block.instructions.push(decoded);
             bytes += decoded.length;
+            // A block that starts inside this instruction's bytes shares them.
+            const after = place(decoded.eip + 1);
+            if (after < sorted.length && sorted[after] < decoded.eip + decoded.length)
+            {
+                overlapping = true;
+            }
             eip = (eip + decoded.length) >>> 0;
             block.end = eip;
             const exit = exitOf(decoded, eip);
@@ -546,7 +595,15 @@ export function formRegion(read, entry,
         for (let address = block.start; address < block.end; address++)
         {
             hash = Math.imul(hash ^ read(address), 0x01000193) >>> 0;
-            pages.add(address >>> 12);
+        }
+        // Each page the block spans, in address order, once: the set of every
+        // byte's page, without a set operation a byte.
+        if (block.end > block.start)
+        {
+            for (let page = block.start >>> 12; page <= (block.end - 1) >>> 12; page++)
+            {
+                pages.add(page);
+            }
         }
     }
     // A table's entries decide the region's blocks: they are hashed with the

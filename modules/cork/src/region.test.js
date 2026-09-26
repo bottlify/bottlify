@@ -78,6 +78,19 @@ test('a target inside an instruction gets a block of its own: overlapping code',
     assert.deepEqual(overlapping?.exit.targets, [0x1006]);
 });
 
+test('once code overlaps, a block that runs into another block\'s bytes falls through to it', ()=>{
+    // 1000: mov eax, 0x01eb0000 (b8 00 00 eb 01)
+    // 1005: jmp 1001            (eb fa)
+    // 1001, inside the mov: add [eax], al (00 00), then 1003 is inside the mov's
+    // block too -- the first block made holds it -- so the block ends there.
+    const region = regionOf([0xb8, 0x00, 0x00, 0xeb, 0x01, 0xeb, rel8(-6)]);
+    const inside = region.blocks.find(b=>b.start === 0x1001);
+    assert.equal(inside?.instructions.length, 1);
+    assert.equal(inside?.exit.kind, 'fallthrough');
+    assert.deepEqual(inside?.exit.targets, [0x1003]);
+    assert.ok(region.entries.includes(0x1003), 'and 1003 a block of its own');
+});
+
 test('a region is cut at an indirect jump, a return, a call, a trap and a fault', ()=>{
     const indirect = regionOf([0xff, 0xe0]); // jmp eax
     assert.equal(indirect.blocks[0].exit.kind, 'indirect');
