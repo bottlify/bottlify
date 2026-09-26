@@ -1683,3 +1683,51 @@ test('a surface answers IDirectDrawGammaControl, whose ramp starts as the identi
         assert.equal(h.release(ddraw), 0);
         h.assertAllReleased();
     });
+
+test('no surface is an overlay: creating one is refused, and the overlay calls say so', ()=>{
+    // ddraw7.c test_offscreen_overlay (13688-13691): UpdateOverlay on a
+    // surface that is not an overlay is DDERR_NOTAOVERLAYSURFACE, shown or
+    // hidden; a failed create_overlay is the test's own skip.
+    const DDSCAPS_OVERLAY = 0x00000080;
+    const DDERR_NOOVERLAYHW = 0x88760104;
+    const DDERR_NOTAOVERLAYSURFACE = 0x88760244;
+    const h = seamed();
+    const ddraw = h.create7();
+    const at = 0x5000;
+    h.box.bytes.fill(0, at, at + DDSURFACEDESC2.SIZE);
+    writeSurfaceDesc(h.box.services, at, DDSURFACEDESC2, {
+        flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT, width: 64, height: 64,
+        pitch: 0, backBufferCount: 0, mipMapCount: 0, caps: DDSCAPS_OVERLAY, caps2: 0,
+        pixelFormat: { size: 0x20, flags: 4, fourCC: 0x59565955, bitCount: 0, redMask: 0,
+            greenMask: 0, blueMask: 0, alphaMask: 0 },
+    });
+    h.box.memory.writeU32(0x5100, 0xdeadbeef);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'CreateSurface'), [at, 0x5100, 0]),
+        DDERR_NOOVERLAYHW);
+
+    const primary = h.createSurface7(ddraw, { caps: DDSCAPS_PRIMARYSURFACE });
+    const offscreen = h.createSurface7(ddraw,
+        { caps: DDSCAPS_OFFSCREENPLAIN, width: 64, height: 64 });
+    const DDOVER_SHOW = 0x00004000;
+    const DDOVER_HIDE = 0x00000200;
+    for (const flags of [DDOVER_SHOW, DDOVER_HIDE])
+    {
+        assert.equal(h.surface7(offscreen, 'UpdateOverlay', [0, primary, 0, flags, 0]),
+            DDERR_NOTAOVERLAYSURFACE);
+    }
+    assert.equal(h.surface7(offscreen, 'GetOverlayPosition', [0x5200, 0x5204]),
+        DDERR_NOTAOVERLAYSURFACE);
+    assert.equal(h.surface7(offscreen, 'SetOverlayPosition', [16, 16]),
+        DDERR_NOTAOVERLAYSURFACE);
+    assert.equal(h.surface7(offscreen, 'UpdateOverlayZOrder', [0, 0]),
+        DDERR_NOTAOVERLAYSURFACE);
+    assert.equal(h.surface7(offscreen, 'UpdateOverlayDisplay', [0]), DDERR_NOTAOVERLAYSURFACE);
+    // The primary has no overlays over it to put in order, and says so by
+    // naming none.
+    assert.equal(h.surface7(primary, 'EnumOverlayZOrders', [0, 0, 0x1234]), DD_OK);
+
+    assert.equal(h.release(offscreen), 0);
+    assert.equal(h.release(primary), 0);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});

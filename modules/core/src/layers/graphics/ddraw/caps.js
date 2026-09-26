@@ -34,6 +34,7 @@ import {
     DDERR_INVALIDCAPS,
     DDERR_INVALIDPARAMS,
     DDERR_NOEXCLUSIVEMODE,
+    DDERR_NOOVERLAYHW,
     DDERR_NOPALETTEATTACHED,
     DDPF_PALETTEINDEXED_ANY,
     DDSCAPS2_CUBEMAP,
@@ -45,6 +46,7 @@ import {
     DDSCAPS_FRONTBUFFER,
     DDSCAPS_LOCALVIDMEM,
     DDSCAPS_MIPMAP,
+    DDSCAPS_OVERLAY,
     DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY,
     DDSCAPS_TEXTURE,
@@ -192,6 +194,14 @@ export function validateSurfaceCaps(request){
         // and refused by every later one, which is a version difference rather
         // than a capability the hardware gained or lost.
         return fail(DDERR_INVALIDCAPS);
+    }
+
+    // No overlay hardware is claimed -- DDCAPS_OVERLAY is not among the caps
+    // -- so a surface that would be an overlay is refused the way a card
+    // without one refuses it, not made and then never shown.
+    if (caps & DDSCAPS_OVERLAY)
+    {
+        return fail(DDERR_NOOVERLAYHW);
     }
 
     return { hr: DD_OK, caps: placedCaps(caps, flipChain), flipChain };

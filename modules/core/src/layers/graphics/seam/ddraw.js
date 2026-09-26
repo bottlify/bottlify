@@ -66,8 +66,9 @@ import {
     DDCAPS2_WIDESURFACES, DDCAPS_BLT, DDCAPS_BLTCOLORFILL, DDCAPS_BLTSTRETCH, DDCAPS_CANBLTSYSMEM,
     DDCAPS_COLORKEY, DDCAPS_GDI, DDCAPS_PALETTE, DDCKEYCAPS_DESTBLT, DDCKEYCAPS_SRCBLT,
     DDCKEY_DESTBLT, DDCKEY_SRCBLT, DDERR_ALREADYINITIALIZED, DDERR_INVALIDPARAMS,
-    DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_SURFACEBUSY, DDERR_SURFACELOST, DDERR_UNSUPPORTED,
-    DDPCAPS_1BIT, DDPCAPS_2BIT, DDPCAPS_4BIT, DDPCAPS_8BIT, DDPCAPS_ALLOW256,
+    DDERR_NOTAOVERLAYSURFACE, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_SURFACEBUSY,
+    DDERR_SURFACELOST, DDERR_UNSUPPORTED, DDPCAPS_1BIT, DDPCAPS_2BIT, DDPCAPS_4BIT,
+    DDPCAPS_8BIT, DDPCAPS_ALLOW256,
     DDPCAPS_PRIMARYSURFACE, DDPF_RGB, DDSCAPS_3DDEVICE, DDSCAPS_BACKBUFFER, DDSCAPS_COMPLEX,
     DDSCAPS_FLIP, DDSCAPS_FRONTBUFFER, DDSCAPS_LOCALVIDMEM, DDSCAPS_MIPMAP, DDSCAPS_OFFSCREENPLAIN,
     DDSCAPS_PRIMARYSURFACE, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_VIDEOMEMORY,
@@ -927,6 +928,20 @@ export function createDirectDrawSeam(
 
             PageLock: ()=>DD_OK,
             PageUnlock: ()=>DD_OK,
+
+            // No surface is an overlay -- creating one is refused for want of
+            // the hardware -- so every call that works on one is answered as
+            // it is for any other surface, and the call that lists the
+            // overlays over a surface lists none.
+            UpdateOverlay: ()=>DDERR_NOTAOVERLAYSURFACE,
+            GetOverlayPosition: ()=>DDERR_NOTAOVERLAYSURFACE,
+            SetOverlayPosition: ()=>DDERR_NOTAOVERLAYSURFACE,
+            UpdateOverlayZOrder: ()=>DDERR_NOTAOVERLAYSURFACE,
+            UpdateOverlayDisplay: ()=>DDERR_NOTAOVERLAYSURFACE,
+            /** @param {any} surface @param {number[]} args */
+            EnumOverlayZOrders: (surface, [, , callback])=>((callback >>> 0) === 0
+                ? DDERR_INVALIDPARAMS
+                : DD_OK),
 
             /** @param {any} surface @param {number[]} args */
             SetSurfaceDesc: (surface, [desc, flags])=>{
