@@ -285,6 +285,11 @@ export const graphicsModule = {
             /** @returns {any} */
             ddraw: (/** @type {any} */ options)=>createDirectDraw({
                 ...services,
+                // A surface's pixels are an address the program writes through
+                // and the presenter reads back, so they come out of the guest's
+                // heap -- not the byte arrays the services hand the others.
+                allocate: config?.allocate,
+                free: config?.free,
                 screenWidth: services.screen.width,
                 screenHeight: services.screen.height,
                 ...options,

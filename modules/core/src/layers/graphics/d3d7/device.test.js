@@ -49,7 +49,7 @@ const ARGB32 = Object.freeze({
  * A DirectDraw object under a cooperative level, the way a program has one
  * before it asks for Direct3D.
  *
- * @param {{ allocate?: (bytes: number) => number }} [options]
+ * @param {{ allocate?: (bytes: number) => number, free?: (address: number) => void }} [options]
  */
 function ddrawObject(options = {}){
     const root = createDirectDraw({ version: 7, screenWidth: 16, screenHeight: 16, ...options });
@@ -494,6 +494,27 @@ test('a state block holds what was set between begin and end, and can be refresh
     assert.equal(device.CreateStateBlock(9, out), DDERR_INVALIDPARAMS);
 
     releaseAll(f);
+});
+
+test('a vertex buffer gives its guest memory back with its last reference', ()=>{
+    /** @type {number[]} */
+    const freed = [];
+    const root = ddrawObject({
+        allocate: ()=>0x200000,
+        free: (/** @type {number} */ address)=>{
+            freed.push(address);
+        },
+    });
+    const d3d = createDirect3D7(root);
+    const made = d3d.createVertexBuffer({ caps: 0, fvf: FVF_TL, numVertices: 4 });
+    assert.equal(made.hr, D3D_OK);
+    assert.equal(made.buffer.base, 0x200000);
+    made.buffer.addRef();
+    made.buffer.release();
+    assert.deepEqual(freed, [], 'not while a reference is held');
+    assert.equal(made.buffer.release(), 0);
+    assert.deepEqual(freed, [0x200000]);
+    assert.equal(root.release('IDirectDraw7'), 0);
 });
 
 test('a vertex buffer is a guest allocation with one lock at a time', ()=>{

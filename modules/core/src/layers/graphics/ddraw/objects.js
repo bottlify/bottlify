@@ -344,6 +344,8 @@ function sameRect(a, b){
  *           Where a surface's pixels live. Injected so the model is testable
  *           with no backend; the default hands out distinct, page-aligned
  *           addresses and never reads or writes them.
+ * @property {(address: number) => void} [free]
+ *           Gives a surface's pixels back when its last reference goes.
  * @property {(attributes: DcAttributes) => number} [createDc]
  *           A device context handle for GetDC, over the surface's own pixels.
  *           This layer records that one was handed out and nothing more --
@@ -395,6 +397,8 @@ export function createDirectDraw(options = {}){
         nextAddress += (bytes + 0xfff) & ~0xfff;
         return address;
     });
+
+    const free = options.free ?? (()=>{});
 
     let nextDc = 0x1000;
     const createDc = options.createDc ?? (()=>{
@@ -787,6 +791,9 @@ export function createDirectDraw(options = {}){
             {
                 release(spec.owner);
             }
+            // Whatever the surface holds now: a flip moves buffers between a
+            // chain's members, and each member gives back the one it ends with.
+            free(buffer);
         });
 
         const surface = {
@@ -1642,6 +1649,11 @@ export function createDirectDraw(options = {}){
          */
         allocateStorage(bytes){
             return allocate(bytes);
+        },
+
+        /** @param {number} address  What allocateStorage handed out. */
+        freeStorage(address){
+            free(address);
         },
 
         /** @returns {Surface[]} every surface alive, in creation order */

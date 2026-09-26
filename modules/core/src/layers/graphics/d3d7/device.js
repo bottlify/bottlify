@@ -323,6 +323,7 @@ export function createDirect3D7(ddraw, services = {}){
                 count--;
                 if (count === 0)
                 {
+                    ddraw.freeStorage(base);
                     ddraw.release('IDirectDraw7');
                 }
                 return Math.max(count, 0);
