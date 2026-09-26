@@ -401,6 +401,26 @@ test('CreateThread hands the kernel the stack size as a commit, or as a reserve 
     assert.equal(kernel.state.created[1].stackSize, undefined);
 });
 
+test('CREATE_SUSPENDED makes the thread with one suspension, and no turn until resumed', ()=>{
+    // Wine's thread test: a thread created suspended does not run, and the
+    // first ResumeThread answers a previous count of one.
+    const CREATE_SUSPENDED = 0x4;
+    const { kernel, fns } = setup();
+    /** @type {any[]} */
+    const suspended = [];
+    Object.assign(kernel, {
+        suspendThread: (/** @type {any} */ thread)=>{
+            suspended.push(thread);
+            return 0;
+        },
+    });
+
+    fns.CreateThread.handler([0, 0, 0x401000, 0, 0, 0]);
+    assert.deepEqual(suspended, [], 'a thread created without it is left to run');
+    fns.CreateThread.handler([0, 0, 0x401000, 0, CREATE_SUSPENDED, 0]);
+    assert.deepEqual(suspended, [kernel.state.created[1]]);
+});
+
 test('a thread the kernel has no room for is a failed CreateThread, not a stopped machine', ()=>{
     const ERROR_NOT_ENOUGH_MEMORY = 8;
     const { kernel, fns, errors } = setup();

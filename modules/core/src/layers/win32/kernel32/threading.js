@@ -53,6 +53,8 @@ const CREATE_MUTEX_INITIAL_OWNER = 0x1;
 
 /** CreateThread's flag that makes dwStackSize the stack's reserve, not its commit. */
 const STACK_SIZE_PARAM_IS_A_RESERVATION = 0x00010000;
+/** CreateThread's flag for a thread that waits for ResumeThread before it first runs. */
+const CREATE_SUSPENDED = 0x4;
 
 /** DuplicateHandle's one option that changes what it does. */
 const DUPLICATE_CLOSE_SOURCE = 0x00000001;
@@ -440,6 +442,10 @@ export function createThreadingFunctions(host){
                     return 0;
                 }
                 host.threadBlock?.(thread);
+                if (((flags >>> 0) & CREATE_SUSPENDED) !== 0)
+                {
+                    kernel.suspendThread(thread);
+                }
                 if (threadIdOut !== 0)
                 {
                     kernel.writeThreadId(threadIdOut, thread.id);
