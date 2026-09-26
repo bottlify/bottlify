@@ -304,6 +304,148 @@ test('a lock keeps the flags it was given, so a backend can honour them', ()=>{
     assertFullyReleased(device);
 });
 
+/** A GDI that hands out numbered contexts and remembers what it was shown. */
+function fakeGdi(){
+    /** @type {any[]} */
+    const made = [];
+    /** @type {number[]} */
+    const deleted = [];
+    return {
+        made,
+        deleted,
+        /** @param {any} attributes */
+        createSurfaceDc: attributes=>{
+            made.push(attributes);
+            return 0x100 + made.length;
+        },
+        /** @param {number} handle */
+        deleteSurfaceDc: handle=>{
+            deleted.push(handle);
+        },
+    };
+}
+
+test('GetDC answers for the formats GDI draws into, and refuses the rest untouched', ()=>{
+    // Wine's d3d9 test_getdc: supported for A8R8G8B8, X8R8G8B8, R5G6B5,
+    // X1R5G5B5 and A1R5G5B5 among what is made here, and a failed call leaves
+    // the handle.
+    const device = createDevice();
+    const gdi = fakeGdi();
+    for (const [format, bitCount, layout] of /** @type {[number, number, string | null][]} */ ([
+        [D3DFMT.A8R8G8B8, 32, null], [D3DFMT.X8R8G8B8, 32, null], [D3DFMT.R5G6B5, 16, '565'],
+        [D3DFMT.X1R5G5B5, 16, '555'], [D3DFMT.A1R5G5B5, 16, '555'],
+        [D3DFMT.A2R10G10B10, 0, null], [D3DFMT.L8, 0, null], [D3DFMT.DXT1, 0, null],
+    ]))
+    {
+        /** @type {{ surface?: any }} */
+        const plain = {};
+        assert.equal(device.CreateOffscreenPlainSurface(64, 64, format, D3DPOOL.SYSTEMMEM, plain),
+            D3D_OK);
+        const surface = plain.surface;
+        /** @type {{ dc?: number }} */
+        const out = { dc: 0x1234 };
+        if (bitCount === 0)
+        {
+            assert.equal(surface.GetDC(gdi, out), D3DERR_INVALIDCALL, `format ${format}`);
+            assert.equal(out.dc, 0x1234);
+        }
+        else
+        {
+            assert.equal(surface.GetDC(gdi, out), D3D_OK, `format ${format}`);
+            const shown = gdi.made[gdi.made.length - 1];
+            assert.equal(out.dc, 0x100 + gdi.made.length);
+            assert.deepEqual([shown.width, shown.height, shown.bitCount, shown.bits, shown.pitch],
+                [64, 64, bitCount, surface.base, surfacePitch(format, 64)]);
+            if (layout)
+            {
+                assert.equal(shown.format, layout);
+            }
+            assert.equal(surface.ReleaseDC(out.dc, gdi), D3D_OK);
+            assert.equal(gdi.deleted[gdi.deleted.length - 1], out.dc);
+        }
+        surface.release();
+    }
+    assertFullyReleased(device);
+});
+
+test('a held context is the resource\'s one lock: no second, no lock, no other level\'s', ()=>{
+    // Wine's d3d9 test_getdc, over two surfaces of one cube texture.
+    const device = createDevice();
+    const gdi = fakeGdi();
+    /** @type {{ texture?: any }} */
+    const cube = {};
+    assert.equal(device.CreateCubeTexture(64, 3, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, cube),
+        D3D_OK);
+    /** @type {{ surface?: any }} */
+    const first = {};
+    /** @type {{ surface?: any }} */
+    const second = {};
+    assert.equal(cube.texture.GetCubeMapSurface(D3DCUBEMAP_FACE.POSITIVE_X, 0, first), D3D_OK);
+    assert.equal(cube.texture.GetCubeMapSurface(D3DCUBEMAP_FACE.NEGATIVE_Y, 2, second), D3D_OK);
+    const surface = first.surface;
+    const other = second.surface;
+    /** @type {{ dc?: number }} */
+    const held = {};
+    /** @type {{ dc?: number }} */
+    const again = { dc: 0x1234 };
+    const locked = { Pitch: 0, pBits: 0 };
+
+    assert.equal(surface.GetDC(gdi, held), D3D_OK);
+    assert.equal(surface.GetDC(gdi, again), D3DERR_INVALIDCALL);
+    assert.equal(again.dc, 0x1234);
+    assert.equal(other.GetDC(gdi, again), D3DERR_INVALIDCALL, 'nor another surface of it');
+    assert.equal(surface.LockRect(locked, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(other.LockRect(locked, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(other.UnlockRect(), D3D_OK, 'the texture is locked, so an unlock is owed');
+    assert.equal(other.ReleaseDC(held.dc, gdi), D3DERR_INVALIDCALL, 'not the holder');
+    assert.equal(surface.ReleaseDC(held.dc, gdi), D3D_OK);
+    assert.equal(surface.ReleaseDC(held.dc, gdi), D3DERR_INVALIDCALL, 'released once');
+    assert.equal(other.UnlockRect(), D3DERR_INVALIDCALL);
+
+    assert.equal(other.LockRect(locked, null, 0), D3D_OK);
+    assert.equal(surface.GetDC(gdi, again), D3DERR_INVALIDCALL, 'a lock anywhere in it');
+    assert.equal(surface.LockRect(locked, null, 0), D3D_OK, 'locks do not exclude each other');
+    assert.equal(surface.UnlockRect(), D3D_OK);
+    assert.equal(other.UnlockRect(), D3D_OK);
+    assert.equal(surface.GetDC(gdi, again), D3D_OK);
+    assert.equal(surface.ReleaseDC(again.dc, gdi), D3D_OK);
+
+    first.surface.release();
+    second.surface.release();
+    cube.texture.release();
+    assertFullyReleased(device);
+});
+
+test('releasing a context is an unlock after a write, so what GDI drew is taken up', ()=>{
+    const device = createDevice();
+    const gdi = fakeGdi();
+    /** @type {{ texture?: any }} */
+    const texture = {};
+    assert.equal(device.CreateTexture(8, 8, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, texture),
+        D3D_OK);
+    /** @type {{ surface?: any }} */
+    const level = {};
+    assert.equal(texture.texture.GetSurfaceLevel(0, level), D3D_OK);
+    const surface = level.surface;
+    let unlocks = 0;
+    const unlock = surface.UnlockRect;
+    // What a renderer tracking the level puts in place.
+    surface.UnlockRect = ()=>{
+        const hr = unlock();
+        unlocks += hr === D3D_OK ? 1 : 0;
+        return hr;
+    };
+    /** @type {{ dc?: number }} */
+    const held = {};
+    assert.equal(surface.GetDC(gdi, held), D3D_OK);
+    assert.equal(unlocks, 0);
+    assert.equal(surface.ReleaseDC(held.dc, gdi), D3D_OK);
+    assert.equal(unlocks, 1);
+    surface.release();
+    texture.texture.release();
+    assertFullyReleased(device);
+});
+
 test('a texture gives its storage back when the last reference goes', ()=>{
     // The arena a texture's pixels come out of is the one the program's own
     // allocator draws from, and GlobalMemoryStatus reports what is left of it.

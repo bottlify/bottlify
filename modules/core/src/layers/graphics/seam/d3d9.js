@@ -137,11 +137,13 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     The client area of a window, which is the size a back buffer asked for
  *     as zero by zero takes. Without it the configured display is the nearest
  *     size this layer knows.
+ * @param {import('../d3d9/resources.js').SurfaceGdi} [deps.gdi]
+ *     Device contexts over a surface's pixels, for GetDC; absent, none is handed out.
  * @param {() => number} [deps.now]  The clock the display's raster runs on, in milliseconds.
  */
 export function createDirect3D9Seam(
     { publisher, memory, screen, divergence, cursor, resolution, identity,
-        windowClientSize, now = ()=>performance.now() },
+        windowClientSize, gdi, now = ()=>performance.now() },
 )
 {
     const fields = createFields(memory);
@@ -500,10 +502,27 @@ export function createDirect3D9Seam(
         },
         /** @param {any} surface */
         UnlockRect: surface=>surface.UnlockRect(),
-        // No device context is drawn through here: GDI reaches a surface
-        // through DirectDraw, and a Direct3D 9 surface is not one.
-        GetDC: ()=>D3DERR_INVALIDCALL,
-        ReleaseDC: ()=>D3DERR_INVALIDCALL,
+        /** @param {any} surface @param {number[]} args */
+        GetDC: (surface, [out])=>{
+            if ((out >>> 0) === 0 || !gdi)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ dc?: number }} */
+            const held = {};
+            /** @param {number} hr */
+            const answer = hr=>{
+                if (hr === D3D_OK)
+                {
+                    fields.writeU32(out >>> 0, held.dc ?? 0);
+                }
+                return hr;
+            };
+            const hr = surface.GetDC(gdi, held);
+            return hr instanceof Promise ? hr.then(answer) : answer(hr);
+        },
+        /** @param {any} surface @param {number[]} args */
+        ReleaseDC: (surface, [dc])=>(gdi ? surface.ReleaseDC(dc >>> 0, gdi) : D3DERR_INVALIDCALL),
     }, {}, privateData.released)];
 
     /**

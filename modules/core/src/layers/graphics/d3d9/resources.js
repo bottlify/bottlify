@@ -153,7 +153,37 @@ export function createReferenceCount(options = {}){
  * @property {() => number} UnlockRect
  * @property {(out: { desc?: SurfaceDesc }) => number} GetDesc
  * @property {number} lockFlags   The flags of the lock in force, if one is.
+ * @property {(gdi: SurfaceGdi, out: { dc?: number }) => number | Promise<number>} GetDC
+ * @property {(handle: number, gdi: SurfaceGdi) => number} ReleaseDC
  */
+
+/**
+ * @typedef {Object} SurfaceGdi  How a device context over guest pixels is made and unmade.
+ * @property {(attributes: { width: number, height: number, pitch: number, bitCount: number,
+ *   bits: number, palette: null, format: '565' | '555' }) => number} createSurfaceDc
+ * @property {(handle: number) => void} deleteSurfaceDc
+ *
+ * @typedef {Object} SurfaceFamily
+ *     What the surfaces of one resource share: a device context held on any
+ *     of them is the whole resource's, so it and a lock exclude each other.
+ * @property {number} locks
+ * @property {Surface | null} dc
+ */
+
+/**
+ * The formats a device context is handed out for (Wine's d3d9 test_getdc):
+ * the bit count GDI is told, and for sixteen bits which layout. R8G8B8 is on
+ * that list too, and no surface here is made in it.
+ *
+ * @type {Readonly<Record<number, { bitCount: number, format: '565' | '555' }>>}
+ */
+const DC_FORMATS = Object.freeze({
+    [D3DFMT.A8R8G8B8]: { bitCount: 32, format: '555' },
+    [D3DFMT.X8R8G8B8]: { bitCount: 32, format: '555' },
+    [D3DFMT.R5G6B5]: { bitCount: 16, format: '565' },
+    [D3DFMT.X1R5G5B5]: { bitCount: 16, format: '555' },
+    [D3DFMT.A1R5G5B5]: { bitCount: 16, format: '555' },
+});
 
 /**
  * @typedef {Object} SurfaceOptions
@@ -182,6 +212,7 @@ export function createReferenceCount(options = {}){
  *           How a render target's pixels cross between the GPU and its guest
  *           bytes. Given, a lock reads them back first and the caller waits;
  *           an unlock after a write hands the bytes over.
+ * @property {SurfaceFamily} [family]  Shared by the surfaces of one texture.
  */
 
 /**
@@ -203,6 +234,10 @@ export function createSurface(options){
     const rejectsMalformedRects = options.rejectsMalformedRects === true;
     let locked = false;
     let lockFlags = 0;
+    /** @type {number | null} */
+    let dc = null;
+    /** @type {SurfaceFamily} */
+    const family = options.family ?? { locks: 0, dc: null };
 
     /** @type {SurfaceDesc} */
     const desc = {
@@ -253,7 +288,7 @@ export function createSurface(options){
          * @param {number} [flags]
          */
         LockRect(out, rect = null, flags = 0){
-            if (locked || !lockable)
+            if (locked || !lockable || family.dc !== null)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -289,6 +324,7 @@ export function createSurface(options){
                 }
             }
             locked = true;
+            family.locks++;
             out.Pitch = pitch;
             out.pBits = options.base
                 + (rect ? offsetOfRect(options.format, pitch, rect) : 0);
@@ -307,9 +343,14 @@ export function createSurface(options){
         UnlockRect(){
             if (!locked)
             {
-                return forgivesDoubleUnlock ? D3D_OK : D3DERR_INVALIDCALL;
+                // A context held on another surface of the resource is the
+                // resource's lock, and this is one of its surfaces.
+                return forgivesDoubleUnlock || (family.dc !== null && family.dc !== self)
+                    ? D3D_OK
+                    : D3DERR_INVALIDCALL;
             }
             locked = false;
+            family.locks--;
             if (options.type === SURFACE_TYPE.RENDER_TARGET && options.pixels
                 && (lockFlags & D3DLOCK_READONLY) === 0)
             {
@@ -321,6 +362,60 @@ export function createSurface(options){
         /** Only meaningful while the surface is locked. */
         get lockFlags(){
             return lockFlags;
+        },
+
+        /**
+         * A device context over the surface's own bytes. A render target's
+         * pixels are read back first, as a lock's are, and the caller waits.
+         *
+         * @param {SurfaceGdi} gdi @param {{ dc?: number }} out  Written only on success.
+         */
+        GetDC(gdi, out){
+            const layout = DC_FORMATS[options.format];
+            if (!layout || locked || family.dc !== null || family.locks > 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const handle = gdi.createSurfaceDc({
+                width: options.width, height: options.height, pitch,
+                bitCount: layout.bitCount, bits: options.base, palette: null,
+                format: layout.format,
+            });
+            if (handle === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            dc = handle;
+            family.dc = self;
+            const answer = ()=>{
+                out.dc = handle;
+                return D3D_OK;
+            };
+            return options.type === SURFACE_TYPE.RENDER_TARGET && options.pixels
+                ? options.pixels.readBack(self).then(answer)
+                : answer();
+        },
+
+        /**
+         * Whatever was drawn through the context is taken up the way an
+         * unlock after a write takes it up, through whichever unlock the
+         * surface has now -- a renderer tracking a texture level puts its own
+         * in place.
+         *
+         * @param {number} handle @param {SurfaceGdi} gdi
+         */
+        ReleaseDC(handle, gdi){
+            if (family.dc !== self || handle !== dc)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            gdi.deleteSurfaceDc(handle);
+            dc = null;
+            family.dc = null;
+            locked = true;
+            family.locks++;
+            lockFlags = 0;
+            return self.UnlockRect();
         },
     };
     return self;
@@ -458,6 +553,8 @@ export function createTexture(options){
     const faces = cube ? 6 : 1;
     /** @type {Map<string, Surface>} */
     const surfaces = new Map();
+    /** @type {SurfaceFamily} */
+    const family = { locks: 0, dc: null };
 
     /**
      * @param {number} face
@@ -491,6 +588,7 @@ export function createTexture(options){
             // measured rather than reasoned about.
             forgivesDoubleUnlock: !cube,
             rejectsMalformedRects: options.rejectsMalformedRects,
+            family,
         });
         surfaces.set(key, surface);
         return surface;

@@ -172,9 +172,23 @@ function seamed(options = {}){
     const windowClientSize = options.windowClientSize ?? measure;
     /** The display's clock, which a test moves. */
     const clock = { time: 0 };
+    /** Device contexts handed out over surfaces, by handle. @type {Map<number, any>} */
+    const dcs = new Map();
     const seam = createDirect3D9Seam({
         publisher,
         memory: box.services,
+        gdi: {
+            /** @param {any} attributes */
+            createSurfaceDc: attributes=>{
+                const handle = 0x7700 + dcs.size;
+                dcs.set(handle, attributes);
+                return handle;
+            },
+            /** @param {number} handle */
+            deleteSurfaceDc: handle=>{
+                dcs.delete(handle);
+            },
+        },
         screen: ()=>SCREEN,
         now: ()=>clock.time,
         windowClientSize,
@@ -200,6 +214,7 @@ function seamed(options = {}){
         box,
         fields,
         clock,
+        dcs,
         publisher,
         seam,
         root,
@@ -536,8 +551,23 @@ test('a texture is made without a shared handle, described and locked at this ve
         assert.equal(call('GetSurfaceLevel', [0, level]), D3D_OK);
         const surface = h.box.memory.readU32(level);
         assert.equal(h.box.call(surface, slot(IDIRECT3DSURFACE9_SLOTS, 'GetType'), []), 1);
-        assert.equal(h.box.call(surface, slot(IDIRECT3DSURFACE9_SLOTS, 'GetDC'), [0x3500]),
-            D3DERR_INVALIDCALL);
+        // A device context over the level's own bytes (Wine's d3d9 test_getdc).
+        /** @param {string} name @param {number[]} args */
+        const onSurface = (name, args)=>
+            h.box.call(surface, slot(IDIRECT3DSURFACE9_SLOTS, name), args);
+        h.box.memory.writeU32(0x3500, 0x1234);
+        assert.equal(onSurface('GetDC', [0]), D3DERR_INVALIDCALL, 'nowhere to write it');
+        assert.equal(onSurface('GetDC', [0x3500]), D3D_OK);
+        const dc = h.box.memory.readU32(0x3500);
+        assert.deepEqual(
+            [h.dcs.get(dc)?.width, h.dcs.get(dc)?.height, h.dcs.get(dc)?.bitCount], [8, 4, 32]);
+        h.box.memory.writeU32(0x3504, 0x1234);
+        assert.equal(onSurface('GetDC', [0x3504]), D3DERR_INVALIDCALL);
+        assert.equal(h.box.memory.readU32(0x3504), 0x1234, 'a refused second is left alone');
+        assert.equal(call('LockRect', [0, locked, 0, 0]), D3DERR_INVALIDCALL, 'held, not lockable');
+        assert.equal(onSurface('ReleaseDC', [dc]), D3D_OK);
+        assert.equal(h.dcs.size, 0);
+        assert.equal(onSurface('ReleaseDC', [dc]), D3DERR_INVALIDCALL);
         // Private data is each object's own: what the texture keeps, its
         // level does not (Wine's d3d9 test_private_data).
         const guid = 0x3600;

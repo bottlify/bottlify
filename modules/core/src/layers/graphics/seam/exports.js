@@ -119,7 +119,7 @@ export function createGraphicsLibraries(
         identity: ()=>graphics.adapter?.() ?? null,
     });
     const d3d9 = createDirect3D9Seam({
-        publisher, memory, screen, divergence, cursor, resolution, windowClientSize, now,
+        publisher, memory, screen, divergence, cursor, resolution, windowClientSize, gdi, now,
         identity: ()=>graphics.adapter?.() ?? null,
     });
     const d3d10 = createDirect3D10Seam({
