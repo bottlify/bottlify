@@ -30,6 +30,7 @@ import {
 } from './mbstring.js';
 import { createCxxFunctions } from './cxx.js';
 import { createMathFunctions } from './math.js';
+import { readDouble } from './float.js';
 import { createStartupFunctions } from './startup.js';
 import { createStdioFunctions, standardRecords } from './stdio.js';
 import { createThreadFunctions } from './threads.js';
@@ -533,6 +534,20 @@ export function createMsvcrtFunctions(host){
 
         itoa,
         _itoa: itoa,
+
+        /**
+         * int _isnan(double x)
+         *
+         * A question about the bits of a double on the stack, answered in EAX:
+         * unlike the maths functions it needs no FPU, so it is here rather than
+         * with them.
+         */
+        _isnan: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>(Number.isNaN(readDouble(args, 0)) ? 1 : 0),
+        },
 
         /**
          * void srand(unsigned int seed) and int rand(void)

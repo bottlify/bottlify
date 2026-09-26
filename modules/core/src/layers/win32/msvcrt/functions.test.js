@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMsvcrtFunctions } from './functions.js';
-import { fakeMemory, fakeVolume } from './harness.test.js';
+import { doubleSlots, fakeMemory, fakeVolume } from './harness.test.js';
 
 /**
  * A stand-in for guest memory, with the same contract as the real one.
@@ -325,6 +325,20 @@ test('atoi saturates rather than wrapping, and atol is the same function', ()=>{
     assert.equal(fns.atoi.handler([put(0x110, '-99999999999')]), -0x80000000);
     assert.equal(fns.atol.handler([put(0x120, '-17')]), -17);
     assert.equal(fns.atol.argBytes, fns.atoi.argBytes);
+});
+
+test('_isnan is nonzero for any NaN and zero for every other double, infinities too', ()=>{
+    // "_isnan ... return a non-zero value if the argument x is a NaN;
+    // otherwise they return 0." A double is two slots, and no FPU is needed.
+    const { fns } = setup();
+    assert.notEqual(fns._isnan.handler(doubleSlots(NaN)), 0);
+    assert.notEqual(fns._isnan.handler([0, 0xfff80000]), 0, 'the x87 indefinite');
+    assert.notEqual(fns._isnan.handler([1, 0x7ff00000]), 0, 'a signalling NaN');
+    for (const value of [0, -0, 1.5, -2e300, Infinity, -Infinity, Number.MIN_VALUE])
+    {
+        assert.equal(fns._isnan.handler(doubleSlots(value)), 0, String(value));
+    }
+    assert.equal(fns._isnan.argBytes, 8);
 });
 
 test('itoa writes the digits and returns the buffer', ()=>{
