@@ -507,12 +507,160 @@ test('a chunk walk over bytes still on their way answers once they arrive', asyn
     assert.equal(fns.mmioSeek.handler([handle, 0, 1]), memory.u32(chunk + 12));
 });
 
+test('mmioSetBuffer gives a file the caller\'s buffer, one of mmio\'s own, or none', ()=>{
+    // mmio.c test_mmioSetBuffer, for a file and for a memory file: the new
+    // buffer starts empty where the file stands, and only a size with no
+    // pointer makes one.
+    for (const memoryFile of [false, true])
+    {
+        const { memory, fns, freed, info } = build();
+        const label = memoryFile ? 'MEM' : 'DOS';
+        const theirs = memory.allocate(256);
+        const record = memory.allocate(INFO.size);
+        memory.setU32(record + INFO.fccIOProc, fourcc(memoryFile ? 'MEM ' : 'DOS '));
+        memory.setU32(record + INFO.cchBuffer, 256);
+        memory.setU32(record + INFO.pchBuffer, theirs);
+        const handle = fns.mmioOpenA.handler(
+            [memoryFile ? 0 : memory.put('C:\\click.wav'), record, MMIO_READ]);
+        assert.notEqual(handle, 0);
+        const got = memory.allocate(INFO.size);
+        /** The buffer as mmioGetInfo reports it, its pointers relative to its start. */
+        const state = ()=>{
+            assert.equal(fns.mmioGetInfo.handler([handle, got, 0]), 0);
+            assert.equal(fns.mmioSeek.handler([handle, 0, SEEK_CUR]), 0);
+            const answer = info(got);
+            return {
+                dwFlags: answer.dwFlags, cchBuffer: answer.cchBuffer,
+                next: answer.pchNext - answer.pchBuffer,
+                endRead: answer.pchEndRead - answer.pchBuffer,
+                endWrite: answer.pchEndWrite - answer.pchBuffer,
+                lBufOffset: answer.lBufOffset, lDiskOffset: answer.lDiskOffset,
+            };
+        };
+        const empty = { next: 0, endRead: 0, lBufOffset: 0, lDiskOffset: 0 };
+        assert.deepEqual(state(), { ...empty, dwFlags: MMIO_READ, cchBuffer: 256,
+            endRead: memoryFile ? 256 : 0, endWrite: 256 }, `${label}: as opened`);
+
+        assert.equal(fns.mmioSetBuffer.handler([handle, 0, 0, 0]), 0);
+        assert.deepEqual(state(), { ...empty, dwFlags: MMIO_READ, cchBuffer: 0, endWrite: 0 },
+            `${label}: unbuffered`);
+        assert.equal(info(got).pchBuffer, 0);
+
+        assert.equal(fns.mmioSetBuffer.handler([handle, 0, 0, MMIO_ALLOCBUF]), 0);
+        assert.deepEqual(state(), { ...empty, dwFlags: MMIO_READ, cchBuffer: 0, endWrite: 0 },
+            `${label}: no size is no buffer, whatever the flags say`);
+        assert.equal(info(got).pchBuffer, 0);
+
+        assert.equal(fns.mmioSetBuffer.handler([handle, theirs, 0, MMIO_ALLOCBUF]), 0);
+        assert.deepEqual(state(), { ...empty, dwFlags: MMIO_READ, cchBuffer: 0, endWrite: 0 });
+        assert.equal(info(got).pchBuffer, theirs, `${label}: a pointer with no size is kept`);
+
+        assert.equal(fns.mmioSetBuffer.handler([handle, 0, 256, MMIO_WRITE | MMIO_ALLOCBUF]), 0);
+        assert.deepEqual(state(), { ...empty, dwFlags: MMIO_READ | MMIO_ALLOCBUF, cchBuffer: 256,
+            endWrite: 256 }, `${label}: a size and no pointer is mmio's own, and empty`);
+        const own = info(got).pchBuffer;
+        assert.ok(own !== 0 && own !== theirs);
+        assert.equal(fns.mmioClose.handler([handle, 0]), 0);
+        assert.equal(freed.at(-1), own, `${label}: and freed with the file`);
+    }
+});
+
+test('a new buffer takes over where the file stands, and the old one is written first', ()=>{
+    const { memory, files, fns, freed, info } = build();
+    const record = memory.allocate(INFO.size);
+    memory.setU32(record + INFO.cchBuffer, 16);
+    const handle = fns.mmioOpenA.handler([memory.put('C:\\new.bin'), record,
+        MMIO_CREATE | MMIO_READWRITE]);
+    const got = memory.allocate(INFO.size);
+    fns.mmioGetInfo.handler([handle, got, 0]);
+    const old = info(got).pchBuffer;
+    const source = memory.allocate(8);
+    memory.writeMemory(source, Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8]));
+    assert.equal(fns.mmioWrite.handler([handle, source, 6]), 6);
+    assert.equal(files.files['C:\\new.bin'].length, 0, 'still in the buffer');
+
+    const theirs = memory.allocate(4);
+    assert.equal(fns.mmioSetBuffer.handler([handle, theirs, 4, 0]), 0);
+    assert.deepEqual([...files.files['C:\\new.bin']], [1, 2, 3, 4, 5, 6]);
+    assert.equal(freed.at(-1), old, 'the buffer mmio made is let go');
+    fns.mmioGetInfo.handler([handle, got, 0]);
+    assert.deepEqual([info(got).dwFlags, info(got).pchBuffer, info(got).lBufOffset],
+        [MMIO_READWRITE, theirs, 6]);
+
+    // Through the new buffer, from the start.
+    assert.equal(fns.mmioSeek.handler([handle, 2, SEEK_SET]), 2);
+    const into = memory.allocate(8);
+    assert.equal(fns.mmioRead.handler([handle, into, 3]), 3);
+    assert.deepEqual([...memory.bytes.subarray(into, into + 3)], [3, 4, 5]);
+    assert.equal(fns.mmioSetBuffer.handler([0x1234, 0, 0, 0]), 5, 'MMSYSERR_INVALHANDLE');
+    assert.equal(fns.mmioClose.handler([handle, 0]), 0);
+});
+
+test('mmioFlush writes what the buffer holds, and MMIO_EMPTYBUF starts it again', ()=>{
+    const MMIO_EMPTYBUF = 0x10;
+    const { memory, files, fns, info } = build();
+    const handle = fns.mmioOpenA.handler([memory.put('C:\\new.bin'), 0,
+        MMIO_CREATE | MMIO_READWRITE | MMIO_ALLOCBUF]);
+    const source = memory.allocate(8);
+    memory.writeMemory(source, Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8]));
+    assert.equal(fns.mmioWrite.handler([handle, source, 4]), 4);
+    assert.equal(files.files['C:\\new.bin'].length, 0);
+
+    assert.equal(fns.mmioFlush.handler([handle, 0]), 0);
+    assert.deepEqual([...files.files['C:\\new.bin']], [1, 2, 3, 4]);
+    const got = memory.allocate(INFO.size);
+    fns.mmioGetInfo.handler([handle, got, 0]);
+    assert.deepEqual([info(got).dwFlags & MMIO_DIRTY, info(got).pchNext - info(got).pchBuffer,
+        info(got).lBufOffset], [0, 4, 0], 'written, and still held');
+
+    assert.equal(fns.mmioWrite.handler([handle, source + 4, 2]), 2);
+    assert.equal(fns.mmioFlush.handler([handle, MMIO_EMPTYBUF]), 0);
+    assert.deepEqual([...files.files['C:\\new.bin']], [1, 2, 3, 4, 5, 6]);
+    fns.mmioGetInfo.handler([handle, got, 0]);
+    assert.deepEqual([info(got).pchNext - info(got).pchBuffer,
+        info(got).pchEndRead - info(got).pchBuffer, info(got).lBufOffset], [0, 0, 6],
+    'emptied, where the file stands');
+    assert.equal(fns.mmioSeek.handler([handle, 0, SEEK_CUR]), 6);
+    assert.equal(fns.mmioFlush.handler([0x1234, 0]), 5, 'MMSYSERR_INVALHANDLE');
+    fns.mmioClose.handler([handle, 0]);
+
+    // An unbuffered file and a memory file have nothing waiting.
+    const plain = fns.mmioOpenA.handler([memory.put('C:\\click.wav'), 0, MMIO_READ]);
+    assert.equal(fns.mmioFlush.handler([plain, 0]), 0);
+    const record = memory.allocate(INFO.size);
+    memory.setU32(record + INFO.fccIOProc, fourcc('MEM '));
+    memory.setU32(record + INFO.cchBuffer, 16);
+    memory.setU32(record + INFO.pchBuffer, memory.allocate(16));
+    const block = fns.mmioOpenA.handler([0, record, MMIO_READWRITE]);
+    assert.equal(fns.mmioFlush.handler([block, MMIO_EMPTYBUF]), 0);
+    assert.equal(fns.mmioSeek.handler([block, 0, SEEK_END]), 16, 'the memory file is all there');
+});
+
+test('the wide four-character code and procedure calls are the ANSI ones', ()=>{
+    const { memory, fns } = build();
+    const MMIO_INSTALLPROC = 0x10000;
+    const MMIO_REMOVEPROC = 0x20000;
+    const MMIO_FINDPROC = 0x40000;
+    assert.equal(fns.mmioStringToFOURCCW.handler([memory.putWide('wave'), 0]), fourcc('wave'));
+    assert.equal(fns.mmioStringToFOURCCW.handler([memory.putWide('xyz'), 0x10]), fourcc('XYZ '),
+        'MMIO_TOUPPER');
+    assert.equal(fns.mmioStringToFOURCCW.handler([memory.putWide('abcdef'), 0]), fourcc('abcd'));
+
+    const proc = 0x401000;
+    assert.equal(fns.mmioInstallIOProcW.handler([fourcc('XYZ '), proc, MMIO_INSTALLPROC]), proc);
+    assert.equal(fns.mmioInstallIOProcA.handler([fourcc('XYZ '), 0, MMIO_FINDPROC]), proc,
+        'one table for both');
+    assert.equal(fns.mmioInstallIOProcW.handler([fourcc('XYZ '), 0, MMIO_REMOVEPROC]), proc);
+    assert.equal(fns.mmioInstallIOProcW.handler([fourcc('XYZ '), 0, MMIO_FINDPROC]), 0);
+});
+
 test('every entry pops what the guest pushed', ()=>{
     const { fns } = build();
     assert.deepEqual(
         ['mmioOpenA', 'mmioOpenW', 'mmioClose', 'mmioRead', 'mmioWrite', 'mmioSeek',
             'mmioDescend', 'mmioAscend', 'mmioCreateChunk', 'mmioGetInfo', 'mmioSetInfo',
-            'mmioAdvance', 'mmioStringToFOURCCA', 'mmioInstallIOProcA']
+            'mmioAdvance', 'mmioStringToFOURCCA', 'mmioInstallIOProcA', 'mmioSetBuffer',
+            'mmioFlush', 'mmioStringToFOURCCW', 'mmioInstallIOProcW']
             .map(name=>fns[name].argBytes),
-        [12, 12, 8, 12, 12, 12, 16, 12, 12, 12, 12, 12, 8, 12]);
+        [12, 12, 8, 12, 12, 12, 16, 12, 12, 12, 12, 12, 8, 12, 16, 8, 8, 12]);
 });
