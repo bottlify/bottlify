@@ -608,7 +608,24 @@ export function formRegion(read, entry,
 
     const ordered = [...blocks.values()].sort((a, b)=>a.start - b.start);
     const pages = new Set();
-    let hash = 0x811c9dc5;
+    // Two FNV lanes, 64 bits: the hash is what a stored translation is found
+    // by, and a store -- a bundle's seed above all, made on another machine
+    // from a build of the program that may differ -- must not answer for
+    // other bytes at the same entry. Thirty-two bits met that at one pair in
+    // four billion, and a birthday search finds such a pair in a second.
+    let low = 0x811c9dc5;
+    let high = 0x050c5d1f;
+    let at = 0;
+    /** @param {number} byte */
+    const mix = byte=>{
+        low = Math.imul(low ^ byte, 0x01000193);
+        high = Math.imul(high ^ byte ^ at++ & 0xff, 0x01000193);
+    };
+    /** @param {number} address */
+    const take = address=>{
+        mix(read(address));
+        pages.add(address >>> 12);
+    };
     for (const block of ordered)
     {
         for (const target of block.exit.targets)
@@ -620,7 +637,7 @@ export function formRegion(read, entry,
         }
         for (let address = block.start; address < block.end; address++)
         {
-            hash = Math.imul(hash ^ read(address), 0x01000193) >>> 0;
+            mix(read(address));
         }
         // Each page the block spans, in address order, once: the set of every
         // byte's page, without a set operation a byte.
@@ -639,7 +656,7 @@ export function formRegion(read, entry,
         {
             for (let shift = 0; shift < 32; shift += 8)
             {
-                hash = Math.imul(hash ^ (target >>> shift & 0xff), 0x01000193) >>> 0;
+                mix(target >>> shift & 0xff);
             }
         }
     }
@@ -651,8 +668,7 @@ export function formRegion(read, entry,
         const end = table.address + table.entries.length * 4;
         for (let address = table.address; address < end; address++)
         {
-            hash = Math.imul(hash ^ read(address), 0x01000193) >>> 0;
-            pages.add(address >>> 12);
+            take(address);
         }
     }
     return {
@@ -661,7 +677,8 @@ export function formRegion(read, entry,
         entries: ordered.map(block=>block.start),
         bytes,
         pages,
-        hash: hash.toString(16).padStart(8, '0'),
+        hash: (high >>> 0).toString(16).padStart(8, '0')
+            + (low >>> 0).toString(16).padStart(8, '0'),
         refused,
     };
 }
