@@ -275,6 +275,50 @@ test('fild, fist and fistp: integers in and out, rounding to nearest even, the i
     assert.equal(r.u32(DATA + 64), 3);
 });
 
+test('a quadword fild stored by a quadword fistp or fisttp copies all eight bytes', ()=>{
+    // The processor's 64-bit mantissa holds the quadword; a double does not,
+    // and the pair is a way programs copy eight bytes. An exchange and a
+    // register copy carry the value along; a write rounds it through the double.
+    const quad = (/** @type {bigint} */ value)=>{
+        const bytes = new Uint8Array(8);
+        new DataView(bytes.buffer).setBigInt64(0, value, true);
+        return [...bytes];
+    };
+    const FILD = [0xdf, 0x2d, 0x00, 0x20, 0, 0];     // fild qword [DATA]
+    const FISTP = [0xdf, 0x3d, 0x08, 0x20, 0, 0];    // fistp qword [DATA+8]
+    const FISTTP = [0xdd, 0x0d, 0x08, 0x20, 0, 0];   // fisttp qword [DATA+8]
+    const between = {
+        nothing: [],
+        'fld1; fxch st1': [0xd9, 0xe8, 0xd9, 0xc9],
+        'fld st0; fstp st1': [0xd9, 0xc0, 0xdd, 0xd9],
+        'fnstsw ax': [0xdf, 0xe0],
+    };
+    for (const value of [0x7fffffffffffffffn, 0x0123456789abcdefn, (1n << 53n) + 1n,
+        -((1n << 60n) + 3n), -0x8000000000000000n])
+    {
+        for (const [name, middle] of Object.entries(between))
+        {
+            for (const store of [FISTP, FISTTP])
+            {
+                const r = run([...FILD, ...middle, ...store], { data: quad(value) });
+                assert.equal(r.exit.kind, 3);
+                assert.equal(r.view.getBigInt64(r.m.layout.ramBase + DATA + 8, true), value,
+                    `${value} with ${name} between`);
+                assert.equal(r.status() & 1, 0, 'no invalid operation');
+            }
+        }
+    }
+    // fchs; fchs writes ST0 twice: the store rounds the double to nearest.
+    const r = run([...FILD, 0xd9, 0xe0, 0xd9, 0xe0, ...FISTP], { data: quad(0x0123456789abcdefn) });
+    assert.equal(r.view.getBigInt64(r.m.layout.ramBase + DATA + 8, true), 0x0123456789abcdf0n);
+    // Onto a full stack the fild pushes the indefinite, and the store is the
+    // integer indefinite with IE, as before.
+    const full = run([...FILD, ...FISTP], { data: quad(5n), empty: 0 });
+    assert.equal(full.view.getBigUint64(full.m.layout.ramBase + DATA + 8, true),
+        0x8000000000000000n);
+    assert.equal(full.status() & 0x41, 0x41, 'IE and SF');
+});
+
 test('an 80-bit load and store round-trip through the conversion helpers', ()=>{
     // 1.5 as extended: mantissa 0xc000000000000000, exponent 16383
     const r = run([

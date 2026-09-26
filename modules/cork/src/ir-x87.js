@@ -65,6 +65,77 @@ const INDEFINITE = fromBits(0xfff8000000000000n);
 /** Pushes the indefinite when the guard fired. @param {number} value @param {number} t1 */
 const orIndefinite = (value, t1)=>t1 !== 0 ? INDEFINITE : value;
 
+/** The forms that write no register: what a quadword `fild` left stays exact across them. */
+const KEEPS_EXACT = new Set([
+    'fwait', 'fnop', 'fnclex', 'fldcw', 'fnstsw', 'fnstcw', 'fnstenv', 'fxch', 'fcom', 'fucom',
+    'ftst', 'ficom', 'fxam', 'fcomi', 'fucomi', 'fist',
+]);
+/** The forms that write no register and pop ST(0), or ST(0) and ST(1). */
+const POPS_EXACT = new Set([
+    'fcomp', 'fucomp', 'ficomp', 'fcomip', 'fucomip', 'fistp', 'fisttp', 'fcompp', 'fucompp',
+]);
+/** The forms that push and write nothing else. */
+const PUSHES_EXACT = new Set([
+    'fld', 'fild', 'fld1', 'fldz', 'fldpi', 'fldl2e', 'fldln2', 'fldlg2', 'fldl2t',
+]);
+/** The arithmetic, which writes its destination and pops in its `p` forms. */
+const ARITHMETIC = new Set([
+    'fadd', 'fsub', 'fsubr', 'fmul', 'fdiv', 'fdivr', 'faddp', 'fsubp', 'fsubrp', 'fmulp',
+    'fdivp', 'fdivrp', 'fiadd', 'fisub', 'fisubr', 'fimul', 'fidiv', 'fidivr',
+]);
+
+/**
+ * What an x87 instruction does to the registers holding an exact quadword
+ * (`fild m64`, whose 64 bits a double does not keep): the registers it writes
+ * and the ones it pops, as masks of `slot`'s entries for ST(i) at `top` -- the
+ * translator's locals, or the physical registers with `slot` the identity.
+ * Null for any form not listed, after which none is exact. A quadword `fistp`
+ * or `fisttp` of an exact register stores the quadword; everything else reads
+ * the double as before. An exchange writes nothing here: the translator's
+ * tracker swaps which locals are the two places, and the evaluator moves the
+ * mark with the value it swaps.
+ *
+ * @param {import('./decode/decoder.js').Instruction} instruction
+ * @param {number} top @param {readonly number[]} slot
+ * @returns {{ written: number, popped: number } | null}
+ */
+export function exactWrites(instruction, top, slot){
+    const { op, operands } = instruction;
+    const [dst] = operands;
+    /** @param {number} i */
+    const bit = i=>1 << slot[(top + i) & 7];
+    if (KEEPS_EXACT.has(op) || op === 'fst' && dst.kind !== 'x87')
+    {
+        return { written: 0, popped: 0 };
+    }
+    if (POPS_EXACT.has(op) || op === 'fstp' && dst.kind !== 'x87')
+    {
+        return { written: 0, popped: op.endsWith('pp') ? bit(0) | bit(1) : bit(0) };
+    }
+    if (PUSHES_EXACT.has(op))
+    {
+        return { written: bit(-1), popped: 0 };
+    }
+    if (op === 'fst' || op === 'fstp')
+    {
+        return { written: bit(Number(dst.reg)), popped: op === 'fstp' ? bit(0) : 0 };
+    }
+    if (ARITHMETIC.has(op))
+    {
+        return {
+            written: bit(dst.kind === 'x87' ? Number(dst.reg) : 0),
+            popped: op.endsWith('p') ? bit(0) : 0,
+        };
+    }
+    return null;
+}
+
+/** The physical registers as their own slots. */
+const IDENTITY = Object.freeze([0, 1, 2, 3, 4, 5, 6, 7]);
+
+/** The registers the instruction being evaluated made exact: a quadword load, or a copy. */
+let made = 0;
+
 /**
  * The stack-fault check: t1 is set when a source ST(i) is empty or a push
  * finds its register held, and IE and SF are raised. A push that overflowed
@@ -483,6 +554,7 @@ export function fxrstor(state, where){
     state.top = (word >>> 11) & 7;
     state.empty = ~state.memory.read(where + 4, 1) & 0xff;
     state.mxcsr = state.memory.read(where + 24, 4) >>> 0;
+    state.x87Exact = 0;
     for (let i = 0; i < 8; i++)
     {
         const low = readMem(state, where + 32 + 16 * i, 8);
@@ -504,6 +576,29 @@ export function fxrstor(state, where){
  * @returns {boolean}
  */
 export function evaluateX87(instruction, state, address){
+    const { op, operands } = instruction;
+    if (state.x87Exact === 0 && (op !== 'fild' || operands[1].size !== 8))
+    {
+        return stepX87(instruction, state, address);
+    }
+    // The exact quadwords (`exactWrites`): kept where the step writes no
+    // register, and what it made itself added.
+    const top = state.top;
+    made = 0;
+    const done = stepX87(instruction, state, address);
+    const writes = exactWrites(instruction, top, IDENTITY);
+    state.x87Exact = writes === null ? 0
+        : ((state.x87Exact & ~writes.written) | made) & ~writes.popped;
+    return done;
+}
+
+/**
+ * @param {import('./decode/decoder.js').Instruction} instruction
+ * @param {import('./ir.js').EvalState} state
+ * @param {(operand: import('./decode/decoder.js').Operand) => number} address
+ * @returns {boolean}
+ */
+function stepX87(instruction, state, address){
     const { op, operands } = instruction;
     /** ST(i). @param {number} i */
     const st = i=>state.f80[(state.top + i) & 7];
@@ -529,6 +624,14 @@ export function evaluateX87(instruction, state, address){
     };
     /** @param {import('./decode/decoder.js').Operand} operand */
     const at = operand=>address(operand);
+    /** Carries an exact quadword with its value, between physical registers. @param {number} from @param {number} to */
+    const copyExact = (from, to)=>{
+        if ((state.x87Exact >>> from & 1) !== 0)
+        {
+            state.x87Shadow[to] = state.x87Shadow[from];
+            made |= 1 << to;
+        }
+    };
 
     switch (op)
     {
@@ -546,7 +649,13 @@ export function evaluateX87(instruction, state, address){
         case 'fld':
             if (src.kind === 'x87')
             {
-                pushValue(orIndefinite(st(Number(src.reg)), guard(state, [Number(src.reg)], true)));
+                const from = (state.top + Number(src.reg)) & 7;
+                const t1 = guard(state, [Number(src.reg)], true);
+                pushValue(orIndefinite(st(Number(src.reg)), t1));
+                if (t1 === 0)
+                {
+                    copyExact(from, state.top);
+                }
             }
             else
             {
@@ -560,7 +669,15 @@ export function evaluateX87(instruction, state, address){
             const signed = src.size === 2 ? Number(BigInt.asIntN(16, value))
                 : src.size === 4 ? Number(BigInt.asIntN(32, value))
                     : Number(BigInt.asIntN(64, value));
-            pushValue(orIndefinite(signed, guard(state, [], true)));
+            const t1 = guard(state, [], true);
+            pushValue(orIndefinite(signed, t1));
+            if (src.size === 8 && t1 === 0)
+            {
+                // The quadword beside the double it rounds to, for a quadword
+                // store of it to copy the eight bytes the processor keeps.
+                state.x87Shadow[state.top] = BigInt.asIntN(64, value);
+                made = 1 << state.top;
+            }
             return true;
         }
         case 'fld1': case 'fldz': case 'fldpi': case 'fldl2e': case 'fldln2': case 'fldlg2':
@@ -575,11 +692,16 @@ export function evaluateX87(instruction, state, address){
         }
         case 'fst': case 'fstp':
         {
-            const value = orIndefinite(st(0), guard(state, [0], false));
+            const t1 = guard(state, [0], false);
+            const value = orIndefinite(st(0), t1);
             if (dst.kind === 'x87')
             {
                 setSt(Number(dst.reg), value);
                 state.empty &= ~(1 << ((state.top + Number(dst.reg)) & 7));
+                if (t1 === 0)
+                {
+                    copyExact(state.top, (state.top + Number(dst.reg)) & 7);
+                }
             }
             else
             {
@@ -593,8 +715,21 @@ export function evaluateX87(instruction, state, address){
         }
         case 'fist': case 'fistp': case 'fisttp':
         {
-            const value = orIndefinite(st(0), guard(state, [0], false));
-            storeInt(state, at(dst), dst.size, value, op === 'fisttp');
+            const t1 = guard(state, [0], false);
+            const value = orIndefinite(st(0), t1);
+            const k = state.top;
+            // A quadword `fild` loaded ST0 and nothing has written it: the
+            // quadword itself, which needs no rounding and is in range. The
+            // compare is a second guard on what the marks promise.
+            if (dst.size === 8 && t1 === 0 && (state.x87Exact >>> k & 1) !== 0
+                && value === Number(state.x87Shadow[k]))
+            {
+                writeMem(state, at(dst), 8, state.x87Shadow[k]);
+            }
+            else
+            {
+                storeInt(state, at(dst), dst.size, value, op === 'fisttp');
+            }
             if (op !== 'fist')
             {
                 popN(1);
@@ -610,6 +745,18 @@ export function evaluateX87(instruction, state, address){
             const swap = state.f80[a];
             state.f80[a] = state.f80[c];
             state.f80[c] = swap;
+            // An exact quadword's mark and shadow go with its value.
+            const exact = state.x87Exact;
+            if (((exact >>> a | exact >>> c) & 1) !== 0)
+            {
+                const shadow = state.x87Shadow[a];
+                state.x87Shadow[a] = state.x87Shadow[c];
+                state.x87Shadow[c] = shadow;
+                if (((exact >>> a ^ exact >>> c) & 1) !== 0)
+                {
+                    state.x87Exact = exact ^ (1 << a | 1 << c);
+                }
+            }
             return true;
         }
         case 'ffree': case 'ffreep':

@@ -478,6 +478,41 @@ test('fbstp writes the packed BCD and its sign', ()=>{
         [2, 0, 0, 0, 0, 0, 0, 0, 0, 0x80]);
 });
 
+test('a quadword fild stored by a quadword fistp or fisttp copies all eight bytes', ()=>{
+    // As the translator does: an exchange and a register copy carry the
+    // quadword with its value, and a write rounds it through the double.
+    const FILD = [0xdf, 0x2d, 0x00, 0x20, 0, 0];     // fild qword [0x2000]
+    const FISTP = [0xdf, 0x3d, 0x08, 0x20, 0, 0];    // fistp qword [0x2008]
+    const FISTTP = [0xdd, 0x0d, 0x08, 0x20, 0, 0];   // fisttp qword [0x2008]
+    const between = {
+        nothing: [],
+        'fld1; fxch st1': [0xd9, 0xe8, 0xd9, 0xc9],
+        'fld st0; fstp st1': [0xd9, 0xc0, 0xdd, 0xd9],
+        'fnstsw ax': [0xdf, 0xe0],
+    };
+    /** @param {number[]} bytes @param {bigint} value */
+    const quad = (bytes, value)=>run(bytes, state=>{
+        state.memory.write(0x2000, 4, Number(BigInt.asUintN(32, value)));
+        state.memory.write(0x2004, 4, Number(BigInt.asUintN(64, value) >> 32n));
+    });
+    for (const value of [0x7fffffffffffffffn, 0x0123456789abcdefn, (1n << 53n) + 1n,
+        -((1n << 60n) + 3n), -0x8000000000000000n])
+    {
+        for (const [name, middle] of Object.entries(between))
+        {
+            for (const store of [FISTP, FISTTP])
+            {
+                const m = quad([...FILD, ...middle, ...store], value);
+                assert.equal(m.view.getBigInt64(0x2008, true), value,
+                    `${value} with ${name} between`);
+                assert.equal(m.state.status & 1, 0, 'no invalid operation');
+            }
+        }
+    }
+    const written = quad([...FILD, 0xd9, 0xe0, 0xd9, 0xe0, ...FISTP], 0x0123456789abcdefn);
+    assert.equal(written.view.getBigInt64(0x2008, true), 0x0123456789abcdf0n, 'fchs twice rounds');
+});
+
 test('the x87 memory forms by words: single precision, a negative quadword, a signalling NaN', ()=>{
     // fld qword [0x2000]; fmul qword [0x2008]; fistp qword [0x2010] under
     // single precision: the product rounded to 24 bits, stored whole.

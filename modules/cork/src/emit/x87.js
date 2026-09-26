@@ -50,6 +50,7 @@ import { Local, Exit, STATE_PARAMS } from './region.js';
 import { prepare, writeReg, readOp } from './integer.js';
 import { PRECISION, noteStore } from './memory.js';
 import { inlineReturns } from '../region.js';
+import { exactWrites } from '../ir-x87.js';
 
 /** @typedef {import('./region.js').RegionEmitter} E */
 /** @typedef {import('../decode/decoder.js').Instruction} Instruction */
@@ -773,6 +774,14 @@ export function planStack(region, states, cut, speculate){
  * @property {(Shape | null)[]} needs  what each entry tests of the stack words, or null
  * @property {Shape} stack   what is known of them at the current point of emission
  * @property {number} guards  stack-fault checks emitted, for the tests
+ * @property {boolean} tracksExact  the region has a quadword `fild` and a quadword `fistp` or
+ *     `fisttp`, and no MMX: the pair copies eight bytes, which a double does not hold
+ * @property {number} exact  the x87 locals, by their index 0-7 (which an exchange moves with
+ *     the value), holding what a quadword `fild` of this block loaded and nothing has written
+ *     since: the integer itself is in the local's `shadow`
+ * @property {number} exactNaN  those of them that may hold the indefinite instead, where the
+ *     push or the copy that made them was not known to find its registers as it needed
+ * @property {number[]} shadow  the i64 local shadowing each x87 local, -1 until one is needed
  */
 
 /**
@@ -837,10 +846,15 @@ export function prepareX87(e, entryTop, checked = false){
             active: false, hasMmx: false, base: 0, form: -1, temp: 0, temp2: 0, temp3: 0,
             states: [], ends: [], cut: new Set(), current: null, controlWritten: false,
             checkedPrecision: -1, known: unknown(), shapes: [], needs: [], stack: NOTHING,
-            guards: 0,
+            guards: 0, tracksExact: false, exact: 0, exactNaN: 0, shadow: [],
         };
     }
     const hasMmx = regionHasMmx(region, e.context.leaveOut);
+    /** @param {(instruction: Instruction) => boolean} test */
+    const any = test=>region.blocks.some(block=>block.instructions.some(test));
+    const tracksExact = !hasMmx
+        && any(({ op, operands })=>op === 'fild' && operands[1].size === 8)
+        && any(({ op, operands })=>(op === 'fistp' || op === 'fisttp') && operands[0].size === 8);
     const { states, cut, ends } = trackRegion(region, entryTop);
     const { known: shapes, needs } = hasMmx
         ? { known: region.blocks.map(()=>NOTHING), needs: [] }
@@ -860,6 +874,7 @@ export function prepareX87(e, entryTop, checked = false){
         active: true, hasMmx, base, form, temp: base + 8, temp2: base + 9, temp3: base + 10,
         states, ends, cut, current: null, controlWritten: false, checkedPrecision: -1,
         known: unknown(), shapes, needs, stack: NOTHING, guards: 0,
+        tracksExact, exact: 0, exactNaN: 0, shadow: new Array(8).fill(-1),
     };
 }
 
@@ -1069,6 +1084,8 @@ export function x87BlockStart(e, index){
     // what is known of the stack words there is the plan's.
     x.known = unknown();
     x.stack = x.shapes[index] ?? NOTHING;
+    x.exact = 0;
+    x.exactNaN = 0;
     if (x.current !== null)
     {
         e.b.i32const(x.current.top).localSet(Local.x87Top);
@@ -1174,6 +1191,8 @@ export function x87Forget(e){
     x87Flush(e, true);
     e.x87.known.block = -1;
     e.x87.stack = NOTHING;
+    e.x87.exact = 0;
+    e.x87.exactNaN = 0;
 }
 
 /**
@@ -1416,6 +1435,39 @@ export function emitX87(e, instruction, flagsLive){
             setTop(top);
         }
     };
+    /** The index of the local ST(i) is held in. @param {number} i */
+    const localOf = i=>state.slot[(state.top + i) & 7];
+    // The exact quadwords this instruction makes, from a load or a copy.
+    let madeExact = 0;
+    let madeNaN = 0;
+    /** The i64 local beside x87 local k. @param {number} k */
+    const shadowOf = k=>{
+        if (x.shadow[k] < 0)
+        {
+            x.shadow[k] = e.localTypes.length + STATE_PARAMS;
+            e.localTypes.push(ValType.i64);
+        }
+        return x.shadow[k];
+    };
+    /**
+     * Carries an exact quadword from one local to another with its value; after
+     * the guard, whose `clear` says whether the value copied may be the
+     * indefinite instead.
+     *
+     * @param {number} from @param {number} to
+     */
+    const copyExact = (from, to)=>{
+        if ((x.exact & 1 << from) === 0)
+        {
+            return;
+        }
+        b.localGet(x.shadow[from]).localSet(shadowOf(to));
+        madeExact |= 1 << to;
+        if ((x.exactNaN & 1 << from) !== 0 || !clear)
+        {
+            madeNaN |= 1 << to;
+        }
+    };
     const finish = ()=>{
         x.current = next;
         if (!safe)
@@ -1424,6 +1476,14 @@ export function emitX87(e, instruction, flagsLive){
             known.block = -1;
         }
         x.stack = x.hasMmx ? NOTHING : advance(x.stack, use, state);
+        if (x.tracksExact)
+        {
+            const writes = exactWrites(instruction, state.top, state.slot);
+            const kept = writes === null ? 0 : ~writes.written;
+            const popped = writes === null ? 0 : writes.popped;
+            x.exact = ((x.exact & kept) | madeExact) & ~popped;
+            x.exactNaN = ((x.exactNaN & kept) | madeNaN) & x.exact;
+        }
         return true;
     };
     /** Sets the status bits given. @param {number} mask */
@@ -1655,6 +1715,7 @@ export function emitX87(e, instruction, flagsLive){
             {
                 guard();
                 b.localGet(st(/** @type {number} */ (src.reg)));
+                copyExact(localOf(Number(src.reg)), localOf(-1));
             }
             else
             {
@@ -1670,6 +1731,15 @@ export function emitX87(e, instruction, flagsLive){
             b.localGet(Local.addr);
             b.load(src.size === 2 ? 'i64_16s' : src.size === 4 ? 'i64_32s' : 'i64',
                 { offset: e.layout.ramBase });
+            if (src.size === 8 && x.tracksExact)
+            {
+                // The quadword beside the double it rounds to, for a quadword
+                // store of it to copy the eight bytes the processor's 64-bit
+                // mantissa keeps.
+                b.localTee(shadowOf(localOf(-1)));
+                madeExact = 1 << localOf(-1);
+                madeNaN = clear ? 0 : madeExact;
+            }
             b.op(F64.convertI64S);
             orIndefinite();
             push();
@@ -1695,6 +1765,7 @@ export function emitX87(e, instruction, flagsLive){
                 dirty(i);
                 // The destination is held from here on, whatever it was.
                 mark((state.top + i) & 7, true);
+                copyExact(localOf(0), localOf(i));
             }
             else
             {
@@ -1710,10 +1781,54 @@ export function emitX87(e, instruction, flagsLive){
             return finish();
         case 'fist': case 'fistp': case 'fisttp':
             guard();
-            b.localGet(st(0));
-            orIndefinite();
-            b.localSet(x.temp2);
-            storeInt(e, dst, x.temp2, op === 'fisttp');
+            if (dst.size === 8 && (x.exact & 1 << localOf(0)) !== 0)
+            {
+                // A quadword `fild` loaded ST0 and nothing has written it: the
+                // quadword itself, which needs no rounding and is in range.
+                // Where ST0 may be the indefinite -- the guard's fault, or one
+                // that came with the value -- that is stored instead, as the
+                // rounding path does.
+                const checkNaN = (x.exactNaN & 1 << localOf(0)) !== 0;
+                const exact = ()=>{
+                    if (!clear)
+                    {
+                        b.localGet(Local.t1).op(I32.eqz);
+                    }
+                    if (checkNaN)
+                    {
+                        b.localGet(st(0)).localGet(st(0)).op(F64.eq);
+                        if (!clear)
+                        {
+                            b.op(I32.and);
+                        }
+                    }
+                };
+                prepare(e, dst);
+                noteStore(e, 8);
+                b.localGet(Local.addr).localGet(x.shadow[localOf(0)]);
+                if (!clear || checkNaN)
+                {
+                    b.i64const(-0x8000000000000000n);
+                    exact();
+                    b.select();
+                }
+                b.store('i64', { offset: e.layout.ramBase });
+                if (!clear || checkNaN)
+                {
+                    exact();
+                    b.op(I32.eqz);
+                    e.openIf('indefinite', EMPTY);
+                    setStatus(Status.IE);
+                    e.close();
+                }
+            }
+            else
+            {
+                b.localGet(st(0));
+                orIndefinite();
+                b.localSet(x.temp2);
+                storeInt(e, dst, x.temp2, op === 'fisttp');
+            }
             if (op !== 'fist')
             {
                 popN(1);

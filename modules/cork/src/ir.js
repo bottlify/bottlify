@@ -69,6 +69,9 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @property {number} control      the x87 control word
  * @property {Float64Array} f80    the eight physical x87 registers, as doubles
  * @property {BigInt64Array} f80bits  the same bytes, for an MMX read or write
+ * @property {number} x87Exact     the physical registers holding what a quadword `fild`
+ *     loaded, unwritten since (`exactWrites` in `ir-x87.js`): the quadword is in `x87Shadow`
+ * @property {BigInt64Array} x87Shadow
  * @property {Uint32Array} xmm     the eight XMM registers, four words each
  * @property {number} mxcsr
  */
@@ -91,6 +94,8 @@ export function createState(memory, { eip = 0, esp = 0, fsBase = 0 } = {}){
         top: 0, empty: 0xff, status: 0, control: 0x37f,
         f80: new Float64Array(f80Bytes),
         f80bits: new BigInt64Array(f80Bytes),
+        x87Exact: 0,
+        x87Shadow: new BigInt64Array(8),
         xmm: new Uint32Array(32),
         mxcsr: 0x1f80,
     };

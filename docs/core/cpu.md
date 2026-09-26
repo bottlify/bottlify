@@ -243,7 +243,14 @@ formed at, whatever other path reaches it, so a join two tops meet at still publ
 for each -- the edge that arrives at the entry with the other top leaves, and the runtime forms
 a region there for the top the machine has. The translator keeps every x87 value as a double, as the emulator does; the
 emulator's tagged-double form is read and written directly, a true 80-bit register it left is
-converted inline. The stack-fault checks -- a register read that is empty, a push into one
+converted inline. The one exception is the quadword a `fild m64` loads: the processor's 64-bit
+mantissa holds it whole and `fild m64; fistp m64` is a way programs copy eight bytes, so within a
+block the translator keeps the loaded quadword in an i64 local beside the register's double, carried
+by `fxch` and the register copies (`fld st(i)`, `fst st(i)`) and dropped by any other write, and a
+`fistp`/`fisttp m64` of such a register stores the quadword (`0x0123456789abcdef` had come back
+`...cdf0`, `INT64_MAX` the integer indefinite with IE); the interpreter keeps the same shadow per
+physical register (`exactWrites` in `ir-x87.js`, one rule for both), dropped at every sync with the
+state block. The stack-fault checks -- a register read that is empty, a push into one
 that is held: IE and SF (and C1 for the push), and the indefinite for the value -- are decided
 at translation wherever the empty mask is known there (`planStack` in `emit/x87.js`). A
 region's function is entered from outside only through its head (the host, or another region

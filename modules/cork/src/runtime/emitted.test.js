@@ -28,6 +28,7 @@ import { CACHE_VERSION } from './cache.js';
 /** The digest of the emitted set, by the cache version that emitted it. */
 const EMITTED = {
     40: 'e17f16d74ecb4c98',
+    41: 'e17f16d74ecb4c98',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */
@@ -48,7 +49,8 @@ function digest(){
         {
             const region = formRegion(read, entry, {});
             const m = new ModuleBuilder();
-            const context = prepareModule(m, layout, FEATURES, {}, { hash: true, trapPort: 0xb077 });
+            const context = prepareModule(m, layout, FEATURES, {},
+                { hash: true, trapPort: 0xb077 });
             const translation = emitRegion(context, region, { entryTop: 0, checked: false });
             m.exportFunction('region', translation.functionIndex);
             hash.update(`${name}:${entry.toString(16)}:`).update(m.toBytes());
