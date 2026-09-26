@@ -291,7 +291,7 @@ export function runScan(input, format, nextPointer, store){
             return stop();
         }
 
-        const scanned = scanInteger(field, base);
+        const scanned = scanInteger(field, base, true);
         if (scanned === null)
         {
             return stop();

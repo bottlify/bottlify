@@ -27,7 +27,17 @@ const MAX_STRING = 1 << 20;
 
 /** `struct _finddata_t` as msvcrt.dll lays it out: 32-bit times, 260 bytes of name. */
 const FINDDATA = Object.freeze({
-    ATTRIB: 0, TIME_CREATE: 4, TIME_ACCESS: 8, TIME_WRITE: 12, SIZE: 16, NAME: 20, BYTES: 280,
+    ATTRIB: 0, TIME_CREATE: 4, TIME_ACCESS: 8, TIME_WRITE: 12, SIZE: 16, WIDE_SIZE: false,
+    NAME: 20, BYTES: 280,
+});
+
+/**
+ * `struct _finddatai64_t`: the same with a 64-bit size, which moves the name
+ * to 24, and the whole rounded up to the size's 8-byte alignment.
+ */
+const FINDDATAI64 = Object.freeze({
+    ATTRIB: 0, TIME_CREATE: 4, TIME_ACCESS: 8, TIME_WRITE: 12, SIZE: 16, WIDE_SIZE: true,
+    NAME: 24, BYTES: 288,
 });
 const MAX_NAME = 259;
 
@@ -166,27 +176,92 @@ export function createPathFunctions(host){
     let nextSearch = 1;
 
     /**
-     * Fills a whole `_finddata_t`. The volume keeps one time per file, the
-     * last write, and it stands for all three.
+     * Fills a whole `_finddata_t` or `_finddatai64_t`. The volume keeps one
+     * time per file, the last write, and it stands for all three.
      *
      * @param {number} address @param {any} entry
+     * @param {typeof FINDDATA | typeof FINDDATAI64} layout
      */
-    const writeFound = (address, entry)=>{
-        const bytes = new Uint8Array(FINDDATA.BYTES);
+    const writeFound = (address, entry, layout)=>{
+        const bytes = new Uint8Array(layout.BYTES);
         const view = new DataView(bytes.buffer);
-        view.setUint32(FINDDATA.ATTRIB, entry.isDirectory ? A_SUBDIR : A_ARCH, true);
+        view.setUint32(layout.ATTRIB, entry.isDirectory ? A_SUBDIR : A_ARCH, true);
         const time = Math.floor((entry.modified ?? 0) / 1000) >>> 0;
-        view.setUint32(FINDDATA.TIME_CREATE, time, true);
-        view.setUint32(FINDDATA.TIME_ACCESS, time, true);
-        view.setUint32(FINDDATA.TIME_WRITE, time, true);
-        view.setUint32(FINDDATA.SIZE, (entry.size ?? 0) >>> 0, true);
+        view.setUint32(layout.TIME_CREATE, time, true);
+        view.setUint32(layout.TIME_ACCESS, time, true);
+        view.setUint32(layout.TIME_WRITE, time, true);
+        if (layout.WIDE_SIZE)
+        {
+            view.setBigUint64(layout.SIZE, BigInt(entry.size ?? 0), true);
+        }
+        else
+        {
+            view.setUint32(layout.SIZE, (entry.size ?? 0) >>> 0, true);
+        }
         const name = String(entry.name).slice(0, MAX_NAME);
         for (let at = 0; at < name.length; at++)
         {
-            bytes[FINDDATA.NAME + at] = name.charCodeAt(at) & 0xff;
+            bytes[layout.NAME + at] = name.charCodeAt(at) & 0xff;
         }
         host.writeMemory(address >>> 0, bytes);
     };
+
+    /**
+     * `_findfirst` for one layout of the record: a handle for `_findnext`
+     * with the first match written out, or -1 with ENOENT when nothing
+     * matches or the directory is not there -- the same answers
+     * FindFirstFile gives, over the same listing.
+     *
+     * @param {typeof FINDDATA | typeof FINDDATAI64} layout
+     */
+    const findFirst = layout=>({
+        convention: 'cdecl',
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([spec, data])=>{
+            if ((spec >>> 0) === 0 || (data >>> 0) === 0)
+            {
+                fail(EINVAL);
+                return -1;
+            }
+            const { directory, pattern } = splitSearch(readString(spec));
+            const holder = host.files.stat(directory);
+            const entries = pattern !== '' && holder?.isDirectory
+                ? host.files.list(directory, pattern) ?? []
+                : [];
+            if (entries.length === 0)
+            {
+                fail(ENOENT);
+                return -1;
+            }
+            writeFound(data, entries[0], layout);
+            const handle = nextSearch++;
+            searches.set(handle, { entries, next: 1 });
+            return handle;
+        },
+    });
+
+    /**
+     * `_findnext` for one layout -- ENOENT at the end. The searches are one
+     * table, whichever record a program asked for them in.
+     *
+     * @param {typeof FINDDATA | typeof FINDDATAI64} layout
+     */
+    const findNext = layout=>({
+        convention: 'cdecl',
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([handle, data])=>{
+            const search = searches.get(handle | 0);
+            if (!search || search.next >= search.entries.length)
+            {
+                fail(ENOENT);
+                return -1;
+            }
+            writeFound(data, search.entries[search.next++], layout);
+            return 0;
+        },
+    });
 
     /**
      * A search specification as the directory to look in and the pattern its
@@ -400,56 +475,21 @@ export function createPathFunctions(host){
                     mask | 1 << (letter[0].toUpperCase().charCodeAt(0) - 0x41), 0) >>> 0,
         },
 
-        /**
-         * intptr_t _findfirst(const char *filespec, struct _finddata_t *fileinfo)
-         *
-         * A handle for `_findnext` with the first match written out, or -1
-         * with ENOENT when nothing matches or the directory is not there --
-         * the same answers FindFirstFile gives, over the same listing.
-         */
-        _findfirst: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([spec, data])=>{
-                if ((spec >>> 0) === 0 || (data >>> 0) === 0)
-                {
-                    fail(EINVAL);
-                    return -1;
-                }
-                const { directory, pattern } = splitSearch(readString(spec));
-                const holder = host.files.stat(directory);
-                const entries = pattern !== '' && holder?.isDirectory
-                    ? host.files.list(directory, pattern) ?? []
-                    : [];
-                if (entries.length === 0)
-                {
-                    fail(ENOENT);
-                    return -1;
-                }
-                writeFound(data, entries[0]);
-                const handle = nextSearch++;
-                searches.set(handle, { entries, next: 1 });
-                return handle;
-            },
-        },
+        /** intptr_t _findfirst(const char *filespec, struct _finddata_t *fileinfo) */
+        _findfirst: findFirst(FINDDATA),
 
-        /** int _findnext(intptr_t handle, struct _finddata_t *fileinfo) -- ENOENT at the end. */
-        _findnext: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([handle, data])=>{
-                const search = searches.get(handle | 0);
-                if (!search || search.next >= search.entries.length)
-                {
-                    fail(ENOENT);
-                    return -1;
-                }
-                writeFound(data, search.entries[search.next++]);
-                return 0;
-            },
-        },
+        /** int _findnext(intptr_t handle, struct _finddata_t *fileinfo) */
+        _findnext: findNext(FINDDATA),
+
+        /**
+         * intptr_t _findfirsti64(const char *filespec, struct _finddatai64_t *fileinfo)
+         *
+         * `_findfirst` with sizes that go past 4 GiB.
+         */
+        _findfirsti64: findFirst(FINDDATAI64),
+
+        /** int _findnexti64(intptr_t handle, struct _finddatai64_t *fileinfo) */
+        _findnexti64: findNext(FINDDATAI64),
 
         /** int _findclose(intptr_t handle) -- EBADF for a handle not open. */
         _findclose: operation(4, ([handle])=>(searches.delete(handle | 0) ? 0 : EBADF)),

@@ -687,3 +687,34 @@ test('the row and the pane are drawn in the 3D face, the label over it', async()
     }
     assert.ok(row.some(pixel=>pixel !== FACE), 'the label is drawn');
 });
+
+test('in the button form the tabs are buttons, the chosen one pressed in, and the pane has '
+    + 'no border', async()=>{
+    // The tab control styles: with TCS_BUTTONS "tabs appear as buttons, and
+    // no border is drawn around the display area"; TCIS_BUTTONPRESSED is the
+    // chosen button's state. The tab form draws the pane's raised border.
+    const HILIGHT = 0x00ffffff;
+    const SHADOW = 0x00808080;
+    const context = setup();
+    await context.makeParent();
+    /** @param {number} style */
+    const drawn = async style=>{
+        const hwnd = await context.tabs(style, 2);
+        await context.pump();
+        const origin = context.windowRect(hwnd);
+        /** @param {number} x @param {number} y */
+        const at = (x, y)=>context.desktop.read(origin.left + x, origin.top + y);
+        const first = context.itemRect(hwnd, 0);
+        const second = context.itemRect(hwnd, 1);
+        const seen = { chosen: at(first.left, first.top), other: at(second.left, second.top),
+            pane: at(0, 120) };
+        context.fns.DestroyWindow.handler([hwnd]);
+        await context.pump();
+        return seen;
+    };
+    assert.equal((await drawn(0)).pane, HILIGHT, 'the tab form borders the pane');
+    const buttons = await drawn(TCS_BUTTONS);
+    assert.equal(buttons.pane, FACE, 'the button form does not');
+    assert.equal(buttons.chosen, SHADOW, 'the chosen button is pressed in');
+    assert.equal(buttons.other, HILIGHT, 'and the other stands out');
+});

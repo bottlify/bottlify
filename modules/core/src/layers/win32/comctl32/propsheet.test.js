@@ -22,8 +22,10 @@ import {
     PSM_SETCURSEL, PSM_REMOVEPAGE, PSM_ADDPAGE, PSM_CHANGED, PSM_UNCHANGED, PSM_QUERYSIBLINGS,
     PSM_PRESSBUTTON, PSM_GETTABCONTROL, PSM_GETCURRENTPAGEHWND, PSM_INSERTPAGE,
     PSM_HWNDTOINDEX, PSM_INDEXTOHWND, PSM_PAGETOINDEX, PSM_INDEXTOPAGE, PSM_IDTOINDEX,
-    PSM_INDEXTOID, PSBTN_NEXT, PSBTN_BACK, PSBTN_OK, PSBTN_CANCEL, PSBTN_APPLYNOW,
+    PSM_INDEXTOID, PSM_ISDIALOGMESSAGE, PSBTN_NEXT, PSBTN_BACK, PSBTN_OK, PSBTN_CANCEL,
+    PSBTN_APPLYNOW, PSM_RESTARTWINDOWS, PSM_REBOOTSYSTEM, ID_PSRESTARTWINDOWS, ID_PSREBOOTSYSTEM,
     IDOK, IDCANCEL, IDHELP, IDC_APPLY_BUTTON, IDC_NEXT_BUTTON, IDC_BACK_BUTTON,
+    IDC_HEADER_TITLE, IDC_HEADER_SUBTITLE, IDC_SUNKEN_LINEHEADER,
 } from './propsheet.js';
 
 /**
@@ -52,6 +54,12 @@ const WM_NCDESTROY = 0x0082;
 const WM_INITDIALOG = 0x0110;
 const WM_NOTIFY = 0x004e;
 const WM_LBUTTONDOWN = 0x0201;
+const WM_KEYDOWN = 0x0100;
+const VK_TAB = 0x09;
+const VK_SHIFT = 0x10;
+const VK_CONTROL = 0x11;
+const VK_PRIOR = 0x21;
+const VK_NEXT = 0x22;
 const WM_QUIT = 0x0012;
 const DM_GETDEFID = 0x0400;
 const DC_HASDEFID = 0x534b;
@@ -84,6 +92,7 @@ const IDC_PS_EDIT2 = 1001;
 const IDD_PROP_PAGE_INTRO = 100;
 const IDD_PROP_PAGE_EDIT = 101;
 const IDD_PROP_PAGE_EXIT = 102;
+const IDD_PROP_PAGE_BAD_CONTROL = 103;
 
 function fakeMemory(size = 0x80000){
     const bytes = new Uint8Array(size);
@@ -150,8 +159,9 @@ function fakeHandles(){
  * A dialog template in the old layout, as a resource compiler writes one.
  *
  * @param {{ style: number, cx: number, cy: number, title?: string,
- *     controls?: { atom: number, id: number, style: number, x: number, y: number,
+ *     controls?: { atom: number | string, id: number, style: number, x: number, y: number,
  *         cx: number, cy: number }[] }} shape
+ *     A control's class is an atom, or a name.
  */
 function dialogTemplate(shape){
     /** @type {number[]} */
@@ -184,8 +194,15 @@ function dialogTemplate(shape){
         dword((WS_CHILD | WS_VISIBLE | control.style) >>> 0);
         dword(0);
         [control.x, control.y, control.cx, control.cy, control.id].forEach(value=>word(value));
-        word(0xffff);
-        word(control.atom);
+        if (typeof control.atom === 'string')
+        {
+            text(control.atom);
+        }
+        else
+        {
+            word(0xffff);
+            word(control.atom);
+        }
         word(0);
         word(0);
     }
@@ -215,6 +232,8 @@ const TEMPLATES = new Map([
     [IDD_PROP_PAGE_EXIT, dialogTemplate({ style: PAGE_STYLE, cx: 227, cy: 215,
         title: 'Exit Page',
         controls: [{ atom: STATIC, id: 0xffff, style: 0, x: 10, y: 6, cx: 170, cy: 8 }] })],
+    [IDD_PROP_PAGE_BAD_CONTROL, dialogTemplate({ style: PAGE_STYLE, cx: 100, cy: 100,
+        controls: [{ atom: 'invalid class', id: 0xffff, style: 0, x: 0, y: 0, cx: 0, cy: 0 }] })],
 ]);
 
 /**
@@ -231,6 +250,8 @@ function setup({ modal = false } = {}){
     let nextProcedure = PROCEDURES;
     let heapNext = HEAP;
     let stringNext = STRINGS;
+    /** The keys held down, as GetKeyState reads them. @type {Set<number>} */
+    const keysDown = new Set();
     /** @param {number} bytes */
     const allocate = bytes=>{
         const at = heapNext;
@@ -287,6 +308,7 @@ function setup({ modal = false } = {}){
         callerThread: ()=>THREAD,
         park: ()=>({ parked: true }),
         idle: modal ? ()=>new Promise(resolve=>setImmediate(resolve)) : ()=>new Promise(()=>{}),
+        keyState: key=>(keysDown.has(key) ? 0x8000 : 0),
         dc: ()=>({
             /** @param {number} hwnd @param {any} bounds */
             get: (hwnd, bounds = null)=>gdi.windowContext(hwnd, bounds),
@@ -503,9 +525,34 @@ function setup({ modal = false } = {}){
         return owner;
     };
 
+    /**
+     * A key press for a window, handed to the dialog manager the way a
+     * modeless sheet's loop hands it: IsDialogMessage, or PSM_ISDIALOGMESSAGE
+     * with `sheet`. The keys named are held while it is.
+     *
+     * @param {number} dialog @param {number} key @param {number[]} [held]
+     * @param {boolean} [sheet]
+     * @returns {Promise<number>} whether the message was taken
+     */
+    const press = async(dialog, key, held = [], sheet = false)=>{
+        const target = table.GetFocus.handler([]) || dialog;
+        [target, WM_KEYDOWN, key, 1].forEach((value, index)=>
+            memory.put32(MSG_BUFFER + index * 4, value));
+        held.forEach(each=>keysDown.add(each));
+        try
+        {
+            return sheet ? await send([dialog, PSM_ISDIALOGMESSAGE, 0, MSG_BUFFER])
+                : await table.IsDialogMessageA.handler([dialog, MSG_BUFFER]);
+        }
+        finally
+        {
+            keysDown.clear();
+        }
+    };
+
     return { memory, desktop, fns: table, comctl, send, pump, heard, register, pageProc,
         description, descriptions, header, createPage, result, string, windowRect, textOf,
-        makeOwner };
+        makeOwner, press };
 }
 
 test('CreatePropertySheetPage copies the description, refuses one older than the first '
@@ -990,4 +1037,186 @@ test('without Apply, the row is OK and Cancel, and the sheet is painted', async(
     assert.ok(sheet.right - cancel.right < 20, 'Cancel ends the row at the right margin');
     // The face under the buttons is the dialog's.
     assert.equal(context.desktop.read(sheet.left + 8, cancel.bottom + 2), 0x00c0c0c0);
+});
+
+test('Tab walks from the sheet into the page on show and through its controls, and '
+    + 'Shift+Tab walks back out', async()=>{
+    // user32's dialog tests (test_GetNextDlgItem): the dialog manager searches
+    // through a child with WS_EX_CONTROLPARENT, which a page is made, as if
+    // its controls were the sheet's own.
+    const context = setup();
+    const page = await context.createPage(context.description({
+        proc: context.pageProc('page') }));
+    const hwnd = await context.comctl.PropertySheetA.handler([context.header({
+        flags: PSH_MODELESS, pages: [page] })]);
+    const current = context.send([hwnd, PSM_GETCURRENTPAGEHWND, 0, 0]);
+    const edit = (/** @type {number} */ id)=>context.fns.GetDlgItem.handler([current, id]);
+    const focus = ()=>context.fns.GetFocus.handler([]);
+    const parentOf = (/** @type {number} */ child)=>context.fns.GetParent.handler([child]);
+    assert.equal(focus(), edit(IDC_PS_EDIT1), 'the page\'s first tab stop');
+
+    assert.equal(await context.press(hwnd, VK_TAB), 1);
+    assert.equal(focus(), edit(IDC_PS_EDIT2), 'to the page\'s next');
+    assert.equal(await context.press(hwnd, VK_TAB), 1);
+    assert.equal(parentOf(focus()), hwnd, 'past the page\'s last, to a control of the sheet');
+    /** @type {number[]} */
+    const walked = [];
+    for (let guard = 0; guard < 8 && focus() !== edit(IDC_PS_EDIT1); guard++)
+    {
+        walked.push(focus());
+        await context.press(hwnd, VK_TAB);
+    }
+    assert.equal(focus(), edit(IDC_PS_EDIT1), 'and round into the page again');
+    await context.press(hwnd, VK_TAB, [VK_SHIFT]);
+    assert.equal(focus(), walked.at(-1), 'Shift+Tab back to the sheet\'s control before it');
+});
+
+test('PSM_ISDIALOGMESSAGE takes Ctrl+PgDn and Ctrl+Tab to the next page, Ctrl+PgUp and '
+    + 'Ctrl+Shift+Tab to the one before, and hands anything else to the dialog manager',
+async()=>{
+    // comctl32's property sheet tests (test_hotkey_navigation): the keys move
+    // a wizard of two pages from the first to the second and back, twice.
+    const context = setup();
+    const pages = [];
+    for (const name of ['one', 'two'])
+    {
+        pages.push(await context.createPage(context.description({
+            proc: context.pageProc(name) })));
+    }
+    const hwnd = await context.comctl.PropertySheetA.handler([context.header({
+        flags: PSH_MODELESS | PSH_WIZARD, caption: 'A Wizard', pages })]);
+    const active = ()=>context.send([hwnd, PSM_HWNDTOINDEX,
+        context.send([hwnd, PSM_GETCURRENTPAGEHWND, 0, 0]), 0]);
+    assert.equal(active(), 0);
+    /** @type {[number, number[], number][]} the key, the keys held with it, the page after */
+    const steps = [[VK_NEXT, [VK_CONTROL], 1], [VK_PRIOR, [VK_CONTROL], 0],
+        [VK_TAB, [VK_CONTROL], 1], [VK_TAB, [VK_CONTROL, VK_SHIFT], 0]];
+    for (const [key, held, page] of steps)
+    {
+        context.heard.length = 0;
+        assert.equal(await context.press(hwnd, key, held, true), 1, `key ${key} taken`);
+        assert.equal(active(), page, `key ${key} with ${held}`);
+        assert.deepEqual(context.heard.filter(([, code])=>code === PSN_KILLACTIVE
+            || code === PSN_SETACTIVE).map(([, code])=>code), [PSN_KILLACTIVE, PSN_SETACTIVE],
+        'the page on show is asked to let go, as a click on a tab asks it');
+    }
+
+    const focused = context.fns.GetFocus.handler([]);
+    assert.equal(await context.press(hwnd, VK_TAB, [], true), 1, 'a plain Tab');
+    assert.notEqual(context.fns.GetFocus.handler([]), focused, 'moves the focus');
+    assert.equal(active(), 0, 'and not the page');
+    assert.equal(await context.press(hwnd, VK_NEXT, [], true), 0,
+        'PgDn alone is not the sheet\'s');
+});
+
+test('a sheet whose only page names a control of a class nobody has cannot show it: a modal '
+    + 'one answers 0, a modeless one is still its window', { timeout: 10000 }, async()=>{
+    // comctl32's property sheet tests (test_bad_control_class), over user32's
+    // dialog manager failing a dialog of such a template.
+    const modal = setup({ modal: true });
+    const bad = ()=>modal.createPage(modal.description({ template: IDD_PROP_PAGE_BAD_CONTROL,
+        proc: modal.pageProc('page') }));
+    assert.notEqual(await bad(), 0);
+    assert.equal(await modal.comctl.PropertySheetA.handler([modal.header({
+        pages: [await bad()] })]), 0);
+    const modeless = await modal.comctl.PropertySheetA.handler([modal.header({
+        flags: PSH_MODELESS, pages: [await bad()] })]);
+    assert.notEqual(modeless, 0);
+    assert.equal(modal.send([modeless, PSM_GETCURRENTPAGEHWND, 0, 0]), 0, 'with no page');
+});
+
+test('a modal sheet closed by OK answers ID_PSRESTARTWINDOWS or ID_PSREBOOTSYSTEM when a page '
+    + 'asked for one, and closed otherwise, whether a page applied', { timeout: 10000 },
+async()=>{
+    // PropertySheet is documented to answer 1 or more when changes were
+    // saved and 0 when none were; PSM_RESTARTWINDOWS and PSM_REBOOTSYSTEM
+    // make it answer ID_PSRESTARTWINDOWS or ID_PSREBOOTSYSTEM, but only when
+    // OK closes the sheet, and the reboot supersedes a restart before or
+    // after it.
+    /**
+     * A modal sheet of one page that asks the sheet for `asks` as it
+     * applies, pressed through `buttons` in turn.
+     *
+     * @param {number[]} asks @param {number[]} buttons
+     */
+    const run = async(asks, buttons)=>{
+        const context = setup({ modal: true });
+        const callback = context.register(([hwnd, message])=>{
+            if (message === PSCB_INITIALIZED)
+            {
+                buttons.forEach(button=>context.fns.PostMessageA.handler([hwnd,
+                    PSM_PRESSBUTTON, button, 0]));
+            }
+            return 0;
+        });
+        const proc = context.pageProc('page', { [PSN_APPLY]: (hwnd, notify)=>{
+            asks.forEach(message=>context.send([context.memory.u32(notify), message, 0, 0]));
+            return 0;
+        } });
+        const page = await context.createPage(context.description({ proc }));
+        return context.comctl.PropertySheetA.handler([context.header({
+            flags: PSH_USECALLBACK, pages: [page], callback })]);
+    };
+    assert.equal(await run([], [PSBTN_OK]), 1);
+    assert.equal(await run([PSM_RESTARTWINDOWS], [PSBTN_OK]), ID_PSRESTARTWINDOWS);
+    assert.equal(await run([PSM_REBOOTSYSTEM, PSM_RESTARTWINDOWS], [PSBTN_OK]),
+        ID_PSREBOOTSYSTEM);
+    assert.equal(await run([PSM_RESTARTWINDOWS], [PSBTN_APPLYNOW, PSBTN_CANCEL]), 1,
+        'applied, then cancelled: changes were saved, and no restart');
+    assert.equal(await run([PSM_RESTARTWINDOWS], [PSBTN_CANCEL]), 0);
+});
+
+test('a Wizard97 sheet is a wizard: an interior page shows its header title and subtitle '
+    + 'in a band over it, an exterior page hides the band, and the caption is the page\'s',
+async()=>{
+    // The wizard documentation: PSH_WIZARD97 alone makes a Wizard97 wizard,
+    // whose pszCaption is ignored for the caption of the page's template; an
+    // interior page's template is 317x143 units against an exterior one's
+    // 317x193, the header taking the difference, and PSP_USEHEADERTITLE and
+    // PSP_USEHEADERSUBTITLE put pszHeaderTitle and pszHeaderSubTitle in it
+    // unless PSP_HIDEHEADER hides it; PSM_SETHEADERTITLE changes a page's
+    // title, repainted at once on the page on show.
+    const PSH_WIZARD97 = 0x01000000;
+    const PSP_HIDEHEADER = 0x0800;
+    const PSP_USEHEADERTITLE = 0x1000;
+    const PSP_USEHEADERSUBTITLE = 0x2000;
+    const PSM_SETHEADERTITLEA = 0x047d;
+    const PSP_V2_SIZE = 48;
+    const WHITE = 0x00ffffff;
+    const context = setup();
+    const { fns } = context;
+    const exterior = await context.createPage(context.description({ size: PSP_V2_SIZE,
+        template: IDD_PROP_PAGE_INTRO, flags: PSP_HIDEHEADER }));
+    const interior = await context.createPage(context.description({ size: PSP_V2_SIZE,
+        template: IDD_PROP_PAGE_EXIT, flags: PSP_USEHEADERTITLE | PSP_USEHEADERSUBTITLE,
+        extra: [context.string('Choose a folder'), context.string('Where the files go.')] }));
+    const hwnd = await context.comctl.PropertySheetA.handler([context.header({
+        flags: PSH_MODELESS | PSH_WIZARD97, pages: [exterior, interior] })]);
+    const item = (/** @type {number} */ id)=>fns.GetDlgItem.handler([hwnd, id]);
+    const shown = (/** @type {number} */ id)=>fns.IsWindowVisible.handler([item(id)]);
+    const page = ()=>context.windowRect(context.send([hwnd, PSM_GETCURRENTPAGEHWND, 0, 0]));
+    assert.equal(shown(IDC_NEXT_BUTTON), 1, 'Back and Next, as a wizard has');
+    assert.equal(item(IDOK), 0);
+    assert.equal(context.textOf(hwnd), 'Edit Control Page', 'the caption of the page\'s template');
+    assert.equal(shown(IDC_HEADER_TITLE), 0, 'an exterior page hides the header');
+    const top = page().top;
+
+    await context.send([hwnd, PSM_PRESSBUTTON, PSBTN_NEXT, 0]);
+    assert.equal(context.textOf(hwnd), 'Exit Page');
+    assert.equal(shown(IDC_HEADER_TITLE), 1);
+    assert.equal(shown(IDC_HEADER_SUBTITLE), 1);
+    assert.equal(context.textOf(item(IDC_HEADER_TITLE)), 'Choose a folder');
+    assert.equal(context.textOf(item(IDC_HEADER_SUBTITLE)), 'Where the files go.');
+    const line = context.windowRect(item(IDC_SUNKEN_LINEHEADER));
+    assert.ok(line.top > top && page().top >= line.bottom, 'the page under the header');
+    await context.pump();
+    const band = context.windowRect(item(IDC_HEADER_TITLE));
+    assert.equal(context.desktop.read(band.right - 1, band.bottom - 1), WHITE,
+        'the header is drawn in the window colour');
+
+    context.send([hwnd, PSM_SETHEADERTITLEA, 1, context.string('Another folder')]);
+    assert.equal(context.textOf(item(IDC_HEADER_TITLE)), 'Another folder');
+    await context.send([hwnd, PSM_PRESSBUTTON, PSBTN_BACK, 0]);
+    assert.equal(shown(IDC_HEADER_TITLE), 0);
+    assert.equal(page().top, top, 'the exterior page where the header was');
 });

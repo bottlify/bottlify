@@ -282,3 +282,47 @@ test('_findfirst with nothing to match is -1 and ENOENT, and a null name EINVAL'
     assert.deepEqual([table._findfirst.argBytes, table._findnext.argBytes,
         table._findclose.argBytes], [8, 8, 4]);
 });
+
+/** `struct _finddatai64_t` as msvcrt.dll lays it out: 32-bit times, the size 8-aligned. */
+const FIND64 = { ATTRIB: 0, CREATE: 4, ACCESS: 8, WRITE: 12, SIZE: 16, NAME: 24, BYTES: 288 };
+
+test('_findfirsti64 and _findnexti64 walk the same way into the 64-bit record', ()=>{
+    const { memory, table, errno, written } = finder();
+    const data = memory.allocate(FIND64.BYTES);
+    memory.writeMemory(data, new Uint8Array(FIND64.BYTES).fill(0xcc));
+    const view = new DataView(memory.bytes.buffer, data, FIND64.BYTES);
+
+    const handle = table._findfirsti64.handler([memory.put('C:\\game\\*.dat'), data]);
+    assert.notEqual(handle, -1);
+    assert.equal(memory.text(data + FIND64.NAME), 'a.dat');
+    assert.equal(view.getUint32(FIND64.ATTRIB, true), 0x20);
+    assert.deepEqual([FIND64.CREATE, FIND64.ACCESS, FIND64.WRITE].map(at=>view.getUint32(at, true)),
+        Array(3).fill(written / 1000));
+    assert.equal(view.getBigUint64(FIND64.SIZE, true), 3n);
+    assert.equal(view.getUint8(FIND64.BYTES - 1), 0, 'the whole record is written');
+
+    assert.equal(table._findnexti64.handler([handle, data]), 0);
+    assert.equal(memory.text(data + FIND64.NAME), 'b.dat');
+    assert.equal(view.getBigUint64(FIND64.SIZE, true), 5n);
+    assert.equal(table._findnexti64.handler([handle, data]), -1);
+    assert.equal(table._findclose.handler([handle]), 0, 'one _findclose for both');
+    assert.equal(table._findfirsti64.handler([memory.put('C:\\game\\*.exe'), data]), -1);
+    assert.deepEqual(errno, [2, 2]);
+    assert.deepEqual([table._findfirsti64.argBytes, table._findnexti64.argBytes], [8, 8]);
+});
+
+test('_findfirsti64 reports a size past 4 GiB whole', ()=>{
+    const memory = fakeMemory();
+    const big = 5 * 2 ** 30;
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory,
+        files: {
+            stat: ()=>({ exists: true, isDirectory: true, size: 0 }),
+            list: ()=>[{ name: 'movie.bik', isDirectory: false, size: big }],
+        },
+    }));
+    const data = memory.allocate(FIND64.BYTES);
+    assert.notEqual(table._findfirsti64.handler([memory.put('C:\\game\\*.bik'), data]), -1);
+    const view = new DataView(memory.bytes.buffer, data, FIND64.BYTES);
+    assert.equal(view.getBigUint64(FIND64.SIZE, true), BigInt(big));
+});

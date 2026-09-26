@@ -79,6 +79,26 @@ const DLGITEMTEMPLATE = Object.freeze({
 
 /** The template says a font follows; without this bit there is none to skip. */
 const DS_SETFONT = 0x0040;
+/** The dialog is made even when one of its controls cannot be, without that one. */
+const DS_NOFAILCREATE = 0x0010;
+/** What a dialog that names a class nobody has leaves in GetLastError. */
+const ERROR_CANNOT_FIND_WND_CLASS = 1407;
+
+/**
+ * The classes Windows' own libraries register besides user32's, lower-case:
+ * a template naming one that this build has no procedure for still gets its
+ * control -- a window answering nothing -- where a class that exists nowhere
+ * fails the dialog.
+ */
+const STANDARD_CLASSES = new Set([
+    'mdiclient', 'combolbox', 'sysheader32', 'toolbarwindow32', 'rebarwindow32',
+    'tooltips_class32', 'msctls_statusbar32', 'msctls_trackbar32', 'msctls_updown32',
+    'msctls_progress32', 'msctls_hotkey32', 'syslistview32', 'systreeview32',
+    'comboboxex32', 'systabcontrol32', 'sysanimate32', 'sysmonthcal32', 'sysdatetimepick32',
+    'sysipaddress32', 'syspager', 'nativefontctl', 'syslink',
+    'richedit', 'richedit20a', 'richedit20w', 'richedit50w',
+]);
+
 /**
  * The point size that means "the shell's dialog font" rather than a size,
  * and the font it means: what a DS_SHELLFONT template is compiled to.
@@ -107,6 +127,8 @@ const WS_DISABLED = 0x08000000;
 const DS_MODALFRAME = 0x0080;
 const DS_CENTER = 0x0800;
 const WS_EX_DLGMODALFRAME = 0x00000001;
+/** A child whose own controls Tab moves between as if they were the dialog's. */
+const WS_EX_CONTROLPARENT = 0x00010000;
 
 /**
  * A DLGTEMPLATEEX begins with a version of 1 and a signature of 0xffff, where
@@ -230,6 +252,7 @@ const MAX_RESOURCE_NAME = 256;
  *           or a dialog's own -- measures as, and the font a template
  *           names. Absent, or answering null, without a font engine.
  * @property {() => unknown} [callerThread]
+ * @property {(code: number) => void} [setLastError]
  * @property {(hwnd: number) => void} [created]
  * @property {() => Promise<void>} idle
  * @property {(instance: number, type: number, name: number | string) => unknown} [findResource]
@@ -247,13 +270,18 @@ const MAX_RESOURCE_NAME = 256;
  *     => number | Promise<number>} options.deliver  Hands a retrieved message to its procedure.
  * @param {(name: string) => ({ wndProc: number, windowExtra: number } | null)} options.classNamed
  *     A class the program registered, by the name a template spells it.
+ * @param {(name: string) => boolean} [options.classKnown]
+ *     Whether a class of that name, or `#atom`, is the program's or the system's.
  * @param {(record: any, args: number[]) => number | Promise<number>} options.announce
  *     Tells a new window's procedure that it exists, as CreateWindowEx does.
  */
 export function createDialogFunctions(options){
     const {
-        host, live, windows, makeWindow, destroyWindow, deliver, classNamed, announce,
+        host, live, windows, makeWindow, destroyWindow, deliver, classNamed, classKnown, announce,
     } = options;
+    /** @param {string} name */
+    const classExists = name=>(classKnown ? classKnown(name) : classNamed(name) !== null)
+        || STANDARD_CLASSES.has(name.toLowerCase());
     /**
      * A cursor over the template, so that every read advances it. The parts are
      * variable-length and consecutive, so an offset carried by hand is an
@@ -494,6 +522,17 @@ export function createDialogFunctions(options){
         {
             return 0;
         }
+        // A control whose class exists nowhere fails the dialog, unless the
+        // template asked to be made without whatever cannot be: checked
+        // before anything is made, so a procedure never hears of it.
+        const makeable = described.controls.filter((/** @type {any} */ control)=>
+            classExists(control.className));
+        if (makeable.length < described.controls.length
+            && (described.style & DS_NOFAILCREATE) === 0)
+        {
+            host.setLastError?.(ERROR_CANNOT_FIND_WND_CLASS);
+            return 0;
+        }
         // The font the template names is the dialog's for as long as it
         // lives: the cell its units scale by, and what every control is
         // handed to paint in.
@@ -551,7 +590,7 @@ export function createDialogFunctions(options){
         const creating = [];
         /** @type {any[]} */
         const controls = [];
-        for (const control of described.controls)
+        for (const control of makeable)
         {
             // A class the program registered is the program's, procedure and
             // all: a template names its own controls this way, and one of
@@ -647,34 +686,77 @@ export function createDialogFunctions(options){
         : then(/** @type {number} */ (created)));
 
     /**
-     * The controls of a dialog in the order Tab walks them, disabled and
-     * hidden ones left out.
+     * Whether Tab searches a child's controls rather than the child: one
+     * with WS_EX_CONTROLPARENT, shown and enabled, as a property sheet's
+     * page is inside the sheet.
      *
-     * @param {any} dialog
+     * @param {any} child
      */
-    const tabOrder = dialog=>host.children(dialog).filter(child=>
-        (child.style & WS_VISIBLE) !== 0 && (child.style & WS_DISABLED) === 0);
+    const searchedThrough = child=>(child.exStyle & WS_EX_CONTROLPARENT) !== 0
+        && (child.style & (WS_VISIBLE | WS_DISABLED)) === WS_VISIBLE;
+
+    /** @param {any} child  Whether Tab stops at it. */
+    const stopsTab = child=>!searchedThrough(child)
+        && (child.style & (WS_TABSTOP | WS_VISIBLE | WS_DISABLED)) === (WS_TABSTOP | WS_VISIBLE);
 
     /**
-     * The control after -- or before -- one, among those with WS_TABSTOP,
-     * wrapping round. From nothing, the first or the last.
+     * The windows inside a dialog in the order Tab meets them: each child,
+     * then, for one it searches through, that child's own. The windows
+     * around `from` are laid out too, so a control Tab could not have
+     * reached is searched from where it stands.
+     *
+     * @param {any} dialog @param {number} from
+     * @returns {any[]}
+     */
+    const tabSequence = (dialog, from)=>{
+        const around = new Set();
+        for (let at = windows.get(from); at && at.hwnd !== dialog.hwnd; at = windows.get(at.parent))
+        {
+            around.add(at.hwnd);
+        }
+        /** @type {any[]} */
+        const sequence = [];
+        /** @param {any} parent */
+        const visit = parent=>{
+            for (const child of host.children(parent))
+            {
+                sequence.push(child);
+                if (searchedThrough(child) || around.has(child.hwnd))
+                {
+                    visit(child);
+                }
+            }
+        };
+        visit(dialog);
+        return sequence;
+    };
+
+    /**
+     * The control after -- or before -- one that stops Tab, wrapping round.
+     * From nothing, or from outside the dialog, the first or the last.
      *
      * @param {any} dialog @param {number} from  A control's handle, or zero.
      * @param {boolean} forward
      * @returns {any | null}
      */
     const nextTabStop = (dialog, from, forward)=>{
-        const stops = tabOrder(dialog).filter(child=>(child.style & WS_TABSTOP) !== 0);
-        if (stops.length === 0)
-        {
-            return null;
-        }
-        const at = stops.findIndex(child=>child.hwnd === from);
+        const sequence = tabSequence(dialog, from);
+        const at = from === 0 ? -1 : sequence.findIndex(child=>child.hwnd === from);
         if (at === -1)
         {
-            return forward ? stops[0] : stops[stops.length - 1];
+            const stops = sequence.filter(stopsTab);
+            return (forward ? stops[0] : stops[stops.length - 1]) ?? null;
         }
-        return stops[(at + (forward ? 1 : stops.length - 1)) % stops.length];
+        for (let step = 1; step <= sequence.length; step++)
+        {
+            const child = sequence[(at + (forward ? step : sequence.length - step))
+                % sequence.length];
+            if (stopsTab(child))
+            {
+                return child;
+            }
+        }
+        return null;
     };
 
     /**
@@ -1179,17 +1261,21 @@ export function createDialogFunctions(options){
          * HWND GetNextDlgTabItem(HWND hDlg, HWND hCtl, BOOL bPrevious)
          *
          * The control Tab would move to from the one named -- the next with
-         * WS_TABSTOP, shown and enabled, wrapping round -- or the first from
-         * nothing.
+         * WS_TABSTOP, shown and enabled, wrapping round, inside the children
+         * it searches through -- or the first from nothing or the dialog
+         * itself, before which there is none.
          */
         GetNextDlgTabItem: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hwnd, from, previous])=>{
                 const dialog = live(hwnd);
-                return dialog
-                    ? nextTabStop(dialog, from >>> 0, (previous >>> 0) === 0)?.hwnd ?? 0
-                    : 0;
+                const start = (from >>> 0) === (hwnd >>> 0) ? 0 : from >>> 0;
+                if (!dialog || (start === 0 && (previous >>> 0) !== 0))
+                {
+                    return 0;
+                }
+                return nextTabStop(dialog, start, (previous >>> 0) === 0)?.hwnd ?? 0;
             },
         },
 

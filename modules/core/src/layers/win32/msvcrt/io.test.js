@@ -7,17 +7,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDescriptors, createIoFunctions } from './io.js';
-import { fakeMemory, fakeVolume } from './harness.test.js';
+import { fakeHandles, fakeMemory, fakeVolume } from './harness.test.js';
 
 const O_RDONLY = 0x0000;
 const O_WRONLY = 0x0001;
 const O_RDWR = 0x0002;
 const O_APPEND = 0x0008;
+const O_TEMPORARY = 0x0040;
 const O_CREAT = 0x0100;
 const O_TRUNC = 0x0200;
 const O_EXCL = 0x0400;
 const O_TEXT = 0x4000;
 const O_BINARY = 0x8000;
+const O_WTEXT = 0x10000;
+const O_U16TEXT = 0x20000;
+const O_U8TEXT = 0x40000;
 
 const SEEK_SET = 0;
 const SEEK_CUR = 1;
@@ -88,6 +92,20 @@ test('a descriptor opens, writes, seeks, reads and closes, numbered from 3', ()=
     assert.equal(fns._close.handler([fd]), 0);
     assert.deepEqual(files.closed, ['C:\\game\\new.bin']);
     assert.equal(open('C:\\game\\new.bin', O_RDONLY), 3, 'a closed number is used again');
+});
+
+test('a file opened _O_TEMPORARY is removed when its descriptor closes', ()=>{
+    const { memory, files, fns, open } = build({ 'C:\\game\\keep.bin': bytesOf('k') });
+    const fd = open('C:\\game\\scratch.tmp', O_CREAT | O_RDWR | O_BINARY | O_TEMPORARY);
+    assert.equal(fns._write.handler([fd, memory.put('abc'), 3]), 3);
+    assert.equal(fns._lseek.handler([fd, 0, SEEK_SET]), 0, 'it is a file like any other');
+    assert.ok(files.files['C:\\game\\scratch.tmp']);
+    assert.equal(fns._close.handler([fd]), 0);
+    assert.equal(files.files['C:\\game\\scratch.tmp'], undefined);
+
+    const kept = open('C:\\game\\keep.bin', O_RDONLY);
+    fns._close.handler([kept]);
+    assert.ok(files.files['C:\\game\\keep.bin'], 'a file opened without it stays');
 });
 
 test('_open says why it failed', ()=>{
@@ -277,6 +295,48 @@ test('_stat: device, mode and the names Windows refuses', ()=>{
     assert.deepEqual(errno, [ENOENT, ENOENT, ENOENT, ENOENT]);
 });
 
+/**
+ * `struct _stati64` as msvcrt.dll lays it out: `_stat`'s fields with a 64-bit
+ * size, which its alignment puts at 24, and the three 32-bit times after it.
+ */
+const STATI64 = { DEV: 0, MODE: 6, NLINK: 8, RDEV: 16, SIZE: 24, TIMES: [32, 36, 40], BYTES: 48 };
+
+test('_stati64 answers as _stat does, into the record with the 64-bit size', ()=>{
+    const { memory, fns, errno } = build({ 'C:\\game\\data.bin': bytesOf('12345') });
+    const stat = memory.allocate(STATI64.BYTES);
+    memory.writeMemory(stat, new Uint8Array(STATI64.BYTES).fill(0xcc));
+    const view = new DataView(memory.bytes.buffer, stat, STATI64.BYTES);
+
+    assert.equal(fns._stati64.handler([memory.put('C:\\game\\data.bin'), stat]), 0);
+    assert.equal(view.getUint16(STATI64.MODE, true), 0x8000 | 0o666);
+    assert.deepEqual([view.getUint32(STATI64.DEV, true), view.getUint32(STATI64.RDEV, true)],
+        [2, 2], 'drive C');
+    assert.equal(view.getInt16(STATI64.NLINK, true), 1);
+    assert.equal(view.getBigInt64(STATI64.SIZE, true), 5n);
+    assert.deepEqual(STATI64.TIMES.map(at=>view.getUint32(at, true)),
+        Array(3).fill(Date.UTC(2001, 0, 2) / 1000));
+    assert.equal(view.getUint32(20, true), 0, 'the padding before the size is written too');
+    assert.equal(view.getUint32(44, true), 0, 'and after the times');
+
+    assert.equal(fns._stati64.handler([memory.put('C:\\game\\'), stat]), -1);
+    assert.equal(fns._stati64.handler([memory.put('C:\\game\\none'), stat]), -1);
+    assert.equal(fns._stati64.handler([0, stat]), -1);
+    assert.deepEqual(errno, [ENOENT, ENOENT, EINVAL]);
+});
+
+test('_stati64 reports a size past 4 GiB whole', ()=>{
+    const memory = fakeMemory();
+    const files = fakeVolume({});
+    const big = 5 * 2 ** 30;
+    files.stat = ()=>({ exists: true, isDirectory: false, size: big, modified: 0 });
+    const fns = /** @type {Record<string, any>} */ (createIoFunctions({ ...memory, files },
+        createDescriptors({ files })));
+    const stat = memory.allocate(STATI64.BYTES);
+    assert.equal(fns._stati64.handler([memory.put('C:\\movie.bik'), stat]), 0);
+    const view = new DataView(memory.bytes.buffer, stat, STATI64.BYTES);
+    assert.equal(view.getBigInt64(STATI64.SIZE, true), BigInt(big));
+});
+
 test('a stream\'s read folds text as the program reads it and consumes only that', ()=>{
     // Wine's msvcrt test_asciimode: CR CR LF is CR LF, and "foo" then ^Z is
     // three bytes and then the end.
@@ -303,10 +363,243 @@ test('a stream\'s read folds text as the program reads it and consumes only that
     assert.equal(files.reads - before, 1, 'the second line came from what the first read');
 });
 
+test('_setmode checks the mode, then the number, and answers with the mode it replaced', ()=>{
+    // Wine's msvcrt test_setmode, for the two translations this runtime has.
+    const { memory, files, fns, errno, open } = build();
+    const fd = open('C:\\game\\empty1', O_CREAT | O_WRONLY);
+
+    assert.equal(fns._setmode.handler([-2, 0]), -1);
+    assert.equal(fns._setmode.handler([-2, O_TEXT]), -1);
+    assert.equal(fns._setmode.handler([fd, 0xffffffff]), -1);
+    assert.equal(fns._setmode.handler([fd, 0]), -1);
+    assert.equal(fns._setmode.handler([fd, O_BINARY | O_TEXT]), -1);
+    assert.equal(fns._setmode.handler([fd, O_WTEXT | O_U16TEXT]), -1);
+    assert.deepEqual(errno.splice(0), [EINVAL, EBADF, EINVAL, EINVAL, EINVAL, EINVAL]);
+
+    assert.equal(fns._setmode.handler([fd, O_BINARY]), O_TEXT);
+    assert.equal(fns._write.handler([fd, memory.put('a\n'), 2]), 2);
+    assert.equal(fns._setmode.handler([fd, O_TEXT]), O_BINARY);
+    assert.equal(fns._write.handler([fd, memory.put('b\n'), 2]), 2);
+    assert.equal(fns._setmode.handler([fd, O_TEXT]), O_TEXT);
+    assert.equal(String.fromCharCode(...files.files['C:\\game\\empty1']), 'a\nb\r\n');
+    assert.equal(fns._setmode.handler([1, O_BINARY]), O_TEXT, 'the console\'s too');
+    assert.deepEqual(errno, []);
+});
+
+test('_setmode refuses the Unicode translations it does not carry, and says so', ()=>{
+    const memory = fakeMemory();
+    const files = fakeVolume({});
+    /** @type {number[]} */
+    const errno = [];
+    /** @type {string[]} */
+    const divergences = [];
+    const descriptors = createDescriptors({ files, errno: code=>errno.push(code) });
+    const fns = /** @type {Record<string, any>} */ (createIoFunctions({
+        ...memory, files, errno: code=>errno.push(code),
+        divergence: api=>divergences.push(api),
+    }, descriptors));
+
+    for (const mode of [O_WTEXT, O_U16TEXT, O_U8TEXT])
+    {
+        assert.equal(fns._setmode.handler([1, mode]), -1);
+    }
+    assert.deepEqual(errno, [EINVAL, EINVAL, EINVAL]);
+    assert.deepEqual(divergences, ['_setmode', '_setmode', '_setmode']);
+    assert.equal(fns._setmode.handler([1, O_TEXT]), O_TEXT, 'the mode stayed what it was');
+});
+
+test('_tell is where the next byte goes, counted in the file\'s own bytes', ()=>{
+    // Wine's msvcrt test__creat: "a\nb\n" is six bytes written in text mode.
+    const { memory, fns, errno, open } = build();
+    const text = open('C:\\game\\text.tst', O_CREAT | O_RDWR | O_TEXT);
+    fns._write.handler([text, memory.put('a\nb\n'), 4]);
+    assert.equal(fns._tell.handler([text]), 6);
+    const binary = open('C:\\game\\binary.tst', O_CREAT | O_RDWR | O_BINARY);
+    fns._write.handler([binary, memory.put('a\nb\n'), 4]);
+    assert.equal(fns._tell.handler([binary]), 4);
+    fns._lseek.handler([binary, 1, SEEK_SET]);
+    assert.equal(fns._tell.handler([binary]), 1);
+
+    assert.equal(fns._tell.handler([77]), -1);
+    assert.deepEqual(errno, [EBADF]);
+});
+
+test('_eof is 1 at the end of the file, 0 before it, and -1 for a number not open', ()=>{
+    const { fns, errno, open, read } = build({
+        'C:\\game\\two.bin': bytesOf('ab'), 'C:\\game\\z.txt': bytesOf('a\x1ab'),
+    });
+    const fd = open('C:\\game\\two.bin', O_RDONLY | O_BINARY);
+    assert.equal(fns._eof.handler([fd]), 0);
+    read(fd, 1);
+    assert.equal(fns._eof.handler([fd]), 0);
+    read(fd, 1);
+    assert.equal(fns._eof.handler([fd]), 1);
+    fns._lseek.handler([fd, 10, SEEK_SET]);
+    assert.equal(fns._eof.handler([fd]), 1, 'past the end is at it');
+
+    const z = open('C:\\game\\z.txt', O_RDONLY | O_TEXT);
+    assert.equal(read(z, 16), 'a');
+    assert.equal(fns._eof.handler([z]), 1, 'a ^Z ends the data a read will see');
+
+    assert.equal(fns._eof.handler([77]), -1);
+    assert.deepEqual(errno, [EBADF]);
+});
+
+test('_filelength is the size of the file, and leaves the position where it was', ()=>{
+    const { fns, errno, open, tell } = build({ 'C:\\game\\five.bin': bytesOf('12345') });
+    const fd = open('C:\\game\\five.bin', O_RDONLY);
+    fns._lseek.handler([fd, 2, SEEK_SET]);
+    assert.equal(fns._filelength.handler([fd]), 5);
+    assert.equal(tell(fd), 2);
+    assert.equal(fns._filelength.handler([77]), -1);
+    assert.deepEqual(errno, [EBADF]);
+});
+
+/** @param {Record<string, Uint8Array>} [contents] */
+function withHandles(contents = {}){
+    const memory = fakeMemory();
+    const files = fakeVolume(contents, { directories: ['C:\\', 'C:\\game'] });
+    const handles = fakeHandles(files);
+    /** @type {number[]} */
+    const errno = [];
+    /** @type {[number, string][]} */
+    const console = [];
+    /** @type {string[]} */
+    const divergences = [];
+    const descriptors = createDescriptors({
+        files, handles, errno: code=>errno.push(code),
+        write: (handle, text)=>console.push([handle, text]),
+    });
+    const fns = /** @type {Record<string, any>} */ (createIoFunctions({
+        ...memory, files, errno: code=>errno.push(code), divergence: api=>divergences.push(api),
+    }, descriptors));
+    /** @param {string} path @param {number} flags */
+    const open = (path, flags)=>fns._open.handler([memory.put(path), flags, 0x180]);
+    /** @param {string} name */
+    const text = name=>String.fromCharCode(...files.files[name]);
+    return { memory, files, handles, errno, console, divergences, fns, open, text };
+}
+
+const INVALID_HANDLE_VALUE = -1;
+
+test('_get_osfhandle hands out a kernel32 handle standing at the descriptor\'s position', ()=>{
+    // Wine's msvcrt test_get_osfhandle: what is written through the handle
+    // is in the file, and a descriptor closed has no handle.
+    const { memory, handles, errno, fns, open, text, files } = withHandles();
+    const fd = open('C:\\game\\t_get_osfhandle', O_CREAT | O_RDWR | O_BINARY);
+    const handle = fns._get_osfhandle.handler([fd]);
+    assert.notEqual(handle, INVALID_HANDLE_VALUE);
+    assert.equal(fns._get_osfhandle.handler([fd]), handle, 'the same one every time');
+
+    const file = handles.file(handle);
+    file.position += files.write(file.node, file.position, bytesOf('bar'));
+    assert.equal(text('C:\\game\\t_get_osfhandle'), 'bar');
+    assert.equal(fns._tell.handler([fd]), 3, 'a write through the handle moved the descriptor');
+    fns._lseek.handler([fd, 1, SEEK_SET]);
+    assert.equal(file.position, 1, 'and a seek of the descriptor moves the handle');
+    assert.equal(fns._write.handler([fd, memory.put('X'), 1]), 1);
+    assert.equal(text('C:\\game\\t_get_osfhandle'), 'bXr');
+
+    assert.equal(fns._close.handler([fd]), 0);
+    assert.equal(handles.file(handle), null, 'closing the descriptor closed the handle');
+    assert.deepEqual(files.closed, ['C:\\game\\t_get_osfhandle'], 'and the file, once');
+    assert.equal(fns._get_osfhandle.handler([fd]), INVALID_HANDLE_VALUE);
+    assert.deepEqual(errno, [EBADF]);
+});
+
+test('_get_osfhandle of the console\'s three is the standard handle each stands for', ()=>{
+    const { fns } = withHandles();
+    assert.deepEqual([0, 1, 2].map(fd=>fns._get_osfhandle.handler([fd])), [1, 2, 3]);
+});
+
+test('_open_osfhandle makes a descriptor of a handle, which _close closes', ()=>{
+    // Wine's msvcrt test__open_osfhandle: INVALID_HANDLE_VALUE and a handle
+    // closed already are EBADF; the descriptor is binary unless told text.
+    const { memory, handles, errno, fns, text } = withHandles({
+        'C:\\game\\open_osfhandle.tst': new Uint8Array(0),
+    });
+    assert.equal(fns._open_osfhandle.handler([INVALID_HANDLE_VALUE, 0]), -1);
+    assert.deepEqual(errno.splice(0), [EBADF]);
+
+    const handle = handles.create('C:\\game\\open_osfhandle.tst', false, true);
+    const fd = fns._open_osfhandle.handler([handle, 0]);
+    assert.ok(fd > 2);
+    assert.equal(fns._get_osfhandle.handler([fd]), handle);
+    assert.equal(fns._write.handler([fd, memory.put('a\n'), 2]), 2);
+    assert.equal(text('C:\\game\\open_osfhandle.tst'), 'a\n', 'binary');
+    assert.equal(handles.file(handle).position, 2, 'the handle moved with the descriptor');
+    assert.equal(fns._read.handler([fd, memory.allocate(4), 1]), -1, 'the handle\'s access');
+    assert.equal(fns._close.handler([fd]), 0);
+    assert.equal(handles.file(handle), null);
+    assert.equal(fns._open_osfhandle.handler([handle, 0]), -1);
+    assert.deepEqual(errno.splice(0), [EBADF, EBADF]);
+
+    const textual = fns._open_osfhandle.handler(
+        [handles.create('C:\\game\\open_osfhandle.tst'), O_TEXT | O_APPEND]);
+    assert.equal(fns._write.handler([textual, memory.put('b\n'), 2]), 2);
+    assert.equal(text('C:\\game\\open_osfhandle.tst'), 'a\nb\r\n', 'text, at the end');
+    assert.deepEqual(errno, []);
+});
+
+test('two descriptors on one handle: the first _close closes it, the second fails', ()=>{
+    // Wine's msvcrt test_close.
+    const { handles, errno, fns } = withHandles({ 'C:\\game\\fdopen.tst': new Uint8Array(0) });
+    const handle = handles.create('C:\\game\\fdopen.tst');
+    const fd1 = fns._open_osfhandle.handler([handle, 0]);
+    const fd2 = fns._open_osfhandle.handler([handle, 0]);
+    assert.notEqual(fd1, fd2);
+    assert.deepEqual([fd1, fd2].map(fd=>fns._get_osfhandle.handler([fd])), [handle, handle]);
+    assert.equal(fns._close.handler([fd1]), 0);
+    assert.equal(handles.file(handle), null);
+    assert.equal(fns._close.handler([fd2]), -1);
+    assert.equal(fns._close.handler([fd1]), -1);
+    assert.deepEqual(errno, [EBADF, EBADF]);
+});
+
+test('a descriptor whose handle the program closed itself answers EBADF', ()=>{
+    const { memory, handles, errno, fns, open, files } = withHandles();
+    const fd = open('C:\\game\\closed.bin', O_CREAT | O_RDWR);
+    handles.close(fns._get_osfhandle.handler([fd]));
+    assert.equal(fns._read.handler([fd, memory.allocate(4), 1]), -1);
+    assert.equal(fns._write.handler([fd, memory.put('x'), 1]), -1);
+    assert.equal(fns._close.handler([fd]), -1);
+    assert.deepEqual(errno, [EBADF, EBADF, EBADF]);
+    assert.deepEqual(files.closed, ['C:\\game\\closed.bin'], 'the file closed once, not twice');
+});
+
+test('_open_osfhandle of a standard handle is a descriptor on the console', ()=>{
+    const { memory, console, fns } = withHandles();
+    const fd = fns._open_osfhandle.handler([2, O_TEXT]);
+    assert.ok(fd > 2);
+    assert.equal(fns._write.handler([fd, memory.put('hi'), 2]), 2);
+    assert.deepEqual(console, [[2, 'hi']]);
+    assert.equal(fns._get_osfhandle.handler([fd]), 2);
+    assert.equal(fns._close.handler([fd]), 0);
+    assert.equal(fns._open_osfhandle.handler([2, 0]), fd, 'the number is free again');
+});
+
+test('_open_osfhandle refuses the Unicode translations, as _setmode does', ()=>{
+    const { handles, errno, divergences, fns } = withHandles({
+        'C:\\game\\u.txt': new Uint8Array(0),
+    });
+    assert.equal(fns._open_osfhandle.handler([handles.create('C:\\game\\u.txt'), O_WTEXT]), -1);
+    assert.deepEqual(errno, [EINVAL]);
+    assert.deepEqual(divergences, ['_open_osfhandle']);
+});
+
+test('without a handle table the two are not exported', ()=>{
+    const { fns } = build();
+    assert.equal(fns._get_osfhandle, undefined);
+    assert.equal(fns._open_osfhandle, undefined);
+    const { fns: joined } = withHandles();
+    assert.deepEqual([joined._get_osfhandle.argBytes, joined._open_osfhandle.argBytes], [4, 8]);
+});
+
 test('every entry is cdecl with the argument count it reads', ()=>{
     const { fns } = build();
     const expected = {
         _open: 12, _close: 4, _read: 12, _write: 12, _lseek: 12, _fstat: 8, _stat: 8,
+        _setmode: 8, _tell: 4, _eof: 4, _filelength: 4,
     };
     for (const [name, argBytes] of Object.entries(expected))
     {

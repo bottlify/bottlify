@@ -2108,7 +2108,6 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * BOOL GrayStringA(HDC, HBRUSH, GRAYSTRINGPROC, LPARAM, int, int, int, int, int)
          * LONG TabbedTextOutA(HDC, int, int, LPCSTR, int, int, const INT *, int)
          * BOOL WinHelpA(HWND, LPCSTR, UINT, ULONG_PTR)
-         * HWND GetNextDlgTabItem(HWND, HWND, BOOL)
          * BOOL ExitWindowsEx(UINT, DWORD)
          */
         LoadAcceleratorsA: { argBytes: 8, handler: ()=>0 },
@@ -2117,7 +2116,6 @@ export function createSystemFunctions({ host, live, windows, classes }){
         GrayStringA: { argBytes: 36, handler: ()=>0 },
         TabbedTextOutA: { argBytes: 32, handler: ()=>0 },
         WinHelpA: { argBytes: 16, handler: ()=>0 },
-        GetNextDlgTabItem: { argBytes: 12, handler: ()=>0 },
         ExitWindowsEx: {
             argBytes: 8,
             handler: ()=>{

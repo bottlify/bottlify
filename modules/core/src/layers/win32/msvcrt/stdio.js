@@ -90,26 +90,29 @@ const IONBF = 0x0004;
 /**
  * The mode string, read as the runtime reads it: the first letter says what,
  * `+` widens it, and `b` or `t` names the translation; neither leaves it to
- * the runtime's `_fmode`.
+ * the runtime's `_fmode`. `D` makes the file temporary, removed when the
+ * stream closes.
  *
  * @param {string} mode
  * @returns {{ read: boolean, write: boolean, create: boolean, truncate: boolean,
- *            append: boolean, flags: number, text: boolean | null } | null}
+ *            append: boolean, flags: number, text: boolean | null,
+ *            temporary: boolean } | null}
  */
 function parseMode(mode){
     const rest = mode.slice(1);
     const plus = rest.includes('+');
     const text = /[bt]/.test(rest) ? rest.lastIndexOf('t') > rest.lastIndexOf('b') : null;
+    const temporary = rest.includes('D');
     switch (mode[0]){
         case 'r':
             return { read: true, write: plus, create: false, truncate: false, append: false,
-                flags: plus ? IORW : IOREAD, text };
+                flags: plus ? IORW : IOREAD, text, temporary };
         case 'w':
             return { read: plus, write: true, create: true, truncate: true, append: false,
-                flags: plus ? IORW : IOWRT, text };
+                flags: plus ? IORW : IOWRT, text, temporary };
         case 'a':
             return { read: plus, write: true, create: true, truncate: false, append: true,
-                flags: plus ? IORW : IOWRT, text };
+                flags: plus ? IORW : IOWRT, text, temporary };
         default:
             return null;
     }
@@ -143,6 +146,18 @@ export function createStdioFunctions(host){
     const bytesOf = text=>Uint8Array.from(text, character=>character.charCodeAt(0) & 0xff);
 
     /**
+     * Which of `_iob`'s standard three a record is, or -1.
+     *
+     * @param {number} pointer
+     */
+    const standardIndex = pointer=>{
+        const base = host.iob?.() ?? 0;
+        const offset = (pointer >>> 0) - base;
+        return base === 0 || offset < 0 || offset % FILE_SIZE !== 0
+            || offset / FILE_SIZE >= STANDARD_STREAMS ? -1 : offset / FILE_SIZE;
+    };
+
+    /**
      * The stream a record is. One of `_iob`'s first three is a standard
      * stream the first time it is used: nothing opens them, and the program's
      * `stdout` is only ever the address of a record in the runtime's image.
@@ -156,20 +171,28 @@ export function createStdioFunctions(host){
         {
             return known;
         }
-        const base = host.iob?.() ?? 0;
-        const offset = (pointer >>> 0) - base;
-        if (base === 0 || offset < 0 || offset % FILE_SIZE !== 0
-            || offset / FILE_SIZE >= STANDARD_STREAMS)
+        const index = standardIndex(pointer);
+        if (index < 0)
         {
             return null;
         }
-        const index = offset / FILE_SIZE;
         /** @type {Stream} */
         const stream = {
             record: pointer >>> 0, fd: index, flags: index === 0 ? IOREAD : IOWRT, pushback: [],
         };
         streams.set(pointer >>> 0, stream);
         return stream;
+    };
+
+    /**
+     * stdin, stdout or stderr by its index in `_iob`, or null before the
+     * runtime's image has placed it.
+     *
+     * @param {number} index
+     */
+    const standardStream = index=>{
+        const base = host.iob?.() ?? 0;
+        return base === 0 ? null : streamOf(base + index * FILE_SIZE);
     };
 
     /**
@@ -206,6 +229,71 @@ export function createStdioFunctions(host){
     const descriptorOf = stream=>descriptors.get(stream.fd);
 
     /**
+     * Points a stream at a descriptor: what `_fileno` and the macros read
+     * from the record, and no bytes held, so the macros call back in.
+     *
+     * @param {Stream} stream @param {number} fd @param {number} flags
+     */
+    const standOn = (stream, fd, flags)=>{
+        stream.fd = fd;
+        stream.pushback.length = 0;
+        writeU32(stream.record + FILE_FILE, fd);
+        writeU32(stream.record + FILE_CNT, 0);
+        setFlags(stream, flags);
+    };
+
+    /**
+     * A new record for a stream on a descriptor, the program's to pass back
+     * until fclose frees it; 0 when the heap has no room.
+     *
+     * @param {number} fd @param {number} flags
+     */
+    const attach = (fd, flags)=>{
+        const record = host.allocate(FILE_SIZE);
+        if (record === 0)
+        {
+            return 0;
+        }
+        host.writeMemory(record, new Uint8Array(FILE_SIZE));
+        const stream = { record, fd, flags: 0, pushback: [] };
+        standOn(stream, fd, flags);
+        streams.set(record, stream);
+        return record;
+    };
+
+    /**
+     * Ends a stream whose descriptor is already closed. Its record is freed,
+     * unless it is one of the standard three, which are the runtime's: one
+     * that freopen moved to a file goes back on the console it started on.
+     *
+     * @param {Stream} stream
+     */
+    const forget = stream=>{
+        const index = standardIndex(stream.record);
+        if (index < 0)
+        {
+            streams.delete(stream.record);
+            host.free(stream.record);
+        }
+        else if (stream.fd !== index)
+        {
+            standOn(stream, index, index === 0 ? IOREAD : IOWRT);
+        }
+    };
+
+    /**
+     * fclose's body: the descriptor closes -- the console's stays open, as it
+     * always does -- and the stream ends.
+     *
+     * @param {Stream} stream @returns {boolean} whether the descriptor closed
+     */
+    const release = stream=>{
+        const closed = descriptors.close(stream.fd);
+        forget(stream);
+        return closed;
+    };
+
+    /**
      * Where the program is in the stream: the descriptor's position, less
      * what ungetc gave back and the program has not read again.
      *
@@ -213,6 +301,31 @@ export function createStdioFunctions(host){
      */
     const tellOf = stream=>
         Math.max(0, (descriptorOf(stream)?.position ?? 0) - stream.pushback.length);
+
+    /**
+     * Moves a stream to a place in its file. The end-of-file condition
+     * clears, which a program that rewinds to read again depends on, and
+     * what ungetc gave back is forgotten. False for the console, which does
+     * not seek, and with EINVAL for a place before the start.
+     *
+     * @param {Stream} stream @param {number} position
+     */
+    const reposition = (stream, position)=>{
+        const descriptor = descriptorOf(stream);
+        if (!descriptor || descriptor.node === null)
+        {
+            return false;
+        }
+        if (position < 0)
+        {
+            fail(EINVAL);
+            return false;
+        }
+        descriptors.seek(descriptor, position);
+        stream.pushback.length = 0;
+        setFlags(stream, stream.flags & ~IOEOF);
+        return true;
+    };
 
     /**
      * Up to `limit` bytes as the program reads them: what ungetc gave back
@@ -380,18 +493,69 @@ export function createStdioFunctions(host){
             {
                 return 0;
             }
-            const record = host.allocate(FILE_SIZE);
+            const record = attach(fd, parsed.flags);
             if (record === 0)
             {
                 descriptors.close(fd);
+            }
+            return record;
+        }),
+
+        /**
+         * FILE *freopen(const char *filename, const char *mode, FILE *stream)
+         *
+         * Closes the stream's file and opens the one named in the same
+         * record, which is the answer. When the new file cannot be opened
+         * the old one is closed all the same, the stream with it, and the
+         * answer is NULL (Wine's msvcrt test_freopen). A null or empty name,
+         * a null stream and a mode that is not one are EINVAL, and close
+         * nothing.
+         */
+        freopen: cdecl(12, ([path, mode, pointer])=>{
+            const stream = argument(pointer);
+            const parsed = (mode >>> 0) === 0 ? null : parseMode(readString(mode));
+            const text = (path >>> 0) === 0 ? '' : readString(path);
+            if (stream && (!parsed || text === ''))
+            {
+                fail(EINVAL);
+            }
+            if (!stream || !parsed || text === '')
+            {
                 return 0;
             }
-            host.writeMemory(record, new Uint8Array(FILE_SIZE));
-            writeU32(record + FILE_FILE, fd);
-            const stream = { record, fd, flags: 0, pushback: [] };
-            setFlags(stream, parsed.flags);
-            streams.set(record, stream);
-            return record;
+            descriptors.close(stream.fd);
+            const fd = descriptors.open(text, parsed);
+            if (fd < 0)
+            {
+                forget(stream);
+                return 0;
+            }
+            standOn(stream, fd, parsed.flags);
+            return stream.record;
+        }),
+
+        /**
+         * FILE *_fdopen(int fd, const char *mode)
+         *
+         * A stream on a descriptor already open, reading and writing from
+         * where it stands; fclose closes the two together. The mode says
+         * what the stream may do, and the translation stays the
+         * descriptor's. A mode that is not one is EINVAL, checked before the
+         * number, which is EBADF when it is not open.
+         */
+        _fdopen: cdecl(8, ([fd, mode])=>{
+            const parsed = (mode >>> 0) === 0 ? null : parseMode(readString(mode));
+            if (!parsed)
+            {
+                fail(EINVAL);
+                return 0;
+            }
+            if (!descriptors.get(fd | 0))
+            {
+                fail(EBADF);
+                return 0;
+            }
+            return attach(fd | 0, parsed.flags);
         }),
 
         /**
@@ -406,15 +570,37 @@ export function createStdioFunctions(host){
             {
                 return EOF;
             }
-            // A standard stream is the runtime's, not the program's to free.
-            if (stream.fd < STANDARD_STREAMS)
+            return release(stream) ? 0 : EOF;
+        }),
+
+        /**
+         * int _fcloseall(void)
+         *
+         * fclose on every stream but stdin, stdout and stderr, and the count
+         * of them (Wine's msvcrt test_fopen_fclose_fcloseall).
+         */
+        _fcloseall: cdecl(0, ()=>{
+            const opened = [...streams.values()].filter(stream=>standardIndex(stream.record) < 0);
+            opened.forEach(release);
+            return opened.length;
+        }),
+
+        /**
+         * int _flushall(void)
+         *
+         * fflush on every stream: nothing waits to be written, and what
+         * ungetc gave back is forgotten, so the next read comes from where
+         * the descriptor is (Wine's msvcrt test_fflush). The answer is the
+         * count of streams open, the standard three always among them.
+         */
+        _flushall: cdecl(0, ()=>{
+            let opened = (host.iob?.() ?? 0) === 0 ? 0 : STANDARD_STREAMS;
+            for (const stream of streams.values())
             {
-                return 0;
+                stream.pushback.length = 0;
+                opened += standardIndex(stream.record) < 0 ? 1 : 0;
             }
-            const closed = descriptors.close(stream.fd);
-            streams.delete(pointer >>> 0);
-            host.free(pointer >>> 0);
-            return closed ? 0 : EOF;
+            return opened;
         }),
 
         /**
@@ -467,13 +653,7 @@ export function createStdioFunctions(host){
             return Math.floor(stored / (size >>> 0));
         }),
 
-        /**
-         * int fseek(FILE *stream, long offset, int origin)
-         *
-         * Zero on success; a seek clears the end-of-file condition, which a
-         * program that rewinds to read again depends on, and forgets what
-         * ungetc gave back.
-         */
+        /** int fseek(FILE *stream, long offset, int origin) -- zero on success. */
         fseek: cdecl(12, ([pointer, offset, origin])=>{
             const stream = argument(pointer);
             const descriptor = stream ? descriptorOf(stream) : null;
@@ -484,21 +664,67 @@ export function createStdioFunctions(host){
             const base = origin === SEEK_SET ? 0
                 : origin === SEEK_CUR ? tellOf(stream)
                     : origin === SEEK_END ? descriptors.size(descriptor) : -1;
-            if (base < 0 || base + (offset | 0) < 0)
+            if (base < 0)
             {
                 fail(EINVAL);
                 return -1;
             }
-            descriptors.seek(descriptor, base + (offset | 0));
-            stream.pushback.length = 0;
-            setFlags(stream, stream.flags & ~IOEOF);
-            return 0;
+            return reposition(stream, base + (offset | 0)) ? 0 : -1;
         }),
 
         /** long ftell(FILE *stream) -- -1 for a stream that is not one. */
         ftell: cdecl(4, ([pointer])=>{
             const stream = argument(pointer);
             return stream ? tellOf(stream) : -1;
+        }),
+
+        /**
+         * int fgetpos(FILE *stream, fpos_t *pos)
+         *
+         * The position ftell answers, stored as the eight bytes of an fpos_t;
+         * nonzero with EINVAL for a null argument.
+         */
+        fgetpos: cdecl(8, ([pointer, pos])=>{
+            const stream = argument(pointer);
+            if (stream && (pos >>> 0) === 0)
+            {
+                fail(EINVAL);
+            }
+            if (!stream || (pos >>> 0) === 0)
+            {
+                return -1;
+            }
+            const bytes = new Uint8Array(8);
+            new DataView(bytes.buffer).setBigInt64(0, BigInt(tellOf(stream)), true);
+            host.writeMemory(pos >>> 0, bytes);
+            return 0;
+        }),
+
+        /**
+         * int fsetpos(FILE *stream, const fpos_t *pos)
+         *
+         * fseek to what fgetpos stored: the end of the file clears and what
+         * ungetc gave back is gone. Nonzero with EINVAL for a null argument or
+         * a position before the start, EBADF for the console.
+         */
+        fsetpos: cdecl(8, ([pointer, pos])=>{
+            const stream = argument(pointer);
+            if (stream && (pos >>> 0) === 0)
+            {
+                fail(EINVAL);
+            }
+            if (!stream || (pos >>> 0) === 0)
+            {
+                return -1;
+            }
+            if (descriptorOf(stream)?.node === null)
+            {
+                fail(EBADF);
+                return -1;
+            }
+            const stored = host.readMemory(pos >>> 0, 8);
+            const position = new DataView(stored.buffer, stored.byteOffset, 8).getBigInt64(0, true);
+            return reposition(stream, Number(position)) ? 0 : -1;
         }),
 
         /** void rewind(FILE *stream) -- the start, with both conditions cleared. */
@@ -621,6 +847,21 @@ export function createStdioFunctions(host){
 
         fputc,
         putc: fputc,
+
+        /**
+         * int getchar(void) / int putchar(int c)
+         *
+         * getc on stdin and putc on stdout: the same streams, and so the same
+         * records, the program's own macros read.
+         */
+        getchar: cdecl(0, ()=>{
+            const stream = standardStream(0);
+            return stream ? nextByte(stream) : EOF;
+        }),
+        putchar: cdecl(4, ([c])=>{
+            const stream = standardStream(1);
+            return stream ? putByte(stream, c) : EOF;
+        }),
 
         /**
          * int _flsbuf(int c, FILE *stream)

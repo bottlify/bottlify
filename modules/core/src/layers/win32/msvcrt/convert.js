@@ -60,14 +60,19 @@ function digitValue(character){
 }
 
 /**
- * The integer scanner behind strtol and strtoul.
+ * The integer scanner behind strtol and strtoul, and scanf's integers.
  *
  * @param {string} text
  * @param {number} requestedBase  Zero means "let the prefix decide".
+ * @param {boolean} [zeroBeforeX]  Read "0x" with no hex digit after it as a
+ *        zero the x ends, as scanf here does. Without it the "0x" is a prefix
+ *        with nothing after it and nothing converts, which is strtol's
+ *        reading: Wine's msvcrt test_strtol has "-0x" leave the end pointer
+ *        at the start.
  * @returns {{ magnitude: bigint, negative: boolean, end: number } | null}
  *          Null when nothing converted, which is not the same as a zero.
  */
-export function scanInteger(text, requestedBase){
+export function scanInteger(text, requestedBase, zeroBeforeX = false){
     let at = 0;
     while (at < text.length && WHITESPACE.includes(text[at]))
     {
@@ -83,11 +88,8 @@ export function scanInteger(text, requestedBase){
 
     let base = requestedBase;
     const hexPrefix = text[at] === '0' && (text[at + 1] === 'x' || text[at + 1] === 'X');
-    // "0x" is only a prefix when a hex digit follows it. Otherwise the zero is
-    // the whole number and the 'x' is where the caller resumes -- which is what
-    // makes strtol("0xzz") answer 0 rather than failing.
-    if ((base === 0 || base === 16) && hexPrefix && digitValue(text[at + 2]) >= 0
-        && digitValue(text[at + 2]) < 16)
+    const hexDigitAfter = digitValue(text[at + 2]) >= 0 && digitValue(text[at + 2]) < 16;
+    if ((base === 0 || base === 16) && hexPrefix && (hexDigitAfter || !zeroBeforeX))
     {
         base = 16;
         at += 2;
@@ -271,7 +273,10 @@ export function createConversionFunctions(host){
          * unsigned long strtoul(const char *str, char **end, int base)
          *
          * A minus sign is accepted and the magnitude is negated within 32 bits,
-         * which C requires: strtoul("-1") is ULONG_MAX, not a failure.
+         * which C requires: strtoul("-1") is ULONG_MAX, not a failure. A
+         * magnitude out of range is clamped before the sign is applied, so a
+         * negative one comes back as ULONG_MAX negated, 1 (Wine's msvcrt
+         * test_strtol).
          */
         strtoul: strtoInteger(12, (magnitude, negative)=>{
             if (magnitude > ULONG_MAX)
@@ -279,7 +284,7 @@ export function createConversionFunctions(host){
                 return null;
             }
             return negative ? BigInt.asUintN(32, -magnitude) : magnitude;
-        }, ()=>ULONG_MAX),
+        }, negative=>(negative ? BigInt.asUintN(32, -ULONG_MAX) : ULONG_MAX)),
 
         /** char *_ltoa(long value, char *buffer, int radix) */
         _ltoa: toText(1, true),

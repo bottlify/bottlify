@@ -905,6 +905,41 @@ test('a window that takes the activation is told, and the one it replaced is tol
     assert.equal(context.queue.depth(), 0, 'sent before the call returns, none of it posted');
 });
 
+test('activation leaving the application for the desktop tells it WM_ACTIVATEAPP(0), and '
+    + 'coming back WM_ACTIVATEAPP(1)', ()=>{
+    // user32's message tests (SetForegroundWindowSeq): SetForegroundWindow
+    // of the desktop away from the application's foreground window sends
+    // that window WM_NCACTIVATE(0), WM_ACTIVATE(WA_INACTIVE),
+    // WM_ACTIVATEAPP(0) and WM_KILLFOCUS. WM_ACTIVATEAPP is documented as
+    // sent to the application whose window is being activated and to the
+    // one whose window is being deactivated -- here, to each of its
+    // top-level windows, as when it first became active.
+    const WM_ACTIVATEAPP = 0x001c;
+    const WM_ACTIVATE = 0x0006;
+    const WM_SETFOCUS = 0x0007;
+    const WM_KILLFOCUS = 0x0008;
+    const context = setup();
+    const { fns, memory, dispatched } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+    const hidden = createWindow(fns, memory);
+    fns.SetForegroundWindow.handler([hwnd]);
+    const told = ()=>dispatched.filter(entry=>entry.hwnd === hwnd || entry.hwnd === hidden)
+        .map(({ hwnd: to, message, wParam })=>[to, message,
+            message === WM_KILLFOCUS || message === WM_SETFOCUS ? 0 : wParam]);
+    dispatched.length = 0;
+
+    fns.SetForegroundWindow.handler([fns.GetDesktopWindow.handler()]);
+    assert.deepEqual(told(), [[hwnd, WM_NCACTIVATE, 0], [hwnd, WM_ACTIVATE, 0],
+        [hwnd, WM_ACTIVATEAPP, 0], [hidden, WM_ACTIVATEAPP, 0], [hwnd, WM_KILLFOCUS, 0]]);
+
+    dispatched.length = 0;
+    fns.SetForegroundWindow.handler([hwnd]);
+    assert.deepEqual(told(), [[hwnd, WM_ACTIVATEAPP, 1], [hidden, WM_ACTIVATEAPP, 1],
+        [hwnd, WM_NCACTIVATE, 1], [hwnd, WM_ACTIVATE, 1], [hwnd, WM_SETFOCUS, 0]]);
+});
+
 test('SetFocus into another window sends the activation set, then the focus', ()=>{
     const context = setup();
     putClass(context.memory);
@@ -974,6 +1009,54 @@ test('a window whose procedure says the pointer passes through passes it beneath
 
     caption = under;
     assert.deepEqual(press(), [under, WM_NCLBUTTONDOWN, HTCAPTION, (y << 16 | x) >>> 0]);
+});
+
+test('a range of messages asked for takes a click in the form the program\'s procedure '
+    + 'gives it, not the one it arrived in', ()=>{
+    // PeekMessage and GetMessage retrieve only the messages in the range
+    // asked for, and a mouse message's form is settled as it is retrieved:
+    // user32's window tests (test_mouse_input) take the second click of a
+    // pair over a frame as a client message once the window has the
+    // capture. A click a procedure calls a caption is not taken by a range
+    // of client messages and is by the frame's; a peek that leaves it sees
+    // that form too; and the other way round.
+    const WM_NCHITTEST = 0x0084;
+    const WM_NCLBUTTONDOWN = 0x00a1;
+    const WM_NCMOUSEFIRST = 0x00a0;
+    const WM_NCMOUSELAST = 0x00ad;
+    const WM_MOUSEFIRST = 0x0200;
+    const WM_MOUSELAST = 0x020e;
+    const WS_CAPTION = 0x00c00000;
+    const HTCLIENT = 1;
+    const HTCAPTION = 2;
+    let hit = HTCAPTION;
+    const context = setup({ reply: message=>(message.message === WM_NCHITTEST ? hit : 0) });
+    const { fns, memory, queue } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    /** @param {number} first @param {number} last @param {number} how */
+    const peek = (first, last, how)=>(fns.PeekMessageA.handler([MSG_BUFFER, 0, first, last,
+        how]) === 0 ? null : [MSG.message, MSG.wParam].map(at=>memory.u32(MSG_BUFFER + at)));
+
+    const plain = createWindow(fns, memory, { style: WS_VISIBLE });
+    memory.putU32s(TEXT_BUFFER, [5, 5]);
+    fns.ClientToScreen.handler([plain, TEXT_BUFFER]);
+    queue.post({ hwnd: 0, message: WM_LBUTTONDOWN, wParam: 1, lParam: 0,
+        x: memory.u32(TEXT_BUFFER), y: memory.u32(TEXT_BUFFER + 4) });
+    assert.equal(peek(WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE), null, 'not a client message');
+    assert.deepEqual(peek(WM_NCMOUSEFIRST, WM_NCMOUSELAST, PM_NOREMOVE),
+        [WM_NCLBUTTONDOWN, HTCAPTION]);
+    assert.deepEqual(peek(WM_NCMOUSEFIRST, WM_NCMOUSELAST, PM_REMOVE),
+        [WM_NCLBUTTONDOWN, HTCAPTION]);
+    fns.DestroyWindow.handler([plain]);
+
+    hit = HTCLIENT;
+    const framed = createWindow(fns, memory, { style: WS_CAPTION | WS_VISIBLE });
+    fns.GetWindowRect.handler([framed, TEXT_BUFFER]);
+    queue.post({ hwnd: 0, message: WM_LBUTTONDOWN, wParam: 1, lParam: 0,
+        x: memory.u32(TEXT_BUFFER) + 40, y: memory.u32(TEXT_BUFFER + 4) + 8 });
+    assert.equal(peek(WM_NCMOUSEFIRST, WM_NCMOUSELAST, PM_REMOVE), null, 'not a frame message');
+    assert.equal(peek(WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE)?.[0], WM_LBUTTONDOWN);
 });
 
 test('WM_SETCURSOR is sent to the window under the pointer as each mouse message is taken', ()=>{

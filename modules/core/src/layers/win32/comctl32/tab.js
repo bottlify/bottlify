@@ -17,8 +17,9 @@
  *
  * In the tab form the focus is the selection: moving one moves the other.
  * The button form (TCS_BUTTONS) keeps them apart -- the focus walks the
- * buttons and the parent hears TCN_FOCUSCHANGE -- and is drawn here as the
- * tab form is. Images are kept as indices and not drawn.
+ * buttons and the parent hears TCN_FOCUSCHANGE -- and is drawn as a row of
+ * push buttons over a pane with no border. Images are kept as indices and
+ * not drawn.
  */
 
 import {
@@ -36,6 +37,7 @@ export const TAB_CLASS = 'SysTabControl32';
 export const TAB_ATOM = 0x8012;
 
 /** Styles. */
+export const TCS_FLATBUTTONS = 0x0008;
 export const TCS_VERTICAL = 0x0080;
 export const TCS_BUTTONS = 0x0100;
 export const TCS_MULTILINE = 0x0200;
@@ -461,8 +463,27 @@ export function createTabProcedure(host, tk){
         const shadow = tk.color(COLOR_3DSHADOW);
         const dark = tk.color(COLOR_3DDKSHADOW);
         draw.fill(hdc, tk.clientRect(record), face);
-        tk.buttonEdge(hdc, paneOf(record), false);
         const ink = tk.disabled(record) ? tk.color(COLOR_GRAYTEXT) : tk.color(COLOR_BTNTEXT);
+        if (buttons(record))
+        {
+            // Push buttons over a pane with no border: a pressed one sunk in
+            // and its label moved with it, and in the flat form the others
+            // level with the face.
+            layout(record).forEach((rect, index)=>{
+                const pressed = (held.items[index].state & TCIS_BUTTONPRESSED) !== 0;
+                if (pressed || (record.style & TCS_FLATBUTTONS) === 0)
+                {
+                    tk.buttonEdge(hdc, rect, pressed);
+                }
+                const shift = pressed ? 1 : 0;
+                const label = { left: rect.left + shift, top: rect.top + shift,
+                    right: rect.right + shift, bottom: rect.bottom + shift };
+                tk.drawText(hdc, held.items[index].text, label,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE, ink);
+            });
+            return;
+        }
+        tk.buttonEdge(hdc, paneOf(record), false);
         layout(record).forEach((rect, index)=>{
             // The selected tab stands out of the row and over the pane's own
             // top edge, so the two read as one piece.
