@@ -1534,6 +1534,8 @@ export async function mapShippedLibraries(options){
 
     const { order, missing } = await planDependencies({
         entry: executable,
+        entryName: imagePath.slice(
+            Math.max(imagePath.lastIndexOf('\\'), imagePath.lastIndexOf('/')) + 1),
         isSystem,
         isKnownDll,
         // A file the program brought is read from beside it; a file it did not
@@ -3957,8 +3959,8 @@ async function buildApp(options){
     //
     // Every one is mapped before any is bound, because they import each other:
     // binding the first needs the second's exports, which need the second's
-    // base. This is also why the executable is bound last, below, rather than
-    // here -- by then every library it names has an address.
+    // base. And they are bound after the program is mapped and known by name,
+    // because a library may import from the program that loads it.
     const shipped = await mapShippedLibraries({
         executable: options.executable,
         imagePath: options.imagePath ?? 'C:\\app.exe',
@@ -3971,11 +3973,6 @@ async function buildApp(options){
         base: MODULE_BASE + Object.keys(allLibraries).length * MODULE_STRIDE,
         limit: STACK_POOL_BASE,
     });
-    for (const library of shipped)
-    {
-        loader.bind(library.mapped, resolveImport, missingImport);
-        loader.bindDelayed(library.mapped, resolveImport, missingImport);
-    }
     // Where a library asked for later goes: after the ones that came with the
     // program, or after the system modules when there were none.
     nextLibraryBase = shipped.reduce(
@@ -4019,6 +4016,11 @@ async function buildApp(options){
     // module already loaded, rather than a second copy at the one base an
     // image without relocations can take.
     byName.set(moduleKeyOf(mainModule.path), mainModule);
+    for (const library of shipped)
+    {
+        loader.bind(library.mapped, resolveImport, missingImport);
+        loader.bindDelayed(library.mapped, resolveImport, missingImport);
+    }
 
     // What the process that asked for this one wrote into it before it existed.
     // This is the first moment at which the addresses those writes name mean

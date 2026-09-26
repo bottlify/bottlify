@@ -46,6 +46,12 @@ import { parsePe, readImports } from './pe.js';
 /**
  * @param {Object} options
  * @param {Uint8Array} options.entry   The executable.
+ * @param {string} [options.entryName]
+ *        The executable's file name. A library that imports from the program
+ *        names it, and is bound to the program already there: Windows looks in
+ *        the loaded-module list before it looks on disk, and a second copy
+ *        planned as a library would have the program's own startup run as its
+ *        DllMain.
  * @param {(name: string) => Promise<Uint8Array | null>} options.readLibrary
  *        Finds a library beside the program and reads it, or answers null when
  *        there is no such file. Asynchronous because the volume may have to
@@ -64,13 +70,13 @@ import { parsePe, readImports } from './pe.js';
  *        recorded rather than thrown, because a program that never calls into
  *        one still runs, and one that does fails where it called.
  */
-export async function planDependencies({ entry, readLibrary, isSystem, isKnownDll }){
+export async function planDependencies({ entry, entryName, readLibrary, isSystem, isKnownDll }){
     /** @type {Dependency[]} */
     const order = [];
     /** @type {string[]} */
     const missing = [];
     /** Lower-cased, because an import descriptor's spelling is not dependable. */
-    const seen = new Set();
+    const seen = new Set(entryName ? [entryName.toLowerCase()] : []);
 
     /**
      * @param {Uint8Array} file

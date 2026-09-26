@@ -493,6 +493,22 @@ test('a library that would reach past the modules\' space is refused, not mapped
             && payload.names.includes('second.dll') && payload.reason === 'no room'));
     });
 
+test('a library that imports from the program is not given a second copy of the program',
+    async()=>{
+        const executable = movable(new Uint8Array(buildExe({
+            imports: { 'game.dll': ['Anything'] }, code: ()=>[0xc3],
+        })));
+        const game = movable(new Uint8Array(buildExe({
+            imports: { 'GAME.EXE': ['Anything'] }, code: ()=>[0xc3],
+        })));
+        const { placed, emitted } = await mapBeside(
+            { 'game.dll': game, 'Game.exe': executable }, executable,
+            { base: 0x02000000, limit: 0x08000000 });
+
+        assert.deepEqual(placed.map(one=>one.name), ['game.dll']);
+        assert.ok(!emitted.some(([, payload])=>payload?.missing?.length > 0));
+    });
+
 test('a parent\'s deferred writes land only inside the child it wrote them for', ()=>{
     // A write that falls outside the image was addressing a mapping this
     // process does not have. Putting the bytes down anyway corrupts whatever
