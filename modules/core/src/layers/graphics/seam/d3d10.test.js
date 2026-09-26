@@ -24,10 +24,9 @@ import { createPublisher } from './com.js';
 import {
     ID3D10BLOB_SLOTS, ID3D10BUFFER_SLOTS, ID3D10DEVICE_SLOTS, ID3D10MULTITHREAD_SLOTS,
     ID3D10QUERY_SLOTS, ID3D10SHADERREFLECTION_SLOTS, ID3D10STATEBLOCK_SLOTS, ID3D10TEXTURE_SLOTS,
-    ID3D10VIEW_SLOTS,
-    IDXGIADAPTER1_SLOTS, IDXGIADAPTER_SLOTS, IDXGIDEVICE1_SLOTS, IDXGIDEVICE_SLOTS,
-    IDXGIFACTORY_SLOTS, IDXGIOUTPUT_SLOTS, IDXGIRESOURCE_SLOTS, IDXGISURFACE_SLOTS,
-    IDXGISWAPCHAIN_SLOTS, createDirect3D10Seam,
+    ID3D10VIEW_SLOTS, IDXGIADAPTER1_SLOTS, IDXGIADAPTER_SLOTS, IDXGIDEVICE1_SLOTS,
+    IDXGIDEVICE_SLOTS, IDXGIFACTORY1_SLOTS, IDXGIFACTORY_SLOTS, IDXGIOUTPUT_SLOTS,
+    IDXGIRESOURCE_SLOTS, IDXGISURFACE_SLOTS, IDXGISWAPCHAIN_SLOTS, createDirect3D10Seam,
 } from './d3d10.js';
 import {
     D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE, D3D10_MAP, D3D10_PRIMITIVE_TOPOLOGY,
@@ -1034,6 +1033,36 @@ test('a compile is refused as a failed compile, with the reason in the error blo
     {
         assert.equal(entries[entry].argBytes, bytes, entry);
     }
+});
+
+test('DXGI 1.1: the second factory entry point answers as IDXGIFactory1', ()=>{
+    // After Wine's dxgi test_create_factory.
+    const h = seamed();
+    const factoryAt = h.box.place([0xdeadbeef]);
+    assert.equal(h.dxgi.CreateDXGIFactory1.handler([h.box.placeGuid(IID.IDXGIDevice),
+        factoryAt]) >>> 0, 0x80004002);
+    assert.equal(h.box.memory.readU32(factoryAt), 0);
+    assert.equal(h.dxgi.CreateDXGIFactory1.handler([h.box.placeGuid(IID.IDXGIFactory1),
+        factoryAt]) >>> 0, S_OK);
+    const factory = h.box.memory.readU32(factoryAt);
+    assert.equal(h.box.call(factory, slot(IDXGIFACTORY1_SLOTS, 'IsCurrent')), 1);
+    const adapterAt = h.box.place([0]);
+    assert.equal(h.box.call(factory, slot(IDXGIFACTORY1_SLOTS, 'EnumAdapters1'),
+        [0, adapterAt]), S_OK);
+    const adapter = h.box.memory.readU32(adapterAt);
+    const descAt = h.box.allocate(0x128);
+    assert.equal(h.box.call(adapter, slot(IDXGIADAPTER1_SLOTS, 'GetDesc1'), [descAt]), S_OK,
+        'an IDXGIAdapter1');
+    assert.equal(h.box.call(factory, slot(IDXGIFACTORY1_SLOTS, 'EnumAdapters1'),
+        [1, adapterAt]), 0x887a0002, 'DXGI_ERROR_NOT_FOUND');
+
+    const firstAt = h.box.place([0]);
+    assert.equal(h.dxgi.CreateDXGIFactory.handler([h.box.placeGuid(IID.IDXGIFactory), firstAt])
+        >>> 0, S_OK);
+    const queried = h.box.place([0]);
+    assert.equal(h.box.call(h.box.memory.readU32(firstAt), 0,
+        [h.box.placeGuid(IID.IDXGIFactory1), queried]), 0x80004002,
+    'a first-version factory is not the second');
 });
 
 test('a state block is made from a mask in guest memory and captures through its vtable', ()=>{

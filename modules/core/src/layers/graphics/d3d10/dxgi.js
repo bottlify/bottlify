@@ -152,9 +152,31 @@ export function CreateDXGIFactory(iid, out, options = {}){
 }
 
 /**
+ * DXGI 1.1's entry point: the same factory, answering as IDXGIFactory1 too.
+ * Only a factory made here does; one made by the first entry point, or
+ * implicitly for a device, stays a first-version factory.
+ *
+ * @param {string} iid
+ * @param {{ object?: any }} out
  * @param {FactoryOptions} [options]
+ * @returns {number}
  */
-export function createFactory(options = {}){
+export function CreateDXGIFactory1(iid, out, options = {}){
+    if (iid !== IID.IUnknown && iid !== IID.IDXGIObject && iid !== IID.IDXGIFactory
+        && iid !== IID.IDXGIFactory1)
+    {
+        out.object = null;
+        return E_NOINTERFACE;
+    }
+    out.object = createFactory(options, true);
+    return S_OK;
+}
+
+/**
+ * @param {FactoryOptions} [options]
+ * @param {boolean} [secondVersion]  Whether it answers as IDXGIFactory1.
+ */
+export function createFactory(options = {}, secondVersion = false){
     const configs = options.adapters ?? DEFAULT_ADAPTERS;
     const windowClientSize = options.windowClientSize ?? (()=>({ width: 640, height: 480 }));
 
@@ -201,11 +223,34 @@ export function createFactory(options = {}){
             return S_OK;
         },
 
+        /**
+         * @param {number} index
+         * @param {{ adapter?: any }} out
+         * @returns {number}
+         */
+        EnumAdapters1(index, out){
+            return factory.EnumAdapters(index, out);
+        },
+
+        /**
+         * Whether the adapters enumerated are still the system's: nothing
+         * here is ever plugged in or out.
+         *
+         * @returns {boolean}
+         */
+        IsCurrent(){
+            return true;
+        },
+
         /** @returns {number} how many adapters this factory reports */
         adapterCount(){
             return adapters.length;
         },
-    }, { interfaces: [IID.IDXGIObject, IID.IDXGIFactory], parent: null });
+    }, {
+        interfaces: [IID.IDXGIObject, IID.IDXGIFactory,
+            ...(secondVersion ? [IID.IDXGIFactory1] : [])],
+        parent: null,
+    });
 
     adapters = configs.map(config=>createAdapter(config, factory));
     return factory;

@@ -35,7 +35,7 @@ import {
     E_NOTIMPL, E_OUTOFMEMORY, IID, S_OK, formatPitch,
 } from '../d3d10/constants.js';
 import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain } from '../d3d10/device.js';
-import { CreateDXGIFactory } from '../d3d10/dxgi.js';
+import { CreateDXGIFactory, CreateDXGIFactory1 } from '../d3d10/dxgi.js';
 import {
     DXGI_MODE_DESC, readModeDesc, readSwapChainDesc, writeModeDesc, writeSwapChainDesc,
 } from '../d3d10/structs.js';
@@ -208,6 +208,12 @@ export const IDXGIFACTORY_SLOTS = /** @type {[string, number][]} */ ([
     ['GetWindowAssociation', 1],
     ['CreateSwapChain', 3],
     ['CreateSoftwareAdapter', 2],
+]);
+
+export const IDXGIFACTORY1_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIFACTORY_SLOTS,
+    ['EnumAdapters1', 2],
+    ['IsCurrent', 0],
 ]);
 
 export const IDXGIADAPTER_SLOTS = /** @type {[string, number][]} */ ([
@@ -837,6 +843,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const factoryInterfaces = describeAll([
         [IID.IDXGIFactory, IDXGIFACTORY_SLOTS], [IID.IDXGIObject, IDXGIOBJECT_SLOTS],
+        [IID.IDXGIFactory1, IDXGIFACTORY1_SLOTS],
     ], {
         ...privateDataMethods,
         GetParent: getParent,
@@ -852,6 +859,20 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             }
             return handBack(held.adapter, adapterInterfaces, IID.IDXGIAdapter, out);
         },
+        /** @param {any} factory @param {number[]} args */
+        EnumAdapters1: (factory, [index, out])=>{
+            /** @type {{ adapter?: any }} */
+            const held = {};
+            const hr = factory.EnumAdapters1(index >>> 0, held);
+            if (hr !== S_OK)
+            {
+                fields.writeU32(out, 0);
+                return hr;
+            }
+            return handBack(held.adapter, adapterInterfaces, IID.IDXGIAdapter1, out);
+        },
+        /** @param {any} factory */
+        IsCurrent: factory=>(factory.IsCurrent() ? 1 : 0),
         // Alt-Enter and the window's association are the host's business; the
         // program is told what it asked for was noted.
         MakeWindowAssociation: ()=>S_OK,
@@ -3114,16 +3135,22 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                         return handBack(held.object, factoryInterfaces, IID.IDXGIFactory, out);
                     },
                 },
-                /**
-                 * The first version is what this build speaks; asking for the
-                 * second is refused by the same rule the object model applies.
-                 */
+                /** HRESULT CreateDXGIFactory1(REFIID, void**) */
                 CreateDXGIFactory1: {
                     argBytes: 8,
                     /** @param {number[]} args */
-                    handler: ([, out])=>{
-                        fields.writeU32(out, 0);
-                        return 0x80004002 | 0;
+                    handler: ([guid, out])=>{
+                        const id = readGuid(memory, guid);
+                        /** @type {{ object?: any }} */
+                        const held = {};
+                        const hr = CreateDXGIFactory1(id, held, factoryOptions);
+                        if (hr !== S_OK)
+                        {
+                            fields.writeU32(out, 0);
+                            return hr;
+                        }
+                        return handBack(held.object, factoryInterfaces,
+                            id === IID.IDXGIFactory1 ? IID.IDXGIFactory1 : IID.IDXGIFactory, out);
                     },
                 },
             },
