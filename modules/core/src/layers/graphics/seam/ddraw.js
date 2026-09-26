@@ -276,10 +276,6 @@ export function createDirectDrawSeam(
     /** Whether an enumeration can reach the program at all. */
     const canEnumerate = ()=>callGuest !== undefined && descriptorScratch() !== 0;
 
-    /** Which ddraw object made a surface: what GetDDInterface hands back. */
-    /** @type {WeakMap<object, any>} */
-    const owners = new WeakMap();
-
     /** One facade per model, so one object is one identity. */
     /** @type {WeakMap<object, any>} */
     const facades = new WeakMap();
@@ -332,6 +328,14 @@ export function createDirectDrawSeam(
         facades.set(root, facade);
         return facade;
     };
+
+    /**
+     * The DirectDraw object that made a surface, as it was published -- a
+     * back buffer or a mip level included, which no CreateSurface handed out.
+     *
+     * @param {any} surface
+     */
+    const ownerOf = surface=>(surface?.directDraw ? facadeOf(surface.directDraw) : null);
 
     /**
      * A RECT at an address. Typed loosely on purpose: the field reader answers
@@ -950,7 +954,7 @@ export function createDirectDrawSeam(
                 {
                     return DDERR_INVALIDPARAMS;
                 }
-                const root = owners.get(surface);
+                const root = ownerOf(surface);
                 if (!root)
                 {
                     return DDERR_INVALIDPARAMS;
@@ -1233,7 +1237,6 @@ export function createDirectDrawSeam(
             {
                 return made.hr;
             }
-            owners.set(made.surface, root);
             handBack(made.surface, surfaceInterfaces, generation.surface, out >>> 0);
             return DD_OK;
         },
@@ -1639,6 +1642,8 @@ export function createDirectDrawSeam(
             wide: callback=>((callback >>> 0) === 0 ? DDERR_INVALIDPARAMS : DDERR_UNSUPPORTED),
             wideEx: ()=>DDERR_UNSUPPORTED,
         },
+
+        ownerOf,
 
         /** For tests, which have no guest to call through. */
         interfaces: {

@@ -426,26 +426,31 @@ function createViewport(materialOf){
 
         /** @param {ScaledViewport} v  D3DVIEWPORT */
         setViewport(v){
-            if (!device)
-            {
-                return D3DERR_VIEWPORTHASNODEVICE;
-            }
             const clipWidth = v.scaleX !== 0 ? v.width / v.scaleX : 2;
             const clipHeight = v.scaleY !== 0 ? v.height / v.scaleY : 2;
-            data = {
+            return viewport.setViewport2({
                 x: v.x, y: v.y, width: v.width, height: v.height,
                 clipX: -clipWidth / 2, clipY: clipHeight / 2, clipWidth, clipHeight,
                 minZ: 0, maxZ: 1,
-            };
-            device.viewportChanged(viewport);
-            return D3D_OK;
+            });
         },
 
-        /** @param {ViewportData} v  D3DVIEWPORT2 */
+        /**
+         * A rectangle the device's target cannot hold is refused by the
+         * DrawPrimitive devices (Wine's ddraw2.c and ddraw4.c test_viewport)
+         * and kept by the execute-buffer device, which then draws nothing
+         * through it (ddraw1.c test_viewport).
+         *
+         * @param {ViewportData} v  D3DVIEWPORT2
+         */
         setViewport2(v){
             if (!device)
             {
                 return D3DERR_VIEWPORTHASNODEVICE;
+            }
+            if (device.version >= 2 && !device.holds(v))
+            {
+                return DDERR_INVALIDPARAMS;
             }
             data = { ...v };
             device.viewportChanged(viewport);
@@ -877,9 +882,19 @@ function createLegacyDevice(inner, version, legacy){
         });
     };
 
-    /** The Direct3D 7 viewport and projection the current viewport stands for. */
+    /**
+     * The viewport draws go through: the current one, or the one an
+     * execute buffer is run through while it runs. Its lights are the ones
+     * lit by.
+     *
+     * @type {any}
+     */
+    let active = null;
+    const inEffect = ()=>active ?? current;
+
+    /** The Direct3D 7 viewport and projection the viewport in effect stands for. */
     const applyViewport = ()=>{
-        const data = current?.data ?? null;
+        const data = inEffect()?.data ?? null;
         if (!data)
         {
             inner.SetTransform(D3DTRANSFORMSTATE.PROJECTION, projection);
@@ -890,19 +905,19 @@ function createLegacyDevice(inner, version, legacy){
             multiplyMatrices(projection, clipVolumeMatrix(data)));
     };
 
-    /** The current viewport's active lights, as the Direct3D 7 device's first few. */
+    /** The active lights of the viewport in effect, as the Direct3D 7 device's first few. */
     const syncLights = ()=>{
-        const active = (current?.lights ?? []).filter((/** @type {any} */ light)=>light.active)
+        const on = (inEffect()?.lights ?? []).filter((/** @type {any} */ light)=>light.active)
             .slice(0, MAX_ACTIVE_LIGHTS);
-        active.forEach((/** @type {any} */ light, /** @type {number} */ index)=>{
+        on.forEach((/** @type {any} */ light, /** @type {number} */ index)=>{
             inner.SetLight(index, lightFor(light.data));
             inner.LightEnable(index, true);
         });
-        for (let index = active.length; index < enabledLights; index++)
+        for (let index = on.length; index < enabledLights; index++)
         {
             inner.LightEnable(index, false);
         }
-        enabledLights = active.length;
+        enabledLights = on.length;
     };
 
     /** The material the MATERIAL light state names, handed to the Direct3D 7 device. */
@@ -1111,8 +1126,48 @@ function createLegacyDevice(inner, version, legacy){
 
         /** @param {any} viewport */
         viewportChanged(viewport){
-            if (viewport === current)
+            if (viewport === inEffect())
             {
+                applyViewport();
+            }
+        },
+
+        /**
+         * Whether the render target holds a viewport's rectangle.
+         *
+         * @param {ViewportData} data
+         */
+        holds(data){
+            /** @type {{ surface?: any }} */
+            const held = {};
+            inner.GetRenderTarget(held);
+            const target = held.surface;
+            target.release();
+            return data.x + data.width <= target.width && data.y + data.height <= target.height;
+        },
+
+        /**
+         * Runs `run` with `viewport` in effect -- its rectangle, its clip
+         * volume and its lights -- and puts the current one back after. How
+         * IDirect3DDevice::Execute draws through the viewport it is handed.
+         *
+         * @param {any} viewport  One of this device's.
+         * @param {() => number} run
+         */
+        through(viewport, run){
+            if (!viewports.includes(viewport))
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            active = viewport;
+            applyViewport();
+            try
+            {
+                return run();
+            }
+            finally
+            {
+                active = null;
                 applyViewport();
             }
         },

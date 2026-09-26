@@ -8,10 +8,11 @@
  * The Direct3D of DirectX 3, 5 and 6, between a guest call and the objects
  * of `d3d7/legacy.js`.
  *
- * Like Direct3D 7 it has no entry point: IDirect3D3 is another table on the
- * DirectDraw object, and IDirect3DTexture2 another on a surface. So this seam
- * publishes no root either; it hands the DirectDraw seam one descriptor for
- * the object and the texture descriptors for its surfaces, and answers
+ * Like Direct3D 7 it has no entry point: IDirect3D, 2 and 3 are more tables
+ * on the DirectDraw object, and IDirect3DTexture and 2 more on a surface --
+ * as is DirectX 3's device, which a program gets by asking its render target
+ * for one. So this seam publishes no root either; it hands the DirectDraw
+ * seam the descriptors for the object and for its surfaces, and answers
  * through them.
  *
  * Three things are this version's own. Most structures carry a size, and
@@ -25,23 +26,24 @@
 
 import { describe } from './vtables.js';
 import {
-    IDIRECT3D2_SLOTS, IDIRECT3D3_SLOTS, IDIRECT3DDEVICE2_SLOTS, IDIRECT3DDEVICE3_SLOTS,
+    IDIRECT3D2_SLOTS, IDIRECT3D3_SLOTS, IDIRECT3D_SLOTS, IDIRECT3DDEVICE2_SLOTS,
+    IDIRECT3DDEVICE3_SLOTS, IDIRECT3DDEVICE_SLOTS, IDIRECT3DEXECUTEBUFFER_SLOTS,
     IDIRECT3DLIGHT_SLOTS, IDIRECT3DMATERIAL2_SLOTS,
     IDIRECT3DMATERIAL3_SLOTS, IDIRECT3DMATERIAL_SLOTS, IDIRECT3DTEXTURE2_SLOTS,
     IDIRECT3DTEXTURE_SLOTS, IDIRECT3DVERTEXBUFFER_SLOTS, IDIRECT3DVIEWPORT2_SLOTS,
     IDIRECT3DVIEWPORT3_SLOTS, IDIRECT3DVIEWPORT_SLOTS,
 } from './vtables-ddraw.js';
 import {
-    IID_IDirect3D2, IID_IDirect3D3, IID_IDirect3DDevice2, IID_IDirect3DDevice3,
-    IID_IDirect3DLight, IID_IDirect3DMaterial,
+    IID_IDirect3D, IID_IDirect3D2, IID_IDirect3D3, IID_IDirect3DDevice, IID_IDirect3DDevice2,
+    IID_IDirect3DDevice3, IID_IDirect3DExecuteBuffer, IID_IDirect3DLight, IID_IDirect3DMaterial,
     IID_IDirect3DMaterial2, IID_IDirect3DMaterial3, IID_IDirect3DTexture, IID_IDirect3DTexture2,
     IID_IDirect3DVertexBuffer, IID_IDirect3DViewport, IID_IDirect3DViewport2,
     IID_IDirect3DViewport3, IID_IDirectDrawSurface, IID_IDirectDrawSurface4,
 } from './iids.js';
 import { D3DPRIMCAPS, D3DRECT, D3DVERTEXBUFFERDESC, createFields } from './structs.js';
 import {
-    D3DDEVICEDESC, D3DFINDDEVICERESULT, D3DFINDDEVICESEARCH, D3DLIGHT, D3DMATERIAL, D3DSTATS,
-    D3DVIEWPORT, D3DVIEWPORT2,
+    D3DDEVICEDESC, D3DEXECUTEBUFFERDESC, D3DEXECUTEDATA, D3DFINDDEVICERESULT,
+    D3DFINDDEVICESEARCH, D3DLIGHT, D3DMATERIAL, D3DSTATS, D3DVIEWPORT, D3DVIEWPORT2,
 } from './structs-legacy.js';
 import { readGuid } from './ddraw.js';
 import { DDSURFACEDESC, writeSurfaceDesc } from '../ddraw/structs.js';
@@ -49,7 +51,8 @@ import { pixelFormatForDepth } from '../ddraw/objects.js';
 import { guidBytes } from './d3d7.js';
 import {
     D3DCOLOR_RGB, D3DDD, D3DDEVCAPS_DRAWPRIMITIVES2EX, D3DDEVCAPS_FLOATTLVERTEX,
-    D3DERR_INVALIDVERTEXTYPE, D3DFVF_LVERTEX, D3DFVF_TLVERTEX, D3DFVF_VERTEX, D3DVT,
+    D3DDEB_BUFSIZE, D3DDEB_LPDATA, D3DERR_INVALIDVERTEXTYPE, D3DERR_MATRIX_GETDATA_FAILED,
+    D3DFVF_LVERTEX, D3DFVF_TLVERTEX, D3DFVF_VERTEX, D3DVT,
     D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DFDS_GUID, D3DFDS_HARDWARE,
     D3DLIGHTCAPS_DIRECTIONAL, D3DLIGHTCAPS_PARALLELPOINT, D3DLIGHTCAPS_POINT, D3DLIGHTCAPS_SPOT,
     D3DLIGHTINGMODEL_RGB, D3DPTEXTURECAPS_POW2, D3DTRANSFORMCAPS_CLIP, D3D_OK,
@@ -60,6 +63,7 @@ import {
 } from '../ddraw/constants.js';
 import { createLegacyDirect3D, createTextureHandles } from '../d3d7/legacy.js';
 import { loadTexture } from '../d3d7/load.js';
+import { createExecuteBuffer, executeBuffer } from '../d3d7/execute.js';
 
 /** What an enumeration callback answers to stop. */
 const D3DENUMRET_CANCEL = 0;
@@ -106,13 +110,16 @@ const HEL_OF_HAL_FIELDS = D3DDD.COLORMODEL | D3DDD.DEVCAPS | D3DDD.TRANSFORMCAPS
  *              => Promise<number>} [callGuest]
  * @property {() => any} [currentThread]
  * @property {{ allocate: (bytes: number) => number }} [scratch]
+ * @property {(surface: any) => any} [ownerOf]
+ *           The DirectDraw object that made a surface, as it was published: a
+ *           first-generation device is asked of a surface, not of an object.
  */
 
 /**
  * @param {LegacyDeps} deps
  */
 export function createLegacyDirect3DSeam(
-    { publisher, memory, d3d7, callGuest, currentThread, scratch })
+    { publisher, memory, d3d7, callGuest, currentThread, scratch, ownerOf = ()=>null })
 {
     const fields = createFields(memory);
     const { deviceMethods, bufferMethods, d3dMethods, readArray, readFloats, strideOf } = d3d7;
@@ -764,6 +771,10 @@ export function createLegacyDirect3DSeam(
             d3d: IID_IDirect3D2, surface: IID_IDirectDrawSurface,
             viewport: IID_IDirect3DViewport2, texture: IID_IDirect3DTexture2,
         },
+        1: {
+            d3d: IID_IDirect3D, surface: IID_IDirectDrawSurface,
+            viewport: IID_IDirect3DViewport, texture: IID_IDirect3DTexture,
+        },
     });
 
     /**
@@ -1154,6 +1165,249 @@ export function createLegacyDirect3DSeam(
     deviceInterfaces[3] = [device3, device2];
     deviceInterfaces[2] = [device2];
 
+    // --- DirectX 3: execute buffers and the device on a surface ---
+
+    /**
+     * The device of the first generation is part of its render target:
+     * a program makes one by asking the surface for IID_IDirect3DHALDevice or
+     * IID_IDirect3DRGBDevice, and the device then answers what the surface
+     * answers, with the surface's count (Wine's ddraw1.c test_device_qi). So
+     * it is made when first used, holds no reference to the surface it is
+     * part of, and goes when the surface does.
+     *
+     * @type {WeakMap<object, Map<string, any>>}
+     */
+    const aggregates = new WeakMap();
+
+    /**
+     * The device a first-generation call acts on: the device itself when the
+     * table is on a later device, or the surface's own device of that kind.
+     *
+     * @param {any} target @param {string | null} kind
+     * @returns {{ hr: number, device: any }}
+     */
+    const deviceOf = (target, kind)=>{
+        if (target.inner || kind === null)
+        {
+            return { hr: D3D_OK, device: target };
+        }
+        let made = aggregates.get(target);
+        if (!made)
+        {
+            made = new Map();
+            aggregates.set(target, made);
+        }
+        const existing = made.get(kind);
+        if (existing)
+        {
+            return { hr: D3D_OK, device: existing };
+        }
+        const root = ownerOf(target);
+        if (!root)
+        {
+            return { hr: DDERR_INVALIDPARAMS, device: null };
+        }
+        const created = legacyFor(root).createDevice(kind, target, 1);
+        if (created.hr !== D3D_OK)
+        {
+            return created;
+        }
+        target.release();
+        created.device.root = root;
+        made.set(kind, created.device);
+        return created;
+    };
+
+    /**
+     * When the surface goes, its devices go with it: the reference each
+     * device's Direct3D 7 device took on the surface was given back at
+     * creation, and what else they hold is released now.
+     *
+     * @param {any} surface
+     */
+    const surfaceGone = surface=>{
+        for (const device of aggregates.get(surface)?.values() ?? [])
+        {
+            device.release();
+        }
+        aggregates.delete(surface);
+    };
+
+    const executeBufferMethods = {
+        Initialize: ()=>DDERR_ALREADYINITIALIZED,
+
+        /** @param {any} buffer @param {number[]} args */
+        Lock: (buffer, [pointer])=>{
+            if ((pointer >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const { hr, desc } = buffer.lock();
+            if (hr === D3D_OK && desc)
+            {
+                fields.writeStruct(pointer >>> 0, D3DEXECUTEBUFFERDESC, {
+                    dwFlags: desc.flags, dwCaps: desc.caps, dwBufferSize: desc.size,
+                    lpData: desc.data,
+                });
+            }
+            return hr;
+        },
+
+        /** @param {any} buffer */
+        Unlock: (/** @type {any} */ buffer)=>buffer.unlock(),
+
+        /** @param {any} buffer @param {number[]} args */
+        SetExecuteData: (buffer, [pointer])=>{
+            if ((pointer >>> 0) === 0
+                || fields.readU32(pointer >>> 0) !== D3DEXECUTEDATA.SIZE)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const raw = fields.readStruct(pointer >>> 0, D3DEXECUTEDATA);
+            const status = (pointer >>> 0) + D3DEXECUTEDATA.dsStatus;
+            return buffer.setExecuteData({
+                vertexOffset: raw.dwVertexOffset, vertexCount: raw.dwVertexCount,
+                instructionOffset: raw.dwInstructionOffset,
+                instructionLength: raw.dwInstructionLength, hVertexOffset: raw.dwHVertexOffset,
+                status: {
+                    flags: fields.readU32(status), status: fields.readU32(status + 4),
+                    extent: [0, 1, 2, 3].map(k=>fields.readU32(status + 8 + k * 4) | 0),
+                },
+            });
+        },
+
+        /**
+         * Written whole, whatever size the caller claims (Wine's ddraw1.c
+         * test_execute_data: no validation here).
+         *
+         * @param {any} buffer @param {number[]} args
+         */
+        GetExecuteData: (buffer, [pointer])=>{
+            if ((pointer >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const data = buffer.getExecuteData();
+            fields.writeStruct(pointer >>> 0, D3DEXECUTEDATA, {
+                dwSize: D3DEXECUTEDATA.SIZE, dwVertexOffset: data.vertexOffset,
+                dwVertexCount: data.vertexCount, dwInstructionOffset: data.instructionOffset,
+                dwInstructionLength: data.instructionLength, dwHVertexOffset: data.hVertexOffset,
+            });
+            const status = (pointer >>> 0) + D3DEXECUTEDATA.dsStatus;
+            [data.status.flags, data.status.status, ...data.status.extent].forEach((value, k)=>
+                fields.writeU32(status + k * 4, value >>> 0));
+            return D3D_OK;
+        },
+    };
+    const executeBufferInterfaces = [describe(IID_IDirect3DExecuteBuffer,
+        IDIRECT3DEXECUTEBUFFER_SLOTS, executeBufferMethods)];
+
+    /**
+     * The first generation's own calls, and the ones it shares with the
+     * second, acting on the device `deviceOf` finds.
+     *
+     * @param {string | null} kind  The device a surface makes, or null on a later device.
+     */
+    const device1Methods = kind=>{
+        /** @param {(device: any, args: number[]) => any} method */
+        const onDevice = method=>(/** @type {any} */ target, /** @type {number[]} */ args)=>{
+            const { hr, device } = deviceOf(target, kind);
+            return device ? method(device, args) : hr;
+        };
+        const shared = sharedDeviceMethods(IDS[1], ()=>0);
+        /** @type {Record<string, (device: any, args: number[]) => any>} */
+        const own = {
+            SwapTextureHandles: swapTextureHandles,
+
+            /** @param {any} device @param {number[]} args */
+            EnumTextureFormats: (device, [callback, context])=>
+                enumerateTextureDescs(callback, context),
+
+            /** @param {any} device @param {number[]} args */
+            CreateExecuteBuffer: (device, [pointer, out, outer])=>{
+                if ((pointer >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                if ((outer >>> 0) !== 0)
+                {
+                    return CLASS_E_NOAGGREGATION;
+                }
+                const raw = fields.readStruct(pointer >>> 0, D3DEXECUTEBUFFERDESC);
+                if (raw.dwSize !== D3DEXECUTEBUFFERDESC.SIZE
+                    || (raw.dwFlags & D3DDEB_BUFSIZE) === 0 || raw.dwBufferSize === 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                // The program's own memory when it names some; the buffer
+                // then reads it where it is.
+                const data = (raw.dwFlags & D3DDEB_LPDATA) !== 0 && raw.lpData !== 0
+                    ? raw.lpData
+                    : device.root.allocateStorage(raw.dwBufferSize);
+                handBack(out, createExecuteBuffer({ caps: raw.dwCaps, size: raw.dwBufferSize,
+                    data }), executeBufferInterfaces, IID_IDirect3DExecuteBuffer);
+                return D3D_OK;
+            },
+
+            /** @param {any} device @param {number[]} args */
+            Execute: (device, [buffer, viewport])=>executeBuffer({ memory, device,
+                buffer: publisher.objectAt(buffer), viewport: publisher.objectAt(viewport) }),
+
+            /** @param {any} device @param {number[]} args */
+            CreateMatrix: (device, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                fields.writeU32(out >>> 0, device.createMatrix());
+                return D3D_OK;
+            },
+
+            /** @param {any} device @param {number[]} args */
+            SetMatrix: (device, [handle, pointer])=>((pointer >>> 0) === 0
+                ? DDERR_INVALIDPARAMS
+                : device.setMatrix(handle >>> 0, readFloats(pointer, 16))),
+
+            /** @param {any} device @param {number[]} args */
+            GetMatrix: (device, [handle, pointer])=>{
+                if ((pointer >>> 0) === 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                const matrix = device.getMatrix(handle >>> 0);
+                if (!matrix)
+                {
+                    return D3DERR_MATRIX_GETDATA_FAILED;
+                }
+                matrix.forEach((/** @type {number} */ value, /** @type {number} */ index)=>
+                    fields.writeF32((pointer >>> 0) + index * 4, value));
+                return D3D_OK;
+            },
+
+            /** @param {any} device @param {number[]} args */
+            DeleteMatrix: (device, [handle])=>device.deleteMatrix(handle >>> 0),
+        };
+        /** @type {Record<string, any>} */
+        const methods = { Initialize: ()=>DDERR_ALREADYINITIALIZED };
+        for (const [name, method] of Object.entries({ ...shared, ...own }))
+        {
+            methods[name] = onDevice(method);
+        }
+        return methods;
+    };
+
+    const device1 = describe(IID_IDirect3DDevice, IDIRECT3DDEVICE_SLOTS, device1Methods(null));
+    deviceInterfaces[3].push(device1);
+    deviceInterfaces[2].push(device1);
+    deviceInterfaces[1] = [device1];
+
+    /** The devices a surface answers for, each a part of it. */
+    const surfaceDevices = [
+        describe(DEVICE_IDS.HAL, IDIRECT3DDEVICE_SLOTS, device1Methods(DEVICE_IDS.HAL), {},
+            surfaceGone),
+        describe(DEVICE_IDS.RGB, IDIRECT3DDEVICE_SLOTS, device1Methods(DEVICE_IDS.RGB)),
+    ];
+
     // --- the Direct3D objects, on the DirectDraw object ---
 
     /**
@@ -1289,20 +1543,45 @@ export function createLegacyDirect3DSeam(
             createDevice(root, riid, surface, out, 2, IID_IDirect3DDevice2),
     };
 
+    /** DirectX 3's object, which makes no device: a surface is asked for one. */
+    const direct3D1Methods = {
+        Initialize: ()=>DDERR_ALREADYINITIALIZED,
+
+        /** @param {any} root @param {number[]} args */
+        EnumDevices: (root, [callback, context])=>
+            enumerateDevices(root, callback, context, D3DDEVICEDESC.SIZE_V1),
+
+        CreateLight: direct3D3Methods.CreateLight,
+
+        /** @param {any} root @param {number[]} args */
+        CreateMaterial: (root, [out, outer])=>create(out, outer,
+            ()=>legacyFor(root).createMaterial(), materialInterfaces, IID_IDirect3DMaterial),
+
+        /** @param {any} root @param {number[]} args */
+        CreateViewport: (root, [out, outer])=>create(out, outer,
+            ()=>legacyFor(root).createViewport(), viewportInterfaces, IID_IDirect3DViewport),
+
+        /** @param {any} root @param {number[]} args */
+        FindDevice: (root, [search, result])=>
+            findDevice(root, search, result, D3DDEVICEDESC.SIZE_V1),
+    };
+
     return {
         /** The descriptors the DirectDraw seam puts beside its own generations. */
         interfaces: [
             describe(IID_IDirect3D3, IDIRECT3D3_SLOTS, direct3D3Methods),
             describe(IID_IDirect3D2, IDIRECT3D2_SLOTS, direct3D2Methods),
+            describe(IID_IDirect3D, IDIRECT3D_SLOTS, direct3D1Methods),
         ],
 
-        /** And beside a surface's. */
-        surfaceInterfaces: textureInterfaces,
+        /** And beside a surface's: its texture interfaces, and the devices it can be. */
+        surfaceInterfaces: [...textureInterfaces, ...surfaceDevices],
 
         /** For tests, which have no guest to call through. */
         objects: {
             device: deviceInterfaces, viewport: viewportInterfaces, light: lightInterfaces,
             material: materialInterfaces, buffer: bufferInterfaces, texture: textureInterfaces,
+            executeBuffer: executeBufferInterfaces,
         },
     };
 }

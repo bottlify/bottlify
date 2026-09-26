@@ -161,13 +161,14 @@ test('a viewport converts between its scale form and its clip-volume form as Win
     'data is set only on a viewport a device holds');
     assert.equal(f.device.addViewport(viewport), D3D_OK);
 
-    assert.equal(viewport.setViewport2({ x: 160, y: 120, width: 480, height: 360, clipX: 2,
+    // Wine's numbers on a 640x480 target, a tenth the size on this 64x48 one.
+    assert.equal(viewport.setViewport2({ x: 16, y: 12, width: 48, height: 36, clipX: 2,
         clipY: -1.75, clipWidth: 2.5, clipHeight: -1.5, minZ: 0.5, maxZ: 2 }), D3D_OK);
-    assert.deepEqual(viewport.getViewport().viewport, { x: 160, y: 120, width: 480,
-        height: 360, scaleX: 192, scaleY: -240, maxX: 4.5, maxY: -1.75, minZ: 0, maxZ: 1 });
+    assert.deepEqual(viewport.getViewport().viewport, { x: 16, y: 12, width: 48,
+        height: 36, scaleX: 19.2, scaleY: -24, maxX: 4.5, maxY: -1.75, minZ: 0, maxZ: 1 });
 
-    assert.equal(viewport.setViewport({ x: 160, y: 120, width: 480, height: 360,
-        scaleX: -320, scaleY: 180, maxX: -3, maxY: 1.75, minZ: 0.5, maxZ: 2 }), D3D_OK);
+    assert.equal(viewport.setViewport({ x: 16, y: 12, width: 48, height: 36,
+        scaleX: -32, scaleY: 18, maxX: -3, maxY: 1.75, minZ: 0.5, maxZ: 2 }), D3D_OK);
     const second = /** @type {any} */ (viewport.getViewport2().viewport);
     assert.deepEqual([second.clipX, second.clipY, second.clipWidth, second.clipHeight,
         second.minZ, second.maxZ], [0.75, 1, -1.5, 2, 0, 1],
@@ -251,8 +252,27 @@ test('the second generation never gives back the reference that made a viewport 
     }
 });
 
+test('a DrawPrimitive device refuses a viewport its target cannot hold', ()=>{
+    // Wine's ddraw2.c and ddraw4.c test_viewport; the execute-buffer device
+    // keeps one and draws nothing through it (ddraw1.c test_viewport).
+    for (const [version, expected] of /** @type {const} */ ([
+        [3, DDERR_INVALIDPARAMS], [2, DDERR_INVALIDPARAMS], [1, D3D_OK],
+    ]))
+    {
+        const f = fixture(version);
+        const viewport = f.legacy.createViewport();
+        f.device.addViewport(viewport);
+        assert.equal(viewport.setViewport2({ x: 8, y: 4, width: 57, height: 20, clipX: -1,
+            clipY: 1, clipWidth: 2, clipHeight: 2, minZ: 0, maxZ: 1 }), expected);
+        assert.equal(viewport.setViewport2({ x: 8, y: 4, width: 56, height: 44, clipX: -1,
+            clipY: 1, clipWidth: 2, clipHeight: 2, minZ: 0, maxZ: 1 }), D3D_OK);
+        viewport.release();
+        f.done();
+    }
+});
+
 test('the current viewport sets the rectangle and carries its clip volume on the projection', ()=>{
-    const f = fixture();
+    const f = fixture(1);
     const viewport = f.legacy.createViewport();
     f.device.addViewport(viewport);
     viewport.setViewport2({ x: 8, y: 4, width: 500, height: 20, clipX: 0, clipY: 1,
@@ -262,7 +282,7 @@ test('the current viewport sets the rectangle and carries its clip volume on the
 
     const [, rect] = f.since('SetViewport', mark).at(-1) ?? [];
     assert.deepEqual(rect, { X: 8, Y: 4, Width: 56, Height: 20, MinZ: 0.25, MaxZ: 0.75 },
-        'a rectangle past the target is cut to it, as the older versions allowed');
+        'a rectangle past the target, which the first generation keeps, is cut to it');
     const [, type, projection] = f.since('SetTransform', mark).at(-1) ?? [];
     assert.equal(type, D3DTRANSFORMSTATE_PROJECTION);
     assert.deepEqual([...projection], [...clipVolumeMatrix(/** @type {any} */ (viewport.data))]);

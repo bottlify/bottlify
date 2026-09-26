@@ -23,23 +23,27 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
-import { IDIRECTDRAW2_SLOTS, IDIRECTDRAW4_SLOTS, IDIRECTDRAWSURFACE4_SLOTS } from './vtables.js';
 import {
-    IDIRECT3D2_SLOTS, IDIRECT3D3_SLOTS, IDIRECT3DDEVICE2_SLOTS, IDIRECT3DDEVICE3_SLOTS,
+    IDIRECTDRAW2_SLOTS, IDIRECTDRAW4_SLOTS, IDIRECTDRAWSURFACE4_SLOTS, IDIRECTDRAW_SLOTS,
+} from './vtables.js';
+import {
+    IDIRECT3D2_SLOTS, IDIRECT3D3_SLOTS, IDIRECT3D_SLOTS, IDIRECT3DDEVICE2_SLOTS,
+    IDIRECT3DDEVICE3_SLOTS, IDIRECT3DDEVICE_SLOTS, IDIRECT3DEXECUTEBUFFER_SLOTS,
     IDIRECT3DLIGHT_SLOTS, IDIRECT3DMATERIAL3_SLOTS, IDIRECT3DTEXTURE2_SLOTS,
     IDIRECT3DVERTEXBUFFER_SLOTS, IDIRECT3DVIEWPORT3_SLOTS,
 } from './vtables-ddraw.js';
 import {
-    IID_IDirect3D, IID_IDirect3D2, IID_IDirect3D3, IID_IDirect3D7, IID_IDirect3DDevice2,
-    IID_IDirect3DDevice3, IID_IDirect3DDevice7, IID_IDirectDraw2,
+    IID_IDirect3D, IID_IDirect3D2, IID_IDirect3D3, IID_IDirect3D7, IID_IDirect3DDevice,
+    IID_IDirect3DDevice2, IID_IDirect3DDevice3, IID_IDirect3DDevice7, IID_IDirectDraw2,
+    IID_IDirectDrawSurface,
     IID_IDirect3DMaterial, IID_IDirect3DMaterial2, IID_IDirect3DTexture, IID_IDirect3DTexture2,
     IID_IDirect3DVertexBuffer, IID_IDirect3DVertexBuffer7, IID_IDirect3DViewport,
     IID_IDirect3DViewport2, IID_IDirect3DViewport3, IID_IDirectDraw4,
     IID_IDirectDrawGammaControl,
 } from './iids.js';
 import {
-    D3DDEVICEDESC, D3DFINDDEVICERESULT, D3DFINDDEVICESEARCH, D3DLIGHT, D3DMATERIAL, D3DSTATS,
-    D3DVIEWPORT, D3DVIEWPORT2,
+    D3DDEVICEDESC, D3DEXECUTEBUFFERDESC, D3DEXECUTEDATA, D3DFINDDEVICERESULT,
+    D3DFINDDEVICESEARCH, D3DLIGHT, D3DMATERIAL, D3DSTATS, D3DVIEWPORT, D3DVIEWPORT2,
 } from './structs-legacy.js';
 import { D3DPRIMCAPS, D3DVERTEXBUFFERDESC } from './structs.js';
 import { guidBytes } from './d3d7.js';
@@ -50,6 +54,7 @@ import {
     DDSCAPS_TEXTURE, DDSCL_NORMAL, DDSD_CAPS, DDSD_HEIGHT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
 } from '../ddraw/constants.js';
 import {
+    D3DDEB_BUFSIZE, D3DDEB_CAPS, DDERR_ALREADYINITIALIZED,
     D3DDEVCAPS_DRAWPRIMITIVES2EX, D3DDEVCAPS_HWRASTERIZATION, D3DERR_NOCURRENTVIEWPORT,
     D3DERR_VIEWPORTDATANOTSET, D3DERR_VIEWPORTHASNODEVICE, D3DFDS_GUID, D3DLIGHTSTATE,
     D3DLIGHT_ACTIVE, D3DPTEXTURECAPS_POW2, D3D_OK, DDERR_INVALIDPARAMS, DDERR_NOTFOUND,
@@ -247,6 +252,36 @@ function seamed(observe = ()=>null){
                 [HWND, DDSCL_NORMAL]), DD_OK);
             return fourth.pointer;
         },
+        /** An IDirectDraw under a cooperative level, as DirectX 3 programs have one. */
+        create1(){
+            assert.equal(ddrawDll.DirectDrawCreate.handler([0, 0x4100, 0]), DD_OK);
+            const first = box.memory.readU32(0x4100);
+            assert.equal(box.call(first, slot(IDIRECTDRAW_SLOTS, 'SetCooperativeLevel'),
+                [HWND, DDSCL_NORMAL]), DD_OK);
+            return first;
+        },
+        /** @param {number} ddraw an IDirectDraw @returns {number} an IDirectDrawSurface */
+        surface1(ddraw){
+            const at = 0x5000;
+            box.bytes.fill(0, at, at + DDSURFACEDESC.SIZE);
+            writeSurfaceDesc(box.services, at, DDSURFACEDESC, {
+                flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
+                width: 8, height: 8, pitch: 0, backBufferCount: 0, mipMapCount: 0,
+                caps: DDSCAPS_3DDEVICE | DDSCAPS_OFFSCREENPLAIN, caps2: 0, pixelFormat: XRGB32,
+            });
+            assert.equal(box.call(ddraw, slot(IDIRECTDRAW_SLOTS, 'CreateSurface'),
+                [at, 0x5100, 0]), DD_OK);
+            return box.memory.readU32(0x5100);
+        },
+        /** @param {number} device @param {string} name @param {number[]} args */
+        device1: (device, name, args = [])=>
+            box.call(device, slot(IDIRECT3DDEVICE_SLOTS, name), args),
+        /** @param {number} d3d an IDirect3D @param {string} method @returns {number} */
+        make1(d3d, method){
+            box.memory.writeU32(0x4400, 0);
+            assert.equal(box.call(d3d, slot(IDIRECT3D_SLOTS, method), [0x4400, 0]), D3D_OK);
+            return box.memory.readU32(0x4400);
+        },
         /** An IDirectDraw2 under a cooperative level, as DirectX 5 programs make one. */
         create2(){
             assert.equal(ddrawDll.DirectDrawCreate.handler([0, 0x4100, 0]), DD_OK);
@@ -289,13 +324,18 @@ function seamed(observe = ()=>null){
             assert.equal(made.hr, DD_OK, 'QueryInterface for IDirect3D3');
             return made.pointer;
         },
-        /** @param {number} ddraw @param {number} caps @param {any} [format] */
-        surface(ddraw, caps = DDSCAPS_3DDEVICE | DDSCAPS_OFFSCREENPLAIN, format = XRGB32){
+        /**
+         * @param {number} ddraw @param {number} caps @param {any} [format]
+         * @param {number} [width] @param {number} [height]
+         */
+        surface(ddraw, caps = DDSCAPS_3DDEVICE | DDSCAPS_OFFSCREENPLAIN, format = XRGB32,
+            width = 8, height = 8)
+        {
             const at = 0x5000;
             box.bytes.fill(0, at, at + DDSURFACEDESC2.SIZE);
             writeSurfaceDesc(box.services, at, DDSURFACEDESC2, {
                 flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
-                width: 8, height: 8, pitch: 0, backBufferCount: 0, mipMapCount: 0,
+                width, height, pitch: 0, backBufferCount: 0, mipMapCount: 0,
                 caps, caps2: 0, pixelFormat: format,
             });
             assert.equal(box.call(ddraw, slot(IDIRECTDRAW4_SLOTS, 'CreateSurface'),
@@ -320,11 +360,11 @@ function seamed(observe = ()=>null){
          * A HAL device on a new target, the way Wine's ddraw4.c create_device
          * makes one: the IDirect3D3 it came through is released afterwards.
          *
-         * @param {number} ddraw
+         * @param {number} ddraw @param {number} [width] @param {number} [height]
          */
-        createDevice(ddraw){
+        createDevice(ddraw, width = 8, height = 8){
             const d3d = h.direct3D(ddraw);
-            const target = h.surface(ddraw);
+            const target = h.surface(ddraw, undefined, undefined, width, height);
             const riid = box.putGuid(0x4300, DEVICE_IDS.HAL);
             assert.equal(h.d3d(d3d, 'CreateDevice', [riid, target, 0x4400, 0]), D3D_OK);
             h.release(d3d);
@@ -439,7 +479,7 @@ test('CreateDevice makes a third-generation device that answers only its own int
 test('a viewport answers all three of its generations with one count, and sizes are exact', ()=>{
     const h = seamed();
     const ddraw = h.create4();
-    const { device, target } = h.createDevice(ddraw);
+    const { device, target } = h.createDevice(ddraw, 64, 48);
     h.device(device, 'GetDirect3D', [0x4500]);
     const d3d = h.box.memory.readU32(0x4500);
 
@@ -492,19 +532,21 @@ test('a viewport answers all three of its generations with one count, and sizes 
     h.box.memory.writeU32(at, 0);
     assert.equal(h.viewport(viewport, 'SetViewport2', [at]), DDERR_INVALIDPARAMS >>> 0);
     h.box.memory.writeU32(at, D3DVIEWPORT2.SIZE);
-    h.box.memory.writeU32(at + D3DVIEWPORT2.dwX, 160);
-    h.box.memory.writeU32(at + D3DVIEWPORT2.dwY, 120);
-    h.box.memory.writeU32(at + D3DVIEWPORT2.dwWidth, 480);
-    h.box.memory.writeU32(at + D3DVIEWPORT2.dwHeight, 360);
+    // Wine's numbers on a 640x480 target, a tenth the size on this one.
+    h.box.memory.writeU32(at + D3DVIEWPORT2.dwX, 16);
+    h.box.memory.writeU32(at + D3DVIEWPORT2.dwY, 12);
+    h.box.memory.writeU32(at + D3DVIEWPORT2.dwWidth, 48);
+    h.box.memory.writeU32(at + D3DVIEWPORT2.dwHeight, 36);
     h.box.putFloats(at + D3DVIEWPORT2.dvClipX, [2, -1.75, 2.5, -1.5, 0.5, 2]);
     assert.equal(h.viewport(viewport, 'SetViewport2', [at]), D3D_OK);
     h.box.bytes.fill(0xff, at, at + D3DVIEWPORT.SIZE);
     h.box.memory.writeU32(at, D3DVIEWPORT.SIZE);
     assert.equal(h.viewport(viewport, 'GetViewport', [at]), D3D_OK);
-    assert.deepEqual(h.box.floatsAt(at + D3DVIEWPORT.dvScaleX, 6), [192, -240, 4.5, -1.75, 0, 1]);
+    assert.deepEqual(h.box.floatsAt(at + D3DVIEWPORT.dvScaleX, 6).map(v=>Math.fround(v)),
+        [19.2, -24, 4.5, -1.75, 0, 1].map(v=>Math.fround(v)));
 
     // And back: D3DVIEWPORT's scale names a volume centred on the origin.
-    h.box.putFloats(at + D3DVIEWPORT.dvScaleX, [-320, 180, -3, 1.75, 0.5, 2]);
+    h.box.putFloats(at + D3DVIEWPORT.dvScaleX, [-32, 18, -3, 1.75, 0.5, 2]);
     assert.equal(h.viewport(viewport, 'SetViewport', [at]), D3D_OK);
     h.box.bytes.fill(0xff, at, at + D3DVIEWPORT2.SIZE);
     h.box.memory.writeU32(at, D3DVIEWPORT2.SIZE);
@@ -1062,6 +1104,322 @@ test('IDirect3D2 describes its devices at DirectX 5\'s size, and names formats b
 
         assert.equal(h.release(device), 0);
         h.release(target);
+        h.release(d3d);
+        h.release(ddraw);
+        h.assertAllReleased();
+    });
+
+// --- DirectX 3: IDirect3D, the device on a surface, execute buffers (Wine's ddraw1.c) ---
+
+/**
+ * An execute buffer's instruction stream, written as ddraw1.c's emit_* helpers
+ * write it: a D3DINSTRUCTION header -- opcode, operand size, count -- and
+ * the operands.
+ */
+function instructions(){
+    /** @type {number[]} */
+    const bytes = [];
+    const dword = (/** @type {number} */ value)=>{
+        bytes.push(value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff);
+    };
+    const word = (/** @type {number} */ value)=>{
+        bytes.push(value & 0xff, value >>> 8 & 0xff);
+    };
+    /** @param {number} opcode @param {number} size @param {number} count */
+    const header = (opcode, size, count)=>{
+        bytes.push(opcode, size);
+        word(count);
+    };
+    const stream = {
+        bytes,
+        /** @param {number} state @param {number} value */
+        renderState(state, value){
+            header(8, 8, 1);
+            dword(state);
+            dword(value);
+            return stream;
+        },
+        /** @param {number} flags @param {number} start @param {number} count */
+        processVertices(flags, start, count){
+            header(9, 16, 1);
+            dword(flags);
+            word(start);
+            word(0);
+            dword(count);
+            dword(0);
+            return stream;
+        },
+        /** Two triangles over vertices 0 to 3, as emit_tquad_tlist writes them. */
+        quad(){
+            header(3, 8, 2);
+            [[0, 1, 2], [2, 3, 0]].forEach(([a, b, c])=>{
+                word(a);
+                word(b);
+                word(c);
+                word(1);
+            });
+            return stream;
+        },
+        /** @param {number} offset  Zero ends the run. */
+        branchAlways(offset){
+            header(12, 16, 1);
+            dword(0);
+            dword(1);
+            dword(1);
+            dword(offset);
+            return stream;
+        },
+        exit(){
+            header(11, 0, 0);
+            return stream;
+        },
+    };
+    return stream;
+}
+
+test('IDirect3D is a query away from IDirectDraw, makes no device, and initializes no twice',
+    async()=>{
+        const h = seamed(box=>box);
+        const ddraw = h.create1();
+        const d3d = h.query(ddraw, IID_IDirect3D);
+        assert.equal(d3d.hr, DD_OK);
+        assert.equal(h.roots[0].refCount('IDirectDraw'), 2);
+        const call = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+            h.box.callRaw(d3d.pointer, slot(IDIRECT3D_SLOTS, name), args);
+        assert.equal(call('Initialize', [0]) >>> 0, DDERR_ALREADYINITIALIZED >>> 0,
+            'ddraw1.c test_initialize');
+
+        h.callbacks.length = 0;
+        const seen = [];
+        assert.equal(await call('EnumDevices', [0x1234, 0]), D3D_OK);
+        for (const { args } of h.callbacks)
+        {
+            seen.push([h.box.memory.readU32(args[3]), h.box.memory.readU32(args[4])]);
+        }
+        assert.deepEqual(seen, [[D3DDEVICEDESC.SIZE_V1, D3DDEVICEDESC.SIZE_V1],
+            [D3DDEVICEDESC.SIZE_V1, D3DDEVICEDESC.SIZE_V1]], 'DirectX 3\'s description size');
+
+        h.release(d3d.pointer);
+        h.release(ddraw);
+        h.assertAllReleased();
+    });
+
+test('a surface asked for a device is one, with the surface\'s interfaces and count', ()=>{
+    const h = seamed();
+    const ddraw = h.create1();
+    const surface = h.surface1(ddraw);
+    const made = h.query(surface, DEVICE_IDS.HAL);
+    assert.equal(made.hr, DD_OK);
+    const device = made.pointer;
+    assert.notEqual(device, surface);
+    assert.equal(h.countOf(surface), 2, 'the device is the surface\'s count');
+
+    // Wine's ddraw1.c test_device_qi: the device answers what the surface
+    // answers, and no Direct3D device interface of a later generation.
+    const back = h.query(device, IID_IDirectDrawSurface);
+    assert.equal(back.pointer, surface);
+    h.release(back.pointer);
+    assert.equal(h.query(device, IID_IDirect3DTexture2).hr, DD_OK);
+    h.release(surface);
+    assert.notEqual(h.query(device, IID_IDirect3DDevice).hr, DD_OK);
+    assert.notEqual(h.query(device, IID_IDirect3DDevice2).hr, DD_OK);
+
+    // ddraw1.c create_device releases the surface and keeps the device.
+    assert.equal(h.release(surface), 1);
+    assert.equal(h.device1(device, 'GetDirect3D', [0x4500]), D3D_OK);
+    const d3d = h.box.memory.readU32(0x4500);
+    assert.equal(d3d, h.query(ddraw, IID_IDirect3D).pointer, 'the IDirect3D of its object');
+    h.release(d3d);
+    h.release(d3d);
+
+    const call = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        h.device1(device, name, args);
+    assert.equal(call('CreateMatrix', [0x4600]), D3D_OK);
+    const handle = h.box.memory.readU32(0x4600);
+    h.box.putFloats(0x6000, [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 1, 2, 3, 1]);
+    assert.equal(call('SetMatrix', [handle, 0x6000]), D3D_OK);
+    assert.equal(call('GetMatrix', [handle, 0x6100]), D3D_OK);
+    assert.deepEqual(h.box.floatsAt(0x6100, 16), h.box.floatsAt(0x6000, 16));
+    assert.equal(call('DeleteMatrix', [handle]), D3D_OK);
+    assert.equal(call('GetMatrix', [handle, 0x6100]), 0x88760000 + 733,
+        'D3DERR_MATRIX_GETDATA_FAILED');
+
+    const model = h.publisher.objectAt(surface);
+    assert.equal(h.release(device), 0);
+    assert.ok(model.destroyed, 'the last reference was the device\'s, and the surface went');
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('later devices answer IDirect3DDevice too, with their own count', ()=>{
+    const h = seamed();
+    const fourth = h.create4();
+    const { device, target } = h.createDevice(fourth);
+    const first = h.query(device, IID_IDirect3DDevice);
+    assert.equal(first.hr, DD_OK);
+    assert.equal(h.countOf(device), 2, 'Wine\'s ddraw4.c test_device_qi');
+    h.release(first.pointer);
+    assert.equal(h.release(device), 0);
+    h.release(target);
+    h.release(fourth);
+
+    const second = h.create2();
+    const made = h.createDevice2(second);
+    const again = h.query(made.device, IID_IDirect3DDevice);
+    assert.equal(again.hr, DD_OK, 'ddraw2.c test_device_qi');
+    h.release(again.pointer);
+    assert.equal(h.release(made.device), 0);
+    h.release(made.target);
+    h.release(made.d3d);
+    h.release(second);
+    h.assertAllReleased();
+});
+
+test('an execute buffer takes its data as given, and refuses a wrong size', ()=>{
+    const h = seamed();
+    const ddraw = h.create1();
+    const surface = h.surface1(ddraw);
+    const device = h.query(surface, DEVICE_IDS.HAL).pointer;
+    h.release(surface);
+    const desc = 0x6000;
+    h.box.bytes.fill(0, desc, desc + D3DEXECUTEBUFFERDESC.SIZE);
+    h.box.memory.writeU32(desc, D3DEXECUTEBUFFERDESC.SIZE);
+    h.box.memory.writeU32(desc + D3DEXECUTEBUFFERDESC.dwFlags, D3DDEB_CAPS);
+    h.box.memory.writeU32(desc + D3DEXECUTEBUFFERDESC.dwBufferSize, 1024);
+    assert.equal(h.device1(device, 'CreateExecuteBuffer', [desc, 0x4600, 0]),
+        DDERR_INVALIDPARAMS >>> 0, 'no size named');
+    h.box.memory.writeU32(desc + D3DEXECUTEBUFFERDESC.dwFlags, D3DDEB_BUFSIZE | D3DDEB_CAPS);
+    assert.equal(h.device1(device, 'CreateExecuteBuffer', [desc, 0x4600, 0]), D3D_OK);
+    const buffer = h.box.memory.readU32(0x4600);
+    const call = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        h.box.call(buffer, slot(IDIRECT3DEXECUTEBUFFER_SLOTS, name), args);
+
+    h.box.bytes.fill(0, desc, desc + D3DEXECUTEBUFFERDESC.SIZE);
+    h.box.memory.writeU32(desc, D3DEXECUTEBUFFERDESC.SIZE);
+    assert.equal(call('Lock', [desc]), D3D_OK);
+    assert.notEqual(h.box.memory.readU32(desc + D3DEXECUTEBUFFERDESC.lpData), 0);
+    assert.equal(h.box.memory.readU32(desc + D3DEXECUTEBUFFERDESC.dwBufferSize), 1024);
+    assert.equal(call('Lock', [desc]), 0x88760000 + 714, 'D3DERR_EXECUTE_LOCKED');
+    assert.equal(call('Unlock', []), D3D_OK);
+    assert.equal(call('Unlock', []), 0x88760000 + 715, 'D3DERR_EXECUTE_NOT_LOCKED');
+
+    // Wine's ddraw1.c test_execute_data.
+    const data = 0x6100;
+    h.box.bytes.fill(0, data, data + D3DEXECUTEDATA.SIZE + 4);
+    h.box.memory.writeU32(data + D3DEXECUTEDATA.dwVertexCount, 999999);
+    h.box.memory.writeU32(data + D3DEXECUTEDATA.dwInstructionLength, 10240);
+    for (const size of [D3DEXECUTEDATA.SIZE - 1, D3DEXECUTEDATA.SIZE + 1])
+    {
+        h.box.memory.writeU32(data, size);
+        assert.equal(call('SetExecuteData', [data]), DDERR_INVALIDPARAMS >>> 0);
+    }
+    h.box.memory.writeU32(data, D3DEXECUTEDATA.SIZE);
+    assert.equal(call('SetExecuteData', [data]), D3D_OK, 'the counts are not checked');
+    h.box.bytes.fill(0xaa, data, data + D3DEXECUTEDATA.SIZE);
+    assert.equal(call('GetExecuteData', [data]), D3D_OK);
+    assert.equal(h.box.memory.readU32(data), D3DEXECUTEDATA.SIZE);
+    assert.equal(h.box.memory.readU32(data + D3DEXECUTEDATA.dwVertexCount), 999999);
+    assert.equal(h.box.memory.readU32(data + D3DEXECUTEDATA.dwInstructionLength), 10240);
+
+    assert.equal(h.release(buffer), 0);
+    assert.equal(h.release(device), 0);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('Execute runs the instructions through its viewport, and draws nothing past the target',
+    ()=>{
+        const h = seamed();
+        const ddraw = h.create1();
+        const surface = h.surface1(ddraw);
+        const device = h.query(surface, DEVICE_IDS.HAL).pointer;
+        h.release(surface);
+        const d3d = h.query(ddraw, IID_IDirect3D).pointer;
+        const viewport = h.make1(d3d, 'CreateViewport');
+        assert.equal(h.device1(device, 'AddViewport', [viewport]), D3D_OK);
+        /** @param {number} x @param {number} width */
+        const setViewport = (x, width)=>{
+            const at = 0x6200;
+            h.box.bytes.fill(0, at, at + D3DVIEWPORT.SIZE);
+            h.box.memory.writeU32(at, D3DVIEWPORT.SIZE);
+            h.box.memory.writeU32(at + D3DVIEWPORT.dwX, x);
+            h.box.memory.writeU32(at + D3DVIEWPORT.dwWidth, width);
+            h.box.memory.writeU32(at + D3DVIEWPORT.dwHeight, 8);
+            h.box.putFloats(at + D3DVIEWPORT.dvScaleX, [width / 2, 4, 1, 1, 0, 1]);
+            assert.equal(h.box.call(viewport, slot(IDIRECT3DVIEWPORT3_SLOTS, 'SetViewport'),
+                [at]), D3D_OK, 'the first generation keeps any rectangle');
+        };
+
+        const desc = 0x6000;
+        h.box.bytes.fill(0, desc, desc + D3DEXECUTEBUFFERDESC.SIZE);
+        h.box.memory.writeU32(desc, D3DEXECUTEBUFFERDESC.SIZE);
+        h.box.memory.writeU32(desc + D3DEXECUTEBUFFERDESC.dwFlags, D3DDEB_BUFSIZE);
+        h.box.memory.writeU32(desc + D3DEXECUTEBUFFERDESC.dwBufferSize, 1024);
+        h.device1(device, 'CreateExecuteBuffer', [desc, 0x4600, 0]);
+        const buffer = h.box.memory.readU32(0x4600);
+        const call = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+            h.box.call(buffer, slot(IDIRECT3DEXECUTEBUFFER_SLOTS, name), args);
+        /** @param {ReturnType<typeof instructions>} stream */
+        const fill = stream=>{
+            call('Lock', [desc]);
+            const at = h.box.memory.readU32(desc + D3DEXECUTEBUFFERDESC.lpData);
+            // Four D3DLVERTEX, a unit square: positions, a reserved dword, colours.
+            h.box.bytes.fill(0, at, at + 128);
+            [[-1, -1], [-1, 1], [1, 1], [1, -1]].forEach(([x, y], k)=>{
+                h.box.putFloats(at + k * 32, [x, y, 0.5]);
+                h.box.memory.writeU32(at + k * 32 + 16, 0xffff0000);
+            });
+            h.box.bytes.set(stream.bytes, at + 128);
+            call('Unlock', []);
+            const data = 0x6100;
+            h.box.bytes.fill(0, data, data + D3DEXECUTEDATA.SIZE);
+            h.box.memory.writeU32(data, D3DEXECUTEDATA.SIZE);
+            h.box.memory.writeU32(data + D3DEXECUTEDATA.dwVertexCount, 4);
+            h.box.memory.writeU32(data + D3DEXECUTEDATA.dwInstructionOffset, 128);
+            h.box.memory.writeU32(data + D3DEXECUTEDATA.dwInstructionLength,
+                stream.bytes.length);
+            call('SetExecuteData', [data]);
+        };
+        const triangles = ()=>{
+            const stats = 0x6400;
+            h.box.memory.writeU32(stats, D3DSTATS.SIZE);
+            h.device1(device, 'GetStats', [stats]);
+            return h.box.memory.readU32(stats + D3DSTATS.dwTrianglesDrawn);
+        };
+        const RS_ZENABLE = 7;
+
+        setViewport(0, 8);
+        fill(instructions().renderState(RS_ZENABLE, 0).processVertices(1, 0, 4).quad().exit());
+        h.device1(device, 'BeginScene');
+        assert.equal(h.device1(device, 'Execute', [buffer, viewport, 1]), D3D_OK);
+        assert.equal(triangles(), 2, 'the processed square, drawn as two triangles');
+
+        setViewport(4, 8);
+        assert.equal(h.device1(device, 'Execute', [buffer, viewport, 1]), D3D_OK);
+        assert.equal(triangles(), 2, 'a viewport the target cannot hold draws nothing');
+
+        setViewport(0, 8);
+        fill(instructions().branchAlways(0).processVertices(1, 0, 4).quad().exit());
+        assert.equal(h.device1(device, 'Execute', [buffer, viewport, 1]), D3D_OK);
+        assert.equal(triangles(), 2, 'a branch with no offset ends the run (Wine\'s d3d.c)');
+        // The branch is twenty bytes and the exit after it four.
+        fill(instructions().branchAlways(24).exit().processVertices(1, 0, 4).quad().exit());
+        assert.equal(h.device1(device, 'Execute', [buffer, viewport, 1]), D3D_OK);
+        assert.equal(triangles(), 4, 'and one with an offset skips forward from itself');
+        h.device1(device, 'EndScene');
+
+        call('Lock', [desc]);
+        assert.equal(h.device1(device, 'Execute', [buffer, viewport, 1]),
+            0x88760000 + 714, 'a locked buffer is not run');
+        call('Unlock', []);
+        const stranger = h.make1(d3d, 'CreateViewport');
+        assert.equal(h.device1(device, 'Execute', [buffer, stranger, 1]),
+            DDERR_INVALIDPARAMS >>> 0, 'a viewport the device does not hold');
+
+        h.release(stranger);
+        assert.equal(h.release(buffer), 0);
+        h.release(viewport);
+        assert.equal(h.release(device), 0);
         h.release(d3d);
         h.release(ddraw);
         h.assertAllReleased();

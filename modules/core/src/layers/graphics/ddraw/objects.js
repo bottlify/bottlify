@@ -227,6 +227,7 @@ export function depthFormatForDepth(bitDepth){
  * @typedef {Object} Surface
  * @property {number} refCount
  * @property {boolean} destroyed
+ * @property {any} directDraw  The DirectDraw object that made it.
  * @property {() => number} addRef
  * @property {() => number} release
  * @property {number} caps
@@ -890,6 +891,10 @@ export function createDirectDraw(options = {}){
             },
             get destroyed(){
                 return life.dead;
+            },
+            /** The DirectDraw object that made it, which an attached surface has too. */
+            get directDraw(){
+                return directDraw;
             },
             addRef: ()=>life.addRef(),
             release: ()=>life.release(),
@@ -1713,7 +1718,7 @@ export function createDirectDraw(options = {}){
         return { hr: DD_OK, surface: front };
     }
 
-    return {
+    const directDraw = {
         get destroyed(){
             return destroyed;
         },
@@ -1907,4 +1912,5 @@ export function createDirectDraw(options = {}){
             return null;
         },
     };
+    return directDraw;
 }

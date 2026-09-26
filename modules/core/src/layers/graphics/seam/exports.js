@@ -134,6 +134,9 @@ export function createGraphicsLibraries(
     });
     const d3dLegacy = createLegacyDirect3DSeam({
         publisher, memory, d3d7: d3d7.shared, callGuest, currentThread, scratch,
+        // A first-generation device is asked of a surface, whose object the
+        // DirectDraw seam knows; that seam is made next, beside these tables.
+        ownerOf: surface=>ddraw.ownerOf(surface),
     });
     const ddraw = createDirectDrawSeam({
         publisher, memory, screen, gdi, present, callGuest, currentThread, scratch, now, schedule,
