@@ -662,6 +662,14 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
         + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
     assertLine(fogged.wgsl, `let scaled = c[${HYBRID_CONSTANTS.FOG}].z * dist;`);
     assert.ok(!fogged.wgsl.includes('fogFactorOf(out.oPos.w)'));
+    // Range fog: the distance from the eye instead of the depth.
+    const ranged = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
+    ], new Map([[0, { components: 3, scalar: 'f32', bgra: false }]]), [], [],
+    D3DFOG.LINEAR, FOG_SOURCE.VERTEX, { rangeFog: true });
+    assertLine(ranged.wgsl, `out.o${fogLocation} = vec4f(fogFactorOf(length((mat4x4f(c[5],`
+        + ' c[6], c[7], c[8]) * vec4f(vec4f(in.v0, 1.0).xyz, 1.0)).xyz)),'
+        + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
 
     // With no mode set, or for a pre-transformed vertex, the factor is the
     // specular alpha the declaration carries, and no curve is declared.

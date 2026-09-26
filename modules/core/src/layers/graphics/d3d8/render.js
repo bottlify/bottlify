@@ -1417,6 +1417,8 @@ export function pipelineStateOf(model, shape){
         lighting: shape.lighting ?? null,
         normalizeNormals: rs('NORMALIZENORMALS') !== 0,
         flatShading: isFlatShaded(model),
+        // Range fog is vertex fog's alone: table fog is the pixel's depth.
+        rangeFog: fog.source === FOG_SOURCE.VERTEX && rs('RANGEFOGENABLE') !== 0,
         ...(shape.vertexLayout ? {
             vertexLayout: shape.vertexLayout,
             vertexLayoutKey: shape.vertexLayoutKey,
@@ -3521,6 +3523,8 @@ export function createRenderer(options){
         // so every translation of the pair is made for it.
         const flat = isFlatShaded(model);
         const normalizeNormals = (model.renderStates.get(D3DRS.NORMALIZENORMALS) ?? 0) !== 0;
+        const rangeFog = fog.source === FOG_SOURCE.VERTEX
+            && (model.renderStates.get(D3DRS.RANGEFOGENABLE) ?? 0) !== 0;
         const pixel = translationOf(pixelShader,
             `ps|fog${fog.source}/${fog.mode}${flat ? '|flat' : ''}`,
             ()=>translateShader(
@@ -3602,9 +3606,9 @@ export function createRenderer(options){
             : hybridStageFor(
                 `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`
                     + `|f${fog.source}/${fog.mode}${flat ? '|flat' : ''}`
-                    + `${normalizeNormals ? '|normalize' : ''}`,
+                    + `${normalizeNormals ? '|normalize' : ''}${rangeFog ? '|range' : ''}`,
                 wanted, layout.shapes, missing, generated, fog,
-                { flatColours: flat, normalizeNormals });
+                { flatColours: flat, normalizeNormals, rangeFog });
         if (vertex.error)
         {
             skip('program');
@@ -3761,7 +3765,7 @@ export function createRenderer(options){
      * @param {number[]} alsoWrite
      * @param {number[]} generated
      * @param {{ source: number, mode: number }} fog  See `fogOf`.
-     * @param {{ flatColours: boolean, normalizeNormals: boolean }} shading
+     * @param {{ flatColours: boolean, normalizeNormals: boolean, rangeFog: boolean }} shading
      *     See `fixedVertexStage`.
      */
     const hybridStageFor = (key, wanted, shapes, alsoWrite, generated, fog, shading)=>{

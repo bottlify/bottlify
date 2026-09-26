@@ -1236,11 +1236,12 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  *        the specular alpha for a pre-transformed vertex or with no mode set,
  *        and for table fog the colour alone, with the curve's range beside it
  *        for the pixel shader to evaluate per pixel.
- * @param {{ flatColours?: boolean, normalizeNormals?: boolean }} [options]
+ * @param {{ flatColours?: boolean, normalizeNormals?: boolean, rangeFog?: boolean }} [options]
  *        `flatColours`: the two colour varyings flat, for D3DSHADE_FLAT, as
  *        the pixel shader must read them. `normalizeNormals`:
  *        D3DRS_NORMALIZENORMALS, whether the camera-space normal a
- *        coordinate is generated from is renormalised.
+ *        coordinate is generated from is renormalised. `rangeFog`:
+ *        D3DRS_RANGEFOGENABLE, vertex fog over the distance from the eye.
  * @returns {TranslatedShader}
  */
 export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [], fog = 0,
@@ -1351,10 +1352,11 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         outputFields.push(`    @location(${location}) o${location}: vec4f,`);
         outputs.push(location);
         const wv = HYBRID_CONSTANTS.WORLD_VIEW;
+        const camera = `(mat4x4f(c[${wv}], c[${wv + 1}], c[${wv + 2}], c[${wv + 3}])`
+            + ` * vec4f(${vertex}, 1.0))`;
         const amount = fogSource === FOG_SOURCE.TABLE ? '0.0'
             : vertexFog
-                ? `fogFactorOf(abs((mat4x4f(c[${wv}], c[${wv + 1}], c[${wv + 2}], c[${wv + 3}])`
-                    + ` * vec4f(${vertex}, 1.0)).z))`
+                ? `fogFactorOf(${options.rangeFog ? `length(${camera}.xyz)` : `abs(${camera}.z)`})`
                 : specularAlpha;
         body.push(`    out.o${location} = vec4f(${amount}, c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
     }

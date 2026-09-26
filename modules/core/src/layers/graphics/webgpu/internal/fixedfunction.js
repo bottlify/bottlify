@@ -673,15 +673,17 @@ export function generateFixedFunction(state, layout){
     // How much of the fragment survives vertex fog, interpolated across the
     // triangle. The distance is the magnitude of the camera-space z, not the
     // clip w: the two agree only under a perspective projection, and an
-    // orthographic one has a w of one at every depth. Where the factor is the
+    // orthographic one has a w of one at every depth. Range fog takes the
+    // camera-space distance from the eye instead. Where the factor is the
     // program's own, in the specular alpha, and the format carries no
     // specular, there is nothing to fog by, and inventing a distance would
     // fade a two-dimensional overlay by how deep the scene behind it happens
     // to be.
+    const cameraPoint = '(uniforms.worldView * vec4f(vertex.position, 1.0))';
     const fogAmount = !carriedFog ? []
         : vertexFog
-            ? ['    out.fogAmount = fogFactorOf(abs((uniforms.worldView'
-                + ' * vec4f(vertex.position, 1.0)).z));']
+            ? [`    out.fogAmount = fogFactorOf(${state.rangeFog
+                ? `length(${cameraPoint}.xyz)` : `abs(${cameraPoint}.z)`});`]
             : [`    out.fogAmount = ${has('specular') ? 'vertex.specular.a' : '1.0'};`];
 
     const lightCount = lighting === null ? 0 : lighting.lights.length;

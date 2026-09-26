@@ -516,6 +516,17 @@ test('vertex fog fades by the magnitude of the camera-space z, not the clip w', 
     assert.doesNotMatch(code, /fogFactorOf\(out\.position\.w\)/);
 });
 
+test('range fog fades vertex fog by the distance from the eye', ()=>{
+    // D3DRS_RANGEFOGENABLE: the vertex's distance from the camera instead of
+    // its depth (Microsoft's "Vertex Fog"; Wine's d3d9 fog_test puts a quad
+    // at z = 0.5 whose corners are 1.5 from the eye).
+    const code = generate(baseState({
+        fogMode: D3DFOG.LINEAR, fogSource: FOG_SOURCE.VERTEX, rangeFog: true,
+    })).code;
+    assert.ok(code.includes('out.fogAmount = fogFactorOf(length((uniforms.worldView'
+        + ' * vec4f(vertex.position, 1.0)).xyz));'), code);
+});
+
 test('table fog is the pixel\'s: the curve over its z or its w, in the fragment stage', ()=>{
     // Wine's d3d9 test_fog_interpolation draws a quad whose z runs from 0 to 1
     // under table EXP fog and finds the middle at the curve's value there,

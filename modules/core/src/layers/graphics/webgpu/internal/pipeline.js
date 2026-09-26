@@ -198,6 +198,9 @@ function lookUp(table, value, what){
  * @property {boolean} [flatShading]
  *     D3DSHADE_FLAT: the two vertex colours are the provoking vertex's over
  *     the whole primitive.
+ * @property {boolean} [rangeFog]
+ *     D3DRS_RANGEFOGENABLE under vertex fog: the distance from the eye rather
+ *     than the depth.
  * @property {import('./vertexformat.js').VertexLayout} [vertexLayout]
  *     The vertex layout when the vertex format cannot spell it -- a declaration
  *     read by the fixed-function stage -- with `vertexLayoutKey` naming it.
@@ -259,6 +262,7 @@ export function pipelineKey(state){
         ...(state.vertexLayoutKey === undefined ? [] : [state.vertexLayoutKey]),
         ...(state.normalizeNormals ? ['normalize'] : []),
         ...(state.flatShading ? ['flat'] : []),
+        ...(state.rangeFog ? ['range'] : []),
     ].join('|');
 }
 

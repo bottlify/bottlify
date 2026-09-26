@@ -3013,6 +3013,60 @@ test('fog: the table mode is the one that runs when it is set, else the vertex m
     assert.deepEqual(fogOf(disabled), { source: FOG_SOURCE.NONE, mode: D3DFOG.NONE });
 });
 
+test('fog: range fog is vertex fog over the distance from the eye, and table fog ignores it',
+    async()=>{
+        // Wine's d3d9 fog_test, "Test RANGEFOG vs FOGTABLEMODE": a quad at
+        // z = 0.5 with corners at x, y = +/-1 under identity matrices, linear
+        // fog from 0.75 to 0.75001. With D3DRS_RANGEFOGENABLE vertex fog takes
+        // each corner's distance from the eye, 1.5, and the quad is all fog
+        // colour; table fog does not use range fog, takes z = 0.5, and the
+        // quad keeps its colour.
+        const draw = async(/** @type {number} */ table)=>{
+            const h = harness({ width: 640, height: 480 });
+            const { device } = h;
+            device.SetRenderState(D3DRS.LIGHTING, 0);
+            device.SetRenderState(D3DRS.FOGENABLE, 1);
+            device.SetRenderState(D3DRS.RANGEFOGENABLE, 1);
+            device.SetRenderState(D3DRS.FOGSTART, floatToDword(0.75));
+            device.SetRenderState(D3DRS.FOGEND, floatToDword(0.75001));
+            device.SetRenderState(D3DRS.FOGTABLEMODE, table);
+            device.SetRenderState(D3DRS.FOGVERTEXMODE, D3DFOG.LINEAR);
+            assert.equal(device.BeginScene(), D3D_OK);
+            assert.equal(device.SetVertexShader(FVF.XYZ | FVF.DIFFUSE), D3D_OK);
+            const bytes = new DataView(new ArrayBuffer(16 * 4));
+            [[-1, -1], [-1, 1], [1, -1], [1, 1]].forEach(([x, y], index)=>{
+                bytes.setFloat32(index * 16, x, true);
+                bytes.setFloat32(index * 16 + 4, y, true);
+                bytes.setFloat32(index * 16 + 8, 0.5, true);
+            });
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLESTRIP, 2,
+                new Uint8Array(bytes.buffer), 16), D3D_OK);
+            assert.equal(device.EndScene(), D3D_OK);
+            await h.present();
+            return h.device.diagnostics().lastFrame
+                .find((/** @type {any} */ c)=>c.kind === 'draw');
+        };
+        const ranged = await draw(D3DFOG.NONE);
+        assert.equal(ranged.state.fogSource, FOG_SOURCE.VERTEX);
+        assert.equal(ranged.state.rangeFog, true);
+        const worldView = ranged.uniforms.subarray(UNIFORM_AT.worldView,
+            UNIFORM_AT.worldView + 16);
+        const range = { start: 0.75, end: 0.75001, density: 1 };
+        for (const corner of [[-1, -1, 0.5], [1, 1, 0.5]])
+        {
+            const eye = transformPosition(worldView, corner);
+            assert.equal(fogFactor(D3DFOG.LINEAR, Math.hypot(eye[0], eye[1], eye[2]), range), 0,
+                'the corner is all fog');
+        }
+        assert.ok(generateFixedFunction(ranged.state, decodeFvf(ranged.state.fvf)).code
+            .includes('fogFactorOf(length((uniforms.worldView'));
+
+        const table = await draw(D3DFOG.LINEAR);
+        assert.equal(table.state.fogSource, FOG_SOURCE.TABLE);
+        assert.equal(table.state.rangeFog, false, 'range fog is vertex fog alone');
+        assert.equal(fogFactor(D3DFOG.LINEAR, 0.5, range), 1, 'z = 0.5 keeps the colour');
+    });
+
 test('fog: table fog is taken over z under an affine projection, over w otherwise', ()=>{
     // Microsoft's "Pixel Fog": a projection whose fourth column is
     // (0, 0, 0, 1) is affine and fogs by z; Wine's test_fog has _44 = 1.01
