@@ -253,6 +253,12 @@ const FONTSIGNATURE_SIZE = 24;
  * for a variable-pitch font and clear for a fixed-pitch one.
  */
 const TMPF_FIXED_PITCH = 0x01;
+/**
+ * TMPF_VECTOR: a font drawn from outlines at any size rather than from
+ * bitmaps at one, which every face here is. TMPF_TRUETYPE is not claimed
+ * with it, since no face has the tables a TrueType font would.
+ */
+const TMPF_VECTOR = 0x02;
 
 /** The character range a metric describes, and the two special characters in it. */
 const FIRST_CHAR = 0x20;
@@ -275,8 +281,8 @@ const NEWTEXTMETRICEXW_SIZE = 100;
 /**
  * An enumerated face's FontType: none of RASTER_FONTTYPE, DEVICE_FONTTYPE and
  * TRUETYPE_FONTTYPE, which is what a vector font is. Every face here is drawn
- * at any size, and none has tables a program could read, as TEXTMETRIC and
- * GetTextCharsetInfo already say.
+ * at any size, and none has tables a program could read, as TEXTMETRIC's
+ * TMPF_VECTOR and GetTextCharsetInfo already say.
  */
 const SCALABLE_FONTTYPE = 0;
 
@@ -856,7 +862,7 @@ export function createGdiFunctions(host){
             // The family nibble travels through unchanged; the pitch bits do not,
             // because there is only one pitch here and it is not the one the
             // constant is named after.
-            pitchAndFamily: (font.pitchAndFamily & 0xf0) & ~TMPF_FIXED_PITCH,
+            pitchAndFamily: ((font.pitchAndFamily & 0xf0) & ~TMPF_FIXED_PITCH) | TMPF_VECTOR,
             charSet: font.charSet === DEFAULT_CHARSET ? ANSI_CHARSET : font.charSet,
             ...measured,
         };

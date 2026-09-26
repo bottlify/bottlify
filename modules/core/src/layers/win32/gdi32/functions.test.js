@@ -1104,6 +1104,22 @@ test('GetTextMetricsA writes TEXTMETRIC at the documented offsets', ()=>{
         'TMPF_FIXED_PITCH is set for a VARIABLE pitch font, and everything here is fixed');
 });
 
+test('a font here reports itself a vector font, as its enumeration does', ()=>{
+    // TMPF_VECTOR is what separates a scalable font from a raster one (Wine's
+    // dib tests skip their outline text when it is clear); neither
+    // TMPF_TRUETYPE nor TMPF_DEVICE is claimed, as FontType claims neither.
+    const TMPF_VECTOR = 0x02;
+    const { fns, memory, hdc } = withDC();
+    for (const pitchAndFamily of [0, 0x11, 0x22, 0x31])
+    {
+        putLogFont(memory, { pitchAndFamily });
+        fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
+        assert.ok(fns.GetTextMetricsA.handler([hdc, OUT]));
+        assert.equal(memory.u8(OUT + TEXTMETRICA.tmPitchAndFamily),
+            (pitchAndFamily & 0xf0) | TMPF_VECTOR, `${pitchAndFamily}`);
+    }
+});
+
 test('a taller font asks for more of everything', ()=>{
     const { fns, memory, hdc } = withDC();
     putLogFont(memory, { height: -10 });
