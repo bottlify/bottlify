@@ -598,6 +598,11 @@ function describe(result, context, calls, symbols){
     say(`  adapter: ${JSON.stringify(result.adapter)}`);
     say(`  ran for ${result.elapsedMs}ms, ${result.instructions} guest instructions`);
     say(`stopped: ${result.stopped ?? result.error ?? 'no answer'}`);
+    if (result.stack && !result.ok)
+    {
+        // A failure before the program ran has only this to say where it came from.
+        say(result.stack.replace(/^/gm, '    '));
+    }
     say('');
 
     const unresolved = byLibrary(result.unresolved ?? []);

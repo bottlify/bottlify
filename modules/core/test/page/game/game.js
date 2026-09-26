@@ -109,10 +109,12 @@ if (inWorker)
         }
     };
     worker.onerror = event=>{
-        namespace.errors.push(`worker:${event.message}`);
+        // Where it was thrown, which the message alone does not say.
+        const where = event.filename ? ` at ${event.filename}:${event.lineno}:${event.colno}` : '';
+        namespace.errors.push(`worker:${event.message}${where}`);
         if (!namespace.result)
         {
-            finish({ ok: false, error: event.message, stopped: event.message });
+            finish({ ok: false, error: event.message, stopped: `${event.message}${where}` });
         }
     };
     const offscreen = canvas.transferControlToOffscreen();
