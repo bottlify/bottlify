@@ -1225,18 +1225,6 @@ export function createDrawingFunctions(
         },
 
         /**
-         * UINT GetDIBColorTable(HDC hdc, UINT iStart, UINT cEntries,
-         *                       RGBQUAD *prgbq)
-         *
-         * Zero entries copied, for the same reason: a colour table belongs to a
-         * DIB of eight bits or fewer, and this pipeline has none.
-         */
-        GetDIBColorTable: {
-            argBytes: 16,
-            handler: ()=>0,
-        },
-
-        /**
          * UINT GetPaletteEntries(HPALETTE hpal, UINT iStart, UINT cEntries,
          *                       LPPALETTEENTRY pPalEntries)
          *
