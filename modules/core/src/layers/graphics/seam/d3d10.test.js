@@ -22,13 +22,14 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import {
-    ID3D10BUFFER_SLOTS, ID3D10DEVICE_SLOTS, ID3D10TEXTURE_SLOTS, IDXGIADAPTER_SLOTS,
+    ID3D10BUFFER_SLOTS, ID3D10DEVICE_SLOTS, ID3D10QUERY_SLOTS, ID3D10TEXTURE_SLOTS,
+    IDXGIADAPTER_SLOTS,
     IDXGIFACTORY_SLOTS, IDXGISWAPCHAIN_SLOTS, createDirect3D10Seam,
 } from './d3d10.js';
 import {
     D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE, D3D10_MAP, D3D10_PRIMITIVE_TOPOLOGY,
-    D3D10_SDK_VERSION, D3D10_USAGE, DXGI_FORMAT, DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, IID,
-    S_OK,
+    D3D10_QUERY, D3D10_SDK_VERSION, D3D10_USAGE, DXGI_ERROR_INVALID_CALL, DXGI_FORMAT,
+    DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, IID, S_OK,
 } from '../d3d10/constants.js';
 import { DXGI_SWAP_CHAIN_DESC, writeSwapChainDesc } from '../d3d10/structs.js';
 import { passThroughVertexShader, solidPixelShader } from '../d3d10/shader-fixtures.js';
@@ -539,6 +540,43 @@ test('private data travels in both method orders, DXGI\'s and Direct3D\'s', ()=>
     assert.equal(h.box.memory.readU32(sizeAt), 3);
     assert.equal(h.swapChain(swapChain, 'GetPrivateData', [guid, sizeAt, 0]), S_OK,
         'no room at all just asks the size');
+});
+
+test('a query answers through its vtable, and a predicate is published as one', ()=>{
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    const desc = h.box.place([D3D10_QUERY.EVENT, 0]);
+    const queryAt = h.box.place([0]);
+    assert.equal(h.device(device, 'CreateQuery', [desc, queryAt]), S_OK);
+    const query = h.box.memory.readU32(queryAt);
+    const call = (/** @type {number} */ target, /** @type {string} */ name,
+        /** @type {number[]} */ args)=>h.box.call(target, slot(ID3D10QUERY_SLOTS, name), args);
+    assert.equal(call(query, 'GetDataSize', []), 4);
+    const dataAt = h.box.place([0xdeadbeef]);
+    assert.equal(call(query, 'GetData', [dataAt, 4, 0]), DXGI_ERROR_INVALID_CALL);
+    call(query, 'End', []);
+    assert.equal(call(query, 'GetData', [dataAt, 4, 0]), S_OK);
+    assert.equal(h.box.memory.readU32(dataAt), 1, 'TRUE, written where the program asked');
+
+    const predicateDesc = h.box.place([D3D10_QUERY.OCCLUSION_PREDICATE, 0]);
+    const predicateAt = h.box.place([0xdeadbeef]);
+    assert.equal(h.device(device, 'CreatePredicate', [predicateDesc, predicateAt]), S_OK);
+    const predicate = h.box.memory.readU32(predicateAt);
+    assert.notEqual(predicate, 0);
+    h.device(device, 'SetPredication', [predicate, 1]);
+    const backAt = h.box.place([0]);
+    const valueAt = h.box.place([0]);
+    h.device(device, 'GetPredication', [backAt, valueAt]);
+    assert.equal(h.box.memory.readU32(backAt), predicate, 'the same pointer back');
+    assert.equal(h.box.memory.readU32(valueAt), 1);
+    assert.equal(call(predicate, 'GetDataSize', []), 4);
+
+    // The asynchronous base answers a query's QueryInterface; a predicate's
+    // interface does not answer a plain query's.
+    const asyncAt = h.box.place([0]);
+    assert.equal(h.box.call(query, 0, [h.box.placeGuid(IID.ID3D10Asynchronous), asyncAt]), S_OK);
+    assert.equal(h.box.call(query, 0, [h.box.placeGuid(IID.ID3D10Predicate), asyncAt]),
+        0x80004002);
 });
 
 test('what this build cannot do says so in the slot rather than in a crash', ()=>{

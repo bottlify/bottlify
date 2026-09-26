@@ -9,8 +9,9 @@
  *
  * The device in `device.js` decides what is legal; this decides what the GPU
  * is told. Between the two is a record: every clear and draw is written down
- * with the whole state it depends on, and a present replays the record onto
- * one backend frame once every pipeline it needs has been built. The replay is
+ * with the whole state it depends on, and a present -- or a flush, which shows
+ * nothing -- replays the record onto one backend frame once every pipeline it
+ * needs has been built. The replay is
  * where the backend's rules are honoured -- one encoder, one submit, a pass per
  * change of target -- and the record is what a test reads back to know what was
  * drawn.
@@ -299,6 +300,17 @@ export function createRenderer(services){
 
     /** @type {any[]} commands recorded since the last present */
     let recording = [];
+    /**
+     * Commands ever recorded, and how many of those have been handed to the
+     * GPU: what a query ended after some of them waits on.
+     */
+    let recordedCount = 0;
+    let handedOver = 0;
+    /** @param {any} command */
+    const record = command=>{
+        recording.push(command);
+        recordedCount++;
+    };
     /** @type {Promise<void>} */
     let chain = Promise.resolve();
     /** @type {any[]} */
@@ -1213,7 +1225,7 @@ export function createRenderer(services){
                 return;
             }
             counters.clears++;
-            recording.push({ kind: 'clear', target, color: [...color] });
+            record({ kind: 'clear', target, color: [...color] });
         },
 
         /**
@@ -1234,7 +1246,7 @@ export function createRenderer(services){
                 return;
             }
             counters.clears++;
-            recording.push({ kind: 'clearDepth', target, flags, depth, stencil });
+            record({ kind: 'clearDepth', target, flags, depth, stencil });
         },
 
         /**
@@ -1337,7 +1349,7 @@ export function createRenderer(services){
                 indexBacking.gpu.markRead();
             }
             counters.draws++;
-            recording.push({
+            record({
                 kind: 'draw',
                 pipeline: pipelineFor(state),
                 target,
@@ -1386,17 +1398,30 @@ export function createRenderer(services){
                 counters.frames++;
                 return chain;
             }
-            const recorded = recording;
-            recording = [];
-            backend.markPresent();
-            const surface = backingOf(backBuffer).surface;
             counters.frames++;
-            chain = chain.then(()=>replay(recorded, surface)).catch(failure=>{
-                counters.failures.push(String(failure && failure.message || failure));
-                diverge(`a frame could not be replayed: ${failure && failure.message || failure}`);
-            });
-            return chain;
+            return submit(backingOf(backBuffer).surface);
         },
+
+        /**
+         * Hands what has been recorded to the GPU without showing anything:
+         * the next present starts from what is left, which is nothing.
+         *
+         * @returns {Promise<void>} settled when it has been submitted
+         */
+        flush(){
+            if (!backend || recording.length === 0)
+            {
+                handedOver = recordedCount;
+                return chain;
+            }
+            return submit(null);
+        },
+
+        /** @returns {number} commands recorded so far */
+        recorded: ()=>recordedCount,
+
+        /** @returns {number} commands handed to the GPU so far */
+        submitted: ()=>handedOver,
 
         idle: ()=>chain,
 
@@ -1413,6 +1438,24 @@ export function createRenderer(services){
             };
         },
     };
+
+    /**
+     * The recording so far, onto one backend frame in its turn.
+     *
+     * @param {any} surface  What the frame shows, or null for a flush.
+     * @returns {Promise<void>}
+     */
+    function submit(surface){
+        const recorded = recording;
+        recording = [];
+        handedOver = recordedCount;
+        backend.markPresent();
+        chain = chain.then(()=>replay(recorded, surface)).catch(failure=>{
+            counters.failures.push(String(failure && failure.message || failure));
+            diverge(`a frame could not be replayed: ${failure && failure.message || failure}`);
+        });
+        return chain;
+    }
 
     /**
      * @param {any[]} recorded
@@ -1575,7 +1618,10 @@ export function createRenderer(services){
                     passFor(target.target, null);
                 }
             }
-            frame.present(surface);
+            if (surface)
+            {
+                frame.present(surface);
+            }
         }
         finally
         {

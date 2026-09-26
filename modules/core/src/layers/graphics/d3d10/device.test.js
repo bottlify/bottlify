@@ -1538,6 +1538,242 @@ test('a query is made for every kind, and only two kinds are predicates', ()=>{
     assertFullyReleased(device);
 });
 
+/**
+ * @param {any} device
+ * @param {number} kind
+ */
+function createQuery(device, kind){
+    /** @type {{ query?: any }} */
+    const out = {};
+    assert.equal(device.CreateQuery({ Query: kind, MiscFlags: 0 }, out), S_OK);
+    return out.query;
+}
+
+/**
+ * The answer a query gives into a buffer of its own size.
+ *
+ * @param {any} query
+ * @returns {{ hr: number, view: DataView | null }}
+ */
+function queryData(query){
+    /** @type {{ data?: Uint8Array | null }} */
+    const out = {};
+    const hr = query.GetData(true, query.GetDataSize(), 0, out);
+    return {
+        hr,
+        view: out.data ? new DataView(out.data.buffer, out.data.byteOffset, out.data.length)
+            : null,
+    };
+}
+
+/**
+ * A 640x480 target, its view bound with a full viewport, and a four-vertex
+ * strip ready to draw: the context Wine's query tests draw in.
+ *
+ * @param {any} device
+ * @param {{ pixelShader?: boolean }} [options]
+ */
+function bindQuad(device, options = {}){
+    const texture = createTexture2D(device, { Width: 640, Height: 480 });
+    /** @type {{ view?: any }} */
+    const view = {};
+    assert.equal(device.CreateRenderTargetView(texture, null, view), S_OK);
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    assert.equal(device.CreateVertexShader(passThroughVertexShader(), vs), S_OK);
+    device.VSSetShader(vs.shader);
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    if (options.pixelShader)
+    {
+        assert.equal(device.CreatePixelShader(solidPixelShader([1, 0, 0, 1]), ps), S_OK);
+        device.PSSetShader(ps.shader);
+    }
+    device.IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY.TRIANGLESTRIP);
+    device.OMSetRenderTargets([view.view], null);
+    device.RSSetViewports([{
+        TopLeftX: 0, TopLeftY: 0, Width: 640, Height: 480, MinDepth: 0, MaxDepth: 1,
+    }]);
+    return [texture, view.view, vs.shader, ps.shader ?? null];
+}
+
+test('each kind of query answers a structure of its own size', ()=>{
+    // After Wine's d3d10core test_occlusion_query, test_pipeline_statistics_query,
+    // test_timestamp_query and test_so_statistics_query, and the header's structures.
+    const device = createDevice();
+    const sizes = {
+        [D3D10_QUERY.EVENT]: 4,
+        [D3D10_QUERY.OCCLUSION]: 8,
+        [D3D10_QUERY.TIMESTAMP]: 8,
+        [D3D10_QUERY.TIMESTAMP_DISJOINT]: 16,
+        [D3D10_QUERY.PIPELINE_STATISTICS]: 64,
+        [D3D10_QUERY.OCCLUSION_PREDICATE]: 4,
+        [D3D10_QUERY.SO_STATISTICS]: 16,
+        [D3D10_QUERY.SO_OVERFLOW_PREDICATE]: 4,
+    };
+    for (const [kind, size] of Object.entries(sizes))
+    {
+        const query = createQuery(device, Number(kind));
+        assert.equal(query.GetDataSize(), size, `query ${kind}`);
+        query.release();
+    }
+    assertFullyReleased(device);
+});
+
+test('a query never ended, or begun again, has no answer and says so', ()=>{
+    const device = createDevice();
+    const query = createQuery(device, D3D10_QUERY.OCCLUSION);
+    /** @type {{ data?: Uint8Array | null }} */
+    const out = {};
+    assert.equal(query.GetData(false, 0, 0, out), DXGI_ERROR_INVALID_CALL);
+    assert.equal(query.GetData(true, 8, 0, out), DXGI_ERROR_INVALID_CALL);
+    // An end with no beginning is nothing; a beginning makes it build.
+    query.End();
+    query.Begin();
+    query.Begin();
+    assert.equal(query.GetData(false, 0, 0, out), DXGI_ERROR_INVALID_CALL);
+    query.End();
+    assert.equal(query.GetData(false, 0, 0, out), S_OK);
+    query.release();
+
+    const event = createQuery(device, D3D10_QUERY.EVENT);
+    assert.equal(event.GetData(true, 4, 0, out), DXGI_ERROR_INVALID_CALL);
+    event.Begin();
+    assert.equal(event.GetData(true, 4, 0, out), DXGI_ERROR_INVALID_CALL,
+        'an event has no beginning, and Begin does not issue it');
+    event.End();
+    const answer = queryData(event);
+    assert.equal(answer.hr, S_OK);
+    assert.equal(answer.view?.getUint32(0, true), 1, 'TRUE: the work before it is done');
+    event.release();
+    assertFullyReleased(device);
+});
+
+test('an answer is refused into a buffer of any size but its own', ()=>{
+    const device = createDevice();
+    const query = createQuery(device, D3D10_QUERY.OCCLUSION);
+    query.Begin();
+    query.End();
+    /** @type {{ data?: Uint8Array | null }} */
+    const out = {};
+    for (const size of [4, 2, 7, 9])
+    {
+        assert.equal(query.GetData(true, size, 0, out), E_INVALIDARG, `${size} bytes`);
+        assert.equal(out.data, null, 'nothing is written');
+    }
+    assert.equal(query.GetData(true, 0, 0, out), S_OK, 'no room asks only whether it is ready');
+    assert.equal(out.data, null);
+    assert.equal(query.GetData(false, 4, 0, out), E_INVALIDARG, 'a size with nowhere to put it');
+    assert.equal(query.GetData(false, 8, 0, out), E_INVALIDARG);
+    query.release();
+    assertFullyReleased(device);
+});
+
+test('an occlusion query counts the samples its draws cover, and none for no draw', ()=>{
+    const device = createDevice();
+    const bound = bindQuad(device, { pixelShader: true });
+    const query = createQuery(device, D3D10_QUERY.OCCLUSION);
+    const predicate = createQuery(device, D3D10_QUERY.OCCLUSION_PREDICATE);
+    query.Begin();
+    predicate.Begin();
+    device.Draw(4, 0);
+    query.End();
+    predicate.End();
+    assert.equal(queryData(query).view?.getBigUint64(0, true), 640n * 480n);
+    assert.equal(queryData(predicate).view?.getUint32(0, true), 1);
+
+    query.Begin();
+    query.End();
+    query.End();
+    assert.equal(queryData(query).view?.getBigUint64(0, true), 0n);
+    predicate.Begin();
+    predicate.End();
+    assert.equal(queryData(predicate).view?.getUint32(0, true), 0);
+    query.release();
+    predicate.release();
+    bound.forEach(object=>object?.release());
+    assertFullyReleased(device);
+});
+
+test('pipeline statistics count what the input assembler and the shaders were given', ()=>{
+    const device = createDevice();
+    const bound = bindQuad(device);
+    const query = createQuery(device, D3D10_QUERY.PIPELINE_STATISTICS);
+    query.Begin();
+    device.Draw(4, 0);
+    query.End();
+    let view = /** @type {DataView} */ (queryData(query).view);
+    const counters = ()=>[0, 8, 16, 24, 32, 40, 48, 56]
+        .map(at=>Number(view.getBigUint64(at, true)));
+    assert.deepEqual(counters(), [4, 2, 4, 0, 0, 2, 2, 0],
+        'IA vertices and primitives, VS, GS, clipper in and out, and no pixel shader');
+
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader(solidPixelShader([1, 0, 0, 1]), ps), S_OK);
+    device.PSSetShader(ps.shader);
+    query.Begin();
+    device.DrawInstanced(4, 3, 0, 0);
+    query.End();
+    view = /** @type {DataView} */ (queryData(query).view);
+    assert.deepEqual(counters().slice(0, 3), [12, 6, 12], 'three instances');
+    assert.ok(counters()[7] >= 3 * 640 * 480, 'a pixel shader runs over what is covered');
+    query.release();
+    ps.shader.release();
+    bound.forEach(object=>object?.release());
+    assertFullyReleased(device);
+});
+
+test('a timestamp ends where it is issued, and its disjoint query says to discard it', ()=>{
+    let clock = 5;
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(D3D10CreateDevice(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0,
+        D3D10_SDK_VERSION, out, { now: ()=>clock }), S_OK);
+    const device = out.device;
+    const disjoint = createQuery(device, D3D10_QUERY.TIMESTAMP_DISJOINT);
+    const stamp = createQuery(device, D3D10_QUERY.TIMESTAMP);
+    disjoint.Begin();
+    assert.equal(queryData(disjoint).hr, DXGI_ERROR_INVALID_CALL);
+    assert.equal(queryData(stamp).hr, DXGI_ERROR_INVALID_CALL);
+    stamp.End();
+    clock = 7;
+    const first = queryData(stamp);
+    assert.equal(first.hr, S_OK);
+    assert.equal(first.view?.getBigUint64(0, true), 5_000_000n, 'nanoseconds at its end');
+    stamp.End();
+    assert.equal(queryData(stamp).view?.getBigUint64(0, true), 7_000_000n);
+    disjoint.End();
+    const answer = queryData(disjoint);
+    assert.equal(answer.hr, S_OK);
+    assert.equal(answer.view?.getBigUint64(0, true), 1_000_000_000n, 'Frequency');
+    assert.equal(answer.view?.getUint32(8, true), 1, 'Disjoint: the host clock is not the GPU\'s');
+    stamp.release();
+    disjoint.release();
+    assertFullyReleased(device);
+});
+
+test('stream-output queries count nothing written and no overflow', ()=>{
+    const device = createDevice();
+    const bound = bindQuad(device);
+    const statistics = createQuery(device, D3D10_QUERY.SO_STATISTICS);
+    const overflow = createQuery(device, D3D10_QUERY.SO_OVERFLOW_PREDICATE);
+    statistics.Begin();
+    overflow.Begin();
+    device.Draw(4, 0);
+    statistics.End();
+    overflow.End();
+    const data = queryData(statistics);
+    assert.equal(data.hr, S_OK);
+    assert.equal(data.view?.getBigUint64(0, true), 0n);
+    assert.equal(data.view?.getBigUint64(8, true), 0n);
+    assert.equal(queryData(overflow).view?.getUint32(0, true), 0);
+    statistics.release();
+    overflow.release();
+    bound.forEach(object=>object?.release());
+    assertFullyReleased(device);
+});
+
 // --- private data ---
 
 test('private data is kept per object and an interface entry holds a reference', ()=>{

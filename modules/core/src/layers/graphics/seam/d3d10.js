@@ -1105,20 +1105,40 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         childMethods)];
     const inputLayoutInterfaces = [describe(IID.ID3D10InputLayout, ID3D10SHADER_SLOTS,
         childMethods)];
-    const queryInterfaces = [describe(IID.ID3D10Query, ID3D10QUERY_SLOTS, {
+    const queryMethods = {
         ...childMethods,
-        Begin: ()=>0,
-        End: ()=>0,
-        // Nothing measures, so nothing is ever ready: a program polling for
-        // an answer keeps its previous one, which is what an occluded-or-not
-        // test falls back to.
-        GetData: ()=>1,
-        GetDataSize: ()=>0,
+        /** @param {any} query */
+        Begin: query=>{
+            query.Begin();
+        },
+        /** @param {any} query */
+        End: query=>{
+            query.End();
+        },
+        /** @param {any} query @param {number[]} args */
+        GetData: (query, [data, size, flags])=>{
+            /** @type {{ data?: Uint8Array | null }} */
+            const held = {};
+            const hr = query.GetData((data >>> 0) !== 0, size >>> 0, flags >>> 0, held);
+            if (hr === S_OK && held.data)
+            {
+                memory.writeMemory(data >>> 0, held.data);
+            }
+            return hr;
+        },
+        /** @param {any} query */
+        GetDataSize: query=>query.GetDataSize(),
         /** @param {any} query @param {number[]} args */
         GetDesc: (query, [out])=>{
             fields.writeStruct(out, D3D10_QUERY_DESC, query.desc);
         },
-    })];
+    };
+    // A predicate is a query and a query is an asynchronous object, one vtable
+    // for all three; which of them an object answers to is its own to say.
+    const queryDescriptors = [IID.ID3D10Asynchronous, IID.ID3D10Query, IID.ID3D10Predicate]
+        .map(id=>describe(id, ID3D10QUERY_SLOTS, queryMethods));
+    /** @param {any} query */
+    const queryInterfacesOf = query=>queryDescriptors.filter(entry=>query.supports(entry.id));
 
     // --- reading descriptions ---
 
@@ -1641,7 +1661,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 /** @type {{ predicate?: any, value?: boolean }} */
                 const held = {};
                 device.GetPredication(held);
-                writeObjects(out, [held.predicate ?? null], queryInterfaces, IID.ID3D10Predicate);
+                writeObjects(out, [held.predicate ?? null], queryDescriptors, IID.ID3D10Predicate);
                 if ((valueAt >>> 0) !== 0)
                 {
                     fields.writeU32(valueAt, held.value ? 1 : 0);
@@ -1951,7 +1971,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                     }
                     return hr;
                 }
-                return handBack(held.query, queryInterfaces, IID.ID3D10Query, out);
+                return handBack(held.query, queryInterfacesOf(held.query), IID.ID3D10Query, out);
             },
             /** @param {any} device @param {number[]} args */
             CreatePredicate: (device, [descAt, out])=>{
@@ -1968,7 +1988,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                     }
                     return hr;
                 }
-                return handBack(held.query, queryInterfaces, IID.ID3D10Predicate, out);
+                return handBack(held.query, queryInterfacesOf(held.query), IID.ID3D10Predicate,
+                    out);
             },
             /** @param {any} device @param {number[]} args */
             CreateCounter: (device, [descAt, out])=>{

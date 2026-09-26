@@ -26,9 +26,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     D3D10_BIND, D3D10_CLEAR, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE, D3D10_FILTER, D3D10_MAP,
-    D3D10_PRIMITIVE_TOPOLOGY, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_TEXTURE_ADDRESS,
-    D3D10_USAGE, DXGI_FORMAT, S_OK,
+    D3D10_PRIMITIVE_TOPOLOGY, D3D10_QUERY, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION,
+    D3D10_TEXTURE_ADDRESS, D3D10_USAGE, DXGI_FORMAT, S_FALSE, S_OK,
 } from './constants.js';
+import { D3D10_ASYNC_GETDATA_DONOTFLUSH } from './queries.js';
 import { D3D10CreateDeviceAndSwapChain } from './device.js';
 import { defaultSwapChainDesc } from './dxgi.js';
 import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
@@ -864,6 +865,46 @@ test('GenerateMips filters a texture made for it and leaves any other alone', ()
     device.GenerateMips(plainView.view);
     assert.equal(h.gpu.count('writeTexture'), 4, 'two levels of initial data, nothing more');
 });
+
+// --- queries ---
+
+test('an event ended after a draw waits for the draw to be sent, and polling sends it',
+    async()=>{
+        const h = harness();
+        bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+        /** @type {{ query?: any }} */
+        const made = {};
+        assert.equal(h.device.CreateQuery({ Query: D3D10_QUERY.EVENT, MiscFlags: 0 }, made),
+            S_OK);
+        const event = made.query;
+        h.device.Draw(3, 0);
+        event.End();
+        /** @type {{ data?: Uint8Array | null }} */
+        const out = {};
+        assert.equal(event.GetData(true, 4, D3D10_ASYNC_GETDATA_DONOTFLUSH, out), S_FALSE,
+            'the draw before it has not reached the GPU');
+        assert.equal(h.gpu.count('submit'), 0);
+        assert.equal(event.GetData(true, 4, 0, out), S_OK, 'a poll that may flush, flushes');
+        assert.deepEqual([...(out.data ?? [])], [1, 0, 0, 0]);
+        await h.device.idle();
+        assert.equal(h.gpu.count('submit'), 1, 'the draw went in a frame of its own');
+        assert.equal(h.gpu.count('draw'), 1);
+        assert.equal(h.presented.length, 0, 'and nothing was shown');
+
+        // Ended with nothing recorded before it, the event has nothing to wait on.
+        await h.present();
+        event.End();
+        assert.equal(event.GetData(false, 0, D3D10_ASYNC_GETDATA_DONOTFLUSH, out), S_OK);
+        h.device.Draw(3, 0);
+        h.device.Flush();
+        event.End();
+        assert.equal(event.GetData(false, 0, D3D10_ASYNC_GETDATA_DONOTFLUSH, out), S_OK,
+            'Flush sends the recording as a poll does');
+        await h.device.idle();
+        assert.equal(h.gpu.count('draw'), 2);
+        assert.deepEqual(h.device.diagnostics().failures, []);
+        event.release();
+    });
 
 test('ResolveSubresource and the other unsupported calls say what they did not do', ()=>{
     const h = harness();

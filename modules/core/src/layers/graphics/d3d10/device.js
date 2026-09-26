@@ -45,6 +45,7 @@ import {
 import { SHADER_KIND, SYSTEM_VALUE, parseDxbc, parseShaderOfKind } from './dxbc.js';
 import { createFactory } from './dxgi.js';
 import { INDEX_FORMAT, TEXTURE_FORMAT, VERTEX_FORMAT } from './gpuformats.js';
+import { createDrawStatistics, createQueryObject } from './queries.js';
 import { createRenderer } from './render.js';
 import {
     VIEW_KINDS, createResource, createView, resolveMipLevels, resolveViewDesc, textureInterfaces,
@@ -95,6 +96,7 @@ const PREDICATE_QUERIES = new Set([
  * @property {(descriptor: object) => any} [createTexture]
  * @property {(api: string, detail: string) => void} [divergence]
  *     Where a call that succeeded without doing all it promises is reported.
+ * @property {() => number} [now]  Milliseconds, for a timestamp query.
  */
 
 /**
@@ -323,6 +325,7 @@ export function createDevice(options = {}){
         createTexture: options.createTexture ?? (()=>null),
         divergence: options.divergence,
     });
+    const statistics = createDrawStatistics();
     /** @type {import('./resources.js').ResourceStorage} */
     const storage = {
         map: (resource, subresource)=>renderer.map(resource, subresource),
@@ -499,31 +502,6 @@ export function createDevice(options = {}){
     };
 
     /**
-     * A device child with nothing to say for itself: a query, a counter.
-     *
-     * @param {readonly string[]} interfaces
-     * @param {any} desc
-     */
-    const createChild = (interfaces, desc)=>attachCom({
-        desc,
-        /** @param {{ device?: any }} target */
-        GetDevice(target){
-            retainDevice();
-            target.device = self;
-            return S_OK;
-        },
-        /** @param {{ desc?: any }} target */
-        GetDesc(target){
-            target.desc = desc;
-            return S_OK;
-        },
-    }, {
-        interfaces: [IID.ID3D10DeviceChild, ...interfaces],
-        onFirstRef: retainDevice,
-        onLastRef: releaseDevice,
-    });
-
-    /**
      * @param {any} desc
      * @param {{ query?: any } | null} out
      * @param {boolean} predicate  Whether the create is for a predicate.
@@ -548,15 +526,23 @@ export function createDevice(options = {}){
         {
             return S_FALSE;
         }
-        diverge('a query is created and never answers: nothing here measures the GPU');
         /** @type {string[]} */
-        const interfaces = [IID.ID3D10Asynchronous, IID.ID3D10Query];
+        const interfaces = [IID.ID3D10Query];
         if (isPredicate)
         {
             interfaces.push(IID.ID3D10Predicate);
         }
-        out.query = createChild(interfaces,
-            Object.freeze({ Query: desc.Query, MiscFlags: desc.MiscFlags ?? 0 }));
+        out.query = createQueryObject(
+            Object.freeze({ Query: desc.Query, MiscFlags: desc.MiscFlags ?? 0 }), interfaces, {
+                totals: statistics.snapshot,
+                recorded: ()=>renderer.recorded(),
+                submitted: ()=>renderer.submitted(),
+                flush: ()=>{
+                    renderer.flush();
+                },
+                now: options.now ?? (()=>performance.now()),
+                diverge,
+            }, { retainDevice, releaseDevice, device: deviceHandle });
         return S_OK;
     };
 
@@ -601,6 +587,18 @@ export function createDevice(options = {}){
             viewports: pipeline.viewports,
             scissorRects: pipeline.scissorRects,
         };
+    };
+
+    /**
+     * Every draw, as the queries count it and the renderer records it.
+     *
+     * @param {{ vertexCount: number, startVertex: number, instanceCount?: number,
+     *           indexCount?: number, startIndex?: number, baseVertex?: number }} request
+     */
+    const draw = request=>{
+        const bound = snapshot();
+        statistics.note(bound, request);
+        renderer.draw(bound, request);
     };
 
     /**
@@ -1246,13 +1244,12 @@ export function createDevice(options = {}){
 
         /** @param {number} vertexCount @param {number} startVertex */
         Draw(vertexCount, startVertex){
-            renderer.draw(snapshot(), { vertexCount, startVertex });
+            draw({ vertexCount, startVertex });
         },
 
         /** @param {number} indexCount @param {number} startIndex @param {number} baseVertex */
         DrawIndexed(indexCount, startIndex, baseVertex){
-            renderer.draw(snapshot(), { vertexCount: 0, startVertex: 0, indexCount, startIndex,
-                baseVertex });
+            draw({ vertexCount: 0, startVertex: 0, indexCount, startIndex, baseVertex });
         },
 
         /**
@@ -1264,7 +1261,7 @@ export function createDevice(options = {}){
             {
                 diverge('an instanced draw starts at instance zero whatever was asked');
             }
-            renderer.draw(snapshot(), { vertexCount, startVertex, instanceCount });
+            draw({ vertexCount, startVertex, instanceCount });
         },
 
         /**
@@ -1276,8 +1273,8 @@ export function createDevice(options = {}){
             {
                 diverge('an instanced draw starts at instance zero whatever was asked');
             }
-            renderer.draw(snapshot(), { vertexCount: 0, startVertex: 0, indexCount, startIndex,
-                baseVertex, instanceCount });
+            draw({ vertexCount: 0, startVertex: 0, indexCount, startIndex, baseVertex,
+                instanceCount });
         },
 
         DrawAuto(){
@@ -1393,8 +1390,9 @@ export function createDevice(options = {}){
                 + ' resolving one that is not is refused');
         },
 
+        /** What has been recorded goes to the GPU now rather than at the next present. */
         Flush(){
-            // Frames reach the queue at present; nothing is held back between.
+            renderer.flush();
         },
 
         // --- stream output and predication ---
