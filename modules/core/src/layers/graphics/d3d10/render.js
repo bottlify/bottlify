@@ -33,10 +33,12 @@ import {
     D3D10_DEPTH_WRITE_MASK, D3D10_FILL_MODE, D3D10_FILTER, D3D10_FILTER_ANISOTROPIC_BIT,
     D3D10_FILTER_COMPARISON_BIT, D3D10_INPUT_CLASSIFICATION, D3D10_PRIMITIVE_TOPOLOGY,
     D3D10_RESOURCE_DIMENSION, D3D10_STENCIL_OP, D3D10_TEXTURE_ADDRESS, D3D10_USAGE,
-    D3D10_APPEND_ALIGNED_ELEMENT,
+    D3D10_APPEND_ALIGNED_ELEMENT, DXGI_FORMAT, FORMAT_INFO, formatPitch,
 } from './constants.js';
+import { convertTexels, convertedTexelBytes } from './blocks.js';
 import {
-    INDEX_FORMAT, TEXEL_BYTES, TEXTURE_FORMAT, VERTEX_FORMAT, VERTEX_FORMAT_BYTES,
+    INDEX_FORMAT, VERTEX_FORMAT, VERTEX_FORMAT_BYTES, isDepthFormat, textureStorage,
+    viewFormatOf,
 } from './gpuformats.js';
 import { levelExtent } from './validity.js';
 import { BINDING, linkProgram, translateShader } from './wgsl.js';
@@ -49,6 +51,8 @@ import { LockFlags } from '../webgpu/internal/buffers.js';
  * @property {(descriptor: object) => any} createSampler
  * @property {(descriptor: object) => any} createTexture
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {boolean} [compressedTextures]  Whether the GPU samples BC blocks as they are;
+ *                                          without it they are decoded on the processor.
  */
 
 /** @type {Readonly<Record<number, string>>} */
@@ -270,6 +274,7 @@ export function createRenderer(services){
     const divergence = services.divergence ?? null;
     const BufferUsage = backend ? backend.BufferUsage : null;
     const TextureUsage = backend ? backend.TextureUsage : null;
+    const compressed = services.compressedTextures ?? false;
 
     /** Said once per distinct detail, so a loop of draws does not flood. */
     const reported = new Set();
@@ -344,25 +349,30 @@ export function createRenderer(services){
     /**
      * @typedef {Object} LevelGeometry
      * @property {number} offset      Into the slice, in bytes.
-     * @property {number} rowPitch
+     * @property {number} rowPitch    Bytes per row of blocks.
      * @property {number} depthPitch
-     * @property {number} width
+     * @property {number} width       Texels.
      * @property {number} height
      * @property {number} depth
+     * @property {number} rows        Rows of blocks.
      */
 
     /**
      * @typedef {Object} ResourceLayout
-     * @property {string | null} format  The GPU spelling, or null for a buffer.
-     * @property {number} texelBytes
+     * @property {string | null} format  The GPU texture's format, or null for a buffer.
+     * @property {import('./gpuformats.js').TextureStorage | null} storage
+     * @property {number} texelBytes     Bytes per block: per texel, but for a compressed format.
+     * @property {number} blockEdge      Texels along a block's side.
      * @property {LevelGeometry[]} levels
      * @property {number} sliceBytes     One array slice, every level of it.
      * @property {number} slices
      */
 
     /**
-     * How a resource's bytes are laid out on the host: every level of a slice
-     * back to back, then the next slice, as the subresource numbering counts.
+     * How a resource's bytes are laid out on the host: in the program's own
+     * format, rows of blocks, every level of a slice back to back and then the
+     * next slice, as the subresource numbering counts. That is the layout a
+     * map hands out, whatever the GPU keeps.
      *
      * @param {any} resource
      * @returns {ResourceLayout}
@@ -373,17 +383,19 @@ export function createRenderer(services){
         {
             return {
                 format: null,
+                storage: null,
                 texelBytes: 1,
+                blockEdge: 1,
                 levels: [{
                     offset: 0, rowPitch: desc.ByteWidth, depthPitch: desc.ByteWidth,
-                    width: desc.ByteWidth, height: 1, depth: 1,
+                    width: desc.ByteWidth, height: 1, depth: 1, rows: 1,
                 }],
                 sliceBytes: desc.ByteWidth,
                 slices: 1,
             };
         }
-        const format = TEXTURE_FORMAT[desc.Format] ?? null;
-        const texelBytes = format ? TEXEL_BYTES[format] : 4;
+        const storage = textureStorage(desc.Format, desc.BindFlags, { compressed });
+        const info = FORMAT_INFO[desc.Format];
         const levels = [];
         let offset = 0;
         for (let level = 0; level < desc.MipLevels; level++)
@@ -395,14 +407,16 @@ export function createRenderer(services){
             const depth = resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
                 ? levelExtent(desc.Depth, level)
                 : 1;
-            const rowPitch = width * texelBytes;
-            const depthPitch = rowPitch * height;
-            levels.push({ offset, rowPitch, depthPitch, width, height, depth });
+            const { rowPitch, rows } = formatPitch(desc.Format, width, height);
+            const depthPitch = rowPitch * rows;
+            levels.push({ offset, rowPitch, depthPitch, width, height, depth, rows });
             offset += depthPitch * depth;
         }
         return {
-            format,
-            texelBytes,
+            format: storage ? storage.format : null,
+            storage,
+            texelBytes: info ? info.bytesPerPixel : 4,
+            blockEdge: info ? info.blockEdge : 1,
             levels,
             sliceBytes: offset,
             slices: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
@@ -410,6 +424,8 @@ export function createRenderer(services){
                 : desc.ArraySize,
         };
     };
+
+    let nextBacking = 1;
 
     /** @param {any} resource */
     const backingOf = resource=>{
@@ -422,7 +438,7 @@ export function createRenderer(services){
         const layout = layoutOf(resource);
         const bytes = new Uint8Array(layout.sliceBytes * layout.slices);
         backing = {
-            layout, bytes, gpu: null, texture: null, surface: null,
+            id: nextBacking++, layout, bytes, gpu: null, texture: null, surface: null,
             sampleCount: desc.SampleDesc ? desc.SampleDesc.Count : 1,
         };
         if (!backend)
@@ -462,6 +478,7 @@ export function createRenderer(services){
                     ? desc.Depth
                     : desc.ArraySize,
             };
+            const viewFormats = layout.storage ? layout.storage.viewFormats : [];
             backing.texture = createTexture({
                 label: `d3d10:texture${resource.dimension - 1}d:${layout.format}`,
                 size,
@@ -471,10 +488,10 @@ export function createRenderer(services){
                     ? '3d'
                     : resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE1D ? '1d' : '2d',
                 format: layout.format,
+                ...(viewFormats.length > 0 ? { viewFormats } : {}),
                 usage,
             });
-            // The surface the backend attaches passes to: the whole of level
-            // zero, which is what a swap chain's buffer is.
+            // The surface a swap chain shows: the whole of level zero.
             backing.surface = {
                 texture: backing.texture,
                 view: backing.texture.createView({ label: 'd3d10:target' }),
@@ -507,7 +524,8 @@ export function createRenderer(services){
     /**
      * @param {any} resource
      * @param {number} subresource
-     * @returns {{ bytes: Uint8Array, rowPitch: number, depthPitch: number, level: any }}
+     * @returns {{ bytes: Uint8Array, rowPitch: number, depthPitch: number,
+     *             level: LevelGeometry }}
      */
     const subresourceBytes = (resource, subresource)=>{
         const backing = backingOf(resource);
@@ -520,6 +538,65 @@ export function createRenderer(services){
             depthPitch: geometry.depthPitch,
             level: geometry,
         };
+    };
+
+    /**
+     * A box in texels as the host layout counts it: whole blocks, a row in
+     * bytes, and clipped to the level it lies in.
+     *
+     * @param {ResourceLayout} layout
+     * @param {LevelGeometry} geometry
+     * @param {Box} box
+     */
+    const blocksOf = (layout, geometry, box)=>{
+        const edge = layout.blockEdge;
+        const left = Math.floor(box.left / edge);
+        const top = Math.floor(box.top / edge);
+        const columns = Math.ceil(Math.min(box.right, geometry.width) / edge) - left;
+        return {
+            left: left * layout.texelBytes,
+            top,
+            front: box.front,
+            rowBytes: Math.max(0, columns) * layout.texelBytes,
+            rows: Math.max(0, Math.ceil(Math.min(box.bottom, geometry.height) / edge) - top),
+            depth: Math.max(0, Math.min(box.back, geometry.depth) - box.front),
+        };
+    };
+
+    /**
+     * A subresource's host bytes as the GPU texture holds them: as they are,
+     * or converted where the texture keeps another format.
+     *
+     * @param {ResourceLayout} layout
+     * @param {LevelGeometry} geometry
+     * @param {Uint8Array} bytes
+     * @returns {{ data: Uint8Array, bytesPerRow: number } | null}
+     */
+    const texelsForGpu = (layout, geometry, bytes)=>{
+        const conversion = layout.storage ? layout.storage.conversion : null;
+        if (!conversion)
+        {
+            return { data: bytes, bytesPerRow: geometry.rowPitch };
+        }
+        const slices = [];
+        for (let z = 0; z < geometry.depth; z++)
+        {
+            const converted = convertTexels(conversion,
+                bytes.subarray(z * geometry.depthPitch, (z + 1) * geometry.depthPitch),
+                geometry.width, geometry.height);
+            if (!converted)
+            {
+                return null;
+            }
+            slices.push(converted);
+        }
+        const texel = convertedTexelBytes(conversion);
+        const data = new Uint8Array(slices.reduce((total, slice)=>total + slice.length, 0));
+        slices.reduce((at, slice)=>{
+            data.set(slice, at);
+            return at + slice.length;
+        }, 0);
+        return { data, bytesPerRow: geometry.width * texel };
     };
 
     /**
@@ -542,23 +619,46 @@ export function createRenderer(services){
         {
             return;
         }
+        if (backing.layout.storage.depth)
+        {
+            // WebGPU copies into no depth format with a stencil, and a depth
+            // texture is written by drawing: bytes a program hands one stay on
+            // the host.
+            diverge('bytes a program gives a depth texture are kept but not uploaded: the'
+                + ' GPU copy of a depth texture is written only by drawing and clearing');
+            return;
+        }
         const { level, slice } = subresourceOf(resource, subresource);
         const geometry = backing.layout.levels[level];
         const held = subresourceBytes(resource, subresource);
-        backend.uploadTexture({
-            texture: backing.texture,
-            format: backing.layout.format,
-            width: geometry.width,
-            height: geometry.height,
-            depthOrArrayLayers: geometry.depth,
-            mipLevel: level,
-            origin: { x: 0, y: 0, z: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
-                ? 0
-                : slice },
-            bytesPerRow: geometry.rowPitch,
-            data: held.bytes,
-            staging: false,
-        });
+        const texels = texelsForGpu(backing.layout, geometry, held.bytes);
+        if (!texels)
+        {
+            return;
+        }
+        const compressedBlocks = backing.layout.blockEdge > 1 && !backing.layout.storage.conversion;
+        try
+        {
+            backend.uploadTexture({
+                texture: backing.texture,
+                format: backing.layout.format,
+                width: geometry.width,
+                height: geometry.height,
+                depthOrArrayLayers: geometry.depth,
+                mipLevel: level,
+                origin: { x: 0, y: 0, z: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
+                    ? 0
+                    : slice },
+                bytesPerRow: texels.bytesPerRow,
+                data: texels.data,
+                // Blocks go through a staging buffer, the path they arrive by.
+                staging: compressedBlocks,
+            });
+        }
+        catch (e){
+            diverge(`a ${backing.layout.format} texture is not uploaded:`
+                + ` ${e && /** @type {any} */ (e).message || e}`);
+        }
     };
 
     /** @param {any} resource */
@@ -592,10 +692,16 @@ export function createRenderer(services){
         const shape = view.dimensionName ?? '';
         const isCube = shape === 'TEXTURECUBE';
         const array = shape.endsWith('ARRAY') || isCube;
-        const format = TEXTURE_FORMAT[desc.Format] ?? backing.layout.format;
-        gpu = backing.texture.createView({
-            label: `d3d10:view:${format}`,
-            format,
+        const chosen = viewFormatOf(backing.layout.storage, desc.Format, { compressed });
+        if (chosen.reinterpreted)
+        {
+            diverge(`a view of a typeless texture as format ${desc.Format} reads it as`
+                + ` ${chosen.format}: WebGPU does not reinterpret one type as another`);
+        }
+        const created = backing.texture.createView({
+            label: `d3d10:view:${chosen.format ?? chosen.aspect}`,
+            ...(chosen.format ? { format: chosen.format } : {}),
+            ...(chosen.aspect ? { aspect: chosen.aspect } : {}),
             dimension: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
                 ? '3d'
                 : resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE1D
@@ -610,9 +716,14 @@ export function createRenderer(services){
                 ? 1
                 : desc.ArraySize ?? 1,
         });
+        gpu = { view: created, sampleType: sampleTypeOf(chosen.format, chosen.aspect) };
         views.set(view, gpu);
         return gpu;
     };
+
+    /** @param {any} state a sampler state object */
+    const isComparisonSampler = state=>(stateDesc(state).Filter
+        & D3D10_FILTER_COMPARISON_BIT) !== 0;
 
     /** @param {any} state a sampler state object */
     const samplerOf = state=>{
@@ -654,7 +765,11 @@ export function createRenderer(services){
         return gpu;
     };
 
-    /** What an unbound slot reads as: zeros, black, and a point sampler. */
+    /**
+     * What an unbound slot reads as: zeros, black, and a point sampler -- a
+     * texture of the type and shape the shader declared, because WebGPU binds
+     * nothing else there.
+     */
     const placeholdersOf = ()=>{
         if (placeholders)
         {
@@ -665,18 +780,74 @@ export function createRenderer(services){
             size: 16,
             usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST,
         });
-        const texture = createTexture({
-            label: 'd3d10:unbound-texture',
-            size: { width: 1, height: 1, depthOrArrayLayers: 1 },
-            format: 'rgba8unorm',
-            usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST,
-        });
+        /** @type {Map<string, any>} */
+        const textures = new Map();
+        /** @type {Record<string, string>} */
+        const formats = {
+            float: 'rgba8unorm', 'unfilterable-float': 'rgba8unorm', depth: 'depth32float',
+            uint: 'rgba8uint', sint: 'rgba8sint',
+        };
         placeholders = {
             buffer,
-            view: texture.createView({ label: 'd3d10:unbound-texture' }),
+            /** @param {{ sampleType: string, viewDimension: string }} kind */
+            view(kind){
+                const key = `${kind.sampleType}:${kind.viewDimension}`;
+                let view = textures.get(key);
+                if (!view)
+                {
+                    const cube = kind.viewDimension.startsWith('cube');
+                    const texture = createTexture({
+                        label: `d3d10:unbound-texture:${key}`,
+                        size: { width: 1, height: 1, depthOrArrayLayers: cube ? 6 : 1 },
+                        dimension: kind.viewDimension === '1d' || kind.viewDimension === '3d'
+                            ? kind.viewDimension
+                            : '2d',
+                        format: formats[kind.sampleType] ?? 'rgba8unorm',
+                        usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST,
+                    });
+                    view = texture.createView({
+                        label: `d3d10:unbound-texture:${key}`, dimension: kind.viewDimension,
+                    });
+                    textures.set(key, view);
+                }
+                return view;
+            },
             sampler: createSampler({ label: 'd3d10:unbound-sampler' }),
+            comparison: createSampler({ label: 'd3d10:unbound-comparison', compare: 'never' }),
         };
         return placeholders;
+    };
+
+    /**
+     * The sample type a view of this format binds as.
+     *
+     * @param {string | undefined} format
+     * @param {string | undefined} aspect
+     * @returns {string}
+     */
+    const sampleTypeOf = (format, aspect)=>{
+        if (aspect === 'depth-only' || (format && isDepthFormat(format)))
+        {
+            return 'depth';
+        }
+        if (aspect === 'stencil-only' || /uint$/.test(format ?? ''))
+        {
+            return 'uint';
+        }
+        if (/sint$/.test(format ?? ''))
+        {
+            return 'sint';
+        }
+        return /32float/.test(format ?? '') ? 'unfilterable-float' : 'float';
+    };
+
+    /** @type {Record<string, string[]>} what each layout sample type accepts */
+    const ACCEPTS = {
+        float: ['float'],
+        'unfilterable-float': ['float', 'unfilterable-float', 'depth'],
+        depth: ['depth'],
+        uint: ['uint'],
+        sint: ['sint'],
     };
 
     // --- shaders and pipelines ---
@@ -777,7 +948,8 @@ export function createRenderer(services){
     const pipelineKey = state=>[
         idOf(state.vertexShader), idOf(state.pixelShader), idOf(state.inputLayout),
         idOf(state.blendState), idOf(state.depthStencilState), idOf(state.rasterizerState),
-        state.topology, state.targetFormat, state.depthFormat ?? '-', state.sampleMask >>> 0,
+        state.topology, state.targetFormat, state.targetWriteMask, state.depthFormat ?? '-',
+        state.sampleMask >>> 0,
         state.sampleCount, state.strides.join(','), state.indexFormat ?? '-',
     ].join('|');
 
@@ -877,7 +1049,7 @@ export function createRenderer(services){
                 entryPoint: 'fragmentMain',
                 targets: [{
                     format: state.targetFormat,
-                    writeMask: blend.RenderTargetWriteMask[0],
+                    writeMask: blend.RenderTargetWriteMask[0] & state.targetWriteMask,
                     ...(blend.BlendEnable[0]
                         ? {
                             blend: {
@@ -948,21 +1120,83 @@ export function createRenderer(services){
 
     // --- recording ---
 
+    /** @type {WeakMap<object, any>} render target or depth stencil view -> target */
+    const targets = new WeakMap();
+
     /**
-     * @param {any} view a render target view
-     * @returns {any | null} the backing of the texture it looks at
+     * What a pass draws into through a render target or depth stencil view:
+     * the one level and slice the view names, as a surface of its own. Two
+     * views of one subresource share its key, which is what a clear through
+     * one and a draw through the other agree on.
+     *
+     * @param {any} view a render target or depth stencil view
+     * @returns {any | null}
      */
     const targetOf = view=>{
         if (!view)
         {
             return null;
         }
+        let target = targets.get(view);
+        if (target)
+        {
+            return target;
+        }
         /** @type {{ resource?: any }} */
         const held = {};
         view.GetResource(held);
         held.resource.release();
         const backing = backingOf(held.resource);
-        return backing.texture ? backing : null;
+        if (!backing.texture)
+        {
+            return null;
+        }
+        /** @type {{ desc?: any }} */
+        const described = {};
+        view.GetDesc(described);
+        const desc = described.desc;
+        const mip = desc.MipSlice ?? 0;
+        const layer = desc.FirstArraySlice ?? 0;
+        if (held.resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D)
+        {
+            diverge('a view into a slice of a 3D texture draws into its first slice');
+        }
+        const chosen = viewFormatOf(backing.layout.storage, desc.Format, { compressed });
+        const format = chosen.format ?? backing.layout.format;
+        const width = levelExtent(held.resource.desc.Width, mip);
+        const height = held.resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE1D
+            ? 1
+            : levelExtent(held.resource.desc.Height, mip);
+        target = {
+            key: `${backing.id}:${mip}:${held.resource.dimension
+                === D3D10_RESOURCE_DIMENSION.TEXTURE3D ? 0 : layer}`,
+            backing,
+            texture: backing.texture,
+            format,
+            sampleCount: backing.sampleCount,
+            // What a draw writes, when the format keeps less than the texture does.
+            writeMask: desc.Format === DXGI_FORMAT.A8_UNORM ? 0x8 : 0xf,
+            surface: {
+                texture: backing.texture,
+                view: backing.texture.createView({
+                    label: `d3d10:target:${format}`,
+                    format,
+                    dimension: '2d',
+                    baseMipLevel: mip,
+                    mipLevelCount: 1,
+                    baseArrayLayer: held.resource.dimension
+                        === D3D10_RESOURCE_DIMENSION.TEXTURE3D ? 0 : layer,
+                    arrayLayerCount: 1,
+                }),
+                width,
+                height,
+                format,
+                mipLevel: mip,
+                label: `d3d10:${format}`,
+            },
+        };
+        targets.set(view, target);
+        return target;
     };
 
     /**
@@ -995,12 +1229,29 @@ export function createRenderer(services){
                     diverge('a shader resource view over a buffer, or over a texture this'
                         + ' device could not back, is read as an empty texture');
                 }
-                return { binding: entry.binding, resource: gpu ?? fallback.view };
+                if (gpu && !(ACCEPTS[entry.texture.sampleType] ?? []).includes(gpu.sampleType))
+                {
+                    diverge(`a ${gpu.sampleType} texture bound where the shader reads a`
+                        + ` ${entry.texture.sampleType} one is read as an empty texture`);
+                    return { binding: entry.binding, resource: fallback.view(entry.texture) };
+                }
+                return {
+                    binding: entry.binding,
+                    resource: gpu ? gpu.view : fallback.view(entry.texture),
+                };
             }
             const sampler = stage.samplers[entry.binding - BINDING.SAMPLER];
+            const comparison = entry.sampler?.type === 'comparison';
+            if (sampler && comparison !== isComparisonSampler(sampler))
+            {
+                diverge('a sampler bound where the shader declares the other kind, comparison'
+                    + ' or not, is replaced by a point sampler of the declared kind');
+            }
             return {
                 binding: entry.binding,
-                resource: sampler ? samplerOf(sampler) : fallback.sampler,
+                resource: sampler && comparison === isComparisonSampler(sampler)
+                    ? samplerOf(sampler)
+                    : comparison ? fallback.comparison : fallback.sampler,
             };
         });
     };
@@ -1026,12 +1277,12 @@ export function createRenderer(services){
                     continue;
                 }
                 const held = subresourceBytes(resource, index);
-                const pitch = source.SysMemPitch || held.rowPitch;
-                const slicePitch = source.SysMemSlicePitch || held.depthPitch;
                 const geometry = held.level;
+                const pitch = source.SysMemPitch || held.rowPitch;
+                const slicePitch = source.SysMemSlicePitch || pitch * geometry.rows;
                 for (let z = 0; z < geometry.depth; z++)
                 {
-                    for (let row = 0; row < geometry.height; row++)
+                    for (let row = 0; row < geometry.rows; row++)
                     {
                         const from = z * slicePitch + row * pitch;
                         held.bytes.set(
@@ -1075,24 +1326,20 @@ export function createRenderer(services){
         updateSubresource(resource, subresource, box, data, rowPitch, depthPitch){
             const held = subresourceBytes(resource, subresource);
             const geometry = held.level;
-            const texel = backingOf(resource).layout.texelBytes;
-            const region = box ?? {
+            const region = blocksOf(backingOf(resource).layout, geometry, box ?? {
                 left: 0, top: 0, front: 0,
                 right: geometry.width, bottom: geometry.height, back: geometry.depth,
-            };
-            const width = Math.max(0, Math.min(region.right, geometry.width) - region.left);
-            const rows = Math.max(0, Math.min(region.bottom, geometry.height) - region.top);
-            const depth = Math.max(0, Math.min(region.back, geometry.depth) - region.front);
-            const pitch = rowPitch || width * texel;
-            const slicePitch = depthPitch || pitch * rows;
-            for (let z = 0; z < depth; z++)
+            });
+            const pitch = rowPitch || region.rowBytes;
+            const slicePitch = depthPitch || pitch * region.rows;
+            for (let z = 0; z < region.depth; z++)
             {
-                for (let row = 0; row < rows; row++)
+                for (let row = 0; row < region.rows; row++)
                 {
                     const from = z * slicePitch + row * pitch;
                     const to = (region.front + z) * held.depthPitch
-                        + (region.top + row) * held.rowPitch + region.left * texel;
-                    held.bytes.set(data.subarray(from, from + width * texel), to);
+                        + (region.top + row) * held.rowPitch + region.left;
+                    held.bytes.set(data.subarray(from, from + region.rowBytes), to);
                 }
             }
             upload(resource, subresource);
@@ -1116,22 +1363,27 @@ export function createRenderer(services){
             }
             const from = subresourceBytes(source, sourceSubresource);
             const to = subresourceBytes(destination, destinationSubresource);
-            const texel = backingOf(source).layout.texelBytes;
-            const region = box ?? {
+            const layout = backingOf(source).layout;
+            const region = blocksOf(layout, from.level, box ?? {
                 left: 0, top: 0, front: 0,
                 right: from.level.width, bottom: from.level.height, back: from.level.depth,
-            };
-            const width = Math.min(region.right - region.left, to.level.width - at.x);
-            const rows = Math.min(region.bottom - region.top, to.level.height - at.y);
-            const depth = Math.min(region.back - region.front, to.level.depth - at.z);
+            });
+            const place = blocksOf(layout, to.level, {
+                left: at.x, top: at.y, front: at.z,
+                right: to.level.width, bottom: to.level.height, back: to.level.depth,
+            });
+            const rowBytes = Math.min(region.rowBytes, place.rowBytes);
+            const rows = Math.min(region.rows, place.rows);
+            const depth = Math.min(region.depth, place.depth);
             for (let z = 0; z < depth; z++)
             {
                 for (let row = 0; row < rows; row++)
                 {
                     const start = (region.front + z) * from.depthPitch
-                        + (region.top + row) * from.rowPitch + region.left * texel;
-                    to.bytes.set(from.bytes.subarray(start, start + width * texel),
-                        (at.z + z) * to.depthPitch + (at.y + row) * to.rowPitch + at.x * texel);
+                        + (region.top + row) * from.rowPitch + region.left;
+                    to.bytes.set(from.bytes.subarray(start, start + rowBytes),
+                        (place.front + z) * to.depthPitch + (place.top + row) * to.rowPitch
+                            + place.left);
                 }
             }
             upload(destination, destinationSubresource);
@@ -1167,7 +1419,7 @@ export function createRenderer(services){
         generateMips(resource){
             const backing = backingOf(resource);
             const format = backing.layout.format ?? '';
-            if (backing.layout.texelBytes !== 4
+            if (backing.layout.texelBytes !== 4 || backing.layout.storage?.conversion
                 || !(format.startsWith('rgba8') || format.startsWith('bgra8')))
             {
                 diverge(`GenerateMips on a ${backing.layout.format} texture is not generated:`
@@ -1301,8 +1553,9 @@ export function createRenderer(services){
                 depthStencilState: pipeline.depthStencilState,
                 rasterizerState: pipeline.rasterizerState,
                 topology,
-                targetFormat: target.layout.format,
-                depthFormat: depth ? depth.layout.format : null,
+                targetFormat: target.format,
+                targetWriteMask: target.writeMask,
+                depthFormat: depth ? depth.format : null,
                 sampleMask: pipeline.sampleMask,
                 sampleCount: target.sampleCount,
                 strides: pipeline.vertexStrides.slice(),
@@ -1488,12 +1741,12 @@ export function createRenderer(services){
             {
                 return pass;
             }
-            const clear = pendingClears.get(target.texture) ?? null;
-            const depthClear = depth ? pendingClears.get(depth.texture) ?? null : null;
-            pendingClears.delete(target.texture);
+            const clear = pendingClears.get(target.key) ?? null;
+            const depthClear = depth ? pendingClears.get(depth.key) ?? null : null;
+            pendingClears.delete(target.key);
             if (depth)
             {
-                pendingClears.delete(depth.texture);
+                pendingClears.delete(depth.key);
             }
             pass = frame.beginPass({
                 target: target.surface,
@@ -1510,7 +1763,7 @@ export function createRenderer(services){
                                 : 'load',
                             depthStoreOp: 'store',
                             depthClearValue: depthClear ? depthClear.depth : 1,
-                            ...(depth.layout.format.endsWith('stencil8')
+                            ...(depth.format.endsWith('stencil8')
                                 ? {
                                     stencilLoadOp: depthClear
                                         && (depthClear.flags & D3D10_CLEAR.STENCIL)
@@ -1536,16 +1789,16 @@ export function createRenderer(services){
                 if (command.kind === 'clear')
                 {
                     closePass();
-                    pendingClears.set(command.target.texture, { color: command.color });
+                    pendingClears.set(command.target.key, { color: command.color });
                     continue;
                 }
                 if (command.kind === 'clearDepth')
                 {
                     closePass();
-                    const previous = pendingClears.get(command.target.texture);
+                    const previous = pendingClears.get(command.target.key);
                     // Two clears of one half each add up; a later clear of a
                     // half replaces the earlier value of that half.
-                    pendingClears.set(command.target.texture, {
+                    pendingClears.set(command.target.key, {
                         flags: (previous ? previous.flags : 0) | command.flags,
                         depth: (command.flags & D3D10_CLEAR.DEPTH)
                             ? command.depth
@@ -1604,14 +1857,14 @@ export function createRenderer(services){
             }
             // A clear that met no draw still has to happen before the frame
             // is shown: a program that only clears expects to see the colour.
-            for (const [texture, clear] of [...pendingClears])
+            for (const [key, clear] of [...pendingClears])
             {
                 if (!clear.color)
                 {
                     continue;
                 }
                 const target = recorded.find(command=>command.kind === 'clear'
-                    && command.target.texture === texture);
+                    && command.target.key === key);
                 if (target)
                 {
                     closePass();

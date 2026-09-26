@@ -30,8 +30,8 @@ import { describe as describeSlots } from './vtables.js';
 import { readGuid } from './ddraw.js';
 import { createFields } from './structs.js';
 import {
-    D3D10_LIMITS, D3D10_RESOURCE_DIMENSION, DXGI_ERROR_INVALID_CALL, E_INVALIDARG, E_NOTIMPL,
-    FORMAT_INFO, IID, S_OK,
+    D3D10_LIMITS, D3D10_RESOURCE_DIMENSION, DXGI_ERROR_INVALID_CALL, E_INVALIDARG, E_NOTIMPL, IID,
+    S_OK, formatPitch,
 } from '../d3d10/constants.js';
 import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain } from '../d3d10/device.js';
 import { CreateDXGIFactory } from '../d3d10/dxgi.js';
@@ -1160,7 +1160,6 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
      * @param {number} slicePitch
      */
     const subresourceBytes = (desc, dimension, level, pitch, slicePitch)=>{
-        const texel = FORMAT_INFO[desc.Format]?.bytesPerPixel ?? 4;
         const width = levelExtent(desc.Width, level);
         const height = dimension === D3D10_RESOURCE_DIMENSION.TEXTURE1D
             ? 1
@@ -1168,8 +1167,9 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         const depth = dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
             ? levelExtent(desc.Depth, level)
             : 1;
-        const rowBytes = pitch || width * texel;
-        return (slicePitch || rowBytes * height) * (depth - 1) + rowBytes * height;
+        const packed = formatPitch(desc.Format, width, height);
+        const rowBytes = pitch || packed.rowPitch;
+        return (slicePitch || rowBytes * packed.rows) * (depth - 1) + rowBytes * packed.rows;
     };
 
     /**
@@ -1352,7 +1352,6 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             return box ? box.right - box.left : resource.desc.ByteWidth;
         }
         const level = subresource % resource.desc.MipLevels;
-        const texel = FORMAT_INFO[resource.desc.Format]?.bytesPerPixel ?? 4;
         const width = box ? box.right - box.left : levelExtent(resource.desc.Width, level);
         const height = box
             ? box.bottom - box.top
@@ -1364,9 +1363,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             : resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
                 ? levelExtent(resource.desc.Depth, level)
                 : 1;
-        const pitch = rowPitch || width * texel;
-        const slicePitch = depthPitch || pitch * height;
-        return slicePitch * (depth - 1) + pitch * height;
+        const packed = formatPitch(resource.desc.Format, width, height);
+        const pitch = rowPitch || packed.rowPitch;
+        const slicePitch = depthPitch || pitch * packed.rows;
+        return slicePitch * (depth - 1) + pitch * packed.rows;
     };
 
     /** @param {number} address @param {number} count */

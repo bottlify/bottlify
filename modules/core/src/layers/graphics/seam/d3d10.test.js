@@ -579,6 +579,27 @@ test('a query answers through its vtable, and a predicate is published as one', 
         0x80004002);
 });
 
+test('a block-compressed texture\'s data is read a row of blocks at a time', ()=>{
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    // An 8x8 BC1 texture: two rows of two eight-byte blocks, and staging so
+    // the bytes can be mapped back.
+    const blocks = Uint8Array.from({ length: 32 }, (_, at)=>at + 1);
+    const desc = h.box.place([8, 8, 1, 1, DXGI_FORMAT.BC1_UNORM, 1, 0, D3D10_USAGE.STAGING, 0,
+        D3D10_CPU_ACCESS.READ | D3D10_CPU_ACCESS.WRITE, 0]);
+    const initial = h.box.place([h.box.placeBytes(blocks), 16, 0]);
+    const textureAt = h.box.place([0]);
+    assert.equal(h.device(device, 'CreateTexture2D', [desc, initial, textureAt]), S_OK);
+    const texture = h.box.memory.readU32(textureAt);
+    const mapped = h.box.place([0, 0]);
+    assert.equal(h.box.call(texture, slot(ID3D10TEXTURE_SLOTS, 'Map'),
+        [0, D3D10_MAP.READ, 0, mapped]), S_OK);
+    assert.equal(h.box.memory.readU32(mapped + 4), 16, 'RowPitch: one row of blocks');
+    assert.deepEqual([...h.box.services.readMemory(h.box.memory.readU32(mapped), 32)],
+        [...blocks]);
+    h.box.call(texture, slot(ID3D10TEXTURE_SLOTS, 'Unmap'), [0]);
+});
+
 test('what this build cannot do says so in the slot rather than in a crash', ()=>{
     const h = seamed();
     const { device, swapChain } = h.createDeviceAndSwapChain();

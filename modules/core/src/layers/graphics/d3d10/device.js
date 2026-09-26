@@ -36,7 +36,7 @@
 
 import { attachCom } from './com.js';
 import {
-    D3D10_CREATE_DEVICE_MASK, D3D10_DEFAULTS, D3D10_DRIVER_TYPE, D3D10_DRIVER_TYPES,
+    D3D10_BIND, D3D10_CREATE_DEVICE_MASK, D3D10_DEFAULTS, D3D10_DRIVER_TYPE, D3D10_DRIVER_TYPES,
     D3D10_LIMITS, D3D10_PRIMITIVE_TOPOLOGY, D3D10_QUERY, D3D10_RESOURCE_DIMENSION,
     D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_USAGE, DXGI_ERROR_INVALID_CALL,
     DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_FAIL, E_INVALIDARG, E_NOTIMPL,
@@ -44,7 +44,7 @@ import {
 } from './constants.js';
 import { SHADER_KIND, SYSTEM_VALUE, parseDxbc, parseShaderOfKind } from './dxbc.js';
 import { createFactory } from './dxgi.js';
-import { INDEX_FORMAT, TEXTURE_FORMAT, VERTEX_FORMAT } from './gpuformats.js';
+import { INDEX_FORMAT, VERTEX_FORMAT, textureStorage } from './gpuformats.js';
 import { createDrawStatistics, createQueryObject } from './queries.js';
 import { createRenderer } from './render.js';
 import {
@@ -97,6 +97,8 @@ const PREDICATE_QUERIES = new Set([
  * @property {(api: string, detail: string) => void} [divergence]
  *     Where a call that succeeded without doing all it promises is reported.
  * @property {() => number} [now]  Milliseconds, for a timestamp query.
+ * @property {boolean} [compressedTextures]  Whether the GPU samples BC blocks as they are;
+ *     without it a block-compressed texture is decoded on the processor.
  */
 
 /**
@@ -319,11 +321,13 @@ export function createDevice(options = {}){
     // With a backend the renderer draws; without one it still keeps every
     // resource's bytes, so a map, a copy and an update mean the same thing in
     // a headless build as under a GPU.
+    const textureOptions = { compressed: options.compressedTextures ?? false };
     const renderer = createRenderer({
         backend: options.backend ?? null,
         createSampler: options.createSampler ?? (()=>null),
         createTexture: options.createTexture ?? (()=>null),
         divergence: options.divergence,
+        compressedTextures: textureOptions.compressed,
     });
     const statistics = createDrawStatistics();
     /** @type {import('./resources.js').ResourceStorage} */
@@ -626,6 +630,16 @@ export function createDevice(options = {}){
             diverge(`${call} into an immutable resource is ignored`);
             return false;
         }
+        // Bits move between formats of one family and no others: a copy
+        // between two families -- a compressed block and a texel among them --
+        // has no meaning and the runtime leaves the destination as it was.
+        if (destination.dimension !== D3D10_RESOURCE_DIMENSION.BUFFER
+            && FORMAT_INFO[destination.desc.Format]?.family
+                !== FORMAT_INFO[source.desc.Format]?.family)
+        {
+            diverge(`${call} between formats of different families is ignored`);
+            return false;
+        }
         return true;
     };
 
@@ -922,7 +936,8 @@ export function createDevice(options = {}){
             {
                 return E_FAIL;
             }
-            let support = FORMAT_SUPPORT.BUFFER | FORMAT_SUPPORT.CPU_LOCKABLE;
+            const block = info.blockEdge > 1;
+            let support = FORMAT_SUPPORT.CPU_LOCKABLE | (block ? 0 : FORMAT_SUPPORT.BUFFER);
             if (VERTEX_FORMAT[format])
             {
                 support |= FORMAT_SUPPORT.IA_VERTEX_BUFFER;
@@ -931,25 +946,38 @@ export function createDevice(options = {}){
             {
                 support |= FORMAT_SUPPORT.IA_INDEX_BUFFER;
             }
-            if (TEXTURE_FORMAT[format] || info.kind === FORMAT_KIND.TYPELESS)
+            const kept = textureStorage(format,
+                info.kind === FORMAT_KIND.DEPTH ? D3D10_BIND.DEPTH_STENCIL : 0, textureOptions);
+            if (kept)
             {
-                support |= FORMAT_SUPPORT.TEXTURE1D | FORMAT_SUPPORT.TEXTURE2D
-                    | FORMAT_SUPPORT.TEXTURE3D | FORMAT_SUPPORT.TEXTURECUBE | FORMAT_SUPPORT.MIP;
+                // WebGPU makes no compressed or depth texture of three dimensions.
+                support |= FORMAT_SUPPORT.TEXTURE2D | FORMAT_SUPPORT.TEXTURECUBE
+                    | FORMAT_SUPPORT.MIP
+                    | (block ? 0 : FORMAT_SUPPORT.TEXTURE1D)
+                    | (block || kept.depth ? 0 : FORMAT_SUPPORT.TEXTURE3D);
             }
-            if (TEXTURE_FORMAT[format] && info.kind === FORMAT_KIND.COLOUR)
+            if (kept && info.kind === FORMAT_KIND.COLOUR)
             {
-                support |= FORMAT_SUPPORT.SHADER_LOAD | FORMAT_SUPPORT.RENDER_TARGET;
-                const spelling = TEXTURE_FORMAT[format];
-                if (/unorm|snorm|float/.test(spelling) && !spelling.startsWith('r32'))
+                support |= FORMAT_SUPPORT.SHADER_LOAD;
+                // What a sampler may filter: normalised and float formats, but
+                // not the 32-bit floats, which WebGPU does not filter.
+                const filterable = /unorm|snorm|float/.test(kept.format)
+                    && !/32float/.test(kept.format);
+                if (filterable)
                 {
-                    support |= FORMAT_SUPPORT.SHADER_SAMPLE | FORMAT_SUPPORT.BLENDABLE;
+                    support |= FORMAT_SUPPORT.SHADER_SAMPLE;
                 }
-                if (spelling.startsWith('rgba8unorm') || spelling.startsWith('bgra8unorm'))
+                if (info.renderable && !kept.conversion)
+                {
+                    support |= FORMAT_SUPPORT.RENDER_TARGET
+                        | (filterable ? FORMAT_SUPPORT.BLENDABLE : 0);
+                }
+                if (/^(rgba8unorm|bgra8unorm)/.test(kept.format) && !kept.conversion)
                 {
                     support |= FORMAT_SUPPORT.MIP_AUTOGEN | FORMAT_SUPPORT.DISPLAY;
                 }
             }
-            if (info.kind === FORMAT_KIND.DEPTH)
+            if (info.kind === FORMAT_KIND.DEPTH && kept)
             {
                 support |= FORMAT_SUPPORT.DEPTH_STENCIL | FORMAT_SUPPORT.SHADER_SAMPLE_COMPARISON;
             }
@@ -1333,6 +1361,12 @@ export function createDevice(options = {}){
         CopyResource(destination, source){
             if (!copyable(destination, source, 'CopyResource'))
             {
+                return;
+            }
+            const extent = ['ByteWidth', 'Width', 'Height', 'Depth', 'MipLevels', 'ArraySize'];
+            if (extent.some(field=>destination.desc[field] !== source.desc[field]))
+            {
+                diverge('CopyResource between resources of different extents is ignored');
                 return;
             }
             renderer.copyResource(destination, source);

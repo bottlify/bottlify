@@ -260,12 +260,23 @@ export const DEPTH_CAPABLE_FAMILIES = new Set(Object.entries(FORMAT_INFO)
     .map(([, info])=>info.family));
 
 /**
+ * The typeless families with a member a render target may be made of, derived
+ * the same way.
+ *
+ * @type {ReadonlySet<number>}
+ */
+export const RENDERABLE_FAMILIES = new Set(Object.entries(FORMAT_INFO)
+    .filter(([, info])=>info.kind === FORMAT_KIND.COLOUR && info.renderable)
+    .map(([, info])=>info.family));
+
+/**
  * Whether a texture of this format may carry this single bind flag.
  *
  * A depth format may only ever be a depth stencil, and a colour format may
  * never be one. A typeless format sits between them: it may be anything its
  * family can express, which is what lets a program write depth through one view
- * of a resource and sample it through another.
+ * of a resource and sample it through another. A render target is further
+ * limited to the formats a pixel shader can write.
  *
  * @param {number} format
  * @param {number} bindFlag  Exactly one bit.
@@ -282,7 +293,15 @@ export function formatAllowsBind(format, bindFlag){
         return info.kind === FORMAT_KIND.DEPTH
             || (info.kind === FORMAT_KIND.TYPELESS && DEPTH_CAPABLE_FAMILIES.has(info.family));
     }
-    if (bindFlag === D3D10_BIND.SHADER_RESOURCE || bindFlag === D3D10_BIND.RENDER_TARGET)
+    if (bindFlag === D3D10_BIND.RENDER_TARGET)
+    {
+        // A shared exponent, a compressed block or the sampled half of a depth
+        // format is read by a shader and never written by one.
+        return info.kind === FORMAT_KIND.TYPELESS
+            ? RENDERABLE_FAMILIES.has(info.family)
+            : info.renderable;
+    }
+    if (bindFlag === D3D10_BIND.SHADER_RESOURCE)
     {
         return info.kind !== FORMAT_KIND.DEPTH;
     }

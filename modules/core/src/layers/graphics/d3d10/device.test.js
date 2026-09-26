@@ -1859,6 +1859,170 @@ test('a format reports what it can be used for, and an unknown one fails', ()=>{
     assertFullyReleased(device);
 });
 
+test('the compressed, packed and typeless formats report what this device does with them', ()=>{
+    // After Wine's d3d10core test_format_support and its display format list.
+    const device = createDevice();
+    /** @param {number} format */
+    const support = format=>{
+        /** @type {{ support?: number }} */
+        const out = {};
+        assert.equal(device.CheckFormatSupport(format, out), S_OK, `format ${format}`);
+        return /** @type {number} */ (out.support);
+    };
+    for (const format of [DXGI_FORMAT.BC1_UNORM, DXGI_FORMAT.BC3_UNORM_SRGB,
+        DXGI_FORMAT.BC4_SNORM, DXGI_FORMAT.BC5_UNORM])
+    {
+        const bits = support(format);
+        assert.ok(bits & 0x20, 'a 2D texture');
+        assert.ok(bits & 0x200, 'sampled');
+        assert.ok(!(bits & 0x4000), 'never a render target');
+        assert.ok(!(bits & 0x1), 'never a buffer');
+    }
+    assert.ok(support(DXGI_FORMAT.R11G11B10_FLOAT) & 0x4000, 'R11G11B10 is a render target');
+    assert.ok(!(support(DXGI_FORMAT.R9G9B9E5_SHAREDEXP) & 0x4000), 'a shared exponent is not');
+    assert.ok(support(DXGI_FORMAT.R9G9B9E5_SHAREDEXP) & 0x200);
+    assert.ok(!(support(DXGI_FORMAT.R32G32B32A32_FLOAT) & 0x200),
+        'a 32-bit float is loaded, not filtered');
+    assert.ok(support(DXGI_FORMAT.R16_FLOAT) & 0x2, 'a one-channel vertex element');
+    assert.ok(support(DXGI_FORMAT.R8G8_UINT) & 0x2);
+    for (const format of [DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UNORM_SRGB,
+        DXGI_FORMAT.B8G8R8A8_UNORM, DXGI_FORMAT.B8G8R8A8_UNORM_SRGB])
+    {
+        assert.ok(support(format) & 0x80000, `format ${format} can be displayed`);
+    }
+    for (const format of [DXGI_FORMAT.R1_UNORM, DXGI_FORMAT.B5G6R5_UNORM,
+        DXGI_FORMAT.B5G5R5A1_UNORM])
+    {
+        /** @type {{ support?: number }} */
+        const out = {};
+        assert.equal(device.CheckFormatSupport(format, out), E_FAIL, `format ${format}`);
+    }
+    assertFullyReleased(device);
+});
+
+test('a texture is made in every format a shader can read, and drawn into only in those'
+    + ' a shader can write', ()=>{
+    // After the format table of Wine's d3d10core test_create_texture2d.
+    const device = createDevice();
+    /** @param {number} format @param {number} bindFlags */
+    const result = (format, bindFlags)=>{
+        /** @type {{ resource?: any }} */
+        const out = {};
+        const hr = device.CreateTexture2D({
+            ...TEXTURE_2D, Width: 16, Height: 16, Format: format, BindFlags: bindFlags,
+        }, null, out);
+        out.resource?.release();
+        return hr;
+    };
+    const { SHADER_RESOURCE, RENDER_TARGET, DEPTH_STENCIL } = D3D10_BIND;
+    for (const format of [
+        DXGI_FORMAT.BC1_TYPELESS, DXGI_FORMAT.BC1_UNORM, DXGI_FORMAT.BC1_UNORM_SRGB,
+        DXGI_FORMAT.BC2_TYPELESS, DXGI_FORMAT.BC2_UNORM, DXGI_FORMAT.BC2_UNORM_SRGB,
+        DXGI_FORMAT.BC3_TYPELESS, DXGI_FORMAT.BC3_UNORM, DXGI_FORMAT.BC3_UNORM_SRGB,
+        DXGI_FORMAT.BC4_TYPELESS, DXGI_FORMAT.BC4_UNORM, DXGI_FORMAT.BC4_SNORM,
+        DXGI_FORMAT.BC5_TYPELESS, DXGI_FORMAT.BC5_UNORM, DXGI_FORMAT.BC5_SNORM,
+    ])
+    {
+        assert.equal(result(format, SHADER_RESOURCE), S_OK, `format ${format} is sampled`);
+        assert.equal(result(format, RENDER_TARGET), E_INVALIDARG, `format ${format} is not drawn`);
+    }
+    assert.equal(result(DXGI_FORMAT.R9G9B9E5_SHAREDEXP, SHADER_RESOURCE), S_OK);
+    assert.equal(result(DXGI_FORMAT.R9G9B9E5_SHAREDEXP, RENDER_TARGET), E_INVALIDARG);
+    assert.equal(result(DXGI_FORMAT.R9G9B9E5_SHAREDEXP, DEPTH_STENCIL), E_INVALIDARG);
+    assert.equal(result(DXGI_FORMAT.R11G11B10_FLOAT, RENDER_TARGET), S_OK);
+    assert.equal(result(DXGI_FORMAT.R32G8X24_TYPELESS, DEPTH_STENCIL), S_OK);
+    assert.equal(result(DXGI_FORMAT.R32G8X24_TYPELESS, RENDER_TARGET), E_INVALIDARG);
+    assert.equal(result(DXGI_FORMAT.R16_TYPELESS, RENDER_TARGET), S_OK);
+    assert.equal(result(DXGI_FORMAT.R16_TYPELESS, DEPTH_STENCIL | SHADER_RESOURCE), S_OK);
+    assert.equal(result(DXGI_FORMAT.R24_UNORM_X8_TYPELESS, RENDER_TARGET), E_INVALIDARG);
+    assert.equal(result(DXGI_FORMAT.R8G8B8A8_UNORM, DEPTH_STENCIL), E_INVALIDARG);
+    assert.equal(result(DXGI_FORMAT.R10G10B10A2_UINT, RENDER_TARGET), S_OK);
+    assert.equal(result(DXGI_FORMAT.B5G6R5_UNORM, SHADER_RESOURCE), E_INVALIDARG,
+        'not a format of this version of the API');
+    assertFullyReleased(device);
+});
+
+test('a block-compressed texture maps a row of blocks at a time', ()=>{
+    const device = createDevice();
+    /** @type {{ resource?: any }} */
+    const out = {};
+    assert.equal(device.CreateTexture2D({
+        ...TEXTURE_2D, Width: 8, Height: 8, MipLevels: 0, Format: DXGI_FORMAT.BC3_UNORM,
+        Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+        CPUAccessFlags: D3D10_CPU_ACCESS.READ | D3D10_CPU_ACCESS.WRITE,
+    }, null, out), S_OK);
+    /** @type {{ data?: Uint8Array | null, rowPitch?: number, depthPitch?: number }} */
+    const mapped = {};
+    assert.equal(out.resource.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
+    assert.equal(mapped.rowPitch, 32, 'two blocks of sixteen bytes');
+    assert.equal(mapped.data?.length, 64, 'two rows of blocks');
+    out.resource.Unmap(0);
+    assert.equal(out.resource.Map(3, D3D10_MAP.READ, 0, mapped), S_OK);
+    assert.equal(mapped.rowPitch, 16, 'a 1x1 level is still one whole block');
+    assert.equal(mapped.data?.length, 16);
+    out.resource.Unmap(3);
+    out.resource.release();
+    assertFullyReleased(device);
+});
+
+test('a copy moves bits within a format family and never between families', ()=>{
+    // After Wine's d3d10core test_format_compatibility and
+    // test_compressed_format_compatibility.
+    const device = createDevice();
+    /**
+     * @param {number} format @param {number} width @param {number} height
+     * @param {Uint8Array} bytes
+     */
+    const texture = (format, width, height, bytes)=>{
+        /** @type {{ resource?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture2D({
+            ...TEXTURE_2D, Width: width, Height: height, Format: format,
+            Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+            CPUAccessFlags: D3D10_CPU_ACCESS.READ | D3D10_CPU_ACCESS.WRITE,
+        }, [{ pSysMem: bytes }], out), S_OK);
+        return out.resource;
+    };
+    /** @param {any} resource */
+    const contents = resource=>{
+        /** @type {{ data?: Uint8Array | null }} */
+        const mapped = {};
+        assert.equal(resource.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
+        const bytes = [.../** @type {Uint8Array} */ (mapped.data)];
+        resource.Unmap(0);
+        return bytes;
+    };
+    const texels = Uint8Array.from({ length: 64 }, (_, at)=>at + 1);
+    const zeros = new Uint8Array(64);
+
+    const typeless = texture(DXGI_FORMAT.R8G8B8A8_TYPELESS, 4, 4, texels);
+    const unorm = texture(DXGI_FORMAT.R8G8B8A8_UNORM, 4, 4, zeros);
+    device.CopyResource(unorm, typeless);
+    assert.deepEqual(contents(unorm), [...texels], 'a typeless resource and its member');
+
+    const bgra = texture(DXGI_FORMAT.B8G8R8A8_UNORM, 4, 4, zeros);
+    device.CopyResource(bgra, unorm);
+    assert.deepEqual(contents(bgra), [...zeros], 'RGBA and BGRA are two families');
+
+    // A 16x16 BC1 texture is 64 bytes, as the 4x4 texture is: the extents differ.
+    const blocks = texture(DXGI_FORMAT.BC1_UNORM, 8, 8, texels.subarray(0, 32));
+    const other = texture(DXGI_FORMAT.R16G16B16A16_UINT, 2, 2, zeros.subarray(0, 32));
+    device.CopySubresourceRegion(other, 0, 0, 0, 0, blocks, 0, null);
+    assert.deepEqual(contents(other), [...zeros.subarray(0, 32)], 'blocks are not texels');
+
+    // Within a family, a region lands at its offset, counted in blocks.
+    const target = texture(DXGI_FORMAT.BC1_TYPELESS, 8, 8, zeros.subarray(0, 32));
+    device.CopySubresourceRegion(target, 0, 4, 4, 0, blocks, 0,
+        { left: 0, top: 0, front: 0, right: 4, bottom: 4, back: 1 });
+    assert.deepEqual(contents(target), [...zeros.subarray(0, 24), ...texels.subarray(0, 8)],
+        'the first block of the source, as the last block of the target');
+    for (const resource of [typeless, unorm, bgra, blocks, other, target])
+    {
+        resource.release();
+    }
+    assertFullyReleased(device);
+});
+
 test('a shader and an input layout answer for their device', ()=>{
     const device = createDevice();
     /** @type {{ shader?: any }} */
