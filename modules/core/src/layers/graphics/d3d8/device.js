@@ -66,6 +66,11 @@ import { volumeCreateResult, volumeLevelCount } from '../d3d9/validity.js';
 import { DEVICE_STATE, LIGHT_ENABLED, createPalettes } from '../d3d9/device.js';
 import { createAdditionalChain } from '../d3d9/swapchain.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
+import {
+    constantsWithin, declaredShader, parseDeclaration, readableByFixedFunction,
+} from './declaration.js';
+import { fixedFunctionLayoutOf } from '../d3d9/declaration.js';
+import { SHADER_KIND, createConstantFile, functionOf, parseShader } from '../d3d9/shader.js';
 
 export { DEVICE_STATE, LIGHT_ENABLED };
 
@@ -79,6 +84,9 @@ export { DEVICE_STATE, LIGHT_ENABLED };
  * @property {boolean} depthCube       as cube maps,
  * @property {boolean} depthPlain      and as image surfaces.
  * @property {number} [maxVolumeExtent]  The longest axis a volume texture may have.
+ * @property {{ major: number, minor: number }} [vertexShaderVersion]
+ *           The newest vertex shader a create accepts; 0.0 makes none.
+ * @property {number} [maxVertexShaderConst]  The vertex shader's float constant registers.
  */
 
 /** @type {DeviceCaps} */
@@ -89,7 +97,25 @@ export const DEFAULT_CAPS = Object.freeze({
     depthCube: false,
     depthPlain: false,
     maxVolumeExtent: 256,
+    vertexShaderVersion: Object.freeze({ major: 1, minor: 1 }),
+    maxVertexShaderConst: 256,
 });
+
+/** Direct3D 8's pixel shader constant registers, c0 to c7. */
+const PIXEL_CONSTANTS = 8;
+
+/**
+ * @typedef {Object} VertexShader8
+ *     What a vertex shader handle names.
+ * @property {number} handle
+ * @property {import('./declaration.js').Declaration8} declaration
+ * @property {Uint32Array | null} tokens  The function as the program gave it, if any.
+ * @property {import('../d3d9/shader.js').ParsedShader | null} parsed
+ *           The function as the translator reads it, its inputs declared.
+ * @property {import('../d3d9/declaration.js').FixedFunctionLayout | null} layout
+ *           How the fixed-function stage reads the declaration, for a handle
+ *           with no function.
+ */
 
 /**
  * @typedef {import('../d3d9/device.js').Light} Light
@@ -576,7 +602,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * rather than one: the two entry points have separate number spaces, so
      * deleting a pixel shader with a vertex shader's handle has to fail.
      *
-     * @type {Map<number, any>}
+     * @type {Map<number, VertexShader8>}
      */
     const vertexShaders = new Map();
     /** @type {Map<number, any>} */
@@ -584,6 +610,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     let nextShaderHandle = 1;
     let boundVertexShader = 0;
     let boundPixelShader = 0;
+    // This version has float constants only; the integer and boolean files
+    // are there because the translator's constant blocks carry all three.
+    const vertexConstants = createConstantFile(
+        { floats: caps.maxVertexShaderConst ?? 256, ints: 16, bools: 16 });
+    const pixelConstants = createConstantFile({ floats: PIXEL_CONSTANTS, ints: 16, bools: 16 });
 
     /** @type {Map<number, Float32Array>} index -> the four coefficients */
     let clipPlanes = new Map();
@@ -932,6 +963,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         set pixelShader(value){
             boundPixelShader = value;
         },
+        vertexConstants: vertexConstants.floats,
+        pixelConstants: pixelConstants.floats,
     };
 
     /**
@@ -1077,6 +1110,51 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     };
 
     /**
+     * Tokens handed to a caller who says how much room it has: its size in
+     * bytes with no room given, the tokens when they fit, and a refusal that
+     * leaves the caller's size alone when they do not.
+     *
+     * @param {Uint32Array} tokens
+     * @param {{ bytes?: number, tokens?: Uint32Array }} out
+     * @param {number | null} room
+     */
+    const handOver = (tokens, out, room)=>{
+        if (room !== null && room < tokens.length * 4)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        out.bytes = tokens.length * 4;
+        if (room !== null)
+        {
+            out.tokens = tokens;
+        }
+        return D3D_OK;
+    };
+
+    /**
+     * @param {import('../d3d9/shader.js').ConstantFile} file
+     * @param {'vertexConstants' | 'pixelConstants'} recorded  The block's map of them.
+     * @param {number} register @param {ArrayLike<number>} values @param {number} registers
+     */
+    const setConstants = (file, recorded, register, values, registers)=>{
+        if (!values || register < 0 || registers < 0
+            || register + registers > file.floats.length / 4)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        if (!recording)
+        {
+            return file.setF(register, values, registers);
+        }
+        for (let at = 0; at < registers; at++)
+        {
+            recording[recorded].set(register + at,
+                Float32Array.from({ length: 4 }, (_, index)=>values[at * 4 + index]));
+        }
+        return D3D_OK;
+    };
+
+    /**
      * @param {any} surface
      * @returns {import('../d3d9/resources.js').SurfaceDesc}
      */
@@ -1102,6 +1180,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         get stream(){
             return stream(0);
         },
+        streamAt: stream,
         get indices(){
             return indices;
         },
@@ -1155,10 +1234,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         {
             return D3DERR_INVALIDCALL;
         }
-        const processing = device.stageProcessing;
         // A vertex format with no position is not a format, and there is
         // nothing to draw without either that or a shader.
-        if (processing.vertexShader === 0 && (processing.fvf & 0xe) === 0)
+        if (!isShaderHandle(boundVertexShader) && (boundVertexShader & 0xe) === 0)
         {
             return D3DERR_INVALIDCALL;
         }
@@ -2735,19 +2813,23 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
-         * The fixed-function transform and lighting of `vertices` vertices of
-         * stream zero, from `start`, into a vertex buffer from
-         * `destinationIndex`, in the format the buffer was made with (Wine's
-         * d3d8 visual.c test_sysmem_draw). A vertex shader would run in
-         * software here, which nothing does, so it is refused.
+         * The fixed-function transform and lighting of `vertices` vertices,
+         * read under the vertex format or the declaration bound, from
+         * `start`, into a vertex buffer from `destinationIndex`, in the format
+         * the buffer was made with (Wine's d3d8 visual.c test_sysmem_draw). A
+         * vertex shader would run in software here, which nothing does, so it
+         * is refused.
          *
          * @param {number} start @param {number} destinationIndex @param {number} vertices
          * @param {any} destination @param {number} flags D3DPV
          */
         ProcessVertices(start, destinationIndex, vertices, destination, flags){
             const processing = device.stageProcessing;
-            if (!destination || destination.type !== D3DRTYPE.VERTEXBUFFER
-                || (processing.fvf & POSITION_MASK) === 0)
+            const attributes = (processing.fvf & POSITION_MASK) !== 0
+                ? decodeFvf(processing.fvf).attributes
+                    .map(attribute=>({ ...attribute, stream: 0 }))
+                : processing.fixedFunctionLayout?.attributes ?? null;
+            if (!destination || destination.type !== D3DRTYPE.VERTEXBUFFER)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -2759,19 +2841,24 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     : 'ProcessVertices was refused: this build cannot write guest memory');
                 return D3DERR_INVALIDCALL;
             }
-            const source = stream(0);
+            if (!attributes)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             return processStreams({
                 memory: { readMemory: services.readMemory, writeMemory: services.writeMemory },
                 model,
-                attributes: decodeFvf(processing.fvf).attributes
-                    .map(attribute=>({ ...attribute, stream: 0 })),
-                streamAt: index=>(index === 0 && source.buffer && source.stride > 0
-                    ? {
-                        base: source.buffer.base,
-                        stride: source.stride,
-                        vertices: Math.floor(source.buffer.length / source.stride),
-                    }
-                    : null),
+                attributes,
+                streamAt: index=>{
+                    const source = streams.get(index);
+                    return source?.buffer && source.stride > 0
+                        ? {
+                            base: source.buffer.base,
+                            stride: source.stride,
+                            vertices: Math.floor(source.buffer.length / source.stride),
+                        }
+                        : null;
+                },
                 start, count: vertices, destination, destinationIndex, flags,
                 destinationFvf: destination.fvf ?? 0,
                 renderer,
@@ -2785,8 +2872,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * an object, so there is nothing for the device to outlive. The new
          * shader is not bound either, whatever the documentation says.
          *
-         * @param {readonly number[]} declaration
-         * @param {readonly number[] | null} functionCode
+         * A declaration alone is a fixed-function vertex stage reading the
+         * registers it loads. With a function, the function is a vs_1_x of
+         * no newer version than the caps claim, naming no constant past the
+         * file (Wine's d3d8 test_shader and test_unsupported_shaders).
+         *
+         * @param {ArrayLike<number> | null} declaration
+         * @param {ArrayLike<number> | null} functionCode
          * @param {{ handle?: number }} out
          */
         CreateVertexShader(declaration, functionCode, out){
@@ -2794,10 +2886,90 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
+            const declared = parseDeclaration(declaration);
+            if (declared.error)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {import('../d3d9/shader.js').ParsedShader | null} */
+            let parsed = null;
+            /** @type {Uint32Array | null} */
+            let tokens = null;
+            if (functionCode)
+            {
+                tokens = functionOf(functionCode);
+                const read = parseShader(tokens);
+                const newest = caps.vertexShaderVersion ?? { major: 0, minor: 0 };
+                const { kind, major, minor } = read.version;
+                if (read.error || kind !== SHADER_KIND.VERTEX || major !== 1
+                    || major > newest.major || (major === newest.major && minor > newest.minor)
+                    || !constantsWithin(read, vertexConstants.floats.length / 4))
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                parsed = declaredShader(read);
+            }
+            else if (!readableByFixedFunction(declared))
+            {
+                return D3DERR_INVALIDCALL;
+            }
             const handle = nextHandle();
-            vertexShaders.set(handle, { declaration, functionCode: functionCode ?? null });
+            vertexShaders.set(handle, {
+                handle, declaration: declared, tokens, parsed,
+                layout: parsed
+                    ? null
+                    : fixedFunctionLayoutOf({ id: handle, elements: declared.elements }),
+            });
             out.handle = handle;
             return D3D_OK;
+        },
+
+        /**
+         * The declaration a shader was made with, token for token. A caller
+         * with no buffer is told its size in bytes; one whose buffer is too
+         * small is refused and told nothing (Wine's d3d8 test_shader).
+         *
+         * @param {number} handle
+         * @param {{ bytes?: number, tokens?: Uint32Array }} out
+         * @param {number | null} room  The caller's buffer in bytes, or null for none.
+         */
+        GetVertexShaderDeclaration(handle, out, room){
+            const shader = vertexShaders.get(handle);
+            return shader ? handOver(shader.declaration.tokens, out, room) : D3DERR_INVALIDCALL;
+        },
+
+        /**
+         * The function a shader was made with, as `GetVertexShaderDeclaration`
+         * hands its declaration over: nothing, for a declaration made alone.
+         *
+         * @param {number} handle
+         * @param {{ bytes?: number, tokens?: Uint32Array }} out
+         * @param {number | null} room
+         */
+        GetVertexShaderFunction(handle, out, room){
+            const shader = vertexShaders.get(handle);
+            return shader
+                ? handOver(shader.tokens ?? new Uint32Array(0), out, room)
+                : D3DERR_INVALIDCALL;
+        },
+
+        /**
+         * Four floats a register, refused past the file. Recording, the
+         * registers go into the block and the device keeps its own (Wine's
+         * d3d8 test_shader_constant_apply).
+         *
+         * @param {number} register @param {ArrayLike<number>} values @param {number} registers
+         */
+        SetVertexShaderConstant(register, values, registers){
+            return setConstants(vertexConstants, 'vertexConstants', register, values, registers);
+        },
+
+        /**
+         * @param {number} register @param {number} registers
+         * @param {{ values?: Float32Array }} out
+         */
+        GetVertexShaderConstant(register, registers, out){
+            return vertexConstants.getF(register, registers, out);
         },
 
         /**
@@ -2812,6 +2984,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * pixel shader bound is an ordinary combination rather than a
          * contradiction.
          *
+         * Setting a shader loads the constants its declaration carries.
+         *
          * @param {number} handle
          */
         SetVertexShader(handle){
@@ -2823,6 +2997,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 recording.vertexShader = handle >>> 0;
                 return D3D_OK;
+            }
+            for (const { register, values } of vertexShaders.get(handle)?.declaration.constants
+                ?? [])
+            {
+                vertexConstants.setF(register, values, values.length / 4);
             }
             if (boundVertexShader !== handle >>> 0)
             {
@@ -2920,12 +3099,31 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * a flag that looks only at the vertex side drops the pixel shader.
          */
         get stageProcessing(){
-            const shader = isShaderHandle(boundVertexShader);
+            const handle = isShaderHandle(boundVertexShader);
+            const shader = handle ? vertexShaders.get(boundVertexShader) ?? null : null;
+            const programmed = shader?.parsed ? shader : null;
             return {
-                vertexShader: shader ? boundVertexShader : 0,
-                fvf: shader ? 0 : boundVertexShader,
-                fixedFunctionVertex: !shader,
+                // A handle naming no live shader -- a block applied after a
+                // delete -- is a stage nothing can draw.
+                vertexShader: programmed || (handle && !shader) ? boundVertexShader : 0,
+                fvf: handle ? 0 : boundVertexShader,
+                fixedFunctionLayout: shader && !programmed ? shader.layout : null,
+                fixedFunctionVertex: !programmed,
                 pixelShader: boundPixelShader,
+                program: programmed && boundPixelShader === 0
+                    ? {
+                        vertex: programmed.parsed,
+                        vertexShader: programmed,
+                        vertexId: programmed.handle,
+                        pixel: null,
+                        pixelShader: null,
+                        pixelId: 0,
+                        declaration: programmed.declaration.elements,
+                        declarationId: programmed.handle,
+                        vertexConstants,
+                        pixelConstants,
+                    }
+                    : null,
             };
         },
     };

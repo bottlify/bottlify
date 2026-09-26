@@ -572,25 +572,88 @@ test('a call given nothing to act on is refused, and GetInfo reports nothing', (
     h.release(root);
 });
 
-test('a shader cannot be created, and the format that shares its parameter can', ()=>{
-    // The renderer draws the fixed-function pipeline and drops a draw with a
-    // shader bound. A create that succeeded would send a program down the
-    // programmable path and it would never look back; the refusal is what sends
-    // it down the one that draws.
+test('a vertex shader is made from guest memory and hands its tokens back as they were', ()=>{
+    // Wine's d3d8 test_shader, through the ABI: a size asked for with no
+    // buffer, a buffer too small refused with the size left alone, and the
+    // tokens as the program gave them.
     const h = seamed();
     const root = h.create();
     const device = h.createDevice(root);
+    const declaration = [0x20000000, 0x40020000, 0xffffffff];
+    const shader = [
+        0xfffe0101,
+        0x0002fffe, 0x0000ffff, 0xffffffff,        // a comment holding an end token
+        0x00000009, 0xc0010000, 0x90e40000, 0xa0e40000,
+        0x00000009, 0xc0020000, 0x90e40000, 0xa0e40001,
+        0x00000009, 0xc0040000, 0x90e40000, 0xa0e40002,
+        0x00000009, 0xc0080000, 0x90e40000, 0xa0e40003,
+        0x0000ffff,
+    ];
+    /** @param {number} at @param {number[]} tokens */
+    const write = (at, tokens)=>h.box.services.writeMemory(at,
+        new Uint8Array(Uint32Array.from(tokens).buffer));
+    /** @param {number} at @param {number} count */
+    const read = (at, count)=>Array.from({ length: count }, (_, i)=>h.fields.readU32(at + i * 4));
+    write(0x7000, [...declaration, 0xdeadbeef]);
+    write(0x7100, [...shader, 0xdeadbeef]);
+    const out = 0x7400;
+    const size = 0x7404;
+    const data = 0x7500;
 
-    assert.equal(h.device(device, 'CreateVertexShader', [0x7000, 0x7100, 0x7200, 0]), E_NOTIMPL);
-    assert.equal(h.device(device, 'CreatePixelShader', [0x7100, 0x7200]), E_NOTIMPL);
-    assert.equal(h.device(device, 'DeleteVertexShader', [1]), D3DERR_INVALIDCALL,
-        'and there is no handle to delete');
+    assert.equal(h.device(device, 'CreateVertexShader', [0x7000, 0x7100, out, 0]), D3D_OK);
+    const made = h.fields.readU32(out);
+    assert.equal(made & 1, 1, 'a handle, which no vertex format is');
+    assert.equal(h.device(device, 'GetVertexShader', [out]), D3D_OK);
+    assert.equal(h.fields.readU32(out), 0, 'made, not set');
+
+    for (const [name, tokens] of /** @type {[string, number[]][]} */ ([
+        ['GetVertexShaderDeclaration', declaration], ['GetVertexShaderFunction', shader]]))
+    {
+        assert.equal(h.device(device, name, [made, 0, size]), D3D_OK);
+        assert.equal(h.fields.readU32(size), tokens.length * 4, `${name}: the size alone`);
+        h.fields.writeU32(size, 1);
+        assert.equal(h.device(device, name, [made, data, size]), D3DERR_INVALIDCALL);
+        assert.equal(h.fields.readU32(size), 1, `${name}: the size left as the caller wrote it`);
+        h.fields.writeU32(size, 1024);
+        assert.equal(h.device(device, name, [made, data, size]), D3D_OK);
+        assert.equal(h.fields.readU32(size), tokens.length * 4);
+        assert.deepEqual(read(data, tokens.length), tokens);
+        assert.equal(h.device(device, name, [made, data, 0]), D3DERR_INVALIDCALL,
+            `${name}: nowhere to say the size`);
+    }
+
+    // Constants, four floats a register, and none past the last.
+    const floats = 0x7600;
+    [1.5, 2.5, 3.5, 4.5].forEach((value, i)=>h.fields.writeF32(floats + i * 4, value));
+    assert.equal(h.device(device, 'SetVertexShaderConstant', [7, floats, 1]), D3D_OK);
+    assert.equal(h.device(device, 'GetVertexShaderConstant', [7, data, 1]), D3D_OK);
+    assert.deepEqual([0, 1, 2, 3].map(i=>h.fields.readF32(data + i * 4)), [1.5, 2.5, 3.5, 4.5]);
+    assert.equal(h.device(device, 'SetVertexShaderConstant', [255, floats, 2]),
+        D3DERR_INVALIDCALL);
+    assert.equal(h.device(device, 'SetVertexShaderConstant', [0, floats, 0x10000000]),
+        D3DERR_INVALIDCALL, 'a count past the file is refused without reading it');
+    assert.equal(h.device(device, 'SetVertexShaderConstant', [0, 0, 1]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(device, 'GetVertexShaderConstant', [0, 0, 1]), D3DERR_INVALIDCALL);
+
+    // What is not a shader.
+    assert.equal(h.device(device, 'CreateVertexShader', [0, 0x7100, out, 0]),
+        D3DERR_INVALIDCALL, 'no declaration');
+    assert.equal(h.device(device, 'CreateVertexShader', [0x7000, 0x7100, 0, 0]),
+        D3DERR_INVALIDCALL, 'nowhere to put the handle');
+    write(0x7100, [0xfffe0200, 0x0000ffff]);
+    assert.equal(h.device(device, 'CreateVertexShader', [0x7000, 0x7100, out, 0]),
+        D3DERR_INVALIDCALL, 'a vs_2_0, past the version the caps claim');
+    // A pixel shader is not made: the caps claim none.
+    assert.equal(h.device(device, 'CreatePixelShader', [0x7100, out]), E_NOTIMPL);
+
+    assert.equal(h.device(device, 'DeleteVertexShader', [made]), D3D_OK);
+    assert.equal(h.device(device, 'DeleteVertexShader', [made]), D3DERR_INVALIDCALL,
+        'and a handle deleted is gone');
 
     // D3DFVF_XYZ | D3DFVF_DIFFUSE: a vertex format, which shares this slot with
-    // a shader handle and is the half that has to work.
+    // a shader handle.
     const fvf = 0x002 | 0x040;
     assert.equal(h.device(device, 'SetVertexShader', [fvf]), D3D_OK);
-    const out = 0x7300;
     assert.equal(h.device(device, 'GetVertexShader', [out]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), fvf, 'read back exactly as it was written');
     assert.equal(h.device(device, 'SetPixelShader', [0]), D3D_OK, 'binding no pixel shader');
@@ -1511,9 +1574,10 @@ test('the capabilities a device reports are answers, not gaps', ()=>{
     assert.ok(caps.MaxVertexW > 0, 'a zero here is read as no clipping headroom at all');
     assert.ok(caps.GuardBandLeft < 0 && caps.GuardBandRight > 0);
 
-    // Both shader versions are zero deliberately: this device runs neither, and
-    // the entry points make that claim good.
-    assert.equal(caps.VertexShaderVersion, 0);
+    // Vertex shaders to 1.1, translated, over a file of 256 constants; the
+    // pixel shader version is zero, and its entry points make that good.
+    assert.equal(caps.VertexShaderVersion, 0xfffe0101);
+    assert.equal(caps.MaxVertexShaderConst, 256);
     assert.equal(caps.PixelShaderVersion, 0);
 
     // The bits land in the fields they belong to rather than one field over.

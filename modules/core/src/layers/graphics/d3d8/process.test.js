@@ -179,6 +179,38 @@ test('Direct3D 9: ProcessVertices reads a declaration\'s streams, and refuses a 
         'no shader runs on the processor');
 });
 
+test('Direct3D 8: ProcessVertices reads a declaration\'s streams, and refuses a shader', ()=>{
+    const h = harness(8);
+    const positions = h.vertexBuffer(12 * 4, 0);
+    h.fill(positions, QUAD.flatMap(([x, y])=>[x, y, 0]));
+    const colours = h.vertexBuffer(4 * 4, 0);
+    h.fill(colours, COLOURS);
+    // D3DVSD_STREAM(0), D3DVSD_REG(D3DVSDE_POSITION, D3DVSDT_FLOAT3),
+    // D3DVSD_STREAM(1), D3DVSD_REG(D3DVSDE_DIFFUSE, D3DVSDT_D3DCOLOR).
+    const declaration = [0x20000000, 0x40020000, 0x20000001, 0x40040005, 0xffffffff];
+    /** @type {{ handle?: number }} */
+    const alone = {};
+    assert.equal(h.device.CreateVertexShader(declaration, null, alone), D3D_OK);
+    assert.equal(h.device.SetVertexShader(alone.handle), D3D_OK);
+    assert.equal(h.device.SetStreamSource(0, positions, 12), D3D_OK);
+    assert.equal(h.device.SetStreamSource(1, colours, 4), D3D_OK);
+    assert.equal(h.device.SetRenderState(D3DRS.LIGHTING, 0), D3D_OK);
+    const into = h.vertexBuffer(20 * 4, FVF.XYZRHW | FVF.DIFFUSE);
+    assert.equal(h.process(0, 0, 4, into), D3D_OK);
+    COLOURS.forEach((colour, index)=>{
+        assert.equal(h.read(into, index, 20, 5).getUint32(16, true), colour,
+            `vertex ${index} took its colour from stream one`);
+    });
+    assert.equal(h.read(into, 3, 20, 5).getFloat32(0, true), 480);
+
+    /** @type {{ handle?: number }} */
+    const shader = {};
+    assert.equal(h.device.CreateVertexShader(declaration,
+        [0xfffe0101, 0x00000001, 0xc00f0000, 0x90e40000, 0x0000ffff], shader), D3D_OK);
+    assert.equal(h.device.SetVertexShader(shader.handle), D3D_OK);
+    assert.equal(h.process(0, 0, 4, into), D3DERR_INVALIDCALL, 'no shader runs on the processor');
+});
+
 test('the source is named by a format, and the destination\'s written range is uploaded', ()=>{
     assert.equal(fvfNaming([
         { name: 'position', stream: 0, offset: 0, format: 'float32x3' },

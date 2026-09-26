@@ -1717,23 +1717,18 @@ test('recorded: a fan drawn from user memory is expanded, and unbinds stream zer
     out.buffer.release();
 });
 
-test('recorded: a bound shader is counted and not drawn as fixed function', async()=>{
+test('recorded: a bound pixel shader is counted and not drawn as fixed function', async()=>{
     const h = harness();
     const { device, gpu } = h;
-    /** @type {{ handle?: number }} */
-    const shader = {};
-    assert.equal(device.CreateVertexShader([0], null, shader), D3D_OK);
     /** @type {{ handle?: number }} */
     const pixel = {};
     assert.equal(device.CreatePixelShader([0], pixel), D3D_OK);
 
     assert.equal(device.BeginScene(), D3D_OK);
-    assert.equal(device.SetVertexShader(shader.handle ?? 0), D3D_OK);
-    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK,
-        'the program is told the draw succeeded');
     assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
     assert.equal(device.SetPixelShader(pixel.handle ?? 0), D3D_OK);
-    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK,
+        'the program is told the draw succeeded');
     assert.equal(device.SetPixelShader(0), D3D_OK);
     assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK);
     assert.equal(device.EndScene(), D3D_OK);
@@ -1741,7 +1736,6 @@ test('recorded: a bound shader is counted and not drawn as fixed function', asyn
 
     assert.equal(gpu.count('draw'), 1, 'only the fixed-function draw reached the pass');
     const skipped = h.device.diagnostics().skipped;
-    assert.equal(skipped.vertexShader, 1, 'a vertex shader draw would be wrong geometry');
     assert.equal(skipped.pixelShader, 1, 'a pixel shader draw would be the wrong formula');
     assert.deepEqual(h.device.diagnostics().failures, []);
 });
@@ -3044,18 +3038,19 @@ test('recorded: a state set to the value it already holds is not a change', asyn
 
 test('recorded: a vertex shader bound and unbound between two draws leaves their state reusable',
     async()=>{
-        // Recorded commands. The excursion through a shader is declined and
-        // changes nothing the two quad draws do, so the state they share is
-        // still the state that was built: a cache keyed on the values serves
-        // the second from the first, and the shader never leaks into it.
+        // Recorded commands. The excursion through a declaration is declined
+        // and changes nothing the two quad draws do, so the state they share
+        // is still the state that was built: a cache keyed on the values
+        // serves the second from the first, and the handle never leaks into it.
         const h = harness();
         /** @type {{ handle?: number }} */
         const made = {};
         assert.equal(h.device.CreateVertexShader([0xffffffff], null, made), D3D_OK);
         const { draws, prepared } = await twoDraws(h, ()=>{
             assert.equal(h.device.SetVertexShader(made.handle ?? 0), D3D_OK);
-            // Declined, because this build has no translation for a shader bound
-            // through a handle -- which is what makes it an excursion.
+            // Declined: the declaration loads no position, so the
+            // fixed-function stage has nothing to read -- which is what makes
+            // it an excursion.
             assert.equal(h.device.DrawPrimitiveUP(
                 D3DPT.TRIANGLELIST, 2, quad([0, 0, 4, 4], 0), 20), D3D_OK);
             assert.equal(h.device.SetVertexShader(FVF_QUAD), D3D_OK);

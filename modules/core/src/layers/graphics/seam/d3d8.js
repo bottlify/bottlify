@@ -16,7 +16,7 @@
  * answers E_NOTIMPL, which is a reply a program handles.
  *
  * A slot that answers a failure code rather than doing the thing asked of it is
- * making the same point more loudly: the shaders are refused, because the
+ * making the same point more loudly: pixel shaders are refused, because the
  * renderer behind this cannot honour what succeeding would promise, and say so
  * where they stand. A refusal is a reply a program acts on -- usually by taking
  * the path this build does draw -- where a success it cannot see through leaves
@@ -55,6 +55,8 @@ import { createCursorTeller } from './cursor.js';
 import { createRaster, rasterStatus } from './raster.js';
 import { TEXTURE_OP_CAPS } from '../d3d8/validity.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
+import { declarationLength } from '../d3d8/declaration.js';
+import { END_TOKEN } from '../d3d9/shader.js';
 import {
     createShadow, getSurfaceLevelCode, lockCode, materialFloats, materialOf, setIndicesCode,
     setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
@@ -69,6 +71,11 @@ import {
  * cannot, and every one of these is a claim a program acts on.
  */
 const D3DCAPS_READ_SCANLINE = 0x00020000;
+const D3DVS_VERSION_MARK = 0xfffe0000;
+
+/** Past this many tokens a shader function with no end token is not one. */
+const MAX_SHADER_DWORDS = 1 << 16;
+
 // A colour cursor at any resolution: the device keeps the bitmap a program
 // hands it and the host shows it over the frame. A device that claims neither
 // sends a program down its own drawing path for the cursor, which a program
@@ -967,6 +974,74 @@ export function createDirect3D8Seam(
         {
             fields.writeF32(address + index * 4, values[index]);
         }
+    };
+
+    /** @param {number} pointer @param {number} count @returns {Uint32Array} */
+    const readDwords = (pointer, count)=>{
+        const dwords = new Uint32Array(count);
+        new Uint8Array(dwords.buffer).set(memory.readMemory(pointer >>> 0, count * 4));
+        return dwords;
+    };
+
+    /**
+     * A shader function's tokens, read to its end token. The stream carries
+     * no length; a comment's own length is honoured, since one may hold
+     * anything.
+     *
+     * @param {number} pointer
+     * @returns {Uint32Array | null}
+     */
+    const readFunction = pointer=>{
+        /** @type {number[]} */
+        const tokens = [];
+        let skip = 0;
+        while (tokens.length < MAX_SHADER_DWORDS)
+        {
+            const token = fields.readU32(pointer + tokens.length * 4);
+            tokens.push(token);
+            if (skip > 0)
+            {
+                skip--;
+            }
+            else if (tokens.length > 1 && (token & 0xffff) === 0xfffe)
+            {
+                skip = (token >>> 16) & 0x7fff;
+            }
+            else if (token === END_TOKEN)
+            {
+                return Uint32Array.from(tokens);
+            }
+        }
+        return null;
+    };
+
+    /**
+     * A reader of a shader's declaration or function by handle: the size
+     * pointer is required, the buffer optional, and a buffer too small is
+     * refused with the size left as the caller wrote it.
+     *
+     * @param {'GetVertexShaderDeclaration' | 'GetVertexShaderFunction'} name
+     */
+    const tokensOf = name=>(/** @type {any} */ device, /** @type {number[]} */ args)=>{
+        const [handle, data, size] = args;
+        if ((size >>> 0) === 0)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        /** @type {{ bytes?: number, tokens?: Uint32Array }} */
+        const held = {};
+        const hr = device[name](handle >>> 0, held,
+            (data >>> 0) === 0 ? null : fields.readU32(size >>> 0));
+        if (hr === D3D_OK)
+        {
+            fields.writeU32(size >>> 0, held.bytes ?? 0);
+            if (held.tokens)
+            {
+                memory.writeMemory(data >>> 0,
+                    new Uint8Array(Uint32Array.from(held.tokens).buffer));
+            }
+        }
+        return hr;
     };
 
     /** @param {number} pointer */
@@ -1961,23 +2036,67 @@ export function createDirect3D8Seam(
                 flags >>> 0);
         },
 
-        // CreateVertexShader and CreatePixelShader are absent on purpose, and
-        // this is the one absence here that is a decision rather than a gap.
-        // The renderer draws the fixed-function pipeline and counts a draw with
-        // either shader bound as one it declined; a create that succeeded would
-        // send a program down the programmable path, where every draw would be
-        // silently dropped, and it would never look back. Refusing sends it
-        // down the fixed-function path it also has, which draws.
-        //
-        // The declaration and function readers, and the shader constants, are
-        // absent for the same reason: they are only reachable through a handle
-        // that cannot exist.
-        //
-        // Setting is a different matter, because this one dword carries two
-        // meanings: a vertex format goes through it, and that is how every
-        // fixed-function draw declares its vertices.
+        /**
+         * The declaration is read to its end token, and the function, when
+         * there is one, to its own. The usage asks for software vertex
+         * processing, which the one stage there is serves either way.
+         *
+         * @param {any} device @param {number[]} args
+         */
+        CreateVertexShader: (device, [declaration, code, out])=>{
+            if ((declaration >>> 0) === 0 || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const length = declarationLength(
+                index=>fields.readU32((declaration >>> 0) + index * 4));
+            const tokens = (code >>> 0) === 0 ? null : readFunction(code >>> 0);
+            if (length < 0 || ((code >>> 0) !== 0 && !tokens))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ handle?: number }} */
+            const held = {};
+            const hr = device.CreateVertexShader(readDwords(declaration >>> 0, length), tokens,
+                held);
+            if (hr === D3D_OK)
+            {
+                fields.writeU32(out >>> 0, held.handle ?? 0);
+            }
+            return hr;
+        },
+
+        // One dword, two meanings: a vertex format goes through it as well
+        // as a handle, and that is how every fixed-function draw declares its
+        // vertices.
         /** @param {any} device @param {number[]} args */
         SetVertexShader: (device, [handle])=>device.SetVertexShader(handle >>> 0),
+
+        GetVertexShaderDeclaration: tokensOf('GetVertexShaderDeclaration'),
+        GetVertexShaderFunction: tokensOf('GetVertexShaderFunction'),
+
+        /** @param {any} device @param {number[]} args */
+        SetVertexShaderConstant: (device, [register, data, count])=>((data >>> 0) === 0
+            ? D3DERR_INVALIDCALL
+            // No more is read than the file holds; a count past it is refused.
+            : device.SetVertexShaderConstant(register >>> 0, readFloats(data >>> 0,
+                Math.min(count >>> 0, device.caps.maxVertexShaderConst ?? 0) * 4), count >>> 0)),
+
+        /** @param {any} device @param {number[]} args */
+        GetVertexShaderConstant: (device, [register, data, count])=>{
+            if ((data >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ values?: Float32Array }} */
+            const held = {};
+            const hr = device.GetVertexShaderConstant(register >>> 0, count >>> 0, held);
+            if (hr === D3D_OK && held.values)
+            {
+                writeFloats(data >>> 0, held.values);
+            }
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         GetVertexShader: (device, [out])=>{
@@ -1998,6 +2117,11 @@ export function createDirect3D8Seam(
         /** @param {any} device @param {number[]} args */
         DeleteVertexShader: (device, [handle])=>device.DeleteVertexShader(handle >>> 0),
 
+        // CreatePixelShader, its constants and its function reader are absent
+        // on purpose: the caps claim no pixel shader, and a create that
+        // succeeded would send a program down a path whose every draw the
+        // renderer declines, where the refusal sends it down the fixed-function
+        // stages, which draw.
         /** @param {any} device @param {number[]} args */
         SetPixelShader: (device, [handle])=>device.SetPixelShader(handle >>> 0),
 
@@ -2209,18 +2333,19 @@ export function createDirect3D8Seam(
      * maximum of zero, and what that looks like from outside is a machine that
      * is running perfectly and getting nowhere.
      *
-     * The values describe what the renderer behind this actually does: fixed
-     * function only, no shaders, two texture stages combined per pass, and
-     * filtering and addressing a GPU of any generation has.
+     * The values describe what the renderer behind this actually does: the
+     * fixed-function stages, vertex shaders to 1.1 translated to the GPU's own,
+     * no pixel shader, and filtering and addressing a GPU of any generation
+     * has.
      *
      * @param {number} address @param {any} caps
      */
     const writeCaps = (address, caps)=>{
         // Zeroed first: the structure is long, a caller allocates all of it,
         // and every field this does not set has to read as "not supported"
-        // rather than as whatever was on the stack. Two of those zeroes are
-        // load-bearing -- the shader versions say this device runs neither,
-        // which is the claim the shader entry points make good on.
+        // rather than as whatever was on the stack. The pixel shader version
+        // is one of those zeroes, and the pixel shader entry points make it
+        // good.
         memory.writeMemory(address, new Uint8Array(D3DCAPS8.SIZE));
         fields.writeStruct(address, D3DCAPS8, {
             DeviceType: D3DDEVTYPE.HAL,
@@ -2288,6 +2413,10 @@ export function createDirect3D8Seam(
             MaxVertexIndex: caps.maxVertexIndex ?? 0xffff,
             MaxStreams: caps.maxStreams ?? 16,
             MaxStreamStride: caps.maxStreamStride ?? 256,
+            VertexShaderVersion: (D3DVS_VERSION_MARK | ((caps.vertexShaderVersion?.major ?? 0) << 8)
+                | (caps.vertexShaderVersion?.minor ?? 0)) >>> 0,
+            MaxVertexShaderConst: caps.vertexShaderVersion?.major
+                ? caps.maxVertexShaderConst ?? 0 : 0,
         });
         // The floats, which the same writer cannot place without being told.
         // MaxVertexW is the largest homogeneous W a vertex may carry; a zero

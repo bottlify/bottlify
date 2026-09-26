@@ -88,6 +88,8 @@ const VERTEX_STATES = statesNamed(VERTEX_RENDER_STATES);
  * @property {{ buffer: any, base: number }} [indices]
  * @property {number} [vertexShader]       A handle, or a vertex format.
  * @property {number} [pixelShader]
+ * @property {Map<number, Float32Array>} vertexConstants   Four floats by register.
+ * @property {Map<number, Float32Array>} pixelConstants
  */
 
 /**
@@ -109,7 +111,20 @@ const VERTEX_STATES = statesNamed(VERTEX_RENDER_STATES);
  * @property {{ buffer: any, base: number }} indices
  * @property {number} vertexShader
  * @property {number} pixelShader
+ * @property {Float32Array} vertexConstants   The float files, four to a register.
+ * @property {Float32Array} pixelConstants
  */
+
+/**
+ * Each of a block's constant maps beside the file it is of.
+ *
+ * @param {StateBlock} block @param {StateView} view
+ * @returns {[Map<number, Float32Array>, Float32Array][]}
+ */
+const constantFiles = (block, view)=>[
+    [block.vertexConstants, view.vertexConstants],
+    [block.pixelConstants, view.pixelConstants],
+];
 
 /** @returns {StateBlock} a block holding nothing yet */
 export function emptyBlock(){
@@ -121,6 +136,8 @@ export function emptyBlock(){
         lights: new Map(),
         streams: new Map(),
         clipPlanes: new Map(),
+        vertexConstants: new Map(),
+        pixelConstants: new Map(),
     };
 }
 
@@ -156,6 +173,10 @@ export function fillBlock(type, view, uncaptured = new Set()){
             }
         }
         block.pixelShader = 0;
+        for (let register = 0; register < view.pixelConstants.length / 4; register++)
+        {
+            block.pixelConstants.set(register, new Float32Array(4));
+        }
     }
     if (vertex)
     {
@@ -165,6 +186,10 @@ export function fillBlock(type, view, uncaptured = new Set()){
         }
         block.vertexShader = 0;
         block.material = view.material;
+        for (let register = 0; register < view.vertexConstants.length / 4; register++)
+        {
+            block.vertexConstants.set(register, new Float32Array(4));
+        }
     }
     if (all)
     {
@@ -232,6 +257,13 @@ export function captureBlock(block, view){
     for (const index of block.clipPlanes.keys())
     {
         block.clipPlanes.set(index, Float32Array.from(view.clipPlanes.get(index) ?? [0, 0, 0, 0]));
+    }
+    for (const [constants, file] of constantFiles(block, view))
+    {
+        for (const register of constants.keys())
+        {
+            constants.set(register, file.slice(register * 4, register * 4 + 4));
+        }
     }
     if (block.material !== undefined)
     {
@@ -306,6 +338,13 @@ export function applyBlock(block, view){
     for (const [index, plane] of block.clipPlanes)
     {
         view.clipPlanes.set(index, Float32Array.from(plane));
+    }
+    for (const [constants, file] of constantFiles(block, view))
+    {
+        for (const [register, values] of constants)
+        {
+            file.set(values, register * 4);
+        }
     }
     if (block.material !== undefined)
     {
