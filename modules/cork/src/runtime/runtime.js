@@ -24,7 +24,7 @@
  * while it was being compiled.
  */
 
-import { formRegion, formShared } from '../region.js';
+import { formRegion, formShared, hashRegion } from '../region.js';
 import { TIER_SLOT, enterRegion, mathImports } from '../emit/region.js';
 import { decode } from '../decode/decoder.js';
 import { SHAPE, isX87, trackRegion } from '../emit/x87.js';
@@ -1044,9 +1044,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      *
      * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string,
      *     wide?: boolean, narrow?: boolean, checked?: boolean, copies?: boolean,
-     *     replaces?: RegionRecord, targets?: [number, number[]][], copying?: boolean }} one
+     *     replaces?: RegionRecord, targets?: [number, number[]][], copying?: boolean,
+     *     waited?: boolean }} one
      *     replaces: the region it is formed again from, with the callees of its indirect calls
-     *     (`targets`), or with copies of the blocks inside its loops (`copying`)
+     *     (`targets`), or with copies of the blocks inside its loops (`copying`); waited: the
+     *     guest ran between its forming and now
      * @param {{ labels: [number, number][], cut: number[], closed?: number[], entryTop: number,
      *     exportName?: string, linked?: boolean }} built
      * @param {WebAssembly.Instance} instance
@@ -1060,7 +1062,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // An x87 region built for a precision control before another was seen
         // would only leave at once: its bytes are translated again for that.
         // So would one built to test the stack's shape once its test had failed.
-        if (one.stamp !== stamp(region.pages) || (one.wide && precision !== 'wide')
+        // A write moves a page's generation only once code is published on it,
+        // so a region the guest ran past before this -- its lookups out, its
+        // batch on the worker -- is also read again: a guest store into a page
+        // whose first region was in flight is otherwise seen by nothing.
+        if (one.stamp !== stamp(region.pages)
+            || (one.waited === true && hashRegion(read, region) !== region.hash)
+            || (one.wide && precision !== 'wide')
             || (one.narrow && precision !== 'narrow')
             || (one.checked !== true && checkedAt(region, one.entryTop)))
         {
@@ -1863,6 +1871,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // a relink does, and keeps each one only when its bytes hash as they
             // did here.
             outstanding = { id: ++workerRequest, metas: unbuilt, store, at: performance.now() };
+            for (const one of unbuilt)
+            {
+                one.waited = true;
+            }
             const copies = copyPages(unbuilt.map(one=>one.region.pages));
             worker.post({
                 id: outstanding.id,
@@ -2200,7 +2212,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 ? null : (settings.store ?? null);
             /** @type {{ region: import('../region.js').Region, entryTop: number,
              *     stamp: string, cached: import('./cache.js').CachedRegion | null, wide?: boolean,
-             *     narrow?: boolean, checked?: boolean, moduleBytes?: Uint8Array | null }[]} */
+             *     narrow?: boolean, checked?: boolean, moduleBytes?: Uint8Array | null,
+             *     waited?: boolean }[]} */
             const formed = [];
             const formedAt = clock();
             // The block starts of the regions this batch formed with no x87 in
@@ -2302,6 +2315,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 }
                 return pending;
             };
+            // The guest runs on while the store answers.
+            const answered = ()=>{
+                storePending = false;
+                for (const one of formed)
+                {
+                    one.waited = true;
+                }
+                finishBatch(formed, store);
+            };
             Promise.all(formed.map(async one=>{
                 const key = regionKey(one);
                 try
@@ -2337,13 +2359,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     counts.cacheMisses++;
                     trace(storeTrace.missed, one);
                 }
-            })).then(()=>{
-                storePending = false;
-                finishBatch(formed, store);
-            }, ()=>{
-                storePending = false;
-                finishBatch(formed, store);
-            });
+            })).then(answered, answered);
             counts.lookupMs += clock() - lookupAt;
             return 0;
         },

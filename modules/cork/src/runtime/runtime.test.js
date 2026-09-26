@@ -763,6 +763,45 @@ test('precise keeps the x87 exception flags, in a store entry of its own; the de
     assert.equal((await status(false)).hits, 1, 'the fast one is, for a fast run');
 });
 
+test('a region whose code is written while its lookups are out is not published for the old bytes',
+    async()=>{
+        const { memoryTranslationStore } = await import('./cache.js');
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+        const store = memoryTranslationStore();
+        // mov eax, imm32; hlt
+        const program = (/** @type {number} */ value)=>[0xb8, value, 0, 0, 0, 0xf4];
+        /**
+         * A batch formed over `before`, its code made `after` while the store
+         * answers -- as a guest store does into a page with no translated code
+         * on it yet, which nothing watches -- and what then runs at the entry.
+         *
+         * @param {number[]} before @param {number[]} after
+         */
+        const formedThenWritten = async(before, after)=>{
+            const m = machine({ store, bundleId: 'test' });
+            m.write(CODE, before);
+            m.setReg(4, 0x80000);
+            m.runtime.noteHot(CODE);
+            await m.runtime.translatePending();
+            m.write(CODE, after);
+            await settle();
+            const published = m.runtime.entryOf(CODE) >= 0;
+            const eax = published ? (m.runtime.run(m.runtime.entryOf(CODE), 100), m.reg(0)) : null;
+            return { published, eax, d: m.runtime.diagnostics() };
+        };
+        // Emitted after the write: from the region formed before it.
+        const emitted = await formedThenWritten(program(1), program(2));
+        assert.equal(emitted.d.cacheMisses, 1);
+        assert.deepEqual([emitted.published, emitted.eax], [false, null],
+            'not published: it would return 1 where the code now says 2');
+        // Taken from the store after the write: a record for the old bytes.
+        const stored = await formedThenWritten(program(3), program(3));
+        assert.equal(stored.eax, 3);
+        const taken = await formedThenWritten(program(3), program(4));
+        assert.equal(taken.d.cacheHits, 1, 'found by the bytes it was formed from');
+        assert.deepEqual([taken.published, taken.eax], [false, null], 'and not published');
+    });
+
 test('structure left unset is structure on, in the store\'s key as in the code', async()=>{
     const { memoryTranslationStore } = await import('./cache.js');
     const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));

@@ -206,6 +206,19 @@ test('a seed made under another precision control answers no x87 region', { time
         }
     });
 
+test('a program that writes its own code sums the same with an empty store or a seed as with none',
+    { timeout: 60000 }, async()=>{
+        // patch-x87 calls a routine that rewrites an immediate of its own
+        // before it runs it: a region formed there before a store answers is
+        // out of date by the time it would be published.
+        const image = imageOf('patch-x87');
+        const without = await iteration(hostFor(image, null));
+        const empty = await firstIteration(image, null);
+        const seeded = await firstIteration(image, await capture(image));
+        assert.equal(empty.eax, without, 'an empty store');
+        assert.equal(seeded.eax, without, 'a seed');
+    });
+
 test('a code byte changed since the seed was made is translated from the bytes it now holds',
     { timeout: 60000 }, async()=>{
         const image = imageOf('crc-x87');

@@ -69,6 +69,7 @@ import { decode } from './decode/decoder.js';
  * @property {number[]} entries          every block start
  * @property {number} bytes
  * @property {Set<number>} pages         4 KiB pages the code and its switch tables span
+ * @property {SwitchTable[]} [tables]    the switch tables its jumps go through, read as data
  * @property {string} hash               of the decoded bytes, for the cache
  * @property {Map<string, number>} refused   opcode → times a refusal cut a block
  */
@@ -640,24 +641,6 @@ export function formRegion(read, entry,
 
     const ordered = [...blocks.values()].sort((a, b)=>a.start - b.start);
     const pages = new Set();
-    // Two FNV lanes, 64 bits: the hash is what a stored translation is found
-    // by, and a store -- a bundle's seed above all, made on another machine
-    // from a build of the program that may differ -- must not answer for
-    // other bytes at the same entry. Thirty-two bits met that at one pair in
-    // four billion, and a birthday search finds such a pair in a second.
-    let low = 0x811c9dc5;
-    let high = 0x050c5d1f;
-    let at = 0;
-    /** @param {number} byte */
-    const mix = byte=>{
-        low = Math.imul(low ^ byte, 0x01000193);
-        high = Math.imul(high ^ byte ^ at++ & 0xff, 0x01000193);
-    };
-    /** @param {number} address */
-    const take = address=>{
-        mix(read(address));
-        pages.add(address >>> 12);
-    };
     for (const block of ordered)
     {
         for (const target of block.exit.targets)
@@ -666,10 +649,6 @@ export function formRegion(read, entry,
             {
                 block.exit.backEdge = true;
             }
-        }
-        for (let address = block.start; address < block.end; address++)
-        {
-            mix(read(address));
         }
         // Each page the block spans, in address order, once: the set of every
         // byte's page, without a set operation a byte.
@@ -681,8 +660,62 @@ export function formRegion(read, entry,
             }
         }
     }
+    // A table's entries decide the region's blocks: they are hashed with the
+    // code, and their pages are the region's, so a region is formed again --
+    // on a worker, from copies of its pages -- from the same entries.
+    for (const table of tables)
+    {
+        const end = table.address + table.entries.length * 4;
+        for (let page = table.address >>> 12; end > table.address && page <= (end - 1) >>> 12;
+            page++)
+        {
+            pages.add(page);
+        }
+    }
+    return {
+        entry,
+        blocks: ordered,
+        entries: ordered.map(block=>block.start),
+        bytes,
+        pages,
+        tables,
+        hash: hashRegion(read, { blocks: ordered, tables }),
+        refused,
+    };
+}
+
+/**
+ * A region's hash, over what decides its code: its blocks' bytes in address
+ * order, the callees its predictions name and its switch tables' entries. Two
+ * FNV lanes, 64 bits: the hash is what a stored translation is found by, and a
+ * store -- a bundle's seed above all, made on another machine from a build of
+ * the program that may differ -- must not answer for other bytes at the same
+ * entry. Thirty-two bits met that at one pair in four billion, and a birthday
+ * search finds such a pair in a second. Read again later, it tells a region
+ * whose code was written since it was formed from one that still fits.
+ *
+ * @param {(address: number) => number} read
+ * @param {{ blocks: Block[], tables?: SwitchTable[] }} region  its blocks in address order
+ * @returns {string}
+ */
+export function hashRegion(read, { blocks, tables = [] }){
+    let low = 0x811c9dc5;
+    let high = 0x050c5d1f;
+    let at = 0;
+    /** @param {number} byte */
+    const mix = byte=>{
+        low = Math.imul(low ^ byte, 0x01000193);
+        high = Math.imul(high ^ byte ^ at++ & 0xff, 0x01000193);
+    };
+    for (const block of blocks)
+    {
+        for (let address = block.start; address < block.end; address++)
+        {
+            mix(read(address));
+        }
+    }
     // A prediction decides blocks as a table does: its callees are hashed too.
-    for (const block of ordered)
+    for (const block of blocks)
     {
         for (const target of block.exit.predicted ? block.exit.targets : [])
         {
@@ -692,27 +725,15 @@ export function formRegion(read, entry,
             }
         }
     }
-    // A table's entries decide the region's blocks: they are hashed with the
-    // code, and their pages are the region's, so a region is formed again --
-    // on a worker, from copies of its pages -- from the same entries.
     for (const table of tables)
     {
         const end = table.address + table.entries.length * 4;
         for (let address = table.address; address < end; address++)
         {
-            take(address);
+            mix(read(address));
         }
     }
-    return {
-        entry,
-        blocks: ordered,
-        entries: ordered.map(block=>block.start),
-        bytes,
-        pages,
-        hash: (high >>> 0).toString(16).padStart(8, '0')
-            + (low >>> 0).toString(16).padStart(8, '0'),
-        refused,
-    };
+    return (high >>> 0).toString(16).padStart(8, '0') + (low >>> 0).toString(16).padStart(8, '0');
 }
 
 /**

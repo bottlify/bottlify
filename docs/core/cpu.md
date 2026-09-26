@@ -532,7 +532,13 @@ storing into its own page went volatile after eight such stores) is no store int
 store is tested at its first byte, its last and one byte in every granule between, since a state
 save spans several (`fnsave`'s 108 bytes over code that lay in neither end's granule went
 unnoticed), and the emulator's "has code" table above is read for the store's last page as well as
-its first.
+its first. Those flags go up as a region is published, so a store into a page whose first region
+is still in flight -- its batch on the translation worker, or its store lookups out -- meets none
+of them: a region the guest ran past between its forming and its publishing is published only
+while its bytes still hash as they did when it was formed (`hashRegion`), and is dropped otherwise,
+to be formed again from what the page holds now. cork-bench's patch-x87, which rewrites an
+immediate of the routine it calls, summed 13c09d36 where the interpreter sums 3bf0ccce whenever a
+store answered its lookups a turn after the batch was formed (`translation-store.itest.js`).
 The common case is one test per access: the flags of the access's page and of the next one,
 read as one halfword (the last byte of an access lies in one of the two), against
 inaccessible -- and, for an access that is only written (`mov` to memory, a push, `stos`, an SSE
