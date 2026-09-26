@@ -294,6 +294,29 @@ test('GetWindow walks top-level windows from the top, and children in creation o
     assert.equal(fns.GetWindow.handler([firstControl, GW_OWNER]), 0, 'a child has no owner');
 });
 
+test('GetLastActivePopup answers the popup of an owner chain that was active last', ()=>{
+    // user32's window tests: an owner, a popup it owns, and a popup that one
+    // owns, each shown as it is made -- the owner's last active popup is the
+    // innermost.
+    const WS_POPUPWINDOW = 0x80880000;
+    const { memory, fns } = setup();
+    makeWindow(memory, fns);
+    /** @param {number} owner */
+    const popup = owner=>fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE,
+        WS_POPUPWINDOW | WS_VISIBLE, 100, 100, 200, 200, owner, 0, HINSTANCE, 0]);
+    const owner = popup(0);
+    const first = popup(owner);
+    const second = popup(first);
+
+    assert.equal(fns.GetLastActivePopup.handler([owner]), second);
+    assert.equal(fns.GetLastActivePopup.handler([first]), first,
+        'an owned window answers itself');
+    fns.DestroyWindow.handler([second]);
+    assert.notEqual(fns.GetLastActivePopup.handler([owner]), second,
+        'and a popup that is gone is no answer');
+    assert.equal(fns.GetLastActivePopup.handler([0x7777]), 0);
+});
+
 // --- painting ---
 
 test('RedrawWindow invalidates, validates and updates as its flags say', ()=>{

@@ -692,6 +692,26 @@ export function createWindowFunctions(host){
         return at;
     };
 
+    /**
+     * The top-level window at the end of a window's owner chain: the one whose
+     * popups GetLastActivePopup answers about. An owner is kept where a
+     * child keeps its parent, and a chain a program looped with SetParent
+     * ends where it comes round.
+     *
+     * @param {any} record
+     */
+    const rootOwnerOf = record=>{
+        let at = topLevelOf(record);
+        const seen = new Set([at]);
+        for (let owner = live(at.parent); owner && !seen.has(topLevelOf(owner));
+            owner = live(at.parent))
+        {
+            at = topLevelOf(owner);
+            seen.add(at);
+        }
+        return at;
+    };
+
     /** @param {any} record @returns {any[]} its live children, in creation order */
     const childrenOf = record=>[...windows.values()]
         .filter(child=>!child.destroyed && child.parent === record.hwnd && isChild(child));
@@ -811,6 +831,10 @@ export function createWindowFunctions(host){
         const record = live(hwnd);
         const previous = active;
         active = record ? topLevelOf(record).hwnd : 0;
+        if (record)
+        {
+            rootOwnerOf(record).lastActivePopup = active;
+        }
         // The keyboard follows activation: a focus outside the window that
         // became active is moved to it, as Windows moves it.
         const current = focusWindow();
@@ -2474,6 +2498,20 @@ export function createWindowFunctions(host){
                 send, callProcedure, geometry, windowFromPoint, isChild, repaint, appear, uncover,
                 shown, raise, sysColorBrush: (/** @type {number} */ index)=>(draw
                     ? draw.solidBrush(sysColor(index)) : 0),
+                /**
+                 * The window of a top-level window's owner chain that was
+                 * active last, or the window itself: for one that is owned or
+                 * is a child, and for a chain none of whose popups has been.
+                 *
+                 * @param {any} record
+                 */
+                lastActivePopup: record=>{
+                    if (isChild(record) || live(record.parent))
+                    {
+                        return record.hwnd;
+                    }
+                    return live(record.lastActivePopup ?? 0)?.hwnd ?? record.hwnd;
+                },
             }),
             live, windows, classes,
         }),

@@ -1973,13 +1973,18 @@ export function createSystemFunctions({ host, live, windows, classes }){
         /**
          * HWND GetLastActivePopup(HWND hWnd)
          *
-         * The window itself when none of its popups was active last, which
-         * with no popup tracking is always.
+         * The popup of the window's owner chain that was active last -- a
+         * program finds the dialog to bring forward this way -- and the window
+         * itself when it is owned, when it is a child, or when none of its
+         * popups was.
          */
         GetLastActivePopup: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([hwnd])=>(live(hwnd) ? hwnd >>> 0 : 0),
+            handler: ([hwnd])=>{
+                const record = live(hwnd);
+                return record ? host.lastActivePopup?.(record) ?? record.hwnd : 0;
+            },
         },
 
         /**
