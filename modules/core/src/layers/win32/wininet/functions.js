@@ -27,6 +27,7 @@
  */
 
 import { URL_COMPONENTS, buildUrl, crackUrl, defaultPort, schemeNumber } from './url.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
@@ -48,7 +49,8 @@ const ICU_ENCODE_PERCENT = 0x00001000;
  * The characters encoded are the ones WinINet treats as unsafe in a URL --
  * controls, space, DEL, anything past ASCII, and the delimiters that are not
  * URL syntax. Reserved characters stay, because encoding "?" or "/" would
- * change what the URL names.
+ * change what the URL names. An escape is of a byte of the ANSI page the URL
+ * was read in, both ways.
  *
  * @param {string} url @param {number} flags
  * @returns {string}
@@ -58,7 +60,7 @@ export function canonicalizeUrl(url, flags){
     if ((flags & ICU_DECODE) !== 0)
     {
         text = text.replace(/%([0-9a-fA-F]{2})/g,
-            (_, hex)=>String.fromCharCode(parseInt(hex, 16)));
+            (_, hex)=>decodeAnsi(Uint8Array.of(parseInt(hex, 16))));
     }
     if ((flags & ICU_NO_META) === 0)
     {
@@ -97,12 +99,14 @@ export function canonicalizeUrl(url, flags){
         for (const character of text)
         {
             const code = character.charCodeAt(0);
+            // A character the page has no byte for has no escape, and stays.
+            const [byte] = encodeAnsi(character);
             const unsafe = spacesOnly
                 ? code === 0x20
                 : code <= 0x20 || code >= 0x7f || '"<>\\^`{|}'.includes(character)
                     || (percent && character === '%');
-            encoded += unsafe && code <= 0xff
-                ? `%${code.toString(16).toUpperCase().padStart(2, '0')}`
+            encoded += unsafe && (code < 0x80 || byte !== 0x3f)
+                ? `%${byte.toString(16).toUpperCase().padStart(2, '0')}`
                 : character;
         }
         text = encoded;
@@ -319,6 +323,8 @@ export function createWininetFunctions(host){
     /**
      * Writes a string and its terminator. Latin-1 rather than UTF-8, because
      * what goes back has to be the same number of bytes the length reported.
+     * What goes through here is what the transport answered; the program's
+     * own text, a URL, goes back through writeAnsi.
      *
      * @param {number} pointer @param {string} text
      */
@@ -329,6 +335,16 @@ export function createWininetFunctions(host){
             bytes[at] = text.charCodeAt(at) & 0xff;
         }
         host.writeMemory(pointer >>> 0, bytes);
+    };
+
+    /**
+     * Writes text read from the program, a URL or a piece of one, and its
+     * terminator, in the ANSI page it was read in.
+     *
+     * @param {number} pointer @param {string} text
+     */
+    const writeAnsi = (pointer, text)=>{
+        host.writeMemory(pointer >>> 0, encodeAnsi(`${text}\0`));
     };
 
     /**
@@ -384,7 +400,7 @@ export function createWininetFunctions(host){
             return;
         }
         const room = Math.max(0, length - 1);
-        writeText(pointer, value.text.slice(0, room));
+        writeAnsi(pointer, value.text.slice(0, room));
         writeDword(base + lengthAt, Math.min(value.text.length, room));
     };
 
@@ -906,7 +922,7 @@ export function createWininetFunctions(host){
                     writeDword(length, needed);
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                writeText(buffer, canonical);
+                writeAnsi(buffer, canonical);
                 writeDword(length, canonical.length);
                 return TRUE;
             },
