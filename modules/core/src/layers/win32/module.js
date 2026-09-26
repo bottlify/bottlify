@@ -1620,7 +1620,11 @@ export const win32Module = {
             }),
 
             'RPCRT4.dll': createRpcFunctions({
-                writeMemory, readCString, divergence: config?.divergence,
+                writeMemory, readCString, readMemory, divergence: config?.divergence,
+                /** @param {number} bytes */
+                allocate: bytes=>heap.allocate(bytes),
+                /** @param {number} address */
+                free: address=>heap.free(address),
             }),
 
             'OLEAUT32.dll': createAutomationFunctions({
