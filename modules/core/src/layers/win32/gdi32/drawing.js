@@ -51,10 +51,11 @@ import {
 
 /**
  * iUsage of the DIB functions: a colour table of RGBQUADs, or of WORD
- * indices into the palette the DC has selected. Nothing else is a usage.
+ * indices into the palette the DC has selected -- or, for the calls that draw
+ * a DIB, no table and pixels that are palette indices themselves.
  */
-const DIB_RGB_COLORS = 0;
 const DIB_PAL_COLORS = 1;
+const DIB_PAL_INDICES = 2;
 
 /** The drawing layer's name for a sixteen-bit surface made in 5-6-5. */
 const RGB_565 = '565';
@@ -272,11 +273,16 @@ function masksFor(shape, bitCount){
  * @param {<T>(bitmap: number, action: (hdc: number) => T) => T} options.lend
  *        Runs `action` over a context of the bookkeeping half's own with the
  *        bitmap in it, wherever else the bitmap is selected.
+ * @param {(at: number, count: number, usage: number, dc: any) => number[]}
+ *        options.readColorTable
+ *        A DIB's colour table as colours, whatever its usage says it holds.
  * @returns The entry points, and `bound`: the drawing interface a context is
  *     bound to, for the window manager, which paints its own controls through
  *     the same engine without a guest string to read.
  */
-export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, currentMetrics, lend }){
+export function createDrawingFunctions(
+    { host, objects, dcOf, surfaceOf, currentMetrics, lend, readColorTable })
+{
     /** @type {DrawingServices} */
     const services = host.graphics ?? {};
 
@@ -374,18 +380,21 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
      *
      * A BI_BITFIELDS DIB's masks sit where a colour table would, forty bytes
      * in, which in a larger header is inside the header rather than after it.
+     * A table shorter than the depth allows leaves the indices past it black.
      *
      * @param {number} info @param {number} bits
+     * @param {number} usage  What the colour table holds.
+     * @param {any} dc  Whose palette a palette-relative table indexes.
      * @returns {{ header: import('./structs.js').BitmapInfoHeaderFields, bits: Uint8Array,
      *             colors: number[], masks: number[] } | null}
      */
-    const readDib = (info, bits)=>{
+    const readDib = (info, bits, usage, dc)=>{
         const header = readBitmapInfoHeader(host, info);
         const masked = header.compression === BI_BITFIELDS
             && (header.bitCount === 16 || header.bitCount === 32);
         if (header.size < BITMAPINFOHEADER.SIZE || header.width <= 0 || header.height === 0
             || !DIB_BIT_COUNTS.has(header.bitCount)
-            || (header.compression !== BI_RGB && !masked))
+            || (header.compression !== BI_RGB && !masked) || usage > DIB_PAL_INDICES)
         {
             return null;
         }
@@ -394,17 +403,12 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
             : [];
         const stride = ((header.width * header.bitCount + 31) >> 5) * 4;
         const rows = Math.abs(header.height);
-        const colors = [];
-        if (header.bitCount <= 8)
-        {
-            const used = header.clrUsed || (1 << header.bitCount);
-            const table = host.readMemory(info + header.size, used * 4);
-            for (let index = 0; index < used; index++)
-            {
-                colors.push((table[index * 4] | table[index * 4 + 1] << 8
-                    | table[index * 4 + 2] << 16) >>> 0);
-            }
-        }
+        // DIB_PAL_INDICES has no table for biClrUsed to shorten.
+        const size = 1 << header.bitCount;
+        const count = usage === DIB_PAL_INDICES ? size : Math.min(header.clrUsed || size, size);
+        const colors = header.bitCount <= 8
+            ? readColorTable(info + header.size, count, usage, dc)
+            : [];
         return { header, bits: host.readMemory(bits, stride * rows), colors, masks };
     };
 
@@ -520,8 +524,7 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
          *                   DWORD rop)
          *
          * The bits are read as the header describes them and the colour table
-         * that follows it; a palette-relative table (DIB_PAL_COLORS) is not
-         * decoded, which is reported as zero lines rather than drawn wrongly.
+         * that follows it, a palette-relative one through the DC's palette.
          */
         StretchDIBits: {
             argBytes: 52,
@@ -529,12 +532,11 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
             handler: ([dest, xDest, yDest, destWidth, destHeight, xSrc, ySrc, srcWidth,
                 srcHeight, bits, info, usage, rop])=>{
                 const interfaces = bound(dest);
-                if (!interfaces || (bits >>> 0) === 0 || (info >>> 0) === 0
-                    || (usage >>> 0) !== DIB_RGB_COLORS)
+                if (!interfaces || (bits >>> 0) === 0 || (info >>> 0) === 0)
                 {
                     return 0;
                 }
-                const image = readDib(info >>> 0, bits >>> 0);
+                const image = readDib(info >>> 0, bits >>> 0, usage >>> 0, dcOf(dest));
                 if (!image)
                 {
                     return 0;

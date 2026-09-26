@@ -188,8 +188,12 @@ const BI_BITFIELDS = 3;
 /** BI_JPEG and BI_PNG: an image file for a printer, never a bitmap's rows. */
 const IMAGE_COMPRESSIONS = new Set([4, 5]);
 
-/** iUsage: the colour table is palette indices, not colours. */
+/**
+ * iUsage: the colour table is palette indices, not colours; or there is no
+ * table, and each pixel is a palette index itself.
+ */
 const DIB_PAL_COLORS = 1;
+const DIB_PAL_INDICES = 2;
 
 /** Entries an indexed DIB's colour table holds, by depth. */
 const colorTableSize = (/** @type {number} */ bitCount)=>1 << bitCount;
@@ -313,6 +317,9 @@ export function createGdiFunctions(host){
      * A palette-relative table (DIB_PAL_COLORS) holds indices into the
      * palette the device has selected, and those are resolved now: the
      * bitmap keeps colours, not a reference to a palette that may change.
+     * An index past the palette's end wraps round to its start (Wine's
+     * test_SetDIBits). DIB_PAL_INDICES has no table at all: a pixel is the
+     * palette index itself, which is the identity table here.
      *
      * @param {number} at @param {number} count @param {number} usage @param {any} dc
      * @param {boolean} [live]  False for a table read once and dropped, which
@@ -321,16 +328,17 @@ export function createGdiFunctions(host){
      */
     const readColorTable = (at, count, usage, dc, live = true)=>{
         const colors = [];
-        if (usage === DIB_PAL_COLORS)
+        if (usage === DIB_PAL_COLORS || usage === DIB_PAL_INDICES)
         {
             const record = objects.get(dc?.palette ?? 0);
             const entries = record?.attributes.entries ?? [];
-            const raw = host.readMemory(at, count * 2);
+            const raw = usage === DIB_PAL_COLORS ? host.readMemory(at, count * 2) : null;
             /** @type {number[]} */
             const indices = [];
             for (let index = 0; index < count; index++)
             {
-                const entry = raw[index * 2] | (raw[index * 2 + 1] << 8);
+                const entry = (raw ? raw[index * 2] | (raw[index * 2 + 1] << 8) : index)
+                    % Math.max(1, entries.length);
                 indices.push(entry);
                 colors.push(paletteEntryToPixel(entries[entry] ?? 0));
             }
@@ -1069,6 +1077,8 @@ export function createGdiFunctions(host){
 
     const drawing = createDrawingFunctions({
         host, objects, dcOf, surfaceOf, currentMetrics, lend,
+        /** @param {number} at @param {number} count @param {number} usage @param {any} dc */
+        readColorTable: (at, count, usage, dc)=>readColorTable(at, count, usage, dc, false),
     });
 
     /**

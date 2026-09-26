@@ -352,8 +352,11 @@ test('the blits that need no source, and the ones that scale, reach the service'
     assert.deepEqual(graphics.calls.filter(call=>call[0] === 'stretchDIBits'),
         [['stretchDIBits', hdc, 2, 4, 16, 8, 4]]);
     assert.equal(fns.StretchDIBits.handler(
-        [hdc, 0, 0, 4, 4, 0, 0, 2, 2, BITS, INFO, DIB_PAL_COLORS, SRCCOPY]), 0,
-    'a palette-relative table is not decoded, and says so with zero lines');
+        [hdc, 0, 0, 4, 4, 0, 0, 2, 2, BITS, INFO, DIB_PAL_COLORS, SRCCOPY]), 2,
+    'a palette-relative table is read through the palette');
+    assert.equal(fns.StretchDIBits.handler(
+        [hdc, 0, 0, 4, 4, 0, 0, 2, 2, BITS, INFO, DIB_PAL_COLORS + 2, SRCCOPY]), 0,
+    'and past DIB_PAL_INDICES there is no usage');
     assert.equal(fns.PatBlt.argBytes, 24);
     assert.equal(fns.StretchDIBits.argBytes, 52);
 });

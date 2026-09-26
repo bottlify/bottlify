@@ -804,3 +804,41 @@ test('CreateDIBitmap with CBM_INIT converts the bits it is given into the DC\'s 
     assert.ok(indexed > 0);
     assert.deepEqual(pixelsOf(indexed, 2), [0x00aabbcc, 0x00112233]);
 });
+
+test('StretchDIBits reads a DIB_PAL_COLORS table through the palette the DC has', ()=>{
+    // Wine's test_SetDIBits and test_SetDIBitsToDevice: each WORD is an index
+    // into the selected palette, wrapping at its end, and an index past
+    // biClrUsed is black; test_dib_formats: DIB_PAL_COLORS + 1, whose pixels
+    // index the palette directly, is drawn too, and nothing past it is.
+    const { fns, view } = wiredGdi();
+    const screen = fns.GetDC.handler([0]);
+    const dc = fns.CreateCompatibleDC.handler([screen]);
+    fns.SelectObject.handler([dc, fns.CreateCompatibleBitmap.handler([screen, 4, 1])]);
+    /** @param {number} usage */
+    const stretch = usage=>fns.StretchDIBits.handler([dc, 0, 0, 4, 1, 0, 0, 4, 1,
+        WIRED_BITS, WIRED_INFO, usage, 0x00cc0020]);
+    /** @returns {number[]} */
+    const row = ()=>[0, 1, 2, 3].map(x=>fns.GetPixel.handler([dc, x, 0]));
+
+    putInfo(view, { width: 4, height: 1, bitCount: 8, table: [0x00000002, 0x00000004] });
+    view.setUint32(WIRED_INFO + BITMAPINFOHEADER.biClrUsed, 3, true);
+    view.setUint32(WIRED_BITS, 0x03020100, true);
+    assert.equal(stretch(1), 1);
+    assert.deepEqual(row(), [0x008000, 0x000000, 0x800000, 0x000000],
+        'the default palette\'s entries 2, 0 and 4, then black past biClrUsed');
+
+    const LOGPALETTE = 0x1100;
+    view.setUint16(LOGPALETTE, 0x300, true);
+    view.setUint16(LOGPALETTE + 2, 3, true);
+    view.setUint32(LOGPALETTE + 4, 0x00332211, true);
+    view.setUint32(LOGPALETTE + 8, 0x00665544, true);
+    view.setUint32(LOGPALETTE + 12, 0x00998877, true);
+    fns.SelectPalette.handler([dc, fns.CreatePalette.handler([LOGPALETTE]), 0]);
+    assert.equal(stretch(1), 1);
+    assert.deepEqual(row(), [0x998877, 0x332211, 0x665544, 0x000000], 'index 4 wraps to 1');
+
+    assert.equal(stretch(2), 1);
+    assert.deepEqual(row(), [0x332211, 0x665544, 0x998877, 0x332211],
+        'DIB_PAL_INDICES: the pixel is the palette index, wrapping too');
+    assert.equal(stretch(3), 0);
+});
