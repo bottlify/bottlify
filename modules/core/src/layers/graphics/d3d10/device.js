@@ -1492,9 +1492,13 @@ export function createDevice(options = {}){
             out.height = textFilter.height;
         },
 
-        /** @returns {number} */
+        /**
+         * Nothing here is ever shared, so no handle names a resource.
+         *
+         * @returns {number}
+         */
         OpenSharedResource(){
-            return E_NOTIMPL;
+            return E_INVALIDARG;
         },
 
         // --- ID3D10Multithread ---

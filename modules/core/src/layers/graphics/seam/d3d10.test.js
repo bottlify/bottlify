@@ -24,7 +24,8 @@ import { createPublisher } from './com.js';
 import {
     ID3D10BUFFER_SLOTS, ID3D10DEVICE_SLOTS, ID3D10MULTITHREAD_SLOTS, ID3D10QUERY_SLOTS,
     ID3D10TEXTURE_SLOTS, ID3D10VIEW_SLOTS, IDXGIADAPTER1_SLOTS, IDXGIADAPTER_SLOTS,
-    IDXGIDEVICE1_SLOTS, IDXGIRESOURCE_SLOTS, IDXGISURFACE_SLOTS,
+    IDXGIDEVICE1_SLOTS, IDXGIDEVICE_SLOTS, IDXGIOUTPUT_SLOTS, IDXGIRESOURCE_SLOTS,
+    IDXGISURFACE_SLOTS,
     IDXGIFACTORY_SLOTS, IDXGISWAPCHAIN_SLOTS, createDirect3D10Seam,
 } from './d3d10.js';
 import {
@@ -812,12 +813,109 @@ test('a staging copy of what the GPU drew is read back, and its map waits for it
     assert.deepEqual(h.divergences, []);
 });
 
+test('an output lists its modes and finds the one nearest a request', ()=>{
+    // After Wine's dxgi test_output and test_find_closest_matching_mode.
+    const h = seamed();
+    const { swapChain } = h.createDeviceAndSwapChain();
+    const outputAt = h.box.place([0]);
+    assert.equal(h.swapChain(swapChain, 'GetContainingOutput', [outputAt]), S_OK,
+        'the window is on the adapter\'s output');
+    const output = h.box.memory.readU32(outputAt);
+    assert.notEqual(output, 0);
+    const call = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        h.box.call(output, slot(IDXGIOUTPUT_SLOTS, name), args);
+
+    const countAt = h.box.place([0]);
+    assert.equal(call('GetDisplayModeList', [DXGI_FORMAT.R8G8B8A8_UNORM, 0, 0, 0]),
+        DXGI_ERROR_INVALID_CALL, 'no count to write to');
+    assert.equal(call('GetDisplayModeList', [DXGI_FORMAT.R8G8B8A8_UNORM, 0, countAt, 0]), S_OK);
+    const count = h.box.memory.readU32(countAt);
+    assert.ok(count > 3, `${count} modes`);
+    assert.equal(call('GetDisplayModeList', [0, 0, countAt, 0]), S_OK);
+    assert.equal(h.box.memory.readU32(countAt), 0, 'none in no format');
+
+    const list = h.box.allocate(count * 28);
+    h.box.memory.writeU32(countAt, 1);
+    assert.equal(call('GetDisplayModeList', [DXGI_FORMAT.R8G8B8A8_UNORM, 2, countAt, list]),
+        0x887a0003, 'DXGI_ERROR_MORE_DATA');
+    assert.equal(h.box.memory.readU32(countAt), 1, 'the count left as it was given');
+    h.box.memory.writeU32(countAt, count + 5);
+    assert.equal(call('GetDisplayModeList', [DXGI_FORMAT.R8G8B8A8_UNORM, 2, countAt, list]),
+        S_OK);
+    assert.equal(h.box.memory.readU32(countAt), count);
+    /** @param {number} index */
+    const mode = index=>[0, 4, 8, 12, 16, 20, 24]
+        .map(at=>h.box.memory.readU32(list + index * 28 + at));
+    assert.deepEqual(mode(0), [640, 480, 60, 1, DXGI_FORMAT.R8G8B8A8_UNORM, 1, 0],
+        'smallest first, progressive, at the one rate');
+    for (let index = 1; index < count; index++)
+    {
+        const [width, height] = mode(index);
+        const [lastWidth, lastHeight] = mode(index - 1);
+        assert.ok(width > lastWidth || (width === lastWidth && height > lastHeight),
+            `mode ${index} is sorted`);
+    }
+
+    const wanted = h.box.allocate(28);
+    const closest = h.box.allocate(28);
+    /** @param {number[]} fields */
+    const find = fields=>{
+        fields.forEach((value, index)=>h.box.memory.writeU32(wanted + index * 4, value));
+        return call('FindClosestMatchingMode', [wanted, closest, 0]);
+    };
+    assert.equal(find([0, 0, 0, 0, 0, 0, 0]), DXGI_ERROR_INVALID_CALL,
+        'no format and no device to take one from');
+    assert.equal(find([800, 0, 0, 0, DXGI_FORMAT.R8G8B8A8_UNORM, 0, 0]),
+        DXGI_ERROR_INVALID_CALL, 'half a size');
+    assert.equal(find([801, 599, 0, 0, DXGI_FORMAT.R8G8B8A8_UNORM, 0, 0]), S_OK);
+    assert.deepEqual([0, 4, 8, 12, 16].map(at=>h.box.memory.readU32(closest + at)),
+        [800, 600, 60, 1, DXGI_FORMAT.R8G8B8A8_UNORM], 'the nearest size');
+    assert.equal(find([10, 10, 0, 0, DXGI_FORMAT.R8G8B8A8_UNORM, 0, 0]), S_OK);
+    assert.deepEqual([0, 4].map(at=>h.box.memory.readU32(closest + at)), [640, 480]);
+
+    // What only a fullscreen swap chain owns is refused, as it is while there is none.
+    assert.equal(call('GetGammaControlCapabilities', [h.box.allocate(4096)]),
+        DXGI_ERROR_INVALID_CALL);
+    assert.equal(call('GetFrameStatistics', [h.box.allocate(32)]), DXGI_ERROR_INVALID_CALL);
+});
+
+test('a DXGI device makes surfaces, and finds every resource resident', ()=>{
+    // After Wine's dxgi test_create_surface and test_parents.
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    const dxgiAt = h.box.place([0]);
+    assert.equal(h.box.call(device, 0, [h.box.placeGuid(IID.IDXGIDevice), dxgiAt]), S_OK);
+    const dxgi = h.box.memory.readU32(dxgiAt);
+    const desc = h.box.place([64, 32, DXGI_FORMAT.R8G8B8A8_UNORM, 1, 0]);
+    const surfacesAt = h.box.place([0, 0]);
+    assert.equal(h.box.call(dxgi, slot(IDXGIDEVICE_SLOTS, 'CreateSurface'),
+        [desc, 2, DXGI_USAGE.RENDER_TARGET_OUTPUT, 0, surfacesAt]), S_OK);
+    const surface = h.box.memory.readU32(surfacesAt);
+    assert.notEqual(surface, 0);
+    assert.notEqual(h.box.memory.readU32(surfacesAt + 4), surface, 'two surfaces');
+    const parentAt = h.box.place([0]);
+    assert.equal(h.box.call(surface, slot(IDXGISURFACE_SLOTS, 'GetParent'),
+        [h.box.placeGuid(IID.IDXGIDevice), parentAt]), S_OK);
+    assert.equal(h.box.memory.readU32(parentAt), dxgi, 'the device it came from');
+    const surfaceDesc = h.box.place([0, 0, 0, 0, 0]);
+    h.box.call(surface, slot(IDXGISURFACE_SLOTS, 'GetDesc'), [surfaceDesc]);
+    assert.deepEqual([0, 4, 8].map(at=>h.box.memory.readU32(surfaceDesc + at)),
+        [64, 32, DXGI_FORMAT.R8G8B8A8_UNORM]);
+
+    const status = h.box.place([0, 0]);
+    assert.equal(h.box.call(dxgi, slot(IDXGIDEVICE_SLOTS, 'QueryResourceResidency'),
+        [surfacesAt, status, 2]), S_OK);
+    assert.deepEqual([h.box.memory.readU32(status), h.box.memory.readU32(status + 4)], [1, 1],
+        'DXGI_RESIDENCY_FULLY_RESIDENT');
+});
+
 test('what this build cannot do says so in the slot rather than in a crash', ()=>{
     const h = seamed();
     const { device, swapChain } = h.createDeviceAndSwapChain();
     const out = h.box.place([0xdeadbeef]);
     assert.equal(h.device(device, 'OpenSharedResource',
-        [1, h.box.placeGuid(IID.ID3D10Texture2D), out]), E_NOTIMPL);
+        [1, h.box.placeGuid(IID.ID3D10Texture2D), out]), E_INVALIDARG,
+    'nothing is shared, so no handle names a resource');
     assert.equal(h.box.memory.readU32(out), 0);
     const outAndBeyond = h.box.place([0xdeadbeef, 0xfeedface]);
     assert.equal(h.device(device, 'CreateGeometryShaderWithStreamOutput',
@@ -825,11 +923,12 @@ test('what this build cannot do says so in the slot rather than in a crash', ()=
     assert.equal(h.box.memory.readU32(outAndBeyond), 0, 'the sixth argument is the out');
     assert.equal(h.box.memory.readU32(outAndBeyond + 4), 0xfeedface,
         'the caller\'s next stack word is not an argument');
-    assert.equal(h.swapChain(swapChain, 'GetContainingOutput', [out]), 0x887a0022);
-    assert.equal(h.box.memory.readU32(out), 0);
+    assert.equal(h.swapChain(swapChain, 'SetFullscreenState', [1, 0]), 0x887a0022,
+        'DXGI_ERROR_NOT_CURRENTLY_AVAILABLE: the display belongs to the page');
+    assert.equal(h.swapChain(swapChain, 'SetFullscreenState', [0, 0]), S_OK);
     const modes = h.box.place([7]);
-    assert.equal(h.box.call(h.box.memory.readU32(out) || swapChain,
-        slot(IDXGISWAPCHAIN_SLOTS, 'ResizeTarget'), [modes]), S_OK);
+    assert.equal(h.swapChain(swapChain, 'ResizeTarget', [modes]), S_OK);
+    assert.equal(h.swapChain(swapChain, 'ResizeTarget', [0]), DXGI_ERROR_INVALID_CALL);
     assert.equal(h.device(device, 'ResolveSubresource', [0, 0, 0, 0, 0]), 0);
     assert.ok(h.divergences.some(line=>line.includes('ResolveSubresource')));
 });

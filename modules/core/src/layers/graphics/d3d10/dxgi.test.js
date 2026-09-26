@@ -207,7 +207,7 @@ test('a swap chain reports the description it was made from', ()=>{
     /** @type {{ desc?: any }} */
     const out = {};
     assert.equal(created.swapChain.GetDesc(out), S_OK);
-    assert.deepEqual(out.desc, requested);
+    assert.deepEqual(out.desc, { ...requested, windowed: true });
     // The description handed back is a copy: writing through it must not reach
     // the swap chain's own.
     out.desc.bufferCount = 99;

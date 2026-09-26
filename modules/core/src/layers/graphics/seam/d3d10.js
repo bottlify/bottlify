@@ -31,12 +31,15 @@ import { readGuid } from './ddraw.js';
 import { createFields } from './structs.js';
 import {
     D3D10_LIMITS, D3D10_MAP, D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_RESOURCE_DIMENSION,
-    DXGI_ERROR_INVALID_CALL, E_INVALIDARG, E_NOTIMPL, IID, S_OK, formatPitch,
+    DXGI_ERROR_INVALID_CALL, DXGI_ERROR_MORE_DATA, DXGI_ERROR_UNSUPPORTED, E_INVALIDARG, IID, S_OK,
+    formatPitch,
 } from '../d3d10/constants.js';
 import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain } from '../d3d10/device.js';
 import { CreateDXGIFactory } from '../d3d10/dxgi.js';
-import { readSwapChainDesc, writeSwapChainDesc } from '../d3d10/structs.js';
-import { levelExtent } from '../d3d10/validity.js';
+import {
+    DXGI_MODE_DESC, readModeDesc, readSwapChainDesc, writeModeDesc, writeSwapChainDesc,
+} from '../d3d10/structs.js';
+import { bindFlagsForUsage, levelExtent } from '../d3d10/validity.js';
 
 /**
  * A method here may answer nothing: the setters of this API are `void`, and
@@ -54,6 +57,9 @@ const describe = (id, slots, implemented)=>describeSlots(id, slots,
 
 /** DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, for what a browser has no counterpart of. */
 const DXGI_ERROR_NOT_CURRENTLY_AVAILABLE = 0x887a0022 | 0;
+
+/** DXGI_RESIDENCY_FULLY_RESIDENT. */
+const DXGI_RESIDENCY_FULLY_RESIDENT = 1;
 
 // --- structures, by offset ---
 
@@ -667,19 +673,62 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             fields.writeU32(out + DXGI_OUTPUT_DESC.Monitor, 1);
             return S_OK;
         },
-        // No mode is switched in a browser; a program that asks for the list
-        // is told it is empty and keeps the mode it has.
-        /** @param {any} output @param {number[]} args */
-        GetDisplayModeList: (output, [, , countAt])=>{
-            if ((countAt >>> 0) !== 0)
+        /**
+         * With no list, how many modes there are; with one, as many as it has
+         * room for -- DXGI_ERROR_MORE_DATA when that is not all of them, the
+         * count then left as the program gave it.
+         *
+         * @param {any} output @param {number[]} args
+         */
+        GetDisplayModeList: (output, [format, , countAt, listAt])=>{
+            if ((countAt >>> 0) === 0)
             {
-                fields.writeU32(countAt, 0);
+                return DXGI_ERROR_INVALID_CALL;
             }
+            const modes = output.GetDisplayModeList(format >>> 0);
+            if ((listAt >>> 0) === 0)
+            {
+                fields.writeU32(countAt, modes.length);
+                return S_OK;
+            }
+            const room = fields.readU32(countAt);
+            modes.slice(0, room).forEach((/** @type {any} */ mode, /** @type {number} */ index)=>{
+                writeModeDesc(memory, listAt + index * DXGI_MODE_DESC.SIZE, mode);
+            });
+            if (room < modes.length)
+            {
+                return DXGI_ERROR_MORE_DATA;
+            }
+            fields.writeU32(countAt, modes.length);
             return S_OK;
+        },
+        /** @param {any} output @param {number[]} args */
+        FindClosestMatchingMode: (output, [wantedAt, closestAt, device])=>{
+            if ((wantedAt >>> 0) === 0 || (closestAt >>> 0) === 0)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            /** @type {{ mode?: any }} */
+            const held = {};
+            const hr = output.FindClosestMatchingMode(readModeDesc(memory, wantedAt),
+                (device >>> 0) !== 0, held);
+            if (hr === S_OK)
+            {
+                writeModeDesc(memory, closestAt, held.mode);
+            }
+            return hr;
         },
         WaitForVBlank: ()=>S_OK,
         TakeOwnership: ()=>DXGI_ERROR_NOT_CURRENTLY_AVAILABLE,
         ReleaseOwnership: ()=>S_OK,
+        // The gamma ramp and the scanned-out surface belong to a swap chain
+        // that has the output fullscreen, and none here ever does.
+        GetGammaControlCapabilities: ()=>DXGI_ERROR_INVALID_CALL,
+        SetGammaControl: ()=>DXGI_ERROR_INVALID_CALL,
+        GetGammaControl: ()=>DXGI_ERROR_INVALID_CALL,
+        SetDisplaySurface: ()=>DXGI_ERROR_INVALID_CALL,
+        GetDisplaySurfaceData: ()=>DXGI_ERROR_NOT_CURRENTLY_AVAILABLE,
+        GetFrameStatistics: ()=>DXGI_ERROR_INVALID_CALL,
     });
 
     /**
@@ -803,7 +852,21 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             swapChainDevices.set(held.swapChain, device);
             return handBack(held.swapChain, swapChainInterfaces, IID.IDXGISwapChain, out);
         },
-        CreateSoftwareAdapter: ()=>E_NOTIMPL,
+        /**
+         * A software rasteriser is a module a program loads; nothing here can
+         * run one.
+         *
+         * @param {any} factory @param {number[]} args
+         */
+        CreateSoftwareAdapter: (factory, [module, out])=>{
+            if ((out >>> 0) !== 0)
+            {
+                fields.writeU32(out, 0);
+            }
+            return (module >>> 0) === 0 || (out >>> 0) === 0
+                ? DXGI_ERROR_INVALID_CALL
+                : DXGI_ERROR_UNSUPPORTED;
+        },
     });
 
     /** @type {import('./com.js').InterfaceDescriptor[]} */
@@ -842,9 +905,9 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             }
             return handBack(held.buffer, texture2DInterfaces, id, out);
         },
-        // The browser owns the display; a request to go exclusive is noted and
-        // reported back as windowed, which a program handles as a refusal.
-        SetFullscreenState: ()=>S_OK,
+        /** @param {any} swapChain @param {number[]} args */
+        SetFullscreenState: (swapChain, [fullscreen])=>
+            swapChain.SetFullscreenState(fullscreen !== 0),
         /** @param {any} swapChain @param {number[]} args */
         GetFullscreenState: (swapChain, [fullscreenAt, targetAt])=>{
             /** @type {{ fullscreen?: boolean, target?: any }} */
@@ -875,12 +938,31 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         ResizeBuffers: (swapChain, [count, width, height, format, flags])=>
             swapChain.ResizeBuffers(count >>> 0, width >>> 0, height >>> 0, format >>> 0,
                 flags >>> 0),
-        ResizeTarget: ()=>S_OK,
+        /**
+         * A windowed swap chain's target is its window, which the page sizes:
+         * the mode is taken and nothing else changes.
+         *
+         * @param {any} swapChain @param {number[]} args
+         */
+        ResizeTarget: (swapChain, [mode])=>((mode >>> 0) === 0 ? DXGI_ERROR_INVALID_CALL : S_OK),
         /** @param {any} swapChain @param {number[]} args */
         GetContainingOutput: (swapChain, [out])=>{
-            fields.writeU32(out, 0);
-            return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            /** @type {{ output?: any }} */
+            const held = {};
+            const hr = swapChain.GetContainingOutput(held);
+            if (hr !== S_OK)
+            {
+                fields.writeU32(out, 0);
+                return hr;
+            }
+            return handBack(held.output, outputInterfaces, IID.IDXGIOutput, out);
         },
+        // Frame statistics are kept for a fullscreen swap chain only.
+        GetFrameStatistics: ()=>DXGI_ERROR_INVALID_CALL,
         /** @param {any} swapChain @param {number[]} args */
         GetLastPresentCount: (swapChain, [out])=>{
             /** @type {{ count?: number }} */
@@ -2341,8 +2423,61 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 adapter.addRef();
                 return handBack(adapter, adapterInterfaces, IID.IDXGIAdapter, out);
             },
-            CreateSurface: ()=>E_NOTIMPL,
-            QueryResourceResidency: ()=>E_NOTIMPL,
+            /**
+             * Surfaces are two-dimensional textures of one level, bound as
+             * the usage word says, handed back as IDXGISurface.
+             *
+             * @param {any} device @param {number[]} args
+             */
+            CreateSurface: (device, [descAt, count, usage, , out])=>{
+                if ((descAt >>> 0) === 0 || (out >>> 0) === 0 || (count >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const desc = fields.readStruct(descAt, DXGI_SURFACE_DESC);
+                /** @type {any[]} */
+                const made = [];
+                for (let index = 0; index < (count >>> 0); index++)
+                {
+                    /** @type {{ resource?: any }} */
+                    const held = {};
+                    const hr = device.CreateTexture2D({
+                        Width: desc.Width, Height: desc.Height, MipLevels: 1, ArraySize: 1,
+                        Format: desc.Format,
+                        SampleDesc: { Count: desc.SampleCount, Quality: desc.SampleQuality },
+                        Usage: 0, BindFlags: bindFlagsForUsage(usage >>> 0),
+                        CPUAccessFlags: 0, MiscFlags: 0,
+                    }, null, held);
+                    if (hr !== S_OK)
+                    {
+                        made.forEach(surface=>surface.release());
+                        fields.writeU32(out, 0);
+                        return hr;
+                    }
+                    made.push(held.resource);
+                }
+                made.forEach((surface, index)=>{
+                    fields.writeU32(out + index * 4, publisher.publish(surface,
+                        answeredBy(surface, texture2DInterfaces), IID.IDXGISurface));
+                });
+                return S_OK;
+            },
+            /**
+             * Everything is where the GPU can reach it: nothing is evicted.
+             *
+             * @param {any} device @param {number[]} args
+             */
+            QueryResourceResidency: (device, [, statusAt, count])=>{
+                if ((statusAt >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                for (let index = 0; index < (count >>> 0); index++)
+                {
+                    fields.writeU32(statusAt + index * 4, DXGI_RESIDENCY_FULLY_RESIDENT);
+                }
+                return S_OK;
+            },
             SetGPUThreadPriority: ()=>S_OK,
             /** @param {any} device @param {number[]} args */
             GetGPUThreadPriority: (device, [out])=>{
