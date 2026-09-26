@@ -956,10 +956,17 @@ test('an index buffer describes itself with its index width', ()=>{
 
 test('a palette is kept and read back, and the current one remembered', ()=>{
     const { device } = make();
-    const entries = Uint8Array.from({ length: 1024 }, (_, index)=>index & 0xff);
+    // Opaque entries: this device claims no D3DPTEXTURECAPS_ALPHAPALETTE, and
+    // without it an entry whose peFlags is not 0xff is refused (Wine's d3d9
+    // test_set_palette).
+    const entries = Uint8Array.from({ length: 1024 },
+        (_, index)=>(index % 4 === 3 ? 0xff : index & 0xff));
     assert.equal(device.SetPaletteEntries(3, entries), D3D_OK);
     assert.equal(device.SetPaletteEntries(4, new Uint8Array(12)), D3DERR_INVALIDCALL,
         'a palette is 256 entries');
+    assert.equal(device.SetPaletteEntries(4,
+        Uint8Array.from({ length: 1024 }, (_, index)=>index & 0xff)), D3DERR_INVALIDCALL,
+    'an entry with alpha');
     /** @type {{ entries?: Uint8Array }} */
     const out = {};
     assert.equal(device.GetPaletteEntries(3, out), D3D_OK);

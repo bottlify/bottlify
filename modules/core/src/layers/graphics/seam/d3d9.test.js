@@ -986,7 +986,9 @@ test('the viewport, scissor and the draws cross with their arguments in this ver
         assert.equal(h.device(device, 'EndScene'), D3D_OK);
 
         // A palette round-trips through memory; patches and processing are refused.
-        h.box.services.writeMemory(0x4000, Uint8Array.from({ length: 1024 }, (_, i)=>i & 0xff));
+        // Opaque entries: alpha in a palette needs D3DPTEXTURECAPS_ALPHAPALETTE.
+        h.box.services.writeMemory(0x4000, Uint8Array.from({ length: 1024 },
+            (_, i)=>(i % 4 === 3 ? 0xff : i & 0xff)));
         assert.equal(h.device(device, 'SetPaletteEntries', [2, 0x4000]), D3D_OK);
         assert.equal(h.device(device, 'SetPaletteEntries', [2, 0]), D3DERR_INVALIDCALL);
         assert.equal(h.device(device, 'GetPaletteEntries', [2, 0x4800]), D3D_OK);

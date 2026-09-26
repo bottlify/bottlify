@@ -60,7 +60,7 @@ import {
     createPriority, createReferenceCount, createSurface, createTexture, rectMoveOf,
     regionAtLevel, writePixels,
 } from '../d3d9/resources.js';
-import { DEVICE_STATE, LIGHT_ENABLED } from '../d3d9/device.js';
+import { DEVICE_STATE, LIGHT_ENABLED, createPalettes } from '../d3d9/device.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 
 export { DEVICE_STATE, LIGHT_ENABLED };
@@ -1292,6 +1292,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         GetCursor(){
             return cursor;
         },
+
+        ...createPalettes(),
 
         /** @param {{ ramp?: GammaRamp }} out */
         GetGammaRamp(out){

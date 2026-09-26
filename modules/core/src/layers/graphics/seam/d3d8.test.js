@@ -564,15 +564,12 @@ test('what this build cannot do says so, and clears the pointer it was given', (
         refused('CreateVolumeTexture', [8, 8, 8, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, out]),
         D3DERR_NOTAVAILABLE);
 
-    // The cursor, the front buffer, the palettes and the transformed-vertex
-    // path: each refuses because succeeding would promise a picture nothing
-    // here draws.
+    // The cursor, the front buffer and the transformed-vertex path: each
+    // refuses because succeeding would promise a picture nothing here draws.
     assert.equal(h.device(device, 'SetCursorProperties', [0, 0, 0]), D3DERR_INVALIDCALL);
     assert.equal(h.device(device, 'ShowCursor', [1]), 0, 'no cursor was showing before');
     assert.equal(h.device(device, 'SetCursorPosition', [10, 20, 0]), 0);
     assert.equal(h.device(device, 'GetFrontBuffer', [0x6100]), D3DERR_INVALIDCALL);
-    assert.equal(h.device(device, 'SetPaletteEntries', [0, 0x6100]), D3DERR_INVALIDCALL);
-    assert.equal(h.device(device, 'GetCurrentTexturePalette', [0x6100]), D3DERR_INVALIDCALL);
     assert.equal(h.device(device, 'ProcessVertices', [0, 0, 3, 0, 0]), D3DERR_INVALIDCALL);
 
     // GetInfo succeeded and reported nothing, which is what a program checks
@@ -1210,6 +1207,39 @@ test('a surface names its container as QueryInterface on it would, and its devic
     h.release(root);
 });
 
+test('a texture palette is kept and read back, and one with alpha is refused', ()=>{
+    // Wine's d3d8 test_set_palette and visual.c's palette test: an opaque
+    // palette is taken and a current one chosen; entries with alpha need
+    // D3DPTEXTURECAPS_ALPHAPALETTE, which this device does not claim.
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const table = 0xe000;
+    const entries = Uint8Array.from({ length: 1024 }, (_, index)=>(index % 4 === 3
+        ? 0xff
+        : index >> 2));
+    h.box.services.writeMemory(table, entries);
+    assert.equal(h.device(device, 'SetPaletteEntries', [1, table]), D3D_OK);
+    const read = 0xe400;
+    assert.equal(h.device(device, 'GetPaletteEntries', [1, read]), D3D_OK);
+    assert.deepEqual([...h.box.services.readMemory(read, 1024)], [...entries]);
+    assert.equal(h.device(device, 'GetPaletteEntries', [2, read]), D3DERR_INVALIDCALL,
+        'a palette never set');
+    assert.equal(h.device(device, 'SetCurrentTexturePalette', [1]), D3D_OK);
+    const current = 0xe800;
+    assert.equal(h.device(device, 'GetCurrentTexturePalette', [current]), D3D_OK);
+    assert.equal(h.box.memory.readU32(current), 1);
+
+    h.box.services.writeMemory(table + 7, Uint8Array.of(0x80));
+    assert.equal(h.device(device, 'SetPaletteEntries', [1, table]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(device, 'GetPaletteEntries', [1, read]), D3D_OK);
+    assert.equal(h.box.services.readMemory(read + 7, 1)[0], 0xff, 'the palette as it was');
+    assert.equal(h.device(device, 'SetPaletteEntries', [1, 0]), D3DERR_INVALIDCALL);
+
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
 test('a stream and an index binding read back as the buffers they were given', ()=>{
     const h = seamed();
     const root = h.create();
@@ -1423,6 +1453,8 @@ test('every capability claimed is one the renderer honours', ()=>{
     assert.equal(caps.TextureCaps & (0x00000800 | 0x00010000), 0,
         'no cube maps, which CreateCubeTexture refuses');
     assert.equal(caps.CubeTextureFilterCaps, 0);
+    assert.equal(caps.TextureCaps & 0x00000080, 0,
+        'no D3DPTEXTURECAPS_ALPHAPALETTE: no palettised format is made');
     assert.equal(caps.RasterCaps & 0x00004000, 0, 'no D3DRS_ZBIAS, which nothing reads');
     assert.equal(caps.RasterCaps & 0x00020000, 0, 'no anisotropy');
     assert.equal(caps.TextureFilterCaps & (0x00000400 | 0x04000000), 0,

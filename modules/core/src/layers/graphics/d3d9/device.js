@@ -155,6 +155,61 @@ const GAMMA_RAMP_ENTRIES = 256;
 export const PALETTE_BYTES = 256 * 4;
 
 /**
+ * The texture palettes a program sets, by number, and which one is current.
+ *
+ * Nothing here is palettised, so no draw reads one; they are kept because a
+ * program sets them and reads them back regardless. A device that does not
+ * claim D3DPTEXTURECAPS_ALPHAPALETTE takes an entry only with its peFlags at
+ * 0xff, fully opaque (Wine's d3d8 and d3d9 test_set_palette).
+ */
+export function createPalettes(){
+    /** @type {Map<number, Uint8Array>} */
+    const palettes = new Map();
+    let current = 0;
+    return {
+        /**
+         * @param {number} number
+         * @param {Uint8Array} entries  256 PALETTEENTRY of four bytes, peFlags last.
+         */
+        SetPaletteEntries(number, entries){
+            if (!entries || entries.length !== PALETTE_BYTES
+                || entries.some((byte, index)=>index % 4 === 3 && byte !== 0xff))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            palettes.set(number >>> 0, Uint8Array.from(entries));
+            return D3D_OK;
+        },
+
+        /**
+         * @param {number} number
+         * @param {{ entries?: Uint8Array }} out
+         */
+        GetPaletteEntries(number, out){
+            const held = palettes.get(number >>> 0);
+            if (!held)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            out.entries = Uint8Array.from(held);
+            return D3D_OK;
+        },
+
+        /** @param {number} number */
+        SetCurrentTexturePalette(number){
+            current = number >>> 0;
+            return D3D_OK;
+        },
+
+        /** @param {{ number?: number }} out */
+        GetCurrentTexturePalette(out){
+            out.number = current;
+            return D3D_OK;
+        },
+    };
+}
+
+/**
  * @typedef {Object} DeviceCaps
  * @property {number} maxPointSize     Decides the POINTSIZE_MAX default.
  * @property {boolean} depthTexture2d  Whether depth formats are usable as textures,
@@ -618,15 +673,6 @@ function createDeviceObject(parameters, caps, services, identity){
     let dialogBoxMode = false;
     let softwareVertexProcessing =
         (identity.BehaviorFlags & D3DCREATE.SOFTWARE_VERTEXPROCESSING) !== 0;
-    /**
-     * The palettes a program sets, by number, each 256 entries of four bytes.
-     * Nothing here is palettised, so none is ever read by a draw; they are
-     * kept because a program sets them and reads them back regardless.
-     *
-     * @type {Map<number, Uint8Array>}
-     */
-    const palettes = new Map();
-    let currentPalette = 0;
     const mixedVertexProcessing =
         (identity.BehaviorFlags & D3DCREATE.MIXED_VERTEXPROCESSING) !== 0;
     /** @type {{ hotSpot: { x: number, y: number }, surface: any, shown: boolean }} */
@@ -2066,47 +2112,7 @@ function createDeviceObject(parameters, caps, services, identity){
             };
         },
 
-        /**
-         * A palette is kept as given and read back the same; no format here is
-         * palettised, so no draw ever consults one.
-         *
-         * @param {number} number
-         * @param {Uint8Array} entries  256 entries of four bytes.
-         */
-        SetPaletteEntries(number, entries){
-            if (!entries || entries.length !== PALETTE_BYTES)
-            {
-                return D3DERR_INVALIDCALL;
-            }
-            palettes.set(number >>> 0, Uint8Array.from(entries));
-            return D3D_OK;
-        },
-
-        /**
-         * @param {number} number
-         * @param {{ entries?: Uint8Array }} out
-         */
-        GetPaletteEntries(number, out){
-            const held = palettes.get(number >>> 0);
-            if (!held)
-            {
-                return D3DERR_INVALIDCALL;
-            }
-            out.entries = Uint8Array.from(held);
-            return D3D_OK;
-        },
-
-        /** @param {number} number */
-        SetCurrentTexturePalette(number){
-            currentPalette = number >>> 0;
-            return D3D_OK;
-        },
-
-        /** @param {{ number?: number }} out */
-        GetCurrentTexturePalette(out){
-            out.number = currentPalette;
-            return D3D_OK;
-        },
+        ...createPalettes(),
 
         /**
          * Noted and nothing else. The mode exists so that a GDI dialog can be
