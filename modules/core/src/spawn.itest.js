@@ -18,6 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
+import { createMemoryDirectory } from './layers/cpu/internal/translation-store.js';
 
 const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
@@ -79,3 +80,59 @@ test('a parent waiting on its child goes on after the child exits, with what it 
 
 test('under cork, the child runs on a machine of its own beside the parent\'s as well',
     { timeout: 120000 }, t=>spawnOn(t, 'cork'));
+
+/**
+ * The origin's file system as a worker has it: a file with a synchronous
+ * access handle open refuses a second one, and a writable, as OPFS does.
+ */
+function exclusiveDirectory(){
+    /** @param {any} directory */
+    const wrap = directory=>({
+        ...directory,
+        getDirectoryHandle: async(/** @type {string} */ name, /** @type {any} */ options)=>
+            wrap(await directory.getDirectoryHandle(name, options)),
+        getFileHandle: async(/** @type {string} */ name, /** @type {any} */ options)=>{
+            const file = await directory.getFileHandle(name, options);
+            const refused = ()=>new DOMException(`${name} is held`, 'NoModificationAllowedError');
+            file.held ??= false;
+            return {
+                getFile: ()=>file.getFile(),
+                async createSyncAccessHandle(){
+                    if (file.held)
+                    {
+                        throw refused();
+                    }
+                    const access = await file.createSyncAccessHandle();
+                    file.held = true;
+                    return { ...access, close(){
+                        file.held = false;
+                    } };
+                },
+                async createWritable(){
+                    throw refused();
+                },
+            };
+        },
+    });
+    return wrap(createMemoryDirectory());
+}
+
+test('a child beside its parent writes to the run\'s one translation store', { timeout: 120000 },
+    async t=>{
+        // Each machine opened a store of its own on the bundle's directory,
+        // and the child's could not write while the paused parent's held its
+        // records file: Warcraft III's launcher stopped at its child's first
+        // append.
+        let opened = 0;
+        const directory = exclusiveDirectory();
+        const was = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+        Object.defineProperty(globalThis, 'navigator', { configurable: true,
+            value: { storage: { getDirectory: async()=>{
+                opened++;
+                return directory;
+            } } } });
+        t.after(()=>(was ? Object.defineProperty(globalThis, 'navigator', was)
+            : delete (/** @type {any} */ (globalThis)).navigator));
+        await spawnOn(t, 'cork');
+        assert.equal(opened, 1, 'one store for the run, the children\'s machines included');
+    });
