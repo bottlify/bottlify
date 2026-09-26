@@ -10,7 +10,7 @@ import {
     D3DCLEAR, D3DCREATE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL,
     D3DERR_NOTFOUND, D3DFMT, D3DFMT_INDEX, D3DLIGHTTYPE, D3DLOCK, D3DORDER, D3DPOOL, D3DPT, D3DRS,
     D3DRS_MAX,
-    D3DPRESENTFLAG, D3DRS_REMOVED_IN_D3D9, D3DSWAPEFFECT, D3DTA, D3DTOP, D3DTS, D3DTSS,
+    D3DPRESENTFLAG, D3DRS_REMOVED_IN_D3D9, D3DSBT, D3DSWAPEFFECT, D3DTA, D3DTOP, D3DTS, D3DTSS,
     D3DUSAGE, D3D_OK,
     dwordToFloat, floatToDword, isShaderHandle, surfaceBytes,
 } from './constants.js';
@@ -1314,6 +1314,149 @@ test('the material reads back as a copy of what was set', ()=>{
     assert.deepEqual(out.material.Emissive, { r: 0.1, g: 0.2, b: 0.3, a: 0 });
 
     assertFullyReleased(device);
+});
+
+// --- state blocks, after Wine's d3d8 stateblock tests ---
+
+/**
+ * One value of each kind a block may or may not hold, set as the test's
+ * values or as the device's defaults, and read back.
+ *
+ * @param {any} device
+ */
+function stateKinds(device){
+    /** @type {{ texture?: any }} */
+    const texture = {};
+    /** @type {{ buffer?: any }} */
+    const vertices = {};
+    /** @type {{ buffer?: any }} */
+    const indices = {};
+    /** @type {{ handle?: number }} */
+    const vs = {};
+    /** @type {{ handle?: number }} */
+    const ps = {};
+    assert.equal(device.CreateTexture(8, 8, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT, texture),
+        D3D_OK);
+    assert.equal(device.CreateVertexBuffer(64, 0, 0, D3DPOOL.DEFAULT, vertices), D3D_OK);
+    assert.equal(device.CreateIndexBuffer(64, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.DEFAULT, indices),
+        D3D_OK);
+    assert.equal(device.CreateVertexShader([0x20000000, 0xffffffff], null, vs), D3D_OK);
+    assert.equal(device.CreatePixelShader([0xffff0101, 0x0000ffff], ps), D3D_OK);
+    const scaled = (/** @type {number} */ x)=>[x, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    /** @param {boolean} testing */
+    const set = testing=>{
+        device.SetRenderState(D3DRS.CULLMODE, testing ? 1 : 3);
+        device.SetRenderState(D3DRS.ZFUNC, testing ? 8 : 4);
+        device.SetTransform(D3DTS.WORLD, scaled(testing ? 7 : 1));
+        device.SetTexture(0, testing ? texture.texture : null);
+        device.LightEnable(0, testing);
+        device.SetVertexShader(testing ? vs.handle : 0);
+        device.SetPixelShader(testing ? ps.handle : 0);
+        device.SetStreamSource(0, testing ? vertices.buffer : null, 16);
+        device.SetIndices(testing ? indices.buffer : null, 0);
+    };
+    const read = ()=>{
+        /** @type {any} */
+        const out = {};
+        const value = (/** @type {number} */ state)=>{
+            device.GetRenderState(state, out);
+            return out.value;
+        };
+        device.GetTransform(D3DTS.WORLD, out);
+        const world = out.matrix[0];
+        device.GetTexture(0, out);
+        const boundTexture = out.texture;
+        boundTexture?.release();
+        device.GetLightEnable(0, out);
+        const light = out.enabled !== 0;
+        device.GetVertexShader(out);
+        const vertexShader = out.handle;
+        device.GetPixelShader(out);
+        const pixelShader = out.handle;
+        device.GetStreamSource(0, out);
+        const stream = out.buffer;
+        stream?.release();
+        device.GetIndices(out);
+        const index = out.buffer;
+        index?.release();
+        return {
+            cull: value(D3DRS.CULLMODE), zfunc: value(D3DRS.ZFUNC), world,
+            texture: boundTexture === texture.texture, light,
+            vs: vertexShader === vs.handle, ps: pixelShader === ps.handle,
+            stream: stream === vertices.buffer, indices: index === indices.buffer,
+        };
+    };
+    const release = ()=>{
+        set(false);
+        texture.texture.release();
+        vertices.buffer.release();
+        indices.buffer.release();
+    };
+    return { set, read, release };
+}
+
+const TEST_ALL = { cull: 1, zfunc: 8, world: 7, texture: true, light: true, vs: true, ps: true,
+    stream: true, indices: true };
+const DEFAULTS = { cull: 3, zfunc: 4, world: 1, texture: false, light: false, vs: false,
+    ps: false, stream: false, indices: false };
+
+test('a recorded block changes nothing until it is applied', ()=>{
+    const device = createDevice();
+    const kinds = stateKinds(device);
+    kinds.set(false);
+    /** @type {{ handle?: number }} */
+    const block = {};
+
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    kinds.set(true);
+    assert.equal(device.EndStateBlock(block), D3D_OK);
+    assert.deepEqual(kinds.read(), DEFAULTS, 'what was set while recording is the block\'s');
+    assert.equal(device.ApplyStateBlock(block.handle), D3D_OK);
+    assert.deepEqual(kinds.read(), TEST_ALL, 'and applying it is what sets it');
+
+    kinds.set(false);
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    kinds.set(true);
+    assert.equal(device.EndStateBlock(block), D3D_OK);
+    assert.equal(device.DeleteStateBlock(block.handle), D3D_OK);
+    assert.deepEqual(kinds.read(), DEFAULTS, 'an abandoned block leaves the device as it was');
+
+    kinds.release();
+    assertFullyReleased(device);
+});
+
+test('a made block holds its half: the vertex half, the pixel half, or everything', ()=>{
+    const expected = {
+        [D3DSBT.ALL]: TEST_ALL,
+        // Transforms, textures, streams and indices are in neither half.
+        [D3DSBT.VERTEXSTATE]: { ...DEFAULTS, cull: 1, light: true, vs: true },
+        [D3DSBT.PIXELSTATE]: { ...DEFAULTS, zfunc: 8, ps: true },
+    };
+    for (const type of [D3DSBT.ALL, D3DSBT.VERTEXSTATE, D3DSBT.PIXELSTATE])
+    {
+        const device = createDevice();
+        const kinds = stateKinds(device);
+        /** @type {{ handle?: number }} */
+        const block = {};
+
+        kinds.set(true);
+        assert.equal(device.CreateStateBlock(type, block), D3D_OK);
+        kinds.set(false);
+        assert.equal(device.ApplyStateBlock(block.handle), D3D_OK);
+        assert.deepEqual(kinds.read(), expected[type], `made with the test values, ${type}`);
+
+        // The same half, made at the defaults and captured at the test values.
+        kinds.set(false);
+        assert.equal(device.CreateStateBlock(type, block), D3D_OK);
+        kinds.set(true);
+        assert.equal(device.CaptureStateBlock(block.handle), D3D_OK);
+        kinds.set(false);
+        assert.equal(device.ApplyStateBlock(block.handle), D3D_OK);
+        assert.deepEqual(kinds.read(), expected[type], `captured at the test values, ${type}`);
+
+        kinds.release();
+        assertFullyReleased(device);
+    }
 });
 
 // --- what a draw or a clear is refused for, with nothing behind the device ---

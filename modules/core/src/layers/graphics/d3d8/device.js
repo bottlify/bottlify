@@ -50,6 +50,7 @@ import { GAMMA_RAMP_ENTRIES } from './structs.js';
 import { DEFAULT_RENDER_STATES, createDefaultRenderStates } from './renderstates.js';
 import { createDefaultStageStates } from './stagestates.js';
 import { IDENTITY, STAGE_COUNT, createRenderer, vertexCountOf } from './render.js';
+import { applyBlock, captureBlock, emptyBlock, fillBlock } from './stateblock.js';
 import {
     SURFACE_TYPE, copyRectsResult, createResult, imageSurfaceCreateResult,
     reportedBackBufferCount, targetPairResult, validatePresentParameters,
@@ -434,14 +435,7 @@ export function createDirect3D8(options = {}){
  *     the object it was made through.
  */
 
-/**
- * @typedef {Object} StateBlock
- * @property {Map<number, number>} renderStates
- * @property {Map<number, number>} stageStates   Keyed by (stage << 8) | type.
- * @property {Map<number, Float32Array>} transforms
- * @property {Map<number, any>} textures         Per stage; null means "nothing bound".
- * @property {Material | null} material
- */
+/** @typedef {import('./stateblock.js').StateBlock} StateBlock */
 
 /**
  * @typedef {Object} SurfaceMove
@@ -835,28 +829,6 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         return made;
     };
 
-    /** @returns {StateBlock} a block holding nothing yet */
-    const emptyBlock = ()=>({
-        renderStates: new Map(),
-        stageStates: new Map(),
-        transforms: new Map(),
-        textures: new Map(),
-        material: null,
-    });
-
-    /**
-     * Notes one state into the block being recorded, if one is.
-     *
-     * The state is also applied, which is the reading this layer takes of a
-     * recording device: a program between Begin and End sees its own changes,
-     * and a program that only ever applies the block afterwards cannot tell the
-     * difference.
-     *
-     * @template T
-     * @param {(block: StateBlock) => Map<number, T>} pick
-     * @param {number} key
-     * @param {T} value
-     */
     /**
      * Whether a matrix a program is setting is the one already there.
      *
@@ -874,119 +846,60 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     };
 
     /**
-     * @param {(block: any) => Map<any, any>} pick
-     * @param {any} key
-     * @param {any} value
-     */
-    const recordState = (pick, key, value)=>{
-        if (recording)
-        {
-            pick(recording).set(key, value);
-        }
-    };
-
-    /** @param {StateBlock} block */
-    const applyBlock = block=>{
-        for (const [state, value] of block.renderStates)
-        {
-            renderStates.set(state, value);
-        }
-        for (const [key, value] of block.stageStates)
-        {
-            stageStatesFor(key >>> 8).set(key & 0xff, value);
-        }
-        for (const [type, matrix] of block.transforms)
-        {
-            transforms.set(type, Float32Array.from(matrix));
-        }
-        for (const [stage, texture] of block.textures)
-        {
-            if (texture)
-            {
-                textures.set(stage, texture);
-            }
-            else
-            {
-                textures.delete(stage);
-            }
-        }
-        if (block.material)
-        {
-            material = copyMaterial(block.material);
-        }
-        drawStateVersion++;
-    };
-
-    /**
-     * The block's states take the values of the moment; which states it holds
-     * does not change, which is the whole difference between capturing a block
-     * and making one.
+     * The device's state, as a state block reads and writes it.
      *
-     * @param {StateBlock} block
+     * @type {import('./stateblock.js').StateView}
      */
-    const captureBlock = block=>{
-        for (const state of block.renderStates.keys())
-        {
-            block.renderStates.set(state, renderStates.get(state) ?? 0);
-        }
-        for (const key of block.stageStates.keys())
-        {
-            block.stageStates.set(key, stageStatesFor(key >>> 8).get(key & 0xff) ?? 0);
-        }
-        for (const type of block.transforms.keys())
-        {
-            block.transforms.set(type, Float32Array.from(transforms.get(type) ?? IDENTITY));
-        }
-        for (const stage of block.textures.keys())
-        {
-            block.textures.set(stage, textures.get(stage) ?? null);
-        }
-        if (block.material)
-        {
-            block.material = copyMaterial(material);
-        }
-    };
-
-    /**
-     * Everything of one kind, as it stands now.
-     *
-     * The split between the two halves is coarser than the header's: Direct3D
-     * assigns each render state to the pixel or the vertex half individually,
-     * and this takes the render and stage states as the pixel half and the
-     * transforms and the material as the vertex half. A block of one half
-     * therefore restores a superset of what it should, and a block of
-     * everything is exact.
-     *
-     * @param {StateBlock} block
-     * @param {number} type D3DSBT
-     */
-    const fillBlock = (block, type)=>{
-        if (type !== D3DSBT.VERTEXSTATE)
-        {
-            for (const [state, value] of renderStates)
-            {
-                if (!NOT_CAPTURED_BY_STATE_BLOCK.has(state))
-                {
-                    block.renderStates.set(state, value);
-                }
-            }
-            for (let stage = 0; stage < STAGE_COUNT; stage++)
-            {
-                for (const [tss, value] of stageStatesFor(stage))
-                {
-                    block.stageStates.set((stage << 8) | tss, value);
-                }
-                block.textures.set(stage, textures.get(stage) ?? null);
-            }
-        }
-        if (type !== D3DSBT.PIXELSTATE)
-        {
-            for (const [key, matrix] of transforms)
-            {
-                block.transforms.set(key, Float32Array.from(matrix));
-            }
-            block.material = copyMaterial(material);
-        }
+    const stateView = {
+        get renderStates(){
+            return renderStates;
+        },
+        stageStates: stageStatesFor,
+        stageCount: STAGE_COUNT,
+        textures,
+        get transforms(){
+            return transforms;
+        },
+        get lights(){
+            return lights;
+        },
+        defaultLight,
+        stream,
+        streams,
+        get clipPlanes(){
+            return clipPlanes;
+        },
+        get material(){
+            return material;
+        },
+        set material(value){
+            material = value;
+        },
+        get viewport(){
+            return viewport;
+        },
+        set viewport(value){
+            viewport = value;
+        },
+        get indices(){
+            return { buffer: indices, base: baseVertexIndex };
+        },
+        set indices(value){
+            indices = value.buffer;
+            baseVertexIndex = value.base;
+        },
+        get vertexShader(){
+            return boundVertexShader;
+        },
+        set vertexShader(value){
+            boundVertexShader = value;
+        },
+        get pixelShader(){
+            return boundPixelShader;
+        },
+        set pixelShader(value){
+            boundPixelShader = value;
+        },
     };
 
     /**
@@ -1484,12 +1397,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (recording)
+            {
+                recording.stageStates.set((stage << 8) | type, value >>> 0);
+                return D3D_OK;
+            }
             if (states.get(type) !== value >>> 0)
             {
                 states.set(type, value >>> 0);
                 drawStateVersion++;
             }
-            recordState(block=>block.stageStates, (stage << 8) | type, value >>> 0);
             return D3D_OK;
         },
 
@@ -1528,22 +1445,25 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             // the expensive part, and there were two of them on every call,
             // including one built for a state block that was not recording.
             //
-            // Only while nothing is recording, because a block captures what a
+            // A recording takes every set, because a block captures what a
             // program set rather than what changed, and a block applied later
             // when another matrix is current must still put this one back.
+            if (recording)
+            {
+                recording.transforms.set(type, Float32Array.from(matrix));
+                return D3D_OK;
+            }
             const held = transforms.get(type);
-            if (!recording && held && sameMatrix(held, matrix))
+            if (held && sameMatrix(held, matrix))
             {
                 redundantTransforms++;
                 return D3D_OK;
             }
-            const taken = Float32Array.from(matrix);
-            transforms.set(type, taken);
+            transforms.set(type, Float32Array.from(matrix));
             if (type !== D3DTS.WORLD)
             {
                 drawStateVersion++;
             }
-            recordState(block=>block.transforms, type, taken);
             return D3D_OK;
         },
 
@@ -1590,12 +1510,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     product[row * 4 + column] = sum;
                 }
             }
+            if (recording)
+            {
+                recording.transforms.set(type, product);
+                return D3D_OK;
+            }
             transforms.set(type, product);
             if (type !== D3DTS.WORLD)
             {
                 drawStateVersion++;
             }
-            recordState(block=>block.transforms, type, Float32Array.from(product));
             return D3D_OK;
         },
 
@@ -1605,12 +1529,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            material = copyMaterial(value);
-            drawStateVersion++;
             if (recording)
             {
                 recording.material = copyMaterial(value);
+                return D3D_OK;
             }
+            material = copyMaterial(value);
+            drawStateVersion++;
             return D3D_OK;
         },
 
@@ -1766,12 +1691,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (recording)
+            {
+                recording.renderStates.set(state, value >>> 0);
+                return D3D_OK;
+            }
             if (renderStates.get(state) !== value >>> 0)
             {
                 renderStates.set(state, value >>> 0);
                 drawStateVersion++;
             }
-            recordState(block=>block.renderStates, state, value >>> 0);
             return D3D_OK;
         },
 
@@ -1793,6 +1722,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {Light} light
          */
         SetLight(index, light){
+            if (recording)
+            {
+                const held = recording.lights.get(index);
+                recording.lights.set(index, { ...held, light: { ...light } });
+                return D3D_OK;
+            }
             const existing = lights.get(index);
             lights.set(index, { light: { ...light }, enabled: existing?.enabled ?? false });
             lightsVersion++;
@@ -1825,6 +1760,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {boolean} enable
          */
         LightEnable(index, enable){
+            if (recording)
+            {
+                const held = recording.lights.get(index);
+                recording.lights.set(index, { ...held, enabled: enable === true });
+                return D3D_OK;
+            }
             const record = lights.get(index) ?? { light: defaultLight(), enabled: false };
             record.enabled = enable === true;
             lights.set(index, record);
@@ -1860,7 +1801,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            clipPlanes.set(index, Float32Array.from(plane));
+            (recording?.clipPlanes ?? clipPlanes).set(index, Float32Array.from(plane));
             return D3D_OK;
         },
 
@@ -1944,7 +1885,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            applyBlock(block);
+            applyBlock(block, stateView);
+            drawStateVersion++;
+            textureBindingVersion++;
+            lightsVersion++;
             return D3D_OK;
         },
 
@@ -1955,7 +1899,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            captureBlock(block);
+            captureBlock(block, stateView);
             return D3D_OK;
         },
 
@@ -1973,8 +1917,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            const block = emptyBlock();
-            fillBlock(block, type);
+            const block = fillBlock(type, stateView, NOT_CAPTURED_BY_STATE_BLOCK);
             const handle = nextStateBlock++;
             stateBlocks.set(handle, block);
             out.handle = handle;
@@ -2006,7 +1949,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            viewport = viewportState({
+            const next = viewportState({
                 x: value.X,
                 y: value.Y,
                 width: value.Width,
@@ -2014,6 +1957,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 minDepth: value.MinZ,
                 maxDepth: value.MaxZ,
             });
+            if (recording)
+            {
+                recording.viewport = next;
+                return D3D_OK;
+            }
+            viewport = next;
             drawStateVersion++;
             return D3D_OK;
         },
@@ -2050,6 +1999,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (recording)
+            {
+                recording.textures.set(stage, texture ?? null);
+                return D3D_OK;
+            }
             if ((textures.get(stage) ?? null) !== (texture ?? null))
             {
                 if (texture)
@@ -2063,7 +2017,6 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 drawStateVersion++;
                 textureBindingVersion++;
             }
-            recordState(block=>block.textures, stage, texture ?? null);
             return D3D_OK;
         },
 
@@ -2093,6 +2046,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {number} [base]
          */
         SetIndices(buffer, base = 0){
+            if (recording)
+            {
+                recording.indices = { buffer: buffer ?? null, base };
+                return D3D_OK;
+            }
             indices = buffer ?? null;
             baseVertexIndex = base;
             return D3D_OK;
@@ -2122,6 +2080,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {number} stride
          */
         SetStreamSource(index, buffer, stride){
+            if (recording)
+            {
+                const held = recording.streams.get(index) ?? { buffer: null, stride: 0 };
+                recording.streams.set(index,
+                    { buffer: buffer ?? null, stride: buffer ? stride : held.stride });
+                return D3D_OK;
+            }
             const record = stream(index);
             record.buffer = buffer ?? null;
             if (buffer)
@@ -2558,6 +2523,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (recording)
+            {
+                recording.vertexShader = handle >>> 0;
+                return D3D_OK;
+            }
             if (boundVertexShader !== handle >>> 0)
             {
                 boundVertexShader = handle >>> 0;
@@ -2612,6 +2582,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             if (handle !== 0 && !pixelShaders.has(handle))
             {
                 return D3DERR_INVALIDCALL;
+            }
+            if (recording)
+            {
+                recording.pixelShader = handle >>> 0;
+                return D3D_OK;
             }
             if (boundPixelShader !== handle >>> 0)
             {
