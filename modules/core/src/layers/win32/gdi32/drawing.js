@@ -93,6 +93,27 @@ const EIGHT_BIT_COLORS = Object.freeze([...Array(256).keys()].map(index=>{
 }));
 
 /**
+ * A halftone palette's entries, as PALETTEENTRYs: the default palette's first
+ * eight, a cube of six levels of each channel, twenty-four greys between black
+ * and white, and the default palette's last eight.
+ */
+const HALFTONE_ENTRIES = Object.freeze((()=>{
+    /** @param {number} red @param {number} green @param {number} blue */
+    const entry = (red, green, blue)=>(red | green << 8 | blue << 16) >>> 0;
+    /** @param {number} pixel */
+    const fromPixel = pixel=>entry(pixel >>> 16 & 0xff, pixel >>> 8 & 0xff, pixel & 0xff);
+    const levels = [0x00, 0x33, 0x66, 0x99, 0xcc, 0xff];
+    const cube = levels.flatMap(red=>levels.flatMap(green=>levels.map(blue=>
+        entry(red, green, blue))));
+    const greys = [...Array(24).keys()].map(step=>{
+        const grey = Math.round((step + 1) * 255 / 25);
+        return entry(grey, grey, grey);
+    });
+    return [...DEFAULT_PALETTE_COLORS.slice(0, 8).map(fromPixel), ...cube, ...greys,
+        ...DEFAULT_PALETTE_COLORS.slice(12).map(fromPixel)];
+})());
+
+/**
  * The colour table GetDIBits reads a bitmap out against at an indexed depth:
  * an indexed section's own at its own depth, and otherwise black and white at
  * one bit, the VGA colours at four and the default table at eight -- what
@@ -1170,13 +1191,14 @@ export function createDrawingFunctions(
         /**
          * HPALETTE CreateHalftonePalette(HDC hdc)
          *
-         * Real, and empty. Every surface here is 32-bit, so a halftone palette
-         * has nothing to hold -- but a program that gets a null handle back
-         * treats it as an error, and this is not one.
+         * 256 colours, the stock palette's first eight and last eight at either
+         * end (Wine's test_halftone_palette). Nothing pins the 240 between, and
+         * they are colours spread over the whole range: a cube of six levels
+         * a channel and a ramp of greys.
          */
         CreateHalftonePalette: {
             argBytes: 4,
-            handler: ()=>objects.create('palette', { entries: [] }),
+            handler: ()=>objects.create('palette', { entries: [...HALFTONE_ENTRIES] }),
         },
 
         /** HPALETTE SelectPalette(HDC hdc, HPALETTE hPal, BOOL bForceBkgd) */

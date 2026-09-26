@@ -668,6 +668,31 @@ test('a palette is real, selectable, and realizes no entries', ()=>{
     assert.equal(fns.GetDIBColorTable.handler([hdc, 0, 256, OUT]), 0);
 });
 
+test('a halftone palette is 256 colours, the default palette\'s first and last eight at its ends',
+    ()=>{
+        // Wine's test_halftone_palette: 256 entries, the first eight those of
+        // the stock default palette and the last eight its last eight, flags
+        // clear. What lies between is not pinned.
+        const { fns, memory, hdc } = setup();
+        const palette = fns.CreateHalftonePalette.handler([hdc]);
+        assert.equal(fns.GetPaletteEntries.handler([palette, 0, 0, 0]), 256);
+        memory.bytes.fill(0xee, OUT, OUT + 1024);
+        assert.equal(fns.GetPaletteEntries.handler([palette, 0, 256, OUT]), 256);
+        const DEFAULTS = OUT + 0x400;
+        assert.equal(fns.GetPaletteEntries.handler([fns.GetStockObject.handler([15]), 0, 20,
+            DEFAULTS]), 20);
+        for (let index = 0; index < 8; index++)
+        {
+            assert.equal(memory.u32(OUT + index * 4), memory.u32(DEFAULTS + index * 4),
+                `${index}`);
+            assert.equal(memory.u32(OUT + (248 + index) * 4),
+                memory.u32(DEFAULTS + (12 + index) * 4), `${248 + index}`);
+        }
+        const distinct = new Set([...Array(256).keys()].map(index=>memory.u32(OUT + index * 4)));
+        assert.ok(distinct.size > 200, 'colours spread over the cube, not one repeated');
+        assert.ok([...distinct].every(entry=>(entry >>> 24) === 0), 'no flags');
+    });
+
 test('UnrealizeObject succeeds for any live object and fails for one that is not', ()=>{
     // The realization it undoes changes nothing here, so all that is left to get
     // right is the handle check: TRUE for an object that exists -- a brush or a
