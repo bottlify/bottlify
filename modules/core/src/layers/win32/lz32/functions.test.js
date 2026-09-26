@@ -30,13 +30,15 @@ function setup(initial){
         Object.entries(initial).map(([path, bytes])=>[path.toLowerCase(), bytes]));
     const memory = new Uint8Array(0x2000);
     const fns = createLzFunctions({
+        // As the memory layer reads an ANSI string: in Windows-1252, which is
+        // what the Encoding standard calls latin1.
         readCString: (address, maxLength)=>{
-            let text = '';
-            for (let at = 0; at < maxLength && memory[address + at] !== 0; at++)
+            let end = address;
+            while (end - address < maxLength && memory[end] !== 0)
             {
-                text += String.fromCharCode(memory[address + at]);
+                end++;
             }
-            return text;
+            return new TextDecoder('latin1').decode(memory.subarray(address, end));
         },
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         files: {
@@ -114,6 +116,26 @@ test('a name that is not there is tried with an underscore; an existence check s
     const OUT = 0x1800;
     assert.equal(fns.GetExpandedNameA.handler([plant('C:\\TEMP\\SETUP.DL_'), OUT]), 1);
     assert.equal(new TextDecoder().decode(memory.subarray(OUT, OUT + 17)), 'C:\\TEMP\\SETUP.DLL');
+});
+
+test('names in the upper half of the ANSI page keep their bytes, the header\'s letter too', ()=>{
+    // 0x80 is the euro sign in Windows-1252 and 0x99 the trade mark: a path
+    // read in that page goes back into the OFSTRUCT and GetExpandedNameA's
+    // answer in it, and the letter the header kept is a byte of the same page.
+    const packed = PACKED.slice();
+    packed[9] = 0x99;
+    const { fns, memory } = setup({ 'C:\\\u20ac\\SETUP.DL_': packed });
+    const name = 0x100;
+    memory.set([0x43, 0x3a, 0x5c, 0x80, 0x5c, ...[...'SETUP.DL_'].map(c=>c.charCodeAt(0)), 0],
+        name);
+    const OFSTRUCT = 0x1000;
+    assert.ok(fns.LZOpenFileA.handler([name, OFSTRUCT, OF_READ]) > 0);
+    assert.deepEqual([...memory.subarray(OFSTRUCT + 8, OFSTRUCT + 13)],
+        [0x43, 0x3a, 0x5c, 0x80, 0x5c]);
+    const OUT = 0x1800;
+    assert.equal(fns.GetExpandedNameA.handler([name, OUT]), 1);
+    assert.deepEqual([...memory.subarray(OUT, OUT + 15)],
+        [0x43, 0x3a, 0x5c, 0x80, 0x5c, ...[...'SETUP.DL'].map(c=>c.charCodeAt(0)), 0x99, 0]);
 });
 
 test('every function declares the stack its arguments occupy', ()=>{

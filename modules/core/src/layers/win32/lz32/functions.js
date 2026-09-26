@@ -17,6 +17,7 @@
  */
 
 import { expand, expandedName, readHeader } from './expand.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 
 /** wStyle bits OpenFile understands and this library acts on. */
 const OF_WRITE = 0x0001;
@@ -100,11 +101,7 @@ export function createLzFunctions(host){
     const writeOfStruct = (address, path)=>{
         const bytes = new Uint8Array(OFSTRUCT_SIZE);
         bytes[0] = OFSTRUCT_SIZE;
-        const kept = path.slice(0, OFSTRUCT_PATH_LENGTH - 1);
-        for (let at = 0; at < kept.length; at++)
-        {
-            bytes[OFSTRUCT_PATH + at] = kept.charCodeAt(at) & 0xff;
-        }
+        bytes.set(encodeAnsi(path.slice(0, OFSTRUCT_PATH_LENGTH - 1)), OFSTRUCT_PATH);
         host.writeMemory(address, bytes);
     };
 
@@ -220,12 +217,7 @@ export function createLzFunctions(host){
                     return LZERROR_BADINHANDLE >>> 0;
                 }
                 const answer = expandedName(asked, readHeader(bytes));
-                const out = new Uint8Array(answer.length + 1);
-                for (let at = 0; at < answer.length; at++)
-                {
-                    out[at] = answer.charCodeAt(at) & 0xff;
-                }
-                host.writeMemory(buffer >>> 0, out);
+                host.writeMemory(buffer >>> 0, encodeAnsi(`${answer}\0`));
                 return 1;
             },
         },
