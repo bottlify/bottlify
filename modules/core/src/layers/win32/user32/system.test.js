@@ -1062,6 +1062,37 @@ test('MapVirtualKeyA maps a virtual key to its scan code and back, and a scan co
         'no key at that code: nothing');
 });
 
+test('MAPVK_VK_TO_VSC_EX prefixes a scan code only where the E0 half alone has the key', ()=>{
+    // user32's input tests: a right-hand control carries its E0 prefix, the
+    // arrows answer the keypad's unprefixed code that also sends them, and
+    // Print Screen answers SysRq's.
+    const { fns } = setup();
+    const MAPVK_VK_TO_VSC_EX = 4;
+    const hkl = fns.GetKeyboardLayout.handler([0]);
+    /** @type {[number, number][]} */
+    const expected = [
+        [0xa1, 0x36],     // VK_RSHIFT
+        [0x6a, 0x37],     // VK_MULTIPLY
+        [0x90, 0x45],     // VK_NUMLOCK
+        [0x26, 0x48],     // VK_UP
+        [0xa2, 0x1d],     // VK_LCONTROL
+        [0xa3, 0xe01d],   // VK_RCONTROL
+        [0xa5, 0xe038],   // VK_RMENU
+        [0x91, 0x46],     // VK_SCROLL
+        [0x2c, 0x54],     // VK_SNAPSHOT
+        [0x6f, 0xe035],   // VK_DIVIDE
+    ];
+    for (const [vk, scan] of expected)
+    {
+        assert.equal(fns.MapVirtualKeyExA.handler([vk, MAPVK_VK_TO_VSC_EX, hkl]), scan,
+            `VK 0x${vk.toString(16)}`);
+    }
+    assert.equal(fns.MapVirtualKeyA.handler([0xa3, 0]), 0x1d,
+        'and MAPVK_VK_TO_VSC never carries the prefix');
+    assert.equal(fns.MapVirtualKeyW.handler([0xa3, MAPVK_VK_TO_VSC_EX]), 0xe01d,
+        'the other spellings answer alike');
+});
+
 test('MapVirtualKeyExA behaves as MapVirtualKeyA for the one layout this build has', ()=>{
     const { fns } = setup();
     const MAPVK_VK_TO_VSC = 0;

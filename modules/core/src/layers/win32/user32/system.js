@@ -186,6 +186,16 @@ const MAPVK_VK_TO_VSC = 0;
 const MAPVK_VSC_TO_VK = 1;
 const MAPVK_VK_TO_CHAR = 2;
 const MAPVK_VSC_TO_VK_EX = 3;
+const MAPVK_VK_TO_VSC_EX = 4;
+
+/**
+ * Keys MAPVK_VK_TO_VSC_EX answers with a code of their own: Print Screen with
+ * SysRq's unprefixed one, which the layout lists for the same virtual key
+ * ahead of the E0 key, and Pause with its E1 sequence.
+ *
+ * @type {ReadonlyMap<number, number>}
+ */
+const EXTENDED_SCAN_OF_VK = new Map([[0x2c, 0x54], [0x13, 0xe11d]]);
 
 /**
  * The ANSI page as text, for the calls that classify one of its characters.
@@ -207,7 +217,7 @@ function mappingForScan(scan){
 }
 
 /**
- * MapVirtualKeyA/MapVirtualKeyExA's four translations, over `keys.js`'s
+ * MapVirtualKeyA/MapVirtualKeyExA's five translations, over `keys.js`'s
  * physical-key table: never a second copy of what already maps a browser key
  * to a scan code and virtual key for `input`'s router.
  *
@@ -232,6 +242,26 @@ function mapVirtualKey(code, mapType){
         case MAPVK_VSC_TO_VK_EX: {
             const mapping = mappingForScan(code & 0xff);
             return mapping ? mapping.vkSide : 0;
+        }
+        case MAPVK_VK_TO_VSC_EX: {
+            const own = EXTENDED_SCAN_OF_VK.get(code);
+            if (own !== undefined)
+            {
+                return own;
+            }
+            const mapping = mappingForVk(code);
+            if (!mapping)
+            {
+                return 0;
+            }
+            // The E0 prefix only where the E0 half alone has the key: the
+            // navigation cluster's virtual keys are also what the numeric
+            // keypad sends with num lock off, from the same codes unprefixed,
+            // and that is the code the layout answers with.
+            const unprefixed = codeForScan(mapping.scan, false);
+            return mapping.extended && !unprefixed?.startsWith('Numpad')
+                ? (0xe000 | mapping.scan) >>> 0
+                : mapping.scan;
         }
         default:
             return 0;
@@ -2580,12 +2610,13 @@ export function createSystemFunctions({ host, live, windows, classes }){
         /**
          * UINT MapVirtualKeyA(UINT uCode, UINT uMapType)
          *
-         * The four translations the one US layout answers for, over the same
+         * The five translations the one US layout answers for, over the same
          * physical-key table `input`'s router turns a browser key into: a
-         * virtual key to its scan code and back, a scan code to the
-         * side-specific virtual key, and a virtual key to the character it
-         * produces with no keyboard state -- MapVirtualKeyExA is this with an
-         * HKL argument this build has only one answer for.
+         * virtual key to its scan code, with or without the E0 prefix, and
+         * back, a scan code to the side-specific virtual key, and a virtual
+         * key to the character it produces with no keyboard state --
+         * MapVirtualKeyExA is this with an HKL argument this build has only
+         * one answer for.
          */
         MapVirtualKeyA: {
             argBytes: 8,
