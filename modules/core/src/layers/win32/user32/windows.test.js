@@ -1336,6 +1336,49 @@ test('DefWindowProcA does not end the program when a window ends', ()=>{
     assert.equal(queue.quitPending(), false);
 });
 
+test('DefWindowProcA(WM_SETCURSOR) asks the parent first, then sets the cursor of the '
+    + 'window under it', ()=>{
+    // As documented for WM_SETCURSOR: the parent decides first, and the
+    // default sets the class cursor over the client area and the arrow
+    // elsewhere. The cursor is the class's of the window wParam names, so a
+    // parent that passes a child's message on sets the child's.
+    const WM_SETCURSOR = 0x0020;
+    const WM_MOUSEMOVE = 0x0200;
+    const HTCLIENT = 1;
+    const HTCAPTION = 2;
+    const IDC_ARROW = 32512;
+    const GCL_HCURSOR = -12;
+    let parentAnswer = 0;
+    const { fns, memory, dispatched, hwnd: parent } = withWindow({
+        reply: message=>(message.message === WM_SETCURSOR ? parentAnswer : 0),
+    });
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent });
+    const overClient = (WM_MOUSEMOVE << 16 | HTCLIENT) >>> 0;
+    dispatched.length = 0;
+
+    assert.equal(fns.DefWindowProcA.handler([child, WM_SETCURSOR, child, overClient]), 1);
+    assert.deepEqual(dispatched.map(({ hwnd, message, wParam, lParam })=>
+        ({ hwnd, message, wParam, lParam })),
+    [{ hwnd: parent, message: WM_SETCURSOR, wParam: child, lParam: overClient }],
+    'the parent was asked with the same arguments');
+    assert.equal(fns.GetCursor.handler(), 0x22, 'the class cursor is set');
+
+    parentAnswer = 1;
+    fns.SetCursor.handler([0x99]);
+    assert.equal(fns.DefWindowProcA.handler([child, WM_SETCURSOR, child, overClient]), 1);
+    assert.equal(fns.GetCursor.handler(), 0x99, 'a parent that answers TRUE has set it');
+
+    fns.DefWindowProcA.handler([parent, WM_SETCURSOR, parent,
+        (WM_MOUSEMOVE << 16 | HTCAPTION) >>> 0]);
+    assert.equal(fns.GetCursor.handler(), IDC_ARROW, 'the frame shows the arrow');
+
+    fns.SetClassLongA.handler([parent, GCL_HCURSOR, 0]);
+    fns.SetCursor.handler([0x99]);
+    assert.equal(fns.DefWindowProcA.handler([parent, WM_SETCURSOR, parent, overClient]), 0,
+        'a class with no cursor leaves the client area to its procedure');
+    assert.equal(fns.GetCursor.handler(), 0x99);
+});
+
 test('DefWindowProcA does nothing at all with a message it has no opinion on', ()=>{
     const { fns, queue, hwnd } = withWindow();
 

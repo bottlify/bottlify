@@ -123,13 +123,25 @@ const CLOSE_GAP = 2;
  */
 const SYSTEM_CLASSES = Object.freeze([
     { name: 'Button', atom: 0x0080, windowExtra: 0, background: 0 },
-    { name: 'Edit', atom: 0x0081, windowExtra: 0, background: 0 },
+    { name: 'Edit', atom: 0x0081, windowExtra: 0, background: 0, cursor: 32513 },
     { name: 'Static', atom: 0x0082, windowExtra: 0, background: 0 },
     { name: 'ListBox', atom: 0x0083, windowExtra: 0, background: 0 },
     { name: 'ScrollBar', atom: 0x0084, windowExtra: 0, background: 0 },
     { name: 'ComboBox', atom: 0x0085, windowExtra: 0, background: 0 },
     { name: '#32770', atom: 0x8002, windowExtra: DLGWINDOWEXTRA, background: COLOR_3DFACE + 1 },
 ]);
+
+/**
+ * The standard arrow, as LoadCursor(NULL, IDC_ARROW) names it: the cursor of
+ * every system class but the edit's, which is the I-beam above.
+ */
+const IDC_ARROW = 32512;
+
+/** The hit-test codes of a sizing border, which a child keeps from its parent. */
+const HTSIZEFIRST = 10;
+const HTSIZELAST = 17;
+
+const WM_SETCURSOR = 0x0020;
 
 /**
  * Where a host procedure's address is when there is no bridge to hand one
@@ -2034,6 +2046,19 @@ export function createWindowFunctions(host){
                     return send(record.hwnd, WM_CLOSE, 0, 0, thread);
                 }
                 return 0;
+            case WM_SETCURSOR: {
+                // The parent decides first -- a dialog chooses for its
+                // controls -- except on a sizing border, which is the
+                // window's own. What a parent passes on names the window
+                // under the cursor in wParam, and that window's class cursor
+                // is the one set.
+                const hit = (message.lParam << 16) >> 16;
+                const parent = isChild(record) && (hit < HTSIZEFIRST || hit > HTSIZELAST)
+                    ? live(record.parent) : null;
+                return andThen(parent ? send(parent.hwnd, WM_SETCURSOR, message.wParam,
+                    message.lParam, thread) : 0, handled=>((handled >>> 0) !== 0
+                    ? 1 : setCursorOver(windows.get(message.wParam >>> 0) ?? record, hit)));
+            }
             case WM_MOUSEACTIVATE:
                 // A child asks its parent first, as the default procedure
                 // does: a dialog decides for the controls in it.
@@ -2085,6 +2110,27 @@ export function createWindowFunctions(host){
             default:
                 return 0;
         }
+    };
+
+    /**
+     * The cursor the default procedure sets for a hit test on a window: its
+     * class cursor over the client area, answering FALSE for a class that has
+     * none, and the arrow anywhere else, answering what SetCursor answers.
+     *
+     * @param {any} record @param {number} hit
+     */
+    const setCursorOver = (record, hit)=>{
+        if (hit !== HTCLIENT)
+        {
+            return table.SetCursor.handler([IDC_ARROW]);
+        }
+        const cursor = (classNamed(record.className)?.cursor ?? 0) >>> 0;
+        if (cursor === 0)
+        {
+            return 0;
+        }
+        table.SetCursor.handler([cursor]);
+        return 1;
     };
 
     /**
@@ -2255,7 +2301,7 @@ export function createWindowFunctions(host){
             windowExtra: definition.windowExtra ?? 0,
             instance: 0,
             icon: 0,
-            cursor: 0,
+            cursor: IDC_ARROW,
             background: definition.background ?? 0,
             menuName: 0,
             className: 0,
@@ -2278,7 +2324,7 @@ export function createWindowFunctions(host){
             windowExtra: definition.windowExtra,
             instance: 0,
             icon: 0,
-            cursor: 0,
+            cursor: definition.cursor ?? IDC_ARROW,
             background: definition.background,
             menuName: 0,
             className: 0,
