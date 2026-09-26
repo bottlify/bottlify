@@ -34,7 +34,10 @@ const ARITH = 0x8d5;
 const TRAP_PORT = 0xb077;
 
 test('the module is built from the source beside it', ()=>{
-    const source = readFileSync(new URL('./interp-wasm.c', import.meta.url));
+    // Line ends as the repository keeps them: a checkout made before
+    // .gitattributes pinned them may still hold CRLF, which the compiler ignores.
+    const source = readFileSync(new URL('./interp-wasm.c', import.meta.url), 'utf8')
+        .replaceAll('\r\n', '\n');
     assert.equal(createHash('sha256').update(source).digest('hex'), SOURCE_SHA256,
         'interp-wasm.c changed: run scripts/build-interp-wasm.mjs');
 });

@@ -55,7 +55,9 @@ try
         throw new Error(`interp-wasm: data and stack end at ${end}, past ${LIMIT}`);
     }
     const compiler = execFileSync(clang, ['--version']).toString().split('\n')[0].trim();
-    const digest = createHash('sha256').update(readFileSync(source)).digest('hex');
+    // Hashed with LF line ends, as the repository keeps it and the test reads it.
+    const digest = createHash('sha256')
+        .update(readFileSync(source, 'utf8').replaceAll('\r\n', '\n')).digest('hex');
     const base64 = bytes.toString('base64');
     /** @type {string[]} */
     const lines = [];

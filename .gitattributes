@@ -1,0 +1,5 @@
+# C sources are compiled reproducibly and their bytes hashed (interp-wasm.c's
+# SHA-256 is recorded beside the module built from it), so a checkout under
+# core.autocrlf must not hand them over with CRLF line ends.
+*.c text eol=lf
+*.h text eol=lf

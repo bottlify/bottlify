@@ -1247,7 +1247,7 @@ test('a transfer to a region of its own module is not a crossing; one into anoth
         return; // no hash: every transfer is the host's
     }
     // The loop and its callee in one batch: one module.
-    const one = machine({ leafCalls: false });
+    const one = machine({ leafCalls: false, dispatch: true });
     one.write(CODE, callLoop(1000));
     one.setReg(4, 0x80000);
     one.runtime.noteHot(CODE);
@@ -1256,7 +1256,7 @@ test('a transfer to a region of its own module is not a crossing; one into anoth
     assert.equal(one.reg(2), 1000);
     assert.equal(one.runtime.diagnostics().crossings, 0);
     // The callee first, in a batch of its own: each call and each return crosses.
-    const two = machine({ leafCalls: false, mergeAfter: 0 });
+    const two = machine({ leafCalls: false, mergeAfter: 0, dispatch: true });
     two.write(CODE, callLoop(1000));
     two.setReg(4, 0x80000);
     two.runtime.noteHot(CODE + 14);
@@ -1276,7 +1276,7 @@ test('a placed module whose regions have all gone gives its range of the table b
     // The callee and the loop in modules of their own, dropped and made again
     // three hundred times, as a program rewriting its code in place has them:
     // six hundred ranges, where the table starts with 256 indices.
-    const m = machine({ leafCalls: false, mergeAfter: 0, volatileAfter: 1000 });
+    const m = machine({ leafCalls: false, mergeAfter: 0, volatileAfter: 1000, dispatch: true });
     for (let round = 0; round < 300; round++)
     {
         m.write(CODE, callLoop(100));
@@ -1301,7 +1301,7 @@ test('two modules that keep transferring into each other are gathered into one, 
     {
         return;
     }
-    const m = machine({ leafCalls: false, mergeAfter: 1000, worker: true });
+    const m = machine({ leafCalls: false, mergeAfter: 1000, worker: true, dispatch: true });
     // Enough calls for the crossings to be read (every 2^20 translated instructions).
     m.write(CODE, callLoop(300_000));
     m.setReg(4, 0x80000);
@@ -1340,7 +1340,7 @@ test('after a merge, the next waits for translated instructions in proportion to
     {
         return;
     }
-    const m = machine({ leafCalls: false, mergeAfter: 100_000, worker: true,
+    const m = machine({ leafCalls: false, mergeAfter: 100_000, worker: true, dispatch: true,
         batchRegions: 128 });
     // Two loops, each calling a callee of its own; the first one's batch has
     // sixty-four more regions, so its merge with its callee builds 66.
@@ -1427,7 +1427,7 @@ test('an indirect call sampled going to a few small callees has them formed into
     {
         return; // no hash, no transfers to count
     }
-    const m = machine({ countTransfers: true });
+    const m = machine({ countTransfers: true, callTargets: true });
     const { code, table, slots, f, g, h } = dispatchLoop(1600);
     m.write(CODE, code);
     m.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
@@ -1457,6 +1457,47 @@ test('an indirect call sampled going to a few small callees has them formed into
     // Only H leaves: its call, its return into the copy of the block after the call, which
     // is inside the loop (`emitCopies`), and the copy's way on to the loop's head.
     assert.equal(run(), 300, 'only H leaves, and its return comes back');
+});
+
+test('callTargets and dispatch are off unless a run asks for them', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return; // no hash: no transfers, no placing
+    }
+    // Each is worth a lot on the benchmarks and cost games on real hardware
+    // their frame rate while on (see the settings); a default that turns one
+    // back on unnoticed is what this holds.
+    const calls = machine({ countTransfers: true });
+    const { code, table, slots, f, g, h } = dispatchLoop(1600);
+    calls.write(CODE, code);
+    calls.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
+    for (const at of [f, g, h, CODE])
+    {
+        calls.runtime.noteHot(at);
+    }
+    await calls.runtime.translatePending();
+    for (let i = 0; i < 16; i++)
+    {
+        calls.setReg(1, 1600);
+        calls.setReg(2, 0);
+        calls.setReg(4, 0x80000);
+        assert.equal(calls.runtime.run(calls.runtime.entryOf(CODE + 5), 1_000_000).kind, 'halt');
+        await calls.runtime.translatePending();
+    }
+    assert.equal(calls.runtime.diagnostics().reforms, 0,
+        'no indirect call sampled, no region formed again with its callees');
+    // The callee in a module of its own: unplaced, a transfer between the two
+    // goes through the table and is no crossing of a placed module's range.
+    const modules = machine({ leafCalls: false, mergeAfter: 0 });
+    modules.write(CODE, callLoop(1000));
+    modules.setReg(4, 0x80000);
+    modules.runtime.noteHot(CODE + 14);
+    assert.equal(await modules.runtime.translatePending(), 1);
+    modules.runtime.noteHot(CODE);
+    assert.equal(await modules.runtime.translatePending(), 1);
+    assert.equal(modules.runtime.run(modules.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+    assert.equal(modules.reg(2), 1000);
+    assert.equal(modules.runtime.diagnostics().crossings, 0, 'no module placed');
 });
 
 test('a transfer that finds no entry leaves with the carried state written back', async()=>{

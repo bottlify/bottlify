@@ -114,8 +114,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // Indirect calls sampled while the translator runs, and a region whose
         // indirect call keeps going to a few small leaf callees formed again
         // with them in it: the call compares its target with each and jumps
-        // (false: every indirect call leaves its region).
-        callTargets: true,
+        // (false: every indirect call leaves its region). Off unless asked:
+        // the benchmarks' virtual and indirect calls run four to five times
+        // faster with it, but games run on real hardware, from their start to
+        // a menu, lost more than half the canvas's frame rate with it and
+        // `dispatch` on, froze frames past 250 ms and repeated their audio,
+        // and what it costs them is not found yet.
+        callTargets: false,
         // Transfers from one module's regions into another's before the two
         // are gathered into one module on the translation worker (0: never;
         // never without a worker): a relink's cost against the direct tail
@@ -124,8 +129,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // Each module is placed in a range of the table, and a transfer to a
         // function of the same module is a direct tail call, the table's
         // indirect one only another module's (false: every transfer through
-        // the table).
-        dispatch: true,
+        // the table). Off unless asked: the benchmarks gain at most a few per
+        // cent from it, and in the games `callTargets` names one still ran at
+        // 57 % of the frame rate it had with neither when this one alone was on.
+        dispatch: false,
         // x87 regions compiled for the precision control the program runs
         // under -- the wide ones (double, extended) until it is seen with
         // single set, single from then on until it is seen with another --
