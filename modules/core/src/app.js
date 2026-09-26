@@ -4495,14 +4495,30 @@ async function buildApp(options){
     // span rather than the guest heap, because the heap is the program's and
     // this is written before the program exists to allocate from it.
     const STARTUP_ARENA = 0x100000;
-    const startupArena = nextLibraryBase;
+    // After the libraries, like one more of them -- and so only where one
+    // would fit: below the thread stacks and on nothing mapped. When the
+    // libraries reach the stacks, any gap in the modules' space will do.
+    const arenaSpan = { relocatable: true, imageBase: 0, sizeOfImage: STARTUP_ARENA };
+    let arenaPlace = placeLibrary(arenaSpan, { next: nextLibraryBase, ...librarySpace });
+    if ('refused' in arenaPlace)
+    {
+        arenaPlace = placeLibrary(arenaSpan, {
+            ...librarySpace,
+            next: Math.ceil(librarySpace.floor / LIBRARY_ALIGN) * LIBRARY_ALIGN,
+        });
+    }
+    if ('refused' in arenaPlace)
+    {
+        throw new Error('no room below the thread stacks for what the process needs to start');
+    }
+    const startupArena = arenaPlace.base;
     memory.register({
         name: 'process-startup', base: startupArena, size: STARTUP_ARENA,
         // Executable because the stub that runs before the program lives here
         // too, and it is guest code.
         kind: memory.RegionKind.THUNK_CODE, access: memory.Access.READ_WRITE_EXECUTE,
     });
-    nextLibraryBase += STARTUP_ARENA;
+    nextLibraryBase = Math.max(nextLibraryBase, startupArena + STARTUP_ARENA);
 
     let scratch = startupArena;
     /** @param {number} size */
