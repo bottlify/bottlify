@@ -80,8 +80,12 @@ const SEE_MASK_IDLIST = 0x00000004;
 const SEE_MASK_NOCLOSEPROCESS = 0x00000040;
 const SEE_MASK_CLASSNAME = 0x00000400;
 
-/** SHFILEOPSTRUCTA: where fAnyOperationsAborted lives. */
-const SHFILEOPSTRUCT_ABORTED = 20;
+/**
+ * SHFILEOPSTRUCTA: where fAnyOperationsAborted lives. shellapi.h packs the
+ * structure to one byte on Win32 and fFlags is a WORD, so the BOOL after it
+ * sits at 18, not at the 20 natural alignment would give it.
+ */
+const SHFILEOPSTRUCT_ABORTED = 18;
 const E_OUTOFMEMORY = 0x8007000e | 0;
 /** E_FAIL, for a namespace call in a build with no volume behind it. */
 const E_FAIL = 0x80004005 | 0;

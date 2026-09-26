@@ -385,7 +385,12 @@ test('the extended launch is refused the same way, in the record the caller read
 test('a shell file operation is refused as not implemented and marked aborted', ()=>{
     const m = machine();
     assert.equal(m.shell.SHFileOperationA.handler([0x100]), 120);
-    assert.deepEqual([...m.memory.slice(0x114, 0x118)], [1, 0, 0, 0], 'fAnyOperationsAborted');
+    // shellapi.h packs the structure to one byte on Win32: fFlags is a WORD
+    // at 16, so the BOOL follows at 18 and hNameMappings at 22.
+    assert.deepEqual([...m.memory.slice(0x112, 0x116)], [1, 0, 0, 0], 'fAnyOperationsAborted');
+    assert.deepEqual([...m.memory.slice(0x110, 0x112)], [0xaa, 0xaa], 'fFlags is not touched');
+    assert.deepEqual([...m.memory.slice(0x116, 0x11a)], [0xaa, 0xaa, 0xaa, 0xaa],
+        'hNameMappings is not touched');
     assert.equal(m.shell.SHChangeNotify.handler([0x8000000, 0, 0, 0]), 0);
     assert.equal(m.shell.SHGetFileInfoA.handler([0x100, 0, 0x120, 352, 0x100]), 0);
     assert.deepEqual([m.shell.SHFileOperationA, m.shell.SHChangeNotify, m.shell.SHGetFileInfoA]
