@@ -206,6 +206,9 @@ export function createSyncFunctions(host){
                 return target.owner === null || target.owner === thread;
             case 'semaphore':
                 return target.count > 0;
+            // Signalled by having ended, and for ever after.
+            case 'thread':
+                return (target.exitCode ?? null) !== null;
             default:
                 return false;
         }

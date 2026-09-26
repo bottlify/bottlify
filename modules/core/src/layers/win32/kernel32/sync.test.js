@@ -73,6 +73,9 @@ function fakeKernel(){
                 return object.signalled === true;
             case 'semaphore':
                 return object.count > 0;
+            // As the kernel has it: signalled once it has ended, for ever.
+            case 'thread':
+                return (object.exitCode ?? null) !== null;
             default:
                 return false;
         }
@@ -494,6 +497,22 @@ test('a waitable timer in a set is ready once the clock has signalled it', ()=>{
     new DataView(host.bytes.buffer).setUint32(0x400, 0x14, true);
     assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, 0]), WAIT_TIMEOUT,
         'an armed but not-yet-due timer is not ready');
+});
+
+test('a thread in a polled set is ready once it has ended', ()=>{
+    // Joining a worker by polling its handle with WaitForMultipleObjects: an
+    // ended thread is signalled, one still running is not.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    const worker = { kind: 'thread', id: 0x108, exitCode: /** @type {number | null} */ (null) };
+    host.register(0x20, 'thread', worker);
+    new DataView(host.bytes.buffer).setUint32(0x400, 0x20, true);
+
+    assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, 0]), WAIT_TIMEOUT);
+    worker.exitCode = 0;
+    assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, 0]), WAIT_OBJECT_0);
+    assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 1, 0]), WAIT_OBJECT_0,
+        'and stays so, for a wait on all of the set too');
 });
 
 test('a finite timeout is a wait with a deadline, not an immediate refusal', ()=>{

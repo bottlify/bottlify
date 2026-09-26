@@ -8,7 +8,8 @@
  * A thread created with CREATE_SUSPENDED does not run until ResumeThread,
  * whose first call answers a previous count of one; and once it has ended,
  * SuspendThread on it fails with ERROR_ACCESS_DENIED -- as Wine's thread test
- * has both. The program checks one property per bit of its exit code.
+ * has both -- and a poll of a set holding it finds it signalled. The program
+ * checks one property per bit of its exit code.
  */
 
 import { test } from 'node:test';
@@ -29,16 +30,17 @@ const CREATE_SUSPENDED = 0x4;
 /**
  * Exit code bits: the thread had not run while its creator slept (1), the
  * first ResumeThread answered one (2), and once resumed it ran (4). Ended,
- * it cannot be suspended (8), and the error says why (0x10).
+ * it cannot be suspended (8), and the error says why (0x10); and it is
+ * signalled to WaitForMultipleObjects with no time to wait (0x20).
  */
-const ALL = 0x1f;
+const ALL = 0x3f;
 const ERROR_ACCESS_DENIED = 5;
 
 function buildProgram(){
     return buildExe({
         imports: { 'KERNEL32.dll': ['CreateThread', 'ResumeThread', 'SuspendThread', 'Sleep',
-            'WaitForSingleObject', 'GetLastError', 'ExitProcess'] },
-        data: { ran: [0, 0, 0, 0] },
+            'WaitForSingleObject', 'WaitForMultipleObjects', 'GetLastError', 'ExitProcess'] },
+        data: { ran: [0, 0, 0, 0], handles: [0, 0, 0, 0] },
         codeSize: 0x100,
         code: ({ iat, at, code })=>{
             /** @param {string} fn */
@@ -63,6 +65,10 @@ function buildProgram(){
                 0x83, 0xf8, 0xff, JNE, 6, ...flag(0x8), //       cmp eax, -1
                 ...call('GetLastError'),
                 0x83, 0xf8, ERROR_ACCESS_DENIED, JNE, 6, ...flag(0x10),
+                0x89, 0x35, ...u32(at('handles')), //            mov [handles], esi
+                0x6a, 0x00, 0x6a, 0x00, 0x68, ...u32(at('handles')), 0x6a, 0x01,
+                ...call('WaitForMultipleObjects'),
+                0x85, 0xc0, JNE, 6, ...flag(0x20), //            WAIT_OBJECT_0
                 0x53, ...call('ExitProcess'),
             ];
             const thread = [
