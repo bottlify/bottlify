@@ -48,6 +48,7 @@ import { ANY_WINDOW, WM_QUIT } from './messages.js';
 import { readMessage, readRect, writeRect } from './structs.js';
 import { WS_VISIBLE, frameOf } from './frame.js';
 import { createTabWalk } from './tabwalk.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 import {
     DLGC_BUTTON, DLGC_DEFPUSHBUTTON, DLGC_HASSETSEL, DLGC_WANTALLKEYS,
     DLGC_WANTTAB, DLGWINDOWEXTRA, DWLP_DLGPROC, IDCANCEL, IDOK, WM_GETDLGCODE, WM_SETFONT,
@@ -512,15 +513,14 @@ export function createDialogFunctions(options){
         return search(dialog);
     };
 
-    /** @param {number} address @param {string} text @param {number} limit */
+    /**
+     * A control's text in the ANSI page, as a window's text goes back.
+     *
+     * @param {number} address @param {string} text @param {number} limit
+     */
     const writeString = (address, text, limit)=>{
         const clipped = limit > 0 ? text.slice(0, limit - 1) : '';
-        const bytes = new Uint8Array(clipped.length + 1);
-        for (let index = 0; index < clipped.length; index++)
-        {
-            bytes[index] = clipped.charCodeAt(index) & 0xff;
-        }
-        host.writeMemory(address, bytes);
+        host.writeMemory(address, encodeAnsi(`${clipped}\0`));
         return clipped.length;
     };
 

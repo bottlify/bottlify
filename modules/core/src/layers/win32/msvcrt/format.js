@@ -489,9 +489,9 @@ export function varargsSlots(read, locate, list, slots){
  *        nothing, and %S of it nothing on the older runtimes).
  * @param {(bytes: Uint8Array) => string} [options.decodeBytes]
  *        How bytes read as text, as `readString` reads a narrow string's: what
- *        a narrow printer makes of a %c, and under the C locale of the byte a
- *        wide character or string becomes, so that the whole text is in one
- *        page. Absent, a byte is the character of its own code.
+ *        a narrow character's byte is, and in a narrow printer under the C
+ *        locale the byte a wide character or string becomes, so that the whole
+ *        text is in one page. Absent, a byte is the character of its own code.
  * @returns {string}
  */
 export function formatToString(format, varargs, readString, options = {}){
@@ -531,7 +531,7 @@ export function formatToString(format, varargs, readString, options = {}){
     };
     /** @param {number} code @param {boolean} asWide */
     const character = (code, asWide)=>{
-        if (options.wide || (asWide && !options.cLocale))
+        if (asWide && (options.wide || !options.cLocale))
         {
             return String.fromCharCode(code);
         }

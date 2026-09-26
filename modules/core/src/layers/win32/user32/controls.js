@@ -30,6 +30,7 @@
  */
 
 import { layoutText } from './paint.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 import { createTabWalk } from './tabwalk.js';
 
 /** Messages the controls answer. */
@@ -1961,12 +1962,7 @@ export function createControlProcedures(host){
                 const room = host.readMemory(out, 2);
                 const limit = room[0] | room[1] << 8;
                 const text = line.text.slice(0, limit);
-                const bytes = new Uint8Array(text.length);
-                for (let index = 0; index < text.length; index++)
-                {
-                    bytes[index] = text.charCodeAt(index) & 0xff;
-                }
-                host.writeMemory(out, bytes);
+                host.writeMemory(out, encodeAnsi(text));
                 return text.length;
             }
             case EM_GETFIRSTVISIBLELINE:
@@ -2051,14 +2047,13 @@ export function createControlProcedures(host){
         value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
     ]));
 
-    /** @param {number} address @param {string} text @returns {number} characters written */
+    /**
+     * In the ANSI page, as the text was read.
+     *
+     * @param {number} address @param {string} text @returns {number} characters written
+     */
     const writeString = (address, text)=>{
-        const bytes = new Uint8Array(text.length + 1);
-        for (let index = 0; index < text.length; index++)
-        {
-            bytes[index] = text.charCodeAt(index) & 0xff;
-        }
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(address >>> 0, encodeAnsi(`${text}\0`));
         return text.length;
     };
 

@@ -289,6 +289,21 @@ test('a menu item is inserted, counted and read back', ()=>{
         'cch comes back as the length written, not as the room offered');
 });
 
+test('an item\'s upper-half text reads back as the bytes it was given', ()=>{
+    // The text is read as Windows-1252, where 0x80 is the euro sign, 0x99 the
+    // trade mark and 0x97 an em dash, and GetMenuItemInfoA writes it back in
+    // that page.
+    const { memory, fns } = setup();
+    const menu = fns.CreateMenu.handler([]);
+    memory.bytes.set([0x80, 0x99, 0x97, 0xe9, 0], TITLE);
+    assert.equal(fns.AppendMenuA.handler([menu, 0, 9, TITLE]), 1);
+
+    putItemInfo(memory, { mask: MIIM_STRING, text: undefined, cch: 16 });
+    memory.putU32s(INFO + MENUITEMINFO.dwTypeData, [OUT, 16]);
+    assert.equal(fns.GetMenuItemInfoA.handler([menu, 0, 1, INFO]), 1);
+    assert.deepEqual([...memory.bytes.subarray(OUT, OUT + 5)], [0x80, 0x99, 0x97, 0xe9, 0]);
+});
+
 test('setting an item changes only what the mask names', ()=>{
     // Copying the whole structure across would blank every member the caller
     // deliberately left alone, which is how a menu loses its text on a state
@@ -573,7 +588,7 @@ test('what the host pasted is read back in the format asked for, until the progr
             release: (/** @type {number} */ address)=>released.push(address),
         });
         assert.equal(fns.IsClipboardFormatAvailable.handler([CF_TEXT]), 0);
-        pasteboard.text = 'pa\u0161s\u00e9';
+        pasteboard.text = 'pa\u0161s\u00e9\u20ac\u0416';
         pasteboard.version = 1;
         assert.equal(fns.IsClipboardFormatAvailable.handler([CF_TEXT]), 1);
         assert.equal(fns.IsClipboardFormatAvailable.handler([CF_UNICODETEXT]), 1);
@@ -586,12 +601,15 @@ test('what the host pasted is read back in the format asked for, until the progr
         assert.equal(fns.EnumClipboardFormats.handler([CF_UNICODETEXT]), 0);
         const narrow = fns.GetClipboardData.handler([CF_TEXT]);
         assert.notEqual(narrow, 0);
-        assert.equal(memory.readCString(narrow, 16), 'pa?s\u00e9', 'one byte a character');
+        assert.deepEqual([...memory.readMemory(narrow, 8)],
+            [0x70, 0x61, 0x9a, 0x73, 0xe9, 0x80, 0x3f, 0],
+            'in the ANSI page, where a character it lacks is the default character');
         assert.equal(fns.GetClipboardData.handler([CF_TEXT]), narrow, 'the same copy again');
         const wide = fns.GetClipboardData.handler([CF_UNICODETEXT]);
         assert.notEqual(wide, narrow);
-        assert.deepEqual([...memory.readMemory(wide, 12)],
-            [0x70, 0, 0x61, 0, 0x61, 1, 0x73, 0, 0xe9, 0, 0, 0], 'UTF-16, terminated');
+        assert.deepEqual([...memory.readMemory(wide, 16)],
+            [0x70, 0, 0x61, 0, 0x61, 1, 0x73, 0, 0xe9, 0, 0xac, 0x20, 0x16, 4, 0, 0],
+            'UTF-16, terminated');
         assert.equal(fns.CloseClipboard.handler([]), 1);
         assert.deepEqual(released, []);
 
@@ -675,6 +693,19 @@ test('CF_UNICODETEXT is read as UTF-16 and preferred over the byte formats', ()=
     fns.SetClipboardData.handler([CF_UNICODETEXT, OUT]);
     fns.CloseClipboard.handler([]);
     assert.deepEqual(copied, ['wide \u0416']);
+});
+
+test('CF_TEXT reaches the host as the characters its bytes are in the ANSI page', ()=>{
+    // 0x80 is the euro sign there, 0x99 the trade mark and 0x97 an em dash,
+    // as Windows turns CF_TEXT into the Unicode text it offers.
+    const { copied, host } = clipboardListener();
+    const { memory, fns } = setup(host);
+    memory.bytes.set([0x80, 0x99, 0x97, 0xe9, 0], TEXT);
+
+    fns.OpenClipboard.handler([0]);
+    fns.SetClipboardData.handler([CF_TEXT, TEXT]);
+    fns.CloseClipboard.handler([]);
+    assert.deepEqual(copied, ['\u20ac\u2122\u2014\u00e9']);
 });
 
 test('CF_OEMTEXT is text too, and a close with no text format hands nothing up', ()=>{

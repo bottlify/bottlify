@@ -731,6 +731,20 @@ test('a control is a child window, and carries the text the template gave it', (
     assert.equal(memory.readCString(OUT, 32), '');
 });
 
+test('a control\'s upper-half text reads back as the bytes it was set as', ()=>{
+    // SetDlgItemTextA's text is read as Windows-1252, where 0x80 is the euro
+    // sign, 0x99 the trade mark and 0x97 an em dash, and GetDlgItemTextA
+    // writes it back in that page.
+    const { memory, fns } = setup();
+    putTemplate(memory, [{ id: 300, x: 0, y: 0, cx: 10, cy: 4, title: 'Ready' }]);
+    const dialog = fns.CreateDialogIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    memory.bytes.set([0x80, 0x99, 0x97, 0xe9, 0], TEXT);
+    assert.equal(fns.SetDlgItemTextA.handler([dialog, 300, TEXT]), 1);
+    assert.equal(fns.GetDlgItemTextA.handler([dialog, 300, OUT, 32]), 4);
+    assert.deepEqual([...memory.bytes.subarray(OUT, OUT + 5)], [0x80, 0x99, 0x97, 0xe9, 0]);
+});
+
 test('a control of a class the program registered is the window of that class', async()=>{
     // A template names the program's own control class beside the system
     // ones. Such a control has the class's procedure and extra bytes, and is
