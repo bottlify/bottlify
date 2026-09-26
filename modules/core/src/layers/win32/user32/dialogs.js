@@ -79,6 +79,26 @@ const DLGITEMTEMPLATE = Object.freeze({
 
 /** The template says a font follows; without this bit there is none to skip. */
 const DS_SETFONT = 0x0040;
+/** The dialog is made even when one of its controls cannot be, without that one. */
+const DS_NOFAILCREATE = 0x0010;
+/** What a dialog that names a class nobody has leaves in GetLastError. */
+const ERROR_CANNOT_FIND_WND_CLASS = 1407;
+
+/**
+ * The classes Windows' own libraries register besides user32's, lower-case:
+ * a template naming one that this build has no procedure for still gets its
+ * control -- a window answering nothing -- where a class that exists nowhere
+ * fails the dialog.
+ */
+const STANDARD_CLASSES = new Set([
+    'mdiclient', 'combolbox', 'sysheader32', 'toolbarwindow32', 'rebarwindow32',
+    'tooltips_class32', 'msctls_statusbar32', 'msctls_trackbar32', 'msctls_updown32',
+    'msctls_progress32', 'msctls_hotkey32', 'syslistview32', 'systreeview32',
+    'comboboxex32', 'systabcontrol32', 'sysanimate32', 'sysmonthcal32', 'sysdatetimepick32',
+    'sysipaddress32', 'syspager', 'nativefontctl', 'syslink',
+    'richedit', 'richedit20a', 'richedit20w', 'richedit50w',
+]);
+
 /**
  * The point size that means "the shell's dialog font" rather than a size,
  * and the font it means: what a DS_SHELLFONT template is compiled to.
@@ -232,6 +252,7 @@ const MAX_RESOURCE_NAME = 256;
  *           or a dialog's own -- measures as, and the font a template
  *           names. Absent, or answering null, without a font engine.
  * @property {() => unknown} [callerThread]
+ * @property {(code: number) => void} [setLastError]
  * @property {(hwnd: number) => void} [created]
  * @property {() => Promise<void>} idle
  * @property {(instance: number, type: number, name: number | string) => unknown} [findResource]
@@ -249,13 +270,18 @@ const MAX_RESOURCE_NAME = 256;
  *     => number | Promise<number>} options.deliver  Hands a retrieved message to its procedure.
  * @param {(name: string) => ({ wndProc: number, windowExtra: number } | null)} options.classNamed
  *     A class the program registered, by the name a template spells it.
+ * @param {(name: string) => boolean} [options.classKnown]
+ *     Whether a class of that name, or `#atom`, is the program's or the system's.
  * @param {(record: any, args: number[]) => number | Promise<number>} options.announce
  *     Tells a new window's procedure that it exists, as CreateWindowEx does.
  */
 export function createDialogFunctions(options){
     const {
-        host, live, windows, makeWindow, destroyWindow, deliver, classNamed, announce,
+        host, live, windows, makeWindow, destroyWindow, deliver, classNamed, classKnown, announce,
     } = options;
+    /** @param {string} name */
+    const classExists = name=>(classKnown ? classKnown(name) : classNamed(name) !== null)
+        || STANDARD_CLASSES.has(name.toLowerCase());
     /**
      * A cursor over the template, so that every read advances it. The parts are
      * variable-length and consecutive, so an offset carried by hand is an
@@ -496,6 +522,17 @@ export function createDialogFunctions(options){
         {
             return 0;
         }
+        // A control whose class exists nowhere fails the dialog, unless the
+        // template asked to be made without whatever cannot be: checked
+        // before anything is made, so a procedure never hears of it.
+        const makeable = described.controls.filter((/** @type {any} */ control)=>
+            classExists(control.className));
+        if (makeable.length < described.controls.length
+            && (described.style & DS_NOFAILCREATE) === 0)
+        {
+            host.setLastError?.(ERROR_CANNOT_FIND_WND_CLASS);
+            return 0;
+        }
         // The font the template names is the dialog's for as long as it
         // lives: the cell its units scale by, and what every control is
         // handed to paint in.
@@ -553,7 +590,7 @@ export function createDialogFunctions(options){
         const creating = [];
         /** @type {any[]} */
         const controls = [];
-        for (const control of described.controls)
+        for (const control of makeable)
         {
             // A class the program registered is the program's, procedure and
             // all: a template names its own controls this way, and one of

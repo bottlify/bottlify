@@ -3144,6 +3144,8 @@ export function createWindowFunctions(host){
             classNamed: name=>(classes.has(name) || [...classes.values()].some(
                 cls=>cls.name.toLowerCase() === name.toLowerCase())
                 ? classNamed(name) : null),
+            classKnown: name=>classNamed(/^#\d+$/.test(name)
+                ? atoms.get(Number(name.slice(1))) ?? name : name) !== null,
         }),
         ...rawInput.table,
 

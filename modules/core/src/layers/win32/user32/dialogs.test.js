@@ -886,6 +886,40 @@ test('DefDlgProcA(WM_SETFOCUS) passes the focus to the first control that stops 
     assert.equal(seen[1].wParam, 0);
 });
 
+test('a template naming a control of a class nobody has makes no dialog, unless it says '
+    + 'DS_NOFAILCREATE', async()=>{
+    // user32's dialog tests (test_DialogBoxParam): DialogBoxParam of a
+    // template whose control's class does not exist answers -1, the dialog
+    // never made. A class Windows' own libraries register, which this build
+    // has no procedure for, is still a control, a window answering nothing.
+    const DS_NOFAILCREATE = 0x0010;
+    /** @type {number[]} */
+    const heard = [];
+    const { memory, fns } = setup({ dispatch: (wndProc, message)=>{
+        heard.push(message.message);
+        return 0;
+    } });
+    const controls = [{ id: 1, x: 0, y: 0, cx: 40, cy: 10, className: 'no such class' }];
+    putTemplate(memory, controls);
+    assert.equal(fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC,
+        0]), 0);
+    assert.equal(await fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0,
+        DIALOGPROC, 0]), -1);
+    assert.equal(heard.includes(WM_INITDIALOG), false, 'the procedure never hears of it');
+
+    putTemplate(memory, controls, { style: DS_NOFAILCREATE });
+    const forgiving = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0,
+        DIALOGPROC, 0]);
+    assert.notEqual(forgiving, 0);
+    assert.equal(fns.GetDlgItem.handler([forgiving, 1]), 0, 'without the control');
+
+    putTemplate(memory, [{ ...controls[0], className: 'RichEdit20A' }]);
+    const standard = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0,
+        DIALOGPROC, 0]);
+    assert.notEqual(standard, 0);
+    assert.notEqual(fns.GetDlgItem.handler([standard, 1]), 0);
+});
+
 test('GetNextDlgTabItem walks into a shown, enabled WS_EX_CONTROLPARENT child as if its '
     + 'controls were the dialog\'s own', ()=>{
     // user32's dialog tests (test_GetNextDlgItem) build this hierarchy of

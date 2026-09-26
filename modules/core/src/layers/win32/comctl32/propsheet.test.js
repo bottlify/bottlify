@@ -91,6 +91,7 @@ const IDC_PS_EDIT2 = 1001;
 const IDD_PROP_PAGE_INTRO = 100;
 const IDD_PROP_PAGE_EDIT = 101;
 const IDD_PROP_PAGE_EXIT = 102;
+const IDD_PROP_PAGE_BAD_CONTROL = 103;
 
 function fakeMemory(size = 0x80000){
     const bytes = new Uint8Array(size);
@@ -157,8 +158,9 @@ function fakeHandles(){
  * A dialog template in the old layout, as a resource compiler writes one.
  *
  * @param {{ style: number, cx: number, cy: number, title?: string,
- *     controls?: { atom: number, id: number, style: number, x: number, y: number,
+ *     controls?: { atom: number | string, id: number, style: number, x: number, y: number,
  *         cx: number, cy: number }[] }} shape
+ *     A control's class is an atom, or a name.
  */
 function dialogTemplate(shape){
     /** @type {number[]} */
@@ -191,8 +193,15 @@ function dialogTemplate(shape){
         dword((WS_CHILD | WS_VISIBLE | control.style) >>> 0);
         dword(0);
         [control.x, control.y, control.cx, control.cy, control.id].forEach(value=>word(value));
-        word(0xffff);
-        word(control.atom);
+        if (typeof control.atom === 'string')
+        {
+            text(control.atom);
+        }
+        else
+        {
+            word(0xffff);
+            word(control.atom);
+        }
         word(0);
         word(0);
     }
@@ -222,6 +231,8 @@ const TEMPLATES = new Map([
     [IDD_PROP_PAGE_EXIT, dialogTemplate({ style: PAGE_STYLE, cx: 227, cy: 215,
         title: 'Exit Page',
         controls: [{ atom: STATIC, id: 0xffff, style: 0, x: 10, y: 6, cx: 170, cy: 8 }] })],
+    [IDD_PROP_PAGE_BAD_CONTROL, dialogTemplate({ style: PAGE_STYLE, cx: 100, cy: 100,
+        controls: [{ atom: 'invalid class', id: 0xffff, style: 0, x: 0, y: 0, cx: 0, cy: 0 }] })],
 ]);
 
 /**
@@ -1095,4 +1106,20 @@ async()=>{
     assert.equal(active(), 0, 'and not the page');
     assert.equal(await context.press(hwnd, VK_NEXT, [], true), 0,
         'PgDn alone is not the sheet\'s');
+});
+
+test('a sheet whose only page names a control of a class nobody has cannot show it: a modal '
+    + 'one answers 0, a modeless one is still its window', { timeout: 10000 }, async()=>{
+    // comctl32's property sheet tests (test_bad_control_class), over user32's
+    // dialog manager failing a dialog of such a template.
+    const modal = setup({ modal: true });
+    const bad = ()=>modal.createPage(modal.description({ template: IDD_PROP_PAGE_BAD_CONTROL,
+        proc: modal.pageProc('page') }));
+    assert.notEqual(await bad(), 0);
+    assert.equal(await modal.comctl.PropertySheetA.handler([modal.header({
+        pages: [await bad()] })]), 0);
+    const modeless = await modal.comctl.PropertySheetA.handler([modal.header({
+        flags: PSH_MODELESS, pages: [await bad()] })]);
+    assert.notEqual(modeless, 0);
+    assert.equal(modal.send([modeless, PSM_GETCURRENTPAGEHWND, 0, 0]), 0, 'with no page');
 });

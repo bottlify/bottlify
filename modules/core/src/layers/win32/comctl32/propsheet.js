@@ -936,8 +936,22 @@ export function createPropertySheetFunctions(host){
                 if ((hwnd >>> 0) === 0)
                 {
                     // A page that cannot be made is dropped, and the sheet
-                    // stays where it was.
-                    return after(removePage(sheet, index, thread), ()=>true);
+                    // stays where it was. With nothing on show yet the page
+                    // that took its place is tried, and a modal sheet left
+                    // with none to show ends.
+                    return after(removePage(sheet, index, thread), ()=>{
+                        if (sheet.current >= 0)
+                        {
+                            return true;
+                        }
+                        if (sheet.entries.length > 0)
+                        {
+                            return select(sheet, Math.min(index, sheet.entries.length - 1),
+                                thread, how);
+                        }
+                        return after((sheet.flags & PSH_MODELESS) === 0 ? finish(sheet) : 0,
+                            ()=>true);
+                    });
                 }
                 return after(notifyPage(sheet, index, PSN_SETACTIVE, 0), answer=>{
                     if ((answer | 0) !== 0 && wizard(sheet))
