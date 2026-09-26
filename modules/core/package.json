@@ -63,8 +63,8 @@
     "check:boundaries": "node scripts/check-boundaries.mjs",
     "check:package": "node scripts/check-package.mjs",
     "typecheck": "tsc --project jsconfig.json",
-    "test": "node --test --test-timeout=60000 --test-force-exit \"src/**/*.test.js\" \"scripts/**/*.test.js\" \"test/**/*.test.js\"",
-    "test:integration": "node --test --test-timeout=60000 --test-force-exit \"src/**/*.itest.js\"",
+    "test": "node --test --test-timeout=60000 \"src/**/*.test.js\" \"scripts/**/*.test.js\" \"test/**/*.test.js\"",
+    "test:integration": "node --test --test-timeout=60000 \"src/**/*.itest.js\"",
     "prepublishOnly": "npm run build && npm run check:package"
   }
 }

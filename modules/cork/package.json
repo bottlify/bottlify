@@ -17,8 +17,8 @@
     "src"
   ],
   "scripts": {
-    "test": "node --test --test-timeout=60000 --test-force-exit \"src/**/*.test.js\"",
-    "test:integration": "node --test --test-timeout=60000 --test-force-exit \"src/**/*.itest.js\"",
+    "test": "node --test --test-timeout=60000 \"src/**/*.test.js\"",
+    "test:integration": "node --test --test-timeout=60000 \"src/**/*.itest.js\"",
     "typecheck": "tsc -p jsconfig.json",
     "fetch:corpus": "node scripts/fetch-corpus.mjs"
   }
