@@ -44,6 +44,10 @@ const MAX_NAME = 260;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_NOT_ENOUGH_MEMORY = 8;
+
+/** CreateThread's flag that makes dwStackSize the stack's reserve, not its commit. */
+const STACK_SIZE_PARAM_IS_A_RESERVATION = 0x00010000;
 
 /** DuplicateHandle's one option that changes what it does. */
 const DUPLICATE_CLOSE_SOURCE = 0x00000001;
@@ -395,10 +399,16 @@ export function createThreadingFunctions(host){
         CreateThread: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([, stackSize, start, parameter, , threadIdOut])=>{
+            handler: ([, stackSize, start, parameter, flags, threadIdOut])=>{
+                // The size is the stack's commit unless the caller says it is
+                // the reserve; the kernel turns either into the reserve by the
+                // rules CreateThread documents.
+                const reservation = ((flags >>> 0) & STACK_SIZE_PARAM_IS_A_RESERVATION) !== 0;
                 const thread = kernel.createThread({
                     entry: start >>> 0,
-                    stackSize: stackSize >>> 0,
+                    ...reservation
+                        ? { stackReserve: stackSize >>> 0 }
+                        : { stackSize: stackSize >>> 0 },
                     parameter: parameter >>> 0,
                     // Returning from the start routine is how most threads end,
                     // and it means exactly what calling ExitThread with the
@@ -406,6 +416,11 @@ export function createThreadingFunctions(host){
                     // it returns to.
                     returnTo: host.threadReturn?.(),
                 });
+                if (!thread)
+                {
+                    host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
+                    return 0;
+                }
                 host.threadBlock?.(thread);
                 if (threadIdOut !== 0)
                 {

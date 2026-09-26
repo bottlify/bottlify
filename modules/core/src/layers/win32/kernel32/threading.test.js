@@ -388,6 +388,29 @@ test('CreateThread fills in the thread id when asked, and not when not', ()=>{
     assert.equal(kernel.state.threadIds.length, 1, 'a null pointer is not written through');
 });
 
+test('CreateThread hands the kernel the stack size as a commit, or as a reserve when flagged', ()=>{
+    const STACK_SIZE_PARAM_IS_A_RESERVATION = 0x00010000;
+    const { kernel, fns } = setup();
+
+    fns.CreateThread.handler([0, 0x800000, 0x401000, 0, 0, 0]);
+    assert.equal(kernel.state.created[0].stackSize, 0x800000);
+    assert.equal(kernel.state.created[0].stackReserve, undefined);
+
+    fns.CreateThread.handler([0, 0x40000, 0x401000, 0, STACK_SIZE_PARAM_IS_A_RESERVATION, 0]);
+    assert.equal(kernel.state.created[1].stackReserve, 0x40000);
+    assert.equal(kernel.state.created[1].stackSize, undefined);
+});
+
+test('a thread the kernel has no room for is a failed CreateThread, not a stopped machine', ()=>{
+    const ERROR_NOT_ENOUGH_MEMORY = 8;
+    const { kernel, fns, errors } = setup();
+    kernel.createThread = ()=>null;
+
+    assert.equal(fns.CreateThread.handler([0, 0, 0x401000, 0, 0, 0x405000]), 0);
+    assert.deepEqual(errors, [ERROR_NOT_ENOUGH_MEMORY]);
+    assert.deepEqual(kernel.state.threadIds, [], 'no id is written for a thread never made');
+});
+
 test('waiting on a child process is where the parent hands over', ()=>{
     // Nothing in this process can signal a child: it runs once the parent has
     // nothing else to do. So the thread blocks outside every wait queue, and is

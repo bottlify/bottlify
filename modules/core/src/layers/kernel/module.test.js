@@ -44,7 +44,17 @@ function fakeMemory(){
         RegionKind: { STACK: 'stack' },
         Access: { READ_WRITE: 'rw' },
         /** @param {any} region */
-        register: region=>regions.push(region),
+        register: region=>{
+            const clash = regions.find(other=>
+                region.base < other.base + other.size && other.base < region.base + region.size);
+            if (clash)
+            {
+                throw new Error(`${region.name} overlaps ${clash.name}`);
+            }
+            regions.push(region);
+        },
+        /** @param {string} name */
+        unregister: name=>regions.splice(regions.findIndex(region=>region.name === name), 1),
         /** @param {number} address @param {number} value */
         writeU32: (address, value)=>words.set(address >>> 0, value >>> 0),
         /** @param {number} address */
@@ -123,6 +133,95 @@ test('the first thread may bring its own stack', async()=>{
 
     assert.equal(memory.regions.length, 0, 'nothing was allocated for it');
     assert.equal(thread.stackTop, 0x00280000 - 16);
+});
+
+/**
+ * A kernel whose threads can be given the CPU, over a pool with room for
+ * `slots` stacks of the default size.
+ *
+ * @param {number} slots @param {number} [size]
+ */
+async function makeRunningKernel(slots, size = STACK_SIZE){
+    const memory = fakeMemory();
+    const cpu = {
+        ...fakeCpu(),
+        captureContext: ()=>({}),
+        restoreContext: ()=>{},
+        resumeContextAt: ()=>{},
+        runSlice: ()=>0,
+        eip: ()=>0,
+    };
+    const kernel = await kernelModule.create(
+        { stacks: { base: STACK_BASE, size, limit: STACK_BASE + slots * size } },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? cpu : name === 'log' ? {} : memory),
+            provide: ()=>{},
+        }),
+    );
+    return { kernel, memory };
+}
+
+test('a thread that exits gives its stack back, and the next thread is given it', async()=>{
+    // Otherwise a program that makes a worker per task and lets each one end
+    // runs out of room after as many threads as the pool holds stacks, having
+    // never had more than two alive.
+    const { kernel, memory } = await makeRunningKernel(2);
+    const first = kernel.createThread({ entry: 0x00402000, name: 'first' });
+    const second = kernel.createThread({ entry: 0x00402000, name: 'second' });
+    assert.equal(kernel.createThread({ entry: 0x00402000, name: 'third' }), null,
+        'a full pool refuses a thread rather than throwing out of the machine');
+
+    kernel.runOnce();
+    assert.equal(kernel.currentThread(), first);
+    kernel.exitThread(first, 0);
+    kernel.runOnce();
+    assert.equal(kernel.currentThread(), second);
+
+    const third = kernel.createThread({ entry: 0x00402000, name: 'third' });
+    assert.notEqual(third, null);
+    assert.equal(third.stackLimit, first.stackLimit, 'on the stack the first one left');
+    assert.equal(memory.regions.length, 2, 'the first one\'s region went with it');
+
+    for (let round = 0; round < 64; round++)
+    {
+        const worker = kernel.createThread({ entry: 0x00402000, name: `worker-${round}` });
+        assert.equal(worker, null, 'the pool is full again: second and third are alive');
+    }
+});
+
+test('a thread ended by another keeps its stack', async()=>{
+    // Microsoft's "Thread Stack Size": a stack is freed when its thread exits,
+    // and not when the thread is terminated by another thread.
+    const { kernel } = await makeRunningKernel(2);
+    const first = kernel.createThread({ entry: 0x00402000, name: 'first' });
+    kernel.createThread({ entry: 0x00402000, name: 'second' });
+
+    kernel.runOnce();
+    kernel.runOnce();
+    assert.notEqual(kernel.currentThread(), first);
+    kernel.exitThread(first, 1);
+
+    assert.equal(kernel.createThread({ entry: 0x00402000, name: 'third' }), null);
+});
+
+test('a stack size asked for is honoured the way CreateThread honours it', async()=>{
+    const MEGABYTE = 0x100000;
+    const { kernel } = await makeRunningKernel(64, MEGABYTE);
+    /** @param {any} options */
+    const reserve = options=>{
+        const thread = kernel.createThread({ entry: 0x00402000, ...options });
+        return thread.stackTop + 16 - thread.stackLimit;
+    };
+
+    assert.equal(reserve({}), MEGABYTE, 'nothing asked is the default reserve');
+    assert.equal(reserve({ stackSize: 0x8000 }), MEGABYTE,
+        'a commit below the default reserve leaves the reserve alone');
+    assert.equal(reserve({ stackSize: 0x180000 }), 2 * MEGABYTE,
+        'a commit at or above it raises the reserve to it, to a whole megabyte');
+    assert.equal(reserve({ stackSize: 8 * MEGABYTE }), 8 * MEGABYTE);
+    assert.equal(reserve({ stackReserve: 0x18000 }), 0x20000,
+        'a reserve is itself, to the allocation granularity');
 });
 
 /** A log layer that publishes into tables the test can read back. */

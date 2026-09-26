@@ -64,11 +64,12 @@ export function createRegionMap(){
     /** @type {Region[]} */
     const regions = [];
     /**
-     * The last two regions a lookup found, most recent first. Regions are only
-     * ever added, so both stay valid once set. Two rather than one because a
-     * host call reads its own stack and the TEB in the same crossing, and those
-     * alternate: a one-entry cache misses on every single lookup for a pattern
-     * that a two-entry one answers from cache every time but the first.
+     * The last two regions a lookup found, most recent first. Both are
+     * forgotten when a region is given back, the one change that can make
+     * either stale. Two rather than one because a host call reads its own
+     * stack and the TEB in the same crossing, and those alternate: a
+     * one-entry cache misses on every single lookup for a pattern that a
+     * two-entry one answers from cache every time but the first.
      * @type {Region | undefined}
      */
     let mostRecent;
@@ -124,6 +125,26 @@ export function createRegionMap(){
             regions.push({ ...region });
             table.version++;
             return region;
+        },
+
+        /**
+         * Gives a region back: its span is unmapped from here on, and free for
+         * whatever is registered next. For memory whose owner is gone -- the
+         * stack of a thread that has exited -- and never for memory someone
+         * may still reach.
+         *
+         * @param {string} name
+         */
+        unregister(name){
+            const at = regions.findIndex(candidate=>candidate.name === name);
+            if (at < 0)
+            {
+                throw new Error(`No region named "${name}"`);
+            }
+            regions.splice(at, 1);
+            mostRecent = undefined;
+            secondMostRecent = undefined;
+            table.version++;
         },
 
         /**

@@ -155,6 +155,15 @@ export const memoryModule = {
                 publish();
                 return made;
             },
+            /** @param {string} name */
+            unregister: name=>{
+                if (!live())
+                {
+                    return;
+                }
+                state.regions.unregister(name);
+                publish();
+            },
             /** @param {string} name @param {string} access */
             protect: (name, access)=>{
                 if (!live())

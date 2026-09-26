@@ -13,6 +13,7 @@ import {
 import { WaitResult, createSyncObjects } from './internal/sync.js';
 import { STILL_ACTIVE, createProcessTable } from './internal/processes.js';
 import { createClock } from './internal/time.js';
+import { createStackPool } from './internal/stacks.js';
 
 /**
  * kernel — the execution core: threads, the scheduler, synchronisation, handles
@@ -82,10 +83,9 @@ export const kernelModule = {
         const memory = host.requireApi('memory');
         const log = host.requireApi('log');
 
-        // Where new threads get their stacks. Each is registered in the address
-        // space like anything else, so a stack that runs into its neighbour is
-        // caught by the region map rather than by the corruption it causes.
-        const stacks = {
+        // Where new threads get their stacks.
+        const stacks = createStackPool({
+            memory,
             base: config?.stacks?.base ?? 0x00400000 - 0x00100000,
             size: config?.stacks?.size ?? 0x10000,
             // Where the pool ends. Without one it grows into whatever follows
@@ -93,8 +93,7 @@ export const kernelModule = {
             // than by failing -- which is the hardest kind of fault to read
             // back to its cause.
             limit: config?.stacks?.limit ?? Infinity,
-            issued: 0,
-        };
+        });
 
         /**
          * Everything this instance owns, and whether it is still open.
@@ -105,10 +104,11 @@ export const kernelModule = {
          * one machine in a worker needs two at once -- so each run keeps its
          * own threads, sync objects and handles.
          *
-         * @type {{ scheduler: any, sync: any, handles: any, clock: any,
-         *          switcher: any, processes: any, disposed: boolean, resumeLog: string[] }}
+         * @type {{ scheduler: any, sync: any, handles: any, clock: any, switcher: any,
+         *          processes: any, stacks: any, disposed: boolean, resumeLog: string[] }}
          */
         const state = {
+            stacks,
             scheduler: null,
             sync: null,
             handles: null,
@@ -189,6 +189,10 @@ export const kernelModule = {
              * @param {number} [options.stackLimit]
              *   The low end of that stack. Only meaningful beside `stackTop`;
              *   a stack from the pool knows its own.
+             * @param {number} [options.stackSize]
+             *   The commit a caller asked for, which moves the reserve only
+             *   when it is as large as the default reserve.
+             * @param {number} [options.stackReserve]  The reserve a caller asked for.
              * @param {number} [options.tebAddress]
              * @param {string} [options.name]
              * @param {number} [options.returnTo]
@@ -199,10 +203,14 @@ export const kernelModule = {
              *   that loop, for a caller with nothing better -- but a caller
              *   that can end the thread should pass somewhere that does.
              * @returns {any} null once this instance is disposed -- there is
-             *     no scheduler left to give a thread to.
+             *     no scheduler left to give a thread to -- or when the pool has
+             *     no room for its stack, which is a thread that cannot be made
+             *     rather than a machine that has to stop.
              */
-            createThread(
-                { entry, parameter = 0, stackTop, stackLimit, tebAddress, name, returnTo })
+            createThread({
+                entry, parameter = 0, stackTop, stackLimit, stackSize, stackReserve,
+                tebAddress, name, returnTo,
+            })
             {
                 if (!live())
                 {
@@ -210,33 +218,33 @@ export const kernelModule = {
                 }
                 /** @type {number | undefined} */
                 let low = stackLimit;
+                let top = stackTop ?? 0;
+                /** @type {any} */
+                let slot = null;
                 // A stack from the pool unless the caller brought its own (the
                 // first thread runs on the one the process was given).
-                const allocateStack = ()=>{
-                    const base = stacks.base + stacks.issued * stacks.size;
-                    if (base + stacks.size > stacks.limit)
+                if (stackTop === undefined)
+                {
+                    slot = stacks.allocate({ commit: stackSize, reserve: stackReserve },
+                        (/** @type {any} */ owner)=>owner.releasesStack === true
+                            && owner.state === ThreadState.TERMINATED
+                            && owner !== state.scheduler.current());
+                    if (!slot)
                     {
-                        throw new Error('kernel: no room for another thread stack'
-                            + ` (${stacks.issued} of ${stacks.size} bytes from`
-                            + ` 0x${stacks.base.toString(16)})`);
+                        log.warn?.('kernel', 'no room in the stack pool for a thread'
+                            + ' (commit {0}, reserve {1}): {2}', stackSize ?? 0,
+                        stackReserve ?? 0, JSON.stringify(stacks.diagnostics()));
+                        return null;
                     }
-                    memory.register({
-                        name: `stack-${stacks.issued + 1}`,
-                        base,
-                        size: stacks.size,
-                        kind: memory.RegionKind.STACK,
-                        access: memory.Access.READ_WRITE,
-                    });
-                    stacks.issued++;
-                    low = base;
-                    return base + stacks.size;
-                };
+                    low = slot.base;
+                    top = slot.base + slot.size;
+                }
                 // Sixteen rather than the eight the frame needs: a thread that
                 // returns pops its return address and then the stub it returns
                 // into pops again, and a stack pointer that lands exactly on
                 // the top of the region is outside it. The headroom keeps every
                 // pointer the thread can reach inside the memory it was given.
-                const top = (stackTop ?? allocateStack()) - 16;
+                top -= 16;
                 memory.writeU32(top + 4, parameter);
                 memory.writeU32(top, returnTo ?? cpu.parkAddress());
 
@@ -248,6 +256,10 @@ export const kernelModule = {
                     name,
                 });
                 thread.handle = state.handles.open('thread', thread);
+                if (slot)
+                {
+                    slot.owner = thread;
+                }
                 return thread;
             },
 
@@ -360,6 +372,10 @@ export const kernelModule = {
                 {
                     return;
                 }
+                // A thread that ends itself gives its stack back; one ended
+                // by another thread does not, as Microsoft documents for
+                // TerminateThread -- whatever it left there stays readable.
+                thread.releasesStack = thread === state.scheduler.current();
                 // A thread that dies holding a mutex leaves whatever it protected
                 // half-written; the next owner has to be told (§ abandoned mutex).
                 state.sync.abandonMutexesOwnedBy(thread);
@@ -628,6 +644,7 @@ export const kernelModule = {
             metrics: {
                 ...instance.scheduler.diagnostics(),
                 ...instance.switcher.diagnostics(),
+                ...instance.stacks.diagnostics(),
                 recentScheduled: instance.resumeLog.slice(),
                 handles: instance.handles.diagnostics(),
                 sync: instance.sync.summary(),
