@@ -30,7 +30,8 @@ import {
     D3DCAPS9, D3DSURFACE_DESC9, D3DVERTEXELEMENT9, D3DVIEWPORT9,
 } from '../d3d9/structs.js';
 import {
-    IDIRECT3DDEVICE9_SLOTS, IDIRECT3DQUERY9_SLOTS, IDIRECT3DSHADER9_SLOTS,
+    IDIRECT3DCUBETEXTURE9_SLOTS, IDIRECT3DDEVICE9_SLOTS, IDIRECT3DQUERY9_SLOTS,
+    IDIRECT3DSHADER9_SLOTS,
     IDIRECT3DSTATEBLOCK9_SLOTS, IDIRECT3DSURFACE9_SLOTS, IDIRECT3DTEXTURE9_SLOTS,
     IDIRECT3DVERTEXDECLARATION9_SLOTS,
 } from '../d3d9/interfaces.js';
@@ -726,15 +727,71 @@ test('a surface names its container: its texture, its swap chain, or its device'
     h.release(root);
 });
 
-test('a cube or volume texture is refused, and the caller\'s pointer cleared', ()=>{
+test('a cube texture is made, and answers for its faces through its own vtable', ()=>{
     const h = seamed();
     const root = h.create();
     const { device } = h.createDevice(root);
     const out = 0x3000;
-    h.box.memory.writeU32(out, 0xdeadbeef);
     assert.equal(h.device(device, 'CreateCubeTexture',
-        [8, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0]), D3DERR_NOTAVAILABLE);
-    assert.equal(h.box.memory.readU32(out), 0);
+        [8, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000]), D3DERR_INVALIDCALL,
+    'a shared handle is the extended interface\'s');
+    assert.equal(h.device(device, 'CreateCubeTexture',
+        [8, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0]), D3D_OK);
+    const cube = h.box.memory.readU32(out);
+    assert.notEqual(cube, 0);
+    /** @param {string} name @param {number[]} [args] */
+    const call = (name, args = [])=>
+        h.box.call(cube, slot(IDIRECT3DCUBETEXTURE9_SLOTS, name), args);
+
+    assert.equal(call('GetType'), 5, 'D3DRTYPE_CUBETEXTURE');
+    assert.equal(call('GetLevelCount'), 4, 'a whole chain for zero levels');
+    const desc = 0x3100;
+    assert.equal(call('GetLevelDesc', [1, desc]), D3D_OK);
+    assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC9.Width), 4);
+    assert.equal(call('GetLevelDesc', [4, desc]), D3DERR_INVALIDCALL);
+
+    // Each face locks at its own storage, and one past the sixth is refused.
+    const locked = 0x3200;
+    assert.equal(call('LockRect', [5, 0, locked, 0, 0]), D3D_OK);
+    assert.equal(h.fields.readU32(locked + D3DLOCKED_RECT.Pitch), 32);
+    const fifth = h.fields.readU32(locked + D3DLOCKED_RECT.pBits);
+    assert.equal(call('UnlockRect', [5, 0]), D3D_OK);
+    assert.equal(call('UnlockRect', [5, 0]), D3DERR_INVALIDCALL, 'a face owes its unlock');
+    assert.equal(call('LockRect', [0, 0, locked, 0, 0]), D3D_OK);
+    assert.notEqual(h.fields.readU32(locked + D3DLOCKED_RECT.pBits), fifth);
+    assert.equal(call('UnlockRect', [0, 0]), D3D_OK);
+    assert.equal(call('LockRect', [6, 0, locked, 0, 0]), D3DERR_INVALIDCALL);
+    assert.equal(call('AddDirtyRect', [1, 0]), D3D_OK);
+    assert.equal(call('AddDirtyRect', [6, 0]), D3DERR_INVALIDCALL);
+
+    // A face's surface names the cube as its container.
+    assert.equal(call('GetCubeMapSurface', [2, 0, out]), D3D_OK);
+    const face = h.box.memory.readU32(out);
+    const iid = 0x3300;
+    putGuid(h, iid, [0xfff32f81, 0xd953, 0x473a, 0x92, 0x23, 0x93, 0xd6, 0x52, 0xab, 0xa9,
+        0x3f]);
+    assert.equal(h.box.call(face, slot(IDIRECT3DSURFACE9_SLOTS, 'GetContainer'), [iid, out]),
+        D3D_OK);
+    assert.equal(h.box.memory.readU32(out), cube);
+    h.release(cube);
+    assert.equal(h.release(face), 1, 'the cube holds its face');
+
+    // Bound and read back, it is the pointer the program holds.
+    assert.equal(h.device(device, 'SetTexture', [0, cube]), D3D_OK);
+    assert.equal(h.device(device, 'GetTexture', [0, out]), D3D_OK);
+    assert.equal(h.box.memory.readU32(out), cube);
+    h.release(cube);
+    assert.equal(h.device(device, 'SetTexture', [0, 0]), D3D_OK);
+    assert.equal(h.release(cube), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('a volume texture is refused, and the caller\'s pointer cleared', ()=>{
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const out = 0x3000;
     h.box.memory.writeU32(out, 0xdeadbeef);
     assert.equal(h.device(device, 'CreateVolumeTexture',
         [8, 8, 8, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0]), D3DERR_NOTAVAILABLE);

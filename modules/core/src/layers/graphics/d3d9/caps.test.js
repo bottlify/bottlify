@@ -97,7 +97,10 @@ test('what the renderer does not do is not claimed', ()=>{
     assert.equal(words.RasterCaps & 0x01000000, 0x01000000,
         'D3DPRASTERCAPS_SCISSORTEST: draws and clears are cut to the scissor');
     assert.equal(words.StencilCaps & 0x100, 0, 'no two-sided stencil');
-    assert.equal(words.TextureCaps & 0x800, 0, 'no cube maps');
+    assert.equal(words.TextureCaps & 0x10800, 0x10800,
+        'cube maps and their chains, which the renderer samples');
+    assert.equal(words.CubeTextureFilterCaps, words.TextureFilterCaps);
+    assert.equal(words.TextureCaps & 0x2000, 0, 'no volumes, which CreateVolumeTexture refuses');
     assert.equal(words.NumSimultaneousRTs, 1);
     assert.equal(words.StretchRectFilterCaps, 0);
     assert.equal(words.MaxAnisotropy, 1);

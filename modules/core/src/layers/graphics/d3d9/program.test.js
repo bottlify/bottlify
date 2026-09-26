@@ -300,6 +300,52 @@ test('a shader pair draws: layout from the declaration, modules, constants, text
         assert.equal(h.device.release(), 0);
     });
 
+test('a sampler declared a cube binds the cube map\'s cube view, and nothing of another kind',
+    async()=>{
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        const cubeSampler = (3 << 27) >>> 0;
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+        assert.equal(h.device.CreatePixelShader([
+            PIXEL_SHADER[0], op(OPCODE.DCL, 2), cubeSampler, dst(REGISTER.SAMPLER, 0),
+            ...PIXEL_SHADER.slice(4),
+        ], ps), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        /** @type {{ texture?: any }} */
+        const cube = {};
+        assert.equal(h.device.CreateCubeTexture(2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, cube),
+            D3D_OK);
+        h.device.SetTexture(0, cube.texture);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+
+        const layouts = h.gpu.of('createBindGroupLayout').map(call=>call.descriptor);
+        assert.ok(layouts.some(layout=>layout.entries.some(
+            (/** @type {any} */ entry)=>entry.texture?.viewDimension === 'cube')));
+        const bound = ()=>h.groupsOfDraw().get(2).descriptor.entries[0].resource;
+        assert.equal(bound().viewDescriptor.dimension, 'cube');
+        assert.equal(bound().texture.descriptor.size.depthOrArrayLayers, 6);
+
+        // A two-dimensional texture cannot be bound where a cube is declared:
+        // the sampler reads a blank cube, and the program is told.
+        h.device.SetTexture(0, h.texture);
+        await h.draw();
+        assert.equal(bound().texture.descriptor.label, 'placeholder:cube');
+        assert.equal(h.reports.length, 1);
+        assert.match(h.reports[0], /declared cube and a 2d texture is bound/);
+
+        h.device.SetTexture(0, null);
+        h.device.SetVertexShader(null);
+        h.device.SetPixelShader(null);
+        vs.shader.release();
+        ps.shader.release();
+        cube.texture.release();
+    });
+
 test('a programmable draw is not blind to the dump: shaders, declaration and samplers', async()=>{
     // render.js's `--dump-draws` table used to skip every draw with
     // `prepared.program` outright (guarded by `!prepared.program`), so a

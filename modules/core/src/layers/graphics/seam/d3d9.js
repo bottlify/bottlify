@@ -591,7 +591,10 @@ export function createDirect3D9Seam(
     const writeLevelDesc = (texture, level, out)=>{
         /** @type {{ surface?: any }} */
         const held = {};
-        const hr = texture.GetSurfaceLevel(level, held);
+        // Every face of a cube's level has one description: the first's.
+        const hr = texture.cube
+            ? texture.GetCubeMapSurface(0, level, held)
+            : texture.GetSurfaceLevel(level, held);
         if (hr !== D3D_OK || !held.surface)
         {
             return hr;
@@ -644,9 +647,42 @@ export function createDirect3D9Seam(
         /** @param {any} texture @param {number[]} args */
         AddDirtyRect: (texture, [rect])=>texture.AddDirtyRect(readRect(rect)),
     };
+    // A cube map's own methods name a face before the level.
     const cubeTextureMethods = {
         ...resourceMethods(D3DRTYPE.CUBETEXTURE),
         ...baseTextureMethods,
+        GetLevelDesc: textureMethods.GetLevelDesc,
+        /** @param {any} texture @param {number[]} args */
+        GetCubeMapSurface: (texture, [face, level, out])=>{
+            /** @type {{ surface?: any }} */
+            const held = {};
+            const hr = texture.GetCubeMapSurface(face >>> 0, level >>> 0, held);
+            if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
+            {
+                return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface9,
+                    out >>> 0, E_OUTOFMEMORY, owners.get(texture));
+            }
+            return hr;
+        },
+        /** @param {any} texture @param {number[]} args */
+        LockRect: (texture, [face, level, out, rect, flags])=>{
+            /** @type {any} */
+            const locked = {};
+            const hr = texture.LockCubeRect(face >>> 0, level >>> 0, locked, readRect(rect),
+                flags >>> 0);
+            if (hr === D3D_OK && (out >>> 0) !== 0)
+            {
+                fields.writeStruct(out >>> 0, D3DLOCKED_RECT, {
+                    Pitch: locked.Pitch ?? 0,
+                    pBits: locked.pBits ?? 0,
+                });
+            }
+            return hr;
+        },
+        /** @param {any} texture @param {number[]} args */
+        UnlockRect: (texture, [face, level])=>texture.UnlockCubeRect(face >>> 0, level >>> 0),
+        /** @param {any} texture @param {number[]} args */
+        AddDirtyRect: (texture, [face, rect])=>texture.AddDirtyRect(readRect(rect), face >>> 0),
     };
 
     /**
@@ -1175,13 +1211,26 @@ export function createDirect3D9Seam(
         },
 
         // A volume texture is refused rather than made: the renderer samples
-        // none, and there is no interface for one here. A cube texture is
-        // refused for the same reason -- the capability block claims no cube
-        // maps, and a program that read it never asks.
+        // none, and there is no interface for one here.
         /** @param {any} device @param {number[]} args */
         CreateVolumeTexture: (device, [, , , , , , , out])=>clearAndRefuse(out),
         /** @param {any} device @param {number[]} args */
-        CreateCubeTexture: (device, [, , , , , out])=>clearAndRefuse(out),
+        CreateCubeTexture: (device, [edgeLength, levels, usage, format, pool, out, shared])=>{
+            if (sharedHandleRefused(shared) || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ texture?: any }} */
+            const held = {};
+            const hr = device.CreateCubeTexture(edgeLength >>> 0, levels >>> 0, usage >>> 0,
+                format >>> 0, pool >>> 0, held);
+            if (hr === D3D_OK && held.texture)
+            {
+                return handBack(held.texture, cubeTextureInterfaces, IID_IDirect3DCubeTexture9,
+                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
+            }
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         CreateVertexBuffer: (device, [length, usage, fvf, pool, out, shared])=>{

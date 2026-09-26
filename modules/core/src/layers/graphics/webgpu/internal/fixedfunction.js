@@ -599,10 +599,17 @@ export function generateFixedFunction(state, layout){
         assignments.push('    out.specularAlpha = out.specular.a;');
     }
 
+    // A set a cube or volume stage reads carries all its components, zero
+    // for one the vertex does not have; every other set carries two.
+    const wide = wideSets(state);
     for (let set = 0; set < layout.texCoordSets; set++)
     {
-        varyings.push(`    @location(${location++}) texCoord${set}: vec2f,`);
-        assignments.push(`    out.texCoord${set} = vertex.texCoord${set}.xy;`);
+        const format = layout.attributes.find(attribute=>attribute.name === `texCoord${set}`)
+            ?.format ?? 'float32x2';
+        varyings.push(
+            `    @location(${location++}) texCoord${set}: ${wide.has(set) ? 'vec4f' : 'vec2f'},`);
+        assignments.push(`    out.texCoord${set} = ${wide.has(set)
+            ? widened(`vertex.texCoord${set}`, format) : `vertex.texCoord${set}.xy`};`);
     }
 
     // A stage generating its coordinates from the vertex in camera space gets
@@ -695,10 +702,10 @@ export function generateFixedFunction(state, layout){
     const code = `${lightCount === 0 ? '' : LIGHT_STRUCT}${uniformStruct(lightCount)}
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 ${functionDeclarations(lighting, vertexFog || fogSource === FOG_SOURCE.TABLE
-        ? state.fogMode : D3DFOG.NONE)}${samplerDeclarations(state.stages.length, 0, 1)}
+        ? state.fogMode : D3DFOG.NONE)}${samplerDeclarations(dimensionsOf(state), 0, 1)}
 ${keys.some(key=>key !== null) ? 'var<private> colourKeyed: bool = false;\n' : ''}${
     sampleFunctions(state.stages.length, state.stages.map((stage, index)=>(generated[index]
-        ? { projected: stage.projected ?? 0 } : null)), keys)}
+        ? { projected: stage.projected ?? 0 } : null)), keys, dimensionsOf(state))}
 struct VertexIn {
 ${inputs}
 };
@@ -812,6 +819,7 @@ function fragmentBody(state, specularEnable, generated = state.stages.map(
     stage=>generates(stage.texCoordIndex)), position = 'input.position',
 specular = 'input.specular')
 {
+    const wide = wideSets(state);
     const stages = state.stages.length === 0
         ? '    var current = input.diffuse;'
         : ['    var current = input.diffuse;', ...state.stages.map((stage, index)=>{
@@ -819,9 +827,12 @@ specular = 'input.specular')
             // sharing one set is the ordinary way a detail or lightmap pass is
             // written, and reading set N for stage N samples a varying the
             // vertex never carried.
+            const set = stage.texCoordIndex & COORD_SET_MASK;
+            const flat = (stage.dimension ?? '2d') === '2d';
+            const own = `input.generated${index}`;
             const coordinate = generated[index]
-                ? `input.generated${index}`
-                : `input.texCoord${stage.texCoordIndex & COORD_SET_MASK}`;
+                ? flat ? own : stage.projected === 4 ? `(${own}.xyz / ${own}.w)` : `${own}.xyz`
+                : `input.texCoord${set}${wide.has(set) ? flat ? '.xy' : '.xyz' : ''}`;
             const color = combine(
                 stage.colorOp, index, coordinate, stage.colorArg1, stage.colorArg2, specular);
             if (color === null)
@@ -907,14 +918,17 @@ export function fixedFragmentStage(state, written){
     }
     const sets = state.stages.reduce(
         (most, stage)=>Math.max(most, (stage.texCoordIndex & COORD_SET_MASK) + 1), 0);
+    const wide = wideSets(state);
     for (let set = 0; set < sets; set++)
     {
         if (has(2 + set))
         {
             fields.push(`    @location(${2 + set}) t${set}: vec4f,`);
         }
+        const keep = wide.has(set);
+        const absent = keep ? 'vec4f(0.0)' : 'vec2f(0.0)';
         carried.push(`    input.texCoord${set} = `
-            + `${has(2 + set) ? `in.t${set}.xy` : 'vec2f(0.0)'};`);
+            + `${has(2 + set) ? `in.t${set}${keep ? '' : '.xy'}` : absent};`);
     }
     // Below table fog, a shader-drawn vertex is fogged by what the shader
     // wrote: its oFog when it wrote one, else its specular alpha -- neither
@@ -930,13 +944,14 @@ export function fixedFragmentStage(state, written){
         carried.push(`    input.fogAmount = ${has(10) ? 'in.fog.x' : has(1) ? 'in.v1.a' : '1.0'};`);
     }
     const members = ['    diffuse: vec4f,', '    specular: vec4f,',
-        ...Array.from({ length: sets }, (_, set)=>`    texCoord${set}: vec2f,`),
+        ...Array.from({ length: sets },
+            (_, set)=>`    texCoord${set}: ${wide.has(set) ? 'vec4f' : 'vec2f'},`),
         ...(carriedFog ? ['    fogAmount: f32,'] : [])];
     const wgsl = `${uniformStruct(0)}
 @group(1) @binding(0) var<uniform> uniforms: Uniforms;
 ${functionDeclarations(null, fogSource === FOG_SOURCE.TABLE ? state.fogMode : D3DFOG.NONE)}${
-    samplerDeclarations(state.stages.length, 2, 0)}
-${sampleFunctions(state.stages.length)}
+    samplerDeclarations(dimensionsOf(state), 2, 0)}
+${sampleFunctions(state.stages.length, [], [], dimensionsOf(state))}
 struct PsIn {
 ${fields.join('\n')}
 };
@@ -955,7 +970,7 @@ ${fragmentBody(state, state.specularEnable === true, [], 'in.position')}
 `;
     return {
         wgsl, entry: 'ps_main',
-        samplers: state.stages.map((_, index)=>({ index, type: '2d' })),
+        samplers: state.stages.map((stage, index)=>({ index, type: stage.dimension ?? '2d' })),
         inputs: [], outputs: [], reads: written.filter(location=>location <= 10),
         constants: 0, error: null,
     };
@@ -1022,9 +1037,12 @@ const ADDRESS_FUNCTION = `fn addressCoordinate(t: f32, mode: u32, texels: f32) -
  *     whose nearest texel is that colour marks the fragment keyed. The texel
  *     itself is compared, not the filtered sample, which blends it with its
  *     neighbours, and its colour alone.
+ * @param {readonly string[]} [dimensions]
+ *     Per stage, '2d', 'cube' or '3d': a cube or volume stage samples three
+ *     components, and is sampled by `cubeSample` or `volumeSample`.
  * @returns {string}
  */
-function sampleFunctions(count, generated = [], keys = []){
+function sampleFunctions(count, generated = [], keys = [], dimensions = []){
     if (count === 0)
     {
         return '';
@@ -1034,6 +1052,14 @@ function sampleFunctions(count, generated = [], keys = []){
     for (let index = 0; index < count; index++)
     {
         const flags = index < 3 ? `uniforms.stage${index}` : '0u';
+        const dimension = dimensions[index] ?? '2d';
+        if (dimension !== '2d')
+        {
+            lines.push(dimension === 'cube'
+                ? cubeSample(index, flags)
+                : volumeSample(index, flags));
+            continue;
+        }
         // The stage's texture transform, as Direct3D applies it to a
         // two-dimensional coordinate: (u, v, 1) through the first three rows,
         // so a translation is the third row and not the fourth. Identity rows
@@ -1085,6 +1111,140 @@ ${keyTest(index, keys[index] ?? null)
 }
 
 /**
+ * The sampling of a cube stage: the coordinate is a direction, three
+ * components, and a face's own texels are what a level is chosen by -- the
+ * derivatives of the direction over its major axis, at half the face's size.
+ * Address modes do not apply across a cube's faces. A point-filtered sample
+ * moves the direction to the centre of the face's texel it points into: the
+ * two minor components over the major one are that face's coordinates.
+ *
+ * @param {number} index @param {string} flags
+ */
+function cubeSample(index, flags){
+    return `fn sampleStage${index}(direction: vec3f) -> vec4f {
+    let flags = ${flags};
+    let size = f32(textureDimensions(texture${index}, 0).x);
+    let axes = abs(direction);
+    let major = max(max(max(axes.x, axes.y), axes.z), 1.0e-12);
+    let dx = dpdx(direction) / major * size * 0.5;
+    let dy = dpdy(direction) / major * size * 0.5;
+    let levels = f32(textureNumLevels(texture${index}));
+    let lod = clamp(0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0e-12)),
+        f32((flags >> 8u) & 0xffu), max(levels - 1.0, 0.0));
+    let mipMode = (flags >> 6u) & 3u;
+    var level = f32((flags >> 8u) & 0xffu);
+    if (mipMode == 1u) {
+        level = round(lod);
+    } else if (mipMode == 2u) {
+        level = lod;
+    }
+    var point = (flags >> 4u) & 1u;
+    if (lod > 0.0) {
+        point = (flags >> 5u) & 1u;
+    }
+    var towards = direction;
+    if (point == 1u) {
+        let texels = max(floor(size / exp2(floor(level))), 1.0);
+        let face = direction / major;
+        let snapped = (floor((face * 0.5 + 0.5) * texels) + 0.5) / texels * 2.0 - 1.0;
+        if (axes.x >= axes.y && axes.x >= axes.z) {
+            towards = vec3f(face.x, snapped.yz);
+        } else if (axes.y >= axes.z) {
+            towards = vec3f(snapped.x, face.y, snapped.z);
+        } else {
+            towards = vec3f(snapped.xy, face.z);
+        }
+    }
+    return textureSampleLevel(texture${index}, sampler${index}, towards, level);
+}
+`;
+}
+
+/**
+ * The sampling of a volume stage: the 2D stage's, over three coordinates,
+ * with the third's address mode in bits 16-17 of the stage's flags.
+ *
+ * @param {number} index @param {string} flags
+ */
+function volumeSample(index, flags){
+    return `fn sampleStage${index}(raw: vec3f) -> vec4f {
+    let flags = ${flags};
+    let size = vec3f(textureDimensions(texture${index}, 0));
+    let dx = dpdx(raw * size);
+    let dy = dpdy(raw * size);
+    let levels = f32(textureNumLevels(texture${index}));
+    let lod = clamp(0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0e-12)),
+        f32((flags >> 8u) & 0xffu), max(levels - 1.0, 0.0));
+    let mipMode = (flags >> 6u) & 3u;
+    var level = f32((flags >> 8u) & 0xffu);
+    if (mipMode == 1u) {
+        level = round(lod);
+    } else if (mipMode == 2u) {
+        level = lod;
+    }
+    let levelSize = max(floor(size / exp2(floor(level))), vec3f(1.0));
+    var uvw = vec3f(addressCoordinate(raw.x, flags & 3u, levelSize.x),
+        addressCoordinate(raw.y, (flags >> 2u) & 3u, levelSize.y),
+        addressCoordinate(raw.z, (flags >> 16u) & 3u, levelSize.z));
+    var point = (flags >> 4u) & 1u;
+    if (lod > 0.0) {
+        point = (flags >> 5u) & 1u;
+    }
+    if (point == 1u) {
+        uvw = (floor(uvw * levelSize) + 0.5) / levelSize;
+    }
+    return textureSampleLevel(texture${index}, sampler${index}, uvw, level);
+}
+`;
+}
+
+/**
+ * The texture each stage samples, by dimension: '2d', 'cube' or '3d'.
+ *
+ * @param {import('./pipeline.js').PipelineState} state
+ * @returns {string[]}
+ */
+function dimensionsOf(state){
+    return state.stages.map(stage=>stage.dimension ?? '2d');
+}
+
+/**
+ * The carried coordinate sets a cube or volume stage reads: those carry every
+ * component rather than two.
+ *
+ * @param {import('./pipeline.js').PipelineState} state
+ * @returns {Set<number>}
+ */
+function wideSets(state){
+    return new Set(state.stages
+        .filter(stage=>(stage.dimension ?? '2d') !== '2d' && !generates(stage.texCoordIndex))
+        .map(stage=>stage.texCoordIndex & COORD_SET_MASK));
+}
+
+/**
+ * A vertex input of `format` as four components, the missing ones zero.
+ *
+ * @param {string} name @param {string} format
+ */
+function widened(name, format){
+    switch (wgslType(format))
+    {
+        case 'f32':
+            return `vec4f(${name}, 0.0, 0.0, 0.0)`;
+        case 'vec2f':
+            return `vec4f(${name}, 0.0, 0.0)`;
+        case 'vec3f':
+            return `vec4f(${name}, 0.0)`;
+        default:
+            return name;
+    }
+}
+
+/** The WGSL texture type of each sampled dimension. */
+const TEXTURE_TYPE = Object.freeze({ '2d': 'texture_2d<f32>', cube: 'texture_cube<f32>',
+    '3d': 'texture_3d<f32>' });
+
+/**
  * The colour-key test inside a stage's sample, or nothing for a stage with
  * no key: its nearest top-level texel against the key, to within half a
  * level, the key having been expanded exactly as the texel was.
@@ -1117,15 +1277,17 @@ function literalOf(value){
  * `group`: the fixed-function pipeline's own group after its block, or the
  * programmable layout's sampler group from its start.
  *
- * @param {number} count @param {number} group @param {number} first @returns {string}
+ * @param {readonly string[]} dimensions  Each stage's: '2d', 'cube' or '3d'.
+ * @param {number} group @param {number} first @returns {string}
  */
-function samplerDeclarations(count, group, first){
+function samplerDeclarations(dimensions, group, first){
     /** @type {string[]} */
     const lines = [];
-    for (let index = 0; index < count; index++)
+    for (let index = 0; index < dimensions.length; index++)
     {
         lines.push(`@group(${group}) @binding(${first + index * 2})`
-            + ` var texture${index}: texture_2d<f32>;`);
+            + ` var texture${index}: ${
+                /** @type {Record<string, string>} */ (TEXTURE_TYPE)[dimensions[index]]};`);
         lines.push(`@group(${group}) @binding(${first + 1 + index * 2})`
             + ` var sampler${index}: sampler;`);
     }

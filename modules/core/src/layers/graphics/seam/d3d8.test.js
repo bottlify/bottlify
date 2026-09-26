@@ -27,8 +27,8 @@ import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
 import { BUFFER, SHADOW, STALE_POINTER, TEXTURE } from './shadow.js';
 import {
-    IDIRECT3D8_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
-    IDIRECT3DVERTEXBUFFER8_SLOTS,
+    IDIRECT3D8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS, IDIRECT3DDEVICE8_SLOTS,
+    IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS, IDIRECT3DVERTEXBUFFER8_SLOTS,
 } from './vtables.js';
 import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js';
 import { REFRESH_HZ } from '../../win32/user32/display.js';
@@ -454,7 +454,10 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
         [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, texture, D3DFMT.UNKNOWN]), D3DERR_NOTAVAILABLE);
     const cubeTexture = 5;
     assert.equal(ask('CheckDeviceFormat',
-        [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, cubeTexture, D3DFMT.A8R8G8B8]),
+        [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, cubeTexture, D3DFMT.A8R8G8B8]), D3D_OK);
+    const volumeTexture = 4;
+    assert.equal(ask('CheckDeviceFormat',
+        [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, volumeTexture, D3DFMT.A8R8G8B8]),
     D3DERR_NOTAVAILABLE, 'and a kind of resource this build refuses to make is never available');
 
     assert.equal(ask('CheckDeviceMultiSampleType',
@@ -558,8 +561,6 @@ test('what this build cannot do says so, and clears the pointer it was given', (
     // A create that cannot be done reports it and leaves nothing behind: a
     // program tests the pointer as often as the result.
     assert.equal(refused('CreateAdditionalSwapChain', [0, out]), D3DERR_NOTAVAILABLE);
-    assert.equal(refused('CreateCubeTexture', [64, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, out]),
-        D3DERR_NOTAVAILABLE, 'nothing samples a cube map here');
     assert.equal(
         refused('CreateVolumeTexture', [8, 8, 8, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, out]),
         D3DERR_NOTAVAILABLE);
@@ -1208,6 +1209,60 @@ test('a surface names its container as QueryInterface on it would, and its devic
     h.release(root);
 });
 
+test('a cube texture is made, and answers for its faces through its own vtable', ()=>{
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const out = 0xe000;
+    assert.equal(h.device(device, 'CreateCubeTexture',
+        [8, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out]), D3D_OK);
+    const cube = h.box.memory.readU32(out);
+    assert.notEqual(cube, 0);
+    /** @param {string} name @param {number[]} [args] */
+    const call = (name, args = [])=>
+        h.box.call(cube, slot(IDIRECT3DCUBETEXTURE8_SLOTS, name), args);
+
+    assert.equal(call('GetType'), 5, 'D3DRTYPE_CUBETEXTURE');
+    assert.equal(call('GetLevelCount'), 4, 'a whole chain for zero levels');
+    const desc = 0xe100;
+    assert.equal(call('GetLevelDesc', [1, desc]), D3D_OK);
+    assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Width), 4);
+
+    // Each face locks at its own storage, and one past the sixth is refused.
+    const locked = 0xe200;
+    assert.equal(call('LockRect', [5, 0, locked, 0, 0]), D3D_OK);
+    assert.equal(h.fields.readU32(locked + D3DLOCKED_RECT.Pitch), 32);
+    const fifth = h.fields.readU32(locked + D3DLOCKED_RECT.pBits);
+    assert.equal(call('UnlockRect', [5, 0]), D3D_OK);
+    assert.equal(call('LockRect', [0, 0, locked, 0, 0]), D3D_OK);
+    assert.notEqual(h.fields.readU32(locked + D3DLOCKED_RECT.pBits), fifth);
+    assert.equal(call('UnlockRect', [0, 0]), D3D_OK);
+    assert.equal(call('LockRect', [6, 0, locked, 0, 0]), D3DERR_INVALIDCALL);
+    assert.equal(call('AddDirtyRect', [1, 0]), D3D_OK);
+    assert.equal(call('AddDirtyRect', [6, 0]), D3DERR_INVALIDCALL);
+
+    // A face's surface names the cube as its container, by d3d8.h's GUID.
+    assert.equal(call('GetCubeMapSurface', [2, 0, out]), D3D_OK);
+    const face = h.box.memory.readU32(out);
+    const iid = 0xe300;
+    putGuid(h, iid, [0x3EE5B968, 0x2ACA, 0x4C34, 0x8B, 0xB5, 0x7E, 0x0C, 0x3D, 0x19, 0xB7,
+        0x50]);
+    assert.equal(h.surface(face, 'GetContainer', [iid, out]), D3D_OK);
+    assert.equal(h.box.memory.readU32(out), cube);
+    h.release(cube);
+    assert.equal(h.release(face), 1, 'the cube holds its face');
+
+    // Bound and read back, it is the pointer the program holds.
+    assert.equal(h.device(device, 'SetTexture', [0, cube]), D3D_OK);
+    assert.equal(h.device(device, 'GetTexture', [0, out]), D3D_OK);
+    assert.equal(h.box.memory.readU32(out), cube);
+    h.release(cube);
+    assert.equal(h.device(device, 'SetTexture', [0, 0]), D3D_OK);
+    assert.equal(h.release(cube), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
 test('a texture palette is kept and read back, and one with alpha is refused', ()=>{
     // Wine's d3d8 test_set_palette and visual.c's palette test: an opaque
     // palette is taken and a current one chosen; entries with alpha need
@@ -1451,9 +1506,10 @@ test('every capability claimed is one the renderer honours', ()=>{
 
     assert.equal(caps.TextureOpCaps, 0x0000ffff,
         'DISABLE through BLENDCURRENTALPHA, the operations the combiner draws');
-    assert.equal(caps.TextureCaps & (0x00000800 | 0x00010000), 0,
-        'no cube maps, which CreateCubeTexture refuses');
-    assert.equal(caps.CubeTextureFilterCaps, 0);
+    assert.equal(caps.TextureCaps & (0x00000800 | 0x00010000), 0x00010800,
+        'cube maps and their chains, which the renderer samples');
+    assert.equal(caps.CubeTextureFilterCaps, caps.TextureFilterCaps);
+    assert.equal(caps.TextureCaps & 0x00002000, 0, 'no volumes, which CreateVolumeTexture refuses');
     assert.equal(caps.Caps2 & 0x00020000, 0,
         'no D3DCAPS2_FULLSCREENGAMMA: a ramp is kept and read back, and nothing applies it');
     assert.equal(caps.TextureCaps & 0x00000080, 0,

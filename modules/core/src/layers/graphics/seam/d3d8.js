@@ -31,10 +31,12 @@
  * because both are facts about the ABI rather than about Direct3D.
  */
 
-import { describe, IDIRECT3D8_SLOTS, IDIRECT3DBASETEXTURE8_SLOTS, IDIRECT3DDEVICE8_SLOTS,
+import { describe, IDIRECT3D8_SLOTS, IDIRECT3DBASETEXTURE8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS,
+    IDIRECT3DDEVICE8_SLOTS,
     IDIRECT3DRESOURCE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
     IDIRECT3DVERTEXBUFFER8_SLOTS, IDIRECT3DINDEXBUFFER8_SLOTS } from './vtables.js';
-import { IID_IDirect3D8, IID_IDirect3DBaseTexture8, IID_IDirect3DDevice8,
+import { IID_IDirect3D8, IID_IDirect3DBaseTexture8, IID_IDirect3DCubeTexture8,
+    IID_IDirect3DDevice8,
     IID_IDirect3DIndexBuffer8, IID_IDirect3DResource8, IID_IDirect3DSurface8,
     IID_IDirect3DTexture8, IID_IDirect3DVertexBuffer8 } from './iids.js';
 import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js';
@@ -120,6 +122,8 @@ const D3DPTEXTURECAPS_PERSPECTIVE = 0x00000001;
 const D3DPTEXTURECAPS_ALPHA = 0x00000004;
 const D3DPTEXTURECAPS_PROJECTED = 0x00000400;
 const D3DPTEXTURECAPS_MIPMAP = 0x00004000;
+const D3DPTEXTURECAPS_CUBEMAP = 0x00000800;
+const D3DPTEXTURECAPS_MIPCUBEMAP = 0x00010000;
 
 /**
  * Point and linear, for minification, magnification and mip. An anisotropic
@@ -391,13 +395,42 @@ export function createDirect3D8Seam(
      * pointer left there is one it goes on to call.
      *
      * @param {number} out
+     * @param {number} [hr]  The refusal; D3DERR_NOTAVAILABLE unless the create said otherwise.
      */
-    const clearAndRefuse = out=>{
+    const clearAndRefuse = (out, hr = D3DERR_NOTAVAILABLE)=>{
         if ((out >>> 0) !== 0)
         {
             fields.writeU32(out >>> 0, 0);
         }
-        return D3DERR_NOTAVAILABLE;
+        return hr;
+    };
+
+    /**
+     * A level's description is the description of its surface, which is also
+     * the only way to reach one. The reference that reaching it took is given
+     * straight back: the call hands out no interface, so a program owes
+     * nothing for it.
+     *
+     * @param {(held: { surface?: any }) => number} reach
+     * @param {number} out
+     */
+    const writeLevelDesc = (reach, out)=>{
+        /** @type {{ surface?: any }} */
+        const held = {};
+        const hr = reach(held);
+        if (hr !== D3D_OK || !held.surface)
+        {
+            return hr;
+        }
+        /** @type {{ desc?: any }} */
+        const described = {};
+        held.surface.GetDesc(described);
+        held.surface.release();
+        if ((out >>> 0) !== 0 && described.desc)
+        {
+            fields.writeStruct(out >>> 0, D3DSURFACE_DESC8, described.desc);
+        }
+        return D3D_OK;
     };
 
     /**
@@ -469,7 +502,8 @@ export function createDirect3D8Seam(
             const id = readGuid(memory, riid);
             if (surface.container)
             {
-                return queryAs(publisher, fields, surface.container, textureInterfaces, id, out);
+                return queryAs(publisher, fields, surface.container,
+                    textureKind(surface.container).interfaces, id, out);
             }
             const device = ownerOf(surface);
             if (!device)
@@ -542,29 +576,9 @@ export function createDirect3D8Seam(
             return answer;
         },
 
-        // A level's description is the description of its surface, which is
-        // also the only way to reach one. The reference that reaching it took
-        // is given straight back: this call hands out no interface, so a
-        // program owes nothing for it.
         /** @param {any} texture @param {number[]} args */
-        GetLevelDesc: (texture, [level, out])=>{
-            /** @type {{ surface?: any }} */
-            const held = {};
-            const hr = texture.GetSurfaceLevel(level >>> 0, held);
-            if (hr !== D3D_OK || !held.surface)
-            {
-                return hr;
-            }
-            /** @type {{ desc?: any }} */
-            const described = {};
-            held.surface.GetDesc(described);
-            held.surface.release();
-            if ((out >>> 0) !== 0 && described.desc)
-            {
-                fields.writeStruct(out >>> 0, D3DSURFACE_DESC8, described.desc);
-            }
-            return D3D_OK;
-        },
+        GetLevelDesc: (texture, [level, out])=>writeLevelDesc(
+            held=>texture.GetSurfaceLevel(level >>> 0, held), out),
 
         // Locking a level through the texture and through the level's own
         // surface are one lock, which is what makes taking both an error.
@@ -597,6 +611,64 @@ export function createDirect3D8Seam(
         describe(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS, textureMethods),
         describe(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, textureMethods),
     ];
+
+    // A cube map: the base texture's methods, then each of its own naming a
+    // face before the level.
+    const cubeTextureMethods = {
+        ...resourceMethods(D3DRTYPE.CUBETEXTURE),
+        SetLOD: textureMethods.SetLOD,
+        GetLOD: textureMethods.GetLOD,
+        GetLevelCount: textureMethods.GetLevelCount,
+        /** @param {any} texture @param {number[]} args */
+        GetLevelDesc: (texture, [level, out])=>writeLevelDesc(
+            held=>texture.GetCubeMapSurface(0, level >>> 0, held), out),
+        /** @param {any} texture @param {number[]} args */
+        GetCubeMapSurface: (texture, [face, level, out])=>{
+            /** @type {{ surface?: any }} */
+            const held = {};
+            const hr = texture.GetCubeMapSurface(face >>> 0, level >>> 0, held);
+            if (hr !== D3D_OK || !held.surface || (out >>> 0) === 0)
+            {
+                return hr;
+            }
+            return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8, out >>> 0);
+        },
+        /** @param {any} texture @param {number[]} args */
+        LockRect: (texture, [face, level, out, rect, flags])=>{
+            /** @type {any} */
+            const locked = {};
+            const hr = texture.LockCubeRect(face >>> 0, level >>> 0, locked, readRect(rect),
+                flags >>> 0);
+            if (hr === D3D_OK && (out >>> 0) !== 0)
+            {
+                fields.writeStruct(out >>> 0, D3DLOCKED_RECT, {
+                    Pitch: locked.Pitch ?? 0,
+                    pBits: locked.pBits ?? 0,
+                });
+            }
+            return hr;
+        },
+        /** @param {any} texture @param {number[]} args */
+        UnlockRect: (texture, [face, level])=>texture.UnlockCubeRect(face >>> 0, level >>> 0),
+        /** @param {any} texture @param {number[]} args */
+        AddDirtyRect: (texture, [face, rect])=>texture.AddDirtyRect(readRect(rect), face >>> 0),
+    };
+    const cubeTextureInterfaces = [
+        describe(IID_IDirect3DCubeTexture8, IDIRECT3DCUBETEXTURE8_SLOTS, cubeTextureMethods,
+            {}, retire),
+        describe(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS, cubeTextureMethods),
+        describe(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, cubeTextureMethods),
+    ];
+
+    /**
+     * Whichever interfaces a texture is published with, by its kind.
+     *
+     * @param {any} texture
+     * @returns {{ interfaces: import('./com.js').InterfaceDescriptor[], id: string }}
+     */
+    const textureKind = texture=>(texture.cube
+        ? { interfaces: cubeTextureInterfaces, id: IID_IDirect3DCubeTexture8 }
+        : { interfaces: textureInterfaces, id: IID_IDirect3DTexture8 });
 
     /**
      * A buffer hands back an address in the guest's own memory, so locking is
@@ -1303,14 +1375,24 @@ export function createDirect3D8Seam(
             return hr;
         },
 
-        // A cube map and a volume texture are refused rather than made. The
-        // renderer samples neither, and there is no vtable for either interface
-        // here -- a texture handed back through a table transcribed from memory
-        // would be worse than one that was never made, because the program
-        // would call into it. The refusal is what sends a program to the
-        // two-dimensional path it also has.
         /** @param {any} device @param {number[]} args */
-        CreateCubeTexture: (device, [, , , , , out])=>clearAndRefuse(out),
+        CreateCubeTexture: (device, [edgeLength, levels, usage, format, pool, out])=>{
+            /** @type {{ texture?: any }} */
+            const held = {};
+            const hr = device.CreateCubeTexture(edgeLength >>> 0, levels >>> 0, usage >>> 0,
+                format >>> 0, pool >>> 0, held);
+            if (hr === D3D_OK && held.texture && (out >>> 0) !== 0)
+            {
+                attachTexture(device, held.texture);
+                return handBack(held.texture, cubeTextureInterfaces, IID_IDirect3DCubeTexture8,
+                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
+            }
+            return clearAndRefuse(out, hr);
+        },
+
+        // A volume texture is refused rather than made: the renderer samples
+        // none, and a refusal sends a program to the two-dimensional path it
+        // also has.
 
         /** @param {any} device @param {number[]} args */
         CreateVolumeTexture: (device, [, , , , , , , out])=>clearAndRefuse(out),
@@ -1487,7 +1569,8 @@ export function createDirect3D8Seam(
                 // answers a null pointer rather than leaving the caller's
                 // variable holding the texture it last read.
                 fields.writeU32(out >>> 0, held.texture
-                    ? publisher.publish(held.texture, textureInterfaces, IID_IDirect3DTexture8)
+                    ? publisher.publish(held.texture, textureKind(held.texture).interfaces,
+                        textureKind(held.texture).id)
                     : 0);
             }
             return hr;
@@ -1967,11 +2050,12 @@ export function createDirect3D8Seam(
             AlphaCmpCaps: ALL_COMPARE_CAPS,
             ShadeCaps: D3DPSHADECAPS_COLORGOURAUDRGB | D3DPSHADECAPS_SPECULARGOURAUDRGB
                 | D3DPSHADECAPS_ALPHAGOURAUDBLEND | D3DPSHADECAPS_FOGGOURAUD,
-            // No cube maps, which CreateCubeTexture refuses, and no palette
-            // alpha: no palettised format is ever made.
+            // No palette alpha: no palettised format is ever made.
             TextureCaps: D3DPTEXTURECAPS_PERSPECTIVE | D3DPTEXTURECAPS_ALPHA
-                | D3DPTEXTURECAPS_PROJECTED | D3DPTEXTURECAPS_MIPMAP,
+                | D3DPTEXTURECAPS_PROJECTED | D3DPTEXTURECAPS_MIPMAP
+                | D3DPTEXTURECAPS_CUBEMAP | D3DPTEXTURECAPS_MIPCUBEMAP,
             TextureFilterCaps: FILTER_CAPS,
+            CubeTextureFilterCaps: FILTER_CAPS,
             // Border and mirror-once are folded into clamp and mirror by the
             // sampler, so neither is promised.
             TextureAddressCaps: D3DPTADDRESSCAPS_WRAP | D3DPTADDRESSCAPS_MIRROR

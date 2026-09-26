@@ -316,6 +316,19 @@ export const IDIRECT3DTEXTURE8_SLOTS = /** @type {[string, number][]} */ ([
     ['AddDirtyRect', 1],
 ]);
 
+/**
+ * IDirect3DCubeTexture8: the base texture, then its own five, each naming the
+ * face before the level.
+ */
+export const IDIRECT3DCUBETEXTURE8_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDIRECT3DBASETEXTURE8_SLOTS,
+    ['GetLevelDesc', 2],
+    ['GetCubeMapSurface', 3],
+    ['LockRect', 5],
+    ['UnlockRect', 2],
+    ['AddDirtyRect', 2],
+]);
+
 /** IDirect3DVertexBuffer8. */
 export const IDIRECT3DVERTEXBUFFER8_SLOTS = /** @type {[string, number][]} */ ([
     ...IDIRECT3DRESOURCE8_SLOTS,

@@ -46,7 +46,7 @@ import { D3DLOCK_NO_DIRTY_UPDATE, levelExtent } from '../d3d9/resources.js';
 import { D3DRS as D3DRS9 } from '../d3d9/constants.js';
 import { resourceId } from '../webgpu/internal/bindings.js';
 import {
-    constantBlocks, createProgramCache, shapeKey, vertexLayoutOf,
+    constantBlocks, createProgramCache, samplerDimension, shapeKey, vertexLayoutOf,
 } from '../webgpu/internal/programmable.js';
 import {
     HYBRID_CONSTANTS, fixedVertexStage, translateShader, varyingLocation,
@@ -1364,10 +1364,25 @@ export function stageCascade(model, layout){
                 },
             };
         }
-        stages.push(key);
+        const dimension = samples ? textureDimensionOf(texture) : '2d';
+        stages.push(dimension === '2d' ? key : { ...key, dimension });
         textures.push(samples ? texture : null);
     }
     return { stages, textures, truncated: null };
+}
+
+/**
+ * What a texture is sampled as: a cube map, a volume, or two-dimensional.
+ *
+ * @param {any} texture
+ * @returns {'2d' | 'cube' | '3d'}
+ */
+export function textureDimensionOf(texture){
+    if (texture?.cube === true)
+    {
+        return 'cube';
+    }
+    return texture?.volume === true ? '3d' : '2d';
 }
 
 /**
@@ -1575,9 +1590,10 @@ const ADDRESS_BITS = Object.freeze({
  *
  * Every draw samples through one hardware sampler -- linear, repeating,
  * whole mip chain -- and the state a program set per stage is carried in the
- * uniform block instead: address mode per axis (bits 0-3), point filtering
- * for magnification and minification (bits 4-5), the mip mode (bits 6-7:
- * none, point, linear) and the most detailed level allowed (bits 8-15).
+ * uniform block instead: address mode per axis (bits 0-3, and 16-17 for a
+ * volume's third), point filtering for magnification and minification (bits
+ * 4-5), the mip mode (bits 6-7: none, point, linear) and the most detailed
+ * level allowed (bits 8-15).
  * Measured reason: a device was seen to keep one sampler in force for every
  * draw of a run regardless of the group each draw bound, for stretches of
  * frames at a time, so a picture whose sampling depends on which sampler is
@@ -1599,7 +1615,8 @@ export function samplerFlagsOf(states, mips = true, lod = 0){
         | (point(get(D3DTSS.MAGFILTER)) << 4)
         | (point(get(D3DTSS.MINFILTER)) << 5)
         | (mipMode << 6)
-        | ((Math.min(255, Math.max(0, get(D3DTSS.MAXMIPLEVEL), lod)) & 0xff) << 8);
+        | ((Math.min(255, Math.max(0, get(D3DTSS.MAXMIPLEVEL), lod)) & 0xff) << 8)
+        | ((ADDRESS_BITS[get(D3DTSS.ADDRESSW)] ?? 0) << 16);
 }
 
 /** The one sampler every draw samples through; the state is in the shader. */
@@ -1743,6 +1760,8 @@ export function createRenderer(options){
     const textures = new WeakMap();
     /** @type {WeakMap<object, number>} a level's surface -> which level it is */
     const surfaceLevels = new WeakMap();
+    /** @type {WeakMap<object, number>} a cube face's surface -> which face it is */
+    const surfaceFaces = new WeakMap();
     /** @type {Map<string, any>} */
     const samplers = new Map();
     /**
@@ -1774,8 +1793,8 @@ export function createRenderer(options){
      */
     const released = new Set();
     let nextTextureId = 0;
-    /** @type {any} */
-    let placeholder = null;
+    /** @type {Map<string, any>} one blank texture per dimension a binding may want */
+    const placeholders = new Map();
 
     /** @type {any} the frame being recorded, or null between frames */
     let recording = null;
@@ -3017,7 +3036,10 @@ export function createRenderer(options){
             // them all: even level zero of a chained texture goes through a
             // view of that level alone.
             const level = surfaceLevels.get(surface) ?? 0;
-            return level === 0 && record.levels === 1 ? record.gpu : levelSurfaceOf(record, level);
+            const face = surfaceFaces.get(surface) ?? 0;
+            return level === 0 && record.levels === 1 && record.faces === 1
+                ? record.gpu
+                : levelSurfaceOf(record, level, face);
         }
         // A hit is the per-draw case, twice per draw; the description is
         // for making the texture and for a flush, and neither is the common
@@ -3066,21 +3088,23 @@ export function createRenderer(options){
     };
 
     /**
-     * A level above the top as a target: the same backend texture through a
-     * view of that level alone.
+     * A level above the top, or a face of a cube, as a target: the same
+     * backend texture through a view of that level of that face alone.
      *
-     * @param {any} record @param {number} level
+     * @param {any} record @param {number} level @param {number} [face]
      */
-    const levelSurfaceOf = (record, level)=>{
+    const levelSurfaceOf = (record, level, face = 0)=>{
         const views = record.levelSurfaces ??= new Map();
-        let made = views.get(level);
+        const key = face * record.levels + level;
+        let made = views.get(key);
         if (!made)
         {
-            const label = `texture:${record.id}:${level}`;
+            const label = `texture:${record.id}:${face > 0 ? `${face}:` : ''}${level}`;
             made = {
                 texture: record.gpu.texture,
                 view: record.gpu.texture.createView({
                     label, dimension: '2d', baseMipLevel: level, mipLevelCount: 1,
+                    baseArrayLayer: face, arrayLayerCount: 1,
                 }),
                 width: levelExtent(record.width, level),
                 height: levelExtent(record.height, level),
@@ -3089,8 +3113,9 @@ export function createRenderer(options){
                 layers: 1,
                 label,
                 mipLevel: level,
+                layer: face,
             };
-            views.set(level, made);
+            views.set(key, made);
         }
         return made;
     };
@@ -3122,7 +3147,7 @@ export function createRenderer(options){
      *
      * @param {any} surface a backend surface
      * @param {{ format: string, mipLevel: number, width: number, height: number,
-     *           texels: Uint8Array }} upload
+     *           texels: Uint8Array, layer?: number }} upload  `layer` is a cube's face.
      * @param {boolean} ordered
      */
     const uploadTexels = (surface, upload, ordered)=>{
@@ -3138,6 +3163,7 @@ export function createRenderer(options){
             width: upload.width,
             height: upload.height,
             data: upload.texels,
+            ...(upload.layer ? { origin: { x: 0, y: 0, z: upload.layer } } : {}),
         });
     };
 
@@ -3235,19 +3261,28 @@ export function createRenderer(options){
         return made;
     };
 
-    /** A 1x1 texture for a cascade stage that reads no texture but is declared to have one. */
-    const placeholderView = ()=>{
+    /**
+     * A 1x1 texture for a stage that reads no texture but is declared to have
+     * one, of the dimension it is declared with.
+     *
+     * @param {string} [dimension]  '2d', 'cube' or '3d'.
+     */
+    const placeholderView = (dimension = '2d')=>{
+        let placeholder = placeholders.get(dimension);
         if (!placeholder)
         {
             placeholder = backend.createSurface({
                 width: 1,
                 height: 1,
                 format: COLOR_FORMAT,
-                label: 'placeholder',
+                label: dimension === '2d' ? 'placeholder' : `placeholder:${dimension}`,
                 usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST
                     | (dumpDraws ? TextureUsage.COPY_SRC : 0),
+                ...(dimension === 'cube' ? { layers: 6, dimension: 'cube' } : {}),
+                ...(dimension === '3d' ? { depth: 1, dimension: '3d' } : {}),
             });
-            if (dumpDraws)
+            placeholders.set(dimension, placeholder);
+            if (dumpDraws && dimension === '2d')
             {
                 uploaded.set('placeholder', {
                     id: 'placeholder',
@@ -3281,7 +3316,8 @@ export function createRenderer(options){
                 height: record.height,
                 format: gpuFormatOf(record.format, record.width, record.height, compressedTextures),
                 mipLevelCount: record.levels,
-                label: 'texture',
+                ...(record.faces === 6 ? { layers: 6, dimension: 'cube' } : {}),
+                label: record.faces === 6 ? 'cube' : 'texture',
                 // Copied out of as well as into: a dumping run reads a
                 // texture back to compare what the device holds against what
                 // was handed to it, and a program copies a texture level into
@@ -3303,8 +3339,10 @@ export function createRenderer(options){
             // further still -- follows the same choice.
             const keepsBlocks = isCompressed(record.format) && compressedTextures
                 && blockAligned(record.width, record.height);
-            for (const level of [...record.dirtyLevels].sort((left, right)=>left - right))
+            for (const subresource of [...record.dirtyLevels].sort((left, right)=>left - right))
             {
+                const level = subresource % record.levels;
+                const face = Math.floor(subresource / record.levels);
                 const width = levelExtent(record.width, level);
                 const height = levelExtent(record.height, level);
                 // The level's own storage, made if the program never touched
@@ -3312,7 +3350,9 @@ export function createRenderer(options){
                 // there, which is what a real device does with such a level.
                 /** @type {{ surface?: any }} */
                 const held = {};
-                if (texture.GetSurfaceLevel(level, held) !== D3D_OK || !held.surface)
+                if ((record.faces === 6
+                    ? texture.GetCubeMapSurface(face, level, held)
+                    : texture.GetSurfaceLevel(level, held)) !== D3D_OK || !held.surface)
                 {
                     continue;
                 }
@@ -3331,17 +3371,17 @@ export function createRenderer(options){
                         ? decodeCompressed(bytes, S3TC_OF[record.format], width, height)
                         : expandTexels(record.format, bytes, width * height);
                 uploadTexels(record.gpu,
-                    { format: gpuFormat, mipLevel: level, width, height, texels },
+                    { format: gpuFormat, mipLevel: level, width, height, texels, layer: face },
                     record.ordered);
                 // Which levels the program has written, and what its smallest
                 // ones hold: a surface sampled far away comes out of those,
                 // and a level the program never wrote is sampled all the same.
                 (record.written ??= new Set()).add(level);
-                if (width * height <= 16 && !keepsBlocks)
+                if (width * height <= 16 && !keepsBlocks && face === 0)
                 {
                     (record.tails ??= {})[level] = [...texels];
                 }
-                if (level === 0 && dumpDraws && !keepsBlocks)
+                if (subresource === 0 && dumpDraws && !keepsBlocks)
                 {
                     record.census = censusOf(texels);
                     if (uploaded.has(record.id) || uploaded.size < TEXTURE_DUMP_LIMIT)
@@ -3684,14 +3724,25 @@ export function createRenderer(options){
         }
         const { pixel, vertex, samplerPlan, state, source } = pieces;
         const samplerBindings = samplerPlan.map((/** @type {any} */ planned)=>{
-            const texture = model.textures.get(planned.stage);
+            const bound = model.textures.get(planned.stage);
+            // A texture of another dimension than the shader declared cannot
+            // be bound to it: the sampler reads a blank one instead.
+            const texture = bound && textureDimensionOf(bound) === planned.dimension
+                ? bound
+                : null;
+            if (bound && !texture)
+            {
+                reportProgram(`dimension:${planned.stage}:${planned.dimension}`,
+                    `sampler s${planned.stage} is declared ${planned.dimension} and a`
+                    + ` ${textureDimensionOf(bound)} texture is bound there: it samples nothing`);
+            }
             // A binding moves no state version, and a managed texture's own
             // level of detail is part of how it is sampled.
             const lod = lodOf(texture);
             return {
                 stage: planned.stage,
                 texture,
-                view: texture ? uploadIfDirty(texture).view : placeholderView(),
+                view: texture ? uploadIfDirty(texture).view : placeholderView(planned.dimension),
                 sampler: lod === planned.lod
                     ? planned.sampler
                     : programSamplerFor(model.stageStates(planned.stage), lod),
@@ -3866,6 +3917,7 @@ export function createRenderer(options){
             const lod = lodOf(model.textures.get(entry.index));
             return {
                 stage: entry.index,
+                dimension: samplerDimension(entry.type),
                 lod,
                 sampler: programSamplerFor(model.stageStates(entry.index), lod),
             };
@@ -4894,8 +4946,11 @@ export function createRenderer(options){
          */
         trackTexture(texture, desc){
             const levels = desc.levels ?? 1;
+            // A cube map's six faces are six layers of one texture; a face's
+            // level is a subresource numbered face * levels + level.
+            const faces = texture.cube === true ? 6 : 1;
             const entry = {
-                gpu: null, dirty: true, base: 0, levels, texture,
+                gpu: null, dirty: true, base: 0, levels, faces, texture,
                 // A render-target texture is written by the GPU as well as
                 // by the guest, so its uploads have to keep their place in
                 // the frame; see `uploadTexels`. A copy landing in a plain
@@ -4905,7 +4960,7 @@ export function createRenderer(options){
                 // fills the chain it asked for, and a chain sampled with a
                 // level missing shows the gap at the distance that level
                 // covers.
-                dirtyLevels: new Set(Array.from({ length: levels }, (_, level)=>level)),
+                dirtyLevels: new Set(Array.from({ length: levels * faces }, (_, index)=>index)),
                 id: `t${nextTextureId++}`,
                 // A per-texture generation of its contents, so a preparation
                 // key can say which bytes it was built against without a
@@ -4972,14 +5027,32 @@ export function createRenderer(options){
             const addDirtyRect = texture.AddDirtyRect;
             if (typeof addDirtyRect === 'function')
             {
-                texture.AddDirtyRect = (/** @type {any} */ rect, /** @type {number} */ face)=>{
+                texture.AddDirtyRect = (/** @type {any} */ rect, /** @type {number} */ face = 0)=>{
                     const hr = addDirtyRect(rect, face);
                     if (hr === D3D_OK)
                     {
                         for (let level = 0; level < levels; level++)
                         {
-                            soiled(level);
+                            soiled(face * levels + level);
                         }
+                    }
+                    return hr;
+                };
+            }
+            const cubeSurface = texture.GetCubeMapSurface;
+            const unlockCube = texture.UnlockCubeRect;
+            if (faces === 6)
+            {
+                texture.UnlockCubeRect = (/** @type {number} */ face, /** @type {number} */ level)=>{
+                    /** @type {{ surface?: any }} */
+                    const held = {};
+                    const keeps = texture.pool === D3DPOOL.MANAGED
+                        && cubeSurface(face, level, held) === D3D_OK && keepsCopy(held.surface);
+                    held.surface?.release();
+                    const hr = unlockCube(face, level);
+                    if (hr === D3D_OK && !keeps)
+                    {
+                        soiled(face * levels + level);
                     }
                     return hr;
                 };
@@ -4990,29 +5063,41 @@ export function createRenderer(options){
             // surfaces are made on demand, so each is taken into care as it is
             // first handed out.
             const hooked = new WeakSet();
-            /** @type {(level: number, out: { surface?: any }) => number} */
-            const takeLevel = (level, out)=>{
-                const hr = surfaceLevel(level, out);
-                const surface = hr === D3D_OK ? out.surface : null;
-                if (surface && !hooked.has(surface))
+            /** @param {any} surface @param {number} face @param {number} level */
+            const hook = (surface, face, level)=>{
+                if (!surface || hooked.has(surface))
                 {
-                    hooked.add(surface);
-                    textures.set(surface, entry);
-                    surfaceLevels.set(surface, level);
-                    const unlockSurface = surface.UnlockRect;
-                    surface.UnlockRect = ()=>{
-                        const keeps = keepsCopy(surface);
-                        const unlocked = unlockSurface();
-                        if (unlocked === D3D_OK && !keeps)
-                        {
-                            soiled(level);
-                        }
-                        return unlocked;
-                    };
+                    return;
                 }
+                hooked.add(surface);
+                textures.set(surface, entry);
+                surfaceLevels.set(surface, level);
+                surfaceFaces.set(surface, face);
+                const unlockSurface = surface.UnlockRect;
+                surface.UnlockRect = ()=>{
+                    const keeps = keepsCopy(surface);
+                    const unlocked = unlockSurface();
+                    if (unlocked === D3D_OK && !keeps)
+                    {
+                        soiled(face * levels + level);
+                    }
+                    return unlocked;
+                };
+            };
+            texture.GetSurfaceLevel = (/** @type {number} */ level, /** @type {any} */ out)=>{
+                const hr = surfaceLevel(level, out);
+                hook(hr === D3D_OK ? out.surface : null, 0, level);
                 return hr;
             };
-            texture.GetSurfaceLevel = takeLevel;
+            if (faces === 6)
+            {
+                /** @param {number} face @param {number} level @param {any} out */
+                texture.GetCubeMapSurface = (face, level, out)=>{
+                    const hr = cubeSurface(face, level, out);
+                    hook(hr === D3D_OK ? out.surface : null, face, level);
+                    return hr;
+                };
+            }
             // A level of detail changes how the texture is sampled, which the
             // prepared state of the draw in hand holds: it is prepared again.
             const setLod = texture.SetLOD;
@@ -5029,9 +5114,12 @@ export function createRenderer(options){
             }
             /** @type {{ surface?: any }} */
             const top = {};
-            texture.GetSurfaceLevel(0, top);
-            top.surface.release();
-            entry.base = top.surface.base;
+            if ((faces === 6 ? texture.GetCubeMapSurface(0, 0, top)
+                : texture.GetSurfaceLevel(0, top)) === D3D_OK)
+            {
+                top.surface.release();
+                entry.base = top.surface.base;
+            }
         },
 
         /**
@@ -5049,7 +5137,8 @@ export function createRenderer(options){
             const tracked = textures.get(resource);
             if (tracked)
             {
-                tracked.dirtyLevels.add(surfaceLevels.get(resource) ?? 0);
+                tracked.dirtyLevels.add((surfaceFaces.get(resource) ?? 0) * tracked.levels
+                    + (surfaceLevels.get(resource) ?? 0));
                 tracked.dirty = true;
                 tracked.soil++;
                 contentVersion++;
@@ -5897,6 +5986,7 @@ export function createRenderer(options){
                     height: command.height,
                     data: command.texels,
                     staging: true,
+                    ...(command.layer ? { origin: { x: 0, y: 0, z: command.layer } } : {}),
                 });
                 pass = null;
                 continue;
@@ -5905,10 +5995,11 @@ export function createRenderer(options){
             {
                 frame.copyTexture(
                     { texture: command.source.texture, mipLevel: command.source.mipLevel ?? 0,
-                        origin: command.sourceOrigin },
+                        origin: { ...command.sourceOrigin, z: command.source.layer ?? 0 } },
                     { texture: command.destination.texture,
                         mipLevel: command.destination.mipLevel ?? 0,
-                        origin: command.destinationOrigin },
+                        origin: { ...command.destinationOrigin,
+                            z: command.destination.layer ?? 0 } },
                     { width: command.width, height: command.height, depthOrArrayLayers: 1 });
                 pass = null;
                 continue;

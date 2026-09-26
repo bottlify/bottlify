@@ -1191,6 +1191,8 @@ test('the sampler state packs as the shader unpacks it', ()=>{
     assert.equal(samplerFlagsOf(states), 1 | (2 << 2) | (1 << 4) | (0 << 5) | (2 << 6) | (3 << 8));
     assert.equal((samplerFlagsOf(states, false) >> 6) & 3, 0, 'mips off: no mip mode');
     assert.equal(samplerFlagsOf(new Map()), 1 << 4 | 1 << 5, 'the defaults: wrap, point, no mips');
+    assert.equal(samplerFlagsOf(new Map([[D3DTSS.ADDRESSW, D3DTADDRESS.CLAMP]])) >>> 16, 2,
+        'a volume\'s third address mode above the rest');
 });
 
 test('recorded: a texture is uploaded after it is unlocked, and only then', async()=>{
@@ -1397,6 +1399,77 @@ test('recorded: a managed texture\'s level of detail is the finest level a sampl
         assert.equal(await draw(), 1, 'the texture\'s level');
         assert.equal(device.SetTextureStageState(0, D3DTSS.MAXMIPLEVEL, 2), D3D_OK);
         assert.equal(await draw(), 2, 'the stage\'s, when it is the coarser');
+    });
+
+test('recorded: a cube map is six layers of one texture, each face going up into its own',
+    async()=>{
+        // A cube stage reads a direction -- three components of the set the
+        // vertex carries -- through a cube view, bound where the layout says
+        // a cube is; a face written again is that face sent again.
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateCubeTexture(4, 2, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, out),
+            D3D_OK);
+        const cube = out.texture;
+        /** @param {number} face @param {number} level @param {number} value */
+        const fill = (face, level, value)=>{
+            /** @type {{ pBits?: number }} */
+            const locked = {};
+            assert.equal(cube.LockCubeRect(face, level, locked, null, 0), D3D_OK);
+            const extent = 4 >> level;
+            h.write(/** @type {number} */ (locked.pBits),
+                new Uint8Array(extent * extent * 4).fill(value));
+            assert.equal(cube.UnlockCubeRect(face, level), D3D_OK);
+        };
+        for (let face = 0; face < 6; face++)
+        {
+            fill(face, 0, 10 + face);
+            fill(face, 1, 20 + face);
+        }
+        assert.equal(device.SetTexture(0, cube), D3D_OK);
+        selectTexture(device);
+        const threeComponents = 1 << 16;
+        const draw = async()=>{
+            assert.equal(device.BeginScene(), D3D_OK);
+            assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD | threeComponents), D3D_OK);
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(96), 32),
+                D3D_OK);
+            assert.equal(device.EndScene(), D3D_OK);
+            await h.present();
+        };
+        await draw();
+
+        const made = gpu.of('createTexture').find(
+            (/** @type {any} */ call)=>call.descriptor.label === 'cube');
+        assert.ok(made, 'the cube was made as one texture');
+        assert.equal(made.descriptor.size.depthOrArrayLayers, 6);
+        assert.equal(made.descriptor.mipLevelCount, 2);
+        assert.ok(gpu.of('createView').some((/** @type {any} */ call)=>call.texture === made.texture
+            && call.view.viewDescriptor?.dimension === 'cube'), 'sampled through a cube view');
+        /** @param {any} call */
+        const shape = call=>[call.destination.origin?.z ?? 0, call.destination.mipLevel,
+            call.size.width, call.bytes[0]];
+        const uploads = ()=>gpu.of('writeTexture')
+            .filter((/** @type {any} */ call)=>call.destination.texture === made.texture)
+            .map(shape);
+        assert.deepEqual(uploads(), Array.from({ length: 6 },
+            (_, face)=>[[face, 0, 4, 10 + face], [face, 1, 2, 20 + face]]).flat());
+
+        const layouts = gpu.of('createBindGroupLayout').map(
+            (/** @type {any} */ call)=>call.createBindGroupLayout?.descriptor ?? call.descriptor);
+        assert.ok(layouts.some((/** @type {any} */ layout)=>layout.entries.some(
+            (/** @type {any} */ entry)=>entry.texture?.viewDimension === 'cube')),
+        'the stage\'s binding takes a cube view');
+        const code = gpu.of('createShaderModule')
+            .map((/** @type {any} */ call)=>call.descriptor.code).join('\n');
+        assert.match(code, /var texture0: texture_cube<f32>;/);
+        assert.match(code, /texCoord0: vec4f/, 'the set carries its third component');
+
+        fill(3, 1, 99);
+        await draw();
+        assert.deepEqual(uploads().slice(12), [[3, 1, 2, 99]]);
     });
 
 test('recorded: with ZENABLE off no depth is written, whatever ZWRITEENABLE says', async()=>{

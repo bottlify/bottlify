@@ -187,6 +187,21 @@ export function constantBlocks(file, reach, take){
     return [floats, ints, bools];
 }
 
+/**
+ * The view a sampler declared as `type` binds: a WGSL texture type, or the
+ * fixed stage's own '2d', 'cube' or '3d'.
+ *
+ * @param {string} type
+ * @returns {string}
+ */
+export function samplerDimension(type){
+    if (type === 'texture_cube<f32>' || type === 'cube')
+    {
+        return 'cube';
+    }
+    return type === 'texture_3d<f32>' || type === '3d' ? '3d' : '2d';
+}
+
 /** GPUShaderStage bits. */
 const VERTEX_STAGE = 1;
 const FRAGMENT_STAGE = 2;
@@ -203,14 +218,20 @@ const FRAGMENT_STAGE = 2;
 export function createProgramCache({ backend }){
     /** @type {Map<string, Promise<any>>} */
     const pipelines = new Map();
-    /** @type {Map<number, any>} sampler count -> the three group layouts and the pipeline layout */
+    /**
+     * The samplers' dimensions -> the three group layouts and the pipeline layout.
+     *
+     * @type {Map<string, any>}
+     */
     const layouts = new Map();
     let built = 0;
     let reused = 0;
 
-    /** @param {number} samplerCount */
-    const layoutsFor = samplerCount=>{
-        const existing = layouts.get(samplerCount);
+    /** @param {readonly string[]} dimensions  Each sampler's: '2d', 'cube' or '3d'. */
+    const layoutsFor = dimensions=>{
+        const key = dimensions.join(',');
+        const samplerCount = dimensions.length;
+        const existing = layouts.get(key);
         if (existing)
         {
             return existing;
@@ -226,7 +247,8 @@ export function createProgramCache({ backend }){
         const samplerEntries = [];
         for (let index = 0; index < samplerCount; index++)
         {
-            samplerEntries.push({ binding: index * 2, visibility: FRAGMENT_STAGE, texture: {} });
+            samplerEntries.push({ binding: index * 2, visibility: FRAGMENT_STAGE,
+                texture: dimensions[index] === '2d' ? {} : { viewDimension: dimensions[index] } });
             samplerEntries.push(
                 { binding: index * 2 + 1, visibility: FRAGMENT_STAGE, sampler: {} });
         }
@@ -234,16 +256,16 @@ export function createProgramCache({ backend }){
             constants(VERTEX_STAGE),
             constants(FRAGMENT_STAGE),
             backend.createBindGroupLayout(
-                { label: `samplers:${samplerCount}`, entries: samplerEntries }),
+                { label: `samplers:${key}`, entries: samplerEntries }),
         ];
         const made = {
             groups,
             pipeline: backend.createPipelineLayout({
-                label: `programmable:${samplerCount}`,
+                label: `programmable:${key}`,
                 bindGroupLayouts: groups,
             }),
         };
-        layouts.set(samplerCount, made);
+        layouts.set(key, made);
         return made;
     };
 
@@ -269,7 +291,8 @@ export function createProgramCache({ backend }){
                         { code: program.pixel.wgsl, label: `ps:${program.key}` }),
                 ]);
                 const descriptor = pipelineDescriptor(state, null);
-                const bound = layoutsFor(program.pixel.samplers.length);
+                const bound = layoutsFor(program.pixel.samplers.map(
+                    (/** @type {{ type: string }} */ entry)=>samplerDimension(entry.type)));
                 return {
                     bindGroupLayouts: bound.groups,
                     gpu: await backend.createRenderPipelineAsync({

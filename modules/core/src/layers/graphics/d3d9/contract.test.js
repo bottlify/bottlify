@@ -819,6 +819,56 @@ test('UpdateTexture carries only the source\'s dirty region, scaled to each leve
     assert.equal(device.release(), 0);
 });
 
+test('UpdateTexture carries a cube map face by face, each by its own dirty region', ()=>{
+    const { device, memory } = makeWithMemory();
+    /** @param {number} pool */
+    const cube = pool=>{
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateCubeTexture(4, 1, 0, D3DFMT.A8R8G8B8, pool, out), D3D_OK);
+        return out.texture;
+    };
+    const source = cube(D3DPOOL.SYSTEMMEM);
+    const destination = cube(D3DPOOL.DEFAULT);
+    /** @param {any} texture @param {number} face */
+    const baseOf = (texture, face)=>{
+        /** @type {{ surface?: any }} */
+        const held = {};
+        assert.equal(texture.GetCubeMapSurface(face, 0, held), D3D_OK);
+        held.surface.release();
+        return held.surface.base;
+    };
+    for (let face = 0; face < 6; face++)
+    {
+        memory.fill(face + 1, baseOf(source, face), baseOf(source, face) + 64);
+    }
+    assert.equal(device.UpdateTexture(source, destination), D3D_OK);
+    assert.deepEqual(Array.from({ length: 6 }, (_, face)=>memory[baseOf(destination, face)]),
+        [1, 2, 3, 4, 5, 6], 'every face, at first');
+
+    for (let face = 0; face < 6; face++)
+    {
+        memory.fill(9, baseOf(source, face), baseOf(source, face) + 64);
+    }
+    /** @type {any} */
+    const locked = {};
+    assert.equal(source.LockCubeRect(3, 0, locked, null, 0), D3D_OK);
+    assert.equal(source.UnlockCubeRect(3, 0), D3D_OK);
+    assert.equal(device.UpdateTexture(source, destination), D3D_OK);
+    assert.deepEqual(Array.from({ length: 6 }, (_, face)=>memory[baseOf(destination, face)]),
+        [1, 2, 3, 9, 5, 6], 'the face that was locked, and no other');
+
+    /** @type {{ texture?: any }} */
+    const flat = {};
+    device.CreateTexture(4, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, flat);
+    assert.equal(device.UpdateTexture(source, flat.texture), D3DERR_INVALIDCALL,
+        'a cube is not carried into a texture of one face');
+    flat.texture.release();
+    source.release();
+    destination.release();
+    assert.equal(device.release(), 0);
+});
+
 test('ColorFill writes the colour in the format\'s own layout, over the rectangle only', ()=>{
     const { device, memory } = makeWithMemory();
     /** @type {{ surface?: any }} */

@@ -95,12 +95,17 @@ export function createBackend(options){
      * automatic layout -- which drops a binding the generated shader happened
      * not to use -- is never reached.
      */
-    /** @type {Map<number, any>} */
+    /** @type {Map<string, any>} */
     const fixedFunctionLayouts = new Map();
 
-    /** @param {number} stageCount */
-    const layoutForStages = stageCount=>{
-        const existing = fixedFunctionLayouts.get(stageCount);
+    /**
+     * @param {readonly string[]} dimensions  Each stage's texture: '2d', 'cube' or '3d'.
+     *     A binding of one kind does not take a view of another.
+     */
+    const layoutForStages = dimensions=>{
+        const key = dimensions.join(',');
+        const stageCount = dimensions.length;
+        const existing = fixedFunctionLayouts.get(key);
         if (existing)
         {
             return existing;
@@ -113,21 +118,22 @@ export function createBackend(options){
         ];
         for (let index = 0; index < stageCount; index++)
         {
-            entries.push({ binding: 1 + index * 2, visibility: 2, texture: {} });
+            entries.push({ binding: 1 + index * 2, visibility: 2,
+                texture: dimensions[index] === '2d' ? {} : { viewDimension: dimensions[index] } });
             entries.push({ binding: 2 + index * 2, visibility: 2, sampler: {} });
         }
         const group = device.createBindGroupLayout({
-            label: `fixed-function:${stageCount}`,
+            label: `fixed-function:${key}`,
             entries,
         });
         const made = {
             group,
             pipeline: device.createPipelineLayout({
-                label: `fixed-function:${stageCount}`,
+                label: `fixed-function:${key}`,
                 bindGroupLayouts: [group],
             }),
         };
-        fixedFunctionLayouts.set(stageCount, made);
+        fixedFunctionLayouts.set(key, made);
         return made;
     };
 
@@ -145,7 +151,8 @@ export function createBackend(options){
             const generated = generateFixedFunction(state, layout);
             const module = await shaders.build(generated);
             const descriptor = pipelineDescriptor(state, layout);
-            const layouts = layoutForStages(state.stages.length);
+            const layouts = layoutForStages(
+                state.stages.map(stage=>stage.dimension ?? '2d'));
 
             return {
                 bindGroupLayout: layouts.group,
@@ -251,10 +258,15 @@ export function createBackend(options){
         const mipLevelCount = descriptor.mipLevelCount === undefined ? 1 : descriptor.mipLevelCount;
         // A cube map is six layers of one texture and a view that says so; a
         // sampler given a plain 2D view of it reads one face and the shader
-        // that declared a cube fails to bind.
-        const layers = descriptor.layers === undefined ? 1 : descriptor.layers;
+        // that declared a cube fails to bind. A volume is a texture of three
+        // dimensions, its depth where the layers would be.
+        const volume = descriptor.dimension === '3d';
+        const layers = volume
+            ? descriptor.depth ?? 1
+            : descriptor.layers === undefined ? 1 : descriptor.layers;
         const texture = device.createTexture({
             label,
+            ...(volume ? { dimension: '3d' } : {}),
             size: {
                 width: descriptor.width,
                 height: descriptor.height,
@@ -748,7 +760,8 @@ export function createBackend(options){
                         });
                     }
                     encoder.copyTextureToBuffer(
-                        { texture: surface.texture, mipLevel: surface.mipLevel ?? 0 },
+                        { texture: surface.texture, mipLevel: surface.mipLevel ?? 0,
+                            origin: { x: 0, y: 0, z: surface.layer ?? 0 } },
                         { buffer: staging, bytesPerRow, rowsPerImage: surface.height },
                         { width: surface.width, height: surface.height, depthOrArrayLayers: 1 });
                     return async()=>{

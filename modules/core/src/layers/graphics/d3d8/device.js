@@ -345,8 +345,8 @@ export function createDirect3D8(options = {}){
          *
          * Answered by the table the creates themselves consult rather than by a
          * list of its own, so that a program told yes here is told yes there.
-         * A kind of resource this build does not make -- a cube map, a volume,
-         * a buffer -- is not available in any format.
+         * A kind of resource this build does not make in a format -- a buffer
+         * -- is not available in any.
          *
          * @param {number} usage
          * @param {number} resourceType  D3DRTYPE
@@ -356,7 +356,9 @@ export function createDirect3D8(options = {}){
         CheckDeviceFormat(usage, resourceType, format){
             const surfaceType = resourceType === D3DRTYPE.TEXTURE
                 ? SURFACE_TYPE.TEXTURE_2D
-                : surfaceTypeOfUsage(resourceType, usage);
+                : resourceType === D3DRTYPE.CUBETEXTURE
+                    ? SURFACE_TYPE.CUBE
+                    : surfaceTypeOfUsage(resourceType, usage);
             if (!surfaceType)
             {
                 return D3DERR_NOTAVAILABLE;
@@ -958,11 +960,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      *
      * @param {any} texture
      * @param {number} level
+     * @param {number} [face]  A cube map's; a texture of one face has only the first.
      */
-    const levelSurface = (texture, level)=>{
+    const levelSurface = (texture, level, face = 0)=>{
         /** @type {{ surface?: any }} */
         const held = {};
-        if (texture.GetSurfaceLevel(level, held) !== D3D_OK || !held.surface)
+        if ((texture.cube
+            ? texture.GetCubeMapSurface(face, level, held)
+            : texture.GetSurfaceLevel(level, held)) !== D3D_OK || !held.surface)
         {
             return null;
         }
@@ -2297,10 +2302,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return hr;
             }
-            out.texture = createTexture({
+            const chain = levels || fullChainOf(edgeLength, edgeLength);
+            const texture = createTexture({
                 width: edgeLength,
                 height: edgeLength,
-                levels: levels || fullChainOf(edgeLength, edgeLength),
+                levels: chain,
                 format,
                 pool,
                 usage,
@@ -2309,6 +2315,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 free,
                 cube: true,
             });
+            renderer?.trackTexture(texture,
+                { width: edgeLength, height: edgeLength, format, levels: chain, usage });
+            out.texture = texture;
             return D3D_OK;
         },
 
@@ -2569,27 +2578,30 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const to = describe(into);
             if (from.Pool !== D3DPOOL.SYSTEMMEM || to.Pool === D3DPOOL.SYSTEMMEM
                 || from.Format !== to.Format
+                || (source.cube ?? false) !== (destination.cube ?? false)
                 || from.Width !== to.Width || from.Height !== to.Height)
             {
                 return D3DERR_INVALIDCALL;
             }
             /** @type {SurfaceMove[]} */
             const moves = [];
-            // What the source was written in since it was last carried, and
-            // nothing more: an update of a source nobody touched moves nothing.
-            const region = source.takeDirtyRegion?.() ?? null;
-            const levels = region ? Math.min(source.levels ?? 1, destination.levels ?? 1) : 0;
-            for (let level = 0; level < levels; level++)
+            const levels = Math.min(source.levels ?? 1, destination.levels ?? 1);
+            for (let face = 0; face < (source.cube ? 6 : 1); face++)
             {
-                const one = levelSurface(source, level);
-                const other = levelSurface(destination, level);
-                if (one && other)
+                // What the face was written in since it was last carried, and
+                // nothing more: an update of a source nobody touched moves nothing.
+                const region = source.takeDirtyRegion?.(face) ?? null;
+                for (let level = 0; level < (region ? levels : 0); level++)
                 {
-                    const desc = describe(one);
-                    const rect = regionAtLevel(/** @type {any} */ (region), level, desc.Width,
-                        desc.Height);
-                    moves.push(rectMoveOf(one, rect, other, { x: rect.left, y: rect.top }));
-                    renderer?.markDirty(other);
+                    const one = levelSurface(source, level, face);
+                    const other = levelSurface(destination, level, face);
+                    if (one && other)
+                    {
+                        const desc = describe(one);
+                        const rect = regionAtLevel(region, level, desc.Width, desc.Height);
+                        moves.push(rectMoveOf(one, rect, other, { x: rect.left, y: rect.top }));
+                        renderer?.markDirty(other);
+                    }
                 }
             }
             out.moves = moves;

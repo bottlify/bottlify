@@ -1343,12 +1343,15 @@ function createDeviceObject(parameters, caps, services, identity){
      *
      * @param {any} texture
      * @param {number} level
+     * @param {number} [face]  A cube map's; a texture of one face has only the first.
      */
-    const levelSurface = (texture, level)=>{
+    const levelSurface = (texture, level, face = 0)=>{
         /** @type {{ surface?: any }} */
         const held = {};
         if (!texture || typeof texture.GetSurfaceLevel !== 'function'
-            || texture.GetSurfaceLevel(level, held) !== D3D_OK || !held.surface)
+            || (texture.cube
+                ? texture.GetCubeMapSurface(face, level, held)
+                : texture.GetSurfaceLevel(level, held)) !== D3D_OK || !held.surface)
         {
             return null;
         }
@@ -3137,38 +3140,45 @@ function createDeviceObject(parameters, caps, services, identity){
                 return D3DERR_INVALIDCALL;
             }
             const skipped = Math.max(0, source.levels - destination.levels);
-            /** @type {{ one: any, other: any, level: number }[]} */
+            const faces = source.cube ? 6 : 1;
+            /** @type {{ one: any, other: any, level: number, face: number }[]} */
             const pairs = [];
-            for (let level = 0; level < destination.levels; level++)
+            for (let face = 0; face < faces; face++)
             {
-                const one = levelSurface(source, level + skipped);
-                const other = levelSurface(destination, level);
-                if (!one || !other)
+                for (let level = 0; level < destination.levels; level++)
                 {
-                    break;
+                    const one = levelSurface(source, level + skipped, face);
+                    const other = levelSurface(destination, level, face);
+                    if (!one || !other)
+                    {
+                        break;
+                    }
+                    const desc = describe(one);
+                    const into = describe(other);
+                    if (desc.Width !== into.Width || desc.Height !== into.Height)
+                    {
+                        return D3DERR_INVALIDCALL;
+                    }
+                    pairs.push({ one, other, level: level + skipped, face });
                 }
-                const desc = describe(one);
-                const into = describe(other);
-                if (desc.Width !== into.Width || desc.Height !== into.Height)
-                {
-                    return D3DERR_INVALIDCALL;
-                }
-                pairs.push({ one, other, level: level + skipped });
             }
             // What the source was written in since it was last carried, and
             // nothing more: an update of a source nobody touched moves nothing
-            // (Wine's d3d9 add_dirty_rect_test).
-            const region = source.takeDirtyRegion?.() ?? null;
+            // (Wine's d3d9 add_dirty_rect_test). A cube's faces are carried
+            // each by its own region.
+            const regions = Array.from({ length: faces },
+                (_, face)=>source.takeDirtyRegion?.(face) ?? null);
             /** @type {SurfaceMove[]} */
             const moves = [];
-            for (const { one, other, level } of region ? pairs : [])
+            const carried = pairs.filter(pair=>regions[pair.face] !== null);
+            for (const { one, other, level, face } of carried)
             {
                 const desc = describe(one);
-                const rect = regionAtLevel(region, level, desc.Width, desc.Height);
+                const rect = regionAtLevel(regions[face], level, desc.Width, desc.Height);
                 moves.push(rectMove(one, rect, other, { x: rect.left, y: rect.top }));
             }
             deliverMoves(moves, out);
-            for (const { other } of region ? pairs : [])
+            for (const { other } of carried)
             {
                 renderer?.markDirty?.(other);
             }

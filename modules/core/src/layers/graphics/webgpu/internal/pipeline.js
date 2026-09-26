@@ -146,6 +146,9 @@ function lookUp(table, value, what){
  * @property {number} [colorKey]
  *     Direct3D 7 colour keying in force on this stage's texture: the key as
  *     its texel expands, 0xRRGGBB. A texel of that colour is not drawn.
+ * @property {'cube' | '3d'} [dimension]
+ *     The texture the stage samples, when it is not two-dimensional: its
+ *     coordinate is then three components and its binding another kind.
  */
 
 /**
@@ -229,6 +232,7 @@ export function pipelineKey(state){
             stage.alphaOp, stage.alphaArg1, stage.alphaArg2,
             stage.texCoordIndex, stage.projected ?? 0,
             ...(stage.colorKey === undefined ? [] : [`k${stage.colorKey}`]),
+            ...(stage.dimension === undefined ? [] : [stage.dimension]),
         ].join(','))
         .join(';');
 

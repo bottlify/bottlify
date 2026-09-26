@@ -436,6 +436,56 @@ test('a stage samples the coordinate set it names, not its own number', ()=>{
     assert.match(code, /fn addressCoordinate\(t: f32, mode: u32, texels: f32\) -> f32/);
 });
 
+test('a cube stage samples a direction of three components, a volume stage three coordinates',
+    ()=>{
+        const textured = {
+            colorOp: D3DTOP.SELECTARG1, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
+            alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.TEXTURE, alphaArg2: D3DTA.CURRENT,
+            texCoordIndex: 0,
+        };
+        const threeComponents = 1 << 16;
+        const cube = generate(baseState({
+            fvf: FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT) | threeComponents,
+            stages: [{ ...textured, dimension: 'cube' }],
+        })).code;
+        assert.match(cube, /var texture0: texture_cube<f32>;/);
+        assert.match(cube, /@location\(\d+\) texCoord0: vec4f,/);
+        assert.match(cube, /out\.texCoord0 = vec4f\(vertex\.texCoord0, 0\.0\);/);
+        assert.match(cube, /sampleStage0\(input\.texCoord0\.xyz\)/);
+        const sampler = cube.slice(cube.indexOf('fn sampleStage0'));
+        const body = sampler.slice(0, sampler.indexOf('\n}\n'));
+        assert.ok(body.startsWith('fn sampleStage0(direction: vec3f) -> vec4f {'));
+        // A point-filtered sample is the centre of the texel of the face the
+        // direction points into; the minor components are that face's.
+        assert.match(body, /let face = direction \/ major;/);
+        assert.match(body, /towards = vec3f\(face\.x, snapped\.yz\);/);
+        assert.match(body, /textureSampleLevel\(texture0, sampler0, towards, level\)/);
+
+        // A set of two components widens with a zero third rather than
+        // reading past what the vertex carries.
+        const flat = generate(baseState({
+            fvf: FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT),
+            stages: [{ ...textured, dimension: 'cube' }],
+        })).code;
+        assert.match(flat, /out\.texCoord0 = vec4f\(vertex\.texCoord0, 0\.0, 0\.0\);/);
+
+        // A generated reflection vector is a direction already.
+        const reflected = generate(baseState({
+            fvf: FVF.XYZ | FVF.NORMAL,
+            stages: [{ ...textured, texCoordIndex: TCI.CAMERASPACEREFLECTIONVECTOR,
+                dimension: 'cube' }],
+        })).code;
+        assert.match(reflected, /sampleStage0\(input\.generated0\.xyz\)/);
+
+        const volume = generate(baseState({
+            fvf: FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT) | threeComponents,
+            stages: [{ ...textured, dimension: '3d' }],
+        })).code;
+        assert.match(volume, /var texture0: texture_3d<f32>;/);
+        assert.match(volume, /addressCoordinate\(raw\.z, \(flags >> 16u\) & 3u, levelSize\.z\)/,
+            'the third coordinate addressed by its own mode');
+    });
+
 test('a stage puts its coordinate through its own texture transform before sampling', ()=>{
     // Direct3D applies D3DTS_TEXTURE0..7 to (u, v, 1) for a two-coordinate
     // set: two dot products against the rows the block carries, computed
