@@ -208,7 +208,11 @@ function fakeGpu(){
         },
         createCommandEncoder: ()=>({ copyTextureToTexture(){}, finish(){} }),
     };
+    /** @type {any[]} */
+    const requested = [];
     return {
+        /** What the device was asked for, one descriptor per requestDevice. */
+        requested,
         /** What the device would report: an error the engine did not catch. @param {string} message */
         fail(message){
             listeners.get('uncapturederror')?.({ error: { message } });
@@ -217,9 +221,12 @@ function fakeGpu(){
         lose: (/** @type {string} */ reason, /** @type {string} */ message)=>lose({ reason, message }),
         gpu: {
             requestAdapter: async()=>({
-                features: new Set(['texture-compression-bc']),
+                features: new Set(['texture-compression-bc', 'depth-clip-control', 'shader-f16']),
                 info: { vendor: 'fake', architecture: '', description: 'a stand-in' },
-                requestDevice: async()=>device,
+                requestDevice: async(/** @type {any} */ descriptor)=>{
+                    requested.push(descriptor);
+                    return device;
+                },
             }),
         },
         // A size that crosses the port, and the context it would give.
@@ -301,7 +308,7 @@ async function connect(options = {}, { journal, audioShared, duringBuild, ...dep
     const channel = new MessageChannel();
     const app = fakeApp({ ...journal, audioShared });
     const keeper = openTestKeeper();
-    const { gpu, canvas, screen, fail, lose } = fakeGpu();
+    const { gpu, canvas, screen, fail, lose, requested } = fakeGpu();
     /** @type {any} */
     let built = null;
     const serving = serveEngine(channel.port2, {
@@ -339,7 +346,8 @@ async function connect(options = {}, { journal, audioShared, duringBuild, ...dep
         },
         keeper: keeper.port,
     });
-    return { remote, app, worker, canvas, keeper, built: ()=>built, gpuFails: fail, gpuLost: lose };
+    return { remote, app, worker, canvas, keeper, built: ()=>built, gpuFails: fail, gpuLost: lose,
+        requested };
 }
 
 test('start rebuilds on the worker what could not cross: fetch, device, watch, storage', async()=>{
@@ -369,6 +377,17 @@ test('start rebuilds on the worker what could not cross: fetch, device, watch, s
         description: 'a stand-in' });
     await remote.dispose();
 });
+
+test('the device is asked for the features the engine draws with that the adapter has',
+    async()=>{
+        // Block compression keeps a program's DXT art compressed; depth clip
+        // control lets a Direct3D 10 rasterizer state turn depth clipping off.
+        // A feature the adapter has and nothing here uses is not asked for.
+        const { remote, requested } = await connect();
+        assert.deepEqual(requested.map(descriptor=>descriptor.requiredFeatures),
+            [['texture-compression-bc', 'depth-clip-control']]);
+        await remote.dispose();
+    });
 
 test('the sound output\'s storage crosses once, at start', async()=>{
     const { remote, app } = await connect();

@@ -281,6 +281,35 @@ test('a per-call compressedTextures override cannot turn BC on for a device with
         await graphicsModule.dispose();
     });
 
+test('Direct3D 10 is handed block compression as 8 and 9 are, the guest clock and depth clip'
+    + ' control', async()=>{
+    // A timestamp query a program compares with its own timers reads the
+    // guest's clock, as the raster does; block compression is asked for by
+    // the configuration and granted by the adapter; unclipped depth needs a
+    // device made with depth-clip-control.
+    for (const features of [['texture-compression-bc', 'depth-clip-control'], []])
+    {
+        const gpu = createFakeDevice();
+        /** @type {any} */ (gpu.device).features = new Set(features);
+        const api = await graphicsModule.create({
+            device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
+            compressedTextures: true,
+            guestNow: ()=>1234,
+        }, hostWith(fakeMemory()));
+        const options = api.create('d3d10');
+        const granted = features.length > 0;
+        assert.equal(options.compressedTextures, granted, 'block compression');
+        assert.equal(options.depthClipControl, granted, 'depth clip control');
+        assert.equal(options.now(), 1234, 'the guest\'s milliseconds');
+        await graphicsModule.dispose();
+    }
+    const api = await graphicsModule.create({}, hostWith(fakeMemory()));
+    const headless = api.create('d3d10');
+    assert.equal(headless.compressedTextures, false);
+    assert.equal(headless.depthClipControl, false);
+    await graphicsModule.dispose();
+});
+
 test('an API is made by name, and an unknown one says so', async()=>{
     const api = await graphicsModule.create({}, hostWith(fakeMemory()));
 

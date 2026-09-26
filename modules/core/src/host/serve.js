@@ -340,7 +340,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
      * era is DXT, and a device without the feature makes the engine refuse
      * every compressed texture -- which a program answers by decompressing on
      * its own CPU, in emulated x86, and handing over surfaces four times the
-     * size.
+     * size. Depth clip control is asked for the same way: without it a
+     * Direct3D 10 rasterizer state that turns depth clipping off still clips.
      */
     const openDevice = async()=>{
         if (!adapters)
@@ -354,9 +355,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             throw Object.assign(new Error('WebGPU is present but no adapter answered '
                 + 'requestAdapter'), { reason: 'no GPU adapter' });
         }
-        const features = adapter.features.has('texture-compression-bc')
-            ? ['texture-compression-bc']
-            : [];
+        const features = ['texture-compression-bc', 'depth-clip-control']
+            .filter(feature=>adapter.features.has(feature));
         const opened = await adapter.requestDevice({ requiredFeatures: features });
         // A validation error the engine did not catch drops the whole frame
         // it was in, silently. It goes into the run's own journal, beside the

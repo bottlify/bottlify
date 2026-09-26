@@ -25,8 +25,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    D3D10_BIND, D3D10_BLEND, D3D10_BLEND_OP, D3D10_CLEAR, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE,
-    D3D10_FILTER, D3D10_MAP,
+    D3D10_BIND, D3D10_BLEND, D3D10_BLEND_OP, D3D10_CLEAR, D3D10_CPU_ACCESS, D3D10_CULL_MODE,
+    D3D10_DRIVER_TYPE, D3D10_FILL_MODE, D3D10_FILTER, D3D10_MAP,
     D3D10_PRIMITIVE_TOPOLOGY, D3D10_QUERY, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION,
     D3D10_TEXTURE_ADDRESS, D3D10_USAGE, DXGI_FORMAT, S_FALSE, S_OK,
 } from './constants.js';
@@ -50,6 +50,7 @@ import {
  * A device with a backend over the recording GPU, and a swap chain to present.
  *
  * @param {{ width?: number, height?: number, compressedTextures?: boolean,
+ *           depthClipControl?: boolean,
  *           fake?: Parameters<typeof createFakeDevice>[0] }} [options]
  */
 function harness(options = {}){
@@ -79,6 +80,7 @@ function harness(options = {}){
             createTexture: gpu.device.createTexture,
             divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
             compressedTextures: options.compressedTextures,
+            depthClipControl: options.depthClipControl,
         }), S_OK);
     const device = deviceOut.device;
     const swapChain = chainOut.swapChain;
@@ -1554,6 +1556,37 @@ test('a blend by the constant factor blends by the device\'s factor, set on the 
         'once per change');
         assert.ok(!diverged(h, 'blend factor'));
     });
+
+test('depth clipping turned off leaves a primitive unclipped where the device can', async()=>{
+    // Direct3D 10 with DepthClipEnable FALSE clamps depth to the viewport's
+    // range instead of clipping; WebGPU clamps always, and leaves clipping
+    // off only on a device made with depth-clip-control.
+    for (const depthClipControl of [true, false])
+    {
+        const h = harness({ depthClipControl });
+        const { device } = h;
+        bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+        /** @type {{ state?: any }} */
+        const rasterizer = {};
+        assert.equal(device.CreateRasterizerState({
+            FillMode: D3D10_FILL_MODE.SOLID, CullMode: D3D10_CULL_MODE.NONE,
+            FrontCounterClockwise: false, DepthBias: 0, DepthBiasClamp: 0,
+            SlopeScaledDepthBias: 0, DepthClipEnable: false, ScissorEnable: false,
+            MultisampleEnable: false, AntialiasedLineEnable: false,
+        }, rasterizer), S_OK);
+        device.RSSetState(rasterizer.state);
+        device.Draw(3, 0);
+        device.RSSetState(null);
+        device.Draw(3, 0);
+        await h.present();
+        const [unclipped, clipped] = h.gpu.of('createRenderPipeline')
+            .slice(-2).map((/** @type {any} */ call)=>call.descriptor.primitive);
+        assert.equal(unclipped.unclippedDepth, depthClipControl ? true : undefined,
+            depthClipControl ? 'with the feature' : 'without it');
+        assert.equal(clipped.unclippedDepth, undefined, 'the default state clips');
+        assert.equal(diverged(h, 'depth clipping'), !depthClipControl);
+    }
+});
 
 // --- queries ---
 

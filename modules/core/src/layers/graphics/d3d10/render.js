@@ -55,6 +55,8 @@ import { LockFlags } from '../webgpu/internal/buffers.js';
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {boolean} [compressedTextures]  Whether the GPU samples BC blocks as they are;
  *                                          without it they are decoded on the processor.
+ * @property {boolean} [depthClipControl]  Whether the GPU device was made with
+ *     depth-clip-control, which leaving depth unclipped needs.
  */
 
 /** @type {Readonly<Record<number, string>>} */
@@ -1235,10 +1237,13 @@ export function createRenderer(services){
             diverge('wireframe fill is drawn solid: the backend has no line rasterisation'
                 + ' of a triangle');
         }
-        if (!rasterizer.DepthClipEnable)
+        // With clipping off Direct3D 10 clamps depth to the viewport's range,
+        // which WebGPU does whether or not it clips.
+        const unclipped = !rasterizer.DepthClipEnable && services.depthClipControl === true;
+        if (!rasterizer.DepthClipEnable && !unclipped)
         {
-            diverge('depth clipping stays on: turning it off needs a device feature this'
-                + ' build does not ask for');
+            diverge('depth clipping stays on: turning it off needs a GPU device made with'
+                + ' depth-clip-control, which this one was not');
         }
         /**
          * @param {string | null} format
@@ -1321,6 +1326,7 @@ export function createRenderer(services){
                 topology: state.topology,
                 cullMode: CULL[rasterizer.CullMode],
                 frontFace: rasterizer.FrontCounterClockwise ? 'ccw' : 'cw',
+                ...(unclipped ? { unclippedDepth: true } : {}),
                 ...(state.topology.endsWith('strip') && state.indexFormat
                     ? { stripIndexFormat: state.indexFormat }
                     : {}),

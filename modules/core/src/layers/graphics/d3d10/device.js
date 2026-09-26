@@ -104,6 +104,8 @@ const PREDICATE_QUERIES = new Set([
  * @property {() => number} [now]  Milliseconds, for a timestamp query.
  * @property {boolean} [compressedTextures]  Whether the GPU samples BC blocks as they are;
  *     without it a block-compressed texture is decoded on the processor.
+ * @property {boolean} [depthClipControl]  Whether the GPU device can leave depth
+ *     unclipped, as a rasterizer state with DepthClipEnable FALSE asks.
  */
 
 /**
@@ -428,6 +430,7 @@ export function createDevice(options = {}){
         createTexture: options.createTexture ?? (()=>null),
         divergence: options.divergence,
         compressedTextures: textureOptions.compressed,
+        depthClipControl: options.depthClipControl ?? false,
     });
     const statistics = createDrawStatistics();
     /** @type {import('./resources.js').ResourceStorage} */

@@ -416,7 +416,7 @@ export const graphicsModule = {
             // Direct3D 10's seam makes the device itself from what a program
             // passes; this hands it the GPU, reached only when one is made.
             /** @returns {import('./d3d10/device.js').DeviceOptions} */
-            d3d10: ()=>({
+            d3d10: (/** @type {any} */ caps)=>({
                 backend: device ? api.backend() : undefined,
                 createSampler: device
                     ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
@@ -425,6 +425,14 @@ export const graphicsModule = {
                     ? (/** @type {any} */ descriptor)=>device.device.createTexture(descriptor)
                     : undefined,
                 divergence: config?.divergence,
+                // The configuration-and-adapter answer the other APIs get.
+                compressedTextures: gatedCompressedTextures(caps),
+                // A timestamp query is read against the program's own timers,
+                // which run on the guest's clock, as the raster does.
+                now: config?.guestNow,
+                // Only a device made with the feature can leave depth
+                // unclipped, which is what DepthClipEnable = FALSE asks.
+                depthClipControl: device?.device?.features?.has('depth-clip-control') === true,
             }),
             /** @returns {any} */
             vulkan: (/** @type {any} */ options)=>createVulkan({
