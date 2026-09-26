@@ -282,3 +282,60 @@ test('a section is read back as its entries, key=value each, and win.ini is a fi
     assert.equal(fns.GetProfileIntA.argBytes, 12);
     assert.equal(fns.WriteProfileStringA.argBytes, 12);
 });
+
+test('a structure is kept as hex with a checksum, and read back only whole and intact', ()=>{
+    // Wine's profile test: "abacus" and its terminator are 616261637573006F,
+    // the last byte the sum of the others; a length or a checksum that does
+    // not match is refused rather than read as far as it goes.
+    const ERROR_BAD_LENGTH = 24;
+    const ERROR_INVALID_DATA = 13;
+    const memory = fakeMemory();
+    const files = fakeFiles();
+    /** @type {number[]} */
+    const errors = [];
+    const fns = createProfileFunctions({
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        /** @param {number} address @param {number} length */
+        readMemory: (address, length)=>memory.bytes.slice(address, address + length),
+        setLastError: code=>errors.push(code),
+        files,
+    });
+    memory.put(SECTION, 's');
+    memory.put(KEY, 'key');
+    memory.put(FILE, 'C:\\WORK\\winetest.ini');
+    memory.put(VALUE, 'abacus');
+
+    assert.equal(fns.GetPrivateProfileStructA.handler([SECTION, KEY, OUT, 7, FILE]), 0,
+        'nothing there yet');
+    assert.equal(errors.at(-1), ERROR_BAD_LENGTH);
+    assert.equal(fns.WritePrivateProfileStructA.handler([SECTION, KEY, VALUE, 7, FILE]), 1);
+    assert.equal(files.text('C:\\WORK\\winetest.ini'), '[s]\r\nkey=616261637573006F\r\n');
+
+    assert.equal(fns.GetPrivateProfileStructA.handler([SECTION, KEY, OUT, 6, FILE]), 0);
+    assert.equal(errors.at(-1), ERROR_BAD_LENGTH);
+    assert.equal(fns.GetPrivateProfileStructA.handler([SECTION, KEY, OUT, 8, FILE]), 0);
+    assert.equal(fns.GetPrivateProfileStructA.handler([SECTION, KEY, OUT, 7, FILE]), 1);
+    assert.equal(memory.readCString(OUT, 16), 'abacus');
+
+    memory.put(DEFAULT, '636163747573006F');
+    fns.WritePrivateProfileStringA.handler([SECTION, KEY, DEFAULT, FILE]);
+    assert.equal(fns.GetPrivateProfileStructA.handler([SECTION, KEY, OUT, 7, FILE]), 0,
+        'the checksum is not cactus\'s');
+    assert.equal(errors.at(-1), ERROR_INVALID_DATA);
+    memory.put(DEFAULT, '6361637475730083');
+    fns.WritePrivateProfileStringA.handler([SECTION, KEY, DEFAULT, FILE]);
+    assert.equal(fns.GetPrivateProfileStructA.handler([SECTION, KEY, OUT, 7, FILE]), 1,
+        'lower or upper case alike');
+    assert.equal(memory.readCString(OUT, 16), 'cactus');
+    memory.put(DEFAULT, '636163747573008Q');
+    fns.WritePrivateProfileStringA.handler([SECTION, KEY, DEFAULT, FILE]);
+    assert.equal(fns.GetPrivateProfileStructA.handler([SECTION, KEY, OUT, 7, FILE]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_DATA);
+
+    assert.equal(fns.WritePrivateProfileStructA.handler([SECTION, KEY, 0, 7, FILE]), 1,
+        'no structure removes the key');
+    assert.equal(files.text('C:\\WORK\\winetest.ini'), '[s]\r\n');
+    assert.equal(fns.GetPrivateProfileStructA.argBytes, 20);
+    assert.equal(fns.WritePrivateProfileStructA.argBytes, 20);
+});

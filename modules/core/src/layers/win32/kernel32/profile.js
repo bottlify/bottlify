@@ -44,7 +44,16 @@ const MAX_VALUE = 0x10000;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {import('./files.js').FileSystem} files
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ *           What a structure is written from. Without it a structure cannot
+ *           be written, and the write says so.
+ * @property {(code: number) => void} [setLastError]
  */
+
+/** Why a structure was not read back. */
+const ERROR_INVALID_DATA = 13;
+const ERROR_BAD_LENGTH = 24;
+const ERROR_INVALID_FUNCTION = 1;
 
 /** @param {string} text */
 const latin1 = text=>Uint8Array.from(text, character=>character.charCodeAt(0) & 0xff);
@@ -383,11 +392,17 @@ export function createProfileFunctions(host){
      * @param {string | null} path @param {number} section @param {number} key
      * @param {number} value
      */
-    const put = (path, section, key, value)=>{
+    const put = (path, section, key, value)=>putText(path, section, key, text(value, MAX_VALUE));
+
+    /**
+     * @param {string | null} path @param {number} section @param {number} key
+     * @param {string | null} value
+     */
+    const putText = (path, section, key, value)=>{
         const wanted = {
             section: text(section, MAX_NAME),
             key: text(key, MAX_NAME),
-            value: text(value, MAX_VALUE),
+            value,
         };
         if (path === null || wanted.section === null)
         {
@@ -401,6 +416,18 @@ export function createProfileFunctions(host){
         };
         const loaded = load(path);
         return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+    };
+
+    /**
+     * A structure's bytes as its profile value: each byte in two hex digits,
+     * then the low byte of their sum, which is what reading it back checks.
+     *
+     * @param {Uint8Array} bytes
+     */
+    const structText = bytes=>{
+        const sum = bytes.reduce((total, byte)=>total + byte, 0) & 0xff;
+        return [...bytes, sum]
+            .map(byte=>byte.toString(16).toUpperCase().padStart(2, '0')).join('');
     };
 
     /** @param {number} file @returns {string | null} */
@@ -489,6 +516,77 @@ export function createProfileFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([section, key, value, file])=>put(pathOf(file), section, key, value),
+        },
+
+        /**
+         * BOOL GetPrivateProfileStructA(LPCSTR lpszSection, LPCSTR lpszKey,
+         *   LPVOID lpStruct, UINT uSizeStruct, LPCSTR szFile)
+         *
+         * Only a value of exactly the size asked, with its checksum right,
+         * is read back: anything else is a different structure or a damaged
+         * one, and a caller given part of it would take it for the whole.
+         */
+        GetPrivateProfileStructA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([section, key, buffer, size, file])=>{
+                const wanted = { section: text(section, MAX_NAME), key: text(key, MAX_NAME) };
+                const path = pathOf(file);
+                /** @param {ProfileLine[]} lines */
+                const answer = lines=>{
+                    const found = wanted.section === null || wanted.key === null
+                        ? { value: '' }
+                        : lookUp(lines, wanted.section, wanted.key, '');
+                    const value = 'value' in found ? found.value : '';
+                    const length = size >>> 0;
+                    if (value.length !== (length + 1) * 2)
+                    {
+                        host.setLastError?.(ERROR_BAD_LENGTH);
+                        return 0;
+                    }
+                    if (!/^[0-9a-f]*$/i.test(value))
+                    {
+                        host.setLastError?.(ERROR_INVALID_DATA);
+                        return 0;
+                    }
+                    const bytes = Uint8Array.from({ length: length + 1 },
+                        (_, at)=>parseInt(value.slice(at * 2, at * 2 + 2), 16));
+                    const data = bytes.subarray(0, length);
+                    if ((data.reduce((total, byte)=>total + byte, 0) & 0xff) !== bytes[length])
+                    {
+                        host.setLastError?.(ERROR_INVALID_DATA);
+                        return 0;
+                    }
+                    host.writeMemory(buffer >>> 0, data);
+                    return 1;
+                };
+                const loaded = path === null ? [] : load(path);
+                return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+            },
+        },
+
+        /**
+         * BOOL WritePrivateProfileStructA(LPCSTR lpszSection, LPCSTR lpszKey,
+         *   LPVOID lpStruct, UINT uSizeStruct, LPCSTR szFile)
+         *
+         * A NULL structure removes the key, as a NULL string does.
+         */
+        WritePrivateProfileStructA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([section, key, structure, size, file])=>{
+                if ((structure >>> 0) === 0)
+                {
+                    return put(pathOf(file), section, key, 0);
+                }
+                if (!host.readMemory)
+                {
+                    host.setLastError?.(ERROR_INVALID_FUNCTION);
+                    return 0;
+                }
+                const value = structText(host.readMemory(structure >>> 0, size >>> 0));
+                return putText(pathOf(file), section, key, value);
+            },
         },
 
         /**
