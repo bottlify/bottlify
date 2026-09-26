@@ -17,7 +17,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from './constants.js';
+import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK, floatToDword } from './constants.js';
 import { D3DFMT_INDEX, D3DPT, D3DRS, D3DTS, D3DTSS } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from './declaration.js';
@@ -294,6 +294,72 @@ test('a shader pair draws: layout from the declaration, modules, constants, text
         h.device.SetStreamSource(0, null, 0, 0);
         vs.shader.release();
         ps.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
+test('a ps_1_1 reads each stage as bound, projects as the stage asks, and bumps by its matrix',
+    async()=>{
+        // Wine's d3d9 visual.c texbem_test: tex t0, texbem t1, t0, mov r0, t1,
+        // with stage 1's matrix and D3DTTFF_COUNT4 | D3DTTFF_PROJECTED.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+        assert.equal(h.device.CreatePixelShader([
+            versionToken(SHADER_KIND.PIXEL, 1, 1),
+            0x00000042, 0xb00f0000,
+            0x00000043, 0xb00f0001, 0xb0e40000,
+            0x00000001, 0x800f0000, 0xb0e40001,
+            END_TOKEN,
+        ], ps), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        /** @type {{ texture?: any }} */
+        const cube = {};
+        assert.equal(h.device.CreateCubeTexture(2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, cube),
+            D3D_OK);
+        h.device.SetTexture(0, h.texture);
+        h.device.SetTexture(1, cube.texture);
+        const matrix = [0, 0.5, -0.5, 0];
+        [D3DTSS.BUMPENVMAT00, D3DTSS.BUMPENVMAT01, D3DTSS.BUMPENVMAT10, D3DTSS.BUMPENVMAT11]
+            .forEach((state, at)=>
+                h.device.SetTextureStageState(1, state, floatToDword(matrix[at])));
+        h.device.SetTextureStageState(1, D3DTSS.BUMPENVLSCALE, floatToDword(2));
+        h.device.SetTextureStageState(1, D3DTSS.TEXTURETRANSFORMFLAGS, 4 | 0x100);
+
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        assert.equal(h.device.diagnostics().programmable, 1);
+        const pixelModule = h.gpu.of('createShaderModule').map(call=>call.descriptor)
+            .find(module=>module.label.startsWith('ps:'));
+        assert.ok(pixelModule.code.includes('var tex1: texture_cube<f32>;'),
+            'stage one samples the cube bound there');
+        assert.ok(pixelModule.code.includes('(in.t1 / in.t1.w)'), 'and divides by w');
+        assert.ok(pixelModule.code.includes('const _bump = 0;'));
+
+        // The bump registers, two a stage from the first past the constants
+        // the shader reads, carry stage one's matrix and luminance.
+        const groups = h.groupsOfDraw();
+        const floats = new Float32Array(h.boundBytes(groups.get(1), 0).buffer);
+        assert.equal(floats.length, 16 * 4);
+        assert.deepEqual([...floats.subarray(8, 16)], [0, 0.5, -0.5, 0, 2, 0, 0, 0]);
+        const sampled = groups.get(2).descriptor.entries;
+        assert.equal(sampled[2].resource.viewDescriptor.dimension, 'cube');
+
+        h.device.SetTexture(0, null);
+        h.device.SetTexture(1, null);
+        h.device.SetVertexShader(null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        vs.shader.release();
+        ps.shader.release();
+        cube.texture.release();
         h.texture.release();
         h.declaration.release();
         h.vb.release();

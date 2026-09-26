@@ -117,6 +117,20 @@ const PLANAR_ROWS = Object.freeze([0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7,
 /** What those elements hold when the transform moves nothing: the identity, by columns. */
 const PLANAR_IDENTITY = Object.freeze([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
+/**
+ * The stages a 1.x pixel shader samples: four below 1.4, six in it.
+ */
+const LEGACY_STAGES = 6;
+
+/**
+ * The component D3DTTFF_PROJECTED divides a coordinate set by, for each
+ * D3DTTFF_COUNTn: the last of the count, or w with no count; one coordinate
+ * has nothing to divide by.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+const PROJECTED_BY = Object.freeze({ 0: 'w', 2: 'y', 3: 'z', 4: 'w' });
+
 /** D3DTTFF_COUNTn: how many coordinates go through the matrix; PROJECTED divides by the last. */
 const TTFF_COUNT_MASK = 0xff;
 const TTFF_PROJECTED = 0x100;
@@ -3969,26 +3983,30 @@ export function createRenderer(options){
         // state the device versions, so it is worked out once per change of
         // that state -- a program that sets its constants and binds a texture
         // before every draw, which is how a shader-drawn frame goes, changes
-        // none of it.
+        // none of it. A 1.x pixel shader's reads also take the dimension of
+        // what is bound, which a binding changes without a version.
         const version = model.stateVersionBesideTextures;
+        const legacy = legacyStages(model, program);
         let pieces = version !== undefined && programPieces !== null
             && programPieces.version === version
             && programPieces.vertexShader === program.vertexShader
             && programPieces.pixelShader === program.pixelShader
             && programPieces.declarationId === program.declarationId
             && programPieces.stride === stride && programPieces.topology === topology
+            && programPieces.legacy === legacy.key
             ? programPieces.made
             : null;
         if (pieces === null)
         {
-            pieces = programPiecesOf(model, stride, topology, program);
+            pieces = programPiecesOf(model, stride, topology, program, legacy);
             if (pieces === null)
             {
                 return null;
             }
             programPieces = version === undefined ? null : {
                 version, vertexShader: program.vertexShader, pixelShader: program.pixelShader,
-                declarationId: program.declarationId, stride, topology, made: pieces,
+                declarationId: program.declarationId, stride, topology, legacy: legacy.key,
+                made: pieces,
             };
         }
         const { pixel, vertex, samplerPlan, state, source } = pieces;
@@ -4023,6 +4041,10 @@ export function createRenderer(options){
             ? shaderVertexBlocks(model, program, vertex, take)
             : hybridBlocks(model, take);
         const pixelBlocks = constantBlocks(program.pixelConstants, pixel.constants, take);
+        if (pixel.bumpRegister !== undefined)
+        {
+            bumpMatrices(model, pixelBlocks[0], pixel.bumpRegister);
+        }
         return {
             version: undefined,
             contentVersion: 0,
@@ -4054,9 +4076,63 @@ export function createRenderer(options){
      * made for; see `prepareProgram`.
      *
      * @type {{ version: number, vertexShader: any, pixelShader: any, declarationId: number,
-     *          stride: number, topology: string, made: any } | null}
+     *          stride: number, topology: string, legacy: string, made: any } | null}
      */
     let programPieces = null;
+
+    /**
+     * What a 1.x pixel shader's reads depend on beyond the shader: the
+     * dimension of the texture bound at each stage and, below 1.4, the
+     * component D3DTTFF_PROJECTED divides each stage's coordinates by. None
+     * for any other shader.
+     *
+     * @param {RenderModel} model @param {ProgramState} program
+     * @returns {{ key: string, stageDimensions?: string[], projectedBy?: string[] }}
+     */
+    const legacyStages = (model, program)=>{
+        const version = program.pixel?.version;
+        if (!version || version.major >= 2)
+        {
+            return { key: '' };
+        }
+        /** @type {string[]} */
+        const stageDimensions = [];
+        /** @type {string[]} */
+        const projectedBy = [];
+        for (let stage = 0; stage < LEGACY_STAGES; stage++)
+        {
+            stageDimensions.push(textureDimensionOf(model.textures.get(stage)));
+            const flags = version.minor >= 4
+                ? 0
+                : model.stageStates(stage).get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
+            projectedBy.push((flags & TTFF_PROJECTED) === 0
+                ? ''
+                : PROJECTED_BY[flags & 0xff] ?? '');
+        }
+        return {
+            key: `${stageDimensions.join(',')}|${projectedBy.join(',')}`,
+            stageDimensions, projectedBy,
+        };
+    };
+
+    /**
+     * Each stage's bump matrix and luminance, into the registers a 1.x pixel
+     * shader's translation reads them from.
+     *
+     * @param {RenderModel} model @param {Float32Array} floats @param {number} register
+     */
+    const bumpMatrices = (model, floats, register)=>{
+        for (let stage = 0; stage < STAGE_COUNT; stage++)
+        {
+            const states = model.stageStates(stage);
+            const read = (/** @type {number} */ state)=>dwordToFloat(states.get(state) ?? 0);
+            floats.set([
+                read(D3DTSS.BUMPENVMAT00), read(D3DTSS.BUMPENVMAT01),
+                read(D3DTSS.BUMPENVMAT10), read(D3DTSS.BUMPENVMAT11),
+                read(D3DTSS.BUMPENVLSCALE), read(D3DTSS.BUMPENVLOFFSET), 0, 0,
+            ], (register + stage * 2) * 4);
+        }
+    };
 
     /**
      * The translations, layout, pipeline state and samplers of a shader draw:
@@ -4067,8 +4143,9 @@ export function createRenderer(options){
      * @param {number} stride
      * @param {string} topology
      * @param {ProgramState} program
+     * @param {ReturnType<typeof legacyStages>} legacy
      */
-    const programPiecesOf = (model, stride, topology, program)=>{
+    const programPiecesOf = (model, stride, topology, program, legacy)=>{
         if (!program.declaration)
         {
             return null;
@@ -4091,12 +4168,14 @@ export function createRenderer(options){
         const rangeFog = fog.source === FOG_SOURCE.VERTEX
             && (model.renderStates.get(D3DRS.RANGEFOGENABLE) ?? 0) !== 0;
         const pixel = translationOf(pixelShader,
-            `ps|fog${fog.source}/${fog.mode}${flat ? '|flat' : ''}`,
+            `ps|fog${fog.source}/${fog.mode}${flat ? '|flat' : ''}|${legacy.key}`,
             ()=>translateShader(
                 /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.pixel), {
                     ...(fog.source === FOG_SOURCE.NONE
                         ? {} : { fog: fog.mode, fogSource: fog.source }),
                     flatColours: flat,
+                    stageDimensions: legacy.stageDimensions,
+                    projectedBy: legacy.projectedBy,
                 }));
         if (pixel.error)
         {

@@ -397,16 +397,20 @@ test('model 3 names its outputs and inputs by declared semantic', ()=>{
     assertLine(ps.wgsl, '@location(1) oC1: vec4f,');
 });
 
-test('a 1.x pixel shader\'s tex and texcoord translate, and its addressing modes do not', ()=>{
+test('a 1.x pixel shader\'s tex, texcoord and texkill read their own stage', ()=>{
     const legacy = translateShader(parseShader([PS_1_1,
         op(OPCODE.TEX, 0), dst(REGISTER.TEXTURE, 0),
         op(OPCODE.TEXCOORD, 0), dst(REGISTER.TEXTURE, 1),
+        op(OPCODE.TEXKILL, 0), dst(REGISTER.TEXTURE, 0),
         op(OPCODE.MUL, 0), dst(REGISTER.TEMP, 0), src(REGISTER.TEXTURE, 0),
         src(REGISTER.TEXTURE, 1),
         END_TOKEN]));
     assert.equal(legacy.error, null);
     assertLine(legacy.wgsl, 't0 = textureSample(tex0, samp0, in.t0.xy);');
-    assertLine(legacy.wgsl, 't1 = in.t1;');
+    // texcoord: the coordinates as a colour, held to [0, 1] with a w of one;
+    // texkill reads the coordinates, not the texel tex filled the register with.
+    assertLine(legacy.wgsl, 't1 = vec4f(clamp(in.t1.xyz, vec3f(0.0), vec3f(1.0)), 1.0);');
+    assertLine(legacy.wgsl, 'if (any(in.t0.xyz < vec3f(0.0))) { discard; }');
     assertLine(legacy.wgsl, 'r0 = (t0 * t1);');
     assertLine(legacy.wgsl, 'oC0 = r0;');
     assertLine(legacy.wgsl, 'out.oC0 = oC0;');
@@ -424,11 +428,186 @@ test('a 1.x pixel shader\'s tex and texcoord translate, and its addressing modes
     assertLine(rewritten.wgsl, 't2 = (t1 * in.v0);');
     assert.ok(!rewritten.wgsl.includes('in.t2 ='), 'the input is never assigned');
     assertLine(rewritten.wgsl, 'var t2: vec4f = vec4f(0.0);');
+});
 
-    const bumped = translateShader(parseShader([PS_1_1,
-        op(OPCODE.TEXBEM, 0), dst(REGISTER.TEXTURE, 1), src(REGISTER.TEXTURE, 0),
+test('a 1.x read samples the texture bound at its stage, divided as the stage projects', ()=>{
+    const parsed = parseShader([PS_1_1,
+        op(OPCODE.TEX, 0), dst(REGISTER.TEXTURE, 0),
+        op(OPCODE.TEX, 0), dst(REGISTER.TEXTURE, 1),
+        op(OPCODE.TEX, 0), dst(REGISTER.TEXTURE, 2),
+        op(OPCODE.ADD, 0), dst(REGISTER.TEMP, 0), src(REGISTER.TEXTURE, 0),
+        src(REGISTER.TEXTURE, 1),
+        END_TOKEN]);
+    const shader = translateShader(parsed,
+        { stageDimensions: ['cube', '2d', '3d'], projectedBy: ['', 'w', 'z'] });
+    assert.equal(shader.error, null);
+    assertLine(shader.wgsl, 't0 = textureSample(tex0, samp0, in.t0.xyz);');
+    assertLine(shader.wgsl, 't1 = textureSample(tex1, samp1, (in.t1 / in.t1.w).xy);');
+    assertLine(shader.wgsl, 't2 = textureSample(tex2, samp2, (in.t2 / in.t2.z).xyz);');
+    assert.deepEqual(shader.samplers, [
+        { index: 0, type: 'texture_cube<f32>' },
+        { index: 1, type: 'texture_2d<f32>' },
+        { index: 2, type: 'texture_3d<f32>' },
+    ]);
+});
+
+test('a 1.x shader\'s constants are held to [-1, 1], and a result is scaled by its shift', ()=>{
+    // Wine's d3d9 visual.c texdepth_test reads a constant of 2 as 1.
+    const shader = translateShader(parseShader([PS_1_1,
+        0x00000051, 0xa00f0000, 0x40000000, 0x3f000000, 0xc0400000, 0x00000000, // def c0
+        0x00000005, 0x810f0000, 0xa0e40000, 0xa0e40001,    // mul_x2 r0, c0, c1
+        0x00000002, 0x8f0f0001, 0xa0e40000, 0xa0e40001,    // add_d2 r1, c0, c1
+        0x00000001, 0x821f0000, 0x80e40001,                // mov_x4_sat r0, r1
         END_TOKEN]));
-    assert.match(bumped.error ?? '', /texbem is not translated/);
+    assert.equal(shader.error, null);
+    assertLine(shader.wgsl, 'let k0 = vec4f(1.0, 0.5, -1.0, 0.0);');
+    assertLine(shader.wgsl,
+        'r0 = ((k0 * clamp(c[1], vec4f(-1.0), vec4f(1.0))) * 2.0);');
+    assertLine(shader.wgsl,
+        'r1 = ((k0 + clamp(c[1], vec4f(-1.0), vec4f(1.0))) * 0.5);');
+    assertLine(shader.wgsl, 'r0 = clamp((r1 * 4.0), vec4f(0.0), vec4f(1.0));');
+    const vertex = translateShader(parseShader([versionToken(SHADER_KIND.VERTEX, 1, 1),
+        0x00000001, 0xc00f0000, 0xa0e40000, END_TOKEN]));
+    assertLine(vertex.wgsl, 'out.oPos = c[0];');
+});
+
+test('texbem and texbeml move a stage\'s coordinates by its bump matrix', ()=>{
+    // Wine's d3d9 visual.c texbem_test: u by 00 and 10, v by 01 and 11 of
+    // the source's red and green, after the projection.
+    const tokens = (/** @type {number} */ opcode)=>[PS_1_1,
+        0x00000042, 0xb00f0000,                 // tex t0
+        opcode, 0xb00f0001, 0xb0e40000,         // texbem(l) t1, t0
+        0x00000001, 0x800f0000, 0xb0e40001,     // mov r0, t1
+        END_TOKEN];
+    const bumped = translateShader(parseShader(tokens(0x00000043)), { projectedBy: ['', 'w'] });
+    assert.equal(bumped.error, null);
+    assertLine(bumped.wgsl, 't1 = textureSample(tex1, samp1, (vec4f((in.t1 / in.t1.w).xy'
+        + ' + vec2f(dot(t0.xy, c[_bump + 2].xz), dot(t0.xy, c[_bump + 2].yw)),'
+        + ' (in.t1 / in.t1.w).zw)).xy);');
+    assertLine(bumped.wgsl, 'const _bump = 0;');
+    assert.equal(bumped.bumpRegister, 0, 'after the none it reads');
+    assert.equal(bumped.constants, 16, 'eight stages of two registers');
+
+    const luminous = translateShader(parseShader(tokens(0x00000044)));
+    assert.equal(luminous.error, null);
+    assertLine(luminous.wgsl, 't1 = vec4f(t1.rgb * clamp(t0.z * c[_bump + 3].x'
+        + ' + c[_bump + 3].y, 0.0, 1.0), t1.a);');
+    assert.equal(translateShader(parseShader([PS_1_1, 0x00000042, 0xb00f0000, END_TOKEN]))
+        .bumpRegister, undefined, 'a shader that bumps nothing carries no matrix');
+});
+
+test('the texm3x rows sample, reflect, or spell a depth', ()=>{
+    const pads = [
+        0x00000042, 0xb00f0000,                 // tex t0
+        0x00000049, 0xb00f0001, 0xb0e40000,     // texm3x3pad t1, t0
+        0x00000049, 0xb00f0002, 0xb0e40000,     // texm3x3pad t2, t0
+    ];
+    const cube = { stageDimensions: ['2d', '2d', '2d', 'cube'] };
+    const vspec = translateShader(parseShader([PS_1_1, ...pads,
+        0x0000004d, 0xb00f0003, 0xb0e40000,     // texm3x3vspec t3, t0
+        0x00000001, 0x800f0000, 0xb0e40003, END_TOKEN]), cube);
+    assert.equal(vspec.error, null);
+    assertLine(vspec.wgsl, 'let _row1 = dot(in.t1.xyz, t0.xyz);');
+    assertLine(vspec.wgsl, 'let _row2 = dot(in.t2.xyz, t0.xyz);');
+    assertLine(vspec.wgsl, '{ let _n = vec3f(_row1, _row2, dot(in.t3.xyz, t0.xyz));'
+        + ' let _e = vec3f(in.t1.w, in.t2.w, in.t3.w); t3 = textureSample(tex3, samp3,'
+        + ' (vec4f(2.0 * dot(_n, _e) / dot(_n, _n) * _n - _e, 0.0)).xyz); }');
+
+    const spec = translateShader(parseShader([PS_1_1, ...pads,
+        0x0000004c, 0xb00f0003, 0xb0e40000, 0xa0e40000,     // texm3x3spec t3, t0, c0
+        0x00000001, 0x800f0000, 0xb0e40003, END_TOKEN]), cube);
+    assert.equal(spec.error, null);
+    assert.ok(spec.wgsl.includes('let _e = clamp(c[0], vec4f(-1.0), vec4f(1.0)).xyz;')
+        || spec.wgsl.includes('let _e = (clamp(c[0], vec4f(-1.0), vec4f(1.0))).xyz;'));
+
+    const sampled = translateShader(parseShader([PS_1_1, ...pads,
+        0x0000004a, 0xb00f0003, 0xb0e40000,     // texm3x3tex t3, t0
+        0x00000001, 0x800f0000, 0xb0e40003, END_TOKEN]), cube);
+    assertLine(sampled.wgsl, 't3 = textureSample(tex3, samp3,'
+        + ' (vec4f(vec3f(_row1, _row2, dot(in.t3.xyz, t0.xyz)), 0.0)).xyz);');
+    const product = translateShader(parseShader([versionToken(SHADER_KIND.PIXEL, 1, 2), ...pads,
+        0x00000056, 0xb00f0003, 0xb0e40000,     // texm3x3 t3, t0
+        0x00000001, 0x800f0000, 0xb0e40003, END_TOKEN]));
+    assertLine(product.wgsl, 't3 = vec4f(vec3f(_row1, _row2, dot(in.t3.xyz, t0.xyz)), 1.0);');
+
+    const two = [
+        0x00000042, 0xb00f0000,                 // tex t0
+        0x00000047, 0xb00f0001, 0xb0e40000,     // texm3x2pad t1, t0
+    ];
+    const pair = translateShader(parseShader([PS_1_1, ...two,
+        0x00000048, 0xb00f0002, 0xb0e40000,     // texm3x2tex t2, t0
+        0x00000001, 0x800f0000, 0xb0e40002, END_TOKEN]));
+    assertLine(pair.wgsl, 't2 = textureSample(tex2, samp2,'
+        + ' (vec4f(vec3f(_row1, dot(in.t2.xyz, t0.xyz), 0.0), 0.0)).xy);');
+    const depth = translateShader(parseShader([versionToken(SHADER_KIND.PIXEL, 1, 3), ...two,
+        0x00000054, 0xb00f0002, 0xb0e40000,     // texm3x2depth t2, t0
+        0x00000001, 0x800f0000, 0xb0e40000, END_TOKEN]));
+    assert.equal(depth.error, null);
+    assertLine(depth.wgsl, 'oDepth = vec4f(select(clamp(_row1 / dot(in.t2.xyz, t0.xyz), 0.0,'
+        + ' 1.0), 1.0, dot(in.t2.xyz, t0.xyz) == 0.0));');
+    assertLine(depth.wgsl, 'out.oDepth = oDepth.x;');
+
+    const early = translateShader(parseShader([PS_1_1,
+        0x00000042, 0xb00f0000, 0x0000004a, 0xb00f0003, 0xb0e40000, END_TOKEN]));
+    assert.match(early.error ?? '', /texm3x3tex follows 0 rows/);
+});
+
+test('the dependent reads of 1.1 and 1.2 sample at the coordinates a register holds', ()=>{
+    const reads = translateShader(parseShader([versionToken(SHADER_KIND.PIXEL, 1, 2),
+        0x00000042, 0xb00f0000,                 // tex t0
+        0x00000045, 0xb00f0001, 0xb0e40000,     // texreg2ar t1, t0
+        0x00000046, 0xb00f0002, 0xb0e40000,     // texreg2gb t2, t0
+        0x00000052, 0xb00f0003, 0xb0e40000,     // texreg2rgb t3, t0
+        0x00000002, 0x800f0000, 0xb0e40001, 0xb0e40002,
+        END_TOKEN]), { stageDimensions: ['2d', '2d', '2d', '3d'] });
+    assert.equal(reads.error, null);
+    assertLine(reads.wgsl, 't1 = textureSample(tex1, samp1, (vec4f(t0.wx, 0.0, 0.0)).xy);');
+    assertLine(reads.wgsl, 't2 = textureSample(tex2, samp2, (vec4f(t0.yz, 0.0, 0.0)).xy);');
+    assertLine(reads.wgsl, 't3 = textureSample(tex3, samp3, (vec4f(t0.xyz, 0.0)).xyz);');
+
+    const dots = translateShader(parseShader([versionToken(SHADER_KIND.PIXEL, 1, 2),
+        0x00000042, 0xb00f0000,                 // tex t0
+        0x00000053, 0xb00f0001, 0xb0e40000,     // texdp3tex t1, t0
+        0x00000055, 0xb00f0002, 0xb0e40000,     // texdp3 t2, t0
+        0x00000002, 0x800f0000, 0xb0e40001, 0xb0e40002,
+        END_TOKEN]));
+    assert.equal(dots.error, null);
+    assertLine(dots.wgsl, 't1 = textureSample(tex1, samp1,'
+        + ' (vec4f(dot(in.t1.xyz, t0.xyz), 0.0, 0.0, 0.0)).xy);');
+    assertLine(dots.wgsl, 't2 = vec4f(dot(in.t2.xyz, t0.xyz));');
+});
+
+test('ps_1_4 reads its coordinates as inputs, samples at a source, bumps and writes a depth',
+    ()=>{
+        const shader = translateShader(parseShader([versionToken(SHADER_KIND.PIXEL, 1, 4),
+            0x00000042, 0x800f0000, 0xb0e40000,             // texld r0, t0
+            0x00000040, 0x80070001, 0xb0e40001,             // texcrd r1.xyz, t1
+            0x00000059, 0x80030002, 0x80e40000, 0x80e40001, // bem r2.xy, r0, r1
+            0x0000fffd,                                     // phase
+            0x00000042, 0x800f0002, 0x80e40002,             // texld r2, r2
+            0x00000057, 0x800f0005,                         // texdepth r5
+            0x00000001, 0x800f0000, 0x80e40002,             // mov r0, r2
+            END_TOKEN]), { stageDimensions: ['2d', '2d', 'cube'] });
+        assert.equal(shader.error, null);
+        assertLine(shader.wgsl, 'r0 = textureSample(tex0, samp0, in.t0.xy);');
+        assertLine(shader.wgsl, '{ let _t = in.t1; r1 = vec4f(_t.x, _t.y, _t.z, r1.w); }');
+        assertLine(shader.wgsl, '{ let _t = vec4f(r0.xy + vec2f(dot(r1.xy, c[_bump + 4].xz),'
+            + ' dot(r1.xy, c[_bump + 4].yw)), 0.0, 0.0); r2 = vec4f(_t.x, _t.y, r2.z, r2.w); }');
+        assertLine(shader.wgsl, 'r2 = textureSample(tex2, samp2, r2.xyz);');
+        assertLine(shader.wgsl,
+            'oDepth = vec4f(select(clamp(r5.x / r5.y, 0.0, 1.0), 1.0, r5.y == 0.0));');
+        assert.ok(!shader.wgsl.includes('var t0'), 'a coordinate set is not a temporary');
+    });
+
+test('a co-issued cnd of 1.1 to 1.3 takes its second source', ()=>{
+    // Wine's d3d8 visual.c cnd_test: +cnd r0.xyz, r0.a, c1, c2 selects c1
+    // whatever r0.a holds; ps_1_4 compares as it always does.
+    const body = [0x40000050, 0x80070000, 0x80ff0000, 0xa0e40001, 0xa0e40002, END_TOKEN];
+    const paired = translateShader(parseShader([PS_1_1, ...body]));
+    assertLine(paired.wgsl, '{ let _t = clamp(c[1], vec4f(-1.0), vec4f(1.0));'
+        + ' r0 = vec4f(_t.x, _t.y, _t.z, r0.w); }');
+    const phased = translateShader(parseShader([versionToken(SHADER_KIND.PIXEL, 1, 4), ...body]));
+    assert.ok(phased.wgsl.includes('> vec4f(0.5)'), 'ps_1_4 compares');
 });
 
 test('what is not translated is reported rather than emitted wrong', ()=>{

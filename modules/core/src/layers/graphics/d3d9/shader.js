@@ -43,7 +43,6 @@ const VERSION_VERTEX = 0xfffe;
 const VERSION_PIXEL = 0xffff;
 export const END_TOKEN = 0x0000ffff;
 const COMMENT_OPCODE = 0xfffe;
-const PHASE_OPCODE = 0xfffd;
 
 /** D3DSIO, the instruction opcodes. */
 export const OPCODE = Object.freeze({
@@ -58,7 +57,7 @@ export const OPCODE = Object.freeze({
     TEXM3x3SPEC: 76, TEXM3x3VSPEC: 77, EXPP: 78, LOGP: 79, CND: 80, DEF: 81,
     TEXREG2RGB: 82, TEXDP3TEX: 83, TEXM3x2DEPTH: 84, TEXDP3: 85, TEXM3x3: 86,
     TEXDEPTH: 87, CMP: 88, BEM: 89, DP2ADD: 90, DSX: 91, DSY: 92, TEXLDD: 93,
-    SETP: 94, TEXLDL: 95, BREAKP: 96,
+    SETP: 94, TEXLDL: 95, BREAKP: 96, PHASE: 0xfffd,
 });
 
 /** D3DSPR, the register types. */
@@ -291,7 +290,7 @@ export function parseShader(tokens){
             at += 1 + ((token >>> 16) & 0x7fff);
             continue;
         }
-        if (opcode === PHASE_OPCODE)
+        if (opcode === OPCODE.PHASE)
         {
             at++;
             instructions.push({
@@ -398,7 +397,13 @@ export function parseShader(tokens){
         }
         else
         {
-            for (let index = 0; index < info.sources; index++)
+            // ps_1_4's texld and texcrd read a source where 1.0 to 1.3's tex
+            // and texcoord read none.
+            const sources = version.kind === SHADER_KIND.PIXEL && version.minor >= 4
+                && (opcode === OPCODE.TEX || opcode === OPCODE.TEXCOORD)
+                ? 1
+                : info.sources;
+            for (let index = 0; index < sources; index++)
             {
                 const source = readOperand();
                 if (!source)
