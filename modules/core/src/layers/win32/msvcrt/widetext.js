@@ -272,6 +272,13 @@ export function wideStringAt(readMemory, pointer){
 }
 
 /**
+ * A string's UTF-16 units.
+ *
+ * @param {string} text
+ */
+export const unitsOfText = text=>Array.from({ length: text.length }, (_, at)=>text.charCodeAt(at));
+
+/**
  * Units as the string they spell, for the console.
  *
  * @param {number[]} units

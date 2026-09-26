@@ -30,11 +30,13 @@ import {
 } from './mbstring.js';
 import { createCxxFunctions } from './cxx.js';
 import { createMathFunctions } from './math.js';
+import { readDouble } from './float.js';
 import { createStartupFunctions } from './startup.js';
 import { createStdioFunctions, standardRecords } from './stdio.js';
 import { createThreadFunctions } from './threads.js';
 import { createGlobals, EINVAL, ERANGE } from './globals.js';
 import { createDescriptors, createIoFunctions } from './io.js';
+import { bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
 
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
@@ -101,6 +103,9 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  *           Registers a call answers in besides EAX: EDX, for the high half
  *           of an __int64. Absent, the calls answering one stay unexported.
  * @property {import('./float.js').FloatHost} [fpu]
+ * @property {import('../kernel32/versions.js').WindowsVersion} [version]
+ *           The Windows GetVersion answers for the process, which the
+ *           runtime's own copy of it follows. Absent, the default one.
  * @property {() => string} [commandLine]
  *           What the process was started with, as GetCommandLineA reports it.
  * @property {(code: number) => any} [exitProcess]
@@ -154,6 +159,9 @@ export function createMsvcrtFunctions(host){
     /** @param {number} pointer */
     const readString = pointer=>host.readCString(pointer, MAX_STRING);
 
+    /** @param {number} pointer */
+    const readWide = pointer=>wideStringAt(host.readMemory, pointer);
+
     /**
      * The scratch a single-byte search marks in. Handlers answer one call at a
      * time and never await inside a scan, so one table per runtime is safe and
@@ -185,9 +193,17 @@ export function createMsvcrtFunctions(host){
      */
     const copyOf = (address, length)=>host.readMemory(address, length).slice();
 
+    /**
+     * What a narrow printer writes: %S and %ls read wide strings, and the
+     * text is bytes under the C locale (see `formatToString`).
+     *
+     * @param {number} format @param {number[]} values
+     */
+    const narrowText = (format, values)=>formatToString(readString(format), values, readString,
+        { readWideString: readWide, cLocale: true });
+
     /** @param {number[]} args @param {number} fixed */
-    const render = (args, fixed)=>
-        formatToString(readString(args[fixed - 1]), args.slice(fixed), readString);
+    const render = (args, fixed)=>narrowText(args[fixed - 1], args.slice(fixed));
 
     /** int atoi(const char *str) */
     const atoi = {
@@ -254,7 +270,7 @@ export function createMsvcrtFunctions(host){
             errno(EINVAL);
             return -1;
         }
-        const text = formatToString(readString(format), values, readString);
+        const text = narrowText(format, values);
         if (text.length + 1 > room)
         {
             host.writeMemory(buffer, new Uint8Array(1));
@@ -535,6 +551,20 @@ export function createMsvcrtFunctions(host){
         _itoa: itoa,
 
         /**
+         * int _isnan(double x)
+         *
+         * A question about the bits of a double on the stack, answered in EAX:
+         * unlike the maths functions it needs no FPU, so it is here rather than
+         * with them.
+         */
+        _isnan: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>(Number.isNaN(readDouble(args, 0)) ? 1 : 0),
+        },
+
+        /**
          * void srand(unsigned int seed) and int rand(void)
          *
          * This runtime's own generator, not a better one. The sequence is part
@@ -664,7 +694,7 @@ export function createMsvcrtFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([buffer, format, list])=>{
-                const text = formatToString(readString(format), varargsAt(list), readString);
+                const text = narrowText(format, varargsAt(list));
                 writeString(buffer, text);
                 return text.length;
             },
@@ -682,7 +712,7 @@ export function createMsvcrtFunctions(host){
             /** @param {number[]} args */
             handler: ([buffer, count, format, list])=>{
                 const limit = count >>> 0;
-                const text = formatToString(readString(format), varargsAt(list), readString);
+                const text = narrowText(format, varargsAt(list));
                 if (text.length > limit)
                 {
                     host.writeMemory(buffer, packInto(new Uint8Array(limit), text));
@@ -690,6 +720,39 @@ export function createMsvcrtFunctions(host){
                 }
                 writeString(buffer, text);
                 return text.length;
+            },
+        },
+
+        /**
+         * int _vsnwprintf(wchar_t *buffer, size_t count, const wchar_t *format,
+         *                 va_list args)
+         *
+         * _vsnprintf in wide characters, where %s is a wide string: at most
+         * `count` characters, terminated only when there is room, and -1 when
+         * the text does not fit. With no buffer and a count of zero it answers
+         * how many the text needs (Wine's msvcrt test_vsnwprintf); no format,
+         * or no buffer for a count, is -1 and EINVAL.
+         */
+        _vsnwprintf: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([buffer, count, format, list])=>{
+                const limit = count >>> 0;
+                if ((format >>> 0) === 0 || ((buffer >>> 0) === 0 && limit !== 0))
+                {
+                    errno(EINVAL);
+                    return -1;
+                }
+                const text = formatToString(readWide(format), varargsAt(list), readString,
+                    { readWideString: readWide, wide: true });
+                if ((buffer >>> 0) === 0)
+                {
+                    return text.length;
+                }
+                const units = unitsOfText(text.slice(0, limit));
+                host.writeMemory(buffer, bytesOfUnits(text.length < limit ? [...units, 0] : units));
+                return text.length > limit ? -1 : text.length;
             },
         },
 
@@ -857,7 +920,12 @@ export function createMsvcrtFunctions(host){
         // Bound to the byte functions above, so the two families cannot drift.
         ...createMultiByteFunctions(narrow),
         ...createWideClassificationFunctions(narrow),
-        ...createWideFunctions(host),
+        ...createWideFunctions({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            readCString: host.readCString,
+            errno,
+        }),
         ...createConversionFunctions({
             readCString: host.readCString,
             writeMemory: host.writeMemory,
@@ -887,6 +955,7 @@ export function createMsvcrtFunctions(host){
                 globals,
                 errnoName,
                 closeStreams,
+                version: host.version,
             })
             : {}),
 
@@ -903,6 +972,7 @@ export function createMsvcrtFunctions(host){
                 readMemory: host.readMemory,
                 writeMemory: host.writeMemory,
                 fillMemory: host.fillMemory,
+                errno,
             })
             : {}),
         ...(host.systemTimeMs && host.now

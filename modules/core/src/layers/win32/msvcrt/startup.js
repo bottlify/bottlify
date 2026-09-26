@@ -30,7 +30,7 @@
  *   pointed at a buffer that will be reused.
  */
 
-import { VERSION_BUILD, VERSION_MAJOR, VERSION_MINOR } from '../kernel32/process.js';
+import { windowsVersion } from '../kernel32/versions.js';
 import { createGlobals } from './globals.js';
 
 /** What `_controlfp` reports when nothing has changed it: the MSVC default. */
@@ -137,6 +137,9 @@ export function splitCommandLine(line){
  * @property {() => void} [closeStreams]
  *           Closes every stream still open, for `_cexit`. Absent, there are
  *           no streams to close.
+ * @property {import('../kernel32/versions.js').WindowsVersion} [version]
+ *           The Windows GetVersion answers for this process. Absent, the
+ *           default one.
  */
 
 /**
@@ -145,6 +148,7 @@ export function splitCommandLine(line){
  */
 export function createStartupFunctions(host){
     let controlWord = DEFAULT_CONTROL_WORD;
+    const version = host.version ?? windowsVersion();
 
     /**
      * A C string in guest memory that outlives this call.
@@ -533,12 +537,13 @@ export function createStartupFunctions(host){
          * The runtime's copy of the system version, which a start-up and a
          * program's own version check read without calling GetVersion: the
          * build, major and minor in one word, and each part alone. The same
-         * figures GetVersion answers, since a program may compare the two.
+         * figures GetVersion answers for the Windows the process is told it
+         * runs on, since a program may compare the two.
          */
-        _osver: { data: ()=>dword(VERSION_BUILD) },
-        _winver: { data: ()=>dword(VERSION_MAJOR << 8 | VERSION_MINOR) },
-        _winmajor: { data: ()=>dword(VERSION_MAJOR) },
-        _winminor: { data: ()=>dword(VERSION_MINOR) },
+        _osver: { data: ()=>dword(version.build) },
+        _winver: { data: ()=>dword(version.major << 8 | version.minor) },
+        _winmajor: { data: ()=>dword(version.major) },
+        _winminor: { data: ()=>dword(version.minor) },
 
         /**
          * double _HUGE

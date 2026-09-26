@@ -324,6 +324,8 @@ function convertFloat(value, spec){
  * @param {() => bigint} source.takeWide   Next argument as a 64-bit value.
  * @param {() => number} source.takeDouble
  * @param {(pointer: number, wide: boolean) => string} source.readText
+ * @param {boolean} [source.bytesOnly]     The text is bytes: a character past
+ *                                         U+00FF has none and is left out.
  * @param {number} produced                Characters written so far, for %n.
  * @param {(pointer: number, value: number) => void} writeCount
  * @returns {Rendered | null}   Null when the conversion is not one we know.
@@ -336,7 +338,8 @@ function convert(spec, source, produced, writeCount){
         case 'c':
         case 'C': {
             const code = take() & (wideText(spec) ? 0xffff : 0xff);
-            return { prefix: '', body: String.fromCharCode(code), numeric: false };
+            const body = source.bytesOnly && code > 0xff ? '' : String.fromCharCode(code);
+            return { prefix: '', body, numeric: false };
         }
         case 's':
         case 'S': {
@@ -479,6 +482,12 @@ export function varargsSlots(read, locate, list, slots){
  *        writes nothing, which is what a runtime with %n disabled does.
  * @param {boolean} [options.wide]
  *        True for the wprintf family, where %s means a wide string by default.
+ * @param {boolean} [options.cLocale]
+ *        The text is written as bytes under the C locale, which has one for
+ *        each character to U+00FF and none past it: a wide string stops
+ *        before its first such character, and a wide character that is one
+ *        is left out (Wine's msvcrt test_sprintf, where %C of U+3042 writes
+ *        nothing, and %S of it nothing on the older runtimes).
  * @returns {string}
  */
 export function formatToString(format, varargs, readString, options = {}){
@@ -501,14 +510,16 @@ export function formatToString(format, varargs, readString, options = {}){
     };
     /** @param {number} pointer @param {boolean} asWide */
     const readText = (pointer, asWide)=>{
-        if (asWide && options.readWideString)
+        if (!asWide || !options.readWideString)
         {
-            return options.readWideString(pointer);
+            return readString(pointer);
         }
-        return readString(pointer);
+        const text = options.readWideString(pointer);
+        const unfit = options.cLocale ? text.search(/[^\0-\xff]/) : -1;
+        return unfit < 0 ? text : text.slice(0, unfit);
     };
 
-    const source = { take, takeWide, takeDouble, readText };
+    const source = { take, takeWide, takeDouble, readText, bytesOnly: options.cLocale === true };
 
     for (let i = 0; i < format.length; i++)
     {

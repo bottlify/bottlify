@@ -241,6 +241,10 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {(thread: any, routine: number, args: number[]) => void} [queueApc]
  *           Queues a routine to a thread, to run at its next alertable wait:
  *           how ReadFileEx and WriteFileEx deliver their completion routines.
+ * @property {string[]} [directories]
+ *           The profile's folders the configured Windows names (the registry's
+ *           `profileDirectories`), parents first, made at start beside the
+ *           system's own. Absent, only the system's are made.
  * @property {() => string} [imagePath]
  *           The running program, whose directory is the first place a search
  *           with no path of its own looks. Absent, the search starts at the
@@ -283,13 +287,13 @@ export function createFileFunctions(host){
 
     // A machine has these directories before any program runs: GetTempPath
     // and GetSystemDirectory promise them, the registry names the program
-    // directories, and an installer's first act is to create its scratch
-    // file in one and its last to move a shared library into another. A
-    // promise of a directory that is not there fails that create or move
-    // with "access denied", which is the wrong answer to a question the
-    // program never asked.
+    // directories and the profile's folders, and an installer's first act is
+    // to create its scratch file in one and its last to move a shared library
+    // into another. A promise of a directory that is not there fails that
+    // create or move with "access denied", which is the wrong answer to a
+    // question the program never asked.
     for (const path of [WINDOWS_DIRECTORY, TEMP_PATH.slice(0, -1), SYSTEM_DIRECTORY,
-        PROGRAM_FILES, `${PROGRAM_FILES}\\Common Files`])
+        PROGRAM_FILES, `${PROGRAM_FILES}\\Common Files`, ...host.directories ?? []])
     {
         try
         {

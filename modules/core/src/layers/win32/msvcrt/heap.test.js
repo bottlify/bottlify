@@ -63,9 +63,12 @@ function fakeAllocator(memory){
 const build = ()=>{
     const memory = fakeMemory();
     const allocator = fakeAllocator(memory);
+    /** @type {number[]} */
+    const errno = [];
     return {
         memory,
         allocator,
+        errno,
         table: /** @type {Record<string, any>} */ (createHeapFunctions({
             allocate: bytes=>allocator.allocate(bytes),
             free: address=>allocator.free(address),
@@ -74,9 +77,39 @@ const build = ()=>{
             readMemory: memory.readMemory,
             writeMemory: memory.writeMemory,
             fillMemory: memory.fillMemory,
+            errno: code=>errno.push(code),
         })),
     };
 };
+
+test('_aligned_malloc answers a multiple of any power of two, and refuses anything else', ()=>{
+    // Wine's msvcrt test_aligned: 256 bytes at each power of two, zero
+    // among them, is a block that far aligned; at 3 or 127 it is NULL and
+    // EINVAL. "If alignment isn't a power of 2 or size is zero ... returns
+    // NULL and sets errno to EINVAL"; a failed allocation is ENOMEM.
+    const { memory, allocator, errno, table } = build();
+    for (const alignment of [0, 1, 2, 4, 8, 16, 32, 64, 128])
+    {
+        const block = table._aligned_malloc.handler([256, alignment]);
+        assert.notEqual(block, 0, String(alignment));
+        assert.equal(block % Math.max(alignment, 1), 0, String(alignment));
+        const base = memory.u32(block - 4);
+        assert.ok((allocator.block(base)?.size ?? 0) >= block - base + 256,
+            'the whole request fits');
+        assert.equal(table._aligned_free.handler([block]), 0);
+        assert.equal(allocator.block(base), null, '_aligned_free frees what malloc gave');
+    }
+    assert.deepEqual(errno, []);
+    assert.equal(table._aligned_malloc.handler([256, 3]), 0);
+    assert.equal(table._aligned_malloc.handler([256, 127]), 0);
+    assert.equal(table._aligned_malloc.handler([0, 16]), 0);
+    allocator.exhaust();
+    assert.equal(table._aligned_malloc.handler([256, 16]), 0);
+    const [EINVAL, ENOMEM] = [22, 12];
+    assert.deepEqual(errno, [EINVAL, EINVAL, EINVAL, ENOMEM]);
+    assert.doesNotThrow(()=>table._aligned_free.handler([0]), 'freeing NULL does nothing');
+    assert.deepEqual([table._aligned_malloc.argBytes, table._aligned_free.argBytes], [8, 4]);
+});
 
 test('malloc answers a distinct address and _msize remembers the request', ()=>{
     const { table } = build();

@@ -261,18 +261,48 @@ export function shellFolders(windows = windowsVersion()){
     });
 }
 
+/**
+ * The directories a Windows's profile folders need on the volume, each parent
+ * before its children: every shell folder under the user's, the shared and the
+ * public profile, and the directories that hold them.
+ *
+ * @param {WindowsVersion} [windows]
+ * @returns {string[]}
+ */
+export function profileDirectories(windows = windowsVersion()){
+    const { user, allUsers, public: shared } = windows.profiles;
+    const roots = [user, allUsers, shared].filter(root=>root !== null);
+    /** @type {Set<string>} */
+    const directories = new Set();
+    for (const folder of Object.values(shellFolders(windows)))
+    {
+        if (!roots.some(root=>folder === root || folder.startsWith(`${root}\\`)))
+        {
+            continue;
+        }
+        const parts = folder.split('\\');
+        for (let depth = 2; depth <= parts.length; depth++)
+        {
+            directories.add(parts.slice(0, depth).join('\\'));
+        }
+    }
+    return [...directories];
+}
+
 /** What NT 4, 2000 and XP keep in CurrentBuild; Vista put the build number there. */
 const OBSOLETE_BUILD = '1.511.1 () (Obsolete data - do not use)';
 
 /** Every value of the Windows NT version key that describes the version. */
 const VERSION_VALUES = Object.freeze(['CurrentVersion', 'CurrentBuildNumber', 'CurrentBuild',
-    'CSDVersion', 'ProductName', 'CurrentMajorVersionNumber', 'CurrentMinorVersionNumber']);
+    'CSDVersion', 'ProductName', 'CurrentMajorVersionNumber', 'CurrentMinorVersionNumber',
+    'DisplayVersion', 'ReleaseId', 'UBR']);
 
 /**
  * The Windows NT version key's description of a Windows. Windows 10 leaves
  * CurrentVersion at 6.3, where programs that parse it expect to find a
- * number they know, and says 10.0 in two DWORDs of its own; a Windows with no
- * service pack has no CSDVersion.
+ * number they know, and says 10.0 in two DWORDs of its own, beside the name of
+ * its release and the revision of its last update; a Windows with no service
+ * pack has no CSDVersion.
  *
  * @param {WindowsVersion} windows
  * @returns {Record<string, string | number>}
@@ -286,6 +316,11 @@ const versionValues = windows=>({
     ...windows.major >= 10
         ? { CurrentMajorVersionNumber: windows.major, CurrentMinorVersionNumber: windows.minor }
         : {},
+    ...windows.release === null ? {} : {
+        DisplayVersion: windows.release.displayVersion,
+        ReleaseId: windows.release.releaseId,
+        UBR: windows.release.ubr,
+    },
 });
 
 /**

@@ -76,6 +76,9 @@ const MMIOM_SEEK = 2;
 const MMIOM_OPEN = 3;
 const MMIOM_CLOSE = 4;
 const MMIOM_WRITEFLUSH = 5;
+const MMIOM_RENAME = 6;
+/** Where a program's own messages to its procedure start. */
+const MMIOM_USER = 0x8000;
 
 const SEEK_SET = 0;
 const SEEK_CUR = 1;
@@ -89,6 +92,7 @@ const MMIOERR_CANNOTOPEN = 260;
 const MMIOERR_CANNOTWRITE = 262;
 const MMIOERR_CANNOTEXPAND = 264;
 const MMIOERR_UNBUFFERED = 266;
+const MMIOERR_ACCESSDENIED = 268;
 const MMIOERR_CHUNKNOTFOUND = 275;
 
 /** MMIOINFO, eighteen dwords. */
@@ -851,6 +855,30 @@ export function createMmioFunctions(host){
     };
 
     /**
+     * Which procedure a file is the program's through, for mmioOpen and
+     * mmioRename alike: one handed in the MMIOINFO, one installed under the
+     * code it names, or under the extension of a compound name
+     * (`archive.xyz+member`, the extension before the last `+`); null for
+     * the built-in ones.
+     *
+     * @param {string | null} path @param {number} record  The caller's MMIOINFO, or 0.
+     * @param {boolean} wide  The width of the call.
+     */
+    const procedureFor = (path, record, wide)=>{
+        const fcc = record === 0 ? 0 : field(record, MMIOINFO.fccIOProc);
+        const proc = record === 0 ? 0 : field(record, MMIOINFO.pIOProc);
+        const memory = fcc === FOURCC_MEM;
+        const compound = path?.includes('+')
+            ? /\.([^.\\/+]{1,4})$/.exec(path.slice(0, path.lastIndexOf('+')))?.[1] ?? null
+            : null;
+        const named = fcc === 0 && compound !== null ? fourccOf(compound, true) : fcc;
+        /** @type {Procedure | null} */
+        const procedure = proc !== 0 ? { entry: proc, wide }
+            : named !== FOURCC_DOS && !memory ? procedures.get(named) ?? null : null;
+        return { fcc, memory, named, procedure };
+    };
+
+    /**
      * mmioOpen for either width, once the name is read: null for a memory
      * file, which has none, and for one opened by a handle.
      *
@@ -869,17 +897,7 @@ export function createMmioFunctions(host){
             }
             return 0;
         };
-        const fcc = record === 0 ? 0 : field(record, MMIOINFO.fccIOProc);
-        const proc = record === 0 ? 0 : field(record, MMIOINFO.pIOProc);
-        const memory = fcc === FOURCC_MEM;
-        // A compound name, `archive.xyz+member`, names its procedure by the
-        // extension before the last `+`.
-        const compound = path?.includes('+')
-            ? /\.([^.\\/+]{1,4})$/.exec(path.slice(0, path.lastIndexOf('+')))?.[1] ?? null
-            : null;
-        const named = fcc === 0 && compound !== null ? fourccOf(compound, true) : fcc;
-        const procedure = proc !== 0 ? { entry: proc, wide }
-            : named !== FOURCC_DOS && !memory ? procedures.get(named) ?? null : null;
+        const { fcc, memory, named, procedure } = procedureFor(path, record, wide);
         if (procedure === null && fcc !== 0 && fcc !== FOURCC_DOS && !memory)
         {
             return refuse(MMIOERR_CANNOTOPEN);
@@ -1104,6 +1122,76 @@ export function createMmioFunctions(host){
             return ((flags >>> 0) & MMIO_FINDPROC) !== 0 ? installed : 0;
         },
     });
+
+    /**
+     * mmioRename for either width, once the names are read: a file on the
+     * volume renamed there, or the program's procedure sent MMIOM_RENAME
+     * with both names, in an MMIOINFO of its own, its answer the call's.
+     *
+     * @param {string} from @param {string} to @param {number} info @param {boolean} wide
+     * @returns {number | Promise<number>}
+     */
+    const renameFile = (from, to, info, wide)=>{
+        const record = info >>> 0;
+        const { fcc, memory, named, procedure } = procedureFor(from, record, wide);
+        if (procedure === null)
+        {
+            if (memory)
+            {
+                return MMIOERR_FILENOTFOUND;
+            }
+            if (fcc !== 0 && fcc !== FOURCC_DOS)
+            {
+                return MMIOERR_CANNOTOPEN;
+            }
+            if (from === '' || !host.files.stat(from))
+            {
+                return MMIOERR_FILENOTFOUND;
+            }
+            return host.files.rename(from, to) ? MMSYSERR_NOERROR : MMIOERR_ACCESSDENIED;
+        }
+        const call = host.call;
+        if (!call)
+        {
+            host.divergence?.('mmioRename', 'a file through a program\'s own I/O procedure, '
+                + 'which this build cannot call');
+            return MMIOERR_CANNOTOPEN;
+        }
+        const blocks = [MMIOINFO.size, ...[from, to].map(name=>encode(name, procedure.wide))]
+            .map(what=>{
+                const bytes = typeof what === 'number' ? new Uint8Array(what) : what;
+                const block = (host.allocate?.(bytes.length) ?? 0) >>> 0;
+                if (block !== 0)
+                {
+                    host.writeMemory(block, bytes);
+                }
+                return block;
+            });
+        const release = ()=>blocks.forEach(block=>{
+            if (block !== 0)
+            {
+                host.free?.(block);
+            }
+        });
+        if (blocks.includes(0))
+        {
+            release();
+            return MMIOERR_OUTOFMEMORY;
+        }
+        const [own, oldName, newName] = blocks;
+        host.writeMemory(own + MMIOINFO.fccIOProc, dword(named));
+        host.writeMemory(own + MMIOINFO.pIOProc, dword(procedure.entry));
+        if (record !== 0)
+        {
+            host.writeMemory(own + MMIOINFO.adwInfo,
+                host.readMemory(record + MMIOINFO.adwInfo, 12).slice());
+        }
+        return call(procedure.entry, [own, MMIOM_RENAME, oldName, newName],
+            host.callerThread?.() ?? undefined).then(answer=>{
+            release();
+            return answer | 0;
+        });
+    };
 
     /**
      * mmioSetBuffer's work once the old buffer is written: the new one
@@ -1613,6 +1701,62 @@ export function createMmioFunctions(host){
                     return MMSYSERR_NOERROR;
                 });
             },
+        },
+
+        /**
+         * LRESULT mmioSendMessage(HMMIO hmmio, UINT uMsg, LPARAM lParam1, LPARAM lParam2)
+         *
+         * A message to the file's procedure, answered by it: the way a
+         * program reaches its own procedure with messages of its own,
+         * MMIOM_USER and up. The built-in procedures recognise none of
+         * those, and answer zero as a procedure does for a message it does
+         * not know; mmio's own messages are not to be sent this way, and a
+         * built-in procedure is not moved by one.
+         */
+        mmioSendMessage: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, message, first, second])=>{
+                const file = fileOf(handle);
+                if (!file)
+                {
+                    return MMSYSERR_INVALHANDLE;
+                }
+                if (file.procedure)
+                {
+                    return send(file, message >>> 0, first, second);
+                }
+                if ((message >>> 0) < MMIOM_USER)
+                {
+                    host.divergence?.('mmioSendMessage', 'one of mmio\'s own messages, sent to '
+                        + 'a built-in procedure, is not acted on');
+                }
+                return 0;
+            },
+        },
+
+        /**
+         * MMRESULT mmioRenameA(LPCSTR pszFileName, LPCSTR pszNewFileName,
+         *   LPCMMIOINFO pmmioinfo, DWORD fdwRename)
+         * MMRESULT mmioRenameW(LPCWSTR, LPCWSTR, LPCMMIOINFO, DWORD)
+         *
+         * Zero once renamed; MMIOERR_FILENOTFOUND for a file that is not
+         * there, as MMIOM_RENAME is documented to answer, and
+         * MMIOERR_ACCESSDENIED when the volume will not rename it.
+         */
+        mmioRenameA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([from, to, info])=>renameFile(
+                (from >>> 0) === 0 ? '' : host.readCString(from >>> 0, MAX_PATH),
+                (to >>> 0) === 0 ? '' : host.readCString(to >>> 0, MAX_PATH), info, false),
+        },
+        mmioRenameW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([from, to, info])=>renameFile(
+                (from >>> 0) === 0 ? '' : wideAt(from >>> 0, MAX_PATH),
+                (to >>> 0) === 0 ? '' : wideAt(to >>> 0, MAX_PATH), info, true),
         },
 
         /**

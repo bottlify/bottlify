@@ -20,6 +20,8 @@
  * ready for a double-byte locale, and the place that would change is here.
  */
 
+import { EILSEQ } from './globals.js';
+
 const MAX_STRING = 1 << 20;
 
 /** Sixty-four thousand UTF-16 units is as far as a wide string is scanned. */
@@ -30,6 +32,7 @@ const MAX_WIDE = 1 << 16;
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(code: number) => void} [errno]  Where a failure says why.
  */
 
 /** WEOF: the value no code unit is, and the one every classifier answers nothing for. */
@@ -286,7 +289,12 @@ export function createWideFunctions(host){
             },
         },
 
-        /** int wctomb(char *dest, wchar_t unit) */
+        /**
+         * int wctomb(char *dest, wchar_t unit)
+         *
+         * One byte for a character to U+00FF; the C locale has none for a
+         * character past it, which is -1 and EILSEQ with nothing written.
+         */
         wctomb: {
             convention: 'cdecl',
             argBytes: 8,
@@ -296,6 +304,11 @@ export function createWideFunctions(host){
                 {
                     // Asking whether the encoding is stateful. It is not.
                     return 0;
+                }
+                if ((unit & 0xffff) > 0xff)
+                {
+                    host.errno?.(EILSEQ);
+                    return -1;
                 }
                 host.writeMemory(destination, new Uint8Array([unit & 0xff]));
                 return 1;

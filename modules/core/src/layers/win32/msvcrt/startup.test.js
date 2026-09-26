@@ -14,11 +14,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStartupFunctions, splitCommandLine } from './startup.js';
+import { windowsVersion } from '../kernel32/versions.js';
 
 const HEAP_BASE = 0x00500000;
 
 /** Guest memory as a flat array, plus a bump allocator over the top of it. */
-function fakeMachine(commandLine = '"C:\\App\\Game.exe"'){
+/**
+ * @param {string} [commandLine]
+ * @param {{ version?: import('../kernel32/versions.js').WindowsVersion }} [options]
+ */
+function fakeMachine(commandLine = '"C:\\App\\Game.exe"', { version } = {}){
     const bytes = new Uint8Array(0x600000);
     let next = HEAP_BASE;
     /** @type {number[]} */
@@ -90,6 +95,7 @@ function fakeMachine(commandLine = '"C:\\App\\Game.exe"'){
         exit: code=>{
             exited.push(code);
         },
+        version,
     });
     return { machine, fns };
 }
@@ -395,6 +401,16 @@ test('every entry point is cdecl and declares the stack it does not pop', ()=>{
     assert.equal(fns._controlfp.argBytes, 8);
     assert.equal(fns.__p__commode.argBytes, 0);
     assert.equal(fns.exit.argBytes, 4);
+});
+
+test('the version variables are the Windows the process is told it runs on', ()=>{
+    // The runtime fills them from GetVersion at start-up, so they answer
+    // what GetVersion does for the Windows the process was given.
+    const { fns } = fakeMachine('"C:\\App\\Game.exe"', { version: windowsVersion('win7') });
+    /** @param {string} name */
+    const dword = name=>new DataView(fns[name].data().buffer).getUint32(0, true);
+    assert.deepEqual(['_winmajor', '_winminor', '_winver', '_osver'].map(dword),
+        [6, 1, 0x0601, 7601]);
 });
 
 test('the version variables are GetVersion\'s figures, _HUGE is infinity, _environ a vector', ()=>{

@@ -77,6 +77,9 @@ const KERNEL32_ALIASES = Object.freeze({
     // Not a rename: kernel32 forwards this one to ntdll on a real machine, and
     // the walk it drives is the same walk a processor fault goes through here.
     RtlUnwind: 'RtlUnwind',
+    // Forwarded the same way (kernel32.spec), so a mask built through either
+    // name is the one both comparisons read.
+    VerSetConditionMask: 'VerSetConditionMask',
 });
 
 /**

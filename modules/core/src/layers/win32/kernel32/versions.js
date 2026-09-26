@@ -62,6 +62,9 @@ const VER_SUITE_SINGLEUSERTS = 0x100;
  * @property {number} productType
  * @property {string} productName   The registry's ProductName.
  * @property {ProfileRoots} profiles
+ * @property {{ displayVersion: string, releaseId: string, ubr: number } | null} release
+ *           How Windows 10 names a release and its update beyond the build:
+ *           the registry's DisplayVersion, ReleaseId and UBR. Null before 10.
  */
 
 /** @type {ProfileRoots} */
@@ -92,6 +95,7 @@ export const WINDOWS_VERSIONS = Object.freeze({
         suiteMask: 0, productType: VER_NT_WORKSTATION,
         productName: 'Microsoft Windows 2000',
         profiles: DOCUMENTS_AND_SETTINGS,
+        release: null,
     }),
     winxp: Object.freeze({
         name: /** @type {WindowsName} */ ('winxp'),
@@ -100,6 +104,7 @@ export const WINDOWS_VERSIONS = Object.freeze({
         suiteMask: VER_SUITE_SINGLEUSERTS, productType: VER_NT_WORKSTATION,
         productName: 'Microsoft Windows XP',
         profiles: DOCUMENTS_AND_SETTINGS,
+        release: null,
     }),
     win7: Object.freeze({
         name: /** @type {WindowsName} */ ('win7'),
@@ -108,6 +113,7 @@ export const WINDOWS_VERSIONS = Object.freeze({
         suiteMask: VER_SUITE_SINGLEUSERTS, productType: VER_NT_WORKSTATION,
         productName: 'Windows 7 Professional',
         profiles: USERS,
+        release: null,
     }),
     win10: Object.freeze({
         name: /** @type {WindowsName} */ ('win10'),
@@ -116,6 +122,10 @@ export const WINDOWS_VERSIONS = Object.freeze({
         suiteMask: VER_SUITE_SINGLEUSERTS, productType: VER_NT_WORKSTATION,
         productName: 'Windows 10 Pro',
         profiles: USERS,
+        // Build 19045 is 22H2. Its ReleaseId stayed at 2009, where it froze
+        // when the name moved to DisplayVersion; the update revision is one
+        // 22H2 was serviced with.
+        release: Object.freeze({ displayVersion: '22H2', releaseId: '2009', ubr: 6456 }),
     }),
 });
 

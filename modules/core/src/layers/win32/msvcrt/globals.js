@@ -22,6 +22,7 @@
 /** errno values, at the numbers msvcrt's errno.h gives them. */
 export const ENOENT = 2;
 export const EBADF = 9;
+export const ENOMEM = 12;
 export const EACCES = 13;
 export const EEXIST = 17;
 export const EINVAL = 22;

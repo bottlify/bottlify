@@ -58,3 +58,56 @@ test('a status with no translation says so rather than guessing', ()=>{
     assert.equal(toDosError(0xc0000123), ERROR_MR_MID_NOT_FOUND);
     assert.equal(ERROR_MR_MID_NOT_FOUND, 317);
 });
+
+test('a version that does not meet a request is a revision mismatch in both domains', ()=>{
+    // RtlVerifyVersionInfo's answer when the system does not satisfy the
+    // request; Wine's ntdll error tests pin its translation.
+    assert.equal(STATUS.REVISION_MISMATCH, 0xc0000059);
+    assert.equal(toDosError(STATUS.REVISION_MISMATCH), 1306);
+});
+
+test('every status translated here answers what Wine\'s ntdll error tests expect', ()=>{
+    // error.c's cmp rows for each status this table holds, as Win32 numbers.
+    // STATUS_NO_SUCH_DEVICE is a cmp3 row there, which accepts
+    // ERROR_FILE_NOT_FOUND beside ERROR_NO_SUCH_DEVICE; STATUS_TIMEOUT has no
+    // row at all.
+    /** @type {[number, number | number[]][]} */
+    const rows = [
+        [STATUS.SUCCESS, 0],
+        [STATUS.PENDING, 997],
+        [STATUS.BUFFER_OVERFLOW, 234],
+        [STATUS.NO_MORE_FILES, 18],
+        [STATUS.UNSUCCESSFUL, 31],
+        [STATUS.NOT_IMPLEMENTED, 1],
+        [STATUS.INVALID_INFO_CLASS, 87],
+        [STATUS.INFO_LENGTH_MISMATCH, 24],
+        [STATUS.ACCESS_VIOLATION, 998],
+        [STATUS.INVALID_HANDLE, 6],
+        [STATUS.INVALID_PARAMETER, 87],
+        [STATUS.NO_SUCH_DEVICE, [433, 2]],
+        [STATUS.NO_SUCH_FILE, 2],
+        [STATUS.END_OF_FILE, 38],
+        [STATUS.NO_MEMORY, 8],
+        [STATUS.ACCESS_DENIED, 5],
+        [STATUS.BUFFER_TOO_SMALL, 122],
+        [STATUS.OBJECT_NAME_NOT_FOUND, 2],
+        [STATUS.OBJECT_NAME_COLLISION, 183],
+        [STATUS.OBJECT_PATH_NOT_FOUND, 3],
+        [STATUS.SHARING_VIOLATION, 32],
+        [STATUS.DISK_FULL, 112],
+        [STATUS.INSUFFICIENT_RESOURCES, 1450],
+        [STATUS.NOT_SUPPORTED, 50],
+        [STATUS.INVALID_PARAMETER_2, 87],
+        [STATUS.NOT_A_DIRECTORY, 267],
+        [STATUS.REVISION_MISMATCH, 1306],
+    ];
+    for (const [status, expected] of rows)
+    {
+        const accepted = Array.isArray(expected) ? expected : [expected];
+        const answer = toDosError(status);
+        assert.ok(accepted.includes(answer),
+            `0x${status.toString(16)}: ${answer}, expected ${accepted.join(' or ')}`);
+    }
+    const named = Object.entries(STATUS).filter(([name])=>name !== 'TIMEOUT');
+    assert.equal(rows.length, named.length, 'every status this table holds but TIMEOUT has a row');
+});

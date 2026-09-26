@@ -156,6 +156,90 @@ const MCI_DEVTYPE_FIRST = 0x0201;
 const MCI_DEVTYPE_LAST = 0x020b;
 
 /**
+ * What mciGetErrorString says for each MCI error, MCIERR_BASE (256) up, in
+ * this build's own wording; a code with no text here is one MCI does not
+ * know, and a driver's own codes, from MCIERR_CUSTOM_DRIVER_BASE, are the
+ * driver's to explain.
+ */
+const MCI_ERROR_TEXT = new Map([
+    [257, 'The device identifier is not one an open device has.'],
+    [259, 'The command parameter is not one this command takes.'],
+    [261, 'The command is not one MCI knows.'],
+    [262, 'The device reported a hardware problem.'],
+    [263, 'The device name is not a known device or alias.'],
+    [264, 'There is not enough memory for this command.'],
+    [265, 'The device name is already the alias of an open device.'],
+    [266, 'The device driver could not be loaded.'],
+    [267, 'No command was given.'],
+    [268, 'The answer is longer than the buffer given for it.'],
+    [269, 'The command needs a string that was not given.'],
+    [270, 'An integer in the command is not valid.'],
+    [271, 'The parser met an internal error.'],
+    [272, 'The device driver met an internal error.'],
+    [273, 'The command needs a parameter that was not given.'],
+    [274, 'The device does not support this command.'],
+    [275, 'The file was not found.'],
+    [276, 'The device is not ready.'],
+    [277, 'MCI met an internal error.'],
+    [278, 'The device driver reported an error.'],
+    [279, 'This command cannot be given to all devices at once.'],
+    [280, 'Errors occurred in more than one device.'],
+    [281, 'No device type is registered for the file\'s extension.'],
+    [282, 'The parameter is out of range for this command.'],
+    [284, 'The flags given cannot be used together.'],
+    [286, 'The file was not saved.'],
+    [287, 'The device type must be given.'],
+    [288, 'The device is in use; wait and try again.'],
+    [289, 'The alias is already in use by this application.'],
+    [290, 'A constant in the command is not valid for it.'],
+    [291, 'The device is already in use and must be opened shareable.'],
+    [292, 'The command needs a device name or alias.'],
+    [293, 'The time format is not valid.'],
+    [294, 'A quotation mark in the command is not closed.'],
+    [295, 'A flag is given more than once.'],
+    [296, 'The file is not in a format the device can use.'],
+    [297, 'The command was given a null parameter block.'],
+    [298, 'The resource was not named.'],
+    [299, 'A new file must be given an alias.'],
+    [300, 'A device opened automatically cannot notify.'],
+    [301, 'The device does not take a file name.'],
+    [302, 'The command is not applicable to this device.'],
+    [303, 'A device opened automatically cannot take this command.'],
+    [304, 'The command needs a file name.'],
+    [305, 'There are characters after the end of the command.'],
+    [306, 'The device is not installed.'],
+    [307, 'The current directory could not be read.'],
+    [308, 'The current directory could not be set.'],
+    [309, 'The current drive could not be set.'],
+    [310, 'The device or driver name is too long.'],
+    [311, 'The device or driver name is too long.'],
+    [312, 'The command needs an integer.'],
+    [320, 'Every wave output device is in use.'],
+    [321, 'The wave output device set is in use.'],
+    [322, 'Every wave input device is in use.'],
+    [323, 'The wave input device set is in use.'],
+    [324, 'No wave output device can play the file.'],
+    [325, 'No wave input device can record.'],
+    [326, 'No wave output device can play the file\'s format.'],
+    [327, 'The wave output device set cannot play the file\'s format.'],
+    [328, 'No wave input device can record the format.'],
+    [329, 'The wave input device set cannot record the format.'],
+    [336, 'The file\'s time division does not suit the sequencer.'],
+    [337, 'The MIDI port is in use.'],
+    [338, 'The MIDI port does not exist.'],
+    [339, 'The MIDI map names a device that is not there.'],
+    [340, 'The MIDI port reported an error.'],
+    [341, 'The sequencer could not get a timer.'],
+    [342, 'No MIDI port is set.'],
+    [343, 'There is no MIDI device to play on.'],
+    [346, 'There is no window to show the display in.'],
+    [347, 'The window could not be made.'],
+    [348, 'The file could not be read.'],
+    [349, 'The file could not be written.'],
+    [350, 'The device identity could not be established.'],
+]);
+
+/**
  * What opening an MCI device or file answers on a machine that has none: a
  * type a driver is registered for, or a file of an extension one opens, fails
  * to load its driver; anything else names no device at all. A `type!element`
@@ -559,6 +643,66 @@ export function createWinmmFunctions(host){
                 : mciString(wide ? wideAt(command, 1024) : ansiAt(command, 1024));
             writeText(buffer, room, answer.text, wide);
             return answer.error;
+        },
+    });
+
+    /**
+     * mciSendCommand, for either width: MCI_OPEN_PARMS is one layout, its
+     * strings of the call's width.
+     *
+     * @param {boolean} wide
+     */
+    const sendCommand = wide=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([, message, flags, parameters])=>{
+            if ((message >>> 0) !== MCI_OPEN)
+            {
+                return MCIERR_INVALID_DEVICE_ID;
+            }
+            if ((parameters >>> 0) === 0)
+            {
+                return MCIERR_NULL_PARAMETER_BLOCK;
+            }
+            /** @param {number} offset */
+            const field = offset=>u32(host.readMemory((parameters >>> 0) + offset, 4), 0);
+            /** @param {number} address @param {number} limit */
+            const text = (address, limit)=>(wide ? wideAt(address, limit) : ansiAt(address, limit));
+            if ((flags & MCI_OPEN_TYPE) !== 0)
+            {
+                const type = field(8);
+                if ((flags & MCI_OPEN_TYPE_ID) !== 0)
+                {
+                    const id = type & 0xffff;
+                    return id >= MCI_DEVTYPE_FIRST && id <= MCI_DEVTYPE_LAST
+                        ? MCIERR_CANNOT_LOAD_DRIVER : MCIERR_INVALID_DEVICE_NAME;
+                }
+                return openFailure(text(type, 128));
+            }
+            if ((flags & MCI_OPEN_ELEMENT) !== 0)
+            {
+                return openFailure(text(field(12), 260));
+            }
+            return MCIERR_MISSING_DEVICE_NAME;
+        },
+    });
+
+    /**
+     * mciGetErrorString, for either width.
+     *
+     * @param {boolean} wide
+     */
+    const errorString = wide=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([error, buffer, room])=>{
+            const text = MCI_ERROR_TEXT.get(error >>> 0);
+            if (text === undefined || (buffer >>> 0) === 0)
+            {
+                return 0;
+            }
+            writeText(buffer, room, text, wide);
+            return 1;
         },
     });
 
@@ -1354,38 +1498,8 @@ export function createWinmmFunctions(host){
          * and an open fails the way it fails where the driver has nothing to
          * drive.
          */
-        mciSendCommandA: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([, message, flags, parameters])=>{
-                if ((message >>> 0) !== MCI_OPEN)
-                {
-                    return MCIERR_INVALID_DEVICE_ID;
-                }
-                if ((parameters >>> 0) === 0)
-                {
-                    return MCIERR_NULL_PARAMETER_BLOCK;
-                }
-                /** @param {number} offset */
-                const field = offset=>u32(host.readMemory((parameters >>> 0) + offset, 4), 0);
-                if ((flags & MCI_OPEN_TYPE) !== 0)
-                {
-                    const type = field(8);
-                    if ((flags & MCI_OPEN_TYPE_ID) !== 0)
-                    {
-                        const id = type & 0xffff;
-                        return id >= MCI_DEVTYPE_FIRST && id <= MCI_DEVTYPE_LAST
-                            ? MCIERR_CANNOT_LOAD_DRIVER : MCIERR_INVALID_DEVICE_NAME;
-                    }
-                    return openFailure(ansiAt(type, 128));
-                }
-                if ((flags & MCI_OPEN_ELEMENT) !== 0)
-                {
-                    return openFailure(ansiAt(field(12), 260));
-                }
-                return MCIERR_MISSING_DEVICE_NAME;
-            },
-        },
+        mciSendCommandA: sendCommand(false),
+        mciSendCommandW: sendCommand(true),
 
         /**
          * MCIERROR mciSendStringA(LPCSTR lpszCommand, LPSTR lpszReturnString,
@@ -1414,8 +1528,24 @@ export function createWinmmFunctions(host){
             /** @param {number[]} args */
             handler: ([name])=>((name >>> 0) === 0 ? 0 : deviceIdOf(wideAt(name, 128))),
         },
-        /** BOOL mciGetErrorStringA(MCIERROR, LPSTR, UINT): no text for a code, so FALSE. */
-        mciGetErrorStringA: { argBytes: 12, handler: ()=>0 },
+        /**
+         * MCIDEVICEID mciGetDeviceIDFromElementIDA(DWORD dwElementID, LPCSTR lpstrType)
+         * MCIDEVICEID mciGetDeviceIDFromElementIDW(DWORD, LPCWSTR)
+         *
+         * An element id belongs to a device that opened it, and none is open.
+         */
+        mciGetDeviceIDFromElementIDA: { argBytes: 8, handler: ()=>0 },
+        mciGetDeviceIDFromElementIDW: { argBytes: 8, handler: ()=>0 },
+
+        /**
+         * BOOL mciGetErrorStringA(MCIERROR mcierr, LPSTR pszText, UINT cchText)
+         * BOOL mciGetErrorStringW(MCIERROR, LPWSTR, UINT)
+         *
+         * TRUE with the text of an MCI error, cut to the buffer; FALSE, and
+         * the buffer left alone, for a code MCI has no text for.
+         */
+        mciGetErrorStringA: errorString(false),
+        mciGetErrorStringW: errorString(true),
 
         /**
          * Joysticks. The input layer is a stub, so there are none -- and a

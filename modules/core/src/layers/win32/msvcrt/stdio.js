@@ -9,7 +9,7 @@ import { VARIADIC_SLOTS } from './scan.js';
 import { EBADF, EILSEQ, EINVAL } from './globals.js';
 import { createDescriptors, LF, settle } from './io.js';
 import {
-    O_U16TEXT, O_U8TEXT, O_WTEXT, bytesOfUnits, unitsOf, wideStringAt,
+    O_U16TEXT, O_U8TEXT, O_WTEXT, bytesOfUnits, unitsOf, unitsOfText, wideStringAt,
 } from './widetext.js';
 
 /**
@@ -61,9 +61,6 @@ const EOF = -1;
 const WEOF = 0xffff;
 
 const MAX_STRING = 1 << 20;
-
-/** @param {string} text */
-const unitsOfText = text=>Array.from({ length: text.length }, (_, at)=>text.charCodeAt(at));
 
 /** `setvbuf`'s mode argument, at the values msvcrt gives them. */
 const IOFBF = 0x0000;
@@ -164,6 +161,9 @@ export function createStdioFunctions(host){
 
     /** @param {number} pointer */
     const readString = pointer=>host.readCString(pointer, MAX_STRING);
+
+    /** @param {number} pointer */
+    const readWide = pointer=>wideStringAt(host.readMemory, pointer);
 
     /** @param {number} code */
     const fail = code=>{
@@ -488,7 +488,8 @@ export function createStdioFunctions(host){
             refuseWrite(stream);
             return EOF;
         }
-        const text = formatToString(readString(format), values, readString);
+        const text = formatToString(readString(format), values, readString,
+            { readWideString: readWide, cLocale: true });
         return emit(stream, bytesOf(text)) === text.length ? text.length : EOF;
     };
 
@@ -590,9 +591,6 @@ export function createStdioFunctions(host){
         }
         return units.length;
     };
-
-    /** @param {number} pointer */
-    const readWide = pointer=>wideStringAt(host.readMemory, pointer);
 
     /**
      * fwprintf's body: the count of wide characters written, or -1.
@@ -1134,6 +1132,16 @@ export function createStdioFunctions(host){
         getwc: fgetwc,
         fputwc,
         putwc: fputwc,
+
+        /** wint_t getwchar(void) / wint_t putwchar(wchar_t c) -- on stdin and stdout. */
+        getwchar: cdecl(0, ()=>{
+            const stream = standardStream(0);
+            return stream ? nextUnit(stream) : WEOF;
+        }),
+        putwchar: cdecl(4, ([c])=>{
+            const stream = standardStream(1);
+            return stream && putUnits(stream, [c & 0xffff]) === 1 ? c & 0xffff : WEOF;
+        }),
 
         /**
          * wchar_t *fgetws(wchar_t *buffer, int count, FILE *stream)

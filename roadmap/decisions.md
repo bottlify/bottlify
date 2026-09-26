@@ -223,6 +223,11 @@ edition rather than a Home one (no `VER_SUITE_PERSONAL`), and 32-bit: `IsWow64Pr
 FALSE and there is no `Program Files (x86)`. The Windows directory is `C:\WINDOWS` for all four,
 2000 included, whose own setup chose `C:\WINNT`: a program asks `GetWindowsDirectory` rather than
 assuming either, and one directory keeps the system volume and every path under it the same.
+The temporary directory (`GetTempPath`, `TEMP`, `TMP`) is `C:\WINDOWS\TEMP` for all four as well,
+where Windows keeps one per user under the profile: XP's is the short
+`C:\DOCUME~1\User\LOCALS~1\Temp`, and this volume has no 8.3 names, so the long path would put its
+spaces into every command line an installer builds from it unquoted. Revisit once the volume
+answers short names.
 `win10` answers `GetVersion`, `GetVersionEx` and `VerifyVersionInfo` with the newest Windows the
 program declares, 6.2 when it declares nothing newer, as Windows 8.1 and later do; the process
 block, `RtlGetVersion`, the registry and a system library's file version keep the truth. A system

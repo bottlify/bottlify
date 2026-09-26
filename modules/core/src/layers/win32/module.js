@@ -41,7 +41,7 @@ import { createRegistryFunctions } from './advapi32/functions.js';
 import { ADMINISTRATORS_SID, createTokenFunctions, isTokenMember } from './advapi32/tokens.js';
 import { createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
-import { createHive, shellFolders } from './advapi32/registry.js';
+import { createHive, profileDirectories, shellFolders } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
 import { createSocketRegistry } from './wsock32/sockets.js';
@@ -1075,6 +1075,7 @@ export const win32Module = {
                     readCString,
                     readWideString,
                     files: volume,
+                    directories: profileDirectories(windows),
                     imagePath: ()=>modules.imagePath(),
                     setLastError: setError,
                     writeConsole: (handle, text)=>sink(handle, text),
@@ -1148,6 +1149,7 @@ export const win32Module = {
                     // The high half of an __int64 answer, which a program
                     // reads from EDX.
                     setRegisters,
+                    version: reported,
                     files: volume,
                     // kernel32's own file handles, so the handle
                     // `_get_osfhandle` gives is one ReadFile and
@@ -1626,6 +1628,17 @@ export const win32Module = {
                         libraries['USER32.dll'].SetPropA.handler([window, name, value]),
                     remove: (window, name)=>
                         libraries['USER32.dll'].RemovePropA.handler([window, name]),
+                },
+                // A BSTR or a SAFEARRAY a PROPVARIANT holds is oleaut32's to
+                // copy and to free, in its own layout.
+                bstr: {
+                    copy: bstr=>libraries['OLEAUT32.dll'].SysAllocString.handler([bstr]),
+                    free: bstr=>libraries['OLEAUT32.dll'].SysFreeString.handler([bstr]),
+                },
+                safeArray: {
+                    copy: (array, out)=>
+                        libraries['OLEAUT32.dll'].SafeArrayCopy.handler([array, out]),
+                    destroy: array=>libraries['OLEAUT32.dll'].SafeArrayDestroy.handler([array]),
                 },
             }),
 

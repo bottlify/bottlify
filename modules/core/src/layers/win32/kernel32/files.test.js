@@ -1179,6 +1179,19 @@ test('the temporary directory exists before a program asks for it', ()=>{
         'which the caller can open for writing: the reservation did not hold it open');
 });
 
+test('the profile\'s directories exist before a program asks for them', ()=>{
+    // The registry, the environment and SHGetFolderPath all name them, and a
+    // program makes its own directory inside one without looking: with the
+    // folder missing, CreateDirectory fails with ERROR_PATH_NOT_FOUND.
+    const APPDATA = 'C:\\Users\\User\\AppData\\Roaming';
+    const { files, fns, at } = setup({ directories: ['C:\\Users', 'C:\\Users\\User',
+        'C:\\Users\\User\\AppData', APPDATA] });
+    assert.ok(files.stat(APPDATA)?.isDirectory);
+
+    assert.equal(fns.CreateDirectoryA.handler([at(NAME, `${APPDATA}\\Title`), 0]), 1);
+    assert.ok(files.stat(`${APPDATA}\\Title`)?.isDirectory);
+});
+
 test('_lopen refuses a file that is not there', ()=>{
     const { fns, error, at } = setup();
     assert.equal(fns._lopen.handler([at(NAME, 'C:\\GAME\\NOPE.BIN'), 0]), HFILE_ERROR);

@@ -354,6 +354,10 @@ test('the configured Windows is the one every library answers with', async()=>{
     const current = key && hive.getValue(key, 'CurrentVersion');
     assert.equal(current && String.fromCharCode(...current.data.subarray(0, 3)), '6.1');
 
+    const winver = libraries['msvcrt.dll']._winver.data();
+    assert.equal(new DataView(winver.buffer).getUint32(0, true), 0x0601,
+        'the C runtime\'s own copy of the version');
+
     assert.ok(kernel32.VerSetConditionMask, 'the 64-bit answer has registers to go to');
     kernel32.VerSetConditionMask.handler([0, 0, 0x80, 1]);
     assert.equal(registers.edx, 0);
@@ -386,4 +390,28 @@ test('a program Windows 10 knows nothing of is told 6.2, and the machine stays 1
 test('a Windows that is not one of the four is refused when the layer is made', async()=>{
     await assert.rejects(win32Module.create({ windows: 'win98' }, stubHost()),
         /win2000, winxp, win7, win10/);
+});
+
+test('the configured Windows\'s profile folders are made on the volume at start', async()=>{
+    // The folders the registry and the environment name for this Windows, and
+    // not the other layout's.
+    /** @type {string[]} */
+    const made = [];
+    const host = stubHost();
+    const filesystem = {
+        drives: ()=>[],
+        stat: ()=>null,
+        createDirectory: (/** @type {string} */ path)=>{
+            made.push(path);
+        },
+    };
+    await win32Module.create({ windows: 'win7' }, /** @type {any} */ ({
+        ...host,
+        requireApi: (/** @type {string} */ name)=>(name === 'filesystem'
+            ? filesystem : host.requireApi(name)),
+    }));
+    assert.ok(made.includes('C:\\Users\\User\\AppData\\Roaming'));
+    assert.ok(made.includes('C:\\ProgramData'));
+    assert.ok(!made.some(path=>path.startsWith('C:\\Documents and Settings')));
+    await win32Module.dispose();
 });
