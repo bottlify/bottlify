@@ -469,6 +469,13 @@ export function createPublisher({ publishInterface }){
                 get destroyed(){
                     return api.destroyed === true;
                 },
+                /** @param {number} pointer */
+                forgotten: pointer=>{
+                    if (byPointer.get(pointer) === api)
+                    {
+                        byPointer.delete(pointer);
+                    }
+                },
             };
             adapters.set(api, adapter);
         }
@@ -1256,6 +1263,11 @@ export function createDirectInput(
      * remembers the version the program asked for: the devices it makes
      * answer as that version does.
      *
+     * It counts its references as one object whichever interface each came
+     * through, and the devices it made take none a program can see: Wine's
+     * dinput tests release it to zero while a device is still held, and the
+     * device goes on answering, since it keeps what it needs of its own.
+     *
      * @param {number} out @param {string} id @param {number} version
      */
     const createInto = (out, id, version)=>{
@@ -1263,7 +1275,15 @@ export function createDirectInput(
         {
             return DIERR_INVALIDPARAM;
         }
-        const root = { version: version >>> 0, addRef: ()=>1, release: ()=>0 };
+        let references = 1;
+        const root = {
+            version: version >>> 0,
+            addRef: ()=>++references,
+            release: ()=>(references = Math.max(0, references - 1)),
+            get destroyed(){
+                return references === 0;
+            },
+        };
         const pointer = publisher.publish(root, rootInterfaces, id);
         writeU32(out, pointer);
         return pointer === 0 ? 0x80004002 | 0 : DI_OK;

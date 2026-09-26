@@ -984,6 +984,49 @@ test('a drop target is registered once per window and holds a reference until re
             'a new window with the same handle starts with nothing registered');
     });
 
+test('a registered drop target is its window\'s OleDropTargetInterface property until revoked',
+    async()=>{
+        // dragdrop.c test_Register_Revoke: GetPropA(hwnd, "OleDropTargetInterface")
+        // is the IDropTarget pointer RegisterDragDrop was given.
+        const { fns, host } = withWindow();
+        /** @type {Map<number, Map<string, number>>} */
+        const properties = new Map();
+        /** @param {number} at */
+        const nameAt = at=>
+            String.fromCharCode(...host.bytes.subarray(at, host.bytes.indexOf(0, at)));
+        /** @param {number} window */
+        const of = window=>properties.get(window) ?? properties.set(window, new Map()).get(window);
+        /** @type {any} */ (host).windowProperty = {
+            /** @param {number} window @param {number} name @param {number} value */
+            set: (window, name, value)=>{
+                /** @type {Map<string, number>} */ (of(window)).set(nameAt(name), value);
+                return 1;
+            },
+            /** @param {number} window @param {number} name */
+            remove: (window, name)=>{
+                const held = of(window)?.get(nameAt(name)) ?? 0;
+                of(window)?.delete(nameAt(name));
+                return held;
+            },
+        };
+        const OTHER_TARGET = GUEST_OBJECT + 0x40;
+        assert.equal(fns.OleInitialize.handler(), S_OK);
+        const blocks = host.heap.live.size;
+
+        assert.equal(await fns.RegisterDragDrop.handler([WINDOW, GUEST_OBJECT]), S_OK);
+        assert.equal(properties.get(WINDOW)?.get('OleDropTargetInterface'), GUEST_OBJECT);
+        assert.equal(host.heap.live.size, blocks, 'the name is not kept in guest memory');
+        assert.equal(await fns.RegisterDragDrop.handler([WINDOW, OTHER_TARGET]),
+            DRAGDROP_E_ALREADYREGISTERED);
+        assert.equal(properties.get(WINDOW)?.get('OleDropTargetInterface'), GUEST_OBJECT,
+            'a refusal leaves it as it was');
+
+        assert.equal(await fns.RevokeDragDrop.handler([WINDOW]), S_OK);
+        assert.equal(properties.get(WINDOW)?.has('OleDropTargetInterface'), false,
+            'and it goes with the target');
+        assert.equal(host.heap.live.size, blocks);
+    });
+
 test('once OLE has run, a thread without an apartment is told it is not initialised', async()=>{
     // dragdrop.c test_mismatched_cleanup: OleInitialize, then CoUninitialize.
     const { fns } = withWindow();

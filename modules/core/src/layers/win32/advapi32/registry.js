@@ -243,6 +243,9 @@ const pick = (table, names)=>Object.fromEntries(names.map(name=>[name, table[nam
  *
  * @type {readonly MachineKey[]}
  */
+/** Where the kernel describes the processor. */
+const PROCESSOR_KEY = 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0';
+
 const MACHINE_KEYS = Object.freeze(/** @type {MachineKey[]} */ ([
     { root: HKEY_LOCAL_MACHINE, path: MACHINE_CLASSES },
     { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion', values: {
@@ -272,9 +275,10 @@ const MACHINE_KEYS = Object.freeze(/** @type {MachineKey[]} */ ([
     { root: HKEY_LOCAL_MACHINE, path: 'SYSTEM\\CurrentControlSet\\Control\\Session Manager' },
     // What the kernel wrote about the processor it found: the identifier is
     // the emulated CPUID's family, model and stepping, and the speed the
-    // emulated counter's rate. A program reads the speed from here before it
-    // measures anything, and one that finds no key reports a 0 MHz machine.
-    { root: HKEY_LOCAL_MACHINE, path: 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0',
+    // emulated counter's rate (`createHive`'s `processorMhz`). A program reads
+    // the speed from here before it measures anything, and one that finds no
+    // key reports a 0 MHz machine.
+    { root: HKEY_LOCAL_MACHINE, path: PROCESSOR_KEY,
         values: {
             Identifier: PROCESSOR_IDENTIFIER,
             VendorIdentifier: PROCESSOR.vendor,
@@ -380,7 +384,12 @@ const classesKey = path=>({
  * index-based enumeration answer the same thing twice. Overwriting a value
  * leaves it where it was; only deleting and re-adding moves it to the end.
  */
-export function createHive(){
+/**
+ * @param {{ processorMhz?: number }} [options]
+ *        The speed the processor key reports: the rate the engine's rdtsc
+ *        advances at, which is the engine's to say.
+ */
+export function createHive({ processorMhz = PROCESSOR.mhz } = {}){
     /** @type {Map<number, RegistryNode>} */
     const roots = new Map();
 
@@ -421,6 +430,11 @@ export function createHive(){
     const furnish = ()=>{
         for (const entry of MACHINE_KEYS)
         {
+            // HARDWARE is written by the kernel at every boot, not kept: a hive
+            // restored from a run on another engine reports this one's speed.
+            const volatile = entry.path.startsWith('HARDWARE\\');
+            const values = entry.path === PROCESSOR_KEY
+                ? { ...entry.values, '~MHz': processorMhz } : entry.values ?? {};
             let node = /** @type {RegistryNode} */ (roots.get(entry.root));
             for (const part of segments(entry.path))
             {
@@ -432,9 +446,9 @@ export function createHive(){
                 }
                 node = next;
             }
-            for (const [name, value] of Object.entries(entry.values ?? {}))
+            for (const [name, value] of Object.entries(values))
             {
-                if (!node.values.has(fold(name)))
+                if (volatile || !node.values.has(fold(name)))
                 {
                     node.values.set(fold(name), typeof value === 'number'
                         ? { name, type: REG_DWORD, data: dword(value) }

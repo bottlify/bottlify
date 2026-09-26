@@ -40,13 +40,22 @@ const FINDDATAI64 = Object.freeze({
     NAME: 24, WIDE_NAME: false, BYTES: 288,
 });
 
+/** `struct _wfinddata_t`: `_finddata_t` with 260 wide characters of name. */
+const WFINDDATA = Object.freeze({
+    ATTRIB: 0, TIME_CREATE: 4, TIME_ACCESS: 8, TIME_WRITE: 12, SIZE: 16, WIDE_SIZE: false,
+    NAME: 20, WIDE_NAME: true, BYTES: 540,
+});
+
 /** `struct _wfinddatai64_t`: `_finddatai64_t` with 260 wide characters of name. */
 const WFINDDATAI64 = Object.freeze({
     ATTRIB: 0, TIME_CREATE: 4, TIME_ACCESS: 8, TIME_WRITE: 12, SIZE: 16, WIDE_SIZE: true,
     NAME: 24, WIDE_NAME: true, BYTES: 544,
 });
 
-/** @typedef {typeof FINDDATA | typeof FINDDATAI64 | typeof WFINDDATAI64} FindLayout */
+/**
+ * @typedef {typeof FINDDATA | typeof FINDDATAI64 | typeof WFINDDATA
+ *           | typeof WFINDDATAI64} FindLayout
+ */
 const MAX_NAME = 259;
 
 /** The attributes FindFirstFile reports, which `_findfirst` passes on. */
@@ -534,6 +543,12 @@ export function createPathFunctions(host){
         // bytes themselves rather than the narrow string reader.
         ...(host.readMemory
             ? {
+                /** intptr_t _wfindfirst(const wchar_t *filespec, struct _wfinddata_t *fileinfo) */
+                _wfindfirst: findFirst(WFINDDATA),
+
+                /** int _wfindnext(intptr_t handle, struct _wfinddata_t *fileinfo) */
+                _wfindnext: findNext(WFINDDATA),
+
                 /**
                  * intptr_t _wfindfirsti64(const wchar_t *filespec,
                  *                         struct _wfinddatai64_t *fileinfo)

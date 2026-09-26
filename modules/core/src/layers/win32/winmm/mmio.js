@@ -16,7 +16,8 @@
  * The positions a program sees are the file's own: what `mmioSeek` reports is
  * where the next read begins, chunk arithmetic included.
  *
- * Two kinds of file open. A DOS file is a file on the volume; a memory file
+ * Two kinds of file open. A DOS file is a file on the volume, by its name or
+ * by the handle of one the program already has open; a memory file
  * (an `fccIOProc` of `MEM `) is a block of guest memory, the caller's or one
  * mmio allocates, and the block is the whole file. Either may be buffered, and
  * the buffer is guest memory too: mmioGetInfo hands its pointers to the
@@ -26,8 +27,15 @@
  * of it holds file data, where the program stands in it, whether it holds
  * bytes the file does not have yet), and every call moves through it.
  *
- * Procedures a program installs are remembered by their code; opening a file
- * through one needs the program's own code run for every read, and is refused.
+ * A file may also be the program's own: an I/O procedure it installed under
+ * a code, named by a compound name's extension (`archive.xyz+member`), or
+ * handed in the MMIOINFO. The buffer and the position are mmio's as for any
+ * file, and what reaches the file itself is a message to the procedure --
+ * MMIOM_OPEN, READ, WRITE, WRITEFLUSH, SEEK and CLOSE -- run as a call into
+ * the program's code. The procedure is handed an MMIOINFO of mmio's own in
+ * guest memory, whose adwInfo and lDiskOffset are the procedure's to keep:
+ * where it stands is where it says it stands, and a seek goes first whenever
+ * that is not where the bytes are.
  */
 
 const MMIO_READ = 0x0000;
@@ -52,12 +60,22 @@ const MMIO_FINDLIST = 0x0040;
 const MMIO_CREATERIFF = 0x0020;
 const MMIO_CREATELIST = 0x0040;
 const MMIO_TOUPPER = 0x0010;
+const MMIO_EMPTYBUF = 0x0010;
+const MMIO_FHOPEN = 0x0010;
 const MMIO_INSTALLPROC = 0x10000;
 const MMIO_REMOVEPROC = 0x20000;
 const MMIO_FINDPROC = 0x40000;
 
 /** What a buffer mmio allocates holds when the caller named no size. */
 const MMIO_DEFAULTBUFFER = 8192;
+
+/** The messages an I/O procedure is sent. */
+const MMIOM_READ = 0;
+const MMIOM_WRITE = 1;
+const MMIOM_SEEK = 2;
+const MMIOM_OPEN = 3;
+const MMIOM_CLOSE = 4;
+const MMIOM_WRITEFLUSH = 5;
 
 const SEEK_SET = 0;
 const SEEK_CUR = 1;
@@ -113,12 +131,44 @@ const MAX_PATH = 260;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {any} files  The volume: open, read, write, close, stat.
+ * @property {{ file: (handle: number) => { path: string, node: any, position: number } | null,
+ *              close: (handle: number) => boolean }} [handles]
+ *           kernel32's file handles, for a file a program opened itself and
+ *           hands mmio by its handle. Absent, no such file opens.
  * @property {(bytes: number) => number} [allocate]
  *           Guest memory for a buffer mmio makes itself: the address, or 0
  *           when nothing fits. Absent in a build that cannot allocate, and a
  *           file that asked for such a buffer is opened unbuffered.
  * @property {(address: number) => void} [free]
+ * @property {(entry: number, args: number[], thread?: unknown) => Promise<number>} [call]
+ *           A stdcall into the program's code: how its own I/O procedure is
+ *           sent a message. The thread names whose call a message answers.
+ *           Absent, a file through such a procedure is refused.
+ * @property {() => unknown} [callerThread]  Whose call is being handled.
  * @property {(api: string, detail: string) => void} [divergence]
+ */
+
+/**
+ * A procedure a program's file goes through: its code, and whether it takes
+ * the name MMIOM_OPEN hands it as UTF-16.
+ *
+ * @typedef {Object} Procedure
+ * @property {number} entry
+ * @property {boolean} wide
+ */
+
+/**
+ * Where a file's bytes are, for any file but a memory file: the volume, or a
+ * procedure of the program's. Each may answer with a promise.
+ *
+ * @typedef {Object} FileStore
+ * @property {(at: number, length: number) => Uint8Array | Promise<Uint8Array>} read
+ *           Short at the end of the file, and empty past it or on a failure.
+ * @property {(at: number, bytes: Uint8Array, flushing: boolean) => number | Promise<number>}
+ *           write  How many were taken. `flushing` for a buffer written out
+ *           because the program asked, which a procedure is told.
+ * @property {() => number | Promise<number>} size  -1 when it cannot be learned.
+ * @property {() => void} release  Lets go of what the store holds itself.
  */
 
 /**
@@ -131,13 +181,16 @@ const MAX_PATH = 260;
  */
 
 /**
- * An open file. For a memory file the buffer is the file, and `origin` stays
- * at zero with everything past `size` beyond its end.
+ * An open file. For a memory file the buffer is the file, `origin` stays at
+ * zero, and `end` is how much of the block the file fills: all of it as
+ * opened, none of a block mmioSetBuffer puts in its place until it is written.
  *
  * @typedef {Object} MmioFile
  * @property {number} handle
  * @property {boolean} memory
  * @property {any} node       The volume's open file, for a DOS file.
+ * @property {number} hfile   The program's own handle the file was opened by,
+ *                            which it shares; zero for a file mmio opened.
  * @property {string} path
  * @property {number} flags   The open flags as mmioGetInfo reports them.
  * @property {number} fcc
@@ -150,6 +203,11 @@ const MAX_PATH = 260;
  * @property {boolean} dirty  The buffer holds bytes the file does not yet.
  * @property {number} disk    lDiskOffset: where the file itself stands.
  * @property {number[]} info  adwInfo; for a memory file, how much it grows by.
+ * @property {FileStore | null} store  Null for a memory file.
+ * @property {Procedure | null} procedure  The program's, when the file is its.
+ * @property {number} record  The MMIOINFO the procedure is handed, whose
+ *                            adwInfo and lDiskOffset are the procedure's.
+ * @property {unknown} caller  Whose call on the file is being answered.
  */
 
 /** @param {Uint8Array} bytes @param {number} at */
@@ -173,6 +231,30 @@ const fourccOf = (name, upper)=>{
 };
 
 /**
+ * A name as a terminated string of either width. Narrowed, a character with
+ * no single-byte form becomes a question mark.
+ *
+ * @param {string} text @param {boolean} wide
+ */
+const encode = (text, wide)=>{
+    const bytes = new Uint8Array((text.length + 1) * (wide ? 2 : 1));
+    for (let index = 0; index < text.length; index++)
+    {
+        const unit = text.charCodeAt(index);
+        if (wide)
+        {
+            bytes[index * 2] = unit & 0xff;
+            bytes[index * 2 + 1] = unit >>> 8;
+        }
+        else
+        {
+            bytes[index] = unit > 0xff ? 0x3f : unit;
+        }
+    }
+    return bytes;
+};
+
+/**
  * Runs `next` on a value that may still be on its way, without turning a
  * value that is here into a promise: a chunk walk over a file the volume
  * already holds answers in the same call.
@@ -187,6 +269,40 @@ const then = (value, next)=>(typeof (/** @type {any} */ (value))?.then === 'func
     : next(/** @type {T} */ (value)));
 
 /**
+ * Runs steps written as a generator, each yielding a value that may still be
+ * on its way, the same way: in the same call for as long as every value is
+ * here, and as a promise from the first that is not -- which a file through
+ * the program's own procedure always is, its every answer being the
+ * program's code run.
+ *
+ * @template R
+ * @param {Generator<any, R, any>} steps
+ * @returns {R | Promise<R>}
+ */
+const drive = steps=>{
+    /**
+     * @param {() => IteratorResult<any, R>} resume
+     * @returns {R | Promise<R>}
+     */
+    const advance = resume=>{
+        for (let next = resume(); ; next = steps.next(next.value))
+        {
+            if (next.done)
+            {
+                return next.value;
+            }
+            if (typeof next.value?.then === 'function')
+            {
+                return next.value.then(
+                    (/** @type {any} */ value)=>advance(()=>steps.next(value)),
+                    (/** @type {any} */ error)=>advance(()=>steps.throw(error)));
+            }
+        }
+    };
+    return advance(()=>steps.next());
+};
+
+/**
  * @param {MmioHost} host
  */
 export function createMmioFunctions(host){
@@ -198,15 +314,56 @@ export function createMmioFunctions(host){
     /**
      * The procedures a program installed, by the code that names them.
      *
-     * @type {Map<number, number>}
+     * @type {Map<number, Procedure>}
      */
     const procedures = new Map();
 
-    /** @param {number} handle */
-    const fileOf = handle=>open.get(handle >>> 0) ?? null;
+    /**
+     * The file a handle names. A procedure's messages go out on the thread
+     * whose call is being answered, which is only known before anything is
+     * awaited -- so it is taken here, where every entry point starts.
+     *
+     * @param {number} handle
+     */
+    const fileOf = handle=>{
+        const file = open.get(handle >>> 0) ?? null;
+        if (file?.procedure)
+        {
+            file.caller = host.callerThread?.() ?? null;
+        }
+        return file;
+    };
 
     /** @param {number} address @param {number} offset */
     const field = (address, offset)=>u32(host.readMemory(address + offset, 4), 0);
+
+    /**
+     * A UTF-16 string, read a piece at a time so a short one near the end of
+     * what is mapped is not read past.
+     *
+     * @param {number} address @param {number} limit
+     */
+    const wideAt = (address, limit)=>{
+        let text = '';
+        for (let at = address; text.length < limit; at += 64)
+        {
+            const bytes = host.readMemory(at, 64);
+            for (let index = 0; index + 1 < bytes.length; index += 2)
+            {
+                const unit = bytes[index] | bytes[index + 1] << 8;
+                if (unit === 0)
+                {
+                    return text.slice(0, limit);
+                }
+                text += String.fromCharCode(unit);
+            }
+            if (bytes.length < 64)
+            {
+                break;
+            }
+        }
+        return text.slice(0, limit);
+    };
 
     /** @param {MmioFile} file */
     const position = file=>file.origin + file.next;
@@ -217,41 +374,55 @@ export function createMmioFunctions(host){
     /** @param {MmioFile} file */
     const readOnly = file=>(file.flags & MMIO_RWMODE) === MMIO_READ;
 
+    /** @param {MmioFile} file */
+    const storeOf = file=>/** @type {FileStore} */ (file.store);
+
     /**
      * Writes what the buffer holds and the file does not. The whole window
      * goes: what it read from the file comes back unchanged, and a program
      * that wrote at pchNext did so anywhere in it. A file opened only to be
      * read takes none of it.
      *
-     * @param {MmioFile} file @returns {boolean} whether it all reached the file
+     * @param {MmioFile} file @param {boolean} [flushing]  The program asked.
+     * @returns {boolean | Promise<boolean>} whether it all reached the file
      */
-    const flush = file=>{
+    const flush = (file, flushing = false)=>{
         if (!file.dirty || file.memory)
         {
             file.dirty = false;
             return true;
         }
+        file.dirty = false;
         if (readOnly(file))
         {
-            file.dirty = false;
             return false;
         }
+        const at = file.origin;
         const length = Math.max(file.end, file.next);
-        const written = length === 0 ? 0 : host.files.write(file.node, file.origin,
-            host.readMemory(file.buffer, length).slice());
-        file.dirty = false;
-        file.disk = file.origin + written;
-        return written === length;
+        if (length === 0)
+        {
+            file.disk = at;
+            return true;
+        }
+        return then(storeOf(file).write(at, host.readMemory(file.buffer, length).slice(),
+            flushing), written=>{
+            file.disk = at + written;
+            return written === length;
+        });
     };
 
-    /** @param {MmioFile} file */
+    /**
+     * How long the file is, what the buffer holds included; -1 when a
+     * procedure cannot say.
+     *
+     * @param {MmioFile} file @returns {number | Promise<number>}
+     */
     const sizeOf = file=>{
         if (file.memory)
         {
-            return file.size;
+            return file.end;
         }
-        flush(file);
-        return host.files.stat(file.path)?.size ?? 0;
+        return then(flush(file), ()=>storeOf(file).size());
     };
 
     /**
@@ -260,23 +431,25 @@ export function createMmioFunctions(host){
      * again, empty, where the file now stands.
      *
      * @param {MmioFile} file @param {number} target
+     * @returns {void | Promise<void>}
      */
     const moveTo = (file, target)=>{
         if (file.memory)
         {
             file.next = target;
-            return;
+            return undefined;
         }
         if (file.size > 0 && target >= file.origin && target <= file.origin + file.end)
         {
             file.next = target - file.origin;
-            return;
+            return undefined;
         }
-        flush(file);
-        file.origin = target;
-        file.next = 0;
-        file.end = 0;
-        file.disk = target;
+        return then(flush(file), ()=>{
+            file.origin = target;
+            file.next = 0;
+            file.end = 0;
+            file.disk = target;
+        });
     };
 
     /**
@@ -289,11 +462,10 @@ export function createMmioFunctions(host){
     const peek = (file, at, length)=>{
         if (file.memory)
         {
-            const count = Math.max(0, Math.min(length, file.size - at));
+            const count = Math.max(0, Math.min(length, file.end - at));
             return host.readMemory(file.buffer + at, count).slice();
         }
-        flush(file);
-        return host.files.read(file.node, at, length);
+        return then(flush(file), ()=>storeOf(file).read(at, length));
     };
 
     /**
@@ -307,7 +479,7 @@ export function createMmioFunctions(host){
         file.origin = at;
         file.next = 0;
         file.end = 0;
-        return then(host.files.read(file.node, at, file.size), bytes=>{
+        return then(storeOf(file).read(at, file.size), bytes=>{
             if (bytes.length > 0)
             {
                 host.writeMemory(file.buffer, bytes);
@@ -357,81 +529,80 @@ export function createMmioFunctions(host){
      * a refill otherwise.
      *
      * @param {MmioFile} file @param {number} wanted
-     * @returns {Uint8Array | Promise<Uint8Array>}
+     * @returns {Generator<any, Uint8Array, any>}
      */
-    const take = (file, wanted)=>{
+    function* taking(file, wanted){
         if (file.memory)
         {
-            const bytes = peek(file, file.next, wanted);
-            file.next += /** @type {Uint8Array} */ (bytes).length;
+            const bytes = /** @type {Uint8Array} */ (peek(file, file.next, wanted));
+            file.next += bytes.length;
             return bytes;
         }
         if (!buffered(file))
         {
-            return then(host.files.read(file.node, file.origin, wanted), bytes=>{
-                file.origin += bytes.length;
-                file.disk = file.origin;
-                return bytes;
-            });
+            /** @type {Uint8Array} */
+            const bytes = yield storeOf(file).read(file.origin, wanted);
+            file.origin += bytes.length;
+            file.disk = file.origin;
+            return bytes;
         }
         /** @type {Uint8Array[]} */
         const pieces = [];
         let left = wanted;
-        const joined = ()=>{
-            const all = new Uint8Array(wanted - left);
-            let at = 0;
-            for (const piece of pieces)
+        while (left > 0)
+        {
+            const available = file.end - file.next;
+            if (available > 0)
             {
-                all.set(piece, at);
-                at += piece.length;
+                const count = Math.min(available, left);
+                pieces.push(host.readMemory(file.buffer + file.next, count).slice());
+                file.next += count;
+                left -= count;
+                continue;
             }
-            return all;
-        };
-        /** @returns {Uint8Array | Promise<Uint8Array>} */
-        const step = ()=>{
-            while (left > 0)
+            if (!(yield flush(file)))
             {
-                const available = file.end - file.next;
-                if (available > 0)
-                {
-                    const count = Math.min(available, left);
-                    pieces.push(host.readMemory(file.buffer + file.next, count).slice());
-                    file.next += count;
-                    left -= count;
-                    continue;
-                }
-                if (!flush(file))
-                {
-                    break;
-                }
-                if (left >= file.size)
-                {
-                    const at = position(file);
-                    return then(host.files.read(file.node, at, left), bytes=>{
-                        pieces.push(bytes);
-                        left -= bytes.length;
-                        file.origin = at + bytes.length;
-                        file.next = 0;
-                        file.end = 0;
-                        file.disk = file.origin;
-                        return joined();
-                    });
-                }
-                return then(refill(file), count=>(count === 0 ? joined() : step()));
+                break;
             }
-            return joined();
-        };
-        return step();
-    };
+            if (left >= file.size)
+            {
+                const at = position(file);
+                /** @type {Uint8Array} */
+                const bytes = yield storeOf(file).read(at, left);
+                pieces.push(bytes);
+                left -= bytes.length;
+                file.origin = at + bytes.length;
+                file.next = 0;
+                file.end = 0;
+                file.disk = file.origin;
+                break;
+            }
+            if ((yield refill(file)) === 0)
+            {
+                break;
+            }
+        }
+        const all = new Uint8Array(wanted - left);
+        let at = 0;
+        for (const piece of pieces)
+        {
+            all.set(piece, at);
+            at += piece.length;
+        }
+        return all;
+    }
+
+    /** @param {MmioFile} file @param {number} wanted */
+    const take = (file, wanted)=>drive(taking(file, wanted));
 
     /**
-     * Writes where the program stands and moves it on.
+     * Writes where the program stands and moves it on, answering how many
+     * bytes were taken -- fewer only when the file cannot hold them.
      *
      * @param {MmioFile} file @param {Uint8Array} bytes
-     * @returns {number} how many were taken, which is fewer only when the
-     *          file cannot hold them
+     * @returns {Generator<any, number, any>}
      */
-    const put = (file, bytes)=>{
+    function* putting(file, bytes){
         if (readOnly(file))
         {
             return 0;
@@ -445,11 +616,13 @@ export function createMmioFunctions(host){
                 host.writeMemory(file.buffer + file.next, bytes.subarray(0, fits));
             }
             file.next += fits;
+            file.end = Math.max(file.end, file.next);
             return fits;
         }
         if (!buffered(file))
         {
-            const written = host.files.write(file.node, file.origin, bytes);
+            /** @type {number} */
+            const written = yield storeOf(file).write(file.origin, bytes, false);
             file.origin += written;
             file.disk = file.origin;
             return written;
@@ -460,7 +633,7 @@ export function createMmioFunctions(host){
             const room = file.size - file.next;
             if (room === 0)
             {
-                if (!flush(file))
+                if (!(yield flush(file)))
                 {
                     break;
                 }
@@ -477,11 +650,15 @@ export function createMmioFunctions(host){
             done += count;
         }
         return done;
-    };
+    }
+
+    /** @param {MmioFile} file @param {Uint8Array} bytes */
+    const put = (file, bytes)=>drive(putting(file, bytes));
 
     /**
      * The MMIOINFO mmioGetInfo hands out: the buffer's pointers as the program
-     * may use them directly.
+     * may use them directly. Of a file through the program's procedure,
+     * adwInfo and lDiskOffset are what the procedure keeps in its own.
      *
      * @param {MmioFile} file
      */
@@ -490,16 +667,20 @@ export function createMmioFunctions(host){
         const view = new DataView(bytes.buffer);
         /** @param {number} offset @param {number} value */
         const set = (offset, value)=>view.setUint32(offset, value >>> 0, true);
+        const kept = file.procedure !== null;
         set(MMIOINFO.dwFlags, file.flags | (file.dirty ? MMIO_DIRTY : 0));
         set(MMIOINFO.fccIOProc, file.fcc);
+        set(MMIOINFO.pIOProc, file.procedure?.entry ?? 0);
         set(MMIOINFO.cchBuffer, file.size);
         set(MMIOINFO.pchBuffer, file.buffer);
         set(MMIOINFO.pchNext, file.buffer + file.next);
-        set(MMIOINFO.pchEndRead, file.buffer + (file.memory ? file.size : file.end));
+        set(MMIOINFO.pchEndRead, file.buffer + file.end);
         set(MMIOINFO.pchEndWrite, file.buffer + file.size);
         set(MMIOINFO.lBufOffset, file.origin);
-        set(MMIOINFO.lDiskOffset, file.memory ? 0 : file.disk);
-        file.info.forEach((value, index)=>set(MMIOINFO.adwInfo + index * 4, value));
+        set(MMIOINFO.lDiskOffset, file.memory ? 0
+            : kept ? field(file.record, MMIOINFO.lDiskOffset) : file.disk);
+        file.info.forEach((value, index)=>set(MMIOINFO.adwInfo + index * 4,
+            kept ? field(file.record, MMIOINFO.adwInfo + index * 4) : value));
         set(MMIOINFO.hmmio, file.handle);
         return bytes;
     };
@@ -518,6 +699,118 @@ export function createMmioFunctions(host){
             file.dirty = true;
             file.end = Math.max(file.end, file.next);
         }
+    };
+
+    /**
+     * Brings the MMIOINFO a procedure is handed up to date with mmio's side
+     * of it: everything but what the procedure keeps there itself (adwInfo,
+     * lDiskOffset) and the reserved words.
+     *
+     * @param {MmioFile} file
+     */
+    const sync = file=>{
+        const info = describe(file);
+        host.writeMemory(file.record, info.subarray(0, MMIOINFO.lDiskOffset));
+        host.writeMemory(file.record + MMIOINFO.hmmio, info.subarray(MMIOINFO.hmmio));
+    };
+
+    /**
+     * Sends the file's procedure a message, as a call into the program's
+     * code on the thread whose call on the file is being answered.
+     *
+     * @param {MmioFile} file @param {number} message
+     * @param {number} first @param {number} second
+     * @returns {Promise<number>} the procedure's answer, signed
+     */
+    const ask = (file, message, first, second)=>{
+        const call = /** @type {NonNullable<MmioHost['call']>} */ (host.call);
+        const procedure = /** @type {Procedure} */ (file.procedure);
+        return call(procedure.entry, [file.record, message, first >>> 0, second >>> 0],
+            file.caller).then(answer=>answer | 0);
+    };
+
+    /**
+     * @param {MmioFile} file @param {number} message
+     * @param {number} first @param {number} second
+     */
+    const send = (file, message, first, second)=>{
+        sync(file);
+        return ask(file, message, first, second);
+    };
+
+    /**
+     * The store of a file through the program's procedure. Bytes pass
+     * through guest memory of mmio's own, and before each read or write the
+     * procedure is sent to where they are, unless it says it is there.
+     *
+     * @param {MmioFile} file
+     * @returns {FileStore}
+     */
+    const procedureStore = file=>{
+        let scratch = 0;
+        let room = 0;
+        /** Guest memory for at least `length` bytes; 0 if none. @param {number} length */
+        const space = length=>{
+            if (length > room)
+            {
+                if (scratch !== 0)
+                {
+                    host.free?.(scratch);
+                }
+                scratch = (host.allocate?.(length) ?? 0) >>> 0;
+                room = scratch === 0 ? 0 : length;
+            }
+            return scratch;
+        };
+        /** @param {number} at @returns {number | Promise<number>} where it now stands */
+        const reach = at=>(field(file.record, MMIOINFO.lDiskOffset) === at ? at
+            : send(file, MMIOM_SEEK, at, SEEK_SET));
+        /**
+         * @param {number} at @param {number} length
+         * @returns {Generator<any, Uint8Array, any>}
+         */
+        function* reading(at, length){
+            const buffer = length > 0 ? space(length) : 0;
+            if (buffer === 0 || (yield reach(at)) !== at)
+            {
+                return new Uint8Array(0);
+            }
+            /** @type {number} */
+            const count = yield send(file, MMIOM_READ, buffer, length);
+            return count > 0 ? host.readMemory(buffer, Math.min(count, length)).slice()
+                : new Uint8Array(0);
+        }
+        /**
+         * @param {number} at @param {Uint8Array} bytes @param {boolean} flushing
+         * @returns {Generator<any, number, any>}
+         */
+        function* writing(at, bytes, flushing){
+            const buffer = bytes.length > 0 ? space(bytes.length) : 0;
+            if (buffer === 0 || (yield reach(at)) !== at)
+            {
+                return 0;
+            }
+            host.writeMemory(buffer, bytes);
+            /** @type {number} */
+            const count = yield send(file, flushing ? MMIOM_WRITEFLUSH : MMIOM_WRITE,
+                buffer, bytes.length);
+            return Math.max(0, Math.min(count, bytes.length));
+        }
+        return {
+            read: (at, length)=>drive(reading(at, length)),
+            write: (at, bytes, flushing)=>drive(writing(at, bytes, flushing)),
+            // The end is where a seek to it lands. The procedure is left
+            // there, which the next read or write moves it on from.
+            size: ()=>send(file, MMIOM_SEEK, 0, SEEK_END),
+            release: ()=>{
+                if (scratch !== 0)
+                {
+                    host.free?.(scratch);
+                }
+                scratch = 0;
+                room = 0;
+            },
+        };
     };
 
     /**
@@ -559,11 +852,14 @@ export function createMmioFunctions(host){
 
     /**
      * mmioOpen for either width, once the name is read: null for a memory
-     * file, which has none.
+     * file, which has none, and for one opened by a handle.
      *
      * @param {string | null} path @param {number} info @param {number} flags
+     * @param {boolean} wide  The width of the call, which a procedure handed
+     *                        in the MMIOINFO takes its name in.
+     * @returns {number | Promise<number>}
      */
-    const openFile = (path, info, flags)=>{
+    const openFile = (path, info, flags, wide)=>{
         const record = info >>> 0;
         /** @param {number} error */
         const refuse = error=>{
@@ -581,24 +877,44 @@ export function createMmioFunctions(host){
         const compound = path?.includes('+')
             ? /\.([^.\\/+]{1,4})$/.exec(path.slice(0, path.lastIndexOf('+')))?.[1] ?? null
             : null;
-        if (proc !== 0 || (fcc !== 0 && fcc !== FOURCC_DOS && !memory)
-            || (fcc === 0 && compound !== null && procedures.has(fourccOf(compound, true))))
+        const named = fcc === 0 && compound !== null ? fourccOf(compound, true) : fcc;
+        const procedure = proc !== 0 ? { entry: proc, wide }
+            : named !== FOURCC_DOS && !memory ? procedures.get(named) ?? null : null;
+        if (procedure === null && fcc !== 0 && fcc !== FOURCC_DOS && !memory)
         {
-            host.divergence?.('mmioOpen', 'a file through a program\'s own I/O procedure');
             return refuse(MMIOERR_CANNOTOPEN);
         }
-        if (procedures.has(memory ? FOURCC_MEM : FOURCC_DOS))
+        if (procedure === null && procedures.has(memory ? FOURCC_MEM : FOURCC_DOS))
         {
             host.divergence?.('mmioOpen', 'the built-in procedure is used, not the one the '
                 + 'program installed in its place');
         }
-        let node = null;
-        if (!memory)
+        if (procedure !== null && !host.call)
         {
-            if (path === null)
+            host.divergence?.('mmioOpen', 'a file through a program\'s own I/O procedure, '
+                + 'which this build cannot call');
+            return refuse(MMIOERR_CANNOTOPEN);
+        }
+
+        let node = null;
+        // With no name and no procedure, adwInfo[0] is a file the program
+        // already has open, and it is read from where its handle stands.
+        let hfile = 0;
+        let start = 0;
+        if (procedure === null && !memory && path === null)
+        {
+            hfile = record === 0 ? 0 : field(record, MMIOINFO.adwInfo);
+            const shared = hfile === 0 ? null : host.handles?.file(hfile) ?? null;
+            if (!shared)
             {
                 return refuse(MMIOERR_FILENOTFOUND);
             }
+            node = shared.node;
+            path = shared.path;
+            start = shared.position;
+        }
+        else if (procedure === null && !memory)
+        {
             if ((flags & MMIO_EXIST) !== 0)
             {
                 return host.files.stat(path) ? 1 : refuse(MMIOERR_FILENOTFOUND);
@@ -615,6 +931,44 @@ export function createMmioFunctions(host){
                 return refuse(MMIOERR_FILENOTFOUND);
             }
         }
+        // What a procedure is handed: an MMIOINFO of its own, and the name
+        // in the width it takes -- the one it was installed by, or for one
+        // handed in the MMIOINFO, the one mmioOpen was called by.
+        let own = 0;
+        let name = 0;
+        if (procedure !== null)
+        {
+            own = (host.allocate?.(MMIOINFO.size) ?? 0) >>> 0;
+            const text = path === null ? null : encode(path, procedure.wide);
+            name = own === 0 || text === null ? 0 : (host.allocate?.(text.length) ?? 0) >>> 0;
+            if (own === 0 || (text !== null && name === 0))
+            {
+                if (own !== 0)
+                {
+                    host.free?.(own);
+                }
+                return refuse(MMIOERR_OUTOFMEMORY);
+            }
+            host.writeMemory(own, new Uint8Array(MMIOINFO.size));
+            if (text !== null)
+            {
+                host.writeMemory(name, text);
+            }
+        }
+        /** Lets go of what was taken for a file that does not open after all. */
+        const abandon = ()=>{
+            if (node && hfile === 0)
+            {
+                host.files.close(node);
+            }
+            for (const block of [own, name])
+            {
+                if (block !== 0)
+                {
+                    host.free?.(block);
+                }
+            }
+        };
 
         // The buffer: the caller's when it gave one with a size, one mmio
         // makes when it gave a size and no buffer or asked for one, none
@@ -630,10 +984,7 @@ export function createMmioFunctions(host){
             buffer = host.allocate(size) >>> 0;
             if (buffer === 0)
             {
-                if (node)
-                {
-                    host.files.close(node);
-                }
+                abandon();
                 return refuse(MMIOERR_OUTOFMEMORY);
             }
             owned = true;
@@ -649,29 +1000,142 @@ export function createMmioFunctions(host){
 
         const handle = nextHandle;
         nextHandle += 4;
-        open.set(handle, {
+        /** @type {MmioFile} */
+        const file = {
             handle,
             memory,
             node,
+            hfile,
             path: path ?? '',
             flags: flags & ~MMIO_ONCE | (owned ? MMIO_ALLOCBUF : 0),
-            fcc: memory ? FOURCC_MEM : FOURCC_DOS,
+            fcc: memory ? FOURCC_MEM : procedure === null ? FOURCC_DOS : named,
             buffer,
             size,
             owned,
-            origin: 0,
+            origin: start,
             next: 0,
-            end: 0,
+            end: memory ? size : 0,
             dirty: false,
-            disk: 0,
+            disk: start,
             info: [0, 1, 2].map(index=>(record === 0 ? 0
                 : field(record, MMIOINFO.adwInfo + index * 4))),
-        });
-        if (record !== 0)
+            store: null,
+            procedure,
+            record: own,
+            caller: procedure === null ? null : host.callerThread?.() ?? null,
+        };
+        /** @param {number} result */
+        const opened = result=>{
+            if (result !== MMSYSERR_NOERROR)
+            {
+                return refuse(result);
+            }
+            open.set(handle, file);
+            if (record !== 0)
+            {
+                host.writeMemory(record + MMIOINFO.wErrorRet, dword(MMSYSERR_NOERROR));
+            }
+            return handle;
+        };
+        if (procedure === null)
         {
-            host.writeMemory(record + MMIOINFO.wErrorRet, dword(MMSYSERR_NOERROR));
+            file.store = memory ? null : {
+                read: (at, length)=>host.files.read(node, at, length),
+                write: (at, bytes)=>host.files.write(node, at, bytes),
+                size: ()=>host.files.stat(file.path)?.size ?? 0,
+                release: ()=>{},
+            };
+            return opened(MMSYSERR_NOERROR);
         }
-        return handle;
+
+        // The procedure starts from what the caller put in adwInfo, and
+        // sees the flags mmioOpen was given, those that ask for something
+        // once included.
+        file.info.forEach((value, index)=>
+            host.writeMemory(own + MMIOINFO.adwInfo + index * 4, dword(value)));
+        const store = procedureStore(file);
+        file.store = store;
+        sync(file);
+        host.writeMemory(own + MMIOINFO.dwFlags, dword(flags));
+        return ask(file, MMIOM_OPEN, name, 0).then(result=>{
+            if (name !== 0)
+            {
+                host.free?.(name);
+            }
+            if (result !== MMSYSERR_NOERROR)
+            {
+                store.release();
+                host.free?.(own);
+                if (owned)
+                {
+                    host.free?.(buffer);
+                }
+            }
+            return opened(result);
+        });
+    };
+
+    /**
+     * mmioInstallIOProc, for either width: a procedure installed by the wide
+     * call is handed a UTF-16 name.
+     *
+     * @param {boolean} wide
+     */
+    const install = wide=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [fcc, proc, flags])=>{
+            const code = fcc >>> 0;
+            const installed = procedures.get(code)?.entry ?? 0;
+            if (((flags >>> 0) & MMIO_INSTALLPROC) !== 0)
+            {
+                if ((proc >>> 0) === 0)
+                {
+                    return 0;
+                }
+                procedures.set(code, { entry: proc >>> 0, wide });
+                return proc >>> 0;
+            }
+            if (((flags >>> 0) & MMIO_REMOVEPROC) !== 0)
+            {
+                procedures.delete(code);
+                return installed;
+            }
+            return ((flags >>> 0) & MMIO_FINDPROC) !== 0 ? installed : 0;
+        },
+    });
+
+    /**
+     * mmioSetBuffer's work once the old buffer is written: the new one
+     * starts empty where the file stands.
+     *
+     * @param {MmioFile} file @param {number} pointer @param {number} size
+     */
+    const replaceBuffer = (file, pointer, size)=>{
+        let buffer = pointer;
+        const owned = size > 0 && buffer === 0;
+        if (owned)
+        {
+            buffer = (host.allocate?.(size) ?? 0) >>> 0;
+            if (buffer === 0)
+            {
+                return MMIOERR_OUTOFMEMORY;
+            }
+        }
+        if (file.owned)
+        {
+            host.free?.(file.buffer);
+        }
+        const at = position(file);
+        file.buffer = buffer;
+        file.size = size;
+        file.owned = owned;
+        file.flags = file.flags & ~MMIO_ALLOCBUF | (owned ? MMIO_ALLOCBUF : 0);
+        file.origin = file.memory ? 0 : at;
+        file.disk = file.origin;
+        file.next = 0;
+        file.end = 0;
+        return MMSYSERR_NOERROR;
     };
 
     return {
@@ -686,57 +1150,68 @@ export function createMmioFunctions(host){
             /** @param {number[]} args */
             handler: ([name, info, flags])=>openFile(
                 (name >>> 0) === 0 ? null : host.readCString(name >>> 0, MAX_PATH),
-                info, flags >>> 0),
+                info, flags >>> 0, false),
         },
 
         /** HMMIO mmioOpenW(LPWSTR szFilename, LPMMIOINFO lpmmioinfo, DWORD dwOpenFlags) */
         mmioOpenW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([name, info, flags])=>{
-                let path = null;
-                // A piece at a time, so a short name near the end of what is
-                // mapped is not read past.
-                for (let at = name >>> 0; at !== 0 && (path ?? '').length < MAX_PATH; at += 64)
-                {
-                    const bytes = host.readMemory(at, 64);
-                    path ??= '';
-                    let unit = 1;
-                    for (let index = 0; index + 1 < bytes.length && unit !== 0; index += 2)
-                    {
-                        unit = bytes[index] | bytes[index + 1] << 8;
-                        path += unit === 0 ? '' : String.fromCharCode(unit);
-                    }
-                    if (unit === 0)
-                    {
-                        break;
-                    }
-                }
-                return openFile(path, info, flags >>> 0);
-            },
+            handler: ([name, info, flags])=>openFile(
+                (name >>> 0) === 0 ? null : wideAt(name >>> 0, MAX_PATH), info, flags >>> 0,
+                true),
         },
 
-        /** MMRESULT mmioClose(HMMIO hmmio, UINT wFlags) */
+        /**
+         * MMRESULT mmioClose(HMMIO hmmio, UINT wFlags)
+         *
+         * A file opened by the program's own handle closes that handle too,
+         * unless MMIO_FHOPEN keeps it open for the program -- standing where
+         * mmio left the file, as a handle mmio read through would. A file
+         * through the program's procedure is closed by it, and answers what
+         * it answers once the buffer is written.
+         */
         mmioClose: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([handle])=>{
+            handler: ([handle, flags])=>{
                 const file = fileOf(handle);
                 if (!file)
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                const written = flush(file);
-                if (file.node)
-                {
-                    host.files.close(file.node);
-                }
-                if (file.owned)
-                {
-                    host.free?.(file.buffer);
-                }
                 open.delete(handle >>> 0);
-                return written ? MMSYSERR_NOERROR : MMIOERR_CANNOTWRITE;
+                return drive((function* (){
+                    const written = yield flush(file, true);
+                    let answer = MMSYSERR_NOERROR;
+                    if (file.procedure)
+                    {
+                        answer = yield send(file, MMIOM_CLOSE, flags, 0);
+                        file.store?.release();
+                        host.free?.(file.record);
+                    }
+                    else if (file.hfile !== 0 && ((flags >>> 0) & MMIO_FHOPEN) !== 0)
+                    {
+                        const shared = host.handles?.file(file.hfile);
+                        if (shared)
+                        {
+                            shared.position = file.disk;
+                        }
+                    }
+                    else if (file.hfile !== 0)
+                    {
+                        host.handles?.close(file.hfile);
+                    }
+                    else if (file.node)
+                    {
+                        host.files.close(file.node);
+                    }
+                    if (file.owned)
+                    {
+                        host.free?.(file.buffer);
+                    }
+                    return written ? answer : MMIOERR_CANNOTWRITE;
+                })());
             },
         },
 
@@ -808,15 +1283,29 @@ export function createMmioFunctions(host){
                 {
                     return -1;
                 }
-                const target = origin === SEEK_SET ? offset | 0
-                    : origin === SEEK_CUR ? position(file) + (offset | 0)
-                        : origin === SEEK_END ? sizeOf(file) - (offset | 0) : -1;
-                if (target < 0)
-                {
-                    return -1;
-                }
-                moveTo(file, target);
-                return target;
+                return drive((function* (){
+                    let target = -1;
+                    if (origin === SEEK_SET)
+                    {
+                        target = offset | 0;
+                    }
+                    else if (origin === SEEK_CUR)
+                    {
+                        target = position(file) + (offset | 0);
+                    }
+                    else if (origin === SEEK_END)
+                    {
+                        /** @type {number} */
+                        const size = yield sizeOf(file);
+                        target = size < 0 ? -1 : size - (offset | 0);
+                    }
+                    if (target < 0)
+                    {
+                        return -1;
+                    }
+                    yield moveTo(file, target);
+                    return target;
+                })());
             },
         },
 
@@ -896,16 +1385,78 @@ export function createMmioFunctions(host){
                     return answer(!writing || file.next < file.size
                         || expand(file, file.size + 1) ? MMSYSERR_NOERROR : MMIOERR_CANNOTEXPAND);
                 }
-                if (!flush(file))
+                return drive((function* (){
+                    if (!(yield flush(file)))
+                    {
+                        return answer(MMIOERR_CANNOTWRITE);
+                    }
+                    file.origin = position(file);
+                    file.next = 0;
+                    file.end = 0;
+                    file.disk = file.origin;
+                    if (!writing)
+                    {
+                        yield refill(file);
+                    }
+                    return answer(MMSYSERR_NOERROR);
+                })());
+            },
+        },
+
+        /**
+         * MMRESULT mmioSetBuffer(HMMIO hmmio, LPSTR pchBuffer, LONG cchBuffer, UINT wFlags)
+         *
+         * What the buffer holds is written first, and the new one starts
+         * empty where the file stands: the caller's when it gives a pointer,
+         * one mmio makes when it gives a size and no pointer (freeing any it
+         * made before), none for no size -- a pointer given with no size is
+         * still reported, as mmioOpen reports it. A memory file's block is
+         * the file, so a memory file given another is a new, empty one.
+         */
+        mmioSetBuffer: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, pointer, count])=>{
+                const file = fileOf(handle);
+                if (!file)
                 {
-                    return answer(MMIOERR_CANNOTWRITE);
+                    return MMSYSERR_INVALHANDLE;
                 }
-                file.origin = position(file);
-                file.next = 0;
-                file.end = 0;
-                file.disk = file.origin;
-                return writing ? answer(MMSYSERR_NOERROR)
-                    : then(refill(file), ()=>answer(MMSYSERR_NOERROR));
+                return then(flush(file), written=>(written
+                    ? replaceBuffer(file, pointer >>> 0, count >>> 0) : MMIOERR_CANNOTWRITE));
+            },
+        },
+
+        /**
+         * MMRESULT mmioFlush(HMMIO hmmio, UINT fuFlush)
+         *
+         * Writes what the buffer holds that the file does not, and keeps it
+         * unless MMIO_EMPTYBUF asks for the buffer to start again, empty,
+         * where the file stands. A memory file has nothing to write, and its
+         * block is the file, so it is never emptied.
+         */
+        mmioFlush: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, flags])=>{
+                const file = fileOf(handle);
+                if (!file)
+                {
+                    return MMSYSERR_INVALHANDLE;
+                }
+                return then(flush(file, true), written=>{
+                    if (!written)
+                    {
+                        return MMIOERR_CANNOTWRITE;
+                    }
+                    if (((flags >>> 0) & MMIO_EMPTYBUF) !== 0 && !file.memory)
+                    {
+                        file.origin = position(file);
+                        file.next = 0;
+                        file.end = 0;
+                    }
+                    return MMSYSERR_NOERROR;
+                });
             },
         },
 
@@ -974,8 +1525,7 @@ export function createMmioFunctions(host){
                             return walk(header.data + header.size + (header.size & 1), header);
                         }
                         writeChunk(info >>> 0, header, 0);
-                        moveTo(file, header.after);
-                        return MMSYSERR_NOERROR;
+                        return then(moveTo(file, header.after), ()=>MMSYSERR_NOERROR);
                     });
                 };
                 return walk(position(file), null);
@@ -1000,30 +1550,32 @@ export function createMmioFunctions(host){
                     return MMSYSERR_INVALHANDLE;
                 }
                 const record = info >>> 0;
-                const data = field(record, MMCKINFO_DWDATAOFFSET);
-                if ((field(record, MMCKINFO_DWFLAGS) & MMIO_DIRTY) === 0)
-                {
-                    const size = field(record, MMCKINFO_CKSIZE);
-                    moveTo(file, data + size + (size & 1));
-                    return MMSYSERR_NOERROR;
-                }
-                const end = position(file);
-                const size = end - data;
-                if (size !== field(record, MMCKINFO_CKSIZE))
-                {
-                    moveTo(file, data - 4);
-                    if (put(file, dword(size)) !== 4)
+                return drive((function* (){
+                    const data = field(record, MMCKINFO_DWDATAOFFSET);
+                    if ((field(record, MMCKINFO_DWFLAGS) & MMIO_DIRTY) === 0)
+                    {
+                        const size = field(record, MMCKINFO_CKSIZE);
+                        yield moveTo(file, data + size + (size & 1));
+                        return MMSYSERR_NOERROR;
+                    }
+                    const end = position(file);
+                    const size = end - data;
+                    if (size !== field(record, MMCKINFO_CKSIZE))
+                    {
+                        yield moveTo(file, data - 4);
+                        if ((yield put(file, dword(size))) !== 4)
+                        {
+                            return MMIOERR_CANNOTWRITE;
+                        }
+                        host.writeMemory(record + MMCKINFO_CKSIZE, dword(size));
+                    }
+                    yield moveTo(file, end);
+                    if ((size & 1) !== 0 && (yield put(file, new Uint8Array(1))) !== 1)
                     {
                         return MMIOERR_CANNOTWRITE;
                     }
-                    host.writeMemory(record + MMCKINFO_CKSIZE, dword(size));
-                }
-                moveTo(file, end);
-                if ((size & 1) !== 0 && put(file, new Uint8Array(1)) !== 1)
-                {
-                    return MMIOERR_CANNOTWRITE;
-                }
-                return MMSYSERR_NOERROR;
+                    return MMSYSERR_NOERROR;
+                })());
             },
         },
 
@@ -1050,14 +1602,16 @@ export function createMmioFunctions(host){
                 const start = position(file);
                 const header = [...dword(id), ...dword(field(record, MMCKINFO_CKSIZE)),
                     ...(kind === 0 ? [] : dword(field(record, MMCKINFO_FCCTYPE)))];
-                if (put(file, Uint8Array.from(header)) !== header.length)
-                {
-                    return MMIOERR_CANNOTWRITE;
-                }
-                host.writeMemory(record + MMCKINFO_CKID, dword(id));
-                host.writeMemory(record + MMCKINFO_DWDATAOFFSET, dword(start + 8));
-                host.writeMemory(record + MMCKINFO_DWFLAGS, dword(MMIO_DIRTY));
-                return MMSYSERR_NOERROR;
+                return then(put(file, Uint8Array.from(header)), written=>{
+                    if (written !== header.length)
+                    {
+                        return MMIOERR_CANNOTWRITE;
+                    }
+                    host.writeMemory(record + MMCKINFO_CKID, dword(id));
+                    host.writeMemory(record + MMCKINFO_DWDATAOFFSET, dword(start + 8));
+                    host.writeMemory(record + MMCKINFO_DWFLAGS, dword(MMIO_DIRTY));
+                    return MMSYSERR_NOERROR;
+                });
             },
         },
 
@@ -1075,35 +1629,28 @@ export function createMmioFunctions(host){
         },
 
         /**
-         * LPMMIOPROC mmioInstallIOProcA(FOURCC fccIOProc, LPMMIOPROC pIOProc, DWORD dwFlags)
+         * FOURCC mmioStringToFOURCCW(LPCWSTR sz, UINT uFlags)
          *
-         * The table itself: installing answers the procedure, finding and
-         * removing answer the one installed, or null. A file opened through
-         * one is refused (see mmioOpen), so installing it changes no answer
-         * a file already open gives.
+         * The same code from a UTF-16 string, whose characters are narrowed
+         * first: one with no single-byte form becomes a question mark.
          */
-        mmioInstallIOProcA: {
-            argBytes: 12,
+        mmioStringToFOURCCW: {
+            argBytes: 8,
             /** @param {number[]} args */
-            handler: ([fcc, proc, flags])=>{
-                const code = fcc >>> 0;
-                const installed = procedures.get(code) ?? 0;
-                if (((flags >>> 0) & MMIO_INSTALLPROC) !== 0)
-                {
-                    if ((proc >>> 0) === 0)
-                    {
-                        return 0;
-                    }
-                    procedures.set(code, proc >>> 0);
-                    return proc >>> 0;
-                }
-                if (((flags >>> 0) & MMIO_REMOVEPROC) !== 0)
-                {
-                    procedures.delete(code);
-                    return installed;
-                }
-                return ((flags >>> 0) & MMIO_FINDPROC) !== 0 ? installed : 0;
-            },
+            handler: ([text, flags])=>fourccOf((text >>> 0) === 0 ? ''
+                : wideAt(text >>> 0, 4).replace(/[^\0-\xff]/g, '?'),
+            ((flags >>> 0) & MMIO_TOUPPER) !== 0),
         },
+
+        /**
+         * LPMMIOPROC mmioInstallIOProcA(FOURCC fccIOProc, LPMMIOPROC pIOProc, DWORD dwFlags)
+         * LPMMIOPROC mmioInstallIOProcW(FOURCC, LPMMIOPROC, DWORD)
+         *
+         * The table itself, one for both: installing answers the procedure,
+         * finding and removing answer the one installed, or null. A file
+         * already open keeps the procedure it was opened through.
+         */
+        mmioInstallIOProcA: install(false),
+        mmioInstallIOProcW: install(true),
     };
 }

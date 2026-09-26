@@ -48,11 +48,11 @@ const WAVERR_UNPREPARED = 34;
 const TIMERR_NOCANDO = 97;
 
 /**
- * What waveOutGetErrorText says for each code it knows: the shared codes and
- * the wave ones. The wording is this build's own; a program shows it to a
- * person and compares nothing against it.
+ * What the error-text calls say for the codes every device family shares. The
+ * wording is this build's own; a program shows it to a person and compares
+ * nothing against it.
  */
-const ERROR_TEXT = new Map([
+const SHARED_ERROR_TEXT = new Map([
     [0, 'The specified command was carried out.'],
     [1, 'An unspecified error occurred.'],
     [2, 'The device identifier is out of range for this system.'],
@@ -75,10 +75,28 @@ const ERROR_TEXT = new Map([
     [19, 'The registry value was not found.'],
     [20, 'The driver does not call back.'],
     [21, 'There is more data to return.'],
+]);
+
+/** The wave calls' codes: the shared ones and WAVERR_BASE's. */
+const WAVE_ERROR_TEXT = new Map([
+    ...SHARED_ERROR_TEXT,
     [32, 'The device does not support this wave format.'],
     [33, 'The device is still playing its buffers.'],
     [34, 'The wave header has not been prepared.'],
     [35, 'The device is synchronous and was not opened to allow that.'],
+]);
+
+/** The MIDI calls' codes: the shared ones and MIDIERR_BASE's. */
+const MIDI_ERROR_TEXT = new Map([
+    ...SHARED_ERROR_TEXT,
+    [64, 'The MIDI header has not been prepared.'],
+    [65, 'The MIDI device is still playing its buffers.'],
+    [66, 'There is no MIDI map to use.'],
+    [67, 'The MIDI port is still sending data to the device.'],
+    [68, 'The MIDI device the setup names is not present.'],
+    [69, 'The MIDI setup is not valid.'],
+    [70, 'The operation is not possible in the mode the device was opened in.'],
+    [71, 'The MIDI message is not to be passed on.'],
 ]);
 
 /** MCI's error space begins above the shared one. */
@@ -92,6 +110,17 @@ const MCIERR_EXTENSION_NOT_FOUND = 281;
 const MCIERR_OUTOFRANGE = 282;
 const MCIERR_MISSING_DEVICE_NAME = 292;
 const MCIERR_NULL_PARAMETER_BLOCK = 297;
+
+/** The id `all` names: every open device at once. */
+const MCI_ALL_DEVICE_ID = 0xffffffff;
+
+/**
+ * mciGetDeviceID's answer for a name. No device is ever open here, so only
+ * `all` names one.
+ *
+ * @param {string} name
+ */
+const deviceIdOf = name=>(name.trim().toLowerCase() === 'all' ? MCI_ALL_DEVICE_ID : 0);
 
 /**
  * The MCI device types Windows registers a driver for. Naming one opens that
@@ -437,6 +466,33 @@ export function createWinmmFunctions(host){
     };
 
     /**
+     * A UTF-16 string out of guest memory, read the same way.
+     *
+     * @param {number} address @param {number} limit
+     */
+    const wideAt = (address, limit)=>{
+        let text = '';
+        for (let at = address >>> 0; text.length < limit; at += 64)
+        {
+            const piece = host.readMemory(at, 64);
+            for (let index = 0; index + 1 < piece.length; index += 2)
+            {
+                const unit = piece[index] | piece[index + 1] << 8;
+                if (unit === 0)
+                {
+                    return text.slice(0, limit);
+                }
+                text += String.fromCharCode(unit);
+            }
+            if (piece.length < 64)
+            {
+                break;
+            }
+        }
+        return text.slice(0, limit);
+    };
+
+    /**
      * A string into a caller's buffer of `room` characters, cut to fit with
      * its terminator; nothing at all when there is no room or no buffer.
      *
@@ -466,15 +522,16 @@ export function createWinmmFunctions(host){
     };
 
     /**
-     * waveOutGetErrorText, for either width.
+     * A family's GetErrorText, for either width: the codes it knows are the
+     * shared ones and its own.
      *
-     * @param {boolean} wide
+     * @param {boolean} wide @param {Map<number, string>} texts
      */
-    const errorText = wide=>({
+    const errorText = (wide, texts)=>({
         argBytes: 12,
         /** @param {number[]} args */
         handler: ([error, buffer, room])=>{
-            const text = ERROR_TEXT.get(error >>> 0);
+            const text = texts.get(error >>> 0);
             if (text === undefined)
             {
                 return MMSYSERR_BADERRNUM;
@@ -485,6 +542,23 @@ export function createWinmmFunctions(host){
             }
             writeText(buffer, room, text, wide);
             return MMSYSERR_NOERROR;
+        },
+    });
+
+    /**
+     * mciSendString, for either width.
+     *
+     * @param {boolean} wide
+     */
+    const sendString = wide=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([command, buffer, room])=>{
+            const answer = (command >>> 0) === 0
+                ? { error: MCIERR_MISSING_COMMAND_STRING, text: '' }
+                : mciString(wide ? wideAt(command, 1024) : ansiAt(command, 1024));
+            writeText(buffer, room, answer.text, wide);
+            return answer.error;
         },
     });
 
@@ -922,9 +996,18 @@ export function createWinmmFunctions(host){
         /**
          * MMRESULT waveOutGetErrorTextA(MMRESULT mmrError, LPSTR pszText, UINT cchText)
          * MMRESULT waveOutGetErrorTextW(MMRESULT, LPWSTR, UINT)
+         *
+         * waveIn's pair is this pair under another name, and midiIn's is
+         * midiOut's: winmm exports each as the other.
          */
-        waveOutGetErrorTextA: errorText(false),
-        waveOutGetErrorTextW: errorText(true),
+        waveOutGetErrorTextA: errorText(false, WAVE_ERROR_TEXT),
+        waveOutGetErrorTextW: errorText(true, WAVE_ERROR_TEXT),
+        waveInGetErrorTextA: errorText(false, WAVE_ERROR_TEXT),
+        waveInGetErrorTextW: errorText(true, WAVE_ERROR_TEXT),
+        midiOutGetErrorTextA: errorText(false, MIDI_ERROR_TEXT),
+        midiOutGetErrorTextW: errorText(true, MIDI_ERROR_TEXT),
+        midiInGetErrorTextA: errorText(false, MIDI_ERROR_TEXT),
+        midiInGetErrorTextW: errorText(true, MIDI_ERROR_TEXT),
 
         /**
          * MMRESULT waveOutGetDevCapsA(UINT_PTR uDeviceID, LPWAVEOUTCAPSA pwoc,
@@ -1307,24 +1390,30 @@ export function createWinmmFunctions(host){
         /**
          * MCIERROR mciSendStringA(LPCSTR lpszCommand, LPSTR lpszReturnString,
          *                         UINT cchReturn, HWND hwndCallback)
+         * MCIERROR mciSendStringW(LPCWSTR, LPWSTR, UINT, HWND)
          *
          * The string form of the same machine: what it answers is written to
          * the caller's buffer, and an error leaves the buffer empty.
          */
-        mciSendStringA: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([command, buffer, room])=>{
-                const answer = (command >>> 0) === 0
-                    ? { error: MCIERR_MISSING_COMMAND_STRING, text: '' }
-                    : mciString(ansiAt(command, 1024));
-                writeText(buffer, room, answer.text, false);
-                return answer.error;
-            },
-        },
+        mciSendStringA: sendString(false),
+        mciSendStringW: sendString(true),
 
-        /** MCIDEVICEID mciGetDeviceIDA(LPCSTR pszDevice): no device of any name is open. */
-        mciGetDeviceIDA: { argBytes: 4, handler: ()=>0 },
+        /**
+         * MCIDEVICEID mciGetDeviceIDA(LPCSTR pszDevice)
+         * MCIDEVICEID mciGetDeviceIDW(LPCWSTR pszDevice)
+         *
+         * No device of any name is open, and `all` is every device's id.
+         */
+        mciGetDeviceIDA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([name])=>((name >>> 0) === 0 ? 0 : deviceIdOf(ansiAt(name, 128))),
+        },
+        mciGetDeviceIDW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([name])=>((name >>> 0) === 0 ? 0 : deviceIdOf(wideAt(name, 128))),
+        },
         /** BOOL mciGetErrorStringA(MCIERROR, LPSTR, UINT): no text for a code, so FALSE. */
         mciGetErrorStringA: { argBytes: 12, handler: ()=>0 },
 

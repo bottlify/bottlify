@@ -941,7 +941,11 @@ export function createMsvcrtFunctions(host){
         ...(stdio ?? {}),
         ...(host.threads ? createThreadFunctions(host.threads) : {}),
         ...(host.fpu
-            ? createMathFunctions({ writeMemory: host.writeMemory, fpu: host.fpu })
+            ? createMathFunctions({
+                writeMemory: host.writeMemory,
+                fpu: host.fpu,
+                setRegisters: host.setRegisters,
+            })
             : {}),
     };
 }

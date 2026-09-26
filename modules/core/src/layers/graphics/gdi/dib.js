@@ -28,7 +28,7 @@
  * table to index, and the caller chooses it; this layer never invents one.
  */
 
-import { bitBlt, stretchBlt } from './blit.js';
+import { COLORONCOLOR, bitBlt, stretchBlt } from './blit.js';
 import { channelsOf, packPixel, unpackPixel } from './channels.js';
 import { SRCCOPY } from './rop.js';
 import { BI_BITFIELDS, createSurface, dibPitch, nearestEntry } from './surface.js';
@@ -36,6 +36,10 @@ import { BI_BITFIELDS, createSurface, dibPitch, nearestEntry } from './surface.j
 /** BI_RGB: uncompressed, with the channel layout the bit count implies. */
 export const BI_RGB = 0;
 export { BI_BITFIELDS };
+
+/** Run-length encoded eight- and four-bit DIBs. */
+export const BI_RLE8 = 1;
+export const BI_RLE4 = 2;
 
 /** The depths this layer converts. */
 const SUPPORTED_DEPTHS = new Set([1, 4, 8, 16, 24, 32]);
@@ -66,9 +70,130 @@ const RGB_MASKS = { 16: [0x7c00, 0x03e0, 0x001f], 32: [0x00ff0000, 0x0000ff00, 0
 export function isConvertibleDib(image){
     const header = image.header;
     const masked = header.bitCount === 16 || header.bitCount === 32;
-    return SUPPORTED_DEPTHS.has(header.bitCount)
+    return (SUPPORTED_DEPTHS.has(header.bitCount)
         && (header.compression === BI_RGB || (header.compression === BI_BITFIELDS && masked))
-        && header.width > 0 && header.height !== 0;
+        && header.width > 0 && header.height !== 0) || isRle(header);
+}
+
+/**
+ * Whether a header is a run-length encoded DIB this layer decodes: RLE8 at
+ * eight bits, RLE4 at four, bottom-up, which is the only way such a DIB can
+ * be stored.
+ *
+ * @param {import("../../win32/gdi32/structs.js").BitmapInfoHeaderFields} header
+ */
+export function isRle(header){
+    return ((header.compression === BI_RLE8 && header.bitCount === 8)
+        || (header.compression === BI_RLE4 && header.bitCount === 4))
+        && header.width > 0 && header.height > 0;
+}
+
+/**
+ * A run-length encoded DIB's picture, and which of its pixels the runs
+ * reached: a pixel no run reaches is not part of the picture, and whatever
+ * it lands on is left as it was.
+ *
+ * The bits are pairs. A count and a value is a run: that many pixels of the
+ * value, or at four bits of its two nibbles by turns. A zero count escapes:
+ * 0 ends the line, 1 ends the picture, 2 moves right and up by the next two
+ * bytes, and any more is that many pixels given one by one, padded to a
+ * WORD. Rows count from the bottom; a pixel past the right edge is dropped
+ * rather than carried to the next line.
+ *
+ * @param {DibImage} image
+ * @returns {{ surface: import("./surface.js").DepthSurface, written: Uint8Array }}
+ */
+function decodeRle(image){
+    const { width, height } = image.header;
+    const four = image.header.compression === BI_RLE4;
+    const bits = image.bits;
+    const colors = image.colors ?? [];
+    const surface = createSurface({ width, height });
+    const written = new Uint8Array(width * height);
+    let at = image.offset ?? 0;
+    let x = 0;
+    let row = 0;
+    /** @param {number} index */
+    const put = index=>{
+        if (x < width && row < height)
+        {
+            const y = height - 1 - row;
+            surface.write(x, y, colors[index] ?? 0);
+            written[y * width + x] = 1;
+        }
+        x++;
+    };
+    while (at + 2 <= bits.length && row < height)
+    {
+        const count = bits[at];
+        const value = bits[at + 1];
+        at += 2;
+        if (count > 0)
+        {
+            for (let index = 0; index < count; index++)
+            {
+                put(four ? ((index & 1) === 0 ? value >>> 4 : value & 0x0f) : value);
+            }
+        }
+        else if (value === 0)
+        {
+            x = 0;
+            row++;
+        }
+        else if (value === 1)
+        {
+            break;
+        }
+        else if (value === 2)
+        {
+            x += bits[at] ?? 0;
+            row += bits[at + 1] ?? 0;
+            at += 2;
+        }
+        else
+        {
+            const bytes = four ? (value + 1) >>> 1 : value;
+            for (let index = 0; index < value && at + (four ? index >>> 1 : index) < bits.length;
+                index++)
+            {
+                const byte = bits[at + (four ? index >>> 1 : index)];
+                put(four ? ((index & 1) === 0 ? byte >>> 4 : byte & 0x0f) : byte);
+            }
+            at += (bytes + 1) & ~1;
+        }
+    }
+    return { surface, written };
+}
+
+/**
+ * A rectangle of a source copied onto a destination where `written` says the
+ * source has a pixel, and nowhere else.
+ *
+ * @param {{ dest: import("./contract.js").Surface, clip?: import("./contract.js").Rect,
+ *           x: number, y: number, width: number, height: number,
+ *           src: import("./contract.js").Surface, srcX: number, srcY: number,
+ *           written: Uint8Array }} options
+ */
+function copyWritten(options){
+    const { dest, src, written } = options;
+    const clip = options.clip ?? { left: 0, top: 0, right: dest.width, bottom: dest.height };
+    const left = Math.max(options.x, clip.left, 0);
+    const top = Math.max(options.y, clip.top, 0);
+    const right = Math.min(options.x + options.width, clip.right, dest.width);
+    const bottom = Math.min(options.y + options.height, clip.bottom, dest.height);
+    for (let y = top; y < bottom; y++)
+    {
+        const sy = options.srcY + (y - options.y);
+        for (let x = left; x < right; x++)
+        {
+            const sx = options.srcX + (x - options.x);
+            if (sx >= 0 && sy >= 0 && sx < src.width && sy < src.height
+                && written[sy * src.width + sx] === 1)
+            {
+                dest.write(x, y, src.read(sx, sy));
+            }
+        }
+    }
 }
 
 /**
@@ -116,6 +241,10 @@ export function decodeDib(image){
     if (!isConvertibleDib(image))
     {
         return null;
+    }
+    if (isRle(image.header))
+    {
+        return decodeRle(image).surface;
     }
     const header = image.header;
     const width = header.width;
@@ -180,7 +309,9 @@ export function decodeDib(image){
  */
 export function encodeDib(surface, image){
     const table = image.colors ?? [];
-    if (!isConvertibleDib(image) || (image.header.bitCount <= 8 && table.length === 0))
+    // Nothing is ever written back run-length encoded.
+    if (!isConvertibleDib(image) || isRle(image.header)
+        || (image.header.bitCount <= 8 && table.length === 0))
     {
         return 0;
     }
@@ -327,6 +458,33 @@ export function setDIBitsToDevice(options){
     const scans = options.scans ?? height;
     const rows = options.height | 0;
     const ySrc = options.ySrc | 0;
+    if (isRle(header))
+    {
+        // An RLE DIB is always whole: the scan lines asked for are ignored,
+        // but for none at all, and the answer is its height (Wine's
+        // test_SetDIBitsToDevice_RLE8).
+        if (scans === 0)
+        {
+            return 0;
+        }
+        const { surface, written } = decodeRle(options.image);
+        const rectangleTop = height - ySrc - rows;
+        const top = Math.max(0, rectangleTop);
+        const bottom = Math.min(height, height - ySrc);
+        copyWritten({
+            dest: options.dest,
+            clip: options.clip,
+            x: options.xDest | 0,
+            y: (options.yDest | 0) + (top - rectangleTop),
+            width: options.width | 0,
+            height: bottom - top,
+            src: surface,
+            srcX: options.xSrc | 0,
+            srcY: top,
+            written,
+        });
+        return height;
+    }
     const source = decodeDib({
         ...options.image,
         startScan: topDown ? height - first - scans : first,
@@ -381,6 +539,10 @@ export function setDIBitsToDevice(options){
  * @returns {number} how many scan lines were transferred, or zero on failure
  */
 export function stretchDIBits(options){
+    if (isRle(options.image.header))
+    {
+        return stretchRle(options);
+    }
     const source = decodeDib(options.image);
     if (!source)
     {
@@ -410,4 +572,83 @@ export function stretchDIBits(options){
         pattern: options.pattern,
     });
     return drawn ? rows : 0;
+}
+
+/**
+ * StretchDIBits of a run-length encoded DIB: the stretch runs as for any
+ * other, into a copy of the destination's rectangle, and only the pixels a
+ * run reached -- stretched the same way, a pixel at a time -- are put back.
+ *
+ * @param {StretchDibOptions} options
+ * @returns {number}
+ */
+function stretchRle(options){
+    const { surface, written } = decodeRle(options.image);
+    const header = options.image.header;
+    const mask = createSurface({ width: header.width, height: header.height });
+    for (let index = 0; index < written.length; index++)
+    {
+        if (written[index] === 1)
+        {
+            mask.write(index % header.width, Math.floor(index / header.width), 0xffffff);
+        }
+    }
+    const dest = options.dest;
+    const x = Math.min(options.xDest | 0, (options.xDest | 0) + (options.destWidth | 0));
+    const y = Math.min(options.yDest | 0, (options.yDest | 0) + (options.destHeight | 0));
+    const clip = options.clip ?? { left: 0, top: 0, right: dest.width, bottom: dest.height };
+    const left = Math.max(x, clip.left, 0);
+    const top = Math.max(y, clip.top, 0);
+    const right = Math.min(x + Math.abs(options.destWidth | 0), clip.right, dest.width);
+    const bottom = Math.min(y + Math.abs(options.destHeight | 0), clip.bottom, dest.height);
+    const rows = Math.abs(options.srcHeight | 0);
+    if (right <= left || bottom <= top)
+    {
+        return rows;
+    }
+    const scratch = createSurface({ width: right - left, height: bottom - top });
+    const reached = createSurface({ width: right - left, height: bottom - top });
+    for (let row = top; row < bottom; row++)
+    {
+        for (let column = left; column < right; column++)
+        {
+            scratch.write(column - left, row - top, dest.read(column, row));
+        }
+    }
+    const srcTop = sourceTop(options.ySrc | 0, rows, header.height, false);
+    const pattern = options.pattern;
+    const geometry = {
+        x: (options.xDest | 0) - left,
+        y: (options.yDest | 0) - top,
+        width: options.destWidth | 0,
+        height: options.destHeight | 0,
+        srcX: options.xSrc | 0,
+        srcY: (options.srcHeight | 0) < 0 ? srcTop + rows : srcTop,
+        srcWidth: options.srcWidth | 0,
+        srcHeight: options.srcHeight | 0,
+    };
+    const drawn = stretchBlt({
+        ...geometry,
+        dest: scratch,
+        src: surface,
+        rop: options.rop ?? SRCCOPY,
+        mode: options.mode,
+        pattern: pattern && ((px, py)=>pattern(px + left, py + top)),
+    });
+    if (!drawn)
+    {
+        return 0;
+    }
+    stretchBlt({ ...geometry, dest: reached, src: mask, rop: SRCCOPY, mode: COLORONCOLOR });
+    for (let row = top; row < bottom; row++)
+    {
+        for (let column = left; column < right; column++)
+        {
+            if (reached.read(column - left, row - top) !== 0)
+            {
+                dest.write(column, row, scratch.read(column - left, row - top));
+            }
+        }
+    }
+    return rows;
 }

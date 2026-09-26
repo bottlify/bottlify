@@ -24,6 +24,7 @@ import { readDouble, returningDouble } from './float.js';
  * @typedef {Object} MathHost
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {import('./float.js').FloatHost} fpu
+ * @property {(values: Record<string, number>) => void} [setRegisters]
  */
 
 /** @param {number} value */
@@ -116,17 +117,15 @@ export function createMathFunctions(host){
     }
 
     /**
-     * long _ftol(double value)
+     * __int64 _ftol(double value)
      *
      * The cast every `(int)` in compiled C goes through. It truncates towards
      * zero -- not the rounding the FPU's own control word asks for, which is
      * exactly why the compiler calls a function instead of emitting `fistp`.
-     *
-     * It is declared as returning __int64, in EDX:EAX. Only EAX is set here,
-     * because a handler has no way to reach EDX; a program casting to `int`
-     * reads EAX alone and is right, and one casting to `__int64` reads a high
-     * half that is whatever EDX already held. Widening the return path is the
-     * fix, and it belongs in the bridge rather than here.
+     * The answer is an __int64 in EDX:EAX, so a cast to `__int64` goes through
+     * it too; a value past that range, or NaN, is the integer indefinite that
+     * `fistp` stores for it. Without the register seam only EAX is answered,
+     * which is still right for a cast to `int`.
      */
     const ftol = {
         convention: 'cdecl',
@@ -134,7 +133,11 @@ export function createMathFunctions(host){
         handler: ()=>{
             const value = fpu.get(0);
             fpu.pop();
-            return Math.trunc(value) | 0;
+            const bits = value >= -(2 ** 63) && value < 2 ** 63
+                ? BigInt.asUintN(64, BigInt(Math.trunc(value)))
+                : 1n << 63n;
+            host.setRegisters?.({ edx: Number(bits >> 32n) });
+            return Number(BigInt.asIntN(32, bits));
         },
     };
 

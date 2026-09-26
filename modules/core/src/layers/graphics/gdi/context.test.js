@@ -467,7 +467,10 @@ function wiredGdi(){
     const bytes = new Uint8Array(0x40000);
     let next = 0x10000;
     const screen = createSurface({ width: WIRED_SCREEN.width, height: WIRED_SCREEN.height });
+    /** @type {number[]} what was set as the last error, in order */
+    const errors = [];
     const gdi = createGdiFunctions({
+        setLastError: code=>errors.push(code),
         readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         readCString: ()=>'',
@@ -500,7 +503,7 @@ function wiredGdi(){
     const fns = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
         /** @type {unknown} */ (gdi.table));
     const view = new DataView(bytes.buffer);
-    return { bytes, view, fns, screen };
+    return { bytes, view, fns, screen, errors };
 }
 
 test('a pattern brush paints the bitmap it was made from, even once that bitmap is gone', ()=>{
@@ -1041,6 +1044,59 @@ test('SetDIBitsToDevice draws only the scan lines it was given, from the picture
     }
 });
 
+test('SetDIBitsToDevice places its destination through the mapping mode and the layout', ()=>{
+    // Wine's test_SetDIBitsToDevice, the three cases in a mapping mode or an
+    // RTL layout: the destination point is mapped to the device and the
+    // rectangle keeps its size in device pixels; under RTL the point is the
+    // rectangle's right edge, so the picture is placed, not mirrored.
+    const scan = scanFixture(false);
+    const { fns } = scan;
+    scan.header(8);
+    fns.SetMapMode.handler([scan.dc, 8]);
+    fns.SetWindowExtEx.handler([scan.dc, 3, 3, 0]);
+    scan.fill();
+    assert.equal(fns.SetDIBitsToDevice.handler([scan.dc, 2, 2, 2, 2, 1, 2, 1, 5, SCAN_DATA,
+        WIRED_INFO, 0]), 3);
+    assert.deepEqual(scan.pixels(), expecting(only([41, 42, 49, 50], data(-32))), 'a third');
+
+    fns.SetWindowExtEx.handler([scan.dc, -1, -1, 0]);
+    scan.fill();
+    // Windows answers 4 here, one short of the lines at or below the source
+    // rectangle's top that it answers everywhere else; what makes the
+    // difference under a mirrored mapping is not known, and 5 is answered.
+    fns.SetDIBitsToDevice.handler([scan.dc, 2, 2, 4, 4, 1, 2, 1, 5, SCAN_DATA, WIRED_INFO, 0]);
+    assert.deepEqual(scan.pixels(), expecting(only([48, 49, 56, 57], data(-37))), 'mirrored');
+    fns.SetMapMode.handler([scan.dc, 1]);
+
+    fns.SetLayout.handler([scan.dc, 1]);
+    scan.fill();
+    assert.equal(fns.SetDIBitsToDevice.handler([scan.dc, 1, 2, 3, 2, 1, 2, 1, 5, SCAN_DATA,
+        WIRED_INFO, 0]), 3);
+    assert.deepEqual(scan.pixels(), expecting(only([36, 37, 38, 44, 45, 46], data(-27))),
+        'right to left');
+});
+
+test('SetDIBits takes DIB_PAL_INDICES into a monochrome bitmap, and only there', ()=>{
+    // Wine's test_dib_formats: SetDIBits with DIB_PAL_COLORS + 1 fails into a
+    // bitmap compatible with the screen and succeeds into one made with
+    // CreateBitmap at one bit; + 2 fails into either. A monochrome bitmap's
+    // palette is its two colours, so each pixel is the bit it names.
+    const { fns, view, bytes } = wiredGdi();
+    const screen = fns.GetDC.handler([0]);
+    const mono = fns.CreateBitmap.handler([8, 2, 1, 1, 0]);
+    const colour = fns.CreateCompatibleBitmap.handler([screen, 8, 2]);
+    putInfo(view, { width: 8, height: 2, bitCount: 1, table: [0x00ff0000, 0x000000ff] });
+    bytes.set([0b10110000, 0, 0, 0, 0b01000000, 0, 0, 0], WIRED_BITS);
+
+    assert.equal(fns.SetDIBits.handler([screen, colour, 0, 2, WIRED_BITS, WIRED_INFO, 2]), 0);
+    assert.equal(fns.SetDIBits.handler([screen, mono, 0, 2, WIRED_BITS, WIRED_INFO, 3]), 0);
+    assert.equal(fns.SetDIBits.handler([screen, mono, 0, 2, WIRED_BITS, WIRED_INFO, 2]), 2);
+    const OUT = 0x5000;
+    assert.equal(fns.GetBitmapBits.handler([mono, 4, OUT]), 4);
+    assert.deepEqual([...bytes.subarray(OUT, OUT + 4)], [0b01000000, 0, 0b10110000, 0],
+        'the bits as they were, the top row first');
+});
+
 test('SetDIBits lays the scan lines it is given against the top of the bitmap', ()=>{
     // Wine's test_SetDIBits: uStartScan and cLines, and what lands where.
     /** @type {[boolean, number, number, number, [number, number, any][]][]} */
@@ -1075,6 +1131,296 @@ test('SetDIBits lays the scan lines it is given against the top of the bitmap', 
             SCAN_DATA, WIRED_INFO, 0]), lines, name);
         assert.deepEqual(scan.pixels(), expecting(ranges), name);
     }
+});
+
+// --- run-length encoded DIBs ---
+
+const RLE_DATA = 0x3800;
+const UNTOUCHED = 0xaaaaaaaa;
+const BI_RLE8 = 1;
+const BI_RLE4 = 2;
+
+/**
+ * An RLE DIB's header, a grey table -- entry i is i, i, i -- and its bytes.
+ *
+ * @param {DataView} view
+ * @param {{ width?: number, height?: number, bitCount?: number, compression?: number,
+ *           size?: number, planes?: number }} header
+ * @param {number[]} [rle]
+ */
+const putRle = (view, header, rle = [])=>{
+    const { width = 8, height = 8, bitCount = 8, compression = BI_RLE8, size, planes = 1 } =
+        header;
+    putInfo(view, { width, height, bitCount, compression,
+        table: [...Array(1 << bitCount).keys()].map(index=>index * 0x010101) });
+    view.setUint16(WIRED_INFO + BITMAPINFOHEADER.biPlanes, planes, true);
+    view.setUint32(WIRED_INFO + BITMAPINFOHEADER.biSizeImage, size ?? rle.length, true);
+    rle.forEach((value, index)=>view.setUint8(RLE_DATA + index, value));
+};
+
+/**
+ * Rows of greys, bottom first as a bottom-up section stores them; a null is a
+ * pixel left as it was.
+ *
+ * @param {(number | null)[][]} rows
+ */
+const greys = rows=>[...rows, ...Array(8 - rows.length).fill(Array(8).fill(null))].flat()
+    .map(grey=>(grey === null ? UNTOUCHED : grey * 0x010101));
+
+const _ = null;
+// Wine's test_SetDIBits_RLE8: 2, 2, 2, f0 x4, <eol>; absolute 4, 5, 6, <pad>;
+// delta (1, 2); 80 x5, the fifth past the edge; <eod>.
+const RLE8 = [0x03, 0x02, 0x04, 0xf0, 0x00, 0x00, 0x00, 0x03, 0x04, 0x05, 0x06, 0x00,
+    0x00, 0x02, 0x01, 0x02, 0x05, 0x80, 0x00, 0x01];
+const RLE8_BOTTOM_UP = greys([[2, 2, 2, 0xf0, 0xf0, 0xf0, 0xf0, _], [4, 5, 6, _, _, _, _, _],
+    [_, _, _, _, _, _, _, _], [_, _, _, _, 0x80, 0x80, 0x80, 0x80]]);
+/** @param {number[]} storage @returns {number[]} the rows the other way up */
+const upsideDown = storage=>[...Array(8).keys()].reverse()
+    .flatMap(row=>storage.slice(row * 8, row * 8 + 8));
+const RLE8_TOP_DOWN = upsideDown(RLE8_BOTTOM_UP);
+
+test('SetDIBits decodes an RLE8 DIB into the lines it names, and nothing else', ()=>{
+    // Wine's test_SetDIBits_RLE8, every case: a pixel the runs never reach
+    // is left as it was; the start and line count are ignored unless the
+    // count is zero; the DIB lies against the bitmap's top whatever its
+    // height; the answer is its height; and a top-down RLE DIB is refused.
+    for (const topDown of [false, true])
+    {
+        const scan = scanFixture(topDown);
+        const { fns, view, errors } = scan;
+        const screen = fns.GetDC.handler([0]);
+        const expected = topDown ? RLE8_TOP_DOWN : RLE8_BOTTOM_UP;
+        /** @param {number} start @param {number} lines */
+        const set = (start, lines)=>{
+            scan.fill();
+            return fns.SetDIBits.handler([screen, scan.section, start, lines, RLE_DATA,
+                WIRED_INFO, 0]);
+        };
+        /** @param {(index: number) => number} pick */
+        const each = pick=>[...Array(64).keys()].map(pick);
+        putRle(view, {}, RLE8);
+        for (const [start, lines] of [[0, 8], [1, 8], [1, 1]])
+        {
+            assert.equal(set(start, lines), 8, `${topDown} ${start}, ${lines}`);
+            assert.deepEqual(scan.pixels(), expected, `${topDown} ${start}, ${lines}`);
+        }
+        assert.equal(set(1, 0), 0);
+        assert.deepEqual(scan.pixels(), Array(64).fill(UNTOUCHED), 'no lines, nothing');
+        if (!topDown)
+        {
+            putRle(view, { width: 4 }, RLE8);
+            assert.equal(set(0, 8), 8);
+            assert.deepEqual(scan.pixels(), each(index=>((index & 4) ? UNTOUCHED
+                : RLE8_BOTTOM_UP[index])), 'four wide: the left half');
+        }
+        putRle(view, { height: 4 }, RLE8);
+        assert.equal(set(0, 8), 4);
+        assert.deepEqual(scan.pixels(), topDown
+            ? each(index=>(index < 32 ? RLE8_TOP_DOWN[index + 32] : UNTOUCHED))
+            : each(index=>(index < 32 ? UNTOUCHED : RLE8_BOTTOM_UP[index - 32])),
+        `${topDown} four high: the top half`);
+        putRle(view, { height: 9 }, RLE8);
+        assert.equal(set(0, 8), 9);
+        assert.deepEqual(scan.pixels(), topDown
+            ? each(index=>(index < 8 ? UNTOUCHED : RLE8_TOP_DOWN[index - 8]))
+            : each(index=>(index < 56 ? RLE8_BOTTOM_UP[index + 8] : UNTOUCHED)),
+        `${topDown} nine high: down a row`);
+        putRle(view, { height: -8 }, RLE8);
+        assert.equal(set(0, 8), 0);
+        assert.deepEqual(errors, [87], 'top-down is ERROR_INVALID_PARAMETER');
+    }
+});
+
+test('SetDIBits decodes an RLE4 DIB, runs alternating their two nibbles', ()=>{
+    // Wine's test_SetDIBits_RLE4.
+    const scan = scanFixture(false);
+    const { fns, view } = scan;
+    putRle(view, { bitCount: 4, compression: BI_RLE4 }, [0x03, 0x52, 0x07, 0x68, 0x00, 0x00,
+        0x00, 0x03, 0x14, 0x50, 0x00, 0x05, 0x79, 0xfd, 0xb0, 0x00, 0x00, 0x00,
+        0x00, 0x02, 0x01, 0x02, 0x05, 0x87, 0x00, 0x01]);
+    scan.fill();
+    assert.equal(fns.SetDIBits.handler([fns.GetDC.handler([0]), scan.section, 0, 8, RLE_DATA,
+        WIRED_INFO, 0]), 8);
+    assert.deepEqual(scan.pixels(), greys([[5, 2, 5, 6, 8, 6, 8, 6],
+        [1, 4, 5, 7, 9, 0xf, 0xd, 0xb], [_, _, _, _, _, _, _, _], [_, _, _, _, _, _, _, _],
+        [_, 8, 7, 8, 7, 8, _, _]]));
+});
+
+test('SetDIBitsToDevice draws an RLE8 DIB whole, its source rectangle as for any DIB', ()=>{
+    // Wine's test_SetDIBitsToDevice_RLE8, every case: the start and line
+    // count are ignored unless the count is zero, the answer is the DIB's
+    // height, and the rectangles fall as they do for an uncompressed DIB
+    // with every line supplied -- only the pixels the runs reach drawn.
+    const rle = [0x04, 0x02, 0x03, 0xf0, 0x00, 0x00, 0x00, 0x03, 0x04, 0x05, 0x06, 0x00,
+        0x00, 0x02, 0x01, 0x02, 0x05, 0x80, 0x00, 0x01];
+    const bottomUp = greys([[2, 2, 2, 2, 0xf0, 0xf0, 0xf0, _], [4, 5, 6, _, _, _, _, _],
+        [_, _, _, _, _, _, _, _], [_, _, _, _, 0x80, 0x80, 0x80, 0x80]]);
+    const topDown = upsideDown(bottomUp);
+    /** @param {(index: number) => number} pick */
+    const each = pick=>[...Array(64).keys()].map(pick);
+    const all = /** @param {number[]} table */ table=>each(index=>table[index]);
+
+    const up = scanFixture(false);
+    /**
+     * @param {typeof up} scan
+     * @param {number[]} args  xDest, yDest, cx, cy, xSrc, ySrc, start, lines
+     */
+    const draw = (scan, args)=>{
+        scan.fill();
+        return scan.fns.SetDIBitsToDevice.handler([scan.dc, ...args, RLE_DATA, WIRED_INFO, 0]);
+    };
+    putRle(up.view, {}, rle);
+    /** @type {[number[], number, number[], string][]} */
+    const cases = [
+        [[0, 0, 8, 8, 0, 0, 0, 8], 8, all(bottomUp), 'whole'],
+        [[0, 0, 8, 8, 0, 0, 1, 8], 8, all(bottomUp), 'start ignored'],
+        [[0, 0, 8, 8, 0, 0, 1, 1], 8, all(bottomUp), 'lines ignored'],
+        [[0, 0, 8, 8, 0, 0, 1, 0], 0, Array(64).fill(UNTOUCHED), 'no lines'],
+    ];
+    for (const [args, answer, expected, name] of cases)
+    {
+        assert.equal(draw(up, args), answer, name);
+        assert.deepEqual(up.pixels(), expected, name);
+    }
+
+    putRle(up.view, { width: 2 }, rle);
+    assert.equal(draw(up, [0, 0, 8, 8, 0, 0, 0, 8]), 8);
+    assert.deepEqual(up.pixels(), each(index=>((index & 7) < 2 ? bottomUp[index] : UNTOUCHED)),
+        'two wide');
+    putRle(up.view, { height: 2 }, rle);
+    assert.equal(draw(up, [0, 0, 8, 8, 0, 0, 0, 8]), 2);
+    assert.deepEqual(up.pixels(), each(index=>(index < 16 ? bottomUp[index] : UNTOUCHED)),
+        'two high');
+    putRle(up.view, { height: 9 }, rle);
+    for (const lines of [8, 9])
+    {
+        assert.equal(draw(up, [0, 0, 8, 8, 0, 0, 0, lines]), 9);
+        assert.deepEqual(up.pixels(), all(bottomUp), `nine high, ${lines} lines`);
+    }
+    putRle(up.view, {}, rle);
+    assert.equal(draw(up, [0, 0, 8, 8, 0, 0, 1, 9]), 8);
+    assert.deepEqual(up.pixels(), all(bottomUp));
+    assert.equal(draw(up, [0, 3, 8, 8, 0, 0, 0, 8]), 8);
+    assert.deepEqual(up.pixels(), each(index=>(index < 40 ? bottomUp[index + 24] : UNTOUCHED)));
+    assert.equal(draw(up, [0, 3, 4, 4, 0, 0, 0, 8]), 8);
+    assert.deepEqual(up.pixels(), each(index=>(index >= 8 && index < 40 && !(index & 4)
+        ? bottomUp[index - 8] : UNTOUCHED)));
+    assert.equal(draw(up, [3, 3, 8, 4, 0, 0, 0, 8]), 8);
+    assert.deepEqual(up.pixels(), each(index=>(index >= 8 && index < 40 && (index & 7) >= 3
+        ? bottomUp[index - 11] : UNTOUCHED)));
+    assert.equal(draw(up, [2, 3, 8, 4, 2, 0, 0, 8]), 8);
+    assert.deepEqual(up.pixels(), each(index=>(index >= 8 && index < 40 && (index & 7) >= 2
+        ? bottomUp[index - 8] : UNTOUCHED)));
+    putRle(up.view, { width: 37, height: 37 }, rle);
+    assert.equal(draw(up, [-2, 1, 10, 5, 2, -1, 12, 24]), 37);
+    assert.deepEqual(up.pixels(), each(index=>{
+        if (index < 24)
+        {
+            return UNTOUCHED;
+        }
+        if (index === 52)
+        {
+            return 0x808080;
+        }
+        return (index & 4) ? UNTOUCHED : bottomUp[index - 20];
+    }), 'thirty-seven square');
+    putRle(up.view, { height: -8 }, rle);
+    assert.equal(draw(up, [0, 0, 8, 8, 0, 0, 0, 8]), 0);
+    assert.deepEqual(up.errors, [87], 'top-down is ERROR_INVALID_PARAMETER');
+
+    const down = scanFixture(true);
+    putRle(down.view, {}, rle);
+    for (const lines of [8, 9])
+    {
+        assert.equal(draw(down, [0, 0, 8, 8, 0, 0, 0, lines]), 8);
+        assert.deepEqual(down.pixels(), all(topDown), `into top-down, ${lines} lines`);
+    }
+    putRle(down.view, { height: 4 }, rle);
+    assert.equal(draw(down, [0, 0, 8, 8, 0, 0, 0, 8]), 4);
+    assert.deepEqual(down.pixels(), all(topDown), 'four high');
+    putRle(down.view, { height: 9 }, rle);
+    for (const lines of [8, 9])
+    {
+        assert.equal(draw(down, [0, 0, 8, 8, 0, 0, 0, lines]), 9);
+        assert.deepEqual(down.pixels(), all(topDown), `nine high, ${lines} lines`);
+    }
+    assert.equal(draw(down, [2, 3, 8, 6, 2, 2, 0, 8]), 9);
+    assert.deepEqual(down.pixels(), each(index=>(index < 24 ? UNTOUCHED : topDown[index - 24])));
+    putRle(down.view, { width: 37, height: 37 }, rle);
+    assert.equal(draw(down, [-2, 1, 10, 5, 2, -1, 12, 24]), 37);
+    assert.deepEqual(down.pixels(), each(index=>{
+        if (index >= 40)
+        {
+            return UNTOUCHED;
+        }
+        if (index === 12)
+        {
+            return 0x808080;
+        }
+        return (index & 4) ? UNTOUCHED : topDown[index + 28];
+    }), 'thirty-seven square, into top-down');
+});
+
+test('an RLE DIB needs its size, and is drawn but never read back', ()=>{
+    // Wine's test_dib_formats: with biSizeImage zero an RLE8 or RLE4 DIB is
+    // refused by SetDIBits, SetDIBitsToDevice and StretchDIBits; with a size
+    // it is taken, even with no planes; GetDIBits describes one but will not
+    // write one; and each compression goes with its own depth only.
+    const scan = scanFixture(false);
+    const { fns, view } = scan;
+    const screen = fns.GetDC.handler([0]);
+    const bitmap = fns.CreateCompatibleBitmap.handler([screen, 10, 10]);
+    const OUT = 0x3000;
+    view.setUint32(RLE_DATA, 0xaaaaaaaa, true);
+    /** @returns {number[]} what each of the three calls answers */
+    const answers = ()=>[
+        fns.SetDIBits.handler([screen, bitmap, 0, 1, RLE_DATA, WIRED_INFO, 0]),
+        fns.SetDIBitsToDevice.handler([scan.dc, 0, 0, 1, 1, 0, 0, 0, 1, RLE_DATA, WIRED_INFO, 0]),
+        fns.StretchDIBits.handler([scan.dc, 0, 0, 1, 1, 0, 0, 1, 1, RLE_DATA, WIRED_INFO, 0,
+            0x00cc0020]),
+    ];
+    for (const [bitCount, compression] of [[8, BI_RLE8], [4, BI_RLE4]])
+    {
+        const name = `RLE${bitCount}`;
+        putRle(view, { width: 2, height: 2, bitCount, compression, size: 0 });
+        assert.deepEqual(answers(), [0, 0, 0], `${name} without a size`);
+        for (const planes of [1, 0])
+        {
+            putRle(view, { width: 2, height: 2, bitCount, compression, size: 1, planes });
+            assert.ok(answers().every(answer=>answer !== 0), `${name} with a size, ${planes}`);
+        }
+        putRle(view, { width: 2, height: 2, bitCount, compression, size: 0 });
+        assert.notEqual(fns.GetDIBits.handler([screen, bitmap, 0, 0, OUT, WIRED_INFO, 0]), 0);
+        assert.notEqual(fns.GetDIBits.handler([screen, bitmap, 0, 2, 0, WIRED_INFO, 0]), 0);
+        assert.equal(fns.GetDIBits.handler([screen, bitmap, 0, 2, OUT, WIRED_INFO, 0]), 0);
+        assert.equal(view.getUint16(WIRED_INFO + BITMAPINFOHEADER.biBitCount, true), bitCount);
+        putRle(view, { width: 2, height: 2, bitCount: 12 - bitCount, compression, size: 1 });
+        assert.deepEqual(answers(), [0, 0, 0], `${name} at the other depth`);
+    }
+});
+
+test('StretchDIBits draws an RLE DIB\'s runs and leaves the rest as it was', ()=>{
+    // Wine's dib tests draw these through StretchDIBits under SRCCOPY and
+    // SRCAND, offset and doubled, and compare the result's hash; here the
+    // one-to-one copy is the SetDIBitsToDevice picture, and a doubled one
+    // each run pixel twice over.
+    const scan = scanFixture(false);
+    const { fns, view } = scan;
+    putRle(view, {}, RLE8);
+    scan.fill();
+    assert.equal(fns.StretchDIBits.handler([scan.dc, 0, 0, 8, 8, 0, 0, 8, 8, RLE_DATA,
+        WIRED_INFO, 0, 0x00cc0020]), 8);
+    assert.deepEqual(scan.pixels(), RLE8_BOTTOM_UP);
+    scan.fill();
+    fns.StretchDIBits.handler([scan.dc, 0, 0, 8, 8, 0, 0, 4, 4, RLE_DATA, WIRED_INFO, 0,
+        0x00cc0020]);
+    // The source's bottom-left quarter, doubled: its rows 0 to 3 from the
+    // bottom -- a bottom-up DIB's ySrc counts from there -- and columns 0 to 3.
+    assert.deepEqual(scan.pixels(), [...Array(64).keys()].map(index=>{
+        const row = index >> 3;
+        const column = index & 7;
+        return RLE8_BOTTOM_UP[(row >> 1) * 8 + (column >> 1)];
+    }));
 });
 
 test('GetDIBits hands back the scan lines asked for, zeros where the bitmap is not', ()=>{

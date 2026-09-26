@@ -208,6 +208,11 @@ export function createAdapter(state, interfaces, destroy){
             }
             return Math.max(references, 0);
         },
+        // One count whichever interface a reference came through, so the
+        // last one ends every interface the bridge published this as.
+        get destroyed(){
+            return references <= 0;
+        },
     };
 }
 
@@ -379,6 +384,7 @@ function writeElemDesc(block, at, type, flags){
  * @property {(id: string) => { id: string, methods: readonly any[] } | null} interfaceFor
  * @property {() => number} addRef
  * @property {() => number} release
+ * @property {boolean} destroyed  Whether the last reference has gone.
  */
 
 /**

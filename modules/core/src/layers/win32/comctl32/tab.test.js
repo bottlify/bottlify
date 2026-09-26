@@ -10,15 +10,17 @@ import { createMessageQueue } from '../user32/messages.js';
 import { createWindowFunctions } from '../user32/windows.js';
 import { createGdiFunctions } from '../gdi32/functions.js';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
-import { createSurface, surfaceForDibSection, viewOf } from '../../graphics/gdi/surface.js';
+import { createSurface, surfaceForDdb, surfaceForDibSection, viewOf }
+    from '../../graphics/gdi/surface.js';
 import { createCommonControls } from './controls.js';
+import { createImageLists } from './imagelist.js';
 import {
     TAB_CLASS, TCS_BUTTONS, TCS_FIXEDWIDTH, TCS_FOCUSNEVER, TCS_VERTICAL, TCS_MULTILINE,
     TCM_GETITEMCOUNT, TCM_INSERTITEMA, TCM_INSERTITEMW, TCM_GETITEMA, TCM_SETITEMA,
     TCM_DELETEITEM, TCM_GETCURSEL, TCM_SETCURSEL, TCM_GETCURFOCUS, TCM_SETCURFOCUS,
     TCM_SETITEMEXTRA, TCM_ADJUSTRECT, TCM_SETITEMSIZE, TCM_GETITEMRECT, TCM_SETMINTABWIDTH,
     TCM_GETROWCOUNT, TCM_SETEXTENDEDSTYLE, TCM_GETEXTENDEDSTYLE, TCM_SETUNICODEFORMAT,
-    TCM_GETUNICODEFORMAT, TCM_HITTEST, TCM_REMOVEIMAGE,
+    TCM_GETUNICODEFORMAT, TCM_HITTEST, TCM_REMOVEIMAGE, TCM_SETIMAGELIST, TCM_SETPADDING,
     TCITEM, TCIF_TEXT, TCIF_IMAGE, TCIF_PARAM, TCIF_STATE, TCIS_BUTTONPRESSED,
     TCIS_HIGHLIGHTED, TCHITTESTINFO, TCHT_ONITEM, TCHT_NOWHERE,
     WM_NOTIFY, NM_CLICK, TCN_SELCHANGE, TCN_SELCHANGING, TCN_FOCUSCHANGE,
@@ -165,9 +167,21 @@ function setup(){
                     return viewOf(desktop, dc.bounds
                         ?? { left: 0, top: 0, right: SCREEN.width, bottom: SCREEN.height });
                 }
+                if (bitmap.pixels)
+                {
+                    return surfaceForDdb(bitmap);
+                }
                 return bitmap.bits ? surfaceForDibSection(bitmap, memory.bytes, 0) : null;
             },
         },
+    });
+    const gdi32 = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
+        /** @type {unknown} */ (gdi.table));
+    const imageLists = createImageLists({
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        gdi32: name=>gdi32[name],
+        bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
     });
 
     const fns = createWindowFunctions({
@@ -201,7 +215,7 @@ function setup(){
         allocate,
         release: ()=>{},
         registerControls: (controlHost, toolkit, register)=>{
-            for (const definition of createCommonControls(controlHost, toolkit))
+            for (const definition of createCommonControls(controlHost, toolkit, imageLists))
             {
                 register(definition);
             }
@@ -314,7 +328,7 @@ function setup(){
     };
 
     return { memory, desktop, fns: table, send, pump, codes, answers, makeParent, tabs,
-        insert, stateOf, itemRect, measure, windowRect };
+        insert, stateOf, itemRect, measure, windowRect, gdi32, lists: imageLists.functions };
 }
 
 test('a tab control is a class a program creates by name, clipping its siblings', async()=>{
@@ -717,4 +731,121 @@ test('in the button form the tabs are buttons, the chosen one pressed in, and th
     assert.equal(buttons.pane, FACE, 'the button form does not');
     assert.equal(buttons.chosen, SHADOW, 'the chosen button is pressed in');
     assert.equal(buttons.other, HILIGHT, 'and the other stands out');
+});
+
+const ILC_COLOR = 0x0000;
+const ILC_COLOR32 = 0x0020;
+
+test('with an image list a fixed-width tab is at least its image and four wide', async()=>{
+    // Wine's test_tab, TCS_FIXEDWIDTH with a 21-pixel image list, as tabs
+    // and as buttons: a size under that is widened to 25 whatever the
+    // padding, and the height is as set.
+    const context = setup();
+    await context.makeParent();
+    const list = context.lists.ImageList_Create.handler([21, 21, ILC_COLOR, 3, 4]);
+    for (const style of [TCS_FIXEDWIDTH, TCS_FIXEDWIDTH | TCS_BUTTONS])
+    {
+        const hwnd = await context.tabs(style, 3);
+        context.send([hwnd, TCM_SETIMAGELIST, 0, list]);
+        /** @param {number} width @param {number} height */
+        const sized = (width, height)=>{
+            context.send([hwnd, TCM_SETITEMSIZE, 0, height << 16 | width]);
+            const rect = context.itemRect(hwnd, 0);
+            return [rect.right - rect.left, rect.bottom - rect.top];
+        };
+        assert.deepEqual(sized(50, 30), [50, 30]);
+        assert.deepEqual(sized(20, 20), [25, 20], 'under the image');
+        assert.deepEqual(sized(0, 1), [25, 1]);
+        context.send([hwnd, TCM_SETPADDING, 0, 4 << 16 | 4]);
+        assert.deepEqual(sized(0, 1), [25, 1], 'whatever the padding');
+        context.fns.DestroyWindow.handler([hwnd]);
+    }
+});
+
+test('with an image list a tab is its label, its image and three paddings wide, and a '
+    + 'padding alone moves nothing', async()=>{
+    // Wine's test_tab without TCS_FIXEDWIDTH, for the default minimum and
+    // two set ones: without the list a tab is its label and two paddings
+    // wide, with it the image and a third padding more, and no narrower than
+    // the minimum; a tab of no text is the image and three paddings. A new
+    // padding shows once the list or a different size is set, not before.
+    const context = setup();
+    await context.makeParent();
+    const list = context.lists.ImageList_Create.handler([21, 21, ILC_COLOR, 3, 4]);
+    for (const minimum of [-1, 24, 94])
+    {
+        for (const text of [true, false])
+        {
+            const hwnd = await context.tabs(0, 0);
+            ['Tab 1', 'Wide Tab 2', 'T 3'].forEach((label, index)=>context.insert(hwnd, index,
+                text ? { text: label, image: index } : { image: index }));
+            context.send([hwnd, TCM_SETMINTABWIDTH, 0, minimum]);
+            const label = text ? context.measure(hwnd, 'Tab 1').width : 0;
+            const least = context.measure(hwnd, 'x').width * 6 + 12;
+            /** @param {number} width @param {number} height */
+            const sized = (width, height)=>{
+                context.send([hwnd, TCM_SETITEMSIZE, 0, height << 16 | width]);
+                return context.itemRect(hwnd, 0);
+            };
+            /** @param {{ left: number, right: number }} rect */
+            const across = rect=>rect.right - rect.left;
+            for (let padding = 0; padding < 8; padding++)
+            {
+                const name = `minimum ${minimum}, ${text ? 'text' : 'no text'}, padding ${padding}`;
+                context.send([hwnd, TCM_SETIMAGELIST, 0, 0]);
+                context.send([hwnd, TCM_SETPADDING, 0, padding << 16 | padding]);
+                const bare = Math.max(label + padding * 2,
+                    minimum < 0 ? least - (6 - padding) * 2 : minimum);
+                assert.equal(across(sized(50, 20)), bare, `${name}, no image`);
+                assert.equal(across(sized(0, 1)), bare, `${name}, no image, least`);
+                context.send([hwnd, TCM_SETIMAGELIST, 0, list]);
+                let expected = text
+                    ? Math.max(label + 21 + padding * 3,
+                        minimum < 0 ? least - (6 - padding) * 3 : minimum)
+                    : Math.max(21 + padding * 3, minimum < 0 ? least - (6 - padding) * 2
+                        : minimum);
+                if (!text && padding > 1 && minimum > 0 && minimum < least)
+                {
+                    expected = minimum + 3 * (padding - 1);
+                }
+                const rect = sized(50, 30);
+                assert.deepEqual([across(rect), rect.bottom - rect.top], [expected, 30], name);
+                assert.equal(across(sized(20, 20)), expected, `${name}, under the image`);
+                assert.equal(across(sized(0, 1)), expected, `${name}, least`);
+                context.send([hwnd, TCM_SETPADDING, 0, (padding + 1) << 16 | padding + 1]);
+                assert.equal(across(context.itemRect(hwnd, 0)), expected,
+                    `${name}, the padding alone`);
+                assert.equal(across(sized(0, 1)), expected, `${name}, the same size again`);
+            }
+            context.fns.DestroyWindow.handler([hwnd]);
+        }
+    }
+});
+
+test('a tab draws its image at its left, and its label beside it', async()=>{
+    const GREEN = 0x0000ff00;
+    const context = setup();
+    await context.makeParent();
+    const PIXELS = 0x13600;
+    for (let index = 0; index < 64; index++)
+    {
+        context.memory.put32(PIXELS + index * 4, GREEN);
+    }
+    const list = context.lists.ImageList_Create.handler([8, 8, ILC_COLOR32, 1, 1]);
+    const bitmap = context.gdi32.CreateBitmap.handler([8, 8, 1, 32, PIXELS]);
+    assert.equal(context.lists.ImageList_Add.handler([list, bitmap, 0]), 0);
+    context.gdi32.DeleteObject.handler([bitmap]);
+    const hwnd = await context.tabs(0, 2);
+    context.send([hwnd, TCM_SETIMAGELIST, 0, list]);
+    context.send([hwnd, TCM_SETITEMSIZE, 0, 20 << 16 | 0]);
+    await context.pump();
+    const origin = context.windowRect(hwnd);
+    const tab = context.itemRect(hwnd, 1);
+    const y = origin.top + ((tab.top + tab.bottom) >> 1);
+    assert.notEqual(context.desktop.read(origin.left + tab.left + 6 + 4, y), GREEN,
+        'the second tab names image 1, which the list does not have');
+    const first = context.itemRect(hwnd, 0);
+    const middle = origin.top + ((first.top + first.bottom) >> 1);
+    assert.equal(context.desktop.read(origin.left + first.left + 6 + 4, middle), GREEN,
+        'the first tab\'s image, a padding in');
 });

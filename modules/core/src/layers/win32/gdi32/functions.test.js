@@ -1906,6 +1906,45 @@ test('LPtoDP and DPtoLP map through the origins and the extents the mode sets', 
     assert.deepEqual(read(1), [7, 7]);
 });
 
+test('an RTL layout mirrors the device across its width, and makes the mode anisotropic', ()=>{
+    // Wine's test_dc_layout, over a 100-pixel-wide memory DC:
+    // LAYOUT_RTL turns MM_TEXT into MM_ANISOTROPIC with its extents kept, and
+    // LPtoDP sends x to 99 - x, the origins untouched; while it holds, even
+    // MM_TEXT reads back anisotropic, and going back to LTR leaves the mode
+    // as it was until MM_TEXT is asked for again.
+    const { fns, hdc, memory } = withDC();
+    const POINTS = 0x9000;
+    const dc = fns.CreateCompatibleDC.handler([hdc]);
+    fns.SelectObject.handler([dc, fns.CreateCompatibleBitmap.handler([hdc, 100, 100])]);
+    /** @returns {number[]} (1000, 1000) as LPtoDP maps it */
+    const mapped = ()=>{
+        memory.writeMemory(POINTS, new Uint8Array(new Int32Array([1000, 1000]).buffer));
+        assert.equal(fns.LPtoDP.handler([dc, POINTS, 1]), 1);
+        return [...new Int32Array(memory.readMemory(POINTS, 8).slice().buffer)];
+    };
+    assert.equal(fns.GetLayout.handler([dc]), 0);
+    assert.equal(fns.SetLayout.handler([dc, 1]), 0, 'the layout it replaced');
+    assert.equal(fns.GetLayout.handler([dc]), 1);
+    assert.equal(fns.GetMapMode.handler([dc]), MM_ANISOTROPIC);
+    assert.deepEqual(mapped(), [-1000 + 99, 1000]);
+    fns.SetViewportOrgEx.handler([dc, 0, 0, OUT]);
+    assert.deepEqual([memory.u32(OUT), memory.u32(OUT + 4)], [0, 0], 'the origin it had');
+    fns.GetWindowExtEx.handler([dc, OUT]);
+    assert.deepEqual([memory.u32(OUT), memory.u32(OUT + 4)], [1, 1]);
+
+    fns.SetMapMode.handler([dc, MM_TEXT]);
+    assert.equal(fns.GetMapMode.handler([dc]), MM_ANISOTROPIC, 'MM_TEXT, mirrored');
+    assert.equal(fns.SetLayout.handler([dc, 0]), 1);
+    assert.equal(fns.GetMapMode.handler([dc]), MM_ANISOTROPIC);
+    assert.deepEqual(mapped(), [1000, 1000]);
+    fns.SetMapMode.handler([dc, MM_TEXT]);
+    assert.equal(fns.GetMapMode.handler([dc]), MM_TEXT);
+
+    assert.equal(fns.SetLayout.handler([0x9999, 1]) >>> 0, 0xffffffff, 'GDI_ERROR');
+    assert.equal(fns.GetLayout.handler([0x9999]) >>> 0, 0xffffffff);
+    assert.deepEqual([fns.SetLayout.argBytes, fns.GetLayout.argBytes], [8, 4]);
+});
+
 test('OffsetWindowOrgEx moves the window origin and reports where it was', ()=>{
     const { fns, hdc, memory } = withDC();
     fns.SetWindowOrgEx.handler([hdc, 5, 6, 0]);

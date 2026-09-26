@@ -825,6 +825,84 @@ test('an error code reads as text, cut to the buffer, and an unknown one is refu
         [12, 12]);
 });
 
+test('wave-in reads wave-out\'s error text, and MIDI in and out read the MIDI codes', ()=>{
+    // winmm.spec: waveInGetErrorTextA/W are waveOutGetErrorTextA/W, and
+    // midiInGetErrorTextA/W are midiOutGetErrorTextA/W.
+    const m = machine();
+    const MMSYSERR_BADERRNUM = 9;
+    const WAVERR_UNPREPARED = 34;
+    const MIDIERR_UNPREPARED = 64;
+    const MIDIERR_DONT_CONTINUE = 71;
+    /** @param {number} at */
+    const ansi = at=>String.fromCharCode(...m.memory.slice(at, m.memory.indexOf(0, at)));
+    /** @param {number} at */
+    const wide = at=>{
+        const units = [];
+        for (let unit = at; m.memory[unit] | m.memory[unit + 1]; unit += 2)
+        {
+            units.push(m.memory[unit] | m.memory[unit + 1] << 8);
+        }
+        return String.fromCharCode(...units);
+    };
+    /** @param {string} name @param {number} code @param {number} at */
+    const text = (name, code, at)=>{
+        m.memory.fill(0, at, at + 0x100);
+        assert.equal(m.winmm[name].handler([code, at, 0x40]), 0, `${name}(${code})`);
+        return name.endsWith('W') ? wide(at) : ansi(at);
+    };
+
+    const unprepared = text('waveOutGetErrorTextA', WAVERR_UNPREPARED, 0x400);
+    assert.equal(text('waveInGetErrorTextA', WAVERR_UNPREPARED, 0x500), unprepared);
+    assert.equal(text('waveInGetErrorTextW', WAVERR_UNPREPARED, 0x600), unprepared);
+
+    const midi = text('midiOutGetErrorTextA', MIDIERR_UNPREPARED, 0x400);
+    assert.ok(midi.length > 10 && midi !== unprepared, `MIDIERR_UNPREPARED reads as "${midi}"`);
+    assert.equal(text('midiOutGetErrorTextW', MIDIERR_UNPREPARED, 0x500), midi);
+    assert.equal(text('midiInGetErrorTextA', MIDIERR_UNPREPARED, 0x600), midi);
+    assert.equal(text('midiInGetErrorTextW', MIDIERR_UNPREPARED, 0x700), midi);
+    assert.ok(text('midiInGetErrorTextA', MIDIERR_DONT_CONTINUE, 0x400).length > 10);
+    assert.equal(text('midiOutGetErrorTextA', 2, 0x400), text('waveInGetErrorTextA', 2, 0x500),
+        'the shared codes read the same whichever family is asked');
+
+    assert.equal(m.winmm.midiOutGetErrorTextA.handler([WAVERR_UNPREPARED, 0x400, 0x40]),
+        MMSYSERR_BADERRNUM, 'a wave code is not a MIDI one');
+    assert.equal(m.winmm.waveInGetErrorTextA.handler([MIDIERR_UNPREPARED, 0x400, 0x40]),
+        MMSYSERR_BADERRNUM, 'nor a MIDI code a wave one');
+    assert.deepEqual(['waveInGetErrorTextA', 'waveInGetErrorTextW', 'midiInGetErrorTextA',
+        'midiInGetErrorTextW', 'midiOutGetErrorTextA', 'midiOutGetErrorTextW']
+        .map(name=>m.winmm[name].argBytes), [12, 12, 12, 12, 12, 12]);
+});
+
+test('the wide MCI string calls answer as the ANSI ones do, in UTF-16', ()=>{
+    const m = machine();
+    const MCIERR_CANNOT_LOAD_DRIVER = 266;
+    const MCI_ALL_DEVICE_ID = 0xffffffff;
+    /** @param {string} text @param {number} at */
+    const putWide = (text, at)=>{
+        [...text].forEach((c, index)=>m.memory.set([c.charCodeAt(0) & 0xff,
+            c.charCodeAt(0) >>> 8], at + index * 2));
+        m.memory.set([0, 0], at + text.length * 2);
+        return at;
+    };
+
+    m.memory.fill(0x55, 0x600, 0x640);
+    assert.equal(m.winmm.mciSendStringW.handler([putWide('sysinfo all quantity', 0x400),
+        0x600, 0x20, 0]), 0);
+    assert.deepEqual([...m.memory.slice(0x600, 0x605)], [0x30, 0, 0, 0, 0x55],
+        '"0" and a wide terminator');
+    assert.equal(m.winmm.mciSendStringW.handler([putWide('open cdaudio alias cd', 0x400),
+        0x600, 0x20, 0]), MCIERR_CANNOT_LOAD_DRIVER);
+    assert.deepEqual([...m.memory.slice(0x600, 0x602)], [0, 0], 'emptied on an error');
+
+    assert.equal(m.winmm.mciGetDeviceIDW.handler([putWide('cdaudio', 0x400)]), 0,
+        'no device of that name is open');
+    // mci.c: mciGetDeviceIDA("all") is MCI_ALL_DEVICE_ID.
+    assert.equal(m.winmm.mciGetDeviceIDW.handler([putWide('all', 0x400)]), MCI_ALL_DEVICE_ID);
+    m.memory.set([...'all'].map(c=>c.charCodeAt(0)).concat([0]), 0x480);
+    assert.equal(m.winmm.mciGetDeviceIDA.handler([0x480]), MCI_ALL_DEVICE_ID);
+    assert.deepEqual([m.winmm.mciSendStringW.argBytes, m.winmm.mciGetDeviceIDW.argBytes], [16, 4]);
+});
+
 test('MCI answers a command string as a machine with no MCI device does', ()=>{
     // mci.c test_mciParser for the parse errors; mcicda.c for what opening the
     // CD player gives where it cannot load; and nothing ever opens here.

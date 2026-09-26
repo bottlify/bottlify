@@ -71,6 +71,15 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  */
 
 /**
+ * The rate cork's time-stamp counter advances at, in MHz, which is the speed
+ * the machine reports everywhere else too -- the registry's `~MHz` and CPUID
+ * leaf 0x16 -- because a program turns rdtsc deltas into seconds with it. A
+ * machine's era is read off this figure: a program that finds 1 GHz picks the
+ * settings it ships for the slowest machine it supports.
+ */
+export const CORK_TSC_MHZ = 3000;
+
+/**
  * Builds the cork host over a memory of its own.
  *
  * @param {CorkHostConfig} config
@@ -207,10 +216,10 @@ export function createCorkHost(config){
      */
     let interpreter = null;
 
-    // Cork's own time-stamp counter: nanoseconds of the page's clock since the
-    // host was made, monotonic, at the scale the emulator's counter has.
+    // Cork's own time-stamp counter: the page's clock since the host was made,
+    // monotonic, at CORK_TSC_MHZ ticks a microsecond.
     const tscBase = performance.now();
-    const readTsc = ()=>BigInt(Math.floor((performance.now() - tscBase) * 1e6));
+    const readTsc = ()=>BigInt(Math.floor((performance.now() - tscBase) * CORK_TSC_MHZ * 1000));
 
     const runtime = createEngine({
         memory,

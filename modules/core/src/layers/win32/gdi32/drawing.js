@@ -93,6 +93,27 @@ const EIGHT_BIT_COLORS = Object.freeze([...Array(256).keys()].map(index=>{
 }));
 
 /**
+ * A halftone palette's entries, as PALETTEENTRYs: the default palette's first
+ * eight, a cube of six levels of each channel, twenty-four greys between black
+ * and white, and the default palette's last eight.
+ */
+const HALFTONE_ENTRIES = Object.freeze((()=>{
+    /** @param {number} red @param {number} green @param {number} blue */
+    const entry = (red, green, blue)=>(red | green << 8 | blue << 16) >>> 0;
+    /** @param {number} pixel */
+    const fromPixel = pixel=>entry(pixel >>> 16 & 0xff, pixel >>> 8 & 0xff, pixel & 0xff);
+    const levels = [0x00, 0x33, 0x66, 0x99, 0xcc, 0xff];
+    const cube = levels.flatMap(red=>levels.flatMap(green=>levels.map(blue=>
+        entry(red, green, blue))));
+    const greys = [...Array(24).keys()].map(step=>{
+        const grey = Math.round((step + 1) * 255 / 25);
+        return entry(grey, grey, grey);
+    });
+    return [...DEFAULT_PALETTE_COLORS.slice(0, 8).map(fromPixel), ...cube, ...greys,
+        ...DEFAULT_PALETTE_COLORS.slice(12).map(fromPixel)];
+})());
+
+/**
  * The colour table GetDIBits reads a bitmap out against at an indexed depth:
  * an indexed section's own at its own depth, and otherwise black and white at
  * one bit, the VGA colours at four and the default table at eight -- what
@@ -119,6 +140,17 @@ function colorTableFor(shape, bitCount){
  */
 const BI_RGB = 0;
 const BI_BITFIELDS = 3;
+
+/**
+ * Run-length encoded DIBs, each at the one depth it encodes: whole pictures
+ * only, which the calls that draw a DIB decode and GetDIBits never writes.
+ *
+ * @param {import('./structs.js').BitmapInfoHeaderFields} header
+ */
+const isRle = header=>(header.compression === 1 && header.bitCount === 8)
+    || (header.compression === 2 && header.bitCount === 4);
+
+const ERROR_INVALID_PARAMETER = 87;
 /** Bits per pixel the DIB decoder reads. */
 const DIB_BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 
@@ -280,13 +312,15 @@ function masksFor(shape, bitCount){
  *        => number[]} options.readColorTable
  *        A DIB's colour table as colours, whatever its usage says it holds;
  *        a table of colours has entries `entryBytes` apart, four by default.
+ * @param {(dc: any, point: { x: number, y: number }) => { x: number, y: number }}
+ *        options.toDevice  A logical point as the device sees it, as LPtoDP maps it.
  * @returns The entry points; `bound`, the drawing interface a context is
  *     bound to, for the window manager, which paints its own controls through
  *     the same engine without a guest string to read; and `setDIBits`, which
  *     CreateDIBitmap initialises a bitmap with.
  */
 export function createDrawingFunctions(
-    { host, objects, dcOf, surfaceOf, currentMetrics, lend, readColorTable })
+    { host, objects, dcOf, surfaceOf, currentMetrics, lend, readColorTable, toDevice })
 {
     /** @type {DrawingServices} */
     const services = host.graphics ?? {};
@@ -386,6 +420,9 @@ export function createDrawingFunctions(
      * A BI_BITFIELDS DIB's masks sit where a colour table would, forty bytes
      * in, which in a larger header is inside the header rather than after it.
      * A table shorter than the depth allows leaves the indices past it black.
+     * A run-length encoded DIB is biSizeImage bytes, which it must give, and
+     * bottom-up, a top-down one being ERROR_INVALID_PARAMETER (Wine's
+     * test_dib_formats and RLE tests).
      *
      * @param {number} info @param {number} bits
      * @param {number} usage  What the colour table holds.
@@ -398,9 +435,15 @@ export function createDrawingFunctions(
         const header = readBitmapInfoHeader(host, info);
         const masked = header.compression === BI_BITFIELDS
             && (header.bitCount === 16 || header.bitCount === 32);
+        const rle = isRle(header);
+        if (rle && header.height < 0)
+        {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return null;
+        }
         if (!isDibHeaderSize(header.size) || header.width <= 0 || header.height === 0
-            || !DIB_BIT_COUNTS.has(header.bitCount)
-            || (header.compression !== BI_RGB && !masked) || usage > DIB_PAL_INDICES)
+            || !DIB_BIT_COUNTS.has(header.bitCount) || (rle && header.sizeImage === 0)
+            || (header.compression !== BI_RGB && !masked && !rle) || usage > DIB_PAL_INDICES)
         {
             return null;
         }
@@ -415,7 +458,8 @@ export function createDrawingFunctions(
         const colors = header.bitCount <= 8
             ? readColorTable(info + header.size, count, usage, dc, colorEntryBytes(header))
             : [];
-        return { header, bits: host.readMemory(bits, stride * rows), colors, masks };
+        return { header, bits: host.readMemory(bits, rle ? header.sizeImage : stride * rows),
+            colors, masks };
     };
 
     /**
@@ -425,7 +469,9 @@ export function createDrawingFunctions(
      * supplied lines land where they belong in it (Wine's test_SetDIBits);
      * a row outside the bitmap is dropped. The answer is the lines handed
      * in, however many of them landed. Unlike the calls that draw a DIB, this
-     * one checks a BI_BITFIELDS DIB's masks, and refuses DIB_PAL_INDICES.
+     * one checks a BI_BITFIELDS DIB's masks, and takes DIB_PAL_INDICES only
+     * into a monochrome bitmap, whose palette is its black and white (Wine's
+     * test_dib_formats).
      *
      * @param {number} bitmap @param {number} start @param {number} lines
      * @param {number} bits @param {number} info @param {number} usage
@@ -433,22 +479,29 @@ export function createDrawingFunctions(
      * @returns {number}
      */
     const setDIBits = (bitmap, start, lines, bits, info, usage, dc)=>{
-        const image = usage === DIB_PAL_INDICES ? null
+        const shape = objects.get(bitmap)?.attributes;
+        const monochrome = shape?.bitCount === 1 && (shape.section >>> 0) === 0;
+        const image = usage === DIB_PAL_INDICES && !monochrome ? null
             : readDib(info, bits, usage, dc, lines);
         if (!image || image.masks.some(mask=>mask === 0))
         {
             return 0;
         }
+        if (usage === DIB_PAL_INDICES)
+        {
+            image.colors = image.colors.map((_, index)=>((index & 1) === 0 ? 0 : 0xffffff));
+        }
         const header = image.header;
-        const landed = lend(bitmap, target=>{
-            const interfaces = bound(target, false);
-            interfaces?.setDIBitsToDevice(target, {
-                xDest: 0, yDest: 0, width: header.width, height: Math.abs(header.height),
-                xSrc: 0, ySrc: 0, firstScan: start, scans: lines, image,
-            });
-            return interfaces !== null;
-        });
-        return landed ? lines : 0;
+        const answer = lend(bitmap, target=>bound(target, false)?.setDIBitsToDevice(target, {
+            xDest: 0, yDest: 0, width: header.width, height: Math.abs(header.height),
+            xSrc: 0, ySrc: 0, firstScan: start, scans: lines, image,
+        }) ?? null);
+        // An RLE DIB answers its height, as SetDIBitsToDevice does for one.
+        if (answer === null)
+        {
+            return 0;
+        }
+        return isRle(header) ? answer : lines;
     };
 
     /** @param {any} a @param {any} b */
@@ -598,7 +651,10 @@ export function createDrawingFunctions(
          *
          * The bits hold cLines scan lines from StartScan on, and only those are
          * drawn: see the drawing layer's setDIBitsToDevice for how they and the
-         * source rectangle are counted, and what the answer counts.
+         * source rectangle are counted, and what the answer counts. The
+         * destination point is mapped to the device and the rectangle keeps
+         * its size in device pixels; under an RTL layout the point is its
+         * right edge (Wine's test_SetDIBitsToDevice).
          */
         SetDIBitsToDevice: {
             argBytes: 48,
@@ -610,14 +666,19 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                const image = readDib(info >>> 0, bits >>> 0, usage >>> 0, dcOf(dest),
-                    lines >>> 0);
+                const dc = dcOf(dest);
+                const image = readDib(info >>> 0, bits >>> 0, usage >>> 0, dc, lines >>> 0);
                 if (!image)
                 {
                     return 0;
                 }
+                const origin = toDevice(dc, { x: xDest | 0, y: yDest | 0 });
+                if ((dc.layout & 1) !== 0)
+                {
+                    origin.x -= (width | 0) - 1;
+                }
                 return interfaces.setDIBitsToDevice(dest >>> 0, {
-                    xDest: xDest | 0, yDest: yDest | 0, width: width | 0, height: height | 0,
+                    xDest: origin.x, yDest: origin.y, width: width | 0, height: height | 0,
                     xSrc: xSrc | 0, ySrc: ySrc | 0,
                     firstScan: start >>> 0, scans: lines >>> 0,
                     image,
@@ -905,14 +966,17 @@ export function createDrawingFunctions(
                 }
                 const masked = header.compression === BI_BITFIELDS
                     && (header.bitCount === 16 || header.bitCount === 32);
+                // An RLE DIB can be described, but nothing is written back
+                // run-length encoded (Wine's test_dib_formats).
+                const rle = isRle(header);
                 if (!DIB_BIT_COUNTS.has(header.bitCount)
-                    || (header.compression !== BI_RGB && !masked)
+                    || (header.compression !== BI_RGB && !masked && !(rle && describing))
                     || header.width <= 0 || header.height === 0
                     || (header.planes === 0 && (lines >>> 0) !== 0))
                 {
                     return 0;
                 }
-                if (!core)
+                if (!core && !rle)
                 {
                     writeU32s(host, info + BITMAPINFOHEADER.biSizeImage,
                         [dibStride(header.width, header.bitCount) * Math.abs(header.height)]);
@@ -1170,13 +1234,14 @@ export function createDrawingFunctions(
         /**
          * HPALETTE CreateHalftonePalette(HDC hdc)
          *
-         * Real, and empty. Every surface here is 32-bit, so a halftone palette
-         * has nothing to hold -- but a program that gets a null handle back
-         * treats it as an error, and this is not one.
+         * 256 colours, the stock palette's first eight and last eight at either
+         * end (Wine's test_halftone_palette). Nothing pins the 240 between, and
+         * they are colours spread over the whole range: a cube of six levels
+         * a channel and a ramp of greys.
          */
         CreateHalftonePalette: {
             argBytes: 4,
-            handler: ()=>objects.create('palette', { entries: [] }),
+            handler: ()=>objects.create('palette', { entries: [...HALFTONE_ENTRIES] }),
         },
 
         /** HPALETTE SelectPalette(HDC hdc, HPALETTE hPal, BOOL bForceBkgd) */
@@ -1222,18 +1287,6 @@ export function createDrawingFunctions(
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>(objects.get(handle) ? 1 : 0),
-        },
-
-        /**
-         * UINT GetDIBColorTable(HDC hdc, UINT iStart, UINT cEntries,
-         *                       RGBQUAD *prgbq)
-         *
-         * Zero entries copied, for the same reason: a colour table belongs to a
-         * DIB of eight bits or fewer, and this pipeline has none.
-         */
-        GetDIBColorTable: {
-            argBytes: 16,
-            handler: ()=>0,
         },
 
         /**

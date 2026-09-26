@@ -72,7 +72,7 @@ builds its renderer without them; the first four also reach the OpenGL device re
 | `backend()` | The WebGPU backend, built on first call; throws when no `device` was configured. |
 | `available()` | Whether this build has a GPU. |
 | `adapter()` | `config.device.adapter` or null. |
-| `present(surface)` | Shows a surface that lives in guest memory through the presenter, for anything outside the drawing libraries (a film, an overlay). |
+| `present(surface, window?, exclusive?)` | Shows a surface that lives in guest memory through the presenter, for anything outside the drawing libraries (a film, an overlay), the way a DirectDraw primary is shown: as the picture of `window` (0, or a handle that names no window, for the program's topmost; a child stands for its top-level window), copied into the desktop over that window's client area -- the whole screen when `exclusive` -- less every shown top-level window above it, and the desktop shown. A surface the GPU owns, one of another size than the screen, one with no window to own it, or one whose region is the whole screen is shown as it is, with nothing over it seen. |
 | `screen()` | The current `{ width, height, bitsPerPixel }`. |
 | `create(name, options?)` | Makes one API object by name: `ddraw`, `d3d8`, `d3d9`, `opengl`, `d3d10`, `vulkan`. Direct3D 7 has no factory of its own; it is reached from a DirectDraw object. |
 | `apis()` | The six names above. |
@@ -271,7 +271,10 @@ when the caller passed somewhere to put it.
 
 `com.js` adapts an API object for the bridge's vtable publisher: it supplies `interfaceFor`,
 `addRef` and `release` from the object's own lifetime model and memoises one adapter per object,
-so one surface is one identity. Every slot of every interface is declared in `vtables.js`; a slot
+so one surface is one identity. Its `destroyed` says whether the latest release ended the object --
+a count of zero on an object that does not report `destroyed: false`, as a DirectDraw object does
+while another generation is held -- and the bridge then forgets every interface pointer of it, not
+only the one released through. Every slot of every interface is declared in `vtables.js`; a slot
 nothing implements answers `E_NOTIMPL` from the index the program compiled against rather than
 shifting the ones after it, and `argBytes` counts the interface pointer and every argument because
 the callee pops the stack.
@@ -740,7 +743,8 @@ and read by its masks whatever they are, each channel written as its mask's top 
 widened by repeating them (`gdi/channels.js`, which the DIB codec shares), with 8-8-8, 5-6-5 and
 5-5-5 on their direct paths. A DIB pattern brush whose table was palette indices takes its colours
 from the palette the DC has when it paints. `setDIBitsToDevice` draws only the scan lines it is
-handed, counted from the DIB's bottom as `ySrc` is. A window context draws into a view (`viewOf`) of
+handed, counted from the DIB's bottom as `ySrc` is; a run-length encoded DIB (`decodeRle`) is drawn
+whole, by it and by `stretchDIBits`, and only the pixels its runs reach are put down. A window context draws into a view (`viewOf`) of
 the **desktop** — one 32-bit surface the size of the display, allocated from the guest heap so the
 presenter can show it the way it shows a DirectDraw primary — at the rectangle `win32` names for the
 window. `gdi32` calls `presentDesktop` after every drawing entry point (`BitBlt`, `TextOutA`,
@@ -827,8 +831,8 @@ Refused (the program is told no):
   layout's own; a colour-space colour key (`DDERR_NOCOLORKEYHW`); a colour fill on a Z-buffer; a
   palette or a colour key on a mip sublevel; the event form of `WaitForVerticalBlank`
   (`DDERR_UNSUPPORTED`).
-- GDI: a run-length encoded DIB (`BI_RLE8`, `BI_RLE4`) to `StretchDIBits`, `SetDIBitsToDevice`,
-  `SetDIBits` or `GetDIBits`; a DIB section backed by a file mapping. `StretchDIBits` draws 1- and
+- GDI: a run-length encoded DIB written back by `GetDIBits`, or top-down (`ERROR_INVALID_PARAMETER`,
+  as Windows answers); a DIB section backed by a file mapping. `StretchDIBits` draws 1- and
   4-bit DIBs, and `GetDIBits` writes 1-, 4- and 8-bit ones with their colour table: a section's own at
   its own depth, otherwise black and white, the sixteen VGA colours, or the twenty default-palette
   colours around a 3-3-2 cube, each pixel given its nearest.

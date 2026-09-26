@@ -37,7 +37,7 @@ import { createMsvcrtFunctions } from './msvcrt/functions.js';
 import { createWindowFunctions } from './user32/windows.js';
 import { createMessageQueue } from './user32/messages.js';
 import { createRegistryFunctions } from './advapi32/functions.js';
-import { createTokenFunctions } from './advapi32/tokens.js';
+import { ADMINISTRATORS_SID, createTokenFunctions, isTokenMember } from './advapi32/tokens.js';
 import { createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
 import { createHive, SHELL_FOLDERS } from './advapi32/registry.js';
@@ -52,6 +52,7 @@ import { createNoticeThread } from './winmm/thread.js';
 import { createTimerService } from './winmm/timers.js';
 import { COMCTL32_ORDINALS, createComctlFunctions } from './comctl32/functions.js';
 import { createCommonControls } from './comctl32/controls.js';
+import { createImageLists } from './comctl32/imagelist.js';
 import { createShellFunctions } from './shell32/functions.js';
 import { registerShellLinkClasses } from './shell32/shelllink.js';
 import { registerWbemClasses } from './ole32/wbem.js';
@@ -61,6 +62,8 @@ import { createLzFunctions } from './lz32/functions.js';
 import { createCommonDialogFunctions } from './comdlg32/functions.js';
 import { createImmFunctions } from './imm32/functions.js';
 import { createShlwapiFunctions } from './shlwapi/functions.js';
+import { createAdvpackFunctions } from './advpack/functions.js';
+import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
 import { createD3dxFunctions } from './d3dx9/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
 import { createNetworkFunctions } from './mpr/functions.js';
@@ -269,7 +272,7 @@ export const win32Module = {
         // Absent unless a bundle is mounted, in which case a read of a block
         // that is not here yet becomes a wait rather than a fault.
         const volume = createVolume(filesystem, config?.fetchBlocks ?? null);
-        const hive = createHive();
+        const hive = createHive({ processorMhz: config?.processorMhz });
         // The guest's clock, because a timer is due against the clock the
         // program itself reads, and the input layer's key state, because a
         // hot key fires on a combination and only the layer that sees the
@@ -785,6 +788,14 @@ export const win32Module = {
             });
         };
 
+        // comctl32's image lists, drawn with gdi32's own calls: its exports,
+        // and what its tab control draws from.
+        const imageLists = createImageLists({
+            readMemory, writeMemory, divergence: config?.divergence,
+            gdi32: name=>libraries['GDI32.dll']?.[name],
+            bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
+        });
+
         libraries = {
             'KERNEL32.dll': {
                 ...createConsoleFunctions({
@@ -842,6 +853,7 @@ export const win32Module = {
                     readMemory,
                     writeMemory,
                     readCString,
+                    readWideString,
                     currentThread: ()=>kernel.currentThread(),
                     now: ()=>kernel.clock.virtualTime(),
                     systemTimeMs: ()=>kernel.clock.wallClock(),
@@ -1207,18 +1219,38 @@ export const win32Module = {
                 // The files a program reads its sounds from are the volume's.
                 ...createMmioFunctions({
                     readMemory, writeMemory, readCString, files: volume,
+                    // A file the program opened itself and hands mmio by its
+                    // handle is kernel32's, and closes as CloseHandle closes it.
+                    handles: {
+                        file: handle=>{
+                            try
+                            {
+                                return handles.resolve(handle, 'file') ?? null;
+                            }
+                            catch (e){
+                                void e;
+                                return null;
+                            }
+                        },
+                        close: handle=>
+                            libraries['KERNEL32.dll'].CloseHandle.handler([handle]) !== 0,
+                    },
                     // A buffer mmio makes is guest memory, because mmioGetInfo
                     // hands its pointers to the program.
                     allocate: bytes=>heap.allocate(bytes),
                     free: address=>{
                         heap.free(address);
                     },
+                    // A file through the program's own I/O procedure is read
+                    // and written by calling it.
+                    call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    callerThread: ()=>bridge.callerThread(),
                     divergence: config?.divergence,
                 }),
             },
 
             'COMCTL32.dll': createComctlFunctions({
-                readMemory, writeMemory, divergence: config?.divergence,
+                readMemory, writeMemory, divergence: config?.divergence, imageLists,
                 // What _TrackMouseEvent is documented to call where the
                 // system has it; looked up when called, as user32 is built
                 // beside it.
@@ -1286,6 +1318,12 @@ export const win32Module = {
             'IMM32.dll': createImmFunctions({ writeMemory }),
 
             'SHLWAPI.dll': createShlwapiFunctions({ readCString, readWideString, writeMemory }),
+
+            'ADVPACK.dll': createAdvpackFunctions({
+                isAdministrator: ()=>isTokenMember(ADMINISTRATORS_SID),
+            }),
+
+            'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
 
             // The maths half of the Direct3D helper: pure vector and matrix
             // functions, here for their stack width as much as their answers,
@@ -1455,7 +1493,7 @@ export const win32Module = {
                 // own system classes use: comctl32 owns their behaviour, not
                 // their registration.
                 registerControls: (controlHost, toolkit, register)=>{
-                    for (const definition of createCommonControls(controlHost, toolkit))
+                    for (const definition of createCommonControls(controlHost, toolkit, imageLists))
                     {
                         register(definition);
                     }
@@ -1543,9 +1581,16 @@ export const win32Module = {
                         libraries['KERNEL32.dll'].GetProcAddress.handler([module, name]),
                 },
                 makeObject: createComObject,
-                // A drop target hangs on a window, which user32 knows.
+                // A drop target hangs on a window, which user32 knows, and is
+                // the window's property as well.
                 /** @param {number} window */
                 isWindow: window=>libraries['USER32.dll'].IsWindow.handler([window]) === 1,
+                windowProperty: {
+                    set: (window, name, value)=>
+                        libraries['USER32.dll'].SetPropA.handler([window, name, value]),
+                    remove: (window, name)=>
+                        libraries['USER32.dll'].RemovePropA.handler([window, name]),
+                },
             }),
 
             'RPCRT4.dll': createRpcFunctions({
@@ -1668,6 +1713,7 @@ export const win32Module = {
                 // number: a framework's start-up calls it and nothing else.
                 'COMCTL32.dll': COMCTL32_ORDINALS,
                 'WINMM.dll': WINMM_ORDINALS,
+                'SFC.dll': SFC_ORDINALS,
             }),
 
             /**
@@ -1861,10 +1907,11 @@ export const win32Module = {
                 windowService.place(hwnd, x, y, width, height, how),
 
             /**
-             * One window's client rectangle, or null for a handle that names
-             * no window. The measurement GetClientRect answers with, for the
-             * callers outside this layer that have to answer a size a program
-             * asked for as zero: a back buffer, whose zero means exactly this.
+             * One window's client rectangle on the screen, or null for a
+             * handle that names no window: GetClientRect's size at
+             * ClientToScreen's origin, for the callers outside this layer that
+             * answer a size a program asked for as zero -- a back buffer, whose
+             * zero means exactly this -- or place a picture inside the window.
              *
              * @param {number} hwnd
              */

@@ -230,6 +230,47 @@ export function unitsOf(bytes){
     return units;
 }
 
+/** How far a wide string is read, in units, before it is taken as ended. */
+const MAX_WIDE = 1 << 16;
+
+/** A wide string is read a stretch at a time, each within one 64-byte line. */
+const WIDE_STRETCH = 64;
+
+/**
+ * A wide string in guest memory up to its terminator, as the string its units
+ * spell. Each stretch read ends at a 64-byte boundary, so a string that ends
+ * just short of where its region does is not read past it.
+ *
+ * @param {(address: number, length: number) => Uint8Array} readMemory
+ * @param {number} pointer
+ */
+export function wideStringAt(readMemory, pointer){
+    /** @type {number[]} */
+    const units = [];
+    let low = -1;
+    for (let at = pointer >>> 0; units.length < MAX_WIDE;)
+    {
+        const end = at - at % WIDE_STRETCH + WIDE_STRETCH;
+        for (const byte of readMemory(at, end - at))
+        {
+            if (low < 0)
+            {
+                low = byte;
+                continue;
+            }
+            const unit = low | byte << 8;
+            low = -1;
+            if (unit === 0)
+            {
+                return textOfUnits(units);
+            }
+            units.push(unit);
+        }
+        at = end;
+    }
+    return textOfUnits(units);
+}
+
 /**
  * Units as the string they spell, for the console.
  *
@@ -259,13 +300,14 @@ export function bytesOfUnits(units){
 }
 
 /**
- * Up to `limit` units of what `decodeUnits` found, CR LF folded to LF, and
- * the offset just past what they took. A character's two units go together
- * or not at all.
+ * Up to `limit` units of what `decodeUnits` found, CR LF folded to LF --
+ * stopping after the first LF when `line` says so -- and the offset just past
+ * what they took. A character's two units go together or not at all.
  *
  * @param {{ units: number[], ends: number[] }} decoded @param {number} limit
+ * @param {boolean} [line]
  */
-export function foldUnits({ units, ends }, limit){
+export function foldUnits({ units, ends }, limit, line = false){
     /** @type {number[]} */
     const out = [];
     let consumed = 0;
@@ -276,16 +318,22 @@ export function foldUnits({ units, ends }, limit){
             out.push(LF);
             consumed = ends[at + 1];
             at += 2;
-            continue;
         }
-        const whole = at + 1 < units.length && ends[at] === ends[at + 1] ? 2 : 1;
-        if (out.length + whole > limit)
+        else
+        {
+            const whole = at + 1 < units.length && ends[at] === ends[at + 1] ? 2 : 1;
+            if (out.length + whole > limit)
+            {
+                break;
+            }
+            out.push(...units.slice(at, at + whole));
+            consumed = ends[at + whole - 1];
+            at += whole;
+        }
+        if (line && out[out.length - 1] === LF)
         {
             break;
         }
-        out.push(...units.slice(at, at + whole));
-        consumed = ends[at + whole - 1];
-        at += whole;
     }
     return { units: out, consumed };
 }

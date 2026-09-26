@@ -411,6 +411,10 @@ export function createSoundBuffer({
         },
         /** Whether it can still be reached: a count of zero is not the end of it while kept. */
         reachable: ()=>references > 0 || kept(),
+        /** Whether the program's last reference has gone, whatever keeps it besides. */
+        get destroyed(){
+            return references === 0;
+        },
 
         /**
          * Both cursors at once, because they are one answer: a program reads

@@ -117,6 +117,14 @@ const MM_ANISOTROPIC = 8;
 const SCALABLE_MAP_MODES = new Set([MM_ISOTROPIC, MM_ANISOTROPIC]);
 
 /**
+ * A right-to-left layout: the device is read from its right edge, x mapped
+ * to width - 1 - x after everything else, and the mode reads MM_ANISOTROPIC
+ * for as long as it holds (Wine's test_dc_layout).
+ */
+const LAYOUT_RTL = 0x01;
+const GDI_ERROR = 0xffffffff;
+
+/**
  * The fixed modes, by how many logical units make an inch: MM_LOMETRIC's
  * tenths of a millimetre through MM_TWIPS. Each maps that many logical units
  * onto the device's inch with y growing upwards, which is what sets them apart
@@ -543,6 +551,7 @@ export function createGdiFunctions(host){
             rop2: R2_COPYPEN,
             textAlign: 0,
             mapMode: MM_TEXT,
+            layout: 0,
             viewportOrg: { x: 0, y: 0 },
             windowOrg: { x: 0, y: 0 },
             viewportExt: { cx: 1, cy: 1 },
@@ -591,6 +600,7 @@ export function createGdiFunctions(host){
         rop2: dc.rop2,
         textAlign: dc.textAlign,
         mapMode: dc.mapMode,
+        layout: dc.layout,
         viewportOrg: { ...dc.viewportOrg },
         windowOrg: { ...dc.windowOrg },
         viewportExt: { ...dc.viewportExt },
@@ -654,6 +664,7 @@ export function createGdiFunctions(host){
         dc.bkMode = state.bkMode;
         dc.rop2 = state.rop2;
         dc.mapMode = state.mapMode;
+        dc.layout = state.layout;
         dc.viewportOrg = state.viewportOrg;
         dc.windowOrg = state.windowOrg;
         dc.viewportExt = state.viewportExt;
@@ -797,10 +808,17 @@ export function createGdiFunctions(host){
         const [from, to, fromExt, toExt] = toDevice
             ? [dc.windowOrg, dc.viewportOrg, dc.windowExt, dc.viewportExt]
             : [dc.viewportOrg, dc.windowOrg, dc.viewportExt, dc.windowExt];
-        return {
-            x: mapped(point.x, from.x, to.x, fromExt.cx, toExt.cx),
+        const edge = (dc.layout & LAYOUT_RTL) !== 0 ? surfaceOf(dc).width - 1 : null;
+        const x = edge !== null && !toDevice ? edge - point.x : point.x;
+        const result = {
+            x: mapped(x, from.x, to.x, fromExt.cx, toExt.cx),
             y: mapped(point.y, from.y, to.y, fromExt.cy, toExt.cy),
         };
+        if (edge !== null && toDevice)
+        {
+            result.x = edge - result.x;
+        }
+        return result;
     };
 
     /**
@@ -1182,6 +1200,7 @@ export function createGdiFunctions(host){
 
     const drawing = createDrawingFunctions({
         host, objects, dcOf, surfaceOf, currentMetrics, lend,
+        toDevice: (dc, point)=>transform(dc, point, true),
         /** @param {number} at @param {number} count @param {number} usage @param {any} dc */
         readColorTable: (at, count, usage, dc, entryBytes)=>
             readColorTable(at, count, usage, dc, false, entryBytes),
@@ -2194,7 +2213,7 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const previous = dc.mapMode;
-                dc.mapMode = mode | 0;
+                dc.mapMode = (dc.layout & LAYOUT_RTL) !== 0 ? MM_ANISOTROPIC : mode | 0;
                 const extents = extentsOf(mode | 0);
                 if (extents)
                 {
@@ -2203,6 +2222,39 @@ export function createGdiFunctions(host){
                 }
                 return previous;
             },
+        },
+
+        /**
+         * DWORD SetLayout(HDC hdc, DWORD dwLayout)
+         * DWORD GetLayout(HDC hdc)
+         *
+         * The layout, and the one it replaced; GDI_ERROR for no DC. Turning
+         * right-to-left on makes the mode MM_ANISOTROPIC, extents kept, and
+         * turning it off leaves the mode as it then is. Of the drawing calls,
+         * SetDIBitsToDevice places through it; the rest draw in device units.
+         */
+        SetLayout: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, layout])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return GDI_ERROR;
+                }
+                const previous = dc.layout;
+                dc.layout = layout >>> 0;
+                if ((dc.layout & LAYOUT_RTL) !== 0)
+                {
+                    dc.mapMode = MM_ANISOTROPIC;
+                }
+                return previous;
+            },
+        },
+        GetLayout: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>dcOf(handle)?.layout ?? GDI_ERROR,
         },
 
         /** int GetMapMode(HDC hdc) */
@@ -2697,6 +2749,20 @@ export function createGdiFunctions(host){
 
     return {
         table: aliased,
+
+        /**
+         * A bitmap's size, or null for a handle that is not a bitmap: what an
+         * image list divides a strip by to count the images in it.
+         *
+         * @param {number} handle
+         * @returns {{ width: number, height: number } | null}
+         */
+        bitmapSize(handle){
+            const record = objects.get(handle >>> 0);
+            return record && record.type === 'bitmap'
+                ? { width: record.attributes.width, height: record.attributes.height }
+                : null;
+        },
 
         /**
          * The rectangle a region object holds, or null for a handle that is

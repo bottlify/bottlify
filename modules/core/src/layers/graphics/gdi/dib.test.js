@@ -169,8 +169,12 @@ test('an indexed DIB is written against the table it is given, and not without o
 
 test('a format this layer cannot convert is refused rather than guessed', ()=>{
     assert.equal(isConvertibleDib({ header: header(2, 2, 2), bits: new Uint8Array(16) }), false);
+    assert.equal(isConvertibleDib({ header: { ...header(2, 2, 4), compression: 1 },
+        bits: new Uint8Array(16) }), false, 'RLE8 encodes eight bits and nothing else');
+    assert.equal(isConvertibleDib({ header: { ...header(2, -2, 8), compression: 1 },
+        bits: new Uint8Array(16) }), false, 'nor is it ever top-down');
     assert.equal(isConvertibleDib({ header: { ...header(2, 2, 8), compression: 1 },
-        bits: new Uint8Array(16) }), false, 'run-length encoded rows are not rows');
+        bits: new Uint8Array(16) }), true);
     assert.equal(decodeDib({ header: header(2, 2, 2), bits: new Uint8Array(16) }), null);
     assert.equal(isConvertibleDib({ header: header(2, 2, 32), bits: new Uint8Array(32) }), true);
 });

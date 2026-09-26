@@ -256,6 +256,11 @@ export function createVtables({ memory, register, heap }){
      * counts references per interface generation can end one while another
      * is still held.
      *
+     * The object is told, through an optional `forgotten(pointer,
+     * interfaceId)`, so that a map it keeps from pointers back to objects
+     * drops the entry now: the words may hold another object's interface by
+     * the next call that hands the pointer in.
+     *
      * @param {any} object
      * @param {string} interfaceId
      */
@@ -271,6 +276,7 @@ export function createVtables({ memory, register, heap }){
         heap.free?.(block);
         interfaces--;
         heldAtZero.get(object)?.delete(interfaceId);
+        object.forgotten?.(block, interfaceId);
     }
 
     /**
