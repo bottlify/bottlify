@@ -2413,14 +2413,12 @@ export function createWindowFunctions(host){
      * @returns {any} the entry, placed
      */
     const rehit = (entry, thread)=>{
-        const kind = entry.message >>> 0;
-        const client = kind >= WM_MOUSEMOVE && kind <= WM_MOUSELAST && kind !== WM_MOUSEWHEEL;
-        const frame = kind >= WM_NCMOUSEMOVE && kind <= WM_NCMOUSELAST;
-        const target = client || frame ? live(entry.hwnd) : null;
-        if (!target || !ownProcedure(target) || captured !== 0 || !host.queue.fromInput(entry))
+        if (!askable(entry))
         {
             return entry;
         }
+        const kind = entry.message >>> 0;
+        const client = kind >= WM_MOUSEMOVE && kind <= WM_MOUSELAST;
         const x = entry.x | 0;
         const y = entry.y | 0;
         return andThen(askedFromPoint(x, y, thread), found=>{
@@ -2450,25 +2448,77 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * Whether `rehit` asks the program's procedures where a message goes: a
+     * mouse message from the input layer, for a window whose procedure is
+     * the program's own, while nothing holds the capture.
+     *
+     * @param {any} entry
+     */
+    const askable = entry=>{
+        const kind = entry.message >>> 0;
+        const client = kind >= WM_MOUSEMOVE && kind <= WM_MOUSELAST && kind !== WM_MOUSEWHEEL;
+        const frame = kind >= WM_NCMOUSEMOVE && kind <= WM_NCMOUSELAST;
+        const target = client || frame ? live(entry.hwnd) : null;
+        return target !== null && ownProcedure(target) && captured === 0
+            && host.queue.fromInput(entry);
+    };
+
+    /**
+     * Places the mouse messages a retrieval could take before its filter
+     * looks at them, oldest first, up to the first the filter takes: the
+     * range and the window a program asks for are those of the message as
+     * its procedures place it, not as it arrived. Only a message the range
+     * could take in either form is asked about.
+     *
+     * @param {import('./messages.js').MessageFilter} filter @param {unknown} thread
+     * @returns {null | Promise<null>}
+     */
+    const placeWaiting = (filter, thread)=>{
+        const asked = new Set();
+        /** @param {number} kind */
+        const inRange = kind=>(filter.first === 0 && filter.last === 0)
+            || (kind >= filter.first && kind <= filter.last);
+        /** @returns {any} */
+        const walk = ()=>{
+            for (const entry of host.queue.queued())
+            {
+                const kind = entry.message >>> 0;
+                const client = kind >= WM_MOUSEMOVE ? kind : kind - WM_NCMOUSEMOVE + WM_MOUSEMOVE;
+                if (!asked.has(entry) && askable(entry)
+                    && (inRange(client) || inRange(client + WM_NCMOUSEMOVE - WM_MOUSEMOVE)))
+                {
+                    asked.add(entry);
+                    return andThen(rehit(entry, thread), walk);
+                }
+                if (host.queue.accepts(entry, filter))
+                {
+                    return null;
+                }
+            }
+            return null;
+        };
+        return walk();
+    };
+
+    /**
      * The next message a retrieval takes, placed where the program's
      * procedures say the pointer is, a press having activated its window
      * first and the window under the pointer asked for its cursor; a press
      * its window ate is passed over for the one after.
      *
-     * @param {() => any} take @param {unknown} thread
+     * @param {import('./messages.js').MessageFilter} filter @param {unknown} thread
      * @returns {any}
      */
-    const takeThrough = (take, thread)=>{
-        const taken = take();
-        if (!taken)
+    const takeThrough = (filter, thread)=>andThen(placeWaiting(filter, thread), ()=>{
+        const entry = host.queue.peek(filter);
+        if (!entry)
         {
             return null;
         }
-        return andThen(rehit(taken, thread), entry=>andThen(mouseActivate(entry, thread),
-            (/** @type {boolean} */ keep)=>(keep
-                ? andThen(askCursor(entry, thread), ()=>entry)
-                : takeThrough(take, thread))));
-    };
+        return andThen(mouseActivate(entry, thread), (/** @type {boolean} */ keep)=>(keep
+            ? andThen(askCursor(entry, thread), ()=>entry)
+            : takeThrough(filter, thread)));
+    });
 
     /**
      * The default window procedure, as every window procedure falls back on
@@ -3670,15 +3720,13 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([out, hwnd, filterMin, filterMax, removeFlag])=>{
                 const remove = (removeFlag & PM_REMOVE) !== 0;
-                const look = ()=>host.queue.peek({
-                    hwnd: windowFilter(hwnd),
-                    first: filterMin >>> 0,
-                    last: filterMax >>> 0,
-                    remove,
-                });
+                const filter = { hwnd: windowFilter(hwnd), first: filterMin >>> 0,
+                    last: filterMax >>> 0, remove };
+                const thread = host.callerThread?.();
                 // Only a message taken activates: a look leaves the press,
                 // and the activation, for the call that takes it.
-                const entry = remove ? takeThrough(look, host.callerThread?.()) : look();
+                const entry = remove ? takeThrough(filter, thread)
+                    : andThen(placeWaiting(filter, thread), ()=>host.queue.peek(filter));
                 return andThen(entry, (/** @type {any} */ taken)=>{
                     if (!taken)
                     {
@@ -3816,15 +3864,10 @@ export function createWindowFunctions(host){
                     // as `while (GetMessage(...))` spins forever on it.
                     return -1;
                 }
-                const take = ()=>host.queue.peek({
-                    hwnd: filter,
-                    first: filterMin >>> 0,
-                    last: filterMax >>> 0,
-                    remove: true,
-                });
-
+                const wanted = { hwnd: filter, first: filterMin >>> 0, last: filterMax >>> 0,
+                    remove: true };
                 const thread = host.callerThread?.();
-                const next = ()=>takeThrough(take, thread);
+                const next = ()=>takeThrough(wanted, thread);
                 /** @param {any} entry */
                 const answer = entry=>{
                     writeMessage(host, out, entry);

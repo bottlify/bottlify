@@ -976,6 +976,54 @@ test('a window whose procedure says the pointer passes through passes it beneath
     assert.deepEqual(press(), [under, WM_NCLBUTTONDOWN, HTCAPTION, (y << 16 | x) >>> 0]);
 });
 
+test('a range of messages asked for takes a click in the form the program\'s procedure '
+    + 'gives it, not the one it arrived in', ()=>{
+    // PeekMessage and GetMessage retrieve only the messages in the range
+    // asked for, and a mouse message's form is settled as it is retrieved:
+    // user32's window tests (test_mouse_input) take the second click of a
+    // pair over a frame as a client message once the window has the
+    // capture. A click a procedure calls a caption is not taken by a range
+    // of client messages and is by the frame's; a peek that leaves it sees
+    // that form too; and the other way round.
+    const WM_NCHITTEST = 0x0084;
+    const WM_NCLBUTTONDOWN = 0x00a1;
+    const WM_NCMOUSEFIRST = 0x00a0;
+    const WM_NCMOUSELAST = 0x00ad;
+    const WM_MOUSEFIRST = 0x0200;
+    const WM_MOUSELAST = 0x020e;
+    const WS_CAPTION = 0x00c00000;
+    const HTCLIENT = 1;
+    const HTCAPTION = 2;
+    let hit = HTCAPTION;
+    const context = setup({ reply: message=>(message.message === WM_NCHITTEST ? hit : 0) });
+    const { fns, memory, queue } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    /** @param {number} first @param {number} last @param {number} how */
+    const peek = (first, last, how)=>(fns.PeekMessageA.handler([MSG_BUFFER, 0, first, last,
+        how]) === 0 ? null : [MSG.message, MSG.wParam].map(at=>memory.u32(MSG_BUFFER + at)));
+
+    const plain = createWindow(fns, memory, { style: WS_VISIBLE });
+    memory.putU32s(TEXT_BUFFER, [5, 5]);
+    fns.ClientToScreen.handler([plain, TEXT_BUFFER]);
+    queue.post({ hwnd: 0, message: WM_LBUTTONDOWN, wParam: 1, lParam: 0,
+        x: memory.u32(TEXT_BUFFER), y: memory.u32(TEXT_BUFFER + 4) });
+    assert.equal(peek(WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE), null, 'not a client message');
+    assert.deepEqual(peek(WM_NCMOUSEFIRST, WM_NCMOUSELAST, PM_NOREMOVE),
+        [WM_NCLBUTTONDOWN, HTCAPTION]);
+    assert.deepEqual(peek(WM_NCMOUSEFIRST, WM_NCMOUSELAST, PM_REMOVE),
+        [WM_NCLBUTTONDOWN, HTCAPTION]);
+    fns.DestroyWindow.handler([plain]);
+
+    hit = HTCLIENT;
+    const framed = createWindow(fns, memory, { style: WS_CAPTION | WS_VISIBLE });
+    fns.GetWindowRect.handler([framed, TEXT_BUFFER]);
+    queue.post({ hwnd: 0, message: WM_LBUTTONDOWN, wParam: 1, lParam: 0,
+        x: memory.u32(TEXT_BUFFER) + 40, y: memory.u32(TEXT_BUFFER + 4) + 8 });
+    assert.equal(peek(WM_NCMOUSEFIRST, WM_NCMOUSELAST, PM_REMOVE), null, 'not a frame message');
+    assert.equal(peek(WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE)?.[0], WM_LBUTTONDOWN);
+});
+
 test('WM_SETCURSOR is sent to the window under the pointer as each mouse message is taken', ()=>{
     // user32's message tests (WmMove_mouse): WM_SETCURSOR, its lParam the
     // hit and the mouse message, is sent before each WM_MOUSEMOVE the pointer

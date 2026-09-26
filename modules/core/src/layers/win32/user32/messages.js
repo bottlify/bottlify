@@ -693,6 +693,17 @@ export function createMessageQueue(options = {}){
         fromInput: entry=>input.has(entry),
 
         /**
+         * The messages posted and not yet taken, oldest first: what a
+         * retrieval looks through before its filter, to settle where a
+         * mouse message goes. A copy, so settling one does not move the
+         * walk under itself.
+         */
+        queued: ()=>[...pending],
+
+        /** Whether a retrieval's filter takes a message. */
+        accepts,
+
+        /**
          * Registers a hot key, or replaces the registration this `hwnd` and
          * `id` already had.
          *
