@@ -461,6 +461,25 @@ export function createVtables({ memory, register, heap }){
             return record ? publish(object, interfaceId, record.methods) : 0;
         },
 
+        /**
+         * Gives back an interface the program cannot release: one whose table
+         * has no IUnknown, which ends when the object that handed it out
+         * ends. Forgotten as a release to zero forgets it -- the pointer then
+         * finds nothing, its words go back and its object is told.
+         *
+         * @param {any} object
+         * @param {string} interfaceId
+         * @returns {boolean} whether it was published
+         */
+        unpublish(object, interfaceId){
+            if (published.get(object)?.get(interfaceId) === undefined)
+            {
+                return false;
+            }
+            forget(object, interfaceId);
+            return true;
+        },
+
         diagnostics: ()=>({
             comInterfaces: interfaces,
             comMethods: methods,

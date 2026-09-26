@@ -59,6 +59,7 @@ A call record handed to `onCall` is one of a ring the dispatcher reuses, fields 
 | `holdForFault` | `(thread, { name, restingStack, hostReturn }, answer) => void` | Holds the running thread while a processor exception it took is offered to its handlers: sends it to the park loop from the vector's stub and records it as a suspended call; `answer` settles with a continuation (or a value, resuming at `hostReturn`). Called from inside the fault's trap. |
 | `useHeap` | `({ allocate, free? }) => Vtables` | Wires COM publishing to a guest arena. |
 | `publishInterface` | `(object, interfaceId) => number` | The interface pointer for an object model record, or 0. Throws before `useHeap`. |
+| `unpublishInterface` | `(object, interfaceId) => boolean` | Gives back an interface the program has no `Release` for (a table without `IUnknown`), as a release to zero would; false when it was not published, before `useHeap` and after `dispose()`. |
 | `suspended` | `() => number` | Host calls waiting on something right now. |
 | `answered` | `() => Promise<void>` | Settles when the next suspended call answers. |
 | `callerThread` | `() => Thread` | Whose call is being handled; read before an `await`. |
@@ -401,7 +402,10 @@ that does not say it outlives it, which a DirectDraw object says while another g
 report `destroyed`, and so does the DirectInput object itself. Each pointer forgotten is told to
 its object through an optional `forgotten(pointer, interfaceId)` once its block is back in the
 heap, so a map an object model keeps from pointers to objects drops it before the words can be
-another interface's; the DirectInput and DirectSound publishers do. A method without `invoke`
+another interface's; the DirectInput and DirectSound publishers do. A table without `IUnknown`
+gives the program no `Release`, so the object model that handed it out ends it with
+`unpublishInterface` when the object it belongs to ends, and it is forgotten the same way, its
+object told. A method without `invoke`
 answers `E_NOTIMPL`; a call through an unpublished pointer answers `E_POINTER`. A method's
 `invoke` may return a promise, and the caller is parked on it.
 

@@ -583,3 +583,32 @@ test('an object is told each pointer of its that the bridge forgets, as it forge
     }, IID));
     assert.deepEqual(told, [[first, IID], [second, IID_B]], 'and the kept one once it is not');
 });
+
+test('an interface nothing can release is given back when whoever made it says so', ()=>{
+    // A table without IUnknown -- a shader reflection's constant buffer, an
+    // effect's technique -- has no Release for the program to call. The
+    // object that handed it out ends it, when that object itself ends.
+    const f = interfaces();
+    /** @type {[number, string][]} */
+    const told = [];
+    const bare = {
+        /** @param {string} id */
+        interfaceFor: id=>(id === IID
+            ? { id, methods: [{ name: 'Draw', argBytes: 8, invoke: ()=>7 }] }
+            : null),
+        /** @param {number} pointer @param {string} id */
+        forgotten: (pointer, id)=>told.push([pointer, id]),
+    };
+    const pointer = f.table.publish(bare, IID);
+    assert.equal(f.call('Draw', pointer, [1]), 7);
+    assert.equal(f.table.diagnostics().comInterfaces, 1);
+
+    assert.equal(f.table.unpublish(bare, IID), true);
+    assert.equal(f.call('Draw', pointer, [1]), 0x80004003, 'the pointer finds nothing');
+    assert.deepEqual(f.freed, [pointer], 'and its words went back');
+    assert.deepEqual(told, [[pointer, IID]], 'the object was told, as for a release');
+    assert.equal(f.table.diagnostics().comInterfaces, 0);
+    assert.equal(f.table.unpublish(bare, IID), false, 'once');
+    assert.equal(f.table.unpublish({}, IID), false, 'and never for what was not published');
+    assert.notEqual(f.table.publish(bare, IID), 0, 'published again, it is a new interface');
+});
