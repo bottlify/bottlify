@@ -14,7 +14,7 @@
 import { formRegion } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
 import { features } from '../wasm/features.js';
-import { emitRegion, enterRegion, prepareModule, mathImports } from '../emit/region.js';
+import { emitRegion, enterRegion, finishModule, prepareModule, mathImports } from '../emit/region.js';
 import { buildHelpersModule } from '../emit/helpers.js';
 import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
 import { createPageTable } from '../runtime/pages.js';
@@ -122,7 +122,7 @@ export function createTestMachine(given = {}){
          * @param {number} entry
          * @param {{ maxBlocks?: number, maxBytes?: number, undoLog?: boolean,
          *     entryTop?: number, hash?: boolean, leafCalls?: boolean, wide?: boolean,
-         *     speculate?: boolean }} [options]
+         *     speculate?: boolean, callTargets?: Map<number, number[]> }} [options]
          *     hash: register the region's entries in the machine's hash, so a transfer from
          *     another region finds them; wide: compiled for the wide precision controls;
          *     speculate: an x87 region's entries test the stack's shape its blocks were
@@ -140,6 +140,7 @@ export function createTestMachine(given = {}){
                 ...(trapPort === undefined ? {} : { trapPort }), leaveOut: new Set(leaveOut),
             });
             const translation = emitRegion(context, region, { entryTop, checked: !speculate });
+            finishModule(context, [translation.functionIndex]);
             m.exportFunction('region', translation.functionIndex);
             const built = m.toBytes();
             if (!WebAssembly.validate(built))
@@ -211,7 +212,8 @@ export function createTestMachine(given = {}){
          *
          * @param {number} entry
          * @param {{ budget?: number, maxRegions?: number, undoLog?: boolean,
-         *     leafCalls?: boolean, wide?: boolean, speculate?: boolean }} [options]
+         *     leafCalls?: boolean, wide?: boolean, speculate?: boolean,
+         *     callTargets?: Map<number, number[]> }} [options]
          *     wide: x87 regions compiled for the wide precision controls until one finds
          *     single set, then everything again with the rounding -- as the runtime does;
          *     speculate: x87 regions compiled for the stack's shape at their entries until
@@ -224,7 +226,7 @@ export function createTestMachine(given = {}){
          */
         runProgram(entry, options = {}){
             const { budget = 10_000_000, maxRegions = 2000, undoLog = false,
-                leafCalls = true } = options;
+                leafCalls = true, callTargets } = options;
             let wide = options.wide ?? true;
             let speculate = options.speculate ?? true;
             /** @type {Map<number, ReturnType<typeof this.translate>>} */
@@ -252,7 +254,7 @@ export function createTestMachine(given = {}){
                         };
                     }
                     unit = this.translate(eip, { undoLog, entryTop: top, hash: true, leafCalls,
-                        wide, speculate });
+                        wide, speculate, ...(callTargets ? { callTargets } : {}) });
                     made.push(unit);
                     regions++;
                     for (const [opcode, count] of unit.translation.unsupported)

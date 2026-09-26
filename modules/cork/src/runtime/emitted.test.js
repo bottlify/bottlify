@@ -21,7 +21,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { formRegion } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
-import { emitRegion, prepareModule } from '../emit/region.js';
+import { emitRegion, finishModule, prepareModule } from '../emit/region.js';
 import { ownLayout } from './layout.js';
 import { CACHE_VERSION } from './cache.js';
 
@@ -30,6 +30,7 @@ const EMITTED = {
     40: 'e17f16d74ecb4c98',
     44: '554b022d79a6d89f',
     45: '6484cc2a873ec56d',
+    46: 'ab4be65a98ba9a5d',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */
@@ -53,6 +54,7 @@ function digest(){
             const context = prepareModule(m, layout, FEATURES, {},
                 { hash: true, trapPort: 0xb077 });
             const translation = emitRegion(context, region, { entryTop: 0, checked: false });
+            finishModule(context, [translation.functionIndex]);
             m.exportFunction('region', translation.functionIndex);
             hash.update(`${name}:${entry.toString(16)}:`).update(m.toBytes());
         }

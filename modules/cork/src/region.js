@@ -44,9 +44,11 @@ import { decode } from './decode/decoder.js';
  * @property {import('./decode/decoder.js').Instruction[]} instructions
  * @property {{ kind: ExitKind, targets: number[], next: number, backEdge: boolean,
  *              refusal?: import('./decode/decoder.js').Refusal,
- *              table?: SwitchTable }} exit
+ *              table?: SwitchTable, predicted?: boolean }} exit
  *   an `indirect` exit through a switch's table of addresses carries the table,
- *   and its distinct targets as `targets`
+ *   and its distinct targets as `targets`; an indirect call the runtime has
+ *   seen go to a few callees (`callTargets`) is `predicted`, those callees its
+ *   `targets`
  */
 
 /**
@@ -147,12 +149,21 @@ function isLeaf(read, target, translatable, calls = false){
 }
 
 /**
+ * The callees a call block may go to inside the region: a direct call's, or
+ * a predicted indirect call's.
+ *
+ * @param {Block['exit']} exit
+ */
+const calleesOf = exit=>(exit.kind === 'call' || exit.kind === 'indirect' && exit.predicted
+    ? exit.targets : []);
+
+/**
  * Where each `ret` of the region may come back to inside it: the return
- * addresses of the direct calls whose callee is formed into the region with
- * them (the callee's start and the return address both blocks), for the rets
- * the callee reaches by its own branches. Such a ret that comes back to one
- * of them jumps there rather than leaving; the region's other rets are no
- * edge to them.
+ * addresses of the calls -- direct, or indirect with their callees predicted
+ * -- whose callee is formed into the region with them (the callee's start and
+ * the return address both blocks), for the rets the callee reaches by its own
+ * branches. Such a ret that comes back to one of them jumps there rather than
+ * leaving; the region's other rets are no edge to them.
  *
  * @param {Region} region
  * @returns {Map<number, number[]>}  ret block start → return addresses
@@ -163,13 +174,14 @@ export function inlineReturns(region){
     const out = new Map();
     for (const block of region.blocks)
     {
-        const { kind, targets, next } = block.exit;
-        if (kind !== 'call' || !byStart.has(targets[0]) || !byStart.has(next))
+        const { next } = block.exit;
+        const callees = calleesOf(block.exit).filter(callee=>byStart.has(callee));
+        if (callees.length === 0 || !byStart.has(next))
         {
             continue;
         }
         const seen = new Set();
-        const work = [targets[0]];
+        const work = [...callees];
         while (work.length > 0)
         {
             const at = /** @type {number} */ (work.pop());
@@ -194,7 +206,7 @@ export function inlineReturns(region){
             {
                 work.push(...exit.targets, ...(exit.kind === 'jump' ? [] : [exit.next]));
             }
-            else if (exit.kind === 'call')
+            else if (calleesOf(exit).length > 0)
             {
                 // A callee of the callee comes back after its call.
                 work.push(exit.next);
@@ -324,12 +336,16 @@ function switchTable(read, block, blocks){
  * @param {(address: number) => number} read
  * @param {number} entry
  * @param {{ maxBlocks?: number, maxBytes?: number,
- *     translatable?: (eip: number) => boolean, leafCalls?: boolean }} [options]
- *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`)
+ *     translatable?: (eip: number) => boolean, leafCalls?: boolean,
+ *     callTargets?: Map<number, number[]> }} [options]
+ *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`); callTargets:
+ *     by the address of an indirect call, the callees it has been seen to go to, formed in
+ *     as a direct call's small callee is -- the call compares its target with each
  * @returns {Region}
  */
 export function formRegion(read, entry,
-    { maxBlocks = 128, maxBytes = 8192, translatable = ()=>true, leafCalls = true } = {})
+    { maxBlocks = 128, maxBytes = 8192, translatable = ()=>true, leafCalls = true,
+        callTargets } = {})
 {
     /** @type {Map<number, Block>} by start */
     const blocks = new Map();
@@ -568,12 +584,22 @@ export function formRegion(read, entry,
                 // the port write: a block there lets the return come back
                 // into translated code.
                 follow(exit.next, depth);
-                if (leafCalls && exit.kind === 'call' && leafAt(exit.targets[0], depth === 0))
+                const predicted = exit.kind === 'indirect' ? callTargets?.get(decoded.eip)
+                    : undefined;
+                if (leafCalls && predicted !== undefined && predicted.length > 0)
+                {
+                    exit.predicted = true;
+                    exit.targets = [...predicted];
+                }
+                for (const callee of leafCalls ? calleesOf(exit) : [])
                 {
                     // A small callee is formed into its caller: the call
                     // becomes a jump inside the region, and its return, when
                     // it comes back to this call's return address, one too.
-                    follow(exit.targets[0], depth + 1);
+                    if (leafAt(callee, depth === 0))
+                    {
+                        follow(callee, depth + 1);
+                    }
                 }
             }
             break;
@@ -603,6 +629,17 @@ export function formRegion(read, entry,
             for (let page = block.start >>> 12; page <= (block.end - 1) >>> 12; page++)
             {
                 pages.add(page);
+            }
+        }
+    }
+    // A prediction decides blocks as a table does: its callees are hashed too.
+    for (const block of ordered)
+    {
+        for (const target of block.exit.predicted ? block.exit.targets : [])
+        {
+            for (let shift = 0; shift < 32; shift += 8)
+            {
+                hash = Math.imul(hash ^ (target >>> shift & 0xff), 0x01000193) >>> 0;
             }
         }
     }

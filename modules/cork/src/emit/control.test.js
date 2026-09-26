@@ -269,6 +269,50 @@ test('a small leaf callee is formed into its caller: the call and the return are
     assert.equal(r.retired, 1 + 4 * 5 + 1);
 });
 
+test('an indirect call jumps to a predicted callee formed into its region, and leaves for'
+    + ' any other', { skip: !tailCalls }, ()=>{
+    const F = CODE + 21;
+    const G = CODE + 25;
+    const program = [
+        0xb9, ...u32(4),                    //     mov ecx, 4
+        0x89, 0xc8,                         // L:  mov eax, ecx
+        0x83, 0xe0, 0x01,                   //     and eax, 1
+        0xff, 0x14, 0x85, ...u32(DATA),     //     call [DATA + eax*4]
+        0x49,                               //     dec ecx
+        0x75, 0xf1,                         //     jnz L
+        0xf4,                               //     hlt
+        0x83, 0xc3, 0x01, 0xc3,             // F:  add ebx, 1; ret
+        0x83, 0xc3, 0x10, 0xc3,             // G:  add ebx, 16; ret
+    ];
+    const call = CODE + 10;
+    for (const [predicted, regions] of /** @type {[number[], number][]} */ ([[[F], 2], [[F, G], 1]]))
+    {
+        const m = machine(program, [...u32(F), ...u32(G)]);
+        const r = m.runProgram(CODE, { callTargets: new Map([[call, predicted]]) });
+        assert.equal(r.kind, 3);
+        assert.equal(r.regions, regions, `${predicted.length} predicted: G a region or a block`);
+        assert.equal(m.reg('ebx'), 2 * 1 + 2 * 16);
+        assert.equal(m.reg('esp'), STACK);
+        assert.equal(r.retired, 1 + 4 * 7 + 1);
+    }
+});
+
+test('an indirect call whose push lands in code leaves stale at its target, predicted or not',
+    { skip: !tailCalls }, ()=>{
+        const F = CODE + 7;
+        const m = machine([
+            0xff, 0x15, ...u32(DATA),       //     call [DATA]
+            0xf4,                           //     hlt
+            0x83, 0xe4, 0xff,               // F:  and esp, -1
+            0xc3,                           //     ret
+        ], u32(F));
+        m.pages.markCode(STACK - 4, 4);
+        const r = m.runProgram(CODE, { callTargets: new Map([[CODE, [F]]]) });
+        assert.equal(r.kind, 5, 'stale');
+        assert.equal(m.eip(), F);
+        assert.equal(m.reg('esp'), STACK - 4, 'with the return address pushed');
+    });
+
 test('a formed-in callee that returns elsewhere leaves by the address it popped', ()=>{
     // F replaces its return address: the ret goes to T, not after the call.
     const T = CODE + 0x40;
