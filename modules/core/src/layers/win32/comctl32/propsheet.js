@@ -260,7 +260,9 @@ const SCRATCH = 64;
  * @property {number} current
  * @property {number} start
  * @property {Set<number>} changed  The pages PSM_CHANGED named and nothing has applied.
- * @property {number} result
+ * @property {boolean} applied  Whether a page's changes were saved.
+ * @property {number} restart  ID_PSRESTARTWINDOWS or ID_PSREBOOTSYSTEM once a page asked, or 0.
+ * @property {number} result  What the sheet answers once it has ended.
  * @property {boolean} ended
  * @property {number} template
  * @property {number} scratch
@@ -1077,7 +1079,7 @@ export function createPropertySheetFunctions(host){
             return after(each(0), (/** @type {boolean} */ applied)=>{
                 if (applied)
                 {
-                    sheet.result |= 1;
+                    sheet.applied = true;
                     sheet.changed.clear();
                     api('EnableWindow', [item(sheet, IDC_APPLY_BUTTON), 0]);
                 }
@@ -1088,12 +1090,16 @@ export function createPropertySheetFunctions(host){
     /**
      * The sheet is done: a modal one ends its dialog with the result, a
      * modeless one says so by having no page on show, and its program
-     * destroys it.
+     * destroys it. The result is 1 when a page's changes were saved and 0
+     * when none were, and the restart a page asked for only when OK or
+     * Finish closed the sheet.
      *
-     * @param {Sheet} sheet
+     * @param {Sheet} sheet @param {boolean} [confirmed]  Whether OK or Finish closed it.
      */
-    const finish = sheet=>{
+    const finish = (sheet, confirmed = false)=>{
         sheet.ended = true;
+        sheet.result = confirmed && sheet.restart !== 0 ? sheet.restart
+            : sheet.applied ? 1 : 0;
         if ((sheet.flags & PSH_MODELESS) === 0)
         {
             return api('EndDialog', [sheet.hwnd, sheet.result]);
@@ -1135,7 +1141,8 @@ export function createPropertySheetFunctions(host){
     const press = (sheet, id, thread)=>{
         switch (id){
             case IDOK:
-                return after(apply(sheet, true, thread), applied=>(applied ? finish(sheet) : 0));
+                return after(apply(sheet, true, thread), applied=>(applied
+                    ? finish(sheet, true) : 0));
             case IDCANCEL:
                 return after(notifyPage(sheet, sheet.current, PSN_QUERYCANCEL, 0), refused=>{
                     if ((refused | 0) !== 0)
@@ -1162,8 +1169,8 @@ export function createPropertySheetFunctions(host){
                     {
                         return 0;
                     }
-                    sheet.result |= 1;
-                    return finish(sheet);
+                    sheet.applied = true;
+                    return finish(sheet, true);
                 });
             default:
                 return null;
@@ -1458,10 +1465,11 @@ export function createPropertySheetFunctions(host){
             case PSM_GETRESULT:
                 return answer(sheet, sheet.ended ? sheet.result : -1);
             case PSM_RESTARTWINDOWS:
-                sheet.result |= ID_PSRESTARTWINDOWS;
+                // A reboot asked for already stands over a restart.
+                sheet.restart ||= ID_PSRESTARTWINDOWS;
                 return answer(sheet, 0);
             case PSM_REBOOTSYSTEM:
-                sheet.result |= ID_PSREBOOTSYSTEM;
+                sheet.restart = ID_PSREBOOTSYSTEM;
                 return answer(sheet, 0);
             case PSM_RECALCPAGESIZES:
                 return answer(sheet, 1);
@@ -1489,8 +1497,8 @@ export function createPropertySheetFunctions(host){
      * or taken as handles, where a value this library did not hand out is
      * read as a description -- the template built and shown to the
      * callback, and the sheet made. A modeless sheet is its window; a modal
-     * one disables its owner and answers once it has ended, with 1 if a
-     * page applied, the restart a page asked for, or 0.
+     * one disables its owner and answers once it has ended, with the
+     * result `finish` gave it.
      *
      * @param {number} header @param {boolean} wide
      * @returns {number | Promise<number>}
@@ -1513,7 +1521,8 @@ export function createPropertySheetFunctions(host){
         const sheet = {
             hwnd: 0, wide, flags, instance: u32(header + PSH.hInstance),
             owner: u32(header + PSH.hwndParent), callback: u32(header + PSH.pfnCallback),
-            entries: [], current: -1, start: 0, changed: new Set(), result: 0, ended: false,
+            entries: [], current: -1, start: 0, changed: new Set(), applied: false, restart: 0,
+            result: 0, ended: false,
             template: 0, scratch: 0, tab: 0, origin: { x: 0, y: 0 },
         };
         let cursor = list;

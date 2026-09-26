@@ -23,7 +23,7 @@ import {
     PSM_PRESSBUTTON, PSM_GETTABCONTROL, PSM_GETCURRENTPAGEHWND, PSM_INSERTPAGE,
     PSM_HWNDTOINDEX, PSM_INDEXTOHWND, PSM_PAGETOINDEX, PSM_INDEXTOPAGE, PSM_IDTOINDEX,
     PSM_INDEXTOID, PSM_ISDIALOGMESSAGE, PSBTN_NEXT, PSBTN_BACK, PSBTN_OK, PSBTN_CANCEL,
-    PSBTN_APPLYNOW,
+    PSBTN_APPLYNOW, PSM_RESTARTWINDOWS, PSM_REBOOTSYSTEM, ID_PSRESTARTWINDOWS, ID_PSREBOOTSYSTEM,
     IDOK, IDCANCEL, IDHELP, IDC_APPLY_BUTTON, IDC_NEXT_BUTTON, IDC_BACK_BUTTON,
 } from './propsheet.js';
 
@@ -1122,4 +1122,45 @@ test('a sheet whose only page names a control of a class nobody has cannot show 
         flags: PSH_MODELESS, pages: [await bad()] })]);
     assert.notEqual(modeless, 0);
     assert.equal(modal.send([modeless, PSM_GETCURRENTPAGEHWND, 0, 0]), 0, 'with no page');
+});
+
+test('a modal sheet closed by OK answers ID_PSRESTARTWINDOWS or ID_PSREBOOTSYSTEM when a page '
+    + 'asked for one, and closed otherwise, whether a page applied', { timeout: 10000 },
+async()=>{
+    // PropertySheet is documented to answer 1 or more when changes were
+    // saved and 0 when none were; PSM_RESTARTWINDOWS and PSM_REBOOTSYSTEM
+    // make it answer ID_PSRESTARTWINDOWS or ID_PSREBOOTSYSTEM, but only when
+    // OK closes the sheet, and the reboot supersedes a restart before or
+    // after it.
+    /**
+     * A modal sheet of one page that asks the sheet for `asks` as it
+     * applies, pressed through `buttons` in turn.
+     *
+     * @param {number[]} asks @param {number[]} buttons
+     */
+    const run = async(asks, buttons)=>{
+        const context = setup({ modal: true });
+        const callback = context.register(([hwnd, message])=>{
+            if (message === PSCB_INITIALIZED)
+            {
+                buttons.forEach(button=>context.fns.PostMessageA.handler([hwnd,
+                    PSM_PRESSBUTTON, button, 0]));
+            }
+            return 0;
+        });
+        const proc = context.pageProc('page', { [PSN_APPLY]: (hwnd, notify)=>{
+            asks.forEach(message=>context.send([context.memory.u32(notify), message, 0, 0]));
+            return 0;
+        } });
+        const page = await context.createPage(context.description({ proc }));
+        return context.comctl.PropertySheetA.handler([context.header({
+            flags: PSH_USECALLBACK, pages: [page], callback })]);
+    };
+    assert.equal(await run([], [PSBTN_OK]), 1);
+    assert.equal(await run([PSM_RESTARTWINDOWS], [PSBTN_OK]), ID_PSRESTARTWINDOWS);
+    assert.equal(await run([PSM_REBOOTSYSTEM, PSM_RESTARTWINDOWS], [PSBTN_OK]),
+        ID_PSREBOOTSYSTEM);
+    assert.equal(await run([PSM_RESTARTWINDOWS], [PSBTN_APPLYNOW, PSBTN_CANCEL]), 1,
+        'applied, then cancelled: changes were saved, and no restart');
+    assert.equal(await run([PSM_RESTARTWINDOWS], [PSBTN_CANCEL]), 0);
 });
