@@ -872,6 +872,45 @@ test('AdjustWindowRectEx grows a client rectangle by the frame the style carries
         'the extended style adds frame rather than being ignored');
 });
 
+test('a frame is as wide as the non-client metrics make it, and SM_CXDLGFRAME says so', ()=>{
+    // user32's window tests check AdjustWindowRectEx against the classic
+    // non-client model: a dialog or sizing frame has a two-pixel outer edge,
+    // a sizing frame one more for the sizing border, a border or dialog frame
+    // one more, a static edge alone one, and a client edge two inside the
+    // rest. WS_EX_WINDOWEDGE is the look of the outer edge, not more width.
+    const WS_BORDER = 0x00800000;
+    const WS_DLGFRAME = 0x00400000;
+    const WS_POPUP = 0x80000000;
+    const WS_EX_DLGMODALFRAME = 0x00000001;
+    const WS_EX_WINDOWEDGE = 0x00000100;
+    const WS_EX_STATICEDGE = 0x00020000;
+    const SM_CXDLGFRAME = 7;
+    const SM_CYDLGFRAME = 8;
+    const { memory, fns } = setup();
+    /** @param {number} style @param {number} exStyle @returns {number[]} */
+    const grown = (style, exStyle)=>{
+        memory.putU32s(RECT_BUFFER, [0, 0, 100, 100]);
+        fns.AdjustWindowRectEx.handler([RECT_BUFFER, style, 0, exStyle]);
+        return [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at) | 0);
+    };
+    assert.deepEqual(grown(WS_CAPTION, 0), [-3, -22, 103, 103], 'a dialog frame is three');
+    assert.deepEqual(grown(WS_CAPTION | WS_THICKFRAME, 0), [-4, -23, 104, 104],
+        'a sizing frame four');
+    assert.deepEqual(grown(WS_BORDER, 0), [-1, -1, 101, 101], 'a border one');
+    assert.deepEqual(grown(WS_DLGFRAME, 0), [-3, -3, 103, 103]);
+    assert.deepEqual(grown(WS_THICKFRAME, 0), [-3, -3, 103, 103],
+        'a sizing frame with no border has no inner line');
+    assert.deepEqual(grown(WS_POPUP | WS_CAPTION, WS_EX_DLGMODALFRAME), [-3, -22, 103, 103]);
+    assert.deepEqual(grown(WS_POPUP, WS_EX_DLGMODALFRAME), [-3, -3, 103, 103]);
+    assert.deepEqual(grown(WS_POPUP, WS_EX_STATICEDGE), [-1, -1, 101, 101]);
+    assert.deepEqual(grown(WS_BORDER, WS_EX_CLIENTEDGE), [-3, -3, 103, 103]);
+    assert.deepEqual(grown(WS_POPUP, WS_EX_WINDOWEDGE), [0, 0, 100, 100]);
+    assert.deepEqual(grown(WS_CAPTION | WS_THICKFRAME, WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE),
+        [-6, -25, 106, 106]);
+    assert.deepEqual([SM_CXDLGFRAME, SM_CYDLGFRAME].map(index=>
+        fns.GetSystemMetrics.handler([index])), [3, 3]);
+});
+
 test('AdjustWindowRect is the same call without an extended style', ()=>{
     const { memory, fns } = setup();
     memory.putU32s(RECT_BUFFER, [0, 0, 100, 100]);

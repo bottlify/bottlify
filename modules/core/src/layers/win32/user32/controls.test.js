@@ -1267,7 +1267,7 @@ test('a program\'s own class is told to erase with its background brush and to p
         await context.pump();
         const seen = context.dispatched.map(one=>one.message);
         assert.ok(seen.includes(WM_CREATE) && seen.includes(WM_PAINT), 'created and painted');
-        assert.equal(context.desktop.read(60, 50), 0x00ffffff, 'COLOR_WINDOW inside the client');
+        assert.equal(context.desktop.read(60, 53), 0x00ffffff, 'COLOR_WINDOW inside the client');
         assert.equal(context.desktop.read(60, 38), 0x00000080, 'the active caption above it');
         assert.equal(context.desktop.read(20, 30), 0x00ffffff, 'the frame\'s highlight corner');
         assert.equal(context.desktop.read(10, 10), 0x00808080, 'the desktop around it');
@@ -1305,10 +1305,10 @@ test('an unread message for a hidden window paints nothing and the desktop stays
         'the template\'s size in pixels');
     context.fns.GetWindowRect.handler([dialog, OUT]);
     assert.deepEqual([context.memory.u32(OUT + 8) - context.memory.u32(OUT),
-        context.memory.u32(OUT + 12) - context.memory.u32(OUT + 4)], [202, 141],
-    'plus the one-pixel edge each side and the caption');
+        context.memory.u32(OUT + 12) - context.memory.u32(OUT + 4)], [206, 145],
+    'plus the three-pixel dialog frame each side and the caption');
     const presentedBefore = context.presents();
-    context.fns.MoveWindow.handler([dialog, 30, 10, 202, 141, 1]);
+    context.fns.MoveWindow.handler([dialog, 30, 10, 206, 145, 1]);
     await context.pump(dialog);
     assert.ok(context.presents() > presentedBefore, 'moving repainted and showed the desktop');
     assert.equal(context.desktop.read(8, 8), 0x00808080, 'the desktop shows where it was');

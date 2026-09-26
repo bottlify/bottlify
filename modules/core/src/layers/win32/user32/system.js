@@ -26,8 +26,8 @@ import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js
 import { characterOf, codeForScan, codeForVk, keyFor, keyForCharacter } from './keys.js';
 import { REFRESH_HZ, displayModes } from './display.js';
 import {
-    BORDER, CAPTION_HEIGHT, SCROLLBAR, SIZE_FRAME, TOOL_CAPTION_HEIGHT, WS_CHILD, WS_VISIBLE,
-    frameOf,
+    BORDER, CAPTION_HEIGHT, DIALOG_FRAME, SCROLLBAR, SIZE_FRAME, TOOL_CAPTION_HEIGHT, WS_CHILD,
+    WS_VISIBLE, frameOf,
 } from './frame.js';
 import {
     DEVMODEA,
@@ -1167,7 +1167,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 return CAPTION_HEIGHT;
             case SM_CXFIXEDFRAME:
             case SM_CYFIXEDFRAME:
-                return BORDER;
+                return DIALOG_FRAME;
             case SM_CXSIZEFRAME:
             case SM_CYSIZEFRAME:
                 return SIZE_FRAME;

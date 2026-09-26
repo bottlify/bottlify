@@ -37,10 +37,15 @@ export const WS_EX_WINDOWEDGE = 0x00000100;
 export const WS_EX_CLIENTEDGE = 0x00000200;
 export const WS_EX_STATICEDGE = 0x00020000;
 
-/** The frame a window with a caption and a sizing border carries. */
+/**
+ * The classic non-client metrics: a border line, a caption, the frame a
+ * sizing window carries (a two-pixel outer edge, the sizing border and the
+ * border line) and a dialog frame (the outer edge and the border line).
+ */
 export const BORDER = 1;
 export const CAPTION_HEIGHT = 19;
 export const SIZE_FRAME = 4;
+export const DIALOG_FRAME = 3;
 export const SCROLLBAR = 16;
 /** A tool window's caption is shorter than an ordinary one's. */
 export const TOOL_CAPTION_HEIGHT = 12;
@@ -66,8 +71,10 @@ export const TOOL_CAPTION_HEIGHT = 12;
 /**
  * How much frame a window's styles give it.
  *
- * The edges add up rather than replace one another: a sizing border and a
- * client edge are two separate frames drawn one inside the other.
+ * The edges add up rather than replace one another: a dialog or sizing
+ * frame's outer edge, the sizing border inside it, a border line, and a
+ * client edge inside all of them. WS_EX_WINDOWEDGE is the look of the outer
+ * edge a dialog or sizing frame already has, not width of its own.
  *
  * @param {number} style @param {number} [exStyle]
  * @returns {Frame}
@@ -76,12 +83,16 @@ export function frameOf(style, exStyle = 0){
     const thick = (style & WS_THICKFRAME) !== 0;
     const border = (style & (WS_BORDER | WS_DLGFRAME)) !== 0;
     const modal = (exStyle & WS_EX_DLGMODALFRAME) !== 0;
-    const windowEdge = (exStyle & (WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE)) !== 0;
+    const clientEdge = (exStyle & WS_EX_CLIENTEDGE) !== 0;
     const staticEdge = (exStyle & WS_EX_STATICEDGE) !== 0;
 
-    let edge = thick ? SIZE_FRAME : border || modal ? BORDER : 0;
-    edge += windowEdge ? 2 * BORDER : 0;
-    edge += staticEdge ? BORDER : 0;
+    // A static edge on its own is a one-pixel outer edge; a dialog or sizing
+    // frame's is two.
+    let edge = staticEdge && !modal ? BORDER
+        : modal || thick || (style & WS_DLGFRAME) !== 0 ? 2 * BORDER : 0;
+    edge += thick ? BORDER : 0;
+    edge += border || modal ? BORDER : 0;
+    edge += clientEdge ? 2 * BORDER : 0;
 
     const captioned = (style & WS_CAPTION) === WS_CAPTION;
     const caption = captioned

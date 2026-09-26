@@ -552,7 +552,8 @@ test('placing a window as the system would moves it and tells the program', ()=>
     const WS_CAPTION = 0x00c00000;
     const { fns, memory, hwnd, queue, service } = withWindow({ style: WS_CAPTION });
     fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
-    assert.equal(memory.u32(RECT_BUFFER + RECT.bottom), 200 - 19 - 2, 'framed before placing');
+    assert.equal(memory.u32(RECT_BUFFER + RECT.bottom), 200 - 19 - 2 * 3,
+        'framed before placing: a caption and a dialog frame');
 
     assert.equal(service.place(hwnd, 0, 0, 1024, 768), true);
 
