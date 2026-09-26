@@ -231,13 +231,27 @@ export function createStartupFunctions(host){
     const cells = new Map();
 
     /**
-     * What `_onexit` registered, in the order it was registered. Run backwards
-     * by `exit`, which is the contract `atexit` is built on: a handler may rely
-     * on what an earlier one set up still being there.
+     * What `_onexit` and `atexit` registered, in the order it was registered.
+     * Run backwards by `exit` and `_cexit`, which is the contract `atexit` is
+     * built on: a handler may rely on what an earlier one set up still being
+     * there.
      *
      * @type {number[]}
      */
     const onExit = [];
+
+    /**
+     * Runs the register, last first, and empties it: a handler runs once
+     * however many of the exits reach it. A handler is guest code, so this
+     * answers with a promise that settles when the last one has returned.
+     */
+    const runOnExit = ()=>{
+        const asked = host.currentThread?.();
+        const handlers = onExit.splice(0).reverse();
+        return handlers.reduce(
+            (waiting, entry)=>waiting.then(()=>host.callGuest(entry, [], asked)),
+            Promise.resolve(0));
+    };
 
     /** @param {string} name @param {number} initial */
     const cell = (name, initial)=>{
@@ -574,6 +588,17 @@ export function createStartupFunctions(host){
             },
         },
 
+        /** int atexit(void (*func)(void)) -- zero once registered. */
+        atexit: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([fn])=>{
+                onExit.push(fn >>> 0);
+                return 0;
+            },
+        },
+
         /**
          * _onexit_t __dllonexit(_onexit_t func, _PVFV **pbegin, _PVFV **pend)
          *
@@ -625,11 +650,7 @@ export function createStartupFunctions(host){
                 {
                     return host.exitProcess(code >>> 0);
                 }
-                const asked = host.currentThread?.();
-                const handlers = onExit.splice(0).reverse();
-                return handlers.reduce(
-                    (waiting, entry)=>waiting.then(()=>host.callGuest(entry, [], asked)),
-                    Promise.resolve(0)).then(()=>{
+                return runOnExit().then(()=>{
                     host.exit?.(code >>> 0);
                     return 0;
                 });
@@ -649,8 +670,17 @@ export function createStartupFunctions(host){
          * Run the runtime's own teardown and return, which is not the same as
          * ending the process: a program calls these when it means to keep going
          * afterwards, and ending here would take away the rest of its shutdown.
+         *
+         * `_cexit` is `exit` without the ending: what `atexit` and `_onexit`
+         * registered runs, last first, and then the streams are flushed --
+         * which here is nothing, every stream writing straight through to the
+         * volume. `_c_exit` is `_exit` without the ending, so it runs nothing.
          */
-        _cexit: { convention: 'cdecl', argBytes: 0, handler: ()=>0 },
+        _cexit: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>(onExit.length === 0 ? 0 : runOnExit().then(()=>0)),
+        },
         _c_exit: { convention: 'cdecl', argBytes: 0, handler: ()=>0 },
 
         /**

@@ -351,6 +351,32 @@ test('_cexit runs the teardown and returns, which is not the same as exiting', (
     assert.deepEqual(machine.exited, []);
 });
 
+test('_cexit runs what atexit and _onexit registered, last first, and returns', async()=>{
+    // One register behind both calls, run once: exit after _cexit finds
+    // nothing left to run.
+    const { machine, fns } = fakeMachine();
+    assert.equal(fns.atexit.handler([0x401000]), 0, 'atexit answers zero on success');
+    assert.equal(fns._onexit.handler([0x402000]), 0x402000);
+    assert.equal(fns.atexit.handler([0x403000]), 0);
+
+    assert.equal(await fns._cexit.handler([]), 0);
+    assert.deepEqual(machine.called, [0x403000, 0x402000, 0x401000]);
+    assert.deepEqual(machine.exited, [], 'the process goes on');
+
+    assert.equal(fns.exit.handler([2]), 'parked', 'nothing is left for exit to run');
+    assert.deepEqual(machine.called, [0x403000, 0x402000, 0x401000]);
+    assert.equal(fns.atexit.argBytes, 4);
+});
+
+test('_c_exit returns without running what atexit registered', ()=>{
+    const { machine, fns } = fakeMachine();
+    fns.atexit.handler([0x401000]);
+
+    assert.equal(fns._c_exit.handler([]), 0);
+    assert.deepEqual(machine.called, []);
+    assert.deepEqual(machine.exited, []);
+});
+
 test('every entry point is cdecl and declares the stack it does not pop', ()=>{
     // The C runtime is cdecl: the caller cleans up. A handler marked stdcall
     // would have the stub pop the arguments as well, and the caller's stack
