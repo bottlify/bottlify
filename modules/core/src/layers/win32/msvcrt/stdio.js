@@ -215,6 +215,31 @@ export function createStdioFunctions(host){
         Math.max(0, (descriptorOf(stream)?.position ?? 0) - stream.pushback.length);
 
     /**
+     * Moves a stream to a place in its file. The end-of-file condition
+     * clears, which a program that rewinds to read again depends on, and
+     * what ungetc gave back is forgotten. False for the console, which does
+     * not seek, and with EINVAL for a place before the start.
+     *
+     * @param {Stream} stream @param {number} position
+     */
+    const reposition = (stream, position)=>{
+        const descriptor = descriptorOf(stream);
+        if (!descriptor || descriptor.node === null)
+        {
+            return false;
+        }
+        if (position < 0)
+        {
+            fail(EINVAL);
+            return false;
+        }
+        descriptors.seek(descriptor, position);
+        stream.pushback.length = 0;
+        setFlags(stream, stream.flags & ~IOEOF);
+        return true;
+    };
+
+    /**
      * Up to `limit` bytes as the program reads them: what ungetc gave back
      * first, then the file, stopping after a line feed when `line` says so.
      *
@@ -467,13 +492,7 @@ export function createStdioFunctions(host){
             return Math.floor(stored / (size >>> 0));
         }),
 
-        /**
-         * int fseek(FILE *stream, long offset, int origin)
-         *
-         * Zero on success; a seek clears the end-of-file condition, which a
-         * program that rewinds to read again depends on, and forgets what
-         * ungetc gave back.
-         */
+        /** int fseek(FILE *stream, long offset, int origin) -- zero on success. */
         fseek: cdecl(12, ([pointer, offset, origin])=>{
             const stream = argument(pointer);
             const descriptor = stream ? descriptorOf(stream) : null;
@@ -484,21 +503,67 @@ export function createStdioFunctions(host){
             const base = origin === SEEK_SET ? 0
                 : origin === SEEK_CUR ? tellOf(stream)
                     : origin === SEEK_END ? descriptors.size(descriptor) : -1;
-            if (base < 0 || base + (offset | 0) < 0)
+            if (base < 0)
             {
                 fail(EINVAL);
                 return -1;
             }
-            descriptors.seek(descriptor, base + (offset | 0));
-            stream.pushback.length = 0;
-            setFlags(stream, stream.flags & ~IOEOF);
-            return 0;
+            return reposition(stream, base + (offset | 0)) ? 0 : -1;
         }),
 
         /** long ftell(FILE *stream) -- -1 for a stream that is not one. */
         ftell: cdecl(4, ([pointer])=>{
             const stream = argument(pointer);
             return stream ? tellOf(stream) : -1;
+        }),
+
+        /**
+         * int fgetpos(FILE *stream, fpos_t *pos)
+         *
+         * The position ftell answers, stored as the eight bytes of an fpos_t;
+         * nonzero with EINVAL for a null argument.
+         */
+        fgetpos: cdecl(8, ([pointer, pos])=>{
+            const stream = argument(pointer);
+            if (stream && (pos >>> 0) === 0)
+            {
+                fail(EINVAL);
+            }
+            if (!stream || (pos >>> 0) === 0)
+            {
+                return -1;
+            }
+            const bytes = new Uint8Array(8);
+            new DataView(bytes.buffer).setBigInt64(0, BigInt(tellOf(stream)), true);
+            host.writeMemory(pos >>> 0, bytes);
+            return 0;
+        }),
+
+        /**
+         * int fsetpos(FILE *stream, const fpos_t *pos)
+         *
+         * fseek to what fgetpos stored: the end of the file clears and what
+         * ungetc gave back is gone. Nonzero with EINVAL for a null argument or
+         * a position before the start, EBADF for the console.
+         */
+        fsetpos: cdecl(8, ([pointer, pos])=>{
+            const stream = argument(pointer);
+            if (stream && (pos >>> 0) === 0)
+            {
+                fail(EINVAL);
+            }
+            if (!stream || (pos >>> 0) === 0)
+            {
+                return -1;
+            }
+            if (descriptorOf(stream)?.node === null)
+            {
+                fail(EBADF);
+                return -1;
+            }
+            const stored = host.readMemory(pos >>> 0, 8);
+            const position = new DataView(stored.buffer, stored.byteOffset, 8).getBigInt64(0, true);
+            return reposition(stream, Number(position)) ? 0 : -1;
         }),
 
         /** void rewind(FILE *stream) -- the start, with both conditions cleared. */

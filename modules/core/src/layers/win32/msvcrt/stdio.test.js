@@ -487,11 +487,60 @@ test('stdin is at its end for getc, and the record says so', ()=>{
     assert.equal(flag(IOB) & IOEOF, IOEOF);
 });
 
+test('fgetpos stores the position as an fpos_t, and fsetpos goes back to it', ()=>{
+    // Wine's msvcrt test_fileops: a position read and set again, and a
+    // stream at its end no longer at it once fsetpos has moved it.
+    const outbuffer = '0,1,2,3,4,5,6,7,8,9\0';
+    const { memory, fns, open, flag } = runtime({ 'C:\\ops.tst': outbuffer });
+    const file = open('C:\\ops.tst', 'rb');
+    const pos = memory.allocate(8);
+    const view = new DataView(memory.bytes.buffer, pos, 8);
+    memory.writeMemory(pos, new Uint8Array(8).fill(0xcc));
+
+    assert.equal(fns.fgetpos.handler([file, pos]), 0);
+    assert.equal(view.getBigInt64(0, true), 0n, 'all eight bytes');
+    view.setBigInt64(0, BigInt(outbuffer.length), true);
+    assert.equal(fns.fsetpos.handler([file, pos]), 0);
+    assert.equal(fns.fgetpos.handler([file, pos]), 0);
+    assert.equal(view.getBigInt64(0, true), BigInt(outbuffer.length));
+    assert.equal(fns.ftell.handler([file]), outbuffer.length);
+
+    fns.rewind.handler([file]);
+    const buffer = memory.allocate(256);
+    fns.fread.handler([buffer, 256, 1, file]);
+    assert.equal(flag(file) & IOEOF, IOEOF);
+    fns.fgetpos.handler([file, pos]);
+    assert.equal(fns.fsetpos.handler([file, pos]), 0);
+    assert.equal(flag(file) & IOEOF, 0, 'fsetpos clears the end of the file');
+
+    view.setBigInt64(0, 4n, true);
+    fns.ungetc.handler([0x41, file]);
+    fns.fsetpos.handler([file, pos]);
+    assert.equal(fns.fgetc.handler([file]), 0x32, 'and forgets what ungetc gave back');
+});
+
+test('fgetpos and fsetpos refuse a null argument, and fsetpos a position before the start', ()=>{
+    const { memory, fns, open, errno } = runtime({ 'C:\\data.bin': 'abc' });
+    const file = open('C:\\data.bin', 'rb');
+    const pos = memory.allocate(8);
+    const EINVAL = 22;
+
+    assert.notEqual(fns.fgetpos.handler([file, 0]), 0);
+    assert.notEqual(fns.fgetpos.handler([0, pos]), 0);
+    assert.notEqual(fns.fsetpos.handler([file, 0]), 0);
+    assert.notEqual(fns.fsetpos.handler([0, pos]), 0);
+    new DataView(memory.bytes.buffer, pos, 8).setBigInt64(0, -1n, true);
+    assert.notEqual(fns.fsetpos.handler([file, pos]), 0);
+    assert.deepEqual(errno, [EINVAL, EINVAL, EINVAL, EINVAL, EINVAL]);
+    assert.equal(fns.ftell.handler([file]), 0, 'the position did not move');
+});
+
 test('the stream calls are cdecl with the argument count each reads', ()=>{
     const { fns } = runtime({});
     const expected = {
         fflush: 4, feof: 4, ferror: 4, clearerr: 4, fgetc: 4, getc: 4, _filbuf: 4,
         fgets: 12, fputc: 8, putc: 8, _flsbuf: 8, fputs: 8, ungetc: 8, rewind: 4, _fileno: 4,
+        fgetpos: 8, fsetpos: 8,
     };
     for (const [name, argBytes] of Object.entries(expected))
     {
