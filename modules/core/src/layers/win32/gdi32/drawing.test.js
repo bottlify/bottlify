@@ -477,6 +477,129 @@ test('GetObjectA sizes a buffer before it fills one', ()=>{
     assert.equal(fns.GetObjectA.handler([0x1234, 16, OUT]), 0, 'a stale handle is not an object');
 });
 
+/**
+ * A BITMAPINFOHEADER at STRUCT, with its colour table after it.
+ *
+ * @param {ReturnType<typeof fakeMemory>} memory
+ * @param {{ width: number, height: number, bitCount: number, colors?: number[],
+ *     pels?: number[] }} shape
+ */
+function putInfo(memory, { width, height, bitCount, colors = [], pels = [0, 0] }){
+    memory.putU32s(STRUCT, [40, width, height, 0, 0, 0, pels[0], pels[1], colors.length, 0]);
+    memory.bytes.set([1, 0, bitCount, 0], STRUCT + 12);
+    memory.putU32s(STRUCT + 40, colors);
+}
+
+test('GetObject gives a bitmap the stride its rows have, and a DIB section its pointer', ()=>{
+    // Wine's bitmap tests: a device-dependent bitmap's rows pad to a WORD and
+    // it has no bits a program can address (bmBits NULL), a DIB section's pad
+    // to a DWORD and bmBits is the pointer CreateDIBSection handed out.
+    const { memory, fns, hdc } = setup();
+    /** @param {number} handle */
+    const bitmapOf = handle=>{
+        memory.bytes.fill(0xee, OUT, OUT + 24);
+        assert.equal(fns.GetObjectA.handler([handle, 24, OUT]), 24);
+        return {
+            type: memory.u32(OUT), width: memory.u32(OUT + 4), height: memory.u32(OUT + 8),
+            widthBytes: memory.u32(OUT + 12), planes: memory.u16(OUT + 16),
+            bitsPixel: memory.u16(OUT + 18), bits: memory.u32(OUT + 20),
+        };
+    };
+
+    assert.deepEqual(bitmapOf(fns.CreateBitmap.handler([15, 15, 1, 1, 0])),
+        { type: 0, width: 15, height: 15, widthBytes: 2, planes: 1, bitsPixel: 1, bits: 0 });
+    assert.deepEqual(bitmapOf(fns.CreateCompatibleBitmap.handler([hdc, 3, 2])),
+        { type: 0, width: 3, height: 2, widthBytes: 12, planes: 1, bitsPixel: 32, bits: 0 });
+    memory.putU32s(STRUCT + 0x100, [0, 0]);
+    assert.equal(bitmapOf(fns.CreateBitmap.handler([2, 2, 1, 4, STRUCT + 0x100])).bits, 0,
+        'bmBits must be NULL for device-dependent bitmaps, whatever lpBits was');
+
+    putInfo(memory, { width: 10, height: -4, bitCount: 24 });
+    const section = fns.CreateDIBSection.handler([hdc, STRUCT, 0, OUT + 0x80, 0, 0]);
+    const pointer = memory.u32(OUT + 0x80);
+    assert.deepEqual(bitmapOf(section), { type: 0, width: 10, height: 4, widthBytes: 32,
+        planes: 1, bitsPixel: 24, bits: pointer });
+});
+
+test('GetObject fills a DIBSECTION for a DIB section when there is room for one', ()=>{
+    const { memory, fns, hdc } = setup();
+    putInfo(memory, { width: 16, height: 8, bitCount: 1, colors: [0x00ff0000, 0x000000ff],
+        pels: [2835, 1417] });
+    const section = fns.CreateDIBSection.handler([hdc, STRUCT, 0, OUT + 0x80, 0, 0]);
+    const pointer = memory.u32(OUT + 0x80);
+
+    assert.equal(fns.GetObjectA.handler([section, 0, 0]), 24,
+        'the size asked with a null buffer is a BITMAP\'s');
+    assert.equal(fns.GetObjectA.handler([section, 80, OUT]), 24, 'short of 84 it is a BITMAP');
+    memory.bytes.fill(0xaa, OUT, OUT + 84);
+    assert.equal(fns.GetObjectA.handler([section, 84 * 2, OUT]), 84);
+    assert.equal(memory.u32(OUT + 20), pointer, 'dsBm.bmBits');
+    assert.equal(memory.u32(OUT + 12), 4, 'dsBm.bmWidthBytes: a DWORD-padded row');
+    const header = OUT + 24;
+    assert.deepEqual([0, 4, 8].map(at=>memory.u32(header + at)), [40, 16, 8],
+        'biSize, biWidth and biHeight');
+    assert.deepEqual([memory.u16(header + 12), memory.u16(header + 14)], [1, 1]);
+    assert.deepEqual([16, 20, 24, 28, 32].map(at=>memory.u32(header + at)),
+        [0, 4 * 8, 2835, 1417, 2], 'BI_RGB, the image size, the pels, the table counted in full');
+    assert.deepEqual([64, 68, 72, 76, 80].map(at=>memory.u32(OUT + at)), [0, 0, 0, 0, 0],
+        'no masks for BI_RGB, no file mapping, no offset');
+
+    // A top-down section reports its height without the sign.
+    putInfo(memory, { width: 2, height: -3, bitCount: 32 });
+    const topDown = fns.CreateDIBSection.handler([hdc, STRUCT, 0, OUT + 0x80, 0, 0]);
+    assert.equal(fns.GetObjectA.handler([topDown, 84, OUT]), 84);
+    assert.equal(memory.u32(OUT + 24 + 8), 3);
+    assert.equal(memory.u32(OUT + 24 + 32), 0, 'no colour table above eight bits');
+});
+
+test('GetObject hands a font back as the LOGFONT it was made from, in either spelling', ()=>{
+    const { memory, fns } = setup();
+    memory.bytes.set([...'Arial'].map(c=>c.charCodeAt(0)).concat(0), STRUCT);
+    const font = fns.CreateFontA.handler([-12, 5, 0, 0, 700, 1, 0, 0, 0xcc, 3, 2, 4, 0x22,
+        STRUCT]);
+
+    assert.equal(fns.GetObjectA.handler([font, 0, 0]), 60, 'sizeof(LOGFONTA)');
+    assert.equal(fns.GetObjectA.handler([font, 59, OUT]), 0);
+    memory.bytes.fill(0xee, OUT, OUT + 92);
+    assert.equal(fns.GetObjectA.handler([font, 60, OUT]), 60);
+    assert.deepEqual([0, 4, 16].map(at=>memory.u32(OUT + at) | 0), [-12, 5, 700]);
+    assert.deepEqual([...memory.bytes.subarray(OUT + 20, OUT + 28)],
+        [1, 0, 0, 0xcc, 3, 2, 4, 0x22]);
+    assert.equal(new TextDecoder('latin1').decode(memory.bytes.subarray(OUT + 28, OUT + 34)),
+        'Arial\0');
+    assert.equal(memory.bytes[OUT + 60], 0xee, 'nothing past the structure');
+
+    assert.equal(fns.GetObjectW.handler([font, 0, 0]), 92, 'sizeof(LOGFONTW)');
+    assert.equal(fns.GetObjectW.handler([font, 92, OUT]), 92);
+    assert.deepEqual([...memory.bytes.subarray(OUT + 28, OUT + 40)],
+        [0x41, 0, 0x72, 0, 0x69, 0, 0x61, 0, 0x6c, 0, 0, 0], 'the face name in UTF-16');
+
+    const DEFAULT_GUI_FONT = 17;
+    assert.equal(fns.GetObjectA.handler([fns.GetStockObject.handler([DEFAULT_GUI_FONT]), 60,
+        OUT]), 60, 'a stock font is a font too');
+});
+
+test('GetObject on a palette is the WORD count of its entries', ()=>{
+    const { memory, fns } = setup();
+    memory.putU32s(STRUCT, [0x300 | (3 << 16), 0x00112233, 0x00445566, 0x00778899]);
+    const palette = fns.CreatePalette.handler([STRUCT]);
+
+    assert.equal(fns.GetObjectA.handler([palette, 0, 0]), 2);
+    assert.equal(fns.GetObjectA.handler([palette, 1, OUT]), 0);
+    memory.bytes.fill(0xee, OUT, OUT + 4);
+    assert.equal(fns.GetObjectW.handler([palette, 4, OUT]), 2);
+    assert.deepEqual([...memory.bytes.subarray(OUT, OUT + 4)], [3, 0, 0xee, 0xee]);
+});
+
+test('GetObjectW answers what GetObjectA does for everything but a font', ()=>{
+    const { memory, fns } = setup();
+    assert.equal(fns.GetObjectW.argBytes, 12);
+    const pen = fns.CreatePen.handler([0, 3, 0x00ff8040]);
+    assert.equal(fns.GetObjectW.handler([pen, 16, OUT]), 16);
+    assert.equal(memory.u32(OUT + 12), 0x00ff8040);
+    assert.equal(fns.GetObjectW.handler([0x1234, 16, OUT]), 0);
+});
+
 // --- palettes, which exist and change nothing ---
 
 test('a palette is real, selectable, and realizes no entries', ()=>{

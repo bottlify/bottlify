@@ -30,6 +30,7 @@ import {
     readLogFontW,
     readLogPalette,
     readLogPen,
+    readU32,
     paletteEntryToPixel,
     writePoint,
     writeSize,
@@ -1368,6 +1369,15 @@ export function createGdiFunctions(host){
                     bits: address,
                     section: address,
                     palette,
+                    // What GetObject hands back of the header the section was
+                    // made from. BI_BITFIELDS' masks sit right after the
+                    // original forty bytes, which in a V4 or V5 header is
+                    // inside the header rather than after it.
+                    compression: header.compression,
+                    bitfields: header.compression === BI_BITFIELDS
+                        ? [0, 4, 8].map(at=>readU32(host, info + BITMAPINFOHEADER.SIZE + at))
+                        : [0, 0, 0],
+                    pelsPerMeter: [header.xPelsPerMeter ?? 0, header.yPelsPerMeter ?? 0],
                 });
             },
         },

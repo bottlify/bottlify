@@ -36,8 +36,17 @@
  */
 
 import { readRect, writeU16, writeU32s } from '../user32/structs.js';
-import { BITMAPINFOHEADER, PALETTEENTRY_SIZE, paletteEntryToPixel, readBitmapInfoHeader }
-    from './structs.js';
+import {
+    BITMAP,
+    BITMAPINFOHEADER,
+    DIBSECTION,
+    PALETTEENTRY_SIZE,
+    ddbStride,
+    dibStride,
+    logFontBytes,
+    paletteEntryToPixel,
+    readBitmapInfoHeader,
+} from './structs.js';
 
 /** iUsage of the DIB functions: a colour table of RGBQUADs, not palette indices. */
 const DIB_RGB_COLORS = 0;
@@ -858,35 +867,22 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
 
         /**
          * int GetObjectA(HGDIOBJ h, int c, LPVOID pv)
+         * int GetObjectW(HGDIOBJ h, int c, LPVOID pv)
          *
          * A null buffer asks how large one would have to be, which is how a
-         * program sizes its own before asking again.
+         * program sizes its own before asking again. The two differ only in
+         * a font's face name.
          */
         GetObjectA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([handle, size, out])=>{
-                const record = objects.get(handle);
-                if (!record)
-                {
-                    return 0;
-                }
-                const shape = describeObject(record);
-                if (!shape)
-                {
-                    return 0;
-                }
-                if ((out >>> 0) === 0)
-                {
-                    return shape.size;
-                }
-                if ((size | 0) < shape.size)
-                {
-                    return 0;
-                }
-                writeU32s(host, out, shape.words);
-                return shape.size;
-            },
+            handler: args=>getObject(args, false),
+        },
+
+        GetObjectW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: args=>getObject(args, true),
         },
 
         /**
@@ -1240,6 +1236,31 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
     };
 
     /**
+     * @param {number[]} args  The object, the room the caller has, its buffer.
+     * @param {boolean} wide
+     */
+    const getObject = ([handle, size, out], wide)=>{
+        const record = objects.get(handle);
+        const shape = record
+            ? describeObject(record, (out >>> 0) === 0 ? 0 : size | 0, wide)
+            : null;
+        if (!shape)
+        {
+            return 0;
+        }
+        if ((out >>> 0) === 0)
+        {
+            return shape.length;
+        }
+        if ((size | 0) < shape.length)
+        {
+            return 0;
+        }
+        host.writeMemory(out >>> 0, shape);
+        return shape.length;
+    };
+
+    /**
      * ExtTextOut, spelt once: the string read as bytes or as UTF-16 code
      * units, `c` of them either way and unterminated, and lpDx one advance per
      * character, which is how justified text is positioned.
@@ -1274,54 +1295,96 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
 }
 
 /**
- * What GetObject reports for one object, as the words of its struct.
+ * What GetObject reports for one object: the bytes of its struct.
  *
  * Only the shapes a program reads back are here. An object whose struct is not
  * described answers zero rather than a buffer of the wrong length, because a
  * caller that trusted the length would read past its own allocation.
  *
  * @param {any} record
- * @returns {{ size: number, words: number[] } | null}
+ * @param {number} room  What the caller has space for. A DIB section is a
+ *        DIBSECTION to a caller with room for one and a BITMAP to any other,
+ *        a null buffer's question included.
+ * @param {boolean} wide  GetObjectW: a font's face name is UTF-16.
+ * @returns {Uint8Array | null}
  */
-function describeObject(record){
+function describeObject(record, room, wide){
     const attributes = record.attributes ?? {};
     switch (record.type){
         // LOGPEN: style, POINT width, colour.
         case 'pen':
-            return {
-                size: 16,
-                words: [
-                    attributes.style | 0,
-                    attributes.width | 0,
-                    0,
-                    attributes.color >>> 0,
-                ],
-            };
+            return dwords([attributes.style | 0, attributes.width | 0, 0, attributes.color >>> 0]);
         // LOGBRUSH: style, colour, hatch.
         case 'brush':
-            return {
-                size: 12,
-                words: [
-                    attributes.style | 0,
-                    attributes.color >>> 0,
-                    attributes.hatch | 0,
-                ],
-            };
-        // BITMAP: type, width, height, widthBytes, planes+bitsPixel, bits.
+            return dwords([attributes.style | 0, attributes.color >>> 0, attributes.hatch | 0]);
         case 'bitmap':
-            return {
-                size: 24,
-                words: [
-                    0,
-                    attributes.width | 0,
-                    attributes.height | 0,
-                    attributes.pitch | 0,
-                    (attributes.planes ?? 1) & 0xffff
-                        | ((attributes.bitCount ?? 32) & 0xffff) << 16,
-                    attributes.bits >>> 0,
-                ],
-            };
+            return describeBitmap(attributes, room >= DIBSECTION.SIZE);
+        case 'font':
+            return logFontBytes(attributes, wide);
+        // A palette is the WORD count of its entries.
+        case 'palette':
+            return new Uint8Array([attributes.entries.length & 0xff,
+                (attributes.entries.length >>> 8) & 0xff]);
         default:
             return null;
     }
+}
+
+/** @param {number[]} values @returns {Uint8Array} the values as little-endian DWORDs */
+function dwords(values){
+    const bytes = new Uint8Array(values.length * 4);
+    const view = new DataView(bytes.buffer);
+    values.forEach((value, index)=>view.setUint32(index * 4, value >>> 0, true));
+    return bytes;
+}
+
+/**
+ * BITMAP, or DIBSECTION for a DIB section when there is room for one.
+ *
+ * The row stride is the one the bitmap's own rows are laid out in: a DIB
+ * section pads to a DWORD, a device-dependent bitmap to a WORD. `section` is
+ * the address the program was handed for a DIB section's bits; a
+ * device-dependent bitmap has none, which is what a NULL bmBits says.
+ *
+ * @param {any} attributes @param {boolean} asSection
+ */
+function describeBitmap(attributes, asSection){
+    const width = attributes.width | 0;
+    const height = attributes.height | 0;
+    const bitCount = attributes.bitCount ?? 32;
+    const section = attributes.section >>> 0;
+    const stride = section !== 0 ? dibStride(width, bitCount) : ddbStride(width, bitCount);
+    const bytes = new Uint8Array(section !== 0 && asSection ? DIBSECTION.SIZE : BITMAP.SIZE);
+    const view = new DataView(bytes.buffer);
+    view.setInt32(BITMAP.bmWidth, width, true);
+    view.setInt32(BITMAP.bmHeight, height, true);
+    view.setInt32(BITMAP.bmWidthBytes, stride, true);
+    view.setUint16(BITMAP.bmPlanes, attributes.planes ?? 1, true);
+    view.setUint16(BITMAP.bmBitsPixel, bitCount, true);
+    view.setUint32(BITMAP.bmBits, section, true);
+    if (bytes.length === BITMAP.SIZE)
+    {
+        return bytes;
+    }
+    // The header comes back as the section is, not as it was asked for: the
+    // height without its sign, the image size worked out, and the colour
+    // table counted in full.
+    /** @param {number} field @param {number} value */
+    const header = (field, value)=>view.setInt32(DIBSECTION.dsBmih + field, value | 0, true);
+    header(BITMAPINFOHEADER.biSize, BITMAPINFOHEADER.SIZE);
+    header(BITMAPINFOHEADER.biWidth, width);
+    header(BITMAPINFOHEADER.biHeight, height);
+    view.setUint16(DIBSECTION.dsBmih + BITMAPINFOHEADER.biPlanes, 1, true);
+    view.setUint16(DIBSECTION.dsBmih + BITMAPINFOHEADER.biBitCount, bitCount, true);
+    header(BITMAPINFOHEADER.biCompression, attributes.compression ?? BI_RGB);
+    header(BITMAPINFOHEADER.biSizeImage, stride * height);
+    header(BITMAPINFOHEADER.biXPelsPerMeter, attributes.pelsPerMeter?.[0] ?? 0);
+    header(BITMAPINFOHEADER.biYPelsPerMeter, attributes.pelsPerMeter?.[1] ?? 0);
+    header(BITMAPINFOHEADER.biClrUsed, attributes.palette?.length ?? 0);
+    const masks = attributes.bitfields ?? [0, 0, 0];
+    for (let index = 0; index < 3; index++)
+    {
+        view.setUint32(DIBSECTION.dsBitfields + index * 4, masks[index] >>> 0, true);
+    }
+    return bytes;
 }
