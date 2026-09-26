@@ -11,7 +11,7 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
 import { writeGuid, readGuid, formatGuid } from '../../win32/ole32/guid.js';
 import {
     createDirectInput, createPublisher, describe,
-    DI_OK, DI_BUFFEROVERFLOW, DIENUM_STOP,
+    DI_OK, DI_BUFFEROVERFLOW, DI_NOEFFECT, DIENUM_STOP,
     GUID_SysKeyboard, GUID_SysMouse,
     IID_IDirectInputA, IID_IDirectInputW, IID_IDirectInput7A,
     IID_IDirectInput8A, IID_IDirectInput8W, IID_IDirectInputDeviceA, IID_IDirectInputDeviceW,
@@ -630,6 +630,22 @@ test('unacquiring stops a device taking events, and acquiring resumes it', ()=>{
     assert.equal(f.dinput.post({ kind: 'key', code: DIK_A, down: true }), false);
     assert.equal(f.bridge.call(f.device, 'Acquire', []), DI_OK);
     assert.equal(f.dinput.post({ kind: 'key', code: DIK_A, down: true }), true);
+});
+
+test('acquiring what is acquired, or releasing what is not, has no effect and says so', ()=>{
+    // device8.c test_sys_mouse and test_sys_keyboard: DI_NOEFFECT, which is
+    // S_FALSE -- a success, so a program testing FAILED() carries on.
+    for (const guid of [GUID_SysMouse, GUID_SysKeyboard])
+    {
+        const f = fixture();
+        const device = createDevice(f, guid);
+        const size = guid === GUID_SysMouse ? 16 : 256;
+        assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, size)]), DI_OK);
+        assert.equal(f.bridge.call(device, 'Unacquire', []), DI_NOEFFECT, guid);
+        assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK, guid);
+        assert.equal(f.bridge.call(device, 'Acquire', []), DI_NOEFFECT, guid);
+        assert.equal(f.bridge.call(device, 'Unacquire', []), DI_OK, guid);
+    }
 });
 
 test('GetCapabilities fills DIDEVCAPS and needs a header that declares its size', ()=>{

@@ -38,6 +38,8 @@ import {
 export const DI_OK = 0;
 /** DI_BUFFEROVERFLOW is S_FALSE: a success a program has to look at. */
 export const DI_BUFFEROVERFLOW = 1;
+/** DI_NOEFFECT is S_FALSE too: the call succeeded and changed nothing. */
+export const DI_NOEFFECT = 1;
 const DIERR_INVALIDPARAM = 0x80070057 | 0;
 const DIERR_NOTACQUIRED = 0x8007000c | 0;
 const DIERR_UNSUPPORTED = 0x80004001 | 0;
@@ -579,13 +581,26 @@ export function createDirectInput(
 
     /** @type {Record<string, (target: any, args: number[], descriptor?: any) => any>} */
     const deviceMethods = {
-        /** HRESULT Acquire(void) */
+        /**
+         * HRESULT Acquire(void)
+         *
+         * A second Acquire, or an Unacquire of a device nobody holds, changes
+         * nothing and answers DI_NOEFFECT -- S_FALSE, still a success.
+         */
         Acquire(device){
+            if (device.acquired)
+            {
+                return DI_NOEFFECT;
+            }
             device.acquire();
             return DI_OK;
         },
         /** HRESULT Unacquire(void) */
         Unacquire(device){
+            if (!device.acquired)
+            {
+                return DI_NOEFFECT;
+            }
             device.unacquire();
             return DI_OK;
         },
