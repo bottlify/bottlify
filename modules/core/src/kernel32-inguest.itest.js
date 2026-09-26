@@ -7,7 +7,8 @@
 /**
  * The kernel32 exports that are code in the guest's own kernel32, called
  * through the import as a program calls them, on cork and on the emulator:
- * the interlocked arithmetic and thread-local storage.
+ * the interlocked arithmetic, thread-local storage, and critical sections --
+ * whose contended entry is the one place any of them reaches the host.
  *
  * Each program exits 0, or with the number of the first check that failed.
  */
@@ -278,9 +279,130 @@ function buildTlsExe(){
     });
 }
 
+/** RTL_CRITICAL_SECTION's fields. */
+const CS = { LOCK_COUNT: 4, RECURSION_COUNT: 8, OWNING_THREAD: 12 };
+const SECTION_TURNS = 64;
+
+/**
+ * Three threads through one section, each entering it twice a turn, reading
+ * the shared count, sometimes sleeping while they hold it -- which is when the
+ * others arrive and wait in the host -- and writing it back one higher. Inside,
+ * the owner is always the thread itself at recursion two. Afterwards the
+ * count is exact and the section is free.
+ */
+function buildSectionRaceExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['InitializeCriticalSection', 'EnterCriticalSection',
+            'LeaveCriticalSection', 'Sleep', 'CreateThread', 'ExitThread',
+            'WaitForMultipleObjects', 'ExitProcess'] },
+        data: { section: new Array(24).fill(0), counter: [0, 0, 0, 0], bad: [0, 0, 0, 0],
+            handles: new Array(16).fill(0) },
+        codeSize: 0x300,
+        code: context=>{
+            const { call, push, store, compare, check, exit, fail, spawn } = toolkit(context);
+            const worker = context.code(0x180);
+            const main = assemble([
+                push('section'), call('InitializeCriticalSection'),
+                ...[0, 1, 2].map(index=>spawn(worker, 'handles', index)),
+                [0x6a, 0xff, 0x6a, 0x01], push('handles'), [0x6a, WORKERS],
+                call('WaitForMultipleObjects'),
+                check(1), compare('bad', 0), { jump: JNE, to: 'fail' },
+                check(2), compare('counter', WORKERS * SECTION_TURNS), { jump: JNE, to: 'fail' },
+                check(3), compare('section', 0xffffffff, CS.LOCK_COUNT), { jump: JNE, to: 'fail' },
+                check(4), compare('section', 0, CS.RECURSION_COUNT), { jump: JNE, to: 'fail' },
+                check(5), compare('section', 0, CS.OWNING_THREAD), { jump: JNE, to: 'fail' },
+                exit(),
+                ...fail(),
+            ]);
+            const body = assemble([
+                [0xbe, ...u32(SECTION_TURNS)],                              // mov esi, turns
+                'turn',
+                push('section'), call('EnterCriticalSection'),
+                push('section'), call('EnterCriticalSection'),
+                [0x64, 0xa1, 0x24, 0, 0, 0],                                // mov eax, fs:[0x24]
+                [0x39, 0x05, ...u32(context.at('section') + CS.OWNING_THREAD)], // cmp [owner], eax
+                { jump: JNE, to: 'bad' },
+                compare('section', 2, CS.RECURSION_COUNT), { jump: JNE, to: 'bad' },
+                [0x8b, 0x3d, ...u32(context.at('counter'))],                // mov edi, [counter]
+                [0xf7, 0xc6, ...u32(15)], { jump: JNZ, to: 'held' },        // test esi, 15
+                [0x6a, 0x01], call('Sleep'),                                // Sleep(1), holding it
+                'held',
+                [0x47, 0x89, 0x3d, ...u32(context.at('counter'))],          // inc edi; store it
+                push('section'), call('LeaveCriticalSection'),
+                compare('section', 1, CS.RECURSION_COUNT), { jump: JNE, to: 'bad' },
+                push('section'), call('LeaveCriticalSection'),
+                [0x4e], { jump: JNZ, to: 'turn' },
+                [0x6a, 0x00], call('ExitThread'),
+                'bad',
+                store('bad', 1), [0x6a, 0x00], call('ExitThread'),
+            ]);
+            assert.ok(main.length <= 0x180, `main is ${main.length} bytes`);
+            return [...main, ...new Array(0x180 - main.length).fill(0x90), ...body];
+        },
+    });
+}
+
+/**
+ * The main thread holds the section while a second thread tries it (and is
+ * refused) and then enters it: the second waits in the host, the count says
+ * one thread is queued, and nothing past its entry runs until the main
+ * thread leaves -- which hands the section over, with the structure naming
+ * the new owner before it runs.
+ */
+function buildSectionHandoffExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['InitializeCriticalSection', 'EnterCriticalSection',
+            'LeaveCriticalSection', 'TryEnterCriticalSection', 'GetCurrentThreadId', 'Sleep',
+            'CreateThread', 'ExitThread', 'WaitForSingleObject', 'ExitProcess'] },
+        data: { section: new Array(24).fill(0), handles: [0, 0, 0, 0],
+            tried: [0xff, 0xff, 0xff, 0xff], reached: [0, 0, 0, 0], inside: [0, 0, 0, 0],
+            owner: [0, 0, 0, 0], recursion: [0, 0, 0, 0], id: [0, 0, 0, 0] },
+        codeSize: 0x300,
+        code: context=>{
+            const { call, push, pushFrom, store, compare, keep, check, exit, fail, spawn } =
+                toolkit(context);
+            const worker = context.code(0x200);
+            const main = assemble([
+                push('section'), call('InitializeCriticalSection'),
+                push('section'), call('EnterCriticalSection'),
+                spawn(worker, 'handles', 0),
+                [0x6a, 0x14], call('Sleep'),                        // the worker runs, and waits
+                check(1), compare('tried', 0), { jump: JNE, to: 'fail' },
+                check(2), compare('reached', 1), { jump: JNE, to: 'fail' },
+                check(3), compare('inside', 0), { jump: JNE, to: 'fail' },
+                check(4), compare('section', 1, CS.LOCK_COUNT), { jump: JNE, to: 'fail' },
+                push('section'), call('LeaveCriticalSection'),
+                [0x6a, 0xff], pushFrom('handles'), call('WaitForSingleObject'),
+                check(5), compare('inside', 1), { jump: JNE, to: 'fail' },
+                check(6), [0xa1, ...u32(context.at('owner'))],           // mov eax, [owner]
+                [0x3b, 0x05, ...u32(context.at('id'))], { jump: JNE, to: 'fail' },
+                check(7), compare('recursion', 1), { jump: JNE, to: 'fail' },
+                check(8), compare('section', 0xffffffff, CS.LOCK_COUNT), { jump: JNE, to: 'fail' },
+                check(9), compare('section', 0, CS.OWNING_THREAD), { jump: JNE, to: 'fail' },
+                exit(),
+                ...fail(),
+            ]);
+            const body = assemble([
+                call('GetCurrentThreadId'), keep('id'),
+                push('section'), call('TryEnterCriticalSection'), keep('tried'),
+                store('reached', 1),
+                push('section'), call('EnterCriticalSection'),
+                [0xa1, ...u32(context.at('section') + CS.OWNING_THREAD)], keep('owner'),
+                [0xa1, ...u32(context.at('section') + CS.RECURSION_COUNT)], keep('recursion'),
+                store('inside', 1),
+                push('section'), call('LeaveCriticalSection'),
+                [0x6a, 0x00], call('ExitThread'),
+            ]);
+            assert.ok(main.length <= 0x200, `main is ${main.length} bytes`);
+            return [...main, ...new Array(0x200 - main.length).fill(0x90), ...body];
+        },
+    });
+}
+
 /**
  * Runs a program to its exit, and reads before the machine goes what crossed
- * into the host: the bridge's most frequent calls.
+ * into the host: the bridge's most frequent calls, and what the host's half
+ * of the critical sections counted.
  *
  * @param {Uint8Array} executable @param {'emulator' | 'cork'} engine
  * @param {number} [quantum]
@@ -299,9 +421,11 @@ async function run(executable, engine, quantum){
     try
     {
         const code = await app.run({ timeoutMs: 30000 });
+        const win32 = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'win32');
         const bridge = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'bridge');
         return {
             code,
+            sections: win32?.metrics?.criticalSections,
             /** @type {[string, number][]} */
             hot: bridge?.metrics?.hot ?? [],
         };
@@ -335,5 +459,29 @@ for (const engine of /** @type {const} */ (['cork', 'emulator']))
             const crossed = Object.fromEntries(hot);
             assert.equal(crossed['<tls-set>'], 2, 'only the two sets past the array crossed');
             assert.equal(crossed['<tls-get>'], 1, 'and the one get');
+        });
+
+    test(`three threads share a section with recursion and the count comes out exact, `
+        + `under ${engine}`, { timeout: 60000 }, async()=>{
+        const { code, sections } = await run(buildSectionRaceExe(), engine, 97);
+        assert.equal(code, 0, '1: a thread found the section wrong inside it; 2: an update'
+            + ' was lost; 3-5: the section was not left free');
+        const passes = WORKERS * SECTION_TURNS * 2;
+        assert.equal(sections.entered, passes, 'every entry ran the guest\'s fast path');
+        assert.equal(sections.left, passes);
+        assert.ok(sections.waits > 0, 'some entries found it held and waited in the host');
+        assert.equal(sections.handoffs, sections.waits, 'and each waiter was handed it');
+        assert.equal(sections.queued, 0);
+        assert.equal(sections.owed, 0);
+    });
+
+    test(`a thread waiting for a section waits in the host and is handed it, under ${engine}`,
+        { timeout: 60000 }, async()=>{
+            const { code, sections } = await run(buildSectionHandoffExe(), engine);
+            assert.equal(code, 0, 'the number of the first check that failed');
+            assert.equal(sections.waits, 1, 'the second thread waited once');
+            assert.equal(sections.wakes, 1, 'the main thread\'s leave woke it');
+            assert.equal(sections.handoffs, 1);
+            assert.equal(sections.queued, 0);
         });
 }

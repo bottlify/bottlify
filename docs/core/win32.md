@@ -431,9 +431,11 @@ exist; a wait on a child's *process* handle hands over to the child and returns 
 below and `kernel32/spawn.js`). Critical sections are an exception to "every call crosses into the
 host": `kernel32/critical.js` emits the enter/leave/try-enter fast paths as guest x86 on the
 pre-Vista algorithm over the program's own `CRITICAL_SECTION` fields, and only a contended entry or
-an owed wake traps; a release goes to the first waiter that can run, never to a suspended one, and
-is kept owed when none can. SRW locks, condition variables and one-time initialisation
-(`kernel32/slimsync.js`) are one word the program allocated, kept true -- zero while an SRW lock is
+an owed wake traps -- the waiter is queued and parked in the host, and the leave that finds it
+hands the section over by writing the owner and recursion count before the waiter runs; a release
+goes to the first waiter that can run, never to a suspended one, and is kept owed when none can.
+SRW locks, condition variables and one-time initialisation (`kernel32/slimsync.js`) are one word
+the program allocated, kept true -- zero while an SRW lock is
 free, its low bit set while held and the sharing holders counted above it: a lock is taken at once
 or queued, shared by readers but never past a writer already waiting, and handed on in arrival
 order; a condition variable's sleep joins the queue and lets go of the lock in one host call, so no
@@ -883,8 +885,11 @@ cork and on the emulator: each interlocked call's answer, the dword it leaves, t
 and the registers it keeps, and three preempted threads counting through two of them; a TLS value
 set in the guest read back by the API, by the compiler's `FS:[0x2c]` sequence and not by another
 thread, the last error each call leaves, a slot past the array through the host, an index past
-every slot refused, a freed slot zero. `src/exceptions.itest.js` runs three compiled fixtures --
-`seh.exe`, `cxxeh.exe`,
+every slot refused, a freed slot zero; three threads through one critical section with recursion,
+sleeping while they hold it, the count exact, every entry through the fast path and every waiter
+handed the section; and a thread that finds a section held refused by `TryEnterCriticalSection`,
+then waiting in the host, with the lock count showing it queued, until the owner's leave hands it
+over. `src/exceptions.itest.js` runs three compiled fixtures -- `seh.exe`, `cxxeh.exe`,
 `unhandled.exe`, built from `test/fixtures/src/` by `scripts/build-fixtures.mjs` with clang and
 lld against the MSVC ABI -- through every path above, processor faults and two threads throwing
 at once included. `src/apc.itest.js` runs `apc.exe`, built the same way: APCs to itself and to
