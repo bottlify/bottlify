@@ -246,7 +246,8 @@ export function depthFormatForDepth(bitDepth){
  * @property {(handle: number) => number} releaseDC
  * @property {(other: Surface) => number} addAttachedSurface
  * @property {(other: Surface | null) => number} deleteAttachedSurface
- * @property {(wanted: number) => { hr: number, surface: Surface | null }} getAttachedSurface
+ * @property {(wanted: number, wanted2?: number) => { hr: number, surface: Surface | null }}
+ *           getAttachedSurface
  * @property {() => Surface[]} enumAttachedSurfaces
  * @property {(target?: Surface | null, flags?: number) => number} flip
  */
@@ -1165,30 +1166,26 @@ export function createDirectDraw(options = {}){
             },
 
             /**
-             * @param {number} wanted  The DDSCAPS the caller is looking for.
+             * The first attached surface whose caps hold every bit asked for.
+             * The last buffer of a flip chain counts the front as attached,
+             * which is how a walk down the chain comes round again.
+             *
+             * @param {number} wanted   The DDSCAPS the caller is looking for.
+             * @param {number} [wanted2]  DDSCAPS2, from the wider structure.
              * @returns {{ hr: number, surface: Surface | null }}
              */
-            getAttachedSurface(wanted){
-                if (wanted & DDSCAPS_ZBUFFER)
+            getAttachedSurface(wanted, wanted2 = 0){
+                const next = flipNext ?? (flipPrev ? chainHead() : null);
+                const found = [next, depth].find(candidate=>candidate !== null
+                    && candidate !== surface
+                    && (candidate.caps & wanted) === wanted >>> 0
+                    && (candidate.caps2 & wanted2) === wanted2 >>> 0);
+                if (!found)
                 {
-                    if (!depth)
-                    {
-                        return { hr: DDERR_NOTFOUND, surface: null };
-                    }
-                    depth.addRef();
-                    return { hr: DD_OK, surface: depth };
+                    return { hr: DDERR_NOTFOUND, surface: null };
                 }
-                if (wanted & DDSCAPS_FLIP)
-                {
-                    const next = flipNext ?? (flipPrev ? chainHead() : null);
-                    if (!next || next === surface)
-                    {
-                        return { hr: DDERR_NOTFOUND, surface: null };
-                    }
-                    next.addRef();
-                    return { hr: DD_OK, surface: next };
-                }
-                return { hr: DDERR_NOTFOUND, surface: null };
+                found.addRef();
+                return { hr: DD_OK, surface: found };
             },
 
             /** @returns {Surface[]} */

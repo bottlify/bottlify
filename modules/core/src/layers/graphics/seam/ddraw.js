@@ -732,7 +732,8 @@ export function createDirectDrawSeam(
                 {
                     return DDERR_INVALIDPARAMS;
                 }
-                const found = surface.getAttachedSurface(readCaps(caps));
+                const found = surface.getAttachedSurface(readCaps(caps),
+                    wide ? fields.readU32((caps >>> 0) + DDSCAPS2.dwCaps2) : 0);
                 if (found.hr === DD_OK)
                 {
                     handBack(found.surface, surfaceInterfaces, generation.id, out >>> 0);

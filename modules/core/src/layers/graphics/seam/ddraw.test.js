@@ -32,7 +32,8 @@ import { createDirectDraw } from '../ddraw/objects.js';
 import {
     DDBLT_COLORFILL, DDCAPS_BLT, DDERR_DCALREADYCREATED, DDERR_INVALIDPARAMS,
     DDERR_NOCOOPERATIVELEVELSET, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_SURFACEBUSY,
-    DDPCAPS_8BIT, DDPF_RGB, DDSCAPS_COMPLEX, DDSCAPS_FLIP, DDSCAPS_OFFSCREENPLAIN,
+    DDPCAPS_8BIT, DDPF_RGB, DDSCAPS2_MIPMAPSUBLEVEL, DDSCAPS_BACKBUFFER, DDSCAPS_COMPLEX,
+    DDSCAPS_FLIP, DDSCAPS_OFFSCREENPLAIN,
     DDSCAPS_PRIMARYSURFACE, DDSCL_EXCLUSIVE, DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSD_BACKBUFFERCOUNT,
     DDSD_CAPS, DDSD_HEIGHT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
 } from '../ddraw/constants.js';
@@ -495,6 +496,35 @@ test('a flip chain walks front to back and closes, and only the front flips', ()
     assert.equal(h.presented[0].bitCount, 32);
 
     assert.equal(h.release(other), 0);
+    assert.equal(h.release(front), 0);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
+test('GetAttachedSurface reads both words of a DDSCAPS2 and wants every bit of each', ()=>{
+    // Wine's ddraw7 test_gdi_surface: the front of a flip chain hands back
+    // the buffer behind it for DDSCAPS_BACKBUFFER.
+    const h = seamed();
+    const ddraw = h.create7(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    const front = h.createSurface7(ddraw,
+        { caps: DDSCAPS_PRIMARYSURFACE | DDSCAPS_COMPLEX | DDSCAPS_FLIP, backBufferCount: 1 });
+    const caps = 0x5500;
+    const out = 0x5600;
+    /** @param {number} dwCaps @param {number} dwCaps2 */
+    const ask = (dwCaps, dwCaps2)=>{
+        h.box.bytes.fill(0, caps, caps + 16);
+        h.box.memory.writeU32(caps, dwCaps);
+        h.box.memory.writeU32(caps + 4, dwCaps2);
+        return h.surface7(front, 'GetAttachedSurface', [caps, out]);
+    };
+
+    assert.equal(ask(DDSCAPS_BACKBUFFER, 0), DD_OK);
+    const back = h.box.memory.readU32(out);
+    assert.notEqual(back, front);
+    assert.equal(h.release(back), 1);
+    assert.equal(ask(DDSCAPS_BACKBUFFER, DDSCAPS2_MIPMAPSUBLEVEL), DDERR_NOTFOUND,
+        'the back buffer is no mip level');
+
     assert.equal(h.release(front), 0);
     assert.equal(h.release(ddraw), 0);
     h.assertAllReleased();

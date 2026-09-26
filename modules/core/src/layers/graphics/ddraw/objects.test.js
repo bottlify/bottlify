@@ -598,6 +598,35 @@ test('a flip chain runs front to back and closes the loop', ()=>{
     assert.ok(ddraw.destroyed);
 });
 
+test('GetAttachedSurface finds the attached surface that has every capability asked for', ()=>{
+    // Wine's ddraw7 test_gdi_surface asks a flip chain's front for
+    // DDSCAPS_BACKBUFFER and is handed the buffer behind it.
+    const { ddraw, front, back1, back2 } = withFlipChain();
+    /** @param {any} surface @param {number} wanted */
+    const lookFor = (surface, wanted)=>{
+        const found = surface.getAttachedSurface(wanted);
+        found.surface?.release();
+        return found;
+    };
+
+    assert.equal(lookFor(front, DDSCAPS_BACKBUFFER).surface, back1);
+    assert.equal(lookFor(front, DDSCAPS_BACKBUFFER | DDSCAPS_FLIP).surface, back1);
+    assert.equal(lookFor(back1, DDSCAPS_FLIP).surface, back2);
+    assert.equal(lookFor(back1, DDSCAPS_BACKBUFFER).hr, DDERR_NOTFOUND,
+        'only the first buffer behind the front is the back buffer');
+    assert.equal(lookFor(front, DDSCAPS_ZBUFFER).hr, DDERR_NOTFOUND);
+
+    const depth = makeOffscreen(ddraw, { caps: DDSCAPS_ZBUFFER, width: 640, height: 480 });
+    assert.equal(front.addAttachedSurface(depth), DD_OK);
+    assert.equal(lookFor(front, DDSCAPS_ZBUFFER).surface, depth);
+    assert.equal(lookFor(front, DDSCAPS_ZBUFFER | DDSCAPS_FLIP).hr, DDERR_NOTFOUND,
+        'every capability asked for, not any one of them');
+
+    assert.equal(depth.release(), 1);
+    assert.equal(front.release(), 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+});
+
 test('only the front of a chain flips, and only to a buffer of its own', ()=>{
     const { ddraw, front, back1, back2, back3 } = withFlipChain();
     const stranger = makeOffscreen(ddraw, { width: 640, height: 480 });
