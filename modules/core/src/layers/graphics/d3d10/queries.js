@@ -187,6 +187,10 @@ export function createDrawStatistics(){
  * @property {() => void} flush        Hands what is recorded to the GPU.
  * @property {() => number} now        Milliseconds, for a timestamp.
  * @property {(detail: string) => void} diverge
+ * @property {{ begin: () => any, end: (counter: any) => void }} [occlusion]
+ *     Where an occlusion query's draws are counted on the GPU. A counter
+ *     answers `samples` once `settled`, unless it `failed`; with no counter,
+ *     the query answers the estimate.
  */
 
 /**
@@ -207,11 +211,11 @@ export function createQueryObject(desc, interfaces, services, owner){
     let answer = null;
     let waitFor = 0;
 
-    if (kind === D3D10_QUERY.OCCLUSION || kind === D3D10_QUERY.OCCLUSION_PREDICATE)
-    {
-        services.diverge('an occlusion query counts every sample its draws\' viewports cover:'
-            + ' nothing here counts the samples that passed the depth and stencil tests');
-    }
+    const occlusion = kind === D3D10_QUERY.OCCLUSION
+        || kind === D3D10_QUERY.OCCLUSION_PREDICATE;
+    /** @type {any} */
+    let counter = null;
+    let estimated = false;
     if (kind === D3D10_QUERY.TIMESTAMP || kind === D3D10_QUERY.TIMESTAMP_DISJOINT)
     {
         services.diverge('a timestamp is the host\'s clock when the query ended, and the'
@@ -223,13 +227,14 @@ export function createQueryObject(desc, interfaces, services, owner){
      *
      * @param {DrawTotals} from
      * @param {DrawTotals} to
+     * @param {number} [counted]  Samples the GPU counted, when it did.
      */
-    const measure = (from, to)=>{
+    const measure = (from, to, counted)=>{
         const bytes = new Uint8Array(size);
         const view = new DataView(bytes.buffer);
         /** @param {number} at @param {number} value */
         const u64 = (at, value)=>view.setBigUint64(at, BigInt(Math.max(0, value)), true);
-        const samples = to.samples - from.samples;
+        const samples = counted ?? to.samples - from.samples;
         switch (kind)
         {
             case D3D10_QUERY.EVENT:
@@ -267,6 +272,26 @@ export function createQueryObject(desc, interfaces, services, owner){
         return bytes;
     };
 
+    /** @type {DrawTotals | null} */
+    let ended = null;
+
+    /** The answer, from the GPU's count when there is one. */
+    const answerOf = ()=>{
+        if (counter && !counter.failed)
+        {
+            return measure(/** @type {DrawTotals} */ (begun), /** @type {DrawTotals} */ (ended),
+                counter.samples);
+        }
+        if (occlusion && !estimated)
+        {
+            estimated = true;
+            services.diverge('an occlusion query counts every sample its draws\' viewports'
+                + ' cover: the GPU did not count the samples that passed the depth and'
+                + ' stencil tests');
+        }
+        return answer;
+    };
+
     return attachCom({
         desc,
 
@@ -275,9 +300,14 @@ export function createQueryObject(desc, interfaces, services, owner){
             {
                 return;
             }
+            if (counter && !counter.ended)
+            {
+                services.occlusion?.end(counter);
+            }
             state = 'building';
             answer = null;
             begun = services.totals();
+            counter = occlusion ? services.occlusion?.begin() ?? null : null;
         },
 
         End(){
@@ -290,7 +320,12 @@ export function createQueryObject(desc, interfaces, services, owner){
                 return;
             }
             state = 'issued';
-            answer = measure(/** @type {DrawTotals} */ (begun), services.totals());
+            ended = services.totals();
+            answer = measure(/** @type {DrawTotals} */ (begun), ended);
+            if (counter)
+            {
+                services.occlusion?.end(counter);
+            }
             waitFor = services.recorded();
         },
 
@@ -328,9 +363,14 @@ export function createQueryObject(desc, interfaces, services, owner){
                     return S_FALSE;
                 }
             }
+            // Sent, and counted once the frames holding its draws come back.
+            if (counter && !counter.settled)
+            {
+                return S_FALSE;
+            }
             if (hasData && dataSize !== 0)
             {
-                out.data = answer;
+                out.data = answerOf();
             }
             return S_OK;
         },

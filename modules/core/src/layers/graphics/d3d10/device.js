@@ -651,6 +651,10 @@ export function createDevice(options = {}){
                 },
                 now: options.now ?? (()=>performance.now()),
                 diverge,
+                occlusion: {
+                    begin: ()=>renderer.beginOcclusion(),
+                    end: counter=>renderer.endOcclusion(counter),
+                },
             }, { retainDevice, releaseDevice, device: deviceHandle });
         return S_OK;
     };

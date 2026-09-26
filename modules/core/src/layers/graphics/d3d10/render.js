@@ -342,6 +342,24 @@ export function createRenderer(services){
     /** @type {any} */
     let placeholders = null;
 
+    /**
+     * Occlusion counters: what an occlusion query of the device counts into.
+     * A draw recorded while any is open is counted on the GPU, into every one
+     * open; a counter is settled once it has ended and every submission that
+     * holds its draws has delivered its counts.
+     *
+     * @typedef {{ samples: number, outstanding: number, ended: boolean,
+     *             settled: boolean, failed: boolean }} OcclusionCounter
+     */
+    /** @type {Set<OcclusionCounter>} */
+    const occluding = new Set();
+    /** @type {Set<OcclusionCounter>} the counters the recording's draws count into */
+    let recordingCounters = new Set();
+    /** @param {OcclusionCounter} counter */
+    const settle = counter=>{
+        counter.settled = counter.ended && counter.outstanding === 0;
+    };
+
     /** @type {any[]} commands recorded since the last present */
     let recording = [];
     /**
@@ -750,15 +768,16 @@ export function createRenderer(services){
         || backingOf(resource).gpuDirty === true;
 
     /**
-     * Whether a level of this texture can be read back as it is: four-byte
-     * texels the GPU keeps in the program's own layout, one sample each.
+     * Whether a level of this texture can be read back as it is: texels the
+     * GPU keeps in the program's own layout, one sample each. A depth format
+     * or one converted on the way to the GPU cannot be.
      *
      * @param {any} backing
      */
     const readable = backing=>{
         const storage = backing.layout.storage;
         return !!storage && !storage.conversion && !storage.depth
-            && TEXEL_BYTES[storage.format] === 4 && backing.sampleCount === 1;
+            && TEXEL_BYTES[storage.format] > 0 && backing.sampleCount === 1;
     };
 
     /**
@@ -1558,11 +1577,11 @@ export function createRenderer(services){
         }
         // A staging resource: the level comes back whole, and the box is
         // placed where the program asked.
-        if (destination.desc.Usage !== D3D10_USAGE.STAGING || !readable(from) || is3D
-            || src.slice !== 0)
+        if (destination.desc.Usage !== D3D10_USAGE.STAGING || !readable(from) || is3D)
         {
             return false;
         }
+        const texel = TEXEL_BYTES[from.layout.storage.format];
         /** @type {(value?: any) => void} */
         let resolve = ()=>{};
         const promise = new Promise(done=>{
@@ -1574,8 +1593,8 @@ export function createRenderer(services){
             kind: 'readback',
             sourceId: from.id,
             surface: {
-                texture: from.texture, mipLevel: src.level,
-                width: fromLevel.width, height: fromLevel.height,
+                texture: from.texture, mipLevel: src.level, layer: src.slice,
+                width: fromLevel.width, height: fromLevel.height, bytesPerTexel: texel,
             },
             /** @param {{ width: number, height: number, data: Uint8Array } | null} image */
             deliver(image){
@@ -1589,9 +1608,9 @@ export function createRenderer(services){
                     const into = subresourceBytes(destination, destinationSubresource);
                     for (let row = 0; row < size.height; row++)
                     {
-                        const start = ((region.top + row) * image.width + region.left) * 4;
-                        into.bytes.set(image.data.subarray(start, start + size.width * 4),
-                            (at.y + row) * into.rowPitch + at.x * 4);
+                        const start = ((region.top + row) * image.width + region.left) * texel;
+                        into.bytes.set(image.data.subarray(start, start + size.width * texel),
+                            (at.y + row) * into.rowPitch + at.x * texel);
                     }
                 }
                 else
@@ -2070,6 +2089,14 @@ export function createRenderer(services){
                 indexBacking.gpu.markRead();
             }
             counters.draws++;
+            for (const counter of occluding)
+            {
+                if (!recordingCounters.has(counter))
+                {
+                    recordingCounters.add(counter);
+                    counter.outstanding++;
+                }
+            }
             record({
                 kind: 'draw',
                 pipeline: pipelineFor(state),
@@ -2105,6 +2132,7 @@ export function createRenderer(services){
                 startInstance: draw.startInstance ?? 0,
                 stencilRef: pipeline.stencilRef,
                 blendFactor: [...pipeline.blendFactor],
+                occlusion: occluding.size > 0 ? [...occluding] : null,
                 indexCount: draw.indexCount ?? null,
                 startIndex: draw.startIndex ?? 0,
                 baseVertex: draw.baseVertex ?? 0,
@@ -2125,6 +2153,32 @@ export function createRenderer(services){
             }
             counters.frames++;
             return submit(backingOf(backBuffer).surface);
+        },
+
+        /**
+         * A counter the draws recorded from now on count their samples into,
+         * or null without a GPU to count them.
+         *
+         * @returns {OcclusionCounter | null}
+         */
+        beginOcclusion(){
+            if (!backend)
+            {
+                return null;
+            }
+            /** @type {OcclusionCounter} */
+            const counter = {
+                samples: 0, outstanding: 0, ended: false, settled: false, failed: false,
+            };
+            occluding.add(counter);
+            return counter;
+        },
+
+        /** @param {OcclusionCounter} counter */
+        endOcclusion(counter){
+            occluding.delete(counter);
+            counter.ended = true;
+            settle(counter);
         },
 
         /**
@@ -2194,11 +2248,22 @@ export function createRenderer(services){
         const recorded = recording;
         recording = [];
         handedOver = recordedCount;
+        const counting = recordingCounters;
+        recordingCounters = new Set();
         backend.markPresent();
         chain = chain.then(()=>replay(recorded, surface)).catch(failure=>{
             counters.failures.push(String(failure && failure.message || failure));
             diverge(`a frame could not be replayed: ${failure && failure.message || failure}`);
+            for (const counter of counting)
+            {
+                counter.failed = true;
+            }
         }).then(()=>{
+            for (const counter of counting)
+            {
+                counter.outstanding--;
+                settle(counter);
+            }
             // A read back that never arrived leaves the host bytes as they
             // were, rather than a map waiting for ever.
             for (const command of recorded)
@@ -2222,6 +2287,11 @@ export function createRenderer(services){
         const frame = backend.beginFrame();
         /** @type {{ read: () => Promise<any>, command: any }[]} */
         const readers = [];
+        const counting = recorded.some(command=>command.occlusion);
+        /** @type {{ slot: number, counters: OcclusionCounter[] }[]} */
+        const counted = [];
+        /** @type {(() => Promise<number[]>) | null} */
+        let readCounts = null;
         /** @type {any} */
         let pass = null;
         /** @type {string | null} */
@@ -2270,6 +2340,7 @@ export function createRenderer(services){
                 targets: targetList.map(entry=>(entry ? entry.surface : null)),
                 clearValues,
                 ...(depth ? { depthTarget: depth.surface } : {}),
+                occlusion: counting,
                 ...(depth
                     ? {
                         depthStencilAttachment: {
@@ -2436,6 +2507,10 @@ export function createRenderer(services){
                     }
                     current.setIndexBuffer(command.indexBuffer.gpu, command.indexBuffer.format,
                         command.indexBuffer.offset);
+                }
+                const slot = command.occlusion ? current.beginOcclusionQuery() : null;
+                if (command.indexCount !== null)
+                {
                     current.drawIndexed(command.indexCount, command.instanceCount,
                         command.startIndex, command.baseVertex, 0);
                 }
@@ -2443,6 +2518,20 @@ export function createRenderer(services){
                 {
                     current.draw(command.vertexCount, command.instanceCount,
                         command.startVertex, 0);
+                }
+                if (slot !== null)
+                {
+                    current.endOcclusionQuery();
+                    counted.push({ slot, counters: command.occlusion });
+                }
+                else if (command.occlusion)
+                {
+                    // Every slot of the frame's set is spent: this draw's
+                    // samples go uncounted, and its queries cannot answer.
+                    for (const counter of command.occlusion)
+                    {
+                        counter.failed = true;
+                    }
                 }
             }
             // A clear that met no draw still has to happen before the frame
@@ -2465,6 +2554,10 @@ export function createRenderer(services){
             {
                 frame.present(surface);
             }
+            if (counting)
+            {
+                readCounts = frame.occlusionResults();
+            }
         }
         finally
         {
@@ -2475,6 +2568,17 @@ export function createRenderer(services){
         for (const reader of readers)
         {
             reader.command.deliver(await reader.read());
+        }
+        if (readCounts)
+        {
+            const values = await readCounts();
+            for (const { slot, counters: into } of counted)
+            {
+                for (const counter of into)
+                {
+                    counter.samples += values[slot] ?? 0;
+                }
+            }
         }
         // The record a test reads, without the promise a draw carried.
         lastFrame = recorded.map(command=>{

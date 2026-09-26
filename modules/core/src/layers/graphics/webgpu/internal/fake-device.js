@@ -28,7 +28,10 @@ const KEPT_FORMATS = /** @type {Record<string, number>} */ ({
 
 /**
  * @param {{ compilationMessages?: Record<string, any[]>,
- *           refusePipeline?: (descriptor: any) => string | null | undefined }} [options]
+ *           refusePipeline?: (descriptor: any) => string | null | undefined,
+ *           occlusionSamples?: (index: number) => number }} [options]
+ *        `occlusionSamples` is what the occlusion query at each slot of a query
+ *        set resolves to, standing in for the rasteriser; zero when absent.
  */
 export function createFakeDevice(options = {}){
     /** @type {any[]} */
@@ -138,6 +141,9 @@ export function createFakeDevice(options = {}){
         pass.setStencilReference = (/** @type {number} */ reference)=>
             record('setStencilReference', { reference });
         pass.setBlendConstant = (/** @type {any} */ color)=>record('setBlendConstant', { color });
+        pass.beginOcclusionQuery = (/** @type {number} */ index)=>
+            record('beginOcclusionQuery', { index });
+        pass.endOcclusionQuery = ()=>record('endOcclusionQuery', {});
         pass.setPipeline = (/** @type {any} */ pipeline)=>record('setPipeline', { pipeline });
         // A dynamic binding resolves to the byte range the shader would read:
         // the offsets arrive in binding order, and the resource names the
@@ -211,6 +217,23 @@ export function createFakeDevice(options = {}){
             deferred.push(()=>moveTexels(source, destination, size));
             calls.push({ op: 'copyTextureToBuffer', encoder, source, destination, size });
         };
+        /**
+         * @param {any} querySet @param {number} firstQuery @param {number} queryCount
+         * @param {any} destination @param {number} at
+         */
+        encoder.resolveQuerySet = (querySet, firstQuery, queryCount, destination, at)=>{
+            const destinationOffset = at;
+            deferred.push(()=>{
+                const view = new DataView(destination.bytes.buffer);
+                for (let index = 0; index < queryCount; index++)
+                {
+                    view.setBigUint64(destinationOffset + index * 8,
+                        BigInt(options.occlusionSamples?.(firstQuery + index) ?? 0), true);
+                }
+            });
+            calls.push({ op: 'resolveQuerySet', encoder, querySet, firstQuery, queryCount,
+                destination, destinationOffset });
+        };
         /** @param {any} source @param {any} destination @param {any} size */
         encoder.copyTextureToTexture = (source, destination, size)=>{
             deferred.push(()=>moveTexels(source, destination, size));
@@ -271,6 +294,15 @@ export function createFakeDevice(options = {}){
         createShaderModule,
         createBuffer,
         createBindGroupLayout: recorder('createBindGroupLayout'),
+        /** @param {any} descriptor */
+        createQuerySet: descriptor=>{
+            const querySet = object('createQuerySet', { descriptor });
+            querySet.destroy = ()=>{
+                calls.push({ op: 'destroyQuerySet', querySet });
+            };
+            calls.push({ op: 'createQuerySet', createQuerySet: querySet, descriptor });
+            return querySet;
+        },
         createPipelineLayout: recorder('createPipelineLayout'),
         /** @param {any} descriptor */
         createBindGroup: descriptor=>{

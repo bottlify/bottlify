@@ -50,6 +50,7 @@
  * @property {(desc: any)=>any} createRenderPipeline
  * @property {(desc: any)=>Promise<any>} createRenderPipelineAsync
  * @property {(desc?: any)=>GpuCommandEncoderLike} createCommandEncoder
+ * @property {(desc: any)=>any} createQuerySet
  */
 
 /**
@@ -68,6 +69,8 @@
  * @property {(source: any, sourceOffset: number, destination: any, destinationOffset: number,
  *            size: number)=>void} copyBufferToBuffer
  * @property {(source: any, destination: any, size: any)=>void} copyTextureToTexture
+ * @property {(querySet: any, firstQuery: number, queryCount: number, destination: any,
+ *            destinationOffset: number)=>void} resolveQuerySet
  * @property {(desc?: any)=>any} finish
  */
 

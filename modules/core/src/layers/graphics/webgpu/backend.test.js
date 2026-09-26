@@ -606,6 +606,62 @@ test('a pass takes a blend constant as dynamic state', ()=>{
         [{ r: 0.5, g: 0.25, b: 0, a: 1 }]);
 });
 
+test('occlusion queries count through the frame\'s query set, read once the frame ends',
+    async()=>{
+        const { gpu, backend } = harness({ fake: { occlusionSamples: (/** @type {number} */ index)=>
+            (index + 1) * 10 } });
+        const frame = backend.beginFrame();
+        const first = frame.beginPass({ target: target(backend), occlusion: true });
+        const zero = first.beginOcclusionQuery();
+        first.draw(3, 1, 0, 0);
+        first.endOcclusionQuery();
+        // A second pass counts on in the same set.
+        const second = frame.beginPass({ target: target(backend, 64), occlusion: true });
+        const one = second.beginOcclusionQuery();
+        second.endOcclusionQuery();
+        const read = frame.occlusionResults();
+        frame.end();
+        assert.deepEqual([zero, one], [0, 1]);
+        const [made] = gpu.of('createQuerySet');
+        assert.equal(made.descriptor.type, 'occlusion');
+        assert.equal(gpu.count('createQuerySet'), 1, 'one set for the frame');
+        for (const pass of gpu.of('beginRenderPass'))
+        {
+            assert.equal(pass.descriptor.occlusionQuerySet, made.createQuerySet);
+        }
+        const [resolved] = gpu.of('resolveQuerySet');
+        assert.deepEqual([resolved.firstQuery, resolved.queryCount], [0, 2]);
+        assert.deepEqual(await read(), [10, 20]);
+        assert.ok(gpu.of('destroyQuerySet').length === 1, 'the set goes with the frame');
+    });
+
+test('a pass not opened for occlusion cannot count, and a frame that counts nothing makes no set',
+    async()=>{
+        const { gpu, backend } = harness();
+        const frame = backend.beginFrame();
+        const pass = frame.beginPass({ target: target(backend) });
+        assert.throws(()=>pass.beginOcclusionQuery(), /occlusion/);
+        const read = frame.occlusionResults();
+        frame.end();
+        assert.deepEqual(await read(), []);
+        assert.equal(gpu.count('createQuerySet'), 0);
+        assert.equal(gpu.count('resolveQuerySet'), 0);
+    });
+
+test('a snapshot reads texels of any width, from any layer', async()=>{
+    const { gpu, backend } = harness();
+    const wide = backend.createSurface({ width: 20, height: 3, format: 'rgba16float',
+        layers: 2, label: 'wide' });
+    const frame = backend.beginFrame();
+    const read = frame.snapshot({ ...wide, layer: 1, bytesPerTexel: 8 });
+    frame.end();
+    const [copy] = gpu.of('copyTextureToBuffer');
+    assert.deepEqual(copy.source.origin, { x: 0, y: 0, z: 1 });
+    assert.equal(copy.destination.bytesPerRow, 256, 'twenty eight-byte texels, a row of 256');
+    const image = await read();
+    assert.equal(image.data.length, 20 * 3 * 8);
+});
+
 test('a texture copy closes the pass it interrupts and records on the frame encoder', ()=>{
     const { gpu, backend } = harness();
     const a = target(backend, 64);

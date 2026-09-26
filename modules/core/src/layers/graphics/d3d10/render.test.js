@@ -49,10 +49,11 @@ import {
 /**
  * A device with a backend over the recording GPU, and a swap chain to present.
  *
- * @param {{ width?: number, height?: number, compressedTextures?: boolean }} [options]
+ * @param {{ width?: number, height?: number, compressedTextures?: boolean,
+ *           fake?: Parameters<typeof createFakeDevice>[0] }} [options]
  */
 function harness(options = {}){
-    const gpu = createFakeDevice();
+    const gpu = createFakeDevice(options.fake);
     /** @type {any[]} */
     const presented = [];
     /** @type {string[]} */
@@ -1242,6 +1243,38 @@ test('a render target of another size than the first is not drawn into, and says
         assert.equal(pass.descriptor.colorAttachments.length, 1);
     });
 
+test('a float target\'s slice past the first is read back through a staging copy', async()=>{
+    const h = harness();
+    const { device } = h;
+    /** @type {{ resource?: any }} */
+    const target = {};
+    assert.equal(device.CreateTexture2D({
+        ...TEXTURE_2X2, Width: 4, Height: 4, ArraySize: 2,
+        Format: DXGI_FORMAT.R16G16B16A16_FLOAT, BindFlags: D3D10_BIND.RENDER_TARGET,
+    }, null, target), S_OK);
+    const made = h.gpu.of('createTexture').at(-1);
+    /** @type {{ resource?: any }} */
+    const staging = {};
+    assert.equal(device.CreateTexture2D({
+        ...TEXTURE_2X2, Width: 4, Height: 4, Format: DXGI_FORMAT.R16G16B16A16_FLOAT,
+        Usage: D3D10_USAGE.STAGING, BindFlags: 0, CPUAccessFlags: D3D10_CPU_ACCESS.READ,
+    }, null, staging), S_OK);
+    // Subresource 1 of a one-level, two-slice texture is its second slice.
+    device.CopySubresourceRegion(staging.resource, 0, 0, 0, 0, target.resource, 1, null);
+    assert.ok(!diverged(h, 'copy out of'), h.divergences.join('\n'));
+    await h.present();
+    const copy = h.gpu.of('copyTextureToBuffer').find((/** @type {any} */ call)=>
+        call.source.texture === made.texture);
+    assert.ok(copy, 'read back on the GPU');
+    assert.deepEqual(copy.source.origin, { x: 0, y: 0, z: 1 });
+    assert.equal(copy.destination.bytesPerRow, 256);
+    /** @type {{ data?: Uint8Array | null }} */
+    const mapped = {};
+    assert.equal(staging.resource.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
+    assert.equal(mapped.data?.length, 4 * 4 * 8);
+    staging.resource.Unmap(0);
+});
+
 test('a one-dimensional texture is kept as one row of a two-dimensional one', ()=>{
     // WebGPU's 1D texture has one level and one layer; Direct3D's has both.
     const h = harness();
@@ -1523,6 +1556,55 @@ test('a blend by the constant factor blends by the device\'s factor, set on the 
     });
 
 // --- queries ---
+
+test('an occlusion query answers the samples the GPU counted for its draws', async()=>{
+    // After Wine's d3d10core test_occlusion_query: the GPU's own count, by
+    // way of an occlusion query around each draw the query spans.
+    const h = harness({ fake: { occlusionSamples: (/** @type {number} */ slot)=>
+        (slot + 1) * 100 } });
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ query?: any }} */
+    const made = {};
+    assert.equal(device.CreateQuery({ Query: D3D10_QUERY.OCCLUSION, MiscFlags: 0 }, made), S_OK);
+    const query = made.query;
+    /** @type {{ query?: any }} */
+    const madePredicate = {};
+    assert.equal(device.CreatePredicate({ Query: D3D10_QUERY.OCCLUSION_PREDICATE,
+        MiscFlags: 0 }, madePredicate), S_OK);
+    const predicate = madePredicate.query;
+    device.Draw(3, 0);
+    query.Begin();
+    predicate.Begin();
+    device.Draw(3, 0);
+    device.Draw(3, 0);
+    predicate.End();
+    query.End();
+    device.Draw(3, 0);
+    /** @type {{ data?: Uint8Array | null }} */
+    const out = {};
+    assert.equal(query.GetData(true, 8, D3D10_ASYNC_GETDATA_DONOTFLUSH, out), S_FALSE,
+        'nothing has been sent');
+    assert.equal(query.GetData(true, 8, 0, out), S_FALSE, 'sent, and not yet counted');
+    await h.device.idle();
+    assert.equal(query.GetData(true, 8, 0, out), S_OK);
+    const count = new DataView((out.data ?? new Uint8Array(8)).buffer).getBigUint64(0, true);
+    assert.equal(count, 100n + 200n, 'the two draws inside, and not the ones around them');
+    assert.equal(predicate.GetData(true, 4, 0, out), S_OK);
+    assert.deepEqual([...(out.data ?? [])], [1, 0, 0, 0]);
+    assert.equal(h.gpu.count('beginOcclusionQuery'), 2);
+    assert.equal(h.gpu.count('endOcclusionQuery'), 2);
+    assert.ok(!diverged(h, 'occlusion'), h.divergences.join('\n'));
+
+    // Nothing drawn inside: nothing counted, with no query on the GPU.
+    query.Begin();
+    query.End();
+    await h.present();
+    assert.equal(query.GetData(true, 8, 0, out), S_OK);
+    assert.deepEqual([...(out.data ?? [])], [0, 0, 0, 0, 0, 0, 0, 0]);
+    query.release();
+    predicate.release();
+});
 
 test('an event ended after a draw waits for the draw to be sent, and polling sends it',
     async()=>{

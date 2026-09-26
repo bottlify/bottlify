@@ -40,7 +40,11 @@ const BufferUsage = {
     UNIFORM: 0x0040,
     STORAGE: 0x0080,
     INDIRECT: 0x0100,
+    QUERY_RESOLVE: 0x0200,
 };
+
+/** The most occlusion queries a frame counts: WebGPU's own limit on one set. */
+const OCCLUSION_CAPACITY = 4096;
 
 /** `GPUMapMode` bits, likewise. */
 const MapMode = {
@@ -345,9 +349,11 @@ export function createBackend(options){
     /**
      * @param {any} encoder
      * @param {any} descriptor
+     * @param {{ set: any, used: number } | null} [occlusion]  The frame's query
+     *     set, for a pass opened with `occlusion: true`.
      * @returns {any}
      */
-    function beginPass(encoder, descriptor){
+    function beginPass(encoder, descriptor, occlusion = null){
         const { sizing: target, attachments } = colourAttachmentsOf(descriptor);
         for (const written of descriptor.targets ?? [descriptor.target])
         {
@@ -361,6 +367,7 @@ export function createBackend(options){
             label: descriptor.label === undefined ? `pass:${target.label}` : descriptor.label,
             colorAttachments: attachments,
             depthStencilAttachment: descriptor.depthStencilAttachment,
+            ...(occlusion ? { occlusionQuerySet: occlusion.set } : {}),
         });
         profiler.count('passes');
 
@@ -426,6 +433,32 @@ export function createBackend(options){
              */
             setBlendConstant(color){
                 raw.setBlendConstant(color);
+            },
+
+            /**
+             * Starts counting the samples that pass the depth and stencil
+             * tests, in the next slot of the frame's set. Queries do not nest
+             * and cannot span passes; a frame that has used every slot counts
+             * no more, and says so with null.
+             *
+             * @returns {number | null} the slot, for `frame.occlusionResults`
+             */
+            beginOcclusionQuery(){
+                if (!occlusion)
+                {
+                    throw new Error('This pass was not opened for occlusion queries');
+                }
+                if (occlusion.used >= OCCLUSION_CAPACITY)
+                {
+                    return null;
+                }
+                const index = occlusion.used++;
+                raw.beginOcclusionQuery(index);
+                return index;
+            },
+
+            endOcclusionQuery(){
+                raw.endOcclusionQuery();
             },
 
             /** @param {any} next */
@@ -667,6 +700,14 @@ export function createBackend(options){
             // this frame's encoder now, so it is this frame's submit that
             // frees them.
             const stagingBuffers = [];
+            /**
+             * The frame's occlusion queries: one set, made by the first pass
+             * that counts, its slots handed out in order across passes.
+             *
+             * @type {{ set: any, used: number, readback: any } | null}
+             */
+            let occlusion = null;
+            let occlusionWanted = false;
             const endUploads = profiler.phase('uploads');
             while (pendingCopies.length > 0)
             {
@@ -783,22 +824,59 @@ export function createBackend(options){
                     }
                     closeCurrentPass();
                     const endPhase = profiler.phase('passes');
-                    currentPass = beginPass(encoder, descriptor);
+                    if (descriptor.occlusion && !occlusion)
+                    {
+                        occlusion = {
+                            set: device.createQuerySet({ label: `occlusion#${index}`,
+                                type: 'occlusion', count: OCCLUSION_CAPACITY }),
+                            used: 0,
+                            readback: null,
+                        };
+                    }
+                    currentPass = beginPass(encoder, descriptor,
+                        descriptor.occlusion ? occlusion : null);
                     endPhase();
                     return currentPass;
                 },
 
                 /**
+                 * What every occlusion query of the frame counted, by slot, for
+                 * a reader after `end`: the set is resolved and copied out as
+                 * the frame's last commands.
+                 *
+                 * @returns {() => Promise<number[]>}
+                 */
+                occlusionResults(){
+                    occlusionWanted = true;
+                    return async()=>{
+                        const readback = occlusion?.readback;
+                        if (!readback)
+                        {
+                            return [];
+                        }
+                        await readback.buffer.mapAsync(MapMode.READ);
+                        const counts = new BigUint64Array(
+                            readback.buffer.getMappedRange().slice(0, readback.count * 8));
+                        readback.buffer.unmap();
+                        readback.buffer.destroy();
+                        return [...counts].map(Number);
+                    };
+                },
+
+                /**
                  * The target's pixels as they are at this point of the frame,
                  * for a reader after `end`. The pass is closed for the copy;
-                 * the caller reopens one that loads what is there.
+                 * the caller reopens one that loads what is there. The level
+                 * and layer are the surface's; its texels are four bytes
+                 * unless it says otherwise.
                  *
-                 * @param {import('./contract.js').Surface} surface
+                 * @param {import('./contract.js').Surface & { bytesPerTexel?: number }} surface
                  * @returns {() => Promise<{ width: number, height: number, data: Uint8Array }>}
                  */
                 snapshot(surface){
                     closeCurrentPass();
-                    const bytesPerRow = Math.ceil(surface.width * 4 / 256) * 256;
+                    const texel = surface.bytesPerTexel ?? 4;
+                    const bytesPerRow = Math.ceil(surface.width * texel / 256) * 256;
                     const size = bytesPerRow * surface.height;
                     let staging;
                     if (spareStaging && spareStaging.size === size)
@@ -822,11 +900,12 @@ export function createBackend(options){
                     return async()=>{
                         await staging.mapAsync(MapMode.READ);
                         const mapped = new Uint8Array(staging.getMappedRange());
-                        const data = new Uint8Array(surface.width * surface.height * 4);
+                        const rowBytes = surface.width * texel;
+                        const data = new Uint8Array(rowBytes * surface.height);
                         for (let row = 0; row < surface.height; row++)
                         {
                             data.set(mapped.subarray(row * bytesPerRow,
-                                row * bytesPerRow + surface.width * 4), row * surface.width * 4);
+                                row * bytesPerRow + rowBytes), row * rowBytes);
                         }
                         staging.unmap();
                         // A snapshot that was in flight when `dispose()` ran has
@@ -865,6 +944,20 @@ export function createBackend(options){
                     frame.ended = true;
                     closeCurrentPass();
 
+                    /** @type {any} */
+                    let resolved = null;
+                    if (occlusion && occlusion.used > 0 && occlusionWanted)
+                    {
+                        const size = occlusion.used * 8;
+                        resolved = device.createBuffer({ label: 'occlusion-resolve', size,
+                            usage: BufferUsage.QUERY_RESOLVE | BufferUsage.COPY_SRC });
+                        const readback = device.createBuffer({ label: 'occlusion', size,
+                            usage: BufferUsage.MAP_READ | BufferUsage.COPY_DST });
+                        encoder.resolveQuerySet(occlusion.set, 0, occlusion.used, resolved, 0);
+                        encoder.copyBufferToBuffer(resolved, 0, readback, 0, size);
+                        occlusion.readback = { buffer: readback, count: occlusion.used };
+                    }
+
                     const endUpload = profiler.phase('uploads');
                     for (const buffer of dynamicBuffers)
                     {
@@ -885,6 +978,8 @@ export function createBackend(options){
                     {
                         staging.destroy();
                     }
+                    resolved?.destroy();
+                    occlusion?.set.destroy();
 
                     for (const buffer of dynamicBuffers)
                     {
