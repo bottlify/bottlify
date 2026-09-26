@@ -323,6 +323,16 @@ export function createMessageQueue(options = {}){
     let dirtyWindow = null;
 
     /**
+     * The entries the input layer posted -- the ones that name the pointer's
+     * position -- as against a program's own posts of the same messages: the
+     * system answers the mouse's own messages in ways it does not answer a
+     * program's.
+     *
+     * @type {WeakSet<object>}
+     */
+    const input = new WeakSet();
+
+    /**
      * Where a message posted from outside goes, when the window half has
      * said: the input layer names the pointer's position and no window, and
      * which window is under the pointer is the window half's to know.
@@ -600,11 +610,15 @@ export function createMessageQueue(options = {}){
                 held.time = (message.time ?? 0) >>> 0;
                 held.x = (message.x ?? 0) | 0;
                 held.y = (message.y ?? 0) | 0;
+                if (message.x !== undefined)
+                {
+                    input.add(held);
+                }
                 posted++;
                 return;
             }
         }
-        pending.push({
+        const entry = {
             hwnd: message.hwnd >>> 0,
             message: message.message >>> 0,
             wParam: message.wParam >>> 0,
@@ -612,7 +626,12 @@ export function createMessageQueue(options = {}){
             time: (message.time ?? 0) >>> 0,
             x: (message.x ?? 0) | 0,
             y: (message.y ?? 0) | 0,
-        });
+        };
+        if (message.x !== undefined)
+        {
+            input.add(entry);
+        }
+        pending.push(entry);
         posted++;
     };
 
@@ -664,6 +683,14 @@ export function createMessageQueue(options = {}){
 
         /** @param {PostedMessage} incoming */
         post: postMessage,
+
+        /**
+         * Whether a message taken from the queue came from the input layer
+         * rather than from a program's post.
+         *
+         * @param {object} entry
+         */
+        fromInput: entry=>input.has(entry),
 
         /**
          * Registers a hot key, or replaces the registration this `hwnd` and

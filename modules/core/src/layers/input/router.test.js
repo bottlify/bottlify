@@ -78,9 +78,9 @@ function harness({ bounds = null, window = ()=>HWND, exclusive } = {}){
         },
         /** @param {import('./router.js').HostInputEvent} event */
         send: event=>router.send(event),
-        /** Everything since the last look, with the noise of a cursor question out. */
+        /** Everything since the last look. */
         drain(){
-            const taken = messages.filter(entry=>entry.message !== WM.SETCURSOR);
+            const taken = [...messages];
             messages.length = 0;
             return taken;
         },
@@ -671,25 +671,6 @@ test('a released key is not released twice when focus goes away', ()=>{
 
     h.send({ kind: 'focus', gained: false });
     assert.deepEqual(h.drain(), []);
-});
-
-test('the cursor question is asked when the answer could have changed, not per move', ()=>{
-    const h = harness();
-    h.send({ kind: 'focus', gained: true });
-    h.all();
-
-    h.send({ kind: 'pointerMove', x: 1, y: 1 });
-    h.send({ kind: 'pointerMove', x: 2, y: 2 });
-    h.send({ kind: 'pointerMove', x: 3, y: 3 });
-    const moves = h.all();
-    const asked = moves.filter(entry=>entry.message === WM.SETCURSOR);
-    assert.equal(asked.length, 1, 'once, on the first move after focus arrived');
-    assert.equal(asked[0].wParam, HWND);
-    assert.equal(asked[0].lParam, WM.MOUSEMOVE << 16 | 1, 'HTCLIENT, and what it precedes');
-    assert.equal(moves.indexOf(asked[0]), 0, 'and before the move it is about');
-
-    h.send({ kind: 'pointerButton', button: 'left', down: true });
-    assert.equal(h.all()[0].message, WM.SETCURSOR, 'a button asks again');
 });
 
 test('a pad is remembered even though nothing reads it yet', ()=>{

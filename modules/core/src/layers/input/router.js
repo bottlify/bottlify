@@ -28,7 +28,6 @@ export const WM = Object.freeze({
     ACTIVATE: 0x0006,
     SETFOCUS: 0x0007,
     KILLFOCUS: 0x0008,
-    SETCURSOR: 0x0020,
     ACTIVATEAPP: 0x001c,
     NCACTIVATE: 0x0086,
     KEYDOWN: 0x0100,
@@ -40,9 +39,6 @@ export const WM = Object.freeze({
     MOUSEMOVE: 0x0200,
     MOUSEWHEEL: 0x020a,
 });
-
-/** The hit-test code WM_SETCURSOR reports for the client area. */
-const HTCLIENT = 1;
 
 /** The virtual keys this file has an opinion about. */
 const VK_SHIFT = 0x10;
@@ -271,14 +267,6 @@ export function createInputRouter(
      * the keyboard layout, which is the host's, not ours.
      */
     let lastKeyLParam = 0;
-    /**
-     * Whether the program is owed a WM_SETCURSOR. Windows *sends* one on every
-     * mouse move; this queue only posts, and posting one per move would double
-     * the traffic of the busiest message there is. So it is posted when the
-     * answer could have changed -- focus arriving, a button going either way --
-     * which is where a program that sets its own cursor sets it.
-     */
-    let cursorDirty = true;
     let posted = 0;
     let dropped = 0;
 
@@ -308,16 +296,6 @@ export function createInputRouter(
             bits |= BUTTONS[name][2];
         }
         return bits;
-    };
-
-    /** @param {number} message  The mouse message this cursor question precedes. */
-    const announceCursor = message=>{
-        if (!cursorDirty)
-        {
-            return;
-        }
-        cursorDirty = false;
-        emit(WM.SETCURSOR, targetWindow(), (message & 0xffff) << 16 | HTCLIENT);
     };
 
     /**
@@ -505,7 +483,6 @@ export function createInputRouter(
 
         if ((cursor.x !== px || cursor.y !== py) && windowHears('mouse'))
         {
-            announceCursor(WM.MOUSEMOVE);
             emit(WM.MOUSEMOVE, mask(), point());
         }
         if (stepX !== 0 || stepY !== 0)
@@ -543,15 +520,11 @@ export function createInputRouter(
         }
 
         const message = event.down ? downMessage : upMessage;
-        // A button is the moment a program is most likely to want a different
-        // cursor, so the question is always asked again here.
-        cursorDirty = true;
         const wParam = (extra << 16 | mask()) >>> 0;
         const lParam = point();
         const withheld = !windowHears('mouse');
         if (!withheld)
         {
-            announceCursor(message);
             emit(message, wParam, lParam);
         }
         // After the message, so a record exists only for a press the guest was
@@ -625,7 +598,6 @@ export function createInputRouter(
     const focus = event=>{
         if (event.gained)
         {
-            cursorDirty = true;
             return true;
         }
 
@@ -703,7 +675,6 @@ export function createInputRouter(
             residualY = 0;
             if (cursor.x !== px || cursor.y !== py)
             {
-                announceCursor(WM.MOUSEMOVE);
                 emit(WM.MOUSEMOVE, mask(), point());
             }
         },

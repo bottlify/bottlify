@@ -83,6 +83,8 @@ const WM_NCPAINT = 0x0085;
  */
 const WM_NCACTIVATE = 0x0086;
 const WM_NCMOUSEMOVE = 0x00a0;
+/** WM_NCXBUTTONDBLCLK, the last of the frame's mouse messages. */
+const WM_NCMOUSELAST = 0x00ad;
 const WM_NCLBUTTONDOWN = 0x00a1;
 const WM_RBUTTONDOWN = 0x0204;
 const WM_MBUTTONDOWN = 0x0207;
@@ -2319,8 +2321,35 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * WM_SETCURSOR, sent as a message of the mouse's own is taken, to the
+     * window the pointer is over -- its hit, and the client form of the mouse
+     * message, in lParam -- as Windows sends it whenever the cursor moves in
+     * a window with the mouse not captured. Sent from the thread taking the
+     * message, like WM_MOUSEACTIVATE; the wheel moves no cursor, and a
+     * message a program posted itself is no move of it.
+     *
+     * @param {any} entry @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const askCursor = (entry, thread)=>{
+        const kind = entry.message >>> 0;
+        const client = kind >= WM_MOUSEMOVE && kind <= WM_MOUSELAST && kind !== WM_MOUSEWHEEL;
+        const frame = kind >= WM_NCMOUSEMOVE && kind <= WM_NCMOUSELAST;
+        const record = client || frame ? live(entry.hwnd) : null;
+        if (!record || captured !== 0 || !host.queue.fromInput(entry))
+        {
+            return 0;
+        }
+        const hit = client ? HTCLIENT : entry.wParam & 0xffff;
+        const mouse = client ? kind : kind - WM_NCMOUSEMOVE + WM_MOUSEMOVE;
+        return send(record.hwnd, WM_SETCURSOR, record.hwnd, ((mouse & 0xffff) << 16 | hit) >>> 0,
+            thread);
+    };
+
+    /**
      * The next message a retrieval takes, a press having activated its
-     * window first; a press its window ate is passed over for the one after.
+     * window first and the window under the pointer asked for its cursor; a
+     * press its window ate is passed over for the one after.
      *
      * @param {() => any} take @param {unknown} thread
      * @returns {any}
@@ -2331,8 +2360,9 @@ export function createWindowFunctions(host){
         {
             return null;
         }
-        return andThen(mouseActivate(entry, thread),
-            (/** @type {boolean} */ keep)=>(keep ? entry : takeThrough(take, thread)));
+        return andThen(mouseActivate(entry, thread), (/** @type {boolean} */ keep)=>(keep
+            ? andThen(askCursor(entry, thread), ()=>entry)
+            : takeThrough(take, thread)));
     };
 
     /**

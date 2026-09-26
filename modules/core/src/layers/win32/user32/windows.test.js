@@ -894,6 +894,51 @@ test('SetFocus into another window sends the activation set, then the focus', ()
     ], 'sent before the call returns: NCACTIVATE, ACTIVATE, then KILLFOCUS and SETFOCUS');
 });
 
+test('WM_SETCURSOR is sent to the window under the pointer as each mouse message is taken', ()=>{
+    // user32's message tests (WmMove_mouse): WM_SETCURSOR, its lParam the
+    // hit and the mouse message, is sent before each WM_MOUSEMOVE the pointer
+    // makes; documented as sent to the window the cursor moves in when the
+    // mouse is not captured. Over the frame the hit is the frame's, and the
+    // message the client one. A mouse message a program posted itself is no
+    // move of the cursor, and a look that leaves the message sends nothing.
+    const WM_SETCURSOR = 0x0020;
+    const WM_MOUSEMOVE = 0x0200;
+    const WS_CAPTION = 0x00c00000;
+    const HTCLIENT = 1;
+    const HTCAPTION = 2;
+    const context = setup();
+    putClass(context.memory);
+    context.fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(context.fns, context.memory, { style: WS_CAPTION | WS_VISIBLE });
+    /** Takes what is queued, and answers what was sent on the way. */
+    const take = (/** @type {number} */ how = PM_REMOVE)=>{
+        context.dispatched.length = 0;
+        context.fns.PeekMessageA.handler([MSG_BUFFER, 0, WM_MOUSEMOVE, WM_MOUSEMOVE + 0x0d, how]);
+        return context.dispatched.map(({ hwnd: to, message, wParam, lParam })=>
+            [to, message, wParam, lParam >>> 0]);
+    };
+    const move = (/** @type {number} */ x, /** @type {number} */ y)=>context.queue.post(
+        { hwnd: 0, message: WM_MOUSEMOVE, wParam: 0, lParam: 0, x, y });
+
+    move(60, 80);
+    assert.deepEqual(take(PM_NOREMOVE), [], 'a look sends nothing');
+    assert.deepEqual(take(), [[hwnd, WM_SETCURSOR, hwnd, (WM_MOUSEMOVE << 16 | HTCLIENT) >>> 0]]);
+    assert.equal(context.memory.u32(MSG_BUFFER + MSG.message), WM_MOUSEMOVE, 'then the move');
+
+    move(60, 30);
+    context.dispatched.length = 0;
+    context.fns.PeekMessageA.handler([MSG_BUFFER, 0, 0x00a0, 0x00a0, PM_REMOVE]);
+    assert.deepEqual(context.dispatched.map(({ message, lParam })=>[message, lParam >>> 0]),
+        [[WM_SETCURSOR, (WM_MOUSEMOVE << 16 | HTCAPTION) >>> 0]], 'over the caption');
+
+    context.queue.post({ hwnd, message: WM_MOUSEMOVE, wParam: 0, lParam: 0 });
+    assert.deepEqual(take(), [], 'posted by the program');
+
+    context.fns.SetCapture.handler([hwnd]);
+    move(61, 80);
+    assert.deepEqual(take(), [], 'captured');
+});
+
 test('a press activates its window as the program takes it, unless the window says not to', ()=>{
     const WM_MOUSEACTIVATE = 0x0021;
     const MA_NOACTIVATEANDEAT = 4;
