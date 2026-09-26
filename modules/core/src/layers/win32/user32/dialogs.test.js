@@ -546,6 +546,40 @@ test('a quit retrieved inside a modal loop ends the dialog and is put back', asy
     assert.equal(queue.quitPending(), true, 'the loop outside has yet to see it');
 });
 
+test('input over a dialog is placed without running the program, whose dialog procedure is '
+    + 'asked WM_NCHITTEST on the thread that takes the message', async()=>{
+    // user32's message tests (WmMove_mouse): WM_NCHITTEST reaches the window
+    // under the pointer from the thread taking the input, a dialog's
+    // procedure first as for every message it gets. The input layer's
+    // messages are routed as they arrive, when no thread of the program is
+    // there to run it on.
+    const WS_VISIBLE = 0x10000000;
+    const WM_NCHITTEST = 0x0084;
+    const WM_LBUTTONDOWN = 0x0201;
+    const PM_REMOVE = 1;
+    /** @type {[number, unknown][]} */
+    const heard = [];
+    const { memory, queue, fns } = setup({ dispatch: (wndProc, message, thread)=>{
+        heard.push([message.message, thread]);
+        return 0;
+    } });
+    putTemplate(memory, [], { style: WS_VISIBLE });
+    const dialog = await fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0,
+        DIALOGPROC, 0]);
+    memory.writeMemory(OUT, new Uint8Array(new Uint32Array([2, 2]).buffer));
+    fns.ClientToScreen.handler([dialog, OUT]);
+    const [x, y] = [memory.u32(OUT), memory.u32(OUT + 4)];
+    heard.length = 0;
+
+    queue.post({ hwnd: 0, message: WM_LBUTTONDOWN, wParam: 1, lParam: 0, x, y });
+    assert.deepEqual([...heard], [], 'nothing of the program runs as the input arrives');
+
+    assert.equal(await fns.PeekMessageA.handler([OUT, 0, 0, 0, PM_REMOVE]), 1);
+    assert.deepEqual([memory.u32(OUT), memory.u32(OUT + 4)], [dialog, WM_LBUTTONDOWN]);
+    assert.deepEqual(heard.find(([message])=>message === WM_NCHITTEST),
+        [WM_NCHITTEST, 'the caller'], 'asked as the message is taken, on the taking thread');
+});
+
 test('a modal loop takes a mouse message the way GetMessage takes it, the window under the '
     + 'pointer asked WM_SETCURSOR first', async()=>{
     // user32's message tests (WmMove_mouse): WM_SETCURSOR is sent to the

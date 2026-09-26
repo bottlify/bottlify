@@ -318,8 +318,10 @@ gets its own heap, hive, queue and COM registry.
   `BS_DEFPUSHBUTTON` while it has it, `DM_SETDEFID` moves the style from the old default to the new,
   and Enter presses the focused push button only while it is the default. Pointer messages from the
   input layer are routed as they arrive to the window under the point (or the capture), in that
-  window's client coordinates, with the frame's hit test turning them into non-client messages; as
-  one is taken for a window whose procedure is the program's own, the windows under the point are
+  window's client coordinates, with the frame's hit test turning them into non-client messages,
+  and nothing of the program runs then -- a dialog's procedure is not asked, since the dialog class
+  hands every message to the program's dialog procedure first; as one is taken for a window whose
+  procedure is the program's own, or a dialog, the windows under the point are
   sent `WM_NCHITTEST` from the top, deepest first, and the message goes to the first that does not
   answer `HTTRANSPARENT`, in the client form for `HTCLIENT` and the frame's otherwise --
   `WindowFromPoint` asks the same, and `PeekMessage`/`GetMessage` ask it before their range and window filter is applied, so a filter sees the message in the form it is delivered in. As each of the mouse's own messages is taken, `WM_SETCURSOR` is

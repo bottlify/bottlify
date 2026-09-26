@@ -2101,13 +2101,14 @@ export function createWindowFunctions(host){
 
     /**
      * Whether a window lets the pointer through, asked of a procedure on
-     * this side: what it answers WM_NCHITTEST with.
+     * this side that answers without the program: what it answers
+     * WM_NCHITTEST with. One that would run the program is not asked.
      *
      * @param {any} record
      */
     const transparentAt = record=>{
         const procedure = procedures.get(record.wndProc);
-        if (!procedure)
+        if (!procedure || reachesProgram(record))
         {
             return false;
         }
@@ -2117,8 +2118,16 @@ export function createWindowFunctions(host){
         return typeof answer === 'number' && (answer | 0) === HTTRANSPARENT;
     };
 
-    /** @param {any} record  Whether its procedure is the program's own. */
-    const ownProcedure = record=>record.wndProc !== 0 && !procedures.has(record.wndProc);
+    /**
+     * Whether a message to a window can run the program's code: its
+     * procedure is the program's own, or the dialog class's, which hands
+     * every message to the program's dialog procedure first.
+     *
+     * @param {any} record
+     */
+    const reachesProgram = record=>record.wndProc !== 0
+        && (!procedures.has(record.wndProc)
+            || procedures.get(record.wndProc) === controlProcedures['#32770']);
 
     /**
      * The window under a screen point as the program would find it, asked
@@ -2139,7 +2148,7 @@ export function createWindowFunctions(host){
             {
                 return null;
             }
-            if (!ownProcedure(record))
+            if (!reachesProgram(record))
             {
                 return transparentAt(record) ? next(index + 1)
                     : { record, hit: hitTest(record, x, y) };
@@ -2467,10 +2476,11 @@ export function createWindowFunctions(host){
     /**
      * The mouse's own message, sent where the program's procedures say the
      * pointer is: it was routed as it arrived by what this side can answer
-     * alone, and a window whose procedure is the program's own is asked
-     * WM_NCHITTEST as the message is taken -- one that answers HTTRANSPARENT
-     * passes it to the window beneath, and the hit answered decides whether
-     * it is the client or the frame form of the message.
+     * alone, and a window whose messages run the program's code -- its own
+     * procedure, or a dialog's -- is asked WM_NCHITTEST as the message is
+     * taken: one that answers HTTRANSPARENT passes it to the window beneath,
+     * and the hit answered decides whether it is the client or the frame
+     * form of the message.
      *
      * @param {any} entry @param {unknown} thread
      * @returns {any} the entry, placed
@@ -2512,8 +2522,8 @@ export function createWindowFunctions(host){
 
     /**
      * Whether `rehit` asks the program's procedures where a message goes: a
-     * mouse message from the input layer, for a window whose procedure is
-     * the program's own, while nothing holds the capture.
+     * mouse message from the input layer, for a window whose messages run
+     * the program's code, while nothing holds the capture.
      *
      * @param {any} entry
      */
@@ -2522,7 +2532,7 @@ export function createWindowFunctions(host){
         const client = kind >= WM_MOUSEMOVE && kind <= WM_MOUSELAST && kind !== WM_MOUSEWHEEL;
         const frame = kind >= WM_NCMOUSEMOVE && kind <= WM_NCMOUSELAST;
         const target = client || frame ? live(entry.hwnd) : null;
-        return target !== null && ownProcedure(target) && captured === 0
+        return target !== null && reachesProgram(target) && captured === 0
             && host.queue.fromInput(entry);
     };
 
