@@ -582,3 +582,53 @@ test('rand starts where this runtime starts, without any srand at all', ()=>{
     // and what msvcrt does.
     assert.equal(fns.rand.handler(), 41);
 });
+
+/**
+ * The whole table over a host that has a heap, a start-up and a volume, so
+ * the functions that need those seams are exported.
+ *
+ * @param {any} files
+ */
+function wholeRuntime(files){
+    const host = fakeHost(0x4000);
+    let next = 0x2000;
+    const fns = /** @type {Record<string, any>} */ (createMsvcrtFunctions({
+        ...host,
+        allocate: bytes=>{
+            const at = next;
+            next += bytes + 7 & ~7;
+            return at;
+        },
+        free: ()=>true,
+        commandLine: ()=>'"C:\\game.exe"',
+        exitProcess: ()=>0,
+        files,
+    }));
+    /** @param {number} address @param {string} text */
+    const put = (address, text)=>{
+        host.writeMemory(address, new Uint8Array([...text].map(c=>c.charCodeAt(0)).concat(0)));
+        return address;
+    };
+    /** @param {number} address */
+    const u32 = address=>new DataView(host.bytes.buffer).getUint32(address, true);
+    return { host, fns, put, u32 };
+}
+
+test('errno is one variable: a failing call sets what _errno points at', ()=>{
+    // Before the program has asked for the address and after: the start-up
+    // hands out the cell the failing functions write.
+    const { fns, put, u32 } = wholeRuntime({
+        stat: ()=>null,
+        currentDirectory: ()=>'C:\\game',
+        setCurrentDirectory: ()=>true,
+    });
+    const ENOENT = 2;
+    const ERANGE = 34;
+
+    assert.equal(fns._chdir.handler([put(0x100, 'C:\\nowhere')]), -1);
+    const cell = fns._errno.handler([]);
+    assert.equal(u32(cell), ENOENT, 'set before anyone asked where errno is');
+
+    assert.equal(fns.strtol.handler([put(0x100, '99999999999'), 0, 10]), 0x7fffffff);
+    assert.equal(u32(cell), ERANGE, 'and written through the cell after');
+});

@@ -17,8 +17,11 @@
  *
  * The operating half returns zero for success and -1 for failure, the C
  * convention and the opposite of the Win32 one sitting beside it in this
- * runtime. Getting that backwards makes every operation appear to fail.
+ * runtime. Getting that backwards makes every operation appear to fail. A
+ * failure says why in errno, with the codes each function documents.
  */
+
+import { EACCES, EEXIST, ENOENT, ENOTEMPTY, ERANGE } from './globals.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -92,6 +95,7 @@ export function fullPath(path, current){
  * @property {() => string[]} [drives]  Letters the filesystem has mounted.
  * @property {any} files  The volume: stat, remove, rename, mkdir and the
  *           current directory.
+ * @property {(code: number) => void} [errno]  Where a failure says why.
  */
 
 /**
@@ -115,16 +119,41 @@ export function createPathFunctions(host){
         host.writeMemory(pointer, bytes);
     };
 
+    /** @param {number} code */
+    const fail = code=>{
+        host.errno?.(code);
+    };
+
+    /** @param {string} path */
+    const exists = path=>host.files.stat(path)?.exists === true;
+
     /**
      * @param {number} argBytes
-     * @param {(args: number[]) => boolean} act
+     * @param {(args: number[]) => number} act  Zero, or the errno it failed with.
      */
     const operation = (argBytes, act)=>({
         convention: 'cdecl',
         argBytes,
         /** @param {number[]} args */
-        handler: (/** @type {number[]} */ args)=>(act(args) ? 0 : -1),
+        handler: (/** @type {number[]} */ args)=>{
+            const code = act(args);
+            if (code === 0)
+            {
+                return 0;
+            }
+            fail(code);
+            return -1;
+        },
     });
+
+    /**
+     * Why a removal the volume refused failed: the name is not there, or it
+     * is and is not the volume's to remove.
+     *
+     * @param {string} path @param {number} refused
+     */
+    const removal = (path, refused)=>
+        (host.files.remove(path) === true ? 0 : (exists(path) ? refused : ENOENT));
 
     return {
         /**
@@ -223,6 +252,7 @@ export function createPathFunctions(host){
                 }
                 if (text.length + 1 > (size | 0))
                 {
+                    fail(ERANGE);
                     return 0;
                 }
                 writeString(buffer, text);
@@ -233,29 +263,52 @@ export function createPathFunctions(host){
         /** int _chdir(const char *path) */
         _chdir: operation(4, ([path])=>{
             const text = readString(path);
-            if (!host.files.stat(text)?.exists)
+            if (!exists(text))
             {
-                return false;
+                return ENOENT;
             }
             host.files.setCurrentDirectory(text);
-            return true;
+            return 0;
         }),
 
-        /** int _mkdir(const char *path) */
-        _mkdir: operation(4, ([path])=>host.files.mkdir(readString(path)) === true),
+        /** int _mkdir(const char *path) -- EEXIST for any name already taken. */
+        _mkdir: operation(4, ([path])=>{
+            const text = readString(path);
+            if (host.files.mkdir(text) === true)
+            {
+                return 0;
+            }
+            return exists(text) ? EEXIST : ENOENT;
+        }),
 
-        /** int _rmdir(const char *path) */
-        _rmdir: operation(4, ([path])=>host.files.remove(readString(path)) === true),
+        /**
+         * int _rmdir(const char *path)
+         *
+         * ENOTEMPTY covers every refusal of a name that is there: not a
+         * directory, not empty, or the one the process stands in.
+         */
+        _rmdir: operation(4, ([path])=>removal(readString(path), ENOTEMPTY)),
 
-        /** int _unlink(const char *path) */
-        _unlink: operation(4, ([path])=>host.files.remove(readString(path)) === true),
+        /** int _unlink(const char *path) -- EACCES for a directory or a read-only file. */
+        _unlink: operation(4, ([path])=>removal(readString(path), EACCES)),
 
         /** int remove(const char *path) */
-        remove: operation(4, ([path])=>host.files.remove(readString(path)) === true),
+        remove: operation(4, ([path])=>removal(readString(path), EACCES)),
 
-        /** int rename(const char *from, const char *to) */
-        rename: operation(8, ([from, to])=>
-            host.files.rename(readString(from), readString(to)) === true),
+        /**
+         * int rename(const char *from, const char *to)
+         *
+         * ENOENT when the old name is not there; any other refusal is EACCES,
+         * which is what the new name already existing is.
+         */
+        rename: operation(8, ([from, to])=>{
+            const source = readString(from);
+            if (host.files.rename(source, readString(to)) === true)
+            {
+                return 0;
+            }
+            return exists(source) ? EACCES : ENOENT;
+        }),
 
         /**
          * int _access(const char *path, int mode)
@@ -265,7 +318,7 @@ export function createPathFunctions(host){
          * whether the path exists -- and a write check against a read-only file
          * would need a permission bit the filesystem does not carry.
          */
-        _access: operation(8, ([path])=>host.files.stat(readString(path))?.exists === true),
+        _access: operation(8, ([path])=>(exists(readString(path)) ? 0 : ENOENT)),
 
         /**
          * unsigned long _getdrives(void)

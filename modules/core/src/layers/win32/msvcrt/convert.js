@@ -20,6 +20,7 @@
  */
 
 import { readDouble, returningDouble } from './float.js';
+import { ERANGE } from './globals.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -145,6 +146,7 @@ export function scanFloat(text){
  * @property {(bytes: number) => number} allocate
  * @property {import('./float.js').FloatHost} [fpu]  Absent means the functions
  *           that return a double are not exported at all.
+ * @property {(code: number) => void} [errno]  Where an out-of-range value says so.
  */
 
 /**
@@ -193,9 +195,11 @@ export function createConversionFunctions(host){
 
     /**
      * @param {number} argBytes
-     * @param {(magnitude: bigint, negative: boolean) => bigint} clamp
+     * @param {(magnitude: bigint, negative: boolean) => bigint | null} convert
+     *        The value, or null when it is out of range and `limit` answers.
+     * @param {(negative: boolean) => bigint} limit
      */
-    const strtoInteger = (argBytes, clamp)=>({
+    const strtoInteger = (argBytes, convert, limit)=>({
         convention: 'cdecl',
         argBytes,
         /** @param {number[]} args */
@@ -205,9 +209,19 @@ export function createConversionFunctions(host){
             // Nothing converted: the end pointer goes back to the start, so a
             // caller comparing it against the input sees no progress.
             writeInt(end, scanned ? string + scanned.end : string);
-            return scanned === null
-                ? 0
-                : Number(BigInt.asIntN(32, clamp(scanned.magnitude, scanned.negative)));
+            if (scanned === null)
+            {
+                return 0;
+            }
+            // errno is set only when the value does not fit: a caller clears it
+            // first and tests it after, to tell a clamped limit from the limit.
+            let value = convert(scanned.magnitude, scanned.negative);
+            if (value === null)
+            {
+                host.errno?.(ERANGE);
+                value = limit(scanned.negative);
+            }
+            return Number(BigInt.asIntN(32, value));
         },
     });
 
@@ -250,8 +264,8 @@ export function createConversionFunctions(host){
         /** long strtol(const char *str, char **end, int base) */
         strtol: strtoInteger(12, (magnitude, negative)=>{
             const value = negative ? -magnitude : magnitude;
-            return value > LONG_MAX ? LONG_MAX : (value < LONG_MIN ? LONG_MIN : value);
-        }),
+            return value > LONG_MAX || value < LONG_MIN ? null : value;
+        }, negative=>(negative ? LONG_MIN : LONG_MAX)),
 
         /**
          * unsigned long strtoul(const char *str, char **end, int base)
@@ -262,10 +276,10 @@ export function createConversionFunctions(host){
         strtoul: strtoInteger(12, (magnitude, negative)=>{
             if (magnitude > ULONG_MAX)
             {
-                return ULONG_MAX;
+                return null;
             }
             return negative ? BigInt.asUintN(32, -magnitude) : magnitude;
-        }),
+        }, ()=>ULONG_MAX),
 
         /** char *_ltoa(long value, char *buffer, int radix) */
         _ltoa: toText(1, true),

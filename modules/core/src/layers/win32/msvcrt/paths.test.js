@@ -165,6 +165,53 @@ test('remove and rename act on the volume, and _access asks whether it exists', 
     assert.equal(files.entries.has('C:\\game\\old.mpq'), false);
 });
 
+test('a failing operation says why in errno, as each one documents', ()=>{
+    const memory = fakeMemory();
+    const files = fakeVolume(['C:\\game', 'C:\\game\\data.mpq', 'C:\\game\\saves']);
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory, files, errno: code=>errno.push(code),
+    }));
+    const ENOENT = 2;
+    const EACCES = 13;
+    const EEXIST = 17;
+    const ERANGE = 34;
+    const ENOTEMPTY = 41;
+    /** @param {string} name @param {number[]} args */
+    const fails = (name, ...args)=>{
+        const answer = table[name].handler(args);
+        return [answer, errno.pop()];
+    };
+
+    assert.deepEqual(fails('_getcwd', memory.allocate(4), 4), [0, ERANGE], 'the path is longer');
+    assert.deepEqual(fails('_chdir', memory.put('C:\\nowhere')), [-1, ENOENT]);
+    assert.deepEqual(fails('_mkdir', memory.put('C:\\game\\saves')), [-1, EEXIST]);
+    files.mkdir = ()=>false;
+    assert.deepEqual(fails('_mkdir', memory.put('C:\\gone\\saves')), [-1, ENOENT],
+        'the directory above is missing');
+    assert.deepEqual(fails('_unlink', memory.put('C:\\game\\none.txt')), [-1, ENOENT]);
+    assert.deepEqual(fails('remove', memory.put('C:\\game\\none.txt')), [-1, ENOENT]);
+    assert.deepEqual(fails('_rmdir', memory.put('C:\\game\\none')), [-1, ENOENT]);
+    assert.deepEqual(fails('rename', memory.put('C:\\game\\none.txt'), memory.put('C:\\x')),
+        [-1, ENOENT], 'the old name is not there');
+    assert.deepEqual(fails('_access', memory.put('C:\\game\\none.txt'), 0), [-1, ENOENT]);
+
+    // What is there and still refused: the volume declines, and the name
+    // exists, so it is not a missing path.
+    files.remove = ()=>false;
+    files.rename = ()=>false;
+    assert.deepEqual(fails('_unlink', memory.put('C:\\game\\data.mpq')), [-1, EACCES]);
+    assert.deepEqual(fails('remove', memory.put('C:\\game\\data.mpq')), [-1, EACCES]);
+    assert.deepEqual(fails('_rmdir', memory.put('C:\\game\\saves')), [-1, ENOTEMPTY]);
+    assert.deepEqual(fails('rename', memory.put('C:\\game\\data.mpq'), memory.put('C:\\game')),
+        [-1, EACCES]);
+    assert.deepEqual(errno, [], 'nothing else was set');
+
+    assert.equal(table._chdir.handler([memory.put('C:\\game')]), 0);
+    assert.deepEqual(errno, [], 'and success leaves errno alone');
+});
+
 test('_getdrives reports C and nothing else', ()=>{
     assert.equal(build().table._getdrives.handler([]), 0b100);
 });

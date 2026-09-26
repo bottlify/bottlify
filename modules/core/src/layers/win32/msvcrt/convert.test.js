@@ -66,6 +66,32 @@ test('strtoul negates within 32 bits: "-1" is ULONG_MAX, not a failure', ()=>{
     assert.equal(table.strtoul.handler([memory.put('-1'), end, 10]) >>> 0, 0xffffffff);
 });
 
+test('strtol and strtoul set ERANGE when they clamp, and leave errno alone in range', ()=>{
+    // The cases of Wine's msvcrt string tests: the limits themselves are in
+    // range, and so is "-4294967295" for strtoul, which negates to 1.
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (createConversionFunctions({
+        ...memory, errno: code=>errno.push(code),
+    }));
+    const end = memory.allocate(4);
+    const ERANGE = 34;
+
+    assert.equal(table.strtol.handler([memory.put('2147483647L'), end, 0]), 0x7fffffff);
+    assert.equal(table.strtol.handler([memory.put('-2147483648L'), end, 0]), -0x80000000);
+    assert.equal(table.strtoul.handler([memory.put('4294967295UL'), end, 0]) >>> 0, 0xffffffff);
+    assert.equal(table.strtoul.handler([memory.put('-4294967295'), end, 0]) >>> 0, 1);
+    assert.deepEqual(errno, []);
+
+    assert.equal(table.strtol.handler([memory.put('9223372036854775807L'), end, 0]),
+        0x7fffffff);
+    assert.equal(table.strtol.handler([memory.put('-99999999999'), end, 10]), -0x80000000);
+    assert.equal(table.strtoul.handler([memory.put('9223372036854775807L'), end, 0]) >>> 0,
+        0xffffffff);
+    assert.deepEqual(errno, [ERANGE, ERANGE, ERANGE]);
+});
+
 test('_ltoa signs base ten and prints the bit pattern in every other base', ()=>{
     const { memory, table } = build();
     const buffer = memory.allocate(64);

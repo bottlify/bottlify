@@ -34,6 +34,7 @@ import { createMathFunctions } from './math.js';
 import { createStartupFunctions } from './startup.js';
 import { createStdioFunctions } from './stdio.js';
 import { createThreadFunctions } from './threads.js';
+import { createGlobals } from './globals.js';
 
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
@@ -746,6 +747,15 @@ export function createMsvcrtFunctions(host){
     };
 
     const allocate = host.allocate ?? (()=>0);
+
+    // One set of the runtime's variables for the whole table: errno is set by
+    // whichever function fails and read through the address `_errno` hands out.
+    const globals = createGlobals({
+        allocate, readMemory: host.readMemory, writeMemory: host.writeMemory,
+    });
+    /** @param {number} code */
+    const errno = code=>globals.set('errno', code);
+
     const narrow = {
         ...table,
         ...createStringFunctions({
@@ -768,6 +778,7 @@ export function createMsvcrtFunctions(host){
             writeMemory: host.writeMemory,
             allocate,
             fpu: host.fpu,
+            errno,
         }),
         ...createScanFunctions(host),
         ...createCxxFunctions(host),
@@ -788,6 +799,7 @@ export function createMsvcrtFunctions(host){
                 currentThread: host.currentThread,
                 exitProcess: host.exitProcess,
                 exit: host.exit,
+                globals,
             })
             : {}),
 
@@ -824,6 +836,7 @@ export function createMsvcrtFunctions(host){
                 allocate,
                 drives: host.drives,
                 files: host.files,
+                errno,
             })
             : {}),
         ...(host.files && host.allocate && host.free
@@ -836,6 +849,7 @@ export function createMsvcrtFunctions(host){
                 files: host.files,
                 write: host.write,
                 iob: host.iob,
+                errno,
             })
             : {}),
         ...(host.threads ? createThreadFunctions(host.threads) : {}),

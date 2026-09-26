@@ -7,6 +7,7 @@
 import { formatToString } from './format.js';
 import { VARIADIC_SLOTS } from './scan.js';
 import { HANDLE_STDERR, HANDLE_STDIN, HANDLE_STDOUT } from '../kernel32/console.js';
+import { EACCES, EINVAL, ENOENT } from './globals.js';
 
 /**
  * Buffered file streams: fopen and the calls that take what it hands out.
@@ -63,6 +64,7 @@ const IONBF = 0x0004;
  * @property {(handle: number, text: string) => void} [write]
  *           The console, for the standard streams.
  * @property {() => number} [iob]  Where `_iob` was placed, once it has been.
+ * @property {(code: number) => void} [errno]  Where a failure says why.
  */
 
 /**
@@ -110,6 +112,11 @@ export function createStdioFunctions(host){
 
     /** @param {number} pointer */
     const readString = pointer=>host.readCString(pointer, MAX_STRING);
+
+    /** @param {number} code */
+    const fail = code=>{
+        host.errno?.(code);
+    };
 
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>host.writeMemory(address, new Uint8Array([
@@ -206,21 +213,25 @@ export function createStdioFunctions(host){
          * FILE *fopen(const char *filename, const char *mode)
          *
          * NULL when the volume has no such file, or the mode is not one; the
-         * record is the program's to pass back until fclose frees it.
+         * record is the program's to pass back until fclose frees it. A null
+         * or empty name and a mode that is not one are EINVAL; a name that is
+         * not there is ENOENT, and one that is and cannot be opened EACCES.
          */
         fopen: cdecl(8, ([path, mode])=>{
-            const parsed = parseMode(readString(mode));
-            if (!parsed)
+            const parsed = (mode >>> 0) === 0 ? null : parseMode(readString(mode));
+            const text = (path >>> 0) === 0 ? '' : readString(path);
+            if (!parsed || text === '')
             {
+                fail(EINVAL);
                 return 0;
             }
-            const text = readString(path);
             const node = host.files.open(text, {
                 read: parsed.read, write: parsed.write, create: parsed.create,
                 truncate: parsed.truncate,
             });
             if (!node)
             {
+                fail(host.files.stat(text) ? EACCES : ENOENT);
                 return 0;
             }
             const record = host.allocate(FILE_SIZE);
@@ -245,11 +256,20 @@ export function createStdioFunctions(host){
             return record;
         }),
 
-        /** int fclose(FILE *stream) -- EOF for a stream that is not one. */
+        /**
+         * int fclose(FILE *stream)
+         *
+         * EOF for a stream that is not one; a null one is also EINVAL, where
+         * one closed already leaves errno as it was.
+         */
         fclose: cdecl(4, ([pointer])=>{
             const stream = streamOf(pointer);
             if (!stream)
             {
+                if ((pointer >>> 0) === 0)
+                {
+                    fail(EINVAL);
+                }
                 return EOF;
             }
             // A standard stream is the runtime's, not the program's to free.

@@ -31,6 +31,7 @@
  */
 
 import { VERSION_BUILD, VERSION_MAJOR, VERSION_MINOR } from '../kernel32/process.js';
+import { createGlobals } from './globals.js';
 
 /** What `_controlfp` reports when nothing has changed it: the MSVC default. */
 const DEFAULT_CONTROL_WORD = 0x0009001f;
@@ -126,6 +127,9 @@ export function splitCommandLine(line){
  *           already left the bridge: `exit` after the handlers it ran in the
  *           guest. The process ends before the thread runs another instruction,
  *           because the run loop reads the code before it hands out a slice.
+ * @property {import('./globals.js').Globals} [globals]
+ *           The runtime's variables, shared with the functions that set them:
+ *           errno is set by whichever call fails. Absent, these are private.
  */
 
 /**
@@ -226,9 +230,7 @@ export function createStartupFunctions(host){
         return bytes;
     };
 
-    /** An int in guest memory that a `__p__*` accessor can hand out. */
-    /** @type {Map<string, number>} */
-    const cells = new Map();
+    const globals = host.globals ?? createGlobals(host);
 
     /**
      * What `_onexit` and `atexit` registered, in the order it was registered.
@@ -253,21 +255,12 @@ export function createStartupFunctions(host){
             Promise.resolve(0));
     };
 
-    /** @param {string} name @param {number} initial */
-    const cell = (name, initial)=>{
-        const held = cells.get(name);
-        if (held !== undefined)
-        {
-            return held;
-        }
-        const address = host.allocate(4);
-        if (address !== 0)
-        {
-            writeU32(address, initial);
-        }
-        cells.set(name, address);
-        return address;
-    };
+    /**
+     * An int in guest memory that a `__p__*` accessor can hand out.
+     *
+     * @param {string} name @param {number} initial
+     */
+    const cell = (name, initial)=>globals.address(name, initial);
 
     /**
      * unsigned int _controlfp(unsigned int newControl, unsigned int mask)
@@ -446,8 +439,8 @@ export function createStartupFunctions(host){
          * import table) must get an address, or the call it later makes
          * through the table goes nowhere. One cell for the process rather
          * than one per thread: what is read after a failing call is the
-         * failing call's own, on the thread that made it, and nothing here
-         * sets it from another.
+         * failing call's own, on the thread that made it, since a call
+         * answers before any other thread runs.
          */
         _errno: {
             convention: 'cdecl',

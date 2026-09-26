@@ -64,6 +64,8 @@ function build(options = {}){
     const files = fakeVolume({ 'C:\\data.bin': new Uint8Array([1, 2, 3, 4, 5, 6, 7]) }, options);
     /** @type {[number, string][]} */
     const console = [];
+    /** @type {number[]} */
+    const errno = [];
     const fns = /** @type {any} */ (createStdioFunctions({
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
@@ -73,8 +75,9 @@ function build(options = {}){
         files,
         write: (handle, text)=>console.push([handle, text]),
         iob: ()=>IOB,
+        errno: code=>errno.push(code),
     }));
-    return { memory, files, fns, console };
+    return { memory, files, fns, console, errno };
 }
 
 test('a stream reads whole elements, tells its position, seeks and closes', ()=>{
@@ -219,4 +222,29 @@ test('stdout and stderr write to the console; stdin is at its end', ()=>{
     assert.equal(fns.fclose.handler([IOB + 32]), 0, 'and is not the program\'s to free');
     assert.equal(fns.fprintf.handler([IOB + 96, text, name, 3]), -1,
         'the fourth record is no stream until something opens one');
+});
+
+test('fopen and fclose say why they failed in errno', ()=>{
+    // fopen: a missing file is ENOENT; a null or empty name and a mode that is
+    // not one are invalid parameters. fclose: a null stream is EINVAL, a
+    // stream closed already fails without touching errno (Wine's msvcrt file
+    // tests, test_fopen_fclose_fcloseall).
+    const { memory, fns, errno } = build();
+    const ENOENT = 2;
+    const EINVAL = 22;
+
+    assert.equal(fns.fopen.handler([memory.put('C:\\none.txt'), memory.put('r')]), 0);
+    assert.deepEqual(errno.splice(0), [ENOENT]);
+    assert.equal(fns.fopen.handler([memory.put(''), memory.put('w+')]), 0);
+    assert.equal(fns.fopen.handler([0, memory.put('w+')]), 0);
+    assert.equal(fns.fopen.handler([memory.put('C:\\data.bin'), memory.put('x')]), 0);
+    assert.equal(fns.fopen.handler([memory.put('C:\\data.bin'), 0]), 0);
+    assert.deepEqual(errno.splice(0), [EINVAL, EINVAL, EINVAL, EINVAL]);
+
+    const stream = fns.fopen.handler([memory.put('C:\\data.bin'), memory.put('rb')]);
+    assert.equal(fns.fclose.handler([stream]), 0);
+    assert.equal(fns.fclose.handler([stream]), -1);
+    assert.deepEqual(errno, [], 'a second close leaves errno alone');
+    assert.equal(fns.fclose.handler([0]), -1);
+    assert.deepEqual(errno, [EINVAL]);
 });
