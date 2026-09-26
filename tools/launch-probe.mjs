@@ -24,6 +24,7 @@
 
 import { createWriteStream } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { openBundle } from './btl.mjs';
 import { createApp } from '../modules/core/src/app.js';
 import { DEFAULT_ENGINE } from '../modules/core/src/layers/cpu/module.js';
@@ -338,7 +339,7 @@ async function main(){
     const directory = new URL(`${id}/`, BUNDLES);
     const manifest = JSON.parse(
         await readFile(new URL('manifest.json', directory), 'utf8'));
-    const path = new URL('bundle.btl', directory).pathname.replace(/^\//, '');
+    const path = fileURLToPath(new URL('bundle.btl', directory));
 
     const handle = await (await import('node:fs/promises')).open(path, 'r');
     /** @param {number} offset @param {number} length */
