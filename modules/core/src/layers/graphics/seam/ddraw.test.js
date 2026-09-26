@@ -828,6 +828,70 @@ test('the vertical blank comes round once a refresh, and a wait for it lasts unt
         h.assertAllReleased();
     });
 
+test('a surface keeps private data under a GUID, an interface entry with a reference', ()=>{
+    // After Wine's ddraw7 test_private_data: the reader takes no reference,
+    // and a read with no buffer is refused unless the room is too small.
+    const DDSPD_IUNKNOWNPOINTER = 1;
+    const DDERR_MOREDATA = 0x887602b2;
+    const h = seamed();
+    const ddraw = h.create7();
+    const surface = h.createSurface7(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 4, height: 4 });
+    const guid = h.box.putGuid(0x7a00, '{FDB37466-428F-4EDF-A37F-9B1DF488C5FC}');
+    const other = h.box.putGuid(0x7a10, '{2E5AFAC2-87B5-4C10-9B4B-89D7D112E72B}');
+    const model = h.roots[0];
+    const count = ()=>model.refCount('IDirectDraw7');
+
+    assert.equal(h.surface7(surface, 'SetPrivateData', [guid, 0, 4, DDSPD_IUNKNOWNPOINTER]),
+        DDERR_INVALIDPARAMS);
+    assert.equal(h.surface7(surface, 'SetPrivateData', [guid, 0, 0, 0]), DDERR_INVALIDPARAMS);
+    assert.equal(h.surface7(surface, 'SetPrivateData', [guid, ddraw, 5, DDSPD_IUNKNOWNPOINTER]),
+        DDERR_INVALIDPARAMS);
+
+    const before = count();
+    assert.equal(h.surface7(surface, 'SetPrivateData', [guid, ddraw, 4, DDSPD_IUNKNOWNPOINTER]),
+        DD_OK);
+    assert.equal(count(), before + 1);
+    assert.equal(h.surface7(surface, 'FreePrivateData', [guid]), DD_OK);
+    assert.equal(count(), before);
+
+    assert.equal(h.surface7(surface, 'SetPrivateData', [guid, ddraw, 4, DDSPD_IUNKNOWNPOINTER]),
+        DD_OK);
+    const data = 0x7b00;
+    const sizeAt = 0x7b10;
+    h.box.memory.writeU32(sizeAt, 8);
+    assert.equal(h.surface7(surface, 'GetPrivateData', [guid, data, sizeAt]), DD_OK);
+    assert.equal(h.box.memory.readU32(data), ddraw);
+    assert.equal(h.box.memory.readU32(sizeAt), 4);
+    assert.equal(count(), before + 1, 'the reader takes no reference');
+
+    h.box.memory.writeU32(sizeAt, 1);
+    assert.equal(h.surface7(surface, 'GetPrivateData', [guid, 0, sizeAt]), DDERR_MOREDATA);
+    assert.equal(h.box.memory.readU32(sizeAt), 4);
+    h.box.memory.writeU32(sizeAt, 8);
+    assert.equal(h.surface7(surface, 'GetPrivateData', [guid, 0, sizeAt]), DDERR_INVALIDPARAMS);
+    assert.equal(h.box.memory.readU32(sizeAt), 8);
+    assert.equal(h.surface7(surface, 'GetPrivateData', [other, 0, 0]), DDERR_NOTFOUND);
+    assert.equal(h.surface7(surface, 'GetPrivateData', [guid, 0, 0]), DDERR_INVALIDPARAMS);
+
+    // A volatile entry lasts only as long as the surface's contents.
+    const DDSPD_VOLATILE = 2;
+    const DDERR_EXPIRED = 0x887602b3;
+    h.box.memory.writeU32(0x7c00, 7);
+    assert.equal(h.surface7(surface, 'SetPrivateData', [other, 0x7c00, 4, DDSPD_VOLATILE]),
+        DD_OK);
+    h.box.memory.writeU32(sizeAt, 4);
+    assert.equal(h.surface7(surface, 'GetPrivateData', [other, data, sizeAt]), DD_OK);
+    assert.equal(h.surface7(surface, 'ChangeUniquenessValue', []), DD_OK);
+    assert.equal(h.surface7(surface, 'GetPrivateData', [other, data, sizeAt]), DDERR_EXPIRED);
+
+    // The surface's going lets go of what its entries held, and of the
+    // reference a seventh-generation surface holds on the object that made it.
+    assert.equal(h.release(surface), 0);
+    assert.equal(count(), before - 1);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
 test('a palette round-trips its entries and is owned by the surface it is set on', ()=>{
     const h = seamed();
     const ddraw = h.create7();

@@ -73,6 +73,7 @@ import {
 import { pixelFormatForDepth } from '../ddraw/objects.js';
 import { blt, bltFast } from '../ddraw/blit.js';
 import { createRaster } from './raster.js';
+import { DDRAW_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { REFRESH_HZ } from '../../win32/user32/display.js';
 
 /** WaitForVerticalBlank: which edge of the blank to return at. */
@@ -226,6 +227,8 @@ export function createDirectDrawSeam(
 )
 {
     const fields = createFields(memory);
+
+    const privateData = createPrivateData({ memory, publisher, rules: DDRAW_PRIVATE_DATA });
 
     /** The raster of a DirectDraw object's display mode. @param {any} root */
     const rasterOf = root=>createRaster({
@@ -598,6 +601,7 @@ export function createDirectDrawSeam(
         const readCaps = pointer=>fields.readU32((pointer >>> 0) + (wide ? DDSCAPS2.dwCaps : 0));
 
         return {
+            ...privateData.methods,
             /** @param {any} surface @param {number[]} args */
             AddAttachedSurface: (surface, [other])=>{
                 const attached = publisher.objectAt(other);
@@ -910,7 +914,8 @@ export function createDirectDrawSeam(
 
     /** Every surface generation, so a QueryInterface across them succeeds. */
     const surfaceInterfaces = SURFACE_GENERATIONS.map(generation=>
-        describe(generation.id, generation.slots, surfaceMethods(generation)));
+        describe(generation.id, generation.slots, surfaceMethods(generation), {},
+            privateData.released));
 
     /**
      * Names each surface to the callback in turn, stopping when it says so.

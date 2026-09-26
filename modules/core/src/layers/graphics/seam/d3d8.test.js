@@ -1204,6 +1204,75 @@ test('every capability claimed is one the renderer honours', ()=>{
     h.release(root);
 });
 
+test('a surface keeps private data under a GUID, an interface entry with a reference', ()=>{
+    // After Wine's d3d8 test_private_data.
+    const D3DSPD_IUNKNOWN = 1;
+    const D3DERR_MOREDATA = 0x88760867;
+    const D3DERR_NOTFOUND = 0x88760866;
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const guid = 0xd000;
+    const other = 0xd010;
+    h.box.services.writeMemory(guid, Uint8Array.from({ length: 16 }, (_, i)=>0x40 + i));
+    h.box.services.writeMemory(other, Uint8Array.from({ length: 16 }, (_, i)=>0x80 + i));
+    const out = 0xd100;
+    assert.equal(h.device(device, 'CreateImageSurface', [4, 4, D3DFMT.A8R8G8B8, out]), D3D_OK);
+    const surface = h.box.memory.readU32(out);
+    const deviceModel = h.object(device);
+    const surfaceCall = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        h.surface(surface, name, args);
+
+    for (const size of [0, 5, 8])
+    {
+        assert.equal(surfaceCall('SetPrivateData', [guid, device, size, D3DSPD_IUNKNOWN]),
+            D3DERR_INVALIDCALL, `an interface is the size of a pointer, not ${size}`);
+    }
+    const before = deviceModel.refCount;
+    assert.equal(surfaceCall('SetPrivateData', [guid, device, 4, D3DSPD_IUNKNOWN]), D3D_OK);
+    assert.equal(deviceModel.refCount, before + 1, 'the entry holds the device');
+    assert.equal(surfaceCall('SetPrivateData', [guid, device, 8, D3DSPD_IUNKNOWN]),
+        D3DERR_INVALIDCALL, 'and a refused set leaves it');
+
+    const data = 0xd200;
+    const sizeAt = 0xd210;
+    h.box.memory.writeU32(sizeAt, 8);
+    assert.equal(surfaceCall('GetPrivateData', [guid, data, sizeAt]), D3D_OK);
+    assert.equal(h.box.memory.readU32(data), device);
+    assert.equal(h.box.memory.readU32(sizeAt), 4);
+    assert.equal(deviceModel.refCount, before + 2, 'reading an interface entry takes one more');
+    assert.equal(h.release(device), before + 1);
+
+    h.box.memory.writeU32(sizeAt, 1);
+    assert.equal(surfaceCall('GetPrivateData', [guid, 0, sizeAt]), D3D_OK, 'a size query');
+    assert.equal(h.box.memory.readU32(sizeAt), 4);
+    h.box.memory.writeU32(sizeAt, 1);
+    h.box.memory.writeU32(data, 0xdeadbeef);
+    assert.equal(surfaceCall('GetPrivateData', [guid, data, sizeAt]), D3DERR_MOREDATA);
+    assert.equal(h.box.memory.readU32(sizeAt), 4);
+    assert.equal(h.box.memory.readU32(data), 0xdeadbeef);
+    h.box.memory.writeU32(sizeAt, 0xdeadbabe);
+    assert.equal(surfaceCall('GetPrivateData', [other, data, sizeAt]), D3DERR_NOTFOUND);
+    assert.equal(h.box.memory.readU32(sizeAt), 0xdeadbabe);
+
+    // Bytes, and a free that gives the device's reference back.
+    const bytes = 0xd300;
+    h.box.memory.writeU32(bytes, 0x04030201);
+    assert.equal(surfaceCall('SetPrivateData', [other, bytes, 4, 0]), D3D_OK);
+    h.box.memory.writeU32(sizeAt, 4);
+    assert.equal(surfaceCall('GetPrivateData', [other, data, sizeAt]), D3D_OK);
+    assert.equal(h.box.memory.readU32(data), 0x04030201);
+    assert.equal(surfaceCall('FreePrivateData', [other]), D3D_OK);
+    assert.equal(surfaceCall('FreePrivateData', [other]), D3DERR_NOTFOUND);
+
+    // Destroying the surface lets go of what its entries held, and of the
+    // device reference every resource holds.
+    assert.equal(h.release(surface), 0);
+    assert.equal(deviceModel.refCount, before - 1);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
 test('a create with nowhere to put the interface fails instead of answering success', ()=>{
     // Publishing an interface takes guest memory for the vtable and a stub per
     // method, and both run out. What the publisher answers then is a null

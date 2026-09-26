@@ -43,7 +43,6 @@ import { displayModes } from '../../win32/user32/display.js';
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
 const D3DERR_NOTAVAILABLE = 0x8876086a;
-const E_NOTIMPL = 0x80004001;
 
 const SCREEN = { width: 800, height: 600, bitsPerPixel: 32, displayWidth: 1280,
     displayHeight: 1024 };
@@ -539,8 +538,23 @@ test('a texture is made without a shared handle, described and locked at this ve
         assert.equal(h.box.call(surface, slot(IDIRECT3DSURFACE9_SLOTS, 'GetType'), []), 1);
         assert.equal(h.box.call(surface, slot(IDIRECT3DSURFACE9_SLOTS, 'GetDC'), [0x3500]),
             D3DERR_INVALIDCALL);
+        // Private data is each object's own: what the texture keeps, its
+        // level does not (Wine's d3d9 test_private_data).
+        const guid = 0x3600;
+        h.box.services.writeMemory(guid, Uint8Array.from({ length: 16 }, (_, i)=>i + 1));
+        const data = 0x3700;
+        [1, 2, 3, 4].forEach((value, k)=>h.box.memory.writeU32(data + k * 4, value));
+        const sizeAt = 0x3800;
+        h.box.memory.writeU32(sizeAt, 16);
         assert.equal(h.box.call(surface, slot(IDIRECT3DSURFACE9_SLOTS, 'SetPrivateData'),
-            [0, 0, 0, 0]), E_NOTIMPL);
+            [0, 0, 0, 0]), D3DERR_INVALIDCALL, 'no GUID and no data');
+        assert.equal(call('SetPrivateData', [guid, data, 16, 0]), D3D_OK);
+        assert.equal(h.box.call(surface, slot(IDIRECT3DSURFACE9_SLOTS, 'GetPrivateData'),
+            [guid, data, sizeAt]), 0x88760866, 'D3DERR_NOTFOUND on the level');
+        h.box.services.writeMemory(data, new Uint8Array(16));
+        assert.equal(call('GetPrivateData', [guid, data, sizeAt]), D3D_OK);
+        assert.deepEqual([0, 1, 2, 3].map(k=>h.box.memory.readU32(data + k * 4)), [1, 2, 3, 4]);
+        assert.equal(call('FreePrivateData', [guid]), D3D_OK);
         h.release(surface);
         assert.equal(h.release(texture), 0);
         assert.equal(h.release(device), 0);

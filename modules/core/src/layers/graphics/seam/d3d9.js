@@ -59,6 +59,7 @@ import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 import { createRaster, rasterStatus } from './raster.js';
+import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c | 0;
@@ -144,6 +145,7 @@ export function createDirect3D9Seam(
 )
 {
     const fields = createFields(memory);
+    const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA });
     const raster = createRaster({
         now, refresh: ()=>REFRESH_HZ, height: ()=>screen().height,
     });
@@ -220,6 +222,7 @@ export function createDirect3D9Seam(
      * @param {number} type  D3DRTYPE, or a function of the object for a texture.
      */
     const resourceMethods = (/** @type {number | ((object: any) => number)} */ type)=>({
+        ...privateData.methods,
         GetDevice: getDevice,
         SetPriority: ()=>0,
         GetPriority: ()=>0,
@@ -501,7 +504,7 @@ export function createDirect3D9Seam(
         // through DirectDraw, and a Direct3D 9 surface is not one.
         GetDC: ()=>D3DERR_INVALIDCALL,
         ReleaseDC: ()=>D3DERR_INVALIDCALL,
-    })];
+    }, {}, privateData.released)];
 
     /**
      * The six every texture kind shares, over the resource eight.
@@ -580,13 +583,13 @@ export function createDirect3D9Seam(
         UnlockRect: (texture, [level])=>texture.UnlockRect(level >>> 0),
         // An unlock already marks the whole level for upload.
         AddDirtyRect: ()=>D3D_OK,
-    })];
+    }, {}, privateData.released)];
 
     const cubeTextureInterfaces = [
         describe(IID_IDirect3DCubeTexture9, IDIRECT3DCUBETEXTURE9_SLOTS, {
             ...resourceMethods(D3DRTYPE.CUBETEXTURE),
             ...baseTextureMethods,
-        }),
+        }, {}, privateData.released),
     ];
 
     /**
@@ -627,7 +630,7 @@ export function createDirect3D9Seam(
                 }
                 return hr;
             },
-        }),
+        }, {}, privateData.released),
     ];
     const indexBufferInterfaces = [
         describe(IID_IDirect3DIndexBuffer9, IDIRECT3DINDEXBUFFER9_SLOTS, {
@@ -644,7 +647,7 @@ export function createDirect3D9Seam(
                 }
                 return hr;
             },
-        }),
+        }, {}, privateData.released),
     ];
 
     const declarationInterfaces = [

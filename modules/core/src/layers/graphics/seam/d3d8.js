@@ -48,6 +48,7 @@ import { vertexCountOf } from '../d3d8/render.js';
 import { createCursorTeller } from './cursor.js';
 import { createRaster, rasterStatus } from './raster.js';
 import { TEXTURE_OP_CAPS } from '../d3d8/validity.js';
+import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
     createShadow, getSurfaceLevelCode, lockCode, materialFloats, materialOf, setIndicesCode,
     setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
@@ -252,6 +253,7 @@ export function createDirect3D8Seam(
     const raster = createRaster({
         now, refresh: ()=>REFRESH_HZ, height: ()=>screen().height,
     });
+    const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA });
 
     /**
      * Each device's block of state the guest sets without crossing, and the
@@ -280,6 +282,7 @@ export function createDirect3D8Seam(
      * @param {any} resource @param {Iterable<number>} pointers
      */
     const retire = (resource, pointers)=>{
+        privateData.released(resource);
         const shadow = resourceShadows.get(resource);
         if (!shadow)
         {
@@ -394,6 +397,7 @@ export function createDirect3D8Seam(
     // Resources carry no behaviour of their own here beyond what the API
     // objects already do, so their descriptors are built once.
     const surfaceInterfaces = [describe(IID_IDirect3DSurface8, IDIRECT3DSURFACE8_SLOTS, {
+        ...privateData.methods,
         /** @param {any} surface @param {number[]} args */
         GetDesc: (surface, [out])=>{
             /** @type {{ desc?: any }} */
@@ -427,9 +431,10 @@ export function createDirect3D8Seam(
         },
         /** @param {any} surface */
         UnlockRect: surface=>surface.UnlockRect(),
-    })];
+    }, {}, retire)];
 
     const textureInterfaces = [describe(IID_IDirect3DTexture8, IDIRECT3DTEXTURE8_SLOTS, {
+        ...privateData.methods,
         // The count is a property of the object rather than a method on it, and
         // this answers a number rather than an HRESULT.
         /** @param {any} texture */
@@ -512,6 +517,7 @@ export function createDirect3D8Seam(
     // settles what the guest did to the buffer first, then tells the block
     // what it did, so the two paths see one lock.
     const bufferMethods = {
+        ...privateData.methods,
         /** @param {any} buffer @param {number[]} args */
         Lock: (buffer, [offset, size, out, flags])=>{
             const shadow = resourceShadows.get(buffer);
