@@ -71,6 +71,8 @@ const MAXIMUM_WAIT_OBJECTS = 64;
 
 /** A thread already carries MAXIMUM_SUSPEND_COUNT suspensions. */
 const ERROR_SIGNAL_REFUSED = 156;
+/** A thread that has ended cannot be suspended. */
+const ERROR_ACCESS_DENIED = 5;
 
 /**
  * @typedef {Object} SyncHost
@@ -490,6 +492,11 @@ export function createSyncFunctions(host){
                 const thread = threadOf(handle);
                 if (!thread)
                 {
+                    return WAIT_FAILED;
+                }
+                if (kernel.ThreadState && thread.state === kernel.ThreadState.TERMINATED)
+                {
+                    host.setLastError?.(ERROR_ACCESS_DENIED);
                     return WAIT_FAILED;
                 }
                 // The count before, which is what tells a caller whether it was

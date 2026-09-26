@@ -6,8 +6,9 @@
 
 /**
  * A thread created with CREATE_SUSPENDED does not run until ResumeThread,
- * whose first call answers a previous count of one, as Wine's thread test
- * has it. The program checks one property per bit of its exit code.
+ * whose first call answers a previous count of one; and once it has ended,
+ * SuspendThread on it fails with ERROR_ACCESS_DENIED -- as Wine's thread test
+ * has both. The program checks one property per bit of its exit code.
  */
 
 import { test } from 'node:test';
@@ -27,14 +28,16 @@ const CREATE_SUSPENDED = 0x4;
 
 /**
  * Exit code bits: the thread had not run while its creator slept (1), the
- * first ResumeThread answered one (2), and once resumed it ran (4).
+ * first ResumeThread answered one (2), and once resumed it ran (4). Ended,
+ * it cannot be suspended (8), and the error says why (0x10).
  */
-const ALL = 0x7;
+const ALL = 0x1f;
+const ERROR_ACCESS_DENIED = 5;
 
 function buildProgram(){
     return buildExe({
-        imports: { 'KERNEL32.dll': ['CreateThread', 'ResumeThread', 'Sleep',
-            'WaitForSingleObject', 'ExitProcess'] },
+        imports: { 'KERNEL32.dll': ['CreateThread', 'ResumeThread', 'SuspendThread', 'Sleep',
+            'WaitForSingleObject', 'GetLastError', 'ExitProcess'] },
         data: { ran: [0, 0, 0, 0] },
         codeSize: 0x100,
         code: ({ iat, at, code })=>{
@@ -56,6 +59,10 @@ function buildProgram(){
                 0x83, 0xf8, 0x01, JNE, 6, ...flag(0x2), //       cmp eax, 1
                 0x6a, 0xff, 0x56, ...call('WaitForSingleObject'),
                 0x83, 0x3d, ...u32(at('ran')), 0x01, JNE, 6, ...flag(0x4),
+                0x56, ...call('SuspendThread'),
+                0x83, 0xf8, 0xff, JNE, 6, ...flag(0x8), //       cmp eax, -1
+                ...call('GetLastError'),
+                0x83, 0xf8, ERROR_ACCESS_DENIED, JNE, 6, ...flag(0x10),
                 0x53, ...call('ExitProcess'),
             ];
             const thread = [
@@ -69,18 +76,19 @@ function buildProgram(){
     });
 }
 
-test('a thread created suspended waits for ResumeThread', { timeout: 60000 }, async t=>{
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
-    const app = await createApp({
-        executable: buildProgram(),
-        imagePath: 'C:\\App\\Suspend.exe',
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
-    });
-    t.after(()=>app.dispose());
+test('a thread created suspended waits for ResumeThread, and one ended cannot be suspended',
+    { timeout: 60000 }, async t=>{
+        const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+        const app = await createApp({
+            executable: buildProgram(),
+            imagePath: 'C:\\App\\Suspend.exe',
+            v86: {
+                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+            },
+        });
+        t.after(()=>app.dispose());
 
-    const code = await app.run({ timeoutMs: 40000 });
-    assert.equal(code, ALL, `missing bits 0x${(ALL & ~code).toString(16)}`);
-});
+        const code = await app.run({ timeoutMs: 40000 });
+        assert.equal(code, ALL, `missing bits 0x${(ALL & ~code).toString(16)}`);
+    });

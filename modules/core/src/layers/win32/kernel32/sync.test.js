@@ -557,6 +557,22 @@ test('a suspension past MAXIMUM_SUSPEND_COUNT fails and leaves the count alone',
     assert.deepEqual(host.errors, [ERROR_SIGNAL_REFUSED]);
 });
 
+test('a thread that has ended cannot be suspended', ()=>{
+    // Wine's thread test: SuspendThread on a thread that has finished answers
+    // (DWORD)-1, with ERROR_ACCESS_DENIED.
+    const ERROR_ACCESS_DENIED = 5;
+    const host = fakeHost();
+    Object.assign(host.kernel, { ThreadState: { TERMINATED: 'terminated' } });
+    const fns = createSyncFunctions(host);
+    const other = host.threads.second;
+    other.state = 'terminated';
+    host.register(0x20, 'thread', other);
+
+    assert.equal(fns.SuspendThread.handler([0x20]), 0xffffffff);
+    assert.deepEqual(host.errors, [ERROR_ACCESS_DENIED]);
+    assert.equal(other.suspendCount ?? 0, 0, 'and nothing is counted');
+});
+
 test('resuming a suspended child is what arms the replacement', ()=>{
     // CREATE_SUSPENDED, WriteProcessMemory, ResumeThread is how a launcher
     // hollows its child. The handle names a process record rather than a
