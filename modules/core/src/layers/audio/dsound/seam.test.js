@@ -19,6 +19,13 @@ import { DSBSTATUS_PLAYING, DSBPLAY_LOOPING, DSBLOCK_ENTIREBUFFER } from './buff
 
 const DSERR_INVALIDPARAM = 0x80070057 | 0;
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
+const DSBCAPS_LOCHARDWARE = 0x00000004;
+const DSBCAPS_LOCSOFTWARE = 0x00000008;
+const DSBCAPS_CTRLFREQUENCY = 0x00000020;
+const DSBCAPS_CTRLPAN = 0x00000040;
+const DSBCAPS_CTRLVOLUME = 0x00000080;
+const DSBCAPS_CTRLPOSITIONNOTIFY = 0x00000100;
+const DSBCAPS_GETCURRENTPOSITION2 = 0x00010000;
 
 /** Flat guest memory, one megabyte, addressed from zero. */
 function guestMemory(){
@@ -401,7 +408,43 @@ test('GetCaps fills DSBCAPS and refuses a header that does not declare its size'
     f.memory.setU32(caps + DSBCAPS.dwSize, DSBCAPS.SIZE);
     assert.equal(f.bridge.call(buffer, 'GetCaps', [caps]), DS_OK);
     assert.equal(f.memory.u32(caps + DSBCAPS.dwBufferBytes), 4096);
-    assert.equal(f.memory.u32(caps + DSBCAPS.dwFlags), 0);
+    assert.equal(f.memory.u32(caps + DSBCAPS.dwFlags), DSBCAPS_LOCSOFTWARE,
+        'asked for nothing, it is mixed in software and says so');
+});
+
+test('GetCaps reports the flags a buffer was created with, and where it is mixed', ()=>{
+    const f = createRoot();
+    const caps = 0x1a00;
+    f.memory.setU32(caps + DSBCAPS.dwSize, DSBCAPS.SIZE);
+    /** @param {number} buffer */
+    const flagsOf = buffer=>{
+        assert.equal(f.bridge.call(buffer, 'GetCaps', [caps]), DS_OK);
+        return f.memory.u32(caps + DSBCAPS.dwFlags);
+    };
+
+    // A program branches on these -- Wine's ds3d test calls SetVolume only when
+    // CTRLVOLUME comes back -- so an answer of nothing says it may not.
+    const controls = DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLPAN | DSBCAPS_CTRLFREQUENCY
+        | DSBCAPS_CTRLPOSITIONNOTIFY | DSBCAPS_GETCURRENTPOSITION2;
+    const plain = createBuffer(f, { flags: controls });
+    assert.equal(flagsOf(plain), controls | DSBCAPS_LOCSOFTWARE);
+
+    const soft = createBuffer(f, { flags: controls | DSBCAPS_LOCSOFTWARE });
+    assert.equal(flagsOf(soft), controls | DSBCAPS_LOCSOFTWARE);
+
+    // Accepted in hardware, so reported in hardware (Wine's dsound test of
+    // hardware buffers checks exactly this bit), and never in both places.
+    const hard = createBuffer(f, { flags: DSBCAPS_LOCHARDWARE | DSBCAPS_CTRLVOLUME });
+    assert.equal(flagsOf(hard), DSBCAPS_LOCHARDWARE | DSBCAPS_CTRLVOLUME);
+
+    const out = 0x1e00;
+    assert.equal(f.bridge.call(f.root, 'DuplicateSoundBuffer', [plain, out, 0]), DS_OK);
+    assert.equal(flagsOf(f.memory.u32(out)), controls | DSBCAPS_LOCSOFTWARE,
+        'a duplicate has the capabilities of its original');
+
+    const primary = createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME });
+    assert.equal(flagsOf(primary) & (DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME),
+        DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME);
 });
 
 test('a size that splits a frame is rounded up to the next whole one', ()=>{

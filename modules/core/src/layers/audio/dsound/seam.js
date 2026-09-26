@@ -40,6 +40,8 @@ const DSERR_INVALIDCALL = 0x88780032 | 0;
 
 /** DSBCAPS flags a program sets when it describes a buffer it wants. */
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
+const DSBCAPS_LOCHARDWARE = 0x00000004;
+const DSBCAPS_LOCSOFTWARE = 0x00000008;
 
 /** Interface identifiers. Facts about somebody else's ABI; there is no partial credit. */
 export const IID_IDirectSound = '{279AFA83-4981-11CE-A521-0020AF0BE560}';
@@ -604,7 +606,14 @@ export function createDirectSound(
             {
                 return DSERR_INVALIDPARAM;
             }
-            writeU32(caps + DSBCAPS.dwFlags, buffer.primary ? DSBCAPS_PRIMARYBUFFER : 0);
+            // What the program asked for, which is what it branches on before
+            // touching a control, and where the buffer is mixed. That is in
+            // software unless it asked for hardware and was given it: a
+            // buffer is in one place or the other, never neither.
+            writeU32(caps + DSBCAPS.dwFlags, buffer.primary
+                || (buffer.capabilities & DSBCAPS_LOCHARDWARE) !== 0
+                ? buffer.capabilities
+                : buffer.capabilities | DSBCAPS_LOCSOFTWARE);
             writeU32(caps + DSBCAPS.dwBufferBytes, buffer.bytes);
             writeU32(caps + DSBCAPS.dwUnlockTransferRate, 0);
             writeU32(caps + DSBCAPS.dwPlayCpuOverhead, 0);
@@ -757,7 +766,7 @@ export function createDirectSound(
             }
 
             const buffer = createSoundBuffer({
-                bytes, address, format: resolved, now, primary,
+                bytes, address, format: resolved, now, primary, capabilities: flags,
             });
             buffers.push(buffer);
             writeU32(out, publishBuffer(buffer));
@@ -780,6 +789,7 @@ export function createDirectSound(
                 address: source.address,
                 format: source.format,
                 now,
+                capabilities: source.capabilities,
             });
             buffers.push(copy);
             writeU32(out, publishBuffer(copy));

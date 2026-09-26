@@ -101,9 +101,10 @@ export function normaliseFormat(format){
  * @param {() => number} options.now   The guest's clock, in milliseconds.
  * @param {boolean} [options.primary]  A primary buffer is the mix target and
  *                                     never holds a program's own samples.
+ * @param {number} [options.capabilities]  The DSBCAPS flags it was created with.
  */
 export function createSoundBuffer(
-    { bytes, address, format: initialFormat, now, primary = false })
+    { bytes, address, format: initialFormat, now, primary = false, capabilities = 0 })
 {
     // Not a constant: a program sets the format of the primary buffer to say
     // what the mix should run at, and everything below is in bytes derived from
@@ -378,6 +379,9 @@ export function createSoundBuffer(
         },
         get primary(){
             return primary;
+        },
+        get capabilities(){
+            return capabilities;
         },
 
         addRef: ()=>++references,
