@@ -2274,11 +2274,23 @@ export function createWindowFunctions(host){
         }
     };
 
+    /**
+     * The clipboard the object half keeps, once it has been built beside the
+     * controls that copy to it and paste from it.
+     *
+     * @type {import('./objects.js').ClipboardService | null}
+     */
+    let clipboardAccess = null;
+
     // The host the system classes and the common controls share: what a
     // procedure needs of the window manager around it, in one object, so a
     // control in comctl32 paints and tells its parent exactly as one here does.
     /** @type {import('./controls.js').ControlHost} */
     const controlHost = {
+        clipboard: {
+            text: ()=>clipboardAccess?.text() ?? null,
+            copy: text=>clipboardAccess?.copy(text) ?? false,
+        },
         readCString: host.readCString,
         writeMemory: host.writeMemory,
         readMemory: host.readMemory,
@@ -2606,7 +2618,9 @@ export function createWindowFunctions(host){
             }),
             live, windows, classes,
         }),
-        ...createObjectFunctions({ host, live }),
+        ...createObjectFunctions({ host, live, clipboardService: service=>{
+            clipboardAccess = service;
+        } }),
         ...createDialogFunctions({
             host: Object.assign(Object.create(host), {
                 focus: focusWindow, setFocus, send, callProcedure, geometry, children: childrenOf,

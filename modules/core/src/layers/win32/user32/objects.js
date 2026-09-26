@@ -362,11 +362,27 @@ const parseMenuTemplate = bytes=>{
 
 
 /**
+ * The clipboard as a control reaches it -- an edit's WM_COPY and WM_PASTE --
+ * rather than through the exports a program calls.
+ *
+ * @typedef {Object} ClipboardService
+ * @property {() => string | null} text
+ *           The text a paste takes: the program's own, else the host's, and
+ *           nothing while a program holds the clipboard open.
+ * @property {(text: string) => boolean} copy
+ *           Makes text the clipboard's CF_TEXT, as a control that opens,
+ *           empties, sets and closes it does; false while a program holds it
+ *           open.
+ */
+
+/**
  * @param {Object} options
  * @param {any} options.host
  * @param {(hwnd: number) => any | null} options.live
+ * @param {(service: ClipboardService) => void} [options.clipboardService]
+ *        Handed the clipboard for the controls' own use.
  */
-export function createObjectFunctions({ host, live }){
+export function createObjectFunctions({ host, live, clipboardService }){
     /** @type {Map<number, any>} */
     const menus = new Map();
     /** @type {Map<number, any>} */
@@ -510,6 +526,42 @@ export function createObjectFunctions({ host, live }){
         const narrow = clipboard.formats.get(CF_TEXT) || clipboard.formats.get(CF_OEMTEXT);
         return narrow ? readTerminated(narrow, 1) : null;
     };
+
+    /**
+     * What a control put on the clipboard is memory of ours, given back when
+     * the clipboard is next emptied, as Windows frees what it held.
+     *
+     * @type {Set<number>}
+     */
+    const controlCopies = new Set();
+    const releaseControlCopies = ()=>{
+        for (const handle of controlCopies)
+        {
+            host.release?.(handle);
+        }
+        controlCopies.clear();
+    };
+
+    clipboardService?.({
+        text: ()=>(clipboard.open ? null : clipboardText() ?? hostText()?.text ?? null),
+        copy: text=>{
+            if (clipboard.open)
+            {
+                return false;
+            }
+            releaseControlCopies();
+            clipboard.formats.clear();
+            clipboard.emptiedAt = host.pasteboard?.version ?? 0;
+            if (host.allocate)
+            {
+                const handle = layDown(CF_TEXT, text);
+                clipboard.formats.set(CF_TEXT, handle);
+                controlCopies.add(handle);
+            }
+            host.clipboard?.(text);
+            return true;
+        },
+    });
 
     /** @param {number} address @param {string} text @param {number} limit */
     const writeString = (address, text, limit)=>{
@@ -1432,6 +1484,7 @@ export function createObjectFunctions({ host, live }){
                 {
                     return 0;
                 }
+                releaseControlCopies();
                 clipboard.formats.clear();
                 clipboard.changed = true;
                 clipboard.emptiedAt = host.pasteboard?.version ?? 0;

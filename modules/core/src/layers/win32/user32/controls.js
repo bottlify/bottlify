@@ -200,6 +200,13 @@ const EM_REPLACESEL = 0x00c2;
 const EM_GETLINE = 0x00c4;
 const EM_LIMITTEXT = 0x00c5;
 const EM_CANUNDO = 0x00c6;
+const EM_UNDO = 0x00c7;
+/** The clipboard messages an edit answers, and the undo they share with it. */
+const WM_CUT = 0x0300;
+const WM_COPY = 0x0301;
+const WM_PASTE = 0x0302;
+const WM_CLEAR = 0x0303;
+const WM_UNDO = 0x0304;
 const EM_EMPTYUNDOBUFFER = 0x00cd;
 const EM_GETFIRSTVISIBLELINE = 0x00ce;
 const EM_SETREADONLY = 0x00cf;
@@ -493,6 +500,9 @@ const RADIO_DOT = [
  *           a structure cannot be sent.
  * @property {(address: number) => void} [release]
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {import('./objects.js').ClipboardService} [clipboard]
+ *           The clipboard an edit copies to and pastes from. Absent, the
+ *           clipboard messages do nothing.
  */
 
 /**
@@ -1353,6 +1363,54 @@ export function createControlProcedures(host){
     };
 
     /**
+     * Keeps what an edit held before a change, for WM_UNDO to put back: one
+     * level, as the control keeps. A run of typing is one change, so the
+     * first character of a run is what remembers; anything else ends the
+     * run.
+     *
+     * @param {any} record @param {boolean} [typing]
+     */
+    const rememberUndo = (record, typing = false)=>{
+        const state = editState(record);
+        if (!typing || !state.typingRun)
+        {
+            state.undo = { text: record.title, selStart: state.selStart, selEnd: state.selEnd };
+        }
+        state.typingRun = typing;
+    };
+
+    /**
+     * Swaps what an edit holds with what it held before its last change, so
+     * that undoing twice is the change again.
+     *
+     * @param {any} record @param {unknown} [thread]
+     */
+    const undoEdit = (record, thread)=>{
+        const state = editState(record);
+        const before = state.undo;
+        if (!before)
+        {
+            return 0;
+        }
+        state.undo = { text: record.title, selStart: state.selStart, selEnd: state.selEnd };
+        state.typingRun = false;
+        record.title = before.text;
+        state.selStart = before.selStart;
+        state.selEnd = before.selEnd;
+        state.modified = true;
+        host.invalidate(record);
+        return after(notify(record, EN_UPDATE, thread),
+            ()=>after(notify(record, EN_CHANGE, thread), ()=>1));
+    };
+
+    /** @param {any} record @returns {string} the text an edit has selected */
+    const selectedText = record=>{
+        const state = editState(record);
+        return record.title.slice(Math.min(state.selStart, state.selEnd),
+            Math.max(state.selStart, state.selEnd));
+    };
+
+    /**
      * Moves the caret, extending the selection when Shift is held.
      *
      * @param {any} record @param {number} to
@@ -1360,6 +1418,7 @@ export function createControlProcedures(host){
     const moveCaret = (record, to)=>{
         const state = editState(record);
         const clamped = Math.max(0, Math.min(record.title.length, to));
+        state.typingRun = false;
         state.selEnd = clamped;
         if (!host.keyDown(VK_SHIFT))
         {
@@ -1386,6 +1445,7 @@ export function createControlProcedures(host){
         const state = editState(record);
         if (character === VK_BACK)
         {
+            rememberUndo(record);
             if (state.selStart === state.selEnd && state.selEnd > 0)
             {
                 state.selStart = state.selEnd - 1;
@@ -1394,14 +1454,18 @@ export function createControlProcedures(host){
         }
         if (character === VK_RETURN)
         {
-            return multiline(record) && (record.style & ES_WANTRETURN) !== 0
-                ? replaceSelection(record, '\r\n', thread, codes)
-                : 0;
+            if (!multiline(record) || (record.style & ES_WANTRETURN) === 0)
+            {
+                return 0;
+            }
+            rememberUndo(record, true);
+            return replaceSelection(record, '\r\n', thread, codes);
         }
         if (character < VK_SPACE || character === VK_TAB || character === VK_ESCAPE)
         {
             return 0;
         }
+        rememberUndo(record, true);
         return replaceSelection(record, String.fromCharCode(character), thread, codes);
     };
 
@@ -1414,6 +1478,7 @@ export function createControlProcedures(host){
      */
     const setSelection = (record, start, end)=>{
         const state = editState(record);
+        state.typingRun = false;
         if (start === -1)
         {
             state.selStart = state.selEnd;
@@ -1543,6 +1608,7 @@ export function createControlProcedures(host){
                 {
                     const at = charFromPoint(record, hdc, point.x, point.y);
                     state.selStart = state.selEnd = at;
+                    state.typingRun = false;
                 }
                 host.endPaint(record, hdc);
                 host.invalidate(record);
@@ -1588,6 +1654,7 @@ export function createControlProcedures(host){
                         {
                             return 0;
                         }
+                        rememberUndo(record);
                         if (state.selStart === state.selEnd)
                         {
                             state.selEnd = Math.min(record.title.length, state.selEnd + 1);
@@ -1623,6 +1690,8 @@ export function createControlProcedures(host){
                 state.selStart = state.selEnd = 0;
                 state.firstLine = 0;
                 state.modified = false;
+                state.undo = null;
+                state.typingRun = false;
                 host.invalidate(record);
                 return after(notify(record, EN_UPDATE, thread),
                     ()=>after(notify(record, EN_CHANGE, thread), ()=>1));
@@ -1645,9 +1714,61 @@ export function createControlProcedures(host){
                 return 0;
             case EM_REPLACESEL: {
                 const address = message.lParam >>> 0;
+                // wParam is fCanUndo: whether the replacement can be undone.
+                if (message.wParam !== 0)
+                {
+                    rememberUndo(record);
+                }
+                else
+                {
+                    state.typingRun = false;
+                }
                 return replaceSelection(record,
                     address === 0 ? '' : host.readCString(address, MAX_TEXT), thread);
             }
+            // The clipboard: a password is never copied out, and a read-only
+            // edit gives nothing up and takes nothing in, though it copies.
+            case WM_COPY:
+                if ((record.style & ES_PASSWORD) === 0 && selectedText(record).length > 0)
+                {
+                    host.clipboard?.copy(selectedText(record));
+                }
+                return 0;
+            case WM_CUT:
+            case WM_CLEAR: {
+                const selected = selectedText(record);
+                if (readOnly() || selected.length === 0
+                    || (message.message === WM_CUT && (record.style & ES_PASSWORD) !== 0))
+                {
+                    return 0;
+                }
+                if (message.message === WM_CUT)
+                {
+                    host.clipboard?.copy(selected);
+                }
+                rememberUndo(record);
+                return after(replaceSelection(record, '', thread), ()=>0);
+            }
+            case WM_PASTE: {
+                const pasted = readOnly() ? null : host.clipboard?.text() ?? null;
+                if (pasted === null)
+                {
+                    return 0;
+                }
+                rememberUndo(record);
+                // A single-line edit takes the first line and no more.
+                const text = multiline(record) ? pasted : pasted.split(/[\r\n]/)[0];
+                return after(replaceSelection(record, text, thread), ()=>0);
+            }
+            case WM_UNDO:
+            case EM_UNDO:
+                return undoEdit(record, thread);
+            case EM_CANUNDO:
+                return state.undo ? 1 : 0;
+            case EM_EMPTYUNDOBUFFER:
+                state.undo = null;
+                state.typingRun = false;
+                return 0;
             case EM_LIMITTEXT:
                 state.limit = (message.wParam >>> 0) === 0
                     ? DEFAULT_EDIT_LIMIT : message.wParam >>> 0;
@@ -1719,8 +1840,6 @@ export function createControlProcedures(host){
                 return 0;
             case EM_GETPASSWORDCHAR:
                 return (record.style & ES_PASSWORD) !== 0 ? state.passwordChar ?? 0x2a : 0;
-            case EM_CANUNDO:
-            case EM_EMPTYUNDOBUFFER:
             case EM_SETMARGINS:
             case EM_GETRECT:
                 return 0;

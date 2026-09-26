@@ -753,6 +753,88 @@ test('an edit takes typing at its caret, selects, and tells its parent EN_CHANGE
     assert.equal(context.memory.readCString(OUT, 16), 'replaced!', 'read-only takes nothing');
 });
 
+test('an edit copies, cuts, pastes and clears through the clipboard, and undoes a change',
+    async()=>{
+        // user32's edit tests: WM_PASTE inserts the clipboard's CF_TEXT, and a
+        // single-line edit keeps only its first line. The rest as documented
+        // for the edit control's clipboard messages and EM_CANUNDO.
+        const WM_CUT = 0x0300;
+        const WM_COPY = 0x0301;
+        const WM_PASTE = 0x0302;
+        const WM_CLEAR = 0x0303;
+        const WM_UNDO = 0x0304;
+        const EM_CANUNDO = 0x00c6;
+        const EM_EMPTYUNDOBUFFER = 0x00cd;
+        const EM_SETREADONLY = 0x00cf;
+        const CF_TEXT = 1;
+        const context = setup();
+        const dialog = await openDialog(context);
+        const { fns, memory } = context;
+        memory.putString(TEXT, 'Edit');
+        const edit = fns.CreateWindowExA.handler([WS_EX_CLIENTEDGE, TEXT, 0,
+            WS_CHILD | WS_VISIBLE, 8, 110, 100, 20, dialog, 300, HINSTANCE, 0]);
+        /** @param {number} message @param {number} [wParam] @param {number} [lParam] */
+        const send = (message, wParam = 0, lParam = 0)=>
+            fns.SendMessageA.handler([edit, message, wParam, lParam]);
+        const text = ()=>{
+            fns.GetWindowTextA.handler([edit, OUT, 64]);
+            return memory.readCString(OUT, 64);
+        };
+        const clipboard = ()=>{
+            fns.OpenClipboard.handler([0]);
+            const handle = fns.GetClipboardData.handler([CF_TEXT]);
+            fns.CloseClipboard.handler([]);
+            return handle === 0 ? null : memory.readCString(handle, 64);
+        };
+        /** @param {string} value */
+        const putClipboard = value=>{
+            const at = memory.putString(TEXT + 0x100, value);
+            fns.OpenClipboard.handler([0]);
+            fns.EmptyClipboard.handler([]);
+            fns.SetClipboardData.handler([CF_TEXT, at]);
+            fns.CloseClipboard.handler([]);
+        };
+        memory.putString(TEXT, 'hello world');
+        fns.SetWindowTextA.handler([edit, TEXT]);
+        assert.equal(send(EM_CANUNDO), 0, 'nothing to undo after WM_SETTEXT');
+
+        send(EM_SETSEL, 0, 5);
+        send(WM_COPY);
+        assert.equal(clipboard(), 'hello', 'the selection is on the clipboard');
+        assert.equal(text(), 'hello world', 'and still in the edit');
+
+        send(EM_SETSEL, 6, 11);
+        send(WM_PASTE);
+        assert.equal(text(), 'hello hello');
+        assert.equal(send(EM_CANUNDO), 1);
+        send(WM_UNDO);
+        assert.equal(text(), 'hello world', 'the paste undone');
+
+        send(EM_SETSEL, 0, 6);
+        send(WM_CUT);
+        assert.equal(text(), 'world');
+        assert.equal(clipboard(), 'hello ');
+        send(EM_SETSEL, 0, 2);
+        send(WM_CLEAR);
+        assert.equal(text(), 'rld');
+        send(EM_EMPTYUNDOBUFFER);
+        assert.equal(send(EM_CANUNDO), 0);
+
+        putClipboard('first line\r\nsecond line');
+        send(EM_SETSEL, 0, -1);
+        send(WM_PASTE);
+        assert.equal(text(), 'first line', 'a single-line edit keeps the first line');
+
+        send(EM_SETREADONLY, 1);
+        send(EM_SETSEL, 0, 5);
+        send(WM_CUT);
+        send(WM_CLEAR);
+        send(WM_PASTE);
+        assert.equal(text(), 'first line', 'read-only: nothing taken out or put in');
+        send(WM_COPY);
+        assert.equal(clipboard(), 'first', 'but copying still works');
+    });
+
 test('typing inside a modal loop reaches the edit with the focus, translated', async()=>{
     // DialogBox pumps for the program, so it translates for the program too:
     // a key press left alone by the dialog manager becomes the character an
