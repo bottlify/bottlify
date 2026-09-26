@@ -1158,7 +1158,9 @@ test('the capabilities a device reports are answers, not gaps', ()=>{
     h.release(root);
 });
 
-test('the fog the raster caps claim is named by the bit d3d8caps.h gives it', ()=>{
+test('the fog the raster caps claim is named by the bits d3d8caps.h gives it', ()=>{
+    // Table fog is taken over w under a perspective projection and over z
+    // under an affine one, which is both of the claims.
     const h = seamed();
     const root = h.create();
     const device = h.createDevice(root);
@@ -1166,7 +1168,7 @@ test('the fog the raster caps claim is named by the bit d3d8caps.h gives it', ()
     assert.equal(h.device(device, 'GetDeviceCaps', [at]), D3D_OK);
     const raster = h.fields.readU32(at + D3DCAPS8.RasterCaps);
     assert.ok((raster & 0x00200000) !== 0, 'D3DPRASTERCAPS_ZFOG');
-    assert.equal(raster & 0x00100000, 0, 'D3DPRASTERCAPS_WFOG is a different claim');
+    assert.ok((raster & 0x00100000) !== 0, 'D3DPRASTERCAPS_WFOG');
     assert.equal(h.release(device), 0);
     h.release(root);
 });

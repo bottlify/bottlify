@@ -80,6 +80,14 @@ test('the default device advertises the model the renderer draws whole', ()=>{
     assert.ok(words.MaxVertexShaderConst >= 96);
 });
 
+test('table fog is claimed over both depths it is taken over', ()=>{
+    // W under a perspective projection, z under an affine one: the rule the
+    // D3DCAPS9 documentation gives for a device claiming W-based fog.
+    const words = capabilityWords(DEFAULT_CAPS);
+    assert.equal(words.RasterCaps & 0x00100000, 0x00100000, 'D3DPRASTERCAPS_WFOG');
+    assert.equal(words.RasterCaps & 0x00200000, 0x00200000, 'D3DPRASTERCAPS_ZFOG');
+});
+
 test('what the renderer does not do is not claimed', ()=>{
     const words = capabilityWords(DEFAULT_CAPS);
     assert.equal(words.MaxUserClipPlanes, 0, 'no clipping against user planes');
