@@ -782,6 +782,47 @@ export function createWindowFunctions(host){
         }
     };
 
+    /**
+     * Moves a child within its siblings' stacking -- which for children is
+     * the order the records are kept in, topmost first -- as SetWindowPos's
+     * hWndInsertAfter says: HWND_BOTTOM below them all, a sibling's handle
+     * just below that sibling, and the top for anything else.
+     *
+     * @param {any} record @param {number} after
+     */
+    const restack = (record, after)=>{
+        const HWND_BOTTOM = 1;
+        const others = childrenOf({ hwnd: record.parent }).filter(each=>each !== record);
+        const sibling = others.findIndex(each=>each.hwnd === (after >>> 0));
+        const at = (after >>> 0) === HWND_BOTTOM ? others.length : sibling + 1;
+        const order = [...others.slice(0, at), record, ...others.slice(at)];
+        const moved = new Set(order);
+        /** @type {any[]} */
+        const kept = [];
+        let placed = false;
+        for (const each of windows.values())
+        {
+            if (!moved.has(each))
+            {
+                kept.push(each);
+            }
+            else if (!placed)
+            {
+                kept.push(...order);
+                placed = true;
+            }
+        }
+        windows.clear();
+        for (const each of kept)
+        {
+            windows.set(each.hwnd, each);
+        }
+        if (shown(record))
+        {
+            appear(record);
+        }
+    };
+
     /** @param {any} record  Whether it and every ancestor is shown. */
     const shown = record=>{
         for (let at = record; at; at = isChild(at) ? windows.get(at.parent) : null)
@@ -1801,13 +1842,12 @@ export function createWindowFunctions(host){
      */
     const windowFromPoint = (x, y, skip = { disabled: true, transparent: true })=>{
         /**
-         * @param {any[]} candidates
+         * @param {any[]} candidates  Topmost first.
          * @returns {{ record: any, hit: number } | null}
          */
         const deepest = candidates=>{
-            for (let index = candidates.length - 1; index >= 0; index--)
+            for (const record of candidates)
             {
-                const record = candidates[index];
                 if ((record.style & WS_VISIBLE) === 0
                     || !contains(geometry.windowRect(record), x, y))
                 {
@@ -1834,8 +1874,10 @@ export function createWindowFunctions(host){
             }
             return null;
         };
+        // Top-level windows are kept bottom-up and children top-down: the
+        // stacking GetWindow walks, and the one that decides who is hit.
         return deepest([...windows.values()].filter(record=>!record.destroyed
-            && !isChild(record)));
+            && !isChild(record)).reverse());
     };
 
     /**
@@ -2545,7 +2587,7 @@ export function createWindowFunctions(host){
                 focus: focusWindow, setFocus, active: activeWindow, activate,
                 capture: ()=>captured, setCapture, releaseCapture,
                 send, callProcedure, geometry, windowFromPoint, isChild, repaint, appear, uncover,
-                shown, raise, sysColorBrush: (/** @type {number} */ index)=>(draw
+                shown, raise, restack, sysColorBrush: (/** @type {number} */ index)=>(draw
                     ? draw.solidBrush(sysColor(index)) : 0),
                 /**
                  * The window of a top-level window's owner chain that was

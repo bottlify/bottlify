@@ -294,6 +294,55 @@ test('GetWindow walks top-level windows from the top, and children in creation o
     assert.equal(fns.GetWindow.handler([firstControl, GW_OWNER]), 0, 'a child has no owner');
 });
 
+test('a child is hit where GetWindow stacks it, and SetWindowPos restacks it', ()=>{
+    // user32's window tests: children made one after another are stacked
+    // first-made on top (GW_CHILD, then GW_HWNDNEXT, walks them in creation
+    // order), and the point both overlap belongs to GW_CHILD's window.
+    const GW_CHILD = 5;
+    const GW_HWNDNEXT = 2;
+    const WS_CHILD = 0x40000000;
+    const WS_POPUP = 0x80000000;
+    const HWND_TOP = 0;
+    const HWND_BOTTOM = 1;
+    const SWP_NOSIZE = 0x0001;
+    const SWP_NOMOVE = 0x0002;
+    const { memory, fns } = setup();
+    makeWindow(memory, fns);
+    const parent = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, WS_POPUP | WS_VISIBLE,
+        0, 0, 200, 200, 0, 0, HINSTANCE, 0]);
+    /** @returns {number} */
+    const child = ()=>fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE,
+        WS_CHILD | WS_VISIBLE, 0, 0, 100, 100, parent, 0, HINSTANCE, 0]);
+    const a = child();
+    const b = child();
+    const c = child();
+    /** @returns {number[]} */
+    const stack = ()=>{
+        const listed = [];
+        for (let at = fns.GetWindow.handler([parent, GW_CHILD]); at !== 0;
+            at = fns.GetWindow.handler([at, GW_HWNDNEXT]))
+        {
+            listed.push(at);
+        }
+        return listed;
+    };
+
+    assert.deepEqual(stack(), [a, b, c]);
+    assert.equal(fns.WindowFromPoint.handler([50, 50]), a, 'the top child takes the point');
+    assert.equal(fns.ChildWindowFromPoint.handler([parent, 50, 50]), a);
+
+    fns.SetWindowPos.handler([c, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE]);
+    assert.deepEqual(stack(), [c, a, b], 'HWND_TOP puts a child above its siblings');
+    assert.equal(fns.WindowFromPoint.handler([50, 50]), c);
+    assert.equal(fns.ChildWindowFromPoint.handler([parent, 50, 50]), c);
+
+    fns.SetWindowPos.handler([c, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE]);
+    assert.deepEqual(stack(), [a, b, c], 'and HWND_BOTTOM below them');
+    fns.SetWindowPos.handler([a, b, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE]);
+    assert.deepEqual(stack(), [b, a, c], 'a sibling handle places it just below that sibling');
+    assert.equal(fns.WindowFromPoint.handler([50, 50]), b);
+});
+
 test('GetLastActivePopup answers the popup of an owner chain that was active last', ()=>{
     // user32's window tests: an owner, a popup it owns, and a popup that one
     // owns, each shown as it is made -- the owner's last active popup is the

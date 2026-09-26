@@ -799,8 +799,10 @@ test('an edit places its caret and selection where the drawn text ends', async()
     const context = setup({ engine: true });
     const dialog = await openDialog(context);
     context.memory.putString(TEXT, 'Edit');
+    // Clear of the page's own controls, which are stacked above a control
+    // made after them and would take the clicks below.
     const edit = context.fns.CreateWindowExA.handler([WS_EX_CLIENTEDGE, TEXT, 0,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 8, 60, 120, 20, dialog, 300, HINSTANCE, 0]);
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 8, 110, 100, 20, dialog, 300, HINSTANCE, 0]);
     assert.notEqual(edit, 0);
     await context.fns.SetFocus.handler([edit]);
     for (const character of 'il')
@@ -996,8 +998,10 @@ test('a scroll bar keeps its range and position, and a click on an arrow asks it
         const context = setup();
         const dialog = await openDialog(context);
         context.memory.putString(TEXT, 'ScrollBar');
+        // Short of the Next button, which is stacked above a control made
+        // after it and would take the click on the lower arrow.
         const bar = context.fns.CreateWindowExA.handler([0, TEXT, 0,
-            WS_CHILD | WS_VISIBLE | SBS_VERT, 180, 4, 16, 100, dialog, 600, HINSTANCE, 0]);
+            WS_CHILD | WS_VISIBLE | SBS_VERT, 180, 4, 16, 70, dialog, 600, HINSTANCE, 0]);
         context.fns.SendMessageA.handler([bar, SBM_SETRANGE, 0, 50]);
         assert.equal(context.fns.SendMessageA.handler([bar, SBM_SETPOS, 70, 1]), 0,
             'the previous position');

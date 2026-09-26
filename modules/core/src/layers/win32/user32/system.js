@@ -535,8 +535,11 @@ export function createSystemFunctions({ host, live, windows, classes }){
         {
             record.style = (record.style & ~WS_VISIBLE) >>> 0;
         }
-        if ((flags & SWP_NOZORDER) === 0 && (after | 0) !== HWND_BOTTOM
-            && (record.style & WS_CHILD) === 0)
+        if ((flags & SWP_NOZORDER) === 0 && (record.style & WS_CHILD) !== 0)
+        {
+            host.restack(record, after >>> 0);
+        }
+        else if ((flags & SWP_NOZORDER) === 0 && (after | 0) !== HWND_BOTTOM)
         {
             host.raise(record);
         }
@@ -1136,8 +1139,9 @@ export function createSystemFunctions({ host, live, windows, classes }){
         : then(value));
 
     /**
-     * ChildWindowFromPoint, both spellings: the last-created child whose
-     * rectangle holds the point, the flags deciding which are passed over.
+     * ChildWindowFromPoint, both spellings: the topmost child whose rectangle
+     * holds the point -- children are kept topmost first -- the flags
+     * deciding which are passed over.
      *
      * @param {number} parent @param {number} x @param {number} y @param {number} flags
      */
@@ -1155,9 +1159,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
         const screenY = origin.y + (y | 0);
         const children = ordered().filter(child=>child.parent === record.hwnd
             && (child.style & WS_CHILD) !== 0);
-        for (let index = children.length - 1; index >= 0; index--)
+        for (const child of children)
         {
-            const child = children[index];
             const rect = host.geometry.windowRect(child);
             if (screenX < rect.left || screenX >= rect.right || screenY < rect.top
                 || screenY >= rect.bottom)
