@@ -108,9 +108,13 @@ export function normaliseFormat(format){
  * @param {boolean} [options.primary]  A primary buffer is the mix target and
  *                                     never holds a program's own samples.
  * @param {number} [options.capabilities]  The DSBCAPS flags it was created with.
+ * @param {() => boolean} [options.kept]  Whether something besides the program's
+ *                                     own references keeps it.
  */
-export function createSoundBuffer(
-    { bytes, address, format: initialFormat, now, primary = false, capabilities = 0 })
+export function createSoundBuffer({
+    bytes, address, format: initialFormat, now, primary = false, capabilities = 0,
+    kept = ()=>false,
+})
 {
     // Not a constant: a program sets the format of the primary buffer to say
     // what the mix should run at, and everything below is in bytes derived from
@@ -405,6 +409,8 @@ export function createSoundBuffer(
         get references(){
             return references;
         },
+        /** Whether it can still be reached: a count of zero is not the end of it while kept. */
+        reachable: ()=>references > 0 || kept(),
 
         /**
          * Both cursors at once, because they are one answer: a program reads

@@ -457,6 +457,35 @@ test('a device has one primary buffer, handed out again with its count raised', 
     assert.equal(f.dsound.buffers().find(b=>b.primary).references, 1);
 });
 
+test('a primary buffer is dropped once nothing can reach it, and not before', ()=>{
+    // Its device holds it: a count of zero is not the end of it while the
+    // device lives. Once both are gone it leaves the walk, or every object a
+    // program creates leaves a buffer behind for the rest of the session.
+    const f = createRoot();
+    const device = f.bridge.recordAt(f.root).object;
+    const primary = f.bridge.recordAt(createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER })).object;
+    const primaries = ()=>f.dsound.buffers().filter(b=>b.primary).length;
+
+    assert.equal(primary.release(), 0);
+    f.dsound.pruneReleased();
+    assert.equal(primaries(), 1, 'its device still has it');
+    assert.equal(device.release(), 0);
+    f.dsound.pruneReleased();
+    assert.equal(primaries(), 0);
+
+    // The other order: the program still holds the primary when the device goes.
+    const other = 0x1004;
+    f.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, other, 0]);
+    const second = { ...f, root: f.memory.u32(other) };
+    const held = f.bridge.recordAt(createBuffer(second, { flags: DSBCAPS_PRIMARYBUFFER })).object;
+    assert.equal(f.bridge.recordAt(second.root).object.release(), 0);
+    f.dsound.pruneReleased();
+    assert.equal(primaries(), 1, 'the program still holds it');
+    assert.equal(held.release(), 0);
+    f.dsound.pruneReleased();
+    assert.equal(primaries(), 0);
+});
+
 test('two DirectSound objects have primary buffers of their own', ()=>{
     // Wine's dsound test_primary_independent.
     const f = createRoot();

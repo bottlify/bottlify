@@ -906,6 +906,9 @@ export function createDirectSound(
 
             const buffer = createSoundBuffer({
                 bytes, address, format: resolved, now, primary, capabilities: flags,
+                // The device's own, which the program can ask for again after
+                // releasing every reference it had.
+                kept: primary ? ()=>root.references > 0 : undefined,
             });
             buffers.push(buffer);
             if (primary)
@@ -1073,6 +1076,9 @@ export function createDirectSound(
         const device = {
             addRef: ()=>++references,
             release: ()=>(references = Math.max(0, references - 1)),
+            get references(){
+                return references;
+            },
             eight,
             /**
              * This object's primary buffer, once asked for: another object's
@@ -1179,7 +1185,8 @@ export function createDirectSound(
 
         /**
          * Drops every buffer the program has fully released (`references`
-         * reached zero) from the walk. Without this, a buffer a program
+         * reached zero, and for a primary buffer its device gone as well)
+         * from the walk. Without this, a buffer a program
          * created, played and released stays in this array for the rest of
          * the session -- harmless on its own, but every caller that walks
          * `buffers()` once a turn was walking a list that only ever grew.
@@ -1187,7 +1194,7 @@ export function createDirectSound(
         pruneReleased(){
             for (let at = buffers.length - 1; at >= 0; at--)
             {
-                if (!buffers[at].primary && buffers[at].references <= 0)
+                if (!buffers[at].reachable())
                 {
                     buffers.splice(at, 1);
                 }
