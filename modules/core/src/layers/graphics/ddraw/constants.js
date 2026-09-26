@@ -198,3 +198,6 @@ export const DDLOCK_READONLY = 0x00000010;
 export const DDLOCK_WRITEONLY = 0x00000020;
 export const DDLOCK_WAIT = 0x00000001;
 export const DDFLIP_WAIT = 0x00000001;
+
+/** GetDeviceIdentifier: the adapter a secondary 3D-only device is attached to. */
+export const DDGDI_GETHOSTIDENTIFIER = 0x00000001;

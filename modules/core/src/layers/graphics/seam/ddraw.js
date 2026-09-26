@@ -56,8 +56,8 @@ import {
     DDBLTFX, DDCAPS, DDCAPS_SIZES, DDCOLORKEY, DDSCAPS2, RECT, createFields,
 } from './structs.js';
 import {
-    DDSURFACEDESC, DDSURFACEDESC2, bytesPerPixel, readSurfaceDesc, writePixelFormat,
-    writeSurfaceDesc,
+    DDDEVICEIDENTIFIER2, DDSURFACEDESC, DDSURFACEDESC2, MAX_DDDEVICEID_STRING, bytesPerPixel,
+    readSurfaceDesc, writePixelFormat, writeSurfaceDesc,
 } from '../ddraw/structs.js';
 import {
     DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_DEPTHFILL, DDBLT_KEYDESTOVERRIDE,
@@ -72,10 +72,11 @@ import {
     DDSCAPS_PRIMARYSURFACE, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_VIDEOMEMORY,
     DDSCAPS_ZBUFFER, DDSD_BACKBUFFERCOUNT,
     DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PITCH,
-    DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK,
+    DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK, DDGDI_GETHOSTIDENTIFIER,
 } from '../ddraw/constants.js';
 import { pixelFormatForDepth } from '../ddraw/objects.js';
 import { blt, bltFast } from '../ddraw/blit.js';
+import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { createRaster } from './raster.js';
 import { DDRAW_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { REFRESH_HZ } from '../../win32/user32/display.js';
@@ -228,12 +229,14 @@ export function versionOf(id){
  * @param {() => number} [deps.now]  The clock the raster runs on, in milliseconds.
  * @param {(ms: number, run: () => void) => void} [deps.schedule]
  *        How a wait for the vertical blank is woken.
+ * @param {() => import('./adapter.js').AdapterIdentity | null} [deps.identity]
+ *        The hardware behind the display, as the assembling caller knows it.
  */
 export function createDirectDrawSeam(
     { publisher, memory, screen, gdi, present, callGuest, currentThread, scratch,
         extraInterfaces = [], now = ()=>performance.now(), schedule = (ms, run)=>{
             setTimeout(run, ms);
-        } },
+        }, identity },
 )
 {
     const fields = createFields(memory);
@@ -1012,6 +1015,43 @@ export function createDirectDrawSeam(
     };
 
     /**
+     * DDDEVICEIDENTIFIER, or its second form with the WHQL level after it,
+     * from what the assembling caller knows of the hardware -- the answer
+     * Direct3D's adapter identifier gives, so a program asking both finds one
+     * card. The driver is named as a DLL because that is what the field holds
+     * on Windows and what a program parsing it looks for. Only the structure's
+     * own bytes are written: rounded up to its alignment it would run four
+     * bytes into whatever the caller keeps after it.
+     *
+     * @param {number} address @param {boolean} withWhql
+     */
+    const writeDeviceIdentifier = (address, withWhql)=>{
+        const { vendorId, description } = describeAdapter(identity?.() ?? null);
+        const block = new Uint8Array(withWhql
+            ? DDDEVICEIDENTIFIER2.SIZE
+            : DDDEVICEIDENTIFIER2.dwWHQLLevel);
+        /** @param {string} text @param {number} at */
+        const ascii = (text, at)=>{
+            for (let index = 0; index < Math.min(text.length, MAX_DDDEVICEID_STRING - 1); index++)
+            {
+                block[at + index] = text.charCodeAt(index) & 0x7f;
+            }
+        };
+        ascii('webgpu.dll', DDDEVICEIDENTIFIER2.szDriver);
+        ascii(description, DDDEVICEIDENTIFIER2.szDescription);
+        const view = new DataView(block.buffer);
+        // Version 1.0.0.0: the product word is the LARGE_INTEGER's high dword.
+        view.setUint32(DDDEVICEIDENTIFIER2.liDriverVersion + 4, 0x00010000, true);
+        view.setUint32(DDDEVICEIDENTIFIER2.dwVendorId, vendorId, true);
+        block.set(ADAPTER_GUID, DDDEVICEIDENTIFIER2.guidDeviceIdentifier);
+        if (withWhql)
+        {
+            view.setUint32(DDDEVICEIDENTIFIER2.dwWHQLLevel, 1, true);
+        }
+        memory.writeMemory(address, block);
+    };
+
+    /**
      * The methods of one ddraw generation.
      *
      * @param {typeof GENERATIONS[keyof typeof GENERATIONS]} generation
@@ -1352,6 +1392,21 @@ export function createDirectDrawSeam(
         RestoreAllSurfaces: (/** @type {any} */ root)=>root.restoreAllSurfaces(),
 
         TestCooperativeLevel: ()=>DD_OK,
+
+        /**
+         * The host flag asks after the adapter a 3D-only card is attached to,
+         * and the one adapter here is its own host.
+         *
+         * @param {any} root @param {number[]} args
+         */
+        GetDeviceIdentifier: (root, [out, flags])=>{
+            if ((out >>> 0) === 0 || (flags & ~DDGDI_GETHOSTIDENTIFIER) !== 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            writeDeviceIdentifier(out >>> 0, version === 7);
+            return DD_OK;
+        },
     });
 
     /** Every generation, so a QueryInterface across them succeeds. */

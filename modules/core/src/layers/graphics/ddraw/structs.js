@@ -112,6 +112,26 @@ export const DDSURFACEDESC2 = Object.freeze({
 });
 
 /**
+ * DDDEVICEIDENTIFIER2, which IDirectDraw7 fills. IDirectDraw4's
+ * DDDEVICEIDENTIFIER is the same structure without its last field, so its
+ * size is where the WHQL level would start. The strings are fixed arrays of
+ * MAX_DDDEVICEID_STRING bytes, not pointers.
+ */
+export const DDDEVICEIDENTIFIER2 = Object.freeze({
+    szDriver: 0x000,
+    szDescription: 0x200,
+    liDriverVersion: 0x400,
+    dwVendorId: 0x408,
+    dwDeviceId: 0x40c,
+    dwSubSysId: 0x410,
+    dwRevision: 0x414,
+    guidDeviceIdentifier: 0x418,
+    dwWHQLLevel: 0x428,
+    SIZE: 0x42c,
+});
+export const MAX_DDDEVICEID_STRING = 512;
+
+/**
  * @typedef {Object} DrawMemory
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory

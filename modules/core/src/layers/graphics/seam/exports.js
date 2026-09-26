@@ -134,6 +134,7 @@ export function createGraphicsLibraries(
     const ddraw = createDirectDrawSeam({
         publisher, memory, screen, gdi, present, callGuest, currentThread, scratch, now, schedule,
         extraInterfaces: [d3d7.interface],
+        identity: ()=>graphics.adapter?.() ?? null,
     });
 
     /** What a program has actually asked us to make, for a report. */

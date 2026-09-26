@@ -27,15 +27,18 @@ import {
 } from './vtables.js';
 import { IID_IDirectDraw4, IID_IDirectDraw7, IID_IDirectDrawSurface7 } from './iids.js';
 import { DDBLTFX, DDCAPS, RECT, createFields } from './structs.js';
-import { DDSURFACEDESC, DDSURFACEDESC2, writeSurfaceDesc } from '../ddraw/structs.js';
+import {
+    DDDEVICEIDENTIFIER2, DDSURFACEDESC, DDSURFACEDESC2, MAX_DDDEVICEID_STRING, writeSurfaceDesc,
+} from '../ddraw/structs.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import {
     DDBLT_COLORFILL, DDCAPS_BLT, DDERR_DCALREADYCREATED, DDERR_INVALIDPARAMS,
-    DDERR_NOCOOPERATIVELEVELSET, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_NOTONMIPMAPSUBLEVEL,
-    DDERR_SURFACEBUSY, DDPCAPS_8BIT, DDPF_RGB, DDSCAPS2_MIPMAPSUBLEVEL, DDSCAPS_BACKBUFFER,
-    DDSCAPS_COMPLEX, DDSCAPS_FLIP, DDSCAPS_MIPMAP, DDSCAPS_OFFSCREENPLAIN, DDSCAPS_PRIMARYSURFACE,
-    DDSCAPS_TEXTURE, DDSCL_EXCLUSIVE, DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSD_BACKBUFFERCOUNT,
-    DDSD_CAPS, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
+    DDGDI_GETHOSTIDENTIFIER, DDERR_NOCOOPERATIVELEVELSET, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND,
+    DDERR_NOTONMIPMAPSUBLEVEL, DDERR_SURFACEBUSY, DDPCAPS_8BIT, DDPF_RGB,
+    DDSCAPS2_MIPMAPSUBLEVEL, DDSCAPS_BACKBUFFER, DDSCAPS_COMPLEX, DDSCAPS_FLIP, DDSCAPS_MIPMAP,
+    DDSCAPS_OFFSCREENPLAIN, DDSCAPS_PRIMARYSURFACE, DDSCAPS_TEXTURE, DDSCL_EXCLUSIVE,
+    DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT,
+    DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
 } from '../ddraw/constants.js';
 
 const HWND = 0x00010044;
@@ -154,8 +157,10 @@ function machine(){
 /**
  * The seam over real DirectDraw objects, with spies where GDI and the
  * presenter would be.
+ *
+ * @param {{ adapter?: any }} [build]  What the build says the hardware is.
  */
-function seamed(){
+function seamed(build = {}){
     const box = machine();
     let time = 0;
     /** @type {{ at: number, run: () => void }[]} */
@@ -180,6 +185,7 @@ function seamed(){
             return root;
         },
         available: ()=>false,
+        adapter: ()=>build.adapter ?? null,
     };
     const libraries = createGraphicsLibraries({
         graphics,
@@ -1324,3 +1330,54 @@ test('without a way into the guest an enumeration names nothing and succeeds', (
     assert.equal(method.invoke(root, [0, 0, 0, 0x1234]), DD_OK);
     assert.equal(root.release('IDirectDraw7'), 0);
 });
+
+test('GetDeviceIdentifier names the driver DLL and the adapter, and fills its own layout only',
+    ()=>{
+        // ddrawmodes.c: DD_OK with no flags and with DDGDI_GETHOSTIDENTIFIER,
+        // a driver name with ".dll" in it, each string's last byte cleared,
+        // and nothing written past dwWHQLLevel -- the structure's size
+        // rounded to eight is not its size.
+        const h = seamed({ adapter: { vendor: 'nvidia', architecture: 'ampere' } });
+        const ddraw = h.create7();
+        const out = 0x8000;
+        const size = DDDEVICEIDENTIFIER2.SIZE;
+        const identifierSlot = slot(IDIRECTDRAW7_SLOTS, 'GetDeviceIdentifier');
+        /** @param {number} at @returns {string} */
+        const text = at=>{
+            const bytes = h.box.bytes.subarray(out + at, out + at + MAX_DDDEVICEID_STRING);
+            return String.fromCharCode(...bytes.subarray(0, bytes.indexOf(0)));
+        };
+
+        for (const flags of [0, DDGDI_GETHOSTIDENTIFIER])
+        {
+            h.box.bytes.fill(0xcc, out, out + size + 8);
+            assert.equal(h.box.call(ddraw, identifierSlot, [out, flags]), DD_OK);
+            assert.match(text(DDDEVICEIDENTIFIER2.szDriver), /\.dll/);
+            assert.equal(text(DDDEVICEIDENTIFIER2.szDescription), 'nvidia ampere');
+            assert.equal(h.box.bytes[out + MAX_DDDEVICEID_STRING - 1], 0);
+            assert.equal(h.box.bytes[out + DDDEVICEIDENTIFIER2.szDescription
+                + MAX_DDDEVICEID_STRING - 1], 0);
+            assert.equal(h.box.memory.readU32(out + DDDEVICEIDENTIFIER2.dwVendorId), 0x10de,
+                'the vendor a program keys its card table by');
+            assert.equal(h.box.memory.readU32(out + DDDEVICEIDENTIFIER2.dwDeviceId), 0);
+            assert.equal(h.box.memory.readU32(out + DDDEVICEIDENTIFIER2.dwWHQLLevel), 1);
+            assert.equal(h.box.memory.readU32(out + size), 0xcccccccc, 'nothing past the end');
+            assert.equal(h.box.memory.readU32(out + size + 4), 0xcccccccc);
+        }
+        assert.equal(h.box.call(ddraw, identifierSlot, [0, 0]), DDERR_INVALIDPARAMS);
+        assert.equal(h.box.call(ddraw, identifierSlot, [out, 2]), DDERR_INVALIDPARAMS);
+
+        // The fourth generation's structure has no WHQL level, and its end
+        // is where that field would be.
+        const riid = h.box.putGuid(0x4000, IID_IDirectDraw4);
+        assert.equal(h.box.call(ddraw, 0, [riid, 0x4300]), DD_OK);
+        const fourth = h.box.memory.readU32(0x4300);
+        h.box.bytes.fill(0xcc, out, out + size + 8);
+        assert.equal(h.box.call(fourth, identifierSlot, [out, 0]), DD_OK);
+        assert.equal(h.box.memory.readU32(out + DDDEVICEIDENTIFIER2.dwVendorId), 0x10de);
+        assert.equal(h.box.memory.readU32(out + DDDEVICEIDENTIFIER2.dwWHQLLevel), 0xcccccccc);
+
+        assert.equal(h.release(fourth), 0);
+        assert.equal(h.release(ddraw), 0);
+        h.assertAllReleased();
+    });
