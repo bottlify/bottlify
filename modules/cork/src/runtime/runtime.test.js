@@ -763,6 +763,28 @@ test('precise keeps the x87 exception flags, in a store entry of its own; the de
     assert.equal((await status(false)).hits, 1, 'the fast one is, for a fast run');
 });
 
+test('structure left unset is structure on, in the store\'s key as in the code', async()=>{
+    const { memoryTranslationStore } = await import('./cache.js');
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const store = memoryTranslationStore();
+    /** @param {{ structure?: boolean }} setting */
+    const hits = async setting=>{
+        const m = machine({ store, bundleId: 'test', ...setting });
+        m.write(CODE, COUNTDOWN);
+        m.setReg(4, 0x80000);
+        m.runtime.noteHot(CODE);
+        await m.runtime.translatePending();
+        await settle();
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+        return m.runtime.diagnostics().cacheHits;
+    };
+    assert.equal(await hits({ structure: undefined }), 0);
+    assert.equal(await hits({ structure: false }), 0,
+        'the loop emitted as a wasm loop is not taken for a run without structure');
+    assert.equal(await hits({ structure: true }), 1, 'unset and on emit the same code');
+    assert.equal(await hits({ structure: false }), 1);
+});
+
 test('a store does not answer at an entry for other bytes that agree in 32 bits of their hash',
     async()=>{
         const { memoryTranslationStore } = await import('./cache.js');

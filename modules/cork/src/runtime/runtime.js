@@ -1221,10 +1221,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     };
     // The settings that change emitted code but not a region's bytes, in the
     // store's keys: structure, precise, the transfer count, the modules' placing
-    // and the call profile, the trap port.
-    const variant = (settings.structure ? 'S' : '') + (settings.precise === true ? 'P' : '')
-        + (settings.countTransfers ? 'T' : '') + (settings.dispatch === true ? 'D' : '')
-        + (settings.callTargets === true ? 'C' : '') + `p${(settings.trapPort ?? 0).toString(16)}`;
+    // and the call profile, the trap port -- each as the emitter reads it, where
+    // structure left unset is on. The entry hash and the tier's resume follow
+    // from the features and the layout, which the key names beside these.
+    const variant = (settings.structure !== false ? 'S' : '')
+        + (settings.precise === true ? 'P' : '') + (settings.countTransfers ? 'T' : '')
+        + (settings.dispatch === true ? 'D' : '') + (settings.callTargets === true ? 'C' : '')
+        + `p${(settings.trapPort ?? 0).toString(16)}`;
     /** The store key of one formed region: an x87 region compiled for the wide
      * precision controls or for single, or checked, is another translation of the same
      * bytes.
