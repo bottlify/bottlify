@@ -134,6 +134,18 @@ test('a slice that dies on a no-tier instruction still counts what it ran', ()=>
     assert.equal(h.instructionCount(), 4, 'the four nops it ran, not the one it stopped on');
 });
 
+test('the status words the wasm tier stores unless precise are counted in the diagnostics', ()=>{
+    for (const precise of [false, true])
+    {
+        // The tier from the first instruction, not after the JavaScript interpreter's stretch.
+        const h = host({ cork: { translate: false, precise, wasmInterpreterAfter: 0 } });
+        // fld1; fnstsw ax; hlt
+        load(h, 0x1000, [0xd9, 0xe8, 0xdf, 0xe0, 0xf4]);
+        assert.equal(h.runSlice(100), 3);
+        assert.equal(h.corkDiagnostics().interpretedRelaxedReads, precise ? 0 : 1);
+    }
+});
+
 test('the host boots a real runtime over cork\'s own memory', ()=>{
     const h = host();
     assert.equal(h.engine(), 'cork');

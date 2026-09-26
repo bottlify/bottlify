@@ -147,9 +147,9 @@
  * @property {string} [bundleId]         The cache's namespace.
  * @property {boolean} [translate]       Test-only: false keeps the translator off, so a run
  *     is the interpreter tier's alone. Default true.
- * @property {boolean} [wasmInterpreter]  Under cork alone, the interpreter tier's integer
- *     instructions run in wasm (`interp-wasm.js`), the JavaScript interpreter taking the rest;
- *     false runs the JavaScript interpreter alone. Default true.
+ * @property {boolean} [wasmInterpreter]  Under cork alone, the interpreter tier's integer, x87
+ *     and SSE instructions run in wasm (`interp-wasm.js`), the JavaScript interpreter taking
+ *     the rest; false runs the JavaScript interpreter alone. Default true.
  * @property {number} [wasmInterpreterAfter]  How far the JavaScript interpreter carries a
  *     process's cork hosts, between them, before the wasm tier takes over: their instructions,
  *     a jump target new to a host counting as 128. Default 8192; 0 runs the wasm tier from the
@@ -157,15 +157,17 @@
  */
 
 /**
- * The engine's interpreter tier in wasm, as the host drives it: the integer instruction set
- * run straight from guest memory over the state block, the host's own interpreter taking
- * what it leaves. It is the engine's `createWasmInterpreter` that makes one.
+ * The engine's interpreter tier in wasm, as the host drives it: the integer, x87 and SSE
+ * instructions run straight from guest memory over the state block, the host's own
+ * interpreter taking what it leaves. It is the engine's `createWasmInterpreter` that makes one.
  *
  * @typedef {Object} WasmInterpreter
  * @property {(budget: number) => number} run  runs from the state block's eip, at most
  *     `budget` instructions; answers a `WasmExit`, with eip and the eager flags word back
  *     in the block
  * @property {() => number} retired     instructions the last run retired
+ * @property {() => number} relaxedReads  x87 status words stored (`fnstsw`) while not
+ *     `precise`: reads that may see what only `precise` keeps
  * @property {() => number} exitValue
  * @property {() => number} exitSize
  * @property {Uint8Array} hotCounts     the counts, a slot per `(address >>> 2) & (HOT_SLOTS - 1)`
@@ -244,6 +246,8 @@
  * @property {number} cacheMisses
  * @property {number} [precisionSwitches]  Times x87 regions went to another precision control:
  *     from the wide ones to single, and from single to a test at every rounding operation.
+ * @property {number} [interpretedRelaxedReads]  x87 status words the interpreter tier in wasm
+ *     stored (`fnstsw`) while not `precise`: reads that may see a bit only `precise` keeps.
  * @property {boolean} [wide]  Whether x87 regions are still compiled for wide precision.
  * @property {'wide' | 'narrow' | 'mixed'} [precision]  The precision control new x87 regions are
  *     compiled for: the wide ones, single, or either (a test at every rounding operation).

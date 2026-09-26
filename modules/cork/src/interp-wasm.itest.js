@@ -8,7 +8,8 @@
  * The whole single-instruction corpus on the interpreter tier in wasm, against
  * the hardware recording: each case runs on the tier over cork's own layout,
  * the JavaScript interpreter taking every instruction the tier leaves, as the
- * cork host runs them. What the JavaScript interpreter has no model for is
+ * cork host runs them, the tier `precise` as the recording is judged. What the
+ * JavaScript interpreter has no model for is
  * counted by its opcode and not judged, as `interp.itest.js` counts it; every
  * case that runs must leave what the recording holds.
  *
@@ -45,7 +46,7 @@ test('the wasm tier leaves what the hardware left, on every case the interpreter
         const bytes = new Uint8Array(memory.buffer);
         const view = new DataView(memory.buffer);
         const tier = createWasmInterpreter({ memory, layout, area, hotThreshold: 2,
-            trapPort: 0xb077, parkBase: 0x100000 });
+            trapPort: 0xb077, parkBase: 0x100000, precise: true });
         assert.ok(tier);
         /** @type {string[]} */
         const failures = [];

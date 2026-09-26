@@ -184,7 +184,8 @@ export function createCorkHost(config){
      */
     const wasmTier = wasmWanted
         ? engine.createWasmInterpreter({ memory, layout, area: wasmArea,
-            hotThreshold: corkConfig?.hotThreshold ?? 2, trapPort, parkBase })
+            hotThreshold: corkConfig?.hotThreshold ?? 2, trapPort, parkBase,
+            precise: corkConfig?.precise === true })
         : null;
     /** The last run starts the interpreter ran, a ring: the path a run took
      * into wherever it sits. The wasm tier's, when there is one. */
@@ -970,7 +971,8 @@ export function createCorkHost(config){
         engine: ()=>'cork',
         /** The translator's runtime, for the layer's sampler and diagnostics. */
         cork: ()=>runtime,
-        corkDiagnostics: ()=>runtime.diagnostics(),
+        corkDiagnostics: ()=>(wasmTier === null ? runtime.diagnostics()
+            : { ...runtime.diagnostics(), interpretedRelaxedReads: wasmTier.relaxedReads() }),
 
         /** Lets the machine run: slices until it halts or is stopped. */
         run(){

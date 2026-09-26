@@ -23,6 +23,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { HOST_MATH } from '../src/interp-wasm.js';
 
 const args = process.argv.slice(2);
 const clang = args.includes('--clang') ? args[args.indexOf('--clang') + 1] : 'clang';
@@ -36,7 +37,9 @@ try
 {
     const out = join(dir, 'interp-wasm.wasm');
     execFileSync(clang, [
+        // No contraction: a multiply and an add stay two roundings, as in JavaScript.
         '--target=wasm32', '-O2', '-nostdlib', '-ffreestanding', '-fno-builtin',
+        '-ffp-contract=off',
         '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
         '-Wl,--no-entry', '-Wl,--import-memory', '-Wl,--global-base=4096',
         '-Wl,-z,stack-size=8192', '-Wl,--export=__heap_base',
@@ -45,7 +48,7 @@ try
     const bytes = readFileSync(out);
     const module = new WebAssembly.Module(bytes);
     const memory = new WebAssembly.Memory({ initial: 1 });
-    const { exports } = new WebAssembly.Instance(module, { env: { memory } });
+    const { exports } = new WebAssembly.Instance(module, { env: { memory, ...HOST_MATH } });
     const end = /** @type {WebAssembly.Global} */ (exports.__heap_base).value;
     if (end > LIMIT)
     {

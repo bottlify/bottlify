@@ -13,9 +13,10 @@
  * closures and their garbage were most of what code run a handful of times
  * cost -- a loading phase's first pass, a routine that rewrites itself. This
  * tier runs the integer instruction set straight from guest memory with the
- * flags kept lazy, and leaves the rest -- x87, MMX, SSE, the rare and system
- * forms -- to the JavaScript interpreter an instruction at a time: `run`
- * answers `WasmExit.UNSUPPORTED` with eip at the instruction, unexecuted.
+ * flags kept lazy, x87 and SSE as `ir-x87.js` and `ir-simd.js` model them, and
+ * leaves the rest -- MMX, the rare and system forms -- to the JavaScript
+ * interpreter an instruction at a time: `run` answers `WasmExit.UNSUPPORTED`
+ * with eip at the instruction, unexecuted.
  *
  * It keeps the host's hotness counts and its ring of recent run starts in an
  * area of the memory past the tables (`WASM_INTERPRETER_AREA` bytes), so both
@@ -25,6 +26,7 @@
 
 import { MODULE_BASE64 } from './interp-wasm.bytes.js';
 import { eflagsOf } from './emit/flags.js';
+import { fpremStatus, fpremValue } from './ir-x87.js';
 import { Tables } from './runtime/layout.js';
 
 /** How a run of the tier ended. `interp-wasm.c` has the same numbers. */
@@ -57,6 +59,14 @@ export const WASM_INTERPRETER_AREA = HOT_SLOTS + RING_STARTS * 4 + 4;
 /** Where the module's own data and stack end (the build fails past it): below guest RAM. */
 const MODULE_END = 16384;
 
+/** The transcendentals and the partial remainder the module imports: the host's
+ * and the model's, as the JavaScript interpreter's and translated code's are, so
+ * every tier computes the same. */
+export const HOST_MATH = Object.freeze({
+    sin: Math.sin, cos: Math.cos, tan: Math.tan, atan2: Math.atan2, expm1: Math.expm1,
+    log2: Math.log2, log1p: Math.log1p, fprem: fpremValue, fpremStatus,
+});
+
 /** @type {WebAssembly.Module | null} */
 let compiled = null;
 /** What the process's hosts ran on the JavaScript interpreter before one started the tier: its
@@ -88,12 +98,16 @@ function wasmModule(){
  *
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
- *     area: number, hotThreshold: number, trapPort?: number, parkBase: number }} options
+ *     area: number, hotThreshold: number, trapPort?: number, parkBase: number,
+ *     precise?: boolean }} options
  *     area: where the tier's `WASM_INTERPRETER_AREA` bytes lie; parkBase: the park loop's
- *     address, whose jumps the ring leaves out
+ *     address, whose jumps the ring leaves out; precise: the engine's `precise`, the x87
+ *     bookkeeping games do not read kept as the JavaScript interpreter keeps it
  * @returns {WasmInterpreter | null}
  */
-export function createWasmInterpreter({ memory, layout, area, hotThreshold, trapPort, parkBase }){
+export function createWasmInterpreter({ memory, layout, area, hotThreshold, trapPort, parkBase,
+    precise = false })
+{
     if ((layout.codePages ?? -1) >= 0 || layout.fsBase < 0 || layout.ramBase < MODULE_END
         || layout.regs + 32 > 512 || area + WASM_INTERPRETER_AREA > memory.buffer.byteLength)
     {
@@ -108,17 +122,20 @@ export function createWasmInterpreter({ memory, layout, area, hotThreshold, trap
     /** @type {((budget: number) => number) | null} */
     let run = null;
     let retired = ()=>0;
+    let relaxedReads = ()=>0;
     let exitValue = ()=>0;
     let exitSize = ()=>0;
     const instantiate = ()=>{
         const exports = /** @type {any} */ (
-            new WebAssembly.Instance(wasmModule(), { env: { memory } }).exports);
+            new WebAssembly.Instance(wasmModule(), { env: { memory, ...HOST_MATH } }).exports);
         exports.configure(layout.ramBase, layout.tables + Tables.PAGE_FLAGS,
             layout.tables + Tables.CODE_RANGES, layout.tables + Tables.HASH, layout.hashShift ?? 16,
             layout.regs, layout.eip, layout.eflags, layout.fsBase, area, HOT_SLOTS, hotThreshold,
             // No port a byte or a word can name: every `out` is left to the JavaScript tier.
             trapPort ?? 0x10000, parkBase >>> 0);
-        ({ retired, exitValue, exitSize } = exports);
+        exports.configureFloat(layout.x87, layout.x87Top, layout.x87Empty, layout.x87Control,
+            layout.x87Status, precise ? 1 : 0, layout.xmm, layout.mxcsr);
+        ({ retired, relaxedReads, exitValue, exitSize } = exports);
         run = /** @type {(budget: number) => number} */ (exports.run);
         return run;
     };
@@ -132,6 +149,7 @@ export function createWasmInterpreter({ memory, layout, area, hotThreshold, trap
             return (run ?? instantiate())(budget);
         },
         retired: ()=>retired(),
+        relaxedReads: ()=>relaxedReads(),
         exitValue: ()=>exitValue() >>> 0,
         exitSize: ()=>exitSize(),
         hotCounts: new Uint8Array(memory.buffer, area, HOT_SLOTS),

@@ -72,8 +72,9 @@ const EDGES = [0, 1, 2, 0x7f, 0x80, 0xff, 0x100, 0x7fff, 0x8000, 0xffff, 0x10000
 
 /**
  * One generated instruction: its bytes. `ebx` points at the data, so `[ebx+d8]`
- * reaches it; every form the tier runs is here, with the JavaScript tier's
- * forms (x87, SSE) among them now and then.
+ * reaches it; every integer form the tier runs is here, with a form of the
+ * JavaScript tier's among them now and then (the float forms have
+ * `interp-wasm-float.test.js`).
  *
  * @param {(n: number) => number} next
  * @returns {number[]}
@@ -173,8 +174,8 @@ function instruction(next){
             // push and pop through the stack.
             return [0x50 | reg(), 0x58 | reg()];
         case 38:
-            // An x87 instruction: the JavaScript tier's.
-            return [0xd9, 0xe8];
+            // A 16-bit address: the JavaScript tier's.
+            return [0x67, 0x90];
         default:
             return [0x90];
     }
@@ -369,8 +370,8 @@ test('the module is instantiated at the tier\'s first run, not when the tier is 
 
 test('an instruction the tier does not run is left at eip, unexecuted', ()=>{
     const m = machine();
-    // inc eax; fld1; hlt
-    reset(m, [0x40, 0xd9, 0xe8, 0xf4], random(1));
+    // inc eax; cpuid; hlt
+    reset(m, [0x40, 0x0f, 0xa2, 0xf4], random(1));
     m.view.setUint32(m.layout.regs, 5, true);
     assert.equal(m.tier.run(100), WasmExit.UNSUPPORTED);
     assert.equal(m.tier.retired(), 1);
