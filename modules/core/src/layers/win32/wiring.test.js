@@ -297,6 +297,35 @@ test('msvcrt\'s descriptors and kernel32\'s file handles are handles in one tabl
     await filesystemModule.dispose();
 });
 
+test('a file msvcrt opened to be deleted on close is gone once the process ends', async()=>{
+    // However the process ends, every handle it held closes: ExitProcess and
+    // TerminateProcess alike.
+    const O_CREAT_RDWR_TEMPORARY = 0x0142;
+    const CURRENT_PROCESS = 0xffffffff;
+    /** @type {[string, (kernel32: any) => void][]} */
+    const endings = [
+        ['ExitProcess', kernel32=>kernel32.ExitProcess.handler([0])],
+        ['TerminateProcess', kernel32=>kernel32.TerminateProcess.handler([CURRENT_PROCESS, 1])],
+    ];
+    for (const [how, end] of endings)
+    {
+        const filesystem = await filesystemModule.create({});
+        const { bytes, libraries, exitCode } = await build({
+            filesystem, kernel: { currentThread: ()=>({ id: 1 }) },
+            modules: { attachedLibraries: ()=>[] },
+        });
+        bytes.set([...'C:\\scratch.tmp\0'].map(ch=>ch.charCodeAt(0)), 0x1000);
+        assert.ok(libraries['msvcrt.dll']._open.handler([0x1000, O_CREAT_RDWR_TEMPORARY, 0]) > 2);
+        assert.notEqual(filesystem.stat('C:\\scratch.tmp'), null, how);
+
+        end(libraries['KERNEL32.dll']);
+        assert.notEqual(exitCode(), null, how);
+        assert.equal(filesystem.stat('C:\\scratch.tmp'), null, how);
+        await win32Module.dispose();
+        await filesystemModule.dispose();
+    }
+});
+
 test('LoadLibraryEx\'s flags reach whoever assembled the process', async()=>{
     /** @type {any[][]} */
     const asked = [];

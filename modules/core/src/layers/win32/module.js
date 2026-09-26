@@ -176,6 +176,15 @@ export const win32Module = {
         let libraries = {};
         /** @type {number | null} */
         let exitCode = null;
+        /**
+         * What runs when the process ends, whichever way it ends: every handle
+         * a process held closes then, which is when a file opened to be
+         * deleted on close goes. Run once, after the code is recorded.
+         *
+         * @type {(() => void)[]}
+         */
+        const endTasks = [];
+        const processEnded = ()=>endTasks.splice(0).forEach(task=>task());
         /** @type {{ list: () => any[], clientRect: (hwnd: number) => any,
          *     place: (hwnd: number, x: number, y: number, width: number,
          *     height: number, how?: { announce?: boolean }) => boolean,
@@ -615,6 +624,7 @@ export const win32Module = {
         const abortProcess = why=>{
             trace(`the C runtime aborted the process: ${why}`);
             exitCode ??= 3;
+            processEnded();
         };
 
         // Structured exception handling. Everything it needs now exists: the
@@ -640,6 +650,7 @@ export const win32Module = {
             // exception's code as its exit code.
             terminate: ({ code })=>{
                 exitCode = code >>> 0;
+                processEnded();
             },
         });
 
@@ -745,6 +756,7 @@ export const win32Module = {
             if (attached.length === 0)
             {
                 exitCode = code;
+                processEnded();
                 return null;
             }
             const self = kernel.currentThread();
@@ -767,6 +779,7 @@ export const win32Module = {
             }
             return told.then(()=>{
                 exitCode = code;
+                processEnded();
                 return 0;
             });
         };
@@ -777,6 +790,7 @@ export const win32Module = {
                     write: (handle, text)=>sink(handle, text),
                     exit: code=>{
                         exitCode = code;
+                        processEnded();
                     },
                     park: ()=>bridge.park(),
                     end: code=>endProcess(code),
@@ -987,6 +1001,7 @@ export const win32Module = {
                     currentThread: ()=>kernel.currentThread(),
                     exit: code=>{
                         exitCode = code >>> 0;
+                        processEnded();
                     },
                 }),
                 ...createAtomFunctions({
@@ -1106,6 +1121,7 @@ export const win32Module = {
                     // returning to a caller that no longer exists.
                     exitProcess: (/** @type {number} */ code)=>endProcess(code),
                     exit: (/** @type {number} */ code)=>detachAndEnd(code),
+                    atProcessEnd: task=>endTasks.push(task),
                     files: volume,
                     // kernel32's own file handles, so the handle
                     // `_get_osfhandle` gives is one ReadFile and
