@@ -33,6 +33,7 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
 import { createSoundBuffer, normaliseFormat, DSBSTATUS_PLAYING } from './buffers.js';
 
 export const DS_OK = 0;
+const DS_UNCERTIFIED = 1;
 const DSERR_INVALIDPARAM = 0x80070057 | 0;
 const DSERR_OUTOFMEMORY = 0x8007000e | 0;
 const DSERR_UNSUPPORTED = 0x80004001 | 0;
@@ -189,6 +190,12 @@ export const IDIRECTSOUND_SLOTS = /** @type {[string, number][]} */ ([
     ['GetSpeakerConfig', 1],
     ['SetSpeakerConfig', 1],
     ['Initialize', 1],
+]);
+
+/** IDirectSound8 is IDirectSound with one appended. */
+export const IDIRECTSOUND8_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDIRECTSOUND_SLOTS,
+    ['VerifyCertification', 1],
 ]);
 
 /**
@@ -910,6 +917,21 @@ export function createDirectSound(
         Initialize(){
             return DS_OK;
         },
+
+        /**
+         * HRESULT VerifyCertification(LPDWORD)
+         *
+         * DS_UNCERTIFIED, the answer GetCaps already gives by leaving out
+         * DSCAPS_CERTIFIED: there is no driver behind this device to certify.
+         */
+        VerifyCertification(root, [out]){
+            if ((out >>> 0) === 0)
+            {
+                return DSERR_INVALIDPARAM;
+            }
+            writeU32(out, DS_UNCERTIFIED);
+            return DS_OK;
+        },
     };
 
     /**
@@ -922,18 +944,22 @@ export function createDirectSound(
     const root = { addRef: ()=>1, release: ()=>0 };
     const rootInterfaces = [
         describe(IID_IDirectSound, IDIRECTSOUND_SLOTS, soundMethods),
-        // Same shape: IDirectSound8's first eight slots are IDirectSound's, and
-        // it adds VerifyCertification, which nothing here needs to answer.
-        describe(IID_IDirectSound8, IDIRECTSOUND_SLOTS, soundMethods),
+        describe(IID_IDirectSound8, IDIRECTSOUND8_SLOTS, soundMethods),
     ];
 
-    /** @param {number} out */
-    const createInto = out=>{
+    /**
+     * Published as the interface the entry point promises: a program holding
+     * what DirectSoundCreate8 returned calls it through IDirectSound8's table,
+     * slot eleven included, without asking for it again.
+     *
+     * @param {number} out @param {string} id
+     */
+    const createInto = (out, id)=>{
         if ((out >>> 0) === 0)
         {
             return DSERR_INVALIDPARAM;
         }
-        writeU32(out, publisher.publish(root, rootInterfaces, IID_IDirectSound));
+        writeU32(out, publisher.publish(root, rootInterfaces, id));
         return DS_OK;
     };
 
@@ -1053,13 +1079,13 @@ export function createDirectSound(
                 DirectSoundCreate: {
                     argBytes: 12,
                     /** @param {number[]} args */
-                    handler: ([, out])=>createInto(out),
+                    handler: ([, out])=>createInto(out, IID_IDirectSound),
                 },
                 /** HRESULT DirectSoundCreate8(LPCGUID, LPDIRECTSOUND8*, IUnknown*) */
                 DirectSoundCreate8: {
                     argBytes: 12,
                     /** @param {number[]} args */
-                    handler: ([, out])=>createInto(out),
+                    handler: ([, out])=>createInto(out, IID_IDirectSound8),
                 },
                 /**
                  * HRESULT DirectSoundEnumerateA(LPDSENUMCALLBACKA, LPVOID)

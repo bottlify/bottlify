@@ -13,13 +13,15 @@ import {
     DS_OK, WAVEFORMATEX, DSBUFFERDESC, DSBCAPS, DSCAPS, DSCAPS_FLAGS, DSBPOSITIONNOTIFY,
     IID_IDirectSound, IID_IDirectSound8, IID_IDirectSoundBuffer,
     IID_IDirectSoundBuffer8, IID_IDirectSoundNotify, IID_IDirectSound3DBuffer,
-    IDIRECTSOUND_SLOTS, IDIRECTSOUNDBUFFER_SLOTS, IDIRECTSOUNDBUFFER8_SLOTS,
+    IDIRECTSOUND_SLOTS, IDIRECTSOUND8_SLOTS, IDIRECTSOUNDBUFFER_SLOTS,
+    IDIRECTSOUNDBUFFER8_SLOTS,
 } from './seam.js';
 import { DSBSTATUS_PLAYING, DSBPLAY_LOOPING, DSBLOCK_ENTIREBUFFER } from './buffers.js';
 
 const DSERR_INVALIDPARAM = 0x80070057 | 0;
 const DSERR_CONTROLUNAVAIL = 0x8878001e | 0;
 const DSERR_INVALIDCALL = 0x88780032 | 0;
+const DS_UNCERTIFIED = 1;
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
 const DSBCAPS_LOCHARDWARE = 0x00000004;
 const DSBCAPS_LOCSOFTWARE = 0x00000008;
@@ -208,6 +210,7 @@ function createBuffer(f, spec = {}){
 test('every declared slot counts `this` in its argument size', ()=>{
     for (const [name, slots] of [
         ['IDirectSound', IDIRECTSOUND_SLOTS],
+        ['IDirectSound8', IDIRECTSOUND8_SLOTS],
         ['IDirectSoundBuffer', IDIRECTSOUNDBUFFER_SLOTS],
     ])
     {
@@ -280,7 +283,35 @@ test('the root answers to both IDirectSound and IDirectSound8', ()=>{
     const f = createRoot();
     const adapter = f.bridge.recordAt(f.root).object;
     assert.equal(adapter.interfaceFor(IID_IDirectSound8).methods.length,
-        adapter.interfaceFor(IID_IDirectSound).methods.length);
+        adapter.interfaceFor(IID_IDirectSound).methods.length + 1,
+        'IDirectSound8 is IDirectSound with VerifyCertification appended');
+});
+
+test('IDirectSound8 has its twelfth slot, VerifyCertification, and answers it', ()=>{
+    // dsound.h declares it after Initialize. A table that ends one short has a
+    // program that calls it jump through whatever word follows the table.
+    assert.deepEqual(IDIRECTSOUND8_SLOTS.map(([name])=>name),
+        [...IDIRECTSOUND_SLOTS.map(([name])=>name), 'VerifyCertification']);
+
+    const f = fixture();
+    const out = 0x1000;
+    assert.equal(
+        f.dsound.libraries['DSOUND.dll'].DirectSoundCreate8.handler([0, out, 0]), DS_OK);
+    const root = f.memory.u32(out);
+    assert.equal(f.bridge.recordAt(root).id, IID_IDirectSound8,
+        'DirectSoundCreate8 hands out the table IDirectSound8 is called through');
+    const methods = f.bridge.methodsOf(root);
+    assert.equal(methods.length, 12);
+    assert.equal(methods[11].name, 'VerifyCertification');
+    assert.equal(methods[11].argBytes, 8);
+
+    // The answer agrees with GetCaps, which does not report DSCAPS_CERTIFIED;
+    // Wine's dsound8 test accepts DS_OK here.
+    const certified = 0x1100;
+    f.memory.setU32(certified, 0xdeadbeef);
+    assert.equal(f.bridge.call(root, 'VerifyCertification', [certified]), DS_OK);
+    assert.equal(f.memory.u32(certified), DS_UNCERTIFIED);
+    assert.equal(f.bridge.call(root, 'VerifyCertification', [0]), DSERR_INVALIDPARAM);
 });
 
 test('CreateSoundBuffer refuses a descriptor with no size or no format', ()=>{
