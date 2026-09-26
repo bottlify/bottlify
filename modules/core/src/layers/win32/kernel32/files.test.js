@@ -847,6 +847,31 @@ test('FindFirstFileEx searches as FindFirstFile does, at either level, in both s
     assert.equal(fns.FindFirstFileExW.argBytes, 24);
 });
 
+test('LockFileEx and UnlockFileEx take a range out of an OVERLAPPED, as LockFile takes one', ()=>{
+    const LOCKFILE_EXCLUSIVE_LOCK = 0x2;
+    const LOCKFILE_FAIL_IMMEDIATELY = 0x1;
+    const OVERLAPPED = 0x700;
+    const { files, error, fns, open } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'x');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+
+    assert.equal(fns.LockFileEx.handler([handle,
+        LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 16, 0, OVERLAPPED]), 1);
+    assert.equal(fns.UnlockFileEx.handler([handle, 0, 16, 0, OVERLAPPED]), 1);
+
+    assert.equal(fns.LockFileEx.handler([handle, 0, 1, 16, 0, OVERLAPPED]), 0,
+        'the reserved word must be zero');
+    assert.equal(error.code, ERROR_INVALID_PARAMETER);
+    assert.equal(fns.UnlockFileEx.handler([handle, 1, 16, 0, OVERLAPPED]), 0);
+    assert.equal(error.code, ERROR_INVALID_PARAMETER);
+    assert.equal(fns.LockFileEx.handler([handle, 0, 0, 16, 0, 0]), 0, 'the range is in it');
+    assert.equal(error.code, ERROR_INVALID_PARAMETER);
+    assert.equal(fns.LockFileEx.handler([0x1234, 0, 0, 16, 0, OVERLAPPED]), 0);
+    assert.equal(error.code, ERROR_INVALID_HANDLE);
+    assert.equal(fns.LockFileEx.argBytes, 24);
+    assert.equal(fns.UnlockFileEx.argBytes, 20);
+});
+
 test('a search handle is not a file handle', ()=>{
     const { files, fns, at, open } = setup();
     files.put('C:\\GAME\\A.SAV', 'a');

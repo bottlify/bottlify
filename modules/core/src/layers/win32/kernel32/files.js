@@ -1855,6 +1855,43 @@ export function createFileFunctions(host){
         },
 
         /**
+         * BOOL LockFileEx(HANDLE, DWORD dwFlags, DWORD dwReserved,
+         *   DWORD nNumberOfBytesToLockLow, DWORD nNumberOfBytesToLockHigh,
+         *   LPOVERLAPPED)
+         *
+         * LockFile's answer, the range starting at the OVERLAPPED's offset:
+         * shared or exclusive, and whether to wait, change nothing when
+         * nothing else can hold a lock.
+         */
+        LockFileEx: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle, , reserved, , , overlapped])=>{
+                if (!object(handle, 'file'))
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                return reserved !== 0 || overlapped === 0 ? fail(ERROR_INVALID_PARAMETER) : 1;
+            },
+        },
+
+        /**
+         * BOOL UnlockFileEx(HANDLE, DWORD dwReserved, DWORD nNumberOfBytesToUnlockLow,
+         *   DWORD nNumberOfBytesToUnlockHigh, LPOVERLAPPED)
+         */
+        UnlockFileEx: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, reserved, , , overlapped])=>{
+                if (!object(handle, 'file'))
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                return reserved !== 0 || overlapped === 0 ? fail(ERROR_INVALID_PARAMETER) : 1;
+            },
+        },
+
+        /**
          * BOOL DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode, LPVOID lpInBuffer,
          *     DWORD nInBufferSize, LPVOID lpOutBuffer, DWORD nOutBufferSize,
          *     LPDWORD lpBytesReturned, LPOVERLAPPED lpOverlapped)
