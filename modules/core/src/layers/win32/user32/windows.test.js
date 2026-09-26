@@ -684,6 +684,34 @@ test('a top-level window\'s menu bar comes out of its client area, as AdjustWind
             'an owned window is not a child, and its hMenu is a menu');
     });
 
+test('DestroyWindow destroys the menu of a window that is not a child', ()=>{
+    // user32's window tests: a popup made with a menu, destroyed, leaves
+    // IsMenu failing with ERROR_INVALID_MENU_HANDLE -- WS_CHILD | WS_POPUP
+    // included, whose hMenu is a menu as a popup's is. A child's hMenu is
+    // its id, and nothing of it is destroyed.
+    const WS_POPUP = 0x80000000;
+    const ERROR_INVALID_MENU_HANDLE = 1401;
+    const { fns, memory, errors } = setup();
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const desktop = fns.GetDesktopWindow.handler();
+    for (const style of [WS_POPUP, WS_CHILD | WS_POPUP])
+    {
+        const menu = fns.CreateMenu.handler();
+        const hwnd = createWindow(fns, memory, { style, parent: desktop, menu });
+        assert.equal(fns.GetMenu.handler([hwnd]), menu, `0x${style.toString(16)}`);
+        assert.equal(fns.DestroyWindow.handler([hwnd]), 1);
+        errors.length = 0;
+        assert.equal(fns.IsMenu.handler([menu]), 0, 'destroyed with the window');
+        assert.deepEqual(errors, [ERROR_INVALID_MENU_HANDLE]);
+    }
+    const kept = fns.CreateMenu.handler();
+    const parent = createWindow(fns, memory, { style: WS_POPUP });
+    const child = createWindow(fns, memory, { style: WS_CHILD, parent, menu: kept });
+    fns.DestroyWindow.handler([child]);
+    assert.equal(fns.IsMenu.handler([kept]), 1, 'a child\'s hMenu is an id, not its menu');
+});
+
 test('SW_SHOWNA tells a visible window it is shown, where SW_SHOW tells it nothing', ()=>{
     // user32's message tests: WmSHOWNATopVisible is WM_SHOWWINDOW(1) for a
     // top-level window that was already visible, with no activation.

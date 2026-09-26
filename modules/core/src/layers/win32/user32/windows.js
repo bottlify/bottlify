@@ -249,6 +249,7 @@ const SW_SHOWNA = 8;
 /** The show commands that leave the window minimised. */
 const MINIMISING = new Set([2, SW_MINIMIZE, 7]);
 const WS_MINIMIZE = 0x20000000;
+const WS_POPUP = 0x80000000;
 /** The ShowWindow commands that leave activation where it is. */
 const SHOW_WITHOUT_ACTIVATING = new Set([SW_HIDE, 4, 6, 7, 8]);
 
@@ -1218,6 +1219,13 @@ export function createWindowFunctions(host){
                     {
                         stopTracking();
                     }
+                    // Its menu goes with it, as DestroyWindow is documented
+                    // to destroy it; one a program took back with SetMenu is
+                    // its own again.
+                    if ((record.menu ?? 0) !== 0)
+                    {
+                        table.DestroyMenu.handler([record.menu]);
+                    }
                     if (covered)
                     {
                         uncover(covered);
@@ -1482,10 +1490,11 @@ export function createWindowFunctions(host){
             parent: desktop !== null && (parent >>> 0) === desktop.hwnd ? 0 : parent >>> 0,
             instance: instance >>> 0,
             // For a child window hMenu is its control id; for any other --
-            // an owned popup included -- it is a menu handle, which the menu
-            // bookkeeping hangs on to and the frame makes room for.
-            id: (style & WS_CHILD) !== 0 ? menu >>> 0 : 0,
-            menu: (style & WS_CHILD) !== 0 ? 0 : menu >>> 0,
+            // an owned popup included, and WS_CHILD | WS_POPUP, which is a
+            // popup -- it is a menu handle, which the menu bookkeeping hangs
+            // on to, the frame makes room for and DestroyWindow destroys.
+            id: (style & (WS_CHILD | WS_POPUP)) === WS_CHILD ? menu >>> 0 : 0,
+            menu: (style & (WS_CHILD | WS_POPUP)) === WS_CHILD ? 0 : menu >>> 0,
             wndProc: cls.wndProc,
             x: coordinate(x, DEFAULT_ORIGIN),
             y: coordinate(y, DEFAULT_ORIGIN),
