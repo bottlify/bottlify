@@ -15,6 +15,13 @@
  *
  * A session's registry outlives the session, so the whole tree converts to a
  * plain JSON-able object and back.
+ *
+ * HKEY_CLASSES_ROOT is not a tree of its own. It is a view of two others: the
+ * machine's classes under HKLM\Software\Classes and the user's under
+ * HKCU\Software\Classes, the user's lying over the machine's. A class an
+ * installer registers under one name is found under the other, and a program
+ * that registers a COM server under HKLM\Software\Classes has it activated by
+ * code that only ever reads the classes root.
  */
 
 import { PROCESSOR, PROCESSOR_IDENTIFIER } from '../kernel32/processor.js';
@@ -36,12 +43,16 @@ export const REG_MULTI_SZ = 7;
 /** Types whose data is text, and is therefore expected to end in a terminator. */
 const STRING_TYPES = new Set([REG_SZ, REG_EXPAND_SZ, REG_MULTI_SZ]);
 
+/** The roots that are trees of their own; the classes root is a view of two of them. */
 const ROOT_NAMES = new Map([
-    [HKEY_CLASSES_ROOT, 'HKEY_CLASSES_ROOT'],
     [HKEY_CURRENT_USER, 'HKEY_CURRENT_USER'],
     [HKEY_LOCAL_MACHINE, 'HKEY_LOCAL_MACHINE'],
     [HKEY_USERS, 'HKEY_USERS'],
 ]);
+
+/** Where each side of the classes root lives. */
+const MACHINE_CLASSES = 'SOFTWARE\\Classes';
+const USER_CLASSES = 'Software\\Classes';
 
 /**
  * @typedef {Object} RegistryValue
@@ -51,11 +62,26 @@ const ROOT_NAMES = new Map([
  */
 
 /**
- * @typedef {Object} RegistryKey
+ * A key as the hive stores it.
+ *
+ * @typedef {Object} RegistryNode
  * @property {string} name
- * @property {Map<string, RegistryKey>} keys      Keyed by folded name.
+ * @property {Map<string, RegistryNode>} keys      Keyed by folded name.
  * @property {Map<string, RegistryValue>} values  Keyed by folded name.
  */
+
+/**
+ * A key reached through HKEY_CLASSES_ROOT: a path under the classes, looked up
+ * on both sides whenever it is used, so a key one side gains or loses after it
+ * was opened is seen through a handle already held.
+ *
+ * @typedef {Object} ClassesKey
+ * @property {'classes'} view
+ * @property {string} name
+ * @property {string[]} path
+ */
+
+/** @typedef {RegistryNode | ClassesKey} RegistryKey */
 
 /**
  * @typedef {Object} StoredValue
@@ -79,7 +105,7 @@ const ROOT_NAMES = new Map([
  */
 const fold = name=>name.toLowerCase();
 
-/** @param {string} name @returns {RegistryKey} */
+/** @param {string} name @returns {RegistryNode} */
 function makeKey(name){
     return { name, keys: new Map(), values: new Map() };
 }
@@ -124,7 +150,7 @@ function terminate(type, data){
     return padded;
 }
 
-/** @param {RegistryKey} key @returns {StoredKey} */
+/** @param {RegistryNode} key @returns {StoredKey} */
 function keyToJSON(key){
     return {
         name: key.name,
@@ -137,7 +163,7 @@ function keyToJSON(key){
     };
 }
 
-/** @param {any} stored @returns {RegistryKey} */
+/** @param {any} stored @returns {RegistryNode} */
 function keyFromJSON(stored){
     const key = makeKey(stored?.name ?? '');
     for (const value of stored?.values ?? [])
@@ -212,7 +238,7 @@ const pick = (table, names)=>Object.fromEntries(names.map(name=>[name, table[nam
  * @type {readonly MachineKey[]}
  */
 const MACHINE_KEYS = Object.freeze(/** @type {MachineKey[]} */ ([
-    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Classes' },
+    { root: HKEY_LOCAL_MACHINE, path: MACHINE_CLASSES },
     { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion', values: {
         ProgramFilesDir: SHELL_FOLDERS.ProgramFiles,
         ProgramFilesPath: SHELL_FOLDERS.ProgramFiles,
@@ -266,6 +292,7 @@ const MACHINE_KEYS = Object.freeze(/** @type {MachineKey[]} */ ([
         values: pick(SHELL_FOLDERS, ['Desktop', 'Programs', 'Start Menu', 'Startup', 'Personal',
             'AppData', 'Local AppData', 'Fonts']) },
     { root: HKEY_CURRENT_USER, path: 'Control Panel\\Desktop' },
+    { root: HKEY_CURRENT_USER, path: USER_CLASSES },
 ]));
 
 /** @param {string} text @returns {Uint8Array} eight-bit text with its terminator */
@@ -286,7 +313,60 @@ const dword = value=>{
 };
 
 /**
- * Builds a hive: the four predefined roots with the machine's own keys under
+ * The node a path leads to from a node, or null where it stops.
+ *
+ * @param {RegistryNode | null | undefined} node @param {string[]} parts
+ * @returns {RegistryNode | null}
+ */
+function walk(node, parts){
+    let at = node ?? null;
+    for (const part of parts)
+    {
+        at = at?.keys.get(fold(part)) ?? null;
+    }
+    return at;
+}
+
+/**
+ * Copies into a node what a saved tree has and the node does not, leaving
+ * what the node already holds as it is.
+ *
+ * @param {RegistryNode} into @param {RegistryNode} from
+ */
+function mergeMissing(into, from){
+    for (const [name, value] of from.values)
+    {
+        if (!into.values.has(name))
+        {
+            into.values.set(name, value);
+        }
+    }
+    for (const [name, child] of from.keys)
+    {
+        const present = into.keys.get(name);
+        if (present)
+        {
+            mergeMissing(present, child);
+        }
+        else
+        {
+            into.keys.set(name, child);
+        }
+    }
+}
+
+/** @param {RegistryKey} key @returns {key is ClassesKey} */
+const isClasses = key=>'view' in key;
+
+/** @param {string[]} path @returns {ClassesKey} */
+const classesKey = path=>({
+    view: 'classes',
+    name: path.length > 0 ? path[path.length - 1] : 'HKEY_CLASSES_ROOT',
+    path,
+});
+
+/**
+ * Builds a hive: the predefined roots with the machine's own keys under
  * them (see MACHINE_KEYS), and nothing a program has put there yet.
  *
  * Enumeration order is insertion order throughout, which is what makes an
@@ -294,8 +374,11 @@ const dword = value=>{
  * leaves it where it was; only deleting and re-adding moves it to the end.
  */
 export function createHive(){
-    /** @type {Map<number, RegistryKey>} */
+    /** @type {Map<number, RegistryNode>} */
     const roots = new Map();
+
+    /** The classes root itself: the same object every time it is asked for. */
+    const CLASSES_ROOT = classesKey([]);
 
     /**
      * Whoever keeps the hive between runs. Told once per burst of changes and
@@ -331,7 +414,7 @@ export function createHive(){
     const furnish = ()=>{
         for (const entry of MACHINE_KEYS)
         {
-            let node = /** @type {RegistryKey} */ (roots.get(entry.root));
+            let node = /** @type {RegistryNode} */ (roots.get(entry.root));
             for (const part of segments(entry.path))
             {
                 let next = node.keys.get(fold(part));
@@ -370,8 +453,8 @@ export function createHive(){
      * Walks to the parent of the last path segment, which is where both
      * creation and deletion have to act.
      *
-     * @param {RegistryKey} key @param {string | null | undefined} path
-     * @returns {{ parent: RegistryKey, name: string } | null}
+     * @param {RegistryNode} key @param {string | null | undefined} path
+     * @returns {{ parent: RegistryNode, name: string } | null}
      */
     const parentOf = (key, path)=>{
         const parts = segments(path);
@@ -392,13 +475,110 @@ export function createHive(){
         return { parent: node, name: parts[parts.length - 1] };
     };
 
+    /**
+     * The two keys a classes path stands for, either of which may be absent.
+     *
+     * @param {ClassesKey} key
+     */
+    const sidesOf = key=>({
+        user: walk(roots.get(HKEY_CURRENT_USER), [...segments(USER_CLASSES), ...key.path]),
+        machine: walk(roots.get(HKEY_LOCAL_MACHINE),
+            [...segments(MACHINE_CLASSES), ...key.path]),
+    });
+
+    /**
+     * Where a write through the classes root lands: the user's key when the
+     * user has one, the machine's otherwise.
+     *
+     * @param {RegistryKey} key @returns {RegistryNode | null}
+     */
+    const writable = key=>{
+        if (!isClasses(key))
+        {
+            return key;
+        }
+        const { user, machine } = sidesOf(key);
+        return user ?? machine;
+    };
+
+    /**
+     * @param {RegistryNode} key @param {string | null} [path]
+     * @returns {{ key: RegistryNode, created: boolean }}
+     */
+    const createNode = (key, path)=>{
+        let node = key;
+        let created = false;
+        for (const part of segments(path))
+        {
+            let next = node.keys.get(fold(part));
+            if (!next)
+            {
+                next = makeKey(part);
+                node.keys.set(fold(part), next);
+                created = true;
+            }
+            node = next;
+        }
+        if (created)
+        {
+            changed();
+        }
+        return { key: node, created };
+    };
+
+    /**
+     * @param {RegistryNode} key @param {string | null} [path]
+     * @returns {'deleted' | 'missing' | 'has-subkeys'}
+     */
+    const removeNode = (key, path)=>{
+        const target = parentOf(key, path);
+        if (!target)
+        {
+            return 'missing';
+        }
+        const doomed = target.parent.keys.get(fold(target.name));
+        if (!doomed)
+        {
+            return 'missing';
+        }
+        if (doomed.keys.size > 0)
+        {
+            return 'has-subkeys';
+        }
+        target.parent.keys.delete(fold(target.name));
+        changed();
+        return 'deleted';
+    };
+
+    /**
+     * What a list keyed by folded name holds on both sides of a classes key,
+     * the user's first and the machine's only where the user has none.
+     *
+     * @template T
+     * @param {ClassesKey} key
+     * @param {(node: RegistryNode) => Map<string, T>} listOf
+     * @returns {T[]}
+     */
+    const merged = (key, listOf)=>{
+        const { user, machine } = sidesOf(key);
+        const seen = new Map(user ? listOf(user) : []);
+        for (const [name, entry] of machine ? listOf(machine) : [])
+        {
+            if (!seen.has(name))
+            {
+                seen.set(name, entry);
+            }
+        }
+        return [...seen.values()];
+    };
+
     return {
         /**
          * @param {number} id
          * @returns {RegistryKey | null}
          */
         root(id){
-            return roots.get(id >>> 0) ?? null;
+            return (id >>> 0) === HKEY_CLASSES_ROOT ? CLASSES_ROOT : roots.get(id >>> 0) ?? null;
         },
 
         /**
@@ -409,72 +589,76 @@ export function createHive(){
          * @returns {RegistryKey | null}
          */
         open(key, path){
-            let node = key;
-            for (const part of segments(path))
+            const parts = segments(path);
+            if (parts.length === 0)
             {
-                const next = node.keys.get(fold(part));
-                if (!next)
-                {
-                    return null;
-                }
-                node = next;
+                return key;
             }
-            return node;
+            if (isClasses(key))
+            {
+                const found = classesKey([...key.path, ...parts]);
+                const { user, machine } = sidesOf(found);
+                return user || machine ? found : null;
+            }
+            return walk(key, parts);
         },
 
         /**
-         * Creates a subkey path, intermediate keys included.
+         * Creates a subkey path, intermediate keys included. A key made
+         * through the classes root that neither side has is the machine's,
+         * which is where Windows stores it.
          *
          * @param {RegistryKey} key @param {string | null} [path]
          * @returns {{ key: RegistryKey, created: boolean }}
          */
         create(key, path){
-            let node = key;
-            let created = false;
-            for (const part of segments(path))
+            if (!isClasses(key))
             {
-                let next = node.keys.get(fold(part));
-                if (!next)
-                {
-                    next = makeKey(part);
-                    node.keys.set(fold(part), next);
-                    created = true;
-                }
-                node = next;
+                return createNode(key, path);
             }
-            if (created)
+            const parts = segments(path);
+            if (parts.length === 0)
             {
-                changed();
+                return { key, created: false };
             }
-            return { key: node, created };
+            const made = classesKey([...key.path, ...parts]);
+            const { user, machine } = sidesOf(made);
+            if (user || machine)
+            {
+                return { key: made, created: false };
+            }
+            const classes = createNode(/** @type {RegistryNode} */ (
+                roots.get(HKEY_LOCAL_MACHINE)), MACHINE_CLASSES).key;
+            createNode(classes, made.path.join('\\'));
+            return { key: made, created: true };
         },
 
         /**
          * Deletes a subkey. One that has subkeys of its own is refused rather
          * than removed recursively -- NT's rule, and the reason a delete can
-         * fail on a key that plainly exists.
+         * fail on a key that plainly exists. Through the classes root the
+         * user's key goes first, and the machine's is what a second delete
+         * finds.
          *
          * @param {RegistryKey} key @param {string | null} [path]
          * @returns {'deleted' | 'missing' | 'has-subkeys'}
          */
         remove(key, path){
-            const target = parentOf(key, path);
-            if (!target)
+            if (!isClasses(key))
+            {
+                return removeNode(key, path);
+            }
+            const parts = segments(path);
+            if (parts.length === 0)
             {
                 return 'missing';
             }
-            const doomed = target.parent.keys.get(fold(target.name));
-            if (!doomed)
-            {
-                return 'missing';
-            }
-            if (doomed.keys.size > 0)
-            {
-                return 'has-subkeys';
-            }
-            target.parent.keys.delete(fold(target.name));
-            changed();
-            return 'deleted';
+            const doomed = classesKey([...key.path, ...parts]);
+            const { user, machine } = sidesOf(doomed);
+            const base = user
+                ? walk(roots.get(HKEY_CURRENT_USER), segments(USER_CLASSES))
+                : machine ? walk(roots.get(HKEY_LOCAL_MACHINE), segments(MACHINE_CLASSES)) : null;
+            return base ? removeNode(base, doomed.path.join('\\')) : 'missing';
         },
 
         /**
@@ -482,7 +666,8 @@ export function createHive(){
          * @returns {string[]} subkey names, in enumeration order
          */
         subkeys(key){
-            return [...key.keys.values()].map(child=>child.name);
+            return (isClasses(key) ? merged(key, node=>node.keys) : [...key.keys.values()])
+                .map(child=>child.name);
         },
 
         /**
@@ -490,7 +675,7 @@ export function createHive(){
          * @returns {RegistryValue[]} in enumeration order
          */
         values(key){
-            return [...key.values.values()];
+            return isClasses(key) ? merged(key, node=>node.values) : [...key.values.values()];
         },
 
         /**
@@ -500,6 +685,11 @@ export function createHive(){
          * @returns {RegistryValue | null}
          */
         getValue(key, name){
+            if (isClasses(key))
+            {
+                const { user, machine } = sidesOf(key);
+                return user?.values.get(fold(name)) ?? machine?.values.get(fold(name)) ?? null;
+            }
             return key.values.get(fold(name)) ?? null;
         },
 
@@ -510,14 +700,19 @@ export function createHive(){
          */
         setValue(key, name, type, data){
             const value = { name, type: type >>> 0, data: terminate(type >>> 0, data) };
-            key.values.set(fold(name), value);
-            changed();
+            const node = writable(key);
+            // A classes key both sides have since deleted takes the value nowhere.
+            if (node)
+            {
+                node.values.set(fold(name), value);
+                changed();
+            }
             return value;
         },
 
         /** @param {RegistryKey} key @param {string} name @returns {boolean} */
         deleteValue(key, name){
-            const deleted = key.values.delete(fold(name));
+            const deleted = writable(key)?.values.delete(fold(name)) ?? false;
             if (deleted)
             {
                 changed();
@@ -545,7 +740,8 @@ export function createHive(){
         /**
          * The whole hive as a plain object. Roots are a list rather than an
          * object so that nothing depends on how a JSON implementation orders
-         * numeric keys.
+         * numeric keys. The classes root is not among them: what it shows is
+         * already under the two roots it is a view of.
          *
          * @returns {{ roots: { id: number, key: StoredKey }[] }}
          */
@@ -558,22 +754,36 @@ export function createHive(){
         /**
          * Replaces the contents with a saved tree. Roots the save does not
          * mention come back empty rather than missing, so a hive is always
-         * usable after a restore.
+         * usable after a restore. A save that kept the classes root as a tree
+         * of its own has it folded into the machine's classes, keeping what
+         * the machine side already says: the classes a program registered
+         * there are still found.
          *
          * @param {any} stored
          */
         fromJSON(stored){
             reset();
+            /** @type {RegistryNode[]} */
+            const classes = [];
             for (const entry of stored?.roots ?? [])
             {
                 const id = entry?.id >>> 0;
-                if (!ROOT_NAMES.has(id))
+                if (id === HKEY_CLASSES_ROOT)
                 {
-                    continue;
+                    classes.push(keyFromJSON(entry.key));
                 }
-                roots.set(id, keyFromJSON(entry.key));
+                else if (ROOT_NAMES.has(id))
+                {
+                    roots.set(id, keyFromJSON(entry.key));
+                }
             }
             furnish();
+            const machine = /** @type {RegistryNode} */ (
+                walk(roots.get(HKEY_LOCAL_MACHINE), segments(MACHINE_CLASSES)));
+            for (const tree of classes)
+            {
+                mergeMissing(machine, tree);
+            }
         },
     };
 }

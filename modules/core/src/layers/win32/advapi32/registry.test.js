@@ -261,3 +261,35 @@ test('a restore discards what the hive was holding', ()=>{
     assert.equal(
         hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)), 'Software\\Stale'), null);
 });
+
+test('the classes root is saved as the two roots it shows, and an older save folds in', ()=>{
+    const hive = createHive();
+    const classes = /** @type {any} */ (hive.root(HKEY_CLASSES_ROOT));
+    const { key } = hive.create(classes, 'CLSID\\{00000000-0000-0000-0000-00000000C0DE}');
+    hive.setValue(key, '', REG_SZ, latin1('Registered'));
+    assert.ok(hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)),
+        'Software\\Classes\\CLSID\\{00000000-0000-0000-0000-00000000C0DE}'));
+    const saved = hive.toJSON();
+    assert.equal(saved.roots.some(root=>root.id === HKEY_CLASSES_ROOT), false,
+        'not a third copy of what the machine and the user already hold');
+
+    // A save made while the classes root was a tree of its own still has its
+    // classes found, and what the machine side says wins where both have it.
+    const older = /** @type {any} */ (saved);
+    older.roots.push({ id: HKEY_CLASSES_ROOT, key: { name: 'HKEY_CLASSES_ROOT', values: [], keys: [
+        { name: '.xyz', values: [{ name: '', type: REG_SZ, data: [...latin1('xyzfile\0')] }],
+            keys: [] },
+        { name: 'CLSID', values: [], keys: [
+            { name: '{00000000-0000-0000-0000-00000000C0DE}',
+                values: [{ name: '', type: REG_SZ, data: [...latin1('Stale\0')] }], keys: [] },
+        ] },
+    ] } });
+    const restored = createHive();
+    restored.fromJSON(JSON.parse(JSON.stringify(older)));
+    const root = /** @type {any} */ (restored.root(HKEY_CLASSES_ROOT));
+    /** @param {any} at */
+    const text = at=>String.fromCharCode(...restored.getValue(at, '')?.data ?? []);
+    assert.equal(text(restored.open(root, '.XYZ')), 'xyzfile\0');
+    assert.equal(text(restored.open(root, 'CLSID\\{00000000-0000-0000-0000-00000000C0DE}')),
+        'Registered\0');
+});
