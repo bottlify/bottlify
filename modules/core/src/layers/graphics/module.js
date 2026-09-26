@@ -213,6 +213,43 @@ export const graphicsModule = {
         const gatedCompressedTextures = (/** @type {any} */ caps)=>
             (caps?.compressedTextures ?? compressedTextures) && hasBcFeature;
 
+        /**
+         * The GPU going away. WebGPU settles `device.lost` once, for good; the
+         * Direct3D 8 and 9 devices made on it are then lost the way a lost
+         * display loses them, and one made afterwards starts lost. Nothing
+         * here recovers: a Reset still answers D3DERR_DEVICELOST, because
+         * there is no second GPU device to rebuild on. A device the host
+         * destroyed is the run ending, not the GPU failing under the program.
+         */
+        const loss = { happened: false, /** @type {Set<() => void>} */ watchers: new Set() };
+        device?.device?.lost?.then?.((/** @type {{ reason?: string }} */ info)=>{
+            if (info?.reason === 'destroyed')
+            {
+                return;
+            }
+            loss.happened = true;
+            for (const watcher of [...loss.watchers])
+            {
+                watcher();
+            }
+            loss.watchers.clear();
+        });
+        /**
+         * @param {() => void} watcher
+         * @returns {() => void} how to stop watching
+         */
+        const onDeviceLost = watcher=>{
+            if (loss.happened)
+            {
+                watcher();
+                return ()=>{};
+            }
+            loss.watchers.add(watcher);
+            return ()=>{
+                loss.watchers.delete(watcher);
+            };
+        };
+
         /** Everything an API needs from outside itself, in one place. */
         const services = {
             /** @param {number} address @param {number} length */
@@ -296,6 +333,7 @@ export const graphicsModule = {
                 probeTexture: device?.probeTexture,
                 fog: device?.fog,
                 mips: device?.mips,
+                onDeviceLost,
             }),
             // The same wiring, except that the backend is asked for only when
             // this build has a GPU: a Direct3D 9 object made in a headless
@@ -330,6 +368,7 @@ export const graphicsModule = {
                 probeTexture: device?.probeTexture,
                 fog: device?.fog,
                 mips: device?.mips,
+                onDeviceLost,
             }),
             // OpenGL asks for a device only when there is one, so it is the
             // one API here that a headless build can run to a finished frame.

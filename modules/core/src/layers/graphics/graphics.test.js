@@ -16,7 +16,7 @@ import { graphicsModule } from './module.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
 import { FVF } from './webgpu/internal/vertexformat.js';
-import { D3DFMT, D3DPOOL, D3DRTYPE, D3D_OK } from './d3d9/constants.js';
+import { D3DERR_DEVICELOST, D3DFMT, D3DPOOL, D3DRTYPE, D3D_OK } from './d3d9/constants.js';
 import { D3DPT, D3DTA, D3DTOP, D3DTSS } from './d3d8/constants.js';
 import { IID_IDirectDraw } from './seam/iids.js';
 
@@ -385,6 +385,74 @@ test('the display\'s raster runs on the guest\'s clock when the caller hands one
     const later = lineAt(1000 / 120);
     assert.ok(later > 100, `half a frame of guest time later the beam is lower (${later})`);
     assert.equal(lineAt(0), 0, 'and it is the guest\'s clock it follows, not the host\'s');
+    await graphicsModule.dispose();
+});
+
+test('a lost GPU loses every Direct3D 8 and 9 device made on it', async()=>{
+    // WebGPU says its device is gone by settling device.lost; the devices a
+    // program made on it then answer D3DERR_DEVICELOST from
+    // TestCooperativeLevel and Present, as they do on a lost display, rather
+    // than go on succeeding while nothing reaches the screen. A device made
+    // after the loss starts lost.
+    const gpu = createFakeDevice();
+    const gpuDevice = /** @type {any} */ (gpu.device);
+    gpuDevice.features = new Set();
+    gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor });
+    /** @type {(info: any) => void} */
+    let lose = ()=>{};
+    gpuDevice.lost = new Promise(resolve=>{
+        lose = resolve;
+    });
+    const api = await graphicsModule.create({
+        device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
+    }, hostWith(ramMemory()));
+    const parameters = {
+        swapEffect: 1, backBufferCount: 1, backBufferWidth: 4, backBufferHeight: 4,
+        backBufferFormat: D3DFMT.X8R8G8B8,
+    };
+    /** @param {string} name */
+    const deviceOf = name=>{
+        /** @type {{ device?: any }} */
+        const out = {};
+        assert.equal(api.create(name).CreateDevice(parameters, out), D3D_OK);
+        return out.device;
+    };
+    const nine = deviceOf('d3d9');
+    const eight = deviceOf('d3d8');
+    assert.equal(nine.TestCooperativeLevel(), D3D_OK);
+    assert.equal(eight.TestCooperativeLevel(), D3D_OK);
+
+    lose({ reason: 'unknown', message: 'the GPU process went away' });
+    await gpuDevice.lost;
+    await Promise.resolve();
+    assert.equal(nine.TestCooperativeLevel(), D3DERR_DEVICELOST);
+    assert.equal(nine.Present(), D3DERR_DEVICELOST);
+    assert.equal(eight.TestCooperativeLevel(), D3DERR_DEVICELOST);
+    assert.equal(deviceOf('d3d9').TestCooperativeLevel(), D3DERR_DEVICELOST,
+        'and one made after it is born lost');
+    await graphicsModule.dispose();
+});
+
+test('a GPU device the host destroys does not lose the program\'s devices', async()=>{
+    // WebGPU settles device.lost with reason "destroyed" when destroy() was
+    // called, which is the host ending the run rather than the GPU failing.
+    const gpu = createFakeDevice();
+    const gpuDevice = /** @type {any} */ (gpu.device);
+    gpuDevice.features = new Set();
+    gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor });
+    gpuDevice.lost = Promise.resolve({ reason: 'destroyed', message: '' });
+    const api = await graphicsModule.create({
+        device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
+    }, hostWith(ramMemory()));
+    await gpuDevice.lost;
+    await Promise.resolve();
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(api.create('d3d9').CreateDevice({
+        swapEffect: 1, backBufferCount: 1, backBufferWidth: 4, backBufferHeight: 4,
+        backBufferFormat: D3DFMT.X8R8G8B8,
+    }, out), D3D_OK);
+    assert.equal(out.device.TestCooperativeLevel(), D3D_OK);
     await graphicsModule.dispose();
 });
 

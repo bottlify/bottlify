@@ -358,6 +358,9 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {string} [probeTexture]
  * @property {boolean} [fog]
  * @property {boolean} [mips]
+ * @property {(watcher: () => void) => () => void} [onDeviceLost]
+ *     Calls the watcher once the GPU underneath is gone for good, at once if it
+ *     already is; returns how to stop watching. Absent, the GPU never goes.
  */
 
 /**
@@ -379,7 +382,7 @@ export function createDirect3D9(options = {}){
     const {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, maxDraws, skipTexture, probeTexture, fog, mips,
-        ...caps
+        onDeviceLost, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps };
@@ -387,6 +390,7 @@ export function createDirect3D9(options = {}){
     const services = {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, maxDraws, skipTexture, probeTexture, fog, mips,
+        onDeviceLost,
     };
     if (backend && !readMemory)
     {
@@ -1440,13 +1444,23 @@ function createDeviceObject(parameters, caps, services, identity){
         return D3D_OK;
     };
 
+    /** @type {(() => void) | undefined} */
+    let stopWatchingLoss;
+
     const device = {
         caps,
         get refCount(){
             return count.value;
         },
         addRef: ()=>count.addRef(),
-        release: ()=>count.release(),
+        release: ()=>{
+            const left = count.release();
+            if (left === 0)
+            {
+                stopWatchingLoss?.();
+            }
+            return left;
+        },
 
         /** The state machine's only input, and deliberately not a D3D method. */
         injectDeviceLoss(restorable = false){
@@ -3529,6 +3543,8 @@ function createDeviceObject(parameters, caps, services, identity){
         });
     };
 
+    // A GPU that is gone takes the device with it, beyond a reset.
+    stopWatchingLoss = services.onDeviceLost?.(()=>device.injectDeviceLoss(false));
     return device;
 }
 
