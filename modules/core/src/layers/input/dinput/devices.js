@@ -195,6 +195,8 @@ export function createInputDevice({ kind, now }){
     let notifyEvent = 0;
     /** Whether the cooperative level asked for DISCL_EXCLUSIVE. */
     let exclusive = false;
+    /** The DirectInput version of the object that made the device. */
+    let version = 0;
     let references = 1;
     /** What SetDataFormat settled on, and zero until it is called. */
     let dataSize = 0;
@@ -277,6 +279,13 @@ export function createInputDevice({ kind, now }){
         },
         get exclusive(){
             return exclusive;
+        },
+        get version(){
+            return version;
+        },
+        /** @param {number} value */
+        setVersion(value){
+            version = value >>> 0;
         },
         /** @param {boolean} value */
         setExclusive(value){

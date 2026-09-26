@@ -920,12 +920,17 @@ export function createDirectInput(
         /**
          * HRESULT Poll(void)
          *
-         * Nothing to poll: events arrive as they happen. DI_NOEFFECT would be
-         * honest and is also what a program checks for with `FAILED()`, which
-         * it is not -- so either answer works and this is the shorter one.
+         * Nothing to poll: events arrive as they happen, and the device does
+         * not claim DIDC_POLLEDDEVICE. Windows answers such a device with
+         * DI_NOEFFECT from DirectInput 7 on and DI_OK before it, and a device
+         * nobody holds with DIERR_NOTACQUIRED (Wine's joystick8.c).
          */
-        Poll(){
-            return DI_OK;
+        Poll(device){
+            if (!device.acquired)
+            {
+                return DIERR_NOTACQUIRED;
+            }
+            return device.version >= 0x0700 ? DI_NOEFFECT : DI_OK;
         },
     };
 
@@ -1103,6 +1108,7 @@ export function createDirectInput(
             const id = descriptor?.legacy === false
                 ? (wide ? IID_IDirectInputDevice8W : IID_IDirectInputDevice8A)
                 : (wide ? IID_IDirectInputDeviceW : IID_IDirectInputDeviceA);
+            device.setVersion(root.version);
             writeU32(out, publisher.publish(device, deviceInterfaces(), id));
             return DI_OK;
         },
@@ -1126,6 +1132,7 @@ export function createDirectInput(
                 return DIERR_DEVICENOTREG;
             }
             const wanted = guidAt(iid);
+            device.setVersion(root.version);
             const pointer = publisher.publish(device, deviceInterfaces(), wanted);
             if (pointer === 0)
             {
@@ -1167,8 +1174,9 @@ export function createDirectInput(
         RunControlPanel(){
             return DI_OK;
         },
-        /** HRESULT Initialize(HINSTANCE, DWORD) */
-        Initialize(){
+        /** HRESULT Initialize(HINSTANCE, DWORD version) */
+        Initialize(root, [, version]){
+            root.version = version >>> 0;
             return DI_OK;
         },
         /** HRESULT FindDevice(REFGUID, LPCSTR, LPGUID) */
@@ -1177,7 +1185,6 @@ export function createDirectInput(
         },
     };
 
-    const root = { addRef: ()=>1, release: ()=>0 };
     const rootInterfaces = [
         describe(IID_IDirectInputA, IDIRECTINPUT_SLOTS, rootMethods, { legacy: true }),
         describe(IID_IDirectInputW, IDIRECTINPUT_SLOTS, rootMethods,
@@ -1192,19 +1199,25 @@ export function createDirectInput(
         describe(IID_IDirectInput8W, IDIRECTINPUT8_SLOTS, rootMethods, { wide: true }),
     ];
 
-    /** @param {number} out @param {string} id */
-    const createInto = (out, id)=>{
+    /**
+     * A new DirectInput object, as each creation call makes on Windows. It
+     * remembers the version the program asked for: the devices it makes
+     * answer as that version does.
+     *
+     * @param {number} out @param {string} id @param {number} version
+     */
+    const createInto = (out, id, version)=>{
         if ((out >>> 0) === 0)
         {
             return DIERR_INVALIDPARAM;
         }
+        const root = { version: version >>> 0, addRef: ()=>1, release: ()=>0 };
         const pointer = publisher.publish(root, rootInterfaces, id);
         writeU32(out, pointer);
         return pointer === 0 ? 0x80004002 | 0 : DI_OK;
     };
 
     return {
-        root,
         publisher,
 
         /**
@@ -1258,12 +1271,12 @@ export function createDirectInput(
                 DirectInputCreateA: {
                     argBytes: 16,
                     /** @param {number[]} args */
-                    handler: ([, , out])=>createInto(out, IID_IDirectInputA),
+                    handler: ([, version, out])=>createInto(out, IID_IDirectInputA, version),
                 },
                 DirectInputCreateW: {
                     argBytes: 16,
                     /** @param {number[]} args */
-                    handler: ([, , out])=>createInto(out, IID_IDirectInputW),
+                    handler: ([, version, out])=>createInto(out, IID_IDirectInputW, version),
                 },
                 /**
                  * HRESULT DirectInputCreateEx(HINSTANCE, DWORD, REFIID,
@@ -1276,8 +1289,8 @@ export function createDirectInput(
                 DirectInputCreateEx: {
                     argBytes: 20,
                     /** @param {number[]} args */
-                    handler: ([, , iid, out])=>createInto(
-                        out, guidAt(iid)),
+                    handler: ([, version, iid, out])=>createInto(
+                        out, guidAt(iid), version),
                 },
                 DllCanUnloadNow: { argBytes: 0, handler: ()=>DI_OK },
             },
@@ -1289,8 +1302,8 @@ export function createDirectInput(
                 DirectInput8Create: {
                     argBytes: 20,
                     /** @param {number[]} args */
-                    handler: ([, , iid, out])=>createInto(
-                        out, guidAt(iid)),
+                    handler: ([, version, iid, out])=>createInto(
+                        out, guidAt(iid), version),
                 },
                 DllCanUnloadNow: { argBytes: 0, handler: ()=>DI_OK },
             },

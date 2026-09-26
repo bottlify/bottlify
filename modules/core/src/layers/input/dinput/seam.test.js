@@ -709,6 +709,34 @@ test('a device is held exclusively only while acquired at an exclusive level', (
     assert.equal(f.dinput.exclusive('mouse'), false, 'DISCL_NONEXCLUSIVE shares it');
 });
 
+test('Poll has nothing to do, and says so from DirectInput 7 on', ()=>{
+    // joystick8.c, for a device that does not need polling -- DIDC_ATTACHED
+    // | DIDC_EMULATED without DIDC_POLLEDDEVICE, which is what GetCapabilities
+    // says of the system pair: DIERR_NOTACQUIRED while it is not held, then
+    // DI_OK for a program of a version before 7 and DI_NOEFFECT from 7.
+    for (const [version, answer] of [[0x0500, DI_OK], [0x0700, DI_NOEFFECT]])
+    {
+        const f = fixture();
+        assert.equal(f.dinput.libraries['DINPUT.dll']
+            .DirectInputCreateA.handler([0, version, AT.out, 0]), DI_OK);
+        const root = f.memory.u32(AT.out);
+        writeGuid(f.memory, AT.guid, GUID_SysMouse);
+        assert.equal(f.bridge.call(root, 'CreateDevice', [AT.guid, AT.out, 0]), DI_OK);
+        const adapter = f.bridge.recordAt(f.memory.u32(AT.out)).object;
+        const device = f.bridge.publishInterface(adapter, IID_IDirectInputDevice2A);
+        assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 16)]), DI_OK);
+        assert.equal(f.bridge.call(device, 'Poll'), DIERR_NOTACQUIRED, `0x${version.toString(16)}`);
+        assert.equal(f.bridge.call(device, 'Acquire'), DI_OK);
+        assert.equal(f.bridge.call(device, 'Poll'), answer, `0x${version.toString(16)}`);
+    }
+    const f = fixture();
+    const device = device8(f, GUID_SysKeyboard, false);
+    assert.equal(f.bridge.call(device, 'Poll'), DIERR_NOTACQUIRED);
+    f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 256)]);
+    f.bridge.call(device, 'Acquire');
+    assert.equal(f.bridge.call(device, 'Poll'), DI_NOEFFECT);
+});
+
 test('GetCapabilities fills DIDEVCAPS and needs a header that declares its size', ()=>{
     const f = keyboard();
     assert.equal(f.bridge.call(f.device, 'GetCapabilities', [AT.caps]),
@@ -1305,7 +1333,7 @@ test('a device made by IDirectInput8 answers Poll from its own slot', ()=>{
     // Slot 25, ten past the end of an IDirectInputDevice's table: a program
     // holding what IDirectInput8 promised calls it without asking for it.
     assert.equal(slotOf(IDIRECTINPUTDEVICE8_SLOTS, 'Poll'), 25);
-    assert.equal(g.call(device, 25), DI_OK);
+    assert.equal(g.call(device, 25), DI_NOEFFECT);
 });
 
 test('QueryInterface finds each device generation by the IID the header defines', ()=>{
@@ -1317,6 +1345,9 @@ test('QueryInterface finds each device generation by the IID the header defines'
     assert.equal(g.call(root, slotOf(IDIRECTINPUT_SLOTS, 'CreateDevice'),
         [AT.guid, AT.out, 0]), DI_OK);
     const device = g.memory.u32(AT.out);
+    assert.equal(g.call(device, slotOf(IDIRECTINPUTDEVICE_SLOTS, 'SetDataFormat'),
+        [dataFormat(g.memory, 16)]), DI_OK);
+    assert.equal(g.call(device, slotOf(IDIRECTINPUTDEVICE_SLOTS, 'Acquire')), DI_OK);
     // dinput.h:45-52, spelled out rather than taken from the module under test.
     const header = [
         ['{5944E680-C92E-11CF-BFC7-444553540000}', IDIRECTINPUTDEVICE_SLOTS],
