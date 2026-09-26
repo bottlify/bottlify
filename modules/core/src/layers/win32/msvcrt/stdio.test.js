@@ -1057,6 +1057,22 @@ test('fwprintf, wprintf, their va_list forms and _putws write wide text to the s
     assert.deepEqual(errno, [EILSEQ, 22, 22]);
 });
 
+test('getwchar and putwchar are fgetwc on stdin and fputwc on stdout', ()=>{
+    // "putwc and putwchar are wide-character versions of putc and putchar";
+    // getwchar reads stdin and answers WEOF at its end.
+    const { memory, fns, console, errno } = runtime({ 'C:\\in.txt': 'a\r\n' });
+    assert.equal(fns.putwchar.handler([0xe9]), 0xe9);
+    assert.equal(fns.putwchar.handler([0x263a]), WEOF, 'the C locale has no byte for it');
+    assert.deepEqual(console, [[2, '\xe9']]);
+    assert.deepEqual(errno.splice(0), [EILSEQ]);
+
+    assert.equal(fns.getwchar.handler([]), WEOF, 'the console\'s stdin is at its end');
+    const stdin = IOB;
+    fns.freopen.handler([memory.put('C:\\in.txt'), memory.put('r'), stdin]);
+    assert.deepEqual([0, 1, 2].map(()=>fns.getwchar.handler([])), [0x61, 0x0a, WEOF]);
+    assert.deepEqual([fns.getwchar.argBytes, fns.putwchar.argBytes], [0, 4]);
+});
+
 test('the stream calls are cdecl with the argument count each reads', ()=>{
     const { fns } = runtime({});
     const expected = {

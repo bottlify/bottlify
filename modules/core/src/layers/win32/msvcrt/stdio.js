@@ -1135,6 +1135,16 @@ export function createStdioFunctions(host){
         fputwc,
         putwc: fputwc,
 
+        /** wint_t getwchar(void) / wint_t putwchar(wchar_t c) -- on stdin and stdout. */
+        getwchar: cdecl(0, ()=>{
+            const stream = standardStream(0);
+            return stream ? nextUnit(stream) : WEOF;
+        }),
+        putwchar: cdecl(4, ([c])=>{
+            const stream = standardStream(1);
+            return stream && putUnits(stream, [c & 0xffff]) === 1 ? c & 0xffff : WEOF;
+        }),
+
         /**
          * wchar_t *fgetws(wchar_t *buffer, int count, FILE *stream)
          *
