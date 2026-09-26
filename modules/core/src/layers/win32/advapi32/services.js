@@ -23,6 +23,7 @@
  */
 
 import { HKEY_LOCAL_MACHINE, REG_SZ, REG_EXPAND_SZ, REG_DWORD } from './registry.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_NAME = 123;
@@ -58,15 +59,13 @@ const HANDLE_STRIDE = 4;
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
-/** @param {string} text @returns {Uint8Array} eight-bit text with its terminator */
-const sz = text=>{
-    const bytes = new Uint8Array(text.length + 1);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at] = text.charCodeAt(at) & 0xff;
-    }
-    return bytes;
-};
+/**
+ * Text as the hive keeps a string, in the ANSI page the A calls read it in,
+ * with its terminator.
+ *
+ * @param {string} text @returns {Uint8Array}
+ */
+const sz = text=>encodeAnsi(`${text}\0`);
 
 /** @param {number} value @returns {Uint8Array} */
 const dword = value=>{

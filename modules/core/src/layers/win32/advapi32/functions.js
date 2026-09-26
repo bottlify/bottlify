@@ -23,6 +23,8 @@
  * want of a right succeeds here.
  */
 
+import { encodeAnsi } from '../kernel32/locale.js';
+
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_ACCESS_DENIED = 5;
@@ -175,18 +177,18 @@ export function createRegistryFunctions(host){
 
     /**
      * The narrow form of UTF-16 bytes: the hive holds every string as the
-     * A calls read it, so what a W call brings is stored narrowed and read
-     * back by either.
+     * A calls read it, in the ANSI page, so what a W call brings is stored
+     * as WideCharToMultiByte(CP_ACP) narrows it and read back by either.
      *
      * @param {Uint8Array} bytes
      */
     const narrowed = bytes=>{
-        const out = new Uint8Array(bytes.length >>> 1);
-        for (let i = 0; i < out.length; i++)
+        let text = '';
+        for (let i = 0; i + 1 < bytes.length; i += 2)
         {
-            out[i] = bytes[i * 2];
+            text += String.fromCharCode(bytes[i] | bytes[i + 1] << 8);
         }
-        return out;
+        return encodeAnsi(text);
     };
 
     /** @param {number} pointer @returns {string | null} */
@@ -209,14 +211,9 @@ export function createRegistryFunctions(host){
         return text;
     };
 
-    /** @param {number} pointer @param {string} text */
+    /** In the ANSI page. @param {number} pointer @param {string} text */
     const writeText = (pointer, text)=>{
-        const bytes = new Uint8Array(text.length + 1);
-        for (let i = 0; i < text.length; i++)
-        {
-            bytes[i] = text.charCodeAt(i) & 0xff;
-        }
-        host.writeMemory(pointer, bytes);
+        host.writeMemory(pointer, encodeAnsi(`${text}\0`));
     };
 
     /**
@@ -389,13 +386,7 @@ export function createRegistryFunctions(host){
                 const target = name === null || name === ''
                     ? key
                     : hive.create(key, name).key;
-                const text = readText(data) ?? '';
-                const bytes = new Uint8Array(text.length + 1);
-                for (let at = 0; at < text.length; at++)
-                {
-                    bytes[at] = text.charCodeAt(at) & 0xff;
-                }
-                hive.setValue(target, '', REG_SZ, bytes);
+                hive.setValue(target, '', REG_SZ, encodeAnsi(`${readText(data) ?? ''}\0`));
                 return ERROR_SUCCESS;
             }),
         },
