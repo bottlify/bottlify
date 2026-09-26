@@ -66,6 +66,22 @@ export const inputModule = {
                 ?? ((/** @type {number} */ entry, /** @type {number[]} */ args,
                     /** @type {any} */ thread)=>bridge.callGuest({ entry, args, thread })),
             callerThread: config?.callerThread ?? (()=>bridge.callerThread()),
+            // What a window handle names, for SetCooperativeLevel, which
+            // wants a top-level window. A build without win32 has no windows
+            // to tell apart, and any handle is then taken as one.
+            windowKind: config?.windowKind ?? ((/** @type {number} */ hwnd)=>{
+                /** @type {{ hwnd: string, child: boolean }[]} */
+                let listed;
+                try
+                {
+                    listed = win32.windows();
+                }
+                catch {
+                    return undefined;
+                }
+                const found = listed.find(entry=>Number(entry.hwnd) === hwnd);
+                return found ? (found.child ? 'child' : 'top') : null;
+            }),
         });
 
         const xinput = createXInput();

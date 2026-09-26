@@ -48,6 +48,7 @@ const DIERR_DEVICENOTREG = 0x80040154 | 0;
 const DIERR_NOTFOUND = 0x80070002 | 0;
 const DIERR_NOTBUFFERED = 0x80040207 | 0;
 const E_POINTER = 0x80004003 | 0;
+const E_HANDLE = 0x80070006 | 0;
 
 /** What a program's enumeration callback answers: another, or no more. */
 export const DIENUM_CONTINUE = 1;
@@ -79,6 +80,9 @@ const DIDC_ATTACHED = 0x00000001;
 const DIDC_EMULATED = 0x00000004;
 const DIEDFL_FORCEFEEDBACK = 0x00000100;
 const DISCL_EXCLUSIVE = 0x00000001;
+const DISCL_NONEXCLUSIVE = 0x00000002;
+const DISCL_FOREGROUND = 0x00000004;
+const DISCL_BACKGROUND = 0x00000008;
 
 /** The devices a program creates, named by the GUIDs it was compiled with. */
 export const GUID_SysKeyboard = '{6F1D2B61-D5A0-11CF-BFC7-444553540000}';
@@ -505,9 +509,13 @@ export function createPublisher({ publishInterface }){
  *        by when the thread the processor is on may no longer be this one --
  *        so the loop names it once, before that first await, rather than
  *        asking the bridge to guess a second time.
+ * @param {(hwnd: number) => 'top' | 'child' | null | undefined} [deps.windowKind]
+ *        What a handle names: a top-level window, a child one, nothing -- or
+ *        undefined when there are no windows to ask about, in which case any
+ *        handle is taken as a window. SetCooperativeLevel wants a top-level one.
  */
 export function createDirectInput(
-    { memory, now, publishInterface, signal, allocate, callGuest, callerThread },
+    { memory, now, publishInterface, signal, allocate, callGuest, callerThread, windowKind },
 )
 {
     const publisher = createPublisher({ publishInterface });
@@ -650,13 +658,41 @@ export function createDirectInput(
          * taken: a held device refuses a new one with DIERR_ACQUIRED. The
          * one part of it anything here acts on is DISCL_EXCLUSIVE -- see
          * `exclusive` below for what holding a device that way takes away.
+         *
+         * The rest is checked as Windows checks it (Wine's device8.c, for
+         * the system mouse and keyboard): exactly one of exclusive and
+         * nonexclusive and one of foreground and background, a top-level
+         * window unless the level is background and nonexclusive, and never
+         * background and exclusive at once for these two devices. A keyboard
+         * made by a version before 7 is not exclusive at all.
          */
-        SetCooperativeLevel(device, [, flags]){
+        SetCooperativeLevel(device, [hwnd, flags]){
             if (device.acquired)
             {
                 return DIERR_ACQUIRED;
             }
-            device.setExclusive((flags & DISCL_EXCLUSIVE) !== 0);
+            const exclusive = (flags & DISCL_EXCLUSIVE) !== 0;
+            const background = (flags & DISCL_BACKGROUND) !== 0;
+            if (exclusive === ((flags & DISCL_NONEXCLUSIVE) !== 0)
+                || background === ((flags & DISCL_FOREGROUND) !== 0))
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            const window = hwnd >>> 0;
+            const kind = window === 0 ? null : windowKind?.(window);
+            if (window === 0 ? exclusive || !background : kind === null || kind === 'child')
+            {
+                return E_HANDLE;
+            }
+            if (exclusive && device.kind === KEYBOARD && device.version < 0x0700)
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            if (exclusive && background)
+            {
+                return DIERR_UNSUPPORTED;
+            }
+            device.setExclusive(exclusive);
             return DI_OK;
         },
 

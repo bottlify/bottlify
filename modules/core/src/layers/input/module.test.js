@@ -193,3 +193,47 @@ test('a mouse a program holds exclusively through DirectInput stops reaching the
 
     await inputModule.dispose();
 });
+
+test('SetCooperativeLevel asks win32 what a window handle names', async()=>{
+    // device8.c: a top-level window is taken, a child or a handle to nothing
+    // is E_HANDLE.
+    const published = new Map();
+    const { api, memory } = await open({
+        win32: {
+            queue: ()=>createMessageQueue(),
+            windows: ()=>[
+                { hwnd: '0x40', child: false },
+                { hwnd: '0x41', child: true },
+            ],
+        },
+        config: {
+            publishInterface: (/** @type {any} */ object, /** @type {string} */ id)=>{
+                const pointer = 0x10000 + published.size * 4;
+                published.set(pointer, { object, id });
+                return pointer;
+            },
+        },
+    });
+    const guids = { readMemory: memory.readBytes, writeMemory: memory.writeBytes };
+    const u32 = (/** @type {number} */ at)=>new DataView(memory.readBytes(at, 4).slice().buffer)
+        .getUint32(0, true);
+    /** @param {number} pointer @param {string} name @param {number[]} args */
+    const call = (pointer, name, args)=>{
+        const entry = published.get(pointer);
+        const method = entry.object.interfaceFor(entry.id).methods
+            .find((/** @type {any} */ m)=>m.name === name);
+        return method.invoke(entry.object, args) | 0;
+    };
+    writeGuid(guids, 0x100, IID_IDirectInput8A);
+    api.libraries()['DINPUT8.dll'].DirectInput8Create.handler([0, 0x0800, 0x100, 0x200, 0]);
+    writeGuid(guids, 0x120, GUID_SysMouse);
+    call(u32(0x200), 'CreateDevice', [0x120, 0x204, 0]);
+    const mouse = u32(0x204);
+    const FOREGROUND_NONEXCLUSIVE = 0x4 | 0x2;
+    const E_HANDLE = 0x80070006 | 0;
+    assert.equal(call(mouse, 'SetCooperativeLevel', [0x40, FOREGROUND_NONEXCLUSIVE]), 0);
+    assert.equal(call(mouse, 'SetCooperativeLevel', [0x41, FOREGROUND_NONEXCLUSIVE]), E_HANDLE);
+    assert.equal(call(mouse, 'SetCooperativeLevel', [0x42, FOREGROUND_NONEXCLUSIVE]), E_HANDLE);
+
+    await inputModule.dispose();
+});

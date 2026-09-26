@@ -147,7 +147,12 @@ function clock(){
     } };
 }
 
-function fixture(){
+/**
+ * @param {{ windows?: Record<number, 'top' | 'child'> }} [options]
+ *     The windows a SetCooperativeLevel may name, by handle. Without it the
+ *     seam is told nothing and takes any handle as a window.
+ */
+function fixture({ windows } = {}){
     const memory = guestMemory();
     const bridge = fakeBridge();
     const time = clock();
@@ -187,6 +192,7 @@ function fixture(){
             return Promise.resolve(answers.shift() ?? 1);
         },
         callerThread: ()=>`thread-token-${++threadRequests}`,
+        windowKind: windows && (hwnd=>windows[hwnd] ?? null),
     });
     const root = (()=>{
         const result = dinput.libraries['DINPUT.dll']
@@ -796,6 +802,60 @@ test('Poll has nothing to do, and says so from DirectInput 7 on', ()=>{
     f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 256)]);
     f.bridge.call(device, 'Acquire');
     assert.equal(f.bridge.call(device, 'Poll'), DI_NOEFFECT);
+});
+
+test('SetCooperativeLevel checks its level and its window as Windows does', ()=>{
+    // device8.c test_sys_mouse, call for call, and joystick8.c's (NULL, 0).
+    const TOP = 0x100;
+    const CHILD = 0x200;
+    const E_HANDLE = 0x80070006 | 0;
+    const EXCLUSIVE = 0x1;
+    const NONEXCLUSIVE = 0x2;
+    const FOREGROUND = 0x4;
+    const BACKGROUND = 0x8;
+    const f = fixture({ windows: { [TOP]: 'top', [CHILD]: 'child' } });
+    const device = device8(f, GUID_SysMouse, false);
+    /** @param {number} hwnd @param {number} flags */
+    const level = (hwnd, flags)=>f.bridge.call(device, 'SetCooperativeLevel', [hwnd, flags]);
+    assert.equal(level(0, 0), DIERR_INVALIDPARAM);
+    assert.deepEqual([
+        level(0, FOREGROUND), level(0, FOREGROUND | EXCLUSIVE), level(0, FOREGROUND | NONEXCLUSIVE),
+        level(0, BACKGROUND), level(0, BACKGROUND | EXCLUSIVE), level(0, BACKGROUND | NONEXCLUSIVE),
+    ], [DIERR_INVALIDPARAM, E_HANDLE, E_HANDLE, DIERR_INVALIDPARAM, E_HANDLE, DI_OK]);
+    assert.deepEqual([
+        level(TOP, FOREGROUND), level(TOP, FOREGROUND | EXCLUSIVE),
+        level(TOP, FOREGROUND | NONEXCLUSIVE), level(TOP, BACKGROUND),
+        level(TOP, BACKGROUND | EXCLUSIVE), level(TOP, BACKGROUND | NONEXCLUSIVE),
+    ], [DIERR_INVALIDPARAM, DI_OK, DI_OK, DIERR_INVALIDPARAM, DIERR_UNSUPPORTED, DI_OK]);
+    assert.deepEqual([
+        level(CHILD, FOREGROUND), level(CHILD, FOREGROUND | EXCLUSIVE),
+        level(CHILD, FOREGROUND | NONEXCLUSIVE), level(CHILD, BACKGROUND),
+        level(CHILD, BACKGROUND | EXCLUSIVE), level(CHILD, BACKGROUND | NONEXCLUSIVE),
+    ], [DIERR_INVALIDPARAM, E_HANDLE, E_HANDLE, DIERR_INVALIDPARAM, E_HANDLE, E_HANDLE]);
+    assert.equal(level(0x300, FOREGROUND | NONEXCLUSIVE), E_HANDLE, 'a handle to no window');
+    assert.equal(level(TOP, FOREGROUND | BACKGROUND | NONEXCLUSIVE), DIERR_INVALIDPARAM);
+    assert.equal(level(TOP, FOREGROUND | EXCLUSIVE | NONEXCLUSIVE), DIERR_INVALIDPARAM);
+
+    // test_sys_keyboard: a DirectInput 5 keyboard is never exclusive.
+    for (const [version, foreground, background] of [
+        [0x0500, DIERR_INVALIDPARAM, DIERR_INVALIDPARAM], [0x0700, DI_OK, DIERR_UNSUPPORTED]])
+    {
+        assert.equal(f.dinput.libraries['DINPUT.dll']
+            .DirectInputCreateA.handler([0, version, AT.out, 0]), DI_OK);
+        const root = f.memory.u32(AT.out);
+        writeGuid(f.memory, AT.guid, GUID_SysKeyboard);
+        assert.equal(f.bridge.call(root, 'CreateDevice', [AT.guid, AT.out, 0]), DI_OK);
+        const keys = f.memory.u32(AT.out);
+        const name = `0x${version.toString(16)}`;
+        assert.equal(f.bridge.call(keys, 'SetCooperativeLevel', [TOP, FOREGROUND | EXCLUSIVE]),
+            foreground, name);
+        assert.equal(f.bridge.call(keys, 'SetCooperativeLevel', [TOP, BACKGROUND | EXCLUSIVE]),
+            background, name);
+        assert.equal(f.bridge.call(keys, 'SetCooperativeLevel', [0, FOREGROUND | EXCLUSIVE]),
+            E_HANDLE, name);
+        assert.equal(f.bridge.call(keys, 'SetCooperativeLevel', [TOP, FOREGROUND | NONEXCLUSIVE]),
+            DI_OK, name);
+    }
 });
 
 test('GetCapabilities fills DIDEVCAPS and needs a header that declares its size', ()=>{
