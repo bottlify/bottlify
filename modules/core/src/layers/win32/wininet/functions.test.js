@@ -32,14 +32,19 @@ function fixture(){
         readMemory: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
         writeMemory: (address, data)=>bytes.set(data, address),
-        /** @param {number} address @param {number} maxLength */
+        /**
+         * As the memory layer reads an ANSI string: in Windows-1252, which is
+         * what the Encoding standard calls latin1.
+         *
+         * @param {number} address @param {number} maxLength
+         */
         readCString(address, maxLength){
-            let text = '';
-            for (let at = 0; at < maxLength && bytes[address + at] !== 0; at++)
+            let end = address;
+            while (end - address < maxLength && bytes[end] !== 0)
             {
-                text += String.fromCharCode(bytes[address + at]);
+                end++;
             }
-            return text;
+            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
         },
         /** @param {number} code */
         setLastError: code=>errors.push(code),
@@ -49,7 +54,7 @@ function fixture(){
     });
     const view = new DataView(bytes.buffer);
     return {
-        fns, errors, divergences,
+        fns, errors, divergences, bytes, view,
         /** @param {string} text */
         put(text){
             for (let at = 0; at < text.length; at++)
@@ -103,6 +108,33 @@ test('the buffer form reports the size it needs, then writes and reports the len
     assert.equal(fx.fns.InternetCanonicalizeUrlA.handler([URL, OUT, LENGTH, 0]), 1);
     assert.equal(fx.out(), 'http://host/b%20c');
     assert.equal(fx.length(), 'http://host/b%20c'.length, 'without it');
+});
+
+test('a URL\'s upper-half bytes are escaped, unescaped and copied as the ANSI page\'s', ()=>{
+    // The URL is read as Windows-1252, where 0x80 is the euro sign and 0x99
+    // the trade mark: escaped, they are %80 and %99, the bytes they are;
+    // unescaped, those escapes are those bytes again; and a component copied
+    // out of the URL is its own bytes.
+    const fx = fixture();
+    fx.put('http://host/\x80\x99 ');
+    fx.room(64);
+    assert.equal(fx.fns.InternetCanonicalizeUrlA.handler([URL, OUT, LENGTH, 0]), 1);
+    assert.equal(fx.out(), 'http://host/%80%99%20');
+
+    fx.put('http://host/%80%99');
+    fx.room(64);
+    assert.equal(fx.fns.InternetCanonicalizeUrlA.handler(
+        [URL, OUT, LENGTH, ICU_DECODE | ICU_NO_ENCODE]), 1);
+    assert.equal(fx.out(), 'http://host/\x80\x99');
+
+    fx.put('http://host/\x80\x99\x97');
+    const components = 0x600;
+    fx.bytes.fill(0, components, components + 60);
+    fx.view.setUint32(components, 60, true);
+    fx.view.setUint32(components + 44, 0x700, true);
+    fx.view.setUint32(components + 48, 32, true);
+    assert.equal(fx.fns.InternetCrackUrlA.handler([URL, 0, 0, components]), 1);
+    assert.deepEqual([...fx.bytes.subarray(0x700, 0x705)], [0x2f, 0x80, 0x99, 0x97, 0]);
 });
 
 test('a missing string or length is refused, and browser mode is said to be ignored once', ()=>{

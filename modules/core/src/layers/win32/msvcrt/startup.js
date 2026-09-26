@@ -31,6 +31,7 @@
  */
 
 import { windowsVersion } from '../kernel32/versions.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 import { createGlobals } from './globals.js';
 
 /** What `_controlfp` reports when nothing has changed it: the MSVC default. */
@@ -151,21 +152,20 @@ export function createStartupFunctions(host){
     const version = host.version ?? windowsVersion();
 
     /**
-     * A C string in guest memory that outlives this call.
+     * A C string in guest memory that outlives this call, in the ANSI page
+     * GetCommandLineA writes the same text in.
      *
      * @param {string} text
      * @returns {number}
      */
     const publish = text=>{
-        const bytes = new TextEncoder().encode(text);
-        const address = host.allocate(bytes.length + 1);
+        const bytes = encodeAnsi(`${text}\0`);
+        const address = host.allocate(bytes.length);
         if (address === 0)
         {
             return 0;
         }
-        const buffer = new Uint8Array(bytes.length + 1);
-        buffer.set(bytes);
-        host.writeMemory(address, buffer);
+        host.writeMemory(address, bytes);
         return address;
     };
 

@@ -79,3 +79,25 @@ test('GetFileTitleA is the name out of the path, or the room it needs, or a refu
     assert.equal(fns.GetFileTitleA.handler([put(0x10, '*.exe'), 0x100, 32]), -1);
     assert.equal(fns.GetFileTitleA.argBytes, 12);
 });
+
+test('GetFileTitleA gives the name back in the bytes the path had', ()=>{
+    // The memory layer reads the path as Windows-1252, where 0x80 is the euro
+    // sign, 0x99 the trade mark and 0x97 an em dash; the title is written in
+    // the same page.
+    const memory = new Uint8Array(0x200);
+    const fns = createCommonDialogFunctions({
+        readMemory: (address, length)=>memory.subarray(address, address + length),
+        readCString: (address, maxLength)=>{
+            let end = address;
+            while (memory[end] !== 0 && end - address < maxLength)
+            {
+                end++;
+            }
+            return new TextDecoder('latin1').decode(memory.subarray(address, end));
+        },
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+    });
+    memory.set([0x43, 0x3a, 0x5c, 0x80, 0x5c, 0x99, 0x97, 0xe9, 0], 0x10);
+    assert.equal(fns.GetFileTitleA.handler([0x10, 0x100, 32]), 0);
+    assert.deepEqual([...memory.subarray(0x100, 0x104)], [0x99, 0x97, 0xe9, 0]);
+});

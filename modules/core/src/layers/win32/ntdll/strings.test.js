@@ -225,6 +225,28 @@ test('narrowing into a short buffer truncates and terminates rather than refusin
     assert.equal(host.readCString(BUFFER), 'abc');
 });
 
+test('an ANSI string is the ANSI page\'s, widened and narrowed', ()=>{
+    // The Rtl conversions are the ANSI code page's, as MultiByteToWideChar
+    // (CP_ACP) is: 0x80 is the euro sign in Windows-1252, 0x99 the trade mark
+    // and 0x97 an em dash, and a character the page lacks narrows to the
+    // default character.
+    const host = fakeHost();
+    const fns = createCountedStringFunctions(host);
+    host.bytes.set([0x80, 0x99, 0x97], TEXT);
+    putDescriptor(host, SOURCE_STRING, { length: 3, maximumLength: 3, buffer: TEXT });
+    putDescriptor(host, DESTINATION, { length: 0, maximumLength: 8, buffer: BUFFER });
+    assert.equal(fns.RtlAnsiStringToUnicodeString.handler([DESTINATION, SOURCE_STRING, 0]),
+        STATUS.SUCCESS);
+    assert.equal(host.readWideString(BUFFER), '€™—');
+
+    putWide(host, TEXT, '€—Ж');
+    putDescriptor(host, SOURCE_STRING, { length: 6, maximumLength: 8, buffer: TEXT });
+    putDescriptor(host, DESTINATION, { length: 0, maximumLength: 8, buffer: BUFFER });
+    assert.equal(fns.RtlUnicodeStringToAnsiString.handler([DESTINATION, SOURCE_STRING, 0]),
+        STATUS.SUCCESS);
+    assert.deepEqual([...host.bytes.subarray(BUFFER, BUFFER + 4)], [0x80, 0x97, 0x3f, 0]);
+});
+
 test('a destination with no room at all is refused before anything is written', ()=>{
     const host = fakeHost();
     const fns = createCountedStringFunctions(host);

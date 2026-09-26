@@ -1574,6 +1574,50 @@ test('wsprintfW formats wide, takes a wide %s and a narrow %S, and writes UTF-16
     assert.equal(fns.wsprintfW.argBytes, fns.wsprintfA.argBytes);
 });
 
+test('wsprintf keeps the ANSI page: a byte of the format, a %s or a %c is itself', ()=>{
+    // The format and a %s are read as Windows-1252, where 0x80 is the euro
+    // sign, 0x99 the trade mark and 0x97 an em dash; wsprintfA writes them
+    // back as those bytes, a %c byte is one too, and a wide %C is converted
+    // into the page. wsprintfW widens a narrow %C as it widens a %S.
+    const { memory, fns } = setup();
+    memory.bytes.set([0x80, 0x25, 0x73, 0x25, 0x63, 0x25, 0x43, 0], FORMAT_BUFFER);
+    memory.bytes.set([0x99, 0], TEXT_BUFFER);
+
+    assert.equal(fns.wsprintfA.handler([OUT_BUFFER, FORMAT_BUFFER, TEXT_BUFFER, 0x97, 0x2014]), 4);
+    assert.deepEqual([...memory.bytes.subarray(OUT_BUFFER, OUT_BUFFER + 5)],
+        [0x80, 0x99, 0x97, 0x97, 0]);
+
+    [...'%C%S\0'].forEach((character, at)=>{
+        memory.bytes[FORMAT_BUFFER + at * 2] = character.charCodeAt(0);
+        memory.bytes[FORMAT_BUFFER + at * 2 + 1] = 0;
+    });
+    assert.equal(fns.wsprintfW.handler([OUT_BUFFER, FORMAT_BUFFER, 0x80, TEXT_BUFFER]), 2);
+    assert.deepEqual([...memory.bytes.subarray(OUT_BUFFER, OUT_BUFFER + 6)],
+        [0xac, 0x20, 0x22, 0x21, 0, 0]);
+});
+
+test('LoadStringA and GetClassNameA write their text in the ANSI page', ()=>{
+    // A resource string is UTF-16 and reaches an ANSI caller as
+    // WideCharToMultiByte(CP_ACP) writes it; a class name goes back in the
+    // page it was registered in.
+    const { memory, fns } = setup({ loadString: ()=>'€™—é' });
+    assert.equal(fns.LoadStringA.handler([HINSTANCE, 0x10, OUT_BUFFER, 16]), 4);
+    assert.deepEqual([...memory.bytes.subarray(OUT_BUFFER, OUT_BUFFER + 5)],
+        [0x80, 0x99, 0x97, 0xe9, 0]);
+
+    memory.bytes.set([0x80, 0x99, 0x97, 0], CLASS_NAME);
+    memory.putU32s(CLASS_STRUCT, [
+        0x0003, WNDPROC, 0, 0, HINSTANCE, 0x11, 0x22, 0x33, 0, CLASS_NAME,
+    ]);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    memory.putString(TITLE, 'Window');
+    const hwnd = fns.CreateWindowExA.handler(
+        [0, CLASS_NAME, TITLE, WS_OVERLAPPED, 0, 0, 320, 240, 0, 0, HINSTANCE, 0]);
+    assert.equal(fns.GetClassNameA.handler([hwnd, OUT_BUFFER, 32]), 3);
+    assert.deepEqual([...memory.bytes.subarray(OUT_BUFFER, OUT_BUFFER + 4)],
+        [0x80, 0x99, 0x97, 0]);
+});
+
 test('the keyboard is the enhanced one, and anything else asked of it is nothing', ()=>{
     const { fns } = setup();
     assert.equal(fns.GetKeyboardType.handler([0]), 4, 'type: enhanced 101/102-key');

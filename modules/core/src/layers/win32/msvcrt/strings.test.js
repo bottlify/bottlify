@@ -213,3 +213,25 @@ test('the scans still answer from the whole string when the answer is late', ()=
         'an empty set rejects nothing, so the terminator ends the span');
     assert.equal(table.strpbrk.handler([string, memory.put('')]), 0, 'and finds nothing');
 });
+
+test('an upper-half string keeps its bytes through a copy, a scan and a search', ()=>{
+    // The memory layer reads an ANSI string as Windows-1252, where 0x80 is the
+    // euro sign, 0x99 the trade mark and 0x97 an em dash: a copy writes those
+    // characters back as the same bytes, a set naming them matches those
+    // bytes, and a search for one finds it.
+    const { memory, table } = build();
+    /** @param {number[]} bytes */
+    const place = bytes=>{
+        const at = memory.allocate(bytes.length + 1);
+        memory.writeMemory(at, Uint8Array.from([...bytes, 0]));
+        return at;
+    };
+    const text = [0x61, 0x80, 0x99, 0x97, 0x80, 0x62];
+    const string = place(text);
+
+    const copy = table._strdup.handler([string]);
+    assert.deepEqual([...memory.bytes.subarray(copy, copy + text.length + 1)], [...text, 0]);
+    assert.equal(table.strcspn.handler([string, place([0x99])]), 2);
+    assert.equal(table.strspn.handler([string, place([0x61, 0x80, 0x99])]), 3);
+    assert.equal(table.strrchr.handler([string, 0x80]), string + 4);
+});

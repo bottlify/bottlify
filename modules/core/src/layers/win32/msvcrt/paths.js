@@ -22,6 +22,7 @@
  */
 
 import { EACCES, EBADF, EEXIST, EINVAL, ENOENT, ENOTEMPTY, ERANGE } from './globals.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -144,18 +145,13 @@ export function createPathFunctions(host){
     /** @param {number} pointer */
     const readString = pointer=>host.readCString(pointer, MAX_STRING);
 
-    /** @param {number} pointer @param {string} text */
+    /** In the ANSI page a path is read in. @param {number} pointer @param {string} text */
     const writeString = (pointer, text)=>{
         if ((pointer >>> 0) === 0)
         {
             return;
         }
-        const bytes = new Uint8Array(text.length + 1);
-        for (let at = 0; at < text.length; at++)
-        {
-            bytes[at] = text.charCodeAt(at) & 0xff;
-        }
-        host.writeMemory(pointer, bytes);
+        host.writeMemory(pointer, encodeAnsi(`${text}\0`));
     };
 
     /** @param {number} code */
@@ -238,16 +234,16 @@ export function createPathFunctions(host){
             view.setUint32(layout.SIZE, (entry.size ?? 0) >>> 0, true);
         }
         const name = String(entry.name).slice(0, MAX_NAME);
-        for (let at = 0; at < name.length; at++)
+        if (layout.WIDE_NAME)
         {
-            if (layout.WIDE_NAME)
+            for (let at = 0; at < name.length; at++)
             {
                 view.setUint16(layout.NAME + at * 2, name.charCodeAt(at), true);
             }
-            else
-            {
-                bytes[layout.NAME + at] = name.charCodeAt(at) & 0xff;
-            }
+        }
+        else
+        {
+            bytes.set(encodeAnsi(name), layout.NAME);
         }
         host.writeMemory(address >>> 0, bytes);
     };

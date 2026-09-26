@@ -24,6 +24,7 @@
  */
 
 import { writeGuid } from '../ole32/guid.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 
 /** CLSID_ShellLink, and the interfaces the object answers to. */
 export const CLSID_SHELL_LINK = '{00021401-0000-0000-C000-000000000046}';
@@ -193,12 +194,7 @@ function writeStringBuffer(host, buffer, cch, text, wide){
         host.writeMemory(buffer, bytes);
         return;
     }
-    const bytes = new Uint8Array(kept.length + 1);
-    for (let at = 0; at < kept.length; at++)
-    {
-        bytes[at] = kept.charCodeAt(at) & 0xff;
-    }
-    host.writeMemory(buffer, bytes);
+    host.writeMemory(buffer, encodeAnsi(`${kept}\0`));
 }
 
 /**
@@ -225,10 +221,7 @@ function writeFindData(host, findData, path, wide){
     }
     else
     {
-        for (let at = 0; at < name.length; at++)
-        {
-            bytes[FIND_DATA_NAME + at] = name.charCodeAt(at) & 0xff;
-        }
+        bytes.set(encodeAnsi(name), FIND_DATA_NAME);
     }
     host.writeMemory(findData, bytes);
 }

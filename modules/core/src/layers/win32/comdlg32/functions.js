@@ -18,6 +18,8 @@
  * report that to the user as a fault. Cancelled is not a fault.
  */
 
+import { encodeAnsi } from '../kernel32/locale.js';
+
 /**
  * @typedef {Object} CommonDialogHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -88,12 +90,7 @@ export function createCommonDialogFunctions(host){
                 {
                     return name.length + 1;
                 }
-                const bytes = new Uint8Array(name.length + 1);
-                for (let at = 0; at < name.length; at++)
-                {
-                    bytes[at] = name.charCodeAt(at) & 0xff;
-                }
-                host.writeMemory?.(title >>> 0, bytes);
+                host.writeMemory?.(title >>> 0, encodeAnsi(`${name}\0`));
                 return 0;
             },
         },

@@ -30,6 +30,7 @@
  */
 
 import { planesToBgra } from './cursors.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 /** The resource directories a cursor and an icon are named in. */
 export const RT_GROUP_CURSOR = 12;
@@ -427,26 +428,36 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
 
     /**
      * The pasted text laid down in guest memory in one format: UTF-16 for
-     * CF_UNICODETEXT, one byte per character otherwise with what does not
-     * fit a byte as '?', a terminator after it either way.
+     * CF_UNICODETEXT, the ANSI page for CF_TEXT, one byte per character
+     * otherwise with what does not fit a byte as '?', a terminator after it
+     * each way.
      *
      * @param {number} format @param {string} text @returns {number}
      */
     const layDown = (format, text)=>{
         const clipped = text.slice(0, MAX_CLIPBOARD_TEXT);
         const wide = format === CF_UNICODETEXT;
-        const bytes = new Uint8Array((clipped.length + 1) * (wide ? 2 : 1));
-        for (let at = 0; at < clipped.length; at++)
+        /** @type {Uint8Array} */
+        let bytes;
+        if (format === CF_TEXT)
         {
-            const code = clipped.charCodeAt(at);
-            if (wide)
+            bytes = encodeAnsi(`${clipped}\0`);
+        }
+        else
+        {
+            bytes = new Uint8Array((clipped.length + 1) * (wide ? 2 : 1));
+            for (let at = 0; at < clipped.length; at++)
             {
-                bytes[at * 2] = code & 0xff;
-                bytes[at * 2 + 1] = code >>> 8;
-            }
-            else
-            {
-                bytes[at] = code < 0x100 ? code : 0x3f;
+                const code = clipped.charCodeAt(at);
+                if (wide)
+                {
+                    bytes[at * 2] = code & 0xff;
+                    bytes[at * 2 + 1] = code >>> 8;
+                }
+                else
+                {
+                    bytes[at] = code < 0x100 ? code : 0x3f;
+                }
             }
         }
         const address = host.allocate(bytes.length);
@@ -515,6 +526,10 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         return text;
     };
 
+    /** CF_TEXT's bytes, as the characters they are in the ANSI page. @param {number} address */
+    const readAnsiText = address=>decodeAnsi(Uint8Array.from(readTerminated(address, 1),
+        character=>character.charCodeAt(0)));
+
     /**
      * The text the clipboard holds, if it holds any. Unicode is preferred
      * over the byte formats because it is the one that lost nothing; a null
@@ -528,8 +543,13 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         {
             return readTerminated(wide, 2);
         }
-        const narrow = clipboard.formats.get(CF_TEXT) || clipboard.formats.get(CF_OEMTEXT);
-        return narrow ? readTerminated(narrow, 1) : null;
+        const ansi = clipboard.formats.get(CF_TEXT);
+        if (ansi)
+        {
+            return readAnsiText(ansi);
+        }
+        const oem = clipboard.formats.get(CF_OEMTEXT);
+        return oem ? readTerminated(oem, 1) : null;
     };
 
     /**
@@ -568,15 +588,10 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         },
     });
 
-    /** @param {number} address @param {string} text @param {number} limit */
+    /** In the ANSI page. @param {number} address @param {string} text @param {number} limit */
     const writeString = (address, text, limit)=>{
         const clipped = limit > 0 ? text.slice(0, limit - 1) : '';
-        const bytes = new Uint8Array(clipped.length + 1);
-        for (let index = 0; index < clipped.length; index++)
-        {
-            bytes[index] = clipped.charCodeAt(index) & 0xff;
-        }
-        host.writeMemory(address, bytes);
+        host.writeMemory(address, encodeAnsi(`${clipped}\0`));
         return clipped.length;
     };
 

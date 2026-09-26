@@ -147,3 +147,23 @@ test('_snscanf reads no further than the count it was given', ()=>{
     assert.equal(table._snscanf.handler([input, 3, memory.put('%d'), out]), 1);
     assert.equal(memory.i32(out), 123);
 });
+
+test('upper-half bytes are stored as they were read, and a range of them is a range of bytes', ()=>{
+    // The memory layer reads an ANSI string as Windows-1252, where 0x80 is the
+    // euro sign, 0x99 the trade mark and 0x97 an em dash. A field is stored as
+    // the bytes it was, and [\x80-\x9f] spans those bytes, as a scan set
+    // orders them, not the characters they stand for.
+    const { memory, table } = build();
+    /** @param {number[]} bytes */
+    const place = bytes=>{
+        const at = memory.allocate(bytes.length + 1);
+        memory.writeMemory(at, Uint8Array.from([...bytes, 0]));
+        return at;
+    };
+    const word = memory.allocate(8);
+    const run = memory.allocate(8);
+    assert.equal(table.sscanf.handler([place([0x80, 0x99, 0x20, 0x97, 0x8c, 0x41]),
+        place([0x25, 0x73, 0x20, 0x25, 0x5b, 0x80, 0x2d, 0x9f, 0x5d]), word, run]), 2);
+    assert.deepEqual([...memory.bytes.subarray(word, word + 3)], [0x80, 0x99, 0]);
+    assert.deepEqual([...memory.bytes.subarray(run, run + 3)], [0x97, 0x8c, 0]);
+});

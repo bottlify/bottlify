@@ -849,6 +849,32 @@ test('a compound name opens through the procedure its extension names', async()=
     assert.equal(memory.u32(record + INFO.wErrorRet), 257, 'MMIOERR_FILENOTFOUND');
 });
 
+test('a code and a procedure\'s name are the ANSI page\'s bytes', async()=>{
+    // 0x80 is the euro sign in Windows-1252, 0x99 the trade mark and 0x97 an
+    // em dash, as the ANSI calls read those bytes: a code spelled with them
+    // is those bytes, a wide one is narrowed into the page, and an ANSI
+    // procedure is handed a name in the bytes the program gave it.
+    const { memory, fns, state } = withProcedure(riffImage());
+    /** @param {number[]} bytes */
+    const place = bytes=>{
+        const at = memory.allocate(bytes.length + 1);
+        memory.writeMemory(at, Uint8Array.from([...bytes, 0]));
+        return at;
+    };
+    assert.equal(fns.mmioStringToFOURCCA.handler([place([0x80, 0x99, 0x97, 0xe9]), 0]),
+        0xe9979980);
+    assert.equal(fns.mmioStringToFOURCCW.handler(
+        [memory.putWide('€™—Ж'), 0]), 0x3f979980);
+
+    fns.mmioInstallIOProcA.handler([fourcc('XYZ '), PROCEDURE, MMIO_INSTALLPROC]);
+    const record = memory.allocate(INFO.size);
+    memory.setU32(record + INFO.fccIOProc, fourcc('XYZ '));
+    assert.notEqual(await fns.mmioOpenA.handler([place([0x43, 0x3a, 0x5c, 0x80, 0x99]), record,
+        MMIO_READ]), 0);
+    assert.deepEqual([...memory.bytes.subarray(state.opened.name, state.opened.name + 6)],
+        [0x43, 0x3a, 0x5c, 0x80, 0x99, 0]);
+});
+
 test('a file the program\'s procedure holds is walked and read as any file is', async()=>{
     // The memory-file walk of mmio.c's tests, through a procedure named in the
     // MMIOINFO by its code: every byte comes by MMIOM_READ, into the buffer

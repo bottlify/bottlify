@@ -28,6 +28,17 @@ test('the header: name, GUID, version, locale, flags and documentation', ()=>{
     assert.equal(library.typeInfos.length, 162);
 });
 
+test('a library\'s text is read in the ANSI page', ()=>{
+    // The library keeps its names and documentation in the machine's code
+    // page, and a byte of it is the character that page makes of it: 0x99 is
+    // the trade mark in Windows-1252, not a control character.
+    const bytes = new Uint8Array(readFileSync(FIXTURE));
+    const at = Buffer.from(bytes).indexOf('Kernel 7.0', 0, 'latin1') + 'Kernel'.length;
+    bytes[at] = 0x99;
+    assert.equal(parseTypeLib(bytes).helpString,
+        'InstallShield Professional Setup Kernel™7.0');
+});
+
 test('every kind of type the library holds is read, and counted by kind', ()=>{
     const counts = new Map();
     for (const type of library.typeInfos)

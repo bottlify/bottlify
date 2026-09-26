@@ -22,6 +22,7 @@
 import { readGuid } from '../ole32/guid.js';
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { createAdapter } from '../oleaut32/objects.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 export const IID_ISHELLFOLDER = '{000214E6-0000-0000-C000-000000000046}';
 export const IID_IENUMIDLIST = '{000214F2-0000-0000-C000-000000000046}';
@@ -58,15 +59,13 @@ const STRRET_CAPACITY = 260;
 
 const MAX_PATH = 260;
 
-/** @param {string} text @returns {Uint8Array} eight-bit text with its terminator */
-const sz = text=>{
-    const bytes = new Uint8Array(text.length + 1);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at] = text.charCodeAt(at) & 0xff;
-    }
-    return bytes;
-};
+/**
+ * Text in the ANSI page, with its terminator: how an item keeps its text, and
+ * how a STRRET_CSTR hands it back, so a path a program gave comes back whole.
+ *
+ * @param {string} text @returns {Uint8Array}
+ */
+const sz = text=>encodeAnsi(`${text}\0`);
 
 /** @param {number} value */
 const dword = value=>new Uint8Array([
@@ -119,7 +118,7 @@ export function itemsOf(memory, list){
         }
         const data = memory.readMemory(at + 2, item - 2);
         const end = data.indexOf(0);
-        texts.push(String.fromCharCode(...data.subarray(0, end < 0 ? data.length : end)));
+        texts.push(decodeAnsi(data.subarray(0, end < 0 ? data.length : end)));
         at += item;
     }
     return texts;

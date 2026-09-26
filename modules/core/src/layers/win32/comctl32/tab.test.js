@@ -479,6 +479,25 @@ test('TCM_GETITEM of a missing tab zeroes the numbers its mask names and leaves 
         assert.equal(memory.readCString(OUT + 0x40, 32), 'a');
     });
 
+test('a tab\'s text in the upper half of the ANSI page round-trips as its bytes', async()=>{
+    // TCM_SETITEMA's text is read as Windows-1252, where 0x80 is the euro
+    // sign, 0x99 the trade mark and 0x97 an em dash, and TCM_GETITEMA writes
+    // it back in that page.
+    const context = setup();
+    await context.makeParent();
+    const hwnd = await context.tabs(TCS_FIXEDWIDTH, 1);
+    const { memory } = context;
+    memory.bytes.fill(0, OUT, OUT + TCITEM.SIZE);
+    memory.put32(OUT + TCITEM.mask, TCIF_TEXT);
+    memory.put32(OUT + TCITEM.pszText, memory.putString(OUT + 0x40, '\x80\x99\x97\xe9'));
+    memory.put32(OUT + TCITEM.cchTextMax, 32);
+    assert.equal(context.send([hwnd, TCM_SETITEMA, 0, OUT]), 1);
+    memory.putString(OUT + 0x40, '');
+    assert.equal(context.send([hwnd, TCM_GETITEMA, 0, OUT]), 1);
+    assert.deepEqual([...memory.bytes.subarray(OUT + 0x40, OUT + 0x45)],
+        [0x80, 0x99, 0x97, 0xe9, 0]);
+});
+
 test('a tab\'s text round-trips, and its state is read and written through the mask',
     async()=>{
         const context = setup();

@@ -24,6 +24,8 @@
  * empty, and a program polling it gets a stable no rather than a wait.
  */
 
+import { decodeAnsi } from './locale.js';
+
 /** Codes this surface reports. */
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
@@ -63,18 +65,20 @@ export function createConsoleIoFunctions(host){
      * The text of a write, however it was spelled. Both forms take a character
      * count rather than a byte count, so the wide one reads twice the bytes for
      * the same number -- reading the count as bytes truncates every wide write
-     * to half its length.
+     * to half its length. The ANSI form is in the page the console reports.
      *
      * @param {number} buffer @param {number} count @param {boolean} isWide
      */
     const textOf = (buffer, count, isWide)=>{
         const bytes = host.readMemory(buffer, count * (isWide ? 2 : 1));
+        if (!isWide)
+        {
+            return decodeAnsi(bytes);
+        }
         let text = '';
         for (let at = 0; at < count; at++)
         {
-            text += String.fromCharCode(isWide
-                ? bytes[at * 2] | bytes[at * 2 + 1] << 8
-                : bytes[at]);
+            text += String.fromCharCode(bytes[at * 2] | bytes[at * 2 + 1] << 8);
         }
         return text;
     };

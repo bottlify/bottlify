@@ -41,6 +41,7 @@ import {
 import {
     SOCKADDR_IN_SIZE, formatAddress, parseAddress, readSockaddr, swap16, swap32, writeSockaddr,
 } from './sockaddr.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 
 /** The name this host answers to, and the only one it can resolve to itself. */
 const HOSTNAME = 'bottlify';
@@ -115,15 +116,8 @@ export function createWinsockFunctions(host){
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
 
-    /** @param {string} text */
-    const latin1 = text=>{
-        const bytes = new Uint8Array(text.length + 1);
-        for (let at = 0; at < text.length; at++)
-        {
-            bytes[at] = text.charCodeAt(at) & 0xff;
-        }
-        return bytes;
-    };
+    /** Terminated, in the ANSI page a name a program passes is read in. @param {string} text */
+    const sz = text=>encodeAnsi(`${text}\0`);
 
     /**
      * Resolves a handle, or reports that it is not a socket. A stale handle is
@@ -290,7 +284,7 @@ export function createWinsockFunctions(host){
         const listAt = aliasesAt + 8;
         const addressAt = listAt + 8;
 
-        host.writeMemory(nameAt, latin1(name));
+        host.writeMemory(nameAt, sz(name));
         writeDword(aliasesAt, 0);
         writeDword(addressAt, swap32(address));
         writeDword(listAt, addressAt);
@@ -590,8 +584,8 @@ export function createWinsockFunctions(host){
                     const asked = requested & 0xffff;
                     view.setUint16(WSADATA.wVersion, asked === 0 ? 0x0202 : asked, true);
                     view.setUint16(WSADATA.wHighVersion, 0x0202, true);
-                    block.set(latin1(WSADESCRIPTION), WSADATA.szDescription);
-                    block.set(latin1(WSASYSSTATUS), WSADATA.szSystemStatus);
+                    block.set(sz(WSADESCRIPTION), WSADATA.szDescription);
+                    block.set(sz(WSASYSSTATUS), WSADATA.szSystemStatus);
                     view.setUint16(WSADATA.iMaxSockets, 0, true);
                     view.setUint16(WSADATA.iMaxUdpDg, 0, true);
                     host.writeMemory(data >>> 0, block);
@@ -1199,7 +1193,7 @@ export function createWinsockFunctions(host){
             /** @param {number[]} args */
             handler: ([value])=>{
                 const buffer = staticBuffer('inet_ntoa', 16);
-                host.writeMemory(buffer, latin1(formatAddress(swap32(value))));
+                host.writeMemory(buffer, sz(formatAddress(swap32(value))));
                 return buffer >>> 0;
             },
         },
@@ -1212,7 +1206,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEFAULT);
                 }
-                host.writeMemory(buffer >>> 0, latin1(HOSTNAME));
+                host.writeMemory(buffer >>> 0, sz(HOSTNAME));
                 return ok(0);
             },
         },

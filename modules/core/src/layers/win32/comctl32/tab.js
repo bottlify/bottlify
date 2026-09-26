@@ -29,6 +29,7 @@ import {
     COLOR_GRAYTEXT,
     after, pointOf,
 } from '../user32/controls.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 
 /** The class name a program creates the control by. */
 export const TAB_CLASS = 'SysTabControl32';
@@ -224,7 +225,7 @@ export function createTabProcedure(host, tk, images){
 
     /**
      * Copies text into a buffer of `room` characters, clipped and
-     * terminated, in the program's spelling.
+     * terminated, in the program's spelling: UTF-16, or the ANSI page.
      *
      * @param {number} address @param {string} text @param {number} room @param {boolean} wide
      */
@@ -234,19 +235,17 @@ export function createTabProcedure(host, tk, images){
             return;
         }
         const clipped = text.slice(0, room - 1);
-        const bytes = new Uint8Array((clipped.length + 1) * (wide ? 2 : 1));
+        if (!wide)
+        {
+            host.writeMemory(address >>> 0, encodeAnsi(`${clipped}\0`));
+            return;
+        }
+        const bytes = new Uint8Array((clipped.length + 1) * 2);
         for (let index = 0; index < clipped.length; index++)
         {
             const unit = clipped.charCodeAt(index);
-            if (wide)
-            {
-                bytes[index * 2] = unit & 0xff;
-                bytes[index * 2 + 1] = unit >>> 8;
-            }
-            else
-            {
-                bytes[index] = unit & 0xff;
-            }
+            bytes[index * 2] = unit & 0xff;
+            bytes[index * 2 + 1] = unit >>> 8;
         }
         host.writeMemory(address >>> 0, bytes);
     };

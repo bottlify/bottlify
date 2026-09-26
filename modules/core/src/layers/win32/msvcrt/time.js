@@ -21,6 +21,8 @@
  * an offset from UTC gets zero.
  */
 
+import { encodeAnsi } from '../kernel32/locale.js';
+
 const MAX_STRING = 1 << 20;
 
 /** msvcrt's clock ticks once per millisecond, unlike most Unix runtimes. */
@@ -139,14 +141,9 @@ export function createTimeFunctions(host){
     const readInt = pointer=>
         new DataView(host.readMemory(pointer, 4).slice().buffer).getInt32(0, true);
 
-    /** @param {number} pointer @param {string} text */
+    /** In the ANSI page a format is read in. @param {number} pointer @param {string} text */
     const writeString = (pointer, text)=>{
-        const bytes = new Uint8Array(text.length + 1);
-        for (let at = 0; at < text.length; at++)
-        {
-            bytes[at] = text.charCodeAt(at) & 0xff;
-        }
-        host.writeMemory(pointer, bytes);
+        host.writeMemory(pointer, encodeAnsi(`${text}\0`));
     };
 
     /**

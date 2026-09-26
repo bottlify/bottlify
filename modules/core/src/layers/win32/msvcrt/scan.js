@@ -22,6 +22,7 @@
  */
 
 import { scanInteger, scanFloat } from './convert.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 /**
  * How many stack slots a variadic function reads past its fixed arguments.
@@ -80,12 +81,14 @@ function scanset(body){
     for (let at = 0; at < text.length; at++)
     {
         // A dash between two characters is a range, but a dash at either end is
-        // itself.
+        // itself. The range runs over byte values, as the runtime compares
+        // them, not over the characters the ANSI page makes of those bytes.
         if (text[at] === '-' && at > 0 && at + 1 < text.length)
         {
-            for (let code = text.charCodeAt(at - 1) + 1; code <= text.charCodeAt(at + 1); code++)
+            const [from, to] = encodeAnsi(text[at - 1] + text[at + 1]);
+            for (let byte = from + 1; byte <= to; byte++)
             {
-                members.add(String.fromCharCode(code));
+                members.add(decodeAnsi(Uint8Array.of(byte)));
             }
             at++;
             continue;
@@ -363,10 +366,7 @@ export function createScanFunctions(host){
 
         text(pointer, value, terminate){
             const buffer = new Uint8Array(value.length + (terminate ? 1 : 0));
-            for (let at = 0; at < value.length; at++)
-            {
-                buffer[at] = value.charCodeAt(at) & 0xff;
-            }
+            buffer.set(encodeAnsi(value));
             host.writeMemory(pointer, buffer);
         },
     };

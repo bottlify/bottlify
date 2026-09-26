@@ -31,13 +31,15 @@ function setup(){
     /** @type {string[]} */
     const diverged = [];
     const built = createServiceFunctions({
+        // As the memory layer reads an ANSI string: in Windows-1252, which is
+        // what the Encoding standard calls latin1.
         readCString: (address, maxLength)=>{
             let end = address;
             while (end < bytes.length && end - address < maxLength && bytes[end] !== 0)
             {
                 end++;
             }
-            return String.fromCharCode(...bytes.subarray(address, end));
+            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
         },
         hive,
         setLastError: code=>{
@@ -158,4 +160,20 @@ test('nothing runs a service here: a start times out and says so, a control find
     assert.notEqual(lock, 0);
     assert.equal(fns.UnlockServiceDatabase.handler([lock]), 1);
     assert.equal(fns.UnlockServiceDatabase.handler([lock]), 0, 'once');
+});
+
+test('a service\'s names are kept in the bytes the program gave them', ()=>{
+    // The memory layer reads them as Windows-1252, where 0x80 is the euro
+    // sign, 0x99 the trade mark and 0x97 an em dash, and the registry keeps a
+    // string in that page, so RegQueryValueExA hands the same bytes back.
+    const { fns, put, serviceKey } = setup();
+    const manager = fns.OpenSCManagerA.handler([0, 0, 2]);
+    assert.notEqual(fns.CreateServiceA.handler([
+        manager, put(NAME, 'Example'), put(DISPLAY, '\x80\x99\x97\xe9'), 0,
+        SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
+        put(PATH, 'C:\\\x80\\s.exe'), 0, 0, 0, 0, 0,
+    ]), 0);
+    const held = /** @type {any} */ (serviceKey('Example'));
+    assert.deepEqual([...held.values.get('displayname').data], [0x80, 0x99, 0x97, 0xe9, 0]);
+    assert.deepEqual([...held.values.get('imagepath').data.subarray(3, 5)], [0x80, 0x5c]);
 });

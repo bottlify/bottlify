@@ -56,12 +56,14 @@ function fakeMemory(size = 0x1000){
         writeMemory: (address, data)=>bytes.set(data, address),
         /** @param {number} address @param {number} maxLength */
         readCString(address, maxLength){
-            let text = '';
-            for (let i = 0; i < maxLength && bytes[address + i] !== 0; i++)
+            // As the memory layer reads an ANSI string: in Windows-1252, which
+            // is what the Encoding standard calls latin1.
+            let end = address;
+            while (end - address < maxLength && bytes[end] !== 0)
             {
-                text += String.fromCharCode(bytes[address + i]);
+                end++;
             }
-            return text;
+            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
         },
         /** @param {number} address @param {string} text */
         putString(address, text){
@@ -166,6 +168,37 @@ test('a key made and a value set through the wide calls read back through the na
         ERROR_SUCCESS);
     assert.equal(memory.dword(OUT_DATA), 0x01020304);
     assert.deepEqual([fns.RegCreateKeyExW.argBytes, fns.RegSetValueExW.argBytes], [36, 24]);
+});
+
+test('names and strings are kept in the ANSI page, whichever form set them', ()=>{
+    // The hive keeps a string as the A calls read it. A key named, or a value
+    // set by RegSetValueA, with 0x80, 0x99 and 0x97 -- the euro sign, the
+    // trade mark and an em dash in Windows-1252 -- reads back as those bytes,
+    // and a wide value with those characters is stored as WideCharToMultiByte
+    // (CP_ACP) writes it, not as each unit's low byte.
+    const { memory, fns, create } = setup();
+    const key = create('Software\\Vendor');
+    const text = [0x80, 0x99, 0x97, 0xe9];
+    memory.bytes.set([...text, 0], SUBKEY);
+    memory.bytes.set([...text, 0], INPUT);
+    assert.equal(fns.RegSetValueA.handler([key, SUBKEY, REG_SZ, INPUT, 0]), ERROR_SUCCESS);
+    assert.equal(fns.RegEnumKeyA.handler([key, 0, OUT_NAME, 64]), ERROR_SUCCESS);
+    assert.deepEqual([...memory.bytes.subarray(OUT_NAME, OUT_NAME + 5)], [...text, 0]);
+    memory.putDword(OUT_SIZE, 0x40);
+    assert.equal(fns.RegQueryValueA.handler([key, SUBKEY, OUT_DATA, OUT_SIZE]), ERROR_SUCCESS);
+    assert.deepEqual([...memory.bytes.subarray(OUT_DATA, OUT_DATA + 5)], [...text, 0]);
+
+    [...'€™—é\0'].forEach((character, at)=>{
+        memory.bytes[INPUT + at * 2] = character.charCodeAt(0) & 0xff;
+        memory.bytes[INPUT + at * 2 + 1] = character.charCodeAt(0) >>> 8;
+    });
+    memory.bytes.set([0x57, 0, 0, 0], NAME);
+    assert.equal(fns.RegSetValueExW.handler([key, NAME, 0, REG_SZ, INPUT, 10]), ERROR_SUCCESS);
+    memory.putString(NAME, 'W');
+    memory.putDword(OUT_SIZE, 0x40);
+    assert.equal(fns.RegQueryValueExA.handler([key, NAME, 0, OUT_TYPE, OUT_DATA, OUT_SIZE]),
+        ERROR_SUCCESS);
+    assert.deepEqual([...memory.bytes.subarray(OUT_DATA, OUT_DATA + 5)], [...text, 0]);
 });
 
 test('a key is created, reopened whatever its case, and read back', ()=>{

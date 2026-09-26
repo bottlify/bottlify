@@ -19,6 +19,8 @@
  * uses them cannot drift apart.
  */
 
+import { encodeAnsi } from '../kernel32/locale.js';
+
 /** LOGPEN. Its width is a POINT, of which only the x is ever meaningful. */
 export const LOGPEN = Object.freeze({
     lopnStyle: 0,
@@ -382,16 +384,14 @@ export function logFontBytes(font, wide){
         });
     // The last unit of the field stays the terminator whatever the name's length.
     const name = font.faceName.slice(0, LF_FACESIZE - 1);
+    if (!wide)
+    {
+        bytes.set(encodeAnsi(name), LOGFONTA.lfFaceName);
+        return bytes;
+    }
     for (let at = 0; at < name.length; at++)
     {
-        if (wide)
-        {
-            view.setUint16(LOGFONTA.lfFaceName + at * 2, name.charCodeAt(at), true);
-        }
-        else
-        {
-            bytes[LOGFONTA.lfFaceName + at] = name.charCodeAt(at) & 0xff;
-        }
+        view.setUint16(LOGFONTA.lfFaceName + at * 2, name.charCodeAt(at), true);
     }
     return bytes;
 }

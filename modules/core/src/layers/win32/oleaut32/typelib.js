@@ -23,6 +23,7 @@
  */
 
 import { GUID_SIZE, formatGuid } from '../ole32/guid.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 /** 'MSFT', as the first four bytes read as a little-endian word. */
 const MAGIC = 0x5446534d;
@@ -269,7 +270,7 @@ export function parseTypeLib(bytes){
             return null;
         }
         const at = inSegment(SEG_NAME, offset);
-        return latin1(at + 12, word(at + 8) & 0xff);
+        return pageText(at + 12, word(at + 8) & 0xff);
     };
     /** @param {number} offset @returns {string | null} */
     const stringAt = offset=>{
@@ -278,7 +279,7 @@ export function parseTypeLib(bytes){
             return null;
         }
         const at = inSegment(SEG_STRING, offset);
-        return latin1(at + 2, view.getUint16(at, true));
+        return pageText(at + 2, view.getUint16(at, true));
     };
     /** @param {number} offset @returns {string | null} */
     const guidAtOffset = offset=>{
@@ -289,16 +290,13 @@ export function parseTypeLib(bytes){
         const at = inSegment(SEG_GUID, offset);
         return formatGuid(bytes.subarray(at, at + GUID_SIZE));
     };
-    /** Text is stored in the machine's code page; one byte, one character. */
-    /** @param {number} at @param {number} length */
-    const latin1 = (at, length)=>{
-        let text = '';
-        for (let index = 0; index < length; index++)
-        {
-            text += String.fromCharCode(bytes[at + index]);
-        }
-        return text;
-    };
+    /**
+     * Text is stored in the machine's code page, which is the ANSI one; one
+     * byte, one character.
+     *
+     * @param {number} at @param {number} length
+     */
+    const pageText = (at, length)=>decodeAnsi(bytes.subarray(at, at + length));
 
     /** @type {Map<number, TypeDescription>} memoised by offset: the table is a graph */
     const typeDescriptions = new Map();
@@ -389,7 +387,7 @@ export function parseTypeLib(bytes){
         switch (vt)
         {
             case VT_BSTR:
-                return { vt, value: latin1(at + 6, word(at + 2)) };
+                return { vt, value: pageText(at + 6, word(at + 2)) };
             case VT_I2:
             case VT_BOOL:
                 return { vt, value: half(at + 2) };
@@ -571,7 +569,7 @@ export function parseTypeLib(bytes){
             lcid: word(at + 4),
             majorVersion: half(at + 8),
             minorVersion: half(at + 10),
-            name: latin1(at + 14, length),
+            name: pageText(at + 14, length),
         };
         importedLibraries.set(offset, library);
         return library;

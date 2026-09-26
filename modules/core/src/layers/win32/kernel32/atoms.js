@@ -20,6 +20,8 @@
  * Names are compared case-insensitively, as Windows compares them.
  */
 
+import { encodeAnsi } from './locale.js';
+
 /** Atoms a caller allocates start here; below it are the integer atoms. */
 const FIRST_ATOM = 0xc000;
 /** The top of the string-atom range; above it a value is not an atom. */
@@ -129,6 +131,8 @@ export function createAtomFunctions(host){
     };
 
     /**
+     * The name, in the ANSI page it was read in.
+     *
      * @param {number} atom @param {number} buffer @param {number} size
      * @returns {number} the length written, without the terminator
      */
@@ -140,12 +144,7 @@ export function createAtomFunctions(host){
             return 0;
         }
         const kept = text.slice(0, (size >>> 0) - 1);
-        const bytes = new Uint8Array(kept.length + 1);
-        for (let at = 0; at < kept.length; at++)
-        {
-            bytes[at] = kept.charCodeAt(at) & 0xff;
-        }
-        host.writeMemory(buffer >>> 0, bytes);
+        host.writeMemory(buffer >>> 0, encodeAnsi(`${kept}\0`));
         return kept.length;
     };
 

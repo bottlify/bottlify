@@ -21,6 +21,7 @@
  */
 
 import { STATUS } from './status.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 /** UNICODE_STRING and ANSI_STRING, which differ only in what they point at. */
 export const COUNTED_STRING = Object.freeze({
@@ -86,7 +87,8 @@ export function createCountedStringFunctions(host){
     /**
      * The bytes a counted string covers, rather than what a terminator would
      * say: a counted string is allowed to hold one, and its length is what
-     * decides where it ends.
+     * decides where it ends. They are the ANSI code page's, which is what the
+     * Rtl conversions convert from.
      *
      * @param {number} buffer @param {number} length
      */
@@ -95,13 +97,7 @@ export function createCountedStringFunctions(host){
         {
             return '';
         }
-        const bytes = host.readMemory(buffer, length);
-        let text = '';
-        for (let at = 0; at < bytes.length; at++)
-        {
-            text += String.fromCharCode(bytes[at]);
-        }
-        return text;
+        return decodeAnsi(host.readMemory(buffer, length));
     };
 
     /** @param {number} buffer @param {number} length  In bytes, as the field is. */
@@ -121,17 +117,13 @@ export function createCountedStringFunctions(host){
         return text;
     };
 
-    /** @param {number} at @param {string} text  The terminator is written too. */
+    /**
+     * In the ANSI code page, a character it lacks as the default character.
+     *
+     * @param {number} at @param {string} text  The terminator is written too.
+     */
     const writeAnsi = (at, text)=>{
-        const bytes = new Uint8Array(text.length + 1);
-        for (let index = 0; index < text.length; index++)
-        {
-            // A byte for a character and nothing else. There is no code page
-            // behind this pair, so anything above 0xff would be a guess at an
-            // encoding the caller never named.
-            bytes[index] = text.charCodeAt(index) & 0xff;
-        }
-        host.writeMemory(at, bytes);
+        host.writeMemory(at, encodeAnsi(`${text}\0`));
     };
 
     /** @param {number} at @param {string} text  The terminator is written too. */

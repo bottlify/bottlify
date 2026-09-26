@@ -16,6 +16,8 @@
  * four-bit length name a run already in the ring.
  */
 
+import { decodeAnsi } from '../kernel32/locale.js';
+
 /** The eight signature bytes: `SZDD` and four that spell nothing. */
 const SIGNATURE = [0x53, 0x5a, 0x44, 0x44, 0x88, 0xf0, 0x27, 0x33];
 const HEADER_SIZE = 14;
@@ -105,7 +107,8 @@ export function expand(bytes){
 }
 
 /**
- * The name a compressed file had before the tool replaced its last letter.
+ * The name a compressed file had before the tool replaced its last letter,
+ * which the header keeps as a byte of the ANSI page the name is read in.
  *
  * @param {string} name @param {ExpandedHeader | null} header
  */
@@ -114,5 +117,5 @@ export function expandedName(name, header){
     {
         return name;
     }
-    return name.slice(0, -1) + String.fromCharCode(header.lastCharacter);
+    return name.slice(0, -1) + decodeAnsi(Uint8Array.of(header.lastCharacter));
 }

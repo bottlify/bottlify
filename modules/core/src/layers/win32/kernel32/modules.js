@@ -20,6 +20,8 @@
  * instruction is the address that works at the last.
  */
 
+import { encodeAnsi } from './locale.js';
+
 /** A module name is at most this long; longer is a pointer that is not a string. */
 const MAX_NAME = 260;
 
@@ -177,7 +179,8 @@ export function createModuleFunctions(host){
      * Writes a NUL-terminated string and reports what a Win32 out-parameter of
      * this shape reports: characters written, not counting the terminator, and
      * the buffer's own size when the name did not fit -- truncated, terminated,
-     * and not an error, which is exactly the trap in that API.
+     * and not an error, which is exactly the trap in that API. The name is in
+     * the ANSI page, as the paths a program gives the ANSI calls are read.
      *
      * @param {number} buffer
      * @param {number} size
@@ -189,12 +192,7 @@ export function createModuleFunctions(host){
             return 0;
         }
         const written = Math.min(text.length, size - 1);
-        const bytes = new Uint8Array(written + 1);
-        for (let at = 0; at < written; at++)
-        {
-            bytes[at] = text.charCodeAt(at) & 0xff;
-        }
-        host.writeMemory(buffer, bytes);
+        host.writeMemory(buffer, encodeAnsi(`${text.slice(0, written)}\0`));
         return written;
     };
 

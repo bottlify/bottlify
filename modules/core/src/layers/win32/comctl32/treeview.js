@@ -37,6 +37,7 @@ import {
     SB_THUMBPOSITION, SB_THUMBTRACK,
     after, pointOf,
 } from '../user32/controls.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 
 /** The class name a program creates the control by. */
 export const TREEVIEW_CLASS = 'SysTreeView32';
@@ -171,15 +172,8 @@ const u32 = value=>new Uint8Array([
     value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
 ]);
 
-/** @param {string} text */
-const stringBytes = text=>{
-    const bytes = new Uint8Array(text.length + 1);
-    for (let index = 0; index < text.length; index++)
-    {
-        bytes[index] = text.charCodeAt(index) & 0xff;
-    }
-    return bytes;
-};
+/** Terminated, in the ANSI page the text was read in. @param {string} text */
+const stringBytes = text=>encodeAnsi(`${text}\0`);
 
 /**
  * Builds the window procedure of a tree view.

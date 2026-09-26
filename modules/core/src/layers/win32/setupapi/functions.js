@@ -8,6 +8,7 @@ import { INF_STYLE_OLDNT, INF_STYLE_WIN4, infText, parseInf } from './inf.js';
 import { decodeFolder, folderOf, readCabinet } from '../cabinet/cabinet.js';
 import { commitQueue, queueInstallSection } from './queue.js';
 import { CATALOG_STORE } from '../sfc/functions.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 
 /**
  * setupapi — INF files, cabinets and file queues: how an installer that
@@ -144,8 +145,8 @@ export function createSetupapiFunctions(host){
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         host.writeMemory(address >>> 0, bytes);
     };
-    /** @param {string} text */
-    const ansi = text=>Uint8Array.from([...text, '\0'].map(c=>c.charCodeAt(0) & 0xff));
+    /** Terminated, in the ANSI page. @param {string} text */
+    const ansi = text=>encodeAnsi(`${text}\0`);
     /** @param {number} address */
     const text = address=>((address >>> 0) === 0 ? null : host.readCString(address >>> 0, 4096));
     /** @param {number} code @param {number} [result] */

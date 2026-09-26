@@ -314,3 +314,32 @@ test('a process starts with the profile variables of the machine\'s layout', ()=
     assert.deepEqual(names, [...names].sort((a, b)=>a.toUpperCase().localeCompare(b.toUpperCase())),
         'in the order Windows keeps the block, whatever the case');
 });
+
+test('text in the upper half of the ANSI page goes back as the bytes it was read from', ()=>{
+    // The memory layer reads an ANSI string as Windows-1252, where 0x80 is the
+    // euro sign, 0x99 the trade mark and 0x97 an em dash; a variable, the block
+    // and the command line are written back in that page.
+    const host = fakeHost({ commandLine: ()=>'C:\\\u20ac\\game.exe' });
+    host.readCString = (address, maxLength)=>new TextDecoder('latin1').decode(
+        host.bytes.subarray(address, host.bytes.indexOf(0, address)).subarray(0, maxLength));
+    const fns = createEnvironmentFunctions(host);
+    const value = [0x80, 0x99, 0x97, 0xe9];
+    host.plant(0x3000, 'X');
+    host.bytes.set([...value, 0], 0x3010);
+    /** @param {number} address @param {number} length */
+    const bytesAt = (address, length)=>[...host.bytes.subarray(address, address + length)];
+
+    assert.equal(fns.SetEnvironmentVariableA.handler([0x3000, 0x3010]), 1);
+    assert.equal(fns.GetEnvironmentVariableA.handler([0x3000, 0x3100, 32]), value.length);
+    assert.deepEqual(bytesAt(0x3100, value.length + 1), [...value, 0]);
+
+    host.plant(0x3020, '%X%');
+    assert.equal(fns.ExpandEnvironmentStringsA.handler([0x3020, 0x3200, 32]), value.length + 1);
+    assert.deepEqual(bytesAt(0x3200, value.length + 1), [...value, 0]);
+
+    const block = fns.GetEnvironmentStrings.handler();
+    const entry = host.bytes.indexOf(0x58, block);
+    assert.deepEqual(bytesAt(entry, value.length + 3), [0x58, 0x3d, ...value, 0]);
+
+    assert.deepEqual(bytesAt(fns.GetCommandLineA.handler() + 3, 2), [0x80, 0x5c]);
+});

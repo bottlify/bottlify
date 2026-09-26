@@ -26,6 +26,8 @@
  * four values together must not overflow.
  */
 
+import { encodeAnsi } from './locale.js';
+
 /** What GetDriveType answers. Only two of the six are ever used here. */
 const DRIVE_NO_ROOT_DIR = 1;
 const DRIVE_FIXED = 3;
@@ -90,16 +92,6 @@ const COMPUTER_NAME = 'BOTTLIFY';
  * @property {(code: number) => void} setLastError
  * @property {() => string[]} [drives]  Letters the filesystem has mounted.
  */
-
-/** @param {string} text */
-const latin1 = text=>{
-    const bytes = new Uint8Array(text.length);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at] = text.charCodeAt(at) & 0xff;
-    }
-    return bytes;
-};
 
 /**
  * @param {DriveHost} host
@@ -209,7 +201,7 @@ export function createDriveFunctions(host){
                 {
                     return needed;
                 }
-                host.writeMemory(buffer >>> 0, latin1(block + '\0'));
+                host.writeMemory(buffer >>> 0, encodeAnsi(block + '\0'));
                 return block.length;
             },
         },
@@ -318,7 +310,7 @@ export function createDriveFunctions(host){
                         host.setLastError(ERROR_INVALID_PARAMETER);
                         return 0;
                     }
-                    host.writeMemory(volumeName >>> 0, latin1(label + '\0'));
+                    host.writeMemory(volumeName >>> 0, encodeAnsi(label + '\0'));
                 }
                 if (systemName !== 0)
                 {
@@ -327,7 +319,7 @@ export function createDriveFunctions(host){
                         host.setLastError(ERROR_INVALID_PARAMETER);
                         return 0;
                     }
-                    host.writeMemory(systemName >>> 0, latin1(FILE_SYSTEM + '\0'));
+                    host.writeMemory(systemName >>> 0, encodeAnsi(FILE_SYSTEM + '\0'));
                 }
                 writeDwordIf(serial >>> 0, VOLUME_SERIAL);
                 writeDwordIf(componentLength >>> 0, MAX_COMPONENT_LENGTH);
@@ -384,7 +376,7 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_BUFFER_OVERFLOW);
                     return 0;
                 }
-                host.writeMemory(buffer >>> 0, latin1(COMPUTER_NAME + '\0'));
+                host.writeMemory(buffer >>> 0, encodeAnsi(COMPUTER_NAME + '\0'));
                 writeDword(size >>> 0, COMPUTER_NAME.length);
                 return 1;
             },

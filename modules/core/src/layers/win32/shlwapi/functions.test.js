@@ -88,13 +88,15 @@ function strings(){
     let next = 0x100;
     const view = new DataView(memory.buffer);
     const fns = /** @type {any} */ (createShlwapiFunctions({
+        // As the memory layer reads an ANSI string: in Windows-1252, which is
+        // what the Encoding standard calls latin1.
         readCString: (address, maxLength)=>{
-            let text = '';
-            for (let at = address; at < address + maxLength && memory[at] !== 0; at++)
+            let end = address;
+            while (end < address + maxLength && memory[end] !== 0)
             {
-                text += String.fromCharCode(memory[at]);
+                end++;
             }
-            return text;
+            return new TextDecoder('latin1').decode(memory.subarray(address, end));
         },
         readWideString: (address, maxLength)=>{
             let text = '';
@@ -143,6 +145,17 @@ function strings(){
     };
     return { fns, memory, view, put, read };
 }
+
+test('PathCombineA gives the path back in the bytes its pieces had', ()=>{
+    // The pieces are read as Windows-1252, where 0x80 is the euro sign, 0x99
+    // the trade mark and 0x97 an em dash, and the path is written in that page.
+    const { fns, memory, put } = strings();
+    const dest = put('');
+    assert.equal(fns.PathCombineA.handler([dest, put('C:\\\x80'), put('\x99\x97.txt')]), dest);
+    assert.deepEqual([...memory.subarray(dest, dest + 11)],
+        [0x43, 0x3a, 0x5c, 0x80, 0x5c, 0x99, 0x97, 0x2e, 0x74, 0x78, 0x74]);
+    assert.equal(memory[dest + 11], 0);
+});
 
 test('PathCombine joins a directory and a file and canonicalises the result', ()=>{
     // shlwapi's path tests, test_PathCombineA.

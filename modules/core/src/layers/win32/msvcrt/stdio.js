@@ -11,6 +11,7 @@ import { createDescriptors, LF, settle } from './io.js';
 import {
     O_U16TEXT, O_U8TEXT, O_WTEXT, bytesOfUnits, unitsOf, unitsOfText, wideStringAt,
 } from './widetext.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 /**
  * Buffered file streams: fopen and the calls that take what it hands out.
@@ -174,9 +175,6 @@ export function createStdioFunctions(host){
     const writeU32 = (address, value)=>host.writeMemory(address, new Uint8Array([
         value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
     ]));
-
-    /** @param {string} text */
-    const bytesOf = text=>Uint8Array.from(text, character=>character.charCodeAt(0) & 0xff);
 
     /**
      * Which of `_iob`'s standard three a record is, or -1.
@@ -489,8 +487,8 @@ export function createStdioFunctions(host){
             return EOF;
         }
         const text = formatToString(readString(format), values, readString,
-            { readWideString: readWide, cLocale: true });
-        return emit(stream, bytesOf(text)) === text.length ? text.length : EOF;
+            { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi });
+        return emit(stream, encodeAnsi(text)) === text.length ? text.length : EOF;
     };
 
     /**
@@ -1107,7 +1105,7 @@ export function createStdioFunctions(host){
                 refuseWrite(stream);
                 return EOF;
             }
-            const bytes = bytesOf(readString(string));
+            const bytes = encodeAnsi(readString(string));
             return emit(stream, bytes) === bytes.length ? 0 : EOF;
         }),
 
@@ -1286,7 +1284,7 @@ export function createStdioFunctions(host){
                 }
                 return EOF;
             }
-            const line = bytesOf(`${readString(string)}\n`);
+            const line = encodeAnsi(`${readString(string)}\n`);
             return emit(stream, line) === line.length ? 0 : EOF;
         }),
 

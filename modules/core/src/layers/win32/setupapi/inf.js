@@ -26,6 +26,8 @@
  *   nothing defines is left as it was.
  */
 
+import { decodeAnsi } from '../kernel32/locale.js';
+
 /** Errors an INF can fail to load with. */
 export const INF_ERROR = Object.freeze({
     ERROR_EXPECTED_SECTION_NAME: 0xe0000000,
@@ -69,8 +71,8 @@ const WIN4_SIGNATURES = new Set(['$chicago$', '$windows nt$', '$windows 95$']);
 const isSpace = c=>c === ' ' || c === '\t' || c === '\r';
 
 /**
- * The INF's text: UTF-16 after a byte-order mark, one byte to a character
- * otherwise.
+ * The INF's text: UTF-16 after a byte-order mark, the ANSI page otherwise, as
+ * the paths and names a program passes alongside it are read.
  *
  * @param {Uint8Array} bytes
  */
@@ -84,12 +86,7 @@ export function infText(bytes){
         }
         return text;
     }
-    let text = '';
-    for (let at = 0; at < bytes.length; at += 8192)
-    {
-        text += String.fromCharCode(...bytes.subarray(at, at + 8192));
-    }
-    return text;
+    return decodeAnsi(bytes);
 }
 
 /**

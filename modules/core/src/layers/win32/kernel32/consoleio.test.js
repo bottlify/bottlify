@@ -65,6 +65,17 @@ test('a wide write reads twice the bytes for the same count', ()=>{
     assert.equal(dword(bytes, 0x404), 2);
 });
 
+test('an ANSI write is read in the page the console reports, as WriteFile\'s is', ()=>{
+    // The console's page is 1252, where 0x80 is the euro sign, 0x99 the trade
+    // mark and 0x97 an em dash; the same bytes written through WriteFile to
+    // the console reach it as those characters, and so do they here.
+    const { fns, bytes, written } = setup();
+    bytes.set([0x80, 0x99, 0x97, 0xe9], 0x300);
+    fns.WriteConsoleA.handler([2, 0x300, 4, 0x404, 0]);
+    assert.deepEqual(written.map(entry=>entry.text), ['€™—é']);
+    assert.equal(fns.GetConsoleOutputCP.handler(), 1252);
+});
+
 test('reading reports end of input rather than blocking on a queue nothing fills', ()=>{
     const { fns, bytes } = setup();
     bytes.set([9, 0, 0, 0], 0x100);

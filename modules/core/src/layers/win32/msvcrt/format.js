@@ -324,21 +324,20 @@ function convertFloat(value, spec){
  * @param {() => bigint} source.takeWide   Next argument as a 64-bit value.
  * @param {() => number} source.takeDouble
  * @param {(pointer: number, wide: boolean) => string} source.readText
- * @param {boolean} [source.bytesOnly]     The text is bytes: a character past
- *                                         U+00FF has none and is left out.
+ * @param {(code: number, wide: boolean) => string} source.character  A %c's text.
  * @param {number} produced                Characters written so far, for %n.
  * @param {(pointer: number, value: number) => void} writeCount
  * @returns {Rendered | null}   Null when the conversion is not one we know.
  */
 function convert(spec, source, produced, writeCount){
-    const { take, takeWide, takeDouble, readText } = source;
+    const { take, takeWide, takeDouble, readText, character } = source;
     switch (spec.conversion){
         case '%':
             return { prefix: '', body: '%', numeric: false };
         case 'c':
         case 'C': {
-            const code = take() & (wideText(spec) ? 0xffff : 0xff);
-            const body = source.bytesOnly && code > 0xff ? '' : String.fromCharCode(code);
+            const wide = wideText(spec);
+            const body = character(take() & (wide ? 0xffff : 0xff), wide);
             return { prefix: '', body, numeric: false };
         }
         case 's':
@@ -488,6 +487,11 @@ export function varargsSlots(read, locate, list, slots){
  *        before its first such character, and a wide character that is one
  *        is left out (Wine's msvcrt test_sprintf, where %C of U+3042 writes
  *        nothing, and %S of it nothing on the older runtimes).
+ * @param {(bytes: Uint8Array) => string} [options.decodeBytes]
+ *        How bytes read as text, as `readString` reads a narrow string's: what
+ *        a narrow character's byte is, and in a narrow printer under the C
+ *        locale the byte a wide character or string becomes, so that the whole
+ *        text is in one page. Absent, a byte is the character of its own code.
  * @returns {string}
  */
 export function formatToString(format, varargs, readString, options = {}){
@@ -508,6 +512,8 @@ export function formatToString(format, varargs, readString, options = {}){
         bytes.setUint32(4, take() >>> 0, true);
         return bytes.getFloat64(0, true);
     };
+    const decode = options.decodeBytes
+        ?? (bytes=>Array.from(bytes, byte=>String.fromCharCode(byte)).join(''));
     /** @param {number} pointer @param {boolean} asWide */
     const readText = (pointer, asWide)=>{
         if (!asWide || !options.readWideString)
@@ -515,11 +521,24 @@ export function formatToString(format, varargs, readString, options = {}){
             return readString(pointer);
         }
         const text = options.readWideString(pointer);
-        const unfit = options.cLocale ? text.search(/[^\0-\xff]/) : -1;
-        return unfit < 0 ? text : text.slice(0, unfit);
+        if (!options.cLocale)
+        {
+            return text;
+        }
+        const unfit = text.search(/[^\0-\xff]/);
+        return decode(Uint8Array.from(unfit < 0 ? text : text.slice(0, unfit),
+            unit=>unit.charCodeAt(0)));
+    };
+    /** @param {number} code @param {boolean} asWide */
+    const character = (code, asWide)=>{
+        if (asWide && (options.wide || !options.cLocale))
+        {
+            return String.fromCharCode(code);
+        }
+        return code > 0xff ? '' : decode(Uint8Array.of(code));
     };
 
-    const source = { take, takeWide, takeDouble, readText, bytesOnly: options.cLocale === true };
+    const source = { take, takeWide, takeDouble, readText, character };
 
     for (let i = 0; i < format.length; i++)
     {

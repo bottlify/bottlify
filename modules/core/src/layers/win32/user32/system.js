@@ -20,7 +20,7 @@
 
 import { formatToString, varargsSlots } from '../msvcrt/format.js';
 import {
-    ANSI_PAGE, LANGID_EN_US, OEM_PAGE, mapCaseAnsi, transcodeSingleByte,
+    ANSI_PAGE, LANGID_EN_US, OEM_PAGE, decodeAnsi, encodeAnsi, mapCaseAnsi, transcodeSingleByte,
 } from '../kernel32/locale.js';
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
 import { dibToBgra, groupImageId } from './cursors.js';
@@ -899,15 +899,10 @@ export function createSystemFunctions({ host, live, windows, classes }){
         return clipped.length;
     };
 
-    /** @param {number} address @param {string} text @param {number} limit */
+    /** In the ANSI page. @param {number} address @param {string} text @param {number} limit */
     const writeString = (address, text, limit)=>{
         const clipped = limit > 0 ? text.slice(0, limit - 1) : '';
-        const bytes = new Uint8Array(clipped.length + 1);
-        for (let index = 0; index < clipped.length; index++)
-        {
-            bytes[index] = clipped.charCodeAt(index) & 0xff;
-        }
-        host.writeMemory(address, bytes);
+        host.writeMemory(address, encodeAnsi(`${clipped}\0`));
         return clipped.length;
     };
 
@@ -2117,7 +2112,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: args=>{
                 const readString = (/** @type {number} */ address)=>
                     (address >>> 0) === 0 ? '(null)' : host.readCString(address, 0x10000);
-                const text = formatToString(readString(args[1]), args.slice(2), readString);
+                const text = formatToString(readString(args[1]), args.slice(2), readString,
+                    { decodeBytes: decodeAnsi });
                 return writeString(args[0], text, text.length + 1);
             },
         },
@@ -2138,7 +2134,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 const readWide = (/** @type {number} */ address)=>
                     (address >>> 0) === 0 ? '(null)' : readWideString(address >>> 0);
                 const text = formatToString(readWide(args[1]), args.slice(2), readString,
-                    { readWideString: readWide, wide: true });
+                    { readWideString: readWide, wide: true, decodeBytes: decodeAnsi });
                 return writeWideString(args[0], text, text.length + 1);
             },
         },
@@ -2160,7 +2156,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
                     (address >>> 0) === 0 ? '(null)' : host.readCString(address, 0x10000);
                 const varargs = varargsSlots(host.readMemory,
                     address=>host.regionAt?.(address) ?? null, list >>> 0, VA_LIST_SLOTS);
-                const text = formatToString(readString(format), varargs, readString);
+                const text = formatToString(readString(format), varargs, readString,
+                    { decodeBytes: decodeAnsi });
                 return writeString(out, text, text.length + 1);
             },
         },
@@ -2357,8 +2354,9 @@ export function createSystemFunctions({ host, live, windows, classes }){
          *
          * The string lives in the module's resource directory, in a bundle of
          * sixteen. What comes back from there is UTF-16; this is the ANSI entry
-         * point, so it is narrowed here rather than anywhere further in -- the
-         * wide entry point wants the same string untouched.
+         * point, so it is narrowed here, into the ANSI page, rather than
+         * anywhere further in -- the wide entry point wants the same string
+         * untouched.
          *
          * A zero buffer is not an error: it asks for the string's address, and
          * a program that passes one is reading the resource in place. Nothing
@@ -2383,12 +2381,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 // and then reading it back would otherwise lose its last
                 // character every time.
                 const kept = text.slice(0, (size | 0) - 1);
-                const bytes = new Uint8Array(kept.length + 1);
-                for (let at = 0; at < kept.length; at++)
-                {
-                    bytes[at] = kept.charCodeAt(at) & 0xff;
-                }
-                host.writeMemory(buffer, bytes);
+                host.writeMemory(buffer, encodeAnsi(`${kept}\0`));
                 return kept.length;
             },
         },

@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { encodeAnsi } from './locale.js';
 import { TAKEN } from './named-objects.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 
@@ -1002,10 +1003,7 @@ export function createThreadingFunctions(host){
                 view.setUint32(PROCESSENTRY32.pcPriClassBase, NORMAL_PRIORITY_BASE, true);
                 const path = host.imagePath?.() ?? '';
                 const name = path.slice(path.lastIndexOf('\\') + 1).slice(0, MAX_PATH - 1);
-                for (let at = 0; at < name.length; at++)
-                {
-                    bytes[PROCESSENTRY32.szExeFile + at] = name.charCodeAt(at) & 0xff;
-                }
+                bytes.set(encodeAnsi(name), PROCESSENTRY32.szExeFile);
                 host.writeMemory(entry >>> 0, bytes);
                 snapshot.walked = true;
                 return 1;

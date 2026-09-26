@@ -1247,6 +1247,31 @@ test('a list box keeps its items and a click selects one with LBN_SELCHANGE', as
         [[400, LBN_SELCHANGE, list]]);
 });
 
+test('an item and a line of upper-half bytes read back as those bytes', async()=>{
+    // The text is read as Windows-1252, where 0x80 is the euro sign, 0x99 the
+    // trade mark and 0x97 an em dash; LB_GETTEXT and EM_GETLINE write it back
+    // in that page.
+    const context = setup();
+    const dialog = await openDialog(context);
+    const text = [0x80, 0x99, 0x97, 0xe9];
+    context.memory.putString(TEXT, 'ListBox');
+    const list = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE, 8, 60, 100, 60, dialog, 400, HINSTANCE, 0]);
+    context.memory.bytes.set([...text, 0], TEXT);
+    context.fns.SendMessageA.handler([list, LB_ADDSTRING, 0, TEXT]);
+    assert.equal(context.fns.SendMessageA.handler([list, LB_GETTEXT, 0, OUT]), 4);
+    assert.deepEqual([...context.memory.bytes.subarray(OUT, OUT + 5)], [...text, 0]);
+
+    context.memory.putString(TEXT, 'Edit');
+    const edit = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | ES_MULTILINE, 8, 60, 200, 40, dialog, 301, HINSTANCE, 0]);
+    context.memory.bytes.set([...text, 0], TEXT);
+    context.fns.SetWindowTextA.handler([edit, TEXT]);
+    context.memory.bytes.set([16, 0], OUT);
+    assert.equal(context.fns.SendMessageA.handler([edit, 0x00c4, 0, OUT]), 4, 'EM_GETLINE');
+    assert.deepEqual([...context.memory.bytes.subarray(OUT, OUT + 4)], text);
+});
+
 test('an owner-drawn list without strings keeps what LB_ADDSTRING is given as item data', async()=>{
     // As documented for LB_ADDSTRING and LB_GETTEXT: in an owner-drawn list
     // box without LBS_HASSTRINGS, lParam is the item's data, not a string,

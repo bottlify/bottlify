@@ -768,6 +768,23 @@ test('a Toolhelp snapshot holds this process and nothing after it', ()=>{
     assert.equal(fns.Process32Next.argBytes, 8);
 });
 
+test('a snapshot names the image in the ANSI page', ()=>{
+    // The euro sign is 0x80 there, the trade mark 0x99 and an em dash 0x97,
+    // as the ANSI calls read those bytes; an image named with them is named
+    // with them in the entry too.
+    const { fns, host, written } = setup();
+    host.imagePath = ()=>'C:\\App\\\u20ac\u2122\u2014\u00e9.exe';
+    const bytes = new Uint8Array(0x1000);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    bytes.set([296 & 0xff, 296 >> 8, 0, 0], 0x100);
+
+    const snapshot = fns.CreateToolhelp32Snapshot.handler([0x2, 0]);
+    assert.equal(fns.Process32First.handler([snapshot, 0x100]), 1);
+    const entry = /** @type {Uint8Array} */ (written.get(0x100));
+    assert.deepEqual([...entry.subarray(36, 45)],
+        [0x80, 0x99, 0x97, 0xe9, 0x2e, 0x65, 0x78, 0x65, 0]);
+});
+
 test('arming a timer with a waiter already parked releases it at the due time', ()=>{
     // The deadlock in one line: thread B waits before thread A arms. The
     // signal is a property of the object and the clock, so the arm is what
