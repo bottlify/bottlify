@@ -50,19 +50,21 @@ export const IID_IDirect3D9 = '{81BDCBCA-64D4-426D-AE8D-AD0147F4275C}';
 export const IID_IDirect3DDevice9 = '{D0223B96-BF7A-43FD-92BD-A43B0D82B9EB}';
 
 /**
- * The Direct3D 8 resource interfaces.
+ * The Direct3D 8 resource interfaces, as d3d8.h defines them.
  *
- * These are the ones this file is least sure of, and the uncertainty is worth
- * stating where it lives rather than only in a report. A resource is nearly
- * always reached through the out-parameter of the call that made it, which
- * hands back a pointer to the interface already published -- so a wrong
+ * A resource is nearly always reached through the out-parameter of the call
+ * that made it, which hands back the interface already published -- so a wrong
  * identifier here costs nothing until a program queries for one by GUID, and
- * then costs an interface that should have been found.
+ * then costs an interface that should have been found. The seam tests query
+ * by the header's own bytes for that reason.
  */
 export const IID_IDirect3DResource8 = '{1B36BB7B-09B7-410A-B445-7D1430D7B33F}';
 export const IID_IDirect3DBaseTexture8 = '{B4211CFA-51B9-4A9F-AB78-DB99B2BB678E}';
-export const IID_IDirect3DTexture8 = '{E4CDD4DB-32C6-11D3-B4EE-00C04F5B4A6C}';
+export const IID_IDirect3DTexture8 = '{E4CDD575-2866-4F01-B12E-7EECE1EC9358}';
 export const IID_IDirect3DSurface8 = '{B96EEBCA-B326-4EA5-882F-2FF5BAE021DD}';
 export const IID_IDirect3DVertexBuffer8 = '{8AEEEAC7-05F9-44D4-B591-000B0DF1CB95}';
-export const IID_IDirect3DIndexBuffer8 = '{0E689C9A-053D-44A0-9D63-05DDC77D552C}';
+export const IID_IDirect3DIndexBuffer8 = '{0E689C9A-053D-44A0-9D92-DB0E3D750F86}';
 export const IID_IDirect3DSwapChain8 = '{928C088B-76B9-4C6B-A536-A590853876CD}';
+export const IID_IDirect3DCubeTexture8 = '{3EE5B968-2ACA-4C34-8BB5-7E0C3D19B750}';
+export const IID_IDirect3DVolumeTexture8 = '{4B8AAAFA-140F-42BA-9131-597EAFAA2EAD}';
+export const IID_IDirect3DVolume8 = '{BD7349F5-14F1-42E4-9C79-972380DB40C0}';

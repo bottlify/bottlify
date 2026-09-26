@@ -988,6 +988,56 @@ test('UpdateTexture carries a system-memory texture into the one that draws', ()
     h.release(root);
 });
 
+/**
+ * A GUID as DEFINE_GUID spells it, laid out in guest memory: three
+ * little-endian integers, then eight bytes as they stand.
+ *
+ * @param {any} h @param {number} at
+ * @param {[number, number, number, ...number[]]} parts
+ */
+const putGuid = (h, at, [data1, data2, data3, ...tail])=>{
+    const bytes = new Uint8Array(16);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, data1, true);
+    view.setUint16(4, data2, true);
+    view.setUint16(6, data3, true);
+    bytes.set(tail, 8);
+    h.box.services.writeMemory(at, bytes);
+};
+
+test('a texture and an index buffer answer QueryInterface for the GUIDs d3d8.h gives them',
+    ()=>{
+        const h = seamed();
+        const root = h.create();
+        const device = h.createDevice(root);
+        const out = 0xe000;
+        assert.equal(h.device(device, 'CreateTexture',
+            [4, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out]), D3D_OK);
+        const texture = h.box.memory.readU32(out);
+        assert.equal(h.device(device, 'CreateIndexBuffer',
+            [64, 0, 101, D3DPOOL.MANAGED, out]), D3D_OK);
+        const indices = h.box.memory.readU32(out);
+
+        const iid = 0xe100;
+        const queried = 0xe200;
+        putGuid(h, iid, [0xE4CDD575, 0x2866, 0x4F01, 0xB1, 0x2E, 0x7E, 0xEC, 0xE1, 0xEC,
+            0x93, 0x58]);
+        assert.equal(h.box.call(texture, 0, [iid, queried]), D3D_OK, 'IID_IDirect3DTexture8');
+        assert.equal(h.box.memory.readU32(queried), texture, 'the interface it was made as');
+        assert.equal(h.release(texture), 1);
+        putGuid(h, iid, [0x0E689C9A, 0x053D, 0x44A0, 0x9D, 0x92, 0xDB, 0x0E, 0x3D, 0x75,
+            0x0F, 0x86]);
+        assert.equal(h.box.call(indices, 0, [iid, queried]), D3D_OK,
+            'IID_IDirect3DIndexBuffer8');
+        assert.equal(h.box.memory.readU32(queried), indices);
+        assert.equal(h.release(indices), 1);
+
+        assert.equal(h.release(texture), 0);
+        assert.equal(h.release(indices), 0);
+        assert.equal(h.release(device), 0);
+        h.release(root);
+    });
+
 test('a stream and an index binding read back as the buffers they were given', ()=>{
     const h = seamed();
     const root = h.create();

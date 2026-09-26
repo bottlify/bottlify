@@ -710,6 +710,21 @@ test('a shader is read from the guest up to its end token and handed back as byt
     assert.deepEqual([...new Uint32Array(h.box.services.readMemory(copy, 28).buffer)],
         tokens.slice(0, 7));
 
+    // IID_IDirect3DVertexShader9 as d3d9.h defines it: the interface the
+    // shader was made as, found by the GUID a program compiled against.
+    const iid = 0x3700;
+    const queried = 0x3710;
+    const guid = new Uint8Array(16);
+    const view = new DataView(guid.buffer);
+    view.setUint32(0, 0xefc5557e, true);
+    view.setUint16(4, 0x6265, true);
+    view.setUint16(6, 0x4613, true);
+    guid.set([0x8a, 0x94, 0x43, 0x85, 0x78, 0x89, 0xeb, 0x36], 8);
+    h.box.services.writeMemory(iid, guid);
+    assert.equal(h.box.call(shader, 0, [iid, queried]), D3D_OK);
+    assert.equal(h.box.memory.readU32(queried), shader);
+    h.release(shader);
+
     assert.equal(h.device(device, 'SetVertexShader', [shader]), D3D_OK);
     const bound = 0x3400;
     assert.equal(h.device(device, 'GetVertexShader', [bound]), D3D_OK);
