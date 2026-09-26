@@ -557,6 +557,31 @@ test('a suspension past MAXIMUM_SUSPEND_COUNT fails and leaves the count alone',
     assert.deepEqual(host.errors, [ERROR_SIGNAL_REFUSED]);
 });
 
+test('a thread resumed while queued behind a released section takes it', ()=>{
+    // Suspended behind a section, a thread is passed over by the release that
+    // nobody else could take; resuming it hands it the section then.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    const builder = fakeBuilder();
+    fns.EnterCriticalSection.guest(builder);
+    fns.LeaveCriticalSection.guest(builder);
+    const [wait, wake] = builder.registered.map(one=>one.trap);
+    const section = 0x200;
+    const waiter = host.threads.second;
+    host.register(0x20, 'thread', waiter);
+
+    host.run(waiter);
+    wait.handler([section]);
+    host.run(host.threads.first);
+    fns.SuspendThread.handler([0x20]);
+    wake.handler([section]);
+    assert.deepEqual(host.kernel.state.woken, [], 'nobody could take it');
+
+    assert.equal(fns.ResumeThread.handler([0x20]), 1);
+    assert.deepEqual(host.kernel.state.woken, [waiter]);
+    assert.equal(host.readI32(section + CS_OWNING_THREAD), waiter.id);
+});
+
 test('a thread that has ended cannot be suspended', ()=>{
     // Wine's thread test: SuspendThread on a thread that has finished answers
     // (DWORD)-1, with ERROR_ACCESS_DENIED.

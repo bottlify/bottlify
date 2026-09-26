@@ -533,7 +533,13 @@ export function createSyncFunctions(host){
                 {
                     return WAIT_FAILED;
                 }
-                return kernel.resumeThread(thread) >>> 0;
+                const previous = kernel.resumeThread(thread);
+                if (previous === 1)
+                {
+                    // A section released while it was suspended may be its now.
+                    host.critical.resumed(thread);
+                }
+                return previous >>> 0;
             },
         },
 
