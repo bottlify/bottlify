@@ -1781,6 +1781,8 @@ export function createRenderer(options){
     let recording = null;
     /** @type {Promise<void>} */
     let chain = Promise.resolve();
+    /** @type {any} The GPU surface the last present handed over: the front buffer. */
+    let front = null;
     /** @type {any[]} the commands of the frame most recently replayed */
     let lastFrame = [];
     /** @type {string[]} one line per draw of the frame being recorded */
@@ -5476,6 +5478,7 @@ export function createRenderer(options){
             // Before the frame closes: a back buffer the program wrote by
             // hand owes its upload to this frame, not the next.
             const surface = surfaceFor(model.backBuffer);
+            front = surface;
             const recorded = ensureFrame();
             recording = null;
             // Before the replay chain, so a rename in the next frame's
@@ -5559,6 +5562,32 @@ export function createRenderer(options){
         idle: ()=>chain,
 
         /**
+         * The picture the last present showed, for GetFrontBuffer: the
+         * surface it handed over, read once its frame has reached the queue
+         * and before a later one has. The draws recorded since are replayed
+         * at the next present, so they are not in it -- unless a read-back of
+         * a target (`readSurface`) replayed them early. Four bytes a pixel,
+         * blue first; null when nothing was presented.
+         *
+         * @returns {Promise<{ width: number, height: number, data: Uint8Array } | null>}
+         */
+        readFront(){
+            const read = chain.then(()=>{
+                const shown = front;
+                if (!shown)
+                {
+                    return null;
+                }
+                const frame = backend.beginFrame();
+                const reader = frame.snapshot(shown);
+                frame.end();
+                return reader();
+            });
+            chain = read.then(()=>undefined, failure);
+            return read;
+        },
+
+        /**
          * A surface the program can no longer reach: its GPU texture goes
          * now rather than when the collector finds the object. Only a
          * surface this renderer made a texture for on its own is affected;
@@ -5570,6 +5599,10 @@ export function createRenderer(options){
             const made = surfaces.get(surface);
             if (made)
             {
+                if (front === made)
+                {
+                    front = null;
+                }
                 surfaces.delete(surface);
                 dirtyTargets.delete(surface);
                 // Not now, and not after the frames already queued either:

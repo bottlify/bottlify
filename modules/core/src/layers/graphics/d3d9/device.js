@@ -62,7 +62,7 @@ import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import { createDefaultRenderStates } from './renderstates.js';
 import {
     createPriority, createReferenceCount, createSurface, createTexture, packColour, rectMoveOf,
-    regionAtLevel, writePixels,
+    regionAtLevel, writeFrontBuffer, writePixels,
 } from './resources.js';
 import { SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters } from './validity.js';
 import { validateStages } from '../d3d8/validity.js';
@@ -969,6 +969,9 @@ function createDeviceObject(parameters, caps, services, identity){
         },
 
         Present: ()=>device.Present(),
+
+        /** @param {any} destination */
+        GetFrontBufferData: destination=>device.GetFrontBufferData(0, destination),
 
         /** @param {{ device?: any }} out */
         GetDevice(out){
@@ -3162,15 +3165,46 @@ function createDeviceObject(parameters, caps, services, identity){
         },
 
         /**
-         * The presented frame lives on the backend's device and is never read
-         * back into guest memory, so there is nothing to copy into the caller's
-         * surface. Answering with an untouched surface would hand a program
-         * whatever that memory happened to hold and call it a screenshot.
+         * The picture the last present showed, as A8R8G8B8, into a
+         * system-memory surface (Wine's d3d9 test_multisample_get_front_buffer_data);
+         * the caller waits for it to come back from the GPU. The front buffer
+         * of a windowed device is the desktop's, with the window where it
+         * stands; here it is the window's picture at the surface's top-left
+         * corner, and said so once. Without a renderer that can read back
+         * there is no picture to copy, and the call is refused.
+         *
+         * @param {number} swapChainIndex
+         * @param {any} destination
+         * @returns {number | Promise<number>}
          */
-        GetFrontBufferData(){
-            report('frontbuffer', 'GetFrontBufferData was refused: the presented frame is'
-                + ' never read back into guest memory');
-            return D3DERR_INVALIDCALL;
+        GetFrontBufferData(swapChainIndex, destination){
+            if (swapChainIndex !== 0 || !destination)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const desc = describe(destination);
+            if (desc.Format !== D3DFMT.A8R8G8B8 || desc.Pool !== D3DPOOL.SYSTEMMEM)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const write = services.writeMemory;
+            if (!renderer?.readFront || !write)
+            {
+                report('frontbuffer', 'GetFrontBufferData was refused: this build draws nothing'
+                    + ' it can read back');
+                return D3DERR_INVALIDCALL;
+            }
+            if (presentParameters.windowed)
+            {
+                report('frontbuffer-windowed', 'GetFrontBufferData puts a windowed device\'s'
+                    + ' picture at the surface\'s corner, not where the window stands on the'
+                    + ' desktop');
+            }
+            return renderer.readFront().then((/** @type {any} */ image)=>{
+                writeFrontBuffer(destination, image, write);
+                renderer.markDirty?.(destination);
+                return D3D_OK;
+            });
         },
 
         /**

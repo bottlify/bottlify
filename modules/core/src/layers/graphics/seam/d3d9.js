@@ -836,7 +836,10 @@ export function createDirect3D9Seam(
     const swapChainInterfaces = [describe(IID_IDirect3DSwapChain9, IDIRECT3DSWAPCHAIN9_SLOTS, {
         /** @param {any} chain */
         Present: chain=>chain.Present(),
-        GetFrontBufferData: ()=>D3DERR_INVALIDCALL,
+        // The caller waits while the picture comes back from the GPU.
+        /** @param {any} chain @param {number[]} args */
+        GetFrontBufferData: (chain, [destination])=>
+            chain.GetFrontBufferData(publisher.objectAt(destination)),
         /** @param {any} chain @param {number[]} args */
         GetBackBuffer: (chain, [index, type, out])=>{
             /** @type {{ surface?: any }} */
@@ -1289,7 +1292,9 @@ export function createDirect3D9Seam(
             publisher.objectAt(target), publisher.objectAt(destination)),
 
         /** @param {any} device */
-        GetFrontBufferData: (/** @type {any} */ device)=>device.GetFrontBufferData(),
+        /** @param {any} device @param {number[]} args */
+        GetFrontBufferData: (device, [chain, destination])=>
+            device.GetFrontBufferData(chain >>> 0, publisher.objectAt(destination)),
 
         /** @param {any} device @param {number[]} args */
         StretchRect: (device, [source, sourceRect, destination, destinationRect, filter])=>

@@ -574,6 +574,60 @@ for (const version of /** @type {const} */ ([9, 8]))
     });
 }
 
+for (const version of /** @type {const} */ ([9, 8]))
+{
+    test(`byte-exact (D3D${version}): the front buffer is the picture the last present showed,`
+        + ' opaque, in a system-memory A8R8G8B8 surface', async()=>{
+        // Wine's d3d9 test_multisample_get_front_buffer_data: after a clear
+        // and a present, the front buffer reads the clear colour back.
+        const h = harness(version);
+        const { device } = h;
+        /** @param {number} width @param {number} height @param {number} format */
+        const plain = (width, height, format)=>{
+            /** @type {{ surface?: any }} */
+            const held = {};
+            assert.equal(version === 9
+                ? device.CreateOffscreenPlainSurface(width, height, format, D3DPOOL.SYSTEMMEM,
+                    held)
+                : device.CreateImageSurface(width, height, format, held), D3D_OK);
+            return held.surface;
+        };
+        /** @param {any} surface @returns {number | Promise<number>} */
+        const front = surface=>(version === 9
+            ? device.GetFrontBufferData(0, surface)
+            : device.GetFrontBuffer(surface));
+        const into = plain(4, 4, D3DFMT.A8R8G8B8);
+        h.write(into.base, new Uint8Array(64).fill(0x77));
+        assert.equal(await front(into), D3D_OK);
+        assert.deepEqual([...h.read(into.base, 4)], [0, 0, 0, 0xff], 'black, before any present');
+
+        h.clear(argb(0x12, 0x34, 0x56, 0x00));
+        await h.present();
+        // Drawn after the present: the back buffer's, not yet the front's.
+        h.clear(argb(0x65, 0x43, 0x21));
+        assert.equal(await front(into), D3D_OK);
+        assert.deepEqual([...h.read(into.base + 60, 4)], [0x56, 0x34, 0x12, 0xff]);
+
+        const larger = plain(8, 8, D3DFMT.A8R8G8B8);
+        assert.equal(await front(larger), D3D_OK);
+        assert.deepEqual([...h.read(larger.base + (3 * 8 + 3) * 4, 4)], [0x56, 0x34, 0x12, 0xff]);
+        assert.deepEqual([...h.read(larger.base + (5 * 8 + 5) * 4, 4)], [0, 0, 0, 0xff],
+            'past the picture');
+
+        assert.equal(front(plain(4, 4, D3DFMT.X8R8G8B8)), 0x8876086c, 'A8R8G8B8 only');
+        assert.equal(front(null), 0x8876086c);
+        if (version === 9)
+        {
+            assert.equal(device.GetFrontBufferData(1, into), 0x8876086c, 'one swap chain');
+            /** @type {{ surface?: any }} */
+            const held = {};
+            assert.equal(device.CreateOffscreenPlainSurface(4, 4, D3DFMT.A8R8G8B8,
+                D3DPOOL.DEFAULT, held), D3D_OK);
+            assert.equal(front(held.surface), 0x8876086c, 'a system-memory surface only');
+        }
+    });
+}
+
 test('a lock of a render target made without lockable is refused, as the real API refuses it',
     ()=>{
         const h = harness(9);

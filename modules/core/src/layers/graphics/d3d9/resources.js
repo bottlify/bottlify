@@ -631,6 +631,41 @@ export function writePixels(surface, pixels, writeMemory){
 }
 
 /**
+ * The front buffer -- four bytes a pixel, blue first, as a read-back hands it
+ * over -- into an A8R8G8B8 surface's guest bytes from its top-left corner,
+ * as much of it as the surface holds. What is shown is opaque, whatever the
+ * back buffer's own alpha bytes held; with nothing shown yet the surface is
+ * black.
+ *
+ * @param {Surface} surface
+ * @param {{ width: number, height: number, data: Uint8Array } | null} image
+ * @param {(address: number, bytes: Uint8Array) => void} writeMemory
+ */
+export function writeFrontBuffer(surface, image, writeMemory){
+    /** @type {{ desc?: SurfaceDesc }} */
+    const out = {};
+    surface.GetDesc(out);
+    const desc = /** @type {SurfaceDesc} */ (out.desc);
+    const pitch = surfacePitch(desc.Format, desc.Width);
+    const row = new Uint8Array(desc.Width * 4);
+    for (let y = 0; y < desc.Height; y++)
+    {
+        row.fill(0);
+        const within = image && y < image.height ? Math.min(desc.Width, image.width) : 0;
+        if (image && within > 0)
+        {
+            row.set(image.data.subarray(y * image.width * 4, (y * image.width + within) * 4));
+        }
+        for (let x = 0; x < desc.Width; x++)
+        {
+            row[x * 4 + 3] = 0xff;
+        }
+        writeMemory(surface.base + y * pitch, row);
+    }
+    surface.noteWritten(null);
+}
+
+/**
  * @param {number} size
  * @param {number} level
  * @returns {number} the extent of a mip level, never smaller than one texel

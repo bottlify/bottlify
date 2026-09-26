@@ -1264,11 +1264,10 @@ export function createDirect3D8Seam(
         /** @param {any} device @param {number[]} args */
         CreateAdditionalSwapChain: (device, [, out])=>clearAndRefuse(out),
 
-        // The presented frame lives on the backend's device and is never read
-        // back into guest memory, so there is nothing to copy into the caller's
-        // surface. Answering with an untouched surface would hand a program
-        // whatever that memory happened to hold and call it a screenshot.
-        GetFrontBuffer: ()=>D3DERR_INVALIDCALL,
+        // The caller waits while the picture comes back from the GPU.
+        /** @param {any} device @param {number[]} args */
+        GetFrontBuffer: (device, [destination])=>
+            device.GetFrontBuffer(publisher.objectAt(destination)),
 
         // --- resources ---
 

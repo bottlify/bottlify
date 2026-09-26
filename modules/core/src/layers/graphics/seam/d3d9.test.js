@@ -1059,6 +1059,15 @@ test('a back buffer and the swap chain come back as the device\'s own', ()=>{
     assert.equal(h.box.call(chain, 6 + 3, [parameters]), D3D_OK, 'GetPresentParameters');
     assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferWidth), 64);
     assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.Windowed), 1);
+    // The front buffer through either door reaches the device, which here
+    // draws nothing it could read back and says so.
+    assert.equal(h.device(device, 'CreateOffscreenPlainSurface',
+        [4, 4, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, 0]), D3D_OK);
+    const plain = h.box.memory.readU32(out);
+    assert.equal(h.box.call(chain, 1 + 3, [plain]), D3DERR_INVALIDCALL, 'GetFrontBufferData');
+    assert.equal(h.device(device, 'GetFrontBufferData', [0, plain]), D3DERR_INVALIDCALL);
+    assert.ok(h.divergences.some(line=>line.includes('GetFrontBufferData was refused')));
+    h.release(plain);
     h.release(chain);
     assert.equal(h.release(device), 0);
     h.release(root);

@@ -564,8 +564,9 @@ test('what this build cannot do says so, and clears the pointer it was given', (
         refused('CreateVolumeTexture', [8, 8, 8, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, out]),
         D3DERR_NOTAVAILABLE);
 
-    // The cursor, the front buffer and the transformed-vertex path: each
-    // refuses because succeeding would promise a picture nothing here draws.
+    // The cursor and the transformed-vertex path: each refuses because
+    // succeeding would promise a picture nothing here draws. A front buffer
+    // copy into a pointer that names no surface is refused too.
     assert.equal(h.device(device, 'SetCursorProperties', [0, 0, 0]), D3DERR_INVALIDCALL);
     assert.equal(h.device(device, 'ShowCursor', [1]), 0, 'no cursor was showing before');
     assert.equal(h.device(device, 'SetCursorPosition', [10, 20, 0]), 0);

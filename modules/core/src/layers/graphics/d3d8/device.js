@@ -58,7 +58,7 @@ import {
 } from './validity.js';
 import {
     createPriority, createReferenceCount, createSurface, createTexture, rectMoveOf,
-    regionAtLevel, writePixels,
+    regionAtLevel, writeFrontBuffer, writePixels,
 } from '../d3d9/resources.js';
 import { DEVICE_STATE, LIGHT_ENABLED, createPalettes } from '../d3d9/device.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
@@ -464,6 +464,17 @@ export function createDirect3D8(options = {}){
 function createDeviceObject(parameters, caps, behaviourFlags, services, identity){
     /** Formats already reported, so a refusal in a loop says it once. */
     const refusedFormats = new Set();
+    /** Divergences already reported, by what makes each one of a kind. */
+    const reported = new Set();
+    /** @param {string} key @param {string} detail */
+    const reportOnce = (key, detail)=>{
+        if (!services.divergence || reported.has(key))
+        {
+            return;
+        }
+        reported.add(key);
+        services.divergence('Direct3D 8', detail);
+    };
 
     /**
      * A refusal a program can act on, but only if it is told which format was
@@ -2407,6 +2418,47 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         CreateIndexBuffer(length, usage, format, pool, out){
             out.buffer = createBuffer({ length, usage, pool, format, type: D3DRTYPE.INDEXBUFFER });
             return D3D_OK;
+        },
+
+        /**
+         * The picture the last present showed, as A8R8G8B8, into an image
+         * surface; the caller waits for it to come back from the GPU. The
+         * front buffer of a windowed device is the desktop's, with the window
+         * where it stands; here it is the window's picture at the surface's
+         * top-left corner, and said so once. Without a renderer that can read
+         * back there is no picture to copy, and the call is refused.
+         *
+         * @param {any} destination
+         * @returns {number | Promise<number>}
+         */
+        GetFrontBuffer(destination){
+            if (!destination)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const desc = describe(destination);
+            if (desc.Format !== D3DFMT.A8R8G8B8 || desc.Pool !== D3DPOOL.SYSTEMMEM)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const write = services.writeMemory;
+            if (!renderer?.readFront || !write)
+            {
+                reportOnce('frontbuffer', 'GetFrontBuffer was refused: this build draws nothing'
+                    + ' it can read back');
+                return D3DERR_INVALIDCALL;
+            }
+            if (presentParameters.windowed)
+            {
+                reportOnce('frontbuffer-windowed', 'GetFrontBuffer puts a windowed device\'s'
+                    + ' picture at the surface\'s corner, not where the window stands on the'
+                    + ' desktop');
+            }
+            return renderer.readFront().then((/** @type {any} */ image)=>{
+                writeFrontBuffer(destination, image, write);
+                renderer.markDirty(destination);
+                return D3D_OK;
+            });
         },
 
         /**
