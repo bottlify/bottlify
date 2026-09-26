@@ -276,9 +276,10 @@ function masksFor(shape, bitCount){
  * @param {(at: number, count: number, usage: number, dc: any) => number[]}
  *        options.readColorTable
  *        A DIB's colour table as colours, whatever its usage says it holds.
- * @returns The entry points, and `bound`: the drawing interface a context is
+ * @returns The entry points; `bound`, the drawing interface a context is
  *     bound to, for the window manager, which paints its own controls through
- *     the same engine without a guest string to read.
+ *     the same engine without a guest string to read; and `setDIBits`, which
+ *     CreateDIBitmap initialises a bitmap with.
  */
 export function createDrawingFunctions(
     { host, objects, dcOf, surfaceOf, currentMetrics, lend, readColorTable })
@@ -385,10 +386,11 @@ export function createDrawingFunctions(
      * @param {number} info @param {number} bits
      * @param {number} usage  What the colour table holds.
      * @param {any} dc  Whose palette a palette-relative table indexes.
+     * @param {number} [lines]  How many rows the bits hold: all of them by default.
      * @returns {{ header: import('./structs.js').BitmapInfoHeaderFields, bits: Uint8Array,
      *             colors: number[], masks: number[] } | null}
      */
-    const readDib = (info, bits, usage, dc)=>{
+    const readDib = (info, bits, usage, dc, lines)=>{
         const header = readBitmapInfoHeader(host, info);
         const masked = header.compression === BI_BITFIELDS
             && (header.bitCount === 16 || header.bitCount === 32);
@@ -402,7 +404,7 @@ export function createDrawingFunctions(
             ? [0, 4, 8].map(at=>readU32(host, info + BITMAPINFOHEADER.SIZE + at))
             : [];
         const stride = ((header.width * header.bitCount + 31) >> 5) * 4;
-        const rows = Math.abs(header.height);
+        const rows = lines ?? Math.abs(header.height);
         // DIB_PAL_INDICES has no table for biClrUsed to shorten.
         const size = 1 << header.bitCount;
         const count = usage === DIB_PAL_INDICES ? size : Math.min(header.clrUsed || size, size);
@@ -410,6 +412,39 @@ export function createDrawingFunctions(
             ? readColorTable(info + header.size, count, usage, dc)
             : [];
         return { header, bits: host.readMemory(bits, stride * rows), colors, masks };
+    };
+
+    /**
+     * SetDIBits: scan lines of a DIB converted into a bitmap's own format.
+     *
+     * The DIB's picture lies against the bitmap's top-left corner and the
+     * supplied lines land where they belong in it (Wine's test_SetDIBits);
+     * a row outside the bitmap is dropped. The answer is the lines handed
+     * in, however many of them landed. Unlike the calls that draw a DIB, this
+     * one checks a BI_BITFIELDS DIB's masks, and refuses DIB_PAL_INDICES.
+     *
+     * @param {number} bitmap @param {number} start @param {number} lines
+     * @param {number} bits @param {number} info @param {number} usage
+     * @param {any} dc  Whose palette a palette-relative table indexes.
+     * @returns {number}
+     */
+    const setDIBits = (bitmap, start, lines, bits, info, usage, dc)=>{
+        const image = usage === DIB_PAL_INDICES ? null
+            : readDib(info, bits, usage, dc, lines);
+        if (!image || image.masks.some(mask=>mask === 0))
+        {
+            return 0;
+        }
+        const header = image.header;
+        const landed = lend(bitmap, target=>{
+            const interfaces = bound(target, false);
+            interfaces?.setDIBitsToDevice(target, {
+                xDest: 0, yDest: 0, width: header.width, height: Math.abs(header.height),
+                xSrc: 0, ySrc: 0, firstScan: start, scans: lines, image,
+            });
+            return interfaces !== null;
+        });
+        return landed ? lines : 0;
     };
 
     /** @param {any} a @param {any} b */
@@ -549,6 +584,62 @@ export function createDrawingFunctions(
                     image,
                     rop: rop >>> 0,
                 });
+            },
+        },
+
+        /**
+         * int SetDIBitsToDevice(HDC hdc, int xDest, int yDest, DWORD w, DWORD h,
+         *   int xSrc, int ySrc, UINT StartScan, UINT cLines, const VOID *lpvBits,
+         *   const BITMAPINFO *lpbmi, UINT ColorUse)
+         *
+         * The bits hold cLines scan lines from StartScan on, and only those are
+         * drawn: see the drawing layer's setDIBitsToDevice for how they and the
+         * source rectangle are counted, and what the answer counts.
+         */
+        SetDIBitsToDevice: {
+            argBytes: 48,
+            /** @param {number[]} args */
+            handler: ([dest, xDest, yDest, width, height, xSrc, ySrc, start, lines, bits, info,
+                usage])=>{
+                const interfaces = bound(dest);
+                if (!interfaces || (bits >>> 0) === 0 || (info >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const image = readDib(info >>> 0, bits >>> 0, usage >>> 0, dcOf(dest),
+                    lines >>> 0);
+                if (!image)
+                {
+                    return 0;
+                }
+                return interfaces.setDIBitsToDevice(dest >>> 0, {
+                    xDest: xDest | 0, yDest: yDest | 0, width: width | 0, height: height | 0,
+                    xSrc: xSrc | 0, ySrc: ySrc | 0,
+                    firstScan: start >>> 0, scans: lines >>> 0,
+                    image,
+                });
+            },
+        },
+
+        /**
+         * int SetDIBits(HDC hdc, HBITMAP hbm, UINT start, UINT cLines,
+         *   const VOID *lpBits, const BITMAPINFO *lpbmi, UINT ColorUse)
+         *
+         * The DC only lends its palette to a palette-relative table.
+         */
+        SetDIBits: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([handle, bitmap, start, lines, bits, info, usage])=>{
+                const record = objects.get(bitmap);
+                const dc = dcOf(handle);
+                if (!dc || !record || record.type !== 'bitmap' || (bits >>> 0) === 0
+                    || (info >>> 0) === 0)
+                {
+                    return 0;
+                }
+                return setDIBits(bitmap >>> 0, start >>> 0, lines >>> 0, bits >>> 0, info >>> 0,
+                    usage >>> 0, dc);
             },
         },
 
@@ -1480,7 +1571,7 @@ export function createDrawingFunctions(
         return interfaces.extTextOutA(handle >>> 0, x | 0, y | 0, options >>> 0,
             (rect >>> 0) === 0 ? null : readRect(host, rect), text, advances) ? 1 : 0;
     };
-    return { functions, bound };
+    return { functions, bound, setDIBits };
 }
 
 /**

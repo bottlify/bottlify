@@ -842,3 +842,166 @@ test('StretchDIBits reads a DIB_PAL_COLORS table through the palette the DC has'
         'DIB_PAL_INDICES: the pixel is the palette index, wrapping too');
     assert.equal(stretch(3), 0);
 });
+
+// --- scan lines, as Wine's bitmap tests place them ---
+
+/** Where 128 DWORDs of source data, counting up from zero, sit. */
+const SCAN_DATA = 0x2000;
+
+/**
+ * Wine's fixture for the scan-line tests: an 8x8 32-bit DIB section
+ * selected into a memory DC, bottom-up or top-down, and 128 DWORDs of data
+ * counting from zero. Its `inverted` is the tests' inverted_data: the same
+ * sixteen rows of eight in the other order.
+ *
+ * @param {boolean} topDown
+ */
+function scanFixture(topDown){
+    const wired = wiredGdi();
+    const { fns, view } = wired;
+    putInfo(view, { width: 8, height: topDown ? -8 : 8, bitCount: 32 });
+    const section = fns.CreateDIBSection.handler([0, WIRED_INFO, 0, WIRED_POINTER, 0, 0]);
+    const bits = view.getUint32(WIRED_POINTER, true);
+    const dc = fns.CreateCompatibleDC.handler([0]);
+    fns.SelectObject.handler([dc, section]);
+    for (let index = 0; index < 128; index++)
+    {
+        view.setUint32(SCAN_DATA + index * 4, index, true);
+    }
+    return {
+        ...wired,
+        section,
+        dc,
+        /** @param {number} height */
+        header: height=>putInfo(view, { width: 8, height, bitCount: 32 }),
+        fill: ()=>{
+            for (let index = 0; index < 64; index++)
+            {
+                view.setUint32(bits + index * 4, 0xaaaaaaaa, true);
+            }
+        },
+        /** @returns {number[]} the section's 64 DWORDs */
+        pixels: ()=>[...Array(64).keys()].map(index=>view.getUint32(bits + index * 4, true)),
+    };
+}
+
+/** @param {number} index @returns {number} inverted_data[index] */
+const inverted = index=>120 - (index & ~7) + (index & 7);
+
+/**
+ * What the section should hold: `pick(i)` for each index a range covers, and
+ * 0xaaaaaaaa -- untouched -- everywhere else.
+ *
+ * @param {[number, number, (i: number) => number][]} ranges
+ * @returns {number[]}
+ */
+const expecting = ranges=>[...Array(64).keys()].map(index=>{
+    const range = ranges.find(([from, to])=>index >= from && index < to);
+    return range ? range[2](index) : 0xaaaaaaaa;
+});
+
+/** @param {number} shift @returns {(i: number) => number} data[i + shift] */
+const data = shift=>index=>index + shift;
+/** @param {number} shift @returns {(i: number) => number} inverted_data[i + shift] */
+const flipped = shift=>index=>inverted(index + shift);
+/** @param {number[]} indices @param {(i: number) => number} pick */
+const only = (indices, pick)=>indices.map(index=>/** @type {[number, number,
+    (i: number) => number]} */ ([index, index + 1, pick]));
+
+test('SetDIBitsToDevice draws only the scan lines it was given, from the picture\'s bottom', ()=>{
+    // Wine's test_SetDIBitsToDevice, every case outside a mapping mode or an
+    // RTL layout: the arguments are xDest, yDest, width, height, xSrc, ySrc,
+    // uStartScan and cLines.
+    /** @type {[boolean, number, number[], number, [number, number, any][]][]} */
+    const cases = [
+        [false, 8, [0, 0, 8, 8, 0, 0, 0, 8], 8, [[0, 64, data(0)]]],
+        [false, 8, [0, 0, 8, 8, 0, 0, 1, 5], 5, [[8, 48, data(-8)]]],
+        [false, 8, [0, 0, 8, 8, 0, 3, 1, 5], 5, [[0, 24, data(16)]]],
+        [false, 16, [0, 0, 8, 8, 0, 0, 1, 12], 7, [[8, 64, data(-8)]]],
+        [false, 16, [0, 2, 8, 8, 0, 6, 1, 12], 12, [[0, 40, data(56)]]],
+        [false, 16, [0, -4, 8, 8, 0, 3, 1, 12], 10, [[32, 64, data(-16)]]],
+        [false, 16, [0, 4, 8, 8, 0, -3, 1, 12], 4, [[0, 32, data(0)]]],
+        [false, 16, [0, 2, 8, 5, 0, -2, 1, 12], 2, [[32, 48, data(-32)]]],
+        [false, 5, [0, 0, 8, 8, 0, 0, 2, 2], 2, [[16, 32, data(-16)]]],
+        [false, 5, [3, 3, 2, 2, 1, 2, 1, 5], 3, only([27, 28, 35, 36], data(-18))],
+        [false, 5, [0, 0, 16, 16, 0, 0, 0, 5], 5, []],
+        [false, 5, [0, 2, 8, 4, 0, -1, 3, 12], 0, []],
+        [false, -8, [0, 0, 8, 8, 0, 0, 0, 8], 8, [[0, 64, flipped(64)]]],
+        [false, -8, [0, 0, 8, 8, 0, 0, 1, 5], 5, [[8, 48, flipped(80)]]],
+        [false, -8, [0, 0, 8, 8, 0, 4, 1, 5], 5, [[0, 16, flipped(112)]]],
+        [false, -16, [0, 0, 8, 8, 0, 0, 1, 12], 12, [[8, 64, flipped(24)]]],
+        [false, -16, [0, 4, 8, 8, 0, 7, 1, 12], 12, [[0, 16, flipped(112)]]],
+        [false, -16, [0, 0, 8, 8, 0, 0, 4, 12], 12, [[32, 64, flipped(0)]]],
+        [false, -16, [0, -3, 8, 8, 0, 2, 4, 12], 12, [[40, 64, flipped(-8)]]],
+        [false, -16, [0, 3, 8, 8, 0, -2, 4, 12], 12, [[24, 40, flipped(8)]]],
+        [false, -16, [0, 0, 8, 8, 0, 0, 5, 12], 12, [[40, 64, flipped(-8)]]],
+        [false, -16, [0, 2, 8, 4, 0, -1, 3, 12], 12, []],
+        [false, -16, [5, -7, 8, 16, -2, -4, 0, 12], 12, only([31, 39, 47, 55, 63], flipped(1))],
+        [false, -5, [0, 0, 8, 8, 0, 0, 1, 2], 2, [[8, 24, flipped(104)]]],
+        [false, -5, [5, 4, 2, 2, 6, 3, 1, 5], 5, only([21, 22, 29, 30], flipped(89))],
+        [false, -5, [0, 0, 16, 16, 0, 0, 0, 5], 5, []],
+        [true, -8, [0, 0, 8, 8, 0, 0, 0, 8], 8, [[0, 64, data(0)]]],
+        [true, -8, [0, 0, 8, 8, 0, 0, 1, 5], 5, [[16, 56, data(-16)]]],
+        [true, -8, [0, 3, 8, 3, 0, 2, 1, 5], 5, [[24, 48, data(-16)]]],
+        [true, -16, [0, 0, 8, 8, 0, 0, 1, 12], 12, [[0, 56, data(40)]]],
+        [true, -16, [5, -7, 8, 16, -1, -8, 0, 12], 12, only([6, 7], data(82))],
+        [true, -5, [0, 0, 8, 8, 0, 0, 1, 2], 2, [[40, 56, data(-40)]]],
+        [true, -5, [7, 2, 8, 8, 1, 0, 0, 5], 5, only([47, 55, 63], data(-46))],
+        [true, -5, [0, 0, 16, 16, 0, 0, 0, 5], 5, []],
+        [true, 8, [0, 0, 8, 8, 0, 0, 0, 8], 8, [[0, 64, flipped(64)]]],
+        [true, 8, [0, 0, 8, 8, 0, 0, 1, 5], 5, [[16, 56, flipped(72)]]],
+        [true, 16, [0, 0, 8, 8, 0, 0, 1, 12], 7, [[0, 56, flipped(72)]]],
+        [true, 16, [4, 4, 8, 8, 0, -4, 1, 12], 3,
+            [[36, 40, flipped(68)], [44, 48, flipped(68)], [52, 56, flipped(68)]]],
+        [true, 16, [4, 4, 8, 8, -30, -30, 1, 12], 0, []],
+        [true, 16, [5, -5, 8, 16, -2, -4, 4, 12], 8, only([7, 15, 23], flipped(97))],
+        [true, 5, [0, 0, 8, 8, 0, 0, 1, 2], 2, [[40, 56, flipped(72)]]],
+        [true, 5, [0, 0, 16, 16, 0, 0, 0, 5], 5, []],
+    ];
+    for (const [topDown, height, args, lines, ranges] of cases)
+    {
+        const scan = scanFixture(topDown);
+        scan.header(height);
+        scan.fill();
+        const name = `${topDown ? 't-d' : 'b-u'} section, biHeight ${height}, ${args}`;
+        assert.equal(scan.fns.SetDIBitsToDevice.handler([scan.dc, ...args,
+            SCAN_DATA, WIRED_INFO, 0]), lines, name);
+        assert.deepEqual(scan.pixels(), expecting(ranges), name);
+    }
+});
+
+test('SetDIBits lays the scan lines it is given against the top of the bitmap', ()=>{
+    // Wine's test_SetDIBits: uStartScan and cLines, and what lands where.
+    /** @type {[boolean, number, number, number, [number, number, any][]][]} */
+    const cases = [
+        [false, 8, 0, 8, [[0, 64, data(0)]]],
+        [false, 8, 1, 5, [[8, 48, data(-8)]]],
+        [false, 16, 1, 12, [[0, 40, data(56)]]],
+        [false, 5, 1, 2, [[32, 48, data(-32)]]],
+        [false, -8, 0, 8, [[0, 64, flipped(64)]]],
+        [false, -8, 1, 5, [[8, 48, flipped(80)]]],
+        [false, -16, 1, 12, [[0, 40, flipped(88)]]],
+        [false, -16, 4, 12, [[0, 64, flipped(64)]]],
+        [false, -16, 5, 12, [[0, 64, flipped(56)]]],
+        [false, -5, 1, 2, [[32, 48, flipped(80)]]],
+        [true, -8, 0, 8, [[0, 64, data(0)]]],
+        [true, -8, 1, 5, [[16, 56, data(-16)]]],
+        [true, -16, 1, 12, [[24, 64, data(-24)]]],
+        [true, -5, 1, 2, [[16, 32, data(-16)]]],
+        [true, 8, 0, 8, [[0, 64, flipped(64)]]],
+        [true, 8, 1, 5, [[16, 56, flipped(72)]]],
+        [true, 16, 1, 12, [[24, 64, flipped(8)]]],
+        [true, 5, 1, 2, [[16, 32, flipped(96)]]],
+    ];
+    for (const [topDown, height, start, lines, ranges] of cases)
+    {
+        const scan = scanFixture(topDown);
+        scan.header(height);
+        scan.fill();
+        const screen = scan.fns.GetDC.handler([0]);
+        const name = `${topDown ? 't-d' : 'b-u'} section, biHeight ${height}, ${start}+${lines}`;
+        assert.equal(scan.fns.SetDIBits.handler([screen, scan.section, start, lines,
+            SCAN_DATA, WIRED_INFO, 0]), lines, name);
+        assert.deepEqual(scan.pixels(), expecting(ranges), name);
+    }
+});

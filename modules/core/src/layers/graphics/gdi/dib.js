@@ -198,6 +198,11 @@ export function decodeDib(image){
     for (let index = 0; index < scanLines; index++)
     {
         const dibRow = startScan + index;
+        if (dibRow < 0)
+        {
+            // Supplied rows can begin above a top-down picture's first.
+            continue;
+        }
         // The one place the sign of biHeight is consulted: a bottom-up DIB's
         // row zero is the picture's last row.
         const y = topDown ? dibRow : height - 1 - dibRow;
@@ -359,34 +364,63 @@ function sourceTop(ySrc, rows, height, topDown){
  * @property {number} height
  * @property {number} xSrc
  * @property {number} ySrc
- * @property {DibImage} image
+ * @property {DibImage} image  Its bits hold the supplied scan lines only.
+ * @property {number} [firstScan]  uStartScan: the first scan line supplied.
+ * @property {number} [scans]      cLines: how many; the whole DIB by default.
  */
 
 /**
+ * SetDIBitsToDevice: the part of a DIB's source rectangle the caller supplied
+ * scan lines for, onto the device, and nothing of the rest.
+ *
+ * Every row here is counted as the call counts it, which is from the
+ * picture's bottom whichever way the DIB is stored: scan line zero is the
+ * bottom row, ySrc is the bottom of the source rectangle, and the bits hold
+ * scans firstScan onward -- bottom-up in a bottom-up DIB, top-down in a
+ * top-down one. The answer counts differently by storage too (Wine's
+ * test_SetDIBitsToDevice): a top-down DIB answers the lines it was handed, a
+ * bottom-up one the supplied lines at or below the source rectangle's top.
+ *
  * @param {SetDibOptions} options
- * @returns {number} how many scan lines were transferred, or zero on failure
+ * @returns {number} the scan lines, as above, or zero on failure
  */
 export function setDIBitsToDevice(options){
-    const source = decodeDib(options.image);
+    const header = options.image.header;
+    const height = Math.abs(header.height);
+    const topDown = header.height < 0;
+    const first = options.firstScan ?? 0;
+    const scans = options.scans ?? height;
+    const rows = options.height | 0;
+    const ySrc = options.ySrc | 0;
+    const source = decodeDib({
+        ...options.image,
+        startScan: topDown ? height - first - scans : first,
+        scanLines: scans,
+    });
     if (!source)
     {
         return 0;
     }
-    const top = sourceTop(options.ySrc | 0, options.height | 0,
-        Math.abs(options.image.header.height), options.image.header.height < 0);
-    const copied = bitBlt({
-        dest: options.dest,
-        clip: options.clip,
-        x: options.xDest | 0,
-        y: options.yDest | 0,
-        width: options.width | 0,
-        height: options.height | 0,
-        src: source,
-        srcX: options.xSrc | 0,
-        srcY: top,
-        rop: SRCCOPY,
-    });
-    return copied ? Math.abs(options.height | 0) : 0;
+    // Both in picture rows, top-down: what was supplied, and what was asked for.
+    const rectangleTop = height - ySrc - rows;
+    const top = Math.max(height - first - scans, rectangleTop);
+    const bottom = Math.min(height - first, height - ySrc);
+    if (bottom > top && (options.width | 0) > 0)
+    {
+        bitBlt({
+            dest: options.dest,
+            clip: options.clip,
+            x: options.xDest | 0,
+            y: (options.yDest | 0) + (top - rectangleTop),
+            width: options.width | 0,
+            height: bottom - top,
+            src: source,
+            srcX: options.xSrc | 0,
+            srcY: top,
+            rop: SRCCOPY,
+        });
+    }
+    return topDown ? scans : Math.max(0, Math.min(first + scans, ySrc + rows) - Math.max(first, 0));
 }
 
 /**

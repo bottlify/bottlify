@@ -1102,43 +1102,6 @@ export function createGdiFunctions(host){
     };
 
     /**
-     * A DIB converted into a bitmap's own format across the whole bitmap, the
-     * DIB's bottom row on the bitmap's bottom row, as SetDIBits from scan line
-     * zero lays it. False when the DIB is not one this build reads, or there
-     * is nothing to draw with.
-     *
-     * @param {number} bitmap @param {number} bits @param {number} info
-     * @param {number} usage @param {any} dc  Whose palette DIB_PAL_COLORS indexes.
-     */
-    const setBits = (bitmap, bits, info, usage, dc)=>{
-        const header = readBitmapInfoHeader(host, info);
-        if (header.size < BITMAPINFOHEADER.SIZE || !BIT_COUNTS.has(header.bitCount)
-            || header.width <= 0 || header.height === 0 || usage > DIB_PAL_COLORS)
-        {
-            return false;
-        }
-        const table = colorTableSize(header.bitCount);
-        const image = {
-            header,
-            bits: host.readMemory(bits, dibStride(header.width, header.bitCount)
-                * Math.abs(header.height)),
-            colors: header.bitCount <= 8
-                ? readColorTable(info + header.size, Math.min(header.clrUsed || table, table),
-                    usage, dc, false)
-                : [],
-            masks: header.compression === BI_BITFIELDS
-                ? [0, 4, 8].map(at=>readU32(host, info + BITMAPINFOHEADER.SIZE + at))
-                : [],
-        };
-        const shape = /** @type {import('./objects.js').GdiObject} */ (
-            objects.get(bitmap)).attributes;
-        return lend(bitmap, target=>(drawing.bound(target, false)?.setDIBitsToDevice(target, {
-            xDest: 0, yDest: 0, width: shape.width, height: shape.height, xSrc: 0, ySrc: 0,
-            image,
-        }) ?? 0) > 0);
-    };
-
-    /**
      * A string into a fixed-size field of a structure being built, NUL-padded:
      * bytes for the A spellings, UTF-16 for the W ones.
      *
@@ -1871,8 +1834,14 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const bitmap = objects.create('bitmap', attributes);
-                if ((init & CBM_INIT) === 0 || (bits >>> 0) === 0 || (info >>> 0) === 0
-                    || setBits(bitmap, bits >>> 0, info >>> 0, usage >>> 0, dc))
+                if ((init & CBM_INIT) === 0 || (bits >>> 0) === 0 || (info >>> 0) === 0)
+                {
+                    return bitmap;
+                }
+                // SetDIBits of the whole DIB the bits are described by.
+                const lines = Math.abs(readBitmapInfoHeader(host, info >>> 0).height);
+                if (drawing.setDIBits(bitmap, 0, lines, bits >>> 0, info >>> 0, usage >>> 0, dc)
+                    > 0)
                 {
                     return bitmap;
                 }
