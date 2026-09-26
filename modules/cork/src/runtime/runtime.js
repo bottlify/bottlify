@@ -115,6 +115,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // A small leaf callee formed into its caller, the call and its return
         // jumps inside the region (false: every call crosses regions).
         leafCalls: true,
+        // A direct call to a compiler's runtime helper recognised by its bytes
+        // (MSVC's _ftol2) formed as the instructions it amounts to (false:
+        // every such call runs the helper's own code; helpers.js).
+        runtimeHelpers: true,
         // Indirect calls sampled while the translator runs, and a region whose
         // indirect call keeps going to a few small leaf callees formed again
         // with them in it: the call compares its target with each and jumps
@@ -181,7 +185,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     let precision = settings.wideFirst === true ? 'wide' : 'mixed';
     /** How a region is formed, the same on this thread, in a batch and in a relink. */
     const formOptions = { maxBlocks: settings.maxRegionBlocks,
-        maxBytes: settings.maxRegionBytes, leafCalls: settings.leafCalls };
+        maxBytes: settings.maxRegionBytes, leafCalls: settings.leafCalls,
+        helpers: settings.runtimeHelpers !== false };
     /** @type {Set<string>} instruction classes left to the other executor */
     const leaveOut = new Set(settings.leaveOut ?? []);
     if (layout.tables + Tables.SIZE > memory.buffer.byteLength)
