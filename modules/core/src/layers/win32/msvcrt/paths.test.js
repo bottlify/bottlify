@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createPathFunctions, splitPath, fullPath } from './paths.js';
-import { fakeMemory } from './harness.test.js';
+import { fakeMemory, fakeVolume as fakeFiles } from './harness.test.js';
 
 /** A volume with the handful of operations the path functions reach for. */
 function fakeVolume(existing = ['C:\\game', 'C:\\game\\data.mpq']){
@@ -214,4 +214,71 @@ test('a failing operation says why in errno, as each one documents', ()=>{
 
 test('_getdrives reports C and nothing else', ()=>{
     assert.equal(build().table._getdrives.handler([]), 0b100);
+});
+
+/** `struct _finddata_t` as msvcrt.dll lays it out: 32-bit times, 260 bytes of name. */
+const FIND = { ATTRIB: 0, CREATE: 4, ACCESS: 8, WRITE: 12, SIZE: 16, NAME: 20, BYTES: 280 };
+
+function finder(){
+    const memory = fakeMemory();
+    const written = Date.UTC(2003, 6, 1);
+    const files = fakeFiles({
+        'C:\\game\\a.dat': new Uint8Array(3),
+        'C:\\game\\b.dat': new Uint8Array(5),
+        'C:\\game\\readme.txt': new Uint8Array(1),
+    }, { directories: ['C:\\', 'C:\\game', 'C:\\game\\maps'], modified: written });
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory, files, errno: code=>errno.push(code),
+    }));
+    const data = memory.allocate(FIND.BYTES);
+    const found = ()=>{
+        const view = new DataView(memory.bytes.buffer, data, FIND.BYTES);
+        return {
+            name: memory.text(data + FIND.NAME),
+            attrib: view.getUint32(FIND.ATTRIB, true),
+            size: view.getUint32(FIND.SIZE, true),
+            times: [FIND.CREATE, FIND.ACCESS, FIND.WRITE].map(at=>view.getUint32(at, true)),
+        };
+    };
+    return { memory, table, errno, data, found, written };
+}
+
+test('_findfirst and _findnext walk what matches, and -1 with ENOENT ends the walk', ()=>{
+    const { memory, table, errno, data, found, written } = finder();
+    const handle = table._findfirst.handler([memory.put('C:\\game\\*.dat'), data]);
+    assert.notEqual(handle, -1);
+    assert.deepEqual(found(), {
+        name: 'a.dat', attrib: 0x20, size: 3, times: Array(3).fill(written / 1000),
+    }, 'an archive-flagged file, as FindFirstFile reports it');
+    assert.equal(table._findnext.handler([handle, data]), 0);
+    assert.equal(found().name, 'b.dat');
+    assert.equal(table._findnext.handler([handle, data]), -1);
+    assert.deepEqual(errno.splice(0), [2]);
+    assert.equal(table._findclose.handler([handle]), 0);
+    assert.equal(table._findclose.handler([handle]), -1, 'closed already');
+    assert.equal(table._findnext.handler([handle, data]), -1);
+    assert.deepEqual(errno.splice(0), [9, 2]);
+});
+
+test('_findfirst finds a directory by its name and says it is one', ()=>{
+    const { memory, table, data, found } = finder();
+    const handle = table._findfirst.handler([memory.put('C:\\game\\maps'), data]);
+    assert.notEqual(handle, -1);
+    assert.deepEqual([found().name, found().attrib], ['maps', 0x10]);
+    assert.equal(table._findfirst.handler([memory.put('C:\\*.*'), data]) === -1, false,
+        'the root, its separator kept');
+    assert.equal(found().name, 'game');
+});
+
+test('_findfirst with nothing to match is -1 and ENOENT, and a null name EINVAL', ()=>{
+    const { memory, table, errno, data } = finder();
+    assert.equal(table._findfirst.handler([memory.put('C:\\game\\*.exe'), data]), -1);
+    assert.equal(table._findfirst.handler([memory.put('C:\\none\\*.dat'), data]), -1);
+    assert.equal(table._findfirst.handler([memory.put('C:\\game\\'), data]), -1);
+    assert.equal(table._findfirst.handler([0, data]), -1);
+    assert.deepEqual(errno, [2, 2, 2, 22]);
+    assert.deepEqual([table._findfirst.argBytes, table._findnext.argBytes,
+        table._findclose.argBytes], [8, 8, 4]);
 });

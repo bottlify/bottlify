@@ -200,6 +200,23 @@ export function fakeVolume(files, { late = false, directories = [], modified = 0
         /** @param {string} node */
         close: node=>closed.push(node),
         currentDirectory: ()=>'C:\\game',
+        /**
+         * What a directory holds whose names match a pattern of `*` and `?`,
+         * `*.*` matching every name as it does on Windows.
+         *
+         * @param {string} directory @param {string} pattern
+         */
+        list(directory, pattern){
+            const inside = `${directory.replace(/\\$/, '')}\\`;
+            const wanted = new RegExp(`^${(pattern === '*.*' ? '*' : pattern)
+                .replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`,
+            'i');
+            return [...folders, ...Object.keys(files)]
+                .filter(path=>path.startsWith(inside) && !path.slice(inside.length).includes('\\'))
+                .map(path=>path.slice(inside.length))
+                .filter(name=>name !== '' && wanted.test(name))
+                .map(name=>({ name, ...volume.stat(inside + name) }));
+        },
     };
     return volume;
 }
