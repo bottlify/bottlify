@@ -23,8 +23,8 @@
  */
 
 /**
- * The LOGFONT fields the engine reads. The rest -- escapement, quality,
- * the precisions -- describe a rendering nobody here can do differently.
+ * The LOGFONT fields the engine reads. The rest -- escapement, the
+ * precisions -- describe a rendering nobody here can do differently.
  *
  * @typedef {Object} FontRequest
  * @property {number} height     Negative: the character height; positive:
@@ -34,7 +34,14 @@
  * @property {number} underline
  * @property {number} strikeOut
  * @property {string} faceName
+ * @property {number} [quality]  NONANTIALIASED_QUALITY asks for glyphs with
+ *                               no partly covered pixel; any other value is
+ *                               drawn smoothed, as the user setting that
+ *                               DEFAULT_QUALITY defers to would have it.
  */
+
+/** lfQuality: "Font is never antialiased." */
+export const NONANTIALIASED_QUALITY = 3;
 
 /**
  * @typedef {Object} FontMetrics
@@ -225,7 +232,8 @@ export function createFontEngine(options = {}){
     // proportions; stretch the canvas horizontally if a program depends on it.
     /** @param {FontRequest} font */
     const keyOf = font=>[font.faceName, font.height | 0, font.weight | 0, font.italic ? 1 : 0,
-        font.underline ? 1 : 0, font.strikeOut ? 1 : 0].join('|');
+        font.underline ? 1 : 0, font.strikeOut ? 1 : 0,
+        font.quality === NONANTIALIASED_QUALITY ? 1 : 0].join('|');
 
     /**
      * @param {FontRequest} font
@@ -317,9 +325,13 @@ export function createFontEngine(options = {}){
                 ctx.fillRect(-left, up - Math.ceil(face.em / 3), advance, stroke);
             }
             const pixels = ctx.getImageData(0, 0, width, height).data;
+            // The canvas always smooths; a font that must not be smoothed
+            // keeps a pixel that is at least half covered and drops the rest.
+            const aliased = font.quality === NONANTIALIASED_QUALITY;
             for (let index = 0; index < coverage.length; index++)
             {
-                coverage[index] = pixels[index * 4 + 3];
+                const alpha = pixels[index * 4 + 3];
+                coverage[index] = aliased ? (alpha >= 128 ? 255 : 0) : alpha;
             }
         }
         return { advance, left: left | 0, top: face.metrics.ascent - up, width, height, coverage };
