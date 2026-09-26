@@ -189,6 +189,10 @@ function parse(argv){
         // long stall (a load): with a program that advances one step a frame,
         // the same frames of play in every run (0: not taken).
         steadyFrames: number('--steady-frames', 0),
+        // A row of the frame split and the draws and calls a frame every this
+        // many presents, printed and written as game-<stamp>-series.json: how
+        // a frame's cost moves with what it draws, over the run (0: none).
+        series: number('--series', 0),
         // The frame this many frames after the last long stall, written beside
         // the report as game-<stamp>-snap.png: a demo's frame N in every run.
         snapFrame: number('--snap-frame', 0),
@@ -895,6 +899,32 @@ function describe(result, context, calls, symbols){
                 + ` (countTransfers), exits to the host: ${exits}`);
         }
     }
+    const series = /** @type {any[]} */ (result.series ?? []);
+    if (series.length > 1)
+    {
+        say('  frame series (a row per window of presents; per frame, and per draw where it'
+            + ' divides):');
+        say('      s   frames  frame ms  host ms  guest ms  draws  calls  host us/draw'
+            + '  guest us/draw  calls/draw  upload KB  heap MB');
+        for (let i = 1; i < series.length; i++)
+        {
+            const row = series[i];
+            const before = series[i - 1];
+            const frames = row.frames > 0 ? row.frames : 1;
+            const draws = (row.draws - before.draws) / frames;
+            const crossings = (row.calls - before.calls) / frames;
+            /** @param {number} ms */
+            const perDraw = ms=>(draws > 0 ? (ms * 1000 / draws).toFixed(1) : '-');
+            say(`  ${(row.at / 1000).toFixed(0).padStart(5)}  ${String(row.frames).padStart(7)}`
+                + `  ${row.frameMs.toFixed(1).padStart(8)}  ${row.hostMs.toFixed(1).padStart(7)}`
+                + `  ${row.guestMs.toFixed(1).padStart(8)}  ${draws.toFixed(0).padStart(5)}`
+                + `  ${crossings.toFixed(0).padStart(5)}  ${perDraw(row.hostMs).padStart(12)}`
+                + `  ${perDraw(row.guestMs).padStart(13)}`
+                + `  ${(draws > 0 ? crossings / draws : 0).toFixed(1).padStart(10)}`
+                + `  ${((row.uploadBytes - before.uploadBytes) / frames / 1024).toFixed(0)
+                    .padStart(9)}  ${row.heapMb.toFixed(0).padStart(7)}`);
+        }
+    }
     // The gaps between presents are the shape a stutter has, and the page's
     // long tasks say whether the thread the person's browser lives on was held.
     const gaps = [...result.presentGaps ?? []].sort((left, right)=>left - right);
@@ -1140,6 +1170,7 @@ export async function game(options){
             trace: options.trace,
             pointer: options.pointer,
             steadyFrames: options.steadyFrames || undefined,
+            series: options.series || undefined,
             snapFrame: options.snapFrame || undefined,
             snapFromStart: options.snapFromStart,
             snapCount: options.snapCount,
@@ -1280,6 +1311,11 @@ export async function game(options){
         // frames rather than the same seconds (tools/frame-span.mjs).
         writeFileSync(join(REPORTS_DIR, `game-${stamp}-presents.json`),
             JSON.stringify(result.presentTimes ?? []));
+        if ((result.series ?? []).length > 0)
+        {
+            writeFileSync(join(REPORTS_DIR, `game-${stamp}-series.json`),
+                JSON.stringify(result.series));
+        }
         result.cpuProfiles = (cpuProfiles ?? []).map(one=>({
             url: one.url, windowMs: one.windowMs, summary: summarise(one.profile, one.windowMs),
             // The frames the program presented inside the window, so a profile's

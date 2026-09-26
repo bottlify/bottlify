@@ -768,7 +768,44 @@ export function scheduleKeyTimes(app, request){
  *                                    reached the request's `steadyFrames`, and the
  *                                    translator's counters a frame over the same frames.
  * @property {any} [steadyFrom]        The translator's counters 240 frames before that.
+ * @property {any[]} [series]           A row every `series` presents (see `seriesRow`).
  */
+
+/**
+ * One row of the run's frame series: the log's frame split averaged over the
+ * frames since the last row, and the counters a reader turns into rates per
+ * frame by subtracting the row before -- the draws the backend encoded, the
+ * host calls the bridge dispatched. A long run's totals hide how the cost of a
+ * frame moves with what the frame draws; this is what shows it.
+ *
+ * @param {any} app
+ * @param {number} count  frames since the last row
+ * @param {number} at     milliseconds since the first present
+ */
+export function seriesRow(app, count, at){
+    const frames = app.log.profile(0).recentFrames.slice(-count);
+    let ms = 0;
+    let host = 0;
+    let guest = 0;
+    for (const frame of frames)
+    {
+        ms += frame.ms;
+        host += frame.byKind.host + frame.sampled.host;
+        guest += frame.byKind.guest;
+    }
+    const layers = Object.fromEntries(app.diagnostics()
+        .map((/** @type {any} */ layer)=>[layer.name, layer.metrics ?? {}]));
+    const counters = layers.graphics?.backend?.counters ?? {};
+    const per = frames.length > 0 ? 1 / frames.length : 0;
+    return {
+        at, frames: frames.length,
+        frameMs: ms * per, hostMs: host * per, guestMs: guest * per,
+        draws: counters.draws ?? 0, submits: counters.submits ?? 0,
+        uploadBytes: (counters.bufferUploadBytes ?? 0) + (counters.textureUploadBytes ?? 0),
+        calls: layers.bridge?.calls ?? 0,
+        heapMb: (/** @type {any} */ (globalThis).performance?.memory?.usedJSHeapSize ?? 0) / 1048576,
+    };
+}
 
 /**
  * One presented frame: counts it, records the gap since the last one, and
@@ -791,7 +828,7 @@ export function scheduleKeyTimes(app, request){
  *               frames: number }[],
  *           typed?: { text: string, after: number, afterSeconds?: number }[],
  *           pasted?: { text: string, after: number, afterSeconds?: number }[],
- *           steadyFrames?: number, snapFrame?: number, snapEvery?: number,
+ *           steadyFrames?: number, series?: number, snapFrame?: number, snapEvery?: number,
  *           snapCount?: number, snapFromStart?: boolean }} request
  * @param {PresentState} state
  * @param {any} frame
@@ -848,6 +885,14 @@ export function presentFrame(app, request, state, frame){
                         per(to.exits[kind], from.exits?.[kind] ?? 0)])),
                 };
             }
+        }
+    }
+    if (request.series && state.presents % request.series === 0)
+    {
+        state.series ??= [];
+        if (state.series.length < LIMITS.samples)
+        {
+            state.series.push(seriesRow(app, request.series, now - state.firstPresent));
         }
     }
     if (state.lastPresent > 0 && state.gaps.length < LIMITS.samples)
@@ -1612,6 +1657,7 @@ export function createHarness(canvas, how = {}){
         result.presentGaps = presentState.gaps.slice();
         result.presentTimes = presentState.times.slice();
         result.steady = presentState.steady ?? null;
+        result.series = presentState.series ?? [];
 
         await app.dispose();
         // Nothing is running any more, and a report asked for now must say
