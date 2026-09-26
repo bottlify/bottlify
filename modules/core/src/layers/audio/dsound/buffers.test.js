@@ -10,7 +10,7 @@ import {
     createSoundBuffer, normaliseFormat,
     DSBSTATUS_PLAYING, DSBSTATUS_LOOPING, DSBPLAY_LOOPING,
     DSBLOCK_FROMWRITECURSOR, DSBLOCK_ENTIREBUFFER,
-    DSBVOLUME_MIN, DSBVOLUME_MAX, DSBPAN_LEFT, DSBPAN_RIGHT,
+    DSBVOLUME_MIN, DSBVOLUME_MAX, DSBPAN_LEFT, DSBPAN_RIGHT, DSBPN_OFFSETSTOP,
 } from './buffers.js';
 
 /** 22050 Hz, stereo, 16-bit: 4 bytes a frame, 88200 a second. */
@@ -212,6 +212,98 @@ test('a notification behind the cursor fires when the buffer wraps past it', ()=
     time.advance(400); // past the end, round to 200ms
     assert.deepEqual(sound.drainNotifications(), [7],
         'comparing offsets instead of testing the crossing would miss this');
+});
+
+test('a position where playback starts is passed first, as the cursor leaves it', ()=>{
+    // Wine's dsound test_notifications, which Windows passes: positions at 0
+    // and half way in a looping half-second buffer come in the order 0, half,
+    // 0, half -- the start is the first thing playback passes.
+    const { sound, time } = buffer({ bytes: SECOND / 2 });
+    sound.setNotifications([
+        { offset: 0, event: 10 },
+        { offset: aligned(SECOND / 4), event: 20 },
+    ]);
+    sound.play(DSBPLAY_LOOPING);
+    /** @type {number[]} */
+    const heard = [];
+    for (let step = 0; step < 30; step++)
+    {
+        time.advance(50);
+        heard.push(...sound.drainNotifications());
+    }
+    assert.deepEqual(heard, [10, 20, 10, 20, 10, 20]);
+});
+
+test('a one-shot passes its first position as it starts and its last as it ends', ()=>{
+    // Wine's dsound test_notifications_noloop: the position at 0 while the
+    // buffer is still playing, the one at its last frame once it has stopped,
+    // and the start not a second time when the cursor reads zero again.
+    const bytes = SECOND / 2;
+    const { sound, time } = buffer({ bytes });
+    sound.setNotifications([
+        { offset: 0, event: 1 },
+        { offset: bytes - FORMAT.blockAlign, event: 2 },
+    ]);
+    sound.play(0);
+    time.advance(20);
+    assert.deepEqual(sound.drainNotifications(), [1]);
+    assert.equal(sound.status(), DSBSTATUS_PLAYING);
+    time.advance(600);
+    assert.deepEqual(sound.drainNotifications(), [2]);
+    assert.equal(sound.status(), 0);
+    time.advance(100);
+    assert.deepEqual(sound.drainNotifications(), []);
+});
+
+test('a one-shot that ends and starts again between two looks passes both runs', ()=>{
+    // A tenth of a second: short enough to end and be played again between
+    // two turns of the machine.
+    const bytes = SECOND / 10;
+    const { sound, time } = buffer({ bytes });
+    sound.setNotifications([
+        { offset: aligned(bytes / 4), event: 4 },
+        { offset: aligned(bytes * 3 / 4), event: 6 },
+    ]);
+    sound.play(0);
+    time.advance(40);
+    assert.deepEqual(sound.drainNotifications(), [4]);
+    time.advance(60);
+    sound.play(0);
+    time.advance(30);
+    assert.deepEqual(sound.drainNotifications(), [6, 4],
+        'the rest of the first run and then the start of the second, in that order');
+});
+
+test('DSBPN_OFFSETSTOP fires when playback stops, and not while a loop goes round', ()=>{
+    // dsound.h defines it as -1: a marker for the stop, not a place in the
+    // buffer. A streaming thread waits on it to learn its sound has ended, and
+    // one woken on every lap would take a playing buffer for a stopped one.
+    const { sound, time } = buffer({ bytes: SECOND / 2 });
+    sound.setNotifications([{ offset: DSBPN_OFFSETSTOP, event: 9 }]);
+    sound.play(DSBPLAY_LOOPING);
+    for (let lap = 0; lap < 6; lap++)
+    {
+        time.advance(200);
+        assert.deepEqual(sound.drainNotifications(), [], `still playing at ${lap * 200 + 200} ms`);
+    }
+    // Wine's dsound test_notify and dsound8 test_effects: Play, Stop, and the
+    // event is set.
+    sound.stop();
+    assert.deepEqual(sound.drainNotifications(), [9]);
+    assert.deepEqual(sound.drainNotifications(), [], 'once');
+});
+
+test('a one-shot that plays to its end has stopped, and says so once', ()=>{
+    const { sound, time } = buffer({ bytes: SECOND / 2 });
+    sound.setNotifications([{ offset: DSBPN_OFFSETSTOP, event: 9 }]);
+    sound.play(0);
+    time.advance(200);
+    assert.deepEqual(sound.drainNotifications(), []);
+    time.advance(400);
+    assert.deepEqual(sound.drainNotifications(), [9]);
+    sound.stop();
+    assert.deepEqual(sound.drainNotifications(), [],
+        'a Stop after the end stops nothing that was playing');
 });
 
 test('volume and pan are clamped to their documented bounds', ()=>{
@@ -419,6 +511,25 @@ test('volume is decibels, and a gain is what a mixer can use', ()=>{
 
     sound.setVolume(DSBVOLUME_MIN);
     assert.equal(sound.gain, 0, 'and the floor is silence, not almost silence');
+});
+
+test('pan takes decibels off the far side and leaves the near one whole', ()=>{
+    // IDirectSoundBuffer::SetPan: hundredths of a decibel, like volume, off the
+    // side the sound is panned away from; DSBPAN_LEFT leaves the right silent.
+    const { sound } = buffer();
+    assert.deepEqual(sound.balance, [1, 1], 'centred, both sides at full');
+
+    sound.setPan(DSBPAN_LEFT);
+    assert.deepEqual(sound.balance, [1, 0]);
+    sound.setPan(DSBPAN_RIGHT);
+    assert.deepEqual(sound.balance, [0, 1]);
+
+    sound.setPan(2000);
+    assert.ok(Math.abs(sound.balance[0] - 0.1) < 1e-9, 'twenty decibels off the left');
+    assert.equal(sound.balance[1], 1);
+    sound.setPan(-600);
+    assert.equal(sound.balance[0], 1);
+    assert.ok(Math.abs(sound.balance[1] - 0.5) < 0.01, 'six off the right');
 });
 
 test('a one-shot that finishes before it is ever drained still hands over its sound', ()=>{

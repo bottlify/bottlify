@@ -3654,6 +3654,7 @@ async function buildApp(options){
     // demand cannot promise that.
     const ordinalsOf = {
         ...(win32.ordinals ? win32.ordinals() : {}),
+        ...(audio.ordinals?.() ?? {}),
         ...(core.api('media').ordinals?.() ?? {}),
     };
     // The drawing APIs are libraries like any other as far as a program is

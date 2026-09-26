@@ -118,6 +118,16 @@ test('a configured screen reaches the libraries that answer for one', async()=>{
     await win32Module.dispose();
 });
 
+test('WINMM\'s ordinal 2 is PlaySoundA, as winmm.spec numbers it', async()=>{
+    // Exported by number and without a name on Windows; a program importing it
+    // that way bound to timeBeginPeriod, which pops four bytes rather than
+    // twelve.
+    const api = await win32Module.create({ screen: SCREEN }, stubHost());
+    assert.equal(api.ordinals()['WINMM.dll'][2], 'PlaySoundA');
+    assert.equal(api.libraries()['WINMM.dll'].PlaySoundA.argBytes, 12);
+    await win32Module.dispose();
+});
+
 test('a DC taken through user32 is one GDI answers for', async()=>{
     // A program asks the display about itself through its own window: GetDC
     // on the window, GetDeviceCaps on what came back. Both libraries live in
