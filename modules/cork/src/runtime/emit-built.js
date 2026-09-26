@@ -66,8 +66,8 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @property {Map<string, { typeIndex: number, locals: number[], body: Uint8Array,
  *     hints: number[], region: Omit<BatchRegion, 'exportName'>, shape: Float64Array,
  *     size: number }>} kept
- *     by the module's context, the region's entry and hash, and the x87 top and shape
- *     test it was compiled for, the least recently used first; `shape` is `shapeOf` the
+ *     by the module's context, the region's entry and hash, and what its job asked of the
+ *     emitter (`jobKey`), the least recently used first; `shape` is `shapeOf` the
  *     region, which a hit must match, and `region` what the emitter answered, shared by
  *     every batch that takes the function (nothing writes it)
  * @property {Map<string, number>} contexts  `contextKey` → the number keys name it by
@@ -148,6 +148,26 @@ function shapeOf(region){
         }
     }
     return shape;
+}
+
+/**
+ * What a job asks of the emitter besides its region -- the x87 top, the shape
+ * test and whatever else a job carries -- every one of them part of the key; a
+ * flag left out and one that is false ask the same.
+ *
+ * @param {Record<string, unknown>} job
+ */
+function jobKey(job){
+    let key = '';
+    for (const name of Object.keys(job).sort())
+    {
+        const value = job[name];
+        if (name !== 'region' && value !== undefined && value !== false)
+        {
+            key += `${name}=${JSON.stringify(value)};`;
+        }
+    }
+    return key;
 }
 
 /** @param {Float64Array} kept @param {number[]} shape */
@@ -252,12 +272,13 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
     /** Each job's function, for the dispatcher. @type {(number | null)[]} */
     const functions = jobs.map(()=>null);
     /** @type {BuiltBatch['results']} */
-    const results = jobs.map(({ region, entryTop, checked }, index)=>{
+    const results = jobs.map((job, index)=>{
+        const { region, entryTop, checked } = job;
         try
         {
             const shape = cache === undefined ? null : shapeOf(region);
             const key = shape === null ? ''
-                : `${prepared}:${region.entry}:${region.hash}:${entryTop}:${checked === true}`;
+                : `${prepared}:${region.entry}:${region.hash}:${jobKey(job)}`;
             const kept = shape === null ? undefined : cache?.kept.get(key);
             let functionIndex;
             /** @type {Omit<BatchRegion, 'exportName'>} */
@@ -274,6 +295,8 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
             }
             else
             {
+                const { functions: made, types, globals, imports } = m;
+                const before = [made.length, types.length, globals.length, imports.length];
                 // The emitter adds the function only once the region is written,
                 // so a region it fails on leaves the module as it was.
                 const translation = emitRegion(context, region,
@@ -289,7 +312,13 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
                     relaxedReads: [...translation.relaxedReads],
                     x87RelaxedReads: translation.x87RelaxedReads,
                 };
-                if (cache !== undefined && shape !== null)
+                // Kept only when the region added its one function and nothing
+                // else to the module: its body then names no index of the module
+                // but those `prepareModule` hands out alike in every module.
+                if (cache !== undefined && shape !== null && made.length === before[0] + 1
+                    && functionIndex === m.importedFunctions + before[0]
+                    && types.length === before[1] && globals.length === before[2]
+                    && imports.length === before[3])
                 {
                     keep(cache, key, shape, m.functions[functionIndex - m.importedFunctions],
                         built);

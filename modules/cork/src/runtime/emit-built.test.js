@@ -84,6 +84,18 @@ test('a relink takes the functions a batch emitted before, the same bytes as emi
         relinkBatch(again, layout, FEATURES, { ...OPTIONS, wide: true }).module);
 });
 
+test('a job that asks the emitter for anything else takes no other job\'s function', ()=>{
+    const relink = relinkOf('game-x87', 6);
+    const cache = createEmitCache();
+    relinkBatch(relink, layout, FEATURES, OPTIONS, cache);
+    const checked = { ...relink, jobs: relink.jobs.map(job=>({ ...job, checked: true })) };
+    const kept = relinkBatch(checked, layout, FEATURES, OPTIONS, cache);
+    assert.equal(cache.hits, 0);
+    assert.deepEqual(kept.module, relinkBatch(checked, layout, FEATURES, OPTIONS).module);
+    relinkBatch(checked, layout, FEATURES, OPTIONS, cache);
+    assert.equal(cache.hits, relink.jobs.length);
+});
+
 test('a region whose bytes changed is formed again and answered changed, whatever the'
     + ' cache holds', ()=>{
     const relink = relinkOf('crc-x87', 4);
