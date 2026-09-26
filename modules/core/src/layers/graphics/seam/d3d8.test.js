@@ -28,7 +28,9 @@ import { createGraphicsLibraries } from './exports.js';
 import { BUFFER, SHADOW, STALE_POINTER, TEXTURE } from './shadow.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
+    IDIRECT3DVERTEXBUFFER8_SLOTS,
 } from './vtables.js';
+import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js';
 import { REFRESH_HZ } from '../../win32/user32/display.js';
 import { createSystemFunctions } from '../../win32/user32/system.js';
 import {
@@ -1037,6 +1039,176 @@ test('a texture and an index buffer answer QueryInterface for the GUIDs d3d8.h g
         assert.equal(h.release(device), 0);
         h.release(root);
     });
+
+test('every resource answers what IDirect3DResource8 asks of it', ()=>{
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const out = 0xe000;
+    /** @param {number} pool */
+    const texture = pool=>{
+        assert.equal(h.device(device, 'CreateTexture',
+            [16, 16, 3, 0, D3DFMT.X8R8G8B8, pool, out]), D3D_OK);
+        return h.box.memory.readU32(out);
+    };
+    /** @param {number} pool @param {number} [usage] */
+    const vertices = (pool, usage = 0)=>{
+        assert.equal(h.device(device, 'CreateVertexBuffer', [256, usage, 0x102, pool, out]),
+            D3D_OK);
+        return h.box.memory.readU32(out);
+    };
+    /** @param {number} pointer @param {string} name @param {number[]} args */
+    const vb = (pointer, name, args = [])=>
+        h.box.call(pointer, slot(IDIRECT3DVERTEXBUFFER8_SLOTS, name), args);
+
+    // GetType returns the kind itself, not an HRESULT (Wine's d3d8
+    // test_resource_type).
+    const managed = texture(D3DPOOL.MANAGED);
+    assert.equal(h.texture(managed, 'GetType'), 3, 'D3DRTYPE_TEXTURE');
+    const buffer = vertices(D3DPOOL.MANAGED, 0x200);
+    assert.equal(vb(buffer, 'GetType'), 6, 'D3DRTYPE_VERTEXBUFFER');
+    assert.equal(h.device(device, 'CreateIndexBuffer', [64, 0, 101, D3DPOOL.SYSTEMMEM, out]),
+        D3D_OK);
+    const indices = h.box.memory.readU32(out);
+    assert.equal(vb(indices, 'GetType'), 7, 'D3DRTYPE_INDEXBUFFER');
+
+    // The descriptions read back what the buffers were made as.
+    const desc = 0xe100;
+    h.box.services.writeMemory(desc, new Uint8Array(32).fill(0xcd));
+    assert.equal(vb(buffer, 'GetDesc', [desc]), D3D_OK);
+    assert.deepEqual(h.fields.readStruct(desc, D3DVERTEXBUFFER_DESC9), {
+        Format: 100, Type: 6, Usage: 0x200, Pool: D3DPOOL.MANAGED, Size: 256, FVF: 0x102,
+    });
+    h.box.services.writeMemory(desc, new Uint8Array(32).fill(0xcd));
+    assert.equal(vb(indices, 'GetDesc', [desc]), D3D_OK);
+    assert.deepEqual(h.fields.readStruct(desc, D3DINDEXBUFFER_DESC9), {
+        Format: 101, Type: 7, Usage: 0, Pool: D3DPOOL.SYSTEMMEM, Size: 64,
+    });
+    assert.equal(h.fields.readU32(desc + D3DINDEXBUFFER_DESC9.SIZE), 0xcdcdcdcd,
+        'an index buffer\'s description has no FVF to write');
+    assert.equal(vb(buffer, 'GetDesc', [0]), D3DERR_INVALIDCALL);
+
+    // Only a managed resource keeps a priority; Set answers the one before
+    // (Wine's d3d8 test_resource_priority).
+    for (const [pool, keeps] of /** @type {[number, boolean][]} */ ([[D3DPOOL.DEFAULT, false],
+        [D3DPOOL.SYSTEMMEM, false], [D3DPOOL.MANAGED, true]]))
+    {
+        // The resource slots are the front of every resource's table.
+        for (const resource of [texture(pool), vertices(pool)])
+        {
+            assert.equal(vb(resource, 'GetPriority'), 0);
+            assert.equal(vb(resource, 'SetPriority', [1]), 0);
+            assert.equal(vb(resource, 'GetPriority'), keeps ? 1 : 0, `pool ${pool}`);
+            assert.equal(vb(resource, 'SetPriority', [0]), keeps ? 1 : 0);
+            assert.equal(vb(resource, 'PreLoad'), 0);
+            assert.equal(h.release(resource), 0);
+        }
+    }
+
+    // A level of detail is a managed texture's alone, clamped to its last
+    // level; the call answers the level before.
+    const unmanaged = texture(D3DPOOL.DEFAULT);
+    assert.equal(h.texture(unmanaged, 'SetLOD', [2]), 0);
+    assert.equal(h.texture(unmanaged, 'GetLOD'), 0);
+    assert.equal(h.texture(managed, 'SetLOD', [1]), 0);
+    assert.equal(h.texture(managed, 'GetLOD'), 1);
+    assert.equal(h.texture(managed, 'SetLOD', [7]), 1);
+    assert.equal(h.texture(managed, 'GetLOD'), 2, 'the last of three levels');
+
+    // Every resource names the device that made it, with a reference.
+    const got = 0xe200;
+    const before = h.object(device).refCount;
+    for (const resource of [managed, buffer, indices])
+    {
+        h.box.memory.writeU32(got, 0);
+        assert.equal(vb(resource, 'GetDevice', [got]), D3D_OK);
+        assert.equal(h.box.memory.readU32(got), device);
+    }
+    assert.equal(h.object(device).refCount, before + 3);
+    for (let index = 0; index < 3; index++)
+    {
+        h.release(device);
+    }
+
+    assert.equal(h.release(unmanaged), 0);
+    assert.equal(h.release(managed), 0);
+    assert.equal(h.release(buffer), 0);
+    assert.equal(h.release(indices), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('a surface names its container as QueryInterface on it would, and its device', ()=>{
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const out = 0xe000;
+    assert.equal(h.device(device, 'CreateTexture',
+        [128, 128, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out]), D3D_OK);
+    const texture = h.box.memory.readU32(out);
+    assert.equal(h.texture(texture, 'GetSurfaceLevel', [0, out]), D3D_OK);
+    const level = h.box.memory.readU32(out);
+    const iid = 0xe100;
+    const container = 0xe200;
+
+    // IDirect3DTexture8 is the pointer the program holds, with a reference.
+    putGuid(h, iid, [0xE4CDD575, 0x2866, 0x4F01, 0xB1, 0x2E, 0x7E, 0xEC, 0xE1, 0xEC, 0x93,
+        0x58]);
+    assert.equal(h.surface(level, 'GetContainer', [iid, container]), D3D_OK);
+    assert.equal(h.box.memory.readU32(container), texture);
+    assert.equal(h.object(texture).refCount, 3, 'the texture, its level, and the container');
+    h.release(texture);
+    // The interfaces it derives from answer too: IDirect3DBaseTexture8 is
+    // callable as one, and IUnknown is the identity QueryInterface gives.
+    putGuid(h, iid, [0xB4211CFA, 0x51B9, 0x4A9F, 0xAB, 0x78, 0xDB, 0x99, 0xB2, 0xBB, 0x67,
+        0x8E]);
+    assert.equal(h.surface(level, 'GetContainer', [iid, container]), D3D_OK);
+    const base = h.box.memory.readU32(container);
+    assert.notEqual(base, 0);
+    assert.equal(h.box.call(base, slot(IDIRECT3DTEXTURE8_SLOTS, 'GetLevelCount')), 1);
+    h.release(base);
+    putGuid(h, iid, [0x00000000, 0x0000, 0x0000, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x46]);
+    const identity = 0xe300;
+    assert.equal(h.surface(level, 'GetContainer', [iid, container]), D3D_OK);
+    assert.equal(h.box.call(texture, 0, [iid, identity]), D3D_OK);
+    assert.equal(h.box.memory.readU32(container), h.box.memory.readU32(identity),
+        'one identity, however it is reached');
+    h.release(texture);
+    h.release(texture);
+    // A surface is not what holds a surface: E_NOINTERFACE, and the pointer
+    // cleared.
+    putGuid(h, iid, [0xB96EEBCA, 0xB326, 0x4EA5, 0x88, 0x2F, 0x2F, 0xF5, 0xBA, 0xE0, 0x21,
+        0xDD]);
+    h.box.memory.writeU32(container, 0x1337c0d3);
+    assert.equal(h.surface(level, 'GetContainer', [iid, container]), 0x80004002);
+    assert.equal(h.box.memory.readU32(container), 0);
+
+    // A surface of its own, the back buffer included, is held by the device.
+    putGuid(h, iid, [0x7385E5DF, 0x8FE8, 0x41D5, 0x86, 0xB6, 0xD7, 0xB4, 0x85, 0x47, 0xB6,
+        0xCF]);
+    assert.equal(h.device(device, 'GetBackBuffer', [0, 0, out]), D3D_OK);
+    const back = h.box.memory.readU32(out);
+    assert.equal(h.surface(back, 'GetContainer', [iid, container]), D3D_OK);
+    assert.equal(h.box.memory.readU32(container), device);
+    h.release(device);
+    assert.equal(h.device(device, 'CreateImageSurface', [8, 8, D3DFMT.X8R8G8B8, out]), D3D_OK);
+    const image = h.box.memory.readU32(out);
+    for (const surface of [level, back, image])
+    {
+        h.box.memory.writeU32(container, 0);
+        assert.equal(h.surface(surface, 'GetDevice', [container]), D3D_OK);
+        assert.equal(h.box.memory.readU32(container), device);
+        h.release(device);
+    }
+
+    assert.equal(h.release(image), 0);
+    assert.equal(h.release(back), 0);
+    assert.equal(h.release(level), 1);
+    assert.equal(h.release(texture), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
 
 test('a stream and an index binding read back as the buffers they were given', ()=>{
     const h = seamed();

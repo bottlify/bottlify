@@ -202,6 +202,9 @@ export const D3DFMT_INDEX = Object.freeze({
     INDEX32: 102,
 });
 
+/** D3DFMT_VERTEXDATA: the format a vertex buffer describes itself as. */
+export const D3DFMT_VERTEXDATA = 100;
+
 /**
  * D3DTRANSFORMSTATETYPE. A world matrix is numbered from 256 upward:
  * D3DTS_WORLD is D3DTS_WORLDMATRIX(0), and 255 more follow it.

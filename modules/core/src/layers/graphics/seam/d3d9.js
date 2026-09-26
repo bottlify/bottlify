@@ -32,11 +32,13 @@ import {
     D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS9, POINT, RECT, createFields,
 } from './structs.js';
 import {
-    IDIRECT3DCUBETEXTURE9_SLOTS, IDIRECT3DDEVICE9_SLOTS, IDIRECT3DINDEXBUFFER9_SLOTS,
-    IDIRECT3DQUERY9_SLOTS, IDIRECT3DSHADER9_SLOTS, IDIRECT3DSTATEBLOCK9_SLOTS,
+    IDIRECT3DBASETEXTURE9_SLOTS, IDIRECT3DCUBETEXTURE9_SLOTS, IDIRECT3DDEVICE9_SLOTS,
+    IDIRECT3DINDEXBUFFER9_SLOTS, IDIRECT3DQUERY9_SLOTS, IDIRECT3DRESOURCE9_SLOTS,
+    IDIRECT3DSHADER9_SLOTS, IDIRECT3DSTATEBLOCK9_SLOTS,
     IDIRECT3DSURFACE9_SLOTS, IDIRECT3DSWAPCHAIN9_SLOTS, IDIRECT3DTEXTURE9_SLOTS,
     IDIRECT3DVERTEXBUFFER9_SLOTS, IDIRECT3DVERTEXDECLARATION9_SLOTS, IID_IDirect3D9,
-    IID_IDirect3DCubeTexture9, IID_IDirect3DDevice9, IID_IDirect3DIndexBuffer9,
+    IID_IDirect3DBaseTexture9, IID_IDirect3DCubeTexture9, IID_IDirect3DDevice9,
+    IID_IDirect3DIndexBuffer9, IID_IDirect3DResource9,
     IID_IDirect3DPixelShader9, IID_IDirect3DQuery9, IID_IDirect3DStateBlock9,
     IID_IDirect3DSurface9, IID_IDirect3DSwapChain9, IID_IDirect3DTexture9,
     IID_IDirect3DVertexBuffer9, IID_IDirect3DVertexDeclaration9, IID_IDirect3DVertexShader9,
@@ -59,6 +61,7 @@ import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 import { createRaster, rasterStatus } from './raster.js';
+import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 
 const D3D_OK = 0;
@@ -217,17 +220,19 @@ export function createDirect3D9Seam(
     };
 
     /**
-     * What every resource interface answers in its first eight slots. Private
-     * data is not kept, so those three slots stay E_NOTIMPL; priorities are
-     * accepted and read back as zero, since nothing here manages residency.
+     * What every resource interface answers in its first eight slots. A
+     * priority is the resource's own, and only a managed one keeps it; a
+     * surface has none to keep and reads back zero whatever it was told.
      *
      * @param {number} type  D3DRTYPE, or a function of the object for a texture.
      */
     const resourceMethods = (/** @type {number | ((object: any) => number)} */ type)=>({
         ...privateData.methods,
         GetDevice: getDevice,
-        SetPriority: ()=>0,
-        GetPriority: ()=>0,
+        /** @param {any} resource @param {number[]} args */
+        SetPriority: (resource, [priority])=>resource.SetPriority?.(priority >>> 0) ?? 0,
+        /** @param {any} resource */
+        GetPriority: resource=>resource.GetPriority?.() ?? 0,
         PreLoad: ()=>0,
         /** @param {any} object */
         GetType: object=>(typeof type === 'function' ? type(object) : type),
@@ -466,6 +471,7 @@ export function createDirect3D9Seam(
         return null;
     };
 
+    /** @type {import('./com.js').InterfaceDescriptor[]} */
     const surfaceInterfaces = [describe(IID_IDirect3DSurface9, IDIRECT3DSURFACE9_SLOTS, {
         ...resourceMethods(D3DRTYPE.SURFACE),
         /** @param {any} surface @param {number[]} args */
@@ -523,6 +529,39 @@ export function createDirect3D9Seam(
         },
         /** @param {any} surface @param {number[]} args */
         ReleaseDC: (surface, [dc])=>(gdi ? surface.ReleaseDC(dc >>> 0, gdi) : D3DERR_INVALIDCALL),
+
+        /**
+         * QueryInterface on what holds the surface: the texture a level
+         * belongs to, the swap chain a back buffer belongs to, and the device
+         * for a surface of its own (Wine's d3d9 test_surface_get_container and
+         * test_refcount).
+         *
+         * @param {any} surface @param {number[]} args
+         * @returns {number}
+         */
+        GetContainer: (surface, [riid, out])=>{
+            if ((riid >>> 0) === 0 || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const id = readGuid(memory, riid);
+            const container = surface.container ?? null;
+            if (container?.GetBackBuffer)
+            {
+                return queryAs(publisher, fields, container, swapChainInterfaces, id, out);
+            }
+            if (container)
+            {
+                return queryAs(publisher, fields, container, textureInterfacesFor(container), id,
+                    out);
+            }
+            const device = owners.get(surface);
+            if (!device)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            return queryAs(publisher, fields, device, deviceInterfaces, id, out);
+        },
     }, {}, privateData.released)];
 
     /**
@@ -531,8 +570,10 @@ export function createDirect3D9Seam(
      * @param {any} texture
      */
     const baseTextureMethods = {
-        SetLOD: ()=>0,
-        GetLOD: ()=>0,
+        /** @param {any} texture @param {number[]} args */
+        SetLOD: (texture, [lod])=>texture.SetLOD(lod >>> 0),
+        /** @param {any} texture */
+        GetLOD: texture=>texture.GetLOD(),
         /** @param {any} texture */
         GetLevelCount: texture=>texture.levels ?? 1,
         SetAutoGenFilterType: ()=>D3D_OK,
@@ -567,7 +608,7 @@ export function createDirect3D9Seam(
         return D3D_OK;
     };
 
-    const textureInterfaces = [describe(IID_IDirect3DTexture9, IDIRECT3DTEXTURE9_SLOTS, {
+    const textureMethods = {
         ...resourceMethods(D3DRTYPE.TEXTURE),
         ...baseTextureMethods,
         /** @param {any} texture @param {number[]} args */
@@ -602,14 +643,27 @@ export function createDirect3D9Seam(
         UnlockRect: (texture, [level])=>texture.UnlockRect(level >>> 0),
         // An unlock already marks the whole level for upload.
         AddDirtyRect: ()=>D3D_OK,
-    }, {}, privateData.released)];
+    };
+    const cubeTextureMethods = {
+        ...resourceMethods(D3DRTYPE.CUBETEXTURE),
+        ...baseTextureMethods,
+    };
 
-    const cubeTextureInterfaces = [
-        describe(IID_IDirect3DCubeTexture9, IDIRECT3DCUBETEXTURE9_SLOTS, {
-            ...resourceMethods(D3DRTYPE.CUBETEXTURE),
-            ...baseTextureMethods,
-        }, {}, privateData.released),
+    /**
+     * A texture kind's own interface, and the two it derives from over the
+     * same methods: their slots are the front of its own.
+     *
+     * @param {string} id @param {[string, number][]} slots @param {any} methods
+     */
+    const textureFamily = (id, slots, methods)=>[
+        describe(id, slots, methods, {}, privateData.released),
+        describe(IID_IDirect3DBaseTexture9, IDIRECT3DBASETEXTURE9_SLOTS, methods),
+        describe(IID_IDirect3DResource9, IDIRECT3DRESOURCE9_SLOTS, methods),
     ];
+    const textureInterfaces = textureFamily(IID_IDirect3DTexture9, IDIRECT3DTEXTURE9_SLOTS,
+        textureMethods);
+    const cubeTextureInterfaces = textureFamily(IID_IDirect3DCubeTexture9,
+        IDIRECT3DCUBETEXTURE9_SLOTS, cubeTextureMethods);
 
     /**
      * A buffer hands back an address in the guest's own memory, so locking is
@@ -778,6 +832,7 @@ export function createDirect3D9Seam(
         fields.writeStruct(address, D3DRASTER_STATUS, rasterStatus(raster));
     };
 
+    /** @type {import('./com.js').InterfaceDescriptor[]} */
     const swapChainInterfaces = [describe(IID_IDirect3DSwapChain9, IDIRECT3DSWAPCHAIN9_SLOTS, {
         /** @param {any} chain */
         Present: chain=>chain.Present(),

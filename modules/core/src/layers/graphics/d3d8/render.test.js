@@ -1322,6 +1322,37 @@ test('mips can be switched off for a run, and every sample comes from the top le
         'the top level alone, whatever the program asked');
 });
 
+test('recorded: a managed texture\'s level of detail is the finest level a sample reaches',
+    async()=>{
+        // Wine's d3d9 maxmip_test: the finer of MAXMIPLEVEL and the texture's
+        // own LOD limits the sample, and a LOD set between two draws of one
+        // state is the second draw's.
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(4, 4, 3, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, out),
+            D3D_OK);
+        const texture = out.texture;
+        assert.equal(device.SetTexture(0, texture), D3D_OK);
+        selectTexture(device);
+        assert.equal(device.SetTextureStageState(0, D3DTSS.MIPFILTER, D3DTEXF.POINT), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+        const draw = async()=>{
+            assert.equal(device.BeginScene(), D3D_OK);
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28),
+                D3D_OK);
+            assert.equal(device.EndScene(), D3D_OK);
+            await h.present();
+            return (stageFlagsWritten(gpu) >> 8) & 0xff;
+        };
+        assert.equal(await draw(), 0);
+        assert.equal(texture.SetLOD(1), 0);
+        assert.equal(await draw(), 1, 'the texture\'s level');
+        assert.equal(device.SetTextureStageState(0, D3DTSS.MAXMIPLEVEL, 2), D3D_OK);
+        assert.equal(await draw(), 2, 'the stage\'s, when it is the coarser');
+    });
+
 test('recorded: with ZENABLE off no depth is written, whatever ZWRITEENABLE says', async()=>{
     // Direct3D ties the write to the test: ZENABLE=FALSE with ZWRITEENABLE=TRUE
     // leaves the depth buffer as it was. WebGPU writes under an 'always'

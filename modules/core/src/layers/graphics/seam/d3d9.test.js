@@ -599,6 +599,133 @@ test('a texture is made without a shared handle, described and locked at this ve
         h.release(root);
     });
 
+/**
+ * A GUID as DEFINE_GUID spells it, into guest memory.
+ *
+ * @param {any} h @param {number} at @param {number[]} parts
+ */
+const putGuid = (h, at, [data1, data2, data3, ...tail])=>{
+    const bytes = new Uint8Array(16);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, data1, true);
+    view.setUint16(4, data2, true);
+    view.setUint16(6, data3, true);
+    bytes.set(tail, 8);
+    h.box.services.writeMemory(at, bytes);
+};
+
+test('a managed resource keeps its priority and level of detail, and nothing else does', ()=>{
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const out = 0x3000;
+    /** @param {number} pointer @param {string} name @param {number[]} [args] */
+    const call = (pointer, name, args = [])=>
+        h.box.call(pointer, slot(IDIRECT3DTEXTURE9_SLOTS, name), args);
+    // Wine's d3d9 test_resource_priority: Set answers the priority before,
+    // and only the managed pool keeps what it was told -- a texture's level
+    // surface never does.
+    for (const [pool, keeps] of /** @type {[number, boolean][]} */ ([[D3DPOOL.DEFAULT, false],
+        [D3DPOOL.SYSTEMMEM, false], [D3DPOOL.MANAGED, true]]))
+    {
+        assert.equal(h.device(device, 'CreateTexture',
+            [16, 16, 3, 0, D3DFMT.X8R8G8B8, pool, out, 0]), D3D_OK);
+        const texture = h.box.memory.readU32(out);
+        assert.equal(call(texture, 'GetPriority'), 0);
+        assert.equal(call(texture, 'SetPriority', [1]), 0);
+        assert.equal(call(texture, 'GetPriority'), keeps ? 1 : 0);
+        assert.equal(call(texture, 'SetPriority', [2]), keeps ? 1 : 0);
+        assert.equal(call(texture, 'GetSurfaceLevel', [0, out]), D3D_OK);
+        const level = h.box.memory.readU32(out);
+        /** @param {string} name @param {number[]} [args] */
+        const onLevel = (name, args = [])=>
+            h.box.call(level, slot(IDIRECT3DSURFACE9_SLOTS, name), args);
+        assert.equal(onLevel('SetPriority', [1]), 0);
+        assert.equal(onLevel('GetPriority'), 0);
+        // Wine's test_lod and maxmip_test: the level of detail is a managed
+        // texture's alone, and a level past the last is the last.
+        assert.equal(call(texture, 'SetLOD', [1]), 0);
+        assert.equal(call(texture, 'GetLOD'), keeps ? 1 : 0);
+        assert.equal(call(texture, 'SetLOD', [5]), keeps ? 1 : 0);
+        assert.equal(call(texture, 'GetLOD'), keeps ? 2 : 0);
+        h.release(level);
+        assert.equal(h.release(texture), 0);
+
+        assert.equal(h.device(device, 'CreateVertexBuffer', [64, 0, 0, pool, out, 0]), D3D_OK);
+        const buffer = h.box.memory.readU32(out);
+        assert.equal(call(buffer, 'SetPriority', [1]), 0);
+        assert.equal(call(buffer, 'GetPriority'), keeps ? 1 : 0);
+        assert.equal(h.release(buffer), 0);
+    }
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('a surface names its container: its texture, its swap chain, or its device', ()=>{
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const out = 0x3000;
+    const iid = 0x3100;
+    const container = 0x3200;
+    /** @param {number} surface */
+    const containerOf = surface=>{
+        h.box.memory.writeU32(container, 0x1337c0d3);
+        const hr = h.box.call(surface, slot(IDIRECT3DSURFACE9_SLOTS, 'GetContainer'),
+            [iid, container]);
+        return { hr, pointer: h.box.memory.readU32(container) };
+    };
+    assert.equal(h.device(device, 'CreateTexture',
+        [128, 128, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out, 0]), D3D_OK);
+    const texture = h.box.memory.readU32(out);
+    assert.equal(h.box.call(texture, slot(IDIRECT3DTEXTURE9_SLOTS, 'GetSurfaceLevel'),
+        [0, out]), D3D_OK);
+    const level = h.box.memory.readU32(out);
+
+    // Wine's d3d9 test_surface_get_container.
+    putGuid(h, iid, [0x85c31227, 0x3de5, 0x4f00, 0x9b, 0x3a, 0xf1, 0x1a, 0xc3, 0x8c, 0x18,
+        0xb5]);
+    assert.deepEqual(containerOf(level), { hr: D3D_OK, pointer: texture },
+        'IDirect3DTexture9 is the pointer the program holds');
+    h.release(texture);
+    putGuid(h, iid, [0x580ca87e, 0x1d3c, 0x4d54, 0x99, 0x1d, 0xb7, 0xd3, 0xe3, 0xc2, 0x98,
+        0xce]);
+    const base = containerOf(level);
+    assert.equal(base.hr, D3D_OK, 'IDirect3DBaseTexture9');
+    assert.equal(h.box.call(base.pointer, slot(IDIRECT3DTEXTURE9_SLOTS, 'GetLevelCount')), 1);
+    h.release(base.pointer);
+    putGuid(h, iid, [0x0cfbaf3a, 0x9ff6, 0x429a, 0x99, 0xb3, 0xa2, 0x79, 0x6a, 0xf8, 0xb8,
+        0x9b]);
+    assert.deepEqual(containerOf(level), { hr: 0x80004002, pointer: 0 },
+        'a surface does not hold a surface');
+
+    // test_refcount: the back buffer's container is the swap chain, a depth
+    // stencil's the device.
+    putGuid(h, iid, [0x794950f2, 0xadfc, 0x458a, 0x90, 0x5e, 0x10, 0xa1, 0x0b, 0x0b, 0x50,
+        0x3b]);
+    assert.equal(h.device(device, 'GetBackBuffer', [0, 0, 0, out]), D3D_OK);
+    const back = h.box.memory.readU32(out);
+    assert.equal(h.device(device, 'GetSwapChain', [0, out]), D3D_OK);
+    const chain = h.box.memory.readU32(out);
+    assert.deepEqual(containerOf(back), { hr: D3D_OK, pointer: chain });
+    h.release(chain);
+    putGuid(h, iid, [0xd0223b96, 0xbf7a, 0x43fd, 0x92, 0xbd, 0xa4, 0x3b, 0x0d, 0x82, 0xb9,
+        0xeb]);
+    assert.equal(h.device(device, 'CreateDepthStencilSurface',
+        [16, 16, D3DFMT.D24S8, 0, 0, 0, out, 0]), D3D_OK);
+    const depth = h.box.memory.readU32(out);
+    assert.deepEqual(containerOf(depth), { hr: D3D_OK, pointer: device });
+    h.release(device);
+
+    assert.equal(h.release(depth), 0);
+    h.release(chain);
+    assert.equal(h.release(back), 0);
+    assert.equal(h.release(level), 1);
+    assert.equal(h.release(texture), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
 test('a cube or volume texture is refused, and the caller\'s pointer cleared', ()=>{
     const h = seamed();
     const root = h.create();

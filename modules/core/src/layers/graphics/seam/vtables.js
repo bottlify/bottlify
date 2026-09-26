@@ -275,7 +275,7 @@ export const IDIRECT3DDEVICE8_SLOTS = /** @type {[string, number][]} */ ([
  * front of its own list. A derived interface names its base's methods again
  * because that is what the guest compiled against.
  */
-const RESOURCE8_SLOTS = /** @type {[string, number][]} */ ([
+export const IDIRECT3DRESOURCE8_SLOTS = /** @type {[string, number][]} */ ([
     ['GetDevice', 1],
     ['SetPrivateData', 4],
     ['GetPrivateData', 3],
@@ -284,6 +284,14 @@ const RESOURCE8_SLOTS = /** @type {[string, number][]} */ ([
     ['GetPriority', 0],
     ['PreLoad', 0],
     ['GetType', 0],
+]);
+
+/** IDirect3DBaseTexture8: a resource, then the three every texture kind shares. */
+export const IDIRECT3DBASETEXTURE8_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDIRECT3DRESOURCE8_SLOTS,
+    ['SetLOD', 1],
+    ['GetLOD', 0],
+    ['GetLevelCount', 0],
 ]);
 
 /** IDirect3DSurface8. Not a resource: it has its own short list. */
@@ -300,10 +308,7 @@ export const IDIRECT3DSURFACE8_SLOTS = /** @type {[string, number][]} */ ([
 
 /** IDirect3DTexture8: a resource, then the base-texture three, then its own. */
 export const IDIRECT3DTEXTURE8_SLOTS = /** @type {[string, number][]} */ ([
-    ...RESOURCE8_SLOTS,
-    ['SetLOD', 1],
-    ['GetLOD', 0],
-    ['GetLevelCount', 0],
+    ...IDIRECT3DBASETEXTURE8_SLOTS,
     ['GetLevelDesc', 2],
     ['GetSurfaceLevel', 2],
     ['LockRect', 4],
@@ -313,7 +318,7 @@ export const IDIRECT3DTEXTURE8_SLOTS = /** @type {[string, number][]} */ ([
 
 /** IDirect3DVertexBuffer8. */
 export const IDIRECT3DVERTEXBUFFER8_SLOTS = /** @type {[string, number][]} */ ([
-    ...RESOURCE8_SLOTS,
+    ...IDIRECT3DRESOURCE8_SLOTS,
     ['Lock', 4],
     ['Unlock', 0],
     ['GetDesc', 1],

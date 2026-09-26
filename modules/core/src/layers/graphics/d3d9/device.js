@@ -61,7 +61,7 @@ import {
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import { createDefaultRenderStates } from './renderstates.js';
 import {
-    createReferenceCount, createSurface, createTexture, packColour, writePixels,
+    createPriority, createReferenceCount, createSurface, createTexture, packColour, writePixels,
 } from './resources.js';
 import { SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters } from './validity.js';
 import { validateStages } from '../d3d8/validity.js';
@@ -931,6 +931,15 @@ function createDeviceObject(parameters, caps, services, identity){
         },
     };
 
+    /** The back buffers are the swap chain's, which is what GetContainer answers. */
+    const adoptBackBuffers = ()=>{
+        for (const surface of backBuffers)
+        {
+            surface.container = swapChain;
+        }
+    };
+    adoptBackBuffers();
+
     renderTargets.set(0, backBuffers[0]);
 
     /** @param {number} index */
@@ -960,6 +969,7 @@ function createDeviceObject(parameters, caps, services, identity){
         const buffer = {
             ...options,
             base,
+            ...createPriority(options.pool),
             get refCount(){
                 return bufferCount.value;
             },
@@ -1635,6 +1645,7 @@ function createDeviceObject(parameters, caps, services, identity){
             indices = null;
             baseVertexIndex = 0;
             makeImplicitSurfaces();
+            adoptBackBuffers();
             renderTargets.clear();
             renderTargets.set(0, backBuffers[0]);
             depthStencil = autoDepthStencil;

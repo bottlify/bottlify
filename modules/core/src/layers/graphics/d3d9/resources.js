@@ -33,8 +33,8 @@
  */
 
 import {
-    D3DERR_INVALIDCALL, D3DFMT, D3DRTYPE, D3D_OK, FORMAT_INFO, offsetOfRect, surfaceBytes,
-    surfacePitch,
+    D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRTYPE, D3D_OK, FORMAT_INFO, offsetOfRect,
+    surfaceBytes, surfacePitch,
 } from './constants.js';
 import { SURFACE_TYPE, surfaceIsLockable } from './validity.js';
 
@@ -103,6 +103,31 @@ export function createReferenceCount(options = {}){
 }
 
 /**
+ * A resource's priority, which a managed resource alone keeps: it is a hint
+ * to the manager that evicts, and nothing else is ever evicted, so every
+ * other pool reads back zero whatever it was told (Wine's d3d8 and d3d9
+ * test_resource_priority). Setting answers the priority before.
+ *
+ * @param {number} pool  D3DPOOL
+ */
+export function createPriority(pool){
+    let priority = 0;
+    return {
+        /** @param {number} next @returns {number} */
+        SetPriority(next){
+            const was = priority;
+            if (pool === D3DPOOL.MANAGED)
+            {
+                priority = next >>> 0;
+            }
+            return was;
+        },
+        /** @returns {number} */
+        GetPriority: ()=>priority,
+    };
+}
+
+/**
  * @typedef {Object} LockedRect
  * @property {number} pBits   Byte address of the first pixel of the locked area.
  * @property {number} Pitch   Bytes between two rows, unchanged by a partial lock.
@@ -153,6 +178,7 @@ export function createReferenceCount(options = {}){
  * @property {() => number} UnlockRect
  * @property {(out: { desc?: SurfaceDesc }) => number} GetDesc
  * @property {number} lockFlags   The flags of the lock in force, if one is.
+ * @property {any} [container]    The texture a level belongs to; absent for a surface of its own.
  * @property {(gdi: SurfaceGdi, out: { dc?: number }) => number | Promise<number>} GetDC
  * @property {(handle: number, gdi: SurfaceGdi) => number} ReleaseDC
  */
@@ -590,14 +616,41 @@ export function createTexture(options){
             rejectsMalformedRects: options.rejectsMalformedRects,
             family,
         });
+        surface.container = texture;
         surfaces.set(key, surface);
         return surface;
     };
 
-    return {
+    /** The most detailed level a managed texture lets a sample reach. */
+    let lod = 0;
+
+    const texture = {
         levels: options.levels,
         cube,
+        pool: options.pool,
         type: cube ? D3DRTYPE.CUBETEXTURE : D3DRTYPE.TEXTURE,
+        ...createPriority(options.pool),
+
+        /**
+         * Only a managed texture keeps its level of detail; the call returns
+         * no HRESULT, so for any other pool it is ignored and reads back as
+         * zero (Wine's d3d9 test_lod). A level past the last is the last.
+         *
+         * @param {number} next
+         * @returns {number} the level before
+         */
+        SetLOD(next){
+            const was = lod;
+            if (options.pool === D3DPOOL.MANAGED)
+            {
+                lod = Math.min(next >>> 0, options.levels - 1);
+            }
+            return was;
+        },
+
+        /** @returns {number} */
+        GetLOD: ()=>lod,
+
         get refCount(){
             return options.count.value;
         },
@@ -695,4 +748,5 @@ export function createTexture(options){
             return surface ? surface.UnlockRect() : D3DERR_INVALIDCALL;
         },
     };
+    return texture;
 }

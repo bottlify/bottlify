@@ -31,12 +31,14 @@
  * because both are facts about the ABI rather than about Direct3D.
  */
 
-import { describe, IDIRECT3D8_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS,
-    IDIRECT3DTEXTURE8_SLOTS, IDIRECT3DVERTEXBUFFER8_SLOTS,
-    IDIRECT3DINDEXBUFFER8_SLOTS } from './vtables.js';
-import { IID_IDirect3D8, IID_IDirect3DDevice8, IID_IDirect3DSurface8,
-    IID_IDirect3DTexture8, IID_IDirect3DVertexBuffer8,
-    IID_IDirect3DIndexBuffer8 } from './iids.js';
+import { describe, IDIRECT3D8_SLOTS, IDIRECT3DBASETEXTURE8_SLOTS, IDIRECT3DDEVICE8_SLOTS,
+    IDIRECT3DRESOURCE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
+    IDIRECT3DVERTEXBUFFER8_SLOTS, IDIRECT3DINDEXBUFFER8_SLOTS } from './vtables.js';
+import { IID_IDirect3D8, IID_IDirect3DBaseTexture8, IID_IDirect3DDevice8,
+    IID_IDirect3DIndexBuffer8, IID_IDirect3DResource8, IID_IDirect3DSurface8,
+    IID_IDirect3DTexture8, IID_IDirect3DVertexBuffer8 } from './iids.js';
+import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js';
+import { queryAs, readGuid } from './guid.js';
 import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DSURFACE_DESC8, D3DLOCKED_RECT, D3DLIGHT7, RECT, POINT, createFields } from './structs.js';
 import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
@@ -369,9 +371,14 @@ export function createDirect3D8Seam(
      * @param {string} id
      * @param {number} out  Where to write the pointer.
      * @param {number} [failure]  What this method answers when it cannot allocate.
+     * @param {any} [owner]  The device that made it, for GetDevice.
      * @returns {number} D3D_OK, or `failure`.
      */
-    const handBack = (object, interfaces, id, out, failure = E_OUTOFMEMORY)=>{
+    const handBack = (object, interfaces, id, out, failure = E_OUTOFMEMORY, owner = null)=>{
+        if (owner)
+        {
+            owners.set(object, owner);
+        }
         const pointer = publisher.publish(object, interfaces, id);
         fields.writeU32(out, pointer);
         return pointer === 0 ? failure : D3D_OK;
@@ -394,10 +401,84 @@ export function createDirect3D8Seam(
         return D3DERR_NOTAVAILABLE;
     };
 
+    /**
+     * The device each resource was made by, for GetDevice. A texture's levels
+     * are found through the texture. Weak, so this keeps nothing alive.
+     *
+     * @type {WeakMap<object, any>}
+     */
+    const owners = new WeakMap();
+    /** @param {any} resource @returns {any} */
+    const ownerOf = resource=>owners.get(resource)
+        ?? (resource.container ? owners.get(resource.container) : undefined) ?? null;
+
+    /**
+     * The device a resource was made by: the same pointer the program already
+     * holds, with the reference the call owes.
+     *
+     * @param {any} resource @param {number[]} args
+     */
+    const getDevice = (resource, [out])=>{
+        const device = ownerOf(resource);
+        if ((out >>> 0) === 0 || !device)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        device.addRef();
+        fields.writeU32(out >>> 0,
+            publisher.publish(device, deviceInterfaces, IID_IDirect3DDevice8));
+        return D3D_OK;
+    };
+
+    /**
+     * What IDirect3DResource8 answers for every resource: GetType returns the
+     * kind rather than an HRESULT, and the two priority calls a DWORD.
+     *
+     * @param {number} type  D3DRTYPE
+     */
+    const resourceMethods = type=>({
+        ...privateData.methods,
+        GetDevice: getDevice,
+        /** @param {any} resource @param {number[]} args */
+        SetPriority: (resource, [priority])=>resource.SetPriority(priority >>> 0),
+        /** @param {any} resource */
+        GetPriority: resource=>resource.GetPriority(),
+        // Declared void: a resource here is uploaded when it changes.
+        PreLoad: ()=>0,
+        GetType: ()=>type,
+    });
+
     // Resources carry no behaviour of their own here beyond what the API
     // objects already do, so their descriptors are built once.
     const surfaceInterfaces = [describe(IID_IDirect3DSurface8, IDIRECT3DSURFACE8_SLOTS, {
         ...privateData.methods,
+        GetDevice: getDevice,
+
+        /**
+         * QueryInterface on what holds the surface: the texture a level
+         * belongs to, and the device for a surface of its own -- a back
+         * buffer included, this version having no swap chain object (Wine's
+         * d3d8 test_surface_get_container and test_refcount).
+         *
+         * @param {any} surface @param {number[]} args
+         */
+        GetContainer: (surface, [riid, out])=>{
+            if ((riid >>> 0) === 0 || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const id = readGuid(memory, riid);
+            if (surface.container)
+            {
+                return queryAs(publisher, fields, surface.container, textureInterfaces, id, out);
+            }
+            const device = ownerOf(surface);
+            if (!device)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            return queryAs(publisher, fields, device, deviceInterfaces, id, out);
+        },
         /** @param {any} surface @param {number[]} args */
         GetDesc: (surface, [out])=>{
             /** @type {{ desc?: any }} */
@@ -433,8 +514,13 @@ export function createDirect3D8Seam(
         UnlockRect: surface=>surface.UnlockRect(),
     }, {}, retire)];
 
-    const textureInterfaces = [describe(IID_IDirect3DTexture8, IDIRECT3DTEXTURE8_SLOTS, {
-        ...privateData.methods,
+    const textureMethods = {
+        ...resourceMethods(D3DRTYPE.TEXTURE),
+        // Both answer a level rather than an HRESULT.
+        /** @param {any} texture @param {number[]} args */
+        SetLOD: (texture, [lod])=>texture.SetLOD(lod >>> 0),
+        /** @param {any} texture */
+        GetLOD: texture=>texture.GetLOD(),
         // The count is a property of the object rather than a method on it, and
         // this answers a number rather than an HRESULT.
         /** @param {any} texture */
@@ -504,7 +590,15 @@ export function createDirect3D8Seam(
         // Noted and nothing else: an unlock already marks the whole level for
         // upload, so there is no smaller area for this to narrow it to.
         AddDirtyRect: ()=>D3D_OK,
-    }, textureGuests, retire)];
+    };
+    // The two interfaces a texture derives from are answered too, over the
+    // same methods: their slots are the front of the texture's own.
+    const textureInterfaces = [
+        describe(IID_IDirect3DTexture8, IDIRECT3DTEXTURE8_SLOTS, textureMethods,
+            textureGuests, retire),
+        describe(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS, textureMethods),
+        describe(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, textureMethods),
+    ];
 
     /**
      * A buffer hands back an address in the guest's own memory, so locking is
@@ -517,7 +611,6 @@ export function createDirect3D8Seam(
     // settles what the guest did to the buffer first, then tells the block
     // what it did, so the two paths see one lock.
     const bufferMethods = {
-        ...privateData.methods,
         /** @param {any} buffer @param {number[]} args */
         Lock: (buffer, [offset, size, out, flags])=>{
             const shadow = resourceShadows.get(buffer);
@@ -555,13 +648,36 @@ export function createDirect3D8Seam(
         }
         : {};
 
+    /**
+     * The one method the two buffers' layouts differ in: an index buffer's
+     * description has no FVF.
+     *
+     * @param {Record<string, number>} layout
+     */
+    const describeBuffer = layout=>(/** @type {any} */ buffer, /** @type {number[]} */ [out])=>{
+        /** @type {{ desc?: any }} */
+        const held = {};
+        const hr = buffer.GetDesc(held);
+        if (hr === D3D_OK && (out >>> 0) !== 0 && held.desc)
+        {
+            fields.writeStruct(out >>> 0, layout, held.desc);
+        }
+        return (out >>> 0) === 0 ? D3DERR_INVALIDCALL : hr;
+    };
+
     const vertexBufferInterfaces = [
-        describe(IID_IDirect3DVertexBuffer8, IDIRECT3DVERTEXBUFFER8_SLOTS, bufferMethods,
-            bufferGuests, retire),
+        describe(IID_IDirect3DVertexBuffer8, IDIRECT3DVERTEXBUFFER8_SLOTS, {
+            ...resourceMethods(D3DRTYPE.VERTEXBUFFER),
+            ...bufferMethods,
+            GetDesc: describeBuffer(D3DVERTEXBUFFER_DESC9),
+        }, bufferGuests, retire),
     ];
     const indexBufferInterfaces = [
-        describe(IID_IDirect3DIndexBuffer8, IDIRECT3DINDEXBUFFER8_SLOTS, bufferMethods,
-            bufferGuests, retire),
+        describe(IID_IDirect3DIndexBuffer8, IDIRECT3DINDEXBUFFER8_SLOTS, {
+            ...resourceMethods(D3DRTYPE.INDEXBUFFER),
+            ...bufferMethods,
+            GetDesc: describeBuffer(D3DINDEXBUFFER_DESC9),
+        }, bufferGuests, retire),
     ];
 
     /**
@@ -836,7 +952,7 @@ export function createDirect3D8Seam(
             {
                 attachTexture(device, held.texture);
                 return handBack(held.texture, textureInterfaces, IID_IDirect3DTexture8,
-                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
+                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
             return hr;
         },
@@ -849,7 +965,7 @@ export function createDirect3D8Seam(
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
-                    out >>> 0);
+                    out >>> 0, E_OUTOFMEMORY, device);
             }
             return hr;
         },
@@ -864,7 +980,7 @@ export function createDirect3D8Seam(
             {
                 attach(device, held.buffer);
                 return handBack(held.buffer, vertexBufferInterfaces,
-                    IID_IDirect3DVertexBuffer8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
+                    IID_IDirect3DVertexBuffer8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
             return hr;
         },
@@ -879,7 +995,7 @@ export function createDirect3D8Seam(
             {
                 attach(device, held.buffer);
                 return handBack(held.buffer, indexBufferInterfaces,
-                    IID_IDirect3DIndexBuffer8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
+                    IID_IDirect3DIndexBuffer8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
             return hr;
         },
@@ -892,7 +1008,7 @@ export function createDirect3D8Seam(
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
-                    out >>> 0);
+                    out >>> 0, E_OUTOFMEMORY, device);
             }
             return hr;
         },
@@ -981,7 +1097,7 @@ export function createDirect3D8Seam(
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
-                    out >>> 0);
+                    out >>> 0, E_OUTOFMEMORY, device);
             }
             return hr;
         },
@@ -994,7 +1110,7 @@ export function createDirect3D8Seam(
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
-                    out >>> 0);
+                    out >>> 0, E_OUTOFMEMORY, device);
             }
             if ((out >>> 0) !== 0)
             {
@@ -1171,7 +1287,7 @@ export function createDirect3D8Seam(
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
-                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
+                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
             return hr;
         },
@@ -1185,7 +1301,7 @@ export function createDirect3D8Seam(
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
-                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
+                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
             return hr;
         },

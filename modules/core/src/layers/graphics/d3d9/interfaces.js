@@ -175,7 +175,7 @@ export const IDIRECT3DDEVICE9_SLOTS = /** @type {[string, number][]} */ ([
  * IDirect3DResource9's own slots, repeated at the front of every resource
  * interface because that is what the guest compiled against.
  */
-const RESOURCE9_SLOTS = /** @type {[string, number][]} */ ([
+export const IDIRECT3DRESOURCE9_SLOTS = /** @type {[string, number][]} */ ([
     ['GetDevice', 1],
     ['SetPrivateData', 4],
     ['GetPrivateData', 3],
@@ -187,8 +187,8 @@ const RESOURCE9_SLOTS = /** @type {[string, number][]} */ ([
 ]);
 
 /** IDirect3DBaseTexture9: a resource, then the six every texture kind shares. */
-const BASETEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
-    ...RESOURCE9_SLOTS,
+export const IDIRECT3DBASETEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDIRECT3DRESOURCE9_SLOTS,
     ['SetLOD', 1],
     ['GetLOD', 0],
     ['GetLevelCount', 0],
@@ -199,7 +199,7 @@ const BASETEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
 
 /** IDirect3DSurface9: a resource in this version, unlike 8's, then a device context pair. */
 export const IDIRECT3DSURFACE9_SLOTS = /** @type {[string, number][]} */ ([
-    ...RESOURCE9_SLOTS,
+    ...IDIRECT3DRESOURCE9_SLOTS,
     ['GetContainer', 2],
     ['GetDesc', 1],
     ['LockRect', 3],
@@ -209,7 +209,7 @@ export const IDIRECT3DSURFACE9_SLOTS = /** @type {[string, number][]} */ ([
 ]);
 
 export const IDIRECT3DTEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
-    ...BASETEXTURE9_SLOTS,
+    ...IDIRECT3DBASETEXTURE9_SLOTS,
     ['GetLevelDesc', 2],
     ['GetSurfaceLevel', 2],
     ['LockRect', 4],
@@ -218,7 +218,7 @@ export const IDIRECT3DTEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
 ]);
 
 export const IDIRECT3DCUBETEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
-    ...BASETEXTURE9_SLOTS,
+    ...IDIRECT3DBASETEXTURE9_SLOTS,
     ['GetLevelDesc', 2],
     ['GetCubeMapSurface', 3],
     ['LockRect', 5],
@@ -227,7 +227,7 @@ export const IDIRECT3DCUBETEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
 ]);
 
 export const IDIRECT3DVERTEXBUFFER9_SLOTS = /** @type {[string, number][]} */ ([
-    ...RESOURCE9_SLOTS,
+    ...IDIRECT3DRESOURCE9_SLOTS,
     ['Lock', 4],
     ['Unlock', 0],
     ['GetDesc', 1],

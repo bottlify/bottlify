@@ -1252,12 +1252,23 @@ const stageTransforms = model=>{
     return transforms;
 };
 
+/**
+ * The level of detail a managed texture was set to: the most detailed level a
+ * sample reaches, alongside the stage's own MAXMIPLEVEL, whichever is less
+ * detailed (Wine's d3d9 maxmip_test).
+ *
+ * @param {any} texture
+ * @returns {number}
+ */
+const lodOf = texture=>texture?.GetLOD?.() ?? 0;
+
 /** @param {RenderModel} model @param {boolean} mips */
 const stageFlags = (model, mips)=>{
     const flags = [];
     for (let index = 0; index < SAMPLED_STAGES; index++)
     {
-        flags.push(samplerFlagsOf(model.stageStates(index), mips));
+        flags.push(samplerFlagsOf(model.stageStates(index), mips,
+            lodOf(model.textures.get(index))));
     }
     return flags;
 };
@@ -1524,24 +1535,26 @@ const ADDRESS = Object.freeze({
 /**
  * @param {Map<number, number>} states  one stage's states
  * @param {boolean} [mips]  False pins every sample to the top level.
+ * @param {number} [lod]  The bound texture's own level of detail.
  * @returns {{ magFilter: string, minFilter: string, mipmapFilter: string,
  *             addressModeU: string, addressModeV: string,
  *             lodMinClamp: number, lodMaxClamp: number }}
  */
-export function samplerDescriptorOf(states, mips = true){
+export function samplerDescriptorOf(states, mips = true, lod = 0){
     const get = (/** @type {number} */ state)=>states.get(state) ?? 0;
     const mipFilter = mips ? get(D3DTSS.MIPFILTER) : D3DTEXF.NONE;
+    const finest = Math.max(get(D3DTSS.MAXMIPLEVEL), lod);
     return {
         magFilter: FILTER[get(D3DTSS.MAGFILTER)] ?? 'nearest',
         minFilter: FILTER[get(D3DTSS.MINFILTER)] ?? 'nearest',
         mipmapFilter: FILTER[mipFilter] ?? 'nearest',
         addressModeU: ADDRESS[get(D3DTSS.ADDRESSU)] ?? 'repeat',
         addressModeV: ADDRESS[get(D3DTSS.ADDRESSV)] ?? 'repeat',
-        // D3DTEXF_NONE for the mip filter means the top level alone, however
-        // many the texture has; the finest level a program allows is the
-        // nearest it lets a sample come.
-        lodMinClamp: get(D3DTSS.MAXMIPLEVEL),
-        lodMaxClamp: mipFilter === D3DTEXF.NONE ? 0 : LOD_MAX,
+        // D3DTEXF_NONE for the mip filter means one level alone, however many
+        // the texture has: the finest a program allows, which is the nearest
+        // it lets any sample come.
+        lodMinClamp: finest,
+        lodMaxClamp: mipFilter === D3DTEXF.NONE ? finest : LOD_MAX,
     };
 }
 
@@ -1573,9 +1586,10 @@ const ADDRESS_BITS = Object.freeze({
  *
  * @param {Map<number, number>} states  one stage's states
  * @param {boolean} [mips]  False pins every sample to the top level.
+ * @param {number} [lod]  The bound texture's own level of detail.
  * @returns {number}
  */
-export function samplerFlagsOf(states, mips = true){
+export function samplerFlagsOf(states, mips = true, lod = 0){
     const get = (/** @type {number} */ state)=>states.get(state) ?? 0;
     const mipFilter = mips ? get(D3DTSS.MIPFILTER) : D3DTEXF.NONE;
     const mipMode = mipFilter === D3DTEXF.LINEAR ? 2 : mipFilter === D3DTEXF.NONE ? 0 : 1;
@@ -1586,7 +1600,7 @@ export function samplerFlagsOf(states, mips = true){
         | (point(get(D3DTSS.MAGFILTER)) << 4)
         | (point(get(D3DTSS.MINFILTER)) << 5)
         | (mipMode << 6)
-        | ((Math.min(255, Math.max(0, get(D3DTSS.MAXMIPLEVEL))) & 0xff) << 8);
+        | ((Math.min(255, Math.max(0, get(D3DTSS.MAXMIPLEVEL), lod)) & 0xff) << 8);
 }
 
 /** The one sampler every draw samples through; the state is in the shader. */
@@ -3592,9 +3606,10 @@ export function createRenderer(options){
      * written, so the state has to be in the sampler it is given.
      *
      * @param {Map<number, number>} states
+     * @param {number} [lod]  The bound texture's own level of detail.
      */
-    const programSamplerFor = states=>{
-        const descriptor = samplerDescriptorOf(states, mipsApplied);
+    const programSamplerFor = (states, lod = 0)=>{
+        const descriptor = samplerDescriptorOf(states, mipsApplied, lod);
         const key = Object.values(descriptor).join('|');
         const existing = programSamplers.get(key);
         if (existing)
@@ -3669,11 +3684,16 @@ export function createRenderer(options){
         const { pixel, vertex, samplerPlan, state, source } = pieces;
         const samplerBindings = samplerPlan.map((/** @type {any} */ planned)=>{
             const texture = model.textures.get(planned.stage);
+            // A binding moves no state version, and a managed texture's own
+            // level of detail is part of how it is sampled.
+            const lod = lodOf(texture);
             return {
                 stage: planned.stage,
                 texture,
                 view: texture ? uploadIfDirty(texture).view : placeholderView(),
-                sampler: planned.sampler,
+                sampler: lod === planned.lod
+                    ? planned.sampler
+                    : programSamplerFor(model.stageStates(planned.stage), lod),
                 placeholder: !texture,
             };
         });
@@ -3841,10 +3861,14 @@ export function createRenderer(options){
                 `vertex stage of shader ${program.vertexId} was not drawn: ${vertex.error}`);
             return null;
         }
-        const samplerPlan = pixel.samplers.map((/** @type {any} */ entry)=>({
-            stage: entry.index,
-            sampler: programSamplerFor(model.stageStates(entry.index)),
-        }));
+        const samplerPlan = pixel.samplers.map((/** @type {any} */ entry)=>{
+            const lod = lodOf(model.textures.get(entry.index));
+            return {
+                stage: entry.index,
+                lod,
+                sampler: programSamplerFor(model.stageStates(entry.index), lod),
+            };
+        });
         const state = {
             ...pipelineStateOf(model, {
                 fvf: 0, topology, ...formatsOf(model), stages: [], lighting: null,
@@ -4466,6 +4490,13 @@ export function createRenderer(options){
             const texture = model.textures.get(stage);
             const held = texture ? textures.get(texture) : null;
             key += held ? `|${held.id}:${held.soil}` : '|-';
+            // A managed texture's level of detail is sampled by, and set on
+            // the texture where no state counter sees it.
+            const lod = lodOf(texture);
+            if (lod !== 0)
+            {
+                key += `:l${lod}`;
+            }
             // A Direct3D 7 texture's colour key is set on the surface and
             // shapes the shader, and no state counter sees it change.
             if (texture?.colorKey)
@@ -4949,6 +4980,20 @@ export function createRenderer(options){
                 return hr;
             };
             texture.GetSurfaceLevel = takeLevel;
+            // A level of detail changes how the texture is sampled, which the
+            // prepared state of the draw in hand holds: it is prepared again.
+            const setLod = texture.SetLOD;
+            if (typeof setLod === 'function')
+            {
+                texture.SetLOD = (/** @type {number} */ lod)=>{
+                    const was = setLod(lod);
+                    if (texture.GetLOD() !== was)
+                    {
+                        contentVersion++;
+                    }
+                    return was;
+                };
+            }
             /** @type {{ surface?: any }} */
             const top = {};
             texture.GetSurfaceLevel(0, top);

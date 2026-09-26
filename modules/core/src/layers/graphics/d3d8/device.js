@@ -43,7 +43,8 @@
 import {
     D3DCLEAR, D3DCREATE, D3DDEVTYPE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET,
     D3DERR_INVALIDCALL, D3DERR_NOTAVAILABLE, D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DPOOL,
-    D3DPRESENTFLAG, D3DRTYPE, D3DSBT, D3DTS, D3DUSAGE, D3D_OK, FORMAT_INFO, isShaderHandle,
+    D3DFMT_VERTEXDATA, D3DPRESENTFLAG, D3DRTYPE, D3DSBT, D3DTS, D3DUSAGE, D3D_OK, FORMAT_INFO,
+    isShaderHandle,
     surfaceBytes, surfacePitch,
 } from './constants.js';
 import { GAMMA_RAMP_ENTRIES } from './structs.js';
@@ -56,7 +57,7 @@ import {
     reportedBackBufferCount, targetPairResult, validatePresentParameters, validateStages,
 } from './validity.js';
 import {
-    createReferenceCount, createSurface, createTexture, writePixels,
+    createPriority, createReferenceCount, createSurface, createTexture, writePixels,
 } from '../d3d9/resources.js';
 import { DEVICE_STATE, LIGHT_ENABLED } from '../d3d9/device.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
@@ -970,11 +971,31 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         const buffer = {
             ...spec,
             base,
+            ...createPriority(spec.pool),
             get refCount(){
                 return bufferCount.value;
             },
             addRef: ()=>bufferCount.addRef(),
             release: ()=>bufferCount.release(),
+
+            /**
+             * What the buffer was made as. A vertex buffer's format is
+             * D3DFMT_VERTEXDATA whatever it holds; the vertex it holds is the
+             * FVF it was made with, zero for none.
+             *
+             * @param {{ desc?: any }} out
+             */
+            GetDesc(out){
+                out.desc = {
+                    Format: spec.type === D3DRTYPE.INDEXBUFFER ? spec.format : D3DFMT_VERTEXDATA,
+                    Type: spec.type,
+                    Usage: spec.usage,
+                    Pool: spec.pool,
+                    Size: spec.length,
+                    FVF: spec.fvf ?? 0,
+                };
+                return D3D_OK;
+            },
 
             /**
              * A size of zero means "to the end", which is the only way a
