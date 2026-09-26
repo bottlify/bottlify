@@ -44,6 +44,7 @@ import {
     D3DERR_INVALIDCALL, SHADER_DESC_FIELDS, SHADER_PROFILE, containerOf, createBlob,
     createShaderReflection, debugInfoOf, reflectShader,
 } from '../d3d10/reflection.js';
+import { STATE_BLOCK_MASK_SIZE, createStateBlock, stateBlockMask } from '../d3d10/stateblock.js';
 
 /**
  * A method here may answer nothing: the setters of this API are `void`, and
@@ -353,6 +354,13 @@ export const ID3D10QUERY_SLOTS = /** @type {[string, number][]} */ ([
 export const ID3D10BLOB_SLOTS = /** @type {[string, number][]} */ ([
     ['GetBufferPointer', 0],
     ['GetBufferSize', 0],
+]);
+
+export const ID3D10STATEBLOCK_SLOTS = /** @type {[string, number][]} */ ([
+    ['Capture', 0],
+    ['Apply', 0],
+    ['ReleaseAllDeviceObjects', 0],
+    ['GetDevice', 1],
 ]);
 
 export const ID3D10SHADERREFLECTION_SLOTS = /** @type {[string, number][]} */ ([
@@ -2759,6 +2767,77 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
     /** @param {string} profile */
     const profileEntry = profile=>({ argBytes: 4, handler: ()=>profileString(profile) });
 
+    // --- state blocks ---
+
+    const stateBlockInterfaces = [describe(IID.ID3D10StateBlock, ID3D10STATEBLOCK_SLOTS, {
+        /** @param {any} block */
+        Capture: block=>block.Capture(),
+        /** @param {any} block */
+        Apply: block=>block.Apply(),
+        /** @param {any} block */
+        ReleaseAllDeviceObjects: block=>block.ReleaseAllDeviceObjects(),
+        /** @param {any} block @param {number[]} args */
+        GetDevice: (block, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            /** @type {{ device?: any }} */
+            const held = {};
+            block.GetDevice(held);
+            return handBack(held.device, deviceInterfaces, IID.ID3D10Device, out);
+        },
+    })];
+
+    /**
+     * A mask in guest memory, read whole; null for a null pointer.
+     *
+     * @param {number} address
+     */
+    const readMask = address=>((address >>> 0) === 0
+        ? null
+        : Uint8Array.from(memory.readMemory(address >>> 0, STATE_BLOCK_MASK_SIZE)));
+
+    /**
+     * A mask function that changes one mask in place.
+     *
+     * @param {(mask: Uint8Array | null, ...rest: number[]) => number} operation
+     * @param {number} argBytes
+     */
+    const maskEntry = (operation, argBytes)=>({
+        argBytes,
+        /** @param {number[]} args */
+        handler: ([address, ...rest])=>{
+            const mask = readMask(address);
+            const hr = operation(mask, ...rest.map(value=>value >>> 0));
+            if (mask && hr === S_OK)
+            {
+                memory.writeMemory(address >>> 0, mask);
+            }
+            return hr;
+        },
+    });
+
+    /**
+     * A mask function of two masks into a third.
+     *
+     * @param {(a: Uint8Array | null, b: Uint8Array | null, out: Uint8Array | null) => number}
+     *     operation
+     */
+    const combineEntry = operation=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([a, b, out])=>{
+            const result = (out >>> 0) === 0 ? null : new Uint8Array(STATE_BLOCK_MASK_SIZE);
+            const hr = operation(readMask(a), readMask(b), result);
+            if (result && hr === S_OK)
+            {
+                memory.writeMemory(out >>> 0, result);
+            }
+            return hr;
+        },
+    });
+
     // --- the entry points ---
 
     /**
@@ -2922,6 +3001,58 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                             IID.ID3D10ShaderReflection, out);
                     },
                 },
+                /**
+                 * HRESULT D3D10CreateStateBlock(ID3D10Device*, D3D10_STATE_BLOCK_MASK*,
+                 *     ID3D10StateBlock**)
+                 */
+                D3D10CreateStateBlock: {
+                    argBytes: 12,
+                    /** @param {number[]} args */
+                    handler: ([devicePointer, maskAt, out])=>{
+                        const device = publisher.objectAt(devicePointer);
+                        const mask = readMask(maskAt);
+                        if (!device || !mask || (out >>> 0) === 0)
+                        {
+                            if ((out >>> 0) !== 0)
+                            {
+                                fields.writeU32(out, 0);
+                            }
+                            return E_INVALIDARG;
+                        }
+                        return handBack(createStateBlock(device, mask), stateBlockInterfaces,
+                            IID.ID3D10StateBlock, out);
+                    },
+                },
+                /** HRESULT D3D10StateBlockMaskEnableAll(D3D10_STATE_BLOCK_MASK*) */
+                D3D10StateBlockMaskEnableAll: maskEntry(stateBlockMask.EnableAll, 4),
+                /** HRESULT D3D10StateBlockMaskDisableAll(D3D10_STATE_BLOCK_MASK*) */
+                D3D10StateBlockMaskDisableAll: maskEntry(stateBlockMask.DisableAll, 4),
+                /**
+                 * HRESULT D3D10StateBlockMaskEnableCapture(D3D10_STATE_BLOCK_MASK*,
+                 *     D3D10_DEVICE_STATE_TYPES, UINT, UINT)
+                 */
+                D3D10StateBlockMaskEnableCapture: maskEntry(stateBlockMask.EnableCapture, 16),
+                /**
+                 * HRESULT D3D10StateBlockMaskDisableCapture(D3D10_STATE_BLOCK_MASK*,
+                 *     D3D10_DEVICE_STATE_TYPES, UINT, UINT)
+                 */
+                D3D10StateBlockMaskDisableCapture: maskEntry(stateBlockMask.DisableCapture, 16),
+                /**
+                 * BOOL D3D10StateBlockMaskGetSetting(D3D10_STATE_BLOCK_MASK*,
+                 *     D3D10_DEVICE_STATE_TYPES, UINT)
+                 */
+                D3D10StateBlockMaskGetSetting: {
+                    argBytes: 12,
+                    /** @param {number[]} args */
+                    handler: ([maskAt, type, entry])=>stateBlockMask.GetSetting(readMask(maskAt),
+                        type >>> 0, entry >>> 0),
+                },
+                /** HRESULT D3D10StateBlockMaskDifference(mask*, mask*, mask*) */
+                D3D10StateBlockMaskDifference: combineEntry(stateBlockMask.Difference),
+                /** HRESULT D3D10StateBlockMaskIntersect(mask*, mask*, mask*) */
+                D3D10StateBlockMaskIntersect: combineEntry(stateBlockMask.Intersect),
+                /** HRESULT D3D10StateBlockMaskUnion(mask*, mask*, mask*) */
+                D3D10StateBlockMaskUnion: combineEntry(stateBlockMask.Union),
                 /** const char* D3D10GetVertexShaderProfile(ID3D10Device*) */
                 D3D10GetVertexShaderProfile: profileEntry(SHADER_PROFILE.VERTEX),
                 /** const char* D3D10GetPixelShaderProfile(ID3D10Device*) */

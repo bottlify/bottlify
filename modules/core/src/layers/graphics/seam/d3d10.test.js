@@ -23,7 +23,8 @@ import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import {
     ID3D10BLOB_SLOTS, ID3D10BUFFER_SLOTS, ID3D10DEVICE_SLOTS, ID3D10MULTITHREAD_SLOTS,
-    ID3D10QUERY_SLOTS, ID3D10SHADERREFLECTION_SLOTS, ID3D10TEXTURE_SLOTS, ID3D10VIEW_SLOTS,
+    ID3D10QUERY_SLOTS, ID3D10SHADERREFLECTION_SLOTS, ID3D10STATEBLOCK_SLOTS, ID3D10TEXTURE_SLOTS,
+    ID3D10VIEW_SLOTS,
     IDXGIADAPTER1_SLOTS, IDXGIADAPTER_SLOTS, IDXGIDEVICE1_SLOTS, IDXGIDEVICE_SLOTS,
     IDXGIFACTORY_SLOTS, IDXGIOUTPUT_SLOTS, IDXGIRESOURCE_SLOTS, IDXGISURFACE_SLOTS,
     IDXGISWAPCHAIN_SLOTS, createDirect3D10Seam,
@@ -1032,6 +1033,57 @@ test('a compile is refused as a failed compile, with the reason in the error blo
     for (const [entry, bytes] of arities)
     {
         assert.equal(entries[entry].argBytes, bytes, entry);
+    }
+});
+
+test('a state block is made from a mask in guest memory and captures through its vtable', ()=>{
+    // After Wine's d3d10 test_stateblock.
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    const entries = /** @type {Record<string, any>} */ (h.d3d10);
+    const mask = h.box.allocate(76);
+    const call = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        entries[name].handler(args) >>> 0;
+    assert.equal(call('D3D10StateBlockMaskEnableAll', [mask]), S_OK);
+    assert.equal(h.box.memory.readU32(mask), 0xffffffff);
+    assert.equal(call('D3D10StateBlockMaskDisableCapture', [mask, 13, 0, 1]), S_OK,
+        'D3D10_DST_PS');
+    assert.equal(h.box.services.readMemory(mask + 42, 1)[0], 0xfe);
+    assert.equal(call('D3D10StateBlockMaskGetSetting', [mask, 13, 0]), 0);
+    assert.equal(call('D3D10StateBlockMaskGetSetting', [mask, 7, 3]), 8);
+    assert.equal(call('D3D10StateBlockMaskEnableCapture', [0, 5, 0, 1]), E_INVALIDARG);
+    const other = h.box.allocate(76);
+    const union = h.box.allocate(76);
+    assert.equal(call('D3D10StateBlockMaskDisableAll', [other]), S_OK);
+    assert.equal(call('D3D10StateBlockMaskUnion', [mask, other, union]), S_OK);
+    assert.deepEqual([...h.box.services.readMemory(union, 76)],
+        [...h.box.services.readMemory(mask, 76)]);
+    assert.equal(call('D3D10StateBlockMaskIntersect', [mask, 0, union]), E_INVALIDARG);
+
+    h.device(device, 'IASetPrimitiveTopology', [4]);
+    const blockAt = h.box.place([0xdeadbeef]);
+    assert.equal(call('D3D10CreateStateBlock', [device, mask, blockAt]), S_OK);
+    const block = h.box.memory.readU32(blockAt);
+    const blockCall = (/** @type {string} */ name, /** @type {number[]} */ args = [])=>
+        h.box.call(block, slot(ID3D10STATEBLOCK_SLOTS, name), args);
+    assert.equal(blockCall('Capture'), S_OK);
+    h.device(device, 'IASetPrimitiveTopology', [1]);
+    assert.equal(blockCall('Apply'), S_OK);
+    const topology = h.box.place([0]);
+    h.device(device, 'IAGetPrimitiveTopology', [topology]);
+    assert.equal(h.box.memory.readU32(topology), 4);
+    const owner = h.box.place([0]);
+    assert.equal(blockCall('GetDevice', [owner]), S_OK);
+    assert.equal(h.box.memory.readU32(owner), device, 'the device the program holds');
+    assert.equal(blockCall('ReleaseAllDeviceObjects'), S_OK);
+    for (const [name, bytes] of /** @type {[string, number][]} */ ([
+        ['D3D10CreateStateBlock', 12], ['D3D10StateBlockMaskDifference', 12],
+        ['D3D10StateBlockMaskDisableAll', 4], ['D3D10StateBlockMaskDisableCapture', 16],
+        ['D3D10StateBlockMaskEnableAll', 4], ['D3D10StateBlockMaskEnableCapture', 16],
+        ['D3D10StateBlockMaskGetSetting', 12], ['D3D10StateBlockMaskIntersect', 12],
+        ['D3D10StateBlockMaskUnion', 12]]))
+    {
+        assert.equal(entries[name].argBytes, bytes, name);
     }
 });
 
