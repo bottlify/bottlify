@@ -871,6 +871,16 @@ export function createLocaleFunctions(host){
         GetSystemDefaultUILanguage: { argBytes: 0, handler: ()=>LANGID_EN_US },
 
         /**
+         * LANGID GetUserDefaultUILanguage(VOID)
+         *
+         * The user's choice of the same, and there is one language to choose:
+         * a locale lookup by it answers what one by the user's LCID does, as
+         * Wine's kernel32 locale tests (test_GetLocaleInfoA,
+         * test_ConvertDefaultLocale) require of the pair.
+         */
+        GetUserDefaultUILanguage: { argBytes: 0, handler: ()=>LANGID_EN_US },
+
+        /**
          * BOOL IsValidCodePage(UINT CodePage)
          *
          * Only the pages this build can actually convert. Claiming one it cannot
