@@ -31,8 +31,8 @@ import { readGuid } from './ddraw.js';
 import { createFields } from './structs.js';
 import {
     D3D10_LIMITS, D3D10_MAP, D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_RESOURCE_DIMENSION,
-    DXGI_ERROR_INVALID_CALL, DXGI_ERROR_MORE_DATA, DXGI_ERROR_UNSUPPORTED, E_INVALIDARG, IID, S_OK,
-    formatPitch,
+    DXGI_ERROR_INVALID_CALL, DXGI_ERROR_MORE_DATA, DXGI_ERROR_UNSUPPORTED, E_FAIL, E_INVALIDARG,
+    E_NOTIMPL, E_OUTOFMEMORY, IID, S_OK, formatPitch,
 } from '../d3d10/constants.js';
 import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain } from '../d3d10/device.js';
 import { CreateDXGIFactory } from '../d3d10/dxgi.js';
@@ -40,6 +40,10 @@ import {
     DXGI_MODE_DESC, readModeDesc, readSwapChainDesc, writeModeDesc, writeSwapChainDesc,
 } from '../d3d10/structs.js';
 import { bindFlagsForUsage, levelExtent } from '../d3d10/validity.js';
+import {
+    D3DERR_INVALIDCALL, SHADER_DESC_FIELDS, SHADER_PROFILE, containerOf, createBlob,
+    createShaderReflection, debugInfoOf, reflectShader,
+} from '../d3d10/reflection.js';
 
 /**
  * A method here may answer nothing: the setters of this API are `void`, and
@@ -344,6 +348,20 @@ export const ID3D10QUERY_SLOTS = /** @type {[string, number][]} */ ([
     ['GetData', 3],
     ['GetDataSize', 0],
     ['GetDesc', 1],
+]);
+
+export const ID3D10BLOB_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetBufferPointer', 0],
+    ['GetBufferSize', 0],
+]);
+
+export const ID3D10SHADERREFLECTION_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetDesc', 1],
+    ['GetConstantBufferByIndex', 1],
+    ['GetConstantBufferByName', 1],
+    ['GetResourceBindingDesc', 2],
+    ['GetInputParameterDesc', 2],
+    ['GetOutputParameterDesc', 2],
 ]);
 
 /**
@@ -2516,6 +2534,231 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         }),
     ];
 
+    // --- blobs and reflection ---
+
+    /**
+     * The most a program is taken to hand over in one blob. A length beyond
+     * it is a caller's garbage rather than a shader, and reading it would
+     * take the host down with it.
+     */
+    const LARGEST_BLOB = 0x10000000;
+
+    /** @param {string} detail */
+    const report = detail=>deviceOptions().divergence?.('d3d10', detail);
+
+    /**
+     * An ID3D10Blob holding these bytes in guest memory, which the program
+     * reads and writes through its pointer.
+     *
+     * @param {Uint8Array} bytes
+     * @returns {any} null when there is no memory to give
+     */
+    const makeBlob = bytes=>{
+        const address = allocate ? allocate(Math.max(bytes.length, 4)) : 0;
+        if (!address)
+        {
+            return null;
+        }
+        memory.writeMemory(address, bytes);
+        return createBlob(address, bytes.length, ()=>free?.(address));
+    };
+
+    const blobInterfaces = [describe(IID.ID3D10Blob, ID3D10BLOB_SLOTS, {
+        /** @param {any} blob */
+        GetBufferPointer: blob=>blob.GetBufferPointer(),
+        /** @param {any} blob */
+        GetBufferSize: blob=>blob.GetBufferSize(),
+    })];
+
+    /**
+     * @param {number} out
+     * @param {Uint8Array | null} bytes
+     * @param {number} missing  What to answer when there are no bytes.
+     */
+    const blobInto = (out, bytes, missing)=>{
+        if (!bytes)
+        {
+            return missing;
+        }
+        const blob = makeBlob(bytes);
+        return blob ? handBack(blob, blobInterfaces, IID.ID3D10Blob, out) : E_OUTOFMEMORY;
+    };
+
+    /**
+     * A shader the program handed over, or null for a pointer or length that
+     * cannot be one.
+     *
+     * @param {number} data
+     * @param {number} size
+     */
+    const shaderBytes = (data, size)=>((data >>> 0) === 0 || (size >>> 0) === 0
+        || (size >>> 0) > LARGEST_BLOB
+        ? null
+        : memory.readMemory(data >>> 0, size >>> 0));
+
+    /**
+     * Where each reflection's copy of its container sits: every name it hands
+     * out points into it, so it lives as long as the reflection.
+     *
+     * @type {WeakMap<any, number>}
+     */
+    const reflectionCopies = new WeakMap();
+
+    /** @param {any} reflection @param {number} at  An offset into the container. */
+    const pointerInto = (reflection, at)=>(at < 0
+        ? 0
+        : (reflectionCopies.get(reflection) ?? 0) + at);
+
+    /**
+     * D3D10_SIGNATURE_PARAMETER_DESC: the name, four dwords, and the two
+     * masks as bytes.
+     *
+     * @param {'GetInputParameterDesc' | 'GetOutputParameterDesc'} method
+     */
+    const parameterDesc = method=>{
+        /** @param {any} reflection @param {number[]} args */
+        const write = (reflection, [index, out])=>{
+            /** @type {{ entry?: any }} */
+            const held = {};
+            const hr = reflection[method](index >>> 0, (out >>> 0) === 0 ? null : held);
+            if (hr === S_OK)
+            {
+                const entry = held.entry;
+                [pointerInto(reflection, entry.nameAt), entry.index, entry.register,
+                    entry.systemValue, entry.componentType,
+                    entry.mask | (entry.readWriteMask << 8)]
+                    .forEach((value, position)=>fields.writeU32(out + position * 4, value));
+            }
+            return hr;
+        };
+        return write;
+    };
+
+    /**
+     * A constant buffer's reflection is an interface without IUnknown's
+     * three methods, which the publisher cannot lay out; a program asking for
+     * one is answered null and the gap reported.
+     */
+    const constantBufferReflection = ()=>{
+        report('a shader reflection\'s constant buffers are not published; answered null');
+        return 0;
+    };
+
+    const reflectionInterfaces = [describe(IID.ID3D10ShaderReflection,
+        ID3D10SHADERREFLECTION_SLOTS, {
+            /** @param {any} reflection @param {number[]} args */
+            GetDesc: (reflection, [out])=>{
+                /** @type {{ desc?: Record<string, number> }} */
+                const held = {};
+                const hr = reflection.GetDesc((out >>> 0) === 0 ? null : held);
+                if (hr === S_OK && held.desc)
+                {
+                    const desc = held.desc;
+                    SHADER_DESC_FIELDS.forEach((field, index)=>fields.writeU32(out + index * 4,
+                        field === 'Creator' ? pointerInto(reflection, desc.Creator) : desc[field]));
+                }
+                return hr;
+            },
+            GetConstantBufferByIndex: constantBufferReflection,
+            GetConstantBufferByName: constantBufferReflection,
+            /**
+             * D3D10_SHADER_INPUT_BIND_DESC, whose order is not the order the
+             * compiler stored the same fields in.
+             *
+             * @param {any} reflection @param {number[]} args
+             */
+            GetResourceBindingDesc: (reflection, [index, out])=>{
+                /** @type {{ entry?: any }} */
+                const held = {};
+                const hr = reflection.GetResourceBindingDesc(index >>> 0,
+                    (out >>> 0) === 0 ? null : held);
+                if (hr === S_OK)
+                {
+                    const entry = held.entry;
+                    [pointerInto(reflection, entry.nameAt), entry.type, entry.bindPoint,
+                        entry.bindCount, entry.flags, entry.returnType, entry.dimension,
+                        entry.sampleCount]
+                        .forEach((value, position)=>fields.writeU32(out + position * 4, value));
+                }
+                return hr;
+            },
+            GetInputParameterDesc: parameterDesc('GetInputParameterDesc'),
+            GetOutputParameterDesc: parameterDesc('GetOutputParameterDesc'),
+        })];
+
+    /**
+     * The profile strings live in guest memory for the life of the process,
+     * as the runtime's own constants do.
+     *
+     * @type {Map<string, number>}
+     */
+    const profiles = new Map();
+    /** @param {string} profile */
+    const profileString = profile=>{
+        if (!profiles.has(profile))
+        {
+            const bytes = Uint8Array.from([...profile].map(char=>char.charCodeAt(0)).concat(0));
+            const at = allocate ? allocate(bytes.length) : 0;
+            if (at)
+            {
+                memory.writeMemory(at, bytes);
+            }
+            profiles.set(profile, at);
+        }
+        return profiles.get(profile) ?? 0;
+    };
+
+    /**
+     * No HLSL compiler runs here. A compile is answered the way a failed one
+     * is -- E_FAIL, no output, and the reason in the error blob when the
+     * program asked for one -- so a program that logs its compiler's errors
+     * says why.
+     *
+     * @param {string} entry
+     * @param {number} outputAt
+     * @param {number} errorsAt
+     */
+    const refuseCompile = (entry, outputAt, errorsAt)=>{
+        if ((outputAt >>> 0) !== 0)
+        {
+            fields.writeU32(outputAt, 0);
+        }
+        if ((errorsAt >>> 0) !== 0)
+        {
+            const message = `${entry}: this runtime has no HLSL compiler\n`;
+            const hr = blobInto(errorsAt,
+                Uint8Array.from([...message].map(char=>char.charCodeAt(0)).concat(0)), E_FAIL);
+            if (hr !== S_OK)
+            {
+                fields.writeU32(errorsAt, 0);
+            }
+        }
+        report(`${entry}: no HLSL compiler; the program was told the compile failed`);
+        return E_FAIL;
+    };
+
+    /** @param {string[]} chunks */
+    const signatureEntry = chunks=>({
+        argBytes: 12,
+        /**
+         * A missing argument is D3DERR_INVALIDCALL and a container without
+         * the chunk E_FAIL, and either leaves the program's pointer as it was.
+         *
+         * @param {number[]} args
+         */
+        handler: ([data, size, out])=>{
+            const bytes = shaderBytes(data, size);
+            if (!bytes || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            return blobInto(out, containerOf(bytes, chunks), E_FAIL);
+        },
+    });
+
+    /** @param {string} profile */
+    const profileEntry = profile=>({ argBytes: 4, handler: ()=>profileString(profile) });
+
     // --- the entry points ---
 
     /**
@@ -2613,6 +2856,113 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                     argBytes: 32,
                     /** @param {number[]} args */
                     handler: args=>createDeviceEntry(args, true),
+                },
+                /** HRESULT D3D10CreateBlob(SIZE_T, ID3D10Blob**) */
+                D3D10CreateBlob: {
+                    argBytes: 8,
+                    /** @param {number[]} args */
+                    handler: ([size, out])=>{
+                        if ((out >>> 0) === 0)
+                        {
+                            return D3DERR_INVALIDCALL;
+                        }
+                        return (size >>> 0) > LARGEST_BLOB
+                            ? E_OUTOFMEMORY
+                            : blobInto(out, new Uint8Array(size >>> 0), E_OUTOFMEMORY);
+                    },
+                },
+                /** HRESULT D3D10GetInputSignatureBlob(const void*, SIZE_T, ID3D10Blob**) */
+                D3D10GetInputSignatureBlob: signatureEntry(['ISGN']),
+                /** HRESULT D3D10GetOutputSignatureBlob(const void*, SIZE_T, ID3D10Blob**) */
+                D3D10GetOutputSignatureBlob: signatureEntry(['OSGN']),
+                /**
+                 * HRESULT D3D10GetInputAndOutputSignatureBlob(const void*, SIZE_T,
+                 *     ID3D10Blob**)
+                 */
+                D3D10GetInputAndOutputSignatureBlob: signatureEntry(['ISGN', 'OSGN']),
+                /** HRESULT D3D10GetShaderDebugInfo(const void*, SIZE_T, ID3D10Blob**) */
+                D3D10GetShaderDebugInfo: {
+                    argBytes: 12,
+                    /** @param {number[]} args */
+                    handler: ([data, size, out])=>{
+                        const bytes = shaderBytes(data, size);
+                        if (!bytes || (out >>> 0) === 0)
+                        {
+                            return D3DERR_INVALIDCALL;
+                        }
+                        return blobInto(out, debugInfoOf(bytes), E_FAIL);
+                    },
+                },
+                /** HRESULT D3D10ReflectShader(const void*, SIZE_T, ID3D10ShaderReflection**) */
+                D3D10ReflectShader: {
+                    argBytes: 12,
+                    /** @param {number[]} args */
+                    handler: ([data, size, out])=>{
+                        if ((out >>> 0) === 0)
+                        {
+                            return E_INVALIDARG;
+                        }
+                        const bytes = shaderBytes(data, size);
+                        const reflected = bytes ? reflectShader(bytes) : null;
+                        if (!bytes || !reflected)
+                        {
+                            fields.writeU32(out, 0);
+                            return E_FAIL;
+                        }
+                        const copy = allocate ? allocate(bytes.length) : 0;
+                        if (!copy)
+                        {
+                            fields.writeU32(out, 0);
+                            return E_OUTOFMEMORY;
+                        }
+                        memory.writeMemory(copy, bytes);
+                        const reflection = createShaderReflection(reflected, ()=>free?.(copy));
+                        reflectionCopies.set(reflection, copy);
+                        return handBack(reflection, reflectionInterfaces,
+                            IID.ID3D10ShaderReflection, out);
+                    },
+                },
+                /** const char* D3D10GetVertexShaderProfile(ID3D10Device*) */
+                D3D10GetVertexShaderProfile: profileEntry(SHADER_PROFILE.VERTEX),
+                /** const char* D3D10GetPixelShaderProfile(ID3D10Device*) */
+                D3D10GetPixelShaderProfile: profileEntry(SHADER_PROFILE.PIXEL),
+                /** const char* D3D10GetGeometryShaderProfile(ID3D10Device*) */
+                D3D10GetGeometryShaderProfile: profileEntry(SHADER_PROFILE.GEOMETRY),
+                /**
+                 * HRESULT D3D10CompileShader(const char*, SIZE_T, const char*,
+                 *     const D3D10_SHADER_MACRO*, ID3D10Include*, const char*, const char*,
+                 *     UINT, ID3D10Blob**, ID3D10Blob**)
+                 */
+                D3D10CompileShader: {
+                    argBytes: 40,
+                    /** @param {number[]} args */
+                    handler: args=>refuseCompile('D3D10CompileShader', args[8], args[9]),
+                },
+                /**
+                 * HRESULT D3D10CompileEffectFromMemory(void*, SIZE_T, const char*,
+                 *     const D3D10_SHADER_MACRO*, ID3D10Include*, UINT, UINT, ID3D10Blob**,
+                 *     ID3D10Blob**)
+                 */
+                D3D10CompileEffectFromMemory: {
+                    argBytes: 36,
+                    /** @param {number[]} args */
+                    handler: args=>refuseCompile('D3D10CompileEffectFromMemory', args[7],
+                        args[8]),
+                },
+                /**
+                 * HRESULT D3D10DisassembleShader(const void*, SIZE_T, BOOL, const char*,
+                 *     ID3D10Blob**): no disassembler is kept here.
+                 */
+                D3D10DisassembleShader: {
+                    argBytes: 20,
+                    /** @param {number[]} args */
+                    handler: ([, , , , out])=>{
+                        if ((out >>> 0) !== 0)
+                        {
+                            fields.writeU32(out, 0);
+                        }
+                        return E_NOTIMPL;
+                    },
                 },
             },
             'DXGI.dll': {

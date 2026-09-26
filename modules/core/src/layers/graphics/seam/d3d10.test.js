@@ -22,11 +22,11 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import {
-    ID3D10BUFFER_SLOTS, ID3D10DEVICE_SLOTS, ID3D10MULTITHREAD_SLOTS, ID3D10QUERY_SLOTS,
-    ID3D10TEXTURE_SLOTS, ID3D10VIEW_SLOTS, IDXGIADAPTER1_SLOTS, IDXGIADAPTER_SLOTS,
-    IDXGIDEVICE1_SLOTS, IDXGIDEVICE_SLOTS, IDXGIOUTPUT_SLOTS, IDXGIRESOURCE_SLOTS,
-    IDXGISURFACE_SLOTS,
-    IDXGIFACTORY_SLOTS, IDXGISWAPCHAIN_SLOTS, createDirect3D10Seam,
+    ID3D10BLOB_SLOTS, ID3D10BUFFER_SLOTS, ID3D10DEVICE_SLOTS, ID3D10MULTITHREAD_SLOTS,
+    ID3D10QUERY_SLOTS, ID3D10SHADERREFLECTION_SLOTS, ID3D10TEXTURE_SLOTS, ID3D10VIEW_SLOTS,
+    IDXGIADAPTER1_SLOTS, IDXGIADAPTER_SLOTS, IDXGIDEVICE1_SLOTS, IDXGIDEVICE_SLOTS,
+    IDXGIFACTORY_SLOTS, IDXGIOUTPUT_SLOTS, IDXGIRESOURCE_SLOTS, IDXGISURFACE_SLOTS,
+    IDXGISWAPCHAIN_SLOTS, createDirect3D10Seam,
 } from './d3d10.js';
 import {
     D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE, D3D10_MAP, D3D10_PRIMITIVE_TOPOLOGY,
@@ -907,6 +907,132 @@ test('a DXGI device makes surfaces, and finds every resource resident', ()=>{
         [surfacesAt, status, 2]), S_OK);
     assert.deepEqual([h.box.memory.readU32(status), h.box.memory.readU32(status + 4)], [1, 1],
         'DXGI_RESIDENCY_FULLY_RESIDENT');
+});
+
+test('d3d10.dll makes blobs, cuts signatures out of a shader and reflects it', ()=>{
+    // After Wine's d3dcompiler test_create_blob, test_get_blob_part and
+    // test_reflection_desc_vs, and d3d10_1 test_shader_profiles.
+    const h = seamed();
+    const D3DERR_INVALIDCALL = 0x8876086c;
+    const E_FAIL = 0x80004005;
+    const blobCall = (/** @type {number} */ blob, /** @type {string} */ name)=>
+        h.box.call(blob, slot(ID3D10BLOB_SLOTS, name));
+
+    const blobAt = h.box.place([0xdeadbeef]);
+    assert.equal(h.d3d10.D3D10CreateBlob.handler([1, 0]) >>> 0, D3DERR_INVALIDCALL);
+    assert.equal(h.d3d10.D3D10CreateBlob.handler([0, 0]) >>> 0, D3DERR_INVALIDCALL);
+    assert.equal(h.d3d10.D3D10CreateBlob.handler([6, blobAt]) >>> 0, S_OK);
+    const blob = h.box.memory.readU32(blobAt);
+    assert.equal(blobCall(blob, 'GetBufferSize'), 6);
+    const pointer = blobCall(blob, 'GetBufferPointer');
+    assert.notEqual(pointer, 0);
+    assert.deepEqual([...h.box.services.readMemory(pointer, 6)], [0, 0, 0, 0, 0, 0]);
+    assert.equal(h.box.call(blob, 2), 0, 'the last release');
+    assert.equal(h.d3d10.D3D10CreateBlob.handler([0, blobAt]) >>> 0, S_OK, 'an empty blob');
+
+    const shader = passThroughVertexShader();
+    const shaderAt = h.box.placeBytes(shader);
+    const signatureAt = h.box.place([0xdeadbeef]);
+    assert.equal(h.d3d10.D3D10GetInputSignatureBlob.handler([0, shader.length, signatureAt])
+        >>> 0, D3DERR_INVALIDCALL);
+    assert.equal(h.d3d10.D3D10GetInputSignatureBlob.handler([shaderAt, shader.length, 0])
+        >>> 0, D3DERR_INVALIDCALL);
+    assert.equal(h.box.memory.readU32(signatureAt), 0xdeadbeef, 'left as it was');
+    assert.equal(h.d3d10.D3D10GetInputSignatureBlob.handler([shaderAt, shader.length,
+        signatureAt]) >>> 0, S_OK);
+    const signature = h.box.memory.readU32(signatureAt);
+    const signatureBytes = h.box.services.readMemory(blobCall(signature, 'GetBufferPointer'),
+        blobCall(signature, 'GetBufferSize'));
+    const word = (/** @type {Uint8Array} */ bytes, /** @type {number} */ index)=>
+        new DataView(bytes.buffer, bytes.byteOffset).getUint32(index * 4, true);
+    assert.equal(word(signatureBytes, 0), 0x43425844, 'DXBC');
+    assert.equal(word(signatureBytes, 9), 0x4e475349, 'ISGN at dword 9');
+    const both = h.box.place([0]);
+    assert.equal(h.d3d10.D3D10GetInputAndOutputSignatureBlob.handler([shaderAt, shader.length,
+        both]) >>> 0, S_OK);
+    assert.equal(h.d3d10.D3D10GetShaderDebugInfo.handler([shaderAt, shader.length, both])
+        >>> 0, E_FAIL, 'no debug information was compiled in');
+
+    // Every name the reflection hands out is a string in guest memory.
+    const reflectionAt = h.box.place([0xdeadbeef]);
+    assert.equal(h.d3d10.D3D10ReflectShader.handler([h.box.place([1, 2, 3]), 12, reflectionAt])
+        >>> 0, E_FAIL, 'not a container');
+    assert.equal(h.box.memory.readU32(reflectionAt), 0);
+    assert.equal(h.d3d10.D3D10ReflectShader.handler([shaderAt, shader.length, reflectionAt])
+        >>> 0, S_OK);
+    const reflection = h.box.memory.readU32(reflectionAt);
+    const reflect = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        h.box.call(reflection, slot(ID3D10SHADERREFLECTION_SLOTS, name), args);
+    assert.equal(reflect('GetDesc', [0]), E_FAIL);
+    const desc = h.box.allocate(28 * 4);
+    assert.equal(reflect('GetDesc', [desc]), S_OK);
+    assert.equal(h.box.memory.readU32(desc), 0x10040, 'Version');
+    assert.equal(h.box.memory.readU32(desc + 4), 0, 'no creator was recorded');
+    assert.deepEqual([20, 24].map(at=>h.box.memory.readU32(desc + at)), [1, 1],
+        'InputParameters and OutputParameters');
+    const parameter = h.box.allocate(24);
+    assert.equal(reflect('GetOutputParameterDesc', [0, parameter]), S_OK);
+    const name = h.box.memory.readU32(parameter);
+    assert.equal(String.fromCharCode(...h.box.services.readMemory(name, 11)), 'SV_POSITION');
+    assert.deepEqual([4, 8, 12, 16].map(at=>h.box.memory.readU32(parameter + at)),
+        [0, 0, 1, 3], 'index, register, D3D10_NAME_POSITION, float');
+    assert.deepEqual([...h.box.services.readMemory(parameter + 20, 2)], [0xf, 0]);
+    assert.equal(reflect('GetInputParameterDesc', [1, parameter]), E_INVALIDARG);
+    assert.equal(reflect('GetResourceBindingDesc', [0, parameter]), E_INVALIDARG);
+    assert.equal(reflect('GetConstantBufferByIndex', [0]), 0);
+    assert.ok(h.divergences.some(line=>line.includes('constant buffers')),
+        'the null answer is reported');
+    const queried = h.box.place([0]);
+    assert.equal(h.box.call(reflection, 0,
+        [h.box.placeGuid(IID.ID3D10ShaderReflection), queried]), S_OK);
+    assert.equal(h.box.call(reflection, 2), 1);
+    assert.equal(h.box.call(reflection, 2), 0);
+
+    /** @type {Record<string, any>} */
+    const entries = h.d3d10;
+    const profile = (/** @type {string} */ entry)=>{
+        const at = entries[entry].handler([0]) >>> 0;
+        return String.fromCharCode(...h.box.services.readMemory(at, 6));
+    };
+    assert.equal(profile('D3D10GetVertexShaderProfile'), 'vs_4_0');
+    assert.equal(profile('D3D10GetPixelShaderProfile'), 'ps_4_0');
+    assert.equal(profile('D3D10GetGeometryShaderProfile'), 'gs_4_0');
+    assert.equal(entries.D3D10GetVertexShaderProfile.handler([0]),
+        entries.D3D10GetVertexShaderProfile.handler([0]), 'one string, kept');
+});
+
+test('a compile is refused as a failed compile, with the reason in the error blob', ()=>{
+    const h = seamed();
+    const E_FAIL = 0x80004005;
+    const outs = h.box.place([0xdeadbeef, 0xdeadbeef]);
+    const args = [h.box.placeString('float4 main() : SV_Target { return 0; }'), 38, 0, 0, 0,
+        h.box.placeString('main'), h.box.placeString('ps_4_0'), 0, outs, outs + 4];
+    assert.equal(h.d3d10.D3D10CompileShader.argBytes, 40);
+    assert.equal(h.d3d10.D3D10CompileShader.handler(args) >>> 0, E_FAIL);
+    assert.equal(h.box.memory.readU32(outs), 0, 'no shader');
+    const errors = h.box.memory.readU32(outs + 4);
+    assert.notEqual(errors, 0);
+    const text = h.box.services.readMemory(h.box.call(errors, slot(ID3D10BLOB_SLOTS,
+        'GetBufferPointer')), h.box.call(errors, slot(ID3D10BLOB_SLOTS, 'GetBufferSize')));
+    assert.match(String.fromCharCode(...text), /no HLSL compiler/);
+    assert.equal(h.d3d10.D3D10CompileEffectFromMemory.argBytes, 36);
+    assert.equal(h.d3d10.D3D10CompileEffectFromMemory.handler([0, 0, 0, 0, 0, 0, 0, outs, 0])
+        >>> 0, E_FAIL);
+    assert.equal(h.d3d10.D3D10DisassembleShader.argBytes, 20);
+    assert.equal(h.d3d10.D3D10DisassembleShader.handler([0, 0, 0, 0, outs]) >>> 0, E_NOTIMPL);
+    assert.ok(h.divergences.some(line=>line.includes('D3D10CompileShader')));
+    /** @type {Record<string, any>} */
+    const entries = h.d3d10;
+    /** @type {[string, number][]} */
+    const arities = [['D3D10CreateBlob', 8], ['D3D10ReflectShader', 12],
+        ['D3D10GetInputSignatureBlob', 12], ['D3D10GetOutputSignatureBlob', 12],
+        ['D3D10GetInputAndOutputSignatureBlob', 12], ['D3D10GetShaderDebugInfo', 12],
+        ['D3D10GetVertexShaderProfile', 4], ['D3D10GetPixelShaderProfile', 4],
+        ['D3D10GetGeometryShaderProfile', 4]];
+    for (const [entry, bytes] of arities)
+    {
+        assert.equal(entries[entry].argBytes, bytes, entry);
+    }
 });
 
 test('what this build cannot do says so in the slot rather than in a crash', ()=>{
