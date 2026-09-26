@@ -811,6 +811,24 @@ test('window text is set, read back, and truncated to the buffer offered', ()=>{
         'there is no room even for a terminator, so nothing is written');
 });
 
+test('window text in the upper half of the ANSI page reads back as the bytes it was set as', ()=>{
+    // A window keeps its text as the ANSI page reads it, where 0x80 is the
+    // euro sign, 0x99 the trade mark and 0x97 an em dash rather than control
+    // characters; GetWindowTextA writes it back in that page, so a caption a
+    // program set is the caption it reads.
+    const { fns, memory, hwnd } = withWindow({
+        reply: (/** @type {any} */ message)=>fns.DefWindowProcA.handler(
+            [message.hwnd, message.message, message.wParam, message.lParam]),
+    });
+    const set = [0x80, 0x20, 0x99, 0x97, 0xe9, 0x8d];
+    memory.bytes.set([...set, 0], TITLE);
+
+    assert.equal(fns.SetWindowTextA.handler([hwnd, TITLE]), 1);
+    assert.equal(fns.GetWindowTextA.handler([hwnd, TEXT_BUFFER, 64]), set.length);
+    assert.deepEqual([...memory.bytes.subarray(TEXT_BUFFER, TEXT_BUFFER + set.length + 1)],
+        [...set, 0]);
+});
+
 test('SetWindowLongA answers with the value it replaced', ()=>{
     const { fns, hwnd } = withWindow();
 

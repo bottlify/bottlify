@@ -813,8 +813,8 @@ Stated as the code states them.
   class Windows' own libraries register and this build does not implement (a list view, a rich
   edit) is still made, as a window with no procedure. A property sheet's
   windows are made through the ANSI calls, which are what user32 has, so a wide sheet's caption
-  and titles are UTF-16 where a template or a tab carries them and Latin-1 where `SetWindowText`
-  does. A wizard's header draws no bitmap, watermark or bold title.
+  and titles are UTF-16 where a template or a tab carries them and in the ANSI page where
+  `SetWindowText` does, where a character the page does not hold is the default character. A wizard's header draws no bitmap, watermark or bold title.
 - **Unimplemented imports** are reported once per name at load. A decorated stdcall name, a
   C++ name that sizes its arguments or a C-runtime name is answered with zero, which reads as
   failure under most conventions but as `S_OK` to a caller expecting an `HRESULT` and as a result

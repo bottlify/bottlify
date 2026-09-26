@@ -355,6 +355,13 @@ const encodeSingleByte = (text, page)=>{
             bytes[at] = 0x80 + found;
             continue;
         }
+        // A position the page leaves undefined decodes as its own code point,
+        // and goes back as its own byte.
+        if (code < 0x80 + high.length && high[code - 0x80] === 0)
+        {
+            bytes[at] = code;
+            continue;
+        }
         // A table that stops short of the top of the page leaves the rest of
         // it Latin-1, exactly as decoding reads it: an accented letter is a
         // byte of its own there, not the default character.
@@ -391,6 +398,13 @@ export const ANSI_PAGE = CP_WINDOWS_1252;
  * @param {string} text
  */
 export const encodeAnsi = text=>encodeSingleByte(text, ANSI_PAGE).bytes;
+
+/**
+ * Bytes of the ANSI page as text, as MultiByteToWideChar(CP_ACP) reads them.
+ *
+ * @param {Uint8Array} bytes
+ */
+export const decodeAnsi = bytes=>decodeSingleByte(bytes, ANSI_PAGE);
 
 /**
  * Bytes of the ANSI page with their case changed, one byte to one byte.
