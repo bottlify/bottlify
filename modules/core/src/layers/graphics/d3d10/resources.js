@@ -31,8 +31,8 @@
 import { attachCom } from './com.js';
 import {
     ALL_REMAINING, D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DSV_DIMENSION, D3D10_MAP,
-    D3D10_RESOURCE_DIMENSION, D3D10_RTV_DIMENSION, D3D10_SRV_DIMENSION, D3D10_USAGE, E_INVALIDARG,
-    FORMAT_INFO, FORMAT_KIND, IID, S_OK,
+    D3D10_RESOURCE_DIMENSION, D3D10_RTV_DIMENSION, D3D10_SRV_DIMENSION, D3D10_USAGE, DXGI_USAGE,
+    E_INVALIDARG, FORMAT_INFO, FORMAT_KIND, IID, S_OK,
 } from './constants.js';
 import { fullMipChainLength, levelExtent, resolveViewFormat } from './validity.js';
 
@@ -125,6 +125,7 @@ export function createResource(options){
         : options.desc.MipLevels * (options.desc.ArraySize ?? 1);
     /** @type {Map<number, number>} subresource -> the map type it is held under */
     const mapped = new Map();
+    let evictionPriority = 0;
 
     return attachCom({
         dimension: options.dimension,
@@ -189,8 +190,42 @@ export function createResource(options){
             out.device = options.device();
             return S_OK;
         },
+
+        /**
+         * Kept and read back: nothing here is ever evicted, so the priority
+         * orders nothing, but a program reads back what it set.
+         *
+         * @param {number} priority
+         */
+        SetEvictionPriority(priority){
+            evictionPriority = priority >>> 0;
+        },
+
+        /** @returns {number} */
+        GetEvictionPriority(){
+            return evictionPriority;
+        },
+
+        /**
+         * What DXGI says the resource is for: a back buffer's usage word as
+         * its swap chain gave it, and for anything else the two halves of the
+         * bind flags DXGI has names for.
+         *
+         * @returns {number}
+         */
+        GetUsage(){
+            if (options.desc.DXGIUsage !== undefined)
+            {
+                return options.desc.DXGIUsage;
+            }
+            const bind = options.desc.BindFlags ?? 0;
+            return ((bind & D3D10_BIND.SHADER_RESOURCE) !== 0 ? DXGI_USAGE.SHADER_INPUT : 0)
+                | ((bind & D3D10_BIND.RENDER_TARGET) !== 0 ? DXGI_USAGE.RENDER_TARGET_OUTPUT : 0);
+        },
     }, {
         interfaces: options.interfaces,
+        // Asked through DXGI, a resource's parent is the device it belongs to.
+        parent: options.device(),
         implicit: options.implicit,
         onFirstRef: ()=>{
             options.retainDevice();

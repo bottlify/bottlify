@@ -22,8 +22,9 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import {
-    ID3D10BUFFER_SLOTS, ID3D10DEVICE_SLOTS, ID3D10QUERY_SLOTS, ID3D10TEXTURE_SLOTS,
-    IDXGIADAPTER_SLOTS,
+    ID3D10BUFFER_SLOTS, ID3D10DEVICE_SLOTS, ID3D10MULTITHREAD_SLOTS, ID3D10QUERY_SLOTS,
+    ID3D10TEXTURE_SLOTS, ID3D10VIEW_SLOTS, IDXGIADAPTER1_SLOTS, IDXGIADAPTER_SLOTS,
+    IDXGIDEVICE1_SLOTS, IDXGIRESOURCE_SLOTS, IDXGISURFACE_SLOTS,
     IDXGIFACTORY_SLOTS, IDXGISWAPCHAIN_SLOTS, createDirect3D10Seam,
 } from './d3d10.js';
 import {
@@ -598,6 +599,167 @@ test('a block-compressed texture\'s data is read a row of blocks at a time', ()=
     assert.deepEqual([...h.box.services.readMemory(h.box.memory.readU32(mapped), 32)],
         [...blocks]);
     h.box.call(texture, slot(ID3D10TEXTURE_SLOTS, 'Unmap'), [0]);
+});
+
+test('a resource answers QueryInterface for every interface it derives from', ()=>{
+    // After Wine's d3d10core test_create_texture2d (IDXGISurface only for a
+    // single subresource) and test_private_data (IDXGISurface_GetPrivateData).
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    /** @param {number} object @param {string} iid */
+    const query = (object, iid)=>{
+        const out = h.box.place([0xdeadbeef]);
+        const hr = h.box.call(object, 0, [h.box.placeGuid(iid), out]);
+        return { hr, pointer: h.box.memory.readU32(out) };
+    };
+    /** @param {number} mipLevels */
+    const texture = mipLevels=>{
+        const desc = h.box.place([4, 4, mipLevels, 1, DXGI_FORMAT.R8G8B8A8_UNORM, 1, 0,
+            D3D10_USAGE.STAGING, 0, D3D10_CPU_ACCESS.READ | D3D10_CPU_ACCESS.WRITE, 0]);
+        const out = h.box.place([0]);
+        assert.equal(h.device(device, 'CreateTexture2D', [desc, 0, out]), S_OK);
+        return h.box.memory.readU32(out);
+    };
+    const single = texture(1);
+    for (const iid of [IID.ID3D10Resource, IID.ID3D10DeviceChild, IID.IDXGIObject,
+        IID.IDXGIDeviceSubObject, IID.IDXGIResource, IID.IDXGISurface])
+    {
+        const answer = query(single, iid);
+        assert.equal(answer.hr, S_OK, `the texture is an ${iid}`);
+        assert.notEqual(answer.pointer, 0);
+    }
+    const chain = texture(0);
+    assert.deepEqual(query(chain, IID.IDXGISurface), { hr: 0x80004002, pointer: 0 },
+        'a mip chain is not one surface');
+    assert.equal(query(chain, IID.IDXGIResource).hr, S_OK);
+
+    // Through the surface: its description, its device and parent, and a map.
+    const surface = query(single, IID.IDXGISurface).pointer;
+    const descAt = h.box.place([0, 0, 0, 0, 0]);
+    assert.equal(h.box.call(surface, slot(IDXGISURFACE_SLOTS, 'GetDesc'), [descAt]), S_OK);
+    assert.deepEqual([0, 4, 8, 12, 16].map(at=>h.box.memory.readU32(descAt + at)),
+        [4, 4, DXGI_FORMAT.R8G8B8A8_UNORM, 1, 0]);
+    const parentAt = h.box.place([0]);
+    assert.equal(h.box.call(surface, slot(IDXGISURFACE_SLOTS, 'GetParent'),
+        [h.box.placeGuid(IID.ID3D10Device), parentAt]), S_OK);
+    assert.equal(h.box.memory.readU32(parentAt), device, 'the parent is the device');
+    const deviceAt = h.box.place([0]);
+    assert.equal(h.box.call(surface, slot(IDXGISURFACE_SLOTS, 'GetDevice'),
+        [h.box.placeGuid(IID.ID3D10Device), deviceAt]), S_OK);
+    assert.equal(h.box.memory.readU32(deviceAt), device);
+    const rect = h.box.place([0, 0]);
+    assert.equal(h.box.call(surface, slot(IDXGISURFACE_SLOTS, 'Map'), [rect, 2]), S_OK);
+    assert.equal(h.box.memory.readU32(rect), 16, 'Pitch');
+    h.box.memory.writeU32(h.box.memory.readU32(rect + 4), 0x44332211);
+    assert.equal(h.box.call(surface, slot(IDXGISURFACE_SLOTS, 'Unmap'), []), S_OK);
+    const mapped = h.box.place([0, 0]);
+    assert.equal(h.box.call(single, slot(ID3D10TEXTURE_SLOTS, 'Map'),
+        [0, D3D10_MAP.READ, 0, mapped]), S_OK);
+    assert.equal(h.box.memory.readU32(h.box.memory.readU32(mapped)), 0x44332211,
+        'what the surface wrote, the texture reads');
+    h.box.call(single, slot(ID3D10TEXTURE_SLOTS, 'Unmap'), [0]);
+
+    // A buffer is a DXGI resource and never a surface.
+    const bufferDesc = h.box.place([16, D3D10_USAGE.DEFAULT, D3D10_BIND.VERTEX_BUFFER, 0, 0]);
+    const bufferAt = h.box.place([0]);
+    assert.equal(h.device(device, 'CreateBuffer', [bufferDesc, 0, bufferAt]), S_OK);
+    const buffer = h.box.memory.readU32(bufferAt);
+    assert.equal(query(buffer, IID.IDXGIResource).hr, S_OK);
+    assert.equal(query(buffer, IID.ID3D10Resource).hr, S_OK);
+    assert.equal(query(buffer, IID.IDXGISurface).hr, 0x80004002);
+
+    // A view is an ID3D10View; its resource comes back as the pointer held.
+    const bufferTextureAt = h.box.place([0]);
+    const rtDesc = h.box.place([4, 4, 1, 1, DXGI_FORMAT.R8G8B8A8_UNORM, 1, 0,
+        D3D10_USAGE.DEFAULT, D3D10_BIND.RENDER_TARGET, 0, 0]);
+    assert.equal(h.device(device, 'CreateTexture2D', [rtDesc, 0, bufferTextureAt]), S_OK);
+    const target = h.box.memory.readU32(bufferTextureAt);
+    const viewAt = h.box.place([0]);
+    assert.equal(h.device(device, 'CreateRenderTargetView', [target, 0, viewAt]), S_OK);
+    const baseView = query(h.box.memory.readU32(viewAt), IID.ID3D10View).pointer;
+    assert.notEqual(baseView, 0);
+    const resourceAt = h.box.place([0]);
+    h.box.call(baseView, slot(ID3D10VIEW_SLOTS, 'GetResource'), [resourceAt]);
+    assert.equal(h.box.memory.readU32(resourceAt), target);
+    assert.equal(query(h.box.memory.readU32(viewAt), IID.ID3D10DeviceChild).hr, S_OK);
+});
+
+test('a back buffer is a DXGI resource of the back buffer\'s usage', ()=>{
+    // After Wine's dxgi test_swapchain_parameters.
+    const h = seamed();
+    const { swapChain } = h.createDeviceAndSwapChain();
+    const out = h.box.place([0]);
+    assert.equal(h.swapChain(swapChain, 'GetBuffer',
+        [0, h.box.placeGuid(IID.IDXGIResource), out]), S_OK);
+    const resource = h.box.memory.readU32(out);
+    assert.notEqual(resource, 0);
+    const usageAt = h.box.place([0]);
+    assert.equal(h.box.call(resource, slot(IDXGIRESOURCE_SLOTS, 'GetUsage'), [usageAt]), S_OK);
+    const usage = h.box.memory.readU32(usageAt);
+    assert.equal(usage & (DXGI_USAGE.RENDER_TARGET_OUTPUT | DXGI_USAGE.BACK_BUFFER),
+        DXGI_USAGE.RENDER_TARGET_OUTPUT | DXGI_USAGE.BACK_BUFFER);
+    assert.equal(h.swapChain(swapChain, 'GetBuffer',
+        [0, h.box.placeGuid(IID.IDXGISurface), out]), S_OK, 'and one surface');
+    const handleAt = h.box.place([0xdeadbeef]);
+    assert.equal(h.box.call(resource, slot(IDXGIRESOURCE_SLOTS, 'GetSharedHandle'), [handleAt]),
+        S_OK);
+    assert.equal(h.box.memory.readU32(handleAt), 0, 'nothing is shared');
+});
+
+test('the device answers as ID3D10Multithread and IDXGIDevice1', ()=>{
+    // After Wine's d3d10core test_create_device and dxgi test_maximum_frame_latency.
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    /** @param {string} iid */
+    const query = iid=>{
+        const out = h.box.place([0]);
+        assert.equal(h.box.call(device, 0, [h.box.placeGuid(iid), out]), S_OK, iid);
+        return h.box.memory.readU32(out);
+    };
+    const multithread = query(IID.ID3D10Multithread);
+    const mt = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        h.box.call(multithread, slot(ID3D10MULTITHREAD_SLOTS, name), args);
+    assert.equal(mt('GetMultithreadProtected', []), 1, 'protected unless made single-threaded');
+    assert.equal(mt('SetMultithreadProtected', [0]), 1, 'the state before');
+    assert.equal(mt('GetMultithreadProtected', []), 0);
+    mt('Enter', []);
+    mt('Leave', []);
+
+    const device1 = query(IID.IDXGIDevice1);
+    const latency = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        h.box.call(device1, slot(IDXGIDEVICE1_SLOTS, name), args);
+    const out = h.box.place([0]);
+    assert.equal(latency('GetMaximumFrameLatency', [0]), DXGI_ERROR_INVALID_CALL);
+    assert.equal(latency('GetMaximumFrameLatency', [out]), S_OK);
+    assert.equal(h.box.memory.readU32(out), 3, 'three frames by default');
+    assert.equal(latency('SetMaximumFrameLatency', [16]), S_OK);
+    assert.equal(latency('SetMaximumFrameLatency', [17]), DXGI_ERROR_INVALID_CALL);
+    latency('GetMaximumFrameLatency', [out]);
+    assert.equal(h.box.memory.readU32(out), 16);
+    assert.equal(latency('SetMaximumFrameLatency', [0]), S_OK);
+    latency('GetMaximumFrameLatency', [out]);
+    assert.equal(h.box.memory.readU32(out), 3);
+    assert.notEqual(query(IID.IDXGIObject), 0);
+});
+
+test('an adapter is an IDXGIAdapter1 too, whose description has a word of flags more', ()=>{
+    // After Wine's dxgi test_adapter_desc.
+    const h = seamed();
+    const factoryAt = h.box.place([0]);
+    h.dxgi.CreateDXGIFactory.handler([h.box.placeGuid(IID.IDXGIFactory), factoryAt]);
+    const adapterAt = h.box.place([0]);
+    h.box.call(h.box.memory.readU32(factoryAt), slot(IDXGIFACTORY_SLOTS, 'EnumAdapters'),
+        [0, adapterAt]);
+    const adapter = h.box.memory.readU32(adapterAt);
+    assert.equal(h.box.call(adapter, slot(IDXGIADAPTER_SLOTS, 'GetDesc'), [0]), E_INVALIDARG);
+    const out = h.box.place([0]);
+    assert.equal(h.box.call(adapter, 0, [h.box.placeGuid(IID.IDXGIAdapter1), out]), S_OK);
+    const adapter1 = h.box.memory.readU32(out);
+    const desc = h.box.allocate(0x128);
+    h.box.memory.writeU32(desc + 0x124, 0xdeadbeef);
+    assert.equal(h.box.call(adapter1, slot(IDXGIADAPTER1_SLOTS, 'GetDesc1'), [desc]), S_OK);
+    assert.equal(h.box.memory.readU32(desc), 0x006f0042, 'the same description');
+    assert.equal(h.box.memory.readU32(desc + 0x124), 0, 'Flags');
 });
 
 test('what this build cannot do says so in the slot rather than in a crash', ()=>{

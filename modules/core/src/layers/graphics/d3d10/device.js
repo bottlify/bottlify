@@ -36,11 +36,11 @@
 
 import { attachCom } from './com.js';
 import {
-    D3D10_BIND, D3D10_CREATE_DEVICE_MASK, D3D10_DEFAULTS, D3D10_DRIVER_TYPE, D3D10_DRIVER_TYPES,
-    D3D10_LIMITS, D3D10_PRIMITIVE_TOPOLOGY, D3D10_QUERY, D3D10_RESOURCE_DIMENSION,
-    D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_USAGE, DXGI_ERROR_INVALID_CALL,
-    DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_FAIL, E_INVALIDARG, E_NOTIMPL,
-    FORMAT_INFO, FORMAT_KIND, IID, S_FALSE, S_OK,
+    D3D10_BIND, D3D10_CREATE_DEVICE, D3D10_CREATE_DEVICE_MASK, D3D10_DEFAULTS, D3D10_DRIVER_TYPE,
+    D3D10_DRIVER_TYPES, D3D10_LIMITS, D3D10_PRIMITIVE_TOPOLOGY, D3D10_QUERY,
+    D3D10_RESOURCE_DIMENSION, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_USAGE,
+    DXGI_ERROR_INVALID_CALL, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_FAIL,
+    E_INVALIDARG, E_NOTIMPL, FORMAT_INFO, FORMAT_KIND, IID, S_FALSE, S_OK,
 } from './constants.js';
 import { SHADER_KIND, SYSTEM_VALUE, parseDxbc, parseShaderOfKind } from './dxbc.js';
 import { createFactory } from './dxgi.js';
@@ -80,6 +80,10 @@ const FORMAT_SUPPORT = Object.freeze({
     CPU_LOCKABLE: 0x20000,
     DISPLAY: 0x80000,
 });
+
+/** The frames a DXGI device queues ahead unless told otherwise, and the most it will. */
+const DEFAULT_FRAME_LATENCY = 3;
+const MAXIMUM_FRAME_LATENCY = 16;
 
 /** The query kinds that are also predicates. */
 const PREDICATE_QUERIES = new Set([
@@ -385,6 +389,9 @@ export function createDevice(options = {}){
     };
     let exceptionMode = 0;
     let textFilter = { width: 0, height: 0 };
+    // A device is thread-safe unless it was made single-threaded.
+    let multithreadProtected = ((options.flags ?? 0) & D3D10_CREATE_DEVICE.SINGLETHREADED) === 0;
+    let maximumFrameLatency = DEFAULT_FRAME_LATENCY;
 
     /**
      * @param {any} desc
@@ -1494,6 +1501,61 @@ export function createDevice(options = {}){
         /** @returns {number} */
         OpenSharedResource(){
             return E_NOTIMPL;
+        },
+
+        // --- ID3D10Multithread ---
+
+        /**
+         * A guest thread reaches the device one call at a time already, so
+         * the device's own lock has nothing left to exclude.
+         */
+        Enter(){
+        },
+
+        Leave(){
+        },
+
+        /**
+         * @param {boolean} enable
+         * @returns {boolean} whether protection was on before
+         */
+        SetMultithreadProtected(enable){
+            const before = multithreadProtected;
+            multithreadProtected = !!enable;
+            return before;
+        },
+
+        /** @returns {boolean} */
+        GetMultithreadProtected(){
+            return multithreadProtected;
+        },
+
+        // --- IDXGIDevice1 ---
+
+        /**
+         * Frames queued ahead of the display: sixteen at most, and zero puts
+         * the default back.
+         *
+         * @param {number} latency
+         * @returns {number}
+         */
+        SetMaximumFrameLatency(latency){
+            if (latency > MAXIMUM_FRAME_LATENCY)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            maximumFrameLatency = latency === 0 ? DEFAULT_FRAME_LATENCY : latency;
+            return S_OK;
+        },
+
+        /** @param {{ latency?: number } | null} out @returns {number} */
+        GetMaximumFrameLatency(out){
+            if (!out)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            out.latency = maximumFrameLatency;
+            return S_OK;
         },
 
         // --- device-wide ---
