@@ -59,6 +59,10 @@ const WM_LBUTTONUP = 0x0202;
 const WM_NCLBUTTONDOWN = 0x00a1;
 const WM_NCHITTEST = 0x0084;
 const WM_CTLCOLORSTATIC = 0x0138;
+/** SetBkMode's two modes, and the stock brush of the classic 3D face's grey. */
+const TRANSPARENT = 1;
+const OPAQUE = 2;
+const LTGRAY_BRUSH = 1;
 const BM_GETCHECK = 0x00f0;
 const BM_SETCHECK = 0x00f1;
 const BN_CLICKED = 0;
@@ -911,9 +915,9 @@ test('an owner-drawn static is drawn by its parent', async()=>{
 test('statics and check boxes write their text in the colour WM_CTLCOLORSTATIC set',
     async()=>{
         // As documented for WM_CTLCOLORSTATIC: the parent sets the text
-        // colour on the device context it is handed, and the control draws
-        // its text in it. A push button keeps the system colours, as
-        // documented for WM_CTLCOLORBTN.
+        // colour on the device context it is handed and answers the brush,
+        // and the control draws its text in it. A push button keeps the
+        // system colours, as documented for WM_CTLCOLORBTN.
         const RED = 0x000000ff;
         /** @type {any} */
         let gdi = null;
@@ -922,6 +926,8 @@ test('statics and check boxes write their text in the colour WM_CTLCOLORSTATIC s
                 if (message.message === WM_CTLCOLORSTATIC || message.message === 0x0135)
                 {
                     gdi.table.SetTextColor.handler([message.wParam, RED]);
+                    gdi.table.SetBkMode.handler([message.wParam, TRANSPARENT]);
+                    return gdi.table.GetStockObject.handler([LTGRAY_BRUSH]);
                 }
                 return 0;
             },
@@ -948,6 +954,64 @@ test('statics and check boxes write their text in the colour WM_CTLCOLORSTATIC s
         assert.ok(!colours(100).has(0), 'and none of it is left black');
         assert.ok(colours(101).has(red), 'so is the check box\'s');
         assert.ok(!colours(3).has(red), 'a push button keeps its own');
+    });
+
+test('a static\'s text is drawn over the context\'s background colour unless it is transparent',
+    async()=>{
+        // As documented for WM_CTLCOLORSTATIC: the parent may set the
+        // background colour and mode of the context it is handed as well as
+        // the text colour; the default procedure sets the system's -- window
+        // text on the 3D face -- so a dialog's static is drawn in the
+        // dialog's colours unless the dialog procedure answers otherwise.
+        const GREEN = 0x0000ff00;
+        const WHITE = 0x00ffffff;
+        /** @type {any} */
+        let gdi = null;
+        let answer = true;
+        let mode = OPAQUE;
+        const context = setup({
+            reply: message=>{
+                if (message.message === WM_CTLCOLORSTATIC && answer)
+                {
+                    gdi.table.SetBkColor.handler([message.wParam, GREEN]);
+                    gdi.table.SetBkMode.handler([message.wParam, mode]);
+                    return gdi.table.GetStockObject.handler([LTGRAY_BRUSH]);
+                }
+                return 0;
+            },
+        });
+        gdi = context.gdi;
+        const dialog = await openDialog(context);
+        const hwnd = context.fns.GetDlgItem.handler([dialog, 100]);
+        /** @returns {Set<number>} the pixels in the static */
+        const colours = ()=>{
+            context.fns.GetWindowRect.handler([hwnd, OUT]);
+            const [left, top, right, bottom] = [0, 4, 8, 12]
+                .map(at=>context.memory.u32(OUT + at));
+            const seen = new Set();
+            for (let y = top; y < bottom; y++)
+            {
+                for (let x = left; x < right; x++)
+                {
+                    seen.add(context.desktop.read(x, y));
+                }
+            }
+            return seen;
+        };
+        /** Paints the static again and answers its pixels. */
+        const repaint = async()=>{
+            context.fns.InvalidateRect.handler([hwnd, 0, 1]);
+            await context.pump(dialog);
+            return colours();
+        };
+        assert.ok(colours().has(GREEN), 'opaque: the text sits on the green background');
+        mode = TRANSPARENT;
+        assert.ok(!(await repaint()).has(GREEN), 'transparent: on the brush alone');
+        answer = false;
+        const plain = await repaint();
+        assert.ok(!plain.has(GREEN) && !plain.has(WHITE),
+            'left to the default: the 3D face, not the context\'s own white');
+        assert.ok(plain.has(0), 'and the window text colour');
     });
 
 test('an edit copies, cuts, pastes and clears through the clipboard, and undoes a change',

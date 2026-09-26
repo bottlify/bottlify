@@ -456,6 +456,9 @@ const RADIO_DOT = [
  * @property {number} lParam
  */
 
+/** SetBkMode's mode in which text is drawn over the context's background colour. */
+const OPAQUE = 2;
+
 /**
  * The drawing the window manager does itself, as gdi32 offers it.
  *
@@ -466,8 +469,14 @@ const RADIO_DOT = [
  * @property {(hdc: number, rect: Rect, brush: number) => boolean} frame
  * @property {(hdc: number, rect: Rect) => boolean} invert
  * @property {(hdc: number) => number} [textColor]  The colour a context draws text in.
+ * @property {(hdc: number) => number} [bkMode]
+ *           OPAQUE or TRANSPARENT, as SetBkMode left the context.
+ * @property {(hdc: number, color: number) => number} [setTextColor]
+ * @property {(hdc: number, color: number) => number} [setBkColor]
  * @property {(hdc: number, x: number, y: number, text: string,
- *     options?: { color?: number, clip?: Rect | null }) => boolean} text
+ *     options?: { color?: number, clip?: Rect | null, transparent?: boolean }) => boolean} text
+ *           `transparent: false` draws over the context's own background
+ *           colour, in its own mode; otherwise over what is there.
  * @property {(hdc: number, text: string) => { width: number, height: number,
  *     ascent: number }} measure
  * @property {(hdc: number, x: number, y: number, bitmap: number) => boolean} bitmap
@@ -579,6 +588,7 @@ export const pointOf = lParam=>({
  * @returns {{ procedures: Record<string, ControlProcedure>,
  *     helpers: { dialogProc: ControlProcedure,
  *         markDefault: (dialog: any, focused: number) => void,
+ *         defaultControlColors: (message: number, hdc: number) => void,
  *         paintScrollBar: (hdc: number, rect: Rect, vertical: boolean,
  *             held: ScrollBarState) => void,
  *         scrollHit: (rect: Rect, vertical: boolean, held: ScrollBarState,
@@ -671,7 +681,7 @@ export function createControlProcedures(host){
      * @param {number} hdc @param {string} text @param {Rect} rect @param {number} format
      * @param {number} rgb
      */
-    const drawText = (hdc, text, rect, format, rgb)=>{
+    const drawText = (hdc, text, rect, format, rgb, opaque = false)=>{
         const draw = /** @type {Drawing} */ (host.draw);
         const metrics = draw.measure(hdc, 'M');
         /** @param {string} piece */
@@ -681,7 +691,8 @@ export function createControlProcedures(host){
         });
         for (const line of lines)
         {
-            draw.text(hdc, line.x, line.y, line.text, { color: rgb, clip: rect });
+            draw.text(hdc, line.x, line.y, line.text,
+                { color: rgb, clip: rect, transparent: !opaque });
             if (line.underline !== null)
             {
                 const at = line.x + widthOf(line.text.slice(0, line.underline));
@@ -834,6 +845,28 @@ export function createControlProcedures(host){
     const staticInk = (record, hdc)=>(disabled(record) ? color(COLOR_GRAYTEXT)
         : host.draw?.textColor?.(hdc) ?? color(COLOR_WINDOWTEXT));
 
+    /**
+     * Whether that text is drawn over the context's background colour: the
+     * mode a context starts in, unless the parent made it transparent.
+     *
+     * @param {number} hdc
+     */
+    const staticOpaque = hdc=>host.draw?.bkMode?.(hdc) === OPAQUE;
+
+    /**
+     * The colours the default procedure gives the context a control asked
+     * WM_CTLCOLOR* about, as DefWindowProc sets them: the window text on the
+     * window colour for an edit or a list box, on the 3D face for the rest.
+     *
+     * @param {number} message @param {number} hdc
+     */
+    const defaultControlColors = (message, hdc)=>{
+        const face = message === WM_CTLCOLOREDIT || message === WM_CTLCOLORLISTBOX
+            ? COLOR_WINDOW : COLOR_3DFACE;
+        host.draw?.setTextColor?.(hdc, color(COLOR_WINDOWTEXT));
+        host.draw?.setBkColor?.(hdc, color(face));
+    };
+
     // --- Button -------------------------------------------------------------
 
     /** @param {any} record */
@@ -952,7 +985,7 @@ export function createControlProcedures(host){
                     right: rect.left + 8 + metrics.width + 4, bottom: rect.top + metrics.height };
                 background(hdc, label, brush, COLOR_3DFACE);
                 drawText(hdc, text, { ...label, left: label.left + 2 }, DT_SINGLELINE,
-                    staticInk(record, hdc));
+                    staticInk(record, hdc), staticOpaque(hdc));
             }
             return;
         }
@@ -989,7 +1022,8 @@ export function createControlProcedures(host){
         const textRect = leftText
             ? { ...rect, right: box.left - CHECK_GAP }
             : { ...rect, left: box.right + CHECK_GAP };
-        drawText(hdc, text, textRect, DT_VCENTER | multi, staticInk(record, hdc));
+        drawText(hdc, text, textRect, DT_VCENTER | multi, staticInk(record, hdc),
+            staticOpaque(hdc));
     };
 
     /** @param {any} record  How an owner-drawn button's parent is told it stands. */
@@ -1240,7 +1274,7 @@ export function createControlProcedures(host){
             | (kind === SS_SIMPLE ? DT_SINGLELINE : 0)
             | ((record.style & SS_CENTERIMAGE) !== 0 ? DT_VCENTER | DT_SINGLELINE : 0)
             | ((record.style & SS_NOPREFIX) !== 0 ? DT_NOPREFIX : 0);
-        drawText(hdc, record.title, inside, format, staticInk(record, hdc));
+        drawText(hdc, record.title, inside, format, staticInk(record, hdc), staticOpaque(hdc));
         return true;
     };
 
@@ -2933,9 +2967,11 @@ export function createControlProcedures(host){
             case WM_CTLCOLORSCROLLBAR:
                 // The dialog's face for its statics and buttons; an edit and a
                 // list box keep the window colour, which is their own default.
+                defaultControlColors(message.message, message.wParam >>> 0);
                 return host.draw ? host.draw.solidBrush(color(COLOR_3DFACE)) : 0;
             case WM_CTLCOLOREDIT:
             case WM_CTLCOLORLISTBOX:
+                defaultControlColors(message.message, message.wParam >>> 0);
                 return 0;
             // The default id is the template's default push button's until a
             // program names another; the dialog manager keeps it on the
@@ -3044,7 +3080,7 @@ export function createControlProcedures(host){
             ScrollBar: scrollBarProc,
             '#32770': dialogProc,
         },
-        helpers: { dialogProc, markDefault, paintScrollBar, scrollHit },
+        helpers: { dialogProc, markDefault, defaultControlColors, paintScrollBar, scrollHit },
         // The drawing and messaging the classes above share, handed out whole
         // so the common controls paint and tell their parent with the same
         // helpers: one look, and a change to it is one change.

@@ -2489,13 +2489,18 @@ export function createWindowFunctions(host){
             }
             case WM_GETTEXTLENGTH:
                 return record.title.length;
+            // The system's colours are set in the context as well as the
+            // brush answered: the window text, on the 3D face or on the
+            // window colour for an edit or a list box.
             case WM_CTLCOLORSTATIC:
             case WM_CTLCOLORBTN:
             case WM_CTLCOLORDLG:
             case WM_CTLCOLORSCROLLBAR:
+                controls.helpers.defaultControlColors(message.message, message.wParam >>> 0);
                 return draw ? draw.solidBrush(sysColor(COLOR_3DFACE)) : 0;
             case WM_CTLCOLOREDIT:
             case WM_CTLCOLORLISTBOX:
+                controls.helpers.defaultControlColors(message.message, message.wParam >>> 0);
                 return 0;
             case WM_VSCROLL:
             case WM_HSCROLL:

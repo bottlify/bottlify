@@ -669,6 +669,22 @@ test('every setter answers with the value it replaced', ()=>{
     assert.equal(fns.GetMapMode.handler([hdc]), MM_ANISOTROPIC);
 });
 
+test('the window manager reads and sets a context\'s colours and mode as the program would', ()=>{
+    // What a control paints with once its parent has answered WM_CTLCOLOR*,
+    // and what the default procedure sets there when the parent did not.
+    const { fns, gdi, hdc } = withDC();
+    fns.SetBkMode.handler([hdc, TRANSPARENT]);
+    fns.SetBkColor.handler([hdc, 0x00000080]);
+    assert.equal(gdi.draw.bkMode(hdc), TRANSPARENT);
+    assert.equal(gdi.draw.bkColor(hdc), 0x00000080);
+
+    assert.equal(gdi.draw.setTextColor(hdc, 0x00123456), 0);
+    assert.equal(gdi.draw.setBkColor(hdc, 0x00c0c0c0), 0x00000080, 'the colour it replaced');
+    assert.equal(fns.GetTextColor.handler([hdc]), 0x00123456);
+    assert.equal(fns.GetBkColor.handler([hdc]), 0x00c0c0c0);
+    assert.equal(gdi.draw.bkMode(0x9999), OPAQUE, 'no context: the mode a new one has');
+});
+
 test('a setter on a handle that is not a DC changes nothing and reports nothing', ()=>{
     const { fns } = setup();
 

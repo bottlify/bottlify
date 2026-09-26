@@ -2379,6 +2379,30 @@ export function createGdiFunctions(host){
             textColor: hdc=>(dcOf(hdc)?.textColor ?? 0) >>> 0,
 
             /**
+             * Whether a context's text is drawn over its background colour,
+             * OPAQUE, or over what is there, TRANSPARENT: what a parent left
+             * with SetBkMode on WM_CTLCOLOR*. A new context's is OPAQUE.
+             *
+             * @param {number} hdc
+             */
+            bkMode: hdc=>dcOf(hdc)?.bkMode ?? OPAQUE,
+
+            /** The colour a context's text is drawn over. @param {number} hdc */
+            bkColor: hdc=>(dcOf(hdc)?.bkColor ?? WHITE) >>> 0,
+
+            /**
+             * The colours the default procedure gives a control's context,
+             * as SetTextColor and SetBkColor would: each answers the colour
+             * it replaced.
+             *
+             * @param {number} hdc @param {number} color
+             */
+            setTextColor: (hdc, color)=>table.SetTextColor.handler([hdc, color]),
+
+            /** @param {number} hdc @param {number} color */
+            setBkColor: (hdc, color)=>table.SetBkColor.handler([hdc, color]),
+
+            /**
              * Text at a point, over whatever is there, clipped to a rectangle
              * when one is given. The context's own colour and mode are put
              * back afterwards: this is the window manager drawing, not the
