@@ -337,6 +337,21 @@ export function createPropertySheetFunctions(host){
     /** @param {string} name @param {number[]} args @returns {any} */
     const api = (name, args)=>host.user32?.(name)?.handler(args) ?? 0;
 
+    /**
+     * Runs each step once the one before has been answered, and answers
+     * with the last. A call that sends a message may be answered by the
+     * program -- a page's procedure is the program's, the sheet's own is
+     * reached the way the program would reach it, and a control may be
+     * subclassed -- and the thread goes into the program for one call at a
+     * time. Sent to a second before it has begun the first, it never runs
+     * the first, and a later answer goes to that call instead of the one
+     * it belongs to: the dialog manager's WM_INITDIALOG is never answered.
+     *
+     * @param {(() => any)[]} steps @returns {any}
+     */
+    const inTurn = (...steps)=>steps.reduce((done, step)=>after(done, step),
+        /** @type {any} */ (0));
+
     /** @param {number} address */
     const u32 = address=>{
         const bytes = host.readMemory(address >>> 0, 4);
@@ -767,7 +782,7 @@ export function createPropertySheetFunctions(host){
      * one from the sheet's edges, an interior page under the header. The
      * sheet is then centred on its owner, or on the screen.
      *
-     * @param {Sheet} sheet
+     * @param {Sheet} sheet @returns {any}
      */
     const layout = sheet=>{
         const margin = units(sheet, MARGIN, MARGIN);
@@ -787,13 +802,15 @@ export function createPropertySheetFunctions(host){
                 height = Math.max(height, size.y + (exterior(entry) ? 0 : sheet.header));
             }
         }
+        /** @type {(() => any)[]} */
+        const moves = [];
         /** @param {number} id @param {number} x @param {number} y @param {number} w @param {number} h */
-        const move = (id, x, y, w, h)=>api('MoveWindow', [item(sheet, id), x, y, w, h, 0]);
+        const move = (id, x, y, w, h)=>moves.push(()=>api('MoveWindow',
+            [item(sheet, id), x, y, w, h, 0]));
         /** @param {number[]} ids @param {number} right @param {number} y */
         const row = (ids, right, y)=>ids.forEach((id, index)=>move(id,
             right - (ids.length - index) * button.x - (ids.length - 1 - index) * gap.x,
             y, button.x, button.y));
-        let client;
         if (wizard(sheet))
         {
             const inset = wizard97(sheet) ? { x: 0, y: 0 } : margin;
@@ -805,7 +822,7 @@ export function createPropertySheetFunctions(host){
                 : [IDC_BACK_BUTTON, IDC_NEXT_BUTTON];
             const trailing = (sheet.flags & PSH_HASHELP) !== 0 ? [IDCANCEL, IDHELP] : [IDCANCEL];
             const across = (lead.length + trailing.length) * (button.x + gap.x);
-            client = { x: Math.max(width + 2 * inset.x, across + 2 * margin.x),
+            const client = { x: Math.max(width + 2 * inset.x, across + 2 * margin.x),
                 y: buttons + button.y + margin.y };
             move(IDC_TABCONTROL, inset.x, inset.y, width, height);
             move(IDC_SUNKEN_LINE, inset.x, line, client.x - 2 * inset.x, 2);
@@ -831,39 +848,55 @@ export function createPropertySheetFunctions(host){
             {
                 move(IDC_FINISH_BUTTON, leadRight - button.x, buttons, button.x, button.y);
             }
+            return inTurn(...moves, ()=>centre(sheet, client));
         }
-        else
-        {
-            const tab = sheet.tab;
-            writeRect(sheet, [0, 0, width, height]);
-            api('SendMessageA', [tab, TCM_ADJUSTRECT, 1, sheet.scratch]);
+        const tab = sheet.tab;
+        writeRect(sheet, [0, 0, width, height]);
+        return after(api('SendMessageA', [tab, TCM_ADJUSTRECT, 1, sheet.scratch]), ()=>{
             const around = readRect(sheet);
             const tabSize = { x: around.right - around.left, y: around.bottom - around.top };
-            api('MoveWindow', [tab, margin.x, margin.y, tabSize.x, tabSize.y, 0]);
-            writeRect(sheet, [margin.x, margin.y, margin.x + tabSize.x, margin.y + tabSize.y]);
-            api('SendMessageA', [tab, TCM_ADJUSTRECT, 0, sheet.scratch]);
-            const pane = readRect(sheet);
-            sheet.origin = { x: pane.left, y: pane.top };
-            const buttons = margin.y + tabSize.y + gap.y;
-            // The row keeps its order whichever buttons show: the ones that
-            // do end at the right margin, and a hidden one sits past them.
-            const visible = [IDOK, IDCANCEL];
-            if ((sheet.flags & PSH_NOAPPLYNOW) === 0)
-            {
-                visible.push(IDC_APPLY_BUTTON);
-            }
-            if ((sheet.flags & PSH_HASHELP) !== 0)
-            {
-                visible.push(IDHELP);
-            }
-            const across = visible.length * button.x + (visible.length - 1) * gap.x;
-            client = { x: Math.max(tabSize.x + 2 * margin.x, across + 2 * margin.x),
-                y: buttons + button.y + margin.y };
-            row(visible, client.x - margin.x, buttons);
-            const hidden = [IDOK, IDCANCEL, IDC_APPLY_BUTTON, IDHELP]
-                .filter(id=>!visible.includes(id));
-            row(hidden, client.x - margin.x + hidden.length * (button.x + gap.x), buttons);
-        }
+            return inTurn(()=>api('MoveWindow', [tab, margin.x, margin.y, tabSize.x, tabSize.y, 0]),
+                ()=>{
+                    writeRect(sheet,
+                        [margin.x, margin.y, margin.x + tabSize.x, margin.y + tabSize.y]);
+                    return api('SendMessageA', [tab, TCM_ADJUSTRECT, 0, sheet.scratch]);
+                },
+                ()=>{
+                    const pane = readRect(sheet);
+                    sheet.origin = { x: pane.left, y: pane.top };
+                    const buttons = margin.y + tabSize.y + gap.y;
+                    // The row keeps its order whichever buttons show: the ones
+                    // that do end at the right margin, and a hidden one sits
+                    // past them.
+                    const visible = [IDOK, IDCANCEL];
+                    if ((sheet.flags & PSH_NOAPPLYNOW) === 0)
+                    {
+                        visible.push(IDC_APPLY_BUTTON);
+                    }
+                    if ((sheet.flags & PSH_HASHELP) !== 0)
+                    {
+                        visible.push(IDHELP);
+                    }
+                    const across = visible.length * button.x + (visible.length - 1) * gap.x;
+                    const client = { x: Math.max(tabSize.x + 2 * margin.x, across + 2 * margin.x),
+                        y: buttons + button.y + margin.y };
+                    row(visible, client.x - margin.x, buttons);
+                    const hidden = [IDOK, IDCANCEL, IDC_APPLY_BUTTON, IDHELP]
+                        .filter(id=>!visible.includes(id));
+                    row(hidden, client.x - margin.x + hidden.length * (button.x + gap.x),
+                        buttons);
+                    return inTurn(...moves, ()=>centre(sheet, client));
+                });
+        });
+    };
+
+    /**
+     * Sizes the sheet around a client area and centres it on its owner, or
+     * on the screen.
+     *
+     * @param {Sheet} sheet @param {{ x: number, y: number }} client
+     */
+    const centre = (sheet, client)=>{
         // The frame is what the window is beyond its client area.
         api('GetWindowRect', [sheet.hwnd, sheet.scratch]);
         const outer = readRect(sheet);
@@ -883,7 +916,7 @@ export function createPropertySheetFunctions(host){
         }
         const x = Math.max(0, over.left + ((over.right - over.left - size.x) >> 1));
         const y = Math.max(0, over.top + ((over.bottom - over.top - size.y) >> 1));
-        api('SetWindowPos', [sheet.hwnd, 0, x, y, size.x, size.y,
+        return api('SetWindowPos', [sheet.hwnd, 0, x, y, size.x, size.y,
             SWP_NOZORDER | SWP_NOACTIVATE]);
     };
 
@@ -945,14 +978,14 @@ export function createPropertySheetFunctions(host){
                 copy, sheet.hwnd, u32(page.handle + PSP.pfnDlgProc), page.handle]), made=>{
                 free(copy);
                 const hwnd = made >>> 0;
-                if (hwnd !== 0)
+                if (hwnd === 0)
                 {
-                    entry.hwnd = hwnd;
-                    const origin = originOf(sheet, entry);
-                    api('SetWindowPos', [hwnd, 0, origin.x, origin.y, 0, 0,
-                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
+                    return 0;
                 }
-                return hwnd;
+                entry.hwnd = hwnd;
+                const origin = originOf(sheet, entry);
+                return after(api('SetWindowPos', [hwnd, 0, origin.x, origin.y, 0, 0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]), ()=>hwnd);
             });
         });
     };
@@ -971,7 +1004,6 @@ export function createPropertySheetFunctions(host){
             return 0;
         }
         sheet.changed.delete(entry.hwnd);
-        api('SendMessageA', [sheet.tab, TCM_DELETEITEM, index, 0]);
         const wasCurrent = sheet.current === index;
         if (wasCurrent)
         {
@@ -981,18 +1013,20 @@ export function createPropertySheetFunctions(host){
         {
             sheet.current--;
         }
-        return after(entry.hwnd !== 0 ? api('DestroyWindow', [entry.hwnd]) : 0, ()=>after(
-            destroyPage(entry.page.handle, thread), ()=>{
+        return inTurn(()=>api('SendMessageA', [sheet.tab, TCM_DELETEITEM, index, 0]),
+            ()=>(entry.hwnd !== 0 ? api('DestroyWindow', [entry.hwnd]) : 0),
+            ()=>destroyPage(entry.page.handle, thread),
+            ()=>{
                 if (sheet.current >= 0)
                 {
-                    api('SendMessageA', [sheet.tab, TCM_SETCURSEL, sheet.current, 0]);
-                    return 1;
+                    return after(api('SendMessageA', [sheet.tab, TCM_SETCURSEL, sheet.current,
+                        0]), ()=>1);
                 }
                 return wasCurrent && sheet.entries.length > 0
                     ? after(select(sheet, Math.min(index, sheet.entries.length - 1), thread,
                         { killed: true }), ()=>1)
                     : 1;
-            }));
+            });
     };
 
     /**
@@ -1010,12 +1044,12 @@ export function createPropertySheetFunctions(host){
         }
         const first = api('GetNextDlgTabItem', [entry.hwnd, 0, 0]) >>> 0;
         return after(notifyPage(sheet, sheet.current, PSN_QUERYINITIALFOCUS, first), asked=>{
-            let target = (asked >>> 0) || first;
-            if (target === 0 && wizard(sheet))
-            {
-                target = item(sheet, api('SendMessageA', [sheet.hwnd, DM_GETDEFID, 0, 0]) & 0xffff);
-            }
-            return api('SetFocus', [target || sheet.tab]);
+            const target = (asked >>> 0) || first;
+            const chosen = target === 0 && wizard(sheet)
+                ? after(api('SendMessageA', [sheet.hwnd, DM_GETDEFID, 0, 0]), id=>
+                    item(sheet, id & 0xffff))
+                : target;
+            return after(chosen, focus=>api('SetFocus', [focus || sheet.tab]));
         });
     };
 
@@ -1075,15 +1109,16 @@ export function createPropertySheetFunctions(host){
                             : false;
                     }
                     const leaving = sheet.entries[previous];
-                    if (leaving && previous !== index && leaving.hwnd !== 0)
-                    {
-                        api('ShowWindow', [leaving.hwnd, SW_HIDE]);
-                    }
-                    sheet.current = index;
-                    api('SendMessageA', [sheet.tab, TCM_SETCURSEL, index, 0]);
-                    showHeader(sheet);
-                    return after(api('ShowWindow', [hwnd, SW_SHOW]), ()=>after(
-                        initialFocus(sheet), ()=>true));
+                    return inTurn(()=>(leaving && previous !== index && leaving.hwnd !== 0
+                        ? api('ShowWindow', [leaving.hwnd, SW_HIDE]) : 0),
+                    ()=>{
+                        sheet.current = index;
+                        return api('SendMessageA', [sheet.tab, TCM_SETCURSEL, index, 0]);
+                    },
+                    ()=>showHeader(sheet),
+                    ()=>api('ShowWindow', [hwnd, SW_SHOW]),
+                    ()=>initialFocus(sheet),
+                    ()=>true);
                 });
             });
         });
@@ -1095,28 +1130,22 @@ export function createPropertySheetFunctions(host){
      * exterior one; and the caption the page's template names, as a
      * Wizard97 wizard shows in place of its own.
      *
-     * @param {Sheet} sheet
+     * @param {Sheet} sheet @returns {any}
      */
     const showHeader = sheet=>{
         const entry = sheet.entries[sheet.current];
         if (!entry || !wizard97(sheet))
         {
-            return;
+            return 0;
         }
         const on = exterior(entry) ? SW_HIDE : SW_SHOW;
-        for (const id of [IDC_HEADER_BAND, IDC_HEADER_TITLE, IDC_HEADER_SUBTITLE,
-            IDC_SUNKEN_LINEHEADER])
-        {
-            api('ShowWindow', [item(sheet, id), on]);
-        }
-        setText(sheet, item(sheet, IDC_HEADER_TITLE), entry.headerTitle);
-        setText(sheet, item(sheet, IDC_HEADER_SUBTITLE), entry.headerSubtitle);
         const template = templateOf(entry.page);
         const caption = template !== 0 ? describe(template).title : '';
-        if (caption !== '')
-        {
-            setText(sheet, sheet.hwnd, caption);
-        }
+        return inTurn(...[IDC_HEADER_BAND, IDC_HEADER_TITLE, IDC_HEADER_SUBTITLE,
+            IDC_SUNKEN_LINEHEADER].map(id=>()=>api('ShowWindow', [item(sheet, id), on])),
+        ()=>setText(item(sheet, IDC_HEADER_TITLE), entry.headerTitle),
+        ()=>setText(item(sheet, IDC_HEADER_SUBTITLE), entry.headerSubtitle),
+        ()=>(caption !== '' ? setText(sheet.hwnd, caption) : 0));
     };
 
     /** A page's index by the resource id its template was named by, or -1. */
@@ -1146,32 +1175,35 @@ export function createPropertySheetFunctions(host){
             }
             const at = Math.max(0, Math.min(index, sheet.entries.length));
             sheet.entries.splice(at, 0, entryFor(sheet, page));
-            addTab(sheet, at, titleOf(page));
             if (sheet.current >= at)
             {
                 sheet.current++;
             }
-            if ((u32(page.handle + PSP.dwFlags) & PSP_PREMATURE) === 0)
-            {
-                return 1;
-            }
-            return after(ensureCreated(sheet, at, thread), hwnd=>{
-                if ((hwnd >>> 0) !== 0)
+            return after(addTab(sheet, at, titleOf(page)), ()=>{
+                if ((u32(page.handle + PSP.dwFlags) & PSP_PREMATURE) === 0)
                 {
                     return 1;
                 }
-                sheet.entries.splice(at, 1);
-                api('SendMessageA', [sheet.tab, TCM_DELETEITEM, at, 0]);
-                if (sheet.current > at)
-                {
-                    sheet.current--;
-                }
-                return 0;
+                return after(ensureCreated(sheet, at, thread), hwnd=>{
+                    if ((hwnd >>> 0) !== 0)
+                    {
+                        return 1;
+                    }
+                    sheet.entries.splice(at, 1);
+                    if (sheet.current > at)
+                    {
+                        sheet.current--;
+                    }
+                    return after(api('SendMessageA', [sheet.tab, TCM_DELETEITEM, at, 0]), ()=>0);
+                });
             });
         });
     };
 
-    /** @param {Sheet} sheet @param {number} index @param {string} title */
+    /**
+     * @param {Sheet} sheet @param {number} index @param {string} title
+     * @returns {any}
+     */
     const addTab = (sheet, index, title)=>{
         const text = place(encode(title, true));
         const tcitem = new Uint8Array(28);
@@ -1179,12 +1211,11 @@ export function createPropertySheetFunctions(host){
         view.setUint32(0, TCIF_TEXT, true);
         view.setUint32(12, text, true);
         const address = place(tcitem);
-        if (address !== 0)
-        {
-            api('SendMessageA', [sheet.tab, TCM_INSERTITEMW, index, address]);
-        }
-        free(address);
-        free(text);
+        return after(address !== 0 ? api('SendMessageA', [sheet.tab, TCM_INSERTITEMW, index,
+            address]) : 0, ()=>{
+            free(address);
+            free(text);
+        });
     };
 
     /**
@@ -1217,13 +1248,13 @@ export function createPropertySheetFunctions(host){
                 });
             };
             return after(each(0), (/** @type {boolean} */ applied)=>{
-                if (applied)
+                if (!applied)
                 {
-                    sheet.applied = true;
-                    sheet.changed.clear();
-                    api('EnableWindow', [item(sheet, IDC_APPLY_BUTTON), 0]);
+                    return false;
                 }
-                return applied;
+                sheet.applied = true;
+                sheet.changed.clear();
+                return after(api('EnableWindow', [item(sheet, IDC_APPLY_BUTTON), 0]), ()=>true);
             });
         });
 
@@ -1328,8 +1359,6 @@ export function createPropertySheetFunctions(host){
         sheet.tab = item(sheet, IDC_TABCONTROL);
         sheet.scratch = host.allocate?.(SCRATCH) ?? 0;
         return after(sheetCallback(sheet, sheet.hwnd, PSCB_INITIALIZED, 0, thread), ()=>{
-            sheet.entries.forEach((entry, index)=>addTab(sheet, index, titleOf(entry.page)));
-            layout(sheet);
             /** @param {number} index @returns {any} */
             const premature = index=>{
                 if (index >= sheet.entries.length)
@@ -1341,8 +1370,12 @@ export function createPropertySheetFunctions(host){
                     ? after(ensureCreated(sheet, index, thread), ()=>premature(index + 1))
                     : premature(index + 1);
             };
-            return after(premature(0), ()=>after(select(sheet, sheet.start, thread,
-                { killed: true }), ()=>0));
+            return inTurn(...sheet.entries.map((entry, index)=>()=>
+                addTab(sheet, index, titleOf(entry.page))),
+            ()=>layout(sheet),
+            ()=>premature(0),
+            ()=>select(sheet, sheet.start, thread, { killed: true }),
+            ()=>0);
         });
     };
 
@@ -1470,9 +1503,9 @@ export function createPropertySheetFunctions(host){
                 }
                 if (code === TCN_SELCHANGE)
                 {
-                    const chosen = api('SendMessageA', [sheet.tab, TCM_GETCURSEL, 0, 0]) | 0;
-                    return after(select(sheet, chosen, thread, { killed: true }), ()=>
-                        answer(sheet, 0));
+                    return after(api('SendMessageA', [sheet.tab, TCM_GETCURSEL, 0, 0]), chosen=>
+                        after(select(sheet, chosen | 0, thread, { killed: true }), ()=>
+                            answer(sheet, 0)));
                 }
                 return 0;
             }
@@ -1517,19 +1550,17 @@ export function createPropertySheetFunctions(host){
             }
             case PSM_CHANGED:
                 sheet.changed.add(wParam >>> 0);
-                api('EnableWindow', [item(sheet, IDC_APPLY_BUTTON), 1]);
-                return answer(sheet, 0);
+                return after(api('EnableWindow', [item(sheet, IDC_APPLY_BUTTON), 1]), ()=>
+                    answer(sheet, 0));
             case PSM_UNCHANGED:
                 sheet.changed.delete(wParam >>> 0);
-                if (sheet.changed.size === 0)
-                {
-                    api('EnableWindow', [item(sheet, IDC_APPLY_BUTTON), 0]);
-                }
-                return answer(sheet, 0);
+                return after(sheet.changed.size === 0
+                    ? api('EnableWindow', [item(sheet, IDC_APPLY_BUTTON), 0]) : 0, ()=>
+                    answer(sheet, 0));
             case PSM_CANCELTOCLOSE:
-                api('EnableWindow', [item(sheet, IDCANCEL), 0]);
-                setText(sheet, item(sheet, IDOK), 'Close');
-                return answer(sheet, 0);
+                return inTurn(()=>api('EnableWindow', [item(sheet, IDCANCEL), 0]),
+                    ()=>setText(item(sheet, IDOK), 'Close'),
+                    ()=>answer(sheet, 0));
             case PSM_QUERYSIBLINGS: {
                 /** @param {number} at @returns {any} */
                 const ask = at=>{
@@ -1549,44 +1580,40 @@ export function createPropertySheetFunctions(host){
             case PSM_SETTITLEA:
             case PSM_SETTITLEW: {
                 const text = stringOf(handle, sheet.instance, (message >>> 0) === PSM_SETTITLEW);
-                setText(sheet, sheet.hwnd, (wParam & PSH_PROPTITLE) !== 0
-                    ? `Properties for ${text}` : text);
-                return answer(sheet, 0);
+                return after(setText(sheet.hwnd, (wParam & PSH_PROPTITLE) !== 0
+                    ? `Properties for ${text}` : text), ()=>answer(sheet, 0));
             }
             case PSM_SETWIZBUTTONS: {
                 const flags = lParam >>> 0;
                 const finishing = (flags & (PSWIZB_FINISH | PSWIZB_DISABLEDFINISH)) !== 0;
                 /** @param {number} id @param {number} bit */
-                const enable = (id, bit)=>api('EnableWindow',
+                const enable = (id, bit)=>()=>api('EnableWindow',
                     [item(sheet, id), (flags & bit) !== 0 ? 1 : 0]);
-                enable(IDC_BACK_BUTTON, PSWIZB_BACK);
-                enable(IDC_NEXT_BUTTON, PSWIZB_NEXT);
-                enable(IDC_FINISH_BUTTON, PSWIZB_FINISH);
-                if ((sheet.flags & PSH_WIZARDHASFINISH) === 0)
-                {
-                    api('ShowWindow',
-                        [item(sheet, IDC_NEXT_BUTTON), finishing ? SW_HIDE : SW_SHOW]);
-                    api('ShowWindow',
-                        [item(sheet, IDC_FINISH_BUTTON), finishing ? SW_SHOW : SW_HIDE]);
-                }
+                const swap = (sheet.flags & PSH_WIZARDHASFINISH) === 0;
+                /** @param {number} id @param {boolean} on */
+                const show = (id, on)=>()=>(swap
+                    ? api('ShowWindow', [item(sheet, id), on ? SW_SHOW : SW_HIDE]) : 0);
                 const standing = finishing ? IDC_FINISH_BUTTON : IDC_NEXT_BUTTON;
-                if (api('IsWindowEnabled', [item(sheet, standing)]) !== 0)
-                {
-                    api('SendMessageA', [sheet.hwnd, DM_SETDEFID, standing, 0]);
-                }
-                return answer(sheet, 0);
+                return inTurn(enable(IDC_BACK_BUTTON, PSWIZB_BACK),
+                    enable(IDC_NEXT_BUTTON, PSWIZB_NEXT),
+                    enable(IDC_FINISH_BUTTON, PSWIZB_FINISH),
+                    show(IDC_NEXT_BUTTON, !finishing),
+                    show(IDC_FINISH_BUTTON, finishing),
+                    ()=>(api('IsWindowEnabled', [item(sheet, standing)]) !== 0
+                        ? api('SendMessageA', [sheet.hwnd, DM_SETDEFID, standing, 0]) : 0),
+                    ()=>answer(sheet, 0));
             }
             case PSM_SETFINISHTEXTA:
             case PSM_SETFINISHTEXTW: {
                 const finishButton = item(sheet, IDC_FINISH_BUTTON);
-                setText(sheet, finishButton, stringOf(handle, sheet.instance,
-                    (message >>> 0) === PSM_SETFINISHTEXTW));
-                api('ShowWindow', [item(sheet, IDC_BACK_BUTTON), SW_HIDE]);
-                api('ShowWindow', [item(sheet, IDC_NEXT_BUTTON), SW_HIDE]);
-                api('EnableWindow', [finishButton, 1]);
-                api('ShowWindow', [finishButton, SW_SHOW]);
-                api('SendMessageA', [sheet.hwnd, DM_SETDEFID, IDC_FINISH_BUTTON, 0]);
-                return answer(sheet, 0);
+                return inTurn(()=>setText(finishButton, stringOf(handle, sheet.instance,
+                    (message >>> 0) === PSM_SETFINISHTEXTW)),
+                ()=>api('ShowWindow', [item(sheet, IDC_BACK_BUTTON), SW_HIDE]),
+                ()=>api('ShowWindow', [item(sheet, IDC_NEXT_BUTTON), SW_HIDE]),
+                ()=>api('EnableWindow', [finishButton, 1]),
+                ()=>api('ShowWindow', [finishButton, SW_SHOW]),
+                ()=>api('SendMessageA', [sheet.hwnd, DM_SETDEFID, IDC_FINISH_BUTTON, 0]),
+                ()=>answer(sheet, 0));
             }
             case PSM_PRESSBUTTON: {
                 const id = PRESSED[index];
@@ -1634,24 +1661,22 @@ export function createPropertySheetFunctions(host){
             case PSM_SETHEADERSUBTITLEW: {
                 const entry = sheet.entries[index];
                 const kind = message >>> 0;
-                if (entry)
+                if (!entry)
                 {
-                    const text = stringOf(handle, sheet.instance,
-                        kind === PSM_SETHEADERTITLEW || kind === PSM_SETHEADERSUBTITLEW);
-                    if (kind === PSM_SETHEADERTITLEA || kind === PSM_SETHEADERTITLEW)
-                    {
-                        entry.headerTitle = text;
-                    }
-                    else
-                    {
-                        entry.headerSubtitle = text;
-                    }
-                    if (index === sheet.current)
-                    {
-                        showHeader(sheet);
-                    }
+                    return answer(sheet, 0);
                 }
-                return answer(sheet, 0);
+                const text = stringOf(handle, sheet.instance,
+                    kind === PSM_SETHEADERTITLEW || kind === PSM_SETHEADERSUBTITLEW);
+                if (kind === PSM_SETHEADERTITLEA || kind === PSM_SETHEADERTITLEW)
+                {
+                    entry.headerTitle = text;
+                }
+                else
+                {
+                    entry.headerSubtitle = text;
+                }
+                return after(index === sheet.current ? showHeader(sheet) : 0, ()=>
+                    answer(sheet, 0));
             }
             case WM_CTLCOLORSTATIC:
                 // The header is drawn in the window colour, not the face.
@@ -1663,17 +1688,18 @@ export function createPropertySheetFunctions(host){
     };
 
     /**
-     * A window's text, through SetWindowTextA and so as Latin-1.
+     * A window's text, through SetWindowTextA and so as Latin-1. The copy
+     * is kept until the window has answered: a procedure of the program's
+     * reads it when it is run, which may be later.
      *
-     * @param {Sheet} sheet @param {number} hwnd @param {string} text
+     * @param {number} hwnd @param {string} text @returns {any}
      */
-    const setText = (sheet, hwnd, text)=>{
+    const setText = (hwnd, text)=>{
         const address = place(encode(text, false));
-        if (address !== 0)
-        {
-            api('SetWindowTextA', [hwnd, address]);
-        }
-        free(address);
+        return address === 0 ? 0 : after(api('SetWindowTextA', [hwnd, address]), done=>{
+            free(address);
+            return done;
+        });
     };
 
     /**
@@ -1766,27 +1792,22 @@ export function createPropertySheetFunctions(host){
                 // callback and its pages are told of a sheet already modal.
                 const owner = sheet.owner !== 0 && api('IsWindowEnabled', [sheet.owner]) !== 0
                     ? sheet.owner : 0;
-                if (owner !== 0)
-                {
-                    api('EnableWindow', [owner, 0]);
-                }
                 /** @param {number} result */
                 const ended = result=>{
                     pending.delete(key);
-                    if (owner !== 0)
-                    {
-                        api('EnableWindow', [owner, 1]);
-                    }
-                    return result | 0;
+                    return after(owner !== 0 ? api('EnableWindow', [owner, 1]) : 0, ()=>
+                        result | 0);
                 };
-                // The sheet runs its own loop, as it does on Windows, where
-                // user32 lends one; a DialogBox's otherwise.
-                if (!host.modal)
-                {
-                    return after(api('DialogBoxIndirectParamA', args), ended);
-                }
-                return after(api('CreateDialogIndirectParamA', args), made=>((made >>> 0) === 0
-                    ? ended(-1) : after(runSheet(sheet, thread), ended)));
+                return after(owner !== 0 ? api('EnableWindow', [owner, 0]) : 0, ()=>{
+                    // The sheet runs its own loop, as it does on Windows,
+                    // where user32 lends one; a DialogBox's otherwise.
+                    if (!host.modal)
+                    {
+                        return after(api('DialogBoxIndirectParamA', args), ended);
+                    }
+                    return after(api('CreateDialogIndirectParamA', args), made=>((made >>> 0)
+                        === 0 ? ended(-1) : after(runSheet(sheet, thread), ended)));
+                });
             });
         });
     };
