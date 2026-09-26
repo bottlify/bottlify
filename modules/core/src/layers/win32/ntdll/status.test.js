@@ -58,3 +58,10 @@ test('a status with no translation says so rather than guessing', ()=>{
     assert.equal(toDosError(0xc0000123), ERROR_MR_MID_NOT_FOUND);
     assert.equal(ERROR_MR_MID_NOT_FOUND, 317);
 });
+
+test('a version that does not meet a request is a revision mismatch in both domains', ()=>{
+    // RtlVerifyVersionInfo's answer when the system does not satisfy the
+    // request; Wine's ntdll error tests pin its translation.
+    assert.equal(STATUS.REVISION_MISMATCH, 0xc0000059);
+    assert.equal(toDosError(STATUS.REVISION_MISMATCH), 1306);
+});

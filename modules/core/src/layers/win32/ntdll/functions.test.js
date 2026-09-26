@@ -44,6 +44,7 @@ function fakeHost({ registers = true } = {}){
         HeapSize: { argBytes: 12, handler: ()=>0 },
         EnterCriticalSection: { argBytes: 4, handler: ()=>0 },
         RtlUnwind: { argBytes: 16, handler: ()=>0 },
+        VerSetConditionMask: { argBytes: 16, handler: ()=>0 },
     };
 
     const crt = {
@@ -121,6 +122,14 @@ test('unwinding is the walk kernel32 already drives', ()=>{
     // called, and would publish its own idea of the head afterwards.
     const host = fakeHost();
     assert.equal(createNtdllFunctions(host).RtlUnwind, host.kernel32.RtlUnwind);
+});
+
+test('VerSetConditionMask is the entry kernel32 exports', ()=>{
+    // kernel32.spec forwards it to ntdll's: one function under two names, so
+    // a mask built through either is read the same by VerifyVersionInfo and
+    // RtlVerifyVersionInfo.
+    const host = fakeHost();
+    assert.equal(createNtdllFunctions(host).VerSetConditionMask, host.kernel32.VerSetConditionMask);
 });
 
 test('a name the other table does not have stays unexported', ()=>{

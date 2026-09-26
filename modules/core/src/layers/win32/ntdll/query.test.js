@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { createQueryFunctions } from './query.js';
 import { STATUS } from './status.js';
 import { PEB, TEB, createProcessBlocks } from '../kernel32/teb.js';
-import { WINDOWS_VERSIONS } from '../kernel32/versions.js';
+import { VER, WINDOWS_VERSIONS, setCondition } from '../kernel32/versions.js';
 
 const TEB_AT = 0x1000;
 const PEB_AT = 0x2000;
@@ -216,4 +216,50 @@ test('argument sizes match what the guest compiled against', ()=>{
     assert.equal(fns.RtlGetVersion.argBytes, 4);
     assert.equal(fns.NtQuerySystemInformation.argBytes, 16);
     assert.equal(fns.NtQueryInformationProcess.argBytes, 20);
+});
+
+test('RtlVerifyVersionInfo compares against the version the process block holds', ()=>{
+    // The truth, as RtlGetVersion answers it: Windows 10 tells a program with
+    // no manifest 6.2 through kernel32, and ntdll still says 10.0.
+    const version = WINDOWS_VERSIONS.win10;
+    const bytes = new Uint8Array(0x10000);
+    const view = new DataView(bytes.buffer);
+    let next = 0x4000;
+    const blocks = createProcessBlocks({
+        allocate: size=>{
+            const at = next;
+            next += size + 15 & ~15;
+            return at;
+        },
+        writeMemory: (at, data)=>bytes.set(data, at),
+        processId: 0x1234,
+        version,
+        imageBase: 0x400000,
+    });
+    const { teb } = blocks.createThreadBlock({ id: 1, stackBase: 0x3000, stackLimit: 0x2000 });
+    const fns = createQueryFunctions({
+        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        writeMemory: (address, data)=>bytes.set(data, address),
+        teb: ()=>teb,
+        arena: { base: 0x400000, size: 0x100000 },
+        version,
+    });
+    const types = VER.MAJORVERSION | VER.MINORVERSION | VER.SERVICEPACKMAJOR;
+    const atLeast = [VER.MAJORVERSION, VER.MINORVERSION, VER.SERVICEPACKMAJOR]
+        .reduce((mask, type)=>setCondition(mask, type, 3), 0n);
+    /** @param {number} major @param {number} minor @param {number} [typeMask] */
+    const ask = (major, minor, typeMask = types)=>{
+        bytes.fill(0, BUFFER, BUFFER + OSVERSIONINFOEXW_SIZE);
+        view.setUint32(BUFFER, OSVERSIONINFOEXW_SIZE, true);
+        view.setUint32(BUFFER + 4, major, true);
+        view.setUint32(BUFFER + 8, minor, true);
+        return fns.RtlVerifyVersionInfo.handler([BUFFER, typeMask,
+            Number(atLeast & 0xffffffffn), Number(atLeast >> 32n)]) >>> 0;
+    };
+
+    assert.equal(ask(10, 0), STATUS.SUCCESS, 'Windows 10 is at least 10.0');
+    assert.equal(ask(6, 3), STATUS.SUCCESS);
+    assert.equal(ask(10, 1), STATUS.REVISION_MISMATCH);
+    assert.equal(ask(10, 0, 0), STATUS.INVALID_PARAMETER, 'a request that names nothing');
+    assert.equal(fns.RtlVerifyVersionInfo.argBytes, 16);
 });

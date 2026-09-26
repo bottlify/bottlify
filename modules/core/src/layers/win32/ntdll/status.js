@@ -48,6 +48,8 @@ export const STATUS = Object.freeze({
     /** The second argument, counting from one, as the native codes number them. */
     INVALID_PARAMETER_2: 0xc00000f0,
     NOT_A_DIRECTORY: 0xc0000103,
+    /** RtlVerifyVersionInfo's answer when the system does not meet the request. */
+    REVISION_MISMATCH: 0xc0000059,
 });
 
 /** The Win32 errors this table produces. */
@@ -74,6 +76,7 @@ const ERROR = Object.freeze({
     MR_MID_NOT_FOUND: 317,
     IO_PENDING: 997,
     NOACCESS: 998,
+    REVISION_MISMATCH: 1306,
     NO_SYSTEM_RESOURCES: 1450,
 });
 
@@ -111,6 +114,7 @@ const TO_DOS_ERROR = new Map([
     [STATUS.NOT_SUPPORTED, ERROR.NOT_SUPPORTED],
     [STATUS.INVALID_PARAMETER_2, ERROR.INVALID_FUNCTION],
     [STATUS.NOT_A_DIRECTORY, ERROR.DIRECTORY],
+    [STATUS.REVISION_MISMATCH, ERROR.REVISION_MISMATCH],
 ]);
 
 /** What an unmapped status becomes, and the one code that means "no mapping". */
