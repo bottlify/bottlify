@@ -117,9 +117,9 @@ export function createWideFunctions(host){
         host.writeMemory(pointer, bytes);
     };
 
-    /** @param {number} pointer @param {string} text */
-    const writeNarrow = (pointer, text)=>{
-        const bytes = new Uint8Array(text.length + 1);
+    /** @param {number} pointer @param {string} text @param {boolean} terminate */
+    const writeNarrow = (pointer, text, terminate)=>{
+        const bytes = new Uint8Array(text.length + (terminate ? 1 : 0));
         for (let at = 0; at < text.length; at++)
         {
             bytes[at] = text.charCodeAt(at) & 0xff;
@@ -284,7 +284,9 @@ export function createWideFunctions(host){
                     return text.length;
                 }
                 const written = text.slice(0, count >>> 0);
-                writeNarrow(destination, written);
+                // Terminated, as mbstowcs is, only when the text ends within
+                // the count: a buffer the text fills is left unterminated.
+                writeNarrow(destination, written, written.length < (count >>> 0));
                 return written.length;
             },
         },

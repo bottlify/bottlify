@@ -86,6 +86,24 @@ test('wcstombs narrows, and answers the count without a destination', ()=>{
     assert.equal(memory.text(destination), 'abc');
 });
 
+test('wcstombs terminates only when the null character comes within the count', ()=>{
+    // "the multibyte character string at mbstr is null-terminated only if
+    // wcstombs encounters a wide-character NULL character during
+    // conversion": a string as long as the count, or longer, is not.
+    const { memory, table } = build();
+    const destination = memory.allocate(16);
+    for (const [text, count, answer] of /** @type {[string, number, number][]} */ ([
+        ['abc', 3, 3], ['abcdef', 3, 3], ['ab', 3, 2],
+    ]))
+    {
+        memory.writeMemory(destination, new Uint8Array(8).fill(0x7c));
+        assert.equal(table.wcstombs.handler([destination, memory.putWide(text), count]), answer);
+        assert.deepEqual([...memory.bytes.subarray(destination, destination + 4)],
+            [...`${text.slice(0, count)}${text.length < count ? '\0' : ''}`.padEnd(4, '|')]
+                .map(character=>character.charCodeAt(0)), `${text} into ${count}`);
+    }
+});
+
 test('wctomb writes a character to U+00FF as its byte, and refuses one past it with EILSEQ', ()=>{
     // "If the conversion isn't possible in the current locale, wctomb returns
     // -1 and errno is set to EILSEQ." The C locale has a byte for each of the
