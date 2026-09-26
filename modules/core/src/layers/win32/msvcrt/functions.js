@@ -868,6 +868,7 @@ export function createMsvcrtFunctions(host){
                 write: host.write,
                 iob: host.iob,
                 errno,
+                descriptors: descriptors ?? undefined,
             })
             : {}),
         ...(host.threads ? createThreadFunctions(host.threads) : {}),

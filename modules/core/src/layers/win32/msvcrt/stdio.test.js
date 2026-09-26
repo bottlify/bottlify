@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStdioFunctions } from './stdio.js';
+import { createDescriptors, createIoFunctions } from './io.js';
 import { fakeMemory, fakeVolume } from './harness.test.js';
 
 // The volume fake lives with the rest of the harness; other layers' tests
@@ -53,7 +54,9 @@ test('a stream reads whole elements, tells its position, seeks and closes', ()=>
     assert.equal(fns.ftell.handler([stream]), 4);
     assert.equal(fns.fread.handler([buffer, 2, 4, stream]), 1,
         'three bytes remain: one whole element, the odd byte not counted');
-    assert.equal(fns.ftell.handler([stream]), 6);
+    // "The file pointer ... is advanced by the number of bytes fread read":
+    // the odd byte was read, so it is behind the position, not ahead of it.
+    assert.equal(fns.ftell.handler([stream]), 7);
 
     assert.equal(fns.fseek.handler([stream, -1, 2]), 0, 'SEEK_END');
     assert.equal(fns.ftell.handler([stream]), 6);
@@ -82,10 +85,13 @@ test('a file that is not there is null to open for reading, and made to open for
     assert.equal(fns.fclose.handler([stream]), 0);
     assert.equal(String.fromCharCode(...files.files['C:\\new.txt']), 'hello');
 
-    // Appending starts at the end; a second write lands after the first.
+    // Appending writes at the end; a second write lands after the first. The
+    // position is the start until the first I/O, as ftell documents for a
+    // file opened for appending.
     const again = fns.fopen.handler([path, memory.put('ab')]);
-    assert.equal(fns.ftell.handler([again]), 5);
+    assert.equal(fns.ftell.handler([again]), 0);
     fns.fwrite.handler([text, 5, 1, again]);
+    assert.equal(fns.ftell.handler([again]), 10);
     fns.fclose.handler([again]);
     assert.equal(String.fromCharCode(...files.files['C:\\new.txt']), 'hellohello');
 });
@@ -205,4 +211,290 @@ test('fopen and fclose say why they failed in errno', ()=>{
     assert.deepEqual(errno, [], 'a second close leaves errno alone');
     assert.equal(fns.fclose.handler([0]), -1);
     assert.deepEqual(errno, [EINVAL]);
+});
+
+/** `_flag` bits and the record's fields a macro reads. */
+const IOEOF = 0x10;
+const IOERR = 0x20;
+const CNT = 4;
+const FLAG = 12;
+const EOF = -1;
+
+/** @param {string} text */
+const bytesOf = text=>Uint8Array.from(text, character=>character.charCodeAt(0));
+
+/**
+ * The streams and the low-level calls over one descriptor table, as the
+ * runtime assembles them, on a volume holding `contents`.
+ *
+ * @param {Record<string, string>} contents
+ * @param {{ fmode?: number }} [options]
+ */
+function runtime(contents, { fmode = 0 } = {}){
+    const memory = fakeMemory();
+    const files = fakeVolume(Object.fromEntries(Object.entries(contents).map(([name, value])=>
+        [name, bytesOf(value)])));
+    /** @type {number[]} */
+    const errno = [];
+    /** @param {number} code */
+    const record = code=>{
+        errno.push(code);
+    };
+    const descriptors = createDescriptors({ files, errno: record, fmode: ()=>fmode });
+    const host = { ...memory, free: ()=>true, files, iob: ()=>IOB, errno: record };
+    const fns = /** @type {Record<string, any>} */ ({
+        ...createIoFunctions(host, descriptors),
+        ...createStdioFunctions({ ...host, descriptors }),
+    });
+    /** @param {string} name @param {string} mode */
+    const open = (name, mode)=>fns.fopen.handler([memory.put(name), memory.put(mode)]);
+    const line = memory.allocate(512);
+    /** @param {number} stream @param {number} [count] */
+    const gets = (stream, count = 512)=>{
+        const got = fns.fgets.handler([line, count, stream]);
+        return got === 0 ? null : memory.text(line);
+    };
+    /** @param {number} stream */
+    const flag = stream=>memory.u32(stream + FLAG);
+    /** @param {string} name */
+    const text = name=>String.fromCharCode(...files.files[name]);
+    return { memory, files, fns, errno, open, gets, flag, text };
+}
+
+test('the end of the file and an error reach the record\'s _flag, where the macros read them', ()=>{
+    // feof and ferror are macros over _flag as much as they are functions:
+    // `while (!feof(f))` compiled against the header never calls us.
+    const { memory, fns, open, flag } = runtime({ 'C:\\five.bin': 'abcde' });
+    const stream = open('C:\\five.bin', 'rb');
+    const buffer = memory.allocate(64);
+
+    assert.equal(fns.fread.handler([buffer, 1, 5, stream]), 5);
+    assert.equal(flag(stream) & IOEOF, 0, 'all five read, and nothing past them yet');
+    assert.equal(fns.fread.handler([buffer, 1, 64, stream]), 0);
+    assert.equal(flag(stream) & IOEOF, IOEOF);
+    assert.notEqual(fns.feof.handler([stream]), 0);
+
+    fns.clearerr.handler([stream]);
+    assert.equal(flag(stream) & IOEOF, 0, 'clearerr clears it in the record');
+    fns.fread.handler([buffer, 1, 64, stream]);
+    assert.equal(fns.fseek.handler([stream, 0, 0]), 0);
+    assert.equal(flag(stream) & IOEOF, 0, 'and so does a seek');
+
+    assert.equal(fns.fputc.handler([0x41, stream]), EOF, 'not open for writing');
+    assert.equal(flag(stream) & IOERR, IOERR);
+    assert.notEqual(fns.ferror.handler([stream]), 0);
+    fns.rewind.handler([stream]);
+    assert.equal(flag(stream) & (IOERR | IOEOF), 0, 'rewind clears both');
+    assert.equal(flag(stream) & 0x1, 0x1, 'and the mode bits stay');
+});
+
+test('_filbuf and _flsbuf answer the getc and putc macros and put _cnt back at zero', ()=>{
+    // The macros count _cnt down first and call these at -1; Wine's msvcrt
+    // test_flsbuf pins the answers, including 0xff for 0xffffffff.
+    const { memory, fns, open, flag, text } = runtime({ 'C:\\in.bin': 'hi' });
+    const input = open('C:\\in.bin', 'rb');
+    memory.setU32(input + CNT, -1);
+    assert.equal(fns._filbuf.handler([input]), 0x68);
+    assert.equal(memory.i32(input + CNT), 0);
+    memory.setU32(input + CNT, -1);
+    assert.equal(fns._filbuf.handler([input]), 0x69);
+    assert.equal(fns._filbuf.handler([input]), EOF);
+    assert.equal(flag(input) & IOEOF, IOEOF);
+
+    const output = open('C:\\out.bin', 'wb');
+    memory.setU32(output + CNT, 1234);
+    assert.equal(fns._flsbuf.handler([0, output]), 0);
+    assert.equal(memory.i32(output + CNT), 0);
+    assert.equal(fns._flsbuf.handler([0xff, output]), 0xff);
+    assert.equal(fns._flsbuf.handler([0xffffffff, output]), 0xff);
+    assert.equal(fns.putc.handler([0x51, output]), 0x51);
+    fns.fclose.handler([output]);
+    assert.equal(text('C:\\out.bin'), '\x00\xff\xffQ');
+
+    assert.equal(fns._flsbuf.handler([0, input]), EOF, 'a stream opened for reading');
+    assert.equal(flag(input) & IOERR, IOERR);
+});
+
+test('fgetc reads to EOF, and ungetc gives a byte back but never EOF', ()=>{
+    // Wine's msvcrt test_fileops.
+    const outbuffer = '0,1,2,3,4,5,6,7,8,9\0';
+    const { fns, open } = runtime({ 'C:\\ops.tst': outbuffer });
+    const file = open('C:\\ops.tst', 'rb');
+
+    let read = '';
+    for (let at = 0; at < outbuffer.length; at++)
+    {
+        read += String.fromCharCode(fns.fgetc.handler([file]));
+    }
+    assert.equal(read, outbuffer);
+    const c = fns.getc.handler([file]);
+    assert.equal(c, EOF);
+    assert.notEqual(fns.feof.handler([file]), 0);
+    assert.equal(fns.ungetc.handler([c, file]), EOF, 'EOF cannot be given back');
+    assert.notEqual(fns.feof.handler([file]), 0, 'and giving it back changes nothing');
+    assert.equal(fns.fgetc.handler([file]), EOF);
+
+    assert.equal(fns.ungetc.handler([0x39, file]), 0x39);
+    assert.equal(fns.feof.handler([file]), 0, 'a byte given back is not the end');
+    assert.equal(fns.ftell.handler([file]), outbuffer.length - 1);
+    assert.equal(fns.fgetc.handler([file]), 0x39);
+    assert.equal(fns.feof.handler([file]), 0);
+    assert.equal(fns.fgetc.handler([file]), EOF);
+    assert.notEqual(fns.feof.handler([file]), 0);
+
+    fns.ungetc.handler([0x39, file]);
+    assert.equal(fns.fflush.handler([file]), 0);
+    assert.equal(fns.fgetc.handler([file]), EOF, 'fflush forgets what ungetc gave back');
+    assert.equal(fns.fflush.handler([0]), 0, 'every stream');
+});
+
+test('fgets stops after a line feed or at count - 1, and NULL is the end', ()=>{
+    // Wine's msvcrt test_fileops: a file without a line feed, NUL-terminated.
+    const outbuffer = '0,1,2,3,4,5,6,7,8,9\0';
+    const { fns, open, gets } = runtime({ 'C:\\ops.tst': outbuffer, 'C:\\lines.txt': 'ab\ncd' });
+    const file = open('C:\\ops.tst', 'rb');
+
+    assert.equal(gets(file), outbuffer.slice(0, -1));
+    assert.equal(gets(file), null);
+    assert.notEqual(fns.feof.handler([file]), 0);
+    fns.rewind.handler([file]);
+    assert.equal(gets(file, outbuffer.length - 1)?.length, outbuffer.length - 2);
+    assert.equal(gets(file, outbuffer.length), '9', 'the last digit, then the NUL');
+
+    const lines = open('C:\\lines.txt', 'rb');
+    assert.equal(gets(lines), 'ab\n');
+    assert.equal(fns.feof.handler([lines]), 0, 'a line that ends in a line feed is not the end');
+    assert.equal(gets(lines), 'cd');
+    assert.notEqual(fns.feof.handler([lines]), 0, 'one that runs into the end is');
+    assert.equal(gets(lines, 1), '', 'room for the terminator alone reads nothing');
+});
+
+test('text mode reads CR LF as LF and stops at ^Z; binary mode reads what is there', ()=>{
+    // Wine's msvcrt test_asciimode and test_ctrlz.
+    const { memory, fns, open, gets } = runtime({
+        'C:\\crcrlf.tst': '\r\r\n',
+        'C:\\foo.tst': 'foo\x1a' + '\0'.repeat(65536) + 'bar',
+        'C:\\ctrlz.tst': 'This is test_ctrlz\x1a\r\na',
+    });
+    const buffer = memory.allocate(64);
+
+    const crlf = open('C:\\crcrlf.tst', 'rt');
+    assert.equal(gets(crlf), '\r\n');
+    fns.rewind.handler([crlf]);
+    assert.equal(fns.fread.handler([buffer, 1, 64, crlf]), 2);
+    assert.equal(memory.text(buffer).slice(0, 2), '\r\n');
+
+    const foo = open('C:\\foo.tst', 'rt');
+    assert.equal(gets(foo), 'foo');
+    assert.equal(gets(foo), null, 'nothing after the ^Z');
+    fns.rewind.handler([foo]);
+    assert.equal(fns.fread.handler([buffer, 1, 64, foo]), 3);
+    assert.equal(fns.fread.handler([buffer, 1, 64, foo]), 0);
+
+    const ctrlz = open('C:\\ctrlz.tst', 'rt');
+    assert.equal(gets(ctrlz), 'This is test_ctrlz');
+    assert.equal(fns.ftell.handler([ctrlz]), 22, 'the true end of the file');
+    assert.notEqual(fns.feof.handler([ctrlz]), 0);
+    const binary = open('C:\\ctrlz.tst', 'rb');
+    assert.equal(gets(binary), 'This is test_ctrlz\x1a\r\n');
+    assert.equal(fns.ftell.handler([binary]), 21);
+    assert.equal(gets(binary), 'a');
+    assert.notEqual(fns.feof.handler([binary]), 0);
+});
+
+test('in text mode ftell and fseek count the bytes of the file', ()=>{
+    // Wine's msvcrt test_asciimode: ten "n\r\n" lines, read with "r".
+    const lines = [...'0123456789'].map(digit=>`${digit}\r\n`).join('');
+    const { fns, open } = runtime({ 'C:\\ascii.tst': lines });
+    const fp = open('C:\\ascii.tst', 'r');
+    assert.equal(fns.fgetc.handler([fp]), 0x30);
+    assert.equal(fns.fgetc.handler([fp]), 0x0a);
+    for (let i = 1; i < 10; i++)
+    {
+        assert.equal(fns.ftell.handler([fp]), i * 3);
+        fns.fseek.handler([fp, 0, 1]);
+        assert.equal(fns.fgetc.handler([fp]), 0x30 + i);
+        assert.equal(fns.fgetc.handler([fp]), 0x0a);
+    }
+    fns.rewind.handler([fp]);
+    assert.equal(fns.fgetc.handler([fp]), 0x30);
+    fns.fseek.handler([fp, 2, 1]);
+    assert.equal(fns.fgetc.handler([fp]), 0x31, 'fseek does not skip a CR');
+    fns.fseek.handler([fp, 9 * 3, 0]);
+    assert.equal(fns.fgetc.handler([fp]), 0x39);
+    fns.fseek.handler([fp, -4, 1]);
+    assert.equal(fns.fgetc.handler([fp]), 0x38);
+});
+
+test('text mode writes LF as CR LF; binary mode leaves it alone', ()=>{
+    // Wine's msvcrt test_file_put_get.
+    const mytext = 'This is a test_file_put_get\n';
+    const dostext = 'This is a test_file_put_get\r\n';
+    const { fns, open, gets, text, memory } = runtime({});
+
+    const wt = open('C:\\put.tst', 'wt');
+    assert.equal(fns.fputs.handler([memory.put(mytext), wt]), 0);
+    fns.fclose.handler([wt]);
+    assert.equal(text('C:\\put.tst'), dostext);
+    assert.equal(gets(open('C:\\put.tst', 'rb')), dostext);
+    assert.equal(gets(open('C:\\put.tst', 'rt')), mytext);
+
+    const wb = open('C:\\put.tst', 'wb');
+    fns.fputs.handler([memory.put(mytext), wb]);
+    fns.fputc.handler([0x0a, wb]);
+    fns.fclose.handler([wb]);
+    assert.equal(text('C:\\put.tst'), mytext + '\n');
+
+    const w = open('C:\\put.tst', 'w');
+    assert.equal(fns.fprintf.handler([w, memory.put('%d\n'), 7]), 2, 'the characters formatted');
+    assert.equal(fns.fwrite.handler([memory.put('a\nb'), 1, 3, w]), 3);
+    fns.fclose.handler([w]);
+    assert.equal(text('C:\\put.tst'), '7\r\na\r\nb');
+});
+
+test('a mode naming neither text nor binary follows _fmode', ()=>{
+    const O_BINARY = 0x8000;
+    const dostext = 'line\r\n';
+    const text = runtime({ 'C:\\a.txt': dostext });
+    assert.equal(text.gets(text.open('C:\\a.txt', 'r')), 'line\n');
+    const binary = runtime({ 'C:\\a.txt': dostext }, { fmode: O_BINARY });
+    assert.equal(binary.gets(binary.open('C:\\a.txt', 'r')), dostext);
+    assert.equal(binary.gets(binary.open('C:\\a.txt', 'rt')), 'line\n');
+});
+
+test('_fileno is the descriptor the low-level calls take, at one position', ()=>{
+    // Wine's msvcrt test_flsbuf reads a stream's position with
+    // _lseek(_fileno(f), 0, SEEK_CUR).
+    const { memory, fns, open } = runtime({ 'C:\\data.bin': 'abcdef' });
+    const stream = open('C:\\data.bin', 'rb');
+    const fd = fns._fileno.handler([stream]);
+    assert.equal(fd, 3);
+    assert.equal(memory.u32(stream + 16), fd, 'the record\'s _file says the same');
+    fns.fgetc.handler([stream]);
+    fns.fgetc.handler([stream]);
+    assert.equal(fns._lseek.handler([fd, 0, 1]), 2);
+    assert.equal(fns._lseek.handler([fd, 4, 0]), 4);
+    assert.equal(fns.fgetc.handler([stream]), 0x65, 'the stream reads on from there');
+    assert.equal(fns._fileno.handler([IOB + 32]), 1, 'stdout');
+
+    const other = fns._open.handler([memory.put('C:\\data.bin'), 0, 0]);
+    assert.equal(other, 4, 'fopen and _open number from one table');
+});
+
+test('stdin is at its end for getc, and the record says so', ()=>{
+    const { fns, flag } = runtime({});
+    assert.equal(fns.getc.handler([IOB]), EOF);
+    assert.equal(flag(IOB) & IOEOF, IOEOF);
+});
+
+test('the stream calls are cdecl with the argument count each reads', ()=>{
+    const { fns } = runtime({});
+    const expected = {
+        fflush: 4, feof: 4, ferror: 4, clearerr: 4, fgetc: 4, getc: 4, _filbuf: 4,
+        fgets: 12, fputc: 8, putc: 8, _flsbuf: 8, fputs: 8, ungetc: 8, rewind: 4, _fileno: 4,
+    };
+    for (const [name, argBytes] of Object.entries(expected))
+    {
+        assert.deepEqual([fns[name].convention, fns[name].argBytes], ['cdecl', argBytes], name);
+    }
 });
