@@ -366,7 +366,8 @@ export function createGpuRenderer(services){
     /**
      * @typedef {Object} Recording
      * @property {any[]} commands
-     * @property {Promise<any>[]} pipelines
+     * @property {Promise<any>[]} pipelines  each distinct pipeline the frame uses, once
+     * @property {Map<Promise<any>, number>} slots  a pipeline's place in `pipelines`
      * @property {number} id
      * @property {string[]} dump     the frame's lines, when one was asked for
      * @property {Set<string>} dumped  the program texts the dump already holds
@@ -967,13 +968,31 @@ export function createGpuRenderer(services){
         return record;
     };
 
+    /**
+     * A pipeline's place in the frame's list, the replay awaiting each
+     * distinct pipeline once rather than once per draw that uses it.
+     *
+     * @param {Recording} recording @param {Promise<any>} pipeline
+     */
+    const pipelineSlot = (recording, pipeline)=>{
+        let slot = recording.slots.get(pipeline);
+        if (slot === undefined)
+        {
+            slot = recording.pipelines.length;
+            recording.pipelines.push(pipeline);
+            recording.slots.set(pipeline, slot);
+        }
+        return slot;
+    };
+
     /** @param {object} context */
     const recordingOf = context=>{
         let recording = recordings.get(context);
         if (!recording)
         {
             recording = {
-                commands: [], pipelines: [], id: nextFrame++, dump: [], dumped: new Set(),
+                commands: [], pipelines: [], slots: new Map(), id: nextFrame++, dump: [],
+                dumped: new Set(),
                 counts: {
                     draws: 0, clears: 0, copies: 0, refused: 0, skipped: 0, cut: 0, merged: 0,
                 },
@@ -1652,7 +1671,6 @@ export function createGpuRenderer(services){
         }
         a.count += b.count;
         commands.pop();
-        recording.pipelines.pop();
         stats.draws--;
         recording.counts.draws--;
         stats.merged++;
@@ -1826,10 +1844,9 @@ export function createGpuRenderer(services){
             probe = probeSpec !== null && dumpIds.includes(probeSpec.id)
                 ? recording.dump.length - 1 : -1;
         }
-        recording.pipelines.push(pipeline);
         recording.commands.push({
             kind: 'draw',
-            pipeline: recording.pipelines.length - 1,
+            pipeline: pipelineSlot(recording, pipeline),
             mergeKey: key,
             uniforms,
             vertexUniforms,
@@ -2084,10 +2101,9 @@ export function createGpuRenderer(services){
                 + ` framebuffer[${x},${y} ${width}x${height}]`
                 + ` -> t${texture.name} level ${level} face ${face} at [${xoffset},${yoffset}]`);
         }
-        recording.pipelines.push(pipeline);
         recording.commands.push({
             kind: 'copy',
-            pipeline: recording.pipelines.length - 1,
+            pipeline: pipelineSlot(recording, pipeline),
             uniforms,
             target: view,
             scissor: clampRect({ x: xoffset, y: yoffset, width, height }, view),
@@ -2137,10 +2153,9 @@ export function createGpuRenderer(services){
                     { x: box.x0, y: box.y0, width: box.x1 - box.x0, height: box.y1 - box.y0 },
                     target))}`);
         }
-        recording.pipelines.push(pipeline);
         recording.commands.push({
             kind: 'draw',
-            pipeline: recording.pipelines.length - 1,
+            pipeline: pipelineSlot(recording, pipeline),
             uniforms,
             slots: [],
             indices: null,
