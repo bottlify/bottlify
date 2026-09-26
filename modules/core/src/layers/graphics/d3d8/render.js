@@ -1842,6 +1842,37 @@ export function createRenderer(options){
     };
     /** @type {Map<string, Promise<any>>} a level-making pipeline per GPU format */
     const mipPipelines = new Map();
+
+    /**
+     * The occlusion count a BEGIN opened and replay has reached without its
+     * END: it goes on counting across passes and frames until then. Replays
+     * run one after another, so one is enough.
+     *
+     * @type {any}
+     */
+    let countingQuery = null;
+    /**
+     * The frame being replayed's occlusion queries: whose count each slot of
+     * its set goes to, and the counts it holds a part of. Null in a frame
+     * that counts nothing.
+     *
+     * @type {{ slots: any[], touched: Set<any> } | null}
+     */
+    let frameOcclusion = null;
+    /** @param {any} count  An occlusion count every counter of which is back. */
+    const settleOcclusion = count=>{
+        count.value = count.total;
+        count.resolve(count.total);
+    };
+    /** @returns {any} a count a BEGIN, or an END with no BEGIN, starts */
+    const occlusionCount = ()=>{
+        /** @type {any} */
+        const count = { total: 0, outstanding: 0, ended: false, value: null, recording: null };
+        count.settled = new Promise(resolve=>{
+            count.resolve = resolve;
+        });
+        return count;
+    };
     /** @type {Map<string, any>} one blank texture per dimension a binding may want */
     const placeholders = new Map();
 
@@ -4392,6 +4423,46 @@ export function createRenderer(options){
     const mipSamplers = new Map();
 
     /**
+     * A draw counts for the occlusion query open where it stands: a query of
+     * the frame's set around it alone, whose samples go to that query's count
+     * once the set comes back. A draw past the set's last query is not
+     * counted, and that is reported.
+     *
+     * @param {any} pass
+     * @returns {number | null} the slot the draw counts in
+     */
+    const beginCounting = pass=>{
+        if (!countingQuery || !frameOcclusion)
+        {
+            return null;
+        }
+        const slot = pass.beginOcclusionQuery();
+        if (slot === null && divergence && !occlusionOverflowReported)
+        {
+            occlusionOverflowReported = true;
+            divergence('Direct3D', 'a frame with more draws inside occlusion queries than'
+                + ' WebGPU counts in one frame: the draws past them are not counted');
+        }
+        return slot;
+    };
+    /** @param {any} pass @param {number | null} slot */
+    const endCounting = (pass, slot)=>{
+        const occlusion = frameOcclusion;
+        if (slot === null || !occlusion)
+        {
+            return;
+        }
+        pass.endOcclusionQuery();
+        occlusion.slots[slot] = countingQuery;
+        if (!occlusion.touched.has(countingQuery))
+        {
+            occlusion.touched.add(countingQuery);
+            countingQuery.outstanding++;
+        }
+    };
+    let occlusionOverflowReported = false;
+
+    /**
      * Every level of a texture below the top, each from the one above it, in
      * the frame where the draw that samples them stands.
      *
@@ -5497,6 +5568,68 @@ export function createRenderer(options){
          * the frame of a swap chain whose picture has nowhere to go is still
          * drawn, into targets that later draws and reads find as it left them.
          */
+        /**
+         * An occlusion query, as the device keeps it: the count its last
+         * BEGIN opened, and the one its last END closed.
+         *
+         * @returns {{ open: any, latest: any }}
+         */
+        createOcclusionQuery(){
+            return { open: null, latest: null };
+        },
+
+        /**
+         * Counts the samples of every draw from here to the query's END,
+         * in this frame's order; a BEGIN while it counts starts again.
+         *
+         * @param {{ open: any, latest: any }} query
+         */
+        beginOcclusion(query){
+            query.open = occlusionCount();
+            ensureFrame().commands.push({ kind: 'occlusion', count: query.open, begin: true });
+        },
+
+        /** @param {{ open: any, latest: any }} query */
+        endOcclusion(query){
+            const count = query.open ?? occlusionCount();
+            query.open = null;
+            query.latest = count;
+            const frame = ensureFrame();
+            count.recording = frame;
+            frame.commands.push({ kind: 'occlusion', count, begin: false });
+        },
+
+        /**
+         * Where a query's answer stands: counting still, never asked, done,
+         * or on its way. Flushing sends the frame its END was recorded in to
+         * the GPU, which is what has to happen before it can come back.
+         *
+         * @param {{ open: any, latest: any }} query
+         * @param {boolean} flush
+         * @returns {{ state: 'building' | 'none' } | { state: 'done', value: number }
+         *     | { state: 'pending', settled: Promise<number> }}
+         */
+        occlusionResult(query, flush){
+            if (query.open)
+            {
+                return { state: 'building' };
+            }
+            const count = query.latest;
+            if (!count)
+            {
+                return { state: 'none' };
+            }
+            if (count.value !== null)
+            {
+                return { state: 'done', value: count.value };
+            }
+            if (flush && recording && count.recording === recording)
+            {
+                this.submit();
+            }
+            return { state: 'pending', settled: count.settled };
+        },
+
         submit(){
             const recorded = ensureFrame();
             recording = null;
@@ -6091,6 +6224,15 @@ export function createRenderer(options){
     async function replay(recorded, surface, snapshot = null){
         const pipelines = await Promise.allSettled(recorded.pipelines);
         const frame = backend.beginFrame();
+        // A frame counts when a query is open as it starts or opens in it,
+        // and then every pass of it can: a BEGIN may land in any of them.
+        const counts = countingQuery !== null
+            || recorded.commands.some((/** @type {any} */ command)=>command.kind === 'occlusion');
+        /** @type {{ slots: any[], touched: Set<any> } | null} */
+        const occlusion = counts ? { slots: [], touched: new Set() } : null;
+        frameOcclusion = occlusion;
+        /** @type {(() => Promise<number[]>) | null} */
+        let counted = null;
         /** @type {any[]} */
         const checks = [];
         /** @type {(() => Promise<Uint8Array[]>) | null} */
@@ -6100,6 +6242,10 @@ export function createRenderer(options){
         try
         {
             replayInto(frame, pipelines, recorded, surface);
+            if (occlusion && occlusion.touched.size > 0)
+            {
+                counted = frame.occlusionResults();
+            }
             if (snapshot)
             {
                 shot = frame.snapshot(snapshot);
@@ -6155,6 +6301,28 @@ export function createRenderer(options){
             frame.end();
         }
         lastFrame = recorded.commands;
+        if (counted && occlusion)
+        {
+            // Not waited for: the next frame replays while these come back,
+            // and a count is settled once every frame it counted in has.
+            const { slots, touched } = occlusion;
+            counted().then(samples=>{
+                samples.forEach((value, slot)=>{
+                    if (slots[slot])
+                    {
+                        slots[slot].total += value;
+                    }
+                });
+                for (const count of touched)
+                {
+                    count.outstanding--;
+                    if (count.ended && count.outstanding === 0)
+                    {
+                        settleOcclusion(count);
+                    }
+                }
+            }).catch(failure);
+        }
         const pixels = shot ? await shot() : undefined;
         if (read)
         {
@@ -6224,6 +6392,7 @@ export function createRenderer(options){
         pass.setBindings(2, pipeline.bindGroupLayouts[2], sampled);
         pass.setVertexBuffer(0, command.vertices.gpu, command.vertices.offset);
         bindStreams(pass, command);
+        const slot = beginCounting(pass);
         if (command.indices)
         {
             pass.setIndexBuffer(command.indices.gpu, command.indices.format,
@@ -6234,6 +6403,7 @@ export function createRenderer(options){
         {
             pass.draw(command.count, 1, command.first);
         }
+        endCounting(pass, slot);
         counters.draws++;
         counters.programmable++;
     }
@@ -6243,6 +6413,15 @@ export function createRenderer(options){
      * @param {any} recorded @param {any} surface
      */
     function replayInto(frame, pipelines, recorded, surface){
+        /**
+         * A pass for the frame's draws, one its draws can count in when the
+         * frame counts.
+         *
+         * @param {any} descriptor
+         */
+        const countingPass = descriptor=>frame.beginPass(frameOcclusion
+            ? { ...descriptor, occlusion: true }
+            : descriptor);
         /** @type {any} */
         let pass = null;
         /** @type {any} */
@@ -6259,7 +6438,7 @@ export function createRenderer(options){
             {
                 return;
             }
-            pass = frame.beginPass({
+            pass = countingPass({
                 target: opened.target,
                 clear: false,
                 depthStencilAttachment: opened.depth
@@ -6277,10 +6456,30 @@ export function createRenderer(options){
         };
         for (const command of recorded.commands)
         {
+            if (command.kind === 'occlusion')
+            {
+                if (command.begin)
+                {
+                    countingQuery = command.count;
+                }
+                else
+                {
+                    if (countingQuery === command.count)
+                    {
+                        countingQuery = null;
+                    }
+                    command.count.ended = true;
+                    if (command.count.outstanding === 0)
+                    {
+                        settleOcclusion(command.count);
+                    }
+                }
+                continue;
+            }
             if (command.kind === 'pass')
             {
                 opened = command;
-                pass = frame.beginPass({
+                pass = countingPass({
                     target: command.target,
                     clear: command.clearColor !== undefined,
                     clearValue: command.clearColor,
@@ -6366,7 +6565,7 @@ export function createRenderer(options){
                 // What the target held before this draw: a draw that seems to
                 // paint what was already there painted nothing.
                 command.check.before = frame.snapshot(opened.target);
-                pass = frame.beginPass({
+                pass = countingPass({
                     target: opened.target,
                     clear: false,
                     depthStencilAttachment: opened.depth
@@ -6410,6 +6609,7 @@ export function createRenderer(options){
             pass.setBindings(0, pipeline.bindGroupLayout, entries);
             pass.setVertexBuffer(0, command.vertices.gpu, command.vertices.offset);
             bindStreams(pass, command);
+            const slot = beginCounting(pass);
             if (command.indices)
             {
                 pass.setIndexBuffer(command.indices.gpu, command.indices.format,
@@ -6420,6 +6620,7 @@ export function createRenderer(options){
             {
                 pass.draw(command.count, 1, command.first);
             }
+            endCounting(pass, slot);
             counters.draws++;
             if (command.check?.probe && opened)
             {
@@ -6671,7 +6872,7 @@ export function createRenderer(options){
                     pass.draw(6, 1, 0);
                     check.quadShot = frame.snapshot(scratch.target);
                 }
-                pass = frame.beginPass({
+                pass = countingPass({
                     target: opened.target,
                     clear: false,
                     depthStencilAttachment: opened.depth

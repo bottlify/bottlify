@@ -550,19 +550,21 @@ test('event and occlusion queries are offered, the timings are not, and a null p
         assert.equal(device.CreateQuery(D3DQUERYTYPE.TIMESTAMP, refused), D3DERR_NOTAVAILABLE);
         assert.equal(refused.query, undefined);
 
-        // An occlusion query answers every pixel of the target, which never
-        // culls what should be drawn, and the device says so once.
+        // A device that draws nothing counts nothing: an occlusion query
+        // never ended answers without writing, and once ended, zero.
         /** @type {{ query?: any }} */
         const occlusion = {};
         assert.equal(device.CreateQuery(D3DQUERYTYPE.OCCLUSION, occlusion), D3D_OK);
-        assert.equal(occlusion.query.Issue(D3DISSUE.BEGIN), D3D_OK);
-        assert.equal(occlusion.query.GetData({}, 4), 1, 'S_FALSE until the end is issued');
-        assert.equal(occlusion.query.Issue(D3DISSUE.END), D3D_OK);
         /** @type {{ value?: number }} */
         const pixels = {};
         assert.equal(occlusion.query.GetData(pixels, 4), D3D_OK);
-        assert.equal(pixels.value, 64 * 48);
-        assert.equal(reports.filter(line=>line.includes('occlusion')).length, 1);
+        assert.equal(pixels.value, undefined);
+        assert.equal(occlusion.query.Issue(D3DISSUE.BEGIN), D3D_OK);
+        assert.equal(occlusion.query.GetData({}, 4), 1, 'S_FALSE until the end is issued');
+        assert.equal(occlusion.query.Issue(D3DISSUE.END), D3D_OK);
+        assert.equal(occlusion.query.GetData(pixels, 4), D3D_OK);
+        assert.equal(pixels.value, 0);
+        assert.equal(reports.filter(line=>line.includes('occlusion')).length, 0);
         assert.equal(occlusion.query.release(), 0);
 
         /** @type {{ query?: any }} */

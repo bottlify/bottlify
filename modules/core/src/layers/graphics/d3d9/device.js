@@ -134,6 +134,9 @@ export const D3DQUERYTYPE = Object.freeze({
 /** D3DISSUE flags. */
 export const D3DISSUE = Object.freeze({ END: 1, BEGIN: 2 });
 
+/** D3DGETDATA_FLUSH: send what was issued to the GPU. */
+const D3DGETDATA_FLUSH = 1;
+
 /** The last D3DTEXTUREFILTERTYPE StretchRect accepts. */
 const D3DTEXF_ANISOTROPIC = 3;
 
@@ -3619,11 +3622,6 @@ function createDeviceObject(parameters, caps, services, identity){
             {
                 return D3D_OK;
             }
-            if (type === D3DQUERYTYPE.OCCLUSION)
-            {
-                report('occlusion', 'an occlusion query reports every pixel of the target'
-                    + ' visible: this device does not count the pixels a draw produced');
-            }
             out.query = createQuery(type);
             return D3D_OK;
         },
@@ -3748,11 +3746,18 @@ function createDeviceObject(parameters, caps, services, identity){
     const createQuery = type=>{
         const queryCount = explicitCount();
         const occlusion = type === D3DQUERYTYPE.OCCLUSION;
+        // An occlusion query counts what the GPU drew between its BEGIN and
+        // its END; a device that draws nothing counts nothing.
+        const counted = occlusion && renderer?.createOcclusionQuery
+            ? renderer.createOcclusionQuery()
+            : null;
         // A query is signalled as created: its data is available, if empty,
         // until a BEGIN opens it, and again once END closes it. A program
         // that waits for the GPU by polling an event query it never issued
         // spins for ever on a query that answers "not yet" from the start.
         let building = false;
+        /** Whether an END has closed a count this device kept without a GPU. */
+        let ended = false;
         return {
             type,
             get refCount(){
@@ -3778,22 +3783,38 @@ function createDeviceObject(parameters, caps, services, identity){
                         return D3DERR_INVALIDCALL;
                     }
                     building = true;
+                    if (counted)
+                    {
+                        renderer.beginOcclusion(counted);
+                    }
                     return D3D_OK;
                 }
                 building = false;
+                ended = true;
+                if (counted)
+                {
+                    renderer.endOcclusion(counted);
+                }
                 return D3D_OK;
             },
             /**
              * The answer: for an event that the work is done, for an
-             * occlusion query every pixel of the current target. A buffer too
-             * small for it is refused; a query between BEGIN and END is still
-             * building and says so with S_FALSE.
+             * occlusion query the samples its draws passed, once they are
+             * back from the GPU -- S_FALSE until then, and while BEGIN has
+             * no END yet. D3DGETDATA_FLUSH sends the draws to the GPU and has
+             * the caller wait for the count (Wine's d3d9 test_occlusion_query,
+             * whose loop polls with it). An event's buffer too small for its
+             * BOOL is refused; an occlusion count is written in as many of
+             * its bytes as there is room for, and a query never ended writes
+             * nothing.
              *
              * @param {{ value?: number } | null} out
              * @param {number} size  Bytes the caller has room for; zero asks nothing.
+             * @param {number} [flags]  D3DGETDATA_FLUSH or nothing.
+             * @returns {number | Promise<number>}
              */
-            GetData(out, size){
-                if (size !== 0 && size < 4)
+            GetData(out, size, flags = 0){
+                if (!occlusion && size !== 0 && size < 4)
                 {
                     return D3DERR_INVALIDCALL;
                 }
@@ -3801,19 +3822,37 @@ function createDeviceObject(parameters, caps, services, identity){
                 {
                     return S_FALSE;
                 }
-                if (out && size >= 4)
+                /** @param {number} value */
+                const answer = value=>{
+                    if (out && size > 0)
+                    {
+                        out.value = value;
+                    }
+                    return D3D_OK;
+                };
+                if (!occlusion)
                 {
-                    if (occlusion)
-                    {
-                        const target = describe(renderTargets.get(0));
-                        out.value = target.Width * target.Height;
-                    }
-                    else
-                    {
-                        out.value = 1;
-                    }
+                    return answer(1);
                 }
-                return D3D_OK;
+                if (!counted)
+                {
+                    return ended ? answer(0) : D3D_OK;
+                }
+                const result = renderer.occlusionResult(counted,
+                    (flags & D3DGETDATA_FLUSH) !== 0);
+                switch (result.state)
+                {
+                    case 'done':
+                        return answer(result.value);
+                    case 'pending':
+                        return (flags & D3DGETDATA_FLUSH) !== 0
+                            ? result.settled.then(answer)
+                            : S_FALSE;
+                    case 'building':
+                        return S_FALSE;
+                    default:
+                        return D3D_OK;
+                }
             },
         };
     };

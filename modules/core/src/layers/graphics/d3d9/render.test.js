@@ -29,7 +29,7 @@ import {
     D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRS, D3DSWAPEFFECT, D3DUSAGE, D3D_OK,
 } from './constants.js';
 import { D3DCLEAR, D3DPT, D3DTA, D3DTEXF, D3DTOP, D3DTSS } from '../d3d8/constants.js';
-import { createDirect3D9 } from './device.js';
+import { D3DISSUE, D3DQUERYTYPE, createDirect3D9 } from './device.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
@@ -59,10 +59,11 @@ const argb = (r, g, b, a = 255)=>((a << 24) | (r << 16) | (g << 8) | b) >>> 0;
  * `readMemory`. An address invented for the purpose would read back as zeroes
  * with nothing reporting a failure.
  *
- * @param {{ width?: number, height?: number, depth?: boolean }} [options]
+ * @param {{ width?: number, height?: number, depth?: boolean,
+ *     occlusionSamples?: (slot: number) => number }} [options]
  */
 function harness(options = {}){
-    const gpu = createFakeDevice();
+    const gpu = createFakeDevice({ occlusionSamples: options.occlusionSamples });
     /** @type {any[]} */
     const presented = [];
     const backend = createBackend({
@@ -1007,4 +1008,72 @@ test('recorded: an additional swap chain shows its own back buffer in the device
         assert.equal(device.Reset(), D3DERR_INVALIDCALL);
         assert.equal(chain.release(), 0);
         assert.equal(device.Reset(), D3D_OK);
+    });
+
+test('recorded: an occlusion query counts the samples of the draws between its BEGIN and END',
+    async()=>{
+        // Wine's d3d9 test_occlusion_query: S_FALSE while the answer is on
+        // its way, and a flush that waits for it. The recording GPU's query
+        // at slot n of a frame counts 10 to the n, so a count says which
+        // draws it took in.
+        const h = harness({ occlusionSamples: slot=>10 ** slot });
+        const { device, gpu } = h;
+        /** @type {{ query?: any }} */
+        const out = {};
+        assert.equal(device.CreateQuery(D3DQUERYTYPE.OCCLUSION, out), D3D_OK);
+        const query = out.query;
+        const triangle = new Uint8Array(3 * TRIANGLE_STRIDE);
+        assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+        const draw = ()=>assert.equal(
+            device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, triangle, TRIANGLE_STRIDE), D3D_OK);
+
+        assert.equal(device.BeginScene(), D3D_OK);
+        draw();
+        assert.equal(query.Issue(D3DISSUE.BEGIN), D3D_OK);
+        draw();
+        draw();
+        assert.equal(query.Issue(D3DISSUE.END), D3D_OK);
+        draw();
+        assert.equal(device.EndScene(), D3D_OK);
+        /** @type {{ value?: number }} */
+        const data = {};
+        assert.equal(query.GetData(data, 4, 0), 1, 'S_FALSE: nothing has gone to the GPU yet');
+        const flushed = query.GetData(data, 4, 1);
+        assert.ok(flushed instanceof Promise, 'a flush has the caller wait');
+        assert.equal(await flushed, D3D_OK);
+        assert.equal(data.value, 11, 'the two draws inside, not the two outside');
+        assert.equal(gpu.of('createQuerySet')[0].descriptor.type, 'occlusion');
+        assert.equal(query.GetData(data, 4, 0), D3D_OK, 'and it stays answered');
+        assert.equal(data.value, 11);
+
+        // Across a change of target and across a present, one count.
+        /** @type {{ surface?: any }} */
+        const other = {};
+        assert.equal(device.CreateRenderTarget(4, 4, D3DFMT.X8R8G8B8, false, other), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const back = {};
+        assert.equal(device.GetRenderTarget(0, back), D3D_OK);
+        assert.equal(query.Issue(D3DISSUE.BEGIN), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        draw();
+        assert.equal(device.SetRenderTarget(0, other.surface), D3D_OK);
+        draw();
+        assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        assert.equal(query.GetData(data, 4, 0), 1, 'still open');
+        assert.equal(device.BeginScene(), D3D_OK);
+        draw();
+        assert.equal(query.Issue(D3DISSUE.END), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        assert.equal(await query.GetData(data, 4, 1), D3D_OK);
+        assert.equal(data.value, 12, 'three draws, in two passes of one frame and one of the next');
+        const begun = gpu.of('beginOcclusionQuery').map((/** @type {any} */ call)=>call.index);
+        assert.deepEqual(begun, [0, 1, 0, 1, 0], 'a query a draw, from the first slot each frame');
+        assert.equal(gpu.count('endOcclusionQuery'), 5);
+
+        other.surface.release();
+        back.surface.release();
+        assert.equal(query.release(), 0);
     });

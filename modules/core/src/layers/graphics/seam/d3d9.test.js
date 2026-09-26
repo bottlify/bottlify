@@ -1096,6 +1096,25 @@ test('a query answers through its vtable, and a null pointer only asks whether i
     assert.equal(h.fields.readU32(data), 1);
     assert.equal(call('GetData', [0, 0, 1]), D3D_OK);
     assert.equal(h.release(query), 0);
+
+    // An occlusion count goes into as many of its four bytes as there is
+    // room for (Wine's d3d9 test_occlusion_query); this device draws
+    // nothing, so it counted none.
+    assert.equal(h.device(device, 'CreateQuery', [D3DQUERYTYPE.OCCLUSION, out]), D3D_OK);
+    const occlusion = h.box.memory.readU32(out);
+    /** @param {string} name @param {number[]} args */
+    const onOcclusion = (name, args)=>
+        h.box.call(occlusion, slot(IDIRECT3DQUERY9_SLOTS, name), args);
+    assert.equal(onOcclusion('Issue', [2]), D3D_OK);
+    assert.equal(onOcclusion('Issue', [1]), D3D_OK);
+    h.fields.writeU32(data, 0xffffffff);
+    h.fields.writeU32(data + 4, 0xffffffff);
+    assert.equal(onOcclusion('GetData', [data, 2, 1]), D3D_OK);
+    assert.deepEqual([h.fields.readU32(data), h.fields.readU32(data + 4)],
+        [0xffff0000, 0xffffffff], 'two bytes, and nothing past them');
+    assert.equal(onOcclusion('GetData', [data, 8, 1]), D3D_OK);
+    assert.deepEqual([h.fields.readU32(data), h.fields.readU32(data + 4)], [0, 0xffffffff]);
+    assert.equal(h.release(occlusion), 0);
     assert.equal(h.release(device), 0);
     h.release(root);
 });

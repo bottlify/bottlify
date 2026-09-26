@@ -959,16 +959,23 @@ export function createDirect3D9Seam(
         GetDataSize: query=>query.GetDataSize(),
         /** @param {any} query @param {number[]} args */
         Issue: (query, [flags])=>query.Issue(flags >>> 0),
+        // A count is written in as many of its four bytes as the caller has
+        // room for, and the caller of a flush waits while it comes back.
         /** @param {any} query @param {number[]} args */
-        GetData: (query, [data, size])=>{
+        GetData: (query, [data, size, flags])=>{
             /** @type {{ value?: number }} */
             const held = {};
-            const hr = query.GetData((data >>> 0) === 0 ? null : held, size >>> 0);
-            if (hr === D3D_OK && (data >>> 0) !== 0 && held.value !== undefined)
-            {
-                fields.writeU32(data >>> 0, held.value);
-            }
-            return hr;
+            /** @param {number} hr */
+            const write = hr=>{
+                if (hr === D3D_OK && (data >>> 0) !== 0 && held.value !== undefined)
+                {
+                    const bytes = new Uint8Array(new Uint32Array([held.value >>> 0]).buffer);
+                    memory.writeMemory(data >>> 0, bytes.subarray(0, Math.min(4, size >>> 0)));
+                }
+                return hr;
+            };
+            const hr = query.GetData((data >>> 0) === 0 ? null : held, size >>> 0, flags >>> 0);
+            return hr instanceof Promise ? hr.then(write) : write(hr);
         },
     })];
 
