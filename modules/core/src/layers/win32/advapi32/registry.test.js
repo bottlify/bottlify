@@ -102,6 +102,22 @@ test('the keys every machine carries are there before any program writes', ()=>{
     assert.ok(hive.open(restored, 'SOFTWARE\\Vendor'));
 });
 
+test('the processor key reports the engine\'s speed, and a restored hive takes it over', ()=>{
+    const mhzOf = (/** @type {any} */ hive)=>{
+        const local = /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE));
+        const processor = hive.open(local, 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0');
+        return new DataView(hive.getValue(processor, '~MHz').data.buffer).getUint32(0, true);
+    };
+    const slow = createHive();
+    const fast = createHive({ processorMhz: 3000 });
+    assert.equal(mhzOf(slow), 1000);
+    assert.equal(mhzOf(fast), 3000);
+    // HARDWARE is the kernel's, written at every boot: a hive saved by a run on
+    // the slower engine does not keep its speed on the faster one.
+    fast.fromJSON(slow.toJSON());
+    assert.equal(mhzOf(fast), 3000);
+});
+
 test('a key path is created once and found again whatever its case', ()=>{
     const hive = createHive();
     const root = /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE));

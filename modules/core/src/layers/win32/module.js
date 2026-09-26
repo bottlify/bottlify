@@ -272,7 +272,7 @@ export const win32Module = {
         // Absent unless a bundle is mounted, in which case a read of a block
         // that is not here yet becomes a wait rather than a fault.
         const volume = createVolume(filesystem, config?.fetchBlocks ?? null);
-        const hive = createHive();
+        const hive = createHive({ processorMhz: config?.processorMhz });
         // The guest's clock, because a timer is due against the clock the
         // program itself reads, and the input layer's key state, because a
         // hot key fires on a combination and only the layer that sees the
