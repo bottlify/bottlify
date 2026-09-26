@@ -38,6 +38,8 @@
  * that is not where the bytes are.
  */
 
+import { encodeAnsi } from '../kernel32/locale.js';
+
 const MMIO_READ = 0x0000;
 const MMIO_WRITE = 0x0001;
 const MMIO_READWRITE = 0x0002;
@@ -224,36 +226,33 @@ const dword = value=>new Uint8Array([
 ]);
 
 /**
- * The code up to four characters spell, padded with spaces.
+ * The code up to four characters spell, padded with spaces: their bytes in
+ * the ANSI page, where a character the page lacks is the default character.
  *
  * @param {string} name @param {boolean} upper
  */
 const fourccOf = (name, upper)=>{
-    const padded = (upper ? name.toUpperCase() : name).slice(0, 4).padEnd(4, ' ');
-    return (padded.charCodeAt(0) | padded.charCodeAt(1) << 8
-        | padded.charCodeAt(2) << 16 | padded.charCodeAt(3) << 24) >>> 0;
+    const bytes = encodeAnsi((upper ? name.toUpperCase() : name).slice(0, 4).padEnd(4, ' '));
+    return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
 };
 
 /**
- * A name as a terminated string of either width. Narrowed, a character with
- * no single-byte form becomes a question mark.
+ * A name as a terminated string of either width. Narrowed, it is in the ANSI
+ * page, a character the page lacks as the default character.
  *
  * @param {string} text @param {boolean} wide
  */
 const encode = (text, wide)=>{
-    const bytes = new Uint8Array((text.length + 1) * (wide ? 2 : 1));
+    if (!wide)
+    {
+        return encodeAnsi(`${text}\0`);
+    }
+    const bytes = new Uint8Array((text.length + 1) * 2);
     for (let index = 0; index < text.length; index++)
     {
         const unit = text.charCodeAt(index);
-        if (wide)
-        {
-            bytes[index * 2] = unit & 0xff;
-            bytes[index * 2 + 1] = unit >>> 8;
-        }
-        else
-        {
-            bytes[index] = unit > 0xff ? 0x3f : unit;
-        }
+        bytes[index * 2] = unit & 0xff;
+        bytes[index * 2 + 1] = unit >>> 8;
     }
     return bytes;
 };
@@ -1776,14 +1775,13 @@ export function createMmioFunctions(host){
          * FOURCC mmioStringToFOURCCW(LPCWSTR sz, UINT uFlags)
          *
          * The same code from a UTF-16 string, whose characters are narrowed
-         * first: one with no single-byte form becomes a question mark.
+         * into the ANSI page first, as the ANSI spelling's are read in it.
          */
         mmioStringToFOURCCW: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([text, flags])=>fourccOf((text >>> 0) === 0 ? ''
-                : wideAt(text >>> 0, 4).replace(/[^\0-\xff]/g, '?'),
-            ((flags >>> 0) & MMIO_TOUPPER) !== 0),
+            handler: ([text, flags])=>fourccOf((text >>> 0) === 0 ? '' : wideAt(text >>> 0, 4),
+                ((flags >>> 0) & MMIO_TOUPPER) !== 0),
         },
 
         /**
