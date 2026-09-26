@@ -748,6 +748,17 @@ test('CreateDIBitmap makes a device-dependent bitmap at the depth of the DC it i
     assert.ok(fns.CreateDIBitmap.handler([hdc, STRUCT, 0, 0, 0, 0]) > 0);
     putBitmapInfo(memory, { width: 2, height: 2, bitCount: 8, compression: 4 });
     assert.equal(fns.CreateDIBitmap.handler([hdc, STRUCT, 0, 0, 0, 0]), 0, 'BI_JPEG');
+
+    // test_dib_formats again: a zero width or height makes a bitmap -- the one
+    // pixel CreateCompatibleBitmap gives for it -- and a negative width none.
+    const stock = fns.CreateCompatibleBitmap.handler([hdc, 0, 0]);
+    putBitmapInfo(memory, { width: 0, height: 2, bitCount: 32 });
+    assert.equal(fns.CreateDIBitmap.handler([hdc, STRUCT, 0, 0, 0, 0]), stock);
+    putBitmapInfo(memory, { width: 2, height: 0, bitCount: 32 });
+    assert.equal(fns.CreateDIBitmap.handler([hdc, STRUCT, 4, BITS_POINTER, STRUCT, 0]), stock,
+        'and nothing is drawn into that shared pixel');
+    putBitmapInfo(memory, { width: -2, height: 2, bitCount: 32 });
+    assert.equal(fns.CreateDIBitmap.handler([hdc, STRUCT, 0, 0, 0, 0]), 0);
 });
 
 test('CreatePalette reads its entries out of the structure that carries them', ()=>{

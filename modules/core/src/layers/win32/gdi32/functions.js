@@ -1823,9 +1823,15 @@ export function createGdiFunctions(host){
                 const dc = (hdc >>> 0) === 0 ? null : dcOf(hdc);
                 if (header.size < BITMAPINFOHEADER.SIZE
                     || IMAGE_COMPRESSIONS.has(header.compression)
-                    || header.width <= 0 || header.height === 0 || ((hdc >>> 0) !== 0 && !dc))
+                    || header.width < 0 || ((hdc >>> 0) !== 0 && !dc))
                 {
                     return 0;
+                }
+                // No size is CreateCompatibleBitmap's answer to no size, and
+                // that pixel is shared: nothing is drawn into it.
+                if (header.width === 0 || header.height === 0)
+                {
+                    return defaultBitmap();
                 }
                 const attributes = deviceBitmap(header.width, Math.abs(header.height),
                     dc ? surfaceOf(dc).bitCount : 1);
