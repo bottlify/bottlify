@@ -1453,6 +1453,8 @@ test('every capability claimed is one the renderer honours', ()=>{
     assert.equal(caps.TextureCaps & (0x00000800 | 0x00010000), 0,
         'no cube maps, which CreateCubeTexture refuses');
     assert.equal(caps.CubeTextureFilterCaps, 0);
+    assert.equal(caps.Caps2 & 0x00020000, 0,
+        'no D3DCAPS2_FULLSCREENGAMMA: a ramp is kept and read back, and nothing applies it');
     assert.equal(caps.TextureCaps & 0x00000080, 0,
         'no D3DPTEXTURECAPS_ALPHAPALETTE: no palettised format is made');
     assert.equal(caps.RasterCaps & 0x00004000, 0, 'no D3DRS_ZBIAS, which nothing reads');

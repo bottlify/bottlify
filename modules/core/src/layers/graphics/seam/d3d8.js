@@ -66,7 +66,6 @@ import {
  * cannot, and every one of these is a claim a program acts on.
  */
 const D3DCAPS_READ_SCANLINE = 0x00020000;
-const D3DCAPS2_FULLSCREENGAMMA = 0x00020000;
 // A colour cursor at any resolution: the device keeps the bitmap a program
 // hands it and the host shows it over the frame. A device that claims neither
 // sends a program down its own drawing path for the cursor, which a program
@@ -1939,7 +1938,9 @@ export function createDirect3D8Seam(
         fields.writeStruct(address, D3DCAPS8, {
             DeviceType: D3DDEVTYPE.HAL,
             Caps: D3DCAPS_READ_SCANLINE,
-            Caps2: D3DCAPS2_CANRENDERWINDOWED | D3DCAPS2_FULLSCREENGAMMA,
+            // D3DCAPS2_FULLSCREENGAMMA is not claimed: a ramp is kept and read
+            // back, and nothing applies it to the picture.
+            Caps2: D3DCAPS2_CANRENDERWINDOWED,
             PresentationIntervals: D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE,
             CursorCaps: D3DCURSORCAPS_COLOR | D3DCURSORCAPS_LOWRES,
             DevCaps: D3DDEVCAPS_HWTRANSFORMANDLIGHT | D3DDEVCAPS_HWRASTERIZATION
