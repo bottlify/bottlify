@@ -506,6 +506,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, moduleBytes: 0,
         queueDrops: 0, queueEvictions: 0,
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, precisionSwitches: 0,
+        // Batches the store answered in the call that formed them, and a turn later.
+        lookedUpNow: 0, lookedUpLater: 0,
         shapeMisses: 0, shapeChecked: 0, x87RelaxedReads: 0,
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
@@ -2396,6 +2398,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             const lookupAt = clock();
             if (lookUpNow(formed, store))
             {
+                counts.lookedUpNow++;
                 counts.lookupMs += clock() - lookupAt;
                 return finishBatch(formed, store);
             }
@@ -2406,6 +2409,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // published this frame. `lookupMs` is the engine thread's own time
             // to start them.
             storePending = true;
+            counts.lookedUpLater++;
             // A batch module's bytes are read once for every record naming it.
             /** @type {Map<string, Promise<Uint8Array | null>>} */
             const modules = new Map();
@@ -2523,6 +2527,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 cacheMisses: counts.cacheMisses,
                 missNoRecord: counts.missNoRecord,
                 missNoModule: counts.missNoModule,
+                lookedUpNow: counts.lookedUpNow,
+                lookedUpLater: counts.lookedUpLater,
                 // x87 regions compiled for the wide precision controls until this is
                 // 1, for single until it is 2 (`precision`).
                 precisionSwitches: counts.precisionSwitches,

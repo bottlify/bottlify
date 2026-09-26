@@ -517,7 +517,9 @@ function describeCork(cork, say){
         + `  queueDrops: ${cork.queueDrops ?? 0}`
         + `  forced steps: ${cork.forcedSteps ?? 0}`
         + `  cache: ${cork.cacheHits ?? 0} hit / ${cork.cacheMisses ?? 0} miss`
-        + ` (no record ${cork.missNoRecord ?? 0}, no module ${cork.missNoModule ?? 0})`);
+        + ` (no record ${cork.missNoRecord ?? 0}, no module ${cork.missNoModule ?? 0})`
+        + `  store batches: ${cork.lookedUpNow ?? 0} at once / ${cork.lookedUpLater ?? 0}`
+        + ' a turn later');
     if (cork.topBlocks?.length)
     {
         // The block profile's most executed blocks (--cork-config blockProfile).

@@ -790,6 +790,8 @@ test('a store that answers at once has a batch published in the call that formed
     assert.equal(await second.runtime.translatePending(), 1, 'a hit, published');
     assert.deepEqual([second.runtime.diagnostics().cacheHits, records.size], [1, 2],
         'nothing emitted or stored again');
+    assert.deepEqual([second.runtime.diagnostics().lookedUpNow,
+        second.runtime.diagnostics().lookedUpLater], [1, 0]);
     const exit = second.runtime.run(second.runtime.entryOf(CODE), 1_000_000);
     assert.equal(exit.kind, 'halt');
     assert.equal(exit.retired, 1 + 2 * 1000 + 1);
@@ -800,6 +802,8 @@ test('a store that answers at once has a batch published in the call that formed
     await settle();
     assert.ok(third.runtime.entryOf(CODE) >= 0);
     assert.equal(third.runtime.diagnostics().cacheHits, 1);
+    assert.deepEqual([third.runtime.diagnostics().lookedUpNow,
+        third.runtime.diagnostics().lookedUpLater], [0, 1]);
 });
 
 test('a region whose code is written while its lookups are out is not published for the old bytes',

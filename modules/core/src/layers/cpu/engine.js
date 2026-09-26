@@ -261,6 +261,8 @@
  * @property {number} retired          Instructions retired in the engine, for a frame's share.
  * @property {number} cacheHits        Regions taken from the store.
  * @property {number} cacheMisses
+ * @property {number} [lookedUpNow]    Batches the store answered in the call that formed them.
+ * @property {number} [lookedUpLater]  Batches it answered a turn of the event loop later.
  * @property {number} [precisionSwitches]  Times x87 regions went to another precision control:
  *     from the wide ones to single, and from single to a test at every rounding operation.
  * @property {number} [interpretedRelaxedReads]  x87 status words the interpreter tier in wasm
