@@ -35,7 +35,7 @@ import { createDirect3D8 } from './device.js';
 import {
     IDENTITY, LIGHT_FLOATS, UNIFORM_AT, UNIFORM_FLOATS, colorToFloats, expandTexels, eyePosition,
     HARDWARE_SAMPLER, listIndices, multiplyMatrices, packLight, pipelineStateOf, samplerFlagsOf,
-    screenExtent, transformPosition, uniformBlock, fogModeOf,
+    screenExtent, transformPosition, uniformBlock, fogModeOf, fogOf, isAffine,
     vertexCountOf,
 } from './render.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -43,8 +43,11 @@ import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { viewportState } from '../webgpu/internal/viewport.js';
 import {
-    clear as referenceClear, createReferenceSurface, fillRect, toBase64,
+    clear as referenceClear, createReferenceSurface, fillRect, fogFactor,
+    fogged as referenceFogged, toBase64,
 } from '../webgpu/internal/reference.js';
+import { generateFixedFunction } from '../webgpu/internal/fixedfunction.js';
+import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
 
 /**
  * The sampler state of stage zero as the last uniform block on the queue carries it.
@@ -2885,4 +2888,143 @@ test('fog: the table mode is the one that runs when it is set, else the vertex m
     });
     assert.equal(fogModeOf(disabled), D3DFOG.NONE);
     assert.equal(fogModeOf(both, false), D3DFOG.NONE);
+
+    // Where the factor comes from follows the same rule, and fog enabled with
+    // neither mode set is the specular alpha rather than no fog at all.
+    assert.deepEqual(fogOf(both), { source: FOG_SOURCE.TABLE, mode: D3DFOG.LINEAR });
+    assert.deepEqual(fogOf(vertexOnly), { source: FOG_SOURCE.VERTEX, mode: D3DFOG.EXP });
+    assert.deepEqual(fogOf(modelOf({ [D3DRS.FOGENABLE]: 1 })),
+        { source: FOG_SOURCE.SPECULAR, mode: D3DFOG.NONE });
+    assert.deepEqual(fogOf(disabled), { source: FOG_SOURCE.NONE, mode: D3DFOG.NONE });
+});
+
+test('fog: table fog is taken over z under an affine projection, over w otherwise', ()=>{
+    // Microsoft's "Pixel Fog": a projection whose fourth column is
+    // (0, 0, 0, 1) is affine and fogs by z; Wine's test_fog has _44 = 1.01
+    // fog by w. The block's fog row carries which, beside the range.
+    assert.equal(isAffine(IDENTITY), true);
+    const perspective = [...IDENTITY];
+    perspective[15] = 1.01;
+    assert.equal(isAffine(perspective), false);
+    const projective = [...IDENTITY];
+    projective[11] = 1;
+    projective[15] = 0;
+    assert.equal(isAffine(projective), false);
+
+    const block = (/** @type {boolean} */ affineProjection)=>uniformBlock({
+        worldViewProjection: IDENTITY,
+        viewport: viewportState({ x: 0, y: 0, width: 4, height: 4 }),
+        textureFactor: 0,
+        fogColor: 0,
+        alphaRef: 0,
+        fogFactors: [2, 10, 0.5],
+        affineProjection,
+    });
+    assert.deepEqual([...block(true).subarray(UNIFORM_AT.fogFactors, UNIFORM_AT.fogFactors + 4)],
+        [2, 10, 0.5, 1]);
+    assert.equal(block(false)[UNIFORM_AT.fogFactors + 3], 0);
+});
+
+test('recorded: the fog interpolation scene fogs as Windows does in every mode', async()=>{
+    // Wine's d3d8 and d3d9 test_fog_interpolation: a quad from x = -1 to 1
+    // whose z runs from 0 on the left to 1 on the right under identity
+    // matrices, the stage colour blue, the fog green at density 5, and a
+    // specular alpha from 1 on the left to 0 on the right. Windows reads
+    // blue at the left edge in every case, 0x00fd02 at the right, and in the
+    // middle the interpolated specular alpha or vertex factor (0x007f80) or,
+    // for table fog, the curve at z = 0.5 (0x00ea15) -- not the mean of the
+    // ends. What is checked is what the renderer hands the shader -- the
+    // source, the curve, the depth the block says to take, the camera-space
+    // depth of each vertex -- carried through the reference's fog formula,
+    // and that the shader takes the factor from the same place.
+    const cases = [
+        [D3DFOG.NONE, D3DFOG.NONE, 1, 0x007f80],
+        [D3DFOG.NONE, D3DFOG.NONE, 2, 0x007f80],
+        [D3DFOG.EXP, D3DFOG.NONE, 1, 0x007f80],
+        [D3DFOG.EXP, D3DFOG.NONE, 2, 0x007f80],
+        [D3DFOG.NONE, D3DFOG.EXP, 1, 0x00ea15],
+        [D3DFOG.NONE, D3DFOG.EXP, 2, 0x00ea15],
+        [D3DFOG.EXP, D3DFOG.EXP, 1, 0x00ea15],
+        [D3DFOG.EXP, D3DFOG.EXP, 2, 0x00ea15],
+    ];
+    const fvf = FVF.XYZ | FVF.DIFFUSE | FVF.SPECULAR;
+    const stride = 20;
+    const corners = [[-1, -1, 0, 0xff000000], [-1, 1, 0, 0xff000000],
+        [1, -1, 1, 0x00000000], [1, 1, 1, 0x00000000]];
+    const bytes = new DataView(new ArrayBuffer(stride * 4));
+    corners.forEach(([x, y, z, specular], index)=>{
+        bytes.setFloat32(index * stride, x, true);
+        bytes.setFloat32(index * stride + 4, y, true);
+        bytes.setFloat32(index * stride + 8, z, true);
+        bytes.setUint32(index * stride + 12, 0xffff0000, true);
+        bytes.setUint32(index * stride + 16, specular, true);
+    });
+    const blue = { r: 0, g: 0, b: 255, a: 255 };
+    const green = { r: 0, g: 255, b: 0, a: 255 };
+    /** @param {number} rgb */
+    const colourOf = rgb=>({ r: (rgb >> 16) & 0xff, g: (rgb >> 8) & 0xff, b: rgb & 0xff });
+
+    for (const [vertexMode, tableMode, shade, middle] of cases)
+    {
+        const h = harness({ width: 640, height: 480 });
+        const { device } = h;
+        device.SetRenderState(D3DRS.LIGHTING, 0);
+        device.SetRenderState(D3DRS.ZENABLE, 0);
+        device.SetRenderState(D3DRS.FOGENABLE, 1);
+        device.SetRenderState(D3DRS.FOGCOLOR, 0x0000ff00);
+        device.SetRenderState(D3DRS.FOGDENSITY, floatToDword(5));
+        device.SetRenderState(D3DRS.TEXTUREFACTOR, 0x000000ff);
+        device.SetRenderState(D3DRS.SHADEMODE, shade);
+        device.SetRenderState(D3DRS.FOGVERTEXMODE, vertexMode);
+        device.SetRenderState(D3DRS.FOGTABLEMODE, tableMode);
+        device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.SELECTARG1);
+        device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.TFACTOR);
+        device.SetTransform(D3DTS.PROJECTION, IDENTITY);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(fvf), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLESTRIP, 2,
+            new Uint8Array(bytes.buffer), stride), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        const draw = h.device.diagnostics().lastFrame
+            .find((/** @type {any} */ c)=>c.kind === 'draw');
+        const state = draw.state;
+        const fog = draw.uniforms.subarray(UNIFORM_AT.fogFactors, UNIFORM_AT.fogFactors + 4);
+        const range = { start: fog[0], end: fog[1], density: fog[2] };
+        const code = generateFixedFunction(state, decodeFvf(state.fvf)).code;
+        const worldView = draw.uniforms.subarray(UNIFORM_AT.worldView, UNIFORM_AT.worldView + 16);
+        const cameraZ = (/** @type {number[]} */ at)=>transformPosition(worldView, at)[2];
+
+        /** @param {number} t  from the left edge to the right, as the pixel centre lies */
+        const factorAt = t=>{
+            if (state.fogSource === FOG_SOURCE.TABLE)
+            {
+                assert.ok(code.includes('fogFactorOf(select(1.0 / input.position.w,'
+                    + ' input.position.z, uniforms.fogFactors.w != 0.0))'));
+                // The pixel's z is the interpolated z; its w is one here.
+                return fogFactor(state.fogMode, fog[3] !== 0 ? t : 1, range);
+            }
+            if (state.fogSource === FOG_SOURCE.VERTEX)
+            {
+                assert.ok(code.includes('out.fogAmount = fogFactorOf(abs((uniforms.worldView'));
+                const left = fogFactor(state.fogMode, Math.abs(cameraZ([-1, 0, 0])), range);
+                const right = fogFactor(state.fogMode, Math.abs(cameraZ([1, 0, 1])), range);
+                return left + (right - left) * t;
+            }
+            assert.equal(state.fogSource, FOG_SOURCE.SPECULAR);
+            assert.ok(code.includes('out.fogAmount = vertex.specular.a;'));
+            return 1 - t;
+        };
+        const label = `vertex ${vertexMode}, table ${tableMode}, shade ${shade}`;
+        for (const [x, expected] of [[0, 0x0000ff], [320, middle], [639, 0x00fd02]])
+        {
+            const got = referenceFogged(blue, green, factorAt(x / 640));
+            const want = colourOf(expected);
+            for (const channel of /** @type {const} */ (['r', 'g', 'b']))
+            {
+                assert.ok(Math.abs(got[channel] - want[channel]) <= 2,
+                    `${label}: x=${x} ${channel} ${got[channel]} against ${want[channel]}`);
+            }
+        }
+    }
 });

@@ -51,6 +51,8 @@
  *   that picked up ambient or diffuse light would make lit geometry fade.
  */
 
+import { FOG_SOURCE, fogSourceOf } from './pipeline.js';
+
 /** D3DTOP, the colour and alpha operations a stage can name. */
 export const D3DTOP = Object.freeze({
     DISABLE: 1,
@@ -614,7 +616,12 @@ export function generateFixedFunction(state, layout){
                 generatedCoordinate(stage.texCoordIndex))};`);
     }
 
-    if (state.fogMode !== D3DFOG.NONE)
+    // Table fog is the pixel's own and needs no varying. Vertex fog on a
+    // pre-transformed vertex is the program's, in its specular alpha.
+    const fogSource = fogSourceOf(state);
+    const vertexFog = fogSource === FOG_SOURCE.VERTEX && !layout.preTransformed;
+    const carriedFog = fogSource === FOG_SOURCE.SPECULAR || fogSource === FOG_SOURCE.VERTEX;
+    if (carriedFog)
     {
         varyings.push(`    @location(${location}) fogAmount: f32,`);
     }
@@ -634,32 +641,25 @@ export function generateFixedFunction(state, layout){
             + 'vertex.position.z, 1.0);'
         : '    out.position = uniforms.worldViewProjection * vec4f(vertex.position, 1.0);';
 
-    // How much of the fragment survives the fog, computed per vertex and
-    // interpolated across the triangle.
-    //
-    // The distance it fades by is the clip-space w, which for a perspective
-    // projection is the eye-space depth -- the distance Direct3D's fog is
-    // defined against. A pre-transformed vertex has no eye to be far from: it
-    // is already on the screen, and Direct3D takes its fog factor straight
-    // from the specular alpha the program supplied. Where such a format carries
-    // no specular there is nothing to fog by, and inventing a distance would
+    // How much of the fragment survives vertex fog, interpolated across the
+    // triangle. The distance is the magnitude of the camera-space z, not the
+    // clip w: the two agree only under a perspective projection, and an
+    // orthographic one has a w of one at every depth. Where the factor is the
+    // program's own, in the specular alpha, and the format carries no
+    // specular, there is nothing to fog by, and inventing a distance would
     // fade a two-dimensional overlay by how deep the scene behind it happens
     // to be.
-    //
-    // Per vertex rather than per pixel, which is what D3DRS_FOGVERTEXMODE asks
-    // for and an approximation of D3DRS_FOGTABLEMODE. The two differ only where
-    // a triangle is large enough for the curve to bend across it, and the
-    // interpolated factor is exact for linear fog either way.
-    const fogAmount = state.fogMode === D3DFOG.NONE
-        ? []
-        : [layout.preTransformed
-            ? `    out.fogAmount = ${has('specular') ? 'vertex.specular.a' : '1.0'};`
-            : '    out.fogAmount = fogFactorOf(out.position.w);'];
+    const fogAmount = !carriedFog ? []
+        : vertexFog
+            ? ['    out.fogAmount = fogFactorOf(abs((uniforms.worldView'
+                + ' * vec4f(vertex.position, 1.0)).z));']
+            : [`    out.fogAmount = ${has('specular') ? 'vertex.specular.a' : '1.0'};`];
 
     const lightCount = lighting === null ? 0 : lighting.lights.length;
     const code = `${lightCount === 0 ? '' : LIGHT_STRUCT}${uniformStruct(lightCount)}
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
-${functionDeclarations(lighting, state.fogMode)}${samplerDeclarations(state.stages.length, 0, 1)}
+${functionDeclarations(lighting, vertexFog || fogSource === FOG_SOURCE.TABLE
+        ? state.fogMode : D3DFOG.NONE)}${samplerDeclarations(state.stages.length, 0, 1)}
 ${sampleFunctions(state.stages.length, state.stages.map((stage, index)=>(generated[index]
         ? { projected: stage.projected ?? 0 } : null)))}
 struct VertexIn {
@@ -742,6 +742,21 @@ function transformedGeneration(index, coordinate){
 }
 
 /**
+ * Table fog's factor for the pixel, from the fragment position builtin: the
+ * curve over its depth, which is its z when the projection is affine and its
+ * w otherwise -- the reciprocal of the interpolated 1/w the builtin carries.
+ * The choice is a uniform (`fogFactors.w`), so a projection change compiles
+ * nothing.
+ *
+ * @param {string} position  the fragment's `@builtin(position)`
+ * @returns {string}
+ */
+function tableFog(position){
+    return `fogFactorOf(select(1.0 / ${position}.w, ${position}.z,`
+        + ' uniforms.fogFactors.w != 0.0))';
+}
+
+/**
  * The fragment half of the fixed function: the stage cascade over `input`'s
  * diffuse, specular and coordinate sets, then the specular add, the fog and
  * the alpha test, leaving the result in `current`.
@@ -750,9 +765,10 @@ function transformedGeneration(index, coordinate){
  * @param {boolean} specularEnable
  * @param {boolean[]} [generated]  Which stages sample a coordinate the
  *     vertex stage generated (`generated{n}`) rather than a carried set.
+ * @param {string} [position]  The fragment's position builtin, for table fog.
  */
 function fragmentBody(state, specularEnable, generated = state.stages.map(
-    stage=>generates(stage.texCoordIndex)))
+    stage=>generates(stage.texCoordIndex)), position = 'input.position')
 {
     const stages = state.stages.length === 0
         ? '    var current = input.diffuse;'
@@ -786,10 +802,11 @@ function fragmentBody(state, specularEnable, generated = state.stages.map(
         ? '\n    current = vec4f(current.rgb + input.specular.rgb, current.a);'
         : '';
 
-    const fog = state.fogMode === D3DFOG.NONE
+    const fog = fogSourceOf(state) === FOG_SOURCE.NONE
         ? ''
         : '\n    current = vec4f(mix(uniforms.fogColor.rgb, current.rgb,'
-            + ' clamp(input.fogAmount, 0.0, 1.0)), current.a);';
+            + ` clamp(${fogSourceOf(state) === FOG_SOURCE.TABLE
+                ? tableFog(position) : 'input.fogAmount'}, 0.0, 1.0)), current.a);`;
 
     // The test discards rather than returning a transparent pixel: a discarded
     // fragment writes no depth, and one blended to zero alpha still does, which
@@ -850,20 +867,26 @@ export function fixedFragmentStage(state, written){
         carried.push(`    input.texCoord${set} = `
             + `${has(2 + set) ? `in.t${set}.xy` : 'vec2f(0.0)'};`);
     }
-    if (state.fogMode !== D3DFOG.NONE)
+    // Below table fog, a shader-drawn vertex is fogged by what the shader
+    // wrote: its oFog when it wrote one, else its specular alpha -- neither
+    // the vertex mode's curve nor its range applies.
+    const fogSource = fogSourceOf(state);
+    const carriedFog = fogSource === FOG_SOURCE.SPECULAR || fogSource === FOG_SOURCE.VERTEX;
+    if (carriedFog)
     {
         if (has(10))
         {
             fields.push('    @location(10) fog: vec4f,');
         }
-        carried.push(`    input.fogAmount = ${has(10) ? 'in.fog.x' : '1.0'};`);
+        carried.push(`    input.fogAmount = ${has(10) ? 'in.fog.x' : has(1) ? 'in.v1.a' : '1.0'};`);
     }
     const members = ['    diffuse: vec4f,', '    specular: vec4f,',
         ...Array.from({ length: sets }, (_, set)=>`    texCoord${set}: vec2f,`),
-        ...(state.fogMode !== D3DFOG.NONE ? ['    fogAmount: f32,'] : [])];
+        ...(carriedFog ? ['    fogAmount: f32,'] : [])];
     const wgsl = `${uniformStruct(0)}
 @group(1) @binding(0) var<uniform> uniforms: Uniforms;
-${functionDeclarations(null, state.fogMode)}${samplerDeclarations(state.stages.length, 2, 0)}
+${functionDeclarations(null, fogSource === FOG_SOURCE.TABLE ? state.fogMode : D3DFOG.NONE)}${
+    samplerDeclarations(state.stages.length, 2, 0)}
 ${sampleFunctions(state.stages.length)}
 struct PsIn {
 ${fields.join('\n')}
@@ -877,7 +900,7 @@ ${members.join('\n')}
 fn ps_main(in: PsIn) -> @location(0) vec4f {
     var input: Carried;
 ${carried.join('\n')}
-${fragmentBody(state, state.specularEnable === true, [])}
+${fragmentBody(state, state.specularEnable === true, [], 'in.position')}
     return current;
 }
 `;

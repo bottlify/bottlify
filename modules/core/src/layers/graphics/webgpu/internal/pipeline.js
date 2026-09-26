@@ -30,6 +30,30 @@
  * picture.
  */
 
+/**
+ * Where the fog factor of a draw comes from, which is decided by which of the
+ * two fog modes is set and not by the curve either of them names.
+ *
+ * - SPECULAR: the vertex's specular alpha, interpolated. D3DRS_FOGENABLE with
+ *   both modes NONE, and vertex fog on a pre-transformed vertex, which has no
+ *   eye space for the vertex pipeline to take a depth in.
+ * - VERTEX: D3DRS_FOGVERTEXMODE's curve, evaluated per vertex over the
+ *   magnitude of its camera-space z and interpolated.
+ * - TABLE: D3DRS_FOGTABLEMODE's curve, evaluated per pixel over the pixel's
+ *   depth: its z when the projection is affine, its w otherwise.
+ */
+export const FOG_SOURCE = Object.freeze({ NONE: 0, SPECULAR: 1, VERTEX: 2, TABLE: 3 });
+
+/**
+ * A state's fog source. A state that names a curve and no source is vertex
+ * fog.
+ *
+ * @param {{ fogMode: number, fogSource?: number }} state
+ * @returns {number} FOG_SOURCE
+ */
+export const fogSourceOf = state=>state.fogSource
+    ?? (state.fogMode === 0 ? FOG_SOURCE.NONE : FOG_SOURCE.VERTEX);
+
 /** D3DCMP → WebGPU's compare function. One is the identity of the other. */
 const COMPARE = Object.freeze({
     1: 'never',
@@ -161,7 +185,10 @@ function lookUp(table, value, what){
  * @property {number} colorWrite         D3DCOLORWRITEENABLE bits.
  * @property {boolean} alphaTest
  * @property {number} alphaFunc
- * @property {number} fogMode            D3DFOG; NONE is 0.
+ * @property {number} fogMode            D3DFOG, the curve; NONE is 0.
+ * @property {number} [fogSource]
+ *     FOG_SOURCE, where the factor comes from; absent is vertex fog for a
+ *     curve and no fog without one (`fogSourceOf`).
  * @property {StageKey[]} stages         Empty means no cascade at all.
  * @property {boolean} [specularEnable]  D3DRS_SPECULARENABLE.
  * @property {LightingState | null} [lighting]  Absent or null means unlit.
@@ -214,7 +241,7 @@ export function pipelineKey(state){
         state.colorWrite,
         state.alphaTest ? 1 : 0,
         state.alphaFunc,
-        state.fogMode,
+        `${fogSourceOf(state)}/${state.fogMode}`,
         // The separator is what keeps two stage lists apart; the count in front
         // is for reading a key in a diagnostic, not for correctness. Said
         // plainly because the first version of this comment claimed the count

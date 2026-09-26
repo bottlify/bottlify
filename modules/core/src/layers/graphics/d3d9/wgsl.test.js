@@ -14,9 +14,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, parseShader, versionToken } from './shader.js';
-import { HYBRID_CONSTANTS, fixedVertexStage, translateShader, varyingLocation } from './wgsl.js';
+import {
+    FOG_RANGE_LOCATION, HYBRID_CONSTANTS, fixedVertexStage, translateShader, varyingLocation,
+} from './wgsl.js';
 import { D3DDECLUSAGE } from './declaration.js';
 import { D3DFOG } from './constants.js';
+import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
 
 /** @param {number} type @param {number} index @param {number} writeMask @param {number} result */
 const dst = (type, index, writeMask = 0xf, result = 0)=>(0x80000000 | ((type & 7) << 28)
@@ -521,9 +524,11 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     ], new Map());
     assert.match(none.error ?? '', /no position/);
 
-    // Fogged, the stage computes the fixed function's factor from its own clip
-    // w and carries it, with the fog colour, in the oFog varying a fogged
-    // pixel shader reads.
+    // Vertex fog: the stage computes the fixed function's factor over the
+    // magnitude of the vertex's camera-space z -- not its clip w, which an
+    // orthographic projection holds at one (Wine's d3d9 test_fog) -- and
+    // carries it, with the fog colour, in the oFog varying a fogged pixel
+    // shader reads.
     const fogged = fixedVertexStage([
         { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
     ], new Map([[0, { components: 3, scalar: 'f32', bgra: false }]]), [], [],
@@ -532,9 +537,37 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     const fogLocation = varyingLocation(D3DDECLUSAGE.FOG, 0);
     assert.ok(fogged.outputs.includes(fogLocation), 'the oFog varying is written');
     assertLine(fogged.wgsl, `@location(${fogLocation}) o${fogLocation}: vec4f,`);
-    assertLine(fogged.wgsl, `out.o${fogLocation} = vec4f(fogFactorOf(out.oPos.w),`
+    assertLine(fogged.wgsl, `out.o${fogLocation} = vec4f(fogFactorOf(abs((mat4x4f(c[5], c[6],`
+        + ' c[7], c[8]) * vec4f(vec4f(in.v0, 1.0).xyz, 1.0)).z)),'
         + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
     assertLine(fogged.wgsl, `let scaled = c[${HYBRID_CONSTANTS.FOG}].z * dist;`);
+    assert.ok(!fogged.wgsl.includes('oPos.w'));
+
+    // With no mode set, or for a pre-transformed vertex, the factor is the
+    // specular alpha the declaration carries, and no curve is declared.
+    const specular = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITIONT, usageIndex: 0, register: 0 },
+        { usage: D3DDECLUSAGE.COLOR, usageIndex: 1, register: 1 },
+    ], new Map([
+        [0, { components: 4, scalar: 'f32', bgra: false }],
+        [1, { components: 4, scalar: 'f32', bgra: true }],
+    ]), [], [], D3DFOG.LINEAR);
+    assertLine(specular.wgsl, `out.o${fogLocation} = vec4f(in.v1.zyxw.w,`
+        + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
+    assert.ok(!specular.wgsl.includes('fogFactorOf'));
+
+    // Table fog is the pixel's: the stage carries the colour, and the curve's
+    // range with the affine flag beside it, flat, for the pixel shader.
+    const table = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
+    ], new Map([[0, { components: 3, scalar: 'f32', bgra: false }]]), [], [],
+    D3DFOG.EXP, FOG_SOURCE.TABLE);
+    assert.ok(table.outputs.includes(FOG_RANGE_LOCATION));
+    assertLine(table.wgsl, `@location(${FOG_RANGE_LOCATION}) @interpolate(flat)`
+        + ` o${FOG_RANGE_LOCATION}: vec4f,`);
+    assertLine(table.wgsl, `out.o${FOG_RANGE_LOCATION} = c[${HYBRID_CONSTANTS.FOG}];`);
+    assertLine(table.wgsl, `out.o${fogLocation} = vec4f(0.0,`
+        + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
 });
 
 test('the fog stage after a pixel shader mixes the shaded colour by the varying', ()=>{
@@ -575,4 +608,24 @@ test('the fog stage after a pixel shader mixes the shaded colour by the varying'
     const plain = translateShader(parsed);
     assert.ok(!plain.wgsl.includes('fog: vec4f'), 'no fog varying');
     assert.ok(!plain.wgsl.includes('in.fog'), 'and no mix');
+
+    // Fog enabled with no mode set is the specular alpha the vertex stage
+    // carried in the same varying, so the mix is the same one.
+    const specular = translateShader(parsed, { fog: 0, fogSource: FOG_SOURCE.SPECULAR });
+    assertLine(specular.wgsl, 'oC0 = vec4f(mix(in.fog.yzw, oC0.rgb,'
+        + ' clamp(in.fog.x, 0.0, 1.0)), oC0.a);');
+
+    // Table fog is evaluated here, per pixel, over the pixel's z under an
+    // affine projection and its w otherwise, with the range the vertex stage
+    // carried flat.
+    const table = translateShader(parsed, { fog: D3DFOG.EXP, fogSource: FOG_SOURCE.TABLE });
+    assert.equal(table.error, null);
+    assert.ok(table.reads.includes(FOG_RANGE_LOCATION));
+    assertLine(table.wgsl, `@location(${FOG_RANGE_LOCATION}) @interpolate(flat)`
+        + ' fogRange: vec4f,');
+    assertLine(table.wgsl, 'var<private> fogRange: vec4f;');
+    assertLine(table.wgsl, 'return clamp(exp(-fogRange.z * dist), 0.0, 1.0);');
+    assertLine(table.wgsl, 'fogRange = in.fogRange;');
+    assertLine(table.wgsl, 'oC0 = vec4f(mix(in.fog.yzw, oC0.rgb, clamp(fogFactorOf('
+        + 'select(1.0 / in.vPos.w, in.vPos.z, fogRange.w != 0.0)), 0.0, 1.0)), oC0.a);');
 });

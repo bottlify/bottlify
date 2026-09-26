@@ -86,6 +86,7 @@ test('every field the descriptor reads is a field the key folds', ()=>{
         alphaTest: true,
         alphaFunc: 8,
         fogMode: 3,
+        fogSource: 1,
         specularEnable: true,
         normalizeNormals: true,
     };
@@ -103,7 +104,7 @@ test('the same state gives the same key, every time', ()=>{
     // Exact, because a key is compared by value and a diagnostic prints it.
     assert.equal(
         pipelineKey(baseState()),
-        '322|0|0|bgra8unorm|depth24plus|1|triangle-list|1|1|4|3|0|5|6|1|15|0|5|0|0[]|0|-',
+        '322|0|0|bgra8unorm|depth24plus|1|triangle-list|1|1|4|3|0|5|6|1|15|0|5|0/0|0[]|0|-',
     );
 });
 

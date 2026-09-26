@@ -20,8 +20,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
-    D3DFOG, D3DLIGHT, D3DMCS, D3DTA, D3DTOP, TCI, generateFixedFunction,
+    D3DFOG, D3DLIGHT, D3DMCS, D3DTA, D3DTOP, TCI, fixedFragmentStage, generateFixedFunction,
 } from './fixedfunction.js';
+import { FOG_SOURCE } from './pipeline.js';
 import { FVF, decodeFvf } from './vertexformat.js';
 
 /** The vertex format a lit draw needs at the very least. */
@@ -423,13 +424,73 @@ test('each fog mode gets its own curve, and only its own', ()=>{
         'and a shader with no fog carries no curve at all');
 });
 
-test('fog fades by eye distance, which is the clip-space w', ()=>{
-    // Direct3D defines fog against eye-space depth, and for a perspective
-    // projection that is exactly the w the transform produces. Fading by the
-    // depth buffer's z instead compresses the whole scene into the far end of
-    // the curve, where everything is equally fogged.
-    const code = generate(baseState({ fogMode: D3DFOG.LINEAR })).code;
-    assert.match(code, /out\.fogAmount = fogFactorOf\(out\.position\.w\);/);
+test('vertex fog fades by the magnitude of the camera-space z, not the clip w', ()=>{
+    // Wine's d3d9 test_fog: with vertex fog the source is the vertex's
+    // camera-space z whatever the projection -- an orthographic one holds
+    // the clip w at one at every depth -- and test_negative_fixedfunction_fog
+    // has the magnitude taken before the curve.
+    const code = generate(baseState({
+        fogMode: D3DFOG.LINEAR, fogSource: FOG_SOURCE.VERTEX,
+    })).code;
+    assert.ok(code.includes('out.fogAmount = fogFactorOf(abs((uniforms.worldView'
+        + ' * vec4f(vertex.position, 1.0)).z));'));
+    assert.doesNotMatch(code, /position\.w/);
+});
+
+test('table fog is the pixel\'s: the curve over its z or its w, in the fragment stage', ()=>{
+    // Wine's d3d9 test_fog_interpolation draws a quad whose z runs from 0 to 1
+    // under table EXP fog and finds the middle at the curve's value there,
+    // not at the mean of the two ends; test_fog has the depth be z under an
+    // affine projection and w otherwise, which the block's fog row says.
+    const code = generate(baseState({
+        fogMode: D3DFOG.EXP, fogSource: FOG_SOURCE.TABLE,
+    })).code;
+    const fragment = code.slice(code.indexOf('@fragment'));
+    assert.ok(fragment.includes('clamp(fogFactorOf(select(1.0 / input.position.w,'
+        + ' input.position.z, uniforms.fogFactors.w != 0.0)), 0.0, 1.0)'), fragment);
+    assert.doesNotMatch(code, /fogAmount/, 'no factor travels from the vertex');
+    assert.match(code, /exp\(-uniforms\.fogFactors\.z \* dist\)/);
+
+    // A pre-transformed vertex is fogged by the same pixel depth -- its z, or
+    // the w its RHW gives -- and not by its specular alpha (test_table_fog_zw).
+    const screen = generate(baseState({
+        fvf: FVF.XYZRHW | FVF.DIFFUSE | FVF.SPECULAR,
+        fogMode: D3DFOG.LINEAR, fogSource: FOG_SOURCE.TABLE,
+    })).code;
+    assert.ok(screen.includes('fogFactorOf(select(1.0 / input.position.w,'));
+    assert.doesNotMatch(screen, /specular\.a/);
+});
+
+test('fog enabled with no mode set is the specular alpha, transformed or not', ()=>{
+    // D3DRS_FOGENABLE with both modes NONE: Wine's test_fog_interpolation
+    // finds the quad fogged by its interpolated specular alpha, as a program
+    // that computes its own fog expects.
+    for (const fvf of [FVF.XYZ | FVF.DIFFUSE | FVF.SPECULAR,
+        FVF.XYZRHW | FVF.DIFFUSE | FVF.SPECULAR])
+    {
+        const code = generate(baseState({
+            fvf, fogMode: D3DFOG.NONE, fogSource: FOG_SOURCE.SPECULAR,
+        })).code;
+        assert.ok(code.includes('out.fogAmount = vertex.specular.a;'));
+        assert.ok(code.includes('clamp(input.fogAmount, 0.0, 1.0)'));
+        assert.doesNotMatch(code, /fogFactorOf/, 'and no curve');
+    }
+});
+
+test('a vertex shader over the fixed pixel stage is fogged by what it wrote, or per pixel', ()=>{
+    // Below table fog the factor is the shader's oFog, else its specular
+    // alpha -- the vertex mode's curve does not apply to it (Wine's test_fog,
+    // VS_MODE_VS_FOG and VS_MODE_VS_NO_FOG); table fog is the pixel's.
+    const state = (/** @type {object} */ over)=>/** @type {any} */ (baseState({
+        fvf: 0, fogMode: D3DFOG.LINEAR, fogSource: FOG_SOURCE.VERTEX, ...over,
+    }));
+    assert.ok(fixedFragmentStage(state({}), [0, 1, 10]).wgsl
+        .includes('input.fogAmount = in.fog.x;'));
+    assert.ok(fixedFragmentStage(state({}), [0, 1]).wgsl
+        .includes('input.fogAmount = in.v1.a;'));
+    const table = fixedFragmentStage(state({ fogSource: FOG_SOURCE.TABLE }), [0, 1, 10]).wgsl;
+    assert.ok(table.includes('fogFactorOf(select(1.0 / in.position.w, in.position.z,'));
+    assert.doesNotMatch(table, /fogAmount/);
 });
 
 test('a pre-transformed vertex takes its fog factor from the specular alpha', ()=>{

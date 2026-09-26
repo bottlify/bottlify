@@ -55,7 +55,7 @@ import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import {
     fixedFragmentStage, generates, generationOf,
 } from '../webgpu/internal/fixedfunction.js';
-import { pipelineKey } from '../webgpu/internal/pipeline.js';
+import { FOG_SOURCE, fogSourceOf, pipelineKey } from '../webgpu/internal/pipeline.js';
 
 /** A stage state's DWORD, as the D3D8 header lays it out. */
 const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
@@ -804,6 +804,9 @@ function putDword(block, at, dword){
  * @property {ArrayLike<number>} [world]   Identity unless the draw is lit.
  * @property {Material} [material]
  * @property {number[]} [fogFactors] Fog start, end and density, as floats.
+ * @property {boolean} [affineProjection]
+ *     Whether the projection's fourth column is (0, 0, 0, 1), which makes
+ *     table fog take the pixel's z rather than its w.
  * @property {number[]} [stages]     Packed sampler state per stage; see `samplerFlagsOf`.
  * @property {(readonly number[])[]} [textureTransforms]
  *     Per stage, the sixteen elements in `PLANAR_ROWS` order; identity when absent.
@@ -829,10 +832,11 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     block.set(values.viewport.scale, at.viewportScale);
     putDword(block, at.textureFactor, values.textureFactor);
     putDword(block, at.fogColor, values.fogColor);
-    // Start, end and density, which is everything the three fog curves need;
-    // which curve is in force shaped the shader and is not carried here.
+    // Start, end and density, which is everything the three fog curves need,
+    // and which depth table fog runs over; which curve is in force shaped the
+    // shader and is not carried here.
     const fog = values.fogFactors ?? [0, 1, 1];
-    put4(block, at.fogFactors, fog[0], fog[1], fog[2], 0);
+    put4(block, at.fogFactors, fog[0], fog[1], fog[2], values.affineProjection ? 1 : 0);
     const material = values.material ?? NO_MATERIAL;
     putColour(block, at.materialDiffuse, material.Diffuse);
     putColour(block, at.materialAmbient, material.Ambient);
@@ -1079,9 +1083,9 @@ export function uniformsOf(model, lighting, take, mips = true){
     const world = transformOf(model, D3DTS.WORLD);
     const view = transformOf(model, D3DTS.VIEW);
     const worldView = multiplyMatrices(world, view, WORLD_VIEW);
+    const projection = transformOf(model, D3DTS.PROJECTION);
     return uniformBlock({
-        worldViewProjection: multiplyMatrices(
-            worldView, transformOf(model, D3DTS.PROJECTION), WORLD_VIEW_PROJECTION),
+        worldViewProjection: multiplyMatrices(worldView, projection, WORLD_VIEW_PROJECTION),
         world,
         worldView,
         viewport: model.viewport,
@@ -1096,6 +1100,7 @@ export function uniformsOf(model, lighting, take, mips = true){
             dwordToFloat(rs('FOGEND')),
             dwordToFloat(rs('FOGDENSITY')),
         ],
+        affineProjection: isAffine(projection),
         alphaRef: rs('ALPHAREF'),
         stages: stageFlags(model, mips),
         textureTransforms: stageTransforms(model),
@@ -1249,13 +1254,46 @@ export function stageCascade(model, layout){
  * @returns {number} D3DFOG; NONE is 0.
  */
 export function fogModeOf(model, applied = true){
+    return fogOf(model, applied).mode;
+}
+
+/**
+ * Where a draw's fog factor comes from, and the curve it is computed by.
+ *
+ * D3DRS_FOGENABLE with both modes NONE is not "no fog": the factor is then
+ * the specular alpha, which is how a program that computes its own fog hands
+ * it over. Wine's d3d9 test_fog_interpolation draws that case fogged by the
+ * interpolated specular alpha, flat shading or not.
+ *
+ * @param {RenderModel} model
+ * @param {boolean} [applied]  False runs the draw as if fog were disabled.
+ * @returns {{ source: number, mode: number }} FOG_SOURCE and D3DFOG
+ */
+export function fogOf(model, applied = true){
     const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
     if (!applied || rs('FOGENABLE') === 0)
     {
-        return D3DFOG.NONE;
+        return { source: FOG_SOURCE.NONE, mode: D3DFOG.NONE };
     }
-    return rs('FOGTABLEMODE') || rs('FOGVERTEXMODE');
+    if (rs('FOGTABLEMODE') !== D3DFOG.NONE)
+    {
+        return { source: FOG_SOURCE.TABLE, mode: rs('FOGTABLEMODE') };
+    }
+    if (rs('FOGVERTEXMODE') !== D3DFOG.NONE)
+    {
+        return { source: FOG_SOURCE.VERTEX, mode: rs('FOGVERTEXMODE') };
+    }
+    return { source: FOG_SOURCE.SPECULAR, mode: D3DFOG.NONE };
 }
+
+/**
+ * Whether a projection is affine -- its fourth column (0, 0, 0, 1) -- which is
+ * Direct3D's test for taking table fog over the pixel's z rather than its w.
+ *
+ * @param {ArrayLike<number>} projection
+ */
+export const isAffine = projection=>projection[3] === 0 && projection[7] === 0
+    && projection[11] === 0 && projection[15] === 1;
 
 /**
  * The render state of a draw, as the pipeline cache keys it.
@@ -1292,7 +1330,7 @@ export function pipelineStateOf(model, shape){
         srcBlend = D3DBLEND.INVSRCALPHA;
         destBlend = D3DBLEND.SRCALPHA;
     }
-    const fogMode = fogModeOf(model, shape.fog !== false);
+    const fog = fogOf(model, shape.fog !== false);
     // Direct3D ties the depth write to the test: with ZENABLE off nothing is
     // written, whatever ZWRITEENABLE says. WebGPU writes under 'always', so
     // the write goes off with the test here, where the API's rule is known.
@@ -1322,7 +1360,8 @@ export function pipelineStateOf(model, shape){
             & (shape.targetHasAlpha === false ? ~COLORWRITEENABLE_ALPHA : ~0),
         alphaTest: rs('ALPHATESTENABLE') !== 0,
         alphaFunc: rs('ALPHAFUNC'),
-        fogMode,
+        fogMode: fog.mode,
+        fogSource: fog.source,
         stages: shape.stages,
         // Specular is a fragment-stage decision as much as a lighting one: the
         // vertex's specular colour is added after the cascade whether lighting
@@ -2080,7 +2119,7 @@ export function createRenderer(options){
             + ` fvf=0x${state.fvf.toString(16)} n=${drawn}`
             + (indices ? ` base=${model.baseVertexIndex}` : '')
             + ` lit=${state.lighting ? state.lighting.lights.length : '-'}`
-            + ` fog=${state.fogMode === D3DFOG.NONE ? '-' : fogSettingOf(model)}`
+            + ` fog=${fogSourceOf(state) === FOG_SOURCE.NONE ? '-' : fogSettingOf(model)}`
             + ` spec=${state.specularEnable ? 1 : 0}`
             + ` z=${state.depthTest ? state.depthFunc : '-'}/${state.depthWrite ? 1 : 0}`
             // The bias a program leans on to keep a layer in front of the
@@ -2156,7 +2195,8 @@ export function createRenderer(options){
             + ` decl=${program.declarationId}`
             // The fog stage below model 3 runs after the shader too, so a
             // program's draw is another place its numbers can be wrong.
-            + ` fog=${prepared.state.fogMode === D3DFOG.NONE ? '-' : fogSettingOf(model)}`
+            + ` fog=${fogSourceOf(prepared.state) === FOG_SOURCE.NONE
+                ? '-' : fogSettingOf(model)}`
             + ` target=${describeTarget(model)}`
             + ` view=${model.viewport.rect.x},${model.viewport.rect.y}`
             + `+${model.viewport.rect.width}x${model.viewport.rect.height}`
@@ -3426,11 +3466,13 @@ export function createRenderer(options){
         // varying the mix reads, so a draw through a vertex shader of the
         // program's own keeps the fog Direct3D would take from that shader,
         // which this translation does not compute.
-        const fog = program.vertex ? 0 : fogModeOf(model, fogApplied);
-        const pixel = translationOf(pixelShader, `ps|fog${fog}`,
+        const fog = program.vertex
+            ? { source: FOG_SOURCE.NONE, mode: D3DFOG.NONE }
+            : fogOf(model, fogApplied);
+        const pixel = translationOf(pixelShader, `ps|fog${fog.source}/${fog.mode}`,
             ()=>translateShader(
                 /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.pixel),
-                fog === 0 ? {} : { fog }));
+                fog.source === FOG_SOURCE.NONE ? {} : { fog: fog.mode, fogSource: fog.source }));
         if (pixel.error)
         {
             skip('program');
@@ -3503,7 +3545,7 @@ export function createRenderer(options){
                     { inputs: layout.shapes, alsoWrite: missing }))
             : hybridStageFor(
                 `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`
-                    + `|f${fog}`,
+                    + `|f${fog.source}/${fog.mode}`,
                 wanted, layout.shapes, missing, generated, fog);
         if (vertex.error)
         {
@@ -3659,7 +3701,7 @@ export function createRenderer(options){
      * @param {Map<number, import('../d3d9/wgsl.js').InputShape>} shapes
      * @param {number[]} alsoWrite
      * @param {number[]} generated
-     * @param {number} fog  D3DFOG; zero for none.
+     * @param {{ source: number, mode: number }} fog  See `fogOf`.
      */
     const hybridStageFor = (key, wanted, shapes, alsoWrite, generated, fog)=>{
         const existing = hybridStages.get(key);
@@ -3667,7 +3709,7 @@ export function createRenderer(options){
         {
             return existing;
         }
-        const made = fixedVertexStage(wanted, shapes, alsoWrite, generated, fog);
+        const made = fixedVertexStage(wanted, shapes, alsoWrite, generated, fog.mode, fog.source);
         hybridStages.set(key, made);
         return made;
     };
@@ -3728,7 +3770,7 @@ export function createRenderer(options){
             dwordToFloat(rs('FOGSTART')),
             dwordToFloat(rs('FOGEND')),
             dwordToFloat(rs('FOGDENSITY')),
-            0,
+            isAffine(transformOf(model, D3DTS.PROJECTION)) ? 1 : 0,
         ], HYBRID_CONSTANTS.FOG * 4);
         const fogColour = colorToFloats(rs('FOGCOLOR'));
         floats.set([fogColour.r, fogColour.g, fogColour.b, fogColour.a],
