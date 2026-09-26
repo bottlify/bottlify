@@ -5,7 +5,7 @@
  */
 
 /**
- * comctl32 — image lists, and the mouse-tracking request.
+ * comctl32 — image lists, the mouse-tracking request and property sheets.
  *
  * An image list is a strip of same-sized bitmaps addressed by index, and that
  * index is the whole of what a caller depends on here: it adds a bitmap, keeps
@@ -20,6 +20,8 @@
  * through the host; without them a bitmap counts as one image and the list says
  * so rather than guessing.
  */
+
+import { createPropertySheetFunctions } from './propsheet.js';
 
 /** ImageList_Add and friends report failure with this, not with zero. */
 const FAILED = -1;
@@ -38,6 +40,19 @@ const FAILED = -1;
  *           user32's TrackMouseEvent, given the request's address. Absent in
  *           a build without user32 behind it, and then a request of the right
  *           size is accepted and nothing is tracked.
+ * @property {(name: string) => ({ handler: (args: number[]) => any } | undefined)} [user32]
+ *           user32's exports, which a property sheet is built with.
+ * @property {(bytes: number) => number} [allocate]
+ * @property {(address: number) => void} [release]
+ * @property {(entry: number, args: number[], thread?: unknown) => number | Promise<number>} [call]
+ * @property {() => unknown} [callerThread]
+ * @property {(name: string, handler: (args: number[]) => number | Promise<number>) => number}
+ *     [procedure]
+ * @property {(instance: number, type: number, name: number | string)
+ *     => ({ rva: number } | null)} [findResource]
+ * @property {(instance: number) => number} [moduleBase]
+ * @property {(instance: number, id: number) => string | null} [loadString]
+ *           The rest of what a property sheet needs; see propsheet.js.
  */
 
 /** @param {Uint8Array} bytes @param {number} at */
@@ -356,5 +371,7 @@ export function createComctlFunctions(host){
                 return size === 16 ? 1 : 0;
             },
         },
+
+        ...createPropertySheetFunctions(host),
     };
 }
