@@ -63,6 +63,7 @@ import {
     DDERR_NOTFLIPPABLE,
     DDERR_NOTFOUND,
     DDERR_NOTLOCKED,
+    DDERR_NOTONMIPMAPSUBLEVEL,
     DDERR_SURFACEALREADYATTACHED,
     DDERR_SURFACEBUSY,
     DDERR_SURFACELOST,
@@ -74,6 +75,7 @@ import {
     DDPF_PALETTEINDEXED8,
     DDPF_RGB,
     DDPF_ZBUFFER,
+    DDSCAPS2_MIPMAPSUBLEVEL,
     DDSCAPS_FLIP,
     DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY,
@@ -82,6 +84,7 @@ import {
     DDSCL_EXCLUSIVE,
     DDSD_BACKBUFFERCOUNT,
     DDSD_HEIGHT,
+    DDSD_MIPMAPCOUNT,
     DDSD_WIDTH,
     DDSD_ZBUFFERBITDEPTH,
     DD_OK,
@@ -90,6 +93,7 @@ import {
 import {
     acceptsMalformedLockRect,
     backBufferCaps,
+    mipLevelCount,
     validateSurfaceCaps,
     validateSurfaceSize,
 } from './caps.js';
@@ -138,6 +142,7 @@ const LEGACY_D3D = Object.freeze(new Set(['IDirect3D', 'IDirect3D2', 'IDirect3D3
  * @property {number} [width]
  * @property {number} [height]
  * @property {number} [backBufferCount]
+ * @property {number} [mipMapCount]      dwMipMapCount, when DDSD_MIPMAPCOUNT names it.
  * @property {number} [zBufferBitDepth]  dwZBufferBitDepth, in the older layout.
  * @property {import("./structs.js").PixelFormatFields} [pixelFormat]
  * @property {ColorKey} [srcColorKey]   ddckCKSrcBlt, when DDSD_CKSRCBLT names it.
@@ -214,6 +219,9 @@ export function depthFormatForDepth(bitDepth){
  * @property {number} pitch
  * @property {import("./structs.js").PixelFormatFields} pixelFormat
  * @property {number} backBufferCount
+ * @property {number} mipMapCount     Levels from this one down; zero off a mip chain.
+ * @property {Surface | null} mipNext The next smaller level.
+ * @property {(next: Surface | null) => void} setMipNext
  * @property {number} buffer          The pixels this surface currently shows.
  * @property {boolean} implicit       Created as part of a complex surface.
  * @property {Palette | null} palette
@@ -716,7 +724,7 @@ export function createDirectDraw(options = {}){
     /**
      * @param {{ caps: number, caps2: number, width: number, height: number,
      *   backBufferCount: number, pixelFormat: import("./structs.js").PixelFormatFields,
-     *   owner: string | null, implicit: boolean }} spec
+     *   owner: string | null, implicit: boolean, mipMapCount?: number }} spec
      * @returns {Surface}
      */
     function makeSurface(spec){
@@ -733,6 +741,11 @@ export function createDirectDraw(options = {}){
         let flipImplicit = false;
         /** @type {Surface | null} */
         let depth = null;
+        /** @type {Surface | null} */
+        let mipNext = null;
+        // A level below the top is the texture's storage and nothing more:
+        // its palette and colour keys are the top level's.
+        const sublevel = (spec.caps2 & DDSCAPS2_MIPMAPSUBLEVEL) !== 0;
         /** @type {Palette | null} */
         let palette = null;
         /** @type {Clipper | null} */
@@ -765,6 +778,11 @@ export function createDirectDraw(options = {}){
                 depth.release();
                 depth = null;
             }
+            if (mipNext)
+            {
+                mipNext.release();
+                mipNext = null;
+            }
             if (spec.owner)
             {
                 release(spec.owner);
@@ -793,6 +811,16 @@ export function createDirectDraw(options = {}){
             pixelFormat: spec.pixelFormat,
             get backBufferCount(){
                 return spec.backBufferCount;
+            },
+            get mipMapCount(){
+                return spec.mipMapCount ?? 0;
+            },
+            get mipNext(){
+                return mipNext;
+            },
+            /** @param {Surface | null} next */
+            setMipNext(next){
+                mipNext = next;
             },
             get buffer(){
                 return buffer;
@@ -825,6 +853,10 @@ export function createDirectDraw(options = {}){
              * @param {ColorKey | null} key  Null removes the key.
              */
             setColorKey(which, key){
+                if (sublevel)
+                {
+                    return DDERR_NOTONMIPMAPSUBLEVEL;
+                }
                 const kind = which & ~DDCKEY_COLORSPACE;
                 if (key === null)
                 {
@@ -917,6 +949,10 @@ export function createDirectDraw(options = {}){
 
             /** @param {Palette | null} next */
             setPalette(next){
+                if (sublevel)
+                {
+                    return DDERR_NOTONMIPMAPSUBLEVEL;
+                }
                 if (palette)
                 {
                     if (caps & DDSCAPS_PRIMARYSURFACE)
@@ -1136,6 +1172,10 @@ export function createDirectDraw(options = {}){
                     other.release();
                     return DD_OK;
                 }
+                if (mipNext === other)
+                {
+                    return DDERR_CANNOTDETACHSURFACE;
+                }
                 if (flipNext !== other)
                 {
                     // Attached the other way round, or attached only by the
@@ -1176,7 +1216,7 @@ export function createDirectDraw(options = {}){
              */
             getAttachedSurface(wanted, wanted2 = 0){
                 const next = flipNext ?? (flipPrev ? chainHead() : null);
-                const found = [next, depth].find(candidate=>candidate !== null
+                const found = [mipNext, next, depth].find(candidate=>candidate !== null
                     && candidate !== surface
                     && (candidate.caps & wanted) === wanted >>> 0
                     && (candidate.caps2 & wanted2) === wanted2 >>> 0);
@@ -1192,6 +1232,10 @@ export function createDirectDraw(options = {}){
             enumAttachedSurfaces(){
                 /** @type {Surface[]} */
                 const found = [];
+                if (mipNext)
+                {
+                    found.push(mipNext);
+                }
                 if (flipNext)
                 {
                     found.push(flipNext);
@@ -1326,6 +1370,7 @@ export function createDirectDraw(options = {}){
             caps2,
             backBufferCount,
             hasBackBufferCount: (request.flags & DDSD_BACKBUFFERCOUNT) !== 0,
+            hasMipMapCount: (request.flags & DDSD_MIPMAPCOUNT) !== 0,
             exclusive: exclusive(),
             version,
         });
@@ -1368,6 +1413,17 @@ export function createDirectDraw(options = {}){
         const pixelFormat = depthRequest
             ? depthFormatForDepth(request.zBufferBitDepth ?? 16)
             : (primary || !request.pixelFormat ? modeFormat : request.pixelFormat);
+        const levels = mipLevelCount({
+            caps: validity.caps,
+            width,
+            height,
+            mipMapCount: (request.flags & DDSD_MIPMAPCOUNT) !== 0 ? request.mipMapCount ?? 0 : null,
+            version,
+        });
+        if (levels === null)
+        {
+            return { hr: DDERR_INVALIDPARAMS, surface: null };
+        }
         const owner = OWNING_GENERATIONS.has(generation) ? generation : null;
         if (owner)
         {
@@ -1383,7 +1439,27 @@ export function createDirectDraw(options = {}){
             pixelFormat,
             owner,
             implicit: false,
+            mipMapCount: levels,
         });
+
+        // Each level holds the one below it, so the chain goes with its top.
+        let above = front;
+        for (let index = 1; index < levels; index++)
+        {
+            const level = makeSurface({
+                caps: validity.caps,
+                caps2: caps2 | DDSCAPS2_MIPMAPSUBLEVEL,
+                width: Math.max(1, width >>> index),
+                height: Math.max(1, height >>> index),
+                backBufferCount: 0,
+                pixelFormat,
+                owner: null,
+                implicit: true,
+                mipMapCount: levels - index,
+            });
+            above.setMipNext(level);
+            above = level;
+        }
 
         if (validity.flipChain)
         {

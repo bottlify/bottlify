@@ -68,8 +68,8 @@ import {
     DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_SURFACEBUSY, DDERR_SURFACELOST, DDERR_UNSUPPORTED,
     DDPCAPS_1BIT, DDPCAPS_2BIT, DDPCAPS_4BIT, DDPCAPS_8BIT, DDPCAPS_ALLOW256,
     DDPCAPS_PRIMARYSURFACE, DDPF_RGB, DDSCAPS_FLIP, DDSCAPS_ZBUFFER, DDSD_BACKBUFFERCOUNT,
-    DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT, DDSD_PITCH, DDSD_PIXELFORMAT,
-    DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK,
+    DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PITCH,
+    DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK,
 } from '../ddraw/constants.js';
 import { pixelFormatForDepth } from '../ddraw/objects.js';
 import { blt, bltFast } from '../ddraw/blit.js';
@@ -578,6 +578,7 @@ export function createDirectDrawSeam(
         return {
             flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH | DDSD_PIXELFORMAT
                 | (surface.backBufferCount > 0 ? DDSD_BACKBUFFERCOUNT : 0)
+                | (surface.mipMapCount > 0 ? DDSD_MIPMAPCOUNT : 0)
                 | (srcColorKey ? DDSD_CKSRCBLT : 0) | (destColorKey ? DDSD_CKDESTBLT : 0),
             srcColorKey,
             destColorKey,
@@ -585,7 +586,7 @@ export function createDirectDrawSeam(
             height: surface.height,
             pitch: surface.pitch,
             backBufferCount: surface.backBufferCount,
-            mipMapCount: 0,
+            mipMapCount: surface.mipMapCount,
             caps: surface.caps,
             caps2: surface.caps2,
             pixelFormat: surface.pixelFormat,

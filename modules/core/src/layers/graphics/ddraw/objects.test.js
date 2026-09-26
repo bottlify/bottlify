@@ -30,17 +30,20 @@ import {
     DDERR_SURFACEBUSY,
     DDERR_SURFACELOST,
     DDERR_SURFACENOTATTACHED,
+    DDERR_NOTONMIPMAPSUBLEVEL,
     DDPCAPS_4BIT,
     DDPCAPS_8BIT,
     DDPCAPS_ALLOW256,
     DDPCAPS_PRIMARYSURFACE,
     DDPF_PALETTEINDEXED8,
     DDPF_RGB,
+    DDSCAPS2_MIPMAPSUBLEVEL,
     DDSCAPS2_TEXTUREMANAGE,
     DDSCAPS_BACKBUFFER,
     DDSCAPS_COMPLEX,
     DDSCAPS_FLIP,
     DDSCAPS_FRONTBUFFER,
+    DDSCAPS_MIPMAP,
     DDSCAPS_OFFSCREENPLAIN,
     DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY,
@@ -53,6 +56,7 @@ import {
     DDSD_BACKBUFFERCOUNT,
     DDSD_CAPS,
     DDSD_HEIGHT,
+    DDSD_MIPMAPCOUNT,
     DDSD_PIXELFORMAT,
     DDSD_WIDTH,
     DD_OK,
@@ -920,6 +924,155 @@ test('a surface with no size is refused, and a primary takes the screen\'s', ()=
     assert.equal(primary.release(), 0);
     assert.equal(ddraw.release('IDirectDraw7'), 0);
     assert.ok(ddraw.destroyed);
+});
+
+// --- mip chains ---
+
+/**
+ * @param {ReturnType<typeof createDirectDraw>} ddraw
+ * @param {{ caps: number, width: number, height: number, count?: number,
+ *   version?: 1 | 2 | 4 | 7 }} options
+ */
+function requestMips(ddraw, options){
+    return ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT | (options.count === undefined ? 0 : DDSD_MIPMAPCOUNT),
+        caps: options.caps,
+        width: options.width,
+        height: options.height,
+        mipMapCount: options.count ?? 0,
+        pixelFormat: RGB32,
+    }, { version: options.version ?? 7 });
+}
+
+/** @param {any} top @returns {any[]} the chain from its top, by DDSCAPS2_MIPMAPSUBLEVEL */
+function levelsOf(top){
+    const levels = [top];
+    for (;;)
+    {
+        const found = levels[levels.length - 1].getAttachedSurface(0, DDSCAPS2_MIPMAPSUBLEVEL);
+        if (found.hr !== DD_OK)
+        {
+            assert.equal(found.hr, DDERR_NOTFOUND);
+            return levels;
+        }
+        found.surface.release();
+        levels.push(found.surface);
+    }
+}
+
+const MIPPED = DDSCAPS_TEXTURE | DDSCAPS_COMPLEX | DDSCAPS_MIPMAP;
+
+test('CreateSurface refuses a mip chain that is not a complex texture, or has no levels', ()=>{
+    // Wine's ddraw1, ddraw2, ddraw4 and ddraw7 test_mipmap, row by row.
+    const ddraw = withLevel();
+    /** @type {[{ caps: number, count?: number }, number][]} */
+    const refused = [
+        [{ caps: DDSCAPS_MIPMAP }, DDERR_INVALIDCAPS],
+        [{ caps: DDSCAPS_COMPLEX }, DDERR_INVALIDCAPS],
+        [{ caps: DDSCAPS_MIPMAP | DDSCAPS_COMPLEX }, DDERR_INVALIDCAPS],
+        [{ caps: DDSCAPS_TEXTURE | DDSCAPS_COMPLEX }, DDERR_INVALIDCAPS],
+        [{ caps: DDSCAPS_TEXTURE | DDSCAPS_MIPMAP, count: 1 }, DDERR_INVALIDCAPS],
+        [{ caps: DDSCAPS_TEXTURE | DDSCAPS_MIPMAP, count: 3 }, DDERR_INVALIDCAPS],
+        [{ caps: MIPPED, count: 0 }, DDERR_INVALIDPARAMS],
+        [{ caps: MIPPED, count: 9 }, DDERR_INVALIDPARAMS],
+    ];
+    for (const [options, hr] of refused)
+    {
+        const made = requestMips(ddraw, { width: 128, height: 32, ...options });
+        assert.equal(made.hr, hr, JSON.stringify(options));
+        assert.equal(made.surface, null);
+    }
+    assert.equal(ddraw.surfaceCount, 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+});
+
+test('a complex mip-mapped texture is a chain of halving levels, as long as asked or full', ()=>{
+    const ddraw = withLevel();
+    /** @type {[number, number, number | undefined, number][]} */
+    const chains = [
+        [128, 32, undefined, 8], [32, 64, undefined, 7], [128, 32, 3, 3], [128, 128, 8, 8],
+    ];
+    for (const [width, height, count, expected] of chains)
+    {
+        const made = requestMips(ddraw, { caps: MIPPED, width, height, count });
+        assert.equal(made.hr, DD_OK);
+        const levels = levelsOf(made.surface);
+        assert.equal(levels.length, expected, `${width}x${height}`);
+        levels.forEach((level, index)=>{
+            assert.equal(level.width, Math.max(1, width >> index));
+            assert.equal(level.height, Math.max(1, height >> index));
+            assert.equal(level.pitch, level.width * 4);
+            assert.equal(level.mipMapCount, expected - index, 'each level counts itself and below');
+            assert.equal(level.caps & MIPPED, MIPPED);
+            assert.equal(level.caps2 & DDSCAPS2_MIPMAPSUBLEVEL,
+                index === 0 ? 0 : DDSCAPS2_MIPMAPSUBLEVEL, 'every level but the top is a sublevel');
+            if (index > 0)
+            {
+                assert.notEqual(level.buffer, levels[index - 1].buffer);
+            }
+        });
+        assert.deepEqual(made.surface?.enumAttachedSurfaces(), [levels[1]]);
+        assert.equal(made.surface?.getAttachedSurface(DDSCAPS_COMPLEX).surface, levels[1],
+            'the level below is found by the caps the chain shares, as Wine\'s walks ask');
+        levels[1].release();
+        assert.equal(made.surface?.release(), 0, 'releasing the top releases the chain');
+        assert.ok(levels.every(level=>level.destroyed));
+    }
+
+    const single = requestMips(ddraw,
+        { caps: DDSCAPS_TEXTURE | DDSCAPS_MIPMAP, width: 128, height: 32 });
+    assert.equal(single.hr, DD_OK);
+    assert.equal(single.surface?.mipMapCount, 1, 'not complex: a chain of the one level');
+    assert.equal(levelsOf(single.surface).length, 1);
+    assert.equal(single.surface?.release(), 0);
+
+    assert.equal(ddraw.surfaceCount, 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+});
+
+test('before IDirectDraw7 a full mip chain ends when the shorter side reaches one', ()=>{
+    // Wine's ddraw1, ddraw2 and ddraw4 test_mipmap expect six levels of
+    // 128x32 and of 32x64, where ddraw7 expects eight and seven.
+    for (const version of /** @type {const} */ ([1, 2, 4]))
+    {
+        const ddraw = withLevel({ version });
+        for (const [width, height] of [[128, 32], [32, 64]])
+        {
+            const made = requestMips(ddraw, { caps: MIPPED, width, height, version });
+            assert.equal(made.hr, DD_OK);
+            assert.equal(made.surface?.mipMapCount, 6, `version ${version}, ${width}x${height}`);
+            assert.equal(levelsOf(made.surface).length, 6);
+            assert.equal(made.surface?.release(), 0);
+        }
+    }
+});
+
+test('a mip sublevel takes no palette, no colour key and no detaching of its own', ()=>{
+    // Wine's ddraw7 test_palette_complex, test_ckey_complex and
+    // test_device_load: DDERR_NOTONMIPMAPSUBLEVEL, and nothing attached.
+    const ddraw = withLevel();
+    const top = /** @type {any} */ (requestMips(ddraw, { caps: MIPPED, width: 16, height: 16 })
+        .surface);
+    const [, level1] = levelsOf(top);
+    const palette = /** @type {any} */ (ddraw.createPalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256,
+        new Array(256).fill(0)).palette);
+
+    assert.equal(level1.setPalette(palette), DDERR_NOTONMIPMAPSUBLEVEL);
+    assert.equal(level1.getPalette().hr, DDERR_NOPALETTEATTACHED);
+    assert.equal(level1.setColorKey(DDCKEY_SRCBLT, { low: 0xff, high: 0xff }),
+        DDERR_NOTONMIPMAPSUBLEVEL);
+    assert.equal(level1.getColorKey(DDCKEY_SRCBLT).hr, DDERR_NOCOLORKEY);
+    assert.equal(top.setColorKey(DDCKEY_SRCBLT, { low: 0xff, high: 0xff }), DD_OK,
+        'the top level is the texture, and takes both');
+    assert.equal(top.setPalette(palette), DD_OK);
+    assert.equal(top.deleteAttachedSurface(level1), DDERR_CANNOTDETACHSURFACE,
+        'a level the chain was made with stays');
+    assert.equal(top.deleteAttachedSurface(null), DD_OK);
+    assert.equal(levelsOf(top).length, 5);
+
+    assert.equal(top.release(), 0);
+    assert.equal(palette.release(), 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
 });
 
 // --- the display mode, and the surfaces that take their shape from it ---

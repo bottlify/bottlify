@@ -31,11 +31,11 @@ import { DDSURFACEDESC, DDSURFACEDESC2, writeSurfaceDesc } from '../ddraw/struct
 import { createDirectDraw } from '../ddraw/objects.js';
 import {
     DDBLT_COLORFILL, DDCAPS_BLT, DDERR_DCALREADYCREATED, DDERR_INVALIDPARAMS,
-    DDERR_NOCOOPERATIVELEVELSET, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_SURFACEBUSY,
-    DDPCAPS_8BIT, DDPF_RGB, DDSCAPS2_MIPMAPSUBLEVEL, DDSCAPS_BACKBUFFER, DDSCAPS_COMPLEX,
-    DDSCAPS_FLIP, DDSCAPS_OFFSCREENPLAIN,
-    DDSCAPS_PRIMARYSURFACE, DDSCL_EXCLUSIVE, DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSD_BACKBUFFERCOUNT,
-    DDSD_CAPS, DDSD_HEIGHT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
+    DDERR_NOCOOPERATIVELEVELSET, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_NOTONMIPMAPSUBLEVEL,
+    DDERR_SURFACEBUSY, DDPCAPS_8BIT, DDPF_RGB, DDSCAPS2_MIPMAPSUBLEVEL, DDSCAPS_BACKBUFFER,
+    DDSCAPS_COMPLEX, DDSCAPS_FLIP, DDSCAPS_MIPMAP, DDSCAPS_OFFSCREENPLAIN, DDSCAPS_PRIMARYSURFACE,
+    DDSCAPS_TEXTURE, DDSCL_EXCLUSIVE, DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSD_BACKBUFFERCOUNT,
+    DDSD_CAPS, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
 } from '../ddraw/constants.js';
 
 const HWND = 0x00010044;
@@ -253,7 +253,8 @@ function seamed(){
         },
         /**
          * @param {number} ddraw
-         * @param {{ caps: number, width?: number, height?: number, backBufferCount?: number }} desc
+         * @param {{ caps: number, width?: number, height?: number, backBufferCount?: number,
+         *   mipMapCount?: number }} desc
          */
         createSurface7(ddraw, desc){
             const at = 0x5000;
@@ -261,12 +262,13 @@ function seamed(){
             writeSurfaceDesc(box.services, at, DDSURFACEDESC2, {
                 flags: DDSD_CAPS
                     | (desc.width === undefined ? 0 : DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT)
-                    | (desc.backBufferCount === undefined ? 0 : DDSD_BACKBUFFERCOUNT),
+                    | (desc.backBufferCount === undefined ? 0 : DDSD_BACKBUFFERCOUNT)
+                    | (desc.mipMapCount === undefined ? 0 : DDSD_MIPMAPCOUNT),
                 width: desc.width ?? 0,
                 height: desc.height ?? 0,
                 pitch: 0,
                 backBufferCount: desc.backBufferCount ?? 0,
-                mipMapCount: 0,
+                mipMapCount: desc.mipMapCount ?? 0,
                 caps: desc.caps,
                 caps2: 0,
                 pixelFormat: { size: 0x20, flags: DDPF_RGB, fourCC: 0, bitCount: 32,
@@ -497,6 +499,66 @@ test('a flip chain walks front to back and closes, and only the front flips', ()
 
     assert.equal(h.release(other), 0);
     assert.equal(h.release(front), 0);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
+test('a mip chain reports its levels through the descriptor and is walked level by level', ()=>{
+    // Wine's ddraw7 test_mipmap: DDSD_MIPMAPCOUNT is set on every level, each
+    // counting itself and those below, in GetSurfaceDesc and Lock alike, and
+    // the walk by DDSCAPS_COMPLEX ends in DDERR_NOTFOUND.
+    const h = seamed();
+    const ddraw = h.create7();
+    const top = h.createSurface7(ddraw, {
+        caps: DDSCAPS_TEXTURE | DDSCAPS_COMPLEX | DDSCAPS_MIPMAP,
+        width: 128, height: 32, mipMapCount: 3,
+    });
+    const caps = 0x5500;
+    const out = 0x5600;
+    const desc = 0x5200;
+    h.box.bytes.fill(0, caps, caps + 16);
+    h.box.memory.writeU32(caps, DDSCAPS_COMPLEX);
+
+    const levels = [top];
+    for (;;)
+    {
+        const hr = h.surface7(levels[levels.length - 1], 'GetAttachedSurface', [caps, out]);
+        if (hr !== DD_OK)
+        {
+            assert.equal(hr, DDERR_NOTFOUND);
+            break;
+        }
+        levels.push(h.box.memory.readU32(out));
+    }
+    assert.equal(levels.length, 3);
+    levels.forEach((level, index)=>{
+        for (const method of ['GetSurfaceDesc', 'Lock'])
+        {
+            h.box.bytes.fill(0, desc, desc + DDSURFACEDESC2.SIZE);
+            h.box.memory.writeU32(desc, DDSURFACEDESC2.SIZE);
+            assert.equal(h.surface7(level, method,
+                method === 'Lock' ? [0, desc, 0, 0] : [desc]), DD_OK);
+            const flags = h.box.memory.readU32(desc + DDSURFACEDESC2.dwFlags);
+            assert.equal(flags & DDSD_MIPMAPCOUNT, DDSD_MIPMAPCOUNT, `${method} of level ${index}`);
+            assert.equal(h.box.memory.readU32(desc + DDSURFACEDESC2.dwMipMapCount), 3 - index);
+            assert.equal(h.box.memory.readU32(desc + DDSURFACEDESC2.dwWidth), 128 >> index);
+            assert.equal(h.box.memory.readU32(desc + DDSURFACEDESC2.dwHeight), 32 >> index);
+            if (method === 'Lock')
+            {
+                assert.equal(h.surface7(level, 'Unlock', [0]), DD_OK);
+            }
+        }
+    });
+
+    h.box.memory.writeU32(0x5700, 0xff);
+    h.box.memory.writeU32(0x5704, 0xff);
+    assert.equal(h.surface7(levels[1], 'SetColorKey', [DDCKEY_SRCBLT, 0x5700]),
+        DDERR_NOTONMIPMAPSUBLEVEL);
+    assert.equal(h.surface7(top, 'SetColorKey', [DDCKEY_SRCBLT, 0x5700]), DD_OK);
+
+    assert.equal(h.release(levels[2]), 1);
+    assert.equal(h.release(levels[1]), 1);
+    assert.equal(h.release(top), 0);
     assert.equal(h.release(ddraw), 0);
     h.assertAllReleased();
 });

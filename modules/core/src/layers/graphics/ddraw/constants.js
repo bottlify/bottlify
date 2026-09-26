@@ -54,6 +54,7 @@ export const DDERR_NOTFLIPPABLE = dderr(582);
 export const DDERR_NOTLOCKED = dderr(584);
 export const DDERR_NODC = dderr(586);
 export const DDERR_IMPLICITLYCREATED = dderr(588);
+export const DDERR_NOTONMIPMAPSUBLEVEL = dderr(603);
 export const DDERR_DCALREADYCREATED = dderr(620);
 
 /** DirectDraw borrows these three from COM rather than minting its own. */
