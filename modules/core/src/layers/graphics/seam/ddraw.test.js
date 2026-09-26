@@ -490,6 +490,139 @@ test('byte-exact: a colour fill and a BltFast move the bytes they say, and show 
     h.assertAllReleased();
 });
 
+// --- colour keys, after Wine's ddraw7 test_range_colorkey and test_ck_operation ---
+
+const DDSD_CKDESTBLT = 0x00004000;
+const DDSD_CKSRCBLT = 0x00010000;
+const DDCKEY_COLORSPACE = 0x00000001;
+const DDCKEY_DESTBLT = 0x00000002;
+const DDCKEY_SRCBLT = 0x00000008;
+const DDBLT_KEYSRC = 0x00008000;
+const DDBLTFAST_SRCCOLORKEY = 0x00000001;
+const DDERR_NOCOLORKEYHW = 0x887600dc;
+
+/**
+ * A 32-bit X8R8G8B8 surface created with extra descriptor flags and, when
+ * given, a source key written into the descriptor. Answers the HRESULT and the
+ * surface.
+ *
+ * @param {ReturnType<typeof seamed>} h @param {number} ddraw
+ * @param {{ caps: number, width: number, flags?: number, srcKey?: [number, number] }} desc
+ */
+function createKeyed(h, ddraw, desc){
+    const at = 0x5000;
+    h.box.bytes.fill(0, at, at + DDSURFACEDESC2.SIZE);
+    writeSurfaceDesc(h.box.services, at, DDSURFACEDESC2, {
+        flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | (desc.flags ?? 0),
+        width: desc.width, height: 1, pitch: 0, backBufferCount: 0, mipMapCount: 0,
+        caps: desc.caps, caps2: 0,
+        pixelFormat: { size: 0x20, flags: DDPF_RGB, fourCC: 0, bitCount: 32,
+            redMask: 0xff0000, greenMask: 0xff00, blueMask: 0xff, alphaMask: 0 },
+    });
+    if (desc.srcKey)
+    {
+        h.box.memory.writeU32(at + DDSURFACEDESC2.ddckCKSrcBlt, desc.srcKey[0]);
+        h.box.memory.writeU32(at + DDSURFACEDESC2.ddckCKSrcBlt + 4, desc.srcKey[1]);
+    }
+    h.box.memory.writeU32(0x5100, 0xdeadbeef);
+    const hr = h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'CreateSurface'), [at, 0x5100, 0]);
+    return { hr, surface: hr === DD_OK ? h.box.memory.readU32(0x5100) : 0 };
+}
+
+test('a colour key is one value: a range collapses to its low end, or is refused', ()=>{
+    const h = seamed();
+    const ddraw = h.create7();
+
+    // A range at creation is refused, whichever way round it is.
+    for (const range of /** @type {[number, number][]} */ ([[0, 1], [1, 0]]))
+    {
+        assert.equal(createKeyed(h, ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 1,
+            flags: DDSD_CKSRCBLT, srcKey: range }).hr, DDERR_NOCOLORKEYHW, `${range}`);
+    }
+    const { hr, surface } = createKeyed(h, ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 1,
+        flags: DDSD_CKSRCBLT, srcKey: [0, 0] });
+    assert.equal(hr, DD_OK);
+
+    const key = 0x6100;
+    const got = 0x6200;
+    /** @param {number} which @param {number} low @param {number} high */
+    const set = (which, low, high)=>{
+        h.box.memory.writeU32(key, low);
+        h.box.memory.writeU32(key + 4, high);
+        return h.surface7(surface, 'SetColorKey', [which, key]);
+    };
+    const get = ()=>{
+        assert.equal(h.surface7(surface, 'GetColorKey', [DDCKEY_SRCBLT, got]), DD_OK);
+        return [h.box.memory.readU32(got), h.box.memory.readU32(got + 4)];
+    };
+
+    assert.equal(set(DDCKEY_SRCBLT, 0, 1), DD_OK);
+    assert.deepEqual(get(), [0, 0], 'without DDCKEY_COLORSPACE only the low value counts');
+    assert.equal(set(DDCKEY_SRCBLT, 1, 0), DD_OK);
+    assert.deepEqual(get(), [1, 1]);
+
+    assert.equal(set(DDCKEY_SRCBLT | DDCKEY_COLORSPACE, 0, 0), DD_OK,
+        'a colour space of one value is a key');
+    assert.deepEqual(get(), [0, 0], 'and is the key the plain name reads back');
+    assert.equal(set(DDCKEY_SRCBLT | DDCKEY_COLORSPACE, 1, 0), DDERR_NOCOLORKEYHW);
+    assert.equal(set(DDCKEY_SRCBLT | DDCKEY_COLORSPACE, 0, 1), DDERR_NOCOLORKEYHW);
+    assert.equal(set(DDCKEY_DESTBLT | DDCKEY_COLORSPACE, 0, 1), DDERR_NOCOLORKEYHW);
+    assert.equal(set(DDCKEY_SRCBLT | DDCKEY_COLORSPACE, 0, 0x01010101), DDERR_NOCOLORKEYHW);
+    assert.deepEqual(get(), [0, 0], 'none of the refusals changed the key');
+
+    assert.equal(h.release(surface), 0);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
+test('byte-exact: a key given at creation keys a blit on its colour bits alone', ()=>{
+    const h = seamed();
+    const ddraw = h.create7();
+    const dst = createKeyed(h, ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 4 }).surface;
+    const made = createKeyed(h, ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 4,
+        flags: DDSD_CKSRCBLT, srcKey: [0x00ff00ff, 0x00ff00ff] });
+    assert.equal(made.hr, DD_OK);
+    const src = made.surface;
+    const srcModel = h.publisher.objectAt(src);
+    const dstModel = h.publisher.objectAt(dst);
+    [0x77010203, 0x00010203, 0x77ff00ff, 0x00ff00ff].forEach((value, index)=>
+        h.box.memory.writeU32(srcModel.buffer + index * 4, value));
+    const pixels = ()=>[0, 1, 2, 3].map(index=>h.box.memory.readU32(dstModel.buffer + index * 4));
+
+    for (const blit of [
+        ()=>h.surface7(dst, 'Blt', [0, src, 0, DDBLT_KEYSRC, 0]),
+        ()=>h.surface7(dst, 'BltFast', [0, 0, src, 0, DDBLTFAST_SRCCOLORKEY]),
+    ])
+    {
+        [0, 1, 2, 3].forEach(index=>h.box.memory.writeU32(dstModel.buffer + index * 4,
+            0xcccccccc));
+        assert.equal(blit(), DD_OK);
+        // The unused top byte takes no part in the comparison and is copied
+        // with the rest of the pixel: the result Wine's test takes as its own.
+        assert.deepEqual(pixels(), [0x77010203, 0x00010203, 0xcccccccc, 0xcccccccc]);
+    }
+
+    // GetSurfaceDesc carries the key, flagged as present.
+    const key = 0x6100;
+    h.box.memory.writeU32(key, 0x0000ff00);
+    h.box.memory.writeU32(key + 4, 0x0000ff00);
+    assert.equal(h.surface7(src, 'SetColorKey', [DDCKEY_SRCBLT, key]), DD_OK);
+    const desc = 0x6400;
+    h.box.bytes.fill(0, desc, desc + DDSURFACEDESC2.SIZE);
+    h.box.memory.writeU32(desc, DDSURFACEDESC2.SIZE);
+    assert.equal(h.surface7(src, 'GetSurfaceDesc', [desc]), DD_OK);
+    const flags = h.box.memory.readU32(desc + DDSURFACEDESC2.dwFlags);
+    assert.ok((flags & DDSD_CKSRCBLT) !== 0, 'DDSD_CKSRCBLT');
+    assert.equal(flags & DDSD_CKDESTBLT, 0, 'no destination key was set');
+    assert.equal(h.box.memory.readU32(desc + DDSURFACEDESC2.ddckCKSrcBlt), 0x0000ff00);
+    assert.equal(h.box.memory.readU32(desc + DDSURFACEDESC2.ddckCKSrcBlt + 4), 0x0000ff00);
+
+    assert.equal(h.release(src), 0);
+    assert.equal(h.release(dst), 0);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
 test('a palette round-trips its entries and is owned by the surface it is set on', ()=>{
     const h = seamed();
     const ddraw = h.create7();

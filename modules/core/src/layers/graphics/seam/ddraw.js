@@ -67,8 +67,8 @@ import {
     DDCKEYCAPS_SRCBLT, DDCKEY_DESTBLT, DDCKEY_SRCBLT, DDERR_ALREADYINITIALIZED,
     DDERR_INVALIDPARAMS, DDERR_SURFACEBUSY, DDERR_SURFACELOST, DDERR_UNSUPPORTED, DDPCAPS_1BIT,
     DDPCAPS_2BIT, DDPCAPS_4BIT, DDPCAPS_8BIT, DDPCAPS_ALLOW256, DDPCAPS_PRIMARYSURFACE,
-    DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT, DDSD_PITCH, DDSD_PIXELFORMAT, DDSD_REFRESHRATE,
-    DDSD_WIDTH, DD_OK,
+    DDPF_RGB, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT,
+    DDSD_PITCH, DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK,
 } from '../ddraw/constants.js';
 import { pixelFormatForDepth } from '../ddraw/objects.js';
 import { blt, bltFast } from '../ddraw/blit.js';
@@ -469,14 +469,26 @@ export function createDirectDrawSeam(
 
     // --- surface ---
 
-    /** @param {any} surface @returns {import('../ddraw/blit.js').BlitSurface} */
-    const blitView = surface=>({
-        buffer: surface.buffer,
-        pitch: surface.pitch,
-        width: surface.width,
-        height: surface.height,
-        bytesPerPixel: surface.bytesPerPixel,
-    });
+    /**
+     * A key is compared on the colour a pixel shows: an RGB format's unused
+     * bits take no part in it, and are copied with the rest of the pixel.
+     *
+     * @param {any} surface @returns {import('../ddraw/blit.js').BlitSurface}
+     */
+    const blitView = surface=>{
+        const format = surface.pixelFormat;
+        const colour = (format.flags & DDPF_RGB) !== 0
+            ? (format.redMask | format.greenMask | format.blueMask) >>> 0
+            : 0;
+        return {
+            buffer: surface.buffer,
+            pitch: surface.pitch,
+            width: surface.width,
+            height: surface.height,
+            bytesPerPixel: surface.bytesPerPixel,
+            ...(colour !== 0 ? { keyMask: colour } : {}),
+        };
+    };
 
     /**
      * The colour keys a blit uses. A key named on the surface is the default;
@@ -534,19 +546,26 @@ export function createDirectDrawSeam(
      * @param {any} surface
      * @param {number} [surfacePointer]
      */
-    const descriptorOf = (surface, surfacePointer)=>({
-        flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH | DDSD_PIXELFORMAT
-            | (surface.backBufferCount > 0 ? DDSD_BACKBUFFERCOUNT : 0),
-        width: surface.width,
-        height: surface.height,
-        pitch: surface.pitch,
-        backBufferCount: surface.backBufferCount,
-        mipMapCount: 0,
-        caps: surface.caps,
-        caps2: surface.caps2,
-        pixelFormat: surface.pixelFormat,
-        surfacePointer,
-    });
+    const descriptorOf = (surface, surfacePointer)=>{
+        const srcColorKey = surface.getColorKey(DDCKEY_SRCBLT).key ?? undefined;
+        const destColorKey = surface.getColorKey(DDCKEY_DESTBLT).key ?? undefined;
+        return {
+            flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH | DDSD_PIXELFORMAT
+                | (surface.backBufferCount > 0 ? DDSD_BACKBUFFERCOUNT : 0)
+                | (srcColorKey ? DDSD_CKSRCBLT : 0) | (destColorKey ? DDSD_CKDESTBLT : 0),
+            srcColorKey,
+            destColorKey,
+            width: surface.width,
+            height: surface.height,
+            pitch: surface.pitch,
+            backBufferCount: surface.backBufferCount,
+            mipMapCount: 0,
+            caps: surface.caps,
+            caps2: surface.caps2,
+            pixelFormat: surface.pixelFormat,
+            surfacePointer,
+        };
+    };
 
     /**
      * The methods of one surface generation.

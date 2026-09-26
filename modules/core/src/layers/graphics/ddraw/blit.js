@@ -35,6 +35,7 @@ import {
  * @property {number} width
  * @property {number} height
  * @property {number} bytesPerPixel   1, 2 or 4.
+ * @property {number} [keyMask]       The bits a colour key compares; the whole pixel if absent.
  */
 
 /**
@@ -71,8 +72,19 @@ const rectFits = (rect, surface)=>rect.left >= 0 && rect.top >= 0
     && rect.right <= surface.width && rect.bottom <= surface.height
     && rect.left < rect.right && rect.top < rect.bottom;
 
-/** @param {number} value @param {ColorKey | undefined} key */
-const keyed = (value, key)=>key !== undefined && value >= key.low && value <= key.high;
+/**
+ * @param {number} value @param {ColorKey | undefined} key
+ * @param {BlitSurface} surface the one whose pixel the value is
+ */
+const keyed = (value, key, surface)=>{
+    if (key === undefined)
+    {
+        return false;
+    }
+    const mask = surface.keyMask ?? 0xffffffff;
+    const bits = (value & mask) >>> 0;
+    return bits >= ((key.low & mask) >>> 0) && bits <= ((key.high & mask) >>> 0);
+};
 
 /** @param {Rect[] | undefined} clipList @param {number} x @param {number} y */
 const clippedOut = (clipList, x, y)=>clipList !== undefined && clipList.length > 0
@@ -145,6 +157,7 @@ export function writePixel(memory, surface, x, y, value){
  * @param {BlitSurface} job.dest
  * @param {Rect} job.destRect
  * @param {(row: number, column: number) => number} job.sample
+ * @param {BlitSurface} [job.src]  Whose pixels the samples are, for the source key.
  * @param {ColorKey} [job.srcColorKey]
  * @param {ColorKey} [job.destColorKey]
  * @param {Rect[]} [job.clipList]
@@ -160,8 +173,9 @@ function transfer(job){
         for (let column = 0; column < width; column++)
         {
             const value = (job.sample(row, column) & mask) >>> 0;
-            if (keyed(value, job.srcColorKey)
-                || (job.destColorKey !== undefined && !keyed(current[column], job.destColorKey))
+            if ((job.src && keyed(value, job.srcColorKey, job.src))
+                || (job.destColorKey !== undefined
+                    && !keyed(current[column], job.destColorKey, job.dest))
                 || clippedOut(job.clipList, destRect.left + column, y))
             {
                 continue;
@@ -263,6 +277,7 @@ export function blt(request){
     }
     transfer({
         ...common,
+        src,
         srcColorKey,
         sample: stretched(destRect, srcRect, snapshot(memory, src, srcRect)),
     });
@@ -312,6 +327,7 @@ export function bltFast(request){
         dest,
         destRect,
         sample: snapshot(memory, src, srcRect),
+        src,
         srcColorKey: (flags & DDBLTFAST_SRCCOLORKEY) !== 0 ? request.srcColorKey : undefined,
         destColorKey: (flags & DDBLTFAST_DESTCOLORKEY) !== 0 ? request.destColorKey : undefined,
     });

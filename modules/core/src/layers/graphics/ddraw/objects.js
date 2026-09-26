@@ -44,6 +44,9 @@
 
 import {
     CLASS_E_NOAGGREGATION,
+    DDCKEY_COLORSPACE,
+    DDCKEY_DESTBLT,
+    DDCKEY_SRCBLT,
     DDERR_CANNOTATTACHSURFACE,
     DDERR_CANNOTDETACHSURFACE,
     DDERR_DCALREADYCREATED,
@@ -52,6 +55,7 @@ import {
     DDERR_INVALIDPARAMS,
     DDERR_NOCLIPPERATTACHED,
     DDERR_NOCOLORKEY,
+    DDERR_NOCOLORKEYHW,
     DDERR_NOCOOPERATIVELEVELSET,
     DDERR_NODC,
     DDERR_NOEXCLUSIVEMODE,
@@ -136,6 +140,8 @@ const LEGACY_D3D = Object.freeze(new Set(['IDirect3D', 'IDirect3D2', 'IDirect3D3
  * @property {number} [backBufferCount]
  * @property {number} [zBufferBitDepth]  dwZBufferBitDepth, in the older layout.
  * @property {import("./structs.js").PixelFormatFields} [pixelFormat]
+ * @property {ColorKey} [srcColorKey]   ddckCKSrcBlt, when DDSD_CKSRCBLT names it.
+ * @property {ColorKey} [destColorKey]  ddckCKDestBlt, when DDSD_CKDESTBLT names it.
  */
 
 /**
@@ -802,18 +808,25 @@ export function createDirectDraw(options = {}){
             },
 
             /**
-             * @param {number} which  A DDCKEY flag.
+             * A key is one colour. Without DDCKEY_COLORSPACE the high value
+             * is not read at all; with it, a range is refused rather than
+             * narrowed, because no device of the era keyed on one.
+             *
+             * @param {number} which  A DDCKEY flag, with DDCKEY_COLORSPACE or without.
              * @param {ColorKey | null} key  Null removes the key.
              */
             setColorKey(which, key){
+                const kind = which & ~DDCKEY_COLORSPACE;
                 if (key === null)
                 {
-                    colorKeys.delete(which);
+                    colorKeys.delete(kind);
+                    return DD_OK;
                 }
-                else
+                if ((which & DDCKEY_COLORSPACE) !== 0 && key.low >>> 0 !== key.high >>> 0)
                 {
-                    colorKeys.set(which, { low: key.low >>> 0, high: key.high >>> 0 });
+                    return DDERR_NOCOLORKEYHW;
                 }
+                colorKeys.set(kind, { low: key.low >>> 0, high: key.low >>> 0 });
                 return DD_OK;
             },
 
@@ -1295,6 +1308,16 @@ export function createDirectDraw(options = {}){
         {
             return { hr: sizeHr, surface: null };
         }
+        const keys = /** @type {[number, ColorKey | undefined][]} */ ([
+            [DDCKEY_SRCBLT, request.srcColorKey],
+            [DDCKEY_DESTBLT, request.destColorKey],
+        ]).filter(([, key])=>key !== undefined);
+        // A descriptor's key is a colour space: one value is a key, a range
+        // is the same refusal SetColorKey gives one under DDCKEY_COLORSPACE.
+        if (keys.some(([, key])=>key && key.low >>> 0 !== key.high >>> 0))
+        {
+            return { hr: DDERR_NOCOLORKEYHW, surface: null };
+        }
 
         // A primary surface is the size and format of the display mode,
         // whatever the caller wrote in the width, height and format fields.
@@ -1348,6 +1371,10 @@ export function createDirectDraw(options = {}){
             }
         }
 
+        for (const [which, key] of keys)
+        {
+            front.setColorKey(which, key ?? null);
+        }
         return { hr: DD_OK, surface: front };
     }
 

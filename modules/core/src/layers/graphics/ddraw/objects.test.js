@@ -1000,11 +1000,12 @@ test('a surface has no colour key until one is set, and each kind is its own', (
         'the destination key is a different key');
 
     assert.equal(surface.setColorKey(DDCKEY_DESTBLT, { low: 1, high: 2 }), DD_OK);
-    assert.deepEqual(surface.getColorKey(DDCKEY_DESTBLT).key, { low: 1, high: 2 });
+    assert.deepEqual(surface.getColorKey(DDCKEY_DESTBLT).key, { low: 1, high: 1 },
+        'a range named without DDCKEY_COLORSPACE is its low value');
 
     assert.equal(surface.setColorKey(DDCKEY_SRCBLT, null), DD_OK);
     assert.equal(surface.getColorKey(DDCKEY_SRCBLT).hr, DDERR_NOCOLORKEY, 'null removes it');
-    assert.deepEqual(surface.getColorKey(DDCKEY_DESTBLT).key, { low: 1, high: 2 },
+    assert.deepEqual(surface.getColorKey(DDCKEY_DESTBLT).key, { low: 1, high: 1 },
         'and leaves the other alone');
 
     assert.equal(surface.release(), 0);

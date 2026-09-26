@@ -37,6 +37,7 @@ export const DDERR_INVALIDOBJECT = dderr(130);
 export const DDERR_INVALIDRECT = dderr(150);
 export const DDERR_INVALIDMODE = dderr(120);
 export const DDERR_NOCOLORKEY = dderr(215);
+export const DDERR_NOCOLORKEYHW = dderr(220);
 export const DDERR_NOCOOPERATIVELEVELSET = dderr(212);
 export const DDERR_NOEXCLUSIVEMODE = dderr(225);
 export const DDERR_NOTFOUND = dderr(255);
@@ -77,6 +78,7 @@ export const DDBLTFAST_DESTCOLORKEY = 0x00000002;
 export const DDBLTFAST_WAIT = 0x00000010;
 
 /** SetColorKey / GetColorKey: which key a call names. */
+export const DDCKEY_COLORSPACE = 0x00000001;
 export const DDCKEY_DESTBLT = 0x00000002;
 export const DDCKEY_SRCBLT = 0x00000008;
 
