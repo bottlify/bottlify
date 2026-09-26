@@ -1342,7 +1342,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     // At most one merge in this many: its module is instantiated on the
     // engine thread, 23 ms for a whole chunk of `relinkRegions`.
     const MERGE_EVERY = 1 << 23;
+    // And past that, this many for each region the last one built: a merge
+    // builds both modules whole again, and with the worker no longer the one
+    // that paced them, a module of hundreds gathering a few new regions at a
+    // time would have the engine thread instantiate it over and over.
+    const MERGE_PER_REGION = 1 << 19;
     let mergedAt = -MERGE_EVERY;
+    let mergeWait = MERGE_EVERY;
     /**
      * The two placed modules one of which transfers into the other most,
      * gathered into one module on the worker once it has crossed `mergeAfter`
@@ -1365,7 +1371,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return false;
         }
         sampledAt = corkRetired;
-        const due = corkRetired - mergedAt >= MERGE_EVERY;
+        const due = corkRetired - mergedAt >= mergeWait;
         /** @type {[Placed, Placed] | null} */
         let pair = null;
         let most = 0;
@@ -1412,6 +1418,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
         counts.merges++;
         mergedAt = corkRetired;
+        mergeWait = Math.max(MERGE_EVERY, chunk.length * MERGE_PER_REGION);
         return relinkChunk(chunk, store);
     };
 
