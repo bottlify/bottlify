@@ -47,8 +47,12 @@ export const DIMOUSE_OFS = Object.freeze({
     BUTTON0: 0x0c,
 });
 
-/** How many buttons the mouse has: DIMOUSESTATE2's eight. */
-export const MOUSE_BUTTONS = 8;
+/**
+ * How many buttons the mouse has: left, right, middle and the two side
+ * buttons, which is what a host reports. DIMOUSESTATE2 has room for eight,
+ * and the three past these stay released.
+ */
+export const MOUSE_BUTTONS = 5;
 
 /** A buffer size of zero means the device is not buffered at all. */
 const UNBUFFERED = 0;
@@ -177,7 +181,7 @@ export function objectsOf(kind){
  */
 export function createInputDevice({ kind, now }){
     const keys = new Uint8Array(KEYBOARD_KEYS);
-    const buttons = new Uint8Array(MOUSE_BUTTONS);
+    const buttons = new Uint8Array(8);
     let deltaX = 0;
     let deltaY = 0;
     let deltaWheel = 0;

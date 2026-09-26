@@ -700,15 +700,18 @@ test('GetCapabilities fills DIDEVCAPS and needs a header that declares its size'
     f.memory.setU32(AT.caps + DIDEVCAPS.dwSize, DIDEVCAPS.SIZE);
     assert.equal(f.bridge.call(f.device, 'GetCapabilities', [AT.caps]), DI_OK);
     assert.equal(f.memory.u32(AT.caps + DIDEVCAPS.dwAxes), 0);
-    assert.equal(f.memory.u32(AT.caps + DIDEVCAPS.dwButtons), 256);
+    // device8.c test_sys_keyboard: 128, not the 256 bytes of its state.
+    assert.equal(f.memory.u32(AT.caps + DIDEVCAPS.dwButtons), 128);
 });
 
-test('a mouse reports three axes', ()=>{
+test('a mouse reports three axes and the five buttons a host can press', ()=>{
+    // device8.c test_sys_mouse: 3 or 5 buttons, as the hardware has -- and
+    // left, right, middle and the two side buttons are the five a page gives.
     const f = mouse();
     f.memory.setU32(AT.caps + DIDEVCAPS.dwSize, DIDEVCAPS.SIZE);
     f.bridge.call(f.device, 'GetCapabilities', [AT.caps]);
     assert.equal(f.memory.u32(AT.caps + DIDEVCAPS.dwAxes), 3);
-    assert.equal(f.memory.u32(AT.caps + DIDEVCAPS.dwButtons), 8);
+    assert.equal(f.memory.u32(AT.caps + DIDEVCAPS.dwButtons), 5);
 });
 
 test('GetCapabilities names the device type in the codes of the version that made it', ()=>{

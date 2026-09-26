@@ -69,6 +69,11 @@ const DIDEVTYPE_KEYBOARD = 3;
 /** The same value in both generations' subtype tables, as PCENH is. */
 const DEVTYPEMOUSE_UNKNOWN = 1;
 const DI8DEVTYPEKEYBOARD_PCENH = 4;
+/**
+ * The buttons Windows counts on the system keyboard, as against the 256 bytes
+ * of its state -- the number device8.c's test_sys_keyboard expects.
+ */
+const KEYBOARD_BUTTONS = 128;
 const DIDC_ATTACHED = 0x00000001;
 const DIDC_EMULATED = 0x00000004;
 const DIEDFL_FORCEFEEDBACK = 0x00000100;
@@ -809,7 +814,7 @@ export function createDirectInput(
             writeU32(caps + DIDEVCAPS.dwDevType,
                 devTypeOf(device.kind, descriptor?.legacy === true));
             writeU32(caps + DIDEVCAPS.dwAxes, keyboard ? 0 : 3);
-            writeU32(caps + DIDEVCAPS.dwButtons, keyboard ? KEYBOARD_KEYS : MOUSE_BUTTONS);
+            writeU32(caps + DIDEVCAPS.dwButtons, keyboard ? KEYBOARD_BUTTONS : MOUSE_BUTTONS);
             writeU32(caps + DIDEVCAPS.dwPOVs, 0);
             return DI_OK;
         },
