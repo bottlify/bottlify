@@ -597,6 +597,31 @@ test('CreateBitmap keeps the format it was given', ()=>{
     assert.ok(fns.CreateBitmap.handler([8, 8, 1, 24, 0x12000]) > 0);
 });
 
+test('CreateBitmap refuses a side past 0x7ffffff with ERROR_INVALID_PARAMETER', ()=>{
+    // Wine's test_bitmap: 0x7ffffff + 1 pixels wide fails, and says why. A
+    // height past the same bound is refused the same way.
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errors = [];
+    const fns = createGdiFunctions({
+        readMemory: (address, length)=>memory.readMemory(address, length),
+        writeMemory: (address, data)=>memory.writeMemory(address, data),
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        handles: fakeHandles(),
+        surfaces: fakeSurfaces(),
+        setLastError: code=>errors.push(code),
+    }).table;
+    const ERROR_INVALID_PARAMETER = 87;
+    assert.equal(fns.CreateBitmap.handler([0x7ffffff + 1, 1, 1, 1, 0]), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
+    assert.equal(fns.CreateBitmap.handler([1, 0x7ffffff + 1, 1, 1, 0]), 0);
+    memory.putU32s(STRUCT, [0, 0x7ffffff + 1, 1, 2, 0x00010001, 0]);
+    assert.equal(fns.CreateBitmapIndirect.handler([STRUCT]), 0);
+    assert.deepEqual(errors, new Array(3).fill(ERROR_INVALID_PARAMETER));
+    assert.ok(fns.CreateBitmap.handler([64, 64, 1, 1, 0]) > 0);
+    assert.equal(errors.length, 3, 'a bitmap that is made sets nothing');
+});
+
 test('CreateBitmapIndirect is CreateBitmap from a BITMAP; CreateDiscardableBitmap, compatible',
     ()=>{
         // Wine's test_CreateBitmap: the BITMAP's bmWidthBytes is ignored, its

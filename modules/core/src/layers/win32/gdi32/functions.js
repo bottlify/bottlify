@@ -184,6 +184,10 @@ const ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
 /** Bit depths a bitmap can have. Anything else is not a format GDI knows. */
 const BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 
+/** The longest side CreateBitmap takes. */
+const MAX_BITMAP_SIDE = 0x7ffffff;
+const ERROR_INVALID_PARAMETER = 87;
+
 /**
  * Depths a device context over somebody else's surface can be made at.
  * A palettised primary is the common one for a program of this era, which is
@@ -308,6 +312,8 @@ const SCALABLE_FONTTYPE = 0;
  *           Absent in a build that cannot, where nothing is enumerated.
  * @property {() => any} [callerThread]
  *           The thread whose call is being answered, which a callback runs on.
+ * @property {(code: number) => void} [setLastError]
+ *           The calling thread's last error, for the calls documented to set it.
  */
 
 /**
@@ -1721,12 +1727,18 @@ export function createGdiFunctions(host){
          * lpBits, when there are any, is the whole image in the bitmap's own
          * layout, and it is copied: the buffer is the caller's, free to be
          * reused or freed the moment this returns. A zero width or height is
-         * the one-pixel monochrome bitmap, whatever the rest says.
+         * the one-pixel monochrome bitmap, whatever the rest says; a side
+         * past 0x7ffffff is ERROR_INVALID_PARAMETER (Wine's test_bitmap).
          */
         CreateBitmap: {
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([width, height, planes, bitCount, bits])=>{
+                if ((width | 0) > MAX_BITMAP_SIDE || (height | 0) > MAX_BITMAP_SIDE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
                 if ((width | 0) === 0 || (height | 0) === 0)
                 {
                     return defaultBitmap();
