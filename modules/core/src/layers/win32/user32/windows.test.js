@@ -922,6 +922,60 @@ test('SetFocus into another window sends the activation set, then the focus', ()
     ], 'sent before the call returns: NCACTIVATE, ACTIVATE, then KILLFOCUS and SETFOCUS');
 });
 
+test('a window whose procedure says the pointer passes through passes it beneath', ()=>{
+    // user32's window tests (WindowFromPoint): the window under the point is
+    // asked WM_NCHITTEST, and one that answers HTTRANSPARENT has the click go
+    // to the window beneath it, which WindowFromPoint answers as well. As
+    // documented for WM_NCHITTEST, the answer is where the pointer is: a
+    // client area the procedure calls a caption takes the frame's form of
+    // the message, the screen point in lParam.
+    const WM_NCHITTEST = 0x0084;
+    const WM_NCLBUTTONDOWN = 0x00a1;
+    const HTTRANSPARENT = 0xffffffff;
+    const HTCLIENT = 1;
+    const HTCAPTION = 2;
+    const POINT = TEXT_BUFFER;
+    let transparent = 0;
+    let caption = 0;
+    const context = setup({ reply: message=>{
+        if (message.message !== WM_NCHITTEST)
+        {
+            return 0;
+        }
+        return message.hwnd === transparent ? HTTRANSPARENT
+            : message.hwnd === caption ? HTCAPTION : HTCLIENT;
+    } });
+    const { fns, memory, queue, dispatched } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const parent = createWindow(fns, memory, { style: WS_VISIBLE });
+    /** A child over the same square as the one made before it, beneath it. */
+    const square = ()=>createWindow(fns, memory,
+        { style: WS_CHILD | WS_VISIBLE, parent, x: 10, y: 10, width: 100, height: 100 });
+    const over = square();
+    const under = square();
+    transparent = over;
+    memory.putU32s(POINT, [5, 5]);
+    fns.ClientToScreen.handler([over, POINT]);
+    const [x, y] = [memory.u32(POINT), memory.u32(POINT + 4)];
+    /** Clicks there as the input layer does, and takes the press. */
+    const press = ()=>{
+        queue.post({ hwnd: 0, message: WM_LBUTTONDOWN, wParam: 1, lParam: 0, x, y });
+        dispatched.length = 0;
+        assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+        return [MSG.hwnd, MSG.message, MSG.wParam, MSG.lParam]
+            .map(at=>memory.u32(MSG_BUFFER + at));
+    };
+
+    assert.deepEqual(press(), [under, WM_LBUTTONDOWN, 1, (5 << 16 | 5) >>> 0]);
+    const asked = dispatched.find(entry=>entry.hwnd === over && entry.message === WM_NCHITTEST);
+    assert.equal(asked?.lParam >>> 0, (y << 16 | x) >>> 0, 'asked, with the screen point');
+    assert.equal(fns.WindowFromPoint.handler([x, y]), under);
+
+    caption = under;
+    assert.deepEqual(press(), [under, WM_NCLBUTTONDOWN, HTCAPTION, (y << 16 | x) >>> 0]);
+});
+
 test('WM_SETCURSOR is sent to the window under the pointer as each mouse message is taken', ()=>{
     // user32's message tests (WmMove_mouse): WM_SETCURSOR, its lParam the
     // hit and the mouse message, is sent before each WM_MOUSEMOVE the pointer
@@ -934,7 +988,15 @@ test('WM_SETCURSOR is sent to the window under the pointer as each mouse message
     const WS_CAPTION = 0x00c00000;
     const HTCLIENT = 1;
     const HTCAPTION = 2;
-    const context = setup();
+    const WM_NCHITTEST = 0x0084;
+    // The window's procedure leaves the hit test to the default one, as a
+    // program's does; the tests pin the messages around it, not it.
+    /** @type {any} */
+    let table = null;
+    const context = setup({ reply: message=>(message.message === WM_NCHITTEST
+        ? table.DefWindowProcA.handler([message.hwnd, message.message, message.wParam,
+            message.lParam]) : 0) });
+    table = context.fns;
     putClass(context.memory);
     context.fns.RegisterClassA.handler([CLASS_STRUCT]);
     const hwnd = createWindow(context.fns, context.memory, { style: WS_CAPTION | WS_VISIBLE });
@@ -942,8 +1004,8 @@ test('WM_SETCURSOR is sent to the window under the pointer as each mouse message
     const take = (/** @type {number} */ how = PM_REMOVE)=>{
         context.dispatched.length = 0;
         context.fns.PeekMessageA.handler([MSG_BUFFER, 0, WM_MOUSEMOVE, WM_MOUSEMOVE + 0x0d, how]);
-        return context.dispatched.map(({ hwnd: to, message, wParam, lParam })=>
-            [to, message, wParam, lParam >>> 0]);
+        return context.dispatched.filter(({ message })=>message !== WM_NCHITTEST)
+            .map(({ hwnd: to, message, wParam, lParam })=>[to, message, wParam, lParam >>> 0]);
     };
     const move = (/** @type {number} */ x, /** @type {number} */ y)=>context.queue.post(
         { hwnd: 0, message: WM_MOUSEMOVE, wParam: 0, lParam: 0, x, y });
@@ -956,7 +1018,8 @@ test('WM_SETCURSOR is sent to the window under the pointer as each mouse message
     move(60, 30);
     context.dispatched.length = 0;
     context.fns.PeekMessageA.handler([MSG_BUFFER, 0, 0x00a0, 0x00a0, PM_REMOVE]);
-    assert.deepEqual(context.dispatched.map(({ message, lParam })=>[message, lParam >>> 0]),
+    const told = context.dispatched.filter(({ message })=>message !== WM_NCHITTEST);
+    assert.deepEqual(told.map(({ message, lParam })=>[message, lParam >>> 0]),
         [[WM_SETCURSOR, (WM_MOUSEMOVE << 16 | HTCAPTION) >>> 0]], 'over the caption');
 
     context.queue.post({ hwnd, message: WM_MOUSEMOVE, wParam: 0, lParam: 0 });

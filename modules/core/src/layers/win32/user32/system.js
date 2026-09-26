@@ -1848,12 +1848,17 @@ export function createSystemFunctions({ host, live, windows, classes }){
          *
          * The point arrives by value, as two arguments. The window found is
          * the one the pointer would reach: shown, not disabled, and not one
-         * that lets the pointer through.
+         * that lets the pointer through -- which a window whose procedure is
+         * the program's own says in its answer to WM_NCHITTEST, sent to it
+         * from the calling thread.
          */
         WindowFromPoint: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([x, y])=>host.windowFromPoint(x | 0, y | 0)?.record.hwnd ?? 0,
+            handler: ([x, y])=>andThen(host.askedFromPoint
+                ? host.askedFromPoint(x | 0, y | 0, host.callerThread?.())
+                : host.windowFromPoint(x | 0, y | 0),
+            (/** @type {{ record: any } | null} */ found)=>found?.record.hwnd ?? 0),
         },
 
         /**

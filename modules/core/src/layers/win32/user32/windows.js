@@ -1977,9 +1977,47 @@ export function createWindowFunctions(host){
     };
 
     /**
-     * The window under a screen point: the topmost shown one whose rectangle
-     * holds it, then down through its children, skipping a window that says
-     * the point passes through it or is disabled.
+     * Every window under a screen point that could take the pointer, in the
+     * order they are offered it: from the top, a window's children at the
+     * point before the window itself, deepest first. A hidden window is
+     * never among them, nor, unless asked for, a disabled one.
+     *
+     * @param {number} x @param {number} y @param {boolean} [disabledToo]
+     * @returns {any[]}
+     */
+    const windowsAt = (x, y, disabledToo = false)=>{
+        /** @type {any[]} */
+        const found = [];
+        /** @param {any[]} candidates  Topmost first. */
+        const visit = candidates=>{
+            for (const record of candidates)
+            {
+                if ((record.style & WS_VISIBLE) === 0
+                    || !contains(geometry.windowRect(record), x, y)
+                    || (!disabledToo && (record.style & WS_DISABLED) !== 0))
+                {
+                    continue;
+                }
+                if (hitTest(record, x, y) === HTCLIENT)
+                {
+                    visit(childrenOf(record));
+                }
+                found.push(record);
+            }
+        };
+        // Top-level windows are kept bottom-up and children top-down: the
+        // stacking GetWindow walks, and the one that decides who is hit.
+        visit([...windows.values()].filter(record=>!record.destroyed
+            && !isChild(record)).reverse());
+        return found;
+    };
+
+    /**
+     * The window under a screen point: the first of `windowsAt` that does
+     * not say the point passes through it. Only the procedures on this side
+     * are asked, as this answers without running the program -- routing
+     * the input layer's messages as they arrive -- and `askedFromPoint`
+     * asks the program's own.
      *
      * @param {number} x @param {number} y
      * @param {{ disabled?: boolean, transparent?: boolean }} [skip]
@@ -1988,50 +2026,19 @@ export function createWindowFunctions(host){
      * @returns {{ record: any, hit: number } | null}
      */
     const windowFromPoint = (x, y, skip = { disabled: true, transparent: true })=>{
-        /**
-         * @param {any[]} candidates  Topmost first.
-         * @returns {{ record: any, hit: number } | null}
-         */
-        const deepest = candidates=>{
-            for (const record of candidates)
+        for (const record of windowsAt(x, y, !skip.disabled))
+        {
+            if (!(skip.transparent && transparentAt(record)))
             {
-                if ((record.style & WS_VISIBLE) === 0
-                    || !contains(geometry.windowRect(record), x, y))
-                {
-                    continue;
-                }
-                if (skip.disabled && (record.style & WS_DISABLED) !== 0)
-                {
-                    continue;
-                }
-                const hit = hitTest(record, x, y);
-                if (hit === HTCLIENT)
-                {
-                    const inner = deepest(childrenOf(record));
-                    if (inner)
-                    {
-                        return inner;
-                    }
-                }
-                if (skip.transparent && transparentAt(record))
-                {
-                    continue;
-                }
-                return { record, hit };
+                return { record, hit: hitTest(record, x, y) };
             }
-            return null;
-        };
-        // Top-level windows are kept bottom-up and children top-down: the
-        // stacking GetWindow walks, and the one that decides who is hit.
-        return deepest([...windows.values()].filter(record=>!record.destroyed
-            && !isChild(record)).reverse());
+        }
+        return null;
     };
 
     /**
-     * Whether a window lets the pointer through: what it answers WM_NCHITTEST
-     * with, asked of the ones whose procedure is on this side. A program's
-     * own procedure is not run for every hit test; a static of the
-     * program's own class stops the pointer as a window does.
+     * Whether a window lets the pointer through, asked of a procedure on
+     * this side: what it answers WM_NCHITTEST with.
      *
      * @param {any} record
      */
@@ -2045,6 +2052,50 @@ export function createWindowFunctions(host){
             hwnd: record.hwnd, message: WM_NCHITTEST, wParam: 0, lParam: 0,
         });
         return typeof answer === 'number' && (answer | 0) === HTTRANSPARENT;
+    };
+
+    /** @param {any} record  Whether its procedure is the program's own. */
+    const ownProcedure = record=>record.wndProc !== 0 && !procedures.has(record.wndProc);
+
+    /**
+     * The window under a screen point as the program would find it, asked
+     * from its own thread: each window in turn is sent WM_NCHITTEST -- a
+     * program's own procedure run -- and the first that does not answer
+     * HTTRANSPARENT is the one, with the hit it answered.
+     *
+     * @param {number} x @param {number} y @param {unknown} thread
+     * @returns {{ record: any, hit: number } | null
+     *     | Promise<{ record: any, hit: number } | null>}
+     */
+    const askedFromPoint = (x, y, thread)=>{
+        const candidates = windowsAt(x, y);
+        /** @param {number} index @returns {any} */
+        const next = index=>{
+            const record = candidates[index];
+            if (!record)
+            {
+                return null;
+            }
+            if (!ownProcedure(record))
+            {
+                return transparentAt(record) ? next(index + 1)
+                    : { record, hit: hitTest(record, x, y) };
+            }
+            return andThen(send(record.hwnd, WM_NCHITTEST, 0,
+                ((y & 0xffff) << 16 | x & 0xffff) >>> 0, thread), answer=>((answer | 0)
+                === HTTRANSPARENT ? next(index + 1) : { record, hit: answer | 0 }));
+        };
+        return next(0);
+    };
+
+    /** The buttons and keys held, as a client mouse message's wParam reports them. */
+    const mouseKeys = ()=>{
+        let keys = 0;
+        for (const [vk, bit] of MOUSE_KEYS)
+        {
+            keys |= ((host.keyState?.(vk) ?? 0) & 0x8000) !== 0 ? bit : 0;
+        }
+        return keys;
     };
 
     /**
@@ -2105,12 +2156,7 @@ export function createWindowFunctions(host){
                 lParam: ((at.y & 0xffff) << 16 | at.x & 0xffff) >>> 0 };
         }
         const origin = geometry.clientOrigin(record);
-        let keys = 0;
-        for (const [vk, bit] of MOUSE_KEYS)
-        {
-            keys |= ((host.keyState?.(vk) ?? 0) & 0x8000) !== 0 ? bit : 0;
-        }
-        return { hwnd: record.hwnd, message: WM_MOUSEHOVER, wParam: keys,
+        return { hwnd: record.hwnd, message: WM_MOUSEHOVER, wParam: mouseKeys(),
             lParam: (((at.y - origin.y) & 0xffff) << 16 | (at.x - origin.x) & 0xffff) >>> 0 };
     };
 
@@ -2356,22 +2402,72 @@ export function createWindowFunctions(host){
     };
 
     /**
-     * The next message a retrieval takes, a press having activated its
-     * window first and the window under the pointer asked for its cursor; a
-     * press its window ate is passed over for the one after.
+     * The mouse's own message, sent where the program's procedures say the
+     * pointer is: it was routed as it arrived by what this side can answer
+     * alone, and a window whose procedure is the program's own is asked
+     * WM_NCHITTEST as the message is taken -- one that answers HTTRANSPARENT
+     * passes it to the window beneath, and the hit answered decides whether
+     * it is the client or the frame form of the message.
+     *
+     * @param {any} entry @param {unknown} thread
+     * @returns {any} the entry, placed
+     */
+    const rehit = (entry, thread)=>{
+        const kind = entry.message >>> 0;
+        const client = kind >= WM_MOUSEMOVE && kind <= WM_MOUSELAST && kind !== WM_MOUSEWHEEL;
+        const frame = kind >= WM_NCMOUSEMOVE && kind <= WM_NCMOUSELAST;
+        const target = client || frame ? live(entry.hwnd) : null;
+        if (!target || !ownProcedure(target) || captured !== 0 || !host.queue.fromInput(entry))
+        {
+            return entry;
+        }
+        const x = entry.x | 0;
+        const y = entry.y | 0;
+        return andThen(askedFromPoint(x, y, thread), found=>{
+            if (!found)
+            {
+                return entry;
+            }
+            const clientKind = client ? kind : kind - WM_NCMOUSEMOVE + WM_MOUSEMOVE;
+            // An XBUTTON's number rides in the high word of either form.
+            const high = entry.wParam & 0xffff0000;
+            entry.hwnd = found.record.hwnd;
+            if (found.hit === HTCLIENT)
+            {
+                const origin = geometry.clientOrigin(found.record);
+                entry.message = clientKind;
+                entry.wParam = (high | (client ? entry.wParam & 0xffff : mouseKeys())) >>> 0;
+                entry.lParam = (((y - origin.y) & 0xffff) << 16 | (x - origin.x) & 0xffff) >>> 0;
+            }
+            else
+            {
+                entry.message = clientKind + WM_NCMOUSEMOVE - WM_MOUSEMOVE;
+                entry.wParam = (high | found.hit & 0xffff) >>> 0;
+                entry.lParam = ((y & 0xffff) << 16 | x & 0xffff) >>> 0;
+            }
+            return entry;
+        });
+    };
+
+    /**
+     * The next message a retrieval takes, placed where the program's
+     * procedures say the pointer is, a press having activated its window
+     * first and the window under the pointer asked for its cursor; a press
+     * its window ate is passed over for the one after.
      *
      * @param {() => any} take @param {unknown} thread
      * @returns {any}
      */
     const takeThrough = (take, thread)=>{
-        const entry = take();
-        if (!entry)
+        const taken = take();
+        if (!taken)
         {
             return null;
         }
-        return andThen(mouseActivate(entry, thread), (/** @type {boolean} */ keep)=>(keep
-            ? andThen(askCursor(entry, thread), ()=>entry)
-            : takeThrough(take, thread)));
+        return andThen(rehit(taken, thread), entry=>andThen(mouseActivate(entry, thread),
+            (/** @type {boolean} */ keep)=>(keep
+                ? andThen(askCursor(entry, thread), ()=>entry)
+                : takeThrough(take, thread))));
     };
 
     /**
@@ -2983,7 +3079,8 @@ export function createWindowFunctions(host){
             host: Object.assign(Object.create(host), {
                 focus: focusWindow, setFocus, active: activeWindow, activate,
                 capture: ()=>captured, setCapture, releaseCapture,
-                send, callProcedure, geometry, windowFromPoint, isChild, repaint, appear, uncover,
+                send, callProcedure, geometry, windowFromPoint, askedFromPoint, isChild, repaint,
+                appear, uncover,
                 shown, raise, restack, desktop: desktopWindow,
                 isDesktop: (/** @type {any} */ record)=>record !== null && record === desktop,
                 sysColorBrush: (/** @type {number} */ index)=>(draw
