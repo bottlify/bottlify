@@ -2095,7 +2095,6 @@ function bulkString(e, instruction){
     }
     b.localGet(edi).localGet(Local.t1).op(I32.add).localSet(edi);
     b.localGet(ecx).localGet(Local.t0).op(I32.sub).localSet(ecx);
-    b.localGet(Local.retired).localGet(Local.t0).op(I32.add).localSet(Local.retired);
     b.localGet(Local.budget).localGet(Local.t0).op(I32.sub).localSet(Local.budget);
     b.localGet(Local.budget).i32const(0).op(I32.leS);
     e.openGuard('bulkSpent', EMPTY);
@@ -2231,7 +2230,6 @@ function stringInstruction(e, instruction){
     if (repeat)
     {
         b.localGet(ecx).i32const(1).op(I32.sub).localSet(ecx);
-        b.localGet(Local.retired).i32const(1).op(I32.add).localSet(Local.retired);
         b.localGet(Local.budget).i32const(1).op(I32.sub).localSet(Local.budget);
         if (compare)
         {

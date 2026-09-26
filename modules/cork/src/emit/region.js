@@ -74,7 +74,7 @@ export const MATH_IMPORTS = Object.freeze([
  * Enters a region function from the host: the state a transfer between
  * regions carries in its parameters, read from the state block -- the eight
  * registers, the flag record (zero under a layout with none), the flags word,
- * and a count of nothing retired yet.
+ * and the budget again, as the one the run started with.
  *
  * @param {Function} fn  the region's function
  * @param {number} label @param {number} budget
@@ -98,7 +98,7 @@ export function enterRegion(fn, label, budget, view, layout){
         record >= 0 ? view.getInt32(record + 8, true) : 0,
         record >= 0 ? view.getInt32(record + 12, true) : 0,
         record >= 0 ? view.getInt32(record + 16, true) : 0,
-        view.getInt32(layout.eflags, true), 0);
+        view.getInt32(layout.eflags, true), budget);
 }
 
 /** The import object entries for `MATH_IMPORTS`. */
@@ -131,7 +131,7 @@ export const Local = Object.freeze({
     // 2..9: eax ecx edx ebx esp ebp esi edi
     reg: 2,
     kind: 10, res: 11, op1: 12, op2: 13, cin: 14, flags: 15,
-    retired: 16, eip: 17, t0: 18, t1: 19, t2: 20, addr: 21, t64: 22, t64b: 23,
+    origin: 16, eip: 17, t0: 18, t1: 19, t2: 20, addr: 21, t64: 22, t64b: 23,
     count: 24, f0: 25, f1: 26, d0: 27, d1: 28, mmxTouched: 29,
     // the page flags of the current access, and whether a store hit a code page
     pflags: 30, stale: 31,
@@ -147,9 +147,11 @@ const RECORD_LOCALS = [Local.kind, Local.res, Local.op1, Local.op2, Local.cin];
  * The function's parameters, locals 0..16: the label and the budget, then the
  * state a transfer between regions carries rather than writing it to the state
  * block and reading it back -- the eight registers, the flag record, the flags
- * word, and the instructions the run has retired so far (the counter word is
- * added to once, when the run leaves for the host). A region over a layout with
- * no flag record (the emulator's) takes them and loads its state as before.
+ * word, and the budget the run started with at the host, which no block changes:
+ * the instructions retired are what the run took off the budget since, added to
+ * the counter word once, when it leaves for the host, and a block charges the
+ * budget alone. A region over a layout with no flag record (the emulator's)
+ * takes them and loads its state as before.
  */
 export const STATE_PARAMS = 17;
 const LOCAL_TYPES = [
@@ -503,7 +505,8 @@ export function finishModule(context, functions){
             b.i32const(0).localGet(eip).store('i32', { offset: layout.previousIp });
         }
         b.i32const(0);
-        b.i32const(0).load('i32', { offset: layout.counter }).localGet(Local.retired).op(I32.add);
+        b.i32const(0).load('i32', { offset: layout.counter }).localGet(Local.origin).op(I32.add)
+            .localGet(Local.budget).op(I32.sub);
         b.store('i32', { offset: layout.counter });
     }
     b.i32const(Exit.UNTRANSLATED);
@@ -940,7 +943,8 @@ export class RegionEmitter {
 
     /**
      * The run's own locals at their start: no record, nothing retired, nothing
-     * touched. `fromParams`: the count came in as a parameter and goes on.
+     * touched. `fromParams`: the budget the run started with came in as a
+     * parameter and goes on.
      *
      * @param {boolean} [fromParams]
      */
@@ -952,7 +956,7 @@ export class RegionEmitter {
         }
         if (!fromParams)
         {
-            b.i32const(0).localSet(Local.retired);
+            b.localGet(Local.budget).localSet(Local.origin);
         }
         b.i32const(0).localSet(Local.mmxTouched);
         b.i32const(0).localSet(Local.stale);
@@ -1028,7 +1032,8 @@ export class RegionEmitter {
             b.i32const(0).localGet(Local.eip).store('i32', { offset: layout.previousIp });
         }
         b.i32const(0);
-        b.i32const(0).load('i32', { offset: layout.counter }).localGet(Local.retired).op(I32.add);
+        b.i32const(0).load('i32', { offset: layout.counter }).localGet(Local.origin).op(I32.add)
+            .localGet(Local.budget).op(I32.sub);
         b.store('i32', { offset: layout.counter });
     }
 
@@ -2010,9 +2015,10 @@ export class RegionEmitter {
     }
 
     /**
-     * Charges the block's instructions so far to the budget and the count.
-     * On a conditional path (inside an `if` the block opened) the count stays
-     * owed: the path that falls through charges it at its own exit.
+     * Charges the block's instructions so far to the budget, which is the
+     * count too (`origin`). On a conditional path (inside an `if` the block
+     * opened) the count stays owed: the path that falls through charges it at
+     * its own exit.
      */
     charge(){
         if (this.blockRetired === 0)
@@ -2020,7 +2026,6 @@ export class RegionEmitter {
             return;
         }
         const { b } = this;
-        b.localGet(Local.retired).i32const(this.blockRetired).op(I32.add).localSet(Local.retired);
         b.localGet(Local.budget).i32const(this.blockRetired).op(I32.sub).localSet(Local.budget);
         if (this.controls.length === this.blockDepth)
         {

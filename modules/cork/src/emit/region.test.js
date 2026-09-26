@@ -440,6 +440,49 @@ test('a loop head reads the flags its latch left, and those it is entered with',
     }
 });
 
+test('the count is what a run took off its budget: across transfers, a host call and a budget',
+    ()=>{
+        // CODE: mov ecx, 4; L: mov eax, 0x2000; jmp eax -- at 0x2000: mov dx, PORT; out dx, eax;
+        // dec ecx; jz D; mov eax, L; jmp eax; D: hlt. Three regions, which transfer to each
+        // other through the hash; the out calls the host from inside the one at 0x2000.
+        const PORT = 0xb077;
+        const L = CODE + 5;
+        const far = [0x66, 0xba, PORT & 0xff, PORT >> 8, 0xef, 0x49, 0x74, 0x07,
+            0xb8, ...u32(L), 0xff, 0xe0, 0xf4];
+        for (const budget of [1_000_000, 1, 3, 6, 7, 13, 20])
+        {
+            /** @type {number[]} */
+            const seen = [];
+            const m = createTestMachine({ trapPort: PORT, trap: ()=>{
+                seen.push(m.counter());
+                return 0;
+            } });
+            m.write(CODE, [0xb9, ...u32(4), 0xb8, ...u32(0x2000), 0xff, 0xe0]);
+            m.write(0x2000, far);
+            m.setReg('esp', 0x80000);
+            let eip = CODE;
+            let total = 0;
+            let exit = null;
+            for (let runs = 0; runs < 100; runs++)
+            {
+                const before = m.counter();
+                exit = m.runProgram(eip, { budget });
+                assert.equal(m.counter() - before, exit.retired, `budget ${budget}`);
+                total += exit.retired;
+                eip = m.eip();
+                if (exit.kind === Exit.HALT)
+                {
+                    break;
+                }
+            }
+            assert.equal(exit?.kind, Exit.HALT, `budget ${budget}`);
+            // 1 + three turns of 8 + a last one of 6 + the hlt; the host sees the count at
+            // each out, the out itself charged.
+            assert.equal(total, 32, `budget ${budget}`);
+            assert.deepEqual(seen, [5, 13, 21, 29], `budget ${budget}`);
+        }
+    });
+
 test('a spent budget on a jump back leaves the flags its target reads', ()=>{
     // mov ecx, 6; clc; H: jnc S; add eax, 100; S: add eax, 1; cmp ecx, 4; dec ecx;
     // jnz H; hlt -- the head reads the CF the cmp left through the dec, across the
