@@ -356,13 +356,22 @@ export function emitInstruction(e, instruction, flagsLive){
             }
             // The value is read before the increment, and the write comes
             // after it: `pop esp` then holds the value, `pop [esp+x]`
-            // addresses with the incremented esp.
+            // addresses with the incremented esp -- folded into the
+            // displacement, so the destination is checked before esp moves
+            // and a fault on it leaves the pop undone.
             stackAccess(e, dst.size);
             b.localGet(Local.addr)
                 .load(dst.size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase })
                 .localSet(Local.t1);
+            if (dst.kind === 'mem')
+            {
+                prepare(e, dst.base === 4 ? { ...dst, disp: ((dst.disp ?? 0) + dst.size) | 0 }
+                    : dst, { store: true });
+                writeOp(e, dst, ()=>b.localGet(Local.t1));
+                b.localGet(Local.reg + 4).i32const(dst.size).op(I32.add).localSet(Local.reg + 4);
+                return true;
+            }
             b.localGet(Local.reg + 4).i32const(dst.size).op(I32.add).localSet(Local.reg + 4);
-            prepare(e, dst);
             writeOp(e, dst, ()=>b.localGet(Local.t1));
             return true;
         case 'pushad':

@@ -571,6 +571,16 @@ export function evaluate(instruction, state){
         {
             const width = operands[0].kind === 'seg' ? size : operands[0].size;
             const value = pop(width);
+            if (operands[0].kind === 'mem')
+            {
+                // `pop [esp+x]` addresses with esp moved, and a store that
+                // faults leaves the pop undone.
+                const at = address(operands[0]);
+                state.reg[4] = (state.reg[4] - width) >>> 0;
+                state.memory.write(at, width, value & MASK[width]);
+                state.reg[4] = (state.reg[4] + width) >>> 0;
+                return;
+            }
             write(operands[0], value);
             return;
         }

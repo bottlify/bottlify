@@ -128,7 +128,9 @@ A fault
 translated code detects (a divide by zero, an undefined instruction, an access the page
 table refuses) leaves before the instruction with the registers as they were, and the
 emulator re-executes it and raises it through the same vector and report a program on the
-emulator alone gets. The same hash is given to the
+emulator alone gets. A `pop` into memory checks its destination before esp moves (the moved esp
+that `pop [esp+x]` addresses with folded into the displacement), so a fault on the destination
+leaves esp as it was -- both tiers had left it past the value. The same hash is given to the
 emulator (`handoffHash`, the fork's `bottlify_handoff_hash`): its slice then returns only at
 an address the hash holds, not anywhere in a flagged page, which would otherwise hand a page
 half translated back one instruction at a time. A page flagged for handoff is one the
