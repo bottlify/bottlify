@@ -32,6 +32,8 @@ import {
     mapShippedLibraries,
     placeLibrary,
     missingImportCall,
+    compatibilityOf,
+    createApp,
 } from './app.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
@@ -384,6 +386,87 @@ function resourceLibrary(){
     bytes.set([0xca, 0xfe, 0xf0, 0x0d], 0x258);
     return bytes;
 }
+
+/**
+ * A program whose only resource is its manifest (RT_MANIFEST 1, the one
+ * CreateProcess reads) and whose PE header names an operating system version.
+ *
+ * @param {Uint8Array | null} manifest  Absent, the resource is RCDATA instead.
+ * @param {number} major @param {number} minor
+ */
+function manifestProgram(manifest, major, minor){
+    const data = manifest ?? Uint8Array.of(0xca, 0xfe, 0xf0, 0x0d);
+    const bytes = new Uint8Array(0x258 + data.length);
+    const view = new DataView(bytes.buffer);
+    const put = (/** @type {number} */ at, /** @type {number} */ value)=>
+        view.setUint32(at, value, true);
+    view.setUint16(0, 0x5a4d, true);
+    put(0x3c, 0x80);
+    put(0x80, 0x4550);
+    view.setUint16(0x84, 0x014c, true);
+    view.setUint16(0x86, 1, true);
+    view.setUint16(0x94, 224, true);
+    view.setUint16(0x96, 0x0102, true); //           an executable
+    view.setUint16(0x98, 0x010b, true);
+    put(0x98 + 28, 0x00400000);
+    put(0x98 + 32, 0x1000);
+    view.setUint16(0x98 + 40, major, true); //       MajorOperatingSystemVersion
+    view.setUint16(0x98 + 42, minor, true);
+    put(0x98 + 56, 0x2000);
+    put(0x98 + 60, 0x200);
+    put(0x98 + 92, 16);
+    put(0x98 + 96 + 2 * 8, 0x1000);
+    put(0x98 + 96 + 2 * 8 + 4, 0x58 + data.length);
+    bytes.set([...'.rsrc'].map(ch=>ch.charCodeAt(0)), 0x178);
+    put(0x178 + 8, 0x58 + data.length);
+    put(0x178 + 12, 0x1000);
+    put(0x178 + 16, 0x58 + data.length);
+    put(0x178 + 20, 0x200);
+    view.setUint16(0x200 + 14, 1, true);
+    put(0x200 + 16, manifest ? 24 : 10);
+    put(0x200 + 20, 24 | 0x80000000);
+    view.setUint16(0x200 + 24 + 14, 1, true);
+    put(0x200 + 40, 1);
+    put(0x200 + 44, 48 | 0x80000000);
+    view.setUint16(0x200 + 48 + 14, 1, true);
+    put(0x200 + 64, 0x409);
+    put(0x200 + 68, 72);
+    put(0x200 + 72, 0x1058);
+    put(0x200 + 76, data.length);
+    bytes.set(data, 0x258);
+    return bytes;
+}
+
+test('a program says what Windows it knows through its manifest and its PE header', ()=>{
+    // Windows 10 answers a program's version calls from these two
+    // (versions.js's reportedVersion), so they are read from the program's
+    // own image, the way CreateProcess reads them.
+    const WINDOWS_10 = '8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a';
+    const WINDOWS_7 = '35138b9a-5d96-4fbd-8e2d-a2440225f93a';
+    const text = '<?xml version="1.0" encoding="UTF-8"?><assembly><compatibility><application>'
+        + `<supportedOS Id="{${WINDOWS_7}}"/><supportedOS Id="{${WINDOWS_10}}"/>`
+        + '</application></compatibility></assembly>';
+    assert.deepEqual(compatibilityOf(manifestProgram(new TextEncoder().encode(text), 6, 0)),
+        { supportedOS: [WINDOWS_7, WINDOWS_10], imageVersion: { major: 6, minor: 0 } });
+
+    const utf16 = new Uint8Array(2 + text.length * 2);
+    utf16.set([0xff, 0xfe]);
+    [...text].forEach((character, index)=>{
+        utf16[2 + index * 2] = character.charCodeAt(0);
+    });
+    assert.deepEqual(compatibilityOf(manifestProgram(utf16, 5, 1)).supportedOS,
+        [WINDOWS_7, WINDOWS_10], 'a manifest written in UTF-16 says the same');
+
+    assert.deepEqual(compatibilityOf(manifestProgram(null, 4, 0)),
+        { supportedOS: [], imageVersion: { major: 4, minor: 0 } }, 'no manifest at all');
+});
+
+test('a Windows that is not one of the four is refused before anything is built', async()=>{
+    // A launcher passes what a manifest said, which no type checks.
+    const options = /** @type {any} */ ({ executable: new Uint8Array(0), windows: 'win98' });
+    await assert.rejects(createApp(options),
+        /unknown Windows version "win98": the choices are win2000, winxp, win7, win10/);
+});
 
 test('a library loaded as data answers for its resources by the handle it was given', ()=>{
     // LoadLibraryEx hands out a data file's base with a low bit set -- one for

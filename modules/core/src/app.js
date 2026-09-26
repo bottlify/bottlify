@@ -21,7 +21,7 @@ import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js'
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
 import { createProcessBlocks } from './layers/win32/kernel32/teb.js';
-import { windowsVersion } from './layers/win32/kernel32/versions.js';
+import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
     from './layers/loader/internal/init.js';
@@ -131,6 +131,14 @@ import { loadZstdWasm } from './zstd-wasm.js';
  *     'function'`. `memory` is set by `createApp` on a rebuilt machine so the
  *     storage outlives the process that made it, and is not something a caller
  *     supplies.
+ * @property {'win2000' | 'winxp' | 'win7' | 'win10'} [windows]
+ *     The Windows the machine is, a bottle's setting: 2000 SP4, XP SP3, 7 SP1
+ *     or 10 (build 19045). Every place a program reads the version from agrees
+ *     on it -- GetVersionEx, VerifyVersionInfo, the process block,
+ *     RtlGetVersion, the registry, a system library's file version -- and so do
+ *     the profile folders the registry, the shell and the environment name.
+ *     Windows 10 tells a program whose manifest does not declare it 6.2, as
+ *     the real one does. Default `winxp`; any other name is refused.
  * @property {{ network?: any }} [win32]
  *     `network` is the transport under Winsock, in the shape the win32 layer's
  *     `wsock32/transport.js` names: what a relay client hands back, or an
@@ -1549,6 +1557,37 @@ export function versionResourceOf(filesystem, path){
     {
         filesystem.close(handle);
     }
+}
+
+/**
+ * What a program's own image says about the Windows it was written for: the
+ * supportedOS elements of its manifest (RT_MANIFEST 1, the one CreateProcess
+ * reads) and the operating system version its PE header names. Windows 10
+ * answers the program's version calls from these.
+ *
+ * @param {Uint8Array} executable
+ * @returns {import('./layers/win32/kernel32/versions.js').ProgramCompatibility}
+ */
+export function compatibilityOf(executable){
+    const RT_MANIFEST = 24;
+    const image = parsePe(executable);
+    const view = new DataView(executable.buffer, executable.byteOffset, executable.byteLength);
+    // MajorOperatingSystemVersion and its minor, forty bytes into the optional
+    // header that follows the signature and the file header.
+    const optional = view.getUint32(0x3c, true) + 24;
+    const imageVersion = {
+        major: view.getUint16(optional + 40, true),
+        minor: view.getUint16(optional + 42, true),
+    };
+    const found = findResource(executable, image, RT_MANIFEST, 1);
+    if (!found)
+    {
+        return { supportedOS: [], imageVersion };
+    }
+    const at = rvaToFileOffset(image, found.rva);
+    const bytes = executable.subarray(at, at + found.size);
+    const encoding = bytes[0] === 0xff && bytes[1] === 0xfe ? 'utf-16le' : 'utf-8';
+    return { supportedOS: supportedOsOf(new TextDecoder(encoding).decode(bytes)), imageVersion };
 }
 
 /**
@@ -3086,6 +3125,10 @@ async function buildApp(options){
             },
         },
         win32: {
+            // The Windows the machine is, and what the program says it knows,
+            // which is all Windows 10 needs to decide what to tell it.
+            windows: options.windows,
+            compatibility: compatibilityOf(options.executable),
             // The speed the registry reports: the rate the engine's rdtsc
             // advances at. The emulator's counter keeps the default.
             processorMhz: options.engine === 'cork' ? CORK_TSC_MHZ : undefined,
@@ -4766,7 +4809,7 @@ async function buildApp(options){
         allocate: allocateFromHeap,
         writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
         processId: 0x1000,
-        version: windowsVersion(),
+        version: windowsVersion(options.windows),
         imageBase: image.base,
         imagePath: options.imagePath ?? 'C:\\app.exe',
         // Quoted, and this is not cosmetic: a program is handed one string and
@@ -6020,6 +6063,9 @@ const EXIT_NOTICE_TYPE = 0x40;
  * @returns {Promise<any>} an AppController
  */
 export async function createApp(options){
+    // Refused before anything is built: a machine made to the wrong Windows
+    // fails later somewhere that says nothing about why.
+    windowsVersion(options.windows);
     // Both outlive every process: subscriptions a caller made before the first
     // child existed still have to fire for the last one, and the record of what
     // asked for a replacement is worthless if it dies with the asker.
