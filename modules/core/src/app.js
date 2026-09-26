@@ -139,11 +139,15 @@ import { loadZstdWasm } from './zstd-wasm.js';
  *     the profile folders the registry, the shell and the environment name.
  *     Windows 10 tells a program whose manifest does not declare it 6.2, as
  *     the real one does. Default `winxp`; any other name is refused.
- * @property {{ network?: any }} [win32]
+ * @property {{ network?: any, trustedRoots?: (Uint8Array | string)[] }} [win32]
  *     `network` is the transport under Winsock, in the shape the win32 layer's
  *     `wsock32/transport.js` names: what a relay client hands back, or an
  *     embedder's own. Absent, Winsock runs over the loopback adapter and
  *     nothing outside this runtime is reachable, which is the default.
+ *     `trustedRoots` is the root store WinVerifyTrust judges Authenticode
+ *     chains against, each root as DER bytes or base64; absent, it holds
+ *     Microsoft's "Microsoft Root Authority" alone, and an empty list trusts
+ *     nothing.
  * @property {(record: any) => void} [onCall]
  *           Every host call as it returns. The ring kept for a failure holds
  *           the end of a run; this holds all of it, for a tool willing to
@@ -3141,6 +3145,9 @@ async function buildApp(options){
             namedObjects: options.namedObjects,
             // The network beyond this runtime, when the embedder supplied one.
             network: options.win32?.network,
+            // The roots WinVerifyTrust judges a signature's chain against;
+            // absent, the win32 layer's default store.
+            trustedRoots: options.win32?.trustedRoots,
             // What the program is told its display is, handed to the libraries
             // that answer for one as well as to the layer that draws on it.
             screen: display,
