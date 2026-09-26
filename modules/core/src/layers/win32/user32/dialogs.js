@@ -252,6 +252,12 @@ const MAX_RESOURCE_NAME = 256;
  *           or a dialog's own -- measures as, and the font a template
  *           names. Absent, or answering null, without a font engine.
  * @property {() => unknown} [callerThread]
+ * @property {(thread: unknown) => any} [take]
+ *           The next message for the thread, taken as GetMessage takes it:
+ *           a mouse message placed where the program's procedures say it
+ *           goes, a press having activated its window and the window under
+ *           the pointer asked for its cursor. A promise when that runs the
+ *           program; null when there is nothing.
  * @property {(code: number) => void} [setLastError]
  * @property {(hwnd: number) => void} [created]
  * @property {() => Promise<void>} idle
@@ -947,7 +953,10 @@ export function createDialogFunctions(options){
         await host.show?.(hwnd);
         while (!record.destroyed)
         {
-            const entry = host.queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true });
+            // The program's own loop would have been GetMessage, and what
+            // that does as it takes a message the dialog's loop does too.
+            const entry = host.take ? await host.take(thread)
+                : host.queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true });
             if (!entry)
             {
                 await host.idle();

@@ -546,6 +546,51 @@ test('a quit retrieved inside a modal loop ends the dialog and is put back', asy
     assert.equal(queue.quitPending(), true, 'the loop outside has yet to see it');
 });
 
+test('a modal loop takes a mouse message the way GetMessage takes it, the window under the '
+    + 'pointer asked WM_SETCURSOR first', async()=>{
+    // user32's message tests (WmMove_mouse): WM_SETCURSOR is sent to the
+    // window under the pointer as each mouse message of the input is taken,
+    // whichever loop takes it -- here the dialog manager's own.
+    const WM_USER = 0x0400;
+    const WM_SETCURSOR = 0x0020;
+    const WM_MOUSEMOVE = 0x0200;
+    /** @type {number[]} */
+    const heard = [];
+    /** @type {any} */
+    let table = null;
+    const { memory, queue, fns } = setup({ dispatch: (wndProc, message)=>{
+        heard.push(message.message);
+        if (message.message === WM_INITDIALOG)
+        {
+            table.PostMessageA.handler([message.hwnd, WM_USER, 0, 0]);
+        }
+        else if (message.message === WM_USER)
+        {
+            // Shown by now: the pointer moves over its client area, clear of
+            // the control.
+            table.GetClientRect.handler([message.hwnd, OUT]);
+            const height = memory.u32(OUT + 12);
+            memory.writeMemory(OUT, new Uint8Array(new Uint32Array([2, height - 2]).buffer));
+            table.ClientToScreen.handler([message.hwnd, OUT]);
+            queue.post({ hwnd: 0, message: WM_MOUSEMOVE, wParam: 0, lParam: 0,
+                x: memory.u32(OUT), y: memory.u32(OUT + 4) });
+        }
+        else if (message.message === WM_MOUSEMOVE)
+        {
+            table.EndDialog.handler([message.hwnd, 5]);
+        }
+        return 0;
+    } });
+    table = fns;
+    putTemplate(memory, [{ id: 100, x: 4, y: 2, cx: 20, cy: 6 }]);
+    assert.equal(await fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC,
+        0]), 5);
+    const moved = heard.indexOf(WM_MOUSEMOVE);
+    assert.ok(moved > 0, 'the move reached the dialog');
+    assert.equal(heard.slice(heard.indexOf(WM_USER), moved).includes(WM_SETCURSOR), true,
+        'asked for its cursor before it was handed the move');
+});
+
 test('DialogBox answers -1 for a dialog its procedure destroyed during WM_INITDIALOG, and 0 '
     + 'for one destroyed later', async()=>{
     // user32's dialog tests (test_DialogBoxParam): DestroyWindow from

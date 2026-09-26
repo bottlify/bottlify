@@ -3192,6 +3192,8 @@ export function createWindowFunctions(host){
                     return record ? showWindow(record, SW_SHOW) : 0;
                 },
                 translate,
+                take: (/** @type {unknown} */ thread)=>takeThrough(
+                    { hwnd: ANY_WINDOW, first: 0, last: 0, remove: true }, thread),
             }),
             live, windows, makeWindow, destroyWindow, deliver, announce,
             // A class the program registered, by the name a template spells it.
