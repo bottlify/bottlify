@@ -1059,8 +1059,10 @@ export function emitVertex(ir, inputs, varyings, group = VERTEX_PROGRAM_GROUP){
             return `    @location(${location}) ${input.name}: ${type},`;
         })
         .join('\n');
+    // Invariant as the fixed stage's is: the position-invariant option's
+    // promise holds on the device only if both modules mark it.
     const varyingFields = [
-        '    @builtin(position) position: vec4f,',
+        '    @builtin(position) @invariant position: vec4f,',
         '    @location(0) color: vec4f,',
         '    @location(1) secondary: vec4f,',
         '    @location(2) fog: f32,',
@@ -1103,9 +1105,10 @@ export function emitVertex(ir, inputs, varyings, group = VERTEX_PROGRAM_GROUP){
         const position = inputs.find(input=>input.name === 'position');
         const source = position ? widen('vertex.position', position)
             : canonicalFallback('position');
-        // The same two lines the fixed stage emits, so the option's promise --
-        // the program's position is the fixed pipeline's -- holds bit for bit
-        // on the device, not only in intent.
+        // The same two lines the fixed stage emits, into a position both
+        // modules mark @invariant, so the option's promise -- the program's
+        // position is the fixed pipeline's -- holds bit for bit on the device,
+        // not only in intent.
         body.push(`    let clip = uniforms.modelViewProjection * ${source};`);
         body.push(`    out.position = ${CLIP_REMAP};`);
     }

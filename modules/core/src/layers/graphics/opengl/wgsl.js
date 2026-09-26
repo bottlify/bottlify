@@ -554,8 +554,11 @@ function environment(unit){
  */
 function vertexOutStruct(varyings, flat){
     const interpolation = flat ? '@interpolate(flat) ' : '';
+    // Invariant, so that two modules computing one position from the same
+    // data agree to the bit: a depth-equal pass drawn through a different
+    // module than the pass before it would otherwise be free to fight it.
     const fields = [
-        '    @builtin(position) position: vec4f,',
+        '    @builtin(position) @invariant position: vec4f,',
         `    @location(0) ${interpolation}color: vec4f,`,
         `    @location(1) ${interpolation}secondary: vec4f,`,
         '    @location(2) fog: f32,',

@@ -365,6 +365,23 @@ test('a position-invariant program emits the fixed stage\'s position lines', ()=
     'the same widening and the same product, under another local\'s name');
 });
 
+test('the position both vertex stages write is @invariant', ()=>{
+    // WGSL promises two entry points the same position from the same data and
+    // control flow only under @invariant, so without it the position-invariant
+    // option's promise -- the fixed pipeline's position -- need not hold on the
+    // device, and a depth-equal pass over a fixed pre-pass can fight it.
+    const parsed = parseProgram('!!ARBvp1.0\nOPTION ARB_position_invariant;\n'
+        + 'MOV result.color, vertex.color;\nEND\n');
+    assert.ok(!('error' in parsed), 'error' in parsed ? parsed.error.message : '');
+    const emitted = emitVertex(parsed,
+        [{ name: 'position', components: 3, scalar: 'f32' }],
+        { texcoords: [], fogCoord: false });
+    assert.ok(!('error' in emitted), 'error' in emitted ? emitted.error : '');
+    assert.match(emitted.code, /@builtin\(position\) @invariant position: vec4f,/);
+    const fixed = generateDraw(state()).code;
+    assert.match(fixed, /@builtin\(position\) @invariant position: vec4f,/);
+});
+
 test('a depth test that is off is always-passing, with the attachment kept', ()=>{
     const descriptor = drawDescriptor(
         state({ depth: { test: false, func: GL.LESS, write: true } }));
