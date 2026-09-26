@@ -34,6 +34,7 @@ import {
 import { createDirect3D8 } from './device.js';
 import {
     IDENTITY, LIGHT_FLOATS, UNIFORM_AT, UNIFORM_FLOATS, colorToFloats, expandTexels, eyePosition,
+    normalMatrixOf,
     HARDWARE_SAMPLER, filledIndices, listIndices, multiplyMatrices, packLight, pipelineStateOf,
     samplerFlagsOf,
     screenExtent, transformPosition, uniformBlock, fogModeOf, fogOf, isAffine,
@@ -1706,6 +1707,34 @@ test('the camera is the point the view matrix sends to the origin', ()=>{
     assert.deepEqual(eyePosition(new Array(16).fill(0)), [0, 0, 0]);
 });
 
+test('a normal goes through the inverse transpose of the world matrix', ()=>{
+    // Wine's d3d9 lighting_test lights a quad whose normal faces the default
+    // directional light under four world matrices: identity, a singular one
+    // and a rotation with translation all light it fully, and a non-affine
+    // one -- a w of -z -- leaves it black. The inverse transpose of the whole
+    // 4x4 does exactly that; the world matrix itself turns the singular
+    // case's normal aside, and its upper 3x3 alone lights the non-affine one.
+    // With no inverse, the adjugate stands in: the direction is what counts.
+    const through = (/** @type {number[]} */ world, /** @type {number[]} */ normal)=>{
+        const n = normalMatrixOf(world);
+        return [0, 1, 2].map(column=>
+            normal[0] * n[column] + normal[1] * n[4 + column] + normal[2] * n[8 + column]);
+    };
+    /** @param {number[]} normal  lit by the default light, travelling along +z */
+    const lit = normal=>Math.min(1, Math.max(0, -normal[2]));
+    assert.equal(lit(through([...IDENTITY], [0, 0, -1])), 1);
+    assert.equal(lit(through([1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0.5, 1], [0, 0, -1])), 1,
+        'singular');
+    assert.equal(lit(through([0, 0, 1, 0, 0, 1, 0, 0, -1, 0, 0, 0, 10, 10, 10, 1],
+        [-1, 0, 0])), 1, 'rotated and translated');
+    assert.equal(lit(through([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -1, 10, 10, 10, 0], [0, 0, -1])),
+        0, 'non-affine');
+    // A mirror flips the normal with it, as an inverse does and an adjugate
+    // would not.
+    assert.deepEqual(through([-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], [1, 0, 0]),
+        [-1, 0, 0]);
+});
+
 test('a light is packed into the rows the shader declares', ()=>{
     // Every row is read by offset. A field one row out is read as a different
     // one, and every one of them is a plausible number.
@@ -1730,6 +1759,34 @@ test('a light is packed into the rows the shader declares', ()=>{
     const degenerate = new Float32Array(LIGHT_FLOATS);
     packLight(degenerate, 0, light8({ Direction: { x: 0, y: 0, z: 0 } }));
     assert.deepEqual([...degenerate.subarray(16, 20)], [0, 0, 0, 0]);
+});
+
+test('recorded: each lit draw carries the normal matrix of its own world', async()=>{
+    // The world moves between draws of one prepared state, and a normal moves
+    // with it: the block of each draw carries the inverse transpose of that
+    // draw's world, not the first one's.
+    const h = harness();
+    const { device } = h;
+    assert.equal(device.SetRenderState(D3DRS.LIGHTING, 1), D3D_OK);
+    assert.equal(device.SetLight(0, light8()), D3D_OK);
+    assert.equal(device.LightEnable(0, true), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF.XYZ | FVF.NORMAL | FVF.DIFFUSE), D3D_OK);
+    const vertices = new Uint8Array(28 * 3);
+    [[0, 0, 0], [1, 0, 0], [0, 1, 0]].forEach((at, index)=>
+        vertices.set(litVertexBytes(at), index * 28));
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, vertices, 28), D3D_OK);
+    const scaled = Float32Array.from(IDENTITY);
+    scaled[0] = 2;
+    assert.equal(device.SetTransform(D3DTS.WORLD, scaled), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, vertices, 28), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    const draws = h.device.diagnostics().lastFrame
+        .filter((/** @type {any} */ command)=>command.kind === 'draw');
+    const at = UNIFORM_AT.normalMatrix;
+    assert.deepEqual([...draws[0].uniforms.subarray(at, at + 16)], [...IDENTITY]);
+    assert.equal(draws[1].uniforms[at], 0.5, 'x scaled by two carries a normal by a half');
 });
 
 test('recorded: a lit draw carries its lights, its material and the scene ambient', async()=>{
@@ -2323,12 +2380,14 @@ test('byte-exact: a two-coordinate texture transform moves the sample by its thi
 test('the block lays a texture transform out as two rows per sampled stage', ()=>{
     // The shader reads array<vec4f, 32> at float 76 -- byte 304, sixteen-aligned
     // after the three sampler words, a matrix per stage for all eight --
-    // then the world-view matrix at byte 816 and the lights from byte 880. A
-    // row at the wrong index is read as another stage's, or as a light.
+    // then the world-view matrix at byte 816, the normal matrix at byte 880
+    // and the lights from byte 944. A row at the wrong index is read as
+    // another stage's, or as a light.
     assert.equal(UNIFORM_AT.textureTransforms, 76);
     assert.equal(UNIFORM_AT.worldView, 204);
-    assert.equal(UNIFORM_AT.lights, 220);
-    assert.equal(UNIFORM_FLOATS, 220);
+    assert.equal(UNIFORM_AT.normalMatrix, 220);
+    assert.equal(UNIFORM_AT.lights, 236);
+    assert.equal(UNIFORM_FLOATS, 236);
     const columns = Array.from({ length: 16 }, (_, at)=>at + 2);
     const block = uniformBlock({
         worldViewProjection: IDENTITY,

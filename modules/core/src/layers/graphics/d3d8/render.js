@@ -766,7 +766,10 @@ export const UNIFORM_AT = Object.freeze({
     textureTransforms: 76,
     // World then view: the camera space a generated coordinate is taken in.
     worldView: 204,
-    lights: 220,
+    // The inverse transpose of the world matrix, which a lit normal goes
+    // through; identity unless the draw is lit.
+    normalMatrix: 220,
+    lights: 236,
 });
 
 /** How many stages the block carries sampler state for. */
@@ -862,6 +865,7 @@ function putDword(block, at, dword){
  * @property {(readonly number[])[]} [textureTransforms]
  *     Per stage, the sixteen elements in `PLANAR_ROWS` order; identity when absent.
  * @property {ArrayLike<number>} [worldView]  Identity unless a stage generates coordinates.
+ * @property {ArrayLike<number>} [normalMatrix]  See `normalMatrixOf`; identity unless lit.
  * @property {number} [ambient]      D3DCOLOR, the scene's own ambient light.
  * @property {readonly number[]} [eye]     Camera position in world space.
  * @property {readonly Light[]} [lights]
@@ -912,6 +916,7 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
         block.set(transforms[index] ?? PLANAR_IDENTITY, at.textureTransforms + index * 16);
     }
     block.set(values.worldView ?? IDENTITY, at.worldView);
+    block.set(values.normalMatrix ?? IDENTITY, at.normalMatrix);
     for (let index = 0; index < lights.length; index++)
     {
         packLight(block, at.lights + index * LIGHT_FLOATS, lights[index]);
@@ -951,6 +956,57 @@ export function createUniformArena(floats = 1 << 16){
             return block;
         },
     };
+}
+
+/**
+ * What a normal is carried into world space by: the inverse transpose of the
+ * world matrix, laid out as a matrix is, so a normal times it is the normal
+ * the surface has after the world matrix moved it. The whole 4x4 is
+ * inverted, not its upper 3x3 -- the two differ only under a non-affine
+ * world, where Direct3D lights by the former (Wine's d3d9 lighting_test has
+ * such a world leave a lit quad black). A matrix with no inverse gives its
+ * adjugate transpose: the cofactors, which the inverse is a scaling of, and a
+ * normal's direction is what lighting reads.
+ *
+ * @param {ArrayLike<number>} m  row-major, as D3DMATRIX
+ * @param {Float32Array} [out]
+ * @returns {Float32Array}
+ */
+export function normalMatrixOf(m, out = new Float32Array(16)){
+    /** @param {number} row @param {number} column */
+    const minor = (row, column)=>{
+        /** @type {number[]} */
+        const cells = [];
+        for (let r = 0; r < 4; r++)
+        {
+            for (let c = 0; c < 4; c++)
+            {
+                if (r !== row && c !== column)
+                {
+                    cells.push(m[r * 4 + c]);
+                }
+            }
+        }
+        const [a, b, c, d, e, f, g, h, i] = cells;
+        return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    };
+    for (let row = 0; row < 4; row++)
+    {
+        for (let column = 0; column < 4; column++)
+        {
+            // Negative zero is the same matrix and a worse one to read.
+            out[row * 4 + column] = ((row + column) % 2 === 0 ? 1 : -1) * minor(row, column) || 0;
+        }
+    }
+    const determinant = m[0] * out[0] + m[1] * out[1] + m[2] * out[2] + m[3] * out[3];
+    if (determinant !== 0)
+    {
+        for (let at = 0; at < 16; at++)
+        {
+            out[at] /= determinant;
+        }
+    }
+    return out;
 }
 
 /**
@@ -1164,6 +1220,7 @@ export function uniformsOf(model, lighting, take, mips = true){
         material: model.material,
         ambient: rs('AMBIENT'),
         eye: eyePosition(view),
+        ...(lighting ? { normalMatrix: normalMatrixOf(world, NORMAL_MATRIX) } : {}),
         // The shader declares an array exactly as long as the lighting state
         // said, so a block that carried lights it does not know about would be
         // read past its own end.
@@ -1208,6 +1265,8 @@ const stageFlags = (model, mips)=>{
 /** Scratch for the two products every draw forms; copied into the block at once. */
 const WORLD_VIEW = new Float32Array(16);
 const WORLD_VIEW_PROJECTION = new Float32Array(16);
+/** Scratch for a lit draw's normal matrix, likewise. */
+const NORMAL_MATRIX = new Float32Array(16);
 
 /** What a preparation's block field holds before its first draw writes one. */
 const EMPTY_BLOCK = new Float32Array(0);
@@ -4418,8 +4477,8 @@ export function createRenderer(options){
     };
 
     /**
-     * This draw's uniform block: the prepared state's block with the three
-     * fields the world transform reaches written over it.
+     * This draw's uniform block: the prepared state's block with the fields
+     * the world transform reaches written over it.
      *
      * @param {RenderModel} model
      * @param {PreparedDraw} prepared
@@ -4435,8 +4494,13 @@ export function createRenderer(options){
             WORLD_VIEW_PROJECTION), UNIFORM_AT.worldViewProjection);
         block.set(world, UNIFORM_AT.world);
         // World then view too: vertex fog's depth and a generated coordinate's
-        // camera space move with the model as its position does.
+        // camera space move with the model as its position does, and a lit
+        // normal with the model's own transform.
         block.set(worldView, UNIFORM_AT.worldView);
+        if (prepared.lighting)
+        {
+            block.set(normalMatrixOf(world, NORMAL_MATRIX), UNIFORM_AT.normalMatrix);
+        }
         return block;
     };
 

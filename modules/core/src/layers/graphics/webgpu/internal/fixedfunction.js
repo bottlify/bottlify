@@ -468,15 +468,14 @@ const normalized = (expression, normalizeNormals)=>
  * The vertex-shader body that lights a vertex, in place of copying its colours
  * through.
  *
- * Lighting is done in world space, so the normal is transformed by the world
- * matrix, and renormalised only under D3DRS_NORMALIZENORMALS. Off -- its
- * default -- a normal that arrives longer or shorter than one, or is scaled by
- * the world matrix, lights its vertex by that length, which is what a program
- * that leaves the state off is shown.
- *
- * Transforming a normal by the world matrix rather than by its inverse
- * transpose is what the fixed-function pipeline specifies; the two differ only
- * under non-uniform scale, and there the specification is the one to follow.
+ * Lighting is done in world space, so the normal is transformed into it --
+ * by the inverse transpose of the world matrix, which the block carries as
+ * `normalMatrix`: the world matrix itself turns a normal aside under
+ * non-uniform scale, and lights a surface under a non-affine world that
+ * Direct3D leaves black. It is renormalised only under
+ * D3DRS_NORMALIZENORMALS. Off -- its default -- a normal that arrives longer
+ * or shorter than one, or is scaled by the transform, lights its vertex by
+ * that length, which is what a program that leaves the state off is shown.
  *
  * @param {import('./pipeline.js').LightingState} lighting
  * @param {(name: string)=>boolean} has
@@ -492,8 +491,8 @@ function lightingBody(lighting, has, specular, normalizeNormals){
     /** @type {string[]} */
     const lines = [
         '    let worldPosition = (uniforms.world * vec4f(vertex.position, 1.0)).xyz;',
-        `    let worldNormal = ${normalized('(uniforms.world * vec4f(vertex.normal, 0.0)).xyz',
-            normalizeNormals)};`,
+        `    let worldNormal = ${normalized(
+            '(uniforms.normalMatrix * vec4f(vertex.normal, 0.0)).xyz', normalizeNormals)};`,
     ];
     if (highlights)
     {
@@ -760,7 +759,8 @@ function uniformStruct(lightCount){
     stage1: u32,
     stage2: u32,
     texTransform: array<vec4f, 32>,
-    worldView: mat4x4f,${lightCount === 0 ? '' : `
+    worldView: mat4x4f,
+    normalMatrix: mat4x4f,${lightCount === 0 ? '' : `
     lights: array<Light, ${lightCount}>,`}
 };`;
 }

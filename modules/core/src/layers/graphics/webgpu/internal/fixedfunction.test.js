@@ -73,7 +73,7 @@ test('the same state generates the same source, byte for byte', ()=>{
     const second = generate(baseState()).code;
 
     assert.equal(first, second);
-    assert.equal(digest(first), '8583ff9772f52935');
+    assert.equal(digest(first), 'df32dcf97ac7fd52');
 });
 
 test('a stage generating its coordinates takes them from the vertex in camera space', ()=>{
@@ -641,8 +641,10 @@ test('a lit vertex transforms its normal by the world matrix and renormalises', 
     const code = generate(baseState({
         fvf: LIT_FVF, lighting: lighting(), normalizeNormals: true,
     })).code;
-    assert.match(code,
-        /let worldNormal = normalize\(\(uniforms\.world \* vec4f\(vertex\.normal, 0\.0\)\)\.xyz\);/);
+    // By the inverse transpose of the world matrix, which the block carries:
+    // the world matrix itself carries a normal wrong under non-uniform scale
+    // and under a non-affine world (Wine's d3d9 lighting_test).
+    assert.match(code, /let worldNormal = normalize\(\(uniforms\.normalMatrix \* vec4f\(vertex\.normal,/);
     assert.match(code,
         /let worldPosition = \(uniforms\.world \* vec4f\(vertex\.position, 1\.0\)\)\.xyz;/);
     // The position still goes through the whole product, not the world matrix.
@@ -656,7 +658,7 @@ test('with NORMALIZENORMALS off a normal keeps the length its transform gave it'
     // it, for lighting and for a coordinate generated from it alike.
     const lit = generate(baseState({ fvf: LIT_FVF, lighting: lighting() })).code;
     assert.ok(lit.includes(
-        'let worldNormal = (uniforms.world * vec4f(vertex.normal, 0.0)).xyz;'), lit);
+        'let worldNormal = (uniforms.normalMatrix * vec4f(vertex.normal, 0.0)).xyz;'), lit);
     const generating = {
         colorOp: D3DTOP.SELECTARG1, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
         alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.DIFFUSE, alphaArg2: D3DTA.CURRENT,

@@ -25,7 +25,7 @@ import { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, versionToken } from './shader
 import { HYBRID_CONSTANTS, varyingLocation } from './wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
-import { multiplyMatrices } from '../d3d8/render.js';
+import { UNIFORM_FLOATS, multiplyMatrices } from '../d3d8/render.js';
 
 const RAM_BASE = 0x40000000;
 const RAM_SIZE = 4 << 20;
@@ -465,7 +465,7 @@ test('a vertex shader over the fixed-function pixel stage gets a fragment stage 
         // render state's texture factor and alpha reference in it.
         const groups = h.groupsOfDraw();
         const block = new Float32Array(h.boundBytes(groups.get(1), 0).buffer);
-        assert.equal(block.length, 220);
+        assert.equal(block.length, UNIFORM_FLOATS);
         assert.deepEqual([...block.subarray(36, 40)].map(v=>Math.round(v * 255)),
             [0x20, 0x40, 0x60, 0xff]);
         assert.equal(Math.round(block[72] * 255), 0x80);
