@@ -210,11 +210,17 @@ table is finite), and one adapter per object so identity survives. Every `Direct
 `DirectSoundCreate8` makes an object of its own that counts its references (the bridge frees an
 interface pointer whose release answers zero), and each object has one primary buffer: asking again
 hands it back with its count raised and ignores the new description, and it cannot be duplicated
-(`DSERR_INVALIDCALL`). The device's `GetCaps` names every `PRIMARY*` and `SECONDARY*`
-mono/stereo/8/16 flag plus `CONTINUOUSRATE`, and writes every hardware field as zero; `EMULDRIVER`
-is deliberately not set, because a middleware reading it concludes DirectSound is not really there,
-and `CERTIFIED` is not set either, which `IDirectSound8::VerifyCertification` agrees with by
-answering `DS_UNCERTIFIED`.
+(`DSERR_INVALIDCALL`). A description of the primary that names a format is refused with
+`DSERR_INVALIDPARAM` -- its format is the device's, set through `SetFormat`. The device keeps its
+primary: after the program's last `Release` the same pointer still answers (the publisher's adapter
+answers the bridge's `reachable()` for it while the device lives), and the seam's `pruneReleased`
+drops it only once the device and every reference to it are gone. Through `DirectSoundCreate8`'s
+object a `DSBCAPS_CTRL3D` buffer must be mono and cannot have `DSBCAPS_CTRLPAN`
+(`DSERR_INVALIDPARAM`); `DirectSoundCreate`'s object accepts both, as the older interface does. The
+device's `GetCaps` names every `PRIMARY*` and `SECONDARY*` mono/stereo/8/16 flag plus
+`CONTINUOUSRATE`, and writes every hardware field as zero; `EMULDRIVER` is deliberately not set,
+because a middleware reading it concludes DirectSound is not really there, and `CERTIFIED` is not
+set either, which `IDirectSound8::VerifyCertification` agrees with by answering `DS_UNCERTIFIED`.
 
 A secondary buffer's size is rounded up to a whole number of frames. A buffer's `GetCaps` reports
 the flags it was created with plus where it is mixed: `DSBCAPS_LOCSOFTWARE`, or `LOCHARDWARE` when
@@ -229,14 +235,15 @@ refused on a secondary.
 then one device -- and stop early if the callback returns FALSE; without `callGuest` they succeed
 having named nothing. The module's `feedBuffers` runs before every mix: it drains every buffer's
 notifications and signals them whether or not anything is listening (a program that waits on a
-position must be woken even in a silent build); closes and drops the track of any buffer the
-program has fully released (`references` at zero) before anything else, so a released buffer's
-slot is not held for the rest of the session; then, when `drained`, opens a mixer track per
-secondary buffer on first play and writes the drained byte ranges from guest memory into it,
-resetting a track whose backlog exceeds the ring's capacity and counting that under `behind`. Every
-fill hands the track the buffer's current `gain` and `balance`, and retunes it when the buffer's
-frequency has changed since, so a program's `SetFrequency` is heard as a change of pitch and the
-track consumes bytes at the rate the cursor drains them.
+position must be woken even in a silent build); closes and drops the track of any buffer the program
+has fully released (`references` at zero) before anything else, so a released buffer's slot is not
+held for the rest of the session, and drops those buffers -- and any primary nothing can reach --
+from the seam's walk; then, when `drained`, opens a mixer track per secondary buffer on first play
+and writes the drained byte ranges from guest memory into it, resetting a track whose backlog
+exceeds the ring's capacity and counting that under `behind`. Every fill hands the track the
+buffer's current `gain` and `balance`, and retunes it when the buffer's frequency has changed since,
+so a program's `SetFrequency` is heard as a change of pitch and the track consumes bytes at the rate
+the cursor drains them.
 
 ### The hosted MPEG provider
 
@@ -325,7 +332,7 @@ All under `npm test` from `modules/core` (`node --test "src/**/*.test.js"`).
 | `src/layers/audio/output/worklet.test.js` | Unit, over a loaded copy of the real `worklet.js` | The `WORKLET-SHARED` region is textually identical to `mix.js`'s, `export` aside; two tracks at different gains come out summed; a balance reaches the audio thread one side at a time; a silent block counts `STARVED_BLOCKS`/`STARVED_FRAMES`; `MIXED_FRAMES` and `READ` advance by exactly what was mixed. |
 | `src/layers/audio/output/ring.test.js` | Unit | Fill and room, short writes, silence on a short read, starvation counters, `clear`. |
 | `src/layers/audio/dsound/buffers.test.js` | Contract | Cursor motion against the clock, write lead and stopped margin, wrapped locks, volume/pan bounds and the pan law, notifications (the start position passed first, a one-shot's last frame as it ends, `DSBPN_OFFSETSTOP` on a stop and never on a lap), duplicates, `drainPlayed` ranges. |
-| `src/layers/audio/dsound/seam.test.js` | Contract, over a flat guest memory | Every slot's argument count, `IDirectSound8`'s twelfth slot, structure layouts (`WAVEFORMATEX`, `DSBUFFERDESC` in both sizes, `DSCAPS` at 96 bytes), device and buffer caps flags, a size rounded to whole frames, controls refused without their flags, `SetFX`, which interfaces each object answers, one object per create with its own count and one primary, `Stop` setting `DSBPN_OFFSETSTOP`, refusals, enumeration through a guest callback, identity through the publisher, the ordinals through the real synthesiser. |
+| `src/layers/audio/dsound/seam.test.js` | Contract, over a flat guest memory | Every slot's argument count, `IDirectSound8`'s twelfth slot, structure layouts (`WAVEFORMATEX`, `DSBUFFERDESC` in both sizes, `DSCAPS` at 96 bytes), device and buffer caps flags, a size rounded to whole frames, controls refused without their flags, `SetFX`, which interfaces each object answers, one object per create with its own count and one primary that outlives its last release while its device lives and is pruned after, a primary described with a format refused, DirectSound 8's rules for 3D buffers, `Stop` setting `DSBPN_OFFSETSTOP`, refusals, enumeration through a guest callback, identity through the publisher, the ordinals through the real synthesiser. |
 | `src/layers/audio/asi/provider.test.js` | Contract, with a substitute decoder | Table registration through `RIB`, chunked continuing fetch, lead decoding, immediate answers, seek forward and back, preferences, a frameless stream, a failing decoder, a platform with none. |
 | `src/layers/audio/asi/mp3.test.js` | Unit | Frame-header parsing for each MPEG version, ID3 skipping, frame scanning, `interleave16` over planar and interleaved `AudioData`. |
 
