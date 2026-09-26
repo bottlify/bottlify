@@ -5,18 +5,19 @@
  */
 
 /**
- * The walk the dialog manager makes over a dialog's controls, from one tab
- * stop to the next. It searches through a shown, enabled child with
- * WS_EX_CONTROLPARENT as if its controls were the dialog's own, as a
- * property sheet's page is inside the sheet.
+ * The walks the dialog manager makes over a dialog's controls: from one tab
+ * stop to the next, and within a group. Both search through a shown, enabled
+ * child with WS_EX_CONTROLPARENT as if its controls were the dialog's own,
+ * as a property sheet's page is inside the sheet.
  *
  * Kept apart from the dialog functions and the dialog class's procedure
- * because both walk: GetNextDlgTabItem and the Tab key on one side,
- * DefDlgProc's WM_NEXTDLGCTL on the other.
+ * because both walk: GetNextDlgTabItem, GetNextDlgGroupItem and the Tab key
+ * on one side, DefDlgProc's WM_NEXTDLGCTL on the other.
  */
 
 const WS_VISIBLE = 0x10000000;
 const WS_DISABLED = 0x08000000;
+const WS_GROUP = 0x00020000;
 const WS_TABSTOP = 0x00010000;
 const WS_EX_CONTROLPARENT = 0x00010000;
 
@@ -94,5 +95,56 @@ export function createTabWalk({ children, recordOf }){
         return null;
     };
 
-    return { nextTabStop };
+    /** @param {any} child  Whether it is shown and enabled. */
+    const usable = child=>(child.style & (WS_VISIBLE | WS_DISABLED)) === WS_VISIBLE;
+
+    /**
+     * The control after -- or before -- one within its group. A group runs
+     * from one WS_GROUP control to the next, round the end of the dialog to
+     * its start, whatever either is showing; the next shown and enabled one
+     * in it, wrapping within the group, or the control itself when there is
+     * none. From nothing, or from outside the dialog, the first shown and
+     * enabled control going forward, and none going back.
+     *
+     * @param {any} dialog @param {number} from  A control's handle, or zero.
+     * @param {boolean} forward
+     * @returns {any | null}
+     */
+    const nextGroupItem = (dialog, from, forward)=>{
+        // A child searched through is its controls, and no item of its own.
+        const items = tabSequence(dialog, from).filter(child=>!searchedThrough(child)
+            || child.hwnd === from);
+        const at = from === 0 ? -1 : items.findIndex(child=>child.hwnd === from);
+        if (at === -1)
+        {
+            return forward ? items.find(usable) ?? null : null;
+        }
+        const count = items.length;
+        /** @param {number} index */
+        const opens = index=>(items[index].style & WS_GROUP) !== 0;
+        let start = at;
+        for (let step = 0; step < count && !opens(start); step++)
+        {
+            start = (start + count - 1) % count;
+        }
+        /** @type {any[]} */
+        const group = [items[start]];
+        for (let index = (start + 1) % count; index !== start && !opens(index);
+            index = (index + 1) % count)
+        {
+            group.push(items[index]);
+        }
+        const place = group.indexOf(items[at]);
+        for (let step = 1; step < group.length; step++)
+        {
+            const child = group[(place + (forward ? step : group.length - step)) % group.length];
+            if (usable(child))
+            {
+                return child;
+            }
+        }
+        return items[at];
+    };
+
+    return { nextTabStop, nextGroupItem };
 }

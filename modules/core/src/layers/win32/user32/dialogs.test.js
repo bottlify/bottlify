@@ -1064,13 +1064,12 @@ test('a template naming a control of a class nobody has makes no dialog, unless 
     assert.notEqual(fns.GetDlgItem.handler([standard, 1]), 0);
 });
 
-test('GetNextDlgTabItem walks into a shown, enabled WS_EX_CONTROLPARENT child as if its '
-    + 'controls were the dialog\'s own', ()=>{
-    // user32's dialog tests (test_GetNextDlgItem) build this hierarchy of
-    // statics and ask for the tab item after or before one: a child with
-    // WS_EX_CONTROLPARENT is searched through, DS_CONTROL alone is not, a
-    // control that could not be reached that way is searched from where it
-    // is, and the item before nothing, or before the dialog itself, is none.
+/**
+ * The hierarchy of statics user32's dialog tests (test_GetNextDlgItem) ask
+ * the tab and group items of, made here window for window: a handle by
+ * Wine's id, and the id of a handle.
+ */
+function dialogHierarchy(){
     const WS_CHILD = 0x40000000;
     const WS_VISIBLE = 0x10000000;
     const WS_DISABLED = 0x08000000;
@@ -1149,6 +1148,17 @@ test('GetNextDlgTabItem walks into a shown, enabled WS_EX_CONTROLPARENT child as
             10, hwnd.get(parent) ?? 0, parent === 0 ? 0 : 2000 + id, HINSTANCE, 0]));
     }
     const idOf = (/** @type {number} */ handle)=>[...hwnd].find(([, each])=>each === handle)?.[0];
+    return { fns, hwnd, idOf };
+}
+
+test('GetNextDlgTabItem walks into a shown, enabled WS_EX_CONTROLPARENT child as if its '
+    + 'controls were the dialog\'s own', ()=>{
+    // user32's dialog tests (test_GetNextDlgItem) ask for the tab item after
+    // or before one: a child with WS_EX_CONTROLPARENT is searched through,
+    // DS_CONTROL alone is not, a control that could not be reached that way
+    // is searched from where it is, and the item before nothing, or before
+    // the dialog itself, is none.
+    const { fns, hwnd, idOf } = dialogHierarchy();
     /** Wine's test number, the dialog, the control, whether before, and the answer. */
     const records = [
         [2, 6, 0, 1, 0], [4, 6, 6, 1, 0], [6, 6, 0, 0, 67], [8, 6, 6, 0, 67],
@@ -1158,6 +1168,32 @@ test('GetNextDlgTabItem walks into a shown, enabled WS_EX_CONTROLPARENT child as
     for (const [number, dialog, control, previous, expected] of records)
     {
         const found = fns.GetNextDlgTabItem.handler([hwnd.get(dialog) ?? 0,
+            hwnd.get(control) ?? 0, previous]);
+        assert.equal(idOf(found), expected, `test ${number}`);
+    }
+});
+
+test('GetNextDlgGroupItem walks a group round, through a shown, enabled WS_EX_CONTROLPARENT '
+    + 'child as if its controls were the dialog\'s own', ()=>{
+    // user32's dialog tests (test_GetNextDlgItem), the group records: a group
+    // runs from one WS_GROUP control to the next, round the end of the
+    // dialog to its start; the next or previous item in it is the next that
+    // is shown and enabled, wrapping within the group, or the control itself
+    // when there is none; a child with WS_EX_CONTROLPARENT is searched
+    // through, DS_CONTROL alone is not; from nothing, or from the dialog,
+    // the first shown and enabled control, and nothing before it.
+    const { fns, hwnd, idOf } = dialogHierarchy();
+    /** Wine's test number, the dialog, the control, whether before, and the answer. */
+    const records = [
+        [1, 6, 0, 1, 0], [3, 6, 6, 1, 0], [5, 6, 0, 0, 66], [7, 6, 6, 0, 66],
+        [10, 4, 83, 0, 5], [12, 5, 81, 0, 66], [14, 5, 82, 1, 79], [15, 6, 70, 0, 72],
+        [16, 6, 72, 0, 25], [17, 6, 75, 0, 26], [18, 6, 77, 0, 76], [19, 6, 79, 0, 66],
+        [20, 6, 71, 0, 72], [21, 6, 64, 0, 66], [22, 6, 25, 0, 70], [23, 6, 68, 0, 68],
+        [24, 6, 25, 1, 72], [25, 1, 70, 0, 72], [35, 2, 0, 0, 60],
+    ];
+    for (const [number, dialog, control, previous, expected] of records)
+    {
+        const found = fns.GetNextDlgGroupItem.handler([hwnd.get(dialog) ?? 0,
             hwnd.get(control) ?? 0, previous]);
         assert.equal(idOf(found), expected, `test ${number}`);
     }

@@ -121,7 +121,6 @@ const SHELL_FONT_FACE = 'MS Shell Dlg';
 
 /** The style bits a dialog's own window carries. */
 const WS_CHILD = 0x40000000;
-const WS_GROUP = 0x00020000;
 const WS_DISABLED = 0x08000000;
 /** The dialog styles that decide where it goes and what frame it has. */
 const DS_MODALFRAME = 0x0080;
@@ -689,41 +688,8 @@ export function createDialogFunctions(options){
         ? /** @type {Promise<number>} */ (created).then(then)
         : then(/** @type {number} */ (created)));
 
-    const { nextTabStop } = createTabWalk({ children: host.children,
+    const { nextTabStop, nextGroupItem } = createTabWalk({ children: host.children,
         recordOf: hwnd=>windows.get(hwnd) });
-
-    /**
-     * The control after -- or before -- one within its group: the run of
-     * siblings from one WS_GROUP to the next, which is what the arrow keys
-     * walk.
-     *
-     * @param {any} dialog @param {number} from @param {boolean} forward
-     * @returns {any | null}
-     */
-    const nextGroupItem = (dialog, from, forward)=>{
-        const all = host.children(dialog);
-        const at = all.findIndex(child=>child.hwnd === from);
-        if (at === -1)
-        {
-            return null;
-        }
-        let first = at;
-        while (first > 0 && (all[first].style & WS_GROUP) === 0)
-        {
-            first--;
-        }
-        let last = at;
-        while (last + 1 < all.length && (all[last + 1].style & WS_GROUP) === 0)
-        {
-            last++;
-        }
-        const group = all.slice(first, last + 1).filter(child=>
-            (child.style & WS_VISIBLE) !== 0 && (child.style & WS_DISABLED) === 0);
-        const index = group.findIndex(child=>child.hwnd === from);
-        return group.length === 0
-            ? null
-            : group[(index + (forward ? 1 : group.length - 1)) % group.length];
-    };
 
     /** @param {number} hwnd @param {number} dialog  Whether hwnd is the dialog or inside it. */
     const within = (hwnd, dialog)=>{
@@ -1225,16 +1191,21 @@ export function createDialogFunctions(options){
          * HWND GetNextDlgGroupItem(HWND hDlg, HWND hCtl, BOOL bPrevious)
          *
          * The next control in the same group, which is what the arrow keys
-         * move between.
+         * move between -- inside the children the walk searches through --
+         * or the first from nothing or the dialog itself, before which there
+         * is none.
          */
         GetNextDlgGroupItem: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hwnd, from, previous])=>{
                 const dialog = live(hwnd);
-                return dialog
-                    ? nextGroupItem(dialog, from >>> 0, (previous >>> 0) === 0)?.hwnd ?? 0
-                    : 0;
+                const start = (from >>> 0) === (hwnd >>> 0) ? 0 : from >>> 0;
+                if (!dialog || (start === 0 && (previous >>> 0) !== 0))
+                {
+                    return 0;
+                }
+                return nextGroupItem(dialog, start, (previous >>> 0) === 0)?.hwnd ?? 0;
             },
         },
 
