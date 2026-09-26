@@ -72,7 +72,7 @@ builds its renderer without them; the first four also reach the OpenGL device re
 | `backend()` | The WebGPU backend, built on first call; throws when no `device` was configured. |
 | `available()` | Whether this build has a GPU. |
 | `adapter()` | `config.device.adapter` or null. |
-| `present(surface)` | Shows a surface that lives in guest memory through the presenter, for anything outside the drawing libraries (a film, an overlay). |
+| `present(surface, window?, exclusive?)` | Shows a surface that lives in guest memory through the presenter, for anything outside the drawing libraries (a film, an overlay), the way a DirectDraw primary is shown: as the picture of `window` (0, or a handle that names no window, for the program's topmost; a child stands for its top-level window), copied into the desktop over that window's client area -- the whole screen when `exclusive` -- less every shown top-level window above it, and the desktop shown. A surface the GPU owns, one of another size than the screen, one with no window to own it, or one whose region is the whole screen is shown as it is, with nothing over it seen. |
 | `screen()` | The current `{ width, height, bitsPerPixel }`. |
 | `create(name, options?)` | Makes one API object by name: `ddraw`, `d3d8`, `d3d9`, `opengl`, `d3d10`, `vulkan`. Direct3D 7 has no factory of its own; it is reached from a DirectDraw object. |
 | `apis()` | The six names above. |
