@@ -115,3 +115,25 @@ test('a format ending inside a specifier stops there', ()=>{
     assert.equal(render('end%'), 'end%');
     assert.equal(render('end%-05'), 'end%');
 });
+
+test('a narrow format under the C locale reads %S and %ls as wide text, a byte a character', ()=>{
+    // Wine's msvcrt test_sprintf: %S, %ls and %ws of L"wide" are "wide", %Ls
+    // is narrow, %C of U+3042 writes nothing where %c writes a low byte, and
+    // %S of it writes nothing on the older runtimes (the later answer -1).
+    const wide = new Map([[0x500, 'wide'], [0x600, 'あ'], [0x700, 'abあcd']]);
+    /** @param {string} format @param {number[]} varargs */
+    const narrow = (format, varargs)=>formatToString(format, varargs, readString,
+        { readWideString: pointer=>wide.get(pointer) ?? '', cLocale: true });
+    assert.equal(narrow('%S', [0x500]), 'wide');
+    assert.equal(narrow('%ls', [0x500]), 'wide');
+    assert.equal(narrow('%-10ws', [0x500]), 'wide      ');
+    assert.equal(narrow('%10ws', [0x500]), '      wide');
+    assert.equal(narrow('%Ls', [HELLO]), 'world');
+    assert.equal(narrow('a%Cb', [0x3042]), 'ab');
+    assert.equal(narrow('%C', [0x61]), 'a');
+    assert.equal(narrow('%c', [0xa082]), '\x82');
+    assert.equal(narrow('%S', [0x600]), '');
+    assert.equal(narrow('%S|', [0x700]), 'ab|', 'the string stops where a byte cannot follow');
+    assert.equal(formatToString('%C', [0x3042], readString), 'あ',
+        'without the option the character is left to the caller');
+});

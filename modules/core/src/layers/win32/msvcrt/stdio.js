@@ -162,6 +162,9 @@ export function createStdioFunctions(host){
     /** @param {number} pointer */
     const readString = pointer=>host.readCString(pointer, MAX_STRING);
 
+    /** @param {number} pointer */
+    const readWide = pointer=>wideStringAt(host.readMemory, pointer);
+
     /** @param {number} code */
     const fail = code=>{
         host.errno?.(code);
@@ -485,7 +488,8 @@ export function createStdioFunctions(host){
             refuseWrite(stream);
             return EOF;
         }
-        const text = formatToString(readString(format), values, readString);
+        const text = formatToString(readString(format), values, readString,
+            { readWideString: readWide, cLocale: true });
         return emit(stream, bytesOf(text)) === text.length ? text.length : EOF;
     };
 
@@ -587,9 +591,6 @@ export function createStdioFunctions(host){
         }
         return units.length;
     };
-
-    /** @param {number} pointer */
-    const readWide = pointer=>wideStringAt(host.readMemory, pointer);
 
     /**
      * fwprintf's body: the count of wide characters written, or -1.

@@ -129,6 +129,15 @@ test('fprintf formats and writes to the stream, not to stdout', ()=>{
     assert.equal(String.fromCharCode(...files.files['C:\\new.txt']), 'player scored 90%');
 });
 
+test('fprintf reads %ls as a wide string, stopping where the C locale has no byte', ()=>{
+    const { memory, files, fns } = build();
+    const stream = fns.fopen.handler([memory.put('C:\\new.txt'), memory.put('wb')]);
+    const format = memory.put('%ls|%S');
+    assert.equal(fns.fprintf.handler([stream, format, memory.putWide('caf\xe9'),
+        memory.putWide('ab\u263acd')]), 7);
+    assert.equal(String.fromCharCode(...files.files['C:\\new.txt']), 'caf\xe9|ab');
+});
+
 test('fprintf on a stream not open for writing is a negative count, nothing written', ()=>{
     const { memory, fns } = build();
     const stream = fns.fopen.handler([memory.put('C:\\data.bin'), memory.put('rb')]);

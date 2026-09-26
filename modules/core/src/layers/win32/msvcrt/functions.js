@@ -193,9 +193,17 @@ export function createMsvcrtFunctions(host){
      */
     const copyOf = (address, length)=>host.readMemory(address, length).slice();
 
+    /**
+     * What a narrow printer writes: %S and %ls read wide strings, and the
+     * text is bytes under the C locale (see `formatToString`).
+     *
+     * @param {number} format @param {number[]} values
+     */
+    const narrowText = (format, values)=>formatToString(readString(format), values, readString,
+        { readWideString: readWide, cLocale: true });
+
     /** @param {number[]} args @param {number} fixed */
-    const render = (args, fixed)=>
-        formatToString(readString(args[fixed - 1]), args.slice(fixed), readString);
+    const render = (args, fixed)=>narrowText(args[fixed - 1], args.slice(fixed));
 
     /** int atoi(const char *str) */
     const atoi = {
@@ -262,7 +270,7 @@ export function createMsvcrtFunctions(host){
             errno(EINVAL);
             return -1;
         }
-        const text = formatToString(readString(format), values, readString);
+        const text = narrowText(format, values);
         if (text.length + 1 > room)
         {
             host.writeMemory(buffer, new Uint8Array(1));
@@ -686,7 +694,7 @@ export function createMsvcrtFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([buffer, format, list])=>{
-                const text = formatToString(readString(format), varargsAt(list), readString);
+                const text = narrowText(format, varargsAt(list));
                 writeString(buffer, text);
                 return text.length;
             },
@@ -704,7 +712,7 @@ export function createMsvcrtFunctions(host){
             /** @param {number[]} args */
             handler: ([buffer, count, format, list])=>{
                 const limit = count >>> 0;
-                const text = formatToString(readString(format), varargsAt(list), readString);
+                const text = narrowText(format, varargsAt(list));
                 if (text.length > limit)
                 {
                     host.writeMemory(buffer, packInto(new Uint8Array(limit), text));

@@ -406,6 +406,19 @@ test('_vsnprintf formats from a list in memory and truncates the way _snprintf d
     assert.equal(fns._vsnprintf.argBytes, 16);
 });
 
+test('sprintf reads %S and %ls as the wide strings they are', ()=>{
+    // Wine's msvcrt test_sprintf: "%S" and "%ls" of L"wide" are "wide".
+    const { fns, host, put, at } = setup();
+    const view = new DataView(host.bytes.buffer);
+    [...'wide\0'].forEach((c, index)=>view.setUint16(0x100 + index * 2, c.charCodeAt(0), true));
+    assert.equal(fns.sprintf.handler([0x200, put(0x140, '%S/%ls'), 0x100, 0x100]), 9);
+    assert.equal(at(0x200), 'wide/wide');
+    const list = 0x180;
+    view.setUint32(list, 0x100, true);
+    assert.equal(fns._vsnprintf.handler([0x200, 16, put(0x140, '<%S>'), list]), 6);
+    assert.equal(at(0x200), '<wide>');
+});
+
 test('_vsnwprintf formats wide text from a list, terminated only when there is room', ()=>{
     // Wine's msvcrt test_vsnwprintf, and test_snprintf's lengths for the
     // narrow twin: text shorter than the count is terminated, text exactly
