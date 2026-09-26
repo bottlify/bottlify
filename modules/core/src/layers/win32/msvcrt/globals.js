@@ -26,6 +26,7 @@ export const EACCES = 13;
 export const EEXIST = 17;
 export const EINVAL = 22;
 export const EMFILE = 24;
+export const ENOSPC = 28;
 export const ERANGE = 34;
 export const ENOTEMPTY = 41;
 

@@ -35,6 +35,7 @@ import { createStartupFunctions } from './startup.js';
 import { createStdioFunctions } from './stdio.js';
 import { createThreadFunctions } from './threads.js';
 import { createGlobals } from './globals.js';
+import { createDescriptors, createIoFunctions } from './io.js';
 
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
@@ -756,6 +757,14 @@ export function createMsvcrtFunctions(host){
     /** @param {number} code */
     const errno = code=>globals.set('errno', code);
 
+    // The descriptor table the low-level calls hand out numbers from and the
+    // streams stand on, so `_fileno(f)` is a number `_read` accepts.
+    const descriptors = host.files
+        ? createDescriptors({
+            files: host.files, write: host.write, errno, fmode: ()=>globals.get('fmode'),
+        })
+        : null;
+
     const narrow = {
         ...table,
         ...createStringFunctions({
@@ -838,6 +847,15 @@ export function createMsvcrtFunctions(host){
                 files: host.files,
                 errno,
             })
+            : {}),
+        ...(descriptors
+            ? createIoFunctions({
+                readMemory: host.readMemory,
+                writeMemory: host.writeMemory,
+                readCString: host.readCString,
+                files: host.files,
+                errno,
+            }, descriptors)
             : {}),
         ...(host.files && host.allocate && host.free
             ? createStdioFunctions({

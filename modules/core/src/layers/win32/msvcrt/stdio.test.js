@@ -7,53 +7,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStdioFunctions } from './stdio.js';
-import { fakeMemory } from './harness.test.js';
+import { fakeMemory, fakeVolume } from './harness.test.js';
 
-/**
- * A volume of byte arrays: a node is a path, reads and writes go straight
- * to the array, and a read may be handed back late to stand for a block
- * that is still on its way.
- *
- * @param {Record<string, Uint8Array>} files
- * @param {{ late?: boolean }} [options]
- */
-export function fakeVolume(files, { late = false } = {}){
-    /** @type {string[]} */
-    const closed = [];
-    return {
-        files,
-        closed,
-        /** @param {string} path @param {{ create?: boolean, truncate?: boolean }} mode */
-        open(path, mode){
-            if (!files[path] && !mode.create)
-            {
-                return null;
-            }
-            if (!files[path] || mode.truncate)
-            {
-                files[path] = new Uint8Array(0);
-            }
-            return path;
-        },
-        /** @param {string} path */
-        stat: path=>(files[path] ? { size: files[path].length } : null),
-        /** @param {string} node @param {number} at @param {number} length */
-        read(node, at, length){
-            const bytes = files[node].slice(at, at + length);
-            return late ? Promise.resolve(bytes) : bytes;
-        },
-        /** @param {string} node @param {number} at @param {Uint8Array} bytes */
-        write(node, at, bytes){
-            const grown = new Uint8Array(Math.max(files[node].length, at + bytes.length));
-            grown.set(files[node]);
-            grown.set(bytes, at);
-            files[node] = grown;
-            return bytes.length;
-        },
-        /** @param {string} node */
-        close: node=>closed.push(node),
-    };
-}
+// The volume fake lives with the rest of the harness; other layers' tests
+// import it from here.
+export { fakeVolume };
 
 /** Where the runtime's `_iob` sits, as the loader would have placed it. */
 const IOB = 0x9000;

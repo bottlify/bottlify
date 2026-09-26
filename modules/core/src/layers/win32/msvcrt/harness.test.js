@@ -143,6 +143,68 @@ export function fakeMemory(base = 0x10000, size = 1 << 20){
 }
 
 /**
+ * A volume of byte arrays: a node is a path, reads and writes go straight
+ * to the array, and a read may be handed back late to stand for a block
+ * that is still on its way. A name in `directories` is a directory, listed
+ * with the files whose names it holds.
+ *
+ * @param {Record<string, Uint8Array>} files
+ * @param {{ late?: boolean, directories?: string[], modified?: number }} [options]
+ */
+export function fakeVolume(files, { late = false, directories = [], modified = 0 } = {}){
+    /** @type {string[]} */
+    const closed = [];
+    const folders = new Set(directories);
+    const volume = {
+        files,
+        closed,
+        folders,
+        /** How many reads reached the volume. */
+        reads: 0,
+        /**
+         * @param {string} path
+         * @param {{ create?: boolean, truncate?: boolean, failIfExists?: boolean }} mode
+         */
+        open(path, mode){
+            if (folders.has(path) || (files[path] && mode.failIfExists)
+                || (!files[path] && !mode.create))
+            {
+                return null;
+            }
+            if (!files[path] || mode.truncate)
+            {
+                files[path] = new Uint8Array(0);
+            }
+            return path;
+        },
+        /** @param {string} path */
+        stat: path=>(folders.has(path)
+            ? { exists: true, isDirectory: true, size: 0, modified }
+            : (files[path]
+                ? { exists: true, isDirectory: false, size: files[path].length, modified }
+                : null)),
+        /** @param {string} node @param {number} at @param {number} length */
+        read(node, at, length){
+            volume.reads++;
+            const bytes = files[node].slice(at, at + length);
+            return late ? Promise.resolve(bytes) : bytes;
+        },
+        /** @param {string} node @param {number} at @param {Uint8Array} bytes */
+        write(node, at, bytes){
+            const grown = new Uint8Array(Math.max(files[node].length, at + bytes.length));
+            grown.set(files[node]);
+            grown.set(bytes, at);
+            files[node] = grown;
+            return bytes.length;
+        },
+        /** @param {string} node */
+        close: node=>closed.push(node),
+        currentDirectory: ()=>'C:\\game',
+    };
+    return volume;
+}
+
+/**
  * The double a cdecl caller pushed, as the two slots a handler receives.
  *
  * @param {number} value
