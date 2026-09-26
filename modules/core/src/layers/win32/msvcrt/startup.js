@@ -122,11 +122,13 @@ export function splitCommandLine(line){
  * @property {(code: number) => any} exitProcess
  *           Ends the process. Returns whatever the caller must return to stop
  *           the calling thread, since `exit` does not come back.
- * @property {(code: number) => void} [exit]
- *           Records the exit without stopping anything, for a call that has
- *           already left the bridge: `exit` after the handlers it ran in the
- *           guest. The process ends before the thread runs another instruction,
- *           because the run loop reads the code before it hands out a slice.
+ * @property {(code: number) => Promise<number> | null | void} [exit]
+ *           Ends the process without parking, for a call that has already
+ *           left the bridge: `exit` after the handlers it ran in the guest.
+ *           What ExitProcess tells the libraries is told here too, and the
+ *           answer is the promise of that when there is any. The process ends
+ *           before the thread runs another instruction, because the run loop
+ *           reads the code before it hands out a slice.
  * @property {import('./globals.js').Globals} [globals]
  *           The runtime's variables, shared with the functions that set them:
  *           errno is set by whichever call fails. Absent, these are private.
@@ -643,8 +645,8 @@ export function createStartupFunctions(host){
                 {
                     return host.exitProcess(code >>> 0);
                 }
-                return runOnExit().then(()=>{
-                    host.exit?.(code >>> 0);
+                return runOnExit().then(async()=>{
+                    await host.exit?.(code >>> 0);
                     return 0;
                 });
             },

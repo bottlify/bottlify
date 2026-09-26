@@ -713,12 +713,27 @@ export const win32Module = {
          * @param {number} code
          */
         const endProcess = code=>{
+            const told = detachAndEnd(code);
+            return told === null ? bridge.park() : told;
+        };
+
+        /**
+         * The ending itself: null when there was nothing to tell and the code
+         * is recorded already, else the promise of telling the libraries and
+         * then recording it. Apart from endProcess so that a caller which has
+         * already left the bridge -- the runtime's exit, after its atexit
+         * handlers -- ends the process the same way without parking.
+         *
+         * @param {number} code
+         * @returns {Promise<number> | null}
+         */
+        const detachAndEnd = code=>{
             const attached = ending ? [] : (modules.attachedLibraries?.() ?? []);
             ending = true;
             if (attached.length === 0)
             {
                 exitCode = code;
-                return bridge.park();
+                return null;
             }
             const self = kernel.currentThread();
             for (const thread of kernel.threads())
@@ -1078,9 +1093,7 @@ export const win32Module = {
                     // the code and parks the calling thread rather than
                     // returning to a caller that no longer exists.
                     exitProcess: (/** @type {number} */ code)=>endProcess(code),
-                    exit: (/** @type {number} */ code)=>{
-                        exitCode = code;
-                    },
+                    exit: (/** @type {number} */ code)=>detachAndEnd(code),
                     files: volume,
                     // The standard streams are records in the runtime's own
                     // image, wherever the loader put its `_iob`.

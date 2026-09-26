@@ -296,6 +296,43 @@ test('ExitProcess ends the other threads and tells each attached library, last f
     await win32Module.dispose();
 });
 
+test('the runtime\'s exit tells the attached libraries too, after the atexit handlers', async()=>{
+    // exit runs what atexit registered and then ends the process the way
+    // ExitProcess does, DLL_PROCESS_DETACH included; the handlers are guest
+    // code, so by then the call has left the bridge and must not park.
+    const DLL_PROCESS_DETACH = 0;
+    const self = { id: 1, state: 'running' };
+    /** @type {any[]} */
+    const called = [];
+    const { libraries, exitCode } = await build({
+        kernel: {
+            currentThread: ()=>self,
+            threads: ()=>[self],
+            ThreadState: { TERMINATED: 'terminated' },
+            exitThread: ()=>{},
+        },
+        bridge: {
+            /** @param {any} call */
+            callGuest: call=>{
+                called.push([call.entry, call.args]);
+                return Promise.resolve(1);
+            },
+        },
+        modules: {
+            attachedLibraries: ()=>[{ name: 'lib.dll', base: 0x10000000, entryPoint: 0x10001000 }],
+        },
+    });
+    const crt = libraries['msvcrt.dll'];
+    assert.equal(crt.atexit.handler([0x401000]), 0);
+    await crt.exit.handler([5]);
+    assert.deepEqual(called, [
+        [0x401000, []],
+        [0x10001000, [0x10000000, DLL_PROCESS_DETACH, 1]],
+    ], 'the handler, then the library');
+    assert.equal(exitCode(), 5);
+    await win32Module.dispose();
+});
+
 test('ExitProcess with no library to tell ends the process at once', async()=>{
     /** @type {any[]} */
     const ended = [];
