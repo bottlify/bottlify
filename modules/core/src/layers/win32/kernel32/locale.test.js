@@ -288,6 +288,24 @@ test('the Latin-1 half of the ANSI page survives a round trip', ()=>{
     assert.equal(new DataView(host.bytes.buffer).getUint32(used, true), 0);
 });
 
+test('the five positions Windows-1252 leaves undefined round-trip as their own code points', ()=>{
+    // Microsoft's table for the page (bestfit1252.txt) maps 0x81, 0x8D, 0x8F,
+    // 0x90 and 0x9D to U+0081, U+008D, U+008F, U+0090 and U+009D and back, so
+    // text read from those bytes is written back as the same bytes rather than
+    // as the default character.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const undefinedBytes = [0x81, 0x8d, 0x8f, 0x90, 0x9d];
+    host.bytes.set(undefinedBytes, 0x100);
+
+    fns.MultiByteToWideChar.handler([CP_ACP, 0, 0x100, 5, 0x200, 5]);
+    assert.equal(host.readWide(0x200, 5), '\u0081\u008d\u008f\u0090\u009d');
+    const used = 0x400;
+    fns.WideCharToMultiByte.handler([CP_ACP, 0, 0x200, 5, 0x300, 8, 0, used]);
+    assert.deepEqual([...host.bytes.subarray(0x300, 0x305)], undefinedBytes);
+    assert.equal(new DataView(host.bytes.buffer).getUint32(used, true), 0);
+});
+
 test('a conversion that loses nothing says so', ()=>{
     const host = fakeHost();
     const fns = createLocaleFunctions(host);

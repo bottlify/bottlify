@@ -355,6 +355,13 @@ const encodeSingleByte = (text, page)=>{
             bytes[at] = 0x80 + found;
             continue;
         }
+        // A position the page leaves undefined decodes as its own code point,
+        // and goes back as its own byte.
+        if (code < 0x80 + high.length && high[code - 0x80] === 0)
+        {
+            bytes[at] = code;
+            continue;
+        }
         // A table that stops short of the top of the page leaves the rest of
         // it Latin-1, exactly as decoding reads it: an accented letter is a
         // byte of its own there, not the default character.
