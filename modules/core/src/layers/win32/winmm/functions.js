@@ -350,6 +350,16 @@ const dword = value=>new Uint8Array([
 ]);
 
 /**
+ * Which ordinal is which export, for a program that links WINMM.dll by number.
+ * Windows exports PlaySoundA a second time as ordinal 2, with no name.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+export const WINMM_ORDINALS = Object.freeze({
+    2: 'PlaySoundA',
+});
+
+/**
  * @param {WinmmHost} host
  */
 export function createWinmmFunctions(host){

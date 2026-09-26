@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
+import { synthesiseModule } from '../../loader/internal/synth.js';
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
 import {
     createDirectSound, createPublisher, describe,
@@ -749,6 +750,40 @@ test('the library exports the entry points a program links against', ()=>{
     for (const [name, entry] of Object.entries(table))
     {
         assert.equal(entry.argBytes % 4, 0, `${name} is not a whole number of slots`);
+    }
+});
+
+test('the library\'s entry points keep the ordinals Windows gives them', ()=>{
+    // dsound.spec: a program that imports by number binds to these, and a
+    // table numbered in its own declaration order gives it another function
+    // with another argument count -- DirectSoundCreate8 where it compiled
+    // against DirectSoundEnumerateA.
+    const f = fixture();
+    /** @type {Record<string, unknown>} */
+    const table = f.dsound.libraries['DSOUND.dll'];
+    const pinned = f.dsound.ordinals['DSOUND.dll'];
+    assert.deepEqual(pinned, {
+        1: 'DirectSoundCreate', 2: 'DirectSoundEnumerateA', 3: 'DirectSoundEnumerateW',
+        6: 'DirectSoundCaptureCreate', 11: 'DirectSoundCreate8', 12: 'DirectSoundCaptureCreate8',
+    });
+    for (const name of Object.values(pinned))
+    {
+        assert.ok(table[name], `${name} is an export, not a number bound to nothing`);
+    }
+
+    // Through the synthesiser, declared the way the assembling caller declares
+    // them, and read back from the image's own export directory.
+    const declared = new Map(Object.entries(pinned).map(([n, name])=>[name, Number(n)]));
+    const module = synthesiseModule({
+        name: 'DSOUND.dll',
+        base: 0x10000000,
+        exports: Object.keys(table).map((name, at)=>({
+            name, ordinal: declared.get(name), target: 0x20000000 + at * 16,
+        })),
+    });
+    for (const [ordinal, name] of Object.entries(pinned))
+    {
+        assert.equal(module.ordinalOf(name), Number(ordinal), name);
     }
 });
 

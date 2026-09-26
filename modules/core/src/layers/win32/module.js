@@ -45,7 +45,7 @@ import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
 import { createSocketRegistry } from './wsock32/sockets.js';
 import { createLoopbackAdapter } from './wsock32/loopback.js';
-import { createWinmmFunctions } from './winmm/functions.js';
+import { createWinmmFunctions, WINMM_ORDINALS } from './winmm/functions.js';
 import { createMmioFunctions } from './winmm/mmio.js';
 import { createWaveNotifier } from './winmm/notify.js';
 import { createNoticeThread } from './winmm/thread.js';
@@ -1622,6 +1622,7 @@ export const win32Module = {
                 // The one common-controls entry point the header exports by
                 // number: a framework's start-up calls it and nothing else.
                 'COMCTL32.dll': COMCTL32_ORDINALS,
+                'WINMM.dll': WINMM_ORDINALS,
             }),
 
             /**

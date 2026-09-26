@@ -173,6 +173,22 @@ const ZEROED_CAPS = Object.freeze([
     DSCAPS.dwPlayCpuOverheadSwBuffers, DSCAPS.dwReserved1, DSCAPS.dwReserved2,
 ]);
 
+/**
+ * Which ordinal is which export, for a program that links DSOUND.dll by
+ * number: Windows' own, and only for the entry points this table has -- a
+ * number bound to nothing is a call that binds and then jumps into nowhere.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+export const DSOUND_ORDINALS = Object.freeze({
+    1: 'DirectSoundCreate',
+    2: 'DirectSoundEnumerateA',
+    3: 'DirectSoundEnumerateW',
+    6: 'DirectSoundCaptureCreate',
+    11: 'DirectSoundCreate8',
+    12: 'DirectSoundCaptureCreate8',
+});
+
 /** DSBPOSITIONNOTIFY, one per position a program wants to be told about. */
 export const DSBPOSITIONNOTIFY = Object.freeze({
     dwOffset: 0x00,
@@ -1116,6 +1132,9 @@ export function createDirectSound(
                 DllCanUnloadNow: { argBytes: 0, handler: ()=>DS_OK },
             },
         },
+
+        /** The numbers `libraries` is imported by, keyed the same way. */
+        ordinals: { 'DSOUND.dll': DSOUND_ORDINALS },
 
         diagnostics: ()=>({
             buffers: buffers.length,

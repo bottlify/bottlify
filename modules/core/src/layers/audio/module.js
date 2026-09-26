@@ -321,6 +321,13 @@ export const audioModule = {
                 : { ...dsound.libraries, ...mp3.libraries }),
 
             /**
+             * Which ordinal is which export, for the libraries a program
+             * imports by number, keyed like `libraries`. The assembling caller
+             * synthesises each library with these, as it does win32's.
+             */
+            ordinals: ()=>({ ...dsound.ordinals }),
+
+            /**
              * Which of those are redistributable runtimes this engine answers
              * for whoever's copy the program brought (`roadmap/decisions.md`):
              * the MPEG provider a sound library loads out of its own directory

@@ -561,6 +561,16 @@ test('the MPEG provider is a library beside DirectSound, with an entry point', a
     });
 });
 
+test('DirectSound\'s ordinals are offered beside its table', async()=>{
+    // The assembling caller synthesises every library with the numbers its
+    // layer declares, and a program that imports by number needs Windows'.
+    const f = await playing();
+    const ordinals = f.api.ordinals()['DSOUND.dll'];
+    assert.equal(ordinals[1], 'DirectSoundCreate');
+    assert.equal(ordinals[2], 'DirectSoundEnumerateA');
+    assert.equal(ordinals[11], 'DirectSoundCreate8');
+});
+
 test('the MPEG provider can be left out, for a run to compare against', async()=>{
     const f = fixture();
     const api = await audioModule.create({ ...f.config, mp3: false }, {
