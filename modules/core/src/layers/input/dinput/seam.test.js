@@ -15,7 +15,8 @@ import {
     GUID_SysKeyboard, GUID_SysMouse,
     IID_IDirectInputA, IID_IDirectInputW, IID_IDirectInput7A,
     IID_IDirectInput8A, IID_IDirectInput8W, IID_IDirectInputDeviceA, IID_IDirectInputDeviceW,
-    IID_IDirectInputDevice2A, IID_IDirectInputDevice8A, IID_IDirectInputDevice8W,
+    IID_IDirectInputDevice2A, IID_IDirectInputDevice7A, IID_IDirectInputDevice8A,
+    IID_IDirectInputDevice8W,
     IDIRECTINPUT_SLOTS, IDIRECTINPUT7_SLOTS, IDIRECTINPUT8_SLOTS,
     IDIRECTINPUTDEVICE_SLOTS, IDIRECTINPUTDEVICE2_SLOTS, IDIRECTINPUTDEVICE7_SLOTS,
     IDIRECTINPUTDEVICE8_SLOTS,
@@ -640,6 +641,41 @@ test('a mouse reports three axes', ()=>{
     f.bridge.call(f.device, 'GetCapabilities', [AT.caps]);
     assert.equal(f.memory.u32(AT.caps + DIDEVCAPS.dwAxes), 3);
     assert.equal(f.memory.u32(AT.caps + DIDEVCAPS.dwButtons), 8);
+});
+
+test('GetCapabilities names the device type in the codes of the version that made it', ()=>{
+    // device8.c test_sys_mouse and test_sys_keyboard: the family in the low
+    // byte and the subtype above it, DI8DEVTYPE_* from 8 and DIDEVTYPE_*
+    // before it -- the mouse's subtype unknown, the keyboard's PC enhanced.
+    const f = fixture();
+    const root8 = directInput8(f, false);
+    const cases = [
+        [f.root, GUID_SysMouse, 0x0102],
+        [f.root, GUID_SysKeyboard, 0x0403],
+        [root8, GUID_SysMouse, 0x0112],
+        [root8, GUID_SysKeyboard, 0x0413],
+    ];
+    for (const [root, guid, devType] of /** @type {[number, string, number][]} */ (cases))
+    {
+        writeGuid(f.memory, AT.guid, guid);
+        assert.equal(f.bridge.call(root, 'CreateDevice', [AT.guid, AT.out, 0]), DI_OK);
+        const device = f.memory.u32(AT.out);
+        f.memory.setU32(AT.caps + DIDEVCAPS.dwSize, DIDEVCAPS.SIZE);
+        assert.equal(f.bridge.call(device, 'GetCapabilities', [AT.caps]), DI_OK);
+        assert.equal(f.memory.u32(AT.caps + DIDEVCAPS.dwDevType), devType,
+            `${guid} from ${f.bridge.recordAt(root).id}`);
+        // DIDC_ATTACHED | DIDC_EMULATED, as both tests expect of the system pair.
+        assert.equal(f.memory.u32(AT.caps + DIDEVCAPS.dwFlags), 0x5);
+    }
+});
+
+test('a device asked for a later generation keeps its version\'s device type', ()=>{
+    const f = mouse();
+    const adapter = f.bridge.recordAt(f.device).object;
+    const device7 = f.bridge.publishInterface(adapter, IID_IDirectInputDevice7A);
+    f.memory.setU32(AT.caps + DIDEVCAPS.dwSize, DIDEVCAPS.SIZE);
+    assert.equal(f.bridge.call(device7, 'GetCapabilities', [AT.caps]), DI_OK);
+    assert.equal(f.memory.u32(AT.caps + DIDEVCAPS.dwDevType), 0x0102);
 });
 
 test('GetDeviceStatus knows the two devices and nothing else', ()=>{

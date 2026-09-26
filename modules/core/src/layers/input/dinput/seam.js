@@ -62,7 +62,11 @@ const DI8DEVTYPE_KEYBOARD = 0x13;
 const DIDEVTYPE_MOUSE = 2;
 const DIDEVTYPE_KEYBOARD = 3;
 const DI8DEVTYPEMOUSE_TRADITIONAL = 2;
+/** The same value in both generations' subtype tables, as PCENH is. */
+const DEVTYPEMOUSE_UNKNOWN = 1;
 const DI8DEVTYPEKEYBOARD_PCENH = 4;
+const DIDC_ATTACHED = 0x00000001;
+const DIDC_EMULATED = 0x00000004;
 const DIEDFL_FORCEFEEDBACK = 0x00000100;
 
 /** The devices a program creates, named by the GUIDs it was compiled with. */
@@ -411,7 +415,19 @@ export function createDirectInput(
     /** @type {Map<string, any>} */
     const devices = new Map();
 
-    /** @type {Record<string, (target: any, args: number[]) => number>} */
+    /**
+     * What a device says it is: its family in the low byte, in the codes of
+     * the generation the interface belongs to, and its subtype above that.
+     * The system mouse's subtype is unknown, not traditional -- the answer
+     * Windows gives in Wine's device8.c, where Wine's own differs.
+     *
+     * @param {any} device @param {boolean} legacy
+     */
+    const devTypeOf = (device, legacy)=>(device.kind === KEYBOARD
+        ? (legacy ? DIDEVTYPE_KEYBOARD : DI8DEVTYPE_KEYBOARD) | DI8DEVTYPEKEYBOARD_PCENH << 8
+        : (legacy ? DIDEVTYPE_MOUSE : DI8DEVTYPE_MOUSE) | DEVTYPEMOUSE_UNKNOWN << 8);
+
+    /** @type {Record<string, (target: any, args: number[], descriptor?: any) => number>} */
     const deviceMethods = {
         /** HRESULT Acquire(void) */
         Acquire(device){
@@ -596,14 +612,15 @@ export function createDirectInput(
         },
 
         /** HRESULT GetCapabilities(LPDIDEVCAPS) */
-        GetCapabilities(device, [caps]){
+        GetCapabilities(device, [caps], descriptor){
             if ((caps >>> 0) === 0 || readU32(caps + DIDEVCAPS.dwSize) < DIDEVCAPS.SIZE)
             {
                 return DIERR_INVALIDPARAM;
             }
             const keyboard = device.kind === KEYBOARD;
-            writeU32(caps + DIDEVCAPS.dwFlags, 0x00000001 | 0x00000004); // ATTACHED | POLLEDDEVICE
-            writeU32(caps + DIDEVCAPS.dwDevType, keyboard ? 0x03 : 0x02); // KEYBOARD | MOUSE
+            writeU32(caps + DIDEVCAPS.dwFlags, DIDC_ATTACHED | DIDC_EMULATED);
+            writeU32(caps + DIDEVCAPS.dwDevType,
+                devTypeOf(device, descriptor?.legacy === true));
             writeU32(caps + DIDEVCAPS.dwAxes, keyboard ? 0 : 3);
             writeU32(caps + DIDEVCAPS.dwButtons, keyboard ? KEYBOARD_KEYS : 8);
             writeU32(caps + DIDEVCAPS.dwPOVs, 0);
@@ -622,15 +639,25 @@ export function createDirectInput(
         },
     };
 
+    // The generation and the width travel with the interface, as they do on
+    // the roots: they are what GetCapabilities' device type and the string
+    // structures are answered in.
     const deviceInterfaces = ()=>[
-        describe(IID_IDirectInputDeviceA, IDIRECTINPUTDEVICE_SLOTS, deviceMethods),
-        describe(IID_IDirectInputDeviceW, IDIRECTINPUTDEVICE_SLOTS, deviceMethods),
-        describe(IID_IDirectInputDevice2A, IDIRECTINPUTDEVICE2_SLOTS, deviceMethods),
-        describe(IID_IDirectInputDevice2W, IDIRECTINPUTDEVICE2_SLOTS, deviceMethods),
-        describe(IID_IDirectInputDevice7A, IDIRECTINPUTDEVICE7_SLOTS, deviceMethods),
-        describe(IID_IDirectInputDevice7W, IDIRECTINPUTDEVICE7_SLOTS, deviceMethods),
+        describe(IID_IDirectInputDeviceA, IDIRECTINPUTDEVICE_SLOTS, deviceMethods,
+            { legacy: true }),
+        describe(IID_IDirectInputDeviceW, IDIRECTINPUTDEVICE_SLOTS, deviceMethods,
+            { legacy: true, wide: true }),
+        describe(IID_IDirectInputDevice2A, IDIRECTINPUTDEVICE2_SLOTS, deviceMethods,
+            { legacy: true }),
+        describe(IID_IDirectInputDevice2W, IDIRECTINPUTDEVICE2_SLOTS, deviceMethods,
+            { legacy: true, wide: true }),
+        describe(IID_IDirectInputDevice7A, IDIRECTINPUTDEVICE7_SLOTS, deviceMethods,
+            { legacy: true }),
+        describe(IID_IDirectInputDevice7W, IDIRECTINPUTDEVICE7_SLOTS, deviceMethods,
+            { legacy: true, wide: true }),
         describe(IID_IDirectInputDevice8A, IDIRECTINPUTDEVICE8_SLOTS, deviceMethods),
-        describe(IID_IDirectInputDevice8W, IDIRECTINPUTDEVICE8_SLOTS, deviceMethods),
+        describe(IID_IDirectInputDevice8W, IDIRECTINPUTDEVICE8_SLOTS, deviceMethods,
+            { wide: true }),
     ];
 
     /** @param {string} guid */
