@@ -47,6 +47,7 @@
 import { ANY_WINDOW, WM_QUIT } from './messages.js';
 import { readMessage, readRect, writeRect } from './structs.js';
 import { WS_VISIBLE, frameOf } from './frame.js';
+import { createTabWalk } from './tabwalk.js';
 import {
     DLGC_BUTTON, DLGC_DEFPUSHBUTTON, DLGC_HASSETSEL, DLGC_WANTALLKEYS,
     DLGC_WANTTAB, DLGWINDOWEXTRA, DWLP_DLGPROC, IDCANCEL, IDOK, WM_GETDLGCODE, WM_SETFONT,
@@ -120,15 +121,12 @@ const SHELL_FONT_FACE = 'MS Shell Dlg';
 
 /** The style bits a dialog's own window carries. */
 const WS_CHILD = 0x40000000;
-const WS_TABSTOP = 0x00010000;
 const WS_GROUP = 0x00020000;
 const WS_DISABLED = 0x08000000;
 /** The dialog styles that decide where it goes and what frame it has. */
 const DS_MODALFRAME = 0x0080;
 const DS_CENTER = 0x0800;
 const WS_EX_DLGMODALFRAME = 0x00000001;
-/** A child whose own controls Tab moves between as if they were the dialog's. */
-const WS_EX_CONTROLPARENT = 0x00010000;
 
 /**
  * A DLGTEMPLATEEX begins with a version of 1 and a signature of 0xffff, where
@@ -691,79 +689,8 @@ export function createDialogFunctions(options){
         ? /** @type {Promise<number>} */ (created).then(then)
         : then(/** @type {number} */ (created)));
 
-    /**
-     * Whether Tab searches a child's controls rather than the child: one
-     * with WS_EX_CONTROLPARENT, shown and enabled, as a property sheet's
-     * page is inside the sheet.
-     *
-     * @param {any} child
-     */
-    const searchedThrough = child=>(child.exStyle & WS_EX_CONTROLPARENT) !== 0
-        && (child.style & (WS_VISIBLE | WS_DISABLED)) === WS_VISIBLE;
-
-    /** @param {any} child  Whether Tab stops at it. */
-    const stopsTab = child=>!searchedThrough(child)
-        && (child.style & (WS_TABSTOP | WS_VISIBLE | WS_DISABLED)) === (WS_TABSTOP | WS_VISIBLE);
-
-    /**
-     * The windows inside a dialog in the order Tab meets them: each child,
-     * then, for one it searches through, that child's own. The windows
-     * around `from` are laid out too, so a control Tab could not have
-     * reached is searched from where it stands.
-     *
-     * @param {any} dialog @param {number} from
-     * @returns {any[]}
-     */
-    const tabSequence = (dialog, from)=>{
-        const around = new Set();
-        for (let at = windows.get(from); at && at.hwnd !== dialog.hwnd; at = windows.get(at.parent))
-        {
-            around.add(at.hwnd);
-        }
-        /** @type {any[]} */
-        const sequence = [];
-        /** @param {any} parent */
-        const visit = parent=>{
-            for (const child of host.children(parent))
-            {
-                sequence.push(child);
-                if (searchedThrough(child) || around.has(child.hwnd))
-                {
-                    visit(child);
-                }
-            }
-        };
-        visit(dialog);
-        return sequence;
-    };
-
-    /**
-     * The control after -- or before -- one that stops Tab, wrapping round.
-     * From nothing, or from outside the dialog, the first or the last.
-     *
-     * @param {any} dialog @param {number} from  A control's handle, or zero.
-     * @param {boolean} forward
-     * @returns {any | null}
-     */
-    const nextTabStop = (dialog, from, forward)=>{
-        const sequence = tabSequence(dialog, from);
-        const at = from === 0 ? -1 : sequence.findIndex(child=>child.hwnd === from);
-        if (at === -1)
-        {
-            const stops = sequence.filter(stopsTab);
-            return (forward ? stops[0] : stops[stops.length - 1]) ?? null;
-        }
-        for (let step = 1; step <= sequence.length; step++)
-        {
-            const child = sequence[(at + (forward ? step : sequence.length - step))
-                % sequence.length];
-            if (stopsTab(child))
-            {
-                return child;
-            }
-        }
-        return null;
-    };
+    const { nextTabStop } = createTabWalk({ children: host.children,
+        recordOf: hwnd=>windows.get(hwnd) });
 
     /**
      * The control after -- or before -- one within its group: the run of

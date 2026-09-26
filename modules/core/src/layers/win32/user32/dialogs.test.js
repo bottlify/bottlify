@@ -975,6 +975,61 @@ test('DefDlgProcA(WM_SETFOCUS) passes the focus to the first control that stops 
     assert.equal(seen[1].wParam, 0);
 });
 
+test('DefDlgProcA(WM_NEXTDLGCTL) moves the focus to the next tab stop, or the one named, '
+    + 'restyling the push buttons and keeping the default id', ()=>{
+    // user32's dialog tests (test_WM_NEXTDLGCTL): an edit, a push button and
+    // another with IDCANCEL, IDCANCEL the default id. From the edit the
+    // focus moves to the first button, which takes BS_DEFPUSHBUTTON from the
+    // second, then to the second, which takes it back, then round to the
+    // edit, the default id IDCANCEL throughout. As documented, wParam names
+    // the control when lParam's low word is TRUE and says which way to go
+    // otherwise.
+    const DEFDLGPROC = 0x404000;
+    const WM_NEXTDLGCTL = 0x0028;
+    const DM_SETDEFID = 0x0401;
+    const DM_GETDEFID = 0x0400;
+    const GWL_STYLE = -16;
+    const WS_CHILD = 0x40000000;
+    const WS_VISIBLE = 0x10000000;
+    const WS_TABSTOP = 0x00010000;
+    const BS_PUSHBUTTON = 0;
+    const BS_DEFPUSHBUTTON = 1;
+    const IDCANCEL = 2;
+    const context = setup();
+    const { memory, fns } = context;
+    const dialog = customDialog(context, DEFDLGPROC);
+    /** @param {string} name @param {number} id @param {number} style */
+    const control = (name, id, style)=>{
+        memory.putString(TEXT, name);
+        return fns.CreateWindowExA.handler([0, TEXT, 0, WS_CHILD | WS_VISIBLE | WS_TABSTOP
+            | style, 0, 0, 40, 20, dialog, id, HINSTANCE, 0]);
+    };
+    const edit = control('Edit', 101, 0);
+    const first = control('Button', 201, BS_PUSHBUTTON);
+    const second = control('Button', IDCANCEL, BS_PUSHBUTTON);
+    fns.DefDlgProcA.handler([dialog, DM_SETDEFID, IDCANCEL, 0]);
+    /** @param {number} hwnd */
+    const kind = hwnd=>fns.GetWindowLongA.handler([hwnd, GWL_STYLE]) & 0x0f;
+    const defaultId = ()=>fns.DefDlgProcA.handler([dialog, DM_GETDEFID, 0, 0]) & 0xffff;
+    fns.SetFocus.handler([edit]);
+
+    assert.equal(fns.DefDlgProcA.handler([dialog, WM_NEXTDLGCTL, 0, 0]), 0);
+    assert.equal(fns.GetFocus.handler([]), first);
+    assert.equal(defaultId(), IDCANCEL, 'the default id stays');
+    assert.deepEqual([kind(first), kind(second)], [BS_DEFPUSHBUTTON, BS_PUSHBUTTON]);
+    fns.DefDlgProcA.handler([dialog, WM_NEXTDLGCTL, 0, 0]);
+    assert.equal(fns.GetFocus.handler([]), second);
+    assert.deepEqual([kind(first), kind(second)], [BS_PUSHBUTTON, BS_DEFPUSHBUTTON]);
+    fns.DefDlgProcA.handler([dialog, WM_NEXTDLGCTL, 0, 0]);
+    assert.equal(fns.GetFocus.handler([]), edit, 'round to the edit');
+    assert.equal(defaultId(), IDCANCEL);
+
+    fns.DefDlgProcA.handler([dialog, WM_NEXTDLGCTL, 1, 0]);
+    assert.equal(fns.GetFocus.handler([]), second, 'the one before');
+    fns.DefDlgProcA.handler([dialog, WM_NEXTDLGCTL, first, 1]);
+    assert.equal(fns.GetFocus.handler([]), first, 'the one named');
+});
+
 test('a template naming a control of a class nobody has makes no dialog, unless it says '
     + 'DS_NOFAILCREATE', async()=>{
     // user32's dialog tests (test_DialogBoxParam): DialogBoxParam of a
