@@ -479,21 +479,26 @@ export function createEffect(data, services){
                     return E_FAIL;
                 }
                 const at = storage.at + offset;
-                storage.bytes.set(bytes.subarray(0, Math.max(0, storage.bytes.length - at)), at);
-                markChanged(shape);
+                if (at < storage.bytes.length)
+                {
+                    storage.bytes.set(bytes.subarray(0, storage.bytes.length - at), at);
+                    markChanged(shape);
+                }
                 return S_OK;
             },
-            /** @param {number} offset @param {number} count @returns {Uint8Array | null} */
+            /**
+             * As many of the bytes asked for as the buffer has.
+             *
+             * @param {number} offset @param {number} count @returns {Uint8Array | null}
+             */
             GetRawValue(offset, count){
                 const storage = shape.storage;
                 if (!storage)
                 {
                     return null;
                 }
-                const out = new Uint8Array(count);
                 const at = storage.at + offset;
-                out.set(storage.bytes.subarray(at, Math.min(at + count, storage.bytes.length)));
-                return out;
+                return storage.bytes.slice(at, Math.min(at + count, storage.bytes.length));
             },
         });
         Object.assign(variable, typedMethods(variable));

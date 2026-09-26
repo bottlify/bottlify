@@ -1605,6 +1605,13 @@ test('an effect variable\'s typed views are called through its vtable', ()=>{
     assert.deepEqual(dwords(out, 2), [7, 8], 'a scalar array\'s offset goes unused');
     assert.equal(variable(array, 'GetRawValue', [raw, 0, 20]), S_OK);
     assert.deepEqual(dwords(raw, 5), [7, 0, 0, 0, 8]);
+    // A count or offset past the buffer goes no further than it, rather
+    // than a caller's garbage sizing what the host allocates.
+    const wide = h.box.allocate(128);
+    assert.equal(scalar(array, 'GetIntArray', [wide, 0, 0xffffffff]), S_OK);
+    assert.equal(variable(array, 'GetRawValue', [wide, 0, 0x7fffffff]), S_OK);
+    assert.equal(variable(array, 'SetRawValue', [wide, 0x1000, 0x7fffffff]), S_OK);
+    assert.deepEqual(dwords(raw, 5), [7, 0, 0, 0, 8]);
 
     const vector = e.kind('vector');
     const vectors = fx('GetVariableByName', [named('v_a')]);
@@ -1652,6 +1659,9 @@ test('an effect variable\'s typed views are called through its vtable', ()=>{
     assert.equal(h.box.call(view, 2), 2, 'handed out with a reference; the effect holds one');
     assert.equal(resource(variable(tex, 'GetElement', [1]), 'GetResource', [out]), S_OK);
     assert.equal(read(out), view);
+    h.box.call(view, 2);
+    assert.equal(resource(tex, 'GetResourceArray', [wide, 1, 0xffffffff]), S_OK);
+    assert.equal(read(wide), view, 'as many as the variable has');
     h.box.call(view, 2);
 
     const cbuffer = e.kind('constantBuffer');

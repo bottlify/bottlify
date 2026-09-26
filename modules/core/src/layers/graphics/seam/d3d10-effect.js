@@ -335,7 +335,12 @@ export function createEffectSeam(context){
             {
                 return E_INVALIDARG;
             }
-            return variable.SetRawValue(memory.readMemory(data >>> 0, count >>> 0), offset >>> 0);
+            const storage = variable.shape.storage;
+            const room = storage
+                ? Math.max(0, storage.bytes.length - storage.at - (offset >>> 0))
+                : 0;
+            return variable.SetRawValue(memory.readMemory(data >>> 0,
+                Math.min(count >>> 0, room)), offset >>> 0);
         },
         /** @param {any} variable @param {number[]} args */
         GetRawValue: (variable, [data, offset, count])=>{
@@ -372,6 +377,17 @@ export function createEffectSeam(context){
     const readDwords = (at, count)=>Array.from({ length: count },
         (_, index)=>fields.readU32((at >>> 0) + index * 4));
 
+    /**
+     * A count a program gave, bounded by what the variable can hold: past
+     * its buffer, or its slots, nothing more is read or written, rather than
+     * a caller's garbage sizing what the host allocates.
+     *
+     * @param {any} variable @param {number} count
+     */
+    const bounded = (variable, count)=>Math.min(count >>> 0, variable.shape.storage
+        ? variable.shape.storage.bytes.length >>> 2
+        : variable.shape.slots?.length ?? 0);
+
     /** @param {number} pointer */
     const objectOf = pointer=>((pointer >>> 0) === 0
         ? null
@@ -404,8 +420,9 @@ export function createEffectSeam(context){
         const components = variable.kind === VARIABLE_KIND.VECTOR
             ? variable.shape.fxType.columns
             : 1;
-        return variable.SetValues(given, readDwords(at, count * components).map(reader(given)),
-            first, count);
+        const most = bounded(variable, count);
+        return variable.SetValues(given, readDwords(at, most * components).map(reader(given)),
+            first, most);
     };
     /**
      * @param {any} variable @param {'float' | 'int' | 'bool'} given
@@ -417,7 +434,8 @@ export function createEffectSeam(context){
             return E_INVALIDARG;
         }
         const write = writer(given);
-        variable.GetValues(given, first, count).forEach((/** @type {number} */ value,
+        variable.GetValues(given, first, bounded(variable, count)).forEach((
+            /** @type {number} */ value,
             /** @type {number} */ index)=>write((at >>> 0) + index * 4, value));
         return S_OK;
     };
@@ -465,7 +483,8 @@ export function createEffectSeam(context){
         /** @param {any} variable @param {number} at @param {number} first @param {number} count */
         const set = (variable, at, first, count)=>((at >>> 0) === 0
             ? E_INVALIDARG
-            : variable.SetMatrices(readDwords(at, count * 16), first, count, transposed));
+            : variable.SetMatrices(readDwords(at, bounded(variable, count) * 16), first,
+                bounded(variable, count), transposed));
         /** @param {any} variable @param {number} at @param {number} first @param {number} count */
         const get = (variable, at, first, count)=>{
             if ((at >>> 0) === 0)
@@ -473,7 +492,7 @@ export function createEffectSeam(context){
                 return E_INVALIDARG;
             }
             /** @type {(number | undefined)[]} */
-            const dwords = variable.GetMatrices(first, count, transposed);
+            const dwords = variable.GetMatrices(first, bounded(variable, count), transposed);
             dwords.forEach((dword, index)=>{
                 if (dword !== undefined)
                 {
@@ -514,13 +533,15 @@ export function createEffectSeam(context){
             }),
             [`Set${name}Array`]: valid((variable, [at, offset, count])=>((at >>> 0) === 0
                 ? E_INVALIDARG
-                : variable.SetViews(readDwords(at, count >>> 0).map(objectOf), offset >>> 0))),
+                : variable.SetViews(readDwords(at, bounded(variable, count)).map(objectOf),
+                    offset >>> 0))),
             [`Get${name}Array`]: valid((variable, [at, offset, count])=>{
                 if ((at >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeObjects(at, variable.GetViews(offset >>> 0, count >>> 0), interfaces, id);
+                writeObjects(at, variable.GetViews(offset >>> 0, bounded(variable, count)),
+                    interfaces, id);
                 return S_OK;
             }),
         };
@@ -645,7 +666,8 @@ export function createEffectSeam(context){
                 {
                     return E_INVALIDARG;
                 }
-                variable.GetStrings(offset >>> 0, count >>> 0).forEach((/** @type {any} */ text,
+                variable.GetStrings(offset >>> 0, bounded(variable, count)).forEach((
+                    /** @type {any} */ text,
                     /** @type {number} */ index)=>fields.writeU32((at >>> 0) + index * 4,
                     pointerOf(variable.owner, text)));
                 return S_OK;
