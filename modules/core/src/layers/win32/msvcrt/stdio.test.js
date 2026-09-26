@@ -188,6 +188,26 @@ test('stdout and stderr write to the console; stdin is at its end', ()=>{
         'the fourth record is no stream until something opens one');
 });
 
+test('putchar writes to stdout and getchar reads stdin, through their records', ()=>{
+    const { fns, console, memory } = build();
+    assert.equal(fns.putchar.handler([0x78]), 0x78);
+    assert.equal(fns.putchar.handler([0x141]), 0x41, 'the byte, as an unsigned char');
+    assert.deepEqual(console, [[2, 'x'], [2, 'A']]);
+
+    assert.equal(fns.getchar.handler([]), -1, 'the console has nothing to type');
+    assert.equal(memory.u32(IOB + 12) & 0x10, 0x10, 'and stdin\'s record says it is at its end');
+    assert.deepEqual([fns.getchar.argBytes, fns.putchar.argBytes], [0, 4]);
+});
+
+test('getchar and putchar are EOF before the runtime\'s streams are placed', ()=>{
+    const memory = fakeMemory();
+    const fns = /** @type {any} */ (createStdioFunctions({
+        ...memory, free: ()=>true, files: fakeVolume({}), write: ()=>{}, iob: ()=>0,
+    }));
+    assert.equal(fns.getchar.handler([]), -1);
+    assert.equal(fns.putchar.handler([0x78]), -1);
+});
+
 test('fopen and fclose say why they failed in errno', ()=>{
     // fopen: a missing file is ENOENT; a null or empty name and a mode that is
     // not one are invalid parameters. fclose: a null stream is EINVAL, a

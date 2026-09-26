@@ -173,6 +173,17 @@ export function createStdioFunctions(host){
     };
 
     /**
+     * stdin, stdout or stderr by its index in `_iob`, or null before the
+     * runtime's image has placed it.
+     *
+     * @param {number} index
+     */
+    const standardStream = index=>{
+        const base = host.iob?.() ?? 0;
+        return base === 0 ? null : streamOf(base + index * FILE_SIZE);
+    };
+
+    /**
      * The stream, or null -- a null pointer being the one case a call is
      * documented to report, as EINVAL.
      *
@@ -686,6 +697,21 @@ export function createStdioFunctions(host){
 
         fputc,
         putc: fputc,
+
+        /**
+         * int getchar(void) / int putchar(int c)
+         *
+         * getc on stdin and putc on stdout: the same streams, and so the same
+         * records, the program's own macros read.
+         */
+        getchar: cdecl(0, ()=>{
+            const stream = standardStream(0);
+            return stream ? nextByte(stream) : EOF;
+        }),
+        putchar: cdecl(4, ([c])=>{
+            const stream = standardStream(1);
+            return stream ? putByte(stream, c) : EOF;
+        }),
 
         /**
          * int _flsbuf(int c, FILE *stream)
