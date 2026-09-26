@@ -110,7 +110,7 @@ test('an engine a launch may select is named, and one that is not is refused', a
     await cpuModule.dispose();
 
     await open();
-    assert.equal(cpuModule.diagnostics().metrics?.engine, 'emulator', 'the default');
+    assert.equal(cpuModule.diagnostics().metrics?.engine, 'cork', 'the default');
     await cpuModule.dispose();
 });
 

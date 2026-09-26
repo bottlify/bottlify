@@ -9,8 +9,11 @@ The phased plan is history: `roadmap/phases-history.md` holds the eleven phase d
 and what landed. Work is ordered by `roadmap/00-TODO-list.md` (local), which opens with the week's
 goal; installers and networking are areas in it, not phases.
 
-What runs today, end to end through `createApp()`: a 64 KiB ROM of our own (no BIOS) takes the CPU
-straight into protected mode; the loader maps a 32-bit PE and synthesises a real in-guest module per
+What runs today, end to end through `createApp()`: the default engine is cork, our own x86 → wasm
+translator (`modules/cork`), which runs with nothing of the emulator loaded; the v86 emulator stays an
+engine a launch selects by name (`emulator`, `hybrid`, `differential`), where a 64 KiB ROM of our own
+(no BIOS) takes the CPU straight into protected mode, and the reference the differential suites judge
+cork against. The loader maps a 32-bit PE and synthesises a real in-guest module per
 system library, so an address from `GetProcAddress` is the one an import was bound to; threads run
 under a round-robin scheduler whose quantum is retired guest instructions; the bridge marshals
 stdcall, cdecl and thiscall, parks a caller that cannot be answered yet, calls back into guest code,

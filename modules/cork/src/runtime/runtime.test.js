@@ -143,6 +143,42 @@ test('a region compiled for single leaves once another precision is seen, and th
     assert.equal(m.runtime.diagnostics().precisionSwitches, 2, 'and no further');
 });
 
+test('a formed-in leaf two tops reach takes an exchanged stack as it is', async()=>{
+    // F is called with two values on the stack and then with one, so its
+    // block is cut and runs on the machine's own top; the first call follows
+    // an fxch, which the block holds as swapped locals. Doom 3's normal maps went
+    // through _ftol2 this way, and the exchange stored back unswapped turned
+    // every flat texel's 128 into 0.
+    const m = machine();
+    const view = new DataView(m.memory.buffer);
+    view.setUint8(m.layout.x87Empty, 0xff);
+    view.setUint16(m.layout.x87Control, 0x27f, true);
+    const F = CODE + 0x100;
+    m.write(CODE, [
+        0xd9, 0xe8,                           // fld1
+        0xd9, 0xee,                           // fldz
+        0xd9, 0xc9,                           // fxch st1            st0 = 1, st1 = 0
+        0xe8, 0xf5, 0, 0, 0,                  // call F              two on the stack
+        0xe8, 0xf0, 0, 0, 0,                  // call F              one
+        0xf4,                                 // hlt
+    ]);
+    m.write(F, [0xdd, 0xd8, 0xc3]);           // F: fstp st0; ret
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE, 0);
+    await m.runtime.translatePending();
+    const exit = m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
+    // F ran inside the region and popped st0; the region leaves at the
+    // second call, whose block the tracking does not reach with a state.
+    assert.equal(exit.kind, 'untranslated');
+    assert.equal(exit.retired, 6, 'fld1, fldz, fxch, call, fstp, ret');
+    assert.equal(m.eip(), CODE + 11);
+    assert.equal(m.reg(4), 0x80000);
+    const top = view.getUint8(m.layout.x87Top);
+    assert.equal(top, 7);
+    assert.equal(view.getFloat64(m.layout.x87 + top * 16, true), 0,
+        'F popped the 1 the fxch brought up, and the 0 is left');
+});
+
 test('a spent budget at an inlined return charges the callee once', async()=>{
     const m = machine();
     // mov ecx, 50; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret -- F is a

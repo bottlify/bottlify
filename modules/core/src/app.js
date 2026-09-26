@@ -9,7 +9,7 @@ import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
 import { captureTrace, describeAddress, formatTrace } from './trace.js';
 import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
-import { DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
+import { DEFAULT_ENGINE, DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
 import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports, rvaToFileOffset } from './layers/loader/internal/pe.js';
@@ -49,7 +49,7 @@ import { loadZstdWasm } from './zstd-wasm.js';
  * @property {string} [v86.moduleUrl]     The emulator's module.
  * @property {string} [v86.wasmUrl]       Where its binary is fetched from.
  * @property {ArrayBuffer} [v86.wasmBytes]  Or the binary itself.
- * @property {Object} [cork]              The translator, for `engine: 'hybrid'`.
+ * @property {Object} [cork]              The translator, for every engine but `emulator`.
  * @property {string} [cork.moduleUrl]    Its entry module; the package beside core by default.
  * @property {import('./layers/cpu/engine.js').EngineConfig} [cork.config]  Its settings;
  *     `store` here is a request -- `'local'` (the default) for the origin's private file
@@ -140,7 +140,7 @@ import { loadZstdWasm } from './zstd-wasm.js';
  *     The emulator's compiler budgets, by config index. For measurement.
  * @property {'emulator' | 'hybrid' | 'cork' | 'differential'} [engine]
  *     Which execution engine runs the program (`docs/core/cpu.md`'s "Engines").
- *     Default `emulator`. Chosen per launch: a launcher passes the person's
+ *     Default `cork`. Chosen per launch: a launcher passes the person's
  *     choice for the bundle, or the bundle manifest's suggestion.
  * @property {boolean} [sampling]  The `cpu` layer's always-on guest sampler
  *     (`docs/core/cpu.md`'s "Sampling"). `false` turns it off, for a caller
@@ -1735,7 +1735,7 @@ async function mountBundle({ options, cpu, filesystem, events }){
         retry: options.bundle.retry,
     });
 
-    const zstdForEngine = chooseZstdDecoder(options.engine ?? 'emulator', cpu,
+    const zstdForEngine = chooseZstdDecoder(options.engine ?? DEFAULT_ENGINE, cpu,
         await zstdWasmFor(options));
     /**
      * A block, turned back into bytes, without awaiting anything.
@@ -2557,8 +2557,9 @@ async function buildApp(options){
             },
         },
         cpu: {
-            jit: options.jit, sampling: options.sampling, memorySize, engine: options.engine,
-            engineUrl: options.engine && options.engine !== 'emulator'
+            jit: options.jit, sampling: options.sampling, memorySize,
+            engine: options.engine ?? DEFAULT_ENGINE,
+            engineUrl: (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
                 ? corkArtifacts(options.cork).moduleUrl : null,
             // The translator's cache goes with the bundle's blocks: local by
             // default, the bundle's name its namespace, resolved here in the
@@ -3290,7 +3291,8 @@ async function buildApp(options){
     const audio = core.api('audio');
     const input = core.api('input');
 
-    if (options.engine === 'cork')
+    const chosen = options.engine ?? DEFAULT_ENGINE;
+    if (chosen === 'cork')
     {
         // Cork runs with nothing of the emulator loaded: its own host, its own
         // memory, and the translator named by `engineUrl`.
@@ -3298,7 +3300,6 @@ async function buildApp(options){
     }
     else
     {
-        const chosen = options.engine ?? 'emulator';
         const emulator = emulatorArtifacts(options.v86);
         /** @type {ArrayBuffer} */
         let wasmBytes;

@@ -45,6 +45,13 @@ export const ENGINES = Object.freeze(['emulator', 'hybrid', 'cork', 'differentia
 const BUILT_ENGINES = new Set(['emulator', 'hybrid', 'cork', 'differential']);
 
 /**
+ * The engine a launch that names none runs: the translator. The emulator stays
+ * an engine a launch may select, and the reference the differential suites
+ * judge the translator against.
+ */
+export const DEFAULT_ENGINE = 'cork';
+
+/**
  * cpu — the guest CPU and the channel the guest calls us through.
  *
  * The only layer that knows an emulator is underneath. Everything above it
@@ -135,7 +142,7 @@ export const cpuModule = {
         // that does not exist is a configuration error, and the assembler
         // reports those before any module has a machine to lose.
         /** @type {string} */
-        const engine = config?.engine ?? 'emulator';
+        const engine = config?.engine ?? DEFAULT_ENGINE;
         if (!ENGINES.includes(engine))
         {
             throw new Error(`cpu: unknown engine "${engine}" (${ENGINES.join(', ')})`);
