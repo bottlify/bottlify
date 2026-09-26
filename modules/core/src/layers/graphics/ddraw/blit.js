@@ -36,6 +36,7 @@ import {
  * @property {number} height
  * @property {number} bytesPerPixel   1, 2 or 4.
  * @property {number} [keyMask]       The bits a colour key compares; the whole pixel if absent.
+ * @property {boolean} [depth]        A depth buffer, which holds no colour to fill.
  */
 
 /**
@@ -256,6 +257,10 @@ export function blt(request){
 
     if ((flags & DDBLT_COLORFILL) !== 0)
     {
+        if (dest.depth)
+        {
+            return DDERR_INVALIDPARAMS;
+        }
         const fill = (fx.fillColor ?? 0) >>> 0;
         transfer({ ...common, sample: ()=>fill });
         return DD_OK;

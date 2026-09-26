@@ -67,8 +67,8 @@ import {
     DDCKEYCAPS_SRCBLT, DDCKEY_DESTBLT, DDCKEY_SRCBLT, DDERR_ALREADYINITIALIZED,
     DDERR_INVALIDPARAMS, DDERR_SURFACEBUSY, DDERR_SURFACELOST, DDERR_UNSUPPORTED, DDPCAPS_1BIT,
     DDPCAPS_2BIT, DDPCAPS_4BIT, DDPCAPS_8BIT, DDPCAPS_ALLOW256, DDPCAPS_PRIMARYSURFACE,
-    DDPF_RGB, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT,
-    DDSD_PITCH, DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK,
+    DDPF_RGB, DDSCAPS_ZBUFFER, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT,
+    DDSD_HEIGHT, DDSD_PITCH, DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK,
 } from '../ddraw/constants.js';
 import { pixelFormatForDepth } from '../ddraw/objects.js';
 import { blt, bltFast } from '../ddraw/blit.js';
@@ -486,6 +486,7 @@ export function createDirectDrawSeam(
             width: surface.width,
             height: surface.height,
             bytesPerPixel: surface.bytesPerPixel,
+            depth: (surface.caps & DDSCAPS_ZBUFFER) !== 0,
             ...(colour !== 0 ? { keyMask: colour } : {}),
         };
     };

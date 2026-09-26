@@ -623,6 +623,51 @@ test('byte-exact: a key given at creation keys a blit on its colour bits alone',
     h.assertAllReleased();
 });
 
+// --- fills, after Wine's ddraw7 test_color_fill ---
+
+const DDSCAPS_ZBUFFER = 0x00020000;
+const DDPF_ZBUFFER = 0x00000400;
+
+/**
+ * A sixteen-bit depth buffer, width by one, through the seventh generation.
+ *
+ * @param {ReturnType<typeof seamed>} h @param {number} ddraw @param {number} width
+ */
+function createDepth(h, ddraw, width){
+    const at = 0x5000;
+    h.box.bytes.fill(0, at, at + DDSURFACEDESC2.SIZE);
+    writeSurfaceDesc(h.box.services, at, DDSURFACEDESC2, {
+        flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
+        width, height: 1, pitch: 0, backBufferCount: 0, mipMapCount: 0,
+        caps: DDSCAPS_ZBUFFER, caps2: 0,
+        pixelFormat: { size: 0x20, flags: DDPF_ZBUFFER, fourCC: 0, bitCount: 16,
+            redMask: 0, greenMask: 0xffff, blueMask: 0, alphaMask: 0 },
+    });
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'CreateSurface'), [at, 0x5100, 0]),
+        DD_OK);
+    return h.box.memory.readU32(0x5100);
+}
+
+test('a colour fill is refused on a depth buffer, which it would leave as it was', ()=>{
+    const h = seamed();
+    const ddraw = h.create7();
+    const depth = createDepth(h, ddraw, 4);
+    const model = h.publisher.objectAt(depth);
+    h.box.bytes.fill(0x11, model.buffer, model.buffer + 8);
+    const fx = 0x5700;
+    h.box.bytes.fill(0, fx, fx + DDBLTFX.SIZE);
+    h.box.memory.writeU32(fx + DDBLTFX.dwSize, DDBLTFX.SIZE);
+    h.box.memory.writeU32(fx + DDBLTFX.dwFillColor, 0xdeadbeef);
+
+    assert.equal(h.surface7(depth, 'Blt', [0, 0, 0, DDBLT_COLORFILL, fx]), DDERR_INVALIDPARAMS);
+    assert.deepEqual([...h.box.bytes.subarray(model.buffer, model.buffer + 8)],
+        new Array(8).fill(0x11));
+
+    assert.equal(h.release(depth), 0);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
 test('a palette round-trips its entries and is owned by the surface it is set on', ()=>{
     const h = seamed();
     const ddraw = h.create7();
