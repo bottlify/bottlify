@@ -53,6 +53,7 @@ import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { validateDeviceTarget } from '../ddraw/caps.js';
 import { validateStages } from '../d3d8/validity.js';
+import { writePixels } from '../d3d9/resources.js';
 import {
     DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_PALETTEINDEXED_ANY, DDPF_ZBUFFER, DDSCAPS_ZBUFFER,
 } from '../ddraw/constants.js';
@@ -89,6 +90,9 @@ const FILTER_NUMBERING = Object.freeze({
  *     What a device that draws needs; absent, the device is the pure model.
  * @property {any} [backend]
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
+ *     How a render target's pixels read back off the GPU reach its guest
+ *     bytes; without it a lock of a target hands out bytes nobody drew.
  * @property {(descriptor: any) => any} [createSampler]
  * @property {{ claim: (buffer: number, show: () => void) => void,
  *              release: (buffer: number) => void }} [presenter]
@@ -455,6 +459,8 @@ export function createDirect3D7(ddraw, services = {}){
             const format = d3dFormatOf(surface.pixelFormat);
             const adapter = {
                 buffer,
+                // Where a read-back is written and a write taken up from.
+                base: buffer,
                 /** @param {{ desc?: any }} out */
                 GetDesc(out){
                     out.desc = {
@@ -737,6 +743,44 @@ export function createDirect3D7(ddraw, services = {}){
                 viewport = kept;
             }) ?? (()=>{});
 
+        /**
+         * The colour target drawn at the address a surface shows, if this
+         * device draws there: after a flip that is another surface's target.
+         *
+         * @param {any} surface
+         */
+        const drawnAt = surface=>((surface.caps & DDSCAPS_ZBUFFER) === 0
+            ? targetAdapters.get(surface.buffer) ?? null
+            : null);
+        const write = services.writeMemory;
+        /**
+         * A surface this device renders into has its picture on the GPU and
+         * stale bytes in guest memory. Before a program reads those bytes --
+         * a lock, a device context, a blit out of it -- they are read back,
+         * and the caller waits; once it has written them, they go up to the
+         * target at its next use. A depth buffer has no way back.
+         */
+        const stopWatchingPixels = ddraw.watchPixels?.({
+            readBack: (/** @type {any} */ surface)=>{
+                const adapter = drawnAt(surface);
+                if (!adapter || !renderer || !write)
+                {
+                    return null;
+                }
+                return renderer.readSurface(adapter).then(
+                    (/** @type {{ data: Uint8Array }} */ pixels)=>{
+                        writePixels(adapter, pixels.data, write);
+                    });
+            },
+            written: (/** @type {any} */ surface)=>{
+                const adapter = drawnAt(surface);
+                if (adapter && renderer)
+                {
+                    renderer.markDirty(adapter);
+                }
+            },
+        }) ?? (()=>{});
+
         const device = {
             description,
             get refCount(){
@@ -765,6 +809,7 @@ export function createDirect3D7(ddraw, services = {}){
                 }
                 textures.clear();
                 stopWatchingDepth();
+                stopWatchingPixels();
                 renderTarget.release();
                 ddraw.release('IDirectDraw7');
                 return 0;

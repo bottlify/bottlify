@@ -1785,3 +1785,82 @@ test('a managed texture keeps a priority; other textures refuse one and other su
         assert.equal(h.release(ddraw), 0);
         h.assertAllReleased();
     });
+
+test('a surface whose pixels are kept elsewhere is brought up to date before a lock, a DC or a'
+    + ' blit reads it, and the caller waits', async()=>{
+    // ddraw7.c get_surface_color (453-470) locks a render target read-only
+    // after drawing and reads the drawn colour: the pointer a lock hands out
+    // has to hold the pixels, wherever they were made.
+    const h = seamed();
+    const ddraw = h.create7();
+    const kept = h.createSurface7(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 2, height: 2 });
+    const other = h.createSurface7(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 2, height: 2 });
+    const keptModel = h.publisher.objectAt(kept);
+    const otherModel = h.publisher.objectAt(other);
+    /** @type {string[]} */
+    const heard = [];
+    h.roots[0].watchPixels({
+        readBack: (/** @type {any} */ surface)=>{
+            if (surface !== keptModel)
+            {
+                return null;
+            }
+            heard.push('read');
+            // What the copy elsewhere holds: every pixel 0x00abcdef.
+            return Promise.resolve().then(()=>{
+                for (let at = 0; at < 16; at += 4)
+                {
+                    h.box.memory.writeU32(keptModel.buffer + at, 0x00abcdef);
+                }
+            });
+        },
+        written: (/** @type {any} */ surface)=>{
+            heard.push(surface === keptModel ? 'written' : 'other written');
+        },
+    });
+    const lockSlot = slot(IDIRECTDRAWSURFACE7_SLOTS, 'Lock');
+    const desc = 0x5200;
+
+    // A read-only lock: parked, then the pointer is to the pixels as kept.
+    h.box.memory.writeU32(desc, DDSURFACEDESC2.SIZE);
+    const parked = h.box.callParked(kept, lockSlot, [0, desc, 0x10, 0]);
+    assert.equal(h.box.memory.readU32(keptModel.buffer), 0, 'not yet current');
+    assert.equal(await parked, DD_OK);
+    const bits = h.box.memory.readU32(desc + DDSURFACEDESC2.lpSurface);
+    assert.equal(bits, keptModel.buffer);
+    assert.equal(h.box.memory.readU32(bits + 12), 0x00abcdef);
+    assert.equal(h.surface7(kept, 'Unlock', [0]), DD_OK);
+    assert.deepEqual(heard, ['read'], 'a read-only lock writes nothing back');
+
+    // A lock of a surface nobody keeps a copy of is answered at once.
+    h.box.memory.writeU32(desc, DDSURFACEDESC2.SIZE);
+    assert.equal(h.box.call(other, lockSlot, [0, desc, 0, 0]), DD_OK);
+    assert.equal(h.surface7(other, 'Unlock', [0]), DD_OK);
+    assert.deepEqual(heard, ['read', 'other written']);
+
+    // A blit out of it reads the kept pixels; a blit into it is a write.
+    heard.length = 0;
+    h.box.memory.writeU32(keptModel.buffer, 0);
+    const bltSlot = slot(IDIRECTDRAWSURFACE7_SLOTS, 'Blt');
+    assert.equal(await h.box.callParked(other, bltSlot, [0, kept, 0, 0, 0]), DD_OK);
+    assert.equal(h.box.memory.readU32(otherModel.buffer), 0x00abcdef);
+    assert.deepEqual(heard, ['read', 'other written']);
+    heard.length = 0;
+    const fastSlot = slot(IDIRECTDRAWSURFACE7_SLOTS, 'BltFast');
+    assert.equal(await h.box.callParked(kept, fastSlot, [0, 0, other, 0, 0]), DD_OK);
+    assert.deepEqual(heard, ['read', 'written'],
+        'the rest of the destination is current before part of it is overwritten');
+
+    // A device context is over the kept pixels too, and releasing it writes.
+    heard.length = 0;
+    assert.equal(await h.box.callParked(kept, slot(IDIRECTDRAWSURFACE7_SLOTS, 'GetDC'),
+        [0x5300]), DD_OK);
+    assert.notEqual(h.box.memory.readU32(0x5300), 0);
+    assert.equal(h.surface7(kept, 'ReleaseDC', [h.box.memory.readU32(0x5300)]), DD_OK);
+    assert.deepEqual(heard, ['read', 'written']);
+
+    assert.equal(h.release(other), 0);
+    assert.equal(h.release(kept), 0);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});

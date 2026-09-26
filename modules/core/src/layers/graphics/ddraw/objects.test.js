@@ -1409,3 +1409,62 @@ test('a device context on a palettised surface carries its palette as pixels', (
     assert.equal(ddraw.release('IDirectDraw7'), 0);
     assert.ok(ddraw.destroyed);
 });
+
+test('a copy of a surface\'s pixels kept elsewhere is asked for them, and told of every write',
+    async()=>{
+        // A device rendering into a surface on the GPU holds its pixels; the
+        // guest's bytes are brought up to date before they are read, and the
+        // device hears when the program wrote them.
+        const ddraw = withLevel();
+        const surface = makeOffscreen(ddraw);
+        const other = makeOffscreen(ddraw);
+        /** @type {string[]} */
+        const heard = [];
+        let resolve = ()=>{};
+        const stop = ddraw.watchPixels({
+            readBack: target=>{
+                if (target !== surface)
+                {
+                    return null;
+                }
+                heard.push('read');
+                return new Promise(done=>{
+                    resolve = ()=>done(undefined);
+                });
+            },
+            written: target=>{
+                heard.push(target === surface ? 'written' : 'written elsewhere');
+            },
+        });
+
+        assert.equal(other.pixelsCurrent(), null, 'a surface nobody holds a copy of is current');
+        const pending = surface.pixelsCurrent();
+        assert.ok(pending, 'the holder is asked');
+        let settled = false;
+        void pending?.then(()=>{
+            settled = true;
+        });
+        await Promise.resolve();
+        assert.equal(settled, false, 'and the bytes are current only once it answers');
+        resolve();
+        await pending;
+        assert.equal(settled, true);
+
+        // A lock that only reads leaves the copy as it was; any other lock,
+        // a device context and a change the program announces are writes.
+        assert.equal(surface.lock(null, 0x10).hr, DD_OK);
+        assert.equal(surface.unlock(null), DD_OK);
+        assert.deepEqual(heard, ['read']);
+        assert.equal(surface.lock(null, 0).hr, DD_OK);
+        assert.equal(surface.unlock(null), DD_OK);
+        assert.equal(surface.getDC().hr, DD_OK);
+        assert.equal(surface.releaseDC(0), DD_OK);
+        surface.changeUniquenessValue();
+        assert.deepEqual(heard, ['read', 'written', 'written', 'written']);
+
+        stop();
+        assert.equal(surface.pixelsCurrent(), null, 'and nobody is asked once it stops');
+        assert.equal(surface.release(), 0);
+        assert.equal(other.release(), 0);
+        assert.equal(ddraw.release('IDirectDraw7'), 0);
+    });

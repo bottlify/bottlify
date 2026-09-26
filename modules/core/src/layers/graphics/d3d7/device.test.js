@@ -595,8 +595,12 @@ test('the material, clip status and clip planes read back as copies', ()=>{
 
 // --- recorded: what the GPU was asked to do ---
 
-/** A device over the recording GPU, with guest memory the test owns. */
-function recorded(){
+/**
+ * A device over the recording GPU, with guest memory the test owns.
+ *
+ * @param {{ writable?: boolean }} [options]  Whether the device may write guest memory.
+ */
+function recorded(options = {}){
     const gpu = createFakeDevice();
     const backend = createBackend({
         device: gpu.device,
@@ -620,6 +624,10 @@ function recorded(){
     const d3d = createDirect3D7(root, {
         backend,
         readMemory: (address, length)=>ram.slice(address, address + length),
+        ...(options.writable
+            ? { writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
+                ram.set(bytes, address) }
+            : {}),
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
         presenter: {
             claim: buffer=>claimed.push(buffer),
@@ -938,6 +946,70 @@ test('recorded: indices by pointer and vertices in a buffer draw as one indexed 
     assert.equal(buffer.release(), 0);
     assert.equal(device.release(), 0);
     assert.equal(target.release(), 0);
+    assert.equal(root.release('IDirectDraw7'), 0);
+    assert.ok(root.destroyed);
+});
+
+test('recorded: a render target\'s pixels are read back into its guest bytes when asked for,'
+    + ' and taken up again when the program wrote them', async()=>{
+    // ddraw7.c get_surface_color (453-470) locks the target after drawing;
+    // the lock's bytes are the GPU's picture only once they are read back.
+    const f = recorded({ writable: true });
+    const { device, gpu, ram, root, target } = f;
+    const depth = surface(root, { caps: DDSCAPS_ZBUFFER, zBufferBitDepth: 16 });
+    assert.equal(target.addAttachedSurface(depth), D3D_OK);
+    const texture = surface(root, { caps: DDSCAPS_TEXTURE, pixelFormat: ARGB32 });
+
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, FVF_TL,
+        vertices([[0, 0], [8, 0], [0, 8]], false), 3), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    device.present(target.buffer);
+    await device.idle();
+    assert.equal(texture.pixelsCurrent(), null, 'a texture\'s bytes are its pixels already');
+    assert.equal(depth.pixelsCurrent(), null, 'and a depth buffer is not read back');
+
+    // What the GPU holds for the target: the fake keeps texels, so they are
+    // put there as a draw would have left them.
+    const drawn = gpu.of('beginRenderPass')[0].descriptor.colorAttachments[0].view.texture;
+    for (let at = 0; at < drawn.bytes.length; at += 4)
+    {
+        drawn.bytes.set([0x30, 0x20, 0x10, 0xff], at);
+    }
+    const pending = target.pixelsCurrent();
+    assert.ok(pending, 'a target is read back');
+    await pending;
+    const copies = gpu.of('copyTextureToBuffer');
+    assert.equal(copies.length, 1);
+    assert.equal(copies[0].source.texture, drawn, 'out of the texture the draw went into');
+    assert.deepEqual([...ram.subarray(target.buffer, target.buffer + 8)],
+        [0x30, 0x20, 0x10, 0xff, 0x30, 0x20, 0x10, 0xff]);
+    assert.deepEqual([...ram.subarray(target.buffer + 8 * 8 * 4 - 4, target.buffer + 8 * 8 * 4)],
+        [0x30, 0x20, 0x10, 0xff], 'every pixel of it, at the surface\'s own pitch');
+
+    // A write lock's bytes go up to the target, in the frame's order, before
+    // it is drawn to again.
+    const uploads = ()=>gpu.of('copyBufferToTexture')
+        .filter(call=>call.destination.texture === drawn);
+    assert.equal(target.lock(null, 0).hr, D3D_OK);
+    ram.set([1, 2, 3, 4], target.buffer);
+    assert.equal(target.unlock(null), D3D_OK);
+    assert.equal(uploads().length, 0, 'not before the target is used');
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, FVF_TL,
+        vertices([[0, 0], [8, 0], [0, 8]], false), 3), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    device.present(target.buffer);
+    await device.idle();
+    assert.equal(uploads().length, 1);
+    assert.deepEqual([...drawn.bytes.subarray(0, 8)], [1, 2, 3, 0xff, 0x30, 0x20, 0x10, 0xff],
+        'the program\'s pixel, X8 as opaque, beside what the read-back brought in');
+
+    assert.equal(device.release(), 0);
+    assert.equal(target.pixelsCurrent(), null, 'a released device holds no copy');
+    assert.equal(texture.release(), 0);
+    assert.equal(target.release(), 0);
+    assert.equal(depth.release(), 0);
     assert.equal(root.release('IDirectDraw7'), 0);
     assert.ok(root.destroyed);
 });

@@ -97,6 +97,7 @@ import {
     DDSD_PIXELFORMAT,
     DDSD_WIDTH,
     DDSD_ZBUFFERBITDEPTH,
+    DDLOCK_READONLY,
     DD_OK,
     E_NOINTERFACE,
 } from './constants.js';
@@ -264,7 +265,7 @@ export function depthFormatForDepth(bitDepth){
  * @property {() => { hr: number, palette: Palette | null }} getPalette
  * @property {(next: Clipper | null) => number} setClipper
  * @property {() => { hr: number, clipper: Clipper | null }} getClipper
- * @property {(rect?: Rect | null) => LockResult} lock
+ * @property {(rect?: Rect | null, flags?: number) => LockResult} lock
  * @property {(rect?: Rect | null) => number} unlock
  * @property {() => { hr: number, dc: number | null }} getDC
  * @property {(handle: number) => number} releaseDC
@@ -280,6 +281,14 @@ export function depthFormatForDepth(bitDepth){
  * @property {(ramp: ArrayLike<number>) => number} setGammaRamp
  * @property {() => { hr: number, priority: number }} getPriority
  * @property {(value: number) => number} setPriority
+ * @property {() => Promise<void> | null} pixelsCurrent
+ *
+ * @typedef {Object} PixelWatcher
+ * @property {(surface: Surface) => Promise<void> | null} readBack
+ *           Settles once the surface's guest bytes hold what the watcher's copy
+ *           holds; null for a surface it keeps no copy of.
+ * @property {(surface: Surface) => void} written
+ *           The guest bytes are newer than the watcher's copy now.
  */
 
 /** Entries per channel of a DDGAMMARAMP, and its three channels end to end. */
@@ -441,6 +450,14 @@ export function createDirectDraw(options = {}){
      * @type {Set<(surface: Surface, rect: Rect | null, value: number) => void>}
      */
     const depthFillWatchers = new Set();
+    /**
+     * Who keeps a surface's pixels somewhere other than its guest bytes -- a
+     * Direct3D device, on the GPU -- and so is asked for them before they are
+     * read and told when the program wrote them.
+     *
+     * @type {Set<PixelWatcher>}
+     */
+    const pixelWatchers = new Set();
 
     /**
      * The display mode, which is what a primary surface takes its size and
@@ -786,7 +803,7 @@ export function createDirectDraw(options = {}){
         let palette = null;
         /** @type {Clipper | null} */
         let clipper = null;
-        /** @type {Rect[]} */
+        /** @type {{ area: Rect, readOnly: boolean }[]} */
         const locks = [];
         /** @type {number | null} */
         let dc = null;
@@ -810,6 +827,13 @@ export function createDirectDraw(options = {}){
                 || sublevel
                 ? DDERR_INVALIDPARAMS
                 : DD_OK;
+        };
+        /** Whoever keeps a copy of these pixels hears that the guest's bytes changed. */
+        const tellWritten = ()=>{
+            for (const watcher of pixelWatchers)
+            {
+                watcher.written(surface);
+            }
         };
 
         const life = counted(()=>{
@@ -945,6 +969,21 @@ export function createDirectDraw(options = {}){
             /** Called by whatever wrote into the surface behind the program's back. */
             changeUniquenessValue(){
                 uniqueness++;
+                tellWritten();
+            },
+
+            /**
+             * Brings the guest's bytes up to date with a copy kept elsewhere
+             * -- a render target the GPU draws into -- before they are read
+             * or partly overwritten. Null when nobody keeps one: the bytes
+             * are the pixels already.
+             *
+             * @returns {Promise<void> | null}
+             */
+            pixelsCurrent(){
+                const pending = [...pixelWatchers].map(watcher=>watcher.readBack(surface))
+                    .filter(answer=>answer !== null);
+                return pending.length === 0 ? null : Promise.all(pending).then(()=>undefined);
             },
 
             /**
@@ -1062,9 +1101,10 @@ export function createDirectDraw(options = {}){
 
             /**
              * @param {Rect | null} [rect]
+             * @param {number} [flags]  DDLOCK; a read-only lock writes nothing when released.
              * @returns {{ hr: number, surfacePointer: number | null, pitch: number }}
              */
-            lock(rect = null){
+            lock(rect = null, flags = 0){
                 // Every failure below leaves the surface pointer null. A caller
                 // that ignores the return code and follows the pointer anyway
                 // then faults instead of writing into a surface it does not own.
@@ -1081,7 +1121,7 @@ export function createDirectDraw(options = {}){
                     return fail(DDERR_SURFACEBUSY);
                 }
                 const area = wholeSurface(rect, width, height);
-                if (locks.some(held=>sameRect(held, area)))
+                if (locks.some(held=>sameRect(held.area, area)))
                 {
                     return fail(DDERR_SURFACEBUSY);
                 }
@@ -1090,7 +1130,7 @@ export function createDirectDraw(options = {}){
                 {
                     return fail(DDERR_INVALIDPARAMS);
                 }
-                locks.push(area);
+                locks.push({ area, readOnly: (flags & DDLOCK_READONLY) !== 0 });
                 // The pointer names the rectangle's own top-left corner, and the
                 // pitch does not change with it: a partial lock is a window onto
                 // the same rows, not a buffer of its own.
@@ -1112,13 +1152,17 @@ export function createDirectDraw(options = {}){
                 // Lock/Unlock calls unwind in the order they were made.
                 const index = rect === null
                     ? locks.length - 1
-                    : locks.findIndex(held=>sameRect(held, rect));
+                    : locks.findIndex(held=>sameRect(held.area, rect));
                 if (index < 0)
                 {
                     return DDERR_NOTLOCKED;
                 }
-                locks.splice(index, 1);
+                const [released] = locks.splice(index, 1);
                 uniqueness++;
+                if (!released.readOnly)
+                {
+                    tellWritten();
+                }
                 surface.present();
                 return DD_OK;
             },
@@ -1162,6 +1206,7 @@ export function createDirectDraw(options = {}){
                 releaseDc(dc);
                 dc = null;
                 uniqueness++;
+                tellWritten();
                 surface.present();
                 return DD_OK;
             },
@@ -1672,6 +1717,17 @@ export function createDirectDraw(options = {}){
             depthFillWatchers.add(watcher);
             return ()=>{
                 depthFillWatchers.delete(watcher);
+            };
+        },
+
+        /**
+         * @param {PixelWatcher} watcher
+         * @returns {() => void} what stops it
+         */
+        watchPixels(watcher){
+            pixelWatchers.add(watcher);
+            return ()=>{
+                pixelWatchers.delete(watcher);
             };
         },
 

@@ -577,6 +577,21 @@ export function createDirectDrawSeam(
         return DD_OK;
     };
 
+    /**
+     * Runs a call once every surface it reads has its pixels in guest memory:
+     * a render target the GPU draws into has them there only once they are
+     * read back, and the caller is parked until then. At once, and as a plain
+     * answer, when nobody keeps a copy elsewhere.
+     *
+     * @param {any[]} surfaces @param {() => number} run
+     * @returns {number | Promise<number>}
+     */
+    const whenCurrent = (surfaces, run)=>{
+        const pending = surfaces.map(surface=>surface.pixelsCurrent())
+            .filter(answer=>answer !== null);
+        return pending.length === 0 ? run() : Promise.all(pending).then(run);
+    };
+
     /** @param {any} surface @returns {import('../ddraw/objects.js').Rect[] | undefined} */
     const clipListOf = surface=>{
         const clipper = surface.clipper;
@@ -647,11 +662,9 @@ export function createDirectDrawSeam(
                     ? 0
                     : fields.readU32((fx >>> 0) + DDBLTFX.dwFillColor);
                 const rect = readRect(destRect);
-                const outcome = blt({
+                const request = {
                     memory,
-                    dest: blitView(surface),
                     destRect: rect,
-                    src: from ? blitView(from) : undefined,
                     srcRect: readRect(sourceRect),
                     flags: flags >>> 0,
                     fx: {
@@ -665,17 +678,24 @@ export function createDirectDrawSeam(
                             (flags & DDBLT_KEYDESTOVERRIDE) !== 0, fx, DDBLTFX.ddckDestColorkey),
                     },
                     clipList: clipListOf(surface),
-                });
-                if (outcome === DD_OK)
-                {
-                    surface.changeUniquenessValue();
-                    surface.present();
-                    if ((flags & DDBLT_DEPTHFILL) !== 0)
+                };
+                return whenCurrent(from ? [surface, from] : [surface], ()=>{
+                    const outcome = blt({
+                        ...request,
+                        dest: blitView(surface),
+                        src: from ? blitView(from) : undefined,
+                    });
+                    if (outcome === DD_OK)
                     {
-                        surface.depthFilled(rect, fill);
+                        surface.changeUniquenessValue();
+                        surface.present();
+                        if ((flags & DDBLT_DEPTHFILL) !== 0)
+                        {
+                            surface.depthFilled(rect, fill);
+                        }
                     }
-                }
-                return outcome;
+                    return outcome;
+                });
             },
 
             /** @param {any} surface @param {number[]} args */
@@ -690,12 +710,10 @@ export function createDirectDrawSeam(
                 {
                     return hr;
                 }
-                const outcome = bltFast({
+                const request = {
                     memory,
-                    dest: blitView(surface),
                     x: x | 0,
                     y: y | 0,
-                    src: blitView(from),
                     srcRect: readRect(sourceRect),
                     flags: flags >>> 0,
                     srcColorKey: (flags & DDBLTFAST_SRCCOLORKEY) !== 0
@@ -704,13 +722,18 @@ export function createDirectDrawSeam(
                     destColorKey: (flags & DDBLTFAST_DESTCOLORKEY) !== 0
                         ? surface.getColorKey(DDCKEY_DESTBLT).key ?? undefined
                         : undefined,
+                };
+                return whenCurrent([surface, from], ()=>{
+                    const outcome = bltFast({
+                        ...request, dest: blitView(surface), src: blitView(from),
+                    });
+                    if (outcome === DD_OK)
+                    {
+                        surface.changeUniquenessValue();
+                        surface.present();
+                    }
+                    return outcome;
                 });
-                if (outcome === DD_OK)
-                {
-                    surface.changeUniquenessValue();
-                    surface.present();
-                }
-                return outcome;
             },
 
             /** @param {any} surface @param {number[]} args */
@@ -815,11 +838,14 @@ export function createDirectDrawSeam(
                     return DDERR_INVALIDPARAMS;
                 }
                 const got = surface.getDC();
-                if (got.hr === DD_OK)
+                if (got.hr !== DD_OK)
                 {
-                    fields.writeU32(out >>> 0, got.dc);
+                    return got.hr;
                 }
-                return got.hr;
+                return whenCurrent([surface], ()=>{
+                    fields.writeU32(out >>> 0, got.dc);
+                    return DD_OK;
+                });
             },
 
             GetFlipStatus: ()=>DD_OK,
@@ -867,12 +893,12 @@ export function createDirectDrawSeam(
              *
              * @param {any} surface @param {number[]} args
              */
-            Lock: (surface, [rect, desc])=>{
+            Lock: (surface, [rect, desc, flags])=>{
                 if ((desc >>> 0) === 0 || fields.readU32(desc >>> 0) !== layout.SIZE)
                 {
                     return DDERR_INVALIDPARAMS;
                 }
-                const locked = surface.lock(readRect(rect));
+                const locked = surface.lock(readRect(rect), flags >>> 0);
                 if (locked.hr !== DD_OK)
                 {
                     fields.writeU32((desc >>> 0) + layout.lpSurface, 0);
@@ -880,7 +906,7 @@ export function createDirectDrawSeam(
                 }
                 writeSurfaceDesc(memory, desc >>> 0, layout,
                     descriptorOf(surface, locked.surfacePointer));
-                return DD_OK;
+                return whenCurrent([surface], ()=>DD_OK);
             },
 
             /** @param {any} surface @param {number[]} args */
