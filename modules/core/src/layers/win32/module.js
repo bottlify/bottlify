@@ -428,6 +428,9 @@ export const win32Module = {
             // graphics is created after win32 and does not exist yet when this
             // configuration is read.
             graphics: config?.graphics,
+            // A font enumeration's callback is the program's own code.
+            call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+            callerThread: ()=>bridge.callerThread(),
         });
 
         // The transport is injected, as the GPU device and the block store are.
