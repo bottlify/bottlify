@@ -37,7 +37,7 @@ import { createMsvcrtFunctions } from './msvcrt/functions.js';
 import { createWindowFunctions } from './user32/windows.js';
 import { createMessageQueue } from './user32/messages.js';
 import { createRegistryFunctions } from './advapi32/functions.js';
-import { createTokenFunctions } from './advapi32/tokens.js';
+import { ADMINISTRATORS_SID, createTokenFunctions, isTokenMember } from './advapi32/tokens.js';
 import { createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
 import { createHive, SHELL_FOLDERS } from './advapi32/registry.js';
@@ -61,6 +61,7 @@ import { createLzFunctions } from './lz32/functions.js';
 import { createCommonDialogFunctions } from './comdlg32/functions.js';
 import { createImmFunctions } from './imm32/functions.js';
 import { createShlwapiFunctions } from './shlwapi/functions.js';
+import { createAdvpackFunctions } from './advpack/functions.js';
 import { createD3dxFunctions } from './d3dx9/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
 import { createNetworkFunctions } from './mpr/functions.js';
@@ -1287,6 +1288,10 @@ export const win32Module = {
             'IMM32.dll': createImmFunctions({ writeMemory }),
 
             'SHLWAPI.dll': createShlwapiFunctions({ readCString, readWideString, writeMemory }),
+
+            'ADVPACK.dll': createAdvpackFunctions({
+                isAdministrator: ()=>isTokenMember(ADMINISTRATORS_SID),
+            }),
 
             // The maths half of the Direct3D helper: pure vector and matrix
             // functions, here for their stack width as much as their answers,

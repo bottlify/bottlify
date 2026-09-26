@@ -148,6 +148,12 @@ test('SHLWAPI\'s wide spellings read wide strings', async()=>{
     await win32Module.dispose();
 });
 
+test('ADVPACK answers IsNTAdmin from the same token the advapi32 calls read', async()=>{
+    const { libraries } = await build();
+    assert.equal(libraries['ADVPACK.dll'].IsNTAdmin.handler(), 1);
+    await win32Module.dispose();
+});
+
 test('VERSION knows which libraries the engine answers for', async()=>{
     const { bytes, libraries } = await build();
     bytes.set([...'kernel32.dll\0'].map(ch=>ch.charCodeAt(0)), 0x4000);
