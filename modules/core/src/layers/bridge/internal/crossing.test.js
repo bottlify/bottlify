@@ -149,7 +149,8 @@ test('a stdcall of four dwords reuses its arguments and frame, and times only th
     assert.equal(frames[0], frames[1], 'one frame per depth of nesting');
     assert.equal(m.sunk(), 5 * CALLS, 'the sink saw every call');
     assert.equal(m.errorReads(), 5 * CALLS, 'and the last error was read after each');
-    assert.equal(m.phases.length, 5 * CALLS / 8, 'one crossing in eight is timed');
+    const share = m.phases.length / (5 * CALLS);
+    assert.ok(share > 0.12 && share < 0.13, `one crossing in eight is timed (${share})`);
     assert.ok(m.phases.every(name=>name === 'trap'), 'and no handler phase without callPhases');
     assert.equal(m.dispatcher.detailed(1)[0].result, '0xa', 'the record still says the answer');
 });

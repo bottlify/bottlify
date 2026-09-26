@@ -456,19 +456,17 @@ test('the crossing is timed apart from the handler it carries', ()=>{
     built.dispatcher.register(1, {
         name: 'TEST.dll!Something', convention: 'stdcall', argBytes: 0, handler: ()=>7,
     });
-    built.dispatcher.dispatch(1);
-
-    assert.deepEqual(opened, ['begin trap', 'end trap'],
-        'the crossing is timed; the call is not, unless a measurement asks');
-    for (let more = 1; more < 16; more++)
+    for (let call = 0; call < 8000; call++)
     {
         built.dispatcher.dispatch(1);
     }
-    assert.deepEqual(opened, ['begin trap', 'end trap', 'begin trap', 'end trap'],
-        'one crossing in eight is timed, standing for the eight');
+    assert.ok(opened.every((line, i)=>line === (i % 2 === 0 ? 'begin trap' : 'end trap')),
+        'the crossing is timed; the call is not, unless a measurement asks');
+    const timed = opened.length / 2;
+    assert.ok(timed > 850 && timed < 1150, `one crossing in eight is timed (${timed} of 8000)`);
 
     opened.length = 0;
-    const timed = machine({
+    const phased = machine({
         profiler: {
             /** @param {string} name */
             begin: name=>opened.push(`begin ${name}`),
@@ -478,16 +476,61 @@ test('the crossing is timed apart from the handler it carries', ()=>{
         },
         callPhases: true,
     });
-    timed.dispatcher.register(1, {
+    phased.dispatcher.register(1, {
         name: 'TEST.dll!Something', convention: 'stdcall', argBytes: 0, handler: ()=>7,
     });
-    timed.dispatcher.dispatch(1);
-    assert.deepEqual(opened, [
+    while (!opened.includes('begin trap'))
+    {
+        phased.dispatcher.dispatch(1);
+    }
+    assert.deepEqual(opened.slice(-4), [
         'begin trap',
         'begin TEST.dll!Something',
         'end TEST.dll!Something',
         'end trap x8',
     ], 'asked for, the handler runs inside the crossing, which keeps only its own time');
+    assert.equal(opened.filter(line=>line === 'begin TEST.dll!Something').length,
+        opened.length / 2 - 1, 'and every call is timed, the untimed crossings\' too');
+});
+
+test('which crossing is timed does not follow the program\'s own sequence of calls', ()=>{
+    // A frame's draws repeat one sequence of calls. Timing every eighth call
+    // of a sequence whose length shares a factor with eight times the same
+    // positions of it every time, and the estimate is those calls' cost
+    // weighted eightfold: here, the one heavy call of eight, timed always or
+    // never.
+    /** @type {string[]} */
+    const timed = [];
+    let inside = false;
+    const built = machine({
+        profiler: {
+            begin: ()=>{
+                inside = true;
+            },
+            end: ()=>{
+                inside = false;
+            },
+        },
+    });
+    built.dispatcher.register(1, {
+        name: 'TEST.dll!Heavy', convention: 'stdcall', argBytes: 0,
+        handler: ()=>(inside && timed.push('heavy'), 0),
+    });
+    built.dispatcher.register(2, {
+        name: 'TEST.dll!Light', convention: 'stdcall', argBytes: 0,
+        handler: ()=>(inside && timed.push('light'), 0),
+    });
+    for (let sequence = 0; sequence < 2000; sequence++)
+    {
+        built.dispatcher.dispatch(1);
+        for (let light = 0; light < 7; light++)
+        {
+            built.dispatcher.dispatch(2);
+        }
+    }
+    const heavy = timed.filter(name=>name === 'heavy').length / timed.length;
+    assert.ok(heavy > 0.08 && heavy < 0.17,
+        `the heavy call is an eighth of the timed ones, as of the calls (${heavy.toFixed(3)})`);
 });
 
 test('the detail ring hands out copies, and its records are written over, not remade', ()=>{

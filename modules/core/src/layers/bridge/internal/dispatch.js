@@ -236,9 +236,14 @@ export function createDispatcher(deps){
     const phased = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiler !== null && callPhases;
     // The crossing is timed one call in this many, each standing for all of
     // them: two clock readings a call were a measured share of a frame in a
-    // match, and a share is as true of a sample as of the whole.
+    // match, and a share is as true of a sample as of the whole -- of a random
+    // sample. Every eighth call of a program that draws in a fixed sequence of
+    // calls is the same few calls of that sequence every time, and the estimate
+    // was those calls' cost eight times over: more host time than the frame had,
+    // and a guest phase whose own time came out below nothing. Which call is
+    // timed is drawn from a xorshift instead, one in eight on average.
     const TRAP_SAMPLE = 8;
-    let crossings = 0;
+    let sampler = 0x9e3779b9;
     // Indexed by trap id: the cpu hands them out in sequence from zero.
     /** @type {(Entry | undefined)[]} */
     const functions = [];
@@ -541,8 +546,15 @@ export function createDispatcher(deps){
             // until this existed there was no way to tell a machine slowed by
             // its own emulation from one slowed by leaving it so often.
             // A production bundle times no crossing at all.
-            if (import.meta.BOTTLIFY_DIAGNOSTICS === false || profiler === null
-                || (crossings++ & (TRAP_SAMPLE - 1)) !== 0)
+            if (import.meta.BOTTLIFY_DIAGNOSTICS === false || profiler === null)
+            {
+                this.dispatchNow(id);
+                return;
+            }
+            sampler ^= sampler << 13;
+            sampler ^= sampler >>> 17;
+            sampler ^= sampler << 5;
+            if ((sampler & (TRAP_SAMPLE - 1)) !== 0)
             {
                 this.dispatchNow(id);
                 return;

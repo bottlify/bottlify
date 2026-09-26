@@ -285,7 +285,10 @@ still ends its call (`finally`), so the bridge is never left inside one.
 
 The crossing is timed as a `trap` phase one call in eight (weighted by eight, which scales the
 profiler's sums and never its per-occurrence figures), so the host's share of a frame is known
-without two clock readings per call; `callPhases` adds a phase per handler. Both, and the clock
+without two clock readings per call. Which call is timed is drawn from a xorshift, one in eight on
+average, rather than every eighth: a frame's draws repeat one sequence of calls, every eighth call of
+it was the same few calls every time, and the estimate was those calls' cost eightfold -- in a scene
+of eighteen calls a draw, more host time than the frames lasted and a guest phase below zero; `callPhases` adds a phase per handler. Both, and the clock
 around a hook's kernel, are diagnostics a production bundle leaves out. A prompt
 call allocates nothing: the argument array, the frame and the ring's records are made once and
 written over, the answer is kept as a number and rendered as text only when a reader asks, and
