@@ -61,10 +61,13 @@ import {
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import { createDefaultRenderStates } from './renderstates.js';
 import {
-    createPriority, createReferenceCount, createSurface, createTexture, packColour, rectMoveOf,
-    regionAtLevel, writeFrontBuffer, writePixels,
+    createPriority, createReferenceCount, createSurface, createTexture, createVolumeTexture,
+    packColour, rectMoveOf, regionAtLevel, volumeUpdate, writeFrontBuffer, writePixels,
 } from './resources.js';
-import { SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters } from './validity.js';
+import {
+    SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters, volumeCreateResult,
+    volumeLevelCount,
+} from './validity.js';
 import { validateStages } from '../d3d8/validity.js';
 import { processStreams } from '../d3d8/process.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
@@ -228,6 +231,7 @@ export function createPalettes(){
  * @property {number} maxActiveLights
  * @property {number} maxTextureWidth
  * @property {number} maxTextureHeight
+ * @property {number} maxVolumeExtent
  * @property {number} maxAnisotropy
  * @property {number} maxPrimitiveCount
  * @property {number} maxVertexIndex
@@ -256,6 +260,7 @@ export const DEFAULT_CAPS = Object.freeze({
     maxActiveLights: 8,
     maxTextureWidth: 4096,
     maxTextureHeight: 4096,
+    maxVolumeExtent: 256,
     maxAnisotropy: 1,
     maxPrimitiveCount: 0xffff,
     // Thirty-two-bit indices are read, so the highest index is not sixteen bits.
@@ -499,6 +504,12 @@ export function createDirect3D9(options = {}){
                     return (info.depth ? resolved.depthCube && !wantsTarget : !wantsDepth)
                         ? D3D_OK
                         : D3DERR_NOTAVAILABLE;
+                // A volume is sampled, never drawn into, and never made in
+                // blocks here.
+                case D3DRTYPE.VOLUMETEXTURE:
+                    return !info.depth && !isCompressed(format) && !wantsTarget && !wantsDepth
+                        ? D3D_OK
+                        : D3DERR_NOTAVAILABLE;
                 case D3DRTYPE.SURFACE:
                     if (wantsTarget)
                     {
@@ -510,7 +521,7 @@ export function createDirect3D9(options = {}){
                     }
                     return !info.depth || resolved.depthPlain ? D3D_OK : D3DERR_NOTAVAILABLE;
                 default:
-                    // Volumes and buffers are never made here, in any format.
+                    // Buffers have no format to ask about.
                     return D3DERR_NOTAVAILABLE;
             }
         },
@@ -2940,6 +2951,36 @@ function createDeviceObject(parameters, caps, services, identity){
         },
 
         /**
+         * @param {number} width @param {number} height @param {number} depth
+         * @param {number} levels  Zero for the whole chain.
+         * @param {number} usage @param {number} format @param {number} pool
+         * @param {{ texture?: any }} out
+         */
+        CreateVolumeTexture(width, height, depth, levels, usage, format, pool, out){
+            const hr = volumeCreateResult({
+                width, height, depth, levels, usage, format, pool,
+                maxExtent: caps.maxVolumeExtent,
+            });
+            if (hr !== D3D_OK)
+            {
+                if (isCompressed(format))
+                {
+                    reportRefusedFormat(format);
+                }
+                return hr;
+            }
+            const chain = levels || volumeLevelCount(width, height, depth);
+            const texture = createVolumeTexture({
+                width, height, depth, levels: chain, format, pool, usage,
+                count: explicitCount(pool), allocate, free,
+            });
+            renderer?.trackTexture?.(texture,
+                { width, height, depth, format, levels: chain, usage });
+            out.texture = texture;
+            return D3D_OK;
+        },
+
+        /**
          * The multisample type is dropped rather than refused: this device
          * renders one sample per pixel whatever it is asked for, and a target
          * that differs from the back buffer only in that is still a target it
@@ -3124,6 +3165,23 @@ function createDeviceObject(parameters, caps, services, identity){
             if (!source || !destination || source === destination)
             {
                 return D3DERR_INVALIDCALL;
+            }
+            if (source.volume || destination.volume)
+            {
+                const update = source.volume && destination.volume
+                    && source.pool === D3DPOOL.SYSTEMMEM && destination.pool === D3DPOOL.DEFAULT
+                    ? volumeUpdate(source, destination)
+                    : null;
+                if (!update)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                deliverMoves(update.moves, out);
+                for (const volume of update.written)
+                {
+                    renderer?.markDirty?.(volume);
+                }
+                return D3D_OK;
             }
             const top = levelSurface(source, 0);
             const target = levelSurface(destination, 0);

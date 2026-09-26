@@ -24,16 +24,16 @@ import { createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
 import { IDIRECT3D9_SLOTS } from './vtables.js';
 import {
-    D3DDISPLAYMODE, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS9, createFields,
+    D3DDISPLAYMODE, D3DLOCKED_BOX, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS9, createFields,
 } from './structs.js';
 import {
-    D3DCAPS9, D3DSURFACE_DESC9, D3DVERTEXELEMENT9, D3DVIEWPORT9,
+    D3DCAPS9, D3DSURFACE_DESC9, D3DVERTEXELEMENT9, D3DVIEWPORT9, D3DVOLUME_DESC9,
 } from '../d3d9/structs.js';
 import {
     IDIRECT3DCUBETEXTURE9_SLOTS, IDIRECT3DDEVICE9_SLOTS, IDIRECT3DQUERY9_SLOTS,
     IDIRECT3DSHADER9_SLOTS,
     IDIRECT3DSTATEBLOCK9_SLOTS, IDIRECT3DSURFACE9_SLOTS, IDIRECT3DTEXTURE9_SLOTS,
-    IDIRECT3DVERTEXDECLARATION9_SLOTS,
+    IDIRECT3DVERTEXDECLARATION9_SLOTS, IDIRECT3DVOLUME9_SLOTS, IDIRECT3DVOLUMETEXTURE9_SLOTS,
 } from '../d3d9/interfaces.js';
 import { D3DCREATE, D3DDEVTYPE, D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
 import { D3DFMT, D3DPOOL, D3DRS } from '../d3d9/constants.js';
@@ -787,18 +787,105 @@ test('a cube texture is made, and answers for its faces through its own vtable',
     h.release(root);
 });
 
-test('a volume texture is refused, and the caller\'s pointer cleared', ()=>{
-    const h = seamed();
-    const root = h.create();
-    const { device } = h.createDevice(root);
-    const out = 0x3000;
-    h.box.memory.writeU32(out, 0xdeadbeef);
-    assert.equal(h.device(device, 'CreateVolumeTexture',
-        [8, 8, 8, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0]), D3DERR_NOTAVAILABLE);
-    assert.equal(h.box.memory.readU32(out), 0);
-    assert.equal(h.release(device), 0);
-    h.release(root);
-});
+test('a volume texture is made, and its levels lock, describe and name it as a box does',
+    ()=>{
+        const h = seamed();
+        const root = h.create();
+        const { device } = h.createDevice(root);
+        const out = 0x3000;
+        assert.equal(h.device(device, 'CreateVolumeTexture',
+            [4, 4, 2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SCRATCH, out, 0x4000]), D3DERR_INVALIDCALL,
+        'a shared handle is the extended interface\'s');
+        h.box.memory.writeU32(out, 0xdeadbeef);
+        assert.equal(h.device(device, 'CreateVolumeTexture',
+            [4, 4, 2, 1, 0x8, D3DFMT.A8R8G8B8, D3DPOOL.SCRATCH, out, 0]), D3DERR_INVALIDCALL,
+        'D3DUSAGE_WRITEONLY (Wine\'s d3d9 test_lockbox_invalid)');
+        assert.equal(h.box.memory.readU32(out), 0, 'and the pointer cleared');
+        assert.equal(h.device(device, 'CreateVolumeTexture',
+            [2, 4, 8, 4, 0, D3DFMT.X8R8G8B8, D3DPOOL.SYSTEMMEM, out, 0]), D3D_OK);
+        const texture = h.box.memory.readU32(out);
+        /** @param {string} name @param {number[]} [args] */
+        const call = (name, args = [])=>
+            h.box.call(texture, slot(IDIRECT3DVOLUMETEXTURE9_SLOTS, name), args);
+
+        // Wine's d3d9 test_resource_type: the texture is a volume texture, a
+        // level a volume, and the level shrinks along every axis.
+        assert.equal(call('GetType'), 4, 'D3DRTYPE_VOLUMETEXTURE');
+        assert.equal(call('GetLevelCount'), 4);
+        const desc = 0x3100;
+        assert.equal(call('GetLevelDesc', [2, desc]), D3D_OK);
+        assert.deepEqual(h.fields.readStruct(desc, D3DVOLUME_DESC9), {
+            Format: D3DFMT.X8R8G8B8, Type: 2, Usage: 0, Pool: D3DPOOL.SYSTEMMEM,
+            Width: 1, Height: 1, Depth: 2,
+        });
+
+        // test_lockbox_invalid: the box is checked, and the address is the
+        // box's corner at the two pitches.
+        const locked = 0x3200;
+        assert.equal(call('LockBox', [0, locked, 0, 0]), D3D_OK);
+        const base = h.fields.readU32(locked + D3DLOCKED_BOX.pBits);
+        assert.equal(h.fields.readU32(locked + D3DLOCKED_BOX.RowPitch), 8);
+        assert.equal(h.fields.readU32(locked + D3DLOCKED_BOX.SlicePitch), 32);
+        assert.equal(call('LockBox', [0, locked, 0, 0]), D3DERR_INVALIDCALL, 'locked already');
+        assert.equal(call('UnlockBox', [0]), D3D_OK);
+        assert.equal(call('UnlockBox', [0]), D3DERR_INVALIDCALL, 'not locked');
+        const box = 0x3300;
+        /** @param {number[]} edges left, top, right, bottom, front, back */
+        const putBox = edges=>edges.forEach((edge, index)=>h.box.memory.writeU32(box + index * 4,
+            edge));
+        putBox([1, 2, 2, 4, 3, 5]);
+        assert.equal(call('LockBox', [0, locked, box, 0]), D3D_OK);
+        assert.equal(h.fields.readU32(locked + D3DLOCKED_BOX.pBits), base + 3 * 32 + 2 * 8 + 4);
+        assert.equal(call('UnlockBox', [0]), D3D_OK);
+        putBox([0, 0, 2, 4, 4, 4]);
+        h.box.memory.writeU32(locked + D3DLOCKED_BOX.pBits, 0xdeadbeef);
+        assert.equal(call('LockBox', [0, locked, box, 0]), D3DERR_INVALIDCALL, 'no depth');
+        assert.equal(h.fields.readU32(locked + D3DLOCKED_BOX.pBits), 0, 'and no address');
+        assert.equal(call('AddDirtyBox', [box]), D3DERR_INVALIDCALL);
+        assert.equal(call('AddDirtyBox', [0]), D3D_OK);
+
+        // test_volume_get_container and test_volume_resource: a level is not
+        // a resource, and its container is the texture.
+        assert.equal(call('GetVolumeLevel', [0, out]), D3D_OK);
+        const volume = h.box.memory.readU32(out);
+        /** @param {string} name @param {number[]} [args] */
+        const onVolume = (name, args = [])=>
+            h.box.call(volume, slot(IDIRECT3DVOLUME9_SLOTS, name), args);
+        assert.equal(onVolume('GetDesc', [desc]), D3D_OK);
+        assert.equal(h.fields.readU32(desc + D3DVOLUME_DESC9.Depth), 8);
+        const iid = 0x3400;
+        putGuid(h, iid, [0x2518526c, 0xe789, 0x4111, 0xa7, 0xb9, 0x47, 0xef, 0x32, 0x8d, 0x13,
+            0xe6]);
+        assert.equal(onVolume('GetContainer', [iid, out]), D3D_OK);
+        assert.equal(h.box.memory.readU32(out), texture);
+        h.release(texture);
+        putGuid(h, iid, [0x24f416e6, 0x1f67, 0x4aa7, 0xb8, 0x8e, 0xd3, 0x3f, 0x6f, 0x31, 0x28,
+            0xa1]);
+        assert.equal(onVolume('GetContainer', [iid, out]), 0x80004002, 'a volume holds no volume');
+        assert.equal(h.box.memory.readU32(out), 0);
+        putGuid(h, iid, [0x05eec05d, 0x8f7d, 0x4362, 0xb9, 0x99, 0xd1, 0xba, 0xf3, 0x57, 0xc7,
+            0x04]);
+        assert.equal(h.box.call(volume, 0, [iid, out]), 0x80004002, 'nor is a resource');
+        assert.equal(onVolume('GetDevice', [out]), D3D_OK);
+        assert.equal(h.box.memory.readU32(out), device);
+        h.release(device);
+        assert.equal(onVolume('LockBox', [locked, 0, 0]), D3D_OK);
+        assert.equal(h.fields.readU32(locked + D3DLOCKED_BOX.pBits), base);
+        assert.equal(call('LockBox', [0, locked, 0, 0]), D3DERR_INVALIDCALL,
+            'one lock, however it is taken');
+        assert.equal(onVolume('UnlockBox'), D3D_OK);
+        assert.equal(h.release(volume), 1, 'the texture holds its level');
+
+        // Bound and read back, it is the pointer the program holds.
+        assert.equal(h.device(device, 'SetTexture', [0, texture]), D3D_OK);
+        assert.equal(h.device(device, 'GetTexture', [0, out]), D3D_OK);
+        assert.equal(h.box.memory.readU32(out), texture);
+        h.release(texture);
+        assert.equal(h.device(device, 'SetTexture', [0, 0]), D3D_OK);
+        assert.equal(h.release(texture), 0);
+        assert.equal(h.release(device), 0);
+        h.release(root);
+    });
 
 test('a declaration is read from the guest to its sentinel and written back with it', ()=>{
     const h = seamed();

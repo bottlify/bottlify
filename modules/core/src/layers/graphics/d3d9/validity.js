@@ -19,7 +19,7 @@
  */
 
 import {
-    D3DERR_INVALIDCALL, D3DPOOL, D3DSWAPEFFECT, D3DUSAGE, D3D_OK,
+    D3DERR_INVALIDCALL, D3DPOOL, D3DSWAPEFFECT, D3DUSAGE, D3D_OK, FORMAT_INFO,
 } from './constants.js';
 
 /** What the pool/usage table distinguishes about a format, and nothing more. */
@@ -180,6 +180,58 @@ export function surfaceCreateResult(surfaceType, row, support){
         default:
             return D3DERR_INVALIDCALL;
     }
+}
+
+/**
+ * How many levels a volume of this extent has when all are asked for: down
+ * to a single texel on its longest axis.
+ *
+ * @param {number} width @param {number} height @param {number} depth
+ */
+export function volumeLevelCount(width, height, depth){
+    let levels = 1;
+    for (let extent = Math.max(width, height, depth); extent > 1; extent >>>= 1)
+    {
+        levels++;
+    }
+    return levels;
+}
+
+/**
+ * Whether a volume texture of these arguments is made, in either version
+ * (Wine's d3d8 and d3d9 test_volume_locking and test_lockbox_invalid): never
+ * a render target, a depth buffer or write-only, and dynamic only in the
+ * default or system-memory pool. A depth format and a format in blocks are
+ * refused too: nothing here uploads either as a volume.
+ *
+ * @param {{ width: number, height: number, depth: number, levels: number, usage: number,
+ *           format: number, pool: number, maxExtent: number }} request
+ *        `levels` zero for the whole chain.
+ * @returns {number} D3D_OK or D3DERR_INVALIDCALL
+ */
+export function volumeCreateResult(request){
+    const info = FORMAT_INFO[request.format];
+    if (!info || info.depth || info.blockBytes !== undefined)
+    {
+        return D3DERR_INVALIDCALL;
+    }
+    if ((request.usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL
+        | D3DUSAGE.WRITEONLY)) !== 0)
+    {
+        return D3DERR_INVALIDCALL;
+    }
+    if ((request.usage & D3DUSAGE.DYNAMIC) !== 0
+        && request.pool !== D3DPOOL.DEFAULT && request.pool !== D3DPOOL.SYSTEMMEM)
+    {
+        return D3DERR_INVALIDCALL;
+    }
+    const extents = [request.width, request.height, request.depth];
+    if (!extents.every(extent=>extent > 0 && extent <= request.maxExtent)
+        || request.levels > volumeLevelCount(request.width, request.height, request.depth))
+    {
+        return D3DERR_INVALIDCALL;
+    }
+    return D3D_OK;
 }
 
 /**

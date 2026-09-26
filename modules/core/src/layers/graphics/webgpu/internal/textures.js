@@ -158,7 +158,9 @@ export function createTextureUploader(options){
         const bytesPerRow = request.bytesPerRow === undefined
             ? columns * info.bytesPerBlock
             : request.bytesPerRow;
-        const needed = rows * bytesPerRow;
+        // A volume's slices, or an array's layers, one image after another.
+        const layers = request.depthOrArrayLayers === undefined ? 1 : request.depthOrArrayLayers;
+        const needed = rows * bytesPerRow * layers;
         const data = request.data;
         if (data.byteLength < needed)
         {
@@ -191,9 +193,7 @@ export function createTextureUploader(options){
         const size = {
             width: info.compressed ? columns * info.blockWidth : request.width,
             height: info.compressed ? rows * info.blockHeight : request.height,
-            depthOrArrayLayers: request.depthOrArrayLayers === undefined
-                ? 1
-                : request.depthOrArrayLayers,
+            depthOrArrayLayers: layers,
         };
 
         const staged = request.staging === undefined ? info.compressed : request.staging;
@@ -210,7 +210,7 @@ export function createTextureUploader(options){
 
         const alignedBytesPerRow = Math.ceil(bytesPerRow / COPY_BYTES_PER_ROW_ALIGNMENT)
             * COPY_BYTES_PER_ROW_ALIGNMENT;
-        const packed = repackRows(data, { rows, bytesPerRow, alignedBytesPerRow });
+        const packed = repackRows(data, { rows: rows * layers, bytesPerRow, alignedBytesPerRow });
         const staging = options.device.createBuffer({
             label: `staging:${request.format}`,
             size: packed.byteLength,

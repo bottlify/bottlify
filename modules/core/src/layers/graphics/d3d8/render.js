@@ -1551,7 +1551,7 @@ const ADDRESS = Object.freeze({
  * @param {boolean} [mips]  False pins every sample to the top level.
  * @param {number} [lod]  The bound texture's own level of detail.
  * @returns {{ magFilter: string, minFilter: string, mipmapFilter: string,
- *             addressModeU: string, addressModeV: string,
+ *             addressModeU: string, addressModeV: string, addressModeW: string,
  *             lodMinClamp: number, lodMaxClamp: number }}
  */
 export function samplerDescriptorOf(states, mips = true, lod = 0){
@@ -1564,6 +1564,7 @@ export function samplerDescriptorOf(states, mips = true, lod = 0){
         mipmapFilter: FILTER[mipFilter] ?? 'nearest',
         addressModeU: ADDRESS[get(D3DTSS.ADDRESSU)] ?? 'repeat',
         addressModeV: ADDRESS[get(D3DTSS.ADDRESSV)] ?? 'repeat',
+        addressModeW: ADDRESS[get(D3DTSS.ADDRESSW)] ?? 'repeat',
         // D3DTEXF_NONE for the mip filter means one level alone, however many
         // the texture has: the finest a program allows, which is the nearest
         // it lets any sample come.
@@ -3088,6 +3089,76 @@ export function createRenderer(options){
     };
 
     /**
+     * A volume texture's levels, taken into care as a texture's surfaces are:
+     * each unlock, through the texture or through the level, marks that
+     * level for upload unless a managed texture keeps its copy, AddDirtyBox
+     * marks them all, and a level handed out is known by what it is a level
+     * of, so a copy into it marks it too.
+     *
+     * @param {any} texture @param {any} entry
+     * @param {(level: number) => void} soiled
+     * @param {(volume: any) => boolean} keepsCopy
+     */
+    const trackVolumeLevels = (texture, entry, soiled, keepsCopy)=>{
+        const volumeLevel = texture.GetVolumeLevel;
+        const unlockBox = texture.UnlockBox;
+        const addDirtyBox = texture.AddDirtyBox;
+        texture.UnlockBox = (/** @type {number} */ level)=>{
+            /** @type {{ volume?: any }} */
+            const held = {};
+            const keeps = volumeLevel(level, held) === D3D_OK && keepsCopy(held.volume);
+            held.volume?.release();
+            const hr = unlockBox(level);
+            if (hr === D3D_OK && !keeps)
+            {
+                soiled(level);
+            }
+            return hr;
+        };
+        texture.AddDirtyBox = (/** @type {any} */ box)=>{
+            const hr = addDirtyBox(box);
+            if (hr === D3D_OK)
+            {
+                for (let level = 0; level < entry.levels; level++)
+                {
+                    soiled(level);
+                }
+            }
+            return hr;
+        };
+        const hooked = new WeakSet();
+        /** @param {number} level @param {{ volume?: any }} out */
+        texture.GetVolumeLevel = (level, out)=>{
+            const hr = volumeLevel(level, out);
+            const volume = hr === D3D_OK ? out.volume : null;
+            if (volume && !hooked.has(volume))
+            {
+                hooked.add(volume);
+                textures.set(volume, entry);
+                surfaceLevels.set(volume, level);
+                const unlockVolume = volume.UnlockBox;
+                volume.UnlockBox = ()=>{
+                    const keeps = keepsCopy(volume);
+                    const unlocked = unlockVolume();
+                    if (unlocked === D3D_OK && !keeps)
+                    {
+                        soiled(level);
+                    }
+                    return unlocked;
+                };
+            }
+            return hr;
+        };
+        /** @type {{ volume?: any }} */
+        const top = {};
+        if (texture.GetVolumeLevel(0, top) === D3D_OK)
+        {
+            top.volume.release();
+            entry.base = top.volume.base;
+        }
+    };
+
+    /**
      * A level above the top, or a face of a cube, as a target: the same
      * backend texture through a view of that level of that face alone.
      *
@@ -3147,7 +3218,8 @@ export function createRenderer(options){
      *
      * @param {any} surface a backend surface
      * @param {{ format: string, mipLevel: number, width: number, height: number,
-     *           texels: Uint8Array, layer?: number }} upload  `layer` is a cube's face.
+     *           texels: Uint8Array, layer?: number, depth?: number }} upload
+     *        `layer` is a cube's face; `depth` a volume level's slices, one after another.
      * @param {boolean} ordered
      */
     const uploadTexels = (surface, upload, ordered)=>{
@@ -3164,6 +3236,7 @@ export function createRenderer(options){
             height: upload.height,
             data: upload.texels,
             ...(upload.layer ? { origin: { x: 0, y: 0, z: upload.layer } } : {}),
+            ...(upload.depth ? { depthOrArrayLayers: upload.depth } : {}),
         });
     };
 
@@ -3298,6 +3371,31 @@ export function createRenderer(options){
     };
 
     /**
+     * One level of a volume texture, all its slices, into the GPU's. A volume
+     * is never in blocks and never drawn into, so it is widened like any
+     * texture and goes up out of the frame's order.
+     *
+     * @param {any} record @param {number} level @param {number} width @param {number} height
+     */
+    const uploadVolumeLevel = (record, level, width, height)=>{
+        /** @type {{ volume?: any }} */
+        const held = {};
+        if (record.texture.GetVolumeLevel(level, held) !== D3D_OK || !held.volume)
+        {
+            return;
+        }
+        held.volume.release();
+        const depth = levelExtent(record.depth, level);
+        const bytes = readMemory(held.volume.base, held.volume.slicePitch * depth);
+        uploadTexels(record.gpu, {
+            format: gpuFormatOf(record.format, record.width, record.height, false),
+            mipLevel: level, width, height, depth,
+            texels: expandTexels(record.format, bytes, width * height * depth),
+        }, false);
+        (record.written ??= new Set()).add(level);
+    };
+
+    /**
      * The GPU texture behind a d3d8 texture, with level zero uploaded if the
      * program has written it since the last draw that read it.
      *
@@ -3317,7 +3415,8 @@ export function createRenderer(options){
                 format: gpuFormatOf(record.format, record.width, record.height, compressedTextures),
                 mipLevelCount: record.levels,
                 ...(record.faces === 6 ? { layers: 6, dimension: 'cube' } : {}),
-                label: record.faces === 6 ? 'cube' : 'texture',
+                ...(record.volume ? { depth: record.depth, dimension: '3d' } : {}),
+                label: record.faces === 6 ? 'cube' : record.volume ? 'volume' : 'texture',
                 // Copied out of as well as into: a dumping run reads a
                 // texture back to compare what the device holds against what
                 // was handed to it, and a program copies a texture level into
@@ -3345,6 +3444,11 @@ export function createRenderer(options){
                 const face = Math.floor(subresource / record.levels);
                 const width = levelExtent(record.width, level);
                 const height = levelExtent(record.height, level);
+                if (record.volume)
+                {
+                    uploadVolumeLevel(record, level, width, height);
+                    continue;
+                }
                 // The level's own storage, made if the program never touched
                 // it: a level it left unwritten is sampled as whatever lies
                 // there, which is what a real device does with such a level.
@@ -4942,7 +5046,7 @@ export function createRenderer(options){
          *
          * @param {any} texture
          * @param {{ width: number, height: number, format: number, levels?: number,
-         *           usage?: number }} desc
+         *           usage?: number, depth?: number }} desc  `depth` is a volume's.
          */
         trackTexture(texture, desc){
             const levels = desc.levels ?? 1;
@@ -4951,6 +5055,7 @@ export function createRenderer(options){
             const faces = texture.cube === true ? 6 : 1;
             const entry = {
                 gpu: null, dirty: true, base: 0, levels, faces, texture,
+                volume: texture.volume === true,
                 // A render-target texture is written by the GPU as well as
                 // by the guest, so its uploads have to keep their place in
                 // the frame; see `uploadTexels`. A copy landing in a plain
@@ -5006,10 +5111,15 @@ export function createRenderer(options){
              * d3d9 add_dirty_rect_test). Any other pool's lock writes the
              * texture it draws from.
              *
-             * @param {any} surface
+             * @param {any} surface  A level's surface, or a volume texture's level.
              */
             const keepsCopy = surface=>texture.pool === D3DPOOL.MANAGED
                 && ((surface?.lockFlags ?? 0) & (D3DLOCK.READONLY | D3DLOCK_NO_DIRTY_UPDATE)) !== 0;
+            if (texture.volume === true)
+            {
+                trackVolumeLevels(texture, entry, soiled, keepsCopy);
+                return;
+            }
             const unlockLevel = texture.UnlockRect;
             texture.UnlockRect = (/** @type {number} */ level)=>{
                 /** @type {{ surface?: any }} */
@@ -5987,6 +6097,7 @@ export function createRenderer(options){
                     data: command.texels,
                     staging: true,
                     ...(command.layer ? { origin: { x: 0, y: 0, z: command.layer } } : {}),
+                    ...(command.depth ? { depthOrArrayLayers: command.depth } : {}),
                 });
                 pass = null;
                 continue;

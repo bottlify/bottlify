@@ -329,6 +329,31 @@ export const IDIRECT3DCUBETEXTURE8_SLOTS = /** @type {[string, number][]} */ ([
     ['AddDirtyRect', 2],
 ]);
 
+/** IDirect3DVolumeTexture8: the base texture, then its own five over boxes. */
+export const IDIRECT3DVOLUMETEXTURE8_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDIRECT3DBASETEXTURE8_SLOTS,
+    ['GetLevelDesc', 2],
+    ['GetVolumeLevel', 2],
+    ['LockBox', 4],
+    ['UnlockBox', 1],
+    ['AddDirtyBox', 1],
+]);
+
+/**
+ * IDirect3DVolume8, a level of a volume texture. Not a resource: it has no
+ * priority, no preload and no type, as a surface has none.
+ */
+export const IDIRECT3DVOLUME8_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetDevice', 1],
+    ['SetPrivateData', 4],
+    ['GetPrivateData', 3],
+    ['FreePrivateData', 1],
+    ['GetContainer', 2],
+    ['GetDesc', 1],
+    ['LockBox', 3],
+    ['UnlockBox', 0],
+]);
+
 /** IDirect3DVertexBuffer8. */
 export const IDIRECT3DVERTEXBUFFER8_SLOTS = /** @type {[string, number][]} */ ([
     ...IDIRECT3DRESOURCE8_SLOTS,

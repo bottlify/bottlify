@@ -16,10 +16,9 @@
  * answers E_NOTIMPL, which is a reply a program handles.
  *
  * A slot that answers a failure code rather than doing the thing asked of it is
- * making the same point more loudly: the shaders, the cube and volume textures,
- * the additional swap chain, the cursor and the transformed-vertex path are all
- * refused, each because the renderer behind this cannot honour what succeeding
- * would promise. Every one of them says so where it stands. A
+ * making the same point more loudly: the shaders and the additional swap chain
+ * are refused, each because the renderer behind this cannot honour what
+ * succeeding would promise. Every one of them says so where it stands. A
  * refusal is a reply a program acts on -- usually by taking the path this build
  * does draw -- where a success it cannot see through leaves it drawing nothing
  * and looking somewhere else for the reason.
@@ -34,15 +33,18 @@
 import { describe, IDIRECT3D8_SLOTS, IDIRECT3DBASETEXTURE8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS,
     IDIRECT3DDEVICE8_SLOTS,
     IDIRECT3DRESOURCE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
-    IDIRECT3DVERTEXBUFFER8_SLOTS, IDIRECT3DINDEXBUFFER8_SLOTS } from './vtables.js';
+    IDIRECT3DVERTEXBUFFER8_SLOTS, IDIRECT3DINDEXBUFFER8_SLOTS, IDIRECT3DVOLUME8_SLOTS,
+    IDIRECT3DVOLUMETEXTURE8_SLOTS } from './vtables.js';
 import { IID_IDirect3D8, IID_IDirect3DBaseTexture8, IID_IDirect3DCubeTexture8,
     IID_IDirect3DDevice8,
     IID_IDirect3DIndexBuffer8, IID_IDirect3DResource8, IID_IDirect3DSurface8,
-    IID_IDirect3DTexture8, IID_IDirect3DVertexBuffer8 } from './iids.js';
+    IID_IDirect3DTexture8, IID_IDirect3DVertexBuffer8, IID_IDirect3DVolume8,
+    IID_IDirect3DVolumeTexture8 } from './iids.js';
 import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
-    D3DSURFACE_DESC8, D3DLOCKED_RECT, D3DLIGHT7, RECT, POINT, createFields } from './structs.js';
+    D3DSURFACE_DESC8, D3DLOCKED_RECT, D3DLIGHT7, RECT, POINT, createFields,
+    D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8 } from './structs.js';
 import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
@@ -124,6 +126,8 @@ const D3DPTEXTURECAPS_PROJECTED = 0x00000400;
 const D3DPTEXTURECAPS_MIPMAP = 0x00004000;
 const D3DPTEXTURECAPS_CUBEMAP = 0x00000800;
 const D3DPTEXTURECAPS_MIPCUBEMAP = 0x00010000;
+const D3DPTEXTURECAPS_VOLUMEMAP = 0x00002000;
+const D3DPTEXTURECAPS_MIPVOLUMEMAP = 0x00008000;
 
 /**
  * Point and linear, for minification, magnification and mip. An anisotropic
@@ -136,6 +140,9 @@ const D3DPTADDRESSCAPS_WRAP = 0x00000001;
 const D3DPTADDRESSCAPS_MIRROR = 0x00000002;
 const D3DPTADDRESSCAPS_CLAMP = 0x00000004;
 const D3DPTADDRESSCAPS_INDEPENDENTUV = 0x00000010;
+/** Border and mirror-once are folded into clamp and mirror by the sampler, so neither is promised. */
+const ADDRESS_CAPS = D3DPTADDRESSCAPS_WRAP | D3DPTADDRESSCAPS_MIRROR | D3DPTADDRESSCAPS_CLAMP
+    | D3DPTADDRESSCAPS_INDEPENDENTUV;
 
 const D3DLINECAPS_TEXTURE = 0x00000001;
 const D3DLINECAPS_ZTEST = 0x00000002;
@@ -661,14 +668,141 @@ export function createDirect3D8Seam(
     ];
 
     /**
+     * A box as the guest passed it, or null for none -- the whole volume.
+     *
+     * @param {number} pointer
+     */
+    const readBox = pointer=>{
+        if ((pointer >>> 0) === 0)
+        {
+            return null;
+        }
+        const box = fields.readStruct(pointer >>> 0, D3DBOX);
+        return {
+            left: box.Left, top: box.Top, right: box.Right, bottom: box.Bottom,
+            front: box.Front, back: box.Back,
+        };
+    };
+    /**
+     * A lock of a volume: the two pitches and the address on success, and on
+     * a refusal a null address -- the pointer a program would otherwise write
+     * through (Wine's d3d8 test_volume_locking).
+     *
+     * @param {number} out @param {(locked: any) => number} lock
+     */
+    const lockBox = (out, lock)=>{
+        /** @type {any} */
+        const locked = {};
+        const hr = lock(locked);
+        if ((out >>> 0) === 0)
+        {
+            return hr;
+        }
+        if (hr === D3D_OK)
+        {
+            fields.writeStruct(out >>> 0, D3DLOCKED_BOX, locked);
+        }
+        else
+        {
+            fields.writeU32((out >>> 0) + D3DLOCKED_BOX.pBits, 0);
+        }
+        return hr;
+    };
+    /** @param {any} volume @param {number} out */
+    const writeVolumeDesc = (volume, out)=>{
+        /** @type {{ desc?: any }} */
+        const described = {};
+        volume.GetDesc(described);
+        if ((out >>> 0) !== 0 && described.desc)
+        {
+            fields.writeStruct(out >>> 0, D3DVOLUME_DESC8, described.desc);
+        }
+        return D3D_OK;
+    };
+
+    // A volume texture's level: not a resource, so it answers for itself and
+    // for IUnknown alone, and names its texture as its container.
+    /** @type {import('./com.js').InterfaceDescriptor[]} */
+    const volumeInterfaces = [describe(IID_IDirect3DVolume8, IDIRECT3DVOLUME8_SLOTS, {
+        ...privateData.methods,
+        GetDevice: getDevice,
+        /** @param {any} volume @param {number[]} args @returns {number} */
+        GetContainer: (volume, [riid, out])=>{
+            if ((riid >>> 0) === 0 || (out >>> 0) === 0 || !volume.container)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            return queryAs(publisher, fields, volume.container, volumeTextureInterfaces,
+                readGuid(memory, riid), out);
+        },
+        /** @param {any} volume @param {number[]} args */
+        GetDesc: (volume, [out])=>writeVolumeDesc(volume, out),
+        /** @param {any} volume @param {number[]} args */
+        LockBox: (volume, [out, box, flags])=>lockBox(out,
+            locked=>volume.LockBox(locked, readBox(box), flags >>> 0)),
+        /** @param {any} volume */
+        UnlockBox: volume=>volume.UnlockBox(),
+    }, {}, privateData.released)];
+
+    const volumeTextureMethods = {
+        ...resourceMethods(D3DRTYPE.VOLUMETEXTURE),
+        SetLOD: textureMethods.SetLOD,
+        GetLOD: textureMethods.GetLOD,
+        GetLevelCount: textureMethods.GetLevelCount,
+        /** @param {any} texture @param {number[]} args */
+        GetLevelDesc: (texture, [level, out])=>{
+            /** @type {{ volume?: any }} */
+            const held = {};
+            const hr = texture.GetVolumeLevel(level >>> 0, held);
+            if (hr !== D3D_OK || !held.volume)
+            {
+                return hr;
+            }
+            held.volume.release();
+            return writeVolumeDesc(held.volume, out);
+        },
+        /** @param {any} texture @param {number[]} args @returns {number} */
+        GetVolumeLevel: (texture, [level, out])=>{
+            /** @type {{ volume?: any }} */
+            const held = {};
+            const hr = texture.GetVolumeLevel(level >>> 0, held);
+            if (hr !== D3D_OK || !held.volume || (out >>> 0) === 0)
+            {
+                return hr;
+            }
+            return handBack(held.volume, volumeInterfaces, IID_IDirect3DVolume8, out >>> 0);
+        },
+        /** @param {any} texture @param {number[]} args */
+        LockBox: (texture, [level, out, box, flags])=>lockBox(out,
+            locked=>texture.LockBox(level >>> 0, locked, readBox(box), flags >>> 0)),
+        /** @param {any} texture @param {number[]} args */
+        UnlockBox: (texture, [level])=>texture.UnlockBox(level >>> 0),
+        /** @param {any} texture @param {number[]} args */
+        AddDirtyBox: (texture, [box])=>texture.AddDirtyBox(readBox(box)),
+    };
+    /** @type {import('./com.js').InterfaceDescriptor[]} */
+    const volumeTextureInterfaces = [
+        describe(IID_IDirect3DVolumeTexture8, IDIRECT3DVOLUMETEXTURE8_SLOTS,
+            volumeTextureMethods, {}, retire),
+        describe(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS, volumeTextureMethods),
+        describe(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, volumeTextureMethods),
+    ];
+
+    /**
      * Whichever interfaces a texture is published with, by its kind.
      *
      * @param {any} texture
      * @returns {{ interfaces: import('./com.js').InterfaceDescriptor[], id: string }}
      */
-    const textureKind = texture=>(texture.cube
-        ? { interfaces: cubeTextureInterfaces, id: IID_IDirect3DCubeTexture8 }
-        : { interfaces: textureInterfaces, id: IID_IDirect3DTexture8 });
+    const textureKind = texture=>{
+        if (texture.cube)
+        {
+            return { interfaces: cubeTextureInterfaces, id: IID_IDirect3DCubeTexture8 };
+        }
+        return texture.volume
+            ? { interfaces: volumeTextureInterfaces, id: IID_IDirect3DVolumeTexture8 }
+            : { interfaces: textureInterfaces, id: IID_IDirect3DTexture8 };
+    };
 
     /**
      * A buffer hands back an address in the guest's own memory, so locking is
@@ -1377,11 +1511,15 @@ export function createDirect3D8Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateCubeTexture: (device, [edgeLength, levels, usage, format, pool, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             /** @type {{ texture?: any }} */
             const held = {};
             const hr = device.CreateCubeTexture(edgeLength >>> 0, levels >>> 0, usage >>> 0,
                 format >>> 0, pool >>> 0, held);
-            if (hr === D3D_OK && held.texture && (out >>> 0) !== 0)
+            if (hr === D3D_OK && held.texture)
             {
                 attachTexture(device, held.texture);
                 return handBack(held.texture, cubeTextureInterfaces, IID_IDirect3DCubeTexture8,
@@ -1390,12 +1528,24 @@ export function createDirect3D8Seam(
             return clearAndRefuse(out, hr);
         },
 
-        // A volume texture is refused rather than made: the renderer samples
-        // none, and a refusal sends a program to the two-dimensional path it
-        // also has.
-
         /** @param {any} device @param {number[]} args */
-        CreateVolumeTexture: (device, [, , , , , , , out])=>clearAndRefuse(out),
+        CreateVolumeTexture: (device, [width, height, depth, levels, usage, format, pool, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ texture?: any }} */
+            const held = {};
+            const hr = device.CreateVolumeTexture(width >>> 0, height >>> 0, depth >>> 0,
+                levels >>> 0, usage >>> 0, format >>> 0, pool >>> 0, held);
+            if (hr === D3D_OK && held.texture)
+            {
+                attachTexture(device, held.texture);
+                return handBack(held.texture, volumeTextureInterfaces,
+                    IID_IDirect3DVolumeTexture8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
+            }
+            return clearAndRefuse(out, hr);
+        },
 
         /** @param {any} device @param {number[]} args */
         CopyRects: (device, [source, rects, count, destination, points])=>{
@@ -2053,13 +2203,13 @@ export function createDirect3D8Seam(
             // No palette alpha: no palettised format is ever made.
             TextureCaps: D3DPTEXTURECAPS_PERSPECTIVE | D3DPTEXTURECAPS_ALPHA
                 | D3DPTEXTURECAPS_PROJECTED | D3DPTEXTURECAPS_MIPMAP
-                | D3DPTEXTURECAPS_CUBEMAP | D3DPTEXTURECAPS_MIPCUBEMAP,
+                | D3DPTEXTURECAPS_CUBEMAP | D3DPTEXTURECAPS_MIPCUBEMAP
+                | D3DPTEXTURECAPS_VOLUMEMAP | D3DPTEXTURECAPS_MIPVOLUMEMAP,
             TextureFilterCaps: FILTER_CAPS,
             CubeTextureFilterCaps: FILTER_CAPS,
-            // Border and mirror-once are folded into clamp and mirror by the
-            // sampler, so neither is promised.
-            TextureAddressCaps: D3DPTADDRESSCAPS_WRAP | D3DPTADDRESSCAPS_MIRROR
-                | D3DPTADDRESSCAPS_CLAMP | D3DPTADDRESSCAPS_INDEPENDENTUV,
+            VolumeTextureFilterCaps: FILTER_CAPS,
+            TextureAddressCaps: ADDRESS_CAPS,
+            VolumeTextureAddressCaps: ADDRESS_CAPS,
             LineCaps: D3DLINECAPS_TEXTURE | D3DLINECAPS_ZTEST | D3DLINECAPS_BLEND
                 | D3DLINECAPS_ALPHACMP | D3DLINECAPS_FOG,
             MaxTextureWidth: caps.maxTextureWidth ?? 4096,

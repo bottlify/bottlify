@@ -1472,6 +1472,114 @@ test('recorded: a cube map is six layers of one texture, each face going up into
         assert.deepEqual(uploads().slice(12), [[3, 1, 2, 99]]);
     });
 
+test('recorded: a volume texture is one texture of three dimensions, each level all its slices',
+    async()=>{
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateVolumeTexture(4, 4, 2, 2, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED,
+            out), D3D_OK);
+        const volume = out.texture;
+        /** @param {number} level @param {number} value @param {number} [flags] */
+        const fill = (level, value, flags = 0)=>{
+            /** @type {{ pBits?: number, SlicePitch?: number }} */
+            const locked = {};
+            assert.equal(volume.LockBox(level, locked, null, flags), D3D_OK);
+            const slices = level === 0 ? 2 : 1;
+            h.write(/** @type {number} */ (locked.pBits),
+                new Uint8Array(slices * /** @type {number} */ (locked.SlicePitch)).fill(value));
+            assert.equal(volume.UnlockBox(level), D3D_OK);
+        };
+        fill(0, 10);
+        fill(1, 20);
+        assert.equal(device.SetTexture(0, volume), D3D_OK);
+        selectTexture(device);
+        assert.equal(device.SetTextureStageState(0, D3DTSS.ADDRESSW, D3DTADDRESS.CLAMP), D3D_OK);
+        const threeComponents = 1 << 16;
+        const draw = async()=>{
+            assert.equal(device.BeginScene(), D3D_OK);
+            assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD | threeComponents), D3D_OK);
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(96), 32),
+                D3D_OK);
+            assert.equal(device.EndScene(), D3D_OK);
+            await h.present();
+        };
+        await draw();
+
+        const made = gpu.of('createTexture').find(
+            (/** @type {any} */ call)=>call.descriptor.label === 'volume');
+        assert.ok(made, 'the volume was made as one texture');
+        assert.equal(made.descriptor.dimension, '3d');
+        assert.equal(made.descriptor.size.depthOrArrayLayers, 2);
+        assert.equal(made.descriptor.mipLevelCount, 2);
+        assert.ok(gpu.of('createView').some((/** @type {any} */ call)=>call.texture === made.texture
+            && call.view.viewDescriptor?.dimension === '3d'), 'sampled through a 3D view');
+        /** @param {any} call */
+        const shape = call=>[call.destination.mipLevel, call.size.width, call.size.height,
+            call.size.depthOrArrayLayers, call.bytes.length, call.bytes[0]];
+        const uploads = ()=>gpu.of('writeTexture')
+            .filter((/** @type {any} */ call)=>call.destination.texture === made.texture)
+            .map(shape);
+        assert.deepEqual(uploads(), [[0, 4, 4, 2, 128, 10], [1, 2, 2, 1, 16, 20]]);
+        const layouts = gpu.of('createBindGroupLayout').map(
+            (/** @type {any} */ call)=>call.descriptor);
+        assert.ok(layouts.some((/** @type {any} */ layout)=>layout.entries.some(
+            (/** @type {any} */ entry)=>entry.texture?.viewDimension === '3d')));
+        const code = gpu.of('createShaderModule')
+            .map((/** @type {any} */ call)=>call.descriptor.code).join('\n');
+        assert.match(code, /var texture0: texture_3d<f32>;/);
+        assert.equal((stageFlagsWritten(gpu) >>> 16) & 3, 2, 'the third axis clamps');
+
+        // A managed volume keeps its copy through a read-only lock; a level
+        // written again is that level sent again.
+        fill(1, 30, D3DLOCK.READONLY);
+        await draw();
+        assert.equal(uploads().length, 2);
+        fill(1, 40);
+        await draw();
+        assert.deepEqual(uploads().slice(2), [[1, 2, 2, 1, 16, 40]]);
+    });
+
+test('recorded: a default-pool volume goes up after UpdateTexture writes it', async()=>{
+    const h = harness();
+    const { device, gpu } = h;
+    /** @param {number} pool */
+    const volume = pool=>{
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateVolumeTexture(2, 2, 2, 1, 0, D3DFMT.X8R8G8B8, pool, out),
+            D3D_OK);
+        return out.texture;
+    };
+    const source = volume(D3DPOOL.SYSTEMMEM);
+    const destination = volume(D3DPOOL.DEFAULT);
+    assert.equal(device.SetTexture(0, destination), D3D_OK);
+    selectTexture(device);
+    const draw = async()=>{
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD | (1 << 16)), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(96), 32),
+            D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+    };
+    await draw();
+    const made = gpu.of('createTexture').find(
+        (/** @type {any} */ call)=>call.descriptor.label === 'volume');
+    const uploads = ()=>gpu.of('writeTexture')
+        .filter((/** @type {any} */ call)=>call.destination.texture === made.texture).length;
+    assert.equal(uploads(), 1);
+    await draw();
+    assert.equal(uploads(), 1, 'nothing written, nothing sent');
+    /** @type {{ moves?: any[] }} */
+    const moved = {};
+    assert.equal(device.UpdateTexture(source, destination, moved), D3D_OK);
+    assert.equal(moved.moves?.length, 2, 'a move per slice');
+    await draw();
+    assert.equal(uploads(), 2);
+});
+
 test('recorded: with ZENABLE off no depth is written, whatever ZWRITEENABLE says', async()=>{
     // Direct3D ties the write to the test: ZENABLE=FALSE with ZWRITEENABLE=TRUE
     // leaves the depth buffer as it was. WebGPU writes under an 'always'

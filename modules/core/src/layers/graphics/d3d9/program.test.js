@@ -346,6 +346,44 @@ test('a sampler declared a cube binds the cube map\'s cube view, and nothing of 
         cube.texture.release();
     });
 
+test('a sampler declared a volume binds the volume texture\'s 3D view', async()=>{
+    const h = harness();
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    const volumeSampler = (4 << 27) >>> 0;
+    assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+    assert.equal(h.device.CreatePixelShader([
+        PIXEL_SHADER[0], op(OPCODE.DCL, 2), volumeSampler, dst(REGISTER.SAMPLER, 0),
+        ...PIXEL_SHADER.slice(4),
+    ], ps), D3D_OK);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetPixelShader(ps.shader);
+    /** @type {{ texture?: any }} */
+    const volume = {};
+    assert.equal(h.device.CreateVolumeTexture(2, 2, 2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED,
+        volume), D3D_OK);
+    h.device.SetTexture(0, volume.texture);
+    await h.draw();
+    assert.deepEqual(h.reports, []);
+    const pixel = h.gpu.of('createShaderModule').map(call=>call.descriptor)
+        .find(module=>module.label.startsWith('ps:'));
+    assert.match(pixel.code, /texture_3d<f32>/);
+    const bound = h.groupsOfDraw().get(2).descriptor.entries[0].resource;
+    assert.equal(bound.viewDescriptor.dimension, '3d');
+    assert.equal(bound.texture.descriptor.size.depthOrArrayLayers, 2);
+    const sampler = h.groupsOfDraw().get(2).descriptor.entries[1].resource.descriptor;
+    assert.equal(sampler.addressModeW, 'repeat', 'the third axis addressed as the program set');
+
+    h.device.SetTexture(0, null);
+    h.device.SetVertexShader(null);
+    h.device.SetPixelShader(null);
+    vs.shader.release();
+    ps.shader.release();
+    volume.texture.release();
+});
+
 test('a programmable draw is not blind to the dump: shaders, declaration and samplers', async()=>{
     // render.js's `--dump-draws` table used to skip every draw with
     // `prepared.program` outright (guarded by `!prepared.program`), so a

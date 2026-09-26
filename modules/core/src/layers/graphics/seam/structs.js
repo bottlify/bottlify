@@ -229,6 +229,29 @@ export const D3DSURFACE_DESC8 = Object.freeze({
     SIZE: 0x20,
 });
 
+/** D3DVOLUME_DESC as Direct3D 8 declares it, with the size Direct3D 9 dropped. */
+export const D3DVOLUME_DESC8 = Object.freeze({
+    Format: 0x00,
+    Type: 0x04,
+    Usage: 0x08,
+    Pool: 0x0c,
+    Size: 0x10,
+    Width: 0x14,
+    Height: 0x18,
+    Depth: 0x1c,
+    SIZE: 0x20,
+});
+
+/** D3DLOCKED_BOX, the same in both versions: two pitches, then the address. */
+export const D3DLOCKED_BOX = Object.freeze({
+    RowPitch: 0x00, SlicePitch: 0x04, pBits: 0x08, SIZE: 0x0c,
+});
+
+/** D3DBOX, the same in both versions: the rectangle's four edges, then front and back. */
+export const D3DBOX = Object.freeze({
+    Left: 0x00, Top: 0x04, Right: 0x08, Bottom: 0x0c, Front: 0x10, Back: 0x14, SIZE: 0x18,
+});
+
 /**
  * D3DCAPS8, every field of it.
  *

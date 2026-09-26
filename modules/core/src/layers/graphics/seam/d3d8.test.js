@@ -29,13 +29,14 @@ import { BUFFER, SHADOW, STALE_POINTER, TEXTURE } from './shadow.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS, IDIRECT3DDEVICE8_SLOTS,
     IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS, IDIRECT3DVERTEXBUFFER8_SLOTS,
+    IDIRECT3DVOLUME8_SLOTS, IDIRECT3DVOLUMETEXTURE8_SLOTS,
 } from './vtables.js';
 import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js';
 import { REFRESH_HZ } from '../../win32/user32/display.js';
 import { createSystemFunctions } from '../../win32/user32/system.js';
 import {
     D3DCAPS8, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS8,
-    D3DSURFACE_DESC8, D3DVIEWPORT8, POINT, RECT, createFields,
+    D3DSURFACE_DESC8, D3DVIEWPORT8, D3DVOLUME_DESC8, POINT, RECT, createFields,
 } from './structs.js';
 import {
     D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8, D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP,
@@ -457,8 +458,14 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
         [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, cubeTexture, D3DFMT.A8R8G8B8]), D3D_OK);
     const volumeTexture = 4;
     assert.equal(ask('CheckDeviceFormat',
-        [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, volumeTexture, D3DFMT.A8R8G8B8]),
-    D3DERR_NOTAVAILABLE, 'and a kind of resource this build refuses to make is never available');
+        [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, volumeTexture, D3DFMT.A8R8G8B8]), D3D_OK);
+    assert.equal(ask('CheckDeviceFormat',
+        [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, volumeTexture, D3DFMT.DXT1]),
+    D3DERR_NOTAVAILABLE, 'a volume is never made in blocks');
+    const vertexBuffer = 6;
+    assert.equal(ask('CheckDeviceFormat',
+        [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, vertexBuffer, D3DFMT.A8R8G8B8]),
+    D3DERR_NOTAVAILABLE, 'and a kind of resource that has no format is never available');
 
     assert.equal(ask('CheckDeviceMultiSampleType',
         [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 1, 0]), D3D_OK, 'one sample per pixel');
@@ -561,9 +568,6 @@ test('what this build cannot do says so, and clears the pointer it was given', (
     // A create that cannot be done reports it and leaves nothing behind: a
     // program tests the pointer as often as the result.
     assert.equal(refused('CreateAdditionalSwapChain', [0, out]), D3DERR_NOTAVAILABLE);
-    assert.equal(
-        refused('CreateVolumeTexture', [8, 8, 8, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, out]),
-        D3DERR_NOTAVAILABLE);
 
     // The cursor and the transformed-vertex path: each refuses because
     // succeeding would promise a picture nothing here draws. A front buffer
@@ -1263,6 +1267,70 @@ test('a cube texture is made, and answers for its faces through its own vtable',
     h.release(root);
 });
 
+test('a volume texture is made, and its levels lock, describe and name it', ()=>{
+    // Wine's d3d8 test_volume_locking, test_lockbox_invalid and
+    // test_volume_get_container.
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const out = 0xe000;
+    const dynamic = 0x200;
+    assert.equal(h.device(device, 'CreateVolumeTexture',
+        [4, 4, 4, 1, dynamic, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out]), D3DERR_INVALIDCALL,
+    'a managed volume is not dynamic');
+    assert.equal(h.device(device, 'CreateVolumeTexture',
+        [4, 4, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out]), D3D_OK);
+    const placed = h.box.memory.readU32(out);
+    const locked = 0xe100;
+    /** @param {number} texture @param {string} name @param {number[]} [args] */
+    const call = (texture, name, args = [])=>
+        h.box.call(texture, slot(IDIRECT3DVOLUMETEXTURE8_SLOTS, name), args);
+    h.box.memory.writeU32(locked + 8, 0xdeadbeef);
+    assert.equal(call(placed, 'LockBox', [0, locked, 0, 0]), D3DERR_INVALIDCALL,
+        'a default-pool volume that is not dynamic does not lock');
+    assert.equal(h.box.memory.readU32(locked + 8), 0, 'and hands out no address');
+    assert.equal(h.release(placed), 0);
+
+    assert.equal(h.device(device, 'CreateVolumeTexture',
+        [4, 4, 2, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out]), D3D_OK);
+    const texture = h.box.memory.readU32(out);
+    assert.equal(call(texture, 'GetType'), 4, 'D3DRTYPE_VOLUMETEXTURE');
+    assert.equal(call(texture, 'GetLevelCount'), 3);
+    const desc = 0xe200;
+    assert.equal(call(texture, 'GetLevelDesc', [1, desc]), D3D_OK);
+    assert.deepEqual(h.fields.readStruct(desc, D3DVOLUME_DESC8), {
+        Format: D3DFMT.A8R8G8B8, Type: 2, Usage: 0, Pool: D3DPOOL.MANAGED, Size: 2 * 2 * 1 * 4,
+        Width: 2, Height: 2, Depth: 1,
+    });
+    assert.equal(call(texture, 'LockBox', [0, locked, 0, 0]), D3D_OK);
+    assert.deepEqual([h.box.memory.readU32(locked), h.box.memory.readU32(locked + 4)], [16, 64],
+        'the row and slice pitches');
+    assert.equal(call(texture, 'UnlockBox', [0]), D3D_OK);
+
+    assert.equal(call(texture, 'GetVolumeLevel', [0, out]), D3D_OK);
+    const volume = h.box.memory.readU32(out);
+    const iid = 0xe300;
+    putGuid(h, iid, [0x4B8AAAFA, 0x140F, 0x42BA, 0x91, 0x31, 0x59, 0x7E, 0xAF, 0xAA, 0x2E,
+        0xAD]);
+    assert.equal(h.box.call(volume, slot(IDIRECT3DVOLUME8_SLOTS, 'GetContainer'), [iid, out]),
+        D3D_OK);
+    assert.equal(h.box.memory.readU32(out), texture);
+    h.release(texture);
+    assert.equal(h.box.call(volume, slot(IDIRECT3DVOLUME8_SLOTS, 'LockBox'), [locked, 0, 0]),
+        D3D_OK);
+    assert.equal(h.box.call(volume, slot(IDIRECT3DVOLUME8_SLOTS, 'UnlockBox')), D3D_OK);
+    assert.equal(h.release(volume), 1);
+
+    assert.equal(h.device(device, 'SetTexture', [0, texture]), D3D_OK);
+    assert.equal(h.device(device, 'GetTexture', [0, out]), D3D_OK);
+    assert.equal(h.box.memory.readU32(out), texture);
+    h.release(texture);
+    assert.equal(h.device(device, 'SetTexture', [0, 0]), D3D_OK);
+    assert.equal(h.release(texture), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
 test('a texture palette is kept and read back, and one with alpha is refused', ()=>{
     // Wine's d3d8 test_set_palette and visual.c's palette test: an opaque
     // palette is taken and a current one chosen; entries with alpha need
@@ -1509,7 +1577,9 @@ test('every capability claimed is one the renderer honours', ()=>{
     assert.equal(caps.TextureCaps & (0x00000800 | 0x00010000), 0x00010800,
         'cube maps and their chains, which the renderer samples');
     assert.equal(caps.CubeTextureFilterCaps, caps.TextureFilterCaps);
-    assert.equal(caps.TextureCaps & 0x00002000, 0, 'no volumes, which CreateVolumeTexture refuses');
+    assert.equal(caps.TextureCaps & 0x0000a000, 0x0000a000, 'volumes and their chains');
+    assert.equal(caps.VolumeTextureFilterCaps, caps.TextureFilterCaps);
+    assert.equal(caps.VolumeTextureAddressCaps, caps.TextureAddressCaps);
     assert.equal(caps.Caps2 & 0x00020000, 0,
         'no D3DCAPS2_FULLSCREENGAMMA: a ramp is kept and read back, and nothing applies it');
     assert.equal(caps.TextureCaps & 0x00000080, 0,

@@ -29,14 +29,17 @@
 
 import { IDIRECT3D9_SLOTS, describe } from './vtables.js';
 import {
-    D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS9, POINT, RECT, createFields,
+    D3DBOX, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_BOX, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS9,
+    POINT, RECT, createFields,
 } from './structs.js';
 import {
     IDIRECT3DBASETEXTURE9_SLOTS, IDIRECT3DCUBETEXTURE9_SLOTS, IDIRECT3DDEVICE9_SLOTS,
     IDIRECT3DINDEXBUFFER9_SLOTS, IDIRECT3DQUERY9_SLOTS, IDIRECT3DRESOURCE9_SLOTS,
     IDIRECT3DSHADER9_SLOTS, IDIRECT3DSTATEBLOCK9_SLOTS,
     IDIRECT3DSURFACE9_SLOTS, IDIRECT3DSWAPCHAIN9_SLOTS, IDIRECT3DTEXTURE9_SLOTS,
-    IDIRECT3DVERTEXBUFFER9_SLOTS, IDIRECT3DVERTEXDECLARATION9_SLOTS, IID_IDirect3D9,
+    IDIRECT3DVERTEXBUFFER9_SLOTS, IDIRECT3DVERTEXDECLARATION9_SLOTS, IDIRECT3DVOLUME9_SLOTS,
+    IDIRECT3DVOLUMETEXTURE9_SLOTS, IID_IDirect3D9, IID_IDirect3DVolume9,
+    IID_IDirect3DVolumeTexture9,
     IID_IDirect3DBaseTexture9, IID_IDirect3DCubeTexture9, IID_IDirect3DDevice9,
     IID_IDirect3DIndexBuffer9, IID_IDirect3DResource9,
     IID_IDirect3DPixelShader9, IID_IDirect3DQuery9, IID_IDirect3DStateBlock9,
@@ -46,7 +49,7 @@ import {
 import {
     D3DADAPTER_IDENTIFIER9, D3DCAPS9, D3DCAPS9_FLOATS, D3DCLIPSTATUS9, D3DDECL_END_STREAM,
     D3DINDEXBUFFER_DESC9, D3DSURFACE_DESC9, D3DVERTEXBUFFER_DESC9, D3DVERTEXELEMENT9,
-    D3DVIEWPORT9,
+    D3DVIEWPORT9, D3DVOLUME_DESC9,
 } from '../d3d9/structs.js';
 import {
     ADAPTER_STRING_LENGTH, D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
@@ -702,6 +705,123 @@ export function createDirect3D9Seam(
         IDIRECT3DCUBETEXTURE9_SLOTS, cubeTextureMethods);
 
     /**
+     * A box as the guest passed it, or null for none -- the whole volume.
+     *
+     * @param {number} pointer
+     */
+    const readBox = pointer=>{
+        if ((pointer >>> 0) === 0)
+        {
+            return null;
+        }
+        const box = fields.readStruct(pointer >>> 0, D3DBOX);
+        return {
+            left: box.Left, top: box.Top, right: box.Right, bottom: box.Bottom,
+            front: box.Front, back: box.Back,
+        };
+    };
+    /**
+     * A lock of a volume: the two pitches and the address on success, and on
+     * a refusal a null address -- the pointer a program would otherwise write
+     * through (Wine's d3d9 test_volume_locking).
+     *
+     * @param {number} out @param {(locked: any) => number} lock
+     */
+    const lockBox = (out, lock)=>{
+        /** @type {any} */
+        const locked = {};
+        const hr = lock(locked);
+        if ((out >>> 0) === 0)
+        {
+            return hr;
+        }
+        if (hr === D3D_OK)
+        {
+            fields.writeStruct(out >>> 0, D3DLOCKED_BOX, locked);
+        }
+        else
+        {
+            fields.writeU32((out >>> 0) + D3DLOCKED_BOX.pBits, 0);
+        }
+        return hr;
+    };
+    /** @param {any} volume @param {number} out */
+    const writeVolumeDesc = (volume, out)=>{
+        /** @type {{ desc?: any }} */
+        const described = {};
+        volume.GetDesc(described);
+        if ((out >>> 0) !== 0 && described.desc)
+        {
+            fields.writeStruct(out >>> 0, D3DVOLUME_DESC9, described.desc);
+        }
+        return D3D_OK;
+    };
+
+    // A volume texture's level is not a resource (Wine's d3d9
+    // test_volume_resource): it answers for itself and IUnknown alone, and
+    // names its texture as its container (test_volume_get_container).
+    /** @type {import('./com.js').InterfaceDescriptor[]} */
+    const volumeInterfaces = [describe(IID_IDirect3DVolume9, IDIRECT3DVOLUME9_SLOTS, {
+        ...privateData.methods,
+        /** @param {any} volume @param {number[]} args */
+        GetDevice: (volume, args)=>getDevice(volume.container, args),
+        /** @param {any} volume @param {number[]} args @returns {number} */
+        GetContainer: (volume, [riid, out])=>{
+            if ((riid >>> 0) === 0 || (out >>> 0) === 0 || !volume.container)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            return queryAs(publisher, fields, volume.container, volumeTextureInterfaces,
+                readGuid(memory, riid), out);
+        },
+        /** @param {any} volume @param {number[]} args */
+        GetDesc: (volume, [out])=>writeVolumeDesc(volume, out),
+        /** @param {any} volume @param {number[]} args */
+        LockBox: (volume, [out, box, flags])=>lockBox(out,
+            locked=>volume.LockBox(locked, readBox(box), flags >>> 0)),
+        /** @param {any} volume */
+        UnlockBox: volume=>volume.UnlockBox(),
+    }, {}, privateData.released)];
+
+    const volumeTextureMethods = {
+        ...resourceMethods(D3DRTYPE.VOLUMETEXTURE),
+        ...baseTextureMethods,
+        /** @param {any} texture @param {number[]} args */
+        GetLevelDesc: (texture, [level, out])=>{
+            /** @type {{ volume?: any }} */
+            const held = {};
+            const hr = texture.GetVolumeLevel(level >>> 0, held);
+            if (hr !== D3D_OK || !held.volume)
+            {
+                return hr;
+            }
+            held.volume.release();
+            return writeVolumeDesc(held.volume, out);
+        },
+        /** @param {any} texture @param {number[]} args @returns {number} */
+        GetVolumeLevel: (texture, [level, out])=>{
+            /** @type {{ volume?: any }} */
+            const held = {};
+            const hr = texture.GetVolumeLevel(level >>> 0, held);
+            if (hr !== D3D_OK || !held.volume || (out >>> 0) === 0)
+            {
+                return hr;
+            }
+            return handBack(held.volume, volumeInterfaces, IID_IDirect3DVolume9, out >>> 0);
+        },
+        /** @param {any} texture @param {number[]} args */
+        LockBox: (texture, [level, out, box, flags])=>lockBox(out,
+            locked=>texture.LockBox(level >>> 0, locked, readBox(box), flags >>> 0)),
+        /** @param {any} texture @param {number[]} args */
+        UnlockBox: (texture, [level])=>texture.UnlockBox(level >>> 0),
+        /** @param {any} texture @param {number[]} args */
+        AddDirtyBox: (texture, [box])=>texture.AddDirtyBox(readBox(box)),
+    };
+    /** @type {import('./com.js').InterfaceDescriptor[]} */
+    const volumeTextureInterfaces = textureFamily(IID_IDirect3DVolumeTexture9,
+        IDIRECT3DVOLUMETEXTURE9_SLOTS, volumeTextureMethods);
+
+    /**
      * A buffer hands back an address in the guest's own memory, so locking is
      * one out-parameter and nothing else: the program writes there itself, and
      * the unlock is what tells this engine to look.
@@ -1210,10 +1330,25 @@ export function createDirect3D9Seam(
             return hr;
         },
 
-        // A volume texture is refused rather than made: the renderer samples
-        // none, and there is no interface for one here.
         /** @param {any} device @param {number[]} args */
-        CreateVolumeTexture: (device, [, , , , , , , out])=>clearAndRefuse(out),
+        CreateVolumeTexture: (device, args)=>{
+            const [width, height, depth, levels, usage, format, pool, out, shared] = args;
+            if (sharedHandleRefused(shared) || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ texture?: any }} */
+            const held = {};
+            const hr = device.CreateVolumeTexture(width >>> 0, height >>> 0, depth >>> 0,
+                levels >>> 0, usage >>> 0, format >>> 0, pool >>> 0, held);
+            if (hr === D3D_OK && held.texture)
+            {
+                return handBack(held.texture, volumeTextureInterfaces,
+                    IID_IDirect3DVolumeTexture9, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
+            }
+            fields.writeU32(out >>> 0, 0);
+            return hr;
+        },
         /** @param {any} device @param {number[]} args */
         CreateCubeTexture: (device, [edgeLength, levels, usage, format, pool, out, shared])=>{
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
@@ -1636,7 +1771,7 @@ export function createDirect3D9Seam(
                 // variable holding the texture it last read.
                 fields.writeU32(out >>> 0, held.texture
                     ? publisher.publish(held.texture, textureInterfacesFor(held.texture),
-                        held.texture.cube ? IID_IDirect3DCubeTexture9 : IID_IDirect3DTexture9)
+                        textureInterfacesFor(held.texture)[0].id)
                     : 0);
             }
             return hr;
@@ -2060,9 +2195,13 @@ export function createDirect3D9Seam(
     };
 
     /** @param {any} texture */
-    const textureInterfacesFor = texture=>(texture.cube
-        ? cubeTextureInterfaces
-        : textureInterfaces);
+    const textureInterfacesFor = texture=>{
+        if (texture.cube)
+        {
+            return cubeTextureInterfaces;
+        }
+        return texture.volume ? volumeTextureInterfaces : textureInterfaces;
+    };
 
     const deviceInterfaces = [
         describe(IID_IDirect3DDevice9, IDIRECT3DDEVICE9_SLOTS, deviceMethods),

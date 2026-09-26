@@ -33,7 +33,7 @@
  */
 
 import {
-    D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRTYPE, D3D_OK, FORMAT_INFO, offsetOfRect,
+    D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRTYPE, D3DUSAGE, D3D_OK, FORMAT_INFO, offsetOfRect,
     surfaceBytes, surfacePitch,
 } from './constants.js';
 import { SURFACE_TYPE, surfaceIsLockable } from './validity.js';
@@ -940,4 +940,438 @@ export function createTexture(options){
         },
     };
     return texture;
+}
+
+/**
+ * @typedef {Object} LockBox  A box of a volume in texels, its far edges exclusive.
+ * @property {number} left
+ * @property {number} top
+ * @property {number} right
+ * @property {number} bottom
+ * @property {number} front
+ * @property {number} back
+ */
+
+/**
+ * @typedef {Object} LockedBox
+ * @property {number} RowPitch    Bytes between two rows of a slice.
+ * @property {number} SlicePitch  Bytes between two slices.
+ * @property {number} pBits       Byte address of the first texel of the locked box.
+ */
+
+/**
+ * A volume's description, every field either version's structure has.
+ *
+ * @typedef {Object} VolumeDesc
+ * @property {number} Format
+ * @property {number} Type    D3DRTYPE_VOLUME.
+ * @property {number} Usage
+ * @property {number} Pool
+ * @property {number} Size    In bytes. D3D8's structure only.
+ * @property {number} Width
+ * @property {number} Height
+ * @property {number} Depth
+ */
+
+/**
+ * Whether a box lies inside a volume of this extent and is not empty along
+ * any axis. A volume checks every box it is handed, in both versions (Wine's
+ * d3d8 and d3d9 test_lockbox_invalid), where a surface's rectangle is checked
+ * only by the later runtime.
+ *
+ * @param {LockBox} box @param {number} width @param {number} height @param {number} depth
+ */
+export function boxWithin(box, width, height, depth){
+    return box.left < box.right && box.top < box.bottom && box.front < box.back
+        && box.right <= width && box.bottom <= height && box.back <= depth;
+}
+
+/**
+ * A volume texture's dirty box, a box of its top level, as it covers one
+ * level: shrunk with the level and taken outward to whole texels.
+ *
+ * @param {LockBox} box @param {number} level
+ * @param {number} width @param {number} height @param {number} depth  The level's own extent.
+ * @returns {LockBox}
+ */
+export function boxAtLevel(box, level, width, height, depth){
+    const round = (/** @type {number} */ edge)=>(edge + (1 << level) - 1) >>> level;
+    return {
+        left: Math.min(box.left >>> level, width - 1),
+        top: Math.min(box.top >>> level, height - 1),
+        front: Math.min(box.front >>> level, depth - 1),
+        right: Math.max(1, Math.min(width, round(box.right))),
+        bottom: Math.max(1, Math.min(height, round(box.bottom))),
+        back: Math.max(1, Math.min(depth, round(box.back))),
+    };
+}
+
+/**
+ * @typedef {Object} VolumeOptions
+ * @property {number} width
+ * @property {number} height
+ * @property {number} depth
+ * @property {number} format   Uncompressed: a volume in blocks is never made here.
+ * @property {number} pool
+ * @property {number} usage
+ * @property {number} base
+ * @property {ReferenceCount} count  The texture's: a level is not counted apart from it.
+ * @property {(box: LockBox | null) => void} [dirtied]
+ *           Told at an unlock what the lock may have written, unless it was
+ *           read-only or asked for no dirty update.
+ */
+
+/**
+ * One level of a volume texture: slices of rows, each slice a surface's
+ * worth, one after another.
+ *
+ * @param {VolumeOptions} options
+ */
+export function createVolume(options){
+    const rowPitch = surfacePitch(options.format, options.width);
+    const slicePitch = rowPitch * options.height;
+    const texelBytes = FORMAT_INFO[options.format]?.bytesPerPixel ?? 4;
+    // Wine's d3d8 and d3d9 test_volume_locking: a default-pool volume locks
+    // only when it was made dynamic; every other pool's always does.
+    const lockable = options.pool !== D3DPOOL.DEFAULT
+        || (options.usage & D3DUSAGE.DYNAMIC) !== 0;
+    let locked = false;
+    let lockFlags = 0;
+    /** @type {LockBox | null} */
+    let lockBox = null;
+    /** @type {VolumeDesc} */
+    const desc = {
+        Format: options.format,
+        Type: D3DRTYPE.VOLUME,
+        Usage: options.usage,
+        Pool: options.pool,
+        Size: slicePitch * options.depth,
+        Width: options.width,
+        Height: options.height,
+        Depth: options.depth,
+    };
+    return {
+        base: options.base,
+        width: options.width,
+        height: options.height,
+        depth: options.depth,
+        rowPitch,
+        slicePitch,
+        texelBytes,
+        /** @type {any} the volume texture this is a level of */
+        container: null,
+        get refCount(){
+            return options.count.value;
+        },
+        addRef: ()=>options.count.addRef(),
+        release: ()=>options.count.release(),
+
+        /** @param {{ desc?: VolumeDesc }} out */
+        GetDesc(out){
+            out.desc = desc;
+            return D3D_OK;
+        },
+
+        /**
+         * @param {LockedBox} out  Written only when the lock succeeds.
+         * @param {LockBox | null} [box]
+         * @param {number} [flags]
+         */
+        LockBox(out, box = null, flags = 0){
+            if (locked || !lockable
+                || (box && !boxWithin(box, options.width, options.height, options.depth)))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            locked = true;
+            lockFlags = flags;
+            lockBox = box;
+            out.RowPitch = rowPitch;
+            out.SlicePitch = slicePitch;
+            out.pBits = options.base + (box
+                ? box.front * slicePitch + box.top * rowPitch + box.left * texelBytes
+                : 0);
+            return D3D_OK;
+        },
+
+        UnlockBox(){
+            if (!locked)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            locked = false;
+            if ((lockFlags & (D3DLOCK_READONLY | D3DLOCK_NO_DIRTY_UPDATE)) === 0)
+            {
+                options.dirtied?.(lockBox);
+            }
+            return D3D_OK;
+        },
+
+        /** Only meaningful while the volume is locked. */
+        get lockFlags(){
+            return lockFlags;
+        },
+    };
+}
+
+/**
+ * @typedef {Object} VolumeTextureOptions
+ * @property {number} width
+ * @property {number} height
+ * @property {number} depth
+ * @property {number} levels
+ * @property {number} format
+ * @property {number} pool
+ * @property {number} usage
+ * @property {ReferenceCount} count
+ * @property {(bytes: number) => number} allocate
+ * @property {(address: number) => void} [free]
+ */
+
+/**
+ * A volume texture and its levels, sharing one count as a texture and its
+ * surfaces do.
+ *
+ * @param {VolumeTextureOptions} options
+ */
+export function createVolumeTexture(options){
+    /** @type {Map<number, ReturnType<typeof createVolume>>} */
+    const volumes = new Map();
+    /** @returns {LockBox} the whole top level */
+    const whole = ()=>({
+        left: 0, top: 0, front: 0,
+        right: options.width, bottom: options.height, back: options.depth,
+    });
+    /**
+     * What UpdateTexture carries from this texture, in texels of the top
+     * level: all of it at first, then what locks and AddDirtyBox add.
+     *
+     * @type {LockBox | null}
+     */
+    let dirty = whole();
+    /** @param {LockBox} box */
+    const addDirty = box=>{
+        dirty = dirty
+            ? {
+                left: Math.min(dirty.left, box.left), top: Math.min(dirty.top, box.top),
+                front: Math.min(dirty.front, box.front),
+                right: Math.max(dirty.right, box.right),
+                bottom: Math.max(dirty.bottom, box.bottom),
+                back: Math.max(dirty.back, box.back),
+            }
+            : { ...box };
+    };
+
+    /** @param {number} level */
+    const volumeFor = level=>{
+        if (level < 0 || level >= options.levels)
+        {
+            return null;
+        }
+        const existing = volumes.get(level);
+        if (existing)
+        {
+            return existing;
+        }
+        const width = levelExtent(options.width, level);
+        const height = levelExtent(options.height, level);
+        const depth = levelExtent(options.depth, level);
+        const volume = createVolume({
+            width,
+            height,
+            depth,
+            format: options.format,
+            pool: options.pool,
+            usage: options.usage,
+            base: options.allocate(surfacePitch(options.format, width) * height * depth),
+            count: options.count,
+            // A level's box is a box of the top level scaled up.
+            dirtied: box=>addDirty(box
+                ? {
+                    left: box.left << level, top: box.top << level, front: box.front << level,
+                    right: Math.min(options.width, box.right << level),
+                    bottom: Math.min(options.height, box.bottom << level),
+                    back: Math.min(options.depth, box.back << level),
+                }
+                : whole()),
+        });
+        volume.container = texture;
+        volumes.set(level, volume);
+        return volume;
+    };
+
+    let lod = 0;
+
+    const texture = {
+        levels: options.levels,
+        volume: true,
+        format: options.format,
+        pool: options.pool,
+        width: options.width,
+        height: options.height,
+        depth: options.depth,
+        type: D3DRTYPE.VOLUMETEXTURE,
+        ...createPriority(options.pool),
+
+        /**
+         * As a texture's: a managed texture's alone, the last level at most.
+         *
+         * @param {number} next
+         * @returns {number} the level before
+         */
+        SetLOD(next){
+            const was = lod;
+            if (options.pool === D3DPOOL.MANAGED)
+            {
+                lod = Math.min(next >>> 0, options.levels - 1);
+            }
+            return was;
+        },
+
+        /** @returns {number} */
+        GetLOD: ()=>lod,
+
+        /**
+         * Adds a box of the top level, or all of it for none, to what
+         * UpdateTexture carries; one that is empty or leaves the level is
+         * refused.
+         *
+         * @param {LockBox | null} box
+         */
+        AddDirtyBox(box){
+            if (box && !boxWithin(box, options.width, options.height, options.depth))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            addDirty(box ?? whole());
+            return D3D_OK;
+        },
+
+        /**
+         * What an update carries, which the texture then no longer holds;
+         * null when nothing was written since the last.
+         *
+         * @returns {LockBox | null}
+         */
+        takeDirtyRegion(){
+            const region = dirty;
+            dirty = null;
+            return region;
+        },
+
+        get refCount(){
+            return options.count.value;
+        },
+        addRef: ()=>options.count.addRef(),
+
+        /** Gives the levels' storage back when the last reference goes. */
+        release(){
+            const left = options.count.release();
+            if (options.count.destroyed)
+            {
+                for (const volume of volumes.values())
+                {
+                    options.free?.(volume.base);
+                }
+                volumes.clear();
+            }
+            return left;
+        },
+
+        /**
+         * @param {number} level
+         * @param {{ volume?: ReturnType<typeof createVolume> }} out
+         */
+        GetVolumeLevel(level, out){
+            const volume = volumeFor(level);
+            if (!volume)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            volume.addRef();
+            out.volume = volume;
+            return D3D_OK;
+        },
+
+        /**
+         * @param {number} level
+         * @param {LockedBox} out
+         * @param {LockBox | null} [box]
+         * @param {number} [flags]
+         */
+        LockBox(level, out, box = null, flags = 0){
+            const volume = volumeFor(level);
+            return volume ? volume.LockBox(out, box, flags) : D3DERR_INVALIDCALL;
+        },
+
+        /** @param {number} level */
+        UnlockBox(level){
+            const volume = volumeFor(level);
+            return volume ? volume.UnlockBox() : D3DERR_INVALIDCALL;
+        },
+    };
+    return texture;
+}
+
+/**
+ * What UpdateTexture moves from one volume texture into another: each level
+ * the destination has, from the source's matching one -- its top levels
+ * skipped when the destination has fewer -- as much of each as the source's
+ * dirty box covers, a slice at a time. Null when the two cannot be matched:
+ * two formats, or levels of two sizes. The source's dirty box is taken only
+ * when they can.
+ *
+ * @param {any} source @param {any} destination  Both volume textures.
+ * @returns {{ moves: SurfaceMove[], written: any[] } | null}
+ */
+export function volumeUpdate(source, destination){
+    if (source.format !== destination.format)
+    {
+        return null;
+    }
+    /** @param {any} texture @param {number} level */
+    const levelOf = (texture, level)=>{
+        /** @type {{ volume?: any }} */
+        const held = {};
+        if (texture.GetVolumeLevel(level, held) !== D3D_OK || !held.volume)
+        {
+            return null;
+        }
+        held.volume.release();
+        return held.volume;
+    };
+    const skipped = Math.max(0, source.levels - destination.levels);
+    /** @type {{ one: any, other: any, level: number }[]} */
+    const pairs = [];
+    for (let level = 0; level + skipped < source.levels && level < destination.levels; level++)
+    {
+        const one = levelOf(source, level + skipped);
+        const other = levelOf(destination, level);
+        if (!one || !other || one.width !== other.width || one.height !== other.height
+            || one.depth !== other.depth)
+        {
+            return null;
+        }
+        pairs.push({ one, other, level: level + skipped });
+    }
+    const region = source.takeDirtyRegion();
+    /** @type {SurfaceMove[]} */
+    const moves = [];
+    for (const { one, other, level } of region ? pairs : [])
+    {
+        const box = boxAtLevel(region, level, one.width, one.height, one.depth);
+        const offset = box.top * one.rowPitch + box.left * one.texelBytes;
+        for (let slice = box.front; slice < box.back; slice++)
+        {
+            moves.push({
+                from: one.base + slice * one.slicePitch + offset,
+                to: other.base + slice * other.slicePitch + offset,
+                rowBytes: (box.right - box.left) * one.texelBytes,
+                rows: box.bottom - box.top,
+                fromPitch: one.rowPitch,
+                toPitch: other.rowPitch,
+            });
+        }
+    }
+    return { moves, written: region ? pairs.map(pair=>pair.other) : [] };
 }

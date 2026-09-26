@@ -80,6 +80,8 @@ const D3DPTEXTURECAPS_ALPHA = 0x00000004;
 const D3DPTEXTURECAPS_MIPMAP = 0x00004000;
 const D3DPTEXTURECAPS_CUBEMAP = 0x00000800;
 const D3DPTEXTURECAPS_MIPCUBEMAP = 0x00010000;
+const D3DPTEXTURECAPS_VOLUMEMAP = 0x00002000;
+const D3DPTEXTURECAPS_MIPVOLUMEMAP = 0x00008000;
 
 const D3DPTFILTERCAPS_MINFPOINT = 0x00000100;
 const D3DPTFILTERCAPS_MINFLINEAR = 0x00000200;
@@ -95,6 +97,8 @@ const D3DPTADDRESSCAPS_WRAP = 0x00000001;
 const D3DPTADDRESSCAPS_MIRROR = 0x00000002;
 const D3DPTADDRESSCAPS_CLAMP = 0x00000004;
 const D3DPTADDRESSCAPS_INDEPENDENTUV = 0x00000010;
+const ADDRESS_CAPS = D3DPTADDRESSCAPS_WRAP | D3DPTADDRESSCAPS_MIRROR | D3DPTADDRESSCAPS_CLAMP
+    | D3DPTADDRESSCAPS_INDEPENDENTUV;
 
 const D3DLINECAPS_TEXTURE = 0x00000001;
 const D3DLINECAPS_ZTEST = 0x00000002;
@@ -166,22 +170,21 @@ export function capabilityWords(caps, identity = {}){
         AlphaCmpCaps: ALL_COMPARE_CAPS,
         ShadeCaps: D3DPSHADECAPS_COLORGOURAUDRGB | D3DPSHADECAPS_SPECULARGOURAUDRGB
             | D3DPSHADECAPS_ALPHAGOURAUDBLEND | D3DPSHADECAPS_FOGGOURAUD,
-        // No volumes: the renderer samples none.
         TextureCaps: D3DPTEXTURECAPS_PERSPECTIVE | D3DPTEXTURECAPS_ALPHA | D3DPTEXTURECAPS_MIPMAP
-            | D3DPTEXTURECAPS_CUBEMAP | D3DPTEXTURECAPS_MIPCUBEMAP,
+            | D3DPTEXTURECAPS_CUBEMAP | D3DPTEXTURECAPS_MIPCUBEMAP
+            | D3DPTEXTURECAPS_VOLUMEMAP | D3DPTEXTURECAPS_MIPVOLUMEMAP,
         TextureFilterCaps: FILTER_CAPS,
         CubeTextureFilterCaps: FILTER_CAPS,
-        VolumeTextureFilterCaps: 0,
+        VolumeTextureFilterCaps: FILTER_CAPS,
         // Border and mirror-once are folded into clamp and mirror by the
         // sampler, so neither is promised.
-        TextureAddressCaps: D3DPTADDRESSCAPS_WRAP | D3DPTADDRESSCAPS_MIRROR
-            | D3DPTADDRESSCAPS_CLAMP | D3DPTADDRESSCAPS_INDEPENDENTUV,
-        VolumeTextureAddressCaps: 0,
+        TextureAddressCaps: ADDRESS_CAPS,
+        VolumeTextureAddressCaps: ADDRESS_CAPS,
         LineCaps: D3DLINECAPS_TEXTURE | D3DLINECAPS_ZTEST | D3DLINECAPS_BLEND
             | D3DLINECAPS_ALPHACMP | D3DLINECAPS_FOG,
         MaxTextureWidth: caps.maxTextureWidth,
         MaxTextureHeight: caps.maxTextureHeight,
-        MaxVolumeExtent: 0,
+        MaxVolumeExtent: caps.maxVolumeExtent,
         MaxTextureRepeat: 8192,
         MaxTextureAspectRatio: caps.maxTextureWidth,
         MaxAnisotropy: 1,

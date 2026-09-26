@@ -44,7 +44,7 @@ import {
     D3DCLEAR, D3DCREATE, D3DDEVTYPE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET,
     D3DERR_INVALIDCALL, D3DERR_NOTAVAILABLE, D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DPOOL,
     D3DFMT_VERTEXDATA, D3DPRESENTFLAG, D3DRTYPE, D3DSBT, D3DTS, D3DUSAGE, D3D_OK, FORMAT_INFO,
-    isShaderHandle,
+    isCompressed, isShaderHandle,
     surfaceBytes, surfacePitch,
 } from './constants.js';
 import { GAMMA_RAMP_ENTRIES } from './structs.js';
@@ -59,9 +59,10 @@ import {
     reportedBackBufferCount, targetPairResult, validatePresentParameters, validateStages,
 } from './validity.js';
 import {
-    createPriority, createReferenceCount, createSurface, createTexture, rectMoveOf,
-    regionAtLevel, writeFrontBuffer, writePixels,
+    createPriority, createReferenceCount, createSurface, createTexture, createVolumeTexture,
+    rectMoveOf, regionAtLevel, volumeUpdate, writeFrontBuffer, writePixels,
 } from '../d3d9/resources.js';
+import { volumeCreateResult, volumeLevelCount } from '../d3d9/validity.js';
 import { DEVICE_STATE, LIGHT_ENABLED, createPalettes } from '../d3d9/device.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 
@@ -76,6 +77,7 @@ export { DEVICE_STATE, LIGHT_ENABLED };
  * @property {boolean} depthTexture2d  Whether depth formats are usable as textures,
  * @property {boolean} depthCube       as cube maps,
  * @property {boolean} depthPlain      and as image surfaces.
+ * @property {number} [maxVolumeExtent]  The longest axis a volume texture may have.
  */
 
 /** @type {DeviceCaps} */
@@ -85,6 +87,7 @@ export const DEFAULT_CAPS = Object.freeze({
     compressedTextures: false,
     depthCube: false,
     depthPlain: false,
+    maxVolumeExtent: 256,
 });
 
 /**
@@ -354,6 +357,13 @@ export function createDirect3D8(options = {}){
          * @returns {number} D3D_OK or D3DERR_NOTAVAILABLE
          */
         CheckDeviceFormat(usage, resourceType, format){
+            if (resourceType === D3DRTYPE.VOLUMETEXTURE)
+            {
+                return volumeCreateResult({
+                    width: 1, height: 1, depth: 1, levels: 1, usage, format,
+                    pool: D3DPOOL.DEFAULT, maxExtent: 1,
+                }) === D3D_OK ? D3D_OK : D3DERR_NOTAVAILABLE;
+            }
             const surfaceType = resourceType === D3DRTYPE.TEXTURE
                 ? SURFACE_TYPE.TEXTURE_2D
                 : resourceType === D3DRTYPE.CUBETEXTURE
@@ -2289,6 +2299,35 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
+         * @param {number} width @param {number} height @param {number} depth
+         * @param {number} levels  Zero for the whole chain.
+         * @param {number} usage @param {number} format @param {number} pool
+         * @param {{ texture?: any }} out
+         */
+        CreateVolumeTexture(width, height, depth, levels, usage, format, pool, out){
+            const hr = volumeCreateResult({
+                width, height, depth, levels, usage, format, pool,
+                maxExtent: caps.maxVolumeExtent ?? 256,
+            });
+            if (hr !== D3D_OK)
+            {
+                if (isCompressed(format))
+                {
+                    reportRefusedFormat(format);
+                }
+                return hr;
+            }
+            const chain = levels || volumeLevelCount(width, height, depth);
+            const texture = createVolumeTexture({
+                width, height, depth, levels: chain, format, pool, usage,
+                count: explicitCount(pool), allocate, free,
+            });
+            renderer?.trackTexture(texture, { width, height, depth, format, levels: chain, usage });
+            out.texture = texture;
+            return D3D_OK;
+        },
+
+        /**
          * @param {number} edgeLength
          * @param {number} levels
          * @param {number} usage
@@ -2567,6 +2606,23 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             if (!source || !destination)
             {
                 return D3DERR_INVALIDCALL;
+            }
+            if (source.volume || destination.volume)
+            {
+                const update = source.volume && destination.volume && source !== destination
+                    && source.pool === D3DPOOL.SYSTEMMEM && destination.pool !== D3DPOOL.SYSTEMMEM
+                    ? volumeUpdate(source, destination)
+                    : null;
+                if (!update)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                for (const volume of update.written)
+                {
+                    renderer?.markDirty(volume);
+                }
+                out.moves = update.moves;
+                return D3D_OK;
             }
             const top = levelSurface(source, 0);
             const into = levelSurface(destination, 0);

@@ -81,8 +81,11 @@ test('the adapter answers format questions from the table its creates consult', 
     assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1), D3D_OK,
         'a compressed format is legal whatever compressedTextures says -- it only chooses'
             + ' how the surface travels to the GPU');
-    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.VOLUMETEXTURE, D3DFMT.A8R8G8B8),
-        D3DERR_NOTAVAILABLE, 'volumes are never made');
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.VOLUMETEXTURE, D3DFMT.A8R8G8B8), D3D_OK);
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.VOLUMETEXTURE, D3DFMT.DXT1),
+        D3DERR_NOTAVAILABLE, 'a volume is never made in blocks');
+    assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.RENDERTARGET, D3DRTYPE.VOLUMETEXTURE,
+        D3DFMT.A8R8G8B8), D3DERR_NOTAVAILABLE, 'nor drawn into');
     assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, 999), D3DERR_NOTAVAILABLE);
 
     /** @type {{ qualityLevels?: number }} */

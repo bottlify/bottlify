@@ -31,6 +31,7 @@ export const IID_IDirect3DBaseTexture9 = '{580CA87E-1D3C-4D54-991D-B7D3E3C298CE}
 export const IID_IDirect3DTexture9 = '{85C31227-3DE5-4F00-9B3A-F11AC38C18B5}';
 export const IID_IDirect3DCubeTexture9 = '{FFF32F81-D953-473A-9223-93D652ABA93F}';
 export const IID_IDirect3DVolumeTexture9 = '{2518526C-E789-4111-A7B9-47EF328D13E6}';
+export const IID_IDirect3DVolume9 = '{24F416E6-1F67-4AA7-B88E-D33F6F3128A1}';
 export const IID_IDirect3DVertexBuffer9 = '{B64BB1B5-FD70-4DF6-BF91-19D0A12455E3}';
 export const IID_IDirect3DIndexBuffer9 = '{7C9DD65E-D3F7-4529-ACEE-785830ACDE35}';
 export const IID_IDirect3DSurface9 = '{0CFBAF3A-9FF6-429A-99B3-A2796AF8B89B}';
@@ -224,6 +225,27 @@ export const IDIRECT3DCUBETEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
     ['LockRect', 5],
     ['UnlockRect', 2],
     ['AddDirtyRect', 2],
+]);
+
+export const IDIRECT3DVOLUMETEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDIRECT3DBASETEXTURE9_SLOTS,
+    ['GetLevelDesc', 2],
+    ['GetVolumeLevel', 2],
+    ['LockBox', 4],
+    ['UnlockBox', 1],
+    ['AddDirtyBox', 1],
+]);
+
+/** A volume texture's level, which unlike a surface is not a resource. */
+export const IDIRECT3DVOLUME9_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetDevice', 1],
+    ['SetPrivateData', 4],
+    ['GetPrivateData', 3],
+    ['FreePrivateData', 1],
+    ['GetContainer', 2],
+    ['GetDesc', 1],
+    ['LockBox', 3],
+    ['UnlockBox', 0],
 ]);
 
 export const IDIRECT3DVERTEXBUFFER9_SLOTS = /** @type {[string, number][]} */ ([

@@ -100,7 +100,10 @@ test('what the renderer does not do is not claimed', ()=>{
     assert.equal(words.TextureCaps & 0x10800, 0x10800,
         'cube maps and their chains, which the renderer samples');
     assert.equal(words.CubeTextureFilterCaps, words.TextureFilterCaps);
-    assert.equal(words.TextureCaps & 0x2000, 0, 'no volumes, which CreateVolumeTexture refuses');
+    assert.equal(words.TextureCaps & 0xa000, 0xa000, 'volumes and their chains');
+    assert.equal(words.VolumeTextureFilterCaps, words.TextureFilterCaps);
+    assert.equal(words.VolumeTextureAddressCaps, words.TextureAddressCaps);
+    assert.equal(words.MaxVolumeExtent, 256);
     assert.equal(words.NumSimultaneousRTs, 1);
     assert.equal(words.StretchRectFilterCaps, 0);
     assert.equal(words.MaxAnisotropy, 1);
