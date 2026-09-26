@@ -1354,7 +1354,7 @@ export const win32Module = {
                 call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                 callerThread: ()=>bridge.callerThread(),
                 handles,
-                folders: SHELL_FOLDERS,
+                folders,
                 registry: hive,
                 divergence: config?.divergence,
             }),
