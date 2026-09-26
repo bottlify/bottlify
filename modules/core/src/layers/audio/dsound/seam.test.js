@@ -551,7 +551,9 @@ test('GetFormat with no structure answers only the size it would need', ()=>{
 
 test('volume, pan and frequency round-trip through guest memory', ()=>{
     const f = createRoot();
-    const buffer = createBuffer(f, { rate: 22050 });
+    const buffer = createBuffer(f, {
+        rate: 22050, flags: DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLPAN | DSBCAPS_CTRLFREQUENCY,
+    });
     const out = 0x1c00;
 
     f.bridge.call(buffer, 'SetVolume', [-2500 | 0]);
@@ -565,6 +567,50 @@ test('volume, pan and frequency round-trip through guest memory', ()=>{
     f.bridge.call(buffer, 'SetFrequency', [11025]);
     f.bridge.call(buffer, 'GetFrequency', [out]);
     assert.equal(f.memory.u32(out), 11025);
+});
+
+test('a control the buffer was not created with is refused, and changes nothing', ()=>{
+    // Wine's ds3d test_buffer: GetVolume without DSBCAPS_CTRLVOLUME and GetPan
+    // without CTRLPAN answer DSERR_CONTROLUNAVAIL; a frequency without
+    // CTRLFREQUENCY likewise.
+    const f = createRoot();
+    const out = 0x1c00;
+    const controls = /** @type {[number, string, string, number][]} */ ([
+        [DSBCAPS_CTRLVOLUME, 'SetVolume', 'GetVolume', -1200],
+        [DSBCAPS_CTRLPAN, 'SetPan', 'GetPan', 2500],
+        [DSBCAPS_CTRLFREQUENCY, 'SetFrequency', 'GetFrequency', 11025],
+    ]);
+    for (const [flag, set, get, value] of controls)
+    {
+        // Every control but this one: each is its own.
+        const others = controls.reduce((all, [bit])=>all | bit, 0) & ~flag;
+        const without = createBuffer(f, { flags: others | DSBCAPS_GETCURRENTPOSITION2 });
+        assert.equal(f.bridge.call(without, set, [value]), DSERR_CONTROLUNAVAIL, set);
+        assert.equal(f.bridge.call(without, get, [out]), DSERR_CONTROLUNAVAIL, get);
+
+        const withIt = createBuffer(f, { flags: flag });
+        assert.equal(f.bridge.call(withIt, set, [value]), DS_OK, set);
+        assert.equal(f.bridge.call(withIt, get, [out]), DS_OK, get);
+        assert.equal(f.memory.u32(out) | 0, value);
+    }
+    const [plain] = f.dsound.buffers();
+    assert.equal(plain.gain, 1, 'a refused SetVolume is not heard');
+});
+
+test('the primary buffer has volume and pan if asked for, and never a frequency', ()=>{
+    // Wine's ds3d test_buffer on the primary: GetFrequency answers
+    // DSERR_CONTROLUNAVAIL whatever it was created with, GetVolume and GetPan
+    // succeed on one created with CTRLVOLUME and CTRLPAN; a null is still a
+    // null first.
+    const f = createRoot();
+    const primary = createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME
+        | DSBCAPS_CTRLPAN | DSBCAPS_CTRLFREQUENCY });
+    const out = 0x1c00;
+    assert.equal(f.bridge.call(primary, 'GetVolume', [out]), DS_OK);
+    assert.equal(f.bridge.call(primary, 'SetPan', [-500]), DS_OK);
+    assert.equal(f.bridge.call(primary, 'GetFrequency', [0]), DSERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(primary, 'GetFrequency', [out]), DSERR_CONTROLUNAVAIL);
+    assert.equal(f.bridge.call(primary, 'SetFrequency', [22050]), DSERR_CONTROLUNAVAIL);
 });
 
 test('the getters refuse a null rather than writing to address zero', ()=>{

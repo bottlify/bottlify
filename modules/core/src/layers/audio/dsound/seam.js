@@ -44,6 +44,9 @@ const DSERR_CONTROLUNAVAIL = 0x8878001e | 0;
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
 const DSBCAPS_LOCHARDWARE = 0x00000004;
 const DSBCAPS_LOCSOFTWARE = 0x00000008;
+const DSBCAPS_CTRLFREQUENCY = 0x00000020;
+const DSBCAPS_CTRLPAN = 0x00000040;
+const DSBCAPS_CTRLVOLUME = 0x00000080;
 const DSBCAPS_CTRLPOSITIONNOTIFY = 0x00000100;
 const DSBCAPS_CTRLFX = 0x00000200;
 
@@ -563,6 +566,16 @@ export function createDirectSound(
         },
     };
 
+    /**
+     * Whether a buffer has a control: only if it was created with it, which is
+     * what a program checks GetCaps for before touching one. The primary
+     * buffer is the device's output and has no rate of its own to change.
+     *
+     * @param {any} buffer @param {number} flag
+     */
+    const hasControl = (buffer, flag)=>(buffer.capabilities & flag) !== 0
+        && !(buffer.primary && flag === DSBCAPS_CTRLFREQUENCY);
+
     /** @type {Record<string, (target: any, args: number[]) => number>} */
     const bufferMethods = {
         /** HRESULT GetCurrentPosition(LPDWORD play, LPDWORD write) */
@@ -712,11 +725,19 @@ export function createDirectSound(
             {
                 return DSERR_INVALIDPARAM;
             }
+            if (!hasControl(buffer, DSBCAPS_CTRLVOLUME))
+            {
+                return DSERR_CONTROLUNAVAIL;
+            }
             writeU32(out, buffer.volume);
             return DS_OK;
         },
         /** HRESULT SetVolume(LONG) */
         SetVolume(buffer, [value]){
+            if (!hasControl(buffer, DSBCAPS_CTRLVOLUME))
+            {
+                return DSERR_CONTROLUNAVAIL;
+            }
             buffer.setVolume(value | 0);
             return DS_OK;
         },
@@ -726,11 +747,19 @@ export function createDirectSound(
             {
                 return DSERR_INVALIDPARAM;
             }
+            if (!hasControl(buffer, DSBCAPS_CTRLPAN))
+            {
+                return DSERR_CONTROLUNAVAIL;
+            }
             writeU32(out, buffer.pan);
             return DS_OK;
         },
         /** HRESULT SetPan(LONG) */
         SetPan(buffer, [value]){
+            if (!hasControl(buffer, DSBCAPS_CTRLPAN))
+            {
+                return DSERR_CONTROLUNAVAIL;
+            }
             buffer.setPan(value | 0);
             return DS_OK;
         },
@@ -740,11 +769,19 @@ export function createDirectSound(
             {
                 return DSERR_INVALIDPARAM;
             }
+            if (!hasControl(buffer, DSBCAPS_CTRLFREQUENCY))
+            {
+                return DSERR_CONTROLUNAVAIL;
+            }
             writeU32(out, buffer.frequency);
             return DS_OK;
         },
         /** HRESULT SetFrequency(DWORD) */
         SetFrequency(buffer, [hz]){
+            if (!hasControl(buffer, DSBCAPS_CTRLFREQUENCY))
+            {
+                return DSERR_CONTROLUNAVAIL;
+            }
             buffer.setFrequency(hz >>> 0);
             return DS_OK;
         },
