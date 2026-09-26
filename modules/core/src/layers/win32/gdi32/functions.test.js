@@ -707,6 +707,49 @@ test('deleting a DIB section gives its memory back', ()=>{
     assert.deepEqual(surfaces.freed, [HEAP]);
 });
 
+test('CreateDIBitmap makes a device-dependent bitmap at the depth of the DC it is given', ()=>{
+    // Wine's test_createdibitmap: the header's own depth does not matter, the
+    // DC's does -- the screen's, a fresh memory DC's single bit, the depth of
+    // the bitmap a memory DC has selected, and one bit with no DC at all --
+    // and the result is a DDB: no bits pointer, WORD rows, zeroed.
+    const { fns, memory, surfaces, hdc } = withDC();
+    assert.equal(fns.CreateDIBitmap.handler([hdc, 0, 4, 0, 0, 0]), 0, 'no header, no bitmap');
+    assert.equal(fns.CreateDIBitmap.handler([hdc, 0, 0, 0, 0, 0]), 0);
+
+    const memoryDC = fns.CreateCompatibleDC.handler([hdc]);
+    /** @param {number} dc @param {number} bitCount */
+    const depthOf = (dc, bitCount)=>{
+        putBitmapInfo(memory, { width: 10, height: 10, bitCount });
+        const bitmap = fns.CreateDIBitmap.handler([dc, STRUCT, 0, 0, 0, 0]);
+        assert.ok(bitmap > 0);
+        memory.fill(OUT, 6);
+        assert.equal(fns.GetObjectA.handler([bitmap, 24, OUT]), 24);
+        assert.deepEqual([4, 8, 20].map(at=>memory.u32(OUT + at)), [10, 10, 0],
+            'the header\'s size, and no bits pointer');
+        const depth = memory.u32(OUT + 16) >>> 16;
+        assert.equal(memory.u32(OUT + 12), Math.ceil(10 * depth / 16) * 2, 'WORD-padded rows');
+        return depth;
+    };
+    assert.deepEqual([32, 16, 1].map(bitCount=>depthOf(hdc, bitCount)), [32, 32, 32]);
+    assert.deepEqual([32, 16, 1].map(bitCount=>depthOf(memoryDC, bitCount)), [1, 1, 1]);
+    assert.equal(depthOf(0, 32), 1);
+    fns.SelectObject.handler([memoryDC, fns.CreateCompatibleBitmap.handler([hdc, 10, 10])]);
+    assert.equal(depthOf(memoryDC, 1), 32);
+    assert.deepEqual(surfaces.allocated, [], 'nothing in guest memory: a DDB\'s bits are its own');
+
+    putBitmapInfo(memory, { width: 2, height: 2, bitCount: 24 });
+    const bitmap = fns.CreateDIBitmap.handler([hdc, STRUCT, 0, 0, 0, 0]);
+    memory.fill(OUT, 4);
+    assert.equal(fns.GetBitmapBits.handler([bitmap, 16, OUT]), 16);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(OUT + at)), [0, 0, 0, 0]);
+
+    // "No sanity checks in CreateDIBitmap except compression."
+    putBitmapInfo(memory, { width: 2, height: 2, bitCount: 7 });
+    assert.ok(fns.CreateDIBitmap.handler([hdc, STRUCT, 0, 0, 0, 0]) > 0);
+    putBitmapInfo(memory, { width: 2, height: 2, bitCount: 8, compression: 4 });
+    assert.equal(fns.CreateDIBitmap.handler([hdc, STRUCT, 0, 0, 0, 0]), 0, 'BI_JPEG');
+});
+
 test('CreatePalette reads its entries out of the structure that carries them', ()=>{
     const { fns, memory } = setup();
     memory.putU16(STRUCT, 0x300);

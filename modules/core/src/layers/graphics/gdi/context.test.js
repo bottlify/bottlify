@@ -757,3 +757,50 @@ test('StretchDIBits draws one- and four-bit DIBs through their colour tables', (
         WIRED_BITS, WIRED_INFO, 0, 0x00cc0020]), 1);
     assert.deepEqual(row(), [0x0000ff, 0x000000, 0x00ff00]);
 });
+
+test('CreateDIBitmap with CBM_INIT converts the bits it is given into the DC\'s format', ()=>{
+    // Wine's test_createdibitmap: a one-bit header for the bitmap, a 24-bit
+    // BITMAPINFO for the bits, and the white pixel reads back white at 32.
+    const { fns, view } = wiredGdi();
+    const CBM_INIT = 4;
+    const HEADER = 0x1000;
+    /** @param {number} width @param {number} bitCount */
+    const putHeader = (width, bitCount)=>{
+        view.setUint32(HEADER, 40, true);
+        view.setInt32(HEADER + 4, width, true);
+        view.setInt32(HEADER + 8, 1, true);
+        view.setUint16(HEADER + 12, 1, true);
+        view.setUint16(HEADER + 14, bitCount, true);
+    };
+    /** @param {number} bitmap @param {number} width @returns {number[]} */
+    const pixelsOf = (bitmap, width)=>{
+        putInfo(view, { width, height: 1, bitCount: 32 });
+        assert.equal(fns.GetDIBits.handler([screen, bitmap, 0, 1, WIRED_BITS, WIRED_INFO, 0]), 1);
+        return [...Array(width).keys()].map(x=>view.getUint32(WIRED_BITS + x * 4, true));
+    };
+    const screen = fns.GetDC.handler([0]);
+
+    putHeader(1, 1);
+    putInfo(view, { width: 1, height: 1, bitCount: 24 });
+    view.setUint32(WIRED_BITS, 0xffffffff, true);
+    const white = fns.CreateDIBitmap.handler([screen, HEADER, CBM_INIT, WIRED_BITS, WIRED_INFO, 0]);
+    assert.ok(white > 0);
+    assert.deepEqual(pixelsOf(white, 1), [0x00ffffff]);
+
+    // DIB_PAL_COLORS: the table is indices into the palette the DC has.
+    const LOGPALETTE = 0x1100;
+    view.setUint16(LOGPALETTE, 0x300, true);
+    view.setUint16(LOGPALETTE + 2, 2, true);
+    view.setUint32(LOGPALETTE + 4, 0x00332211, true);
+    view.setUint32(LOGPALETTE + 8, 0x00ccbbaa, true);
+    const dc = fns.CreateCompatibleDC.handler([screen]);
+    fns.SelectObject.handler([dc, fns.CreateCompatibleBitmap.handler([screen, 1, 1])]);
+    fns.SelectPalette.handler([dc, fns.CreatePalette.handler([LOGPALETTE]), 0]);
+    putHeader(2, 8);
+    putInfo(view, { width: 2, height: 1, bitCount: 8, table: [0x00000001] });
+    view.setUint32(WIRED_INFO + BITMAPINFOHEADER.biClrUsed, 2, true);
+    view.setUint16(WIRED_BITS, 0x0100, true);
+    const indexed = fns.CreateDIBitmap.handler([dc, HEADER, CBM_INIT, WIRED_BITS, WIRED_INFO, 1]);
+    assert.ok(indexed > 0);
+    assert.deepEqual(pixelsOf(indexed, 2), [0x00aabbcc, 0x00112233]);
+});

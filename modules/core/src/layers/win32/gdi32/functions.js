@@ -180,6 +180,9 @@ const SURFACE_DC_DEPTHS = new Set([8, 16, 32]);
 const BI_RGB = 0;
 const BI_BITFIELDS = 3;
 
+/** BI_JPEG and BI_PNG: an image file for a printer, never a bitmap's rows. */
+const IMAGE_COMPRESSIONS = new Set([4, 5]);
+
 /** iUsage: the colour table is palette indices, not colours. */
 const DIB_PAL_COLORS = 1;
 
@@ -285,9 +288,11 @@ export function createGdiFunctions(host){
      * bitmap keeps colours, not a reference to a palette that may change.
      *
      * @param {number} at @param {number} count @param {number} usage @param {any} dc
+     * @param {boolean} [live]  False for a table read once and dropped, which
+     *        the palette need not keep up to date.
      * @returns {number[]}
      */
-    const readColorTable = (at, count, usage, dc)=>{
+    const readColorTable = (at, count, usage, dc, live = true)=>{
         const colors = [];
         if (usage === DIB_PAL_COLORS)
         {
@@ -308,7 +313,7 @@ export function createGdiFunctions(host){
             // is now, not as it was when the bitmap was made. So the resolved
             // array is kept alive on the palette and refreshed in place -- the
             // same array the surface already holds a reference to.
-            if (record && record.type === 'palette')
+            if (live && record && record.type === 'palette')
             {
                 (record.attributes.dependents ??= []).push({ indices, table: colors });
             }
@@ -1056,6 +1061,43 @@ export function createGdiFunctions(host){
         return handle;
     };
 
+    /**
+     * A DIB converted into a bitmap's own format across the whole bitmap, the
+     * DIB's bottom row on the bitmap's bottom row, as SetDIBits from scan line
+     * zero lays it. False when the DIB is not one this build reads, or there
+     * is nothing to draw with.
+     *
+     * @param {number} bitmap @param {number} bits @param {number} info
+     * @param {number} usage @param {any} dc  Whose palette DIB_PAL_COLORS indexes.
+     */
+    const setBits = (bitmap, bits, info, usage, dc)=>{
+        const header = readBitmapInfoHeader(host, info);
+        if (header.size < BITMAPINFOHEADER.SIZE || !BIT_COUNTS.has(header.bitCount)
+            || header.width <= 0 || header.height === 0 || usage > DIB_PAL_COLORS)
+        {
+            return false;
+        }
+        const table = colorTableSize(header.bitCount);
+        const image = {
+            header,
+            bits: host.readMemory(bits, dibStride(header.width, header.bitCount)
+                * Math.abs(header.height)),
+            colors: header.bitCount <= 8
+                ? readColorTable(info + header.size, Math.min(header.clrUsed || table, table),
+                    usage, dc, false)
+                : [],
+            masks: header.compression === BI_BITFIELDS
+                ? [0, 4, 8].map(at=>readU32(host, info + BITMAPINFOHEADER.SIZE + at))
+                : [],
+        };
+        const shape = /** @type {import('./objects.js').GdiObject} */ (
+            objects.get(bitmap)).attributes;
+        return lend(bitmap, target=>(drawing.bound(target, false)?.setDIBitsToDevice(target, {
+            xDest: 0, yDest: 0, width: shape.width, height: shape.height, xSrc: 0, ySrc: 0,
+            image,
+        }) ?? 0) > 0);
+    };
+
     const table = {
         ...drawing.functions,
 
@@ -1660,43 +1702,45 @@ export function createGdiFunctions(host){
          * HBITMAP CreateDIBitmap(HDC hdc, const BITMAPINFOHEADER *pbmih,
          *   DWORD flInit, const VOID *pjBits, const BITMAPINFO *pbmi, UINT iUsage)
          *
-         * The bitmap it produces is device-dependent by name and a DIB by
-         * construction, exactly as CreateDIBSection's is: one storage format
-         * downstream means one code path, and a program cannot observe the
-         * difference through any call this library offers.
-         *
-         * CBM_INIT copies the caller's rows in as they are, which is only
-         * correct because the two formats are the same one -- the header the
-         * bits were described by is the header the bitmap is created with.
+         * A device-dependent bitmap, as CreateCompatibleBitmap makes one: the
+         * header gives its size and nothing else, and its depth is the DC's
+         * -- one bit with no DC at all (Wine's test_createdibitmap, which also
+         * finds no check on the header but its compression). With CBM_INIT
+         * the bits are converted in as pbmi describes them, which need not be
+         * the format the header names; bits that cannot be converted make no
+         * bitmap rather than a black one.
          */
         CreateDIBitmap: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([, infoHeader, init, bits])=>{
+            handler: ([hdc, infoHeader, init, bits, info, usage])=>{
                 const CBM_INIT = 4;
-                const header = readBitmapInfoHeader(host, infoHeader);
-                if (header.size < BITMAPINFOHEADER.SIZE
-                    || (header.compression !== BI_RGB && header.compression !== BI_BITFIELDS)
-                    || !BIT_COUNTS.has(header.bitCount)
-                    || header.width <= 0 || header.height === 0)
+                if ((infoHeader >>> 0) === 0)
                 {
                     return 0;
                 }
-                const bytes = dibSize(header.width, header.height, header.bitCount);
-                const address = host.surfaces.allocate(bytes);
-                if ((init & CBM_INIT) !== 0 && (bits >>> 0) !== 0)
+                const header = readBitmapInfoHeader(host, infoHeader);
+                const dc = (hdc >>> 0) === 0 ? null : dcOf(hdc);
+                if (header.size < BITMAPINFOHEADER.SIZE
+                    || IMAGE_COMPRESSIONS.has(header.compression)
+                    || header.width <= 0 || header.height === 0 || ((hdc >>> 0) !== 0 && !dc))
                 {
-                    host.writeMemory(address, host.readMemory(bits >>> 0, bytes));
+                    return 0;
                 }
-                return objects.create('bitmap', {
-                    width: header.width,
-                    height: Math.abs(header.height),
-                    planes: 1,
-                    bitCount: header.bitCount,
-                    topDown: header.height < 0,
-                    bits: address,
-                    section: address,
-                });
+                const attributes = deviceBitmap(header.width, Math.abs(header.height),
+                    dc ? surfaceOf(dc).bitCount : 1);
+                if (!attributes)
+                {
+                    return 0;
+                }
+                const bitmap = objects.create('bitmap', attributes);
+                if ((init & CBM_INIT) === 0 || (bits >>> 0) === 0 || (info >>> 0) === 0
+                    || setBits(bitmap, bits >>> 0, info >>> 0, usage >>> 0, dc))
+                {
+                    return bitmap;
+                }
+                objects.remove(bitmap);
+                return 0;
             },
         },
 
