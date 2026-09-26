@@ -15,7 +15,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
-import { createHive, SHELL_FOLDERS } from '../advapi32/registry.js';
+import { createHive, shellFolders } from '../advapi32/registry.js';
 import { FILEOP, SPFILENOTIFY, createSetupapiFunctions } from './functions.js';
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
@@ -101,7 +101,7 @@ async function machine(){
             },
             close: handle=>handles.delete(handle),
         },
-        folders: SHELL_FOLDERS,
+        folders: shellFolders(),
         registry: hive,
     });
 
