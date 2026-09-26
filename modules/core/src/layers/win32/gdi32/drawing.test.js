@@ -788,6 +788,40 @@ test('palette entries are kept, and only as far as the palette goes', ()=>{
         'and a handle that is not a palette is not one');
 });
 
+test('the stock default palette holds the twenty colours Windows records for it', ()=>{
+    // Wine's metafile tests replay a Windows-recorded CreatePalette of the
+    // stock palette: these twenty PALETTEENTRYs, red first. Its palette tests
+    // read twenty back, and find SetPaletteEntries refused on it.
+    const { memory, fns, hdc } = setup();
+    const stock = fns.GetStockObject.handler([15]);
+    assert.equal(fns.GetPaletteEntries.argBytes, 16);
+    assert.equal(fns.GetPaletteEntries.handler([stock, 0, 0, 0]), 20,
+        'a null buffer asks the size');
+    assert.equal(fns.GetPaletteEntries.handler([stock, 0, 20, OUT]), 20);
+    const colours = [...Array(20).keys()].map(index=>memory.u32(OUT + index * 4));
+    assert.deepEqual(colours, [
+        0x000000, 0x000080, 0x008000, 0x008080, 0x800000, 0x800080, 0x808000, 0xc0c0c0,
+        0xc0dcc0, 0xf0caa6, 0xf0fbff, 0xa4a0a0,
+        0x808080, 0x0000ff, 0x00ff00, 0x00ffff, 0xff0000, 0xff00ff, 0xffff00, 0xffffff,
+    ].map(bgr=>bgr >>> 0));
+    assert.equal(fns.GetPaletteEntries.handler([stock, 18, 5, OUT]), 2, 'only as far as it goes');
+
+    memory.putU32s(STRUCT, [0x00123456]);
+    assert.equal(fns.SetPaletteEntries.handler([stock, 0, 1, STRUCT]), 0);
+    fns.GetPaletteEntries.handler([stock, 0, 1, OUT]);
+    assert.equal(memory.u32(OUT), 0, 'and it is not changed');
+
+    // A DIB_PAL_COLORS table is indices into it from the moment a DC exists.
+    memory.putU32s(STRUCT, [40, 1, 1, 1 | 8 << 16, 0, 0, 0, 0, 1, 0]);
+    memory.bytes[STRUCT + 40] = 13;
+    memory.bytes[STRUCT + 41] = 0;
+    const section = fns.CreateDIBSection.handler([hdc, STRUCT, 1, 0, 0, 0]);
+    const reader = fns.CreateCompatibleDC.handler([hdc]);
+    fns.SelectObject.handler([reader, section]);
+    assert.equal(fns.GetDIBColorTable.handler([reader, 0, 1, OUT]), 1);
+    assert.equal(memory.u32(OUT), 0x00ff0000, 'entry 13 is red');
+});
+
 test('the system palette has no entries to report', ()=>{
     // A system palette exists on a device of eight bits or fewer, and this one
     // is 32. Reporting entries would have a program match colours against a

@@ -61,9 +61,11 @@ const RGB_565 = '565';
 
 /**
  * The default palette's twenty colours, the ones a palette device keeps for
- * itself: eight dark, four pale, eight bright. 0x00RRGGBB.
+ * itself: eight dark, four pale, eight bright. 0x00RRGGBB. They are the
+ * entries of the CreatePalette record a Windows metafile holds for the stock
+ * palette, which Wine's metafile tests replay.
  */
-const DEFAULT_PALETTE_COLORS = Object.freeze([
+export const DEFAULT_PALETTE_COLORS = Object.freeze([
     0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0xc0c0c0,
     0xc0dcc0, 0xa6caf0, 0xfffbf0, 0xa0a0a4,
     0x808080, 0xff0000, 0x00ff00, 0xffff00, 0x0000ff, 0xff00ff, 0x00ffff, 0xffffff,
@@ -1111,6 +1113,33 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
         },
 
         /**
+         * UINT GetPaletteEntries(HPALETTE hpal, UINT iStart, UINT cEntries,
+         *                       LPPALETTEENTRY pPalEntries)
+         *
+         * The entries from iStart on, as far as the palette goes; a null buffer
+         * asks how many entries the palette has.
+         */
+        GetPaletteEntries: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, start, count, out])=>{
+                const record = objects.get(handle);
+                if (!record || record.type !== 'palette')
+                {
+                    return 0;
+                }
+                const held = record.attributes.entries;
+                if ((out >>> 0) === 0)
+                {
+                    return held.length;
+                }
+                const copied = held.slice(start >>> 0, (start >>> 0) + (count >>> 0));
+                writeU32s(host, out >>> 0, copied);
+                return copied.length;
+            },
+        },
+
+        /**
          * UINT SetPaletteEntries(HPALETTE hpal, UINT iStart, UINT cEntries,
          *                       const PALETTEENTRY *pPalEntries)
          *
@@ -1125,7 +1154,9 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
             /** @param {number[]} args */
             handler: ([handle, start, count, entries])=>{
                 const record = objects.get(handle);
-                if (!record || record.type !== 'palette' || (entries >>> 0) === 0)
+                // The stock palette is the system's, and no program changes it.
+                if (!record || record.type !== 'palette' || record.stock
+                    || (entries >>> 0) === 0)
                 {
                     return 0;
                 }

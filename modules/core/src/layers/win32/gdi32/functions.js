@@ -21,7 +21,7 @@
  */
 
 import { createGdiObjects } from './objects.js';
-import { createDrawingFunctions } from './drawing.js';
+import { DEFAULT_PALETTE_COLORS, createDrawingFunctions } from './drawing.js';
 import { FACES, faceNamed } from './faces.js';
 import {
     BITMAPINFOHEADER,
@@ -407,7 +407,10 @@ export function createGdiFunctions(host){
             case DEFAULT_GUI_FONT:
                 return { type: 'font', attributes: logFont({ height: -11 }) };
             case DEFAULT_PALETTE:
-                return { type: 'palette', attributes: { version: 0x300, entries: [] } };
+                // PALETTEENTRYs, red in the low byte.
+                return { type: 'palette', attributes: { version: 0x300,
+                    entries: DEFAULT_PALETTE_COLORS.map(pixel=>((pixel & 0xff) << 16
+                        | (pixel & 0xff00) | (pixel >>> 16) & 0xff) >>> 0) } };
             default:
                 return null;
         }
