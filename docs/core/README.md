@@ -96,14 +96,14 @@ From the repository root (`package.json` is an npm workspace over `modules/*`):
 | `npm ci` | Installs the dev toolchain. The package has no runtime dependencies. |
 | `npm run typecheck` | `tsc --checkJs --noEmit` over the source; types are JSDoc. |
 | `npm run lint` | ESLint flat config, zero warnings tolerated. |
-| `npm test` | Node's `node:test` over every `*.test.js` colocated with its code, across the workspaces. |
-| `npm run test:integration` | `*.itest.js`: whole programs from `test/fixtures/` run through the engine, needing the prebuilt emulator. |
+| `npm test` | Node's `node:test` over every `*.test.js` colocated with its code, across the workspaces. `scripts/tree.test.js` refuses a committed symbolic link: a worktree links its ignored artifact directories to the main checkout's, and a link committed from one checks out in the main checkout as a link to itself, dropping the fetched emulator or corpus the suites need. |
+| `npm run test:integration` | `*.itest.js`: whole programs from `test/fixtures/` run through the engine, needing the prebuilt emulator; then the translator package's differential suites against the hardware corpus and the emulator (`npm run fetch:corpus` first). Without their data those suites skip, except where `CI` is set: there they run and fail on the missing file (`testing/fetched.js`), so CI cannot go green without judging the corpus -- it had never run them. |
 | `node scripts/build-fixtures.mjs` (in `modules/core`) | Rebuilds the compiled fixtures (`seh.exe`, `cxxeh.exe`, `unhandled.exe`, `apc.exe`, `processor.exe`, `crtdata.exe`, `virtual.exe`, `spawn.exe`, `spawn_child.exe`) from `test/fixtures/src/` with clang, lld-link and llvm-dlltool against the MSVC ABI -- no Microsoft toolchain. Only after changing a source; the executables are committed, and the build is byte-reproducible. |
 | `npm run check:boundaries` | The layer graph and the acyclic import check. |
 | `npm run fetch:v86`, `npm run fetch:video-decoder` | Pull the pinned emulator and decoder binaries into `vendor/prebuilt/`, verified against their lock files. |
 | `npm run fetch:corpus` | Pull the nasm instruction corpus (every case as an image with the state real hardware recorded) into `modules/cork/vendor/`, for the translator package's differential tests; pinned by `modules/cork/corpus-lock.json`. |
 | `npm run build` | esbuild → `dist/core.js`, `dist/engine.worker.js`, `dist/worklet.js`, `dist/vendor/*`, `dist/checksums.json`. |
-| `npm run build:v86 -- --docker` and `npm run verify:reproducibility` | Rebuild the emulator from the submodule in a container and diff its hashes against the manifest. Not needed day to day. |
+| `npm run build:v86 -- --docker` and `npm run verify:reproducibility` | Rebuild the emulator from the submodule in a container and diff its hashes against the manifest. Not needed day to day. The submodule pins the commit the locked prebuilt release (`vendor-lock.json`'s `build-<commit>` tag) was built from, and `scripts/vendor-lock.test.js` fails when the two drift apart -- the pin had stayed 33 commits behind the build every test ran on, without the handoff exports cork's hybrid mode uses. |
 | `npm run cdp:probe` | Launches a headless Chromium, boots the core in a worker, checks it answers a ping. |
 | `npm run cdp:game`, `npm run cdp:frames` | Drive a program bundle in a real browser on a real GPU; report what a run cost, and where a frame's time goes once the program has settled. Development tooling in `tools/cdp_test/`, not tests. |
 

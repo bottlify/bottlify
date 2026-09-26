@@ -19,8 +19,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import {
-    Codec, openBundle, packBlock, unpackBlock, verifyBundle, writeBundle,
+    attachTranslations, Codec, openBundle, packBlock, unpackBlock, verifyBundle, writeBundle,
 } from './bundle-node.js';
+import { openBundle as readBundle } from './layers/filesystem/internal/bundle/format.js';
 
 /** Compresses well: what an executable or a text file looks like to a compressor. */
 const compressible = (/** @type {number} */ size)=>Buffer.alloc(size, 0x41);
@@ -191,6 +192,76 @@ test('storing everything is a choice the bundle records', async()=>{
     assert.equal(summary.ratio, 1);
     assert.equal((await bundle.read('text.txt')).length, 20000);
     await cleanup();
+});
+
+test('a bundle carries a translation seed beside its files, out of the volume', async()=>{
+    const files = { 'game.exe': compressible(9000), 'data.pak': incompressible(9000) };
+    const seed = new Uint8Array(Buffer.concat([compressible(5000), incompressible(6000)]));
+    const plain = await bundleOf(files);
+    const carrying = await bundleOf(files, [], { translations: seed });
+    const member = carrying.summary.translations;
+    assert.equal(plain.summary.translations, null);
+    assert.equal(plain.bundle.translations, null, 'an old bundle has none');
+    assert.deepEqual(member, {
+        size: seed.length, firstBlock: plain.summary.totalBlocks, blocks: 3,
+        sha256: createHash('sha256').update(seed).digest('hex'),
+    });
+    assert.deepEqual(carrying.bundle.translations, member);
+    assert.deepEqual(await carrying.bundle.readTranslations(), Buffer.from(seed));
+    assert.deepEqual(carrying.bundle.list().map((/** @type {any} */ file)=>file.path),
+        plain.bundle.list().map((/** @type {any} */ file)=>file.path), 'not a file');
+    assert.equal(carrying.summary.sha256, plain.summary.sha256,
+        'the game\'s digest is the game\'s');
+    assert.deepEqual(await verifyBundle(carrying.output), { checked: 2, bad: [] });
+
+    // The engine's own reader: the entry, and each block's decoded length.
+    const bytes = await readFile(carrying.output);
+    /** @param {number} offset @param {number} length */
+    const fetchRange = async(offset, length)=>new Uint8Array(
+        bytes.subarray(offset, offset + length));
+    const read = await readBundle(fetchRange,
+        (codec, stored)=>new Uint8Array(unpackBlock(codec, stored)));
+    assert.deepEqual(read.translations, member);
+    assert.deepEqual([0, 1, 2].map(at=>read.block(member.firstBlock + at).length),
+        [4096, 4096, seed.length - 8192]);
+    const oldRead = await readBundle(async(offset, length)=>new Uint8Array(
+        (await readFile(plain.output)).subarray(offset, offset + length)),
+    (codec, stored)=>new Uint8Array(unpackBlock(codec, stored)));
+    assert.equal(oldRead.translations, null);
+
+    // Damage to the seed is found by the verifier, and named.
+    const last = carrying.bundle.index.blocks[member.firstBlock + 2];
+    bytes[last.offset] ^= 0xff;
+    await writeFile(carrying.output, bytes);
+    assert.deepEqual((await verifyBundle(carrying.output)).bad, ['<translations>']);
+    await plain.cleanup();
+    await carrying.cleanup();
+});
+
+test('a seed put into a bundle already written makes the bundle packed with it', async()=>{
+    const files = { 'game.exe': compressible(9000), 'data.pak': incompressible(9000) };
+    const seed = new Uint8Array(incompressible(10000));
+    const packed = await bundleOf(files, [], { translations: seed });
+    const later = await bundleOf(files);
+    const attached = await attachTranslations(later.output, seed);
+    assert.deepEqual(await readFile(later.output), await readFile(packed.output),
+        'byte for byte');
+    assert.equal(attached.indexSha256, packed.summary.indexSha256);
+    assert.deepEqual(attached.translations, packed.summary.translations);
+
+    // Replaced by another, then taken out: the bundle the files alone make.
+    const other = new Uint8Array(compressible(100));
+    const replaced = await attachTranslations(later.output, other);
+    const reopened = await openBundle(later.output);
+    assert.deepEqual(await reopened.readTranslations(), Buffer.from(other));
+    assert.equal(replaced.translations.firstBlock, packed.summary.translations.firstBlock);
+    await reopened.close();
+    await attachTranslations(later.output, null);
+    const plain = await bundleOf(files);
+    assert.deepEqual(await readFile(later.output), await readFile(plain.output));
+    await packed.cleanup();
+    await later.cleanup();
+    await plain.cleanup();
 });
 
 test('what is not a bundle is refused before anything is read', async()=>{

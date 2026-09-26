@@ -513,6 +513,84 @@ test('generated code goes on into the next module, and the slice still bounds it
     host.stop();
 });
 
+test('cork\'s CPUID table is the emulator\'s answer, leaf and subleaf, clocks aside', async()=>{
+    const { cpuidLeaf } = await import('../../../../../cork/src/cpuid.js');
+    const { CORK_TSC_MHZ } = await import('./cork-host.js');
+    // The clock leaves state the rate cork's host counts rdtsc at, which is not
+    // the emulator's: 0x15 as a crystal times a ratio, 0x16 in MHz.
+    const tsc = cpuidLeaf(0x15, 0);
+    assert.equal(tsc.ecx * tsc.ebx / tsc.eax, CORK_TSC_MHZ * 1e6, 'leaf 0x15 states the rate');
+    assert.deepEqual([cpuidLeaf(0x16, 0).eax, cpuidLeaf(0x16, 0).ebx], [CORK_TSC_MHZ, CORK_TSC_MHZ],
+        'leaf 0x16 states it in MHz, base and maximum');
+    const host = await boot();
+    const leaves = [0, 1, 2, 3, 4, 5, 6, 7, 0xb, 0xd, 0x17, 0x40000000, 0x80000000,
+        0x80000001, 0x80000004];
+    for (const leaf of leaves)
+    {
+        for (const subleaf of [0, 1, 2, 3])
+        {
+            // mov eax, leaf; mov ecx, subleaf; cpuid; hlt
+            host.writePhysical(GUEST_CODE, new Uint8Array([0xb8, ...u32(leaf), 0xb9,
+                ...u32(subleaf), 0x0f, 0xa2, 0xf4]));
+            host.cpu().in_hlt[0] = 0;
+            host.cpu().instruction_pointer[0] = GUEST_CODE;
+            for (let slices = 0; slices < 8 && !host.cpu().in_hlt[0]; slices++)
+            {
+                host.cpu().run_slice(4);
+            }
+            const expected = cpuidLeaf(leaf, subleaf);
+            assert.deepEqual(['eax', 'ebx', 'ecx', 'edx'].map(name=>host.readReg32(name) >>> 0),
+                [expected.eax, expected.ebx, expected.ecx, expected.edx].map(word=>word >>> 0),
+                `leaf 0x${leaf.toString(16)} subleaf ${subleaf}`);
+        }
+    }
+    host.stop();
+});
+
+test('a data write over code the emulator compiled runs as the new code', async()=>{
+    // The heap is one read-write region, so a host write there goes in as
+    // data; a program can still have run code from it -- a routine it placed
+    // or unpacked -- and its next call must see the bytes written since.
+    const host = await boot();
+    const N = 300000;
+    const routine = GUEST_CODE + 0x4000;
+    host.writePhysical(routine, new Uint8Array([0xb8, ...u32(1), 0xc3]));    // mov eax, 1; ret
+    const code = [0x31, 0xdb, 0xb9, ...u32(N)];         // xor ebx, ebx; mov ecx, N
+    const loopAt = GUEST_CODE + code.length;
+    code.push(0xe8, ...u32(routine - (loopAt + 5)));                         // call routine
+    code.push(0x01, 0xc3, 0x49);                        // add ebx, eax; dec ecx
+    const jnzAt = GUEST_CODE + code.length;
+    code.push(0x0f, 0x85, ...u32(loopAt - (jnzAt + 6)), 0xf4);               // jnz loop; hlt
+    host.writePhysical(GUEST_CODE, new Uint8Array(code));
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+    const run = async()=>{
+        host.cpu().in_hlt[0] = 0;
+        host.cpu().instruction_pointer[0] = GUEST_CODE;
+        host.writeReg32('esp', INITIAL_STACK);
+        for (let slices = 0; !host.cpu().in_hlt[0] && slices < 20000; slices++)
+        {
+            host.cpu().run_slice(10000);
+            if (slices % 20 === 0)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 0));
+            }
+        }
+        assert.ok(host.cpu().in_hlt[0], 'the loop ran to its end');
+        return host.readReg32('ebx');
+    };
+    assert.equal(await run(), N);
+    const pointer = host.cpu().wm.exports.bottlify_page_has_code_ptr;
+    if (typeof pointer !== 'function')
+    {
+        return; // a build without the table dirties nothing it could not see
+    }
+    const codePages = new Uint8Array(host.wasmMemory().buffer, pointer() >>> 0, 0x100000);
+    assert.notEqual(codePages[routine >>> 12], 0, 'the routine\'s page was compiled');
+    host.writeData(routine + 1, new Uint8Array(u32(2)));                     // mov eax, 2
+    assert.equal(await run(), 2 * N, 'every call ran the routine as written');
+    host.stop();
+});
+
 test('a return into the module it left from stays in it, chained or not', async()=>{
     // A loop calling four routines in its own page: every return lands in
     // the module that made the call, and the one lookup an exit makes says

@@ -19,7 +19,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { skipWithout } from './fetched.js';
 import { readFile } from 'node:fs/promises';
 import { createV86Host } from '../../../core/src/layers/cpu/internal/v86-host.js';
 import { restore, snapshot } from './snapshot.js';
@@ -30,15 +30,12 @@ const PREBUILT = new URL('../../../core/vendor/prebuilt/', import.meta.url);
 const CORPUS = new URL('../../vendor/nasm-corpus.json.gz', import.meta.url);
 const ENTRY_VECTOR = 0x7000;
 
-const missing = [PREBUILT.href + 'v86.wasm', CORPUS.href]
-    .filter(url=>!existsSync(new URL(url)));
-
 /** @param {number} value */
 const u32 = value=>Uint8Array.from(
     [value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff]);
 
 test('the emulator replayed against itself diffs to nothing on every corpus case',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 30 * 60 * 1000 },
+    { skip: skipWithout(new URL('v86.wasm', PREBUILT), CORPUS), timeout: 30 * 60 * 1000 },
     async()=>{
         const wasm = await readFile(new URL('v86.wasm', PREBUILT));
         const host = await createV86Host({

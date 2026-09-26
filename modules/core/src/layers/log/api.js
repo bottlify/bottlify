@@ -11,11 +11,14 @@
  * sinks -- and, on the same storage, the phase profiler that answers where a
  * frame went. Requires nothing.
  *
- * Both instruments are meant to stay on in a build that ships. A rejected log
- * call is a map lookup and a comparison; a kept one fills a slot that already
- * exists and stores its arguments as they were passed, leaving the message a
- * template until a reader asks for it. Nothing here formats, allocates or does
- * I/O on the path being measured.
+ * The journal stays on in a build that ships. A rejected log call is a map
+ * lookup and a comparison; a kept one fills a slot that already exists and
+ * stores its arguments as they were passed, leaving the message a template
+ * until a reader asks for it. Nothing here formats, allocates or does I/O on
+ * the path being measured. The profiler is a diagnostic: a production bundle
+ * leaves it out (`import.meta.BOTTLIFY_DIAGNOSTICS`), its calls do nothing and
+ * `frames`/`profile` answer empty -- while `endFrame` still runs the frame's
+ * samplers, which feed the translator.
  *
  * Configuration:
  *

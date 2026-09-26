@@ -81,6 +81,7 @@ const PROGRAMS = [
     { name: 'virtual', source: 'virtual.c', cxx: false },
     { name: 'spawn', source: 'spawn.c', cxx: false },
     { name: 'spawn_child', source: 'spawn_child.c', cxx: false },
+    { name: 'fpuenv', source: 'fpuenv.c', cxx: false },
 ];
 
 /**

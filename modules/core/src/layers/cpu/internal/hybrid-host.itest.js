@@ -215,6 +215,70 @@ test('with the handoff export the emulator returns at the translated loop mid-sl
     assert.equal(withIt.ecx, without.ecx);
 });
 
+test('a control word a region loaded is the emulator\'s at its next instruction', async()=>{
+    // The region ends with fldcw (round toward zero) and leaves through an
+    // indirect jump to code only the emulator runs: its fistp must round by
+    // the new word, which the emulator also keeps decoded apart from the word.
+    const { createV86Host } = await import('./v86-host.js');
+    const { createHybridHost } = await import('./hybrid-host.js');
+    const { TABLES_RESERVE } = await import('../engine.js');
+    const { createEngine } = await import(ENGINE);
+    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+    const machine = await createV86Host({
+        moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+        wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+        memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
+        initialStack: 0x300000,
+    });
+    const cork = createEngine({
+        memory: machine.wasmMemory(),
+        layout: machine.stateLayout(TABLES_RESERVE),
+        config: {},
+        read: machine.readByte,
+        imports: {
+            trap: ()=>0, getEflags: machine.getEflags, x87Read: ()=>0, rdtsc: ()=>0n,
+            handoffPage: machine.handoffPage, handoffHash: machine.handoffHash,
+            dirtyCode: machine.dirtyCode,
+        },
+    });
+    const host = createHybridHost({ emulator: machine, cork });
+    host.writePhysical(GUEST_CODE, new Uint8Array([0xf4]));
+    host.writePhysical(0x7000, new Uint8Array(u32(GUEST_CODE)));
+    host.runSlice(1000); // the ROM's jump, onto a halt
+    const program = new Uint8Array(0x2012);
+    program.set([
+        0xb9, 3, 0, 0, 0,                    // mov ecx, 3
+        0x49, 0x75, 0xfd,                    // L: dec ecx; jnz L
+        0xd9, 0x2d, 0x00, 0x90, 0, 0,        // fldcw [0x9000]
+        0xb8, 0x00, 0xa0, 0, 0,              // mov eax, 0xa000
+        0xff, 0xe0,                          // jmp eax
+    ]);
+    const data = new DataView(program.buffer, 0x1000);
+    data.setUint16(0, 0x0f7f, true);         // every exception masked, round toward zero
+    data.setFloat64(8, 2.7, true);
+    program.set([
+        0xdd, 0x05, 0x08, 0x90, 0, 0,        // fld qword [0x9008]
+        0xdb, 0x1d, 0x10, 0x90, 0, 0,        // fistp dword [0x9010]
+        0xb8, 0x34, 0x12, 0, 0, 0xf4,        // mov eax, 0x1234; hlt
+    ], 0x2000);
+    host.writePhysical(GUEST_CODE, program);
+    machine.cpu().instruction_pointer[0] = GUEST_CODE;
+    machine.cpu().in_hlt[0] = 0;
+    cork.noteHot(GUEST_CODE + 5, 0);
+    assert.equal(await cork.translatePending(), 1);
+    assert.equal(cork.entryOf(0xa000, 8), -1, 'the fistp is the emulator\'s');
+    for (let slices = 0; machine.readReg32('eax') !== 0x1234 && slices < 50; slices++)
+    {
+        host.runSlice(2000);
+    }
+    assert.equal(machine.readReg32('eax'), 0x1234);
+    assert.ok(host.corkDiagnostics().regions >= 1);
+    const result = new DataView(machine.wasmMemory().buffer).getInt32(
+        machine.stateLayout(TABLES_RESERVE).ramBase + 0x9010, true);
+    assert.equal(result, 2, 'rounded toward zero, as the word the region loaded says');
+    machine.stop();
+});
+
 test('a join two x87 tops reach becomes a region for each, and its misses stop', async()=>{
     // The shape 3j names on real code. main: fninit; mov esi, N
     //   L: test esi, 1; jz A; fld1
@@ -347,7 +411,8 @@ test('a call in the hot loop: the callee, the call and the return all stay in wa
 test('a second boot with the same store takes every region from it', async()=>{
     const { memoryTranslationStore } = await import('../../../../../cork/src/runtime/cache.js');
     const store = memoryTranslationStore();
-    const config = { engine: 'hybrid', engineUrl: ENGINE, cork: { store, bundleId: 'itest' } };
+    const config = { engine: 'hybrid', engineUrl: ENGINE,
+        cork: { store, bundleId: 'itest', timings: true } };
     const first = await booted(PROGRAM, GUEST_CODE, config);
     await runToHalt(first);
     const before = metricsOf().cork;
@@ -381,7 +446,8 @@ test('with the translation worker the emitting leaves the engine thread', async(
     const expectedCount = inline.api.instructionCount();
     await cpuModule.dispose();
 
-    const hybrid = await booted(PROGRAM, GUEST_CODE, { ...config, cork: { worker: true } });
+    const hybrid = await booted(PROGRAM, GUEST_CODE,
+        { ...config, cork: { worker: true, timings: true } });
     // Let the worker open before the first candidates are formed.
     await new Promise(resolve=>setTimeout(resolve, 50));
     const slices = await runToHalt(hybrid);
@@ -490,7 +556,8 @@ test('the directory store takes the second run from its index and records', asyn
     const { createDirectoryTranslationStore } = await import('./translation-store.js');
     const counter = { probes: 0 };
     const store = await createDirectoryTranslationStore(fakeRoot(counter), 'itest');
-    const config = { engine: 'hybrid', engineUrl: ENGINE, cork: { store, bundleId: 'itest' } };
+    const config = { engine: 'hybrid', engineUrl: ENGINE,
+        cork: { store, bundleId: 'itest', timings: true } };
     const first = await booted(PROGRAM, GUEST_CODE, config);
     await runToHalt(first);
     const before = metricsOf().cork;

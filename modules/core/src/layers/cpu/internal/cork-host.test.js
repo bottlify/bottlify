@@ -13,7 +13,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createCorkHost } from './cork-host.js';
+import { CORK_TSC_MHZ, createCorkHost } from './cork-host.js';
+import { freshThreadFpu } from './context.js';
 import * as engine from '../../../../../cork/src/index.js';
 
 const MEMORY = 4 << 20;
@@ -131,6 +132,50 @@ test('a slice that dies on a no-tier instruction still counts what it ran', ()=>
     load(h, 0x1000, [0x90, 0x90, 0x90, 0x90, 0x0f, 0x00, 0x00, 0xf4]);
     assert.throws(()=>h.runSlice(100), /no tier for 0x0f/);
     assert.equal(h.instructionCount(), 4, 'the four nops it ran, not the one it stopped on');
+});
+
+test('a call into code left untranslated runs on the wasm tier in place, not through the host',
+    async()=>{
+        const CALLS = 3000;
+        /** @param {number} value */
+        const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24];
+        /** @param {boolean} wasmInterpreter */
+        const run = async wasmInterpreter=>{
+            const h = host({
+                cork: { wasmInterpreter, wasmInterpreterAfter: 0, leafCalls: false },
+            });
+            // mov al, 0xc3; mov ecx, CALLS; L: call F; dec ecx; jnz L; hlt -- where F is
+            // mov [F + 5], al; ret: a routine that writes its own page, which is left to
+            // the interpreter once its regions have been dropped often enough.
+            load(h, 0x1000, [0xb0, 0xc3, 0xb9, ...u32(CALLS), 0xe8, ...u32(0x4000 - 0x100c),
+                0x49, 0x75, 0xf8, 0xf4]);
+            h.writePhysical(0x4000, Uint8Array.from([0xa2, ...u32(0x4005), 0xc3]));
+            while (!h.halted())
+            {
+                h.runSlice(100_000);
+                await h.cork().translatePending();
+            }
+            return { ecx: h.readReg32('ecx'), count: h.instructionCount(),
+                exits: h.corkDiagnostics().exits };
+        };
+        const js = await run(false);
+        const tier = await run(true);
+        assert.deepEqual([tier.ecx, tier.count], [js.ecx, js.count], 'the same run');
+        assert.ok(js.exits.untranslated > CALLS * 0.8, `${js.exits.untranslated} calls left`);
+        assert.ok(tier.exits.untranslated + tier.exits.interpreted < CALLS * 0.1,
+            `${tier.exits.untranslated} + ${tier.exits.interpreted} calls left`);
+    });
+
+test('the status words the wasm tier stores unless precise are counted in the diagnostics', ()=>{
+    for (const precise of [false, true])
+    {
+        // The tier from the first instruction, not after the JavaScript interpreter's stretch.
+        const h = host({ cork: { translate: false, precise, wasmInterpreterAfter: 0 } });
+        // fld1; fnstsw ax; hlt
+        load(h, 0x1000, [0xd9, 0xe8, 0xdf, 0xe0, 0xf4]);
+        assert.equal(h.runSlice(100), 3);
+        assert.equal(h.corkDiagnostics().interpretedRelaxedReads, precise ? 0 : 1);
+    }
 });
 
 test('the host boots a real runtime over cork\'s own memory', ()=>{
@@ -309,4 +354,164 @@ test('newContext under cork positions eip and esp', async()=>{
     {
         await cpuModule.dispose();
     }
+});
+
+test('a tight loop run with no frame to feed the translator is translated in its stretch', ()=>{
+    const h = host();
+    // mov ecx, 400000; L: add eax, ecx; xor ebx, eax; dec ecx; jnz L; hlt -- every
+    // note of the loop's head falls in its first 2048 interpreted instructions,
+    // and only slices of the scheduler's quantum run it, as a loader's do.
+    load(h, 0x1000, [0xb9, 0x80, 0x1a, 0x06, 0x00, 0x01, 0xc8, 0x31, 0xc3, 0x49, 0x75, 0xf9, 0xf4]);
+    let retired = h.runSlice(100_000);
+    while (!h.halted())
+    {
+        retired += h.runSlice(100_000);
+    }
+    assert.equal(retired, 1 + 400_000 * 4 + 1);
+    assert.ok(h.cork().counters().translatedShare > 0.99,
+        `translated share ${h.cork().counters().translatedShare}`);
+});
+
+/**
+ * The engine with what each interpreter retires counted, its wasm tier's
+ * process-wide stretch and start standing for a process of its own: a fresh
+ * one, whatever tests ran in this one before.
+ */
+function countingEngine(){
+    const retired = { js: 0, wasm: 0 };
+    const stretch = { work: 0 };
+    let started = false;
+    const counting = {
+        ...engine,
+        /** @param {any} state @param {number} budget @param {any} hooks */
+        interpret(state, budget, hooks){
+            const before = state.retired;
+            try
+            {
+                return engine.interpret(state, budget, hooks);
+            }
+            finally
+            {
+                retired.js += state.retired - before;
+            }
+        },
+        /** @param {any} options */
+        createWasmInterpreter(options){
+            const tier = engine.createWasmInterpreter(options);
+            return tier && { ...tier, stretch, started: ()=>started,
+                run(/** @type {number} */ budget){
+                    started = true;
+                    const code = tier.run(budget);
+                    retired.wasm += tier.retired();
+                    return code;
+                } };
+        },
+    };
+    return { counting, retired };
+}
+
+/** mov ecx, n; L: dec ecx; jnz L; hlt -- 2n + 2 instructions, one jump target. */
+const countdown = (/** @type {number} */ n)=>[0xb9, n & 0xff, n >>> 8 & 0xff, n >>> 16, 0,
+    0x49, 0x75, 0xfd, 0xf4];
+
+/**
+ * Runs a program to its halt on a fresh host of a counting engine, and
+ * answers what each interpreter retired for it.
+ *
+ * @param {ReturnType<typeof countingEngine>} counted @param {number[]} code
+ * @param {Record<string, unknown>} [cork]
+ */
+function runCounted(counted, code, cork = {}){
+    const before = { ...counted.retired };
+    const h = host({ engine: counted.counting, cork: { translate: false, ...cork } });
+    load(h, 0x1000, code);
+    h.runSlice(100_000);
+    assert.ok(h.halted());
+    return { js: counted.retired.js - before.js, wasm: counted.retired.wasm - before.wasm };
+}
+
+test('the JavaScript interpreter carries a process\'s first stretch, the wasm tier the rest', ()=>{
+    assert.deepEqual(runCounted(countingEngine(), countdown(2000)), { js: 4002, wasm: 0 },
+        'a program this short never starts the tier');
+    const long = runCounted(countingEngine(), countdown(10_000));
+    assert.equal(long.js + long.wasm, 20_002);
+    assert.ok(long.js > 8000 && long.js <= 8192, `the stretch, then the tier: ${long.js}`);
+    // 200 short jumps, each to the next four bytes on: every one a target new to the
+    // interpreter, each in a count slot of its own.
+    const chain = runCounted(countingEngine(),
+        [...Array.from({ length: 200 }, ()=>[0xeb, 0x02, 0x90, 0x90]).flat(), 0xf4]);
+    assert.equal(chain.js + chain.wasm, 201);
+    assert.equal(chain.js, 65, 'new code hands over at its 64th new target, after the run there');
+    assert.deepEqual(runCounted(countingEngine(), countdown(2000), { wasmInterpreterAfter: 0 }),
+        { js: 0, wasm: 4002 }, 'no stretch');
+});
+
+test('the stretch is the process\'s: hosts add to it, a host after the tier started runs it',
+    ()=>{
+        const process = countingEngine();
+        assert.deepEqual(runCounted(process, countdown(2000)), { js: 4002, wasm: 0 });
+        const second = runCounted(process, countdown(2000));
+        assert.equal(second.js + second.wasm, 4002);
+        assert.ok(second.js < 4002 && second.js > 3900,
+            `the second host spends what the first left of the stretch: ${second.js}`);
+        assert.deepEqual(runCounted(process, countdown(2000)), { js: 0, wasm: 4002 },
+            'the tier started, a third host runs it from its first instruction');
+    });
+
+test('a slow slice accounts for itself only when the translator\'s timings are asked for', ()=>{
+    // mov ecx, 250000; L: add eax, ecx; xor ebx, eax; dec ecx; jnz L; hlt -- a
+    // million instructions on the JavaScript interpreter in one slice, past its
+    // 20 ms floor (the wasm tier runs them in less).
+    for (const timings of [false, true])
+    {
+        const h = host({ cork: { translate: false, wasmInterpreter: false, timings } });
+        load(h, 0x1000,
+            [0xb9, 0x90, 0xd0, 0x03, 0x00, 0x01, 0xc8, 0x31, 0xc3, 0x49, 0x75, 0xf9, 0xf4]);
+        assert.equal(h.runSlice(2_000_000), 1 + 250_000 * 4 + 1);
+        const stalls = /** @type {any} */ (h.cork().diagnostics()).stalls;
+        assert.deepEqual(stalls.map((/** @type {{ what: string }} */ one)=>one.what.split(' ')[0]),
+            timings ? ['slice'] : [], `timings ${timings}`);
+    }
+});
+
+test('a fresh thread\'s block starts at 0x27f and MXCSR 0x1f80, not its creator\'s modes', ()=>{
+    const h = host();
+    h.restoreX87State({ top: 5, empty: 0x1f, control: 0x007f, status: 0x21,
+        raw: new Uint8Array(128).fill(0x40) });
+    h.writeMxcsr(0x9fc0); // flush to zero and denormals are zero
+    h.writeReg32('ebx', 0x1234);
+    const context = h.captureContext();
+    freshThreadFpu(context);
+    h.restoreContext(context);
+    const x87 = h.x87State();
+    assert.equal(x87.control, 0x27f);
+    assert.equal(x87.top, 0);
+    assert.equal(x87.empty, 0xff);
+    assert.equal(x87.status, 0);
+    assert.equal(h.readMxcsr(), 0x1f80);
+    assert.equal(h.readReg32('ebx'), 0x1234, 'the rest of the template stays');
+});
+
+test('rdtsc counts the guest\'s clock once one is given, at CORK_TSC_MHZ, never backward', ()=>{
+    const h = host();
+    const perMs = BigInt(CORK_TSC_MHZ) * 1000n;
+    let ms = 5000;
+    h.useGuestClock(()=>ms);
+    /** @returns {bigint} edx:eax after rdtsc; hlt */
+    const read = ()=>{
+        load(h, 0x1000, [0x0f, 0x31, 0xf4]);
+        h.writeReg32('eip', 0x1000);
+        h.wake?.();
+        h.runSlice(10);
+        return BigInt(h.readReg32('edx') >>> 0) << 32n | BigInt(h.readReg32('eax') >>> 0);
+    };
+    const first = read();
+    assert.ok(first >= 5000n * perMs && first < 5016n * perMs + 1n,
+        `the guest's 5 s in ticks, within a credit: ${first}`);
+    ms = 5100;
+    const second = read();
+    assert.ok(second - first >= 99n * perMs && second - first < 116n * perMs + 1n,
+        `a tenth of a second of guest time reads as a tenth of the rate: ${second - first}`);
+    const third = read();
+    assert.ok(third > second, 'the guest clock standing still, the counter still moves on');
 });

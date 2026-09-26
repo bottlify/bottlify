@@ -135,7 +135,8 @@ const PEEK_LIMIT = 96;
  * where `performance` is not a global -- true of every environment this runs
  * in today, so this is a guard rather than a live fallback.
  */
-const hookClock = typeof performance === 'undefined' ? Date.now : ()=>performance.now();
+const hookClock = import.meta.BOTTLIFY_DIAGNOSTICS !== false && typeof performance !== 'undefined'
+    ? ()=>performance.now() : Date.now;
 
 /**
  * @param {Object} deps
@@ -228,9 +229,11 @@ export function createDispatcher(deps){
     // That is what a report's cost per API comes from, and it costs two clock
     // readings per call -- measured at three percent of a frame in a match,
     // where a frame makes fifteen hundred calls. Off unless a measurement
-    // asks; the crossing is always timed, so the host's share is always known.
+    // asks; the crossing is sampled whenever there is a profiler, so the
+    // host's share is known -- and a production bundle, which has none, times
+    // nothing.
     const callPhases = deps.callPhases ?? false;
-    const phased = profiler !== null && callPhases;
+    const phased = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiler !== null && callPhases;
     // The crossing is timed one call in this many, each standing for all of
     // them: two clock readings a call were a measured share of a frame in a
     // match, and a share is as true of a sample as of the whole.
@@ -537,7 +540,9 @@ export function createDispatcher(deps){
             // in the report costs a fraction of a millisecond a frame, and
             // until this existed there was no way to tell a machine slowed by
             // its own emulation from one slowed by leaving it so often.
-            if (profiler === null || (crossings++ & (TRAP_SAMPLE - 1)) !== 0)
+            // A production bundle times no crossing at all.
+            if (import.meta.BOTTLIFY_DIAGNOSTICS === false || profiler === null
+                || (crossings++ & (TRAP_SAMPLE - 1)) !== 0)
             {
                 this.dispatchNow(id);
                 return;
@@ -728,9 +733,9 @@ export function createDispatcher(deps){
             // unlike the `trap` phase above (sampled one call in eight,
             // weighted back up), this is the number a kernel's own cost is
             // read from, so it is not sampled.
-            const timeHook = entry.hookStats !== null;
-            const hookStart = timeHook ? hookClock() : 0;
-            if (phased)
+            const hookStart = import.meta.BOTTLIFY_DIAGNOSTICS !== false && entry.hookStats !== null
+                ? hookClock() : 0;
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && phased)
             {
                 profiler.begin(entry.name, 'host');
             }
@@ -740,7 +745,7 @@ export function createDispatcher(deps){
                 // the mutable object built above, not `args` (which stays the
                 // pristine reading a fallthrough restores from).
                 result = entry.handler(entry.site ? entry.registers : args, frame);
-                if (entry.hookStats !== null)
+                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && entry.hookStats !== null)
                 {
                     entry.hookStats.ms += hookClock() - hookStart;
                 }
@@ -779,7 +784,7 @@ export function createDispatcher(deps){
             }
             finally
             {
-                if (phased)
+                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && phased)
                 {
                     profiler.end(entry.name);
                 }

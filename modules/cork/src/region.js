@@ -44,9 +44,11 @@ import { decode } from './decode/decoder.js';
  * @property {import('./decode/decoder.js').Instruction[]} instructions
  * @property {{ kind: ExitKind, targets: number[], next: number, backEdge: boolean,
  *              refusal?: import('./decode/decoder.js').Refusal,
- *              table?: SwitchTable }} exit
+ *              table?: SwitchTable, predicted?: boolean }} exit
  *   an `indirect` exit through a switch's table of addresses carries the table,
- *   and its distinct targets as `targets`
+ *   and its distinct targets as `targets`; an indirect call the runtime has
+ *   seen go to a few callees (`callTargets`) is `predicted`, those callees its
+ *   `targets`
  */
 
 /**
@@ -67,6 +69,7 @@ import { decode } from './decode/decoder.js';
  * @property {number[]} entries          every block start
  * @property {number} bytes
  * @property {Set<number>} pages         4 KiB pages the code and its switch tables span
+ * @property {SwitchTable[]} [tables]    the switch tables its jumps go through, read as data
  * @property {string} hash               of the decoded bytes, for the cache
  * @property {Map<string, number>} refused   opcode → times a refusal cut a block
  */
@@ -88,10 +91,12 @@ const LEAF_BYTES = 512;
  * it unless `calls`, when the callee's own callees leave through the hash as
  * any call does and come back to the block after their call.
  *
- * @param {(address: number) => number} read @param {number} target
+ * @param {(address: number) => import('./decode/decoder.js').Instruction
+ *     | import('./decode/decoder.js').Refusal} decodeAt
+ * @param {number} target
  * @param {(eip: number) => boolean} translatable @param {boolean} [calls]
  */
-function isLeaf(read, target, translatable, calls = false){
+function isLeaf(decodeAt, target, translatable, calls = false){
     const seen = new Set();
     const work = [target];
     let bytes = 0;
@@ -109,7 +114,7 @@ function isLeaf(read, target, translatable, calls = false){
         seen.add(start);
         for (let eip = start; ;)
         {
-            const decoded = decode(read, eip);
+            const decoded = decodeAt(eip);
             if ('refused' in decoded)
             {
                 return false;
@@ -147,12 +152,21 @@ function isLeaf(read, target, translatable, calls = false){
 }
 
 /**
+ * The callees a call block may go to inside the region: a direct call's, or
+ * a predicted indirect call's.
+ *
+ * @param {Block['exit']} exit
+ */
+const calleesOf = exit=>(exit.kind === 'call' || exit.kind === 'indirect' && exit.predicted
+    ? exit.targets : []);
+
+/**
  * Where each `ret` of the region may come back to inside it: the return
- * addresses of the direct calls whose callee is formed into the region with
- * them (the callee's start and the return address both blocks), for the rets
- * the callee reaches by its own branches. Such a ret that comes back to one
- * of them jumps there rather than leaving; the region's other rets are no
- * edge to them.
+ * addresses of the calls -- direct, or indirect with their callees predicted
+ * -- whose callee is formed into the region with them (the callee's start and
+ * the return address both blocks), for the rets the callee reaches by its own
+ * branches. Such a ret that comes back to one of them jumps there rather than
+ * leaving; the region's other rets are no edge to them.
  *
  * @param {Region} region
  * @returns {Map<number, number[]>}  ret block start → return addresses
@@ -163,13 +177,14 @@ export function inlineReturns(region){
     const out = new Map();
     for (const block of region.blocks)
     {
-        const { kind, targets, next } = block.exit;
-        if (kind !== 'call' || !byStart.has(targets[0]) || !byStart.has(next))
+        const { next } = block.exit;
+        const callees = calleesOf(block.exit).filter(callee=>byStart.has(callee));
+        if (callees.length === 0 || !byStart.has(next))
         {
             continue;
         }
         const seen = new Set();
-        const work = [targets[0]];
+        const work = [...callees];
         while (work.length > 0)
         {
             const at = /** @type {number} */ (work.pop());
@@ -194,7 +209,7 @@ export function inlineReturns(region){
             {
                 work.push(...exit.targets, ...(exit.kind === 'jump' ? [] : [exit.next]));
             }
-            else if (exit.kind === 'call')
+            else if (calleesOf(exit).length > 0)
             {
                 // A callee of the callee comes back after its call.
                 work.push(exit.next);
@@ -321,16 +336,49 @@ function switchTable(read, block, blocks){
 }
 
 /**
+ * What forming learns of bytes that stay as they are while several regions are
+ * formed over them -- a batch on the engine thread, a relink over its copy of
+ * the pages -- so each instruction is decoded, and each callee's leaf test
+ * made, once for all of them: a loading phase's regions call the same small
+ * functions, and each region decoded every callee again to test it.
+ *
+ * @typedef {{ decoded: Map<number, import('./decode/decoder.js').Instruction
+ *     | import('./decode/decoder.js').Refusal>, leaves: Map<number, boolean> }} FormShared
+ */
+
+/** @returns {FormShared} */
+export function formShared(){
+    return { decoded: new Map(), leaves: new Map() };
+}
+
+/**
  * @param {(address: number) => number} read
  * @param {number} entry
  * @param {{ maxBlocks?: number, maxBytes?: number,
- *     translatable?: (eip: number) => boolean, leafCalls?: boolean }} [options]
- *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`)
+ *     translatable?: (eip: number) => boolean, leafCalls?: boolean,
+ *     callTargets?: Map<number, number[]>, shared?: FormShared }} [options]
+ *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`); callTargets:
+ *     by the address of an indirect call, the callees it has been seen to go to, formed in
+ *     as a direct call's small callee is -- the call compares its target with each;
+ *     shared: what forming found, for other regions formed over the same bytes with the
+ *     same `translatable` (`formShared`)
  * @returns {Region}
  */
 export function formRegion(read, entry,
-    { maxBlocks = 128, maxBytes = 8192, translatable = ()=>true, leafCalls = true } = {})
+    { maxBlocks = 128, maxBytes = 8192, translatable = ()=>true, leafCalls = true,
+        callTargets, shared } = {})
 {
+    /** @param {number} address */
+    const decodeAt = shared === undefined ? (/** @type {number} */ address)=>decode(read, address)
+        : (/** @type {number} */ address)=>{
+            let decoded = shared.decoded.get(address);
+            if (decoded === undefined)
+            {
+                decoded = decode(read, address);
+                shared.decoded.set(address, decoded);
+            }
+            return decoded;
+        };
     /** @type {Map<number, Block>} by start */
     const blocks = new Map();
     /** The starts still to decode, by how many callees deep they were reached:
@@ -354,10 +402,62 @@ export function formRegion(read, entry,
     const refused = new Map();
     /** The switch tables the region's jumps go through, read as data. @type {SwitchTable[]} */
     const tables = [];
+    /** `isLeaf` by callee and form, once a region (or once for every region
+     * sharing it): a function called from many places is decoded once.
+     * @type {Map<number, boolean>} */
+    const leaves = shared?.leaves ?? new Map();
+    /** @param {number} target @param {boolean} calls */
+    const leafAt = (target, calls)=>{
+        const key = target * 2 + (calls ? 1 : 0);
+        let leaf = leaves.get(key);
+        if (leaf === undefined)
+        {
+            leaf = isLeaf(decodeAt, target, translatable, calls);
+            leaves.set(key, leaf);
+        }
+        return leaf;
+    };
     let bytes = 0;
+
+    /** The block starts in address order, for `containing`'s search. @type {number[]} */
+    const sorted = [];
+    /** Where `at` goes in `sorted`: the first start not below it. @param {number} at */
+    const place = at=>{
+        let lo = 0;
+        let hi = sorted.length;
+        while (lo < hi)
+        {
+            const mid = (lo + hi) >> 1;
+            if (sorted[mid] < at)
+            {
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+        return lo;
+    };
+    /** @param {number} at */
+    const addStart = at=>{
+        sorted.splice(place(at), 0, at);
+    };
+    // Whether two blocks share a byte: a target inside an instruction another
+    // block decoded, or an instruction running into a block after it. Until
+    // they do, the blocks are disjoint and the one holding an address is the
+    // last to start at or below it; once they do, the first block made that
+    // holds it answers, as the scan in insertion order always did.
+    let overlapping = false;
 
     /** The block that contains an address, if any. @param {number} address */
     const containing = address=>{
+        if (!overlapping)
+        {
+            const at = place(address + 1) - 1;
+            const block = at < 0 ? undefined : blocks.get(sorted[at]);
+            return block !== undefined && address < block.end ? block : null;
+        }
         for (const block of blocks.values())
         {
             if (address >= block.start && address < block.end)
@@ -392,6 +492,7 @@ export function formRegion(read, entry,
         block.instructions = block.instructions.slice(0, index);
         block.exit = { kind: 'fallthrough', targets: [at], next: at, backEdge: false };
         blocks.set(at, tail);
+        addStart(at);
         return true;
     };
 
@@ -407,6 +508,10 @@ export function formRegion(read, entry,
         {
             continue;
         }
+        if (inside)
+        {
+            overlapping = true;
+        }
         if (blocks.size >= maxBlocks || !translatable(start))
         {
             // Not followed: whoever jumps here exits to the runtime.
@@ -418,6 +523,7 @@ export function formRegion(read, entry,
             exit: { kind: 'cut', targets: [], next: start, backEdge: false },
         };
         blocks.set(start, block);
+        addStart(start);
         let eip = start;
         for (;;)
         {
@@ -433,7 +539,7 @@ export function formRegion(read, entry,
                 block.exit = { kind: 'cut', targets: [], next: eip, backEdge: false };
                 break;
             }
-            const decoded = decode(read, eip);
+            const decoded = decodeAt(eip);
             if ('refused' in decoded)
             {
                 refused.set(decoded.opcode, (refused.get(decoded.opcode) ?? 0) + 1);
@@ -466,6 +572,12 @@ export function formRegion(read, entry,
             }
             block.instructions.push(decoded);
             bytes += decoded.length;
+            // A block that starts inside this instruction's bytes shares them.
+            const after = place(decoded.eip + 1);
+            if (after < sorted.length && sorted[after] < decoded.eip + decoded.length)
+            {
+                overlapping = true;
+            }
             eip = (eip + decoded.length) >>> 0;
             block.end = eip;
             const exit = exitOf(decoded, eip);
@@ -505,13 +617,22 @@ export function formRegion(read, entry,
                 // the port write: a block there lets the return come back
                 // into translated code.
                 follow(exit.next, depth);
-                if (leafCalls && exit.kind === 'call'
-                    && isLeaf(read, exit.targets[0], translatable, depth === 0))
+                const predicted = exit.kind === 'indirect' ? callTargets?.get(decoded.eip)
+                    : undefined;
+                if (leafCalls && predicted !== undefined && predicted.length > 0)
+                {
+                    exit.predicted = true;
+                    exit.targets = [...predicted];
+                }
+                for (const callee of leafCalls ? calleesOf(exit) : [])
                 {
                     // A small callee is formed into its caller: the call
                     // becomes a jump inside the region, and its return, when
                     // it comes back to this call's return address, one too.
-                    follow(exit.targets[0], depth + 1);
+                    if (leafAt(callee, depth === 0))
+                    {
+                        follow(callee, depth + 1);
+                    }
                 }
             }
             break;
@@ -520,7 +641,6 @@ export function formRegion(read, entry,
 
     const ordered = [...blocks.values()].sort((a, b)=>a.start - b.start);
     const pages = new Set();
-    let hash = 0x811c9dc5;
     for (const block of ordered)
     {
         for (const target of block.exit.targets)
@@ -530,10 +650,14 @@ export function formRegion(read, entry,
                 block.exit.backEdge = true;
             }
         }
-        for (let address = block.start; address < block.end; address++)
+        // Each page the block spans, in address order, once: the set of every
+        // byte's page, without a set operation a byte.
+        if (block.end > block.start)
         {
-            hash = Math.imul(hash ^ read(address), 0x01000193) >>> 0;
-            pages.add(address >>> 12);
+            for (let page = block.start >>> 12; page <= (block.end - 1) >>> 12; page++)
+            {
+                pages.add(page);
+            }
         }
     }
     // A table's entries decide the region's blocks: they are hashed with the
@@ -542,10 +666,10 @@ export function formRegion(read, entry,
     for (const table of tables)
     {
         const end = table.address + table.entries.length * 4;
-        for (let address = table.address; address < end; address++)
+        for (let page = table.address >>> 12; end > table.address && page <= (end - 1) >>> 12;
+            page++)
         {
-            hash = Math.imul(hash ^ read(address), 0x01000193) >>> 0;
-            pages.add(address >>> 12);
+            pages.add(page);
         }
     }
     return {
@@ -554,9 +678,62 @@ export function formRegion(read, entry,
         entries: ordered.map(block=>block.start),
         bytes,
         pages,
-        hash: hash.toString(16).padStart(8, '0'),
+        tables,
+        hash: hashRegion(read, { blocks: ordered, tables }),
         refused,
     };
+}
+
+/**
+ * A region's hash, over what decides its code: its blocks' bytes in address
+ * order, the callees its predictions name and its switch tables' entries. Two
+ * FNV lanes, 64 bits: the hash is what a stored translation is found by, and a
+ * store -- a bundle's seed above all, made on another machine from a build of
+ * the program that may differ -- must not answer for other bytes at the same
+ * entry. Thirty-two bits met that at one pair in four billion, and a birthday
+ * search finds such a pair in a second. Read again later, it tells a region
+ * whose code was written since it was formed from one that still fits.
+ *
+ * @param {(address: number) => number} read
+ * @param {{ blocks: Block[], tables?: SwitchTable[] }} region  its blocks in address order
+ * @returns {string}
+ */
+export function hashRegion(read, { blocks, tables = [] }){
+    let low = 0x811c9dc5;
+    let high = 0x050c5d1f;
+    let at = 0;
+    /** @param {number} byte */
+    const mix = byte=>{
+        low = Math.imul(low ^ byte, 0x01000193);
+        high = Math.imul(high ^ byte ^ at++ & 0xff, 0x01000193);
+    };
+    for (const block of blocks)
+    {
+        for (let address = block.start; address < block.end; address++)
+        {
+            mix(read(address));
+        }
+    }
+    // A prediction decides blocks as a table does: its callees are hashed too.
+    for (const block of blocks)
+    {
+        for (const target of block.exit.predicted ? block.exit.targets : [])
+        {
+            for (let shift = 0; shift < 32; shift += 8)
+            {
+                mix(target >>> shift & 0xff);
+            }
+        }
+    }
+    for (const table of tables)
+    {
+        const end = table.address + table.entries.length * 4;
+        for (let address = table.address; address < end; address++)
+        {
+            mix(read(address));
+        }
+    }
+    return (high >>> 0).toString(16).padStart(8, '0') + (low >>> 0).toString(16).padStart(8, '0');
 }
 
 /**

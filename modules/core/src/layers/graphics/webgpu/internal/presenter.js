@@ -160,7 +160,7 @@ export function createPresenter(options = {}){
     const screen = options.screen ?? null;
     const canvas = options.canvas ?? screen?.canvas ?? null;
     const onFrame = options.onFrame ?? (()=>{});
-    const onPresented = options.onPresented ?? (()=>{});
+    const onPresented = options.onPresented ?? null;
     const onPresentFailed = options.onPresentFailed ?? (()=>{});
     const now = options.now ?? (()=>performance.now());
     // A caller that has no canvas to configure but does have somewhere to put a
@@ -347,7 +347,11 @@ export function createPresenter(options = {}){
             fallbackPresentTo?.(frame);
             return;
         }
-        const startedAt = now();
+        // A present's record -- when, how long, how big -- is kept for a report
+        // and handed to whoever asked for it; a production bundle keeps none
+        // and, with nobody asking, reads no clock for it either.
+        const recorded = import.meta.BOTTLIFY_DIAGNOSTICS !== false || onPresented !== null;
+        const startedAt = recorded ? now() : 0;
         try
         {
             const resized = canvas
@@ -378,16 +382,22 @@ export function createPresenter(options = {}){
             counters.shown++;
             const label = surface === texture ? uploadedLabel : (surface.label ?? 'surface');
             shownBy[label] = (shownBy[label] ?? 0) + 1;
-            const record = {
-                index: frame.frameIndex, at: startedAt, ms: now() - startedAt,
-                w: surface.width, h: surface.height, failed: false, label,
-            };
-            history.push(record);
-            if (history.length > 600)
+            if (recorded)
             {
-                history.shift();
+                const record = {
+                    index: frame.frameIndex, at: startedAt, ms: now() - startedAt,
+                    w: surface.width, h: surface.height, failed: false, label,
+                };
+                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+                {
+                    history.push(record);
+                    if (history.length > 600)
+                    {
+                        history.shift();
+                    }
+                }
+                onPresented?.(record);
             }
-            onPresented(record);
             if (resized || counters.shown === 1)
             {
                 onFrame({
@@ -401,12 +411,15 @@ export function createPresenter(options = {}){
                 index: frame.frameIndex, at: startedAt, ms: -1, w: 0, h: 0, failed: true,
                 label: surface === texture ? uploadedLabel : (surface.label ?? 'surface'),
             };
-            history.push(record);
-            if (history.length > 600)
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
             {
-                history.shift();
+                history.push(record);
+                if (history.length > 600)
+                {
+                    history.shift();
+                }
             }
-            onPresented(record);
+            onPresented?.(record);
             onPresentFailed({
                 index: frame.frameIndex,
                 message: e instanceof Error ? e.message : String(e),

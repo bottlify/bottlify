@@ -10,13 +10,16 @@
  * A browser reaches it through the page's own `Worker`; a process without
  * one (a test, a headless run) reaches the same worker file through Node's
  * `worker_threads`. Both carry the same messages, so `translator.worker.js`
- * does not know which opened it. Where neither exists -- or the URL cannot
- * be reached -- this answers null and the runtime emits inline, which is the
- * behaviour every run had before the worker.
+ * does not know which opened it. Where neither exists this answers null and
+ * the runtime emits inline, which is the behaviour every run had before the
+ * worker. A worker whose file cannot be loaded is still made -- a browser
+ * reports that later, as an error event -- so the adapter passes its errors
+ * and its exit on (`onLost`), and the runtime goes back to emitting inline.
  *
  * @typedef {Object} WorkerAdapter
  * @property {(message: any, transfer: any[]) => void} post
  * @property {(handler: (data: any) => void) => void} onMessage
+ * @property {(handler: (reason: string) => void) => void} onLost
  * @property {() => void} terminate
  */
 
@@ -34,6 +37,10 @@ export async function openTranslationWorker(url){
                 post: (message, transfer)=>worker.postMessage(message, transfer),
                 onMessage: handler=>{
                     worker.onmessage = event=>handler(event.data);
+                },
+                onLost: handler=>{
+                    worker.onerror = event=>handler(event.message || 'the worker failed');
+                    worker.onmessageerror = ()=>handler('a message could not be read');
                 },
                 terminate: ()=>worker.terminate(),
             };
@@ -58,6 +65,10 @@ export async function openTranslationWorker(url){
         return {
             post: (message, transfer)=>worker.postMessage(message, transfer),
             onMessage: handler=>worker.on('message', handler),
+            onLost: handler=>{
+                worker.on('error', error=>handler(error?.message ?? String(error)));
+                worker.on('exit', code=>handler(`the worker exited (${code})`));
+            },
             terminate: ()=>worker.terminate(),
         };
     }

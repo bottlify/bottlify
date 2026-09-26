@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 /**
@@ -119,4 +119,68 @@ test('the packed tarball installs and hands a consumer the emulator',
                 : manifest.artifacts[`./${name}`];
             assert.equal(`sha256:${hash}`, recorded, `${name} did not survive packing intact`);
         }
+    });
+
+/** Words only the code a production bundle leaves out has, by where they come from. */
+const LEFT_OUT = [
+    'longestGuestInstructions',   // the phase profiler's frame table
+    'stagedTextureUploads',       // the GPU backend's profiler
+    'topBlocks', 'storeTrace',    // the translator's block profile and store trace
+    'slice i',                    // a slow slice's account of itself
+];
+
+/**
+ * A program run to its end under `cork`, through the entry `module` names: its
+ * exit code, what it wrote, and how many regions the translator formed.
+ */
+const RUN = `
+import { readFile } from 'node:fs/promises';
+const [module, exe] = process.argv.slice(2);
+const { createApp } = await import(module);
+const app = await createApp({ executable: new Uint8Array(await readFile(exe)), engine: 'cork',
+    cork: { config: { feed: 'slice' } } });
+const output = [];
+app.attachLog((_, text)=>output.push(text));
+const code = await app.run({ timeoutMs: 60000 });
+const cpu = (await app.diagnostics()).find(one=>one.name === 'cpu');
+console.log(JSON.stringify({ code, output: output.join(''), regions: cpu.metrics.cork.regions }));
+await app.dispose();
+process.exit(0);
+`;
+
+test('a production bundle carries no diagnostic instrument and runs a program as the source does',
+    { timeout: 600000 }, async t=>{
+        npm(PACKAGE, ['run', 'build']);
+        const dist = join(PACKAGE, 'dist');
+        for (const name of ['core.js', 'engine.worker.js', 'log.worker.js', 'cork/index.js',
+            'cork/translator.worker.js'])
+        {
+            const text = await readFile(join(dist, name), 'utf8');
+            assert.ok(!text.includes('BOTTLIFY_DIAGNOSTICS'),
+                `${name}: a guard the build did not fold`);
+            for (const word of LEFT_OUT)
+            {
+                assert.ok(!text.includes(word), `${name} carries "${word}"`);
+            }
+        }
+
+        // The same program through the built package and through the source:
+        // what the bundle left out is a measurement, never behaviour, and the
+        // frame's samplers that feed the translator are not among it.
+        const scratch = await mkdtemp(join(tmpdir(), 'bottlify-prod-'));
+        t.after(()=>rm(scratch, { recursive: true, force: true }));
+        await writeFile(join(scratch, 'run.mjs'), RUN);
+        const exe = join(PACKAGE, 'test', 'fixtures', 'qsort.exe');
+        /** @param {string} module */
+        const run = module=>{
+            const child = spawnSync(process.execPath, [join(scratch, 'run.mjs'), module, exe],
+                { encoding: 'utf8' });
+            assert.equal(child.status, 0, `${module}:\n${child.stderr}`);
+            return JSON.parse(child.stdout.trim().split('\n').at(-1) ?? '{}');
+        };
+        const built = run(pathToFileURL(join(dist, 'core.js')).href);
+        const source = run(pathToFileURL(join(PACKAGE, 'src', 'app.js')).href);
+        assert.equal(built.code, source.code);
+        assert.equal(built.output, source.output);
+        assert.ok(built.regions >= 1, `the built translator formed no region: ${built.regions}`);
     });

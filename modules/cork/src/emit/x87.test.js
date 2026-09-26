@@ -275,6 +275,97 @@ test('fild, fist and fistp: integers in and out, rounding to nearest even, the i
     assert.equal(r.u32(DATA + 64), 3);
 });
 
+test('a quadword fild stored by a quadword fistp or fisttp copies all eight bytes', ()=>{
+    // The processor's 64-bit mantissa holds the quadword; a double does not,
+    // and the pair is a way programs copy eight bytes. An exchange and a
+    // register copy carry the value along; a write rounds it through the double.
+    const quad = (/** @type {bigint} */ value)=>{
+        const bytes = new Uint8Array(8);
+        new DataView(bytes.buffer).setBigInt64(0, value, true);
+        return [...bytes];
+    };
+    const FILD = [0xdf, 0x2d, 0x00, 0x20, 0, 0];     // fild qword [DATA]
+    const FISTP = [0xdf, 0x3d, 0x08, 0x20, 0, 0];    // fistp qword [DATA+8]
+    const FISTTP = [0xdd, 0x0d, 0x08, 0x20, 0, 0];   // fisttp qword [DATA+8]
+    const between = {
+        nothing: [],
+        'fld1; fxch st1': [0xd9, 0xe8, 0xd9, 0xc9],
+        'fld st0; fstp st1': [0xd9, 0xc0, 0xdd, 0xd9],
+        'fnstsw ax': [0xdf, 0xe0],
+    };
+    for (const value of [0x7fffffffffffffffn, 0x0123456789abcdefn, (1n << 53n) + 1n,
+        -((1n << 60n) + 3n), -0x8000000000000000n])
+    {
+        for (const [name, middle] of Object.entries(between))
+        {
+            for (const store of [FISTP, FISTTP])
+            {
+                const r = run([...FILD, ...middle, ...store], { data: quad(value) });
+                assert.equal(r.exit.kind, 3);
+                assert.equal(r.view.getBigInt64(r.m.layout.ramBase + DATA + 8, true), value,
+                    `${value} with ${name} between`);
+                assert.equal(r.status() & 1, 0, 'no invalid operation');
+            }
+        }
+    }
+    // fchs; fchs writes ST0 twice: the store rounds the double to nearest.
+    const r = run([...FILD, 0xd9, 0xe0, 0xd9, 0xe0, ...FISTP], { data: quad(0x0123456789abcdefn) });
+    assert.equal(r.view.getBigInt64(r.m.layout.ramBase + DATA + 8, true), 0x0123456789abcdf0n);
+    // Onto a full stack the fild pushes the indefinite, and the store is the
+    // integer indefinite with IE, as before.
+    const full = run([...FILD, ...FISTP], { data: quad(5n), empty: 0 });
+    assert.equal(full.view.getBigUint64(full.m.layout.ramBase + DATA + 8, true),
+        0x8000000000000000n);
+    assert.equal(full.status() & 0x41, 0x41, 'IE and SF');
+});
+
+/**
+ * The partial remainders the architecture defines, worked out in integers:
+ * [ST0, ST1, fprem's remainder and quotient mod 8, fprem1's]. The first is a
+ * dividend just below a multiple of the divisor, where a quotient in doubles
+ * rounds up; the others have quotients past a double's 53 bits.
+ *
+ * @type {[number, number, number, number, number, number][]}
+ */
+const REMAINDERS = [
+    [3736.3244596153145, 7.049668791727009, 7.04966879172678, 1, -2.291500322826323e-13, 2],
+    [1e17, 7, 5, 5, -2, 6],
+    [-1e17, 7, -5, 5, 2, 6],
+    [2 ** 63 + 2 ** 11, 3, 1, 5, 1, 5],
+    [100, 2 * Math.PI, 5.7522203923062065, 7, -0.5309649148733797, 0],
+];
+
+/** C0 C3 C1 for a quotient's low three bits. @param {number} low */
+const quotientBits = low=>((low & 4) !== 0 ? 0x100 : 0) | ((low & 2) !== 0 ? 0x4000 : 0)
+    | ((low & 1) !== 0 ? 0x200 : 0);
+
+test('fprem and fprem1 leave the exact remainder, and the quotient\'s low bits in C0 C3 C1', ()=>{
+    for (const [a, c, rem, low, rem1, low1] of REMAINDERS)
+    {
+        for (const [opcode, want, bits] of [[0xf8, rem, low], [0xf5, rem1, low1]])
+        {
+            // fld qword [DATA] (c); fld qword [DATA+8] (a); fprem/fprem1;
+            // fnstsw ax; fstp qword [DATA+16]; fstp st0
+            const r = run([
+                0xdd, 0x05, 0x00, 0x20, 0, 0, 0xdd, 0x05, 0x08, 0x20, 0, 0, 0xd9, opcode,
+                0xdf, 0xe0, 0xdd, 0x1d, 0x10, 0x20, 0, 0, 0xdd, 0xd8,
+            ], { data: [...f64bytes(c), ...f64bytes(a)] });
+            const name = `${opcode === 0xf8 ? 'fprem' : 'fprem1'}(${a}, ${c})`;
+            assert.equal(r.exit.kind, 3);
+            assert.equal(r.f64(DATA + 16), want, name);
+            assert.equal(r.m.reg('eax') & 0x4700, quotientBits(bits), `${name}: C0 C1 C2 C3`);
+        }
+    }
+    // Past an exponent difference of 63 the reduction is partial: C2, and a
+    // remainder the next fprem goes on from.
+    const r = run([
+        0xdd, 0x05, 0x00, 0x20, 0, 0, 0xdd, 0x05, 0x08, 0x20, 0, 0, 0xd9, 0xf8,
+        0xdf, 0xe0, 0xdd, 0x1d, 0x10, 0x20, 0, 0, 0xdd, 0xd8,
+    ], { data: [...f64bytes(3), ...f64bytes(1e300)] });
+    assert.equal(r.m.reg('eax') & 0x4700, 0x400, 'C2 alone');
+    assert.equal(r.f64(DATA + 16) % 3, 1e300 % 3, 'congruent to the dividend');
+});
+
 test('an 80-bit load and store round-trip through the conversion helpers', ()=>{
     // 1.5 as extended: mantissa 0xc000000000000000, exponent 16383
     const r = run([

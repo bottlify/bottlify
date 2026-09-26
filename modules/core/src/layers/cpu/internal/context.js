@@ -210,6 +210,53 @@ export function restoreBlockContext(host, context){
 }
 
 /**
+ * The x87 control word Windows starts every thread with: every exception
+ * masked, double precision, round to nearest -- not the processor's reset
+ * value (0x37f, extended precision), and not its creator's.
+ */
+export const THREAD_CONTROL_WORD = 0x027f;
+/** The MXCSR a thread starts with: every SIMD exception masked, no FTZ or DAZ. */
+export const THREAD_MXCSR = 0x1f80;
+
+/**
+ * Gives a context the floating-point environment a new thread starts with.
+ *
+ * A thread is made from its creator's context as a template (segments, the
+ * process environment), but Windows starts each one with a fresh x87 and SSE
+ * state: a precision a thread set with `_controlfp`, a flush-to-zero mode in its
+ * MXCSR, or values left on its x87 stack are its own and do not pass to the
+ * threads it creates.
+ *
+ * @param {any} context  Either record: the emulator's fields or cork's block.
+ */
+export function freshThreadFpu(context){
+    if (context.block instanceof Uint8Array)
+    {
+        const { block, layout } = /** @type {BlockContext} */ (context);
+        const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+        view.setUint16(layout.x87Control, THREAD_CONTROL_WORD, true);
+        view.setUint16(layout.x87Status, 0, true);
+        block[layout.x87Top] = 0;
+        block[layout.x87Empty] = 0xff;
+        block.fill(0, layout.xmm, layout.xmm + 8 * 16);
+        view.setUint32(layout.mxcsr, THREAD_MXCSR, true);
+        return;
+    }
+    context.fpuSt.fill(0);
+    context.fpuStackPtr = 0;
+    context.fpuStackEmpty = 0xff;
+    context.fpuControlWord = THREAD_CONTROL_WORD;
+    context.fpuStatusWord = 0;
+    context.fpuOpcode = 0;
+    context.fpuIp = 0;
+    context.fpuIpSelector = 0;
+    context.fpuDp = 0;
+    context.fpuDpSelector = 0;
+    context.regXmm.fill(0);
+    context.mxcsr = THREAD_MXCSR;
+}
+
+/**
  * The TEB base the thread runs on. Kept next to the context because moving it
  * is part of switching threads, not a duty of whoever calls the switch (§12.5).
  *

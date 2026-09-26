@@ -157,6 +157,21 @@ engine; `src/bundle.js` (`@bottlify/core/bundle`) publishes the constants and ch
   per block by the writer. `openBundle(fetchRange, decode, { verifyIndex })` reads only the header
   and index, checks them against each other, and answers `rangesFor(file, offset, length)`: the
   blocks a read touches and which bytes of each.
+- **Translations** (optional): the index may name one more run of blocks, `translations: { size,
+  firstBlock, blocks, sha256 }` -- a translation seed, what the translator made of the bundle's
+  code on one machine (`docs/core/cpu.md`, the translation cache). It is not a file of the volume,
+  its blocks come after every file's, and the bundle's digest (`sha256` in the writer's summary)
+  stays that of the game's blocks alone. A reader that does not know the entry skips it, and a
+  bundle without it reads as before; the format version is unchanged. `writeBundle({
+  translations })` packs one, and `attachTranslations(path, seed)` puts one into a bundle already
+  written -- where the index was, or over the seed it replaces, with a new index after it, the
+  game's blocks untouched -- or takes it out (`null`); the index's digest changes with it, so the
+  manifest's `indexSha256` must be written again. `verifyBundle` checks the seed's digest too and
+  names it `<translations>` when it is damaged. Under a translating engine `mountBundle` fetches
+  the seed's blocks in one request, each checked against its CRC-32 as a read's are, and hands them
+  to the translation store before the program's first instruction, unless that store has taken this
+  seed already (it keeps the seed's digest); the background fill leaves those blocks out, and an
+  `emulator` launch never fetches them. The event `bundle-translations` says what the store took.
 - **Source** (`source.js`): `createBundleSource({ bundle, readBlock, decode, cacheBlocks = 16,
   prefix })` is a `SourceStore`. A guest read is synchronous, so `read` serves only blocks already
   resident: it asks `readBlock(index, offset, packed)` for the stored bytes, decodes them, keeps the

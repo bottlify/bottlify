@@ -15,14 +15,16 @@
  * indefinite" 0x80000000 for a NaN or a value out of range (a saturating
  * conversion and a fix-up); `rsqrtps` and `rcpps` are computed exactly, as
  * the emulator does, so results stay bit-identical to what the library's
- * programs already run against. MMX operations run in the low lane of a
- * `v128` and come back as an `i64`; an MMX instruction also marks the x87
- * stack as it does on the processor (top at zero, every register held),
- * which the region's exit writes out when one ran.
+ * programs already run against. MXCSR is read by the conversions that round
+ * alone: the arithmetic rounds to nearest, keeps denormals (no FTZ, no DAZ)
+ * and raises no flag, as the host's f32 and f64 lanes do. MMX operations run
+ * in the low lane of a `v128` and come back as an `i64`; an MMX instruction
+ * also marks the x87 stack as it does on the processor (top at zero, every
+ * register held), which the region's exit writes out when one ran.
  */
 
 import { CF, OF, PF, SF, ZF, AF } from '../decode/table.js';
-import { EMPTY, ValType } from '../wasm/encoder.js';
+import { EMPTY } from '../wasm/encoder.js';
 import { SIMD } from '../wasm/simd.js';
 import { I32 } from './flags.js';
 import { Local, MMX_HELD, MMX_TOP } from './region.js';
@@ -47,16 +49,20 @@ const F64 = Object.freeze({
  * @typedef {import('../decode/decoder.js').Operand} Operand
  */
 
-/** A lane-0 mask: the low four bytes set. */
 /** The processor's default NaN in every lane: sign set, quiet bit set. */
 const DEFAULT_NAN_32 = [0, 0, 0xc0, 0xff, 0, 0, 0xc0, 0xff, 0, 0, 0xc0, 0xff, 0, 0, 0xc0, 0xff];
 const DEFAULT_NAN_64 = [0, 0, 0, 0, 0, 0, 0xf8, 0xff, 0, 0, 0, 0, 0, 0, 0xf8, 0xff];
-const LANE0_32 = [0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 /** A lane-0 mask: the low eight bytes set. */
 const LANE0_64 = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0];
-
-/** @param {number[]} bytes @returns {number[]} a 16-byte pattern */
-const pattern = bytes=>bytes;
+/**
+ * The shuffles that take the low dword (qword) of their first operand and the rest of
+ * their second: a scalar form's merge into its destination, one blend where the mask
+ * constant and a bitselect were four operations and a constant built in registers. The
+ * operation itself stays packed: TurboFan swaps a scalar add's or multiply's operands,
+ * and the NaN kept when both are NaNs would be the source's rather than the destination's.
+ */
+const LOW_LANE_32 = [0, 1, 2, 3, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31];
+const LOW_LANE_64 = [0, 1, 2, 3, 4, 5, 6, 7, 24, 25, 26, 27, 28, 29, 30, 31];
 
 /** The shuffle that picks dwords `[a, b, c, d]` out of two operands (0..3 first, 4..7 second). @param {number[]} dwords */
 const dwordShuffle = dwords=>dwords.flatMap(d=>[d * 4, d * 4 + 1, d * 4 + 2, d * 4 + 3]);
@@ -148,8 +154,7 @@ function emitForm(e, instruction, flagsLive){
                 // The low lane from the source, the rest kept.
                 readV(e, src, 16);
                 readV(e, dst, 16);
-                constant(width === 4 ? LANE0_32 : LANE0_64);
-                simd(SIMD.bitselect);
+                shuffle(width === 4 ? LOW_LANE_32 : LOW_LANE_64);
                 writeV(e, dst, null);
                 return true;
             }
@@ -811,7 +816,7 @@ function emitForm(e, instruction, flagsLive){
                     }
                     else
                     {
-                        shuffle(pattern([0, 1, 2, 3, 8, 9, 10, 11, 0, 0, 0, 0, 0, 0, 0, 0]));
+                        shuffle([0, 1, 2, 3, 8, 9, 10, 11, 0, 0, 0, 0, 0, 0, 0, 0]);
                     }
                 }
                 else
@@ -1176,8 +1181,7 @@ function binary(e, dst, src, operation, scalar, floatWidth = 0){
     if (scalar)
     {
         readV(e, dst, 16);
-        b.v128const(scalar === 4 ? LANE0_32 : LANE0_64);
-        b.simd(SIMD.bitselect);
+        b.op(0xfd, [SIMD.shuffle, ...(scalar === 4 ? LOW_LANE_32 : LOW_LANE_64)]);
     }
     writeV(e, dst, null);
 }
@@ -1204,8 +1208,7 @@ function unary(e, dst, src, operation, scalar, floatWidth = 0){
     if (scalar)
     {
         readV(e, dst, 16);
-        b.v128const(scalar === 4 ? LANE0_32 : LANE0_64);
-        b.simd(SIMD.bitselect);
+        b.op(0xfd, [SIMD.shuffle, ...(scalar === 4 ? LOW_LANE_32 : LOW_LANE_64)]);
     }
     writeV(e, dst, null);
 }
@@ -1465,6 +1468,12 @@ function comparison(e, dst, src, double, flagsLive){
     const a = double ? Local.d0 : Local.f0;
     const c = double ? Local.d1 : Local.f1;
     const [feq, flt, fne] = double ? [0x61, 0x63, 0x62] : [F32.eq, F32.lt, F32.ne];
+    // Read by the branch right after it alone: the branch compares f0 and f1.
+    if (e.fusesCompare(e.region.blocks[e.blockIndex].instructions.indexOf(e.current), ()=>false))
+    {
+        e.fcmp = { a, c, double };
+        return;
+    }
     e.eagerWrite(CF | PF | AF | ZF | SF | OF);
     // unordered: ZF = PF = CF = 1
     b.localGet(a).localGet(a).op(fne);
@@ -1545,5 +1554,3 @@ function packedToInt(e){
     b.localGet(vecTemp2(e));
     b.simd(SIMD.bitselect);
 }
-
-export { EMPTY, ValType, F32, F64 };

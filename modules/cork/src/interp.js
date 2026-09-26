@@ -144,19 +144,35 @@ function extendRun(state, run){
  */
 function runAt(state, cache){
     const { memory, eip } = state;
+    // A fetch fault is raised at the instruction being fetched.
+    state.faultEip = eip;
     const hit = cache.get(eip);
-    if (hit !== undefined && (memory.same !== undefined
-        ? memory.same(eip, hit.bytes) : sameBytes(memory, eip, hit.bytes)))
+    if (hit !== undefined)
     {
-        return hit;
+        try
+        {
+            if (memory.same !== undefined
+                ? memory.same(eip, hit.bytes) : sameBytes(memory, eip, hit.bytes))
+            {
+                return hit;
+            }
+        }
+        catch (e){
+            // Some of the run's bytes cannot be fetched now (a page it spans
+            // was freed or protected): decoded afresh, its leading
+            // instructions run and the fetch faults at the one that reaches
+            // the page, as the processor's own fetch would.
+            if (!(e instanceof Fault))
+            {
+                throw e;
+            }
+        }
     }
     /** @type {Run} */
     const run = {
         start: eip, bytes: NO_BYTES, count: 0, closed: false, starts: [], nexts: [], steps: [],
         decoded: [], refused: null,
     };
-    // A fetch fault is raised at the instruction being fetched.
-    state.faultEip = eip;
     extendRun(state, run);
     if (run.refused === null)
     {
@@ -186,22 +202,28 @@ function runAt(state, cache){
  * earlier call stopped midway through a block. Both hooks are optional, so
  * the tight loop the corpus and tests use is unchanged. `force` runs the
  * first instruction whatever `shouldStop` answers, alone: the host's progress
- * guarantee, for a turn that would otherwise retire nothing.
+ * guarantee, for a turn that would otherwise retire nothing. `asked` says the
+ * caller has just put `shouldStop`'s question to the first start itself -- the
+ * host looks for an entry there before it calls -- so the first run goes
+ * ahead without it.
  *
  * @param {import('./ir.js').EvalState} state
  * @param {number} [maxInstructions]
  * @param {{ shouldStop?: () => boolean, onStep?: (eip: number, jumped: boolean) => void,
- *     force?: boolean, entered?: boolean }} [options]
+ *     force?: boolean, entered?: boolean, asked?: boolean, jumped?: boolean }} [options]
+ *     jumped: set on return, whether the address the call stopped at was reached by a
+ *     jump -- a start a caller going on from there counts as `onStep` would have
  * @returns {number}
  */
 export function interpret(state, maxInstructions = 1, options = {}){
-    const { shouldStop, onStep, force, entered } = options;
+    const { shouldStop, onStep, force, entered, asked } = options;
     const before = state.retired;
     const end = before + maxInstructions;
     const { memory } = state;
     // Where falling through from the last instruction lands.
     let fallthrough = entered === true ? -1 : state.eip;
     let first = force === true;
+    let unasked = first || asked === true;
     let cache = runsBy.get(state);
     if (cache === undefined)
     {
@@ -212,10 +234,11 @@ export function interpret(state, maxInstructions = 1, options = {}){
     {
         while (state.retired < end && !state.halted)
         {
-            if (!first && shouldStop !== undefined && shouldStop())
+            if (!unasked && shouldStop !== undefined && shouldStop())
             {
                 break;
             }
+            unasked = false;
             const run = runAt(state, cache);
             if (run.refused !== null)
             {
@@ -276,6 +299,7 @@ export function interpret(state, maxInstructions = 1, options = {}){
     finally
     {
         memory.watch?.(0, 0);
+        options.jumped = state.eip !== fallthrough;
     }
     return state.retired - before;
 }
@@ -514,6 +538,8 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
         syncIn(){
             x87In = false;
             xmmIn = false;
+            // Translated code may have written the registers since.
+            state.x87Exact = 0;
             // The record a region left is folded into the word the steps use.
             state.eflags = eflagsOf(view, layout);
         },
@@ -558,6 +584,8 @@ export function blockState({ memory, layout, onCodeWrite, rdtsc }){
         hit: false,
     };
     state.memory = memoryApi;
+    state.x87Exact = 0;
+    state.x87Shadow = new BigInt64Array(8);
     state.halted = false;
     state.retired = 0;
     state.trapped = [];

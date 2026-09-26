@@ -16,8 +16,8 @@ import { createMetrics } from './internal/metrics.js';
  *
  * Two instruments over one kind of storage. The journal answers "what
  * happened", the profiler answers "how long did it take and whose time was it",
- * and both write into a ring of slots made once at startup, so that either can
- * be left on in a build that ships.
+ * and both write into a ring of slots made once at startup. The journal is left
+ * on in a build that ships; the profiler is left out of a production bundle.
  *
  * This layer requires nothing and reaches for nothing. The clock is injected
  * because the engine has its own notion of time and a test needs a clock it can
@@ -61,6 +61,22 @@ let current = null;
 /** The layer's own counters, in the order they are published. */
 const REJECTED = 0;
 const UNBALANCED = 1;
+
+/** What `profile` answers with no profiler to ask: a closed machine, or a production bundle. */
+const noProfile = ()=>({
+    frames: 0,
+    unbalanced: 0,
+    imbalances: [],
+    openPhases: 0,
+    hostShare: 0,
+    averageFrameMs: 0,
+    averageGuestMs: 0,
+    averageHostMs: 0,
+    phases: [],
+    worstFrames: [],
+    slowestFrames: [],
+    recentFrames: [],
+});
 
 export const logModule = {
     name: 'log',
@@ -119,11 +135,14 @@ export const logModule = {
         state.journal = journal;
         const registry = createMetrics({ shared: config?.shared });
         const own = registry.counters('log', ['rejected', 'unbalancedPhases']);
-        const tables = {
+        // The profiler and its tables are a measurement nothing the machine
+        // does reads, so a production bundle leaves them out of itself
+        // (`import.meta.BOTTLIFY_DIAGNOSTICS`); a reader then finds no frames.
+        const tables = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? {
             frames: registry.table('log', 'frames',
                 { rows: config?.frames ?? 240, columns: FRAME_COLUMNS }),
             phases: registry.table('log', 'phases', { rows: PHASE_ROWS, columns: PHASE_COLUMNS }),
-        };
+        } : null;
         // The profiler is given the *host's* clock, not the guest's.
         //
         // A journal entry is stamped with guest time, because that is the time
@@ -136,18 +155,18 @@ export const logModule = {
         // whole milliseconds: a phase entered tens of thousands of times reads
         // as a column of zeroes and ones, which is a distribution rather than a
         // measurement, and the short phases are exactly the ones it ruins.
-        const profiler = createProfiler({
+        const profiler = import.meta.BOTTLIFY_DIAGNOSTICS !== false && tables ? createProfiler({
             now: config?.wallClock ?? (typeof performance === 'undefined'
                 ? ()=>Date.now()
                 : ()=>performance.now()),
             frames: config?.frames,
             tables,
             intern: journal.intern,
-        });
+        }) : null;
         state.profiler = profiler;
         registry.onFrame(()=>{
             own[REJECTED] = journal.rejected();
-            own[UNBALANCED] = profiler.unbalanced();
+            own[UNBALANCED] = profiler?.unbalanced() ?? 0;
         });
 
         /**
@@ -176,7 +195,7 @@ export const logModule = {
                         + ` every frame reports ${entry.column} as zero.`);
                 }
             }
-            profiler.mirror(rows, indices);
+            profiler?.mirror(rows, indices);
         };
 
         for (const sink of config?.sinks ?? [])
@@ -284,46 +303,53 @@ export const logModule = {
 
             /** @param {string} name @param {string} [kind] */
             begin: (name, kind)=>{
-                if (live())
+                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && live())
                 {
-                    profiler.begin(name, kind);
+                    profiler?.begin(name, kind);
                 }
             },
             /**
              * @param {string} [name] @param {{ instructions?: number }} [detail]
              * @returns {number} the phase's duration
              */
-            end: (name, detail)=>live() ? profiler.end(name, detail) : 0,
+            end: (name, detail)=>(import.meta.BOTTLIFY_DIAGNOSTICS !== false && live()
+                ? profiler?.end(name, detail) ?? 0 : 0),
             /** @param {number} [count] */
             compiled: count=>{
-                if (live())
+                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && live())
                 {
-                    profiler.compiled(count);
+                    profiler?.compiled(count);
                 }
             },
             /** @param {string} name @param {number} amount */
             note: (name, amount)=>{
-                if (live())
+                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && live())
                 {
-                    profiler.note(name, amount);
+                    profiler?.note(name, amount);
                 }
             },
             beginFrame: ()=>{
-                if (live())
+                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && live())
                 {
-                    profiler.beginFrame();
+                    profiler?.beginFrame();
                 }
             },
             // The one moment on the engine thread when figures nobody keeps
             // as they run are copied into their tables -- before the frame's
             // own row is written, so that the row carries the counters as they
             // stand at its close rather than as they stood at the one before.
+            // The samplers run whether or not a profiler is built: the cpu
+            // layer's feeds the translator.
             endFrame: ()=>{
                 if (!live())
                 {
                     return null;
                 }
                 registry.sample();
+                if (import.meta.BOTTLIFY_DIAGNOSTICS === false || profiler === null)
+                {
+                    return null;
+                }
                 if (!mirrored)
                 {
                     resolveMirror();
@@ -331,22 +357,11 @@ export const logModule = {
                 return profiler.endFrame();
             },
             /** @param {number} [count] */
-            frames: count=>live() ? profiler.frames(count) : [],
+            frames: count=>(import.meta.BOTTLIFY_DIAGNOSTICS !== false && live()
+                ? profiler?.frames(count) ?? [] : []),
             /** @param {number} [worst] */
-            profile: worst=>live() ? profiler.snapshot(worst) : {
-                frames: 0,
-                unbalanced: 0,
-                imbalances: [],
-                openPhases: 0,
-                hostShare: 0,
-                averageFrameMs: 0,
-                averageGuestMs: 0,
-                averageHostMs: 0,
-                phases: [],
-                worstFrames: [],
-                slowestFrames: [],
-                recentFrames: [],
-            },
+            profile: worst=>(import.meta.BOTTLIFY_DIAGNOSTICS !== false && live() && profiler
+                ? profiler.snapshot(worst) : noProfile()),
         };
     },
 
@@ -357,7 +372,18 @@ export const logModule = {
         {
             return { name: 'log', version: '0.1.0', status: 'created', metrics: {} };
         }
-        const profile = instance.profiler.snapshot(3);
+        const profile = import.meta.BOTTLIFY_DIAGNOSTICS !== false && instance.profiler
+            ? instance.profiler.snapshot(3) : null;
+        if (profile === null)
+        {
+            // A production bundle's: the journal alone, whose count a process
+            // replacement carries on from.
+            return {
+                name: 'log', version: '0.1.0', status: 'ready',
+                metrics: { journal: instance.journal.diagnostics() },
+                issues: [...instance.issues],
+            };
+        }
         return {
             name: 'log',
             version: '0.1.0',
