@@ -105,7 +105,9 @@ from its command line, set there instead of by editing the bundle.
 `windows` is the Windows the bottle runs under, optional: one of `win2000`,
 `winxp`, `win7` and `win10` (`docs/core/host.md`'s `windows` option), and absent
 means the engine's default, XP with its third service pack. Whatever starts the
-bottle passes it to `createApp`. Any other value is refused by `publish()` before anything is sent, naming
+bottle passes it to `createApp`, and the install itself runs under the same one
+(`prefixOptions(media, { windows })`), since an installer acts on the Windows it
+finds. Any other value is refused by `publish()` before anything is sent, naming
 the four, as the engine would refuse it when the bottle first started.
 
 ## Turning it on

@@ -13,11 +13,11 @@
  * on, because a canvas, a device and a run loop are a launcher's concerns and
  * not an installer's.
  *
- *     const options = prefixOptions(media);        // build the app with these
- *     const silent = silentOptions(media);         // and these, to skip the wizard
- *     await app.run(...);                          // the person clicks through
- *     const prefix = collectFrom(app, media);      // this is what it produced
- *     await publish({ prefix, ... });              // and this is the bottle
+ *     const options = prefixOptions(media, { windows }); // build the app with these
+ *     const silent = silentOptions(media);               // and these, to skip the wizard
+ *     await app.run(...);                                // the person clicks through
+ *     const prefix = collectFrom(app, media);            // this is what it produced
+ *     await publish({ prefix, manifest: { windows } });  // and this is the bottle
  *
  * `silentOptions` is the engine's own unattended mode, when its family is
  * recognised: a command line and the files it reads its answers from, with
