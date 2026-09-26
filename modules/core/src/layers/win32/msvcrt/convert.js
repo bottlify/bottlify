@@ -271,7 +271,10 @@ export function createConversionFunctions(host){
          * unsigned long strtoul(const char *str, char **end, int base)
          *
          * A minus sign is accepted and the magnitude is negated within 32 bits,
-         * which C requires: strtoul("-1") is ULONG_MAX, not a failure.
+         * which C requires: strtoul("-1") is ULONG_MAX, not a failure. A
+         * magnitude out of range is clamped before the sign is applied, so a
+         * negative one comes back as ULONG_MAX negated, 1 (Wine's msvcrt
+         * test_strtol).
          */
         strtoul: strtoInteger(12, (magnitude, negative)=>{
             if (magnitude > ULONG_MAX)
@@ -279,7 +282,7 @@ export function createConversionFunctions(host){
                 return null;
             }
             return negative ? BigInt.asUintN(32, -magnitude) : magnitude;
-        }, ()=>ULONG_MAX),
+        }, negative=>(negative ? BigInt.asUintN(32, -ULONG_MAX) : ULONG_MAX)),
 
         /** char *_ltoa(long value, char *buffer, int radix) */
         _ltoa: toText(1, true),

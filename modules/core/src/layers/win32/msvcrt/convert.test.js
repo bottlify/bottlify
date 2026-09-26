@@ -92,6 +92,20 @@ test('strtol and strtoul set ERANGE when they clamp, and leave errno alone in ra
     assert.deepEqual(errno, [ERANGE, ERANGE, ERANGE]);
 });
 
+test('strtoul clamps a negative magnitude to ULONG_MAX before negating it', ()=>{
+    // Wine's msvcrt test_strtol: "-4294967296" is out of range and answers 1,
+    // the clamped ULONG_MAX negated, with ERANGE.
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (createConversionFunctions({
+        ...memory, errno: code=>errno.push(code),
+    }));
+    assert.equal(table.strtoul.handler([memory.put('-4294967296'), 0, 0]) >>> 0, 1);
+    assert.equal(table.strtoul.handler([memory.put('-99999999999'), 0, 10]) >>> 0, 1);
+    assert.deepEqual(errno, [34, 34]);
+});
+
 test('_ltoa signs base ten and prints the bit pattern in every other base', ()=>{
     const { memory, table } = build();
     const buffer = memory.allocate(64);
