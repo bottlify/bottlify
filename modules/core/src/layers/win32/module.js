@@ -1871,10 +1871,11 @@ export const win32Module = {
                 windowService.place(hwnd, x, y, width, height, how),
 
             /**
-             * One window's client rectangle, or null for a handle that names
-             * no window. The measurement GetClientRect answers with, for the
-             * callers outside this layer that have to answer a size a program
-             * asked for as zero: a back buffer, whose zero means exactly this.
+             * One window's client rectangle on the screen, or null for a
+             * handle that names no window: GetClientRect's size at
+             * ClientToScreen's origin, for the callers outside this layer that
+             * answer a size a program asked for as zero -- a back buffer, whose
+             * zero means exactly this -- or place a picture inside the window.
              *
              * @param {number} hwnd
              */
