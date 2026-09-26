@@ -277,6 +277,12 @@ const WAIT_TIMEOUT = 0x102;
 const WAIT_FAILED = 0xffffffff;
 const INFINITE = 0xffffffff;
 
+/**
+ * The kernel objects whose signal a poll reads the same for every thread:
+ * a mutex is owned by one, a thread and a process are not polled at all.
+ */
+const POLLED_KINDS = new Set(['event', 'semaphore', 'timer']);
+
 /** PeekMessage takes this where a window goes to mean "thread messages only". */
 const HWND_THREAD_MESSAGES = 0xffffffff;
 
@@ -363,7 +369,10 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           The region an address sits in, from the memory layer's map: the
  *           `va_list` window wvsprintfA reads stops at its end.
  * @property {{ open: (type: string, object: any) => number,
- *              close: (handle: number) => any }} handles
+ *              close: (handle: number) => any,
+ *              typeOf?: (handle: number) => string | null }} handles
+ *           typeOf names the kind of object a handle is, which decides how a
+ *           wait that also watches the queue can hold it.
  * @property {ReturnType<typeof import('./messages.js').createMessageQueue>} queue
  *           Where messages come from, including the ones the input layer posts.
  * @property {{ hwnd: number, message: number, at: number }[]} [dispatching]
@@ -642,6 +651,28 @@ export function createWindowFunctions(host){
     const andThen = (value, then)=>(typeof value?.then === 'function'
         ? value.then(then)
         : then(value));
+
+    /**
+     * Whether every handle a wait names is one a poll can answer for whichever
+     * thread asks, which is what a wait held across turns asks it from.
+     *
+     * @param {number} array  The guest's array of handles. @param {number} total
+     */
+    const pollable = (array, total)=>{
+        const typeOf = host.handles.typeOf;
+        if (!typeOf || array === 0)
+        {
+            return false;
+        }
+        for (let at = 0; at < total; at++)
+        {
+            if (!POLLED_KINDS.has(typeOf(readU32(host, array + at * 4)) ?? ''))
+            {
+                return false;
+            }
+        }
+        return true;
+    };
 
     /**
      * The window a FindWindow of either spelling answers with, or zero.
@@ -1569,6 +1600,7 @@ export function createWindowFunctions(host){
         {
             return;
         }
+        host.queue.dirtied?.();
         const origin = geometry.clientRect(record);
         const dirty = {
             left: origin.left + record.updateRect.left,
@@ -3225,30 +3257,40 @@ export function createWindowFunctions(host){
          * DWORD MsgWaitForMultipleObjects(DWORD nCount, const HANDLE *pHandles,
          *   BOOL fWaitAll, DWORD dwMilliseconds, DWORD dwWakeMask)
          *
-         * A wait on handles that also ends when a message arrives, answered
-         * with the count of handles when it is the message that ended it.
-         * The handles are kernel32's business and are deferred to it; the
-         * queue is looked at here, and the two are asked in that order because
-         * a handle and a message both ready is answered with the handle.
+         * A wait on handles that also ends when input of the kinds the wake
+         * mask names arrives, answered with the count of handles when it is
+         * the input that ended it. Input is what arrived since the queue was
+         * last looked at: a message a PeekMessage has already seen does not
+         * end the wait, whether or not it was taken. With fWaitAll, the
+         * handles and the input together end it, and the handles are taken
+         * only then.
          *
-         * The wake mask is not applied: a message of any kind ends the wait.
-         * The one program-visible difference is a wait that ends a message
-         * early, and a loop written round this call goes on to pump the queue
-         * and wait again.
+         * The handles are kernel32's business and are asked of it; the queue
+         * is looked at here, and the two are asked in that order because a
+         * handle and input both ready is answered with the handle. A wait
+         * that has to be held is a poll of both on every turn the host
+         * gives, as a wait on the queue alone always was -- but only for
+         * handles a poll can answer for any thread: an event, a semaphore, a
+         * waitable timer. A thread, a process or a mutex, whose answer
+         * depends on who is waiting or whose wait hands the machine to
+         * another process, is kernel32's to hold, and a message arriving
+         * while it holds one does not end the wait.
          *
-         * A wait on nothing but the queue -- a count of zero -- is a sleep
-         * the queue can cut short. A program uses that to pump messages while
-         * waiting out an interval, and it must not stop the thread for good.
+         * A sixth and a seventh element, which no program's call carries, are
+         * MsgWaitForMultipleObjectsEx's flags: MWMO_INPUTAVAILABLE, input
+         * already waiting ending the wait too, seen or not; and
+         * MWMO_ALERTABLE, which leaves a wait on handles to kernel32, whose
+         * wait an APC can end.
          */
         MsgWaitForMultipleObjects: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([count, handles, waitAll, timeout])=>{
+            handler: ([count, handles, waitAll, timeout, wakeMask, inputAvailable, alertable])=>{
                 const total = count >>> 0;
                 const wait = timeout >>> 0;
-                const queued = ()=>host.queue.peek({
-                    hwnd: ANY_WINDOW, first: 0, last: 0, remove: false,
-                }) !== null;
+                const mask = wakeMask >>> 0;
+                const input = ()=>((inputAvailable ? host.queue.waiting() : host.queue.news())
+                    & mask) !== 0;
                 /** @param {number} milliseconds */
                 const askHandles = milliseconds=>{
                     if (total === 0)
@@ -3259,41 +3301,53 @@ export function createWindowFunctions(host){
                         ? host.waitForObjects([total, handles, waitAll, milliseconds])
                         : WAIT_FAILED;
                 };
+                /** @returns {any} what the wait answers now, or null while it goes on */
+                const settle = ()=>{
+                    if (waitAll !== 0 && total > 0)
+                    {
+                        if (!input())
+                        {
+                            return null;
+                        }
+                        const all = askHandles(0);
+                        return all === WAIT_TIMEOUT ? null : all;
+                    }
+                    const polled = askHandles(0);
+                    if (polled !== WAIT_TIMEOUT)
+                    {
+                        return polled;
+                    }
+                    return input() ? WAIT_OBJECT_0 + total : null;
+                };
 
-                // Handles first, then the queue: a poll answers both at once.
-                const polled = askHandles(0);
-                if (polled !== WAIT_TIMEOUT)
+                const settled = settle();
+                if (settled !== null)
                 {
-                    return polled;
-                }
-                if (queued())
-                {
-                    return WAIT_OBJECT_0 + total;
+                    return settled;
                 }
                 if (wait === 0)
                 {
                     return WAIT_TIMEOUT;
                 }
-                // A real wait with handles in it is kernel32's to hold, and a
-                // handle that can only be signalled by a process that is to
-                // take this one's place holds it for good. What is given up
-                // is a message arriving while it is held; nobody posts one to
-                // a thread that is stopped.
-                if (total > 0)
+                if (total > 0 && (alertable || !pollable(handles >>> 0, total)))
                 {
                     return askHandles(wait);
                 }
                 const deadline = wait === INFINITE ? null : (host.now?.() ?? 0) + wait;
                 return (async()=>{
-                    while (!queued())
+                    for (;;)
                     {
                         if (deadline !== null && (host.now?.() ?? 0) >= deadline)
                         {
                             return WAIT_TIMEOUT;
                         }
                         await host.idle();
+                        const answer = settle();
+                        if (answer !== null)
+                        {
+                            return answer;
+                        }
                     }
-                    return WAIT_OBJECT_0;
                 })();
             },
         },

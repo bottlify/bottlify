@@ -186,6 +186,11 @@ export function createMessageQueue(options = {}){
      */
     let reportedSynthetic = 0;
     /**
+     * When the queue was last looked at, on the guest clock: a timer that
+     * came due after it is news to a wait, one already due then is not.
+     */
+    let lookedAt = -Infinity;
+    /**
      * The message most recently taken off the queue, for GetMessageTime and
      * GetMessagePos: both answer about it, whichever window it was for.
      *
@@ -452,6 +457,34 @@ export function createMessageQueue(options = {}){
         return null;
     };
 
+    /** Every class waiting to be retrieved now, the synthesised ones included. */
+    const waiting = ()=>{
+        let inQueue = 0;
+        for (const entry of pending)
+        {
+            inQueue |= classOf(entry.message);
+        }
+        if (quitCode !== null)
+        {
+            inQueue |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
+        }
+        const filter = { hwnd: ANY_WINDOW, first: 0, last: 0, remove: false };
+        if (dirtyWindow && dirtyWindow(filter) !== 0)
+        {
+            inQueue |= QS_PAINT;
+        }
+        const at = now();
+        for (const [key, timer] of timers)
+        {
+            if (timer.due <= at && deliverable(key, timer))
+            {
+                inQueue |= QS_TIMER;
+                break;
+            }
+        }
+        return inQueue;
+    };
+
     /**
      * The one path in: the input layer posts through here like everything
      * else, because a keystroke and a program's own post are the same
@@ -669,37 +702,48 @@ export function createMessageQueue(options = {}){
          * @returns {{ inQueue: number, changed: number }}
          */
         status(){
-            let inQueue = 0;
-            for (const entry of pending)
-            {
-                inQueue |= classOf(entry.message);
-            }
-            if (quitCode !== null)
-            {
-                inQueue |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
-            }
-            const filter = { hwnd: ANY_WINDOW, first: 0, last: 0, remove: false };
-            if (dirtyWindow && dirtyWindow(filter) !== 0)
-            {
-                inQueue |= QS_PAINT;
-            }
-            const at = now();
-            for (const [key, timer] of timers)
-            {
-                if (timer.due <= at && deliverable(key, timer))
-                {
-                    inQueue |= QS_TIMER;
-                    break;
-                }
-            }
+            const inQueue = waiting();
             const synthetic = inQueue & (QS_PAINT | QS_TIMER);
             // Only what is still there: the low word is defined as what arrived
             // *and has not been taken yet*, so a keystroke posted and retrieved
             // between two looks is no longer news.
             const news = (changed | (synthetic & ~reportedSynthetic)) & inQueue;
             changed = 0;
+            lookedAt = now();
             reportedSynthetic = synthetic;
             return { inQueue, changed: news };
+        },
+
+        /**
+         * The classes waiting now, as GetQueueStatus's high word reports
+         * them, without the look that clears the news.
+         */
+        waiting,
+
+        /**
+         * The classes that arrived since the queue was last looked at: what
+         * MsgWaitForMultipleObjects wakes for. Asking is not a look -- a
+         * wait that ends on news leaves it for the pump that follows -- and a
+         * message a look has already seen is no longer news, whether or not
+         * it was taken.
+         */
+        news(){
+            let arrived = changed;
+            const at = now();
+            for (const [key, timer] of timers)
+            {
+                if (timer.due > lookedAt && timer.due <= at && deliverable(key, timer))
+                {
+                    arrived |= QS_TIMER;
+                    break;
+                }
+            }
+            return arrived;
+        },
+
+        /** A window has an area to paint where it had none: news of a paint. */
+        dirtied(){
+            changed |= QS_PAINT;
         },
 
         /**
@@ -792,6 +836,7 @@ export function createMessageQueue(options = {}){
             // PeekMessage clear the news GetQueueStatus reports just as
             // GetQueueStatus itself does.
             changed = 0;
+            lookedAt = now();
             const index = pending.findIndex(entry=>accepts(entry, filter));
             if (index >= 0)
             {

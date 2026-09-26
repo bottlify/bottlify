@@ -144,6 +144,8 @@ function fakeHandles(){
                 throw new Error('Invalid handle');
             }
         },
+        /** @param {number} handle */
+        typeOf: handle=>entries.get(handle)?.type ?? null,
     };
 }
 
@@ -1068,6 +1070,125 @@ test('MsgWaitForMultipleObjects with no handles is a sleep the queue can cut sho
     await tick();
     assert.equal(await expired, WAIT_TIMEOUT, 'and the deadline is kept on the guest clock');
 });
+
+test('MsgWaitForMultipleObjects wakes for input that arrived since the queue was last looked at',
+    ()=>{
+        // user32's message tests, step by step: a posted message ends a
+        // zero-time wait for QS_POSTMESSAGE until a PeekMessage has seen it,
+        // taken or not, and a new post ends it again; MWMO_INPUTAVAILABLE ends
+        // it for a message already seen.
+        const { fns, hwnd } = withWindow();
+        const post = ()=>fns.PostMessageA.handler([hwnd, WM_USER, 0, 0]);
+        /** @param {number} [inputAvailable] */
+        const wait = (inputAvailable = 0)=>fns.MsgWaitForMultipleObjects.handler(
+            [0, 0, 0, 0, QS_POSTMESSAGE, inputAvailable]);
+        /** @param {number} remove */
+        const peek = remove=>fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, remove]);
+
+        assert.equal(wait(), WAIT_TIMEOUT);
+        post();
+        assert.equal(wait(), WAIT_OBJECT_0);
+        assert.equal(wait(), WAIT_OBJECT_0, 'asking is not a look');
+        assert.equal(peek(PM_REMOVE), 1);
+        assert.equal(wait(), WAIT_TIMEOUT);
+        post();
+        assert.equal(wait(), WAIT_OBJECT_0);
+        assert.equal(peek(PM_NOREMOVE), 1);
+        assert.equal(wait(), WAIT_TIMEOUT, 'a message seen and left is no longer new');
+        post();
+        assert.equal(wait(), WAIT_OBJECT_0, 'a new one is');
+        assert.equal(peek(PM_REMOVE), 1);
+        assert.equal(peek(PM_REMOVE), 1);
+
+        post();
+        assert.equal(peek(PM_NOREMOVE), 1);
+        assert.equal(wait(1), WAIT_OBJECT_0, 'MWMO_INPUTAVAILABLE: seen or not, it is there');
+        assert.equal(fns.MsgWaitForMultipleObjects.handler([0, 0, 0, 0, QS_KEY]), WAIT_TIMEOUT,
+            'and only the kinds the wake mask names wake it');
+    });
+
+test('MsgWaitForMultipleObjects on an event ends when a message arrives while it waits',
+    async()=>{
+        // As documented: the wait ends when an object is signalled or input
+        // arrives. The event is polled on every turn rather than handed to
+        // kernel32's wait, which would hold the thread past the message.
+        const HANDLES = 0x11800;
+        let ready = false;
+        /** @type {number[][]} */
+        const asked = [];
+        const { fns, handles, memory, queue, tick } = setup({ waitForObjects: args=>{
+            asked.push(args);
+            if (args[3] !== 0)
+            {
+                return /** @type {any} */ (PARKED);
+            }
+            return ready ? WAIT_OBJECT_0 : WAIT_TIMEOUT;
+        } });
+        memory.putU32s(HANDLES, [handles.open('event', {})]);
+        /** @returns {Promise<number>} */
+        const waiting = ()=>/** @type {any} */ (fns.MsgWaitForMultipleObjects.handler(
+            [1, HANDLES, 0, INFINITE, QS_ALLINPUT]));
+
+        const first = waiting();
+        assert.equal(typeof first.then, 'function');
+        await tick();
+        queue.post({ hwnd: 0, message: 0x0401, wParam: 0, lParam: 0 });
+        await tick();
+        assert.equal(await first, WAIT_OBJECT_0 + 1, 'the message, past the one handle');
+        queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
+
+        const second = waiting();
+        await tick();
+        ready = true;
+        await tick();
+        assert.equal(await second, WAIT_OBJECT_0, 'and the event, when it is the one');
+        assert.ok(asked.every(args=>args[3] === 0), 'the handles were only ever polled');
+
+        ready = false;
+        assert.equal(fns.MsgWaitForMultipleObjects.handler(
+            [1, HANDLES, 0, INFINITE, QS_ALLINPUT, 0, 1]), PARKED,
+        'an alertable wait is kernel32\'s, whose wait an APC can end');
+
+        memory.putU32s(HANDLES, [handles.open('process', {})]);
+        ready = false;
+        assert.equal(fns.MsgWaitForMultipleObjects.handler([1, HANDLES, 0, INFINITE, QS_ALLINPUT]),
+            PARKED, 'a process is kernel32\'s to wait on');
+        assert.equal(asked.at(-1)?.[3], INFINITE);
+    });
+
+test('with fWaitAll the handles and the input together end the wait, and neither alone',
+    async()=>{
+        // As documented for fWaitAll: complete only when every object is
+        // signalled and an input event has been received -- and the objects
+        // are not taken before then.
+        const HANDLES = 0x11800;
+        let ready = false;
+        /** @type {number[][]} */
+        const asked = [];
+        const { fns, handles, memory, queue, tick } = setup({ waitForObjects: args=>{
+            asked.push(args);
+            return ready ? WAIT_OBJECT_0 : WAIT_TIMEOUT;
+        } });
+        memory.putU32s(HANDLES, [handles.open('event', {}), handles.open('event', {})]);
+
+        ready = true;
+        assert.equal(fns.MsgWaitForMultipleObjects.handler([2, HANDLES, 1, 0, QS_ALLINPUT]),
+            WAIT_TIMEOUT, 'the handles alone');
+        assert.deepEqual(asked, [], 'and they were not taken without the input');
+
+        ready = false;
+        queue.post({ hwnd: 0, message: 0x0401, wParam: 0, lParam: 0 });
+        assert.equal(fns.MsgWaitForMultipleObjects.handler([2, HANDLES, 1, 0, QS_ALLINPUT]),
+            WAIT_TIMEOUT, 'the input alone');
+        assert.deepEqual(asked, [[2, HANDLES, 1, 0]], 'the set was asked for all at once');
+
+        const both = /** @type {Promise<number>} */ (/** @type {any} */ (
+            fns.MsgWaitForMultipleObjects.handler([2, HANDLES, 1, INFINITE, QS_ALLINPUT])));
+        await tick();
+        ready = true;
+        await tick();
+        assert.equal(await both, WAIT_OBJECT_0, 'both: the set, answered for all of it');
+    });
 
 /**
  * Retrieves and validates until the queue is empty, which runs a paint pass to
