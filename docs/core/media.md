@@ -60,7 +60,7 @@ An instance owns its decoder view. `create()` may run more than once in the same
 replacement runs it again; the plan for two machines in one worker needs two at once), so the
 binary, the given `instance`, the machine's session over it and the hosted JPEG library live in the
 instance the api closes over, and a second `create()` cannot take the first one's clips;
-`diagnostics()` answers for the most recently created instance. After `dispose()`, a call that was
+`diagnostics()` answers for its own graph's instance. After `dispose()`, a call that was
 in flight is answered as a build with no decoder binary is: `available()` is false, `open()` and
 `prepare()` reject with `media: this build has no decoder binary`, `openAudio()` and `instance()`
 answer null, `closeAll()` does nothing, and `libraries()`/`ordinals()` answer empty.

@@ -113,7 +113,7 @@ An instance owns its threads. `create()` may run more than once in the same real
 replacement runs it again; the plan for two machines in one worker needs two at once), so the
 scheduler, the sync objects, the handle table, the process table and the clock live in the
 instance the api closes over, and a second `create()` cannot take the first one's threads;
-`diagnostics()` answers for the most recently created instance. After `dispose()`, a call that
+`diagnostics()` answers for its own graph's instance. After `dispose()`, a call that
 was in flight answers harmlessly rather than throwing: the creating calls
 (`createThread`/`createEvent`/`createMutex`/`createSemaphore`/`createTimer`/`processes.create`)
 answer `null`, the boolean calls (`wake`, `armTimer`, `releaseMutex`,

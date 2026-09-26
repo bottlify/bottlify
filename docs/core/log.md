@@ -72,7 +72,7 @@ the layer still runs, but every timestamp reads as zero and `diagnostics().issue
 An instance owns its journal. `create()` may run more than once in the same realm (a process
 replacement runs it again; the plan for two machines in one worker needs two at once), so each api
 closes over its own instance and a second `create()` cannot take the first's ring; `diagnostics()`
-answers for the most recently created instance. After `dispose()`, a call that was in flight is
+answers for its own graph's instance. After `dispose()`, a call that was in flight is
 accepted and does nothing: `enabled()` answers false, `write()` returns, `recent()` and `drain()`
 answer empty, and nothing throws, because the contract of a writer that never waits and never
 throws holds after disposal too.

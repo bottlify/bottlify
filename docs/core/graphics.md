@@ -83,7 +83,7 @@ An instance owns its GPU work. `create()` may run more than once in the same rea
 replacement runs it again; the plan for two machines in one worker needs two at once), so the
 backend, the factories, the published interfaces and the api's own record of what was created live
 in the instance the api closes over, and a second `create()` cannot hand the first one's backend to
-an api that was never given a device; `diagnostics()` answers for the most recently created
+an api that was never given a device; `diagnostics()` answers for its own graph's
 instance. The presenter is in that state too, but its lifetime is unchanged: a presenter handed in
 is the run's, attached and never disposed here, and only one this layer made itself goes with the
 machine (see *The backend*). After `dispose()`, a call that was in flight is answered the way a

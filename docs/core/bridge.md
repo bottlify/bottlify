@@ -77,7 +77,7 @@ An instance owns its crossing. `create()` may run more than once in the same rea
 replacement runs it again; the plan for two machines in one worker needs two at once), so the
 dispatcher, the parking table, the callback bookkeeping and the COM vtables live in the instance
 the api closes over, and a second `create()` cannot take the first one's traps; `diagnostics()`
-answers for the most recently created instance. After `dispose()`, a call that was in flight — or
+answers for its own graph's instance. After `dispose()`, a call that was in flight — or
 a trap still arriving from a `cpu` that outlives this layer briefly during teardown — answers
 harmlessly rather than throwing: `register`/`watch`/`callGuest`/`publishInterface` answer
 `0`/`0`/`Promise.resolve(0)`/`0`, `park`/`useHeap`/`callerThread`/`failure`/`sentinelTrap`/
