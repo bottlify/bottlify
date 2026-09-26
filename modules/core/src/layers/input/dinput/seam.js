@@ -125,6 +125,7 @@ export const DIPROPDWORD_DATA = 0x10;
 
 /** MAKEDIPROP packs a small integer into a pointer; these are the ones we read. */
 export const DIPROP_BUFFERSIZE = 1;
+const DIPROP_AXISMODE = 2;
 
 /** DIDEVCAPS, as far as a program reads it. */
 export const DIDEVCAPS = Object.freeze({
@@ -672,14 +673,16 @@ export function createDirectInput(
             }
             // A property GUID is either a real pointer or a small integer
             // packed into one by MAKEDIPROP, and only the latter reaches here.
-            if ((guid >>> 0) === DIPROP_BUFFERSIZE)
+            // The queue's size and the axis mode are settled while nobody
+            // reads the device; a held one keeps what it was acquired with.
+            const property = guid >>> 0;
+            if ((property === DIPROP_BUFFERSIZE || property === DIPROP_AXISMODE)
+                && device.acquired)
             {
-                // The queue is sized while nobody reads it; a held device
-                // keeps the one it was acquired with.
-                if (device.acquired)
-                {
-                    return DIERR_ACQUIRED;
-                }
+                return DIERR_ACQUIRED;
+            }
+            if (property === DIPROP_BUFFERSIZE)
+            {
                 device.setBufferSize(readU32((header >>> 0) + DIPROPDWORD_DATA));
                 return DI_OK;
             }

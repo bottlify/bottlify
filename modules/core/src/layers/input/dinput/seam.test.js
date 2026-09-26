@@ -30,6 +30,9 @@ const DIERR_NOTACQUIRED = 0x8007000c | 0;
 const DIERR_UNSUPPORTED = 0x80004001 | 0;
 const DIERR_DEVICENOTREG = 0x80040154 | 0;
 const DIERR_ACQUIRED = 0x800700aa | 0;
+/** MAKEDIPROP numbers the seam does not export. */
+const DIPROP_AXISMODE = 2;
+const DIPROP_RANGE = 4;
 
 const DIK_A = 0x1e;
 const DIK_S = 0x1f;
@@ -504,12 +507,25 @@ test('SetProperty and GetProperty round-trip the buffer size', ()=>{
 
 test('an unknown property is accepted on set and refused on get', ()=>{
     const f = keyboard();
-    // Axis mode and dead zones: the device is already relative and unscaled.
-    assert.equal(f.bridge.call(f.device, 'SetProperty', [2, AT.property]), DI_OK);
-    assert.equal(f.bridge.call(f.device, 'GetProperty', [2, AT.property]),
+    // Ranges and dead zones: the device is already relative and unscaled.
+    // joystick8.c takes DIPROP_RANGE on an acquired device.
+    assert.equal(f.bridge.call(f.device, 'SetProperty', [DIPROP_RANGE, AT.property]), DI_OK);
+    assert.equal(f.bridge.call(f.device, 'GetProperty', [DIPROP_RANGE, AT.property]),
         DIERR_UNSUPPORTED);
     assert.equal(f.bridge.call(f.device, 'SetProperty', [DIPROP_BUFFERSIZE, 0]),
         DIERR_INVALIDPARAM);
+});
+
+test('the axis mode is settled before the device is acquired', ()=>{
+    // joystick8.c: SetProperty(DIPROP_AXISMODE) on a held device is
+    // DIERR_ACQUIRED, as the buffer size is.
+    const f = mouse();
+    f.memory.setU32(AT.property + DIPROPDWORD_DATA, 1); // DIPROPAXISMODE_REL
+    assert.equal(f.bridge.call(f.device, 'SetProperty', [DIPROP_AXISMODE, AT.property]),
+        DIERR_ACQUIRED);
+    assert.equal(f.bridge.call(f.device, 'Unacquire', []), DI_OK);
+    assert.equal(f.bridge.call(f.device, 'SetProperty', [DIPROP_AXISMODE, AT.property]),
+        DI_OK);
 });
 
 test('GetDeviceData writes DIDEVICEOBJECTDATA and reports how many it wrote', ()=>{
