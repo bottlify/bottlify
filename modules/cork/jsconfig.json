@@ -20,6 +20,7 @@
     }
   },
   "include": [
-    "src/**/*.js"
+    "src/**/*.js",
+    "../core/types/build.d.ts"
   ]
 }

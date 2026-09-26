@@ -19,7 +19,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { skipWithout } from '../testing/fetched.js';
 import { readFile } from 'node:fs/promises';
 import { createTestMachine } from '../testing/machine.js';
 import { BSS, BSS_SIZE, diffFixture, loadCorpus } from '../testing/corpus.js';
@@ -37,7 +37,7 @@ const VECTOR_NAMES = new Map([[0, 'DE'], [6, 'UD'], [13, 'GP']]);
 const X87_PRECISION = new Set(['x87-int-binop', 'fscale-wide']);
 
 test('translated code leaves what the hardware left, on every case it translates in full',
-    { skip: !existsSync(CORPUS) && `missing ${CORPUS.href}`, timeout: 30 * 60 * 1000 },
+    { skip: skipWithout(CORPUS), timeout: 30 * 60 * 1000 },
     async()=>{
         const { cases } = loadCorpus(await readFile(CORPUS));
         const selected = cases.filter(one=>ONLY.test(one.name));
@@ -53,7 +53,8 @@ test('translated code leaves what the hardware left, on every case it translates
         const started = Date.now();
         for (const one of selected)
         {
-            const m = createTestMachine({ ramSize: 2 << 20 });
+            // Judged against the hardware, so exact where the fast default is not.
+            const m = createTestMachine({ ramSize: 2 << 20, precise: true });
             for (const { address, bytes } of one.segments)
             {
                 m.write(address, bytes);

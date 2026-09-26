@@ -9,8 +9,12 @@ Source: `modules/core/src/layers/log/`. Module contract and host machinery: [`sy
 instruments over one kind of storage: a **journal** (levels, categories, a ring of recent records,
 sinks) that answers "what happened", and a **phase profiler** (named, nestable phases tagged with
 whose time they are, per-frame history) that answers "how long did it take and whose time was it".
-Both are built to stay switched on in a shipping build: a rejected log call is a map lookup and a
-comparison, a kept one fills a slot allocated at startup.
+The journal is built to stay switched on in a shipping build: a rejected log call is a map lookup
+and a comparison, a kept one fills a slot allocated at startup. The profiler is a diagnostic, left
+out of a production bundle with its tables (`import.meta.BOTTLIFY_DIAGNOSTICS`, see `host.md`): there
+`begin`/`end`/`note` do nothing, `frames` and `profile` answer empty and `diagnostics()` carries the
+journal alone -- and `endFrame` still runs the registered samplers, the cpu layer's among them, which
+feeds the translator.
 
 It is not a transport. The layer never formats, allocates or does I/O on the path being measured;
 it never picks a console or a collector; and it does not own a clock. Sinks and the clock are

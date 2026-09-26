@@ -35,6 +35,9 @@ jobs:
       - run: npm run fetch:video-decoder
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      # The translator's differential suites judge it against the hardware corpus
+      # and the emulator; with CI set they fail rather than skip without them.
+      - run: npm run fetch:corpus
       - run: npm run test:integration
       - run: npm run build
 

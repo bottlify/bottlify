@@ -288,7 +288,7 @@ async function run(executable, engine, config = {}){
     const app = await createApp({
         executable,
         engine,
-        cork: { config: { hotThreshold: 100, feed: 'slice', ...config } },
+        cork: { config: { hotThreshold: 100, feed: 'slice', timings: true, ...config } },
         v86: {
             moduleUrl: new URL('libv86.mjs', PREBUILT).href,
             wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),

@@ -105,11 +105,24 @@ export const Codec = {
  */
 
 /**
+ * A run of blocks the index names beside the files: the translation seed a
+ * bundle may carry, what the translator made of its code on one machine. Not
+ * a file of the volume; a reader that does not know the entry never sees it.
+ *
+ * @typedef {Object} BundleMember
+ * @property {number} size        Its bytes, decoded.
+ * @property {number} firstBlock
+ * @property {number} blocks
+ * @property {string} sha256      Of its bytes, as written.
+ */
+
+/**
  * @typedef {Object} Bundle
  * @property {number} blockSize
  * @property {number} blockCount  How many blocks the container holds.
  * @property {readonly BundleFile[]} files
  * @property {readonly string[]} directories    Recorded empty ones only.
+ * @property {BundleMember | null} translations  The translation seed, when there is one.
  * @property {(path: string) => BundleFile | null} find   Case-insensitive.
  * @property {(index: number) => BundleBlock} block
  * @property {(file: BundleFile, offset: number, length: number) => BlockRange[]} rangesFor
@@ -179,9 +192,19 @@ export async function openBundle(fetchRange, decode, options = {}){
         crc: typeof block.crc === 'number' ? block.crc : null,
         length: blockSize,
     }));
+    const member = index.translations;
+    /** @type {BundleMember | null} */
+    const translations = member && Number.isInteger(member.firstBlock)
+        && Number.isInteger(member.blocks) && member.blocks > 0 && member.firstBlock >= 0
+        && member.firstBlock + member.blocks <= blocks.length
+        && Number.isInteger(member.size) && typeof member.sha256 === 'string'
+        ? { size: member.size, firstBlock: member.firstBlock, blocks: member.blocks,
+            sha256: member.sha256 }
+        : null;
+
     // Only the file a block belongs to knows how long it decodes to, because the
     // last block of a file is as short as the file's remainder.
-    for (const file of files)
+    for (const file of translations === null ? files : [...files, translations])
     {
         for (let at = 0; at < file.blocks; at++)
         {
@@ -197,6 +220,7 @@ export async function openBundle(fetchRange, decode, options = {}){
         blockCount: blocks.length,
         files,
         directories: index.directories,
+        translations,
 
         /** @param {string} path */
         find: path=>byPath.get(path.toLowerCase()) ?? null,

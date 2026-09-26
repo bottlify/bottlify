@@ -30,6 +30,9 @@ export {
     ownLayout, pagesFor, layoutId, Tables, STATE_BLOCK_SIZE, PAGE,
 } from './runtime/layout.js';
 export { interpret, blockState } from './interp.js';
+export {
+    createWasmInterpreter, WasmExit, WASM_INTERPRETER_AREA, HOT_SLOTS,
+} from './interp-wasm.js';
 export { eflagsOf, setEflags } from './emit/flags.js';
 export { snapshot, restore, compare } from './testing/snapshot.js';
 export { readUndoLog, resetUndoLog, spansOf } from './emit/memory.js';

@@ -9,7 +9,7 @@ import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
 import { captureTrace, describeAddress, formatTrace } from './trace.js';
 import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
-import { DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
+import { DEFAULT_ENGINE, DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
 import { CORK_TSC_MHZ } from './layers/cpu/internal/cork-host.js';
 import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
@@ -53,7 +53,7 @@ import { loadZstdWasm } from './zstd-wasm.js';
  * @property {string} [v86.moduleUrl]     The emulator's module.
  * @property {string} [v86.wasmUrl]       Where its binary is fetched from.
  * @property {ArrayBuffer} [v86.wasmBytes]  Or the binary itself.
- * @property {Object} [cork]              The translator, for `engine: 'hybrid'`.
+ * @property {Object} [cork]              The translator, for every engine but `emulator`.
  * @property {string} [cork.moduleUrl]    Its entry module; the package beside core by default.
  * @property {import('./layers/cpu/engine.js').EngineConfig} [cork.config]  Its settings;
  *     `store` here is a request -- `'local'` (the default) for the origin's private file
@@ -157,7 +157,7 @@ import { loadZstdWasm } from './zstd-wasm.js';
  *     The emulator's compiler budgets, by config index. For measurement.
  * @property {'emulator' | 'hybrid' | 'cork' | 'differential'} [engine]
  *     Which execution engine runs the program (`docs/core/cpu.md`'s "Engines").
- *     Default `emulator`. Chosen per launch: a launcher passes the person's
+ *     Default `cork`. Chosen per launch: a launcher passes the person's
  *     choice for the bundle, or the bundle manifest's suggestion.
  * @property {boolean} [sampling]  The `cpu` layer's always-on guest sampler
  *     (`docs/core/cpu.md`'s "Sampling"). `false` turns it off, for a caller
@@ -1134,14 +1134,21 @@ const VENDOR = /** @type {{ env?: { BOTTLIFY_VENDOR?: string } }} */ (import.met
     ?? '../vendor/prebuilt/';
 
 /**
- * The translator to load for `hybrid`: what the caller named, else the
- * package installed beside this one.
+ * Where the translator is, relative to this module: built beside a package,
+ * the workspace's own source otherwise.
+ */
+const CORK = /** @type {{ env?: { BOTTLIFY_CORK?: string } }} */ (import.meta).env?.BOTTLIFY_CORK
+    ?? '../../cork/src/index.js';
+
+/**
+ * The translator to load for `hybrid` or `cork`: what the caller named, else
+ * the one built beside this module (see `CORK`).
  *
  * @param {{ moduleUrl?: string } | undefined} asked
  * @param {string} [here]
  */
 export function corkArtifacts(asked, here = import.meta.url){
-    return { moduleUrl: asked?.moduleUrl ?? new URL('../../cork/src/index.js', here).href };
+    return { moduleUrl: asked?.moduleUrl ?? new URL(CORK, here).href };
 }
 
 /**
@@ -1927,7 +1934,7 @@ export async function zstdWasmFor(options, here = import.meta.url){
  *                     refetched: () => { blocks: number, bytes: number },
  *                     ranges: () => { requests: number, bytes: number } } | null>}
  */
-async function mountBundle({ options, cpu, filesystem, events }){
+async function mountBundle({ options, cpu, filesystem, events, translationStore }){
     if (!options.bundle?.fetch)
     {
         return null;
@@ -1940,7 +1947,7 @@ async function mountBundle({ options, cpu, filesystem, events }){
         retry: options.bundle.retry,
     });
 
-    const zstdForEngine = chooseZstdDecoder(options.engine ?? 'emulator', cpu,
+    const zstdForEngine = chooseZstdDecoder(options.engine ?? DEFAULT_ENGINE, cpu,
         await zstdWasmFor(options));
     /**
      * A block, turned back into bytes, without awaiting anything.
@@ -2001,6 +2008,65 @@ async function mountBundle({ options, cpu, filesystem, events }){
     });
 
     filesystem.mount('C', { source });
+
+    /**
+     * The translation seed's bytes: one request for its run of blocks, each
+     * checked against the index and decoded as a guest read's block is. Not
+     * kept in the block cache, where nothing would read it again: the store
+     * keeps what it takes.
+     *
+     * @param {import('./layers/filesystem/internal/bundle/format.js').BundleMember} of
+     */
+    const readTranslations = async of=>{
+        const first = bundle.block(of.firstBlock);
+        const last = bundle.block(of.firstBlock + of.blocks - 1);
+        const whole = await fetchRange(first.offset, last.offset + last.packed - first.offset,
+            bytes=>{
+                for (let at = of.firstBlock; at < of.firstBlock + of.blocks; at++)
+                {
+                    const block = bundle.block(at);
+                    const from = block.offset - first.offset;
+                    if (block.crc !== null
+                        && crc32(bytes.subarray(from, from + block.packed)) !== block.crc)
+                    {
+                        return `block ${at} of the translations arrived damaged`;
+                    }
+                }
+                return null;
+            });
+        const out = new Uint8Array(of.size);
+        let written = 0;
+        for (let at = of.firstBlock; at < of.firstBlock + of.blocks; at++)
+        {
+            const block = bundle.block(at);
+            const from = block.offset - first.offset;
+            const raw = whole.subarray(from, from + block.packed);
+            const bytes = block.codec === 1 ? await inflateRaw(raw) : decode(block.codec, raw,
+                block.length);
+            out.set(bytes, written);
+            written += bytes.length;
+        }
+        return written === of.size ? out : null;
+    };
+
+    // The bundle's translation seed goes into the translator's store before
+    // the program's first instruction, and every lookup waits for it, so the
+    // first run of the bundle on this machine starts from the regions a run
+    // elsewhere made instead of from none. Once a store has taken this seed
+    // it is not fetched again. Only an engine with the translator has a use
+    // for it, the default among them.
+    const member = bundle.translations;
+    if (member !== null && (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
+        && typeof translationStore?.seed === 'function')
+    {
+        const seeding = (async()=>(await translationStore.seededWith() === member.sha256
+            ? null : readTranslations(member))
+        )();
+        translationStore.seed(seeding, member.sha256).then((/** @type {any} */ result)=>{
+            events.emit('bundle-translations', { size: member.size, ...result });
+        });
+    }
+
     events.emit('bundle', {
         files: bundle.files.length,
         blockSize: bundle.blockSize,
@@ -2246,8 +2312,11 @@ async function mountBundle({ options, cpu, filesystem, events }){
             }
         }
 
+        // The translation seed's blocks are the store's business, read once.
         const all = Array.from({ length: bundle.blockCount },
-            (unused, index)=>bundle.block(index));
+            (unused, index)=>bundle.block(index))
+            .filter(block=>member === null || block.index < member.firstBlock
+                || block.index >= member.firstBlock + member.blocks);
         await fillGroups(groupBlocks(all));
     };
 
@@ -2774,6 +2843,13 @@ async function buildApp(options){
             core.api('kernel').currentThread()?.name ?? '?');
     };
 
+    // The translator's cache goes with the bundle's blocks: local by default,
+    // the bundle's name its namespace, resolved here in the engine's own
+    // thread as the block store is. Held here as well, for the bundle's seed.
+    const translationStore = await resolveTranslationStore(
+        options.cork?.config?.store === undefined ? 'local' : options.cork.config.store,
+        options.bundle?.id ?? options.id ?? 'bundle');
+
     const core = await assembleModules({
         filesystem: {
             // The host's own files live in the volume before the bundle is
@@ -2799,17 +2875,13 @@ async function buildApp(options){
             },
         },
         cpu: {
-            jit: options.jit, sampling: options.sampling, memorySize, engine: options.engine,
-            engineUrl: options.engine && options.engine !== 'emulator'
+            jit: options.jit, sampling: options.sampling, memorySize,
+            engine: options.engine ?? DEFAULT_ENGINE,
+            engineUrl: (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
                 ? corkArtifacts(options.cork).moduleUrl : null,
-            // The translator's cache goes with the bundle's blocks: local by
-            // default, the bundle's name its namespace, resolved here in the
-            // engine's own thread as the block store is.
             cork: {
                 ...options.cork?.config,
-                store: await resolveTranslationStore(
-                    options.cork?.config?.store === undefined ? 'local' : options.cork.config.store,
-                    options.bundle?.id ?? options.id ?? 'bundle'),
+                store: translationStore,
                 bundleId: options.bundle?.id ?? options.id ?? 'bundle',
             },
         },
@@ -3032,13 +3104,17 @@ async function buildApp(options){
                             // interpreter ran: a frame of ordinary slices that
                             // all ran slowly is a compiler that had thrown its
                             // code away, and nothing else in the frame says so.
-                            journal.note('instructions',
-                                cpu.instructionCount() - retiredAtFrameStart);
-                            journal.note('interpreted',
-                                cpu.interpretedSteps() - interpretedAtFrameStart);
-                            journal.note('hostWrittenBytes',
-                                cpu.hostWrittenBytes() - writtenAtFrameStart);
-                            journal.note('heapDelta', heapUsed() - heapAtFrameStart);
+                            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+                            {
+                                journal.note('instructions',
+                                    cpu.instructionCount() - retiredAtFrameStart);
+                                journal.note('interpreted',
+                                    cpu.interpretedSteps() - interpretedAtFrameStart);
+                                journal.note('hostWrittenBytes',
+                                    cpu.hostWrittenBytes() - writtenAtFrameStart);
+                                journal.note('heapDelta', heapUsed() - heapAtFrameStart);
+                            }
+                            // Run in every build: the frame's samplers feed the translator.
                             journal.endFrame();
                         }
                         // The run's presenter owns the canvas copy; a build
@@ -3053,10 +3129,13 @@ async function buildApp(options){
                             options.device.presentTo?.(frame);
                         }
                         journal.beginFrame();
-                        retiredAtFrameStart = cpu.instructionCount();
-                        interpretedAtFrameStart = cpu.interpretedSteps();
-                        writtenAtFrameStart = cpu.hostWrittenBytes();
-                        heapAtFrameStart = heapUsed();
+                        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+                        {
+                            retiredAtFrameStart = cpu.instructionCount();
+                            interpretedAtFrameStart = cpu.interpretedSteps();
+                            writtenAtFrameStart = cpu.hostWrittenBytes();
+                            heapAtFrameStart = heapUsed();
+                        }
                         framed = true;
                     },
                 }
@@ -3570,7 +3649,8 @@ async function buildApp(options){
     const audio = core.api('audio');
     const input = core.api('input');
 
-    if (options.engine === 'cork')
+    const chosen = options.engine ?? DEFAULT_ENGINE;
+    if (chosen === 'cork')
     {
         // Cork runs with nothing of the emulator loaded: its own host, its own
         // memory, and the translator named by `engineUrl`.
@@ -3578,7 +3658,6 @@ async function buildApp(options){
     }
     else
     {
-        const chosen = options.engine ?? 'emulator';
         const emulator = emulatorArtifacts(options.v86);
         /** @type {ArrayBuffer} */
         let wasmBytes;
@@ -3631,7 +3710,7 @@ async function buildApp(options){
 
     // Mounted after the machine is up. A zstd block is decoded by this
     // project's own decoder now, so the mount no longer needs the emulator.
-    blocks = await mountBundle({ options, cpu, filesystem, events });
+    blocks = await mountBundle({ options, cpu, filesystem, events, translationStore });
 
     // The session's files go onto the volume once it is the one the program
     // will run on: the mount above puts a fresh writable layer over the
@@ -5442,11 +5521,15 @@ async function buildApp(options){
                         // time is the guest actually executing -- which is the
                         // number every question about speed starts from.
                         journal.begin('guest', journal.PhaseKind.GUEST);
-                        const compiledBefore = cpu.compiledModules();
+                        const compiledBefore = import.meta.BOTTLIFY_DIAGNOSTICS !== false
+                            ? cpu.compiledModules() : 0;
                         step = kernel.runOnce();
                         // Compiling happens inside the slice, on the way to a
                         // hot page, and is the guest's time only by position.
-                        journal.compiled(cpu.compiledModules() - compiledBefore);
+                        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+                        {
+                            journal.compiled(cpu.compiledModules() - compiledBefore);
+                        }
                         // Where the guest stood when its slice ran out. Sampled
                         // here because this is the only boundary the host owns: a
                         // program that decides something inside its own code makes
@@ -5955,6 +6038,16 @@ async function buildApp(options){
             /** @param {{ path: string, bytes?: Uint8Array, delete?: boolean }[]} changes */
             apply: changes=>filesystem.apply(changes),
         },
+
+        /**
+         * What the translator has made of this bundle's code, as the seed a
+         * bundle carries (`attachTranslations`); null without a translating
+         * engine or a store. Asked before `dispose`, which takes the
+         * translator away.
+         *
+         * @returns {Promise<Uint8Array | null>}
+         */
+        exportTranslations: ()=>cpu.exportTranslations(),
 
         exitCode: ()=>win32.exitCode(),
 

@@ -9,13 +9,14 @@
  *
  * `materialise` (fold a lazy flag record into the flags word), `f80ToF64`
  * and `f64ToF80` (the 80-bit memory forms), `round` (the control word's
- * rounding control) and `codeHit` (a store into a page holding translated
- * code) are identical in every region module: the task-4 measurement put
- * them at 17 % of the route's module bytes, all of it repeated. They are
- * defined once here, instantiated once by the host with the same memory, and
- * every region module imports them by name -- the same shape as the funcref
- * table a region already imports, so nothing in the emitter's call sites
- * changes but the function index.
+ * rounding control), `codeHit` (a store into a page holding translated
+ * code), `f64ToBcd` (`fbstp`'s packed BCD) and `x87Invalid` (an x87 NaN
+ * result's IE) are identical in every region module, where a copy in each
+ * would be a sixth of a module's bytes. They are defined once here,
+ * instantiated once by the host with the same memory, and every region
+ * module imports them by name -- the same shape as the funcref table a region
+ * already imports, so nothing in the emitter's call sites changes but the
+ * function index.
  *
  * `undo` is not here: a store calls it only in a differential build, and a
  * module that imported it always would write the ring always. It stays a

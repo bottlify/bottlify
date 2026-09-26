@@ -101,6 +101,11 @@ export function createEntries({ memory, hashBase = -1, shift = 16 } = {}){
     /** @type {Map<number, Set<number>>} page → slots */
     const byPage = new Map();
     let live = 0;
+    // The last entry found: the interpreter stops at an address it finds an
+    // entry for, and the host's slice loop asks for the same one next.
+    let lastEip = -1;
+    let lastTop = -1;
+    let lastEntry = -1;
     return {
         /**
          * Adds an entry and answers its index; an address already mapped
@@ -119,6 +124,8 @@ export function createEntries({ memory, hashBase = -1, shift = 16 } = {}){
             const slot = insert(eip, table, label, top);
             const index = slots.push({ eip, fn, label, page, top, table, slot }) - 1;
             byEip.set(keyOf(eip, top), index);
+            // One for the top alone comes before one for any top.
+            lastEip = -1;
             if (top !== ANY_TOP)
             {
                 specialised.add(eip);
@@ -139,7 +146,18 @@ export function createEntries({ memory, hashBase = -1, shift = 16 } = {}){
          * @param {number} eip @param {number} [top] @returns {number} the index, or -1
          */
         entryOf(eip, top = 0){
-            return byEip.get(keyOf(eip, top)) ?? byEip.get(keyOf(eip, ANY_TOP)) ?? -1;
+            if (eip === lastEip && top === lastTop)
+            {
+                return lastEntry;
+            }
+            const entry = byEip.get(keyOf(eip, top)) ?? byEip.get(keyOf(eip, ANY_TOP)) ?? -1;
+            if (entry >= 0)
+            {
+                lastEip = eip;
+                lastTop = top;
+                lastEntry = entry;
+            }
+            return entry;
         },
         /** Whether some entry at the address was compiled for a top. @param {number} eip */
         isSpecialised(eip){
@@ -170,6 +188,25 @@ export function createEntries({ memory, hashBase = -1, shift = 16 } = {}){
             }
             return entry;
         },
+        /**
+         * Moves an entry to another function-table index -- its region's function
+         * in a relinked module -- in the map and in the hash translated code probes.
+         *
+         * @param {number} index @param {Entry['fn']} fn @param {number} table
+         */
+        retable(index, fn, table){
+            const entry = slots[index];
+            if (!entry)
+            {
+                return;
+            }
+            entry.fn = fn;
+            entry.table = table;
+            if (entry.slot >= 0)
+            {
+                view().setUint32(hashBase + entry.slot * Tables.HASH_SLOT + 4, table, true);
+            }
+        },
         /** Removes one entry. @param {number} index */
         remove(index){
             const entry = slots[index];
@@ -179,6 +216,7 @@ export function createEntries({ memory, hashBase = -1, shift = 16 } = {}){
             }
             slots[index] = null;
             byEip.delete(keyOf(entry.eip, entry.top));
+            lastEip = -1;
             byPage.get(entry.page)?.delete(index);
             live--;
             if (entry.slot >= 0)

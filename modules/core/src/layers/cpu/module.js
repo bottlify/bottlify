@@ -11,10 +11,15 @@ import { createDifferentialHost } from './internal/differential-host.js';
 import { TABLES_RESERVE } from './engine.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
-import { FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE, VECTORS } from './internal/boot-rom.js';
+import {
+    FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE, THREAD_DESCRIPTOR, VECTORS,
+} from './internal/boot-rom.js';
 import { readFault, describeFault, hostFault } from './internal/faults.js';
-import { captureContext, restoreContext, setThreadBase } from './internal/context.js';
+import {
+    captureContext, freshThreadFpu, restoreContext, setThreadBase,
+} from './internal/context.js';
 import { createSampleTable, creditSample, topSamples } from './internal/samples.js';
+import { fileNameOf } from './internal/translation-store.js';
 
 /**
  * Guest RAM when nobody says otherwise. A gigabyte, because a program of this
@@ -39,6 +44,13 @@ export const ENGINES = Object.freeze(['emulator', 'hybrid', 'cork', 'differentia
 
 /** The engines a launch can run today. */
 const BUILT_ENGINES = new Set(['emulator', 'hybrid', 'cork', 'differential']);
+
+/**
+ * The engine a launch that names none runs: the translator. The emulator stays
+ * an engine a launch may select, and the reference the differential suites
+ * judge the translator against.
+ */
+export const DEFAULT_ENGINE = 'cork';
 
 /**
  * cpu — the guest CPU and the channel the guest calls us through.
@@ -131,7 +143,7 @@ export const cpuModule = {
         // that does not exist is a configuration error, and the assembler
         // reports those before any module has a machine to lose.
         /** @type {string} */
-        const engine = config?.engine ?? 'emulator';
+        const engine = config?.engine ?? DEFAULT_ENGINE;
         if (!ENGINES.includes(engine))
         {
             throw new Error(`cpu: unknown engine "${engine}" (${ENGINES.join(', ')})`);
@@ -160,7 +172,8 @@ export const cpuModule = {
          *          cork: import('./engine.js').Runtime | null,
          *          corkFrame: { instructions: number, retired: number, translateMs: number,
          *              leaves: number },
-         *          faultHandler: ((fault: any) => boolean) | null }}
+         *          faultHandler: ((fault: any) => boolean) | null,
+         *          guestClock: (() => number) | null }}
          */
         const state = {
             host: null, thunks: null, running: false, tableWritten: false,
@@ -168,6 +181,8 @@ export const cpuModule = {
             lastFault: null, disposed: false, samples: createSampleTable(), engine,
             cork: null,
             faultHandler: null,
+            // The guest's clock once the kernel gives it (`useGuestClock`).
+            guestClock: null,
             // The translator's figures at the last frame, for the frame's own columns.
             corkFrame: { instructions: 0, retired: 0, translateMs: 0, leaves: 0 },
         };
@@ -233,7 +248,8 @@ export const cpuModule = {
                     counters[CORK_AT + 1] = cork.invalidations;
                     counters[CORK_AT + 2] = cork.translatedShare;
                     const leaves = cork.exits.untranslated + cork.exits.budget + cork.exits.trap
-                        + cork.exits.halt + cork.exits.fault + cork.exits.stale;
+                        + cork.exits.halt + cork.exits.fault + cork.exits.stale
+                        + (cork.exits.interpreted ?? 0);
                     const instructions = state.host.instructionCount();
                     const last = state.corkFrame;
                     const ran = instructions - last.instructions;
@@ -424,6 +440,10 @@ export const cpuModule = {
                         cork: settings.cork,
                     });
                     state.cork = state.host.cork();
+                    if (state.guestClock !== null)
+                    {
+                        state.host.useGuestClock(state.guestClock);
+                    }
                 }
                 else
                 {
@@ -595,6 +615,26 @@ export const cpuModule = {
             },
 
             /**
+             * The translation store as a seed a bundle can carry, kept to the
+             * records this translator's lookups can reach; null without a
+             * store that exports, or before the translator is up.
+             *
+             * @returns {Promise<Uint8Array | null>}
+             */
+            async exportTranslations(){
+                const store = /** @type {any} */ (settings.cork?.store);
+                const select = state.cork?.seedRecords;
+                if (typeof store?.exportSeed !== 'function' || typeof select !== 'function')
+                {
+                    return null;
+                }
+                return store.exportSeed({
+                    select: (/** @type {[string, Uint8Array][]} */ records)=>
+                        select(records, fileNameOf),
+                });
+            },
+
+            /**
              * Stops the machine on a processor exception that was offered to
              * the program and not taken -- reported exactly as one that was
              * never offered, because to a reader it is the same failure.
@@ -763,20 +803,36 @@ export const cpuModule = {
                     state.worstInterpretedAt = from;
                 }
                 // Where the slice left the guest, weighted by what it retired
-                // getting there -- the only boundary this layer owns, and the
-                // one every slice crosses regardless of what the guest was
-                // doing. Skipped for a slice that retired nothing: a parked
-                // thread's turn says nothing about where the guest's own code
-                // runs hot.
-                if (samplingEnabled && instructions > 0)
+                // getting there -- the only boundary this layer owns. Only a
+                // slice that ran its whole budget is a sample: it stopped
+                // wherever the guest happened to be. One that ended early
+                // stopped where the guest asked to -- a wait it parked in, a
+                // halt -- and crediting that place with everything the slice
+                // retired charged a frame's hot loop to the call ending it.
+                if (samplingEnabled && instructions >= maxInstructions)
                 {
                     creditSample(state.samples, machine.eip(), instructions);
-                    if (settings.cork.feed === 'slice')
-                    {
-                        feedTranslator();
-                    }
+                }
+                if (samplingEnabled && instructions > 0 && settings.cork.feed === 'slice')
+                {
+                    feedTranslator();
                 }
                 return instructions;
+            },
+
+            /**
+             * The guest's clock, for the time-stamp counter: under cork `rdtsc`
+             * then counts nanoseconds of the time QueryPerformanceCounter reads.
+             * The emulator's counter is its own and is not moved by this.
+             *
+             * @param {() => number} readMs  milliseconds of guest time
+             */
+            useGuestClock(readMs){
+                state.guestClock = readMs;
+                if (typeof state.host?.useGuestClock === 'function')
+                {
+                    state.host.useGuestClock(readMs);
+                }
             },
 
             /** @returns {any} the running thread's full CPU state */
@@ -850,12 +906,21 @@ export const cpuModule = {
                     return;
                 }
                 restoreContext(host.cpu(), context);
+                // The emulator loads a segment's base from its descriptor, so
+                // FS's follows the thread too: a program reloading FS finds its
+                // own TEB. Bytes 2..7 of the descriptor: the base's low three
+                // bytes, the access and flags as the ROM wrote them, the high.
+                host.writePhysical(THREAD_DESCRIPTOR + 2, new Uint8Array([
+                    threadBase & 0xff, threadBase >>> 8 & 0xff, threadBase >>> 16 & 0xff,
+                    0x92, 0xcf, threadBase >>> 24 & 0xff,
+                ]));
             },
 
             /**
              * A context for a thread that has not run yet: the current CPU state
-             * as a template -- segments, control words and the rest of the process
-             * environment -- positioned at its own entry point and stack.
+             * as a template -- segments and the rest of the process environment
+             * -- positioned at its own entry point and stack, with the
+             * floating-point environment a new thread starts with.
              *
              * @param {Object} options
              * @param {number} options.entry
@@ -864,6 +929,7 @@ export const cpuModule = {
              */
             newContext({ entry, stackTop }){
                 const context = captureCurrentContext();
+                freshThreadFpu(context);
                 context.eip = entry;
                 context.reg32[4] = stackTop; // ESP
                 context.reg32[5] = stackTop; // EBP

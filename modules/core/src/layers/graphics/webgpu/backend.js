@@ -6,7 +6,7 @@
 
 import { LockFlags, createDynamicBuffer } from './internal/buffers.js';
 import { createBindingCache, createUniformPool, dynamicOffsetsOf } from './internal/bindings.js';
-import { createProfiler } from './internal/profiler.js';
+import { ABSENT_PROFILER, createProfiler } from './internal/profiler.js';
 import { createShaderCache } from './internal/shaders.js';
 import { createTextureUploader } from './internal/textures.js';
 import { fullTarget, viewportState } from './internal/viewport.js';
@@ -74,8 +74,11 @@ const OPAQUE_BLACK = { r: 0, g: 0, b: 0, a: 1 };
  */
 export function createBackend(options){
     const { device, queue, presentTo } = options;
-    const now = options.now === undefined ? ()=>performance.now() : options.now;
-    const profiler = createProfiler({ now, frameHistory: options.frameHistory });
+    const now = import.meta.BOTTLIFY_DIAGNOSTICS === false ? ()=>0
+        : options.now === undefined ? ()=>performance.now() : options.now;
+    // A measurement nothing draws by, left out of a production bundle.
+    const profiler = import.meta.BOTTLIFY_DIAGNOSTICS !== false
+        ? createProfiler({ now, frameHistory: options.frameHistory }) : ABSENT_PROFILER;
     const shaders = createShaderCache({ device });
     const uniforms = createUniformPool({
         device,
@@ -355,12 +358,15 @@ export function createBackend(options){
      */
     function beginPass(encoder, descriptor, occlusion = null){
         const { sizing: target, attachments } = colourAttachmentsOf(descriptor);
-        for (const written of descriptor.targets ?? [descriptor.target])
+        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
         {
-            if (written)
+            for (const written of descriptor.targets ?? [descriptor.target])
             {
-                remember(surfaceWrites,
-                    { index: frameIndex, label: written.label ?? 'surface', at: now() });
+                if (written)
+                {
+                    remember(surfaceWrites,
+                        { index: frameIndex, label: written.label ?? 'surface', at: now() });
+                }
             }
         }
         const raw = encoder.beginRenderPass({
@@ -991,8 +997,11 @@ export function createBackend(options){
                     {
                         const endPresent = profiler.phase('present');
                         lastPresented = { surface: presenting, frameIndex: index };
-                        remember(presentLog, { index,
-                            label: presenting.label ?? 'surface', at: now() });
+                        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+                        {
+                            remember(presentLog, { index,
+                                label: presenting.label ?? 'surface', at: now() });
+                        }
                         profiler.count('presents');
                         presentTo(lastPresented);
                         endPresent();

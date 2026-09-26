@@ -7,6 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../testing/machine.js';
+import { createState, evaluate } from '../ir.js';
+import { decode } from '../decode/decoder.js';
 
 const CODE = 0x1000;
 const DATA = 0x2000;
@@ -60,6 +62,59 @@ test('fptan pushes 1 after the tangent; fpatan takes two and leaves one', ()=>{
     const a = run([0xd9, 0xe8, 0xd9, 0xe8, 0xd9, 0xf3]); // fld1; fld1; fpatan -> atan2(1, 1)
     assert.equal(a.st(0), Math.PI / 4);
     assert.equal(a.top(), 7);
+});
+
+test('fptan and fsincos out of the reduction range push nothing: the operand stays, C2 set', ()=>{
+    // fld qword [DATA]; fptan or fsincos; fstp qword [DATA+8]: the store
+    // takes the operand back and leaves the stack empty, on translated code
+    // and on the interpreter.
+    for (const value of [2 ** 64, -(2 ** 63)])
+    {
+        for (const opcode of [0xf2, 0xfb])
+        {
+            const bytes = [0xdd, 0x05, 0x00, 0x20, 0, 0, 0xd9, opcode,
+                0xdd, 0x1d, 0x08, 0x20, 0, 0];
+            const r = run(bytes, f64bytes(value));
+            const name = `${opcode === 0xf2 ? 'fptan' : 'fsincos'} of ${value}`;
+            assert.equal(r.exit.kind, 3);
+            const view = new DataView(r.m.memory.buffer);
+            assert.equal(view.getFloat64(r.m.layout.ramBase + DATA + 8, true), value, name);
+            assert.equal(r.top(), 0, `${name}: the top back where it began`);
+            assert.equal(view.getUint8(r.m.layout.x87Empty), 0xff, `${name}: every register empty`);
+            assert.equal(r.status() & 0x400, 0x400, `${name}: C2`);
+
+            const ram = new Uint8Array(0x10000);
+            const words = new DataView(ram.buffer);
+            ram.set(bytes, CODE);
+            words.setFloat64(DATA, value, true);
+            const state = createState({
+                read: (address, size)=>size === 1 ? ram[address]
+                    : size === 2 ? words.getUint16(address, true) : words.getUint32(address, true),
+                write: (address, size, word)=>{
+                    if (size === 1)
+                    {
+                        ram[address] = word;
+                    }
+                    else if (size === 2)
+                    {
+                        words.setUint16(address, word, true);
+                    }
+                    else
+                    {
+                        words.setUint32(address, word, true);
+                    }
+                },
+            }, { eip: CODE });
+            while (state.eip < CODE + bytes.length)
+            {
+                evaluate(/** @type {any} */ (decode(address=>ram[address], state.eip)), state);
+            }
+            assert.equal(words.getFloat64(DATA + 8, true), value, `${name}, interpreted`);
+            assert.equal(state.top, 0);
+            assert.equal(state.empty, 0xff);
+            assert.equal(state.status & 0x400, 0x400);
+        }
+    }
 });
 
 test('f2xm1, fyl2x and fyl2xp1, with the zero-divide of a zero argument', ()=>{

@@ -61,6 +61,23 @@ test('an entry compiled for an x87 top is found at that top, or under any top', 
     assert.equal(entries.entryOf(0x2000, 0), zero);
 });
 
+test('an entry just found is found again, and an add or a removal there is seen', ()=>{
+    // The interpreter stops where it finds an entry and the host asks for the
+    // same one next: the second answer is kept, and has to change with the map.
+    const entries = createEntries();
+    const any = entries.add(0x3000, fn, 0);
+    assert.equal(entries.entryOf(0x3000, 5), any);
+    assert.equal(entries.entryOf(0x3000, 5), any, 'asked again at once');
+    const five = entries.add(0x3000, fn, 1, 5);
+    assert.equal(entries.entryOf(0x3000, 5), five, 'one for the top alone comes first');
+    assert.equal(entries.entryOf(0x3000, 4), any, 'another top still has the one for any');
+    entries.remove(five);
+    assert.equal(entries.entryOf(0x3000, 5), any);
+    entries.removePage(3);
+    assert.equal(entries.entryOf(0x3000, 5), -1, 'nor one kept past its page');
+    assert.equal(entries.entryOf(0x3000, 4), -1);
+});
+
 /** A memory with room for the hash at its start. */
 function hashed(){
     const memory = new WebAssembly.Memory({
@@ -188,3 +205,24 @@ test('a title\'s hundred thousand entries spread over the whole hash, with no lo
     assert.ok(last > Tables.HASH_SLOTS * 0.9, `the last slot used is ${last}`);
     assert.ok(longest < 100, `the longest run of used slots is ${longest}`);
 });
+
+test('retable moves an entry to another function-table index, in the map and in the hash',
+    ()=>{
+        const memory = new WebAssembly.Memory({
+            initial: Math.ceil(Tables.HASH_SLOTS * Tables.HASH_SLOT / 65536) + 1,
+        });
+        const entries = createEntries({ memory, hashBase: 0, shift: 14 });
+        const before = ()=>1;
+        const after = ()=>2;
+        const index = entries.add(0x401000, before, 3, 8, 17);
+        entries.retable(index, after, 512);
+        const entry = entries.at(index);
+        assert.equal(entry.fn, after);
+        assert.equal(entry.table, 512);
+        assert.equal(entry.label, 3, 'the label stands');
+        const at = entry.slot * Tables.HASH_SLOT;
+        const view = new DataView(memory.buffer);
+        assert.equal(view.getUint32(at, true), 0x401000);
+        assert.equal(view.getUint32(at + 4, true), 512, 'the slot names the new index');
+        assert.equal(view.getUint16(at + 8, true), 3);
+    });

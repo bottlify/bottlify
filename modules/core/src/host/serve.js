@@ -517,14 +517,17 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                                 presented: payload.presented,
                             });
                         },
-                        /** @param {any} record */
-                        onPresented: record=>{
-                            presented.push(record);
-                            if (presented.length > PRESENT_HISTORY)
-                            {
-                                presented.shift();
+                        // A diagnostic's ring, which a production bundle keeps
+                        // none of.
+                        onPresented: import.meta.BOTTLIFY_DIAGNOSTICS !== false
+                            ? (/** @type {any} */ record)=>{
+                                presented.push(record);
+                                if (presented.length > PRESENT_HISTORY)
+                                {
+                                    presented.shift();
+                                }
                             }
-                        },
+                            : undefined,
                         /** @param {any} payload */
                         onPresentFailed: payload=>emit('present-failed', payload),
                     }

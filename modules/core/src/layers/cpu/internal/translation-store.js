@@ -29,6 +29,15 @@
 
 /** @typedef {import('../engine.js').TranslationStore} TranslationStore */
 /** @typedef {{ offset: number, length: number, session: number }} Place */
+/**
+ * @typedef {TranslationStore & {
+ *     flush: () => Promise<void>, close: () => void,
+ *     seed: (source: Uint8Array | null | Promise<Uint8Array | null>, identity?: string)
+ *         => Promise<{ taken: boolean, added: number, present: number }>,
+ *     seededWith: () => Promise<string | null>,
+ *     exportSeed: (options?: { select?: (records: [string, Uint8Array][])
+ *         => [string, Uint8Array][] }) => Promise<Uint8Array> }} SeedableStore
+ */
 
 /**
  * The store's own layout version: a bundle directory of another version is
@@ -42,6 +51,105 @@ const RECORDS = 'records';
 const INDEX = 'index';
 /** Names the generation the two files above are: `records.<g>`, `index.<g>` (none: 0). */
 const CURRENT = 'current';
+/** Names the last seed taken in, so a start that finds it there fetches nothing. */
+const SEEDED = 'seeded';
+
+/**
+ * A seed: a store's records in one blob, which a bundle carries so the first
+ * run of it on a machine starts with the translations a run made elsewhere.
+ *
+ *     0x00  magic "CORKSEED"                  8
+ *     0x08  seed format                       4
+ *     0x0c  STORE_VERSION of the names        4
+ *     0x10  record count                      4
+ *     0x14  reserved                          4
+ *     0x18  per record: its name's 16 hex digits as 8 bytes, its length   12 each
+ *           ... the records, back to back in the same order ...
+ *
+ * A record is under the name of its key, and the key carries everything its
+ * code was made from -- the code bytes' hash, the entry, the emitter's
+ * version, the host's features, the emitting settings, the layout, the
+ * bundle -- so a record another engine made is one no lookup of this one
+ * names, and it simply never hits.
+ */
+const SEED_MAGIC = 'CORKSEED';
+export const SEED_FORMAT = 1;
+const SEED_HEADER = 0x18;
+const SEED_ENTRY = 12;
+const RECORD_NAME = /^([0-9a-f]{8})([0-9a-f]{8})\.cork$/;
+
+/**
+ * Packs records into a seed, in the order of their names, so the same records
+ * make the same bytes whatever order the store held them in.
+ *
+ * @param {Iterable<[string, Uint8Array]>} records  name and bytes
+ * @returns {Uint8Array}
+ */
+export function packSeed(records){
+    const sorted = [...new Map(records)].filter(([name])=>RECORD_NAME.test(name))
+        .sort((a, b)=>(a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    const body = sorted.reduce((sum, [, bytes])=>sum + bytes.length, 0);
+    const out = new Uint8Array(SEED_HEADER + sorted.length * SEED_ENTRY + body);
+    const view = new DataView(out.buffer);
+    for (let i = 0; i < SEED_MAGIC.length; i++)
+    {
+        out[i] = SEED_MAGIC.charCodeAt(i);
+    }
+    view.setUint32(8, SEED_FORMAT, true);
+    view.setUint32(12, STORE_VERSION, true);
+    view.setUint32(16, sorted.length, true);
+    let at = SEED_HEADER + sorted.length * SEED_ENTRY;
+    sorted.forEach(([name, bytes], i)=>{
+        const [, high, low] = /** @type {RegExpExecArray} */ (RECORD_NAME.exec(name));
+        const entry = SEED_HEADER + i * SEED_ENTRY;
+        view.setUint32(entry, parseInt(high, 16));
+        view.setUint32(entry + 4, parseInt(low, 16));
+        view.setUint32(entry + 8, bytes.length, true);
+        out.set(bytes, at);
+        at += bytes.length;
+    });
+    return out;
+}
+
+/**
+ * The records of a seed, as views into it; null for bytes that are not a seed
+ * of this format and this store's layout version, or that end before their
+ * records do.
+ *
+ * @param {Uint8Array} seed
+ * @returns {[string, Uint8Array][] | null}
+ */
+export function unpackSeed(seed){
+    if (seed.length < SEED_HEADER
+        || String.fromCharCode(...seed.subarray(0, SEED_MAGIC.length)) !== SEED_MAGIC)
+    {
+        return null;
+    }
+    const view = new DataView(seed.buffer, seed.byteOffset, seed.byteLength);
+    const count = view.getUint32(16, true);
+    if (view.getUint32(8, true) !== SEED_FORMAT || view.getUint32(12, true) !== STORE_VERSION
+        || SEED_HEADER + count * SEED_ENTRY > seed.length)
+    {
+        return null;
+    }
+    /** @type {[string, Uint8Array][]} */
+    const records = [];
+    let at = SEED_HEADER + count * SEED_ENTRY;
+    for (let i = 0; i < count; i++)
+    {
+        const entry = SEED_HEADER + i * SEED_ENTRY;
+        const length = view.getUint32(entry + 8, true);
+        if (length === 0 || at + length > seed.length)
+        {
+            return null;
+        }
+        const name = view.getUint32(entry).toString(16).padStart(8, '0')
+            + view.getUint32(entry + 4).toString(16).padStart(8, '0') + '.cork';
+        records.push([name, seed.subarray(at, at + length)]);
+        at += length;
+    }
+    return records;
+}
 
 /**
  * The store is kept to what recent runs used. A session is one opening; the
@@ -173,7 +281,7 @@ async function appendAt(handle, at, bytes){
  * @param {{ keepSessions: number, compactFloor: number, cap: number,
  *     indexFloor?: number }} [limits]
  *     the ages and sizes it is kept to (tests shrink them)
- * @returns {Promise<TranslationStore & { flush: () => Promise<void>, close: () => void }>}
+ * @returns {Promise<SeedableStore>}
  */
 export async function createDirectoryTranslationStore(root, name, limits = LIMITS){
     const safe = name.replace(/[^A-Za-z0-9._-]/g, '_') || 'bundle';
@@ -421,9 +529,46 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
     /** @type {Promise<void>} */
     let appending = Promise.resolve();
 
+    /**
+     * Appends records at places already taken from `end`: one write each
+     * through the synchronous handle, one stream for all of them without it.
+     *
+     * @param {[number, Uint8Array][]} writes  offset and bytes
+     */
+    const appendRecords = async writes=>{
+        if (access !== null)
+        {
+            for (const [offset, bytes] of writes)
+            {
+                access.write(bytes, { at: offset });
+            }
+            return;
+        }
+        appending = appending.then(async()=>{
+            const writable = await records.createWritable({ keepExistingData: true });
+            for (const [offset, bytes] of writes)
+            {
+                await writable.write({ type: 'write', position: offset, data: bytes });
+            }
+            await writable.close();
+        });
+        await appending;
+    };
+
+    /**
+     * The seeds being taken in, one after another. Every lookup waits for
+     * them, so the engine's first lookup already sees what a seed brought.
+     * @type {Promise<unknown>}
+     */
+    let seeding = Promise.resolve();
+    const ready = async()=>{
+        await open();
+        await seeding;
+    };
+
     return {
         async get(key){
-            await open();
+            await ready();
             const recordName = fileNameOf(key);
             const place = /** @type {Map<string, Place>} */ (places).get(recordName);
             if (!place)
@@ -444,22 +589,10 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             return readAt(place.offset, place.length);
         },
         async put(key, bytes){
-            await open();
+            await ready();
             const offset = end;
             end += bytes.length;
-            if (access !== null)
-            {
-                access.write(bytes, { at: offset });
-            }
-            else
-            {
-                appending = appending.then(async()=>{
-                    const writable = await records.createWritable({ keepExistingData: true });
-                    await writable.write({ type: 'write', position: offset, data: bytes });
-                    await writable.close();
-                });
-                await appending;
-            }
+            await appendRecords([[offset, bytes]]);
             const recordName = fileNameOf(key);
             /** @type {Map<string, Place>} */ (places)
                 .set(recordName, { offset, length: bytes.length, session });
@@ -478,10 +611,195 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             }
             access?.flush();
         },
+        /**
+         * Takes in a seed's records this store does not hold: appended, named
+         * in the index and counted as used in this session, before any lookup
+         * of this opening is answered. A name held already is left as it is,
+         * so taking a seed twice adds nothing; a seed of another format or
+         * layout version adds nothing either. `identity` (the seed's digest) is
+         * kept once the records are on disk, for `seededWith`.
+         *
+         * @param {Uint8Array | null | Promise<Uint8Array | null>} source
+         * @param {string} [identity]
+         * @returns {Promise<{ taken: boolean, added: number, present: number }>}
+         */
+        seed(source, identity){
+            const after = seeding;
+            const taking = (async()=>{
+                await after;
+                await open();
+                const bytes = await source;
+                const entries = bytes ? unpackSeed(bytes) : null;
+                if (entries === null)
+                {
+                    return { taken: false, added: 0, present: 0 };
+                }
+                const all = /** @type {Map<string, Place>} */ (places);
+                /** @type {[number, Uint8Array][]} */
+                const writes = [];
+                for (const [recordName, record] of entries)
+                {
+                    if (all.has(recordName))
+                    {
+                        continue;
+                    }
+                    writes.push([end, record]);
+                    all.set(recordName, { offset: end, length: record.length, session });
+                    pendingLines.push(`${recordName} ${end} ${record.length}\n`);
+                    end += record.length;
+                }
+                if (writes.length > 0)
+                {
+                    await appendRecords(writes);
+                    await publish();
+                }
+                if (identity)
+                {
+                    await writeWhole(directory, SEEDED, new TextEncoder().encode(identity));
+                }
+                return { taken: true, added: writes.length,
+                    present: entries.length - writes.length };
+            })().catch(()=>({ taken: false, added: 0, present: 0 }));
+            seeding = taking;
+            return taking;
+        },
+        /** The identity of the last seed taken in, or null. */
+        async seededWith(){
+            try
+            {
+                return await textOf(await (await directory.getFileHandle(SEEDED)).getFile());
+            }
+            catch {
+                return null;
+            }
+        },
+        /**
+         * The live records -- the later place of each name used in the last
+         * `keepSessions` sessions, what a compaction would keep -- as a seed.
+         * `select` narrows them with what only the translator can read in a
+         * record: which of them its lookups can still reach.
+         *
+         * @param {{ select?: (records: [string, Uint8Array][]) => [string, Uint8Array][] }}
+         *     [options]
+         * @returns {Promise<Uint8Array>}
+         */
+        async exportSeed({ select } = {}){
+            await ready();
+            await appending;
+            access?.flush();
+            const whole = access === null
+                ? new Uint8Array(await (await records.getFile()).arrayBuffer()) : null;
+            /** @type {[string, Uint8Array][]} */
+            const out = [];
+            for (const [recordName, place] of /** @type {Map<string, Place>} */ (places))
+            {
+                if (place.session < session - limits.keepSessions)
+                {
+                    continue;
+                }
+                const bytes = whole === null ? await readAt(place.offset, place.length)
+                    : whole.subarray(place.offset, place.offset + place.length);
+                if (bytes !== null && bytes.length === place.length)
+                {
+                    out.push([recordName, bytes]);
+                }
+            }
+            return packSeed(select ? select(out) : out);
+        },
         /** Lets go of the records file's access handle; nothing else holds one. */
         close(){
             access?.close();
             access = null;
+        },
+    };
+}
+
+/**
+ * A directory in memory, with the shape the store uses inside a worker (a
+ * synchronous access handle on every file): for a host with no origin file
+ * system, such as Node, where a run is captured into a seed or started from
+ * one.
+ *
+ * @returns {{ getDirectoryHandle: Function, getFileHandle: Function,
+ *     entries: () => AsyncGenerator<[string, any]>, removeEntry: Function }}
+ */
+export function createMemoryDirectory(){
+    /** @type {Map<string, any>} */
+    const children = new Map();
+    const fileHandle = ()=>{
+        let bytes = new Uint8Array(0);
+        let size = 0;
+        /** @param {number} wanted */
+        const reserve = wanted=>{
+            if (wanted > bytes.length)
+            {
+                // Doubled, as a run appends its records a few at a time.
+                const grown = new Uint8Array(Math.max(wanted, bytes.length * 2));
+                grown.set(bytes.subarray(0, size));
+                bytes = grown;
+            }
+        };
+        return {
+            async getFile(){
+                const copy = bytes.slice(0, size);
+                return { size, arrayBuffer: async()=>copy.buffer };
+            },
+            async createSyncAccessHandle(){
+                return {
+                    getSize: ()=>size,
+                    /** @param {Uint8Array} into @param {{ at: number }} where */
+                    read(into, { at }){
+                        const length = Math.max(0, Math.min(into.length, size - at));
+                        into.set(bytes.subarray(at, at + length));
+                        return length;
+                    },
+                    /** @param {Uint8Array} from @param {{ at: number }} where */
+                    write(from, { at }){
+                        reserve(at + from.length);
+                        bytes.set(from, at);
+                        size = Math.max(size, at + from.length);
+                        return from.length;
+                    },
+                    /** @param {number} length */
+                    truncate(length){
+                        reserve(length);
+                        bytes.fill(0, Math.min(length, size), bytes.length);
+                        size = length;
+                    },
+                    flush(){},
+                    close(){},
+                };
+            },
+        };
+    };
+    /**
+     * @param {string} name @param {{ create?: boolean }} options
+     * @param {() => any} make
+     */
+    const child = (name, options, make)=>{
+        let found = children.get(name);
+        if (found === undefined)
+        {
+            if (!options.create)
+            {
+                throw new DOMException(`${name} not found`, 'NotFoundError');
+            }
+            found = make();
+            children.set(name, found);
+        }
+        return found;
+    };
+    return {
+        /** @param {string} name @param {{ create?: boolean }} [options] */
+        getDirectoryHandle: async(name, options = {})=>child(name, options, createMemoryDirectory),
+        /** @param {string} name @param {{ create?: boolean }} [options] */
+        getFileHandle: async(name, options = {})=>child(name, options, fileHandle),
+        async* entries(){
+            yield* children;
+        },
+        /** @param {string} name */
+        removeEntry: async name=>{
+            children.delete(name);
         },
     };
 }

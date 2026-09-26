@@ -15,6 +15,7 @@ const REPO = resolve(ROOT, '..', '..');
 const SRC = join(ROOT, 'src');
 const DIST = join(ROOT, 'dist');
 const PREBUILT = join(ROOT, 'vendor', 'prebuilt');
+const CORK_SRC = join(REPO, 'modules', 'cork', 'src');
 const VENDOR_OUT = join(DIST, 'vendor');
 
 /**
@@ -151,6 +152,12 @@ async function copyVendor(){
 }
 
 await mkdir(DIST, { recursive: true });
+// A production bundle leaves its diagnostic instruments out of itself: every
+// guard reads `import.meta.BOTTLIFY_DIAGNOSTICS !== false`, which this folds to
+// `false`, and the minifier drops what it guards -- the clock reads, the
+// profilers, the records only a report reads. The source, which the tests and
+// the harness run, has no such define and keeps them.
+const DIAGNOSTICS_OFF = { 'import.meta.BOTTLIFY_DIAGNOSTICS': 'false' };
 // Three entries, one build: the module a page imports and the workers it
 // starts -- the engine and the log keeper. Bundled apart because a worker is
 // loaded by URL, not imported, and each carries what it needs. All sit in
@@ -174,9 +181,13 @@ await build({
     // it, and the package is the built thing.
     minify: true,
     sourcemap: false,
-    // The built module's own directory holds the emulator (see copyVendor),
-    // so the engine finds it without being told.
-    define: { 'import.meta.env.BOTTLIFY_VENDOR': '"./vendor/"' },
+    // The built module's own directory holds the emulator (see copyVendor)
+    // and the translator (below), so the engine finds both without being told.
+    define: {
+        ...DIAGNOSTICS_OFF,
+        'import.meta.env.BOTTLIFY_VENDOR': '"./vendor/"',
+        'import.meta.env.BOTTLIFY_CORK': '"./cork/index.js"',
+    },
     outdir: DIST,
     entryNames: '[name]',
     logLevel: 'info',
@@ -184,6 +195,26 @@ await build({
 // `index.js` is the package's entry and `core.js` is the file the exports map
 // names; esbuild names an output after its entry.
 await rename(join(DIST, 'index.js'), join(DIST, 'core.js'));
+// The translator, which the cpu layer loads by URL rather than imports: its
+// engine module and the translation worker it opens from beside itself, under
+// the same define. Node's worker and zlib are for a test process, never a page.
+await build({
+    entryPoints: [
+        join(CORK_SRC, 'index.js'),
+        join(CORK_SRC, 'runtime', 'translator.worker.js'),
+    ],
+    bundle: true,
+    format: 'esm',
+    platform: 'browser',
+    target: ['es2022'],
+    external: ['node:worker_threads', 'node:zlib'],
+    minify: true,
+    sourcemap: false,
+    define: DIAGNOSTICS_OFF,
+    outdir: join(DIST, 'cork'),
+    entryNames: '[name]',
+    logLevel: 'info',
+});
 const vendored = await copyVendor();
 // The audio worklet runs on the browser's audio thread, loaded by URL rather
 // than imported, so it ships as a file of its own beside the module.
@@ -195,5 +226,5 @@ for (const name of LEGAL)
     await copyFile(join(REPO, name), join(ROOT, name));
 }
 await writeChecksums();
-console.log('dist: core.js + engine.worker.js + log.worker.js + '
+console.log('dist: core.js + engine.worker.js + log.worker.js + cork/ + '
     + `${vendored} vendor artifacts + checksums.json`);
