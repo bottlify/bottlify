@@ -117,9 +117,9 @@ export function createWideFunctions(host){
         host.writeMemory(pointer, bytes);
     };
 
-    /** @param {number} pointer @param {string} text */
-    const writeNarrow = (pointer, text)=>{
-        const bytes = new Uint8Array(text.length + 1);
+    /** @param {number} pointer @param {string} text @param {boolean} terminate */
+    const writeNarrow = (pointer, text, terminate)=>{
+        const bytes = new Uint8Array(text.length + (terminate ? 1 : 0));
         for (let at = 0; at < text.length; at++)
         {
             bytes[at] = text.charCodeAt(at) & 0xff;
@@ -272,20 +272,34 @@ export function createWideFunctions(host){
             },
         },
 
-        /** size_t wcstombs(char *dest, const wchar_t *src, size_t count) */
+        /**
+         * size_t wcstombs(char *dest, const wchar_t *src, size_t count)
+         *
+         * A byte for each character it converts -- all of them with no
+         * destination, which asks how many bytes that is -- and -1 with
+         * EILSEQ, nothing written, when one of those has no byte in the C
+         * locale, as wctomb refuses it.
+         */
         wcstombs: {
             convention: 'cdecl',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 const text = readWide(source);
+                const converted = (destination >>> 0) === 0 ? text : text.slice(0, count >>> 0);
+                if (/[^\0-\xff]/.test(converted))
+                {
+                    host.errno?.(EILSEQ);
+                    return -1;
+                }
                 if ((destination >>> 0) === 0)
                 {
                     return text.length;
                 }
-                const written = text.slice(0, count >>> 0);
-                writeNarrow(destination, written);
-                return written.length;
+                // Terminated, as mbstowcs is, only when the text ends within
+                // the count: a buffer the text fills is left unterminated.
+                writeNarrow(destination, converted, converted.length < (count >>> 0));
+                return converted.length;
             },
         },
 

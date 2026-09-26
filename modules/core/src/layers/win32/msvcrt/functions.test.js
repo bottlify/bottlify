@@ -464,6 +464,35 @@ test('_vsnwprintf formats wide text from a list, terminated only when there is r
     assert.equal(fns._vsnwprintf.argBytes, 16);
 });
 
+test('_snprintf and _vsnprintf terminate only when the text is shorter than the count', ()=>{
+    // Wine's ntdll test__snprintf, whose _snprintf is this one: "hello world"
+    // into 11 leaves the X after it, "test" into 4 leaves the byte after it
+    // alone, and into 12 the text is terminated. "The _snprintf family of
+    // functions only appends a terminating NULL character if the formatted
+    // string length is strictly less than count characters."
+    const { fns, host, put, at } = setup();
+    const text = put(0x100, 'hello world');
+    put(0x200, 'XXXXXXXXXXXX');
+    assert.equal(fns._snprintf.handler([0x200, 11, text]), 11);
+    assert.equal(at(0x200), 'hello worldX');
+    put(0x200, 'XXXXXXXXXXXX');
+    assert.equal(fns._snprintf.handler([0x200, 12, text]), 11);
+    assert.equal(at(0x200), 'hello world');
+    assert.equal(fns._snprintf.handler([0x200, 10, text]), -1);
+
+    const test4 = put(0x140, 'test');
+    for (const call of [
+        ()=>fns._snprintf.handler([0x300, 4, test4]),
+        ()=>fns._vsnprintf.handler([0x300, 4, test4, 0x180]),
+    ])
+    {
+        host.bytes.fill(0x7c, 0x300, 0x320);
+        assert.equal(call(), 4);
+        assert.equal(at(0x300).slice(0, 4), 'test');
+        assert.equal(host.bytes[0x304], 0x7c, 'nothing past the count');
+    }
+});
+
 test('_vsnprintf stops the va_list window at the end of its region', ()=>{
     // The stop that faulted a whole run: a thread formats from just below the
     // top of its stack, every argument it reads is there, and the fixed
@@ -736,6 +765,20 @@ test('each thread has its own errno: another thread\'s failure does not overwrit
     assert.equal(u32(mainErrno), 2, 'ENOENT, from the main thread\'s own call');
     assert.equal(u32(workerErrno), 34, 'ERANGE, from the worker\'s');
     assert.equal(fns._errno.handler([]), mainErrno, 'the same cell every time');
+});
+
+test('_snprintf and _vsnprintf with no buffer and a count of zero answer the length needed', ()=>{
+    // Wine's ntdll test__snprintf: _snprintf(NULL, 0, "hello world") is 11.
+    // With no buffer and a count to fill it is -1 and EINVAL, the answer the
+    // documentation gives and the test allows.
+    const { fns, put, u32 } = wholeRuntime(fakeVolume({}));
+    const text = put(0x100, 'hello world');
+    assert.equal(fns._snprintf.handler([0, 0, text]), 11);
+    assert.equal(fns._vsnprintf.handler([0, 0, text, 0x180]), 11);
+    assert.equal(u32(fns._errno.handler([])), 0);
+    assert.equal(fns._snprintf.handler([0, 1, text]), -1);
+    assert.equal(u32(fns._errno.handler([])), 22);
+    assert.equal(fns._vsnprintf.handler([0, 12, text, 0x180]), -1);
 });
 
 test('printf, puts and vprintf write through stdout, so freopen moves them with it', ()=>{

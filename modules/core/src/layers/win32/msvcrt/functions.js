@@ -205,6 +205,32 @@ export function createMsvcrtFunctions(host){
     /** @param {number[]} args @param {number} fixed */
     const render = (args, fixed)=>narrowText(args[fixed - 1], args.slice(fixed));
 
+    /**
+     * The _snprintf family's answer: at most `count` characters, with the
+     * terminator only when the text is shorter than that -- a text of
+     * exactly `count` fills the buffer and the byte after it stays the
+     * caller's -- and -1 when the text did not fit. No buffer and a count of
+     * zero asks how long the text is; no buffer for a count is EINVAL.
+     *
+     * @param {number} buffer @param {number} count @param {string} text
+     */
+    const countedPrint = (buffer, count, text)=>{
+        const limit = count >>> 0;
+        if ((buffer >>> 0) === 0)
+        {
+            if (limit === 0)
+            {
+                return text.length;
+            }
+            errno(EINVAL);
+            return -1;
+        }
+        const kept = text.slice(0, limit);
+        host.writeMemory(buffer, packInto(
+            new Uint8Array(kept.length + (text.length < limit ? 1 : 0)), kept));
+        return text.length > limit ? -1 : text.length;
+    };
+
     /** int atoi(const char *str) */
     const atoi = {
         convention: 'cdecl',
@@ -675,17 +701,7 @@ export function createMsvcrtFunctions(host){
             convention: 'cdecl',
             argBytes: 12 + VARIADIC_SLOTS * 4,
             /** @param {number[]} args */
-            handler: args=>{
-                const limit = args[1] >>> 0;
-                const text = render(args, 3);
-                if (text.length > limit)
-                {
-                    host.writeMemory(args[0], packInto(new Uint8Array(limit), text));
-                    return -1;
-                }
-                writeString(args[0], text);
-                return text.length;
-            },
+            handler: args=>countedPrint(args[0], args[1], render(args, 3)),
         },
 
         /** int vsprintf(char *buffer, const char *format, va_list args) */
@@ -710,17 +726,8 @@ export function createMsvcrtFunctions(host){
             convention: 'cdecl',
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([buffer, count, format, list])=>{
-                const limit = count >>> 0;
-                const text = narrowText(format, varargsAt(list));
-                if (text.length > limit)
-                {
-                    host.writeMemory(buffer, packInto(new Uint8Array(limit), text));
-                    return -1;
-                }
-                writeString(buffer, text);
-                return text.length;
-            },
+            handler: ([buffer, count, format, list])=>
+                countedPrint(buffer, count, narrowText(format, varargsAt(list))),
         },
 
         /**
