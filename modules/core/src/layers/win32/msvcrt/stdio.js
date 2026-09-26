@@ -77,6 +77,8 @@ const IONBF = 0x0004;
  *           The runtime's descriptor table, shared with `_open` and the rest;
  *           absent, the streams keep one of their own.
  * @property {() => number} [fmode]  The runtime's `_fmode`, for that table.
+ * @property {(list: number) => number[]} [varargs]
+ *           The argument slots a `va_list` points at, for vprintf.
  */
 
 /**
@@ -411,6 +413,22 @@ export function createStdioFunctions(host){
             }
             return bytes[0];
         });
+    };
+
+    /**
+     * fprintf's body: the count of characters formatted; a negative one on a
+     * stream not open for writing, or when not all of them were stored.
+     *
+     * @param {Stream} stream @param {number} format @param {number[]} values
+     */
+    const printTo = (stream, format, values)=>{
+        if (!writable(stream))
+        {
+            refuseWrite(stream);
+            return EOF;
+        }
+        const text = formatToString(readString(format), values, readString);
+        return emit(stream, bytesOf(text)) === text.length ? text.length : EOF;
     };
 
     /** @param {Stream} stream @param {number} c */
@@ -928,20 +946,50 @@ export function createStdioFunctions(host){
          * open for writing, or when not all of them were stored.
          */
         fprintf: cdecl(8 + VARIADIC_SLOTS * 4, args=>{
-            const [pointer, format] = args;
-            const stream = argument(pointer);
-            if (!stream)
-            {
-                return EOF;
-            }
-            if (!writable(stream))
-            {
-                refuseWrite(stream);
-                return EOF;
-            }
-            const text = formatToString(readString(format), args.slice(2), readString);
-            return emit(stream, bytesOf(text)) === text.length ? text.length : EOF;
+            const stream = argument(args[0]);
+            return stream ? printTo(stream, args[1], args.slice(2)) : EOF;
         }),
+
+        /**
+         * int printf(const char *format, ...)
+         *
+         * fprintf on stdout, so a program that moved stdout with freopen
+         * finds the text where it moved it. The variadic arguments sit above
+         * the format on the caller's stack and arrive as the tail of `args`.
+         */
+        printf: cdecl(4 + VARIADIC_SLOTS * 4, args=>{
+            const stream = standardStream(1);
+            return stream ? printTo(stream, args[0], args.slice(1)) : EOF;
+        }),
+
+        /** int puts(const char *str) -- the string and a newline on stdout: 0, or EOF. */
+        puts: cdecl(4, ([string])=>{
+            const stream = standardStream(1);
+            if (!stream || !writable(stream))
+            {
+                if (stream)
+                {
+                    refuseWrite(stream);
+                }
+                return EOF;
+            }
+            const line = bytesOf(`${readString(string)}\n`);
+            return emit(stream, line) === line.length ? 0 : EOF;
+        }),
+
+        // A `va_list` carries no count, so it is read through whoever knows
+        // how far the caller's stack reaches; without that, vprintf stays
+        // unexported.
+        ...(host.varargs
+            ? {
+                /** int vprintf(const char *format, va_list args) -- printf from a list. */
+                vprintf: cdecl(8, ([format, list])=>{
+                    const stream = standardStream(1);
+                    const values = /** @type {(list: number) => number[]} */ (host.varargs);
+                    return stream ? printTo(stream, format, values(list)) : EOF;
+                }),
+            }
+            : {}),
 
         /**
          * int setvbuf(FILE *stream, char *buffer, int mode, size_t size)

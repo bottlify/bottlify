@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMsvcrtFunctions } from './functions.js';
-import { fakeMemory } from './harness.test.js';
+import { fakeMemory, fakeVolume } from './harness.test.js';
 
 /**
  * A stand-in for guest memory, with the same contract as the real one.
@@ -344,14 +344,14 @@ test('itoa writes the digits and returns the buffer', ()=>{
 });
 
 test('puts writes the string with a newline', ()=>{
-    const { fns, host, put } = setup();
+    const { fns, host, put } = onConsole();
 
     assert.equal(fns.puts.handler([put(0x100, 'hello')]), 0);
     assert.deepEqual(host.output.map(entry=>entry.text), ['hello\n']);
 });
 
 test('printf formats its variadic tail and returns the character count', ()=>{
-    const { fns, host, put } = setup();
+    const { fns, host, put } = onConsole();
     const format = put(0x100, '%s scored %d%%');
     const name = put(0x200, 'player');
 
@@ -360,7 +360,7 @@ test('printf formats its variadic tail and returns the character count', ()=>{
 });
 
 test('printf survives a format that no argument satisfies', ()=>{
-    const { fns, host, put } = setup();
+    const { fns, host, put } = onConsole();
 
     fns.printf.handler([put(0x100, '%d %s')]);
     assert.deepEqual(host.output.map(entry=>entry.text), ['0 (null)']);
@@ -419,7 +419,7 @@ test('_vsnprintf stops the va_list window at the end of its region', ()=>{
 });
 
 test('every function is cdecl and declares the stack its arguments occupy', ()=>{
-    const { fns } = setup();
+    const { fns } = onConsole();
 
     for (const [name, fn] of Object.entries(fns))
     {
@@ -589,12 +589,14 @@ test('rand starts where this runtime starts, without any srand at all', ()=>{
  *
  * @param {any} files
  * @param {() => any} [currentThread]
+ * @param {Record<string, any>} [more]  Further seams, the runtime's `_iob` among them.
  */
-function wholeRuntime(files, currentThread){
+function wholeRuntime(files, currentThread, more = {}){
     const host = fakeHost(0x4000);
     let next = 0x2000;
     const fns = /** @type {Record<string, any>} */ (createMsvcrtFunctions({
         ...host,
+        ...more,
         currentThread,
         allocate: bytes=>{
             const at = next;
@@ -614,6 +616,12 @@ function wholeRuntime(files, currentThread){
     /** @param {number} address */
     const u32 = address=>new DataView(host.bytes.buffer).getUint32(address, true);
     return { host, fns, put, u32 };
+}
+
+/** The whole runtime, its standard streams placed and stdout on the console. */
+function onConsole(){
+    return wholeRuntime(fakeVolume({}, { directories: ['C:\\'] }), undefined,
+        { iob: ()=>0x3800 });
 }
 
 test('errno is one variable: a failing call sets what _errno points at', ()=>{
@@ -656,6 +664,36 @@ test('each thread has its own errno: another thread\'s failure does not overwrit
     assert.equal(u32(mainErrno), 2, 'ENOENT, from the main thread\'s own call');
     assert.equal(u32(workerErrno), 34, 'ERANGE, from the worker\'s');
     assert.equal(fns._errno.handler([]), mainErrno, 'the same cell every time');
+});
+
+test('printf, puts and vprintf write through stdout, so freopen moves them with it', ()=>{
+    // printf is fprintf on stdout and puts is fputs on it: a program that
+    // moved stdout to a file with freopen finds their output there.
+    const IOB = 0x3800;
+    const files = fakeVolume({}, { directories: ['C:\\'] });
+    const { host, fns, put } = wholeRuntime(files, undefined, { iob: ()=>IOB });
+    const stdout = IOB + 32;
+    const format = put(0x100, '%s=%d\n');
+    const name = put(0x140, 'x');
+    const list = 0x180;
+    new DataView(host.bytes.buffer).setUint32(list, name, true);
+    new DataView(host.bytes.buffer).setUint32(list + 4, 3, true);
+    const say = ()=>[
+        fns.printf.handler([format, name, 1]),
+        fns.puts.handler([put(0x1c0, 'hi')]),
+        fns.vprintf.handler([format, list]),
+    ];
+
+    assert.deepEqual(say(), [4, 0, 4]);
+    assert.deepEqual(host.output.map(entry=>[entry.handle, entry.text]),
+        [[2, 'x=1\n'], [2, 'hi\n'], [2, 'x=3\n']], 'the console, while stdout is on it');
+
+    host.output.length = 0;
+    assert.equal(fns.freopen.handler([put(0x200, 'C:\\log.txt'), put(0x220, 'w'), stdout]),
+        stdout);
+    assert.deepEqual(say(), [4, 0, 4]);
+    assert.deepEqual(host.output, []);
+    assert.equal(String.fromCharCode(...files.files['C:\\log.txt']), 'x=1\r\nhi\r\nx=3\r\n');
 });
 
 test('sprintf_s and vsprintf_s write what fits with its terminator, and refuse the rest', ()=>{

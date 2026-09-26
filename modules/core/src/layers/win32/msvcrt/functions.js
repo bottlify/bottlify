@@ -18,7 +18,6 @@
  * undefined, the choice made here is written down at the function.
  */
 
-import { HANDLE_STDOUT } from '../kernel32/console.js';
 import { formatToString, varargsSlots } from './format.js';
 import { createStringFunctions } from './strings.js';
 import { createConversionFunctions } from './convert.js';
@@ -563,37 +562,6 @@ export function createMsvcrtFunctions(host){
             },
         },
 
-        /** int puts(const char *str) */
-        puts: {
-            convention: 'cdecl',
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([string])=>{
-                // puts appends the newline that printf would have had in the
-                // format string.
-                host.write(HANDLE_STDOUT, `${readString(string)}\n`);
-                return 0;
-            },
-        },
-
-        /**
-         * int printf(const char *format, ...)
-         *
-         * The variadic arguments sit contiguously above the format pointer on
-         * the caller's stack and arrive as the tail of `args` -- everything
-         * from index 1 on -- for as many slots as `argBytes` reads.
-         */
-        printf: {
-            convention: 'cdecl',
-            argBytes: 4 + VARIADIC_SLOTS * 4,
-            /** @param {number[]} args */
-            handler: args=>{
-                const text = render(args, 1);
-                host.write(HANDLE_STDOUT, text);
-                return text.length;
-            },
-        },
-
         /**
          * void qsort(void *base, size_t num, size_t width, int (*cmp)(const void*, const void*))
          *
@@ -741,18 +709,6 @@ export function createMsvcrtFunctions(host){
             /** @param {number[]} args */
             handler: ([buffer, size, format, list])=>
                 boundedPrint(buffer, size, format, (format >>> 0) === 0 ? [] : varargsAt(list)),
-        },
-
-        /** int vprintf(const char *format, va_list args) */
-        vprintf: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([format, list])=>{
-                const text = formatToString(readString(format), varargsAt(list), readString);
-                host.write(HANDLE_STDOUT, text);
-                return text.length;
-            },
         },
 
         /**
@@ -950,6 +906,7 @@ export function createMsvcrtFunctions(host){
                 iob: host.iob,
                 errno,
                 descriptors: descriptors ?? undefined,
+                varargs: varargsAt,
             })
             : {}),
         ...(host.threads ? createThreadFunctions(host.threads) : {}),
