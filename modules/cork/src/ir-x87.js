@@ -231,6 +231,95 @@ function roundBy(value, control){
     return floor % 2 === 0 ? floor : floor + 1;
 }
 
+/**
+ * The exponent of a finite nonzero double as the 80-bit format has it, a
+ * subnormal's normalised.
+ *
+ * @param {number} value
+ * @returns {number}
+ */
+function exponentOf(value){
+    scratchF[0] = value;
+    const field = scratchU32[1] >>> 20 & 0x7ff;
+    return field !== 0 ? field - 1023 : exponentOf(value * 2 ** 64) - 64;
+}
+
+/** The condition bits of the last `remainder`. */
+let remainderBits = 0;
+
+/**
+ * `fprem` (`nearest` false) and `fprem1` on doubles, exactly, for a finite
+ * `a` and a nonzero `c` that is not a NaN: the remainder, and in
+ * `remainderBits` C2 and the quotient's low three bits in C0, C3 and C1.
+ *
+ * JS's `%` is the IEEE fmod, exact: the remainder of a quotient truncated
+ * toward zero, which `fprem`'s is. `fprem1` rounds the quotient to nearest,
+ * even on a tie, which moves the remainder by `c` exactly where it is past
+ * half of `c` -- the two lie within a factor of two of each other, so the
+ * difference is exact. The quotient's low bits come from the remainder of
+ * `8c`, which the quotient mod 8 times `c` separates from the one of `c`.
+ * Past an exponent difference of 63 the processor reduces partially: C2 set,
+ * and the exponent brought down by 32 to 63, here 32 plus the difference mod
+ * 32 -- a multiple of `c` by a power of two, so a loop of them ends at the
+ * exact remainder.
+ *
+ * @param {number} a @param {number} c @param {boolean} nearest
+ * @returns {number}
+ */
+function remainder(a, c, nearest){
+    if (a === 0 || !Number.isFinite(c))
+    {
+        remainderBits = 0;
+        return a;
+    }
+    const d = exponentOf(a) - exponentOf(c);
+    if (d >= 64)
+    {
+        // c scaled by 2^(d - n) in steps a double holds; it stays below a.
+        let scaled = c;
+        for (let k = d - 32 - d % 32; k > 0; k -= 1000)
+        {
+            scaled *= 2 ** Math.min(k, 1000);
+        }
+        remainderBits = Status.C2;
+        return a % scaled;
+    }
+    const r = a % c;
+    // The quotient is below 8 where 8c overflows.
+    const c8 = c * 8;
+    let low = Math.round(Math.abs((Number.isFinite(c8) ? a % c8 - r : a - r) / c));
+    let value = r;
+    if (nearest)
+    {
+        const twice = Math.abs(r) * 2;
+        const magnitude = Math.abs(c);
+        if (twice > magnitude || (twice === magnitude && (low & 1) !== 0))
+        {
+            value = r > 0 ? r - magnitude : r + magnitude;
+            low = (low + 1) & 7;
+        }
+    }
+    remainderBits = ((low & 4) !== 0 ? Status.C0 : 0) | ((low & 2) !== 0 ? Status.C3 : 0)
+        | ((low & 1) !== 0 ? Status.C1 : 0);
+    return value;
+}
+
+/**
+ * `remainder` as the translator's host import: `fprem` for `nearest` 0,
+ * `fprem1` otherwise, and the status bits by the second import.
+ *
+ * @param {number} a @param {number} c @param {number} nearest
+ */
+export function fpremValue(a, c, nearest){
+    return remainder(a, c, nearest !== 0);
+}
+
+/** @param {number} a @param {number} c @param {number} nearest */
+export function fpremStatus(a, c, nearest){
+    remainder(a, c, nearest !== 0);
+    return remainderBits;
+}
+
 /** @param {number} value @param {number[]} inputs */
 function hostNaN(value, inputs){
     if (!Number.isNaN(value) || inputs.some(input=>Number.isNaN(input)))
@@ -927,30 +1016,8 @@ function stepX87(instruction, state, address){
                 return true;
             }
             state.status &= ~(Status.C2 | Status.C0 | Status.C3 | Status.C1);
-            let q = a / c;
-            if (Math.abs(q) < 2 ** 63)
-            {
-                q = op === 'fprem' ? Math.trunc(q) : roundBy(q, 0);
-                setSt(0, a - q * c);
-                const low = BigInt.asIntN(32, BigInt(Math.trunc(Math.abs(q))));
-                if ((low & 4n) !== 0n)
-                {
-                    state.status |= Status.C0;
-                }
-                if ((low & 2n) !== 0n)
-                {
-                    state.status |= Status.C3;
-                }
-                if ((low & 1n) !== 0n)
-                {
-                    state.status |= Status.C1;
-                }
-            }
-            else
-            {
-                setSt(0, a - Math.trunc(q * 2 ** -32) * 2 ** 32 * c);
-                state.status |= Status.C2;
-            }
+            setSt(0, remainder(a, c, op === 'fprem1'));
+            state.status |= remainderBits;
             return true;
         }
         case 'fadd': case 'fsub': case 'fsubr': case 'fmul': case 'fdiv': case 'fdivr':

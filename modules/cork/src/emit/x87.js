@@ -2129,10 +2129,14 @@ export function emitX87(e, instruction, flagsLive){
         }
         case 'fprem': case 'fprem1':
         {
-            // The partial remainder: ST0 - Q * ST1 with Q the quotient rounded
-            // toward zero (fprem) or to nearest (fprem1); when the quotient
-            // would not fit 64 bits only a partial reduction is done and C2
-            // says so. C0, C3 and C1 carry the quotient's bits 2, 1 and 0.
+            // The partial remainder: ST0 - Q * ST1 with Q the quotient
+            // rounded toward zero (fprem) or to nearest (fprem1), exact, and
+            // C0, C3 and C1 its bits 2, 1 and 0; past an exponent difference of
+            // 63 a partial reduction and C2. The host's (`remainder` in
+            // `ir-x87.js`, the interpreter's too), since its `%` is the exact
+            // IEEE fmod, where a quotient in doubles rounds.
+            const math = e.context.math;
+            const nearest = op === 'fprem1' ? 1 : 0;
             guard();
             b.localGet(st(0)).localSet(x.temp);
             b.localGet(st(1)).localSet(x.temp2);
@@ -2148,31 +2152,11 @@ export function emitX87(e, instruction, flagsLive){
             indefinite();
             b.localSet(st(0));
             b.else();
+            b.localGet(x.temp).localGet(x.temp2).i32const(nearest).call(math.fpremStatus);
             b.localGet(Local.x87Status).i32const(~(Status.C2 | Status.C0 | Status.C3 | Status.C1))
-                .op(I32.and).localSet(Local.x87Status);
-            // The quotient, and whether its magnitude fits.
-            b.localGet(x.temp).localGet(x.temp2).op(F64.div).localSet(x.temp3);
-            b.localGet(x.temp3).op(F64.abs).f64const(2 ** 63).op(F64.lt);
-            e.openIf('fits', EMPTY);
-            b.localGet(x.temp3).op(op === 'fprem' ? F64.trunc : F64.nearest).localSet(x.temp3);
-            b.localGet(x.temp).localGet(x.temp3).localGet(x.temp2).op(F64.mul).op(F64.sub)
+                .op(I32.and).op(I32.or).localSet(Local.x87Status);
+            b.localGet(x.temp).localGet(x.temp2).i32const(nearest).call(math.fprem)
                 .localSet(st(0));
-            // The low three bits of the quotient into C0 (bit 2), C3 (bit 1), C1 (bit 0).
-            b.localGet(x.temp3).op(F64.abs).op(TRUNC_SAT_I64[0], [TRUNC_SAT_I64[1]]).op(I64.wrap)
-                .localSet(Local.t2);
-            b.localGet(Local.t2).i32const(4).op(I32.and).i32const(Status.C0 / 4).op(0x6c);
-            b.localGet(Local.t2).i32const(2).op(I32.and).i32const(Status.C3 / 2).op(0x6c)
-                .op(I32.or);
-            b.localGet(Local.t2).i32const(1).op(I32.and).i32const(Status.C1).op(0x6c).op(I32.or);
-            b.localGet(Local.x87Status).op(I32.or).localSet(Local.x87Status);
-            b.else();
-            // Partial: reduce by the quotient scaled down to fit, C2 set.
-            b.localGet(x.temp3).f64const(2 ** -32).op(F64.mul).op(F64.trunc).f64const(2 ** 32)
-                .op(F64.mul).localSet(x.temp3);
-            b.localGet(x.temp).localGet(x.temp3).localGet(x.temp2).op(F64.mul).op(F64.sub)
-                .localSet(st(0));
-            setStatus(Status.C2);
-            e.close();
             e.close();
             dirty(0);
             return finish();

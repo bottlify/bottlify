@@ -310,7 +310,14 @@ read the MXCSR rounding control the same way; a NaN an operation makes carries t
 processor's negative sign whatever the host's default NaN is; exception masks are not
 honoured, an exception behaves as masked. The transcendentals (`fsin`, `fcos`, `fsincos`,
 `fptan`, `fpatan`, `f2xm1`, `fyl2x`, `fyl2xp1`) go through the host's `Math`, imported by every
-translated module, as the emulator's do, so the two agree on one engine. `fnstenv` and
+translated module, as the emulator's do, so the two agree on one engine. `fprem` and `fprem1` go
+through the host too (the `fprem` and `fpremStatus` imports, the interpreter's own `remainder` in
+`ir-x87.js`), exactly: JS's `%` is the IEEE fmod, `fprem1`'s quotient rounded to nearest moves that
+remainder by the divisor exactly, and the quotient's low bits for C0, C3 and C1 come from the
+remainder of eight times the divisor; both tiers had computed `a - trunc(a / c) * c` in doubles, so a
+quotient that rounded up gave a remainder of the wrong sign and bits off by one, and one past 2^53 lost
+the remainder. Past an exponent difference of 63 the reduction is partial, C2 set, by 32 plus the
+difference mod 32 bits, so a loop of them ends at the exact remainder. `fnstenv` and
 `fnsave` write the protected-mode environment as the emulator does (the instruction and data
 pointers zero, which neither keeps); `fldenv` and `frstor` read it back into the locals and
 leave for the next block, since the top they set is known only at run time and every block

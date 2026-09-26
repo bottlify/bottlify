@@ -54,6 +54,7 @@ import { importHelpers } from './helpers.js';
 import { Tables, blockSlot } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
 import { inlineReturns } from '../region.js';
+import { fpremStatus, fpremValue } from '../ir-x87.js';
 import {
     isX87, prepareX87, regionHasMmx, sameState, x87BlockEnd, x87BlockStart,
     x87Edge, x87EntryCheck, x87Epilogue, x87LoadRegisters, x87Normalise,
@@ -61,11 +62,12 @@ import {
 } from './x87.js';
 
 /**
- * The host functions a module imports for the transcendentals, by name; an
- * instantiation supplies each from `Math` (`mathImports()`).
+ * The host functions a module imports for the transcendentals and the partial
+ * remainder, by name; an instantiation supplies each (`mathImports()`), the
+ * transcendentals from `Math`.
  */
 export const MATH_IMPORTS = Object.freeze([
-    'sin', 'cos', 'tan', 'atan2', 'exp2m1', 'log2', 'log1p',
+    'sin', 'cos', 'tan', 'atan2', 'exp2m1', 'log2', 'log1p', 'fprem', 'fpremStatus',
 ]);
 
 /**
@@ -106,6 +108,7 @@ export function mathImports(){
         /** @param {number} x */
         exp2m1: x=>Math.expm1(x * Math.LN2),
         log2: Math.log2, log1p: Math.log1p,
+        fprem: fpremValue, fpremStatus,
     };
 }
 
@@ -238,14 +241,24 @@ export function prepareModule(m, layout, features, memory = {},
     // cork's clock under cork -- so `rdtsc` needs no crossing and the two agree.
     const rdtsc = m.importFunction('env', 'rdtsc',
         m.type({ params: [], results: [ValType.i64] }));
-    // The transcendentals wasm has no operation for, as the host's Math.
+    // The transcendentals wasm has no operation for, as the host's Math, and
+    // the partial remainder, whose exact fmod is the host's `%`.
     const unary = m.type({ params: [ValType.f64], results: [ValType.f64] });
-    const binary = m.type({ params: [ValType.f64, ValType.f64], results: [ValType.f64] });
+    /** @type {Record<string, number>} the others' types, by name */
+    const types = {
+        atan2: m.type({ params: [ValType.f64, ValType.f64], results: [ValType.f64] }),
+        fprem: m.type({
+            params: [ValType.f64, ValType.f64, ValType.i32], results: [ValType.f64],
+        }),
+        fpremStatus: m.type({
+            params: [ValType.f64, ValType.f64, ValType.i32], results: [ValType.i32],
+        }),
+    };
     /** @type {Record<string, number>} */
     const math = {};
     for (const name of MATH_IMPORTS)
     {
-        math[name] = m.importFunction('env', name, name === 'atan2' ? binary : unary);
+        math[name] = m.importFunction('env', name, types[name] ?? unary);
     }
     const regionType = m.type({
         params: new Array(STATE_PARAMS).fill(ValType.i32), results: [ValType.i32],

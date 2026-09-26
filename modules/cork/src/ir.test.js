@@ -513,6 +513,42 @@ test('a quadword fild stored by a quadword fistp or fisttp copies all eight byte
     assert.equal(written.view.getBigInt64(0x2008, true), 0x0123456789abcdf0n, 'fchs twice rounds');
 });
 
+test('fprem and fprem1 leave the exact remainder, and the quotient\'s low bits in C0 C3 C1', ()=>{
+    // [ST0, ST1, fprem's remainder and quotient mod 8, fprem1's], worked out
+    // in integers; the translator's test holds it to the same.
+    /** @type {[number, number, number, number, number, number][]} */
+    const cases = [
+        [3736.3244596153145, 7.049668791727009, 7.04966879172678, 1, -2.291500322826323e-13, 2],
+        [1e17, 7, 5, 5, -2, 6],
+        [-1e17, 7, -5, 5, 2, 6],
+        [2 ** 63 + 2 ** 11, 3, 1, 5, 1, 5],
+        [100, 2 * Math.PI, 5.7522203923062065, 7, -0.5309649148733797, 0],
+    ];
+    /** @param {number} low */
+    const bits = low=>((low & 4) !== 0 ? 0x100 : 0) | ((low & 2) !== 0 ? 0x4000 : 0)
+        | ((low & 1) !== 0 ? 0x200 : 0);
+    for (const [a, c, rem, low, rem1, low1] of cases)
+    {
+        for (const [opcode, want, quotient] of [[0xf8, rem, low], [0xf5, rem1, low1]])
+        {
+            // fld qword [0x2000]; fld qword [0x2008]; fprem/fprem1; fstp qword [0x2010]
+            const m = run([0xdd, 0x05, 0x00, 0x20, 0, 0, 0xdd, 0x05, 0x08, 0x20, 0, 0, 0xd9, opcode,
+                0xdd, 0x1d, 0x10, 0x20, 0, 0], state=>{
+                const bytes = new DataView(new ArrayBuffer(16));
+                bytes.setFloat64(0, c, true);
+                bytes.setFloat64(8, a, true);
+                for (let i = 0; i < 16; i++)
+                {
+                    state.memory.write(0x2000 + i, 1, bytes.getUint8(i));
+                }
+            });
+            const name = `${opcode === 0xf8 ? 'fprem' : 'fprem1'}(${a}, ${c})`;
+            assert.equal(m.view.getFloat64(0x2010, true), want, name);
+            assert.equal(m.state.status & 0x4700, bits(quotient), `${name}: C0 C1 C2 C3`);
+        }
+    }
+});
+
 test('the x87 memory forms by words: single precision, a negative quadword, a signalling NaN', ()=>{
     // fld qword [0x2000]; fmul qword [0x2008]; fistp qword [0x2010] under
     // single precision: the product rounded to 24 bits, stored whole.
