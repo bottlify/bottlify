@@ -519,6 +519,10 @@ with nothing retired -- a loop spinning for ever with the budget untouched the m
 met a page it could not use. Held, it returns to the host, which interprets the instruction.
 All the windows tested at one place share one such exit.
 
+That probe takes EIP 0 for a miss before it looks: an empty slot's key is 0, so a jump to address
+0 -- a call through a null pointer -- took the first empty slot it met for an entry and ran some
+region's code with its label, where the processor faults on the fetch.
+
 A block that loops onto itself is taken further (`planLoop` and `emitStreamWindow` in
 `emit/memory.js`, `emitHoistedLoop` in `emit/region.js`): when a register its accesses go off
 holds at the end of a turn the value it held at the start moved by a constant (the planner's

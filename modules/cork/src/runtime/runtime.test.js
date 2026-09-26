@@ -526,6 +526,21 @@ test('the runtime refuses a memory that has no room for its tables', ()=>{
     }), /before the tables/);
 });
 
+test('a jump to address 0 misses the entry hash, whose empty slots are keyed 0', async()=>{
+    // A call through a null pointer: EIP 0 has no translation, so the run
+    // leaves for it untranslated, where the fetch there faults as the
+    // processor's would, rather than taking an empty slot's label and index.
+    const m = machine();
+    // xor eax, eax; jmp eax
+    m.write(CODE, [0x31, 0xc0, 0xff, 0xe0]);
+    m.runtime.noteHot(CODE);
+    assert.ok(await m.runtime.translatePending() >= 1);
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1000);
+    assert.equal(exit.kind, 'untranslated');
+    assert.equal(m.eip(), 0);
+    assert.equal(exit.retired, 2);
+});
+
 test('a hot region\'s direct callee lands in the same batch, and the call transfers', async()=>{
     // The callee kept out of its caller, so the call is a transfer.
     const m = machine({ leafCalls: false });

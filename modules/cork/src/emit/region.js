@@ -413,6 +413,9 @@ export function finishModule(context, functions){
     };
     b.block(EMPTY); // miss
     b.block(EMPTY); // found
+    // An empty slot's key is 0, so EIP 0 -- a call through a null pointer --
+    // would take the first empty slot it met for an entry.
+    b.localGet(eip).op(I32.eqz).brIf(1);
     b.localGet(eip).i32const(0x9e3779b1 | 0).op(I32.mul).i32const(layout.hashShift ?? 16)
         .op(I32.shrU)
         .localSet(index);
