@@ -38,7 +38,7 @@ import {
     DDSCAPS2_MIPMAPSUBLEVEL, DDSCAPS_BACKBUFFER, DDSCAPS_COMPLEX, DDSCAPS_FLIP, DDSCAPS_MIPMAP,
     DDSCAPS_OFFSCREENPLAIN, DDSCAPS_PRIMARYSURFACE, DDSCAPS_TEXTURE, DDSCL_EXCLUSIVE,
     DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT,
-    DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
+    DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK, DDERR_UNSUPPORTED,
 } from '../ddraw/constants.js';
 
 const HWND = 0x00010044;
@@ -1330,6 +1330,64 @@ test('without a way into the guest an enumeration names nothing and succeeds', (
     assert.equal(method.invoke(root, [0, 0, 0, 0x1234]), DD_OK);
     assert.equal(root.release('IDirectDraw7'), 0);
 });
+
+test('DirectDrawEnumerate names the primary display driver to its callback, the ANSI forms only',
+    async()=>{
+        // ddrawmodes.c 129-308: a null callback is DDERR_INVALIDPARAMS, the
+        // context reaches the callback, the primary device is one callback
+        // with a null GUID, Ex refuses unknown flags; the wide forms are not
+        // implemented on Windows and say DDERR_UNSUPPORTED.
+        const box = machine();
+        /** @type {{ entry: number, args: number[], description: string, name: string }[]} */
+        const calls = [];
+        /** @param {number} at */
+        const text = at=>{
+            const end = box.bytes.indexOf(0, at);
+            return String.fromCharCode(...box.bytes.subarray(at, end));
+        };
+        const libraries = createGraphicsLibraries({
+            graphics: { create: ()=>null, available: ()=>false },
+            memory: box.services,
+            publishInterface: box.publishInterface,
+            screen: ()=>SCREEN,
+            callGuest: async({ entry, args })=>{
+                calls.push({ entry, args, description: text(args[1]), name: text(args[2]) });
+                return 1;
+            },
+            scratch: { allocate: box.allocateSurface },
+        }).libraries['DDRAW.dll'];
+
+        assert.equal(await libraries.DirectDrawEnumerateA.handler([0, 0]), DDERR_INVALIDPARAMS);
+        assert.equal(await libraries.DirectDrawEnumerateA.handler([0x1234, 0xdeadbeef]), DD_OK);
+        assert.equal(calls.length, 1, 'one device: the primary');
+        assert.deepEqual(calls[0], { entry: 0x1234, args: calls[0].args,
+            description: 'Primary Display Driver', name: 'display' });
+        assert.equal(calls[0].args.length, 4);
+        assert.equal(calls[0].args[0], 0, 'the primary is named by a null GUID');
+        assert.equal(calls[0].args[3], 0xdeadbeef, 'the context travels');
+
+        calls.length = 0;
+        const ex = libraries.DirectDrawEnumerateExA;
+        assert.equal(ex.argBytes, 12);
+        assert.equal(await ex.handler([0, 0, 0]), DDERR_INVALIDPARAMS);
+        assert.equal(await ex.handler([0x1234, 0, ~0]), DDERR_INVALIDPARAMS, 'unknown flags');
+        assert.equal(calls.length, 0);
+        assert.equal(await ex.handler([0x1234, 0x77, 7]), DD_OK, 'every documented flag');
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].args.length, 5, 'and a monitor');
+        assert.deepEqual([calls[0].args[0], calls[0].args[3], calls[0].args[4]], [0, 0x77, 0],
+            'the primary device has no monitor handle of its own');
+
+        calls.length = 0;
+        assert.equal(await libraries.DirectDrawEnumerateW.handler([0, 0]), DDERR_INVALIDPARAMS);
+        assert.equal(await libraries.DirectDrawEnumerateW.handler([0x1234, 0]),
+            DDERR_UNSUPPORTED);
+        assert.equal(await libraries.DirectDrawEnumerateExW.handler([0x1234, 0, 0]),
+            DDERR_UNSUPPORTED);
+        assert.equal(await libraries.DirectDrawEnumerateExW.handler([0, 0, 0]),
+            DDERR_UNSUPPORTED);
+        assert.equal(calls.length, 0, 'the wide forms call nothing');
+    });
 
 test('GetDeviceIdentifier names the driver DLL and the adapter, and fills its own layout only',
     ()=>{

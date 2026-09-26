@@ -287,15 +287,28 @@ export function createGraphicsLibraries(
             },
 
             /**
-             * HRESULT DirectDrawEnumerateA(LPDDENUMCALLBACKA, LPVOID)
-             *
-             * Enumeration needs to call back into guest code once per device.
-             * There is one device and the callback machinery is the bridge's,
-             * not this table's, so this reports success having enumerated
-             * nothing -- which a caller reads as "no secondary devices" and
-             * handles, since that is the common case on a real machine.
+             * HRESULT DirectDrawEnumerateA(LPDDENUMCALLBACKA, LPVOID), its Ex
+             * form with flags and a monitor, and the two wide forms. Each
+             * calls back into guest code once per device, so the answer is a
+             * promise the bridge parks the caller on.
              */
-            DirectDrawEnumerateA: { argBytes: 8, handler: ()=>DD_OK },
+            DirectDrawEnumerateA: {
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([callback, context])=>ddraw.enumerate.ansi(callback, context),
+            },
+            DirectDrawEnumerateExA: {
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([callback, context, flags])=>
+                    ddraw.enumerate.ansiEx(callback, context, flags),
+            },
+            DirectDrawEnumerateW: {
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([callback])=>ddraw.enumerate.wide(callback),
+            },
+            DirectDrawEnumerateExW: { argBytes: 12, handler: ()=>ddraw.enumerate.wideEx() },
 
             /**
              * HRESULT DirectDrawCreateClipper(DWORD, LPDIRECTDRAWCLIPPER*, IUnknown*)

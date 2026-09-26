@@ -101,6 +101,9 @@ const SURFACE_CAPS = (DDSCAPS_BACKBUFFER | DDSCAPS_COMPLEX | DDSCAPS_FLIP | DDSC
 /** What an enumeration callback answers to go on, and to stop. */
 const DDENUMRET_CANCEL = 0;
 
+/** DirectDrawEnumerateEx flags: which devices besides the primary to name. */
+const DDENUM_KNOWN = 0x00000007;
+
 /** EnumSurfaces flags: which surfaces the caller wants named. */
 const DDENUMSURFACES_ALL = 0x00000001;
 const DDENUMSURFACES_MATCH = 0x00000002;
@@ -1409,6 +1412,38 @@ export function createDirectDrawSeam(
         },
     });
 
+    /**
+     * Names the one DirectDraw device there is to a program's callback: the
+     * primary display driver, which a program then creates by passing a null
+     * GUID. The Ex form's callback takes a monitor handle as well, and the
+     * primary device's is null -- it is the whole desktop, not one monitor.
+     * Without a way into the guest nothing is named, and the program sees a
+     * machine with no devices to choose between.
+     *
+     * @param {number} callback @param {number} context @param {boolean} withMonitor
+     * @returns {number | Promise<number>}
+     */
+    const enumerateDevices = (callback, context, withMonitor)=>{
+        if (!canEnumerate())
+        {
+            return DD_OK;
+        }
+        const call = /** @type {NonNullable<typeof callGuest>} */ (callGuest);
+        const at = descriptorScratch();
+        const name = at + 0x40;
+        for (const [where, text] of /** @type {const} */ ([
+            [at, 'Primary Display Driver'], [name, 'display'],
+        ]))
+        {
+            memory.writeMemory(where, Uint8Array.from([...text, '\0'], c=>c.charCodeAt(0)));
+        }
+        return call({
+            entry: callback,
+            args: [0, at, name, context, ...(withMonitor ? [0] : [])],
+            thread: currentThread?.(),
+        }).then(()=>DD_OK);
+    };
+
     /** Every generation, so a QueryInterface across them succeeds. */
     const ddrawInterfaces = [
         .../** @type {[1, 2, 4, 7]} */ ([1, 2, 4, 7]).map(version=>
@@ -1464,6 +1499,26 @@ export function createDirectDrawSeam(
          */
         publishRoot: (root, version)=>
             publisher.publish(facadeOf(root), ddrawInterfaces, GENERATIONS[version].id),
+
+        /**
+         * DirectDrawEnumerate, in the four forms DDRAW.dll exports. The wide
+         * ones were never implemented by the runtime and answer that they are
+         * not, having called nothing; a null callback is refused first.
+         */
+        enumerate: {
+            /** @param {number} callback @param {number} context */
+            ansi: (callback, context)=>((callback >>> 0) === 0
+                ? DDERR_INVALIDPARAMS
+                : enumerateDevices(callback >>> 0, context >>> 0, false)),
+            /** @param {number} callback @param {number} context @param {number} flags */
+            ansiEx: (callback, context, flags)=>((callback >>> 0) === 0
+                || (flags & ~DDENUM_KNOWN) !== 0
+                ? DDERR_INVALIDPARAMS
+                : enumerateDevices(callback >>> 0, context >>> 0, true)),
+            /** @param {number} callback */
+            wide: callback=>((callback >>> 0) === 0 ? DDERR_INVALIDPARAMS : DDERR_UNSUPPORTED),
+            wideEx: ()=>DDERR_UNSUPPORTED,
+        },
 
         /** For tests, which have no guest to call through. */
         interfaces: {
