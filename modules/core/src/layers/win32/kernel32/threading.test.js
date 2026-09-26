@@ -959,3 +959,103 @@ test('a timer set without a routine queues nothing', ()=>{
 
     assert.equal(kernel.handles.resolve(timer, 'timer').fired, null);
 });
+
+test('SwitchToThread answers zero at once when no other thread is ready', ()=>{
+    const { fns, kernel, parked, current } = setup();
+    /** @type {any} */ (kernel).threads = ()=>[current, { state: 'blocked' },
+        { state: 'ready', awaitingHost: true }];
+    assert.equal(fns.SwitchToThread.handler(), 0);
+    assert.deepEqual(parked, []);
+    assert.deepEqual(kernel.state.blocked, []);
+    assert.equal(fns.SwitchToThread.argBytes, 0);
+});
+
+test('SwitchToThread stands aside for a ready thread and answers nonzero when it runs again',
+    ()=>{
+        const { fns, kernel, parked, current } = setup();
+        kernel.state.now = 500;
+        current.priority = 0;
+        /** @type {any} */ (kernel).threads = ()=>[current, { state: 'ready', priority: 0 }];
+        assert.equal(fns.SwitchToThread.handler(), PARKED);
+        assert.deepEqual(parked, [current]);
+        assert.deepEqual(kernel.state.blocked, [{ thread: current, reason: 'SwitchToThread',
+            timed: { deadline: 500, result: 1 } }], 'behind one of its own priority, no longer');
+
+        /** @type {any} */ (kernel).threads = ()=>[current, { state: 'ready', priority: -2 }];
+        current.priority = 2;
+        fns.SwitchToThread.handler();
+        assert.deepEqual(kernel.state.blocked[1].timed, { deadline: 501, result: 1 },
+            'a lower priority gets a moment of guest time, as the scheduler would pick the '
+            + 'caller again at once');
+    });
+
+/**
+ * An OVERLAPPED in guest memory at 0x20, and a count at 0x40.
+ *
+ * @param {ReturnType<typeof setup>} parts
+ * @param {number} internal @param {number} internalHigh @param {number} [event]
+ */
+function overlapped({ host }, internal, internalHigh, event = 0){
+    const bytes = new Uint8Array(0x100);
+    const view = new DataView(bytes.buffer);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.writeMemory = (address, data)=>bytes.set(data, address);
+    view.setUint32(0x20, internal, true);
+    view.setUint32(0x24, internalHigh, true);
+    view.setUint32(0x30, event, true);
+    view.setUint32(0x40, 0x5555, true);
+    return { count: ()=>view.getUint32(0x40, true), view };
+}
+
+test('GetOverlappedResult reads the count and the status the I/O left in the OVERLAPPED', ()=>{
+    // Wine's kernel32 file tests, test_overlapped.
+    const STATUS_INVALID_HANDLE = 0xc0000008;
+    const parts = setup();
+    const done = overlapped(parts, 0, 0xabcd);
+    assert.equal(parts.fns.GetOverlappedResult.handler([0, 0x20, 0x40, 0]), 1);
+    assert.equal(done.count(), 0xabcd);
+    assert.equal(parts.fns.GetOverlappedResult.argBytes, 16);
+
+    const failed = overlapped(parts, STATUS_INVALID_HANDLE, 0xabcd);
+    assert.equal(parts.fns.GetOverlappedResult.handler([0, 0x20, 0x40, 0]), 0);
+    assert.equal(parts.errors.at(-1), 6, 'ERROR_INVALID_HANDLE, from the status');
+    assert.equal(failed.count(), 0xabcd, 'the count is written all the same');
+});
+
+test('an operation still pending is incomplete without bWait, and waited for with it', ()=>{
+    const STATUS_PENDING = 0x103;
+    const ERROR_IO_INCOMPLETE = 996;
+    const parts = setup();
+    const { fns, kernel, parked, current } = parts;
+    const event = fns.CreateEventA.handler([0, 1, 1, 0]);
+    const pending = overlapped(parts, STATUS_PENDING, 0xabcd, event);
+    assert.equal(fns.GetOverlappedResult.handler([0, 0x20, 0x40, 0]), 0);
+    assert.equal(parts.errors.at(-1), ERROR_IO_INCOMPLETE);
+    assert.equal(pending.count(), 0x5555, 'and the count is left alone');
+
+    /** @type {any[]} */
+    const sets = [];
+    /** @type {any} */ (kernel).waitAny = (/** @type {any[]} */ objects)=>{
+        sets.push(objects);
+        const index = objects.findIndex(object=>object.signalled);
+        return index < 0 ? null : { index, result: index };
+    };
+    assert.equal(fns.GetOverlappedResult.handler([0, 0x20, 0x40, 1]), 1,
+        'a signalled event ends the wait at once, the status still pending');
+    assert.equal(pending.count(), 0xabcd);
+    const object = kernel.handles.resolve(event, 'event');
+    assert.equal(sets[0][1], object, 'the event awaited is the one the OVERLAPPED names');
+    assert.equal(sets[0][0].signalled, false, 'behind one nothing sets');
+
+    kernel.resetEvent(object);
+    pending.view.setUint32(0x30, event | 1, true);
+    assert.equal(fns.GetOverlappedResult.handler([0, 0x20, 0x40, 1]), PARKED,
+        'the low bit of hEvent is a flag, not part of the handle');
+    assert.deepEqual(parked, [current]);
+    assert.equal(sets[1][1], object);
+
+    pending.view.setUint32(0x30, 0, true);
+    assert.equal(fns.GetOverlappedResult.handler([0x9999, 0x20, 0x40, 1]), 0,
+        'with no event the file is waited on, and it must be a handle');
+    assert.equal(parts.errors.at(-1), 6);
+});
