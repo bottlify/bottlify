@@ -224,17 +224,31 @@ test('the current viewport is held by the device, and the third generation lets 
         assert.equal(first.release(), 0);
     });
 
-test('the second generation keeps holding a current viewport it deletes', ()=>{
+test('the second generation never gives back the reference that made a viewport current', ()=>{
+    // Wine's ddraw2.c test_viewport_object, whose counts Windows meets and
+    // Wine marks todo: the reference leaks on delete and on the device's end.
     const f = fixture(2);
-    const viewport = f.legacy.createViewport();
-    f.device.addViewport(viewport);
-    f.device.setCurrentViewport(viewport);
-    assert.equal(viewport.refCount, 3);
-    assert.equal(f.device.deleteViewport(viewport), D3D_OK);
-    assert.equal(viewport.refCount, 2, 'only the list\'s reference went');
+    const deleted = f.legacy.createViewport();
+    f.device.addViewport(deleted);
+    f.device.setCurrentViewport(deleted);
+    assert.equal(deleted.refCount, 3);
+    assert.equal(f.device.deleteViewport(deleted), D3D_OK);
+    assert.equal(deleted.refCount, 2, 'only the list\'s reference went');
+    assert.equal(f.device.getCurrentViewport().hr, D3DERR_NOCURRENTVIEWPORT,
+        'though it is current no more');
+
+    const kept = f.legacy.createViewport();
+    f.device.addViewport(kept);
+    f.device.setCurrentViewport(kept);
+    assert.equal(deleted.refCount, 2, 'a new current viewport does not free the old reference');
+    assert.equal(kept.refCount, 3);
     f.done();
-    assert.equal(viewport.refCount, 1);
-    assert.equal(viewport.release(), 0);
+    assert.equal(kept.refCount, 2, 'the device\'s end leaves the current viewport\'s reference');
+    for (const viewport of [deleted, kept])
+    {
+        viewport.release();
+        assert.equal(viewport.release(), 0);
+    }
 });
 
 test('the current viewport sets the rectangle and carries its clip volume on the projection', ()=>{

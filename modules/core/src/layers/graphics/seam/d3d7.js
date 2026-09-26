@@ -1108,7 +1108,7 @@ export function createDirect3D7Seam(
          */
         shared: {
             d3dFor, deviceMethods, bufferMethods, d3dMethods, gatherStrided, readArray, readFloats,
-            strideOf, writeString,
+            strideOf, writeString, textureDepths: TEXTURE_DEPTHS,
         },
     };
 }

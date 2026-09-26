@@ -1014,6 +1014,9 @@ function createLegacyDevice(inner, version, legacy){
          * The last reference takes the viewports with it, and the Direct3D 7
          * device, which holds the target (Wine's ddraw4.c test_viewport_object:
          * the device's release leaves a viewport at the program's own count).
+         * Before the third generation the current viewport's reference is
+         * not given back (ddraw2.c test_viewport_object, where Windows keeps
+         * it and Wine does not yet).
          */
         release(){
             count--;
@@ -1026,7 +1029,10 @@ function createLegacyDevice(inner, version, legacy){
                 viewport.detach();
                 viewport.release();
             }
-            current?.release();
+            if (version >= 3)
+            {
+                current?.release();
+            }
             current = null;
             inner.release();
             return 0;
@@ -1047,9 +1053,10 @@ function createLegacyDevice(inner, version, legacy){
         },
 
         /**
-         * The third generation also lets go of the current viewport when it
-         * is the one deleted; the second keeps holding it (Wine's ddraw4.c
-         * test_viewport_object).
+         * A deleted current viewport is current no more. The third
+         * generation gives back the reference that made it current; the
+         * older ones keep it, and nothing ever releases it (Wine's ddraw4.c
+         * and ddraw2.c test_viewport_object).
          *
          * @param {any} viewport
          */
@@ -1061,10 +1068,13 @@ function createLegacyDevice(inner, version, legacy){
             }
             viewports.splice(index, 1);
             viewport.detach();
-            if (current === viewport && version >= 3)
+            if (current === viewport)
             {
                 current = null;
-                viewport.release();
+                if (version >= 3)
+                {
+                    viewport.release();
+                }
             }
             viewport.release();
             return D3D_OK;

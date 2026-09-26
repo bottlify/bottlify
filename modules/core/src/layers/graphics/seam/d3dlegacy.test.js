@@ -23,13 +23,15 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
-import { IDIRECTDRAW4_SLOTS, IDIRECTDRAWSURFACE4_SLOTS } from './vtables.js';
+import { IDIRECTDRAW2_SLOTS, IDIRECTDRAW4_SLOTS, IDIRECTDRAWSURFACE4_SLOTS } from './vtables.js';
 import {
-    IDIRECT3D3_SLOTS, IDIRECT3DDEVICE3_SLOTS, IDIRECT3DLIGHT_SLOTS, IDIRECT3DMATERIAL3_SLOTS,
-    IDIRECT3DTEXTURE2_SLOTS, IDIRECT3DVERTEXBUFFER_SLOTS, IDIRECT3DVIEWPORT3_SLOTS,
+    IDIRECT3D2_SLOTS, IDIRECT3D3_SLOTS, IDIRECT3DDEVICE2_SLOTS, IDIRECT3DDEVICE3_SLOTS,
+    IDIRECT3DLIGHT_SLOTS, IDIRECT3DMATERIAL3_SLOTS, IDIRECT3DTEXTURE2_SLOTS,
+    IDIRECT3DVERTEXBUFFER_SLOTS, IDIRECT3DVIEWPORT3_SLOTS,
 } from './vtables-ddraw.js';
 import {
-    IID_IDirect3D, IID_IDirect3D3, IID_IDirect3D7, IID_IDirect3DDevice7,
+    IID_IDirect3D, IID_IDirect3D2, IID_IDirect3D3, IID_IDirect3D7, IID_IDirect3DDevice2,
+    IID_IDirect3DDevice3, IID_IDirect3DDevice7, IID_IDirectDraw2,
     IID_IDirect3DMaterial, IID_IDirect3DMaterial2, IID_IDirect3DTexture, IID_IDirect3DTexture2,
     IID_IDirect3DVertexBuffer, IID_IDirect3DVertexBuffer7, IID_IDirect3DViewport,
     IID_IDirect3DViewport2, IID_IDirect3DViewport3, IID_IDirectDraw4,
@@ -42,7 +44,7 @@ import {
 import { D3DPRIMCAPS, D3DVERTEXBUFFERDESC } from './structs.js';
 import { guidBytes } from './d3d7.js';
 import { createDirectDraw } from '../ddraw/objects.js';
-import { DDSURFACEDESC2, writeSurfaceDesc } from '../ddraw/structs.js';
+import { DDSURFACEDESC, DDSURFACEDESC2, writeSurfaceDesc } from '../ddraw/structs.js';
 import {
     DDCKEY_SRCBLT, DDERR_NOCOLORKEY, DDPF_RGB, DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN,
     DDSCAPS_TEXTURE, DDSCL_NORMAL, DDSD_CAPS, DDSD_HEIGHT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
@@ -245,6 +247,42 @@ function seamed(observe = ()=>null){
                 [HWND, DDSCL_NORMAL]), DD_OK);
             return fourth.pointer;
         },
+        /** An IDirectDraw2 under a cooperative level, as DirectX 5 programs make one. */
+        create2(){
+            assert.equal(ddrawDll.DirectDrawCreate.handler([0, 0x4100, 0]), DD_OK);
+            const first = box.memory.readU32(0x4100);
+            const second = query(first, IID_IDirectDraw2);
+            assert.equal(second.hr, DD_OK);
+            assert.equal(h.release(first), 0);
+            assert.equal(box.call(second.pointer, slot(IDIRECTDRAW2_SLOTS, 'SetCooperativeLevel'),
+                [HWND, DDSCL_NORMAL]), DD_OK);
+            return second.pointer;
+        },
+        /** @param {number} ddraw an IDirectDraw2 @returns {number} an IDirectDrawSurface */
+        surface2(ddraw){
+            const at = 0x5000;
+            box.bytes.fill(0, at, at + DDSURFACEDESC.SIZE);
+            writeSurfaceDesc(box.services, at, DDSURFACEDESC, {
+                flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
+                width: 8, height: 8, pitch: 0, backBufferCount: 0, mipMapCount: 0,
+                caps: DDSCAPS_3DDEVICE | DDSCAPS_OFFSCREENPLAIN, caps2: 0, pixelFormat: XRGB32,
+            });
+            assert.equal(box.call(ddraw, slot(IDIRECTDRAW2_SLOTS, 'CreateSurface'),
+                [at, 0x5100, 0]), DD_OK);
+            return box.memory.readU32(0x5100);
+        },
+        /** @param {number} ddraw an IDirectDraw2 */
+        createDevice2(ddraw){
+            const d3d = query(ddraw, IID_IDirect3D2).pointer;
+            const target = h.surface2(ddraw);
+            const riid = box.putGuid(0x4300, DEVICE_IDS.HAL);
+            assert.equal(box.call(d3d, slot(IDIRECT3D2_SLOTS, 'CreateDevice'),
+                [riid, target, 0x4400]), D3D_OK);
+            return { d3d, target, device: box.memory.readU32(0x4400) };
+        },
+        /** @param {number} device @param {string} name @param {number[]} args */
+        device2: (device, name, args = [])=>
+            box.call(device, slot(IDIRECT3DDEVICE2_SLOTS, name), args),
         /** @param {number} ddraw */
         direct3D(ddraw){
             const made = query(ddraw, IID_IDirect3D3);
@@ -854,3 +892,177 @@ test('an IDirectDrawSurface4 still answers its own slots beside the texture ones
     h.release(ddraw);
     h.assertAllReleased();
 });
+
+// --- DirectX 5: IDirect3D2 and IDirect3DDevice2 (Wine's ddraw2.c) ---
+
+test('IDirect3D2 makes a second-generation device that the third answers too', ()=>{
+    const h = seamed();
+    const ddraw = h.create2();
+    const model = h.roots[0];
+    const { d3d, target, device } = h.createDevice2(ddraw);
+    assert.equal(model.refCount('IDirectDraw2'), 2, 'IDirect3D2 counts with IDirectDraw2');
+    assert.equal(h.countOf(device), 1);
+    assert.equal(h.query(device, IID_IDirect3DDevice3).hr, E_NOINTERFACE,
+        'a second-generation device is no third');
+    const unknown = h.query(device, '{00000000-0000-0000-C000-000000000046}');
+    assert.equal(h.countOf(device), 2);
+    h.release(unknown.pointer);
+
+    assert.equal(h.device2(device, 'GetDirect3D', [0x4500]), D3D_OK);
+    assert.equal(h.box.memory.readU32(0x4500), d3d);
+    h.release(d3d);
+    assert.equal(h.device2(device, 'GetRenderTarget', [0x4500]), D3D_OK);
+    assert.equal(h.box.memory.readU32(0x4500), target, 'the IDirectDrawSurface it was made on');
+    h.release(target);
+    assert.equal(h.device2(device, 'GetRenderState', [RS_SPECULARENABLE, 0x4600]), D3D_OK);
+    assert.equal(h.box.memory.readU32(0x4600), 1, 'specular starts on before the third');
+
+    // A third-generation device answers IDirect3DDevice2, and hands back
+    // through it what the second generation's tables read.
+    const fourth = h.create4();
+    const made = h.createDevice(fourth);
+    const second = h.query(made.device, IID_IDirect3DDevice2);
+    assert.equal(second.hr, DD_OK);
+    assert.equal(h.countOf(made.device), 2, 'one count for both');
+    assert.equal(h.device2(second.pointer, 'GetRenderTarget', [0x4500]), D3D_OK);
+    const asFirst = h.box.memory.readU32(0x4500);
+    assert.notEqual(asFirst, made.target, 'an IDirectDrawSurface, not the IDirectDrawSurface4');
+    assert.equal(h.publisher.objectAt(asFirst), h.publisher.objectAt(made.target));
+    h.release(asFirst);
+    h.release(second.pointer);
+    assert.equal(h.release(made.device), 0);
+    h.release(made.target);
+    h.release(fourth);
+
+    assert.equal(h.release(device), 0);
+    h.release(target);
+    h.release(d3d);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('a second-generation draw names its vertices by D3DVERTEXTYPE', ()=>{
+    const h = seamed();
+    const ddraw = h.create2();
+    const { d3d, target, device } = h.createDevice2(ddraw);
+    const vertices = 0x7000;
+    h.box.bytes.fill(0, vertices, vertices + 4 * 32);
+    h.device2(device, 'BeginScene');
+    assert.equal(h.device2(device, 'DrawPrimitive', [D3DPT.TRIANGLESTRIP, 9, vertices, 4, 0]),
+        0x88760000 + 737, 'D3DERR_INVALIDVERTEXTYPE');
+    for (const type of [1, 2, 3])
+    {
+        assert.equal(h.device2(device, 'DrawPrimitive', [D3DPT.TRIANGLESTRIP, type, vertices, 4,
+            0]), D3D_OK, `D3DVERTEXTYPE ${type}`);
+    }
+    h.device2(device, 'EndScene');
+    const stats = 0x6400;
+    h.box.memory.writeU32(stats, D3DSTATS.SIZE);
+    h.device2(device, 'GetStats', [stats]);
+    assert.equal(h.box.memory.readU32(stats + D3DSTATS.dwTrianglesDrawn), 6);
+
+    assert.equal(h.release(device), 0);
+    h.release(target);
+    h.release(d3d);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('SwapTextureHandles trades the handles of two textures that both have one', ()=>{
+    const h = seamed();
+    const ddraw = h.create2();
+    const { d3d, target, device } = h.createDevice2(ddraw);
+    const texture = (/** @type {number} */ surface)=>
+        h.query(surface, IID_IDirect3DTexture2).pointer;
+    const handleOf = (/** @type {number} */ tex, /** @type {number} */ through)=>{
+        assert.equal(h.box.call(tex, slot(IDIRECT3DTEXTURE2_SLOTS, 'GetHandle'),
+            [through, 0x4600]), D3D_OK);
+        return h.box.memory.readU32(0x4600);
+    };
+    const firstSurface = h.surface2(ddraw);
+    const secondSurface = h.surface2(ddraw);
+    const first = texture(firstSurface);
+    const second = texture(secondSurface);
+
+    assert.equal(h.device2(device, 'SwapTextureHandles', [first, second]),
+        DDERR_INVALIDPARAMS >>> 0, 'E_INVALIDARG: neither has a handle');
+    const a = handleOf(first, device);
+    assert.equal(h.device2(device, 'SwapTextureHandles', [first, second]),
+        DDERR_INVALIDPARAMS >>> 0);
+
+    // A handle is the texture's: another DirectDraw object's device reads the same one.
+    const otherDdraw = h.create2();
+    const other = h.createDevice2(otherDdraw);
+    assert.equal(handleOf(first, other.device), a);
+    const b = handleOf(second, device);
+    assert.notEqual(a, b);
+    assert.equal(h.device2(device, 'SwapTextureHandles', [first, second]), D3D_OK);
+    assert.equal(handleOf(first, device), b);
+    assert.equal(handleOf(second, device), a);
+
+    assert.equal(h.device2(device, 'SetRenderState', [1, a]), D3D_OK);
+    h.device2(device, 'GetRenderState', [1, 0x4700]);
+    assert.equal(h.box.memory.readU32(0x4700), a);
+    h.device2(device, 'SetRenderState', [1, 0]);
+
+    h.release(first);
+    h.release(second);
+    assert.equal(h.release(firstSurface), 0);
+    assert.equal(h.release(secondSurface), 0);
+    for (const made of [other, { d3d, target, device }])
+    {
+        assert.equal(h.release(made.device), 0);
+        h.release(made.target);
+        h.release(made.d3d);
+    }
+    h.release(otherDdraw);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('IDirect3D2 describes its devices at DirectX 5\'s size, and names formats by surface',
+    async()=>{
+        const h = seamed((box, args)=>args.map(arg=>box.memory.readU32(arg)));
+        const ddraw = h.create2();
+        const d3d = h.query(ddraw, IID_IDirect3D2).pointer;
+        assert.equal(await h.box.callRaw(d3d, slot(IDIRECT3D2_SLOTS, 'EnumDevices'),
+            [0x1234, 0]), D3D_OK);
+        assert.equal(h.callbacks.length, 2);
+        // The fourth and fifth arguments are the two descriptions; each
+        // reads its own size first.
+        assert.deepEqual(h.callbacks.map(call=>call.seen.slice(3, 5)),
+            [[D3DDEVICEDESC.SIZE_V2, D3DDEVICEDESC.SIZE_V2],
+                [D3DDEVICEDESC.SIZE_V2, D3DDEVICEDESC.SIZE_V2]]);
+
+        const search = 0x6000;
+        const result = 0x6100;
+        h.box.bytes.fill(0, search, search + 0x300);
+        h.box.memory.writeU32(search, D3DFINDDEVICESEARCH.SIZE);
+        h.box.memory.writeU32(result,
+            D3DFINDDEVICERESULT.ddHwDesc + 2 * D3DDEVICEDESC.SIZE_V2);
+        assert.equal(h.box.call(d3d, slot(IDIRECT3D2_SLOTS, 'FindDevice'), [search, result]),
+            D3D_OK);
+        assert.equal(h.box.memory.readU32(result + D3DFINDDEVICERESULT.ddHwDesc),
+            D3DDEVICEDESC.SIZE_V2);
+
+        const { target, device, d3d: again } = h.createDevice2(ddraw);
+        assert.equal(again, d3d);
+        h.release(again);
+        h.callbacks.length = 0;
+        assert.equal(await h.box.callRaw(device,
+            slot(IDIRECT3DDEVICE2_SLOTS, 'EnumTextureFormats'), [0x1234, 0x99]), D3D_OK);
+        assert.ok(h.callbacks.length > 0);
+        for (const call of h.callbacks)
+        {
+            const at = call.args[0];
+            assert.equal(h.box.memory.readU32(at), DDSURFACEDESC.SIZE, 'a DDSURFACEDESC');
+            assert.equal(h.box.memory.readU32(at + 4) & DDSD_PIXELFORMAT, DDSD_PIXELFORMAT);
+            assert.equal(call.args[1], 0x99);
+        }
+
+        assert.equal(h.release(device), 0);
+        h.release(target);
+        h.release(d3d);
+        h.release(ddraw);
+        h.assertAllReleased();
+    });
