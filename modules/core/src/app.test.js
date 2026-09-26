@@ -30,6 +30,7 @@ import {
     chooseZstdDecoder,
     answeredByEngine,
     mapShippedLibraries,
+    placeLibrary,
 } from './app.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
@@ -442,7 +443,8 @@ function movable(file){
  *
  * @param {Record<string, Uint8Array>} files  Beside the program, by name.
  * @param {Uint8Array} executable
- * @param {{ base: number, limit: number }} space
+ * @param {{ base: number, limit: number, floor?: number,
+ *           held?: { base: number, size: number }[] }} space
  */
 async function mapBeside(files, executable, space){
     const filesystem = await filesystemModule.create({
@@ -461,13 +463,18 @@ async function mapBeside(files, executable, space){
         },
     };
     const kernel32 = (/** @type {string} */ name)=>name.toLowerCase() === 'kernel32.dll';
+    const { held = [], floor = 0x00500000, ...bounds } = space;
     const mapped = await mapShippedLibraries({
         executable, imagePath: IMAGE, filesystem, loader, blocks: null,
         events: { emit: (/** @type {string} */ name, /** @type {any} */ payload)=>
             emitted.push([name, payload]) },
         isSystem: kernel32, isKnownDll: kernel32,
         byName: new Map(), byBase: new Map(),
-        ...space,
+        floor,
+        /** @param {number} base @param {number} size */
+        holder: (base, size)=>[...held, ...placed].find(one=>
+            base < one.base + one.size && one.base < base + size) ?? null,
+        ...bounds,
     });
     return { mapped, placed, emitted };
 }
@@ -492,6 +499,75 @@ test('a library that would reach past the modules\' space is refused, not mapped
         assert.ok(emitted.some(([name, payload])=>name === 'libraries-missing'
             && payload.names.includes('second.dll') && payload.reason === 'no room'));
     });
+
+test('a library without relocations goes to its own base, and movable ones fill in around it',
+    async()=>{
+        // Its absolute addresses assume that base, and it runs nowhere else.
+        const fixed = new Uint8Array(buildExe({
+            imports: { 'KERNEL32.dll': ['Anything'] }, code: ()=>[0xc3],
+        }));
+        new DataView(fixed.buffer).setUint32(
+            new DataView(fixed.buffer).getUint32(0x3c, true) + 4 + 20 + 28, 0x02020000, true);
+        const executable = new Uint8Array(buildExe({
+            imports: { 'first.dll': ['Anything'], 'fixed.dll': ['Anything'],
+                'second.dll': ['Anything'], 'third.dll': ['Anything'] },
+            code: ()=>[0xc3],
+        }));
+        const library = ()=>movable(new Uint8Array(buildExe({
+            imports: { 'KERNEL32.dll': ['Anything'] }, code: ()=>[0xc3],
+        })));
+        const { placed } = await mapBeside(
+            { 'first.dll': library(), 'fixed.dll': fixed, 'second.dll': library(),
+                'third.dll': library() },
+            executable, { base: 0x02000000, limit: 0x08000000 });
+
+        assert.deepEqual(placed.map(one=>[one.name, one.base]), [
+            ['first.dll', 0x02000000], ['fixed.dll', 0x02020000],
+            ['second.dll', 0x02010000], ['third.dll', 0x02030000],
+        ]);
+    });
+
+test('a library without relocations whose base is taken is refused, not moved', async()=>{
+    // "If the base address is not available, the loader reports an error"
+    // (the PE format's IMAGE_FILE_RELOCS_STRIPPED): a library moved without
+    // relocations runs with every absolute address pointing at its old base.
+    const fixed = new Uint8Array(buildExe({
+        imports: { 'KERNEL32.dll': ['Anything'] }, code: ()=>[0xc3],
+    }));
+    const executable = new Uint8Array(buildExe({
+        imports: { 'fixed.dll': ['Anything'] }, code: ()=>[0xc3],
+    }));
+    const { placed, emitted } = await mapBeside({ 'fixed.dll': fixed }, executable,
+        { base: 0x02000000, limit: 0x08000000 });
+
+    assert.deepEqual(placed, [], 'its base, 0x400000, is the program\'s');
+    assert.ok(emitted.some(([name, payload])=>name === 'libraries-missing'
+        && payload.names.includes('fixed.dll') && /no relocations/.test(payload.reason)));
+});
+
+test('a movable library takes the first free base at or after the next one', ()=>{
+    const held = [{ base: 0x02000000, size: 0x3000 }, { base: 0x02010000, size: 0x10000 }];
+    /** @param {number} base @param {number} size */
+    const holder = (base, size)=>held.find(one=>
+        base < one.base + one.size && one.base < base + size) ?? null;
+    const space = { next: 0x02000000, floor: 0x00500000, limit: 0x08000000, holder };
+
+    assert.deepEqual(placeLibrary(
+        { relocatable: true, imageBase: 0x10000000, sizeOfImage: 0x5000 }, space),
+    { base: 0x02020000 });
+    assert.deepEqual(placeLibrary(
+        { relocatable: true, imageBase: 0x10000000, sizeOfImage: 0x06000000 }, space),
+    { refused: 'no room' });
+    assert.deepEqual(placeLibrary(
+        { relocatable: false, imageBase: 0x03000000, sizeOfImage: 0x5000 }, space),
+    { base: 0x03000000 });
+    assert.ok('refused' in placeLibrary(
+        { relocatable: false, imageBase: 0x10000000, sizeOfImage: 0x5000 }, space),
+    'above the modules\' space is the stacks\' and the heap\'s');
+    assert.ok('refused' in placeLibrary(
+        { relocatable: false, imageBase: 0x00400000, sizeOfImage: 0x5000 }, space),
+    'below the floor is the program\'s and the engine\'s');
+});
 
 test('a library that imports from the program is not given a second copy of the program',
     async()=>{

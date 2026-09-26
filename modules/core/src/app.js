@@ -1493,6 +1493,47 @@ async function readWholeFile(filesystem, blocks, path){
 }
 
 /**
+ * Where a library goes.
+ *
+ * One that carries relocations takes the first base at or after `next` that
+ * nothing holds. One that does not can run only at its preferred base -- every
+ * absolute address in it assumes that base -- and takes it when it lies in the
+ * modules' space and nothing holds it; otherwise it is refused, as the PE
+ * format says a loader refuses such an image, rather than mapped somewhere
+ * its addresses do not describe.
+ *
+ * @param {{ relocatable: boolean, imageBase: number, sizeOfImage: number }} image
+ * @param {{ next: number, floor: number, limit: number,
+ *     holder: (base: number, size: number) => { base: number, size: number } | null }} space
+ *        `floor` and `limit` bound the modules' space: below is the program and
+ *        the engine's own, above the thread stacks and the heap. `holder`
+ *        answers what already holds part of a span, if anything.
+ * @returns {{ base: number } | { refused: string }}
+ */
+export function placeLibrary(image, { next, floor, limit, holder }){
+    if (!image.relocatable)
+    {
+        const base = image.imageBase;
+        if (base < floor || base + image.sizeOfImage > limit || holder(base, image.sizeOfImage))
+        {
+            return { refused: `no relocations, and 0x${base.toString(16)} is not free` };
+        }
+        return { base };
+    }
+    let base = next;
+    for (let held = holder(base, image.sizeOfImage); held;
+        held = holder(base, image.sizeOfImage))
+    {
+        base = Math.ceil((held.base + held.size) / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+    }
+    if (base + image.sizeOfImage > limit)
+    {
+        return { refused: 'no room' };
+    }
+    return { base };
+}
+
+/**
  * Maps every library the program brought with it, in dependency order.
  *
  * Nothing is bound here. A set of libraries that import each other has to be
@@ -1553,20 +1594,24 @@ export async function mapShippedLibraries(options){
         events.emit('libraries-missing', { names: missing });
     }
 
-    let base = options.base;
+    let next = options.base;
     /** @type {any[]} */
     const mapped = [];
     for (const { name, file } of order)
     {
         const image = parsePe(file);
-        if (base + image.sizeOfImage > options.limit)
+        const place = placeLibrary(image,
+            { next, floor: options.floor, limit: options.limit, holder: options.holder });
+        if ('refused' in place)
         {
             // Refused here rather than as an overlap with the pool of thread
-            // stacks above, found only when a thread's stack is laid over it
-            // and saying nothing about which library or why.
-            events.emit('libraries-missing', { names: [name], reason: 'no room' });
+            // stacks above, found only when a thread's stack is laid over it,
+            // or as a throw out of the mapping, saying nothing about which
+            // library or why.
+            events.emit('libraries-missing', { names: [name], reason: place.refused });
             continue;
         }
+        const base = place.base;
         const record = loader.map(file, { base, name });
         const { exports } = readExports(file, image);
 
@@ -1607,7 +1652,10 @@ export async function mapShippedLibraries(options){
         byBase.set(base, held);
         mapped.push(held);
 
-        base += Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+        if (image.relocatable)
+        {
+            next = base + Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+        }
     }
 
     events.emit('libraries', { loaded: mapped.map(entry=>entry.name), missing });
@@ -3832,14 +3880,15 @@ async function buildApp(options){
                         });
                         return 0;
                     }
-                    if (nextLibraryBase + image.sizeOfImage > STACK_POOL_BASE)
+                    const place = placeLibrary(image, { next: nextLibraryBase, ...librarySpace });
+                    if ('refused' in place)
                     {
                         absentLibraries.add(key);
-                        events.emit('libraries-missing', { names: [name], reason: 'no room' });
+                        events.emit('libraries-missing', { names: [name], reason: place.refused });
                         return 0;
                     }
 
-                    const base = nextLibraryBase;
+                    const base = place.base;
                     const mapped = loader.map(file, { base, name });
                     const { exports } = readExports(file, image);
                     const addresses = new Map(exports
@@ -3872,8 +3921,11 @@ async function buildApp(options){
                     // returns is not told the library it just asked for was
                     // never loaded.
                     threadBlocks?.addModule(held);
-                    nextLibraryBase = base
-                        + Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+                    if (image.relocatable)
+                    {
+                        nextLibraryBase = base
+                            + Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+                    }
 
                     // Its own libraries first, then binding.
                     //
@@ -3955,6 +4007,16 @@ async function buildApp(options){
         return 0;
     };
 
+    // Where a library may go: above the program's own image, which is not in
+    // the map yet, and below the stack pool; and nowhere anything is mapped.
+    const librarySpace = {
+        floor: mainImage.imageBase + mainImage.sizeOfImage,
+        limit: STACK_POOL_BASE,
+        /** @param {number} base @param {number} size */
+        holder: (base, size)=>memory.list().find((/** @type {any} */ region)=>
+            base < region.base + region.size && region.base < base + size) ?? null,
+    };
+
     // The libraries the program brought with it, before the program itself.
     //
     // Every one is mapped before any is bound, because they import each other:
@@ -3971,7 +4033,7 @@ async function buildApp(options){
         // Straight after the system modules, which is the first address nothing
         // else has claimed, and up to the pool of thread stacks.
         base: MODULE_BASE + Object.keys(allLibraries).length * MODULE_STRIDE,
-        limit: STACK_POOL_BASE,
+        ...librarySpace,
     });
     // Where a library asked for later goes: after the ones that came with the
     // program, or after the system modules when there were none.
