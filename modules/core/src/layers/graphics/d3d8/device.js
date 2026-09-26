@@ -64,6 +64,7 @@ import {
 } from '../d3d9/resources.js';
 import { volumeCreateResult, volumeLevelCount } from '../d3d9/validity.js';
 import { DEVICE_STATE, LIGHT_ENABLED, createPalettes } from '../d3d9/device.js';
+import { createAdditionalChain } from '../d3d9/swapchain.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 
 export { DEVICE_STATE, LIGHT_ENABLED };
@@ -1178,6 +1179,31 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     /** @type {(() => void) | undefined} */
     let stopWatchingLoss;
 
+    /**
+     * An additional swap chain's back buffer presented: onto the display
+     * when it goes into the window the display shows, and otherwise drawn and
+     * kept, which is reported once.
+     *
+     * @param {any} backBuffer @param {boolean} shown
+     */
+    const presentChain = (backBuffer, shown)=>{
+        if (deviceState !== DEVICE_STATE.OK)
+        {
+            return D3DERR_DEVICELOST;
+        }
+        if (shown)
+        {
+            renderer?.present(Object.create(model, { backBuffer: { get: ()=>backBuffer } }));
+        }
+        else
+        {
+            reportOnce('chain-window', 'a swap chain presented into a window the display does'
+                + ' not show: its frame is drawn and its picture is not shown');
+            renderer?.submit();
+        }
+        return D3D_OK;
+    };
+
     const device = {
         caps,
         get refCount(){
@@ -1346,6 +1372,50 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 renderer.present(model);
             }
+            return D3D_OK;
+        },
+
+        /**
+         * A swap chain beside the device's own, windowed only (Wine's d3d8
+         * test_swapchain): back buffers of its own, at the size and in the
+         * format its parameters give. As a creation does, it writes back the
+         * back buffer count a zero stood for.
+         *
+         * @param {import('./validity.js').PresentParameters} asked
+         * @param {{ swapChain?: any }} out
+         */
+        CreateAdditionalSwapChain(asked, out){
+            if (!asked || asked.windowed === false || validatePresentParameters(asked) !== D3D_OK)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            reportPresentParameters(asked);
+            const wanted = normalisePresentParameters(asked);
+            const width = wanted.backBufferWidth ?? 640;
+            const height = wanted.backBufferHeight ?? 480;
+            const format = wanted.backBufferFormat ?? D3DFMT.X8R8G8B8;
+            out.swapChain = createAdditionalChain({
+                parameters: wanted,
+                count: explicitCount(D3DPOOL.DEFAULT),
+                makeBackBuffer: chainCount=>createSurface({
+                    type: SURFACE_TYPE.RENDER_TARGET,
+                    width,
+                    height,
+                    format,
+                    pool: D3DPOOL.DEFAULT,
+                    usage: D3DUSAGE.RENDERTARGET,
+                    lockable: ((wanted.flags ?? 0) & D3DPRESENTFLAG.LOCKABLE_BACKBUFFER) !== 0,
+                    divergence: services.divergence ?? null,
+                    pixels: targetPixels(),
+                    base: allocate(surfaceBytes(format, width, height)),
+                    count: chainCount,
+                }),
+                present: presentChain,
+                retire: surface=>{
+                    free(surface.base);
+                    renderer?.retire(surface);
+                },
+            });
             return D3D_OK;
         },
 

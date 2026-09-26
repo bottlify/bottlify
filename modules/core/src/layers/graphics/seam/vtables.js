@@ -340,6 +340,15 @@ export const IDIRECT3DVOLUMETEXTURE8_SLOTS = /** @type {[string, number][]} */ (
 ]);
 
 /**
+ * IDirect3DSwapChain8, which after IUnknown has two methods: Present with the
+ * device's four arguments, and GetBackBuffer.
+ */
+export const IDIRECT3DSWAPCHAIN8_SLOTS = /** @type {[string, number][]} */ ([
+    ['Present', 4],
+    ['GetBackBuffer', 3],
+]);
+
+/**
  * IDirect3DVolume8, a level of a volume texture. Not a resource: it has no
  * priority, no preload and no type, as a surface has none.
  */

@@ -32,7 +32,8 @@ import {
 import {
     IDIRECT3DCUBETEXTURE9_SLOTS, IDIRECT3DDEVICE9_SLOTS, IDIRECT3DQUERY9_SLOTS,
     IDIRECT3DSHADER9_SLOTS,
-    IDIRECT3DSTATEBLOCK9_SLOTS, IDIRECT3DSURFACE9_SLOTS, IDIRECT3DTEXTURE9_SLOTS,
+    IDIRECT3DSTATEBLOCK9_SLOTS, IDIRECT3DSURFACE9_SLOTS, IDIRECT3DSWAPCHAIN9_SLOTS,
+    IDIRECT3DTEXTURE9_SLOTS,
     IDIRECT3DVERTEXDECLARATION9_SLOTS, IDIRECT3DVOLUME9_SLOTS, IDIRECT3DVOLUMETEXTURE9_SLOTS,
 } from '../d3d9/interfaces.js';
 import { D3DCREATE, D3DDEVTYPE, D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
@@ -1192,7 +1193,10 @@ test('a back buffer and the swap chain come back as the device\'s own', ()=>{
     assert.equal(h.device(device, 'GetBackBuffer', [0, 0, 0, out]), D3D_OK);
     const back = h.box.memory.readU32(out);
     assert.notEqual(back, 0);
-    assert.equal(h.device(device, 'GetBackBuffer', [0, 0, 1, out]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(device, 'GetBackBuffer', [0, 0, 0xdeadbeef, out]), D3D_OK,
+        'the type is not looked at (Wine\'s d3d9 test_swapchain)');
+    assert.equal(h.box.memory.readU32(out), back);
+    h.release(back);
     assert.equal(h.device(device, 'GetRenderTarget', [0, out]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), back, 'target zero is back buffer zero');
     h.release(back);
@@ -1220,3 +1224,86 @@ test('a back buffer and the swap chain come back as the device\'s own', ()=>{
     assert.equal(h.release(device), 0);
     h.release(root);
 });
+
+test('an additional swap chain has back buffers of its own, and GetSwapChain names none of it',
+    ()=>{
+        // Wine's d3d9 test_swapchain.
+        const h = seamed();
+        const root = h.create();
+        const { device } = h.createDevice(root);
+        const at = 0x3400;
+        const out = 0x3000;
+        /** @param {Record<string, number>} fields */
+        const parameters = fields=>{
+            h.box.services.writeMemory(at, new Uint8Array(D3DPRESENT_PARAMETERS9.SIZE));
+            h.fields.writeStruct(at, D3DPRESENT_PARAMETERS9, {
+                Windowed: 1, SwapEffect: 1, BackBufferFormat: D3DFMT.A8R8G8B8, ...fields,
+            });
+        };
+        /** @param {number} chain @param {string} name @param {number[]} [args] */
+        const call = (chain, name, args = [])=>
+            h.box.call(chain, slot(IDIRECT3DSWAPCHAIN9_SLOTS, name), args);
+
+        parameters({ BackBufferCount: 0 });
+        assert.equal(h.device(device, 'CreateAdditionalSwapChain', [at, out]), D3D_OK);
+        const first = h.box.memory.readU32(out);
+        const written = h.fields.readStruct(at, D3DPRESENT_PARAMETERS9);
+        assert.deepEqual([written.BackBufferWidth, written.BackBufferHeight,
+            written.BackBufferFormat, written.BackBufferCount, written.hDeviceWindow],
+        [640, 480, D3DFMT.A8R8G8B8, 1, 0],
+        'the device window\'s client area and one buffer written back, the window not');
+        assert.equal(call(first, 'GetBackBuffer', [0, 0, out]), D3D_OK);
+        h.release(h.box.memory.readU32(out));
+        h.box.memory.writeU32(out, 0xdeadbeef);
+        assert.equal(call(first, 'GetBackBuffer', [1, 0, out]), D3DERR_INVALIDCALL);
+        assert.equal(h.box.memory.readU32(out), 0xdeadbeef, 'the caller\'s pointer left alone');
+
+        parameters({ BackBufferCount: 2 });
+        assert.equal(h.device(device, 'CreateAdditionalSwapChain', [at, out]), D3D_OK);
+        const second = h.box.memory.readU32(out);
+        const held = 0x3600;
+        assert.equal(call(second, 'GetPresentParameters', [held]), D3D_OK);
+        assert.equal(h.fields.readU32(held + D3DPRESENT_PARAMETERS9.hDeviceWindow), HWND,
+            'a chain naming no window presents into the device\'s');
+        assert.equal(h.fields.readU32(held + D3DPRESENT_PARAMETERS9.BackBufferCount), 2);
+        assert.equal(call(second, 'GetBackBuffer', [0, 0, 0]), D3DERR_INVALIDCALL);
+        assert.equal(call(second, 'GetBackBuffer', [0, 0, out]), D3D_OK);
+        const back = h.box.memory.readU32(out);
+        assert.equal(call(second, 'GetBackBuffer', [0, 2 /* RIGHT */, out]), D3D_OK);
+        assert.equal(h.box.memory.readU32(out), back, 'the type is not looked at');
+        h.release(back);
+        assert.equal(call(second, 'GetBackBuffer', [1, 0, out]), D3D_OK);
+        assert.notEqual(h.box.memory.readU32(out), back);
+        h.release(h.box.memory.readU32(out));
+        h.box.memory.writeU32(out, 0xdeadbeef);
+        assert.equal(call(second, 'GetBackBuffer', [2, 0, out]), D3DERR_INVALIDCALL);
+        assert.equal(h.box.memory.readU32(out), 0xdeadbeef);
+        // Its back buffer's container is the chain.
+        const iid = 0x3700;
+        putGuid(h, iid, [0x794950f2, 0xadfc, 0x458a, 0x90, 0x5e, 0x10, 0xa1, 0x0b, 0x0b, 0x50,
+            0x3b]);
+        assert.equal(h.box.call(back, slot(IDIRECT3DSURFACE9_SLOTS, 'GetContainer'), [iid, out]),
+            D3D_OK);
+        assert.equal(h.box.memory.readU32(out), second);
+        h.release(second);
+        h.release(back);
+        assert.equal(call(second, 'Present', [0, 0, 0, 0, 0]), D3D_OK);
+
+        h.box.memory.writeU32(out, 0xdeadbeef);
+        assert.equal(h.device(device, 'GetSwapChain', [1, out]), D3DERR_INVALIDCALL,
+            'only the device\'s own chain is numbered');
+        assert.equal(h.box.memory.readU32(out), 0);
+        assert.equal(h.device(device, 'GetNumberOfSwapChains'), 1);
+
+        parameters({ Windowed: 0, hDeviceWindow: HWND, BackBufferCount: 1,
+            BackBufferWidth: 640, BackBufferHeight: 480 });
+        h.box.memory.writeU32(out, 0xdeadbeef);
+        assert.equal(h.device(device, 'CreateAdditionalSwapChain', [at, out]),
+            D3DERR_INVALIDCALL, 'a chain is windowed or not made');
+        assert.equal(h.box.memory.readU32(out), 0);
+
+        assert.equal(h.release(second), 0);
+        assert.equal(h.release(first), 0);
+        assert.equal(h.release(device), 0);
+        h.release(root);
+    });

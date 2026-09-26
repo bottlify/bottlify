@@ -507,7 +507,10 @@ test('a render target must be one, only index zero exists, and a depth stencil m
     /** @type {{ surface?: any }} */
     const depth = {};
     assert.equal(device.GetDepthStencilSurface(depth), D3DERR_NOTFOUND);
-    assert.equal(device.GetBackBuffer(0, 0, 1, depth), D3DERR_INVALIDCALL, 'not a mono buffer');
+    // Wine's d3d9 test_swapchain: the type is not looked at, and a stereo
+    // buffer asked for is the mono one.
+    assert.equal(device.GetBackBuffer(0, 0, 1, depth), D3D_OK, 'D3DBACKBUFFER_TYPE_LEFT');
+    depth.surface.release();
     assert.equal(device.GetBackBuffer(0, 1, 0, depth), D3DERR_INVALIDCALL, 'past the count');
 
     level.surface.release();

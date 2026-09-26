@@ -68,6 +68,7 @@ import {
     SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters, volumeCreateResult,
     volumeLevelCount,
 } from './validity.js';
+import { createAdditionalChain } from './swapchain.js';
 import { validateStages } from '../d3d8/validity.js';
 import { processStreams } from '../d3d8/process.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
@@ -144,8 +145,6 @@ const STREAMSOURCE_INSTANCEDATA = 0x80000000;
 const STAGE_STATE_TYPES = new Set(/** @type {number[]} */ (Object.values(D3DTSS9)));
 const SAMPLER_STATE_TYPES = new Set(/** @type {number[]} */ (Object.values(D3DSAMP)));
 
-/** The one back-buffer type, D3DBACKBUFFER_TYPE_MONO. */
-const BACKBUFFER_TYPE_MONO = 0;
 
 /** S_FALSE: a query whose answer is not ready yet. */
 const S_FALSE = 1;
@@ -974,13 +973,16 @@ function createDeviceObject(parameters, caps, services, identity){
         release: ()=>swapChainCount.release(),
 
         /**
+         * The type is not looked at: a stereo buffer asked for is the mono
+         * one (Wine's d3d9 test_swapchain).
+         *
          * @param {number} index
-         * @param {number} type
+         * @param {number} _type
          * @param {{ surface?: any }} out
          */
-        GetBackBuffer(index, type, out){
+        GetBackBuffer(index, _type, out){
             const surface = backBuffers[index];
-            if (!surface || type !== BACKBUFFER_TYPE_MONO)
+            if (!surface)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -1513,6 +1515,73 @@ function createDeviceObject(parameters, caps, services, identity){
 
     /** @type {(() => void) | undefined} */
     let stopWatchingLoss;
+
+    /**
+     * A swap chain's back buffer presented: onto the display when it goes
+     * into the window the display shows, and otherwise drawn and kept, which
+     * is reported once.
+     *
+     * @param {any} backBuffer @param {boolean} shown
+     */
+    const presentChain = (backBuffer, shown)=>{
+        if (deviceState !== DEVICE_STATE.OK)
+        {
+            return D3DERR_DEVICELOST;
+        }
+        if (shown)
+        {
+            renderer?.present(Object.create(model, { backBuffer: { get: ()=>backBuffer } }));
+        }
+        else
+        {
+            report('chain-window', 'a swap chain presented into a window the display does not'
+                + ' show: its frame is drawn and its picture is not shown');
+            renderer?.submit();
+        }
+        return D3D_OK;
+    };
+
+    /**
+     * What a front buffer holds, as A8R8G8B8, into a system-memory surface:
+     * the display's picture, or what an additional swap chain last presented
+     * -- black before it presented anything.
+     *
+     * @param {any} destination
+     * @param {any} chain  An additional swap chain, or null for the display.
+     * @returns {number | Promise<number>}
+     */
+    const readFrontInto = (destination, chain)=>{
+        if (!destination)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        const desc = describe(destination);
+        if (desc.Format !== D3DFMT.A8R8G8B8 || desc.Pool !== D3DPOOL.SYSTEMMEM)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        const write = services.writeMemory;
+        if (!renderer?.readFront || !write)
+        {
+            report('frontbuffer', 'GetFrontBufferData was refused: this build draws nothing'
+                + ' it can read back');
+            return D3DERR_INVALIDCALL;
+        }
+        if (presentParameters.windowed)
+        {
+            report('frontbuffer-windowed', 'GetFrontBufferData puts a windowed device\'s'
+                + ' picture at the surface\'s corner, not where the window stands on the'
+                + ' desktop');
+        }
+        const read = chain
+            ? chain.presented ? renderer.readFront(chain.presented) : Promise.resolve(null)
+            : renderer.readFront();
+        return read.then((/** @type {any} */ image)=>{
+            writeFrontBuffer(destination, image, write);
+            renderer.markDirty?.(destination);
+            return D3D_OK;
+        });
+    };
 
     const device = {
         caps,
@@ -3316,33 +3385,72 @@ function createDeviceObject(parameters, caps, services, identity){
          * @returns {number | Promise<number>}
          */
         GetFrontBufferData(swapChainIndex, destination){
-            if (swapChainIndex !== 0 || !destination)
+            return swapChainIndex === 0
+                ? readFrontInto(destination, null)
+                : D3DERR_INVALIDCALL;
+        },
+
+        /**
+         * A swap chain beside the device's own, windowed only (Wine's d3d9
+         * test_swapchain): its back buffers are its own, at the size and in
+         * the format its parameters give, and GetSwapChain never names it.
+         *
+         * @param {any} asked  PresentParameters, with the window it presents
+         *        into as `hDeviceWindow`, which the caller resolves.
+         * @param {{ swapChain?: any }} out
+         */
+        CreateAdditionalSwapChain(asked, out){
+            if (!asked || asked.windowed === false || validatePresentParameters(asked) !== D3D_OK)
             {
                 return D3DERR_INVALIDCALL;
             }
-            const desc = describe(destination);
-            if (desc.Format !== D3DFMT.A8R8G8B8 || desc.Pool !== D3DPOOL.SYSTEMMEM)
-            {
-                return D3DERR_INVALIDCALL;
-            }
-            const write = services.writeMemory;
-            if (!renderer?.readFront || !write)
-            {
-                report('frontbuffer', 'GetFrontBufferData was refused: this build draws nothing'
-                    + ' it can read back');
-                return D3DERR_INVALIDCALL;
-            }
-            if (presentParameters.windowed)
-            {
-                report('frontbuffer-windowed', 'GetFrontBufferData puts a windowed device\'s'
-                    + ' picture at the surface\'s corner, not where the window stands on the'
-                    + ' desktop');
-            }
-            return renderer.readFront().then((/** @type {any} */ image)=>{
-                writeFrontBuffer(destination, image, write);
-                renderer.markDirty?.(destination);
-                return D3D_OK;
+            const wanted = {
+                ...normalisePresentParameters(asked),
+                hDeviceWindow: asked.hDeviceWindow ?? 0,
+            };
+            const width = wanted.backBufferWidth ?? 640;
+            const height = wanted.backBufferHeight ?? 480;
+            const format = wanted.backBufferFormat ?? D3DFMT.X8R8G8B8;
+            const chain = createAdditionalChain({
+                parameters: wanted,
+                count: explicitCount(D3DPOOL.DEFAULT),
+                makeBackBuffer: chainCount=>createSurface({
+                    type: SURFACE_TYPE.RENDER_TARGET,
+                    width,
+                    height,
+                    format,
+                    pool: D3DPOOL.DEFAULT,
+                    usage: D3DUSAGE.RENDERTARGET,
+                    lockable: wanted.lockableBackBuffer,
+                    base: allocate(surfaceBytes(format, width, height)),
+                    count: chainCount,
+                    rejectsMalformedRects: true,
+                    divergence: services.divergence ?? null,
+                    pixels: targetPixels(),
+                }),
+                present: presentChain,
+                retire: surface=>{
+                    free(surface.base);
+                    renderer?.retire(surface);
+                },
             });
+            const made = Object.assign(chain, {
+                /** @param {any} destination */
+                GetFrontBufferData: (/** @type {any} */ destination)=>
+                    readFrontInto(destination, chain),
+                /** @param {{ device?: any }} held */
+                GetDevice(/** @type {{ device?: any }} */ held){
+                    device.addRef();
+                    held.device = device;
+                    return D3D_OK;
+                },
+            });
+            for (const surface of chain.backBuffers)
+            {
+                surface.container = made;
+            }
+            out.swapChain = made;
+            return D3D_OK;
         },
 
         /**

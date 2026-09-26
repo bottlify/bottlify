@@ -5493,6 +5493,20 @@ export function createRenderer(options){
         },
 
         /**
+         * What has been recorded so far goes to the GPU with nothing shown:
+         * the frame of a swap chain whose picture has nowhere to go is still
+         * drawn, into targets that later draws and reads find as it left them.
+         */
+        submit(){
+            const recorded = ensureFrame();
+            recording = null;
+            recorded.dump = dump;
+            dump = [];
+            kept = 0;
+            chain = chain.then(()=>replay(recorded, null)).catch(failure);
+        },
+
+        /**
          * A surface's pixels as the GPU holds them at this point of the
          * frame, for a program that reads its target back.
          *
@@ -5953,11 +5967,15 @@ export function createRenderer(options){
          * a target (`readSurface`) replayed them early. Four bytes a pixel,
          * blue first; null when nothing was presented.
          *
+         * @param {any} [surface]
+         *        A d3d8 surface to read in place of what the display shows: a
+         *        back buffer a swap chain presented and the display did not.
          * @returns {Promise<{ width: number, height: number, data: Uint8Array } | null>}
          */
-        readFront(){
+        readFront(surface){
+            const asked = surface ? surfaceFor(surface) : null;
             const read = chain.then(()=>{
-                const shown = front;
+                const shown = asked ?? front;
                 if (!shown)
                 {
                     return null;

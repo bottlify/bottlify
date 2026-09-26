@@ -16,12 +16,11 @@
  * answers E_NOTIMPL, which is a reply a program handles.
  *
  * A slot that answers a failure code rather than doing the thing asked of it is
- * making the same point more loudly: the shaders and the additional swap chain
- * are refused, each because the renderer behind this cannot honour what
- * succeeding would promise. Every one of them says so where it stands. A
- * refusal is a reply a program acts on -- usually by taking the path this build
- * does draw -- where a success it cannot see through leaves it drawing nothing
- * and looking somewhere else for the reason.
+ * making the same point more loudly: the shaders are refused, because the
+ * renderer behind this cannot honour what succeeding would promise, and say so
+ * where they stand. A refusal is a reply a program acts on -- usually by taking
+ * the path this build does draw -- where a success it cannot see through leaves
+ * it drawing nothing and looking somewhere else for the reason.
  *
  * Out-parameters are where this is easy to get wrong in a way nothing reports.
  * A method that hands back an interface writes a pointer *and* takes a
@@ -31,7 +30,7 @@
  */
 
 import { describe, IDIRECT3D8_SLOTS, IDIRECT3DBASETEXTURE8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS,
-    IDIRECT3DDEVICE8_SLOTS,
+    IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSWAPCHAIN8_SLOTS,
     IDIRECT3DRESOURCE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
     IDIRECT3DVERTEXBUFFER8_SLOTS, IDIRECT3DINDEXBUFFER8_SLOTS, IDIRECT3DVOLUME8_SLOTS,
     IDIRECT3DVOLUMETEXTURE8_SLOTS } from './vtables.js';
@@ -39,7 +38,7 @@ import { IID_IDirect3D8, IID_IDirect3DBaseTexture8, IID_IDirect3DCubeTexture8,
     IID_IDirect3DDevice8,
     IID_IDirect3DIndexBuffer8, IID_IDirect3DResource8, IID_IDirect3DSurface8,
     IID_IDirect3DTexture8, IID_IDirect3DVertexBuffer8, IID_IDirect3DVolume8,
-    IID_IDirect3DVolumeTexture8 } from './iids.js';
+    IID_IDirect3DVolumeTexture8, IID_IDirect3DSwapChain8 } from './iids.js';
 import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
@@ -439,6 +438,40 @@ export function createDirect3D8Seam(
         }
         return D3D_OK;
     };
+
+    /**
+     * The window each additional swap chain presents into. The display shows
+     * the device's window; a chain presenting anywhere else has its frame
+     * drawn and not shown.
+     *
+     * @type {WeakMap<object, number>}
+     */
+    const chainWindows = new WeakMap();
+
+    // IDirect3DSwapChain8: a present, whose rectangles and dirty region are
+    // not honoured and whose window decides whether the display shows the
+    // picture, and the back buffers.
+    const swapChainInterfaces = [describe(IID_IDirect3DSwapChain8, IDIRECT3DSWAPCHAIN8_SLOTS, {
+        /** @param {any} chain @param {number[]} args */
+        Present: (chain, [, , override])=>chain.Present(
+            ((override >>> 0) || chainWindows.get(chain) || deviceWindow) === deviceWindow),
+        /** @param {any} chain @param {number[]} args */
+        GetBackBuffer: (chain, [index, type, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ surface?: any }} */
+            const held = {};
+            const hr = chain.GetBackBuffer(index >>> 0, type >>> 0, held);
+            if (hr !== D3D_OK || !held.surface)
+            {
+                return hr;
+            }
+            return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8, out >>> 0,
+                E_OUTOFMEMORY, owners.get(chain));
+        },
+    })];
 
     /**
      * The device each resource was made by, for GetDevice. A texture's levels
@@ -1464,11 +1497,28 @@ export function createDirect3D8Seam(
             return was ? 1 : 0;
         },
 
-        // One swap chain exists and it is the device's own. There is no second
-        // one to publish -- not even an interface for it -- and NOTAVAILABLE is
-        // what a device that cannot do something answers.
         /** @param {any} device @param {number[]} args */
-        CreateAdditionalSwapChain: (device, [, out])=>clearAndRefuse(out),
+        CreateAdditionalSwapChain: (device, [parameters, out])=>{
+            if ((parameters >>> 0) === 0 || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            // A chain naming no window presents into the device's, measured
+            // for a size asked for as zero; only the count is written back.
+            const wanted = readPresentParameters(parameters >>> 0, deviceWindow);
+            const window = (wanted.hDeviceWindow >>> 0) || deviceWindow;
+            /** @type {{ swapChain?: any }} */
+            const held = {};
+            const hr = device.CreateAdditionalSwapChain(wanted, held);
+            if (hr !== D3D_OK || !held.swapChain)
+            {
+                return clearAndRefuse(out, hr);
+            }
+            writePresentParameters(parameters >>> 0, wanted);
+            chainWindows.set(held.swapChain, window);
+            return handBack(held.swapChain, swapChainInterfaces, IID_IDirect3DSwapChain8,
+                out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
+        },
 
         // The caller waits while the picture comes back from the GPU.
         /** @param {any} device @param {number[]} args */

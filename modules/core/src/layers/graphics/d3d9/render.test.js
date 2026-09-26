@@ -25,7 +25,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { D3DFMT, D3DPOOL, D3DRS, D3DSWAPEFFECT, D3DUSAGE, D3D_OK } from './constants.js';
+import {
+    D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRS, D3DSWAPEFFECT, D3DUSAGE, D3D_OK,
+} from './constants.js';
 import { D3DCLEAR, D3DPT, D3DTA, D3DTEXF, D3DTOP, D3DTSS } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -966,4 +968,43 @@ test('recorded: a render target that makes its own levels makes them from what w
         back.surface.release();
         assert.equal(device.SetTexture(0, null), D3D_OK);
         texture.release();
+    });
+
+test('recorded: an additional swap chain shows its own back buffer in the device\'s window',
+    async()=>{
+        const h = harness();
+        const { device } = h;
+        /** @type {{ swapChain?: any }} */
+        const out = {};
+        assert.equal(device.CreateAdditionalSwapChain({
+            swapEffect: D3DSWAPEFFECT.DISCARD, backBufferWidth: 8, backBufferHeight: 6,
+            backBufferFormat: D3DFMT.X8R8G8B8, backBufferCount: 1, windowed: true,
+        }, out), D3D_OK);
+        const chain = out.swapChain;
+        /** @type {{ surface?: any }} */
+        const back = {};
+        assert.equal(chain.GetBackBuffer(0, 0, back), D3D_OK);
+        const draw = ()=>{
+            assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+            assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0xff00ff00, 1, 0), D3D_OK);
+        };
+        draw();
+        assert.equal(chain.Present(true), D3D_OK);
+        await device.idle();
+        assert.equal(h.presented.length, 1);
+        assert.deepEqual([h.presented[0].surface.width, h.presented[0].surface.height], [8, 6],
+            'the chain\'s back buffer, not the device\'s');
+
+        // Into a window the display does not show: drawn, submitted, not shown.
+        draw();
+        assert.equal(chain.Present(false), D3D_OK);
+        await device.idle();
+        assert.equal(h.presented.length, 1, 'nothing more reached the display');
+        assert.ok(h.gpu.of('submit').length >= 2, 'the frame was drawn all the same');
+
+        // A reset waits for the chain, a default-pool resource, to go.
+        back.surface.release();
+        assert.equal(device.Reset(), D3DERR_INVALIDCALL);
+        assert.equal(chain.release(), 0);
+        assert.equal(device.Reset(), D3D_OK);
     });

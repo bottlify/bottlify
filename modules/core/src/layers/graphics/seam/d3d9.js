@@ -69,7 +69,6 @@ import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c | 0;
-const D3DERR_NOTAVAILABLE = 0x8876086a | 0;
 const D3DERR_OUTOFVIDEOMEMORY = 0x8876017c | 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
 /** D3DENUM_NO_WHQL_LEVEL: skip the certification lookup, which took seconds on real Windows. */
@@ -188,19 +187,16 @@ export function createDirect3D9Seam(
     };
 
     /**
-     * A create this build cannot do: the caller's pointer is cleared as well
-     * as the result reported, because a program tests the one as often as the
-     * other.
+     * The window each additional swap chain presents into. The display shows
+     * the device's window; a chain presenting anywhere else has its frame
+     * drawn and not shown.
      *
-     * @param {number} out
+     * @type {WeakMap<object, number>}
      */
-    const clearAndRefuse = out=>{
-        if ((out >>> 0) !== 0)
-        {
-            fields.writeU32(out >>> 0, 0);
-        }
-        return D3DERR_NOTAVAILABLE;
-    };
+    const chainWindows = new WeakMap();
+    /** @param {any} chain @param {number} override  The window a present named, or 0. */
+    const shownIn = (chain, override)=>
+        ((override >>> 0) || chainWindows.get(chain) || deviceWindow) === deviceWindow;
 
     /**
      * The method that hands a resource its device: the same pointer the
@@ -996,18 +992,25 @@ export function createDirect3D9Seam(
 
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const swapChainInterfaces = [describe(IID_IDirect3DSwapChain9, IDIRECT3DSWAPCHAIN9_SLOTS, {
-        /** @param {any} chain */
-        Present: chain=>chain.Present(),
+        // The rectangles and the dirty region are not honoured; the window,
+        // the chain's own or the override, decides whether the display
+        // shows the picture.
+        /** @param {any} chain @param {number[]} args */
+        Present: (chain, [, , window])=>chain.Present(shownIn(chain, window)),
         // The caller waits while the picture comes back from the GPU.
         /** @param {any} chain @param {number[]} args */
         GetFrontBufferData: (chain, [destination])=>
             chain.GetFrontBufferData(publisher.objectAt(destination)),
         /** @param {any} chain @param {number[]} args */
         GetBackBuffer: (chain, [index, type, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             /** @type {{ surface?: any }} */
             const held = {};
             const hr = chain.GetBackBuffer(index >>> 0, type >>> 0, held);
-            if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
+            if (hr === D3D_OK && held.surface)
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface9,
                     out >>> 0, E_OUTOFMEMORY, owners.get(chain));
@@ -1197,9 +1200,31 @@ export function createDirect3D9Seam(
             return was ? 1 : 0;
         },
 
-        // One swap chain exists and it is the device's own.
         /** @param {any} device @param {number[]} args */
-        CreateAdditionalSwapChain: (device, [, out])=>clearAndRefuse(out),
+        CreateAdditionalSwapChain: (device, [parameters, out])=>{
+            if ((parameters >>> 0) === 0 || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            // A chain naming no window presents into the device's, measured
+            // for a size asked for as zero, and says so when asked for its
+            // parameters; what is written back leaves the window as it was.
+            const wanted = readPresentParameters(parameters >>> 0, deviceWindow);
+            const window = (wanted.hDeviceWindow >>> 0) || deviceWindow;
+            /** @type {{ swapChain?: any }} */
+            const held = {};
+            const hr = device.CreateAdditionalSwapChain({ ...wanted, hDeviceWindow: window },
+                held);
+            if (hr !== D3D_OK || !held.swapChain)
+            {
+                fields.writeU32(out >>> 0, 0);
+                return hr;
+            }
+            writePresentParameters(parameters >>> 0, wanted);
+            chainWindows.set(held.swapChain, window);
+            return handBack(held.swapChain, swapChainInterfaces, IID_IDirect3DSwapChain9,
+                out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
+        },
 
         /** @param {any} device @param {number[]} args */
         GetSwapChain: (device, [index, out])=>{
@@ -1215,6 +1240,7 @@ export function createDirect3D9Seam(
                 return handBack(held.swapChain, swapChainInterfaces, IID_IDirect3DSwapChain9,
                     out >>> 0, E_OUTOFMEMORY, device);
             }
+            fields.writeU32(out >>> 0, 0);
             return hr;
         },
         /** @param {any} device */
