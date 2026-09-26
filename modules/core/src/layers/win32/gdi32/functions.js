@@ -22,10 +22,15 @@
 
 import { createGdiObjects } from './objects.js';
 import { createDrawingFunctions } from './drawing.js';
+import { FACES, faceNamed } from './faces.js';
 import {
     BITMAPINFOHEADER,
+    LF_FACESIZE,
+    LOGFONTA,
+    LOGFONTW_SIZE,
     ddbStride,
     dibStride,
+    logFontBytes,
     readBitmapInfoHeader,
     readLogBrush,
     readLogFont,
@@ -244,6 +249,23 @@ const BREAK_CHAR = 0x20;
 const MAX_FACE_NAME = 64;
 
 /**
+ * ENUMLOGFONTEX: a LOGFONT, then the full name, the style and the script, in
+ * characters of the LOGFONT's own width.
+ */
+const LF_FULLFACESIZE = 64;
+/** NEWTEXTMETRICEX, the larger of the two structures an enumeration's second pointer names. */
+const NEWTEXTMETRICEXA_SIZE = 96;
+const NEWTEXTMETRICEXW_SIZE = 100;
+
+/**
+ * An enumerated face's FontType: none of RASTER_FONTTYPE, DEVICE_FONTTYPE and
+ * TRUETYPE_FONTTYPE, which is what a vector font is. Every face here is drawn
+ * at any size, and none has tables a program could read, as TEXTMETRIC and
+ * GetTextCharsetInfo already say.
+ */
+const SCALABLE_FONTTYPE = 0;
+
+/**
  * @typedef {Object} GdiHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -260,6 +282,11 @@ const MAX_FACE_NAME = 64;
  * @property {import('./drawing.js').DrawingServices} [graphics]
  *           Where pixels go. Absent in a build that cannot draw, and every
  *           entry point that needs it then fails truthfully.
+ * @property {(entry: number, args: number[], thread?: any) => Promise<number>} [call]
+ *           Calls the program back, as an enumeration's callback is called.
+ *           Absent in a build that cannot, where nothing is enumerated.
+ * @property {() => any} [callerThread]
+ *           The thread whose call is being answered, which a callback runs on.
  */
 
 /**
@@ -1096,6 +1123,103 @@ export function createGdiFunctions(host){
             xDest: 0, yDest: 0, width: shape.width, height: shape.height, xSrc: 0, ySrc: 0,
             image,
         }) ?? 0) > 0);
+    };
+
+    /**
+     * A string into a fixed-size field of a structure being built, NUL-padded:
+     * bytes for the A spellings, UTF-16 for the W ones.
+     *
+     * @param {Uint8Array} bytes @param {number} at @param {string} text @param {boolean} wide
+     */
+    const putText = (bytes, at, text, wide)=>{
+        for (let index = 0; index < text.length; index++)
+        {
+            const code = text.charCodeAt(index);
+            if (wide)
+            {
+                bytes[at + index * 2] = code & 0xff;
+                bytes[at + index * 2 + 1] = code >>> 8;
+            }
+            else
+            {
+                bytes[at + index] = code & 0xff;
+            }
+        }
+    };
+
+    /**
+     * EnumFontFamiliesExA and W: each face the LOGFONT asks for, handed to the
+     * program's callback until it answers zero, and the last answer returned.
+     *
+     * No name lists every face once, substitutes aside; a name finds that face
+     * whatever its case, a substitute under the name asked for with the face it
+     * stands for as its full name (Wine's test_EnumFonts_subst). The engine
+     * draws one character set, so DEFAULT_CHARSET and ANSI_CHARSET find the
+     * faces and every other set none. Each is described as it would realise:
+     * the LOGFONT's height, width and weight are the TEXTMETRIC's, which is
+     * GetTextMetrics' own answer for it. Nothing enumerated answers 1, which
+     * is how a program learns a face is not installed.
+     *
+     * @param {number[]} args @param {boolean} wide
+     */
+    const enumerateFaces = ([hdc, logfont, proc, lParam], wide)=>{
+        if (!dcOf(hdc))
+        {
+            return 0;
+        }
+        const request = (logfont >>> 0) === 0 ? null
+            : (wide ? readLogFontW : readLogFont)(host, logfont >>> 0);
+        const charSet = request ? request.charSet : DEFAULT_CHARSET;
+        const named = request && request.faceName !== '' ? faceNamed(request.faceName) : null;
+        const faces = charSet !== DEFAULT_CHARSET && charSet !== ANSI_CHARSET ? []
+            : request && request.faceName !== '' ? (named ? [named] : [])
+                : FACES.filter(face=>!face.substitute);
+        const call = host.call;
+        if (!call || (proc >>> 0) === 0 || faces.length === 0)
+        {
+            return 1;
+        }
+        // Read before the first await: after it the processor is whoever's
+        // the scheduler chose.
+        const thread = host.callerThread?.();
+        const logSize = wide ? LOGFONTW_SIZE : LOGFONTA.SIZE;
+        const unit = wide ? 2 : 1;
+        const enumSize = logSize + (LF_FULLFACESIZE + 2 * LF_FACESIZE) * unit;
+        const metricSize = wide ? NEWTEXTMETRICEXW_SIZE : NEWTEXTMETRICEXA_SIZE;
+        const block = host.surfaces.allocate(enumSize + metricSize);
+        return (async()=>{
+            let answer = 1;
+            try
+            {
+                for (const face of faces)
+                {
+                    const font = logFont({ faceName: face.name, charSet: ANSI_CHARSET,
+                        pitchAndFamily: face.family | face.pitch });
+                    const metrics = metricsOf(font);
+                    const bytes = new Uint8Array(enumSize);
+                    bytes.set(logFontBytes({ ...font, height: metrics.height,
+                        width: metrics.aveCharWidth, weight: metrics.weight }, wide));
+                    putText(bytes, logSize, face.substitute ?? face.name, wide);
+                    putText(bytes, logSize + LF_FULLFACESIZE * unit, 'Regular', wide);
+                    putText(bytes, logSize + (LF_FULLFACESIZE + LF_FACESIZE) * unit, 'Western',
+                        wide);
+                    host.writeMemory(block, bytes);
+                    host.writeMemory(block + enumSize, new Uint8Array(metricSize));
+                    (wide ? writeTextMetricsW : writeTextMetrics)(host, block + enumSize, metrics);
+                    answer = (await call(proc >>> 0,
+                        [block, block + enumSize, SCALABLE_FONTTYPE, lParam >>> 0], thread)) | 0;
+                    if (answer === 0)
+                    {
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                host.surfaces.free(block);
+            }
+            return answer;
+        })();
     };
 
     const table = {
@@ -2044,6 +2168,24 @@ export function createGdiFunctions(host){
         DeleteMetaFile: {
             argBytes: 4,
             handler: ()=>0,
+        },
+
+        /**
+         * int EnumFontFamiliesExA(HDC hdc, LPLOGFONTA lpLogfont, FONTENUMPROCA lpProc,
+         *                         LPARAM lParam, DWORD dwFlags)
+         * int EnumFontFamiliesExW(HDC hdc, LPLOGFONTW lpLogfont, FONTENUMPROCW lpProc,
+         *                         LPARAM lParam, DWORD dwFlags)
+         */
+        EnumFontFamiliesExA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>enumerateFaces(args, false),
+        },
+
+        EnumFontFamiliesExW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>enumerateFaces(args, true),
         },
 
         /**

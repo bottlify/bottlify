@@ -22,6 +22,8 @@
  * canvas's own fractional width.
  */
 
+import { FACES, FF_MODERN, FF_ROMAN } from '../../win32/gdi32/faces.js';
+
 /**
  * The LOGFONT fields the engine reads. The rest -- escapement, the
  * precisions -- describe a rendering nobody here can do differently.
@@ -113,32 +115,14 @@ export const NONANTIALIASED_QUALITY = 3;
  */
 
 /**
- * The classic Windows faces, and which generic family stands in when the
- * browser has no face of that name. The named family goes first in the
- * stack, so a machine that does have it uses it.
+ * The classic Windows faces -- the ones gdi32 offers a program -- and which
+ * generic family stands in when the browser has no face of that name. The
+ * named family goes first in the stack, so a machine that does have it uses it.
  *
  * @type {Record<string, string>}
  */
-const GENERIC_FAMILIES = {
-    'ms sans serif': 'sans-serif',
-    'microsoft sans serif': 'sans-serif',
-    'ms shell dlg': 'sans-serif',
-    'ms shell dlg 2': 'sans-serif',
-    tahoma: 'sans-serif',
-    arial: 'sans-serif',
-    helv: 'sans-serif',
-    verdana: 'sans-serif',
-    system: 'sans-serif',
-    'segoe ui': 'sans-serif',
-    'times new roman': 'serif',
-    'ms serif': 'serif',
-    georgia: 'serif',
-    'courier new': 'monospace',
-    courier: 'monospace',
-    fixedsys: 'monospace',
-    terminal: 'monospace',
-    'lucida console': 'monospace',
-};
+const GENERIC_FAMILIES = Object.fromEntries(FACES.map(face=>[face.name.toLowerCase(),
+    face.family === FF_ROMAN ? 'serif' : face.family === FF_MODERN ? 'monospace' : 'sans-serif']));
 
 /** FW_NORMAL, which a LOGFONT weight of zero means. */
 const FW_NORMAL = 400;

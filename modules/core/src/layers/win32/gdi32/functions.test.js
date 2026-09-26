@@ -1183,6 +1183,178 @@ test('the extents a DC has are read back, and a metafile is refused', ()=>{
         fns.PlayMetaFile, fns.DeleteMetaFile].map(fn=>fn.argBytes), [8, 8, 8, 8, 4]);
 });
 
+// --- enumerating the faces ---
+
+/** The program's EnumFontFamExProc, and the thread that asked. */
+const ENUMPROC = 0x405000;
+const THREAD = { id: 7 };
+
+/**
+ * gdi32 with a guest to call back. Each call records what the program's
+ * callback would read -- the ENUMLOGFONTEX and the TEXTMETRIC the two
+ * pointers name, at the moment it is called -- and answers `reply`.
+ *
+ * @param {boolean} wide
+ * @param {(seen: any) => number} [reply]
+ */
+function withEnumeration(wide, reply = ()=>1){
+    const memory = fakeMemory();
+    const surfaces = fakeSurfaces();
+    /** @type {any[]} */
+    const seen = [];
+    /** @param {number} at @param {number} units */
+    const text = (at, units)=>{
+        let value = '';
+        for (let index = 0; index < units; index++)
+        {
+            const unit = wide ? memory.bytes[at + index * 2] | memory.bytes[at + index * 2 + 1] << 8
+                : memory.bytes[at + index];
+            if (unit === 0)
+            {
+                break;
+            }
+            value += String.fromCharCode(unit);
+        }
+        return value;
+    };
+    const logFontSize = wide ? 92 : 60;
+    const unit = wide ? 2 : 1;
+    const gdi = createGdiFunctions({
+        readMemory: (address, length)=>memory.readMemory(address, length),
+        writeMemory: (address, data)=>memory.writeMemory(address, data),
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        handles: fakeHandles(),
+        surfaces,
+        call: (entry, [logfont, metric, type, lParam], thread)=>{
+            const one = {
+                entry, type, lParam, thread,
+                face: text(logfont + LOGFONTA.lfFaceName, 32),
+                fullName: text(logfont + logFontSize, 64),
+                style: text(logfont + logFontSize + 64 * unit, 32),
+                script: text(logfont + logFontSize + 96 * unit, 32),
+                height: memory.i32(logfont + LOGFONTA.lfHeight),
+                weight: memory.i32(logfont + LOGFONTA.lfWeight),
+                charSet: memory.u8(logfont + LOGFONTA.lfCharSet),
+                pitchAndFamily: memory.u8(logfont + LOGFONTA.lfPitchAndFamily),
+                tmHeight: memory.i32(metric + TEXTMETRICA.tmHeight),
+                tmWeight: memory.i32(metric + TEXTMETRICA.tmWeight),
+            };
+            seen.push(one);
+            return Promise.resolve(reply(one));
+        },
+        callerThread: ()=>THREAD,
+    });
+    const fns = /** @type {Record<string, { argBytes: number,
+        handler: (args: number[]) => any }>} */ (/** @type {unknown} */ (gdi.table));
+    return { memory, surfaces, seen, fns, hdc: fns.GetDC.handler([HWND]) };
+}
+
+test('EnumFontFamiliesEx lists every face offered, once each, in the one set drawn', async()=>{
+    const { fns, memory, seen, surfaces, hdc } = withEnumeration(false);
+    assert.equal(fns.EnumFontFamiliesExA.argBytes, 20);
+
+    // Wine's test_EnumFonts_subst passes no LOGFONT at all: everything.
+    assert.equal(await fns.EnumFontFamiliesExA.handler([hdc, 0, ENUMPROC, 0x77, 0]), 1);
+    const faces = seen.map(one=>one.face);
+    assert.ok(['Arial', 'Times New Roman', 'Courier New', 'MS Sans Serif']
+        .every(face=>faces.includes(face)));
+    assert.equal(new Set(faces).size, faces.length, 'each face once');
+    assert.ok(!faces.includes('MS Shell Dlg') && !faces.includes('Helv'),
+        'a substitute is found by name and never listed');
+    for (const one of seen)
+    {
+        assert.equal(one.entry, ENUMPROC);
+        assert.equal(one.thread, THREAD, 'called back on the thread that asked');
+        assert.equal(one.lParam, 0x77);
+        assert.equal(one.charSet, 0, 'ANSI_CHARSET, the one set the engine draws');
+        assert.equal(one.height, one.tmHeight, 'Wine\'s arial_enum_proc: lfHeight is tmHeight');
+        assert.equal(one.weight, one.tmWeight, 'and its enum_fonts_proc: lfWeight is tmWeight');
+        assert.equal(one.type, 0, 'scalable, and not TrueType, as TEXTMETRIC says');
+        assert.equal(one.script, 'Western');
+    }
+    assert.deepEqual(surfaces.freed, surfaces.allocated.map(block=>block.address),
+        'what the callback was pointed at is given back');
+
+    // DEFAULT_CHARSET and no name is the same question.
+    seen.length = 0;
+    putLogFont(memory, { faceName: '', charSet: 1 });
+    await fns.EnumFontFamiliesExA.handler([hdc, STRUCT, ENUMPROC, 0, 0]);
+    assert.deepEqual(seen.map(one=>one.face), faces);
+
+    seen.length = 0;
+    putLogFont(memory, { faceName: '', charSet: 128 });
+    assert.equal(await fns.EnumFontFamiliesExA.handler([hdc, STRUCT, ENUMPROC, 0, 0]), 1,
+        'a set nothing here draws has no faces, and nothing enumerated is not a stop');
+    assert.equal(seen.length, 0);
+});
+
+test('EnumFontFamiliesEx finds a face by name in any case, and a substitute by its own', async()=>{
+    const { fns, memory, seen, hdc } = withEnumeration(false);
+    /** @param {string} faceName @param {number} charSet */
+    const enumerate = async(faceName, charSet)=>{
+        seen.length = 0;
+        putLogFont(memory, { faceName, charSet });
+        const answer = await fns.EnumFontFamiliesExA.handler([hdc, STRUCT, ENUMPROC, 0, 0]);
+        return { answer, seen: seen.map(({ face, fullName, style, pitchAndFamily })=>
+            ({ face, fullName, style, pitchAndFamily })) };
+    };
+
+    assert.deepEqual((await enumerate('arial', 1)).seen, [{
+        face: 'Arial', fullName: 'Arial', style: 'Regular', pitchAndFamily: 0x22,
+    }], 'FF_SWISS | VARIABLE_PITCH');
+    assert.deepEqual((await enumerate('Courier New', 0)).seen.map(one=>one.pitchAndFamily),
+        [0x31], 'FF_MODERN | FIXED_PITCH');
+
+    // Wine's test_EnumFonts_subst: the name asked for, and not as the full name.
+    const substitute = (await enumerate('MS Shell Dlg', 1)).seen;
+    assert.equal(substitute.length, 1);
+    assert.equal(substitute[0].face, 'MS Shell Dlg');
+    assert.equal(substitute[0].fullName, 'Microsoft Sans Serif');
+
+    // Wine's is_font_installed: a face nobody has answers nonzero.
+    assert.deepEqual(await enumerate('Wingdings', 1), { answer: 1, seen: [] });
+});
+
+test('EnumFontFamiliesEx stops at a zero and answers what the callback last answered', async()=>{
+    const stopping = withEnumeration(false, ()=>0);
+    assert.equal(await stopping.fns.EnumFontFamiliesExA.handler(
+        [stopping.hdc, 0, ENUMPROC, 0, 0]), 0);
+    assert.equal(stopping.seen.length, 1);
+
+    // Wine's test_EnumFonts: the callback's own value comes back.
+    const magic = withEnumeration(false, one=>one.lParam);
+    assert.equal(await magic.fns.EnumFontFamiliesExA.handler(
+        [magic.hdc, 0, ENUMPROC, 0xcafe, 0]), 0xcafe);
+    assert.ok(magic.seen.length > 1);
+});
+
+test('EnumFontFamiliesExW reads a wide LOGFONT and hands back wide names', async()=>{
+    const { fns, memory, seen, hdc } = withEnumeration(true);
+    assert.equal(fns.EnumFontFamiliesExW.argBytes, 20);
+    const name = 'Tahoma';
+    memory.putU32s(STRUCT, new Array(23).fill(0));
+    memory.putU8(STRUCT + LOGFONTA.lfCharSet, 1);
+    for (let index = 0; index < name.length; index++)
+    {
+        memory.putU8(STRUCT + LOGFONTA.lfFaceName + index * 2, name.charCodeAt(index));
+    }
+    assert.equal(await fns.EnumFontFamiliesExW.handler([hdc, STRUCT, ENUMPROC, 0, 0]), 1);
+    assert.deepEqual(
+        seen.map(({ face, fullName, style, script })=>({ face, fullName, style, script })),
+        [{ face: 'Tahoma', fullName: 'Tahoma', style: 'Regular', script: 'Western' }]);
+    assert.equal(seen[0].height, seen[0].tmHeight, 'a TEXTMETRICW has the same LONGs');
+});
+
+test('EnumFontFamiliesEx calls nothing when it cannot, and refuses what is not a DC', async()=>{
+    const { fns, hdc } = withDC();
+    assert.equal(await fns.EnumFontFamiliesExA.handler([hdc, 0, ENUMPROC, 0, 0]), 1,
+        'with no way to call the program back nothing is enumerated');
+    const enumeration = withEnumeration(false);
+    assert.equal(await enumeration.fns.EnumFontFamiliesExA.handler([0x9999, 0, ENUMPROC, 0, 0]),
+        0);
+    assert.equal(enumeration.seen.length, 0);
+});
+
 test('a font file cannot be added to the fixed font table, with the stack intact', ()=>{
     const { fns } = setup();
     assert.equal(fns.AddFontResourceA.handler(), 0);
