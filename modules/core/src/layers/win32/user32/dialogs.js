@@ -107,6 +107,8 @@ const WS_DISABLED = 0x08000000;
 const DS_MODALFRAME = 0x0080;
 const DS_CENTER = 0x0800;
 const WS_EX_DLGMODALFRAME = 0x00000001;
+/** A child whose own controls Tab moves between as if they were the dialog's. */
+const WS_EX_CONTROLPARENT = 0x00010000;
 
 /**
  * A DLGTEMPLATEEX begins with a version of 1 and a signature of 0xffff, where
@@ -647,34 +649,77 @@ export function createDialogFunctions(options){
         : then(/** @type {number} */ (created)));
 
     /**
-     * The controls of a dialog in the order Tab walks them, disabled and
-     * hidden ones left out.
+     * Whether Tab searches a child's controls rather than the child: one
+     * with WS_EX_CONTROLPARENT, shown and enabled, as a property sheet's
+     * page is inside the sheet.
      *
-     * @param {any} dialog
+     * @param {any} child
      */
-    const tabOrder = dialog=>host.children(dialog).filter(child=>
-        (child.style & WS_VISIBLE) !== 0 && (child.style & WS_DISABLED) === 0);
+    const searchedThrough = child=>(child.exStyle & WS_EX_CONTROLPARENT) !== 0
+        && (child.style & (WS_VISIBLE | WS_DISABLED)) === WS_VISIBLE;
+
+    /** @param {any} child  Whether Tab stops at it. */
+    const stopsTab = child=>!searchedThrough(child)
+        && (child.style & (WS_TABSTOP | WS_VISIBLE | WS_DISABLED)) === (WS_TABSTOP | WS_VISIBLE);
 
     /**
-     * The control after -- or before -- one, among those with WS_TABSTOP,
-     * wrapping round. From nothing, the first or the last.
+     * The windows inside a dialog in the order Tab meets them: each child,
+     * then, for one it searches through, that child's own. The windows
+     * around `from` are laid out too, so a control Tab could not have
+     * reached is searched from where it stands.
+     *
+     * @param {any} dialog @param {number} from
+     * @returns {any[]}
+     */
+    const tabSequence = (dialog, from)=>{
+        const around = new Set();
+        for (let at = windows.get(from); at && at.hwnd !== dialog.hwnd; at = windows.get(at.parent))
+        {
+            around.add(at.hwnd);
+        }
+        /** @type {any[]} */
+        const sequence = [];
+        /** @param {any} parent */
+        const visit = parent=>{
+            for (const child of host.children(parent))
+            {
+                sequence.push(child);
+                if (searchedThrough(child) || around.has(child.hwnd))
+                {
+                    visit(child);
+                }
+            }
+        };
+        visit(dialog);
+        return sequence;
+    };
+
+    /**
+     * The control after -- or before -- one that stops Tab, wrapping round.
+     * From nothing, or from outside the dialog, the first or the last.
      *
      * @param {any} dialog @param {number} from  A control's handle, or zero.
      * @param {boolean} forward
      * @returns {any | null}
      */
     const nextTabStop = (dialog, from, forward)=>{
-        const stops = tabOrder(dialog).filter(child=>(child.style & WS_TABSTOP) !== 0);
-        if (stops.length === 0)
-        {
-            return null;
-        }
-        const at = stops.findIndex(child=>child.hwnd === from);
+        const sequence = tabSequence(dialog, from);
+        const at = from === 0 ? -1 : sequence.findIndex(child=>child.hwnd === from);
         if (at === -1)
         {
-            return forward ? stops[0] : stops[stops.length - 1];
+            const stops = sequence.filter(stopsTab);
+            return (forward ? stops[0] : stops[stops.length - 1]) ?? null;
         }
-        return stops[(at + (forward ? 1 : stops.length - 1)) % stops.length];
+        for (let step = 1; step <= sequence.length; step++)
+        {
+            const child = sequence[(at + (forward ? step : sequence.length - step))
+                % sequence.length];
+            if (stopsTab(child))
+            {
+                return child;
+            }
+        }
+        return null;
     };
 
     /**
@@ -1179,17 +1224,21 @@ export function createDialogFunctions(options){
          * HWND GetNextDlgTabItem(HWND hDlg, HWND hCtl, BOOL bPrevious)
          *
          * The control Tab would move to from the one named -- the next with
-         * WS_TABSTOP, shown and enabled, wrapping round -- or the first from
-         * nothing.
+         * WS_TABSTOP, shown and enabled, wrapping round, inside the children
+         * it searches through -- or the first from nothing or the dialog
+         * itself, before which there is none.
          */
         GetNextDlgTabItem: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hwnd, from, previous])=>{
                 const dialog = live(hwnd);
-                return dialog
-                    ? nextTabStop(dialog, from >>> 0, (previous >>> 0) === 0)?.hwnd ?? 0
-                    : 0;
+                const start = (from >>> 0) === (hwnd >>> 0) ? 0 : from >>> 0;
+                if (!dialog || (start === 0 && (previous >>> 0) !== 0))
+                {
+                    return 0;
+                }
+                return nextTabStop(dialog, start, (previous >>> 0) === 0)?.hwnd ?? 0;
             },
         },
 

@@ -22,7 +22,8 @@ import {
     PSM_SETCURSEL, PSM_REMOVEPAGE, PSM_ADDPAGE, PSM_CHANGED, PSM_UNCHANGED, PSM_QUERYSIBLINGS,
     PSM_PRESSBUTTON, PSM_GETTABCONTROL, PSM_GETCURRENTPAGEHWND, PSM_INSERTPAGE,
     PSM_HWNDTOINDEX, PSM_INDEXTOHWND, PSM_PAGETOINDEX, PSM_INDEXTOPAGE, PSM_IDTOINDEX,
-    PSM_INDEXTOID, PSBTN_NEXT, PSBTN_BACK, PSBTN_OK, PSBTN_CANCEL, PSBTN_APPLYNOW,
+    PSM_INDEXTOID, PSM_ISDIALOGMESSAGE, PSBTN_NEXT, PSBTN_BACK, PSBTN_OK, PSBTN_CANCEL,
+    PSBTN_APPLYNOW,
     IDOK, IDCANCEL, IDHELP, IDC_APPLY_BUTTON, IDC_NEXT_BUTTON, IDC_BACK_BUTTON,
 } from './propsheet.js';
 
@@ -52,6 +53,9 @@ const WM_NCDESTROY = 0x0082;
 const WM_INITDIALOG = 0x0110;
 const WM_NOTIFY = 0x004e;
 const WM_LBUTTONDOWN = 0x0201;
+const WM_KEYDOWN = 0x0100;
+const VK_TAB = 0x09;
+const VK_SHIFT = 0x10;
 const WM_QUIT = 0x0012;
 const DM_GETDEFID = 0x0400;
 const DC_HASDEFID = 0x534b;
@@ -231,6 +235,8 @@ function setup({ modal = false } = {}){
     let nextProcedure = PROCEDURES;
     let heapNext = HEAP;
     let stringNext = STRINGS;
+    /** The keys held down, as GetKeyState reads them. @type {Set<number>} */
+    const keysDown = new Set();
     /** @param {number} bytes */
     const allocate = bytes=>{
         const at = heapNext;
@@ -287,6 +293,7 @@ function setup({ modal = false } = {}){
         callerThread: ()=>THREAD,
         park: ()=>({ parked: true }),
         idle: modal ? ()=>new Promise(resolve=>setImmediate(resolve)) : ()=>new Promise(()=>{}),
+        keyState: key=>(keysDown.has(key) ? 0x8000 : 0),
         dc: ()=>({
             /** @param {number} hwnd @param {any} bounds */
             get: (hwnd, bounds = null)=>gdi.windowContext(hwnd, bounds),
@@ -503,9 +510,34 @@ function setup({ modal = false } = {}){
         return owner;
     };
 
+    /**
+     * A key press for a window, handed to the dialog manager the way a
+     * modeless sheet's loop hands it: IsDialogMessage, or PSM_ISDIALOGMESSAGE
+     * with `sheet`. The keys named are held while it is.
+     *
+     * @param {number} dialog @param {number} key @param {number[]} [held]
+     * @param {boolean} [sheet]
+     * @returns {Promise<number>} whether the message was taken
+     */
+    const press = async(dialog, key, held = [], sheet = false)=>{
+        const target = table.GetFocus.handler([]) || dialog;
+        [target, WM_KEYDOWN, key, 1].forEach((value, index)=>
+            memory.put32(MSG_BUFFER + index * 4, value));
+        held.forEach(each=>keysDown.add(each));
+        try
+        {
+            return sheet ? await send([dialog, PSM_ISDIALOGMESSAGE, 0, MSG_BUFFER])
+                : await table.IsDialogMessageA.handler([dialog, MSG_BUFFER]);
+        }
+        finally
+        {
+            keysDown.clear();
+        }
+    };
+
     return { memory, desktop, fns: table, comctl, send, pump, heard, register, pageProc,
         description, descriptions, header, createPage, result, string, windowRect, textOf,
-        makeOwner };
+        makeOwner, press };
 }
 
 test('CreatePropertySheetPage copies the description, refuses one older than the first '
@@ -990,4 +1022,36 @@ test('without Apply, the row is OK and Cancel, and the sheet is painted', async(
     assert.ok(sheet.right - cancel.right < 20, 'Cancel ends the row at the right margin');
     // The face under the buttons is the dialog's.
     assert.equal(context.desktop.read(sheet.left + 8, cancel.bottom + 2), 0x00c0c0c0);
+});
+
+test('Tab walks from the sheet into the page on show and through its controls, and '
+    + 'Shift+Tab walks back out', async()=>{
+    // user32's dialog tests (test_GetNextDlgItem): the dialog manager searches
+    // through a child with WS_EX_CONTROLPARENT, which a page is made, as if
+    // its controls were the sheet's own.
+    const context = setup();
+    const page = await context.createPage(context.description({
+        proc: context.pageProc('page') }));
+    const hwnd = await context.comctl.PropertySheetA.handler([context.header({
+        flags: PSH_MODELESS, pages: [page] })]);
+    const current = context.send([hwnd, PSM_GETCURRENTPAGEHWND, 0, 0]);
+    const edit = (/** @type {number} */ id)=>context.fns.GetDlgItem.handler([current, id]);
+    const focus = ()=>context.fns.GetFocus.handler([]);
+    const parentOf = (/** @type {number} */ child)=>context.fns.GetParent.handler([child]);
+    assert.equal(focus(), edit(IDC_PS_EDIT1), 'the page\'s first tab stop');
+
+    assert.equal(await context.press(hwnd, VK_TAB), 1);
+    assert.equal(focus(), edit(IDC_PS_EDIT2), 'to the page\'s next');
+    assert.equal(await context.press(hwnd, VK_TAB), 1);
+    assert.equal(parentOf(focus()), hwnd, 'past the page\'s last, to a control of the sheet');
+    /** @type {number[]} */
+    const walked = [];
+    for (let guard = 0; guard < 8 && focus() !== edit(IDC_PS_EDIT1); guard++)
+    {
+        walked.push(focus());
+        await context.press(hwnd, VK_TAB);
+    }
+    assert.equal(focus(), edit(IDC_PS_EDIT1), 'and round into the page again');
+    await context.press(hwnd, VK_TAB, [VK_SHIFT]);
+    assert.equal(focus(), walked.at(-1), 'Shift+Tab back to the sheet\'s control before it');
 });

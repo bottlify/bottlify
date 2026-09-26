@@ -885,3 +885,102 @@ test('DefDlgProcA(WM_SETFOCUS) passes the focus to the first control that stops 
         'the control is asked what it wants, its text selected, then it has the focus');
     assert.equal(seen[1].wParam, 0);
 });
+
+test('GetNextDlgTabItem walks into a shown, enabled WS_EX_CONTROLPARENT child as if its '
+    + 'controls were the dialog\'s own', ()=>{
+    // user32's dialog tests (test_GetNextDlgItem) build this hierarchy of
+    // statics and ask for the tab item after or before one: a child with
+    // WS_EX_CONTROLPARENT is searched through, DS_CONTROL alone is not, a
+    // control that could not be reached that way is searched from where it
+    // is, and the item before nothing, or before the dialog itself, is none.
+    const WS_CHILD = 0x40000000;
+    const WS_VISIBLE = 0x10000000;
+    const WS_DISABLED = 0x08000000;
+    const WS_GROUP = 0x00020000;
+    const WS_TABSTOP = 0x00010000;
+    const DS_CONTROL = 0x0400;
+    const WS_EX_CONTROLPARENT = 0x00010000;
+    const V = WS_CHILD | WS_VISIBLE;
+    /** id, parent, style, extended style: Wine's table, in its order. */
+    const hierarchy = [
+        [1, 0, WS_VISIBLE, 0],
+        [20, 1, V | WS_GROUP, 0],
+        [2, 1, V, WS_EX_CONTROLPARENT],
+        [60, 2, V | WS_TABSTOP, 0],
+        [8, 2, V | WS_DISABLED | WS_TABSTOP, WS_EX_CONTROLPARENT],
+        [85, 8, V | WS_TABSTOP | WS_GROUP, 0],
+        [9, 8, WS_CHILD, WS_EX_CONTROLPARENT],
+        [86, 9, V, 0],
+        [87, 9, V, 0],
+        [31, 8, V | WS_GROUP, 0],
+        [10, 2, V, WS_EX_CONTROLPARENT],
+        [88, 10, V | WS_GROUP, 0],
+        [11, 10, WS_CHILD, WS_EX_CONTROLPARENT],
+        [89, 11, V, 0],
+        [32, 11, V | WS_GROUP, 0],
+        [90, 11, V, 0],
+        [33, 10, V | WS_GROUP, 0],
+        [21, 2, V | WS_GROUP, 0],
+        [61, 2, V | WS_TABSTOP, 0],
+        [3, 1, V | DS_CONTROL, 0],
+        [22, 3, V | WS_GROUP, 0],
+        [62, 3, V | WS_TABSTOP, 0],
+        [7, 3, V, WS_EX_CONTROLPARENT],
+        [4, 7, V | DS_CONTROL, 0],
+        [83, 4, V, 0],
+        [5, 4, V | DS_CONTROL, 0],
+        [29, 5, V | WS_GROUP, 0],
+        [81, 5, V, 0],
+        [6, 5, V, WS_EX_CONTROLPARENT],
+        [63, 6, V | WS_DISABLED | WS_TABSTOP, 0],
+        [64, 6, WS_CHILD | WS_TABSTOP, 0],
+        [65, 6, WS_CHILD | WS_DISABLED | WS_TABSTOP, 0],
+        [66, 6, V, 0],
+        [23, 6, V | WS_GROUP, 0],
+        [67, 6, V | WS_TABSTOP, 0],
+        [24, 6, WS_CHILD | WS_DISABLED | WS_GROUP, 0],
+        [68, 6, V | WS_DISABLED | WS_TABSTOP, 0],
+        [69, 6, WS_CHILD | WS_TABSTOP, 0],
+        [25, 6, V | WS_GROUP, 0],
+        [70, 6, V, 0],
+        [71, 6, V | WS_DISABLED | WS_TABSTOP, 0],
+        [72, 6, V | WS_TABSTOP, 0],
+        [73, 6, V | WS_DISABLED | WS_TABSTOP, 0],
+        [26, 6, V | WS_GROUP, 0],
+        [74, 6, V | WS_TABSTOP, 0],
+        [75, 6, V | WS_TABSTOP, 0],
+        [27, 6, V | WS_DISABLED | WS_GROUP, 0],
+        [76, 6, V | WS_TABSTOP, 0],
+        [77, 6, V | WS_TABSTOP, 0],
+        [28, 6, WS_CHILD | WS_GROUP, 0],
+        [78, 6, V | WS_TABSTOP, 0],
+        [79, 6, V, 0],
+        [80, 6, V | WS_DISABLED | WS_TABSTOP, 0],
+        [82, 5, V, 0],
+        [30, 5, V | WS_GROUP, 0],
+        [84, 4, V | WS_TABSTOP, 0],
+    ];
+    const { memory, fns } = setup();
+    const CLASS_NAME = 0x10b00;
+    memory.putString(CLASS_NAME, 'static');
+    /** @type {Map<number, number>} */
+    const hwnd = new Map([[0, 0]]);
+    for (const [id, parent, style, exStyle] of hierarchy)
+    {
+        hwnd.set(id, fns.CreateWindowExA.handler([exStyle, CLASS_NAME, 0, style, 10, 10, 10,
+            10, hwnd.get(parent) ?? 0, parent === 0 ? 0 : 2000 + id, HINSTANCE, 0]));
+    }
+    const idOf = (/** @type {number} */ handle)=>[...hwnd].find(([, each])=>each === handle)?.[0];
+    /** Wine's test number, the dialog, the control, whether before, and the answer. */
+    const records = [
+        [2, 6, 0, 1, 0], [4, 6, 6, 1, 0], [6, 6, 0, 0, 67], [8, 6, 6, 0, 67],
+        [9, 4, 83, 0, 84], [11, 5, 81, 0, 67], [13, 5, 82, 1, 78], [27, 1, 70, 0, 72],
+        [29, 6, 67, 0, 72], [30, 6, 72, 1, 67], [36, 2, 0, 0, 60],
+    ];
+    for (const [number, dialog, control, previous, expected] of records)
+    {
+        const found = fns.GetNextDlgTabItem.handler([hwnd.get(dialog) ?? 0,
+            hwnd.get(control) ?? 0, previous]);
+        assert.equal(idOf(found), expected, `test ${number}`);
+    }
+});
