@@ -366,6 +366,9 @@ export function createPublisher({ publishInterface }){
                 },
                 addRef: ()=>api.addRef?.() ?? 1,
                 release: ()=>api.release?.() ?? 0,
+                // Whether the bridge keeps the pointer at a count of zero: a
+                // primary buffer lives as long as its device does.
+                reachable: ()=>api.reachable?.() ?? false,
             };
             adapters.set(api, adapter);
         }

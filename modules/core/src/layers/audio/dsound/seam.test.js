@@ -1123,6 +1123,40 @@ const slotOf = (slots, name)=>{
     return 3 + index;
 };
 
+test('the primary buffer answers through its pointer after its last release', ()=>{
+    // Wine's dsound test_primary: Release to zero, AddRef answers one, two
+    // Releases answer zero, and QueryInterface still answers -- E_NOINTERFACE
+    // for IDirectSoundNotify, not E_POINTER -- because the device keeps it.
+    const g = guestMachine();
+    g.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, 0x1000, 0]);
+    const device = g.memory.u32(0x1000);
+    const descriptor = describeBuffer(g.memory, { flags: DSBCAPS_PRIMARYBUFFER });
+    assert.equal(g.call(device, slotOf(IDIRECTSOUND_SLOTS, 'CreateSoundBuffer'),
+        [descriptor, 0x1100, 0]), DS_OK);
+    const primary = g.memory.u32(0x1100);
+    const [ADDREF, RELEASE] = [1, 2];
+    assert.equal(g.call(primary, RELEASE), 0);
+    assert.equal(g.call(primary, ADDREF), 1);
+    assert.equal(g.call(primary, RELEASE), 0);
+    assert.equal(g.call(primary, RELEASE), 0);
+    const iid = 0x1200;
+    g.memory.writeMemory(iid, new Uint8Array([
+        0x83, 0x07, 0x21, 0xb0, 0xcd, 0x89, 0xd0, 0x11,
+        0xaf, 0x08, 0x00, 0xa0, 0xc9, 0x25, 0xcd, 0x16,
+    ]));
+    assert.equal(g.call(primary, 0, [iid, 0x1300]) >>> 0, 0x80004002, 'E_NOINTERFACE');
+
+    // Asked for again, it is the same buffer behind the same pointer.
+    assert.equal(g.call(device, slotOf(IDIRECTSOUND_SLOTS, 'CreateSoundBuffer'),
+        [descriptor, 0x1100, 0]), DS_OK);
+    assert.equal(g.memory.u32(0x1100), primary);
+    assert.equal(g.call(primary, RELEASE), 0);
+
+    // Once its device is gone as well, the pointer is let go.
+    assert.equal(g.call(device, RELEASE), 0);
+    assert.equal(g.call(primary, ADDREF) >>> 0, 0x80004003, 'E_POINTER');
+});
+
 test('a method reaches the arguments the guest pushed, at the offsets it pushed them', ()=>{
     const g = guestMachine();
     const out = 0x1000;
