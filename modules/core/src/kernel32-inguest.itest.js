@@ -5,8 +5,9 @@
  */
 
 /**
- * The interlocked arithmetic, code in the guest's own kernel32, called
- * through the import as a program calls it, on cork and on the emulator.
+ * The kernel32 exports that are code in the guest's own kernel32, called
+ * through the import as a program calls them, on cork and on the emulator:
+ * the interlocked arithmetic and thread-local storage.
  *
  * Each program exits 0, or with the number of the first check that failed.
  */
@@ -67,6 +68,9 @@ function assemble(pieces){
 
 const JNE = [0x0f, 0x85];
 const JNZ = JNE;
+const JE = [0x0f, 0x84];
+const JAE = [0x0f, 0x83];
+const JMP = [0xe9];
 
 /**
  * The context `buildExe` hands a program's code, and the few instructions
@@ -201,6 +205,80 @@ function buildInterlockedRaceExe(){
 }
 
 /**
+ * TlsAlloc, TlsSetValue and TlsGetValue through the import: a value set is
+ * the value read, by the API and by the compiler's own `fs:[0x2c]` sequence;
+ * a get clears the last error and a set leaves it; another thread has its
+ * own; a slot past the thread's array goes through the host and works the
+ * same; an index past every slot fails with ERROR_INVALID_PARAMETER; a freed
+ * slot reads as zero.
+ */
+function buildTlsExe(){
+    const ERROR_INVALID_PARAMETER = 87;
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['TlsAlloc', 'TlsFree', 'TlsGetValue', 'TlsSetValue',
+            'GetLastError', 'SetLastError', 'CreateThread', 'ExitThread',
+            'WaitForSingleObject', 'ExitProcess'] },
+        data: { index: [0, 0, 0, 0], high: [0, 0, 0, 0], handles: [0, 0, 0, 0],
+            seen: [0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0] },
+        codeSize: 0x400,
+        code: context=>{
+            const { call, pushFrom, pushValue, compare, keep, check, exit, fail, spawn } =
+                toolkit(context);
+            const worker = context.code(0x300);
+            /** cmp eax, value; jne fail @param {number} value */
+            const expect = value=>[[0x3d, ...u32(value)], { jump: JNE, to: 'fail' }];
+            /** @param {number} code */
+            const errorIs = code=>[call('GetLastError'), ...expect(code)];
+            const main = assemble([
+                check(1), call('TlsAlloc'), keep('index'),
+                [0x3d, ...u32(0xffffffff)], { jump: JE, to: 'fail' },     // TLS_OUT_OF_INDEXES
+                check(2), pushValue(5), call('SetLastError'),
+                pushValue(0x1234), pushFrom('index'), call('TlsSetValue'), ...expect(1),
+                check(3), ...errorIs(5),
+                check(4), pushFrom('index'), call('TlsGetValue'), ...expect(0x1234),
+                check(5), ...errorIs(0),
+                // __declspec(thread) as the compiler reads it.
+                check(6), [0x64, 0x8b, 0x0d, 0x2c, 0, 0, 0],             // mov ecx, fs:[0x2c]
+                [0xa1, ...u32(context.at('index'))],                     // mov eax, [index]
+                [0x8b, 0x04, 0x81], ...expect(0x1234),                   // mov eax, [ecx+eax*4]
+                spawn(worker, 'handles', 0),
+                [0x6a, 0xff], pushFrom('handles'), call('WaitForSingleObject'),
+                check(7), compare('seen', 0), { jump: JNE, to: 'fail' },
+                check(8), compare('seen', 0x5678, 4), { jump: JNE, to: 'fail' },
+                check(9), pushFrom('index'), call('TlsGetValue'), ...expect(0x1234),
+                // Past the array: allocate until an index of 64 or more.
+                check(10), [0xbe, ...u32(100)],                          // mov esi, 100
+                'more',
+                call('TlsAlloc'), [0x83, 0xf8, 64], { jump: JAE, to: 'found' }, // cmp eax, 64
+                [0x4e], { jump: JNZ, to: 'more' },                       // dec esi
+                { jump: JMP, to: 'fail' },
+                'found',
+                keep('high'),
+                check(11), pushValue(0x9abc), pushFrom('high'), call('TlsSetValue'), ...expect(1),
+                pushValue(5), call('SetLastError'),
+                check(12), pushFrom('high'), call('TlsGetValue'), ...expect(0x9abc),
+                check(13), ...errorIs(0),
+                check(14), pushValue(1), pushValue(5000), call('TlsSetValue'), ...expect(0),
+                check(15), ...errorIs(ERROR_INVALID_PARAMETER),
+                check(16), pushFrom('index'), call('TlsFree'), ...expect(1),
+                check(17), [0x64, 0x8b, 0x0d, 0x2c, 0, 0, 0],
+                [0xa1, ...u32(context.at('index'))], [0x8b, 0x04, 0x81], ...expect(0),
+                exit(),
+                ...fail(),
+            ]);
+            const body = assemble([
+                pushFrom('index'), call('TlsGetValue'), keep('seen'),
+                pushValue(0x5678), pushFrom('index'), call('TlsSetValue'),
+                pushFrom('index'), call('TlsGetValue'), keep('seen', 4),
+                [0x6a, 0x00], call('ExitThread'),
+            ]);
+            assert.ok(main.length <= 0x300, `main is ${main.length} bytes`);
+            return [...main, ...new Array(0x300 - main.length).fill(0x90), ...body];
+        },
+    });
+}
+
+/**
  * Runs a program to its exit, and reads before the machine goes what crossed
  * into the host: the bridge's most frequent calls.
  *
@@ -248,5 +326,14 @@ for (const engine of /** @type {const} */ (['cork', 'emulator']))
         { timeout: 60000 }, async()=>{
             const { code } = await run(buildInterlockedRaceExe(), engine, 97);
             assert.equal(code, 0, '1: an increment was lost; 2: an addition was');
+        });
+
+    test(`a thread-local slot set in the guest is the slot every reader sees, under ${engine}`,
+        { timeout: 60000 }, async()=>{
+            const { code, hot } = await run(buildTlsExe(), engine);
+            assert.equal(code, 0, 'the number of the first check that failed');
+            const crossed = Object.fromEntries(hot);
+            assert.equal(crossed['<tls-set>'], 2, 'only the two sets past the array crossed');
+            assert.equal(crossed['<tls-get>'], 1, 'and the one get');
         });
 }

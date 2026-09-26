@@ -164,7 +164,7 @@ engine.
 A table entry is `{ argBytes, handler }` — the bytes the callee pops (zero for cdecl, where
 `argBytes` describes the stack layout only) and a function of the argument array. An entry may
 instead carry `guest`, a builder that emits guest code and registers the traps it falls back to:
-kernel32's critical sections, interlocked arithmetic, last error, TLS reads and clocks
+kernel32's critical sections, interlocked arithmetic, last error, TLS reads and writes and clocks
 do this, and such an export is bound to its code, crossing into the host only where the code
 jumps to a trap. The assembler (`src/app.js`) merges `win32.libraries()` with the
 tables from `graphics`, `audio`, `input` and `media`, registers every handler with the bridge under
@@ -447,9 +447,15 @@ a packet from every overlapped read or write on a bound handle. The interlocked 
 exception: each is its one locked instruction on the program's dword, placed as guest code
 (`kernel32/interlocked.js`) with no trap at all, so it is atomic for the reason it is on Windows --
 the scheduler preempts only between instructions -- and a bad pointer faults in the guest at the
-instruction that touched it. TLS slots are read out of the running thread's own block through its
-TLS pointer rather than tracked on the host, so what `TlsGetValue` answers cannot drift from what
-the guest reaches through `FS`.
+instruction that touched it. TLS slots below 64 live in the running thread's own array behind its
+TLS pointer (`FS:[0x2c]`), the one record of them: `TlsGetValue`/`FlsGetValue` and
+`TlsSetValue`/`FlsSetValue` read and write it as guest code -- the get clearing the last error, the
+set leaving it and not checking the index against the allocation, as on Windows -- and the host's
+own handlers read and write the same array, so what they answer cannot drift from what the guest,
+the compiler's `__declspec(thread)` sequence included, reaches through `FS`. `TlsFree` clears the
+slot in every thread's array. An index from 64 up jumps to the host, which keeps those values per
+thread under the slot's generation and fails an index nobody allocated with
+`ERROR_INVALID_PARAMETER`.
 
 Asynchronous procedure calls (`kernel32/apc.js`) are queued per thread -- by `QueueUserAPC`, or by a
 waitable timer at each expiry for the completion routine `SetWaitableTimer` was given, queued to
@@ -874,8 +880,11 @@ Unit tests are colocated with each file, `node:test`, over `fakeMemory`
 emulator (`npm run test:integration`), pinning that the bytes the unit test checks are x86 that
 does the job. `src/kernel32-inguest.itest.js` calls the guest-code exports through the import, on
 cork and on the emulator: each interlocked call's answer, the dword it leaves, the stack it pops
-and the registers it keeps, and three preempted threads counting through two of them.
-`src/exceptions.itest.js` runs three compiled fixtures -- `seh.exe`, `cxxeh.exe`,
+and the registers it keeps, and three preempted threads counting through two of them; a TLS value
+set in the guest read back by the API, by the compiler's `FS:[0x2c]` sequence and not by another
+thread, the last error each call leaves, a slot past the array through the host, an index past
+every slot refused, a freed slot zero. `src/exceptions.itest.js` runs three compiled fixtures --
+`seh.exe`, `cxxeh.exe`,
 `unhandled.exe`, built from `test/fixtures/src/` by `scripts/build-fixtures.mjs` with clang and
 lld against the MSVC ABI -- through every path above, processor faults and two threads throwing
 at once included. `src/apc.itest.js` runs `apc.exe`, built the same way: APCs to itself and to

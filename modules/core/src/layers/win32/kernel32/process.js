@@ -266,6 +266,34 @@ export function tlsGetValueCode(at, trap){
 }
 
 /**
+ * TlsSetValue as guest code: the value into a slot of the block. An index past
+ * the array goes to the host, which keeps the rest.
+ *
+ * A slot in the array is written whether or not anybody allocated it, and
+ * success leaves the last error alone, as on Windows: the array is the
+ * thread's own, and what keeps a freed slot's old value from its next tenant
+ * is TlsFree clearing that slot in every thread's array.
+ *
+ * @param {number} at    Where the code lands, for the jump to the trap.
+ * @param {number} trap  The host's TlsSetValue.
+ */
+export function tlsSetValueCode(at, trap){
+    const slow = 31;
+    return new Uint8Array([
+        0x8b, 0x44, 0x24, 0x04,                                      // mov eax, [esp+4]
+        0x83, 0xf8, TLS_SLOTS_IN_BLOCK,                              // cmp eax, 64
+        0x73, slow - 9,                                              // jae slow
+        0x64, 0x8b, 0x0d, ...dword(TEB.TLS_POINTER),                 // mov ecx, fs:[0x2c]
+        0x8b, 0x54, 0x24, 0x08,                                      // mov edx, [esp+8]
+        0x89, 0x14, 0x81,                                            // mov [ecx+eax*4], edx
+        0xb8, ...dword(1),                                           // mov eax, 1
+        0xc2, 0x08, 0x00,                                            // ret 8
+        // slow:
+        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+    ]);
+}
+
+/**
  * QueryPerformanceCounter as guest code: the two words of the block, copied
  * into the caller's LARGE_INTEGER.
  *
@@ -392,9 +420,11 @@ export function createProcessFunctions(host){
 
     /**
      * The guest-side paths, placed once and shared by the exports that use
-     * them: reading and writing the last error, and reading a TLS slot.
+     * them: reading and writing the last error, and reading and writing a TLS
+     * slot.
      *
-     * @type {{ getLastError: number, setLastError: number, tlsGetValue: number } | null}
+     * @type {{ getLastError: number, setLastError: number, tlsGetValue: number,
+     *     tlsSetValue: number } | null}
      */
     let fastPaths = null;
     /** @param {import('./sync.js').GuestBuilder} builder */
@@ -413,6 +443,11 @@ export function createProcessFunctions(host){
             /** @param {number[]} args */
             handler: args=>table.TlsGetValue.handler(args),
         });
+        const setTrap = builder.register('<tls-set>', {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>table.TlsSetValue.handler(args),
+        });
         /** @param {(at: number) => Uint8Array} code */
         const place = code=>{
             const at = allocate(code(0).length);
@@ -423,6 +458,7 @@ export function createProcessFunctions(host){
             getLastError: place(()=>getLastErrorCode()),
             setLastError: place(()=>setLastErrorCode()),
             tlsGetValue: place(at=>tlsGetValueCode(at, getTrap)),
+            tlsSetValue: place(at=>tlsSetValueCode(at, setTrap)),
         };
         return fastPaths;
     };
@@ -539,27 +575,16 @@ export function createProcessFunctions(host){
         : {});
 
     /**
-     * Mirrors a slot into the block the compiler reads.
+     * The running thread's array, when `slot` is one of the slots it holds:
+     * there the array is the value's one record, which the guest-side paths
+     * and the compiler's own `fs:[0x2c]` sequence read and write without
+     * asking. Zero past the array, or for a thread with no block -- a build
+     * with no process blocks assembled keeps every value here, which is what
+     * the tests drive.
      *
-     * Silent when there is no block -- a build with no process blocks assembled
-     * still has working Tls* calls, which is what the tests drive.
-     *
-     * @param {number} slot @param {number} value
+     * @param {number} slot
      */
-    const publishSlot = (slot, value)=>{
-        if (slot >= TLS_SLOTS_IN_BLOCK || !host.tlsBlock)
-        {
-            return;
-        }
-        const block = host.tlsBlock();
-        if (block === 0)
-        {
-            return;
-        }
-        host.writeMemory(block + slot * 4, new Uint8Array([
-            value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
-        ]));
-    };
+    const blockFor = slot=>(slot < TLS_SLOTS_IN_BLOCK && host.tlsBlock ? host.tlsBlock() : 0);
 
     /** @param {number} index */
     const validSlot = index=>index >= 0 && index < TLS_SLOTS && slots[index] !== null;
@@ -960,6 +985,11 @@ export function createProcessFunctions(host){
                 // failure, so success clears the error -- which is what makes
                 // the documented "check GetLastError" idiom work at all.
                 setError(ERROR_SUCCESS);
+                const block = blockFor(slot);
+                if (block !== 0)
+                {
+                    return memory.readU32(block + slot * 4);
+                }
                 const entry = stateOf().tls.get(slot);
                 return entry && entry.generation === slots[slot] ? entry.value : 0;
             },
@@ -978,13 +1008,20 @@ export function createProcessFunctions(host){
                     setError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
+                const block = blockFor(slot);
+                if (block !== 0)
+                {
+                    memory.writeU32(block + slot * 4, value >>> 0);
+                    return 1;
+                }
                 stateOf().tls.set(slot, {
                     generation: /** @type {number} */ (slots[slot]),
                     value: value >>> 0,
                 });
-                publishSlot(slot, value >>> 0);
                 return 1;
             },
+            /** @param {import('./sync.js').GuestBuilder} builder */
+            guest: builder=>placed(builder).tlsSetValue,
         },
 
         // Fibre-local storage is thread-local storage on a machine with no
@@ -1017,6 +1054,8 @@ export function createProcessFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: args=>table.TlsSetValue.handler(args),
+            /** @param {import('./sync.js').GuestBuilder} builder */
+            guest: builder=>placed(builder).tlsSetValue,
         },
 
         /**
