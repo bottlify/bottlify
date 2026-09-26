@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    CACHE_VERSION, cacheKey, memoryTranslationStore, packRegion, unpackRegion,
+    CACHE_VERSION, cacheKey, memoryTranslationStore, moduleKey, packRegion, unpackRegion,
 } from './cache.js';
 
 test('a record round-trips, and bytes of another version or shape are a miss', ()=>{
@@ -40,10 +40,12 @@ test('the key changes with every input', ()=>{
         entry: 0x401000, hash: 'deadbeef',
     };
     const key = cacheKey(base);
-    assert.equal(key, 'cork/1st/abc/game/401000/deadbeef');
+    assert.equal(key, 'cork/1st-/abc/game/401000/deadbeef');
     for (const change of [
         { version: 2 }, { features: { simd: false, tailCalls: true } }, { layoutId: 'abd' },
         { bundleId: 'other' }, { entry: 0x401001 }, { hash: 'deadbeee' },
+        { features: { simd: true, tailCalls: true, defaultNaNNegative: true } },
+        { variant: 'S' }, { variant: 'pb077' },
     ])
     {
         assert.notEqual(cacheKey({ ...base, ...change }), key, JSON.stringify(change));
@@ -56,4 +58,13 @@ test('the memory store keeps what it is given', async()=>{
     await store.put('a', new Uint8Array([1, 2]));
     assert.deepEqual([...(await store.get('a') ?? [])], [1, 2]);
     assert.equal(store.size(), 1);
+});
+
+test('a module\'s key sees its bytes past 32 bits, and the emitting settings', ()=>{
+    const of = { version: 1, features: { simd: true, tailCalls: true }, layoutId: 'abc',
+        bundleId: 'game' };
+    const key = moduleKey(of, new Uint8Array([1, 2, 3]));
+    assert.match(key, /^cork\/1st-\/abc\/game\/module\/[0-9a-f]{9,16}-3$/);
+    assert.notEqual(moduleKey(of, new Uint8Array([1, 2, 4])), key);
+    assert.notEqual(moduleKey({ ...of, variant: 'S' }, new Uint8Array([1, 2, 3])), key);
 });

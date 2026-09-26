@@ -908,12 +908,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 + (spans ? `:${spans.join(',')}` : ''));
         }
     };
+    // The settings that change emitted code but not a region's bytes, in the
+    // store's keys: structure, the transfer count, the trap port.
+    const variant = (settings.structure ? 'S' : '') + (settings.countTransfers ? 'T' : '')
+        + `p${(settings.trapPort ?? 0).toString(16)}`;
     /** The store key of one formed region: an x87 region compiled for the wide
      * precision controls, or checked, is another translation of the same bytes.
      * @param {{ region: { entry: number, hash: string }, entryTop: number, wide?: boolean,
      *     checked?: boolean }} one */
     const regionKey = one=>cacheKey({
-        version: CACHE_VERSION, features: found, layoutId: layout.id,
+        version: CACHE_VERSION, features: found, variant, layoutId: layout.id,
         bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
         hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}${one.checked ? '-c' : ''}`,
     });
@@ -950,8 +954,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         if (store !== null)
         {
             const storeAt = clock();
-            key = moduleKey({ version: CACHE_VERSION, features: found, layoutId: layout.id,
-                bundleId: settings.bundleId ?? 'unknown' }, batch.module);
+            key = moduleKey({ version: CACHE_VERSION, features: found, variant,
+                layoutId: layout.id, bundleId: settings.bundleId ?? 'unknown' }, batch.module);
             store.put(key, packRegion({ module: batch.module, labels: [], cut: [], entryTop: 0,
                 instructions: 0 })).catch(()=>{});
             if (instance !== null)
@@ -1011,8 +1015,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         let key;
         if (store !== null)
         {
-            key = moduleKey({ version: CACHE_VERSION, features: found, layoutId: layout.id,
-                bundleId: settings.bundleId ?? 'unknown' }, batch.module);
+            key = moduleKey({ version: CACHE_VERSION, features: found, variant,
+                layoutId: layout.id, bundleId: settings.bundleId ?? 'unknown' }, batch.module);
             store.put(key, packRegion({ module: batch.module, labels: [], cut: [], entryTop: 0,
                 instructions: 0 })).catch(()=>{});
             batchInstances.set(key, instance);

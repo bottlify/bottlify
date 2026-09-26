@@ -180,7 +180,15 @@ system in the engine's own thread, a directory per bundle, as it does the block 
 second run of a program takes every region it ran before from the store, each batch module
 instantiated once for all its regions -- the region is still formed, a decode, which gives its
 hash; what is saved is the emitting and the encoding, and the report says
-`cacheHits`/`cacheMisses`. A region dropped when its page is written leaves its batch's module
+`cacheHits`/`cacheMisses`. The keys carry what the emitter reads besides a region's bytes: the
+host's features, the default NaN's sign among them (`n`), and the emitting settings (`structure`
+`S`, `countTransfers` `T`, the trap port `p<port>`) -- a run with `structure` on a store a run
+without it wrote took the other code; a batch module is named by 64 bits of its bytes' hash (two
+FNV lanes), since every batch of a bundle shares one namespace. `CACHE_VERSION` moves by hand
+when the emitter's output does; `runtime/emitted.test.js` emits a fixed set of regions (the
+benchmark's programs at their entries, under fixed features) and holds the digest to the one
+recorded for the current version, so a change to the emitted code fails it until the version is
+bumped -- a change the set's code does not reach still passes. A region dropped when its page is written leaves its batch's module
 in place for the batch's other regions. Batches stay small while a title keeps finding code, so
 once `relinkAfter` batch modules (16) have gathered the running regions not relinked yet go, in
 chunks of `relinkRegions` (512: the engine thread instantiates each chunk's module whole, and 4096 of a real title's regions held it for 160 ms where 512 hold it for about 23), to the worker with a copy of their pages: each is formed there

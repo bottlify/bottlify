@@ -26,12 +26,24 @@ export const CACHE_VERSION = 40;
 const MAGIC = 0x4b524f43; // 'CORK'
 
 /**
- * @param {{ version: number, features: { simd: boolean, tailCalls: boolean },
- *     layoutId: string, bundleId: string, entry: number, hash: string }} of
+ * What the emitter reads besides a region's bytes, its entry and the layout:
+ * the host's features and the settings that change the code it emits -- a
+ * store taken with other ones must not answer.
+ *
+ * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
+ * @param {string} variant  the emitting settings, as the runtime names them
  */
-export function cacheKey({ version, features, layoutId, bundleId, entry, hash }){
-    const flags = (features.simd ? 's' : '-') + (features.tailCalls ? 't' : '-');
-    return `cork/${version}${flags}/${layoutId}/${bundleId}/${entry.toString(16)}/${hash}`;
+const flagsOf = (features, variant)=>(features.simd ? 's' : '-') + (features.tailCalls ? 't' : '-')
+    + (features.defaultNaNNegative ? 'n' : '-') + variant;
+
+/**
+ * @param {{ version: number, features: { simd: boolean, tailCalls: boolean,
+ *     defaultNaNNegative?: boolean }, variant?: string, layoutId: string, bundleId: string,
+ *     entry: number, hash: string }} of
+ */
+export function cacheKey({ version, features, variant = '', layoutId, bundleId, entry, hash }){
+    return `cork/${version}${flagsOf(features, variant)}/${layoutId}/${bundleId}/`
+        + `${entry.toString(16)}/${hash}`;
 }
 
 /**
@@ -39,22 +51,24 @@ export function cacheKey({ version, features, layoutId, bundleId, entry, hash })
  * so every region record of the batch names the same bytes, and a batch of
  * other regions later never takes a record's name.
  *
- * @param {{ version: number, features: { simd: boolean, tailCalls: boolean },
- *     layoutId: string, bundleId: string }} of
+ * @param {{ version: number, features: { simd: boolean, tailCalls: boolean,
+ *     defaultNaNNegative?: boolean }, variant?: string, layoutId: string, bundleId: string }} of
  * @param {Uint8Array} bytes
  */
-export function moduleKey({ version, features, layoutId, bundleId }, bytes){
-    // FNV-1a over the bytes, with their length beside it.
-    // ponytail: 32 bits of hash; a wider one if a bundle ever keeps enough
-    // batches for a collision to be a real chance.
-    let hash = 0x811c9dc5;
+export function moduleKey({ version, features, variant = '', layoutId, bundleId }, bytes){
+    // Two FNV-1a lanes over the bytes, 64 bits with their length beside it:
+    // every batch of a bundle shares one namespace, and a record whose module
+    // key another batch's bytes answered would run the other batch's code.
+    let low = 0x811c9dc5;
+    let high = 0x050c5d1f;
     for (let i = 0; i < bytes.length; i++)
     {
-        hash = Math.imul(hash ^ bytes[i], 0x01000193);
+        low = Math.imul(low ^ bytes[i], 0x01000193);
+        high = Math.imul(high ^ bytes[i] ^ i & 0xff, 0x01000193);
     }
-    const flags = (features.simd ? 's' : '-') + (features.tailCalls ? 't' : '-');
-    return `cork/${version}${flags}/${layoutId}/${bundleId}/module/`
-        + `${(hash >>> 0).toString(16)}-${bytes.length.toString(16)}`;
+    return `cork/${version}${flagsOf(features, variant)}/${layoutId}/${bundleId}/module/`
+        + `${(high >>> 0).toString(16)}${(low >>> 0).toString(16).padStart(8, '0')}`
+        + `-${bytes.length.toString(16)}`;
 }
 
 /**
