@@ -96,6 +96,9 @@ const KERNEL32_ALIASES = Object.freeze({
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *           Without it the 64-bit helpers stay unexported: their answer does not
  *           fit in the one register the dispatcher writes.
+ * @property {import('../kernel32/versions.js').WindowsVersion} [windows]
+ *           The machine's Windows, for what RtlGetVersion cannot read from the
+ *           process block. Absent, the default.
  */
 
 /**
@@ -152,6 +155,7 @@ export function createNtdllFunctions(host){
             writeMemory: host.writeMemory,
             teb: host.teb,
             arena: host.arena,
+            version: host.windows,
         }),
 
         ...(host.setRegisters

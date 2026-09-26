@@ -17,7 +17,8 @@ import { createSyncFunctions } from './kernel32/sync.js';
 import { createCodeArena } from './kernel32/code-arena.js';
 import { createCriticalSections } from './kernel32/critical.js';
 import { createLocaleFunctions } from './kernel32/locale.js';
-import { createEnvironmentFunctions } from './kernel32/environment.js';
+import { createEnvironmentFunctions, defaultEnvironment } from './kernel32/environment.js';
+import { reportedVersion, windowsVersion } from './kernel32/versions.js';
 import { createSystemFunctions } from './kernel32/system.js';
 import { createSpawner, createSpawnFunctions } from './kernel32/spawn.js';
 import { createAtomFunctions } from './kernel32/atoms.js';
@@ -164,6 +165,14 @@ export const win32Module = {
      * @returns {Promise<any>}
      */
     async create(config, host){
+        // Before anything else: a Windows that is not one of the four is a
+        // configuration error, not a machine to build.
+        const windows = windowsVersion(config?.windows);
+        // What the running program is told, which Windows 10 decides from
+        // what the program says it knows; everything else keeps the truth.
+        const reported = reportedVersion(windows, config?.compatibility);
+        const folders = shellFolders(windows);
+
         const memory = host.requireApi('memory');
         const kernel = host.requireApi('kernel');
         const bridge = host.requireApi('bridge');
@@ -273,7 +282,7 @@ export const win32Module = {
         // Absent unless a bundle is mounted, in which case a read of a block
         // that is not here yet becomes a wait rather than a fault.
         const volume = createVolume(filesystem, config?.fetchBlocks ?? null);
-        const hive = createHive({ processorMhz: config?.processorMhz });
+        const hive = createHive({ processorMhz: config?.processorMhz, windows });
         // The guest's clock, because a timer is due against the clock the
         // program itself reads, and the input layer's key state, because a
         // hot key fires on a combination and only the layer that sees the
@@ -863,6 +872,8 @@ export const win32Module = {
                     // reads it answers what a call would have answered.
                     publishClock: refresh=>kernel.clock.whenMoved(refresh),
                     moduleHandle: name=>modules.find(name)?.base ?? 0,
+                    version: reported,
+                    setRegisters,
                     // Actually waiting is the scheduler's, and there is no timed
                     // wait yet. Crediting the clock is what we can honour, and
                     // it is what keeps a guest from believing no time passed.
@@ -995,11 +1006,7 @@ export const win32Module = {
                     // What a program believes it was started with. Kept stable
                     // because the pointer is handed out once and callers keep it.
                     commandLine: ()=>config?.commandLine ?? `"${modules.imagePath()}"`,
-                    environment: ()=>config?.environment ?? {
-                        SystemRoot: 'C:\\WINDOWS',
-                        TEMP: 'C:\\WINDOWS\\TEMP',
-                        windir: 'C:\\WINDOWS',
-                    },
+                    environment: ()=>config?.environment ?? defaultEnvironment(windows, folders),
                 }),
                 ...createSystemFunctions({
                     readMemory,
@@ -1288,7 +1295,7 @@ export const win32Module = {
                 // with CoTaskMemFree, which is this same heap.
                 /** @param {number} bytes */
                 allocate: bytes=>heap.allocate(bytes),
-                folders: shellFolders(),
+                folders,
                 // The namespace a folder browser walks is the volume every
                 // file call uses, published through the same vtables COM uses.
                 volume: { ...volume, drives: ()=>filesystem.drives() },
@@ -1310,6 +1317,7 @@ export const win32Module = {
                 // Where VerInstallFile reads a compressed source and writes the
                 // expanded file: the same volume every other file call uses.
                 files: volume,
+                windows,
             }),
 
             'LZ32.dll': createLzFunctions({ readCString, writeMemory, files: volume }),
@@ -1672,6 +1680,7 @@ export const win32Module = {
             teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
             arena,
             setRegisters,
+            windows,
         });
 
         /** Every function, whichever library exports it. */

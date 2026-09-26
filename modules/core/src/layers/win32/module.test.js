@@ -264,3 +264,126 @@ test('comctl32\'s _TrackMouseEvent is user32\'s TrackMouseEvent', async()=>{
 
     await win32Module.dispose();
 });
+
+/**
+ * The stub host over a guest memory that holds what is written to it, for the
+ * calls that answer by filling a structure.
+ */
+function hostWithMemory(){
+    const bytes = new Uint8Array(0x2000);
+    const view = new DataView(bytes.buffer);
+    const host = stubHost();
+    /** @param {number} at @param {number} limit @param {number} unit */
+    const text = (at, limit, unit)=>{
+        let result = '';
+        for (let index = 0; index < limit; index++)
+        {
+            const code = unit === 1 ? bytes[at + index] : view.getUint16(at + index * 2, true);
+            if (code === 0)
+            {
+                break;
+            }
+            result += String.fromCharCode(code);
+        }
+        return result;
+    };
+    const memory = {
+        readBytes: (/** @type {number} */ at, /** @type {number} */ length)=>
+            bytes.slice(at, at + length),
+        writeBytes: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>bytes.set(data, at),
+        readCString: (/** @type {number} */ at, /** @type {number} */ limit)=>text(at, limit, 1),
+        readWideString: (/** @type {number} */ at, /** @type {number} */ limit)=>
+            text(at, limit, 2),
+        readU32: (/** @type {number} */ at)=>view.getUint32(at, true),
+    };
+    return {
+        bytes,
+        view,
+        /** @param {number} at @param {string} value */
+        put: (at, value)=>{
+            bytes.set([...value].map(character=>character.charCodeAt(0)).concat([0]), at);
+            return at;
+        },
+        /** @param {number} at */
+        text: at=>text(at, 260, 1),
+        host: /** @type {any} */ ({
+            ...host,
+            requireApi: (/** @type {string} */ name)=>(name === 'memory'
+                ? memory : host.requireApi(name)),
+        }),
+    };
+}
+
+test('the configured Windows is the one every library answers with', async()=>{
+    // GetVersionEx, the registry, the environment, the shell's folders: a
+    // program asks two of them and compares, so a setting that reached one
+    // and not the others would be a machine that contradicts itself.
+    const machine = hostWithMemory();
+    /** @type {Record<string, number>} */
+    const registers = {};
+    const api = await win32Module.create({
+        windows: 'win7',
+        registers: {
+            read: ()=>0,
+            write: (/** @type {string} */ name, /** @type {number} */ value)=>{
+                registers[name] = value;
+            },
+        },
+    }, machine.host);
+    const libraries = /** @type {Record<string, any>} */ (api.libraries());
+    const kernel32 = libraries['KERNEL32.dll'];
+
+    machine.view.setUint32(0x100, 156, true);
+    assert.equal(kernel32.GetVersionExA.handler([0x100]), 1);
+    assert.deepEqual([4, 8, 12].map(at=>machine.view.getUint32(0x100 + at, true)), [6, 1, 7601]);
+    assert.equal(machine.text(0x100 + 20), 'Service Pack 1');
+
+    const size = kernel32.GetEnvironmentVariableA.handler([machine.put(0x300, 'APPDATA'),
+        0x400, 260]);
+    assert.equal(machine.text(0x400), 'C:\\Users\\User\\AppData\\Roaming');
+    assert.equal(size, 'C:\\Users\\User\\AppData\\Roaming'.length);
+
+    const CSIDL_APPDATA = 0x1a;
+    assert.equal(libraries['SHELL32.dll'].SHGetFolderPathA.handler([0, CSIDL_APPDATA, 0, 0,
+        0x600]), 0);
+    assert.equal(machine.text(0x600), 'C:\\Users\\User\\AppData\\Roaming');
+
+    const hive = api.registry();
+    const key = hive.open(/** @type {any} */ (hive.root(0x80000002)),
+        'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion');
+    const current = key && hive.getValue(key, 'CurrentVersion');
+    assert.equal(current && String.fromCharCode(...current.data.subarray(0, 3)), '6.1');
+
+    assert.ok(kernel32.VerSetConditionMask, 'the 64-bit answer has registers to go to');
+    kernel32.VerSetConditionMask.handler([0, 0, 0x80, 1]);
+    assert.equal(registers.edx, 0);
+
+    await win32Module.dispose();
+});
+
+test('a program Windows 10 knows nothing of is told 6.2, and the machine stays 10', async()=>{
+    const machine = hostWithMemory();
+    const api = await win32Module.create({
+        windows: 'win10',
+        compatibility: { supportedOS: [], imageVersion: { major: 4, minor: 0 } },
+    }, machine.host);
+    const libraries = /** @type {Record<string, any>} */ (api.libraries());
+
+    machine.view.setUint32(0x100, 148, true);
+    assert.equal(libraries['KERNEL32.dll'].GetVersionExA.handler([0x100]), 1);
+    assert.deepEqual([4, 8, 12].map(at=>machine.view.getUint32(0x100 + at, true)),
+        [6, 2, 9200]);
+
+    const hive = api.registry();
+    const key = hive.open(/** @type {any} */ (hive.root(0x80000002)),
+        'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion');
+    const major = key && hive.getValue(key, 'CurrentMajorVersionNumber');
+    assert.deepEqual(major && [...major.data], [10, 0, 0, 0]);
+
+    await win32Module.dispose();
+});
+
+test('a Windows that is not one of the four is refused when the layer is made', async()=>{
+    await assert.rejects(win32Module.create({ windows: 'win98' }, stubHost()),
+        /win2000, winxp, win7, win10/);
+});
