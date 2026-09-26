@@ -404,6 +404,24 @@ test('GetCaps fills DSBCAPS and refuses a header that does not declare its size'
     assert.equal(f.memory.u32(caps + DSBCAPS.dwFlags), 0);
 });
 
+test('a size that splits a frame is rounded up to the next whole one', ()=>{
+    // Wine's dsound test_block_align, which Windows passes: a second of 11025 Hz
+    // 16-bit stereo plus one byte comes back as that second plus one frame.
+    const f = createRoot();
+    const buffer = createBuffer(f, { bytes: 44101, rate: 11025, channels: 2, bits: 16 });
+    const caps = 0x1a00;
+    f.memory.setU32(caps + DSBCAPS.dwSize, DSBCAPS.SIZE);
+    assert.equal(f.bridge.call(buffer, 'GetCaps', [caps]), DS_OK);
+    assert.equal(f.memory.u32(caps + DSBCAPS.dwBufferBytes), 44104);
+
+    // A lap that ends on a frame boundary, or the second one reads its samples
+    // one byte out of step, which is noise.
+    const [sound] = f.dsound.buffers();
+    assert.equal(sound.bytes % sound.format.blockAlign, 0);
+    f.bridge.call(buffer, 'Lock', [0, 0, 0x1900, 0x1904, 0x1908, 0x190c, DSBLOCK_ENTIREBUFFER]);
+    assert.equal(f.memory.u32(0x1904), 44104, 'the whole buffer is the rounded size');
+});
+
 test('GetFormat writes a WAVEFORMATEX derived from the format, not echoed back', ()=>{
     const f = createRoot();
     const buffer = createBuffer(f, { channels: 2, rate: 44100, bits: 16 });

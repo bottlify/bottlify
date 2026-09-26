@@ -743,7 +743,12 @@ export function createDirectSound(
             }
 
             const resolved = format ?? normaliseFormat({});
-            const bytes = primary ? resolved.blockAlign * resolved.sampleRate : wanted;
+            // Up to a whole frame, as DirectSound does: every cursor and every
+            // read is frame-aligned, and a lap that ends part way through a
+            // frame starts the next one reading its samples out of step.
+            const bytes = primary
+                ? resolved.blockAlign * resolved.sampleRate
+                : Math.ceil(wanted / resolved.blockAlign) * resolved.blockAlign;
             const address = allocate(bytes);
             if (address === 0)
             {
