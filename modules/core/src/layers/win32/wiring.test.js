@@ -224,6 +224,79 @@ test('a structure written to a profile is read from guest memory and read back',
     await filesystemModule.dispose();
 });
 
+test('msvcrt\'s descriptors and kernel32\'s file handles are handles in one table', async()=>{
+    // _get_osfhandle gives a handle kernel32's calls take, at the descriptor's
+    // position; _open_osfhandle takes CreateFile's; the descriptor closes
+    // either through the CloseHandle a program calls.
+    const filesystem = await filesystemModule.create({});
+    /** @type {Map<number, { type: string, object: any }>} */
+    const entries = new Map();
+    let next = 0x100;
+    const handles = {
+        /** @param {string} type @param {any} object */
+        open(type, object){
+            entries.set(next, { type, object });
+            next += 4;
+            return next - 4;
+        },
+        /** @param {number} handle @param {string} [type] */
+        resolve(handle, type){
+            const entry = entries.get(handle);
+            if (!entry || (type && entry.type !== type))
+            {
+                throw new Error(`invalid handle ${handle}`);
+            }
+            return entry.object;
+        },
+        /** @param {number} handle */
+        close(handle){
+            const entry = entries.get(handle);
+            if (!entry)
+            {
+                throw new Error(`invalid handle ${handle}`);
+            }
+            entries.delete(handle);
+            return entry.object;
+        },
+        /** @param {number} handle */
+        typeOf: handle=>entries.get(handle)?.type ?? null,
+    };
+    const thread = { id: 1 };
+    const { bytes, libraries } = await build({
+        filesystem, kernel: { handles, currentThread: ()=>thread },
+    });
+    const kernel32 = libraries['KERNEL32.dll'];
+    const crt = libraries['msvcrt.dll'];
+    /** @param {number} at @param {string} text */
+    const narrow = (at, text)=>{
+        bytes.set([...text, '\0'].map(ch=>ch.charCodeAt(0)), at);
+        return at;
+    };
+    const O_RDWR_CREAT_BINARY = 0x8102;
+    const FILE_BEGIN = 0;
+    const GENERIC_READ = 0x80000000;
+    const OPEN_EXISTING = 3;
+
+    const fd = crt._open.handler([narrow(0x1000, 'C:\\save.dat'), O_RDWR_CREAT_BINARY, 0x180]);
+    assert.equal(crt._write.handler([fd, narrow(0x1100, 'abc'), 3]), 3);
+    const handle = crt._get_osfhandle.handler([fd]);
+    assert.equal(kernel32.GetFileSize.handler([handle, 0]), 3);
+    assert.equal(kernel32.SetFilePointer.handler([handle, 1, 0, FILE_BEGIN]), 1);
+    assert.equal(crt._tell.handler([fd]), 1, 'the handle moved the descriptor');
+    assert.equal(crt._close.handler([fd]), 0);
+    assert.equal(kernel32.CloseHandle.handler([handle]), 0, 'the descriptor closed it');
+
+    const created = kernel32.CreateFileA.handler(
+        [narrow(0x1200, 'C:\\save.dat'), GENERIC_READ, 0, 0, OPEN_EXISTING, 0, 0]);
+    const adopted = crt._open_osfhandle.handler([created, 0]);
+    assert.equal(crt._read.handler([adopted, 0x2000, 16]), 3);
+    assert.deepEqual([...bytes.subarray(0x2000, 0x2003)], [0x61, 0x62, 0x63]);
+    assert.equal(crt._close.handler([adopted]), 0);
+    assert.equal(kernel32.CloseHandle.handler([created]), 0, 'and this one too');
+    await win32Module.dispose();
+    await filesystemModule.dispose();
+});
+
 test('LoadLibraryEx\'s flags reach whoever assembled the process', async()=>{
     /** @type {any[][]} */
     const asked = [];

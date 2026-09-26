@@ -1106,6 +1106,25 @@ export const win32Module = {
                     exitProcess: (/** @type {number} */ code)=>endProcess(code),
                     exit: (/** @type {number} */ code)=>detachAndEnd(code),
                     files: volume,
+                    // kernel32's own file handles, so the handle
+                    // `_get_osfhandle` gives is one ReadFile and
+                    // CreateFileMapping take, and a descriptor closes its
+                    // handle through the same CloseHandle a program calls.
+                    handles: {
+                        open: file=>handles.open('file', file),
+                        file: handle=>{
+                            try
+                            {
+                                return handles.resolve(handle, 'file') ?? null;
+                            }
+                            catch (e){
+                                void e;
+                                return null;
+                            }
+                        },
+                        close: handle=>
+                            libraries['KERNEL32.dll'].CloseHandle.handler([handle]) !== 0,
+                    },
                     // The standard streams are records in the runtime's own
                     // image, wherever the loader put its `_iob`.
                     iob: ()=>modules.find('msvcrt.dll')?.addressOf?.('_iob') ?? 0,
