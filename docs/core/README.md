@@ -103,7 +103,7 @@ From the repository root (`package.json` is an npm workspace over `modules/*`):
 | `npm run fetch:v86`, `npm run fetch:video-decoder` | Pull the pinned emulator and decoder binaries into `vendor/prebuilt/`, verified against their lock files. |
 | `npm run fetch:corpus` | Pull the nasm instruction corpus (every case as an image with the state real hardware recorded) into `modules/cork/vendor/`, for the translator package's differential tests; pinned by `modules/cork/corpus-lock.json`. |
 | `npm run build` | esbuild → `dist/core.js`, `dist/engine.worker.js`, `dist/worklet.js`, `dist/vendor/*`, `dist/checksums.json`. |
-| `npm run build:v86 -- --docker` and `npm run verify:reproducibility` | Rebuild the emulator from the submodule in a container and diff its hashes against the manifest. Not needed day to day. |
+| `npm run build:v86 -- --docker` and `npm run verify:reproducibility` | Rebuild the emulator from the submodule in a container and diff its hashes against the manifest. Not needed day to day. The submodule pins the commit the locked prebuilt release (`vendor-lock.json`'s `build-<commit>` tag) was built from, and `scripts/vendor-lock.test.js` fails when the two drift apart -- the pin had stayed 33 commits behind the build every test ran on, without the handoff exports cork's hybrid mode uses. |
 | `npm run cdp:probe` | Launches a headless Chromium, boots the core in a worker, checks it answers a ping. |
 | `npm run cdp:game`, `npm run cdp:frames` | Drive a program bundle in a real browser on a real GPU; report what a run cost, and where a frame's time goes once the program has settled. Development tooling in `tools/cdp_test/`, not tests. |
 
