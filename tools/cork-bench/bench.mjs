@@ -10,7 +10,8 @@
  * decoder, x87 and SSE float math, a game's entity update, a message pump,
  * a loading phase's fifteen hundred functions each run a few times, and a
  * loop calling a routine that patches its own code, which crosses from
- * translated code into the interpreter and back on every call --
+ * translated code into the interpreter and back on every call; the x87 float
+ * ones again under single precision control, as Direct3D leaves it (`pc24`) --
  * compiled to i386 (`build.sh`, `images/`) and run on cork alone, the cork
  * host with no emulator, as a launch under `engine: 'cork'` runs a program.
  *
