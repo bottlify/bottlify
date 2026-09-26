@@ -68,12 +68,32 @@ function resourceKey(resource){
  * @returns {number[] | undefined}
  */
 export function dynamicOffsetsOf(entries){
-    const offsets = entries
-        .filter(entry=>entry.resource && typeof entry.resource === 'object'
-            && entry.resource.buffer && entry.resource.dynamicOffset !== undefined)
-        .sort((left, right)=>left.binding - right.binding)
-        .map(entry=>entry.resource.dynamicOffset);
-    return offsets.length > 0 ? offsets : undefined;
+    // Every draw binds through here: one pass and one array when the entries
+    // already come in binding order, as a renderer lays them out.
+    /** @type {number[] | undefined} */
+    let offsets;
+    let last = -Infinity;
+    for (let i = 0; i < entries.length; i++)
+    {
+        const entry = entries[i];
+        const resource = entry.resource;
+        if (!resource || typeof resource !== 'object' || !resource.buffer
+            || resource.dynamicOffset === undefined)
+        {
+            continue;
+        }
+        if (entry.binding < last)
+        {
+            return entries
+                .filter(one=>one.resource && typeof one.resource === 'object'
+                    && one.resource.buffer && one.resource.dynamicOffset !== undefined)
+                .sort((left, right)=>left.binding - right.binding)
+                .map(one=>one.resource.dynamicOffset);
+        }
+        last = entry.binding;
+        (offsets ??= []).push(resource.dynamicOffset);
+    }
+    return offsets;
 }
 
 /**
@@ -127,6 +147,9 @@ export function createBindingCache(options){
         stats(){
             return { created, reused };
         },
+
+        /** Groups built so far: a number, read around every draw's `get`. */
+        created: ()=>created,
     };
 }
 

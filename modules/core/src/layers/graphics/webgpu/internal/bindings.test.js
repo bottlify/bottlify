@@ -90,6 +90,18 @@ test('a uniform pool lays each block at its own offset of one ring, as bytes', (
         'a view carries no offset');
 });
 
+test('dynamic offsets come in binding order whatever order the entries were given in', ()=>{
+    const ring = {};
+    /** @param {number} binding @param {number} at */
+    const block = (binding, at)=>({ binding,
+        resource: { buffer: ring, offset: 0, size: 64, dynamicOffset: at } });
+    const view = { binding: 1, resource: {} };
+    assert.deepEqual(dynamicOffsetsOf([block(0, 512), view, block(9, 256)]), [512, 256]);
+    assert.deepEqual(dynamicOffsetsOf([block(9, 256), view, block(0, 512)]), [512, 256],
+        'WebGPU reads them by binding number, not by position in the list');
+    assert.equal(dynamicOffsetsOf([view]), undefined);
+});
+
 test('the ring wraps rather than growing, and a block larger than it gets a larger ring', ()=>{
     const gpu = createFakeDevice();
     const pool = createUniformPool({ device: gpu.device, queue: gpu.queue, capacity: 512 });

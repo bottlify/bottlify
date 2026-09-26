@@ -369,10 +369,9 @@ export function createBackend(options){
              * @param {string} [label]
              */
             setBindings(index, layout, entries, label){
-                const before = cache.stats();
+                const before = cache.created();
                 const group = cache.get(layout, entries, label);
-                const after = cache.stats();
-                profiler.count(after.created > before.created
+                profiler.count(cache.created() > before
                     ? 'bindGroupsCreated'
                     : 'bindGroupsReused');
                 const offsets = dynamicOffsetsOf(entries);
