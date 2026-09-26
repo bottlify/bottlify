@@ -651,15 +651,19 @@ export function createDirect3D7(ddraw, services = {}){
 
         /**
          * What every draw is refused for before its arguments are looked at.
+         * A draw of nothing -- no vertices, or no indices -- is not refused
+         * for having no primitives: it draws nothing and succeeds, whatever
+         * its arrays are (Wine's ddraw7.c test_draw_primitive).
          *
          * @param {number} type @param {number} fvf @param {number} primitiveCount
+         * @param {number} elements  The vertices or indices the draw names.
          */
-        const drawPreconditions = (type, fvf, primitiveCount)=>{
+        const drawPreconditions = (type, fvf, primitiveCount, elements)=>{
             if (!inScene)
             {
                 return D3DERR_SCENE_NOT_IN_SCENE;
             }
-            if (vertexCountOf(type, primitiveCount) === 0)
+            if (elements !== 0 && vertexCountOf(type, primitiveCount) === 0)
             {
                 return primitiveCount > 0 ? D3DERR_INVALIDPRIMITIVETYPE : DDERR_INVALIDPARAMS;
             }
@@ -1359,8 +1363,8 @@ export function createDirect3D7(ddraw, services = {}){
              */
             DrawPrimitive(type, fvf, vertices, vertexCount){
                 const primitiveCount = primitiveCountOf(type, vertexCount);
-                const hr = drawPreconditions(type, fvf, primitiveCount);
-                if (hr !== D3D_OK)
+                const hr = drawPreconditions(type, fvf, primitiveCount, vertexCount);
+                if (hr !== D3D_OK || vertexCount === 0)
                 {
                     return hr;
                 }
@@ -1384,8 +1388,8 @@ export function createDirect3D7(ddraw, services = {}){
              */
             DrawIndexedPrimitive(type, fvf, vertices, vertexCount, indices, indexCount){
                 const primitiveCount = primitiveCountOf(type, indexCount);
-                const hr = drawPreconditions(type, fvf, primitiveCount);
-                if (hr !== D3D_OK)
+                const hr = drawPreconditions(type, fvf, primitiveCount, indexCount);
+                if (hr !== D3D_OK || indexCount === 0)
                 {
                     return hr;
                 }
@@ -1409,9 +1413,10 @@ export function createDirect3D7(ddraw, services = {}){
              */
             DrawPrimitiveVB(type, buffer, startVertex, vertexCount){
                 const primitiveCount = primitiveCountOf(type, vertexCount);
-                const hr = buffer ? drawPreconditions(type, buffer.fvf, primitiveCount)
+                const hr = buffer
+                    ? drawPreconditions(type, buffer.fvf, primitiveCount, vertexCount)
                     : DDERR_INVALIDPARAMS;
-                if (hr !== D3D_OK)
+                if (hr !== D3D_OK || vertexCount === 0)
                 {
                     return hr;
                 }
@@ -1443,9 +1448,10 @@ export function createDirect3D7(ddraw, services = {}){
             )
             {
                 const primitiveCount = primitiveCountOf(type, indexCount);
-                const hr = buffer ? drawPreconditions(type, buffer.fvf, primitiveCount)
+                const hr = buffer
+                    ? drawPreconditions(type, buffer.fvf, primitiveCount, indexCount)
                     : DDERR_INVALIDPARAMS;
-                if (hr !== D3D_OK)
+                if (hr !== D3D_OK || indexCount === 0)
                 {
                     return hr;
                 }

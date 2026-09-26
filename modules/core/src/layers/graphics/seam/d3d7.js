@@ -46,6 +46,19 @@ const DDENUMRET_CANCEL = 0;
 /** The texture formats EnumTextureFormats names: the ones the renderer uploads. */
 const TEXTURE_DEPTHS = Object.freeze([32, 16]);
 
+/** The most vertices one draw may name (d3dtypes.h). */
+const D3DMAXNUMVERTICES = 0xffff;
+
+/**
+ * Which entry of a D3DDRAWPRIMITIVESTRIDEDDATA holds an attribute, and where
+ * in that entry's element it starts; the coordinate sets follow at four on.
+ *
+ * @type {Readonly<Record<string, [number, number]>>}
+ */
+const STRIDED_STREAMS = Object.freeze({
+    position: [0, 0], blendWeight: [0, 12], normal: [1, 0], diffuse: [2, 0], specular: [3, 0],
+});
+
 /**
  * A GUID as its sixteen bytes, the way a program reads one out of a structure:
  * three little-endian integers and eight raw bytes.
@@ -215,6 +228,74 @@ export function createDirect3D7Seam(
     const readArray = (pointer, length)=>((pointer >>> 0) === 0 || !(length > 0)
         ? null
         : memory.readMemory(pointer >>> 0, length));
+
+    /**
+     * One stream of a D3DDRAWPRIMITIVESTRIDEDDATA: a pointer and a stride for
+     * the position, the normal, the two colours and eight coordinate sets, in
+     * that order. Blend weights ride in the position's stream after its three
+     * floats; a point size has no stream in this version.
+     *
+     * @param {number} data @param {string} name  An attribute of decodeFvf's.
+     * @returns {{ base: number, stride: number } | null}
+     */
+    const stridedStream = (data, name)=>{
+        const [entry, offset] = STRIDED_STREAMS[name]
+            ?? (name.startsWith('texCoord') ? [4 + Number(name.slice('texCoord'.length)), 0]
+                : [-1, 0]);
+        if (entry < 0)
+        {
+            return null;
+        }
+        const at = (data >>> 0) + entry * 8;
+        return { base: (fields.readU32(at) + offset) >>> 0, stride: fields.readU32(at + 4) };
+    };
+
+    /**
+     * The vertices of a strided draw packed as the format lays them out, so
+     * the draw goes down the path a draw by pointer takes. Each stream is read
+     * once over the span its vertices cover, unless its stride makes that
+     * span a waste. Null for no structure, a format with no position, or more
+     * vertices than one draw may have -- all of which the draw refuses.
+     *
+     * @param {number} data @param {number} fvf @param {number} count
+     * @returns {Uint8Array | null}
+     */
+    const gatherStrided = (data, fvf, count)=>{
+        if ((data >>> 0) === 0 || count > D3DMAXNUMVERTICES)
+        {
+            return null;
+        }
+        let layout;
+        try
+        {
+            layout = decodeFvf(fvf >>> 0);
+        }
+        catch (e){
+            void e;
+            return null;
+        }
+        const packed = new Uint8Array(layout.stride * count);
+        layout.attributes.forEach((attribute, index)=>{
+            const size = (layout.attributes[index + 1]?.offset ?? layout.stride) - attribute.offset;
+            const stream = stridedStream(data, attribute.name);
+            if (!stream || count === 0)
+            {
+                return;
+            }
+            const spanBytes = (count - 1) * stream.stride + size;
+            const span = spanBytes <= count * size * 4
+                ? memory.readMemory(stream.base, spanBytes)
+                : null;
+            for (let k = 0; k < count; k++)
+            {
+                const bytes = span
+                    ? span.subarray(k * stream.stride, k * stream.stride + size)
+                    : memory.readMemory((stream.base + k * stream.stride) >>> 0, size);
+                packed.set(bytes, k * layout.stride + attribute.offset);
+            }
+        });
+        return packed;
+    };
 
     /** @param {number} fvf @returns {number} the stride of a format, or zero for a bad one */
     const strideOf = fvf=>{
@@ -389,9 +470,8 @@ export function createDirect3D7Seam(
             });
         },
         /**
-         * D3DDRAWPRIMITIVESTRIDEDDATA: a pointer and a stride for the position,
-         * the normal, the two colours and eight coordinate sets, each stream
-         * read from its first vertex. Blend weights ride in the position's.
+         * The source is a D3DDRAWPRIMITIVESTRIDEDDATA, each stream read from
+         * its first vertex.
          *
          * @param {any} buffer @param {number[]} args
          */
@@ -409,20 +489,13 @@ export function createDirect3D7Seam(
                 void e;
                 return DDERR_INVALIDPARAMS;
             }
-            /** @type {Record<string, [number, number]>} entry and offset in it */
-            const streams = { position: [0, 0], blendWeight: [0, 12], normal: [1, 0],
-                diffuse: [2, 0], specular: [3, 0] };
             return processInto(buffer, op, destIndex, count, device, flags, {
                 fvf: fvf >>> 0,
                 addressOf: (name, k)=>{
-                    if (!layout.attributes.some(entry=>entry.name === name))
-                    {
-                        return null;
-                    }
-                    const [entry, offset] = streams[name]
-                        ?? [4 + Number(name.slice('texCoord'.length)), 0];
-                    const at = (data >>> 0) + entry * 8;
-                    return fields.readU32(at) + k * fields.readU32(at + 4) + offset;
+                    const stream = layout.attributes.some(entry=>entry.name === name)
+                        ? stridedStream(data, name)
+                        : null;
+                    return stream ? stream.base + k * stream.stride : null;
                 },
             });
         },
@@ -704,6 +777,16 @@ export function createDirect3D7Seam(
             }, ['minx', 'maxx', 'miny', 'maxy', 'minz', 'maxz']);
             return D3D_OK;
         },
+
+        /** @param {any} device @param {number[]} args */
+        DrawPrimitiveStrided: (device, [type, fvf, data, count])=>device.DrawPrimitive(
+            type >>> 0, fvf >>> 0, gatherStrided(data, fvf, count >>> 0), count >>> 0),
+
+        /** @param {any} device @param {number[]} args */
+        DrawIndexedPrimitiveStrided: (device, [type, fvf, data, count, indices, indexCount])=>
+            device.DrawIndexedPrimitive(type >>> 0, fvf >>> 0,
+                gatherStrided(data, fvf, count >>> 0), count >>> 0,
+                readArray(indices, (indexCount >>> 0) * 2), indexCount >>> 0),
 
         /** @param {any} device @param {number[]} args */
         DrawPrimitiveVB: (device, [type, buffer, start, count])=>device.DrawPrimitiveVB(

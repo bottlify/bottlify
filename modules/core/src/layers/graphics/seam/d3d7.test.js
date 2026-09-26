@@ -509,6 +509,134 @@ test('a draw reads exactly as many vertex bytes as the format implies', ()=>{
     h.assertAllReleased();
 });
 
+test('a strided draw gathers each stream into packed vertices and draws those', ()=>{
+    // ddraw7.c test_draw_strided (4784-4841): positions and colours in two
+    // arrays, each at its own stride, drawn indexed; the rest of the
+    // structure is 0x55 garbage the format never names.
+    const h = seamed();
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const device = h.createDevice(d3d, target).device;
+    const model = h.publisher.objectAt(device);
+    /** @type {any[][]} */
+    const drawn = [];
+    for (const name of ['DrawPrimitive', 'DrawIndexedPrimitive'])
+    {
+        const original = model[name];
+        model[name] = (/** @type {any[]} */ ...args)=>{
+            drawn.push([name, ...args]);
+            return original(...args);
+        };
+    }
+
+    const positions = 0x7000;
+    const colours = 0x7100;
+    const indices = 0x7200;
+    const strided = 0x7300;
+    const corners = [[-1, -1, 0], [-1, 1, 0], [1, 1, 0], [1, -1, 0]];
+    corners.forEach((corner, k)=>corner.forEach((value, axis)=>
+        h.box.memory.writeU32(positions + k * 12 + axis * 4, floatToDword(value))));
+    corners.forEach((_, k)=>h.box.memory.writeU32(colours + k * 4, 0x0000ff00 + k));
+    [0, 1, 2, 2, 3, 0].forEach((index, k)=>{
+        h.box.bytes[indices + k * 2] = index;
+        h.box.bytes[indices + k * 2 + 1] = 0;
+    });
+    h.box.bytes.fill(0x55, strided, strided + 12 * 8);
+    h.box.memory.writeU32(strided, positions);
+    h.box.memory.writeU32(strided + 4, 12);
+    h.box.memory.writeU32(strided + 2 * 8, colours);
+    h.box.memory.writeU32(strided + 2 * 8 + 4, 4);
+
+    const fvf = FVF.XYZ | FVF.DIFFUSE;
+    assert.equal(h.device(device, 'BeginScene'), D3D_OK);
+    assert.equal(h.device(device, 'DrawIndexedPrimitiveStrided',
+        [D3DPT.TRIANGLELIST, fvf, strided, 4, indices, 6, 0]), D3D_OK);
+    assert.equal(drawn.length, 1);
+    const [name, type, format, packed, count, indexBytes, indexCount] = drawn[0];
+    assert.deepEqual([name, type, format, count, indexCount],
+        ['DrawIndexedPrimitive', D3DPT.TRIANGLELIST, fvf, 4, 6]);
+    const view = new DataView(packed.buffer, packed.byteOffset, packed.byteLength);
+    assert.equal(packed.byteLength, 4 * 16, 'twelve bytes of position and four of colour each');
+    corners.forEach((corner, k)=>{
+        assert.deepEqual([0, 1, 2].map(axis=>view.getFloat32(k * 16 + axis * 4, true)), corner);
+        assert.equal(view.getUint32(k * 16 + 12, true), 0x0000ff00 + k);
+    });
+    assert.deepEqual([...indexBytes], [0, 0, 1, 0, 2, 0, 2, 0, 3, 0, 0, 0]);
+
+    // The same streams unindexed, with a texture coordinate set from a third
+    // array: the eight sets follow the specular entry in the structure.
+    const uvs = 0x7400;
+    corners.forEach((_, k)=>{
+        h.box.memory.writeU32(uvs + k * 8, floatToDword(k));
+        h.box.memory.writeU32(uvs + k * 8 + 4, floatToDword(-k));
+    });
+    h.box.memory.writeU32(strided + 4 * 8, uvs);
+    h.box.memory.writeU32(strided + 4 * 8 + 4, 8);
+    const textured = fvf | 1 << FVF.TEXCOUNT_SHIFT;
+    assert.equal(h.device(device, 'DrawPrimitiveStrided',
+        [D3DPT.TRIANGLESTRIP, textured, strided, 4, 0]), D3D_OK);
+    const [, , , flat, flatCount] = drawn[1];
+    assert.equal(flatCount, 4);
+    const flatView = new DataView(flat.buffer, flat.byteOffset, flat.byteLength);
+    assert.equal(flat.byteLength, 4 * 24);
+    assert.equal(flatView.getUint32(3 * 24 + 12, true), 0x0000ff03);
+    assert.deepEqual([flatView.getFloat32(3 * 24 + 16, true), flatView.getFloat32(3 * 24 + 20,
+        true)], [3, -3]);
+
+    assert.equal(h.device(device, 'DrawPrimitiveStrided',
+        [D3DPT.TRIANGLESTRIP, textured, 0, 4, 0]), DDERR_INVALIDPARAMS >>> 0,
+    'no structure is no vertices');
+    assert.equal(h.device(device, 'EndScene'), D3D_OK);
+
+    assert.equal(h.release(device), 0);
+    h.release(d3d);
+    h.release(target);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('a draw of nothing draws nothing and succeeds, by pointer, by buffer and strided', ()=>{
+    // ddraw7.c test_draw_primitive (14614-14630): zero vertices or zero
+    // indices, with null arrays where there is nothing to read.
+    const h = seamed();
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const device = h.createDevice(d3d, target).device;
+    const strided = 0x7300;
+    h.box.bytes.fill(0, strided, strided + 12 * 8);
+    const desc = 0x6400;
+    h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwSize, D3DVERTEXBUFFERDESC.SIZE);
+    h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwFVF, FVF.XYZ);
+    h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwNumVertices, 4);
+    assert.equal(h.box.call(d3d, slot(IDIRECT3D7_SLOTS, 'CreateVertexBuffer'),
+        [desc, 0x6500, 0]), D3D_OK);
+    const buffer = h.box.memory.readU32(0x6500);
+    const strip = D3DPT.TRIANGLESTRIP;
+
+    assert.equal(h.device(device, 'BeginScene'), D3D_OK);
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['DrawIndexedPrimitive', [strip, FVF.XYZ, 0, 0, 0, 0, 0]],
+        ['DrawIndexedPrimitiveStrided', [strip, FVF.XYZ, strided, 0, 0, 0, 0]],
+        ['DrawPrimitive', [strip, FVF.XYZ, 0, 0, 0]],
+        ['DrawPrimitiveStrided', [strip, FVF.XYZ, strided, 0, 0]],
+        ['DrawPrimitiveVB', [strip, buffer, 0, 0, 0]],
+        ['DrawIndexedPrimitiveVB', [strip, buffer, 0, 4, 0, 0, 0]],
+    ]))
+    {
+        assert.equal(h.device(device, name, args), D3D_OK, name);
+    }
+    assert.equal(h.device(device, 'EndScene'), D3D_OK);
+
+    assert.equal(h.release(buffer), 0);
+    assert.equal(h.release(device), 0);
+    h.release(d3d);
+    h.release(target);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
 test('a vertex buffer is a guest allocation with a description of its own', ()=>{
     const h = seamed();
     const ddraw = h.create7();
