@@ -25,6 +25,7 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
+import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { BUFFER, SHADOW, STALE_POINTER, TEXTURE } from './shadow.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS, IDIRECT3DDEVICE8_SLOTS,
@@ -392,6 +393,13 @@ test('the adapter says who made it, in the shape a card database reads', ()=>{
     assert.equal(text(D3DADAPTER_IDENTIFIER8.Description), 'nvidia ampere');
     assert.equal(text(D3DADAPTER_IDENTIFIER8.Driver), 'webgpu');
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.VendorId), 0x10de);
+    // The answer every generation gives, DirectDraw's GetDeviceIdentifier
+    // included: a program asking through two compares them.
+    const shared = describeAdapter({ vendor: 'nvidia', architecture: 'ampere' });
+    assert.equal(text(D3DADAPTER_IDENTIFIER8.Description), shared.description);
+    assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.VendorId), shared.vendorId);
+    assert.deepEqual([...h.box.services.readMemory(out + D3DADAPTER_IDENTIFIER8.DeviceIdentifier,
+        16)], [...ADAPTER_GUID]);
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.DeviceId), 0);
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.WHQLLevel), 1);
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.DriverVersion + 4), 0x00010000);

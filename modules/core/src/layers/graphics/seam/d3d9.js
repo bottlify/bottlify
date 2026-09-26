@@ -61,6 +61,7 @@ import {
 import { D3DFMT_INDEX, D3DFMT, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
 import { vertexCountOf } from '../d3d8/render.js';
 import { createCursorTeller } from './cursor.js';
+import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { capabilityWords } from '../d3d9/caps.js';
 import { D3DCREATE, D3DDEVTYPE, PALETTE_BYTES } from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
@@ -92,42 +93,8 @@ const LOCKABLE_BACKBUFFER = 0x00000001;
  */
 const ADAPTER_FORMATS = new Set([D3DFMT.X8R8G8B8, D3DFMT.R5G6B5]);
 
-/**
- * WebGPU's word for a vendor against the PCI id a program's card database is
- * keyed by. Only vendors with a WebGPU spelling appear; anything else is
- * reported as zero, an unknown card.
- *
- * @type {Readonly<Record<string, number>>}
- */
-const PCI_VENDOR_IDS = Object.freeze({
-    nvidia: 0x10de,
-    amd: 0x1002,
-    intel: 0x8086,
-    apple: 0x106b,
-    qualcomm: 0x5143,
-    arm: 0x13b5,
-    microsoft: 0x1414,
-});
-
-/**
- * The identifier's GUID: one per adapter and driver on Windows, and one for
- * this engine here -- a program keeps it to recognise the same hardware next
- * run, and the same engine is the same hardware for that purpose.
- */
-const ADAPTER_GUID = Uint8Array.from([
-    0x7a, 0x1b, 0x6c, 0x0d, 0x3e, 0x9f, 0x40, 0x11,
-    0x8a, 0x2b, 0x5c, 0x6d, 0x7e, 0x8f, 0x90, 0xa1,
-]);
-
 /** The most dwords a shader read from guest memory may run to before it is given up on. */
 const MAX_SHADER_DWORDS = 1 << 16;
-
-/**
- * @typedef {Object} AdapterIdentity
- * @property {string} [vendor]
- * @property {string} [architecture]
- * @property {string} [description]
- */
 
 /**
  * @param {Object} deps
@@ -144,7 +111,7 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     screen -- and which window it presents into, so a fullscreen one can be
  *     placed. `announce` asks that the window be told its size even if it
  *     did not change.
- * @param {() => AdapterIdentity | null} [deps.identity]
+ * @param {() => import('./adapter.js').AdapterIdentity | null} [deps.identity]
  * @param {(window: number) => { width: number, height: number } | null} [deps.windowClientSize]
  *     The client area of a window, which is the size a back buffer asked for
  *     as zero by zero takes. Without it the configured display is the nearest
@@ -2552,18 +2519,12 @@ export function createDirect3D9Seam(
 
     /**
      * D3DADAPTER_IDENTIFIER9, from what the assembling caller knows of the
-     * hardware. The vendor is the one number a program acts on -- its card
-     * database is keyed by PCI vendor id -- so WebGPU's word for the vendor is
-     * turned into that id, and a vendor not in the table is reported as zero.
+     * hardware: the vendor, name and GUID every generation reports.
      *
      * @param {number} address @param {number} flags D3DENUM_*
      */
     const writeAdapterIdentifier = (address, flags)=>{
-        const known = identity?.() ?? null;
-        const vendor = (known?.vendor ?? '').toLowerCase();
-        const description = known?.description
-            || [known?.vendor, known?.architecture].filter(Boolean).join(' ')
-            || 'WebGPU adapter';
+        const { vendorId, description } = describeAdapter(identity?.() ?? null);
         const block = new Uint8Array(D3DADAPTER_IDENTIFIER9.FIELDS);
         /** @param {string} text @param {number} at @param {number} room */
         const ascii = (text, at, room)=>{
@@ -2577,7 +2538,7 @@ export function createDirect3D9Seam(
         ascii('\\\\.\\DISPLAY1', D3DADAPTER_IDENTIFIER9.DeviceName, 32);
         const view = new DataView(block.buffer);
         view.setUint32(D3DADAPTER_IDENTIFIER9.DriverVersion + 4, 0x00010000, true);
-        view.setUint32(D3DADAPTER_IDENTIFIER9.VendorId, PCI_VENDOR_IDS[vendor] ?? 0, true);
+        view.setUint32(D3DADAPTER_IDENTIFIER9.VendorId, vendorId, true);
         block.set(ADAPTER_GUID, D3DADAPTER_IDENTIFIER9.DeviceIdentifier);
         view.setUint32(D3DADAPTER_IDENTIFIER9.WHQLLevel,
             (flags & D3DENUM_NO_WHQL_LEVEL) !== 0 ? 0 : 1, true);

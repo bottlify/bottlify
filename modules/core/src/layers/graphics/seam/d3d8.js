@@ -52,6 +52,7 @@ import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
 import { vertexCountOf } from '../d3d8/render.js';
 import { PALETTE_BYTES } from '../d3d9/device.js';
 import { createCursorTeller } from './cursor.js';
+import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { createRaster, rasterStatus } from './raster.js';
 import { TEXTURE_OP_CAPS } from '../d3d8/validity.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
@@ -176,41 +177,6 @@ const D3DERR_INVALIDCALL = 0x8876086c | 0;
 /** D3DENUM_NO_WHQL_LEVEL: skip the certification lookup, which took seconds on real Windows. */
 const D3DENUM_NO_WHQL_LEVEL = 0x00000002;
 
-/**
- * WebGPU's word for a vendor against the PCI id a program's card database is
- * keyed by. Only vendors with a WebGPU spelling appear; anything else is
- * reported as zero, an unknown card.
- *
- * @type {Readonly<Record<string, number>>}
- */
-const PCI_VENDOR_IDS = Object.freeze({
-    nvidia: 0x10de,
-    amd: 0x1002,
-    intel: 0x8086,
-    apple: 0x106b,
-    qualcomm: 0x5143,
-    arm: 0x13b5,
-    microsoft: 0x1414,
-});
-
-/**
- * The identifier's GUID: one per adapter and driver on Windows, and one for
- * this engine here -- a program keeps it to recognise the same hardware next
- * run, and the same engine is the same hardware for that purpose.
- */
-const ADAPTER_GUID = Uint8Array.from([
-    0x7a, 0x1b, 0x6c, 0x0d, 0x3e, 0x9f, 0x40, 0x11,
-    0x8a, 0x2b, 0x5c, 0x6d, 0x7e, 0x8f, 0x90, 0xa1,
-]);
-
-/**
- * @typedef {Object} AdapterIdentity
- *     The hardware behind the device, as WebGPU describes it.
- * @property {string} [vendor]        WebGPU's vendor word, e.g. "nvidia".
- * @property {string} [architecture]  WebGPU's architecture word, e.g. "ampere".
- * @property {string} [description]   A human-readable name, when the browser gives one.
- */
-
 /** What a device answers for something it could do on other hardware and cannot here. */
 const D3DERR_NOTAVAILABLE = 0x8876086a | 0;
 
@@ -259,7 +225,7 @@ const S_FALSE = 1;
  *          ) => void} [deps.resolution]
  *        Told the resolution a device is created at, to report as the screen --
  *        and which window it presents into, so a fullscreen one can be placed.
- * @param {() => AdapterIdentity | null} [deps.identity]
+ * @param {() => import('./adapter.js').AdapterIdentity | null} [deps.identity]
  *        The hardware behind the device, as the assembling caller knows it.
  * @param {(window: number) => { width: number, height: number } | null} [deps.windowClientSize]
  *        The client area of a window, which is the size a back buffer asked
@@ -2296,20 +2262,14 @@ export function createDirect3D8Seam(
 
     /**
      * D3DADAPTER_IDENTIFIER8, from what the assembling caller knows of the
-     * hardware. The vendor is the one number a program acts on -- its card
-     * database is keyed by PCI vendor id -- so WebGPU's word for the vendor is
-     * turned into that id, and a vendor not in the table is reported as zero,
-     * which every program reads as a card it does not know rather than as a
-     * refusal.
+     * hardware: the vendor, name and GUID every generation reports. A vendor
+     * with no PCI id is reported as zero, which every program reads as a card
+     * it does not know rather than as a refusal.
      *
      * @param {number} address @param {number} flags D3DENUM_*
      */
     const writeAdapterIdentifier = (address, flags)=>{
-        const known = identity?.() ?? null;
-        const vendor = (known?.vendor ?? '').toLowerCase();
-        const description = known?.description
-            || [known?.vendor, known?.architecture].filter(Boolean).join(' ')
-            || 'WebGPU adapter';
+        const { vendorId, description } = describeAdapter(identity?.() ?? null);
         const block = new Uint8Array(D3DADAPTER_IDENTIFIER8.FIELDS);
         /** @param {string} text @param {number} at */
         const ascii = (text, at)=>{
@@ -2324,7 +2284,7 @@ export function createDirect3D8Seam(
         // A version of 1.0.0.0: the product word of the LARGE_INTEGER is its
         // high dword, and a program that prints it prints something sane.
         view.setUint32(D3DADAPTER_IDENTIFIER8.DriverVersion + 4, 0x00010000, true);
-        view.setUint32(D3DADAPTER_IDENTIFIER8.VendorId, PCI_VENDOR_IDS[vendor] ?? 0, true);
+        view.setUint32(D3DADAPTER_IDENTIFIER8.VendorId, vendorId, true);
         block.set(ADAPTER_GUID, D3DADAPTER_IDENTIFIER8.DeviceIdentifier);
         // Certified unless the caller said not to ask: the flag exists because
         // asking took seconds on real Windows, and a program that passes it

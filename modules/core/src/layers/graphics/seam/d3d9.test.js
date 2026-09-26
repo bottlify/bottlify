@@ -22,13 +22,14 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
+import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { IDIRECT3D9_SLOTS } from './vtables.js';
 import {
     D3DDISPLAYMODE, D3DLOCKED_BOX, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS9, createFields,
 } from './structs.js';
 import {
-    D3DCAPS9, D3DDISPLAYMODEEX, D3DDISPLAYMODEFILTER, D3DSURFACE_DESC9, D3DVERTEXELEMENT9,
-    D3DVIEWPORT9, D3DVOLUME_DESC9,
+    D3DADAPTER_IDENTIFIER9, D3DCAPS9, D3DDISPLAYMODEEX, D3DDISPLAYMODEFILTER, D3DSURFACE_DESC9,
+    D3DVERTEXELEMENT9, D3DVIEWPORT9, D3DVOLUME_DESC9,
 } from '../d3d9/structs.js';
 import {
     IDIRECT3DCUBETEXTURE9_SLOTS, IDIRECT3DDEVICE9_SLOTS, IDIRECT3DQUERY9_SLOTS,
@@ -1499,4 +1500,32 @@ test('IDirect3D9Ex answers modes as D3DDISPLAYMODEEX, its LUID, and makes Ex dev
 
     assert.equal(h.release(made), 0);
     assert.equal(h.release(ex), 0);
+});
+
+test('the adapter a Direct3D 9 program is told about is the one every generation describes', ()=>{
+    // DirectDraw's GetDeviceIdentifier and Direct3D 8's GetAdapterIdentifier
+    // give the same vendor, name and GUID: a program asking through two of
+    // them compares the answers to learn whether it is on one card.
+    const h = seamed();
+    const root = h.create();
+    const out = 0x1400;
+    h.box.services.writeMemory(out, new Uint8Array(D3DADAPTER_IDENTIFIER9.SIZE + 4).fill(0xcd));
+    assert.equal(h.box.call(root, slot(IDIRECT3D9_SLOTS, 'GetAdapterIdentifier'), [0, 0, out]),
+        D3D_OK);
+    /** @param {number} at */
+    const text = at=>{
+        const bytes = h.box.services.readMemory(out + at, 512);
+        const end = bytes.indexOf(0);
+        return String.fromCharCode(...bytes.subarray(0, end < 0 ? 512 : end));
+    };
+    const shared = describeAdapter({ vendor: 'nvidia', architecture: 'ampere' });
+    assert.equal(text(D3DADAPTER_IDENTIFIER9.Description), shared.description);
+    assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER9.VendorId), shared.vendorId);
+    assert.deepEqual([...h.box.services.readMemory(out + D3DADAPTER_IDENTIFIER9.DeviceIdentifier,
+        16)], [...ADAPTER_GUID]);
+    assert.equal(text(D3DADAPTER_IDENTIFIER9.Driver), 'webgpu');
+    assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER9.WHQLLevel), 1);
+    assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER9.FIELDS), 0xcdcdcdcd,
+        'the padding after the fields is not written');
+    h.box.call(root, 2, []);
 });
