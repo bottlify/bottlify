@@ -28,13 +28,15 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 /**
  * @param {{ ramSize?: number, codePages?: boolean, trapPort?: number,
  *     trap?: (value: number) => number, rdtsc?: () => bigint,
- *     leaveOut?: string[] }} [given]
+ *     leaveOut?: string[], precise?: boolean }} [given]
  *     trapPort: `out dx, eax` to it calls
  *     `trap` from inside the region (answering 1 when it moved EIP), as under a host with
- *     a call channel; without `trap`, one that answers 0
+ *     a call channel; without `trap`, one that answers 0; precise: nothing relaxed -- on
+ *     unless a test asks, since the tests and the corpus judge the processor's behaviour
  */
 export function createTestMachine(given = {}){
-    const { ramSize = 1 << 20, codePages = false, trapPort, trap, rdtsc, leaveOut = [] } = given;
+    const { ramSize = 1 << 20, codePages = false, trapPort, trap, rdtsc, leaveOut = [],
+        precise = true } = given;
     // With `codePages`, the undo ring's area doubles as another executor's
     // byte-per-page code table, for the tests of a store into its pages.
     const own = ownLayout({ ramSize });
@@ -134,7 +136,7 @@ export function createTestMachine(given = {}){
             const region = formRegion(read, entry, regionOptions);
             const m = new ModuleBuilder();
             const context = prepareModule(m, layout, found, {}, {
-                undoLog, hash: table !== null && hash, wide,
+                undoLog, hash: table !== null && hash, wide, precise,
                 ...(trapPort === undefined ? {} : { trapPort }), leaveOut: new Set(leaveOut),
             });
             const translation = emitRegion(context, region, { entryTop, checked: !speculate });

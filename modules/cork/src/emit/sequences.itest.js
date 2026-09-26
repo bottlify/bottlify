@@ -145,7 +145,8 @@ async function createJudge(){
         // put at the same address, or crowd that sequence's own out. This
         // corpus translates every sequence itself, through `noteHot`, and a
         // run is only repeatable from its seed with that feed alone.
-        config: { missThreshold: Number.POSITIVE_INFINITY },
+        // Judged against the emulator bit for bit: nothing relaxed.
+        config: { missThreshold: Number.POSITIVE_INFINITY, precise: true },
         read: emulator.readByte,
         imports: {
             trap: ()=>0, getEflags: emulator.getEflags, x87Read: ()=>0, rdtsc: ()=>0n,

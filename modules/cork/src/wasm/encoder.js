@@ -140,6 +140,24 @@ export class Body {
         /** Every local the body reads or writes, and those it writes. */
         this.used = new Set();
         this.written = new Set();
+        /**
+         * Branch hints: each the offset of an `if` or `br_if` and whether it is
+         * likely taken (1) or not (0), for the module's `metadata.code.branch_hint`.
+         * @type {[number, number][]}
+         */
+        this.hints = [];
+    }
+
+    /**
+     * Hints the branch written next (an `if` or a `br_if`): `likely` false says
+     * it is rarely taken, so the engine lays its body out of the way and keeps
+     * the registers for the path that goes on.
+     *
+     * @param {boolean} likely
+     */
+    hint(likely){
+        this.hints.push([this.length, likely ? 1 : 0]);
+        return this;
     }
 
     /** Room for `count` more bytes. @param {number} count */
@@ -201,6 +219,13 @@ export class Body {
      * @param {number} at @param {Body} other
      */
     insert(at, other){
+        for (const one of this.hints)
+        {
+            if (one[0] >= at)
+            {
+                one[0] += other.length;
+            }
+        }
         this.reserve(other.length);
         this.buffer.copyWithin(at + other.length, at, this.length);
         this.buffer.set(other.buffer.subarray(0, other.length), at);
@@ -461,7 +486,7 @@ export class ModuleBuilder {
         this.imports = [];
         this.importedFunctions = 0;
         this.importedGlobals = 0;
-        /** @type {{ typeIndex: number, locals: number[], body: Uint8Array }[]} */
+        /** @type {{ typeIndex: number, locals: number[], body: Uint8Array, hints: [number, number][] }[]} */
         this.functions = [];
         /** @type {number[][]} */
         this.globals = [];
@@ -585,12 +610,13 @@ export class ModuleBuilder {
      * @param {number} typeIndex
      * @param {number[]} locals  value types, one entry per local
      * @param {Uint8Array} body  from `Body.toBytes()`
-     * @param {{ exportAs?: string }} [options]
+     * @param {{ exportAs?: string, hints?: [number, number][] }} [options]  hints: the
+     *     body's branch hints (`Body.hint`), by their offsets in it
      * @returns {number} the function index
      */
-    function(typeIndex, locals, body, { exportAs } = {}){
+    function(typeIndex, locals, body, { exportAs, hints = [] } = {}){
         const index = this.importedFunctions + this.functions.length;
-        this.functions.push({ typeIndex, locals, body });
+        this.functions.push({ typeIndex, locals, body, hints });
         if (exportAs !== undefined)
         {
             this.exports.push([...name(exportAs), 0x00, ...leb128u(index)]);
@@ -665,7 +691,12 @@ export class ModuleBuilder {
             }
             return out;
         };
-        const codes = this.functions.map(({ locals, body })=>{
+        // The branch hints, by function: each hint's offset counts from the
+        // start of the function's body, its local declarations included.
+        /** @type {number[]} */
+        const hinted = [];
+        let hintedFunctions = 0;
+        const codes = this.functions.map(({ locals, body, hints }, k)=>{
             // Runs of one type are one entry: "3 × i32, 1 × f64".
             /** @type {number[][]} */
             const runs = [];
@@ -683,8 +714,23 @@ export class ModuleBuilder {
             }
             const declared = vector(
                 runs.flatMap(([count, type])=>[...leb128u(count), type]), runs.length);
+            if (hints.length > 0)
+            {
+                hintedFunctions++;
+                hinted.push(...leb128u(this.importedFunctions + k), ...leb128u(hints.length));
+                for (const [offset, likely] of [...hints].sort((a, c)=>a[0] - c[0]))
+                {
+                    hinted.push(...leb128u(declared.length + offset), 1, likely);
+                }
+            }
             return concat([leb128u(declared.length + body.length), declared, body]);
         });
+        // Before the code section, as the engine reads it.
+        const hintSection = hintedFunctions === 0 ? new Uint8Array(0) : (()=>{
+            const content = [...name('metadata.code.branch_hint'), ...leb128u(hintedFunctions),
+                ...hinted];
+            return concat([[0x00], leb128u(content.length), content]);
+        })();
         const codeSection = codes.length === 0 ? new Uint8Array(0) : (()=>{
             const content = concat([leb128u(codes.length), ...codes]);
             return concat([[10], leb128u(content.length), content]);
@@ -717,6 +763,7 @@ export class ModuleBuilder {
             section(6, entries(this.globals)),
             section(7, entries(this.exports)),
             section(9, entries(elements)),
+            hintSection,
             codeSection,
             nameSection,
         ]);

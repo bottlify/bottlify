@@ -123,6 +123,39 @@ test('scalar forms touch the low lane and keep the rest', { skip }, ()=>{
     assert.deepEqual(lanes(m, 0), [11, 2, 3, 4]);
     const sqrt = run([0xf3, 0x0f, 0x51, 0xc1], { xmm0: [1, 2, 3, 4], xmm1: [16, 0, 0, 0] });
     assert.deepEqual(lanes(sqrt, 0), [4, 2, 3, 4]);
+    // subss, divss: the destination first; from memory; movss between registers
+    const four = [1, 2, 3, 4];
+    assert.deepEqual(lanes(run([0xf3, 0x0f, 0x5c, 0xc1], { xmm0: four, xmm1: [10, 0, 0, 0] }), 0),
+        [-9, 2, 3, 4]);
+    assert.deepEqual(lanes(run([0xf3, 0x0f, 0x5e, 0x05, 0x00, 0x20, 0, 0],
+        { xmm0: four, data: [0, 0, 0x80, 0x40] }), 0), [0.25, 2, 3, 4]);
+    assert.deepEqual(lanes(run([0xf3, 0x0f, 0x10, 0xc1], { xmm0: four, xmm1: [9, 8, 7, 6] }), 0),
+        [9, 2, 3, 4]);
+    // mulsd xmm0, xmm1; movsd xmm2, xmm0: the low qword, the high one kept
+    const double = createTestMachine();
+    const view = new DataView(double.memory.buffer);
+    const qword = (/** @type {number} */ at)=>view.getFloat64(double.layout.xmm + at, true);
+    [1.5, 7, 2.5, 8, 0, 9].forEach((value, i)=>{
+        view.setFloat64(double.layout.xmm + i * 8, value, true);
+    });
+    double.write(CODE, [0xf2, 0x0f, 0x59, 0xc1, 0xf2, 0x0f, 0x10, 0xd0, 0xf4]);
+    double.setReg('esp', 0x80000);
+    assert.equal(double.runProgram(CODE).kind, 3);
+    assert.deepEqual([qword(0), qword(8)], [3.75, 7], 'mulsd: the low qwords multiplied');
+    assert.deepEqual([qword(32), qword(40)], [3.75, 9], 'movsd xmm2, xmm0: the low qword');
+    // Both operands NaNs: the destination's comes out, quieted, as on the processor.
+    const nan = createTestMachine();
+    const state = new DataView(nan.memory.buffer);
+    state.setUint32(nan.layout.xmm, 0x7fc00001, true);
+    state.setUint32(nan.layout.xmm + 16, 0x7fc00002, true);
+    state.setUint32(nan.layout.xmm + 32, 0x7fc00003, true);
+    state.setUint32(nan.layout.xmm + 48, 0x7fc00004, true);
+    // addss xmm0, xmm1; mulss xmm2, xmm3
+    nan.write(CODE, [0xf3, 0x0f, 0x58, 0xc1, 0xf3, 0x0f, 0x59, 0xd3, 0xf4]);
+    nan.setReg('esp', 0x80000);
+    assert.equal(nan.runProgram(CODE).kind, 3);
+    assert.equal(words(nan, 0)[0], 0x7fc00001);
+    assert.equal(words(nan, 2)[0], 0x7fc00003);
 });
 
 test('minps and maxps return the second operand for a NaN or two zeros', { skip }, ()=>{

@@ -41,6 +41,15 @@
  * transcendentals go through the host's `Math`, as the emulator's do, so
  * the two agree bit for bit on one engine; the environment forms end a
  * region.
+ *
+ * Unless the module is `precise`, the sticky exception flags are not
+ * computed -- no IE from an invalid operation, a NaN compared or a signalling
+ * NaN read (whose load does not quiet an m64 either), no ZE, no UE -- and C1
+ * is not cleared by a push or `fcomi`: a test and a branch per operation
+ * that split the block at every one, where a program reads the words only in
+ * `fnstsw` and the environment saves, and practically never the exception
+ * bits. What stays exact is every value, C0, C2 and C3, the stack and its
+ * faults, and precision and rounding control.
  */
 
 import { CF, PF, ZF, AF, SF, OF } from '../decode/table.js';
@@ -58,7 +67,7 @@ import { inlineReturns } from '../region.js';
 /** f64 and conversion opcodes. */
 const F64 = Object.freeze({
     eq: 0x61, ne: 0x62, lt: 0x63, gt: 0x64, le: 0x65, ge: 0x66,
-    abs: 0x99, neg: 0x9a, trunc: 0x9d, nearest: 0x9e, sqrt: 0x9f,
+    abs: 0x99, neg: 0x9a, ceil: 0x9b, floor: 0x9c, trunc: 0x9d, nearest: 0x9e, sqrt: 0x9f,
     add: 0xa0, sub: 0xa1, mul: 0xa2, div: 0xa3, copysign: 0xa6,
     convertI32S: 0xb7, convertI64S: 0xb9, convertI64U: 0xba, promoteF32: 0xbb,
     reinterpretI64: 0xbf,
@@ -773,6 +782,8 @@ export function planStack(region, states, cut, speculate){
  * @property {(Shape | null)[]} needs  what each entry tests of the stack words, or null
  * @property {Shape} stack   what is known of them at the current point of emission
  * @property {number} guards  stack-fault checks emitted, for the tests
+ * @property {number} relaxedReads  status-word reads through which a module that is not
+ *     `precise` lets the program see what it does not keep (`readsRelaxed`)
  */
 
 /**
@@ -837,7 +848,7 @@ export function prepareX87(e, entryTop, checked = false){
             active: false, hasMmx: false, base: 0, form: -1, temp: 0, temp2: 0, temp3: 0,
             states: [], ends: [], cut: new Set(), current: null, controlWritten: false,
             checkedPrecision: -1, known: unknown(), shapes: [], needs: [], stack: NOTHING,
-            guards: 0,
+            guards: 0, relaxedReads: 0,
         };
     }
     const hasMmx = regionHasMmx(region, e.context.leaveOut);
@@ -846,7 +857,8 @@ export function prepareX87(e, entryTop, checked = false){
         ? { known: region.blocks.map(()=>NOTHING), needs: [] }
         : planStack(region, states, cut, !checked);
     const base = e.localTypes.length + STATE_PARAMS;
-    for (let k = 0; k < 11; k++)
+    // The eight registers, three scratch locals, and a fused compare's operands.
+    for (let k = 0; k < 13; k++)
     {
         e.localTypes.push(ValType.f64);
     }
@@ -854,12 +866,12 @@ export function prepareX87(e, entryTop, checked = false){
     if (hasMmx)
     {
         e.localTypes.push(ValType.i32);
-        form = base + 11;
+        form = base + 13;
     }
     return {
         active: true, hasMmx, base, form, temp: base + 8, temp2: base + 9, temp3: base + 10,
         states, ends, cut, current: null, controlWritten: false, checkedPrecision: -1,
-        known: unknown(), shapes, needs, stack: NOTHING, guards: 0,
+        known: unknown(), shapes, needs, stack: NOTHING, guards: 0, relaxedReads: 0,
     };
 }
 
@@ -1282,6 +1294,7 @@ export function emitX87(e, instruction, flagsLive){
     }
     const { b } = e;
     const { op, operands } = instruction;
+    const precise = e.context.precise === true;
     const state = x.current;
     const next = step(instruction, state);
     if (next === null)
@@ -1457,7 +1470,7 @@ export function emitX87(e, instruction, flagsLive){
         read &= ~x.stack.held;
         const into = 1 << ((state.top - 1) & 7);
         const overflowChecked = pushes && (x.stack.empty & into) === 0;
-        if (pushes && !x.stack.c1)
+        if (pushes && !x.stack.c1 && precise)
         {
             // C1 is a push's overflow indicator: cleared here, and set below
             // when the register it would take is held -- the processor leaves
@@ -1525,7 +1538,8 @@ export function emitX87(e, instruction, flagsLive){
         // every operation.
         b.localSet(x.temp3);
         b.localGet(Local.x87Control).i32const(0x300).op(I32.and).op(I32.eqz);
-        e.openIf('single', EMPTY);
+        // Not `single`, the wide regions' way out: under Direct3D this one is taken.
+        e.openIf('narrow', EMPTY);
         b.localGet(x.temp3).op(I64.reinterpretF64).localSet(Local.t64);
         b.localGet(Local.t64).localGet(Local.t64).i64const(29n).op(I64.shrU).i64const(1n)
             .op(I64.and).op(I64.add).i64const(0x0fffffffn).op(I64.add)
@@ -1566,12 +1580,19 @@ export function emitX87(e, instruction, flagsLive){
      * the IE a signalling one raises. The host quiets it in the arithmetic
      * as the processor does.
      *
+     * Unless `precise`, only the sign: no IE (see the file's header).
+     *
      * @param {number[]} inputs  the locals holding the operands
      * @param {boolean} [invalid]
      * @param {Operand | null} [memory]
      */
     const hostNaN = (inputs, invalid = false, memory = null)=>{
         const fix = !e.context.features.defaultNaNNegative;
+        if (!precise)
+        {
+            invalid = false;
+            memory = null;
+        }
         if (!fix && !invalid && memory === null)
         {
             return;
@@ -1804,11 +1825,14 @@ export function emitX87(e, instruction, flagsLive){
             return finish();
         case 'fsqrt':
             guard();
-            // A negative other than -0 is invalid: IE, and the result is a NaN.
-            b.localGet(st(0)).f64const(0).op(F64.lt);
-            e.openIf('negative', EMPTY);
-            setStatus(Status.IE);
-            e.close();
+            if (precise)
+            {
+                // A negative other than -0 is invalid: IE, and the result is a NaN.
+                b.localGet(st(0)).f64const(0).op(F64.lt);
+                e.openIf('negative', EMPTY);
+                setStatus(Status.IE);
+                e.close();
+            }
             b.localGet(st(0)).localTee(x.temp).op(F64.sqrt);
             hostNaN([x.temp]);
             byPrecision();
@@ -1985,24 +2009,30 @@ export function emitX87(e, instruction, flagsLive){
             b.localGet(st(0)).localSet(x.temp);
             if (op === 'fyl2x')
             {
-                b.localGet(x.temp).f64const(0).op(F64.eq);
-                b.localGet(st(1)).op(F64.abs).f64const(Infinity).op(F64.lt).op(I32.and);
-                b.localGet(st(1)).f64const(0).op(F64.ne).op(I32.and);
-                e.openIf('zero', EMPTY);
-                setStatus(Status.ZE);
-                e.close();
-                b.localGet(x.temp).f64const(0).op(F64.lt);
-                e.openIf('negative', EMPTY);
-                setStatus(Status.IE);
-                e.close();
+                if (precise)
+                {
+                    b.localGet(x.temp).f64const(0).op(F64.eq);
+                    b.localGet(st(1)).op(F64.abs).f64const(Infinity).op(F64.lt).op(I32.and);
+                    b.localGet(st(1)).f64const(0).op(F64.ne).op(I32.and);
+                    e.openIf('zero', EMPTY);
+                    setStatus(Status.ZE);
+                    e.close();
+                    b.localGet(x.temp).f64const(0).op(F64.lt);
+                    e.openIf('negative', EMPTY);
+                    setStatus(Status.IE);
+                    e.close();
+                }
                 b.localGet(st(1)).localGet(x.temp).call(math.log2).op(F64.mul);
             }
             else
             {
-                b.localGet(x.temp).f64const(-1).op(F64.lt);
-                e.openIf('negative', EMPTY);
-                setStatus(Status.IE);
-                e.close();
+                if (precise)
+                {
+                    b.localGet(x.temp).f64const(-1).op(F64.lt);
+                    e.openIf('negative', EMPTY);
+                    setStatus(Status.IE);
+                    e.close();
+                }
                 b.localGet(st(1)).localGet(x.temp).call(math.log1p).f64const(Math.LN2).op(F64.div)
                     .op(F64.mul);
             }
@@ -2101,7 +2131,7 @@ export function emitX87(e, instruction, flagsLive){
                 src.kind === 'mem' && !op.startsWith('fi') && src.size !== 10 ? src : null);
             orIndefinite();
             b.localSet(st(target));
-            if (kind === 'fdiv')
+            if (kind === 'fdiv' && precise)
             {
                 // A zero-divide of a finite nonzero, by a sound operation.
                 b.localGet(c).f64const(0).op(F64.eq);
@@ -2172,7 +2202,17 @@ export function emitX87(e, instruction, flagsLive){
             b.localGet(a).localGet(a).op(F64.ne).localGet(c).localGet(c).op(F64.ne).op(I32.or);
             b.localGet(Local.t1).op(I32.or);
             b.localSet(Local.t1);
-            if (flagsLive)
+            // Only the branch after it reading the flags: the branch compares.
+            // The operands are kept aside, since what stands between (a pop
+            // into ST(1)) may write the registers they are in.
+            if (flagsLive && clear && e.fusesCompare(
+                e.region.blocks[e.blockIndex].instructions.indexOf(instruction), keepsCompare))
+            {
+                b.localGet(a).localSet(x.base + 11);
+                b.localGet(c).localSet(x.base + 12);
+                e.fcmp = { a: x.base + 11, c: x.base + 12, double: true };
+            }
+            else if (flagsLive)
             {
                 e.eagerWrite(CF | PF | AF | ZF | SF | OF);
                 b.localGet(Local.t1);
@@ -2182,16 +2222,20 @@ export function emitX87(e, instruction, flagsLive){
                 b.localGet(Local.t1).localGet(a).localGet(c).op(F64.lt).op(I32.or);
                 e.orFlag(CF);
             }
-            b.localGet(Local.t1);
-            if (op.startsWith('fu'))
+            if (precise)
             {
-                signalling(e, a, c);
-                b.op(I32.and);
+                b.localGet(Local.t1);
+                if (op.startsWith('fu'))
+                {
+                    signalling(e, a, c);
+                    b.op(I32.and);
+                }
+                e.openIf('invalid', EMPTY);
+                setStatus(Status.IE);
+                e.close();
+                b.localGet(Local.x87Status).i32const(~Status.C1).op(I32.and)
+                    .localSet(Local.x87Status);
             }
-            e.openIf('invalid', EMPTY);
-            setStatus(Status.IE);
-            e.close();
-            b.localGet(Local.x87Status).i32const(~Status.C1).op(I32.and).localSet(Local.x87Status);
             popN(op.endsWith('p') ? 1 : 0);
             return finish();
         }
@@ -2242,6 +2286,10 @@ export function emitX87(e, instruction, flagsLive){
             return finish();
         }
         case 'fnstsw':
+            if (!precise && readsRelaxed(e, instruction))
+            {
+                x.relaxedReads++;
+            }
             b.localGet(Local.x87Status).i32const(~0x3800).op(I32.and)
                 .i32const(state.top << 11).op(I32.or);
             if (dst.kind === 'reg')
@@ -2271,6 +2319,10 @@ export function emitX87(e, instruction, flagsLive){
             // has them). fnsave follows with the eight registers in stack
             // order as ten-byte values, and leaves the unit as fninit does.
             const save = op === 'fnsave';
+            if (!precise)
+            {
+                x.relaxedReads++;
+            }
             prepare(e, { ...dst, size: save ? 108 : 28 });
             noteStore(e, save ? 108 : 28);
             const ram = e.layout.ramBase;
@@ -2370,6 +2422,101 @@ export function emitX87(e, instruction, flagsLive){
 }
 
 /**
+ * A float compare's operands, in locals, for the branch that reads its flags
+ * (`fusesCompare` in `region.js`): f64 locals for the x87's, f32 or f64 for SSE's.
+ *
+ * @typedef {{ a: number, c: number, double: boolean }} FloatCompare
+ */
+
+/**
+ * What may stand between a fused `fcomi` and its branch: an x87 move between
+ * registers, which reads and writes no flag, touches no memory, rounds nothing
+ * and cannot leave the region.
+ *
+ * @param {Instruction} instruction
+ */
+function keepsCompare(instruction){
+    return (instruction.op === 'fstp' || instruction.op === 'fst' || instruction.op === 'fxch'
+        || instruction.op === 'fld' || instruction.op === 'ffreep' || instruction.op === 'fnop')
+        && instruction.operands.every(operand=>operand.kind === 'x87');
+}
+
+/**
+ * Pushes 0/1 for a condition code read from a float compare's operands, as
+ * `fcomi` and `comiss` set the flags: CF less or unordered, ZF equal or
+ * unordered, PF unordered, OF SF AF clear.
+ *
+ * @param {Body} b @param {FloatCompare} compare @param {number} cc
+ */
+export function floatCondition(b, { a, c, double }, cc){
+    // f64 or f32: ne, lt, gt, ge
+    const [ne, lt, gt, ge] = double ? [F64.ne, F64.lt, F64.gt, F64.ge] : [0x5c, 0x5d, 0x5e, 0x60];
+    const equalOrUnordered = ()=>{
+        b.localGet(a).localGet(c).op(lt).localGet(a).localGet(c).op(gt).op(I32.or).op(I32.eqz);
+    };
+    switch (cc >> 1)
+    {
+        case 1: // b: CF
+            b.localGet(a).localGet(c).op(ge).op(I32.eqz);
+            break;
+        case 2: // e: ZF
+        case 7: // le: ZF, SF and OF being equal
+            equalOrUnordered();
+            break;
+        case 3: // be: CF or ZF
+            b.localGet(a).localGet(c).op(gt).op(I32.eqz);
+            break;
+        case 5: // p: PF
+            b.localGet(a).localGet(a).op(ne).localGet(c).localGet(c).op(ne).op(I32.or);
+            break;
+        default: // o, s, l: OF, SF, SF != OF
+            b.i32const(0);
+    }
+    if ((cc & 1) === 1)
+    {
+        b.op(I32.eqz);
+    }
+}
+
+/** The status word's bits a module that is not `precise` does not keep: the
+ * exception flags, the stack fault and summary bits of the low byte, and C1. */
+const RELAXED_STATUS = 0x02ff;
+
+/**
+ * Whether an `fnstsw` lets the program see the bits a module that is not
+ * `precise` does not keep: into memory, or into AX with anything after it but
+ * `sahf` (C0, C2 and C3 into the flags) or a `test`/`and` of AH or AX with a
+ * mask that leaves those bits out -- the compare idioms compilers emit. Found
+ * at translation, for the diagnostics; the code is the same either way.
+ *
+ * @param {E} e @param {Instruction} instruction
+ */
+function readsRelaxed(e, instruction){
+    if (instruction.operands[0].kind !== 'reg')
+    {
+        return true;
+    }
+    const block = e.region.blocks[e.blockIndex];
+    const next = block?.instructions[block.instructions.indexOf(instruction) + 1];
+    if (next === undefined)
+    {
+        return true;
+    }
+    if (next.op === 'sahf')
+    {
+        return false;
+    }
+    const [target, mask] = next.operands;
+    if ((next.op === 'test' || next.op === 'and') && target?.kind === 'reg'
+        && target.reg === 0 && mask?.kind === 'imm')
+    {
+        const bits = /** @type {number} */ (mask.value) << (target.size === 1 && target.high ? 8 : 0);
+        return (bits & RELAXED_STATUS) !== 0;
+    }
+    return true;
+}
+
+/**
  * Pushes 1 when the float at `Local.addr` (m32 or m64) is a signalling NaN,
  * from its bits: all-ones exponent, quiet bit clear, fraction not zero.
  *
@@ -2401,14 +2548,25 @@ function rawSignalling(e, operand){
  * one compare on the common path, where the bit test was an integer load, a
  * mask and a compare -- and `unchecked` leaves the test to the caller: an
  * operation whose result is a NaN whenever the operand is (the arithmetic's
- * `hostNaN`) or that raises IE on any NaN (an ordered compare).
+ * `hostNaN`) or that raises IE on any NaN (an ordered compare). A module
+ * that is not `precise` tests nothing: every load is `unchecked`.
  *
  * @param {E} e @param {Operand} operand
  * @param {'checked' | 'quick' | 'unchecked'} [mode]
  */
 function loadFloat(e, operand, mode = 'checked'){
     const { b } = e;
+    if (e.context.precise !== true)
+    {
+        mode = 'unchecked';
+    }
     prepare(e, operand);
+    if (mode === 'unchecked' && operand.size === 10)
+    {
+        b.localGet(Local.addr).i32const(e.layout.ramBase).op(I32.add)
+            .call(/** @type {number} */ (e.context.f80ToF64));
+        return;
+    }
     if (mode !== 'checked' && operand.size !== 10)
     {
         // f32 -> f64 quiets a signalling NaN keeping its payload, as the
@@ -2500,7 +2658,7 @@ function storeFloat(e, operand, pushValue){
         b.call(/** @type {number} */ (e.context.f64ToF80));
         return;
     }
-    if (operand.size === 4)
+    if (operand.size === 4 && e.context.precise === true)
     {
         // A nonzero value below the smallest normal single underflows: UE
         // (masked: the store still happens, denormal or zero).
@@ -2517,31 +2675,49 @@ function storeFloat(e, operand, pushValue){
     }
     b.localGet(Local.addr);
     pushValue();
+    if (operand.size === 4)
+    {
+        b.op(F32.demoteF64).store('f32', { offset: e.layout.ramBase });
+        return;
+    }
     b.store('f64', { offset: e.layout.ramBase });
 }
 
 /**
  * Pushes a local rounded to an integer by the control word's rounding
- * control: to nearest (even) inline -- the control word every program runs
- * its conversions under, `_ftol2`'s `fistp` among them -- and the other three
- * modes through the module's helper.
+ * control, every mode inline: to nearest (even) first -- the control word
+ * most conversions run under, `_ftol2`'s `fistp` among them -- then toward
+ * zero, which a C cast compiled for the x87 sets with `fldcw` around its
+ * `fistp`, then down and up. A call to the module's helper there spilled the
+ * registers around every such conversion.
  *
  * @param {E} e @param {number} local
  */
 function roundLocal(e, local){
     const { b } = e;
-    b.localGet(Local.x87Control).i32const(0xc00).op(I32.and).op(I32.eqz);
+    const rc = ()=>b.localGet(Local.x87Control).i32const(0xc00).op(I32.and);
+    rc().op(I32.eqz);
     e.openIf('nearest', ValType.f64);
     b.localGet(local).op(F64.nearest);
     b.else();
-    b.localGet(local).localGet(Local.x87Control).call(/** @type {number} */ (e.context.round));
+    rc().i32const(0xc00).op(I32.eq);
+    e.openIf('chop', ValType.f64);
+    b.localGet(local).op(F64.trunc);
+    b.else();
+    rc().i32const(0x400).op(I32.eq);
+    e.openIf('down', ValType.f64);
+    b.localGet(local).op(F64.floor);
+    b.else();
+    b.localGet(local).op(F64.ceil);
+    e.close();
+    e.close();
     e.close();
 }
 
 /**
- * Stores the register as an integer of the operand's width, rounded to
- * nearest (or truncated); a NaN or a value out of range stores the integer
- * indefinite and raises IE.
+ * Stores the register as an integer of the operand's width, rounded by the
+ * control word (or truncated); a NaN or a value out of range stores the
+ * integer indefinite and, when `precise`, raises IE.
  *
  * @param {E} e @param {Operand} operand @param {number} local @param {boolean} truncate
  */
@@ -2561,10 +2737,34 @@ function storeInt(e, operand, local, truncate){
     const rounded = e.x87.temp;
     const limit = operand.size === 2 ? 32768
         : operand.size === 4 ? 2147483648 : 9223372036854775808;
-    // In range: -limit <= v < limit; a NaN fails both compares.
-    b.localGet(rounded).f64const(-limit).op(F64.ge);
-    b.localGet(rounded).f64const(limit).op(F64.lt);
-    b.op(I32.and).op(I32.eqz);
+    const wide = operand.size === 8;
+    const inRange = ()=>{
+        // -limit <= v < limit; a NaN fails both compares.
+        b.localGet(rounded).f64const(-limit).op(F64.ge);
+        b.localGet(rounded).f64const(limit).op(F64.lt);
+        b.op(I32.and);
+    };
+    if (e.context.precise !== true)
+    {
+        // No IE: the integer indefinite chosen by a select, with no branch.
+        b.localGet(Local.addr).localGet(rounded);
+        if (wide)
+        {
+            b.op(TRUNC_SAT_I64[0], [TRUNC_SAT_I64[1]]).i64const(-0x8000000000000000n);
+        }
+        else
+        {
+            b.op(TRUNC_SAT_I32[0], [TRUNC_SAT_I32[1]])
+                .i32const(operand.size === 2 ? 0x8000 : -0x80000000);
+        }
+        inRange();
+        b.select();
+        b.store(wide ? 'i64' : operand.size === 2 ? 'i32_16' : 'i32',
+            { offset: e.layout.ramBase });
+        return;
+    }
+    inRange();
+    b.op(I32.eqz);
     e.openIf('indefinite', EMPTY);
     b.localGet(Local.x87Status).i32const(Status.IE).op(I32.or).localSet(Local.x87Status);
     b.localGet(Local.addr);
@@ -2594,7 +2794,7 @@ function storeInt(e, operand, local, truncate){
 /**
  * Compares two locals into C3 C2 C0 (equal, unordered, less): unordered
  * sets all three; C1 is cleared. IE on any NaN for the ordered compare, on
- * a signalling NaN for the unordered one.
+ * a signalling NaN for the unordered one, when `precise`.
  *
  * @param {E} e @param {number} a @param {number} c @param {boolean} ordered
  */
@@ -2604,6 +2804,16 @@ function conditionBits(e, a, c, ordered){
     // Unordered: a NaN, or the guard's empty register already in t1.
     b.localGet(a).localGet(a).op(F64.ne).localGet(c).localGet(c).op(F64.ne).op(I32.or);
     b.localGet(Local.t1).op(I32.or);
+    if (e.context.precise !== true)
+    {
+        // No IE to raise: the three bits with no branch, the unordered case's
+        // all three over what the two compares (false for a NaN) give.
+        b.i32const(Status.C3 | Status.C2 | Status.C0).op(0x6c); // i32.mul
+        b.localGet(a).localGet(c).op(F64.eq).i32const(Status.C3).op(0x6c).op(I32.or);
+        b.localGet(a).localGet(c).op(F64.lt).i32const(Status.C0).op(0x6c).op(I32.or);
+        b.localGet(Local.x87Status).op(I32.or).localSet(Local.x87Status);
+        return;
+    }
     b.localSet(Local.t1);
     b.localGet(Local.t1);
     e.openIf('unordered', EMPTY);

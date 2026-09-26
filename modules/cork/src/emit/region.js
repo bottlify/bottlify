@@ -55,7 +55,7 @@ import { Tables, blockSlot } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
 import { inlineReturns } from '../region.js';
 import {
-    isX87, prepareX87, regionHasMmx, sameState, x87BlockEnd, x87BlockStart,
+    floatCondition, isX87, prepareX87, regionHasMmx, sameState, x87BlockEnd, x87BlockStart,
     x87Edge, x87EntryCheck, x87Epilogue, x87LoadRegisters, x87Normalise,
     x87Prologue, x87StoreRegisters,
 } from './x87.js';
@@ -122,6 +122,21 @@ export const Exit = Object.freeze({
 export const MMX_HELD = 1;
 export const MMX_TOP = 2;
 
+/**
+ * The `if`s whose body is a slow path -- a way out of the region, a fault, a
+ * page flagged, a spent budget, an exception the processor would raise --
+ * hinted rarely taken (`Body.hint`): the engine lays them out of the way and
+ * keeps the registers for the path that goes on, where it had spilled around
+ * them. By the name each is opened with; a name also opened for a branch that
+ * data decides (`zero` in `bsf`, `taken`) is not here.
+ */
+const UNLIKELY = new Set([
+    'spent', 'bulkSpent', 'flagged', 'window', 'windowFaults', 'windowCode', 'storeCode',
+    'inaccessible', 'maybeCode', 'code', 'stale', 'streamsFlagged', 'fault', 'overflow',
+    'unshaped', 'single', 'nan', 'signalling', 'made', 'invalid', 'negative', 'underflow',
+    'indefinite', 'unordered',
+]);
+
 /** Local indices every region function shares. */
 export const Local = Object.freeze({
     label: 0, budget: 1,
@@ -174,9 +189,13 @@ const LOCAL_TYPES = [
  * @property {boolean} [blockProfile] each block counts its executions in the block
  *     profile past the tables (a diagnostic run, in a memory sized for it)
  * @property {boolean} [flat]  every backward jump through the dispatch and every flag live at
- *     every block's end, rather than the loops and liveness the region's structure gives
+ *     every block's end, rather than the loops and liveness the region's structure gives -- but
+ *     for a float compare's flags, whose liveness decides its fusion with its branch either way
  * @property {boolean} [wide]  compiled for the wide precision controls (double, extended):
  *     no rounding to single, and a block leaves with `PRECISION` if it finds single set
+ * @property {boolean} [precise]  every relaxation off: the x87 exception flags, the
+ *     signalling-NaN tests, the underflow test and C1 kept as the processor keeps them
+ *     (the runtime's `precise`); without it they are not computed
  * @property {number} codeHit         the helper telling whether a byte lies in translated code
  * @property {number} [getEflags]      the host's flag fold, imported when the layout keeps
  *                                     lazy flags (the emulator's `flags_changed`)
@@ -203,7 +222,8 @@ const LOCAL_TYPES = [
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
- *     countTransfers?: boolean, wide?: boolean, blockProfile?: boolean, structure?: boolean }}
+ *     countTransfers?: boolean, wide?: boolean, blockProfile?: boolean, structure?: boolean,
+ *     precise?: boolean }}
  *     [options]  undoLog:
  *     record every store's old bytes (differential builds only; part of the cache key);
  *     hash: import the host's function table and transfer through the entry hash (needs
@@ -212,7 +232,7 @@ const LOCAL_TYPES = [
  */
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
-        wide = false, blockProfile = false, structure = false } = {})
+        wide = false, blockProfile = false, structure = false, precise = false } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -282,6 +302,10 @@ export function prepareModule(m, layout, features, memory = {},
     {
         context.wide = true;
     }
+    if (precise)
+    {
+        context.precise = true;
+    }
     if (!structure)
     {
         context.flat = true;
@@ -306,6 +330,10 @@ export function prepareModule(m, layout, features, memory = {},
  * @property {number} entryTop      the x87 top the function was compiled for
  * @property {number} loops         blocks emitted as wasm loops onto themselves
  * @property {number} x87Guards     x87 stack-fault checks left to run time
+ * @property {number} fusedCompares  branches that compared a float compare's operands
+ *     themselves, the flags never made (`fusesCompare`)
+ * @property {number} x87RelaxedReads  status-word reads that may see what a module that is
+ *     not `precise` does not keep (`readsRelaxed` in `x87.js`)
  */
 
 /**
@@ -394,12 +422,25 @@ export class RegionEmitter {
         this.trapped = false;
         /** Blocks emitted as loops onto themselves. */
         this.loops = 0;
-        /** The flags live at each block's end (`liveFlagsOut`). @type {number[]} */
+        /** The flags live at each block's end as the dead-flag pass takes them:
+         * `liveOut`, or all of them in a flat region. @type {number[]} */
         this.flagsOut = [];
+        /** The flags live at each block's end over the region (`liveFlagsOut`), which
+         * decides a fused compare in either shape. @type {number[]} */
+        this.liveOut = [];
         /** The flags live after each instruction of the block being emitted. @type {number[]} */
         this.flagsAfterEach = [];
         /** The flags live after the instruction being emitted. */
         this.flagsAfter = ARITH_FLAGS | DF;
+        /**
+         * A float compare of the current block whose flags only its final
+         * branch reads (`fusesCompare`): the branch compares the operands, held
+         * in these locals, and the flags are never made.
+         * @type {import('./x87.js').FloatCompare | null}
+         */
+        this.fcmp = null;
+        /** Branches that compared a float compare's operands themselves, for the tests. */
+        this.fusedCompares = 0;
         /** Each loop head's last block (`planLoops`). @type {Map<number, number>} */
         this.loopEnds = new Map();
         /** The ranges being emitted, innermost last (`emitRange`).
@@ -542,8 +583,8 @@ export class RegionEmitter {
         const blocks = this.region.blocks;
         const flat = this.context.flat === true;
         this.loopEnds = flat ? new Map() : planLoops(blocks);
-        this.flagsOut = flat ? blocks.map(()=>ARITH_FLAGS | DF)
-            : liveFlagsOut(blocks, new Set(this.labels.keys()));
+        this.liveOut = liveFlagsOut(blocks, new Set(this.labels.keys()));
+        this.flagsOut = flat ? blocks.map(()=>ARITH_FLAGS | DF) : this.liveOut;
         // The other executor's code table in a hybrid layout is a second
         // thing a store is noted against: that layout tests each access. A
         // jump back carries windows only through the flat dispatch; a block
@@ -564,7 +605,7 @@ export class RegionEmitter {
         this.epilogue();
         this.fillDeferred();
         const functionIndex = this.context.m.function(
-            this.context.regionType, this.localTypes, b.toBytes());
+            this.context.regionType, this.localTypes, b.toBytes(), { hints: b.hints });
         return {
             functionIndex, labels: this.labels, unsupported: this.unsupported,
             refusals: this.refusals,
@@ -572,6 +613,7 @@ export class RegionEmitter {
             cut: new Set([...this.x87.cut, ...this.unknownBlocks(), ...this.leaving,
                 ...this.shapedBlocks()]),
             entryTop: this.entryTop, loops: this.loops, x87Guards: this.x87.guards,
+            x87RelaxedReads: this.x87.relaxedReads, fusedCompares: this.fusedCompares,
         };
     }
 
@@ -592,6 +634,10 @@ export class RegionEmitter {
     /** @param {string} name @param {number} type */
     openIf(name, type = EMPTY){
         this.controls.push(name);
+        if (UNLIKELY.has(name))
+        {
+            this.b.hint(false);
+        }
         this.b.if(type);
     }
 
@@ -1079,7 +1125,43 @@ export class RegionEmitter {
 
     /** Pushes 0/1 for a condition code. @param {number} cc */
     pushCondition(cc){
+        if (this.fcmp !== null)
+        {
+            // Read once, by the branch; a loop's second copy compares again.
+            floatCondition(this.b, this.fcmp, cc);
+            this.fcmp = null;
+            this.fusedCompares++;
+            return;
+        }
         this.pushRead((kind, width)=>emitCondition(this.b, this.flagLocals, kind, width, cc));
+    }
+
+    /**
+     * Whether the flags of the instruction at `at` in the current block are
+     * read by the block's final conditional branch alone: nothing after the
+     * branch reads them (the flags' liveness over the region), and nothing
+     * between the two touches the flags or can leave (`between` names what
+     * may stand there). Such a float compare need not make the flags at all;
+     * the branch compares its operands itself.
+     *
+     * @param {number} at
+     * @param {(instruction: import('../decode/decoder.js').Instruction) => boolean} between
+     */
+    fusesCompare(at, between){
+        const block = this.region.blocks[this.blockIndex];
+        const last = block.instructions.length - 1;
+        if (block.exit.kind !== 'jcc' || at < 0 || at >= last)
+        {
+            return false;
+        }
+        for (let k = at + 1; k < last; k++)
+        {
+            if (!between(block.instructions[k]))
+            {
+                return false;
+            }
+        }
+        return (this.liveOut[this.blockIndex] & ARITH_FLAGS) === 0;
     }
 
     /**
@@ -1424,6 +1506,7 @@ export class RegionEmitter {
             }
         }
         this.pending = null;
+        this.fcmp = null;
         this.dead = false;
         this.blockRetired = 0;
         this.blockDepth = this.controls.length;
