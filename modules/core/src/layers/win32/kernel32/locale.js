@@ -383,6 +383,14 @@ export const OEM_PAGE = CP_OEM_437;
 export const ANSI_PAGE = CP_WINDOWS_1252;
 
 /**
+ * Text in the ANSI page, as WideCharToMultiByte(CP_ACP) writes it: what a
+ * wide call's string becomes when it reaches something that reads ANSI.
+ *
+ * @param {string} text
+ */
+export const encodeAnsi = text=>encodeSingleByte(text, ANSI_PAGE).bytes;
+
+/**
  * Bytes of the ANSI page with their case changed, one byte to one byte.
  *
  * What CharUpper and CharLower do to a buffer: a byte whose mapping is not

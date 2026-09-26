@@ -2666,3 +2666,70 @@ test('a registered keyboard follows the focus, and only a sink hears it in the b
     service.rawInput({ device: 'key', scan: 0x1e, vk: 0x41, down: true });
     assert.deepEqual(next().slice(0, 2), [hwnd, RIM_INPUTSINK], 'unless it is a sink');
 });
+
+test('SetWindowTextW hands an ANSI window its text in the ANSI page, lent for the call', ()=>{
+    const context = setup({
+        heap: true,
+        reply: (/** @type {any} */ message)=>context.fns.DefWindowProcA.handler(
+            [message.hwnd, message.message, message.wParam, message.lParam]),
+    });
+    const { fns, memory, released, dispatched } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    const WIDE = 0x10600;
+    // e acute is in Windows-1252, a Cyrillic letter is not and becomes '?'.
+    memory.writeMemory(WIDE, new Uint8Array(Buffer.from('Café Ж\0', 'utf16le')));
+    released.length = 0;
+
+    assert.equal(fns.SetWindowTextW.argBytes, 8);
+    assert.equal(fns.SetWindowTextW.handler([hwnd, WIDE]), 1);
+    const sent = dispatched.at(-1);
+    assert.equal(sent.message, 0x000c, 'WM_SETTEXT reached the procedure');
+    assert.deepEqual(released, [sent.lParam], 'the ANSI copy is given back after the message');
+    assert.equal(fns.GetWindowTextA.handler([hwnd, TEXT_BUFFER, 64]), 6);
+    assert.deepEqual([...memory.readMemory(TEXT_BUFFER, 7)], [0x43, 0x61, 0x66, 0xe9, 0x20,
+        0x3f, 0]);
+    assert.equal(fns.SetWindowTextW.handler([0x9999, WIDE]), 0, 'no such window');
+});
+
+test('SetWindowTextW fails where there is no heap to put the ANSI text in', ()=>{
+    const { fns, memory, hwnd } = withWindow();
+    memory.writeMemory(0x10600, new Uint8Array(Buffer.from('Title\0', 'utf16le')));
+    assert.equal(fns.SetWindowTextW.handler([hwnd, 0x10600]), 0);
+});
+
+test('EnumWindows hands over every top-level window, topmost first, until told to stop',
+    async()=>{
+        const ENUMPROC = 0x405000;
+        const { fns, memory, called } = setup({ hookReply: ()=>1 });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const first = createWindow(fns, memory);
+        const child = createWindow(fns, memory, { parent: first, style: WS_CHILD });
+        const second = createWindow(fns, memory);
+        const third = createWindow(fns, memory);
+        fns.SetForegroundWindow?.handler([first]);
+        fns.SetWindowPos.handler([first, 0, 0, 0, 0, 0, 0x3]); // HWND_TOP, no move or size
+
+        assert.equal(fns.EnumWindows.argBytes, 8);
+        assert.equal(await fns.EnumWindows.handler([ENUMPROC, 0x77]), 1);
+        const listed = called.filter(one=>one.entry === ENUMPROC).map(one=>one.args[0]);
+        assert.deepEqual(listed, [first, third, second],
+            'the one brought to the top, then the rest newest first, never a child');
+        assert.ok(!listed.includes(child));
+        assert.ok(called.every(one=>one.entry !== ENUMPROC
+            || (one.args[1] === 0x77 && one.thread === THREAD)));
+
+        const stopping = setup({ hookReply: ()=>0 });
+        putClass(stopping.memory);
+        stopping.fns.RegisterClassA.handler([CLASS_STRUCT]);
+        createWindow(stopping.fns, stopping.memory);
+        createWindow(stopping.fns, stopping.memory);
+        assert.equal(await stopping.fns.EnumWindows.handler([ENUMPROC, 0]), 0,
+            'FALSE from the callback is the answer too');
+        assert.equal(stopping.called.filter(one=>one.entry === ENUMPROC).length, 1);
+
+        assert.equal(stopping.fns.EnumWindows.handler([0, 0]), 0);
+        assert.equal(stopping.errors.at(-1), 87, 'ERROR_INVALID_PARAMETER for no callback');
+    });
