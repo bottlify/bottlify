@@ -21,6 +21,7 @@ import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js'
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
 import { createProcessBlocks } from './layers/win32/kernel32/teb.js';
+import { windowsVersion } from './layers/win32/kernel32/versions.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
     from './layers/loader/internal/init.js';
@@ -4765,7 +4766,7 @@ async function buildApp(options){
         allocate: allocateFromHeap,
         writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
         processId: 0x1000,
-        version: { major: 5, minor: 1, build: 2600 },
+        version: windowsVersion(),
         imageBase: image.base,
         imagePath: options.imagePath ?? 'C:\\app.exe',
         // Quoted, and this is not cosmetic: a program is handed one string and

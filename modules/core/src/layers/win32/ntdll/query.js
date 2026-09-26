@@ -24,6 +24,7 @@
 import { PEB, TEB } from '../kernel32/teb.js';
 import { STATUS } from './status.js';
 import { PROCESSOR } from '../kernel32/processor.js';
+import { windowsVersion } from '../kernel32/versions.js';
 
 /** RTL_OSVERSIONINFOW, and the extended form that also carries the service pack. */
 const OSVERSIONINFOW_SIZE = 276;
@@ -41,8 +42,8 @@ const OSVERSIONINFO = Object.freeze({
     PRODUCT_TYPE: 0x11a,
 });
 
-/** Not a server, and nothing here models the distinction any further. */
-const VER_NT_WORKSTATION = 1;
+/** szCSDVersion's room, in characters. */
+const CSD_VERSION_CHARACTERS = 128;
 
 /** SYSTEM_BASIC_INFORMATION as a 32-bit program declares it. */
 const SYSTEM_BASIC = Object.freeze({
@@ -104,6 +105,10 @@ const NORMAL_BASE_PRIORITY = 8;
  * @property {() => number} teb  The running thread's block, which is the only
  *           route to the process block a program would take itself.
  * @property {{ base: number, size: number }} arena  The memory the process has.
+ * @property {import('../kernel32/versions.js').WindowsVersion} [version]
+ *           The machine's Windows, for the two fields the process block does
+ *           not hold: the suite and the product type, which Windows keeps in
+ *           the page the kernel shares with every process. Absent, the default.
  */
 
 /**
@@ -115,6 +120,8 @@ const NORMAL_BASE_PRIORITY = 8;
  * @param {QueryHost} host
  */
 export function createQueryFunctions(host){
+    const machine = host.version ?? windowsVersion();
+
     /** @param {number} at */
     const readU32 = at=>{
         const bytes = host.readMemory(at, 4);
@@ -168,19 +175,31 @@ export function createQueryFunctions(host){
                 // caller's own size field survives untouched.
                 const struct = new Uint8Array(declared);
                 const view = new DataView(struct.buffer);
+                // The build and the service pack are one DWORD's two WORDs.
+                const buildAndPack = readU32(block + PEB.OS_BUILD_NUMBER);
                 view.setUint32(OSVERSIONINFO.MAJOR,
                     readU32(block + PEB.OS_MAJOR_VERSION), true);
                 view.setUint32(OSVERSIONINFO.MINOR,
                     readU32(block + PEB.OS_MINOR_VERSION), true);
-                view.setUint32(OSVERSIONINFO.BUILD,
-                    readU32(block + PEB.OS_BUILD_NUMBER), true);
+                view.setUint32(OSVERSIONINFO.BUILD, buildAndPack & 0xffff, true);
                 view.setUint32(OSVERSIONINFO.PLATFORM,
                     readU32(block + PEB.OS_PLATFORM_ID), true);
-                // szCSDVersion stays zeroed: no service pack is installed, and an
-                // empty string is what says so.
+                // The rest of szCSDVersion stays zeroed rather than whatever
+                // the caller left there.
+                const csdLength = Math.min(readU32(block + PEB.CSD_VERSION) & 0xffff,
+                    (CSD_VERSION_CHARACTERS - 1) * 2);
+                const csdText = readU32(block + PEB.CSD_VERSION + 4);
+                if (csdLength > 0 && csdText !== 0)
+                {
+                    struct.set(host.readMemory(csdText, csdLength), OSVERSIONINFO.CSD_VERSION);
+                }
                 if (declared === OSVERSIONINFOEXW_SIZE)
                 {
-                    view.setUint8(OSVERSIONINFO.PRODUCT_TYPE, VER_NT_WORKSTATION);
+                    view.setUint16(OSVERSIONINFO.SERVICE_PACK_MAJOR, buildAndPack >>> 24, true);
+                    view.setUint16(OSVERSIONINFO.SERVICE_PACK_MINOR,
+                        buildAndPack >>> 16 & 0xff, true);
+                    view.setUint16(OSVERSIONINFO.SUITE_MASK, machine.suiteMask, true);
+                    view.setUint8(OSVERSIONINFO.PRODUCT_TYPE, machine.productType);
                 }
                 host.writeMemory(at + 4, struct.subarray(4));
                 return STATUS.SUCCESS;
