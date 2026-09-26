@@ -51,7 +51,8 @@ import {
     IID_IDirectDraw, IID_IDirectDraw2, IID_IDirectDraw4, IID_IDirectDraw7,
     IID_IDirectDrawSurface, IID_IDirectDrawSurface2, IID_IDirectDrawSurface3,
     IID_IDirectDrawSurface4, IID_IDirectDrawSurface7, IID_IDirectDrawPalette,
-    IID_IDirectDrawClipper, IID_IDirectDrawGammaControl,
+    IID_IDirectDrawClipper, IID_IDirectDrawGammaControl, IID_IDirect3D, IID_IDirect3D2,
+    IID_IDirect3D3,
 } from './iids.js';
 import {
     DDBLTFX, DDCAPS, DDCAPS_SIZES, DDCOLORKEY, DDSCAPS2, RECT, createFields,
@@ -90,6 +91,9 @@ const DDWAITVB_BLOCKEND = 0x00000004;
 
 /** The Direct3D 7 interface, whose count is IDirectDraw7's. */
 const IID_IDirect3D7 = '{F5049E77-4861-11D2-A407-00A0C90629A8}';
+
+/** The older Direct3D interfaces, which share the count of one earlier generation. */
+const LEGACY_D3D_IIDS = Object.freeze(new Set([IID_IDirect3D, IID_IDirect3D2, IID_IDirect3D3]));
 
 /** DDGAMMARAMP: red, green and blue, 256 words each. */
 const DDGAMMARAMP_BYTES = 3 * 256 * 2;
@@ -234,6 +238,9 @@ export function versionOf(id){
  * @param {import('./com.js').InterfaceDescriptor[]} [deps.extraInterfaces]
  *        Interfaces other seams put on the DirectDraw object -- IDirect3D7 is
  *        reached by QueryInterface from it, not made by an entry point.
+ * @param {import('./com.js').InterfaceDescriptor[]} [deps.extraSurfaceInterfaces]
+ *        And on every surface: the texture interfaces of the Direct3D before
+ *        the seventh, which a surface answers a QueryInterface for.
  * @param {() => number} [deps.now]  The clock the raster runs on, in milliseconds.
  * @param {(ms: number, run: () => void) => void} [deps.schedule]
  *        How a wait for the vertical blank is woken.
@@ -242,7 +249,8 @@ export function versionOf(id){
  */
 export function createDirectDrawSeam(
     { publisher, memory, screen, gdi, present, callGuest, currentThread, scratch,
-        extraInterfaces = [], now = ()=>performance.now(), schedule = (ms, run)=>{
+        extraInterfaces = [], extraSurfaceInterfaces = [], now = ()=>performance.now(),
+        schedule = (ms, run)=>{
             setTimeout(run, ms);
         }, identity },
 )
@@ -295,7 +303,8 @@ export function createDirectDrawSeam(
         }
         // Either an identifier or a generation name arrives here: the bridge
         // sends identifiers, and the sibling APIs name the generation they
-        // share a count with. IDirect3D7 is IDirectDraw7's count.
+        // share a count with. IDirect3D7 is IDirectDraw7's count; the older
+        // Direct3D interfaces share the one the model binds them to.
         const generationOf = (/** @type {string | undefined} */ id)=>{
             if (id === undefined)
             {
@@ -304,6 +313,10 @@ export function createDirectDrawSeam(
             if (id === IID_IDirect3D7)
             {
                 return GENERATIONS[7].name;
+            }
+            if (LEGACY_D3D_IIDS.has(id))
+            {
+                return root.legacyD3dGeneration();
             }
             const version = versionOf(id);
             if (version !== null)
@@ -1051,6 +1064,7 @@ export function createDirectDrawSeam(
             describe(generation.id, generation.slots, surfaceMethods(generation), {},
                 privateData.released)),
         gammaInterface,
+        ...extraSurfaceInterfaces,
     ];
 
     /**

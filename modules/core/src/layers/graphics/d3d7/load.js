@@ -80,6 +80,10 @@ function copyLevel(memory, dest, point, src, rect){
  * @param {Point | null} request.destPoint  Null for the corner.
  * @param {any} request.src         The source texture's top level.
  * @param {Rect | null} request.srcRect     Null for the whole source.
+ * @param {boolean} [request.keepDestinationKey]  A source with no colour key
+ *        leaves the destination's: IDirect3DTexture2::Load does, where
+ *        IDirect3DDevice7::Load takes the key away (Wine's ddraw7.c
+ *        test_texture_load_ckey, 1993-2002, against ddraw4.c's).
  * @returns {number} HRESULT
  */
 export function loadTexture(request){
@@ -132,6 +136,10 @@ export function loadTexture(request){
     {
         dest.palette.setEntries(0, src.palette.entries.slice(0, dest.palette.entries.length));
     }
-    dest.setColorKey(DDCKEY_SRCBLT, src.getColorKey(DDCKEY_SRCBLT).key);
+    const key = src.getColorKey(DDCKEY_SRCBLT).key;
+    if (key || !request.keepDestinationKey)
+    {
+        dest.setColorKey(DDCKEY_SRCBLT, key);
+    }
     return D3D_OK;
 }

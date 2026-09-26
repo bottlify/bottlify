@@ -413,7 +413,7 @@ export function createDirect3D7Seam(
         return hr;
     };
 
-    const bufferInterfaces = [describe(IID_IDirect3DVertexBuffer7, IDIRECT3DVERTEXBUFFER7_SLOTS, {
+    const bufferMethods = {
         /** @param {any} buffer @param {number[]} args */
         Lock: (buffer, [flags, out, sizeOut])=>{
             if ((out >>> 0) === 0)
@@ -502,7 +502,10 @@ export function createDirect3D7Seam(
                 },
             });
         },
-    })];
+    };
+    const bufferInterfaces = [
+        describe(IID_IDirect3DVertexBuffer7, IDIRECT3DVERTEXBUFFER7_SLOTS, bufferMethods),
+    ];
 
     // --- device ---
 
@@ -1096,5 +1099,16 @@ export function createDirect3D7Seam(
 
         /** For tests, which have no guest to call through. */
         interfaces: { device: deviceInterfaces, buffer: bufferInterfaces },
+
+        /**
+         * What the Direct3D of DirectX 3, 5 and 6 shares with this one: the
+         * object per DirectDraw object, and the translations of the calls
+         * whose arguments did not change -- its devices wrap these devices,
+         * and its vertex buffer is this one under an older table.
+         */
+        shared: {
+            d3dFor, deviceMethods, bufferMethods, d3dMethods, gatherStrided, readArray, readFloats,
+            strideOf, writeString,
+        },
     };
 }

@@ -266,4 +266,149 @@ export const DEVICE_IDS = Object.freeze({
     TNLHAL: '{F5049E78-4861-11D2-A407-00A0C90629A8}',
     REF: '{50936643-13E9-11D1-89AA-00A0C9054129}',
     NULL: '{8767DF22-BACC-11D1-8969-00A0C90629B8}',
+    RAMP: '{F2086B20-259F-11CF-A31A-00AA00B93356}',
+    MMX: '{881949A1-D6F3-11D0-89AB-00A0C9054129}',
 });
+
+// --- the versions before 7 (d3d.h, d3dtypes.h, d3dcaps.h) ---
+
+export const DDERR_ALREADYINITIALIZED = dderr(5);
+export const D3DERR_INVALIDCURRENTVIEWPORT = dderr(735);
+export const D3DERR_INVALIDVERTEXTYPE = dderr(737);
+export const D3DERR_LIGHTHASVIEWPORT = dderr(751);
+export const D3DERR_LIGHTNOTINTHISVIEWPORT = dderr(752);
+export const D3DERR_INBEGIN = dderr(770);
+export const D3DERR_NOTINBEGIN = dderr(771);
+export const D3DERR_VIEWPORTDATANOTSET = dderr(773);
+export const D3DERR_VIEWPORTHASNODEVICE = dderr(774);
+export const D3DERR_NOCURRENTVIEWPORT = dderr(775);
+export const D3DERR_EXECUTE_LOCKED = dderr(714);
+export const D3DERR_EXECUTE_NOT_LOCKED = dderr(715);
+export const D3DERR_MATRIX_DESTROY_FAILED = dderr(731);
+export const D3DERR_MATRIX_GETDATA_FAILED = dderr(733);
+export const D3DERR_MATRIX_SETDATA_FAILED = dderr(732);
+
+/** D3DLIGHTSTATETYPE: the lighting state DirectX 3 to 6 keep apart from the render states. */
+export const D3DLIGHTSTATE = Object.freeze({
+    MATERIAL: 1,
+    AMBIENT: 2,
+    COLORMODEL: 3,
+    FOGMODE: 4,
+    FOGSTART: 5,
+    FOGEND: 6,
+    FOGDENSITY: 7,
+    COLORVERTEX: 8,
+});
+
+/** D3DCOLORMODEL. */
+export const D3DCOLOR_MONO = 1;
+export const D3DCOLOR_RGB = 2;
+
+/** D3DLIGHT2.dwFlags. */
+export const D3DLIGHT_ACTIVE = 0x00000001;
+export const D3DLIGHT_NO_SPECULAR = 0x00000002;
+
+/** D3DLIGHTTYPE, with the two kinds Direct3D 7 dropped. */
+export const D3DLIGHT_PARALLELPOINT = 4;
+export const D3DLIGHT_GLSPOT = 5;
+
+/** NextViewport and NextLight: where in the list to go. */
+export const D3DNEXT_NEXT = 0x01;
+export const D3DNEXT_HEAD = 0x02;
+export const D3DNEXT_TAIL = 0x04;
+
+/** DrawPrimitive flags the versions before 7 read. */
+export const D3DDP_DONOTUPDATEEXTENTS = 0x00000008;
+export const D3DDP_DONOTLIGHT = 0x00000010;
+
+/** D3DTEXTUREBLEND: the one render state a DirectX 5 program blends a texture by. */
+export const D3DTBLEND = Object.freeze({
+    DECAL: 1,
+    MODULATE: 2,
+    DECALALPHA: 3,
+    MODULATEALPHA: 4,
+    DECALMASK: 5,
+    MODULATEMASK: 6,
+    COPY: 7,
+    ADD: 8,
+});
+
+/** D3DTEXTUREFILTER, as TEXTUREMAG and TEXTUREMIN take it. */
+export const D3DFILTER = Object.freeze({
+    NEAREST: 1,
+    LINEAR: 2,
+    MIPNEAREST: 3,
+    MIPLINEAR: 4,
+    LINEARMIPNEAREST: 5,
+    LINEARMIPLINEAR: 6,
+});
+
+/** D3DVERTEXTYPE, and the vertex formats they are. */
+export const D3DVT = Object.freeze({ VERTEX: 1, LVERTEX: 2, TLVERTEX: 3 });
+export const D3DFVF_RESERVED1 = 0x020;
+export const D3DFVF_VERTEX = 0x002 | 0x010 | 0x100;
+export const D3DFVF_LVERTEX = 0x002 | D3DFVF_RESERVED1 | 0x040 | 0x080 | 0x100;
+export const D3DFVF_TLVERTEX = 0x004 | 0x040 | 0x080 | 0x100;
+
+/** D3DFINDDEVICESEARCH.dwFlags that name a device rather than a capability. */
+export const D3DFDS_GUID = 0x00000002;
+export const D3DFDS_HARDWARE = 0x00000004;
+
+/** D3DDEVICEDESC.dwFlags: which of its fields hold something. */
+export const D3DDD = Object.freeze({
+    COLORMODEL: 0x001,
+    DEVCAPS: 0x002,
+    TRANSFORMCAPS: 0x004,
+    LIGHTINGCAPS: 0x008,
+    BCLIPPING: 0x010,
+    LINECAPS: 0x020,
+    TRICAPS: 0x040,
+    DEVICERENDERBITDEPTH: 0x080,
+    DEVICEZBUFFERBITDEPTH: 0x100,
+    MAXBUFFERSIZE: 0x200,
+    MAXVERTEXCOUNT: 0x400,
+});
+export const D3DTRANSFORMCAPS_CLIP = 0x00000001;
+export const D3DLIGHTINGMODEL_RGB = 0x00000001;
+export const D3DLIGHTCAPS_POINT = 0x00000001;
+export const D3DLIGHTCAPS_SPOT = 0x00000002;
+export const D3DLIGHTCAPS_DIRECTIONAL = 0x00000004;
+export const D3DLIGHTCAPS_PARALLELPOINT = 0x00000008;
+
+/** Every texture must be a power of two on a side, which the software device says. */
+export const D3DPTEXTURECAPS_POW2 = 0x00000002;
+
+/** D3DOPCODE: the instructions of an execute buffer. */
+export const D3DOP = Object.freeze({
+    POINT: 1,
+    LINE: 2,
+    TRIANGLE: 3,
+    MATRIXLOAD: 4,
+    MATRIXMULTIPLY: 5,
+    STATETRANSFORM: 6,
+    STATELIGHT: 7,
+    STATERENDER: 8,
+    PROCESSVERTICES: 9,
+    TEXTURELOAD: 10,
+    EXIT: 11,
+    BRANCHFORWARD: 12,
+    SPAN: 13,
+    SETSTATUS: 14,
+});
+
+/** D3DPROCESSVERTICES.dwFlags. */
+export const D3DPROCESSVERTICES = Object.freeze({
+    TRANSFORMLIGHT: 0x0,
+    TRANSFORM: 0x1,
+    COPY: 0x2,
+    OPMASK: 0x7,
+    UPDATEEXTENTS: 0x8,
+    NOCOLOR: 0x10,
+});
+
+/** D3DEXECUTEBUFFERDESC.dwFlags and dwCaps. */
+export const D3DDEB_BUFSIZE = 0x00000001;
+export const D3DDEB_CAPS = 0x00000002;
+export const D3DDEB_LPDATA = 0x00000004;
+export const D3DDEBCAPS_SYSTEMMEMORY = 0x00000001;
+export const D3DDEBCAPS_VIDEOMEMORY = 0x00000002;

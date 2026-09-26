@@ -551,6 +551,24 @@ export function createDirectDraw(options = {}){
     }
 
     /**
+     * The generation the older Direct3D interfaces count against when the
+     * caller cannot say which interface a query came through -- the bridge
+     * answers a QueryInterface from the table alone. Bound as a query binds
+     * it, once: to the newest generation before the seventh that is held,
+     * which is the one a program queries from, or else to the seed.
+     *
+     * @returns {string}
+     */
+    function legacyD3dGenerationHeld(){
+        if (legacyD3dGeneration === null)
+        {
+            legacyD3dGeneration = ['IDirectDraw4', 'IDirectDraw2', 'IDirectDraw']
+                .find(generation=>(counts.get(generation) ?? 0) > 0) ?? seed;
+        }
+        return legacyD3dGeneration;
+    }
+
+    /**
      * @param {string} id       The interface asked for.
      * @param {string} [through] The interface asked through; defaults to the seed.
      * @returns {{ hr: number, iface: { id: string, generation: string } | null }}
@@ -1744,6 +1762,7 @@ export function createDirectDraw(options = {}){
             return release(generation);
         },
         queryInterface,
+        legacyD3dGeneration: legacyD3dGenerationHeld,
 
         /**
          * @param {number} window

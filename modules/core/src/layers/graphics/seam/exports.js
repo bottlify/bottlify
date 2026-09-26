@@ -31,6 +31,7 @@ import { createDirect3D10Seam } from './d3d10.js';
 import { createVulkanSeam } from './vulkan.js';
 import { createDirectDrawSeam, readGuid } from './ddraw.js';
 import { createDirect3D7Seam } from './d3d7.js';
+import { createLegacyDirect3DSeam } from './d3dlegacy.js';
 import { IID_IDirectDraw7, IID_IDirectDrawClipper } from './iids.js';
 import { createFields } from './structs.js';
 
@@ -131,9 +132,13 @@ export function createGraphicsLibraries(
     const d3d7 = createDirect3D7Seam({
         publisher, memory, render, callGuest, currentThread, scratch,
     });
+    const d3dLegacy = createLegacyDirect3DSeam({
+        publisher, memory, d3d7: d3d7.shared, callGuest, currentThread, scratch,
+    });
     const ddraw = createDirectDrawSeam({
         publisher, memory, screen, gdi, present, callGuest, currentThread, scratch, now, schedule,
-        extraInterfaces: [d3d7.interface],
+        extraInterfaces: [d3d7.interface, ...d3dLegacy.interfaces],
+        extraSurfaceInterfaces: d3dLegacy.surfaceInterfaces,
         identity: ()=>graphics.adapter?.() ?? null,
     });
 

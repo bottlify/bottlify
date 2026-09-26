@@ -41,6 +41,25 @@ export const IID_IDirect3D7 = '{F5049E77-4861-11D2-A407-00A0C90629A8}';
 export const IID_IDirect3DDevice7 = '{F5049E79-4861-11D2-A407-00A0C90629A8}';
 export const IID_IDirect3DVertexBuffer7 = '{F5049E7D-4861-11D2-A407-00A0C90629A8}';
 
+/** The Direct3D of DirectX 3, 5 and 6, reached the same way. */
+export const IID_IDirect3D = '{3BBA0080-2421-11CF-A31A-00AA00B93356}';
+export const IID_IDirect3D2 = '{6AAE1EC1-662A-11D0-889D-00AA00BBB76A}';
+export const IID_IDirect3D3 = '{BB223240-E72B-11D0-A9B4-00AA00C0993E}';
+export const IID_IDirect3DDevice = '{64108800-957D-11D0-89AB-00A0C9054129}';
+export const IID_IDirect3DDevice2 = '{93281501-8CF8-11D0-89AB-00A0C9054129}';
+export const IID_IDirect3DDevice3 = '{B0AB3B60-33D7-11D1-A981-00C04FD7B174}';
+export const IID_IDirect3DTexture = '{2CDCD9E0-25A0-11CF-A31A-00AA00B93356}';
+export const IID_IDirect3DTexture2 = '{93281502-8CF8-11D0-89AB-00A0C9054129}';
+export const IID_IDirect3DLight = '{4417C142-33AD-11CF-816F-0000C020156E}';
+export const IID_IDirect3DMaterial = '{4417C144-33AD-11CF-816F-0000C020156E}';
+export const IID_IDirect3DMaterial2 = '{93281503-8CF8-11D0-89AB-00A0C9054129}';
+export const IID_IDirect3DMaterial3 = '{CA9C46F4-D3C5-11D1-B75A-00600852B312}';
+export const IID_IDirect3DExecuteBuffer = '{4417C145-33AD-11CF-816F-0000C020156E}';
+export const IID_IDirect3DViewport = '{4417C146-33AD-11CF-816F-0000C020156E}';
+export const IID_IDirect3DViewport2 = '{93281500-8CF8-11D0-89AB-00A0C9054129}';
+export const IID_IDirect3DViewport3 = '{B0AB3B61-33D7-11D1-A981-00C04FD7B174}';
+export const IID_IDirect3DVertexBuffer = '{7A503555-4A83-11D1-A5DB-00A0C90367F8}';
+
 /** Direct3D 8. */
 export const IID_IDirect3D8 = '{1DD9E8DA-1C77-4D40-B0CF-98FEFDFF9512}';
 export const IID_IDirect3DDevice8 = '{7385E5DF-8FE8-41D5-86B6-D7B48547B6CF}';
