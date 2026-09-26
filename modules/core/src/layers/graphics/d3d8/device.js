@@ -53,7 +53,7 @@ import { IDENTITY, STAGE_COUNT, createRenderer, vertexCountOf } from './render.j
 import { applyBlock, captureBlock, emptyBlock, fillBlock } from './stateblock.js';
 import {
     SURFACE_TYPE, copyRectsResult, createResult, imageSurfaceCreateResult,
-    reportedBackBufferCount, targetPairResult, validatePresentParameters,
+    reportedBackBufferCount, targetPairResult, validatePresentParameters, validateStages,
 } from './validity.js';
 import {
     createReferenceCount, createSurface, createTexture, writePixels,
@@ -1842,16 +1842,22 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         /**
          * How many passes the state as it stands would take.
          *
-         * Always one, and that is a property of this renderer rather than a
-         * guess: the whole stage cascade becomes a single generated shader, so
-         * a state this device accepts is a state it draws in one pass or not at
-         * all.
+         * One, when the combiner draws the cascade: the whole of it becomes a
+         * single generated shader, so a cascade drawn at all is drawn in one
+         * pass. A stage it cannot draw is named instead, and a pixel shader
+         * replaces the cascade altogether.
          *
-         * @param {{ passes?: number }} out
+         * @param {{ passes?: number }} out  Written only on success.
          */
         ValidateDevice(out){
-            out.passes = 1;
-            return D3D_OK;
+            const hr = boundPixelShader !== 0
+                ? D3D_OK
+                : validateStages(stageStatesFor, STAGE_COUNT);
+            if (hr === D3D_OK)
+            {
+                out.passes = 1;
+            }
+            return hr;
         },
 
         // --- state blocks ---

@@ -1459,6 +1459,29 @@ test('a made block holds its half: the vertex half, the pixel half, or everythin
     }
 });
 
+test('ValidateDevice refuses a stage the combiner does not draw, and writes no passes', ()=>{
+    const device = createDevice();
+    /** @type {{ passes?: number }} */
+    const out = {};
+    assert.equal(device.ValidateDevice(out), D3D_OK);
+    assert.equal(out.passes, 1);
+
+    /** @type {{ passes?: number }} */
+    const refused = {};
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, 24), D3D_OK, 'DOTPRODUCT3');
+    assert.equal(device.ValidateDevice(refused), 0x88760819, 'D3DERR_UNSUPPORTEDCOLOROPERATION');
+    assert.equal(refused.passes, undefined);
+
+    // A pixel shader replaces the cascade, so the cascade is not what is drawn.
+    /** @type {{ handle?: number }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader([0xffff0101, 0x0000ffff], ps), D3D_OK);
+    assert.equal(device.SetPixelShader(ps.handle), D3D_OK);
+    assert.equal(device.ValidateDevice(out), D3D_OK);
+    assert.equal(device.SetPixelShader(0), D3D_OK);
+    assertFullyReleased(device);
+});
+
 // --- what a draw or a clear is refused for, with nothing behind the device ---
 
 test('a draw outside a scene, of nothing, or without a stream is refused', ()=>{

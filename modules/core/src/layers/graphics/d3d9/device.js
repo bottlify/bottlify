@@ -64,6 +64,7 @@ import {
     createReferenceCount, createSurface, createTexture, packColour, writePixels,
 } from './resources.js';
 import { SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters } from './validity.js';
+import { validateStages } from '../d3d8/validity.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import {
     MAX_STREAMS, createVertexDeclaration, elementsOfFvf, fixedFunctionLayoutOf, fvfOfElements,
@@ -3319,10 +3320,20 @@ function createDeviceObject(parameters, caps, services, identity){
             return D3D_OK;
         },
 
-        /** @param {{ passes?: number }} out */
+        /**
+         * One pass when the combiner draws the cascade, which it draws in one
+         * shader; the refusal naming what it cannot draw otherwise. A pixel
+         * shader replaces the cascade.
+         *
+         * @param {{ passes?: number }} out  Written only on success.
+         */
         ValidateDevice(out){
-            out.passes = 1;
-            return D3D_OK;
+            const hr = pixelShader ? D3D_OK : validateStages(stageStatesFor, STAGE_COUNT);
+            if (hr === D3D_OK)
+            {
+                out.passes = 1;
+            }
+            return hr;
         },
     };
 

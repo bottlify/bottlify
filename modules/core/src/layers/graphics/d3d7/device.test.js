@@ -349,6 +349,22 @@ test('stage zero modulates by default and the stage states stop at D3D7\'s last'
     releaseAll(f);
 });
 
+test('ValidateDevice refuses a stage the combiner does not draw', ()=>{
+    const f = fixture();
+    const { device } = f;
+    /** @type {{ passes?: number }} */
+    const out = {};
+    assert.equal(device.ValidateDevice(out), D3D_OK);
+    assert.equal(out.passes, 1);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLORARG1, 5), D3D_OK, 'D3DTA_TEMP');
+    /** @type {{ passes?: number }} */
+    const refused = {};
+    assert.equal(device.ValidateDevice(refused), 0x8876081a, 'D3DERR_UNSUPPORTEDCOLORARG');
+    assert.equal(refused.passes, undefined);
+
+    releaseAll(f);
+});
+
 test('binding a texture owns it, in this version', ()=>{
     const f = fixture();
     const { device, root } = f;

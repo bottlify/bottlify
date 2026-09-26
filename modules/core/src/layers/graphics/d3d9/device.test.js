@@ -41,6 +41,25 @@ function createDevice(options = {}){
     return out.device;
 }
 
+test('ValidateDevice refuses what the combiner does not draw, a filter of none included', ()=>{
+    // Wine's d3d9 test_filter: a magnification or minification filter of
+    // none is D3DERR_UNSUPPORTEDTEXTUREFILTER, with or without a texture.
+    const device = createDevice();
+    /** @type {{ passes?: number }} */
+    const out = {};
+    assert.equal(device.ValidateDevice(out), D3D_OK);
+    assert.equal(out.passes, 1);
+    assert.equal(device.SetSamplerState(0, 5, 0), D3D_OK, 'D3DSAMP_MAGFILTER, NONE');
+    /** @type {{ passes?: number }} */
+    const refused = {};
+    assert.equal(device.ValidateDevice(refused), 0x88760822, 'D3DERR_UNSUPPORTEDTEXTUREFILTER');
+    assert.equal(refused.passes, undefined);
+    assert.equal(device.SetSamplerState(0, 5, 1), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, 1, 26), D3D_OK, 'D3DTOP_LERP');
+    assert.equal(device.ValidateDevice(refused), 0x88760819, 'D3DERR_UNSUPPORTEDCOLOROPERATION');
+    assert.equal(device.release(), 0);
+});
+
 /**
  * Every test ends here. A device whose last reference is not the caller's has
  * something still holding it, which for a graphics layer is a leaked resource.

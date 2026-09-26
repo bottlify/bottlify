@@ -21,12 +21,20 @@
  */
 
 import {
-    D3DERR_INVALIDCALL, D3DPOOL, D3DSWAPEFFECT, D3DUSAGE, D3D_OK, FORMAT_INFO,
+    D3DERR_INVALIDCALL, D3DPOOL, D3DSWAPEFFECT, D3DTEXF, D3DTSS, D3DUSAGE, D3D_OK, FORMAT_INFO,
     isCompressed,
 } from './constants.js';
 import {
     FORMAT_KIND, RESOURCE_VALIDITY, SURFACE_TYPE, surfaceCreateResult,
 } from '../d3d9/validity.js';
+import { D3DTA, D3DTOP, argumentsRead } from '../webgpu/internal/fixedfunction.js';
+
+/** ValidateDevice's refusals: MAKE_D3DHRESULT of the codes d3d8.h and d3d9.h give them. */
+export const D3DERR_UNSUPPORTEDCOLOROPERATION = 0x88760819;
+export const D3DERR_UNSUPPORTEDCOLORARG = 0x8876081a;
+export const D3DERR_UNSUPPORTEDALPHAOPERATION = 0x8876081b;
+export const D3DERR_UNSUPPORTEDALPHAARG = 0x8876081c;
+export const D3DERR_UNSUPPORTEDTEXTUREFILTER = 0x88760822;
 
 export {
     FORMAT_KIND, RESOURCE_VALIDITY, SURFACE_TYPE, reportedBackBufferCount, surfaceCreateResult,
@@ -257,6 +265,91 @@ export function copyRectsResult(source, destination, rects, points){
             || point.x + width > destination.width || point.y + height > destination.height)
         {
             return D3DERR_INVALIDCALL;
+        }
+    }
+    return D3D_OK;
+}
+
+/** The operations the fixed-function combiner draws. @type {Set<number>} */
+const COMBINED_OPS = new Set(Object.values(D3DTOP));
+
+/**
+ * The same, as D3DTEXOPCAPS: operation n is bit n - 1. A cap derived from the
+ * combiner cannot claim an operation the combiner lacks.
+ */
+export const TEXTURE_OP_CAPS = [...COMBINED_OPS]
+    .reduce((caps, op)=>(caps | (1 << (op - 1))) >>> 0, 0);
+
+/**
+ * The argument sources the combiner reads: diffuse, current, texture, factor,
+ * specular.
+ *
+ * @type {Set<number>}
+ */
+const COMBINED_SOURCES = new Set([
+    D3DTA.DIFFUSE, D3DTA.CURRENT, D3DTA.TEXTURE, D3DTA.TFACTOR, D3DTA.SPECULAR,
+]);
+
+/** What a stage may minify and magnify by. @type {Set<number>} */
+const SAMPLED_FILTERS = new Set([D3DTEXF.POINT, D3DTEXF.LINEAR]);
+/** What may pick its mip level. @type {Set<number>} */
+const MIP_FILTERS = new Set([D3DTEXF.NONE, D3DTEXF.POINT, D3DTEXF.LINEAR]);
+
+/**
+ * ValidateDevice's answer for the texture stages as they stand: D3D_OK when
+ * the combiner draws the cascade -- in the one pass it draws everything in --
+ * or the documented refusal naming the first thing it cannot. Only stages up
+ * to the first disabled one are drawn, and only the arguments an operation
+ * reads are looked at.
+ *
+ * @param {(stage: number) => Map<number, number>} stageStates
+ * @param {number} stageCount
+ * @param {{ filters?: boolean }} [options]  whether the stages hold filters in
+ *        the D3DTEXF numbering, which Direct3D 7's do not
+ * @returns {number} HRESULT
+ */
+export function validateStages(stageStates, stageCount, options = {}){
+    /** @param {number} arg */
+    const readable = arg=>COMBINED_SOURCES.has(arg & D3DTA.SELECTMASK);
+    for (let stage = 0; stage < stageCount; stage++)
+    {
+        const states = stageStates(stage);
+        const colorOp = states.get(D3DTSS.COLOROP) ?? 0;
+        if (colorOp === D3DTOP.DISABLE)
+        {
+            break;
+        }
+        if (!COMBINED_OPS.has(colorOp))
+        {
+            return D3DERR_UNSUPPORTEDCOLOROPERATION;
+        }
+        if (!argumentsRead(colorOp, states.get(D3DTSS.COLORARG1) ?? 0,
+            states.get(D3DTSS.COLORARG2) ?? 0).every(readable))
+        {
+            return D3DERR_UNSUPPORTEDCOLORARG;
+        }
+        const alphaOp = states.get(D3DTSS.ALPHAOP) ?? 0;
+        if (!COMBINED_OPS.has(alphaOp))
+        {
+            return D3DERR_UNSUPPORTEDALPHAOPERATION;
+        }
+        if (!argumentsRead(alphaOp, states.get(D3DTSS.ALPHAARG1) ?? 0,
+            states.get(D3DTSS.ALPHAARG2) ?? 0).every(readable))
+        {
+            return D3DERR_UNSUPPORTEDALPHAARG;
+        }
+    }
+    if (options.filters !== false)
+    {
+        for (let stage = 0; stage < stageCount; stage++)
+        {
+            const states = stageStates(stage);
+            if (!SAMPLED_FILTERS.has(states.get(D3DTSS.MAGFILTER) ?? D3DTEXF.POINT)
+                || !SAMPLED_FILTERS.has(states.get(D3DTSS.MINFILTER) ?? D3DTEXF.POINT)
+                || !MIP_FILTERS.has(states.get(D3DTSS.MIPFILTER) ?? D3DTEXF.NONE))
+            {
+                return D3DERR_UNSUPPORTEDTEXTUREFILTER;
+            }
         }
     }
     return D3D_OK;

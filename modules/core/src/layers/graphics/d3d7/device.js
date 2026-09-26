@@ -50,6 +50,7 @@ import { IDENTITY, STAGE_COUNT, createRenderer, vertexCountOf } from '../d3d8/re
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { validateDeviceTarget } from '../ddraw/caps.js';
+import { validateStages } from '../d3d8/validity.js';
 import {
     DDPF_ALPHAPIXELS, DDPF_PALETTEINDEXED_ANY, DDPF_ZBUFFER, DDSCAPS_ZBUFFER,
 } from '../ddraw/constants.js';
@@ -1027,10 +1028,19 @@ export function createDirect3D7(ddraw, services = {}){
                 return D3D_OK;
             },
 
-            /** @param {{ passes?: number }} out */
+            /**
+             * One pass when the combiner draws the cascade. The filters are
+             * this version's own numbering, which the check does not read.
+             *
+             * @param {{ passes?: number }} out  Written only on success.
+             */
             ValidateDevice(out){
-                out.passes = 1;
-                return D3D_OK;
+                const hr = validateStages(stageStatesFor, STAGE_COUNT, { filters: false });
+                if (hr === D3D_OK)
+                {
+                    out.passes = 1;
+                }
+                return hr;
             },
 
             PreLoad(){
