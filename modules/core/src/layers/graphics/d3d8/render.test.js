@@ -2486,12 +2486,21 @@ test('recorded: the world transform reaches each draw of one prepared state', as
     assert.equal(draws[0].uniforms[at.worldViewProjection + 12], 0);
     assert.equal(draws[1].uniforms[at.worldViewProjection + 12], 7,
         'and its product with the view and the projection');
-    // Everything past the two world fields is what the preparation carries, and
-    // a draw that rewrote any of it would be a draw served from a stale block.
+    // And its product with the view alone, which vertex fog takes its depth
+    // from and a generated coordinate its camera space: a draw that read the
+    // preparation's fogged and textured by where the first draw's model was.
+    assert.equal(draws[0].uniforms[at.worldView + 12], 0);
+    assert.equal(draws[1].uniforms[at.worldView + 12], 7);
+    // Everything else past the world fields is what the preparation carries,
+    // and a draw that rewrote any of it would be a draw served from a stale
+    // block.
     assert.deepEqual(
-        [...draws[0].uniforms.subarray(at.viewportOffset)],
-        [...draws[1].uniforms.subarray(at.viewportOffset)],
+        [...draws[0].uniforms.subarray(at.viewportOffset, at.worldView)],
+        [...draws[1].uniforms.subarray(at.viewportOffset, at.worldView)],
         'and nothing else');
+    assert.deepEqual(
+        [...draws[0].uniforms.subarray(at.worldView + 16)],
+        [...draws[1].uniforms.subarray(at.worldView + 16)]);
 });
 
 test('recorded: every state group the device publishes ends the reuse', async()=>{

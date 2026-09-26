@@ -4155,7 +4155,7 @@ export function createRenderer(options){
     };
 
     /**
-     * This draw's uniform block: the prepared state's block with the two
+     * This draw's uniform block: the prepared state's block with the three
      * fields the world transform reaches written over it.
      *
      * @param {RenderModel} model
@@ -4167,11 +4167,13 @@ export function createRenderer(options){
         const block = ensureFrame().arena.take(template.length);
         block.set(template);
         const world = transformOf(model, D3DTS.WORLD);
-        block.set(multiplyMatrices(
-            multiplyMatrices(world, transformOf(model, D3DTS.VIEW), WORLD_VIEW),
-            transformOf(model, D3DTS.PROJECTION), WORLD_VIEW_PROJECTION),
-        UNIFORM_AT.worldViewProjection);
+        const worldView = multiplyMatrices(world, transformOf(model, D3DTS.VIEW), WORLD_VIEW);
+        block.set(multiplyMatrices(worldView, transformOf(model, D3DTS.PROJECTION),
+            WORLD_VIEW_PROJECTION), UNIFORM_AT.worldViewProjection);
         block.set(world, UNIFORM_AT.world);
+        // World then view too: vertex fog's depth and a generated coordinate's
+        // camera space move with the model as its position does.
+        block.set(worldView, UNIFORM_AT.worldView);
         return block;
     };
 
