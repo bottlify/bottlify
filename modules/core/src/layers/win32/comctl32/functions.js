@@ -22,6 +22,9 @@ import { createPropertySheetFunctions } from './propsheet.js';
  *           as the single image it can be sure of.
  * @property {(api: string, detail: string) => void} [divergence]
  *           Where a call that does less than the real one says so.
+ * @property {ReturnType<typeof import('./imagelist.js').createImageLists>} [imageLists]
+ *           The image lists to export, built by the host to share with the
+ *           tab control; without them this host's own are made.
  * @property {(request: number) => number} [trackMouseEvent]
  *           user32's TrackMouseEvent, given the request's address. Absent in
  *           a build without user32 behind it, and then a request of the right

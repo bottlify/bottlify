@@ -52,6 +52,7 @@ import { createNoticeThread } from './winmm/thread.js';
 import { createTimerService } from './winmm/timers.js';
 import { COMCTL32_ORDINALS, createComctlFunctions } from './comctl32/functions.js';
 import { createCommonControls } from './comctl32/controls.js';
+import { createImageLists } from './comctl32/imagelist.js';
 import { createShellFunctions } from './shell32/functions.js';
 import { registerShellLinkClasses } from './shell32/shelllink.js';
 import { registerWbemClasses } from './ole32/wbem.js';
@@ -787,6 +788,14 @@ export const win32Module = {
             });
         };
 
+        // comctl32's image lists, drawn with gdi32's own calls: its exports,
+        // and what its tab control draws from.
+        const imageLists = createImageLists({
+            readMemory, writeMemory, divergence: config?.divergence,
+            gdi32: name=>libraries['GDI32.dll']?.[name],
+            bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
+        });
+
         libraries = {
             'KERNEL32.dll': {
                 ...createConsoleFunctions({
@@ -1241,7 +1250,7 @@ export const win32Module = {
             },
 
             'COMCTL32.dll': createComctlFunctions({
-                readMemory, writeMemory, divergence: config?.divergence,
+                readMemory, writeMemory, divergence: config?.divergence, imageLists,
                 // What _TrackMouseEvent is documented to call where the
                 // system has it; looked up when called, as user32 is built
                 // beside it.
@@ -1484,7 +1493,7 @@ export const win32Module = {
                 // own system classes use: comctl32 owns their behaviour, not
                 // their registration.
                 registerControls: (controlHost, toolkit, register)=>{
-                    for (const definition of createCommonControls(controlHost, toolkit))
+                    for (const definition of createCommonControls(controlHost, toolkit, imageLists))
                     {
                         register(definition);
                     }
