@@ -223,6 +223,17 @@ Reading it:
 - An unresolved import is a real answer, not noise: a program that cannot bind
   one may take a different path silently.
 
+## `../host-call-bench.mjs` -- what a call into the host costs
+
+`node tools/host-call-bench.mjs [N] [--rounds R] [--profile]` runs, in node and under cork, a
+program that calls `KERNEL32!lstrlenA` N times (1 000 000 by default) against the same loop
+without the call, and prints the difference over N: one call out of translated code into a
+host handler and back. The bridge's own count of host calls is printed beside it, because
+some imports never cross (`GetLastError` and `GetTickCount` run in the guest's kernel32), and
+a count of one means the loop timed nothing. `--profile` runs the calling loop once under the
+V8 profiler and prints the functions a crossing spends its time in -- the dispatch, the reads
+of guest memory, the bookkeeping -- which is what a change to the crossing is judged by.
+
 ## Two rules the numbers depend on
 
 - A frame rate is counted on the canvas the person sees (the browser's

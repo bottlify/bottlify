@@ -17,6 +17,7 @@
  */
 
 import { writeFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 
 const IMAGE_BASE = 0x400000;
 const SECTION_RVA = 0x1000;
@@ -1103,8 +1104,10 @@ export function buildTriangleExe(){
     });
 }
 
-const [, , output, kind = 'hello'] = process.argv;
-if (output)
+// Only when run itself: a script that imports buildExe would otherwise have its
+// own first argument taken for a file to write.
+const [, entry, output, kind = 'hello'] = process.argv;
+if (output && entry && import.meta.url === pathToFileURL(entry).href)
 {
     /** @type {Record<string, () => Uint8Array>} */
     const kinds = {
