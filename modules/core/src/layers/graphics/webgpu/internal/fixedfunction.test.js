@@ -352,6 +352,29 @@ test('each stage saturates its result before the next stage reads it', ()=>{
     ]);
 });
 
+test('a colour-keyed stage discards where its nearest texel is the key', ()=>{
+    // Direct3D 7's D3DRENDERSTATE_COLORKEYENABLE: a texel of the texture's
+    // source colour key is not drawn. The key is compared against the texel
+    // itself, before filtering blends it with its neighbours, and against
+    // its colour alone; the stage's sample is taken as ever.
+    const code = generate(baseState({
+        fvf: FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT),
+        stages: [{
+            colorOp: D3DTOP.SELECTARG1, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
+            alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.TEXTURE, alphaArg2: D3DTA.CURRENT,
+            texCoordIndex: 0, colorKey: 0xff00ff,
+        }],
+    })).code;
+    assert.ok(code.includes('var<private> colourKeyed: bool = false;'));
+    const sampler = code.slice(code.indexOf('fn sampleStage0'));
+    assert.ok(sampler.includes('let keyTexel = textureLoad(texture0,'
+        + ' vec2i(clamp(floor(uv * size), vec2f(0.0), size - 1.0)), 0);'), sampler);
+    assert.ok(sampler.includes('if (all(abs(keyTexel.rgb - vec3f(1.0, 0.0, 1.0))'
+        + ' < vec3f(0.5 / 255.0)))'));
+    assert.match(code, /if \(colourKeyed\)\s*\{\s*discard;/);
+    assert.doesNotMatch(generate(baseState()).code, /colourKeyed/, 'unkeyed, nothing');
+});
+
 test('an argument slot the operation does not read is never built', ()=>{
     // Stage state persists across draws, so the unread slot holds whatever an
     // earlier operation put there. Building it anyway sampled a texture the

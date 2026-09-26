@@ -687,6 +687,7 @@ export function generateFixedFunction(state, layout){
             : [`    out.fogAmount = ${has('specular') ? 'vertex.specular.a' : '1.0'};`];
 
     const lightCount = lighting === null ? 0 : lighting.lights.length;
+    const keys = state.stages.map(stage=>stage.colorKey ?? null);
     // The position is @invariant: a second pass over the same geometry with
     // a different stage or light setup is a different module, and WGSL
     // promises two modules the same position from the same computation only
@@ -696,8 +697,9 @@ export function generateFixedFunction(state, layout){
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 ${functionDeclarations(lighting, vertexFog || fogSource === FOG_SOURCE.TABLE
         ? state.fogMode : D3DFOG.NONE)}${samplerDeclarations(state.stages.length, 0, 1)}
-${sampleFunctions(state.stages.length, state.stages.map((stage, index)=>(generated[index]
-        ? { projected: stage.projected ?? 0 } : null)))}
+${keys.some(key=>key !== null) ? 'var<private> colourKeyed: bool = false;\n' : ''}${
+    sampleFunctions(state.stages.length, state.stages.map((stage, index)=>(generated[index]
+        ? { projected: stage.projected ?? 0 } : null)), keys)}
 struct VertexIn {
 ${inputs}
 };
@@ -856,7 +858,12 @@ specular = 'input.specular')
         ? `\n    if (!(${compareExpression(state.alphaFunc, 'current.a', 'uniforms.alphaRef')}))`
             + '\n    {\n        discard;\n    }'
         : '';
-    return `${stages}${highlight}${fog}${alphaTest}`;
+    // A texel of a stage's colour key is not drawn, whatever it combined to;
+    // the sample that met it said so.
+    const colourKey = state.stages.some(stage=>stage.colorKey !== undefined)
+        ? '\n    if (colourKeyed)\n    {\n        discard;\n    }'
+        : '';
+    return `${stages}${highlight}${fog}${alphaTest}${colourKey}`;
 }
 
 /**
@@ -1010,9 +1017,14 @@ const ADDRESS_FUNCTION = `fn addressCoordinate(t: f32, mode: u32, texels: f32) -
  *     Stages whose coordinate the vertex stage generated and transformed
  *     already, arriving as four components; `projected` names the one the
  *     first two are divided by, or is zero.
+ * @param {(number | null)[]} [keys]
+ *     Per stage, the colour key in force as 0xRRGGBB, or null: a sample
+ *     whose nearest texel is that colour marks the fragment keyed. The texel
+ *     itself is compared, not the filtered sample, which blends it with its
+ *     neighbours, and its colour alone.
  * @returns {string}
  */
-function sampleFunctions(count, generated = []){
+function sampleFunctions(count, generated = [], keys = []){
     if (count === 0)
     {
         return '';
@@ -1064,11 +1076,40 @@ ${transformed}    let flags = ${flags};
     if (point == 1u) {
         uv = (floor(uv * levelSize) + 0.5) / levelSize;
     }
-    return textureSampleLevel(texture${index}, sampler${index}, uv, level);
+${keyTest(index, keys[index] ?? null)
+}    return textureSampleLevel(texture${index}, sampler${index}, uv, level);
 }
 `);
     }
     return lines.join('\n');
+}
+
+/**
+ * The colour-key test inside a stage's sample, or nothing for a stage with
+ * no key: its nearest top-level texel against the key, to within half a
+ * level, the key having been expanded exactly as the texel was.
+ *
+ * @param {number} index @param {number | null} key  0xRRGGBB
+ * @returns {string}
+ */
+function keyTest(index, key){
+    if (key === null)
+    {
+        return '';
+    }
+    const channel = (/** @type {number} */ shift)=>literalOf(((key >>> shift) & 0xff) / 255);
+    return `    let keyTexel = textureLoad(texture${index},`
+        + ' vec2i(clamp(floor(uv * size), vec2f(0.0), size - 1.0)), 0);\n'
+        + `    if (all(abs(keyTexel.rgb - vec3f(${channel(16)}, ${channel(8)}, ${channel(0)}))`
+        + ' < vec3f(0.5 / 255.0))) {\n'
+        + '        colourKeyed = true;\n'
+        + '    }\n';
+}
+
+/** @param {number} value @returns {string} a WGSL float literal */
+function literalOf(value){
+    const text = String(value);
+    return text.includes('.') || text.includes('e') ? text : `${text}.0`;
 }
 
 /**

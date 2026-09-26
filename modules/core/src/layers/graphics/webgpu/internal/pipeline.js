@@ -143,6 +143,9 @@ function lookUp(table, value, what){
  *     For a stage generating its coordinate: which component the transformed
  *     coordinate is divided by at the sample -- 3 or 4 under
  *     D3DTTFF_PROJECTED with that count, 0 or absent for no divide.
+ * @property {number} [colorKey]
+ *     Direct3D 7 colour keying in force on this stage's texture: the key as
+ *     its texel expands, 0xRRGGBB. A texel of that colour is not drawn.
  */
 
 /**
@@ -225,6 +228,7 @@ export function pipelineKey(state){
             stage.colorOp, stage.colorArg1, stage.colorArg2,
             stage.alphaOp, stage.alphaArg1, stage.alphaArg2,
             stage.texCoordIndex, stage.projected ?? 0,
+            ...(stage.colorKey === undefined ? [] : [`k${stage.colorKey}`]),
         ].join(','))
         .join(';');
 

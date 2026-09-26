@@ -59,6 +59,12 @@ import {
 } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE, fogSourceOf, pipelineKey } from '../webgpu/internal/pipeline.js';
 
+/**
+ * Direct3D 7's D3DRENDERSTATE_COLORKEYENABLE. Its number is free in Direct3D
+ * 8 and 9, which never set it, so only a Direct3D 7 device keys a draw.
+ */
+const D3DRENDERSTATE_COLORKEYENABLE = 41;
+
 /** A stage state's DWORD, as the D3D8 header lays it out. */
 const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
 
@@ -4271,6 +4277,12 @@ export function createRenderer(options){
             const texture = model.textures.get(stage);
             const held = texture ? textures.get(texture) : null;
             key += held ? `|${held.id}:${held.soil}` : '|-';
+            // A Direct3D 7 texture's colour key is set on the surface and
+            // shapes the shader, and no state counter sees it change.
+            if (texture?.colorKey)
+            {
+                key += `:${texture.colorKey()}`;
+            }
         }
         return key;
     };
@@ -4316,6 +4328,40 @@ export function createRenderer(options){
         countLighting(model, prepared);
         prepared.uniforms = blockFor(model, prepared);
         return prepared;
+    };
+
+    /**
+     * Direct3D 7 colour keying: with D3DRENDERSTATE_COLORKEYENABLE on, a
+     * stage sampling a texture that has a source colour key is keyed by it
+     * (Wine's ddraw7 test_ck_default). The key is the texel it names,
+     * expanded as the upload expands the texture, so the shader compares like
+     * with like; a compressed or unexpandable format is left unkeyed.
+     *
+     * @param {RenderModel} model
+     * @param {{ stages: import('../webgpu/internal/pipeline.js').StageKey[],
+     *     textures: (any | null)[] }} cascade
+     */
+    const keyStages = (model, cascade)=>{
+        if ((model.renderStates.get(D3DRENDERSTATE_COLORKEYENABLE) ?? 0) === 0)
+        {
+            return;
+        }
+        cascade.textures.forEach((texture, index)=>{
+            const raw = texture?.colorKey?.() ?? null;
+            const held = texture ? textures.get(texture) : undefined;
+            const info = held ? FORMAT_INFO[held.format] : undefined;
+            if (raw === null || !held || !info || !TEXEL_EXPANSION[held.format])
+            {
+                return;
+            }
+            const bytes = new Uint8Array(new Uint32Array([raw >>> 0]).buffer)
+                .subarray(0, info.bytesPerPixel);
+            const texel = expandTexels(held.format, bytes, 1);
+            cascade.stages[index] = {
+                ...cascade.stages[index],
+                colorKey: (texel[2] << 16) | (texel[1] << 8) | texel[0],
+            };
+        });
     };
 
     /**
@@ -4408,6 +4454,7 @@ export function createRenderer(options){
             }
         }
         const cascade = stageCascade(model, layout);
+        keyStages(model, cascade);
         reportCascade(cascade);
         if (skipTextures.size > 0 && cascade.textures.some(
             texture=>texture && skipTextures.has(textures.get(texture)?.id ?? '')))

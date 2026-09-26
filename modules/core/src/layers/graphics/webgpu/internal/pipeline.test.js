@@ -123,6 +123,10 @@ test('a stage list is folded stage by stage, and its length is part of the key',
     assert.notEqual(one, sameFirst, 'a second stage is not the same as one stage');
     assert.notEqual(sameFirst, differentSecond, 'stage one\'s operation is folded');
     assert.notEqual(sameFirst, differentCoords, 'stage one\'s coordinate index is folded');
+    assert.notEqual(pipelineKey({ ...base, stages: [stage({ colorKey: 0xff })] }), one,
+        'a colour key is folded');
+    assert.notEqual(pipelineKey({ ...base, stages: [stage({ colorKey: 0xff })] }),
+        pipelineKey({ ...base, stages: [stage({ colorKey: 0xfe })] }), 'and which key it is');
 });
 
 test('every part of the lighting state that shapes the shader is folded', ()=>{

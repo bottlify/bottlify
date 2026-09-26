@@ -30,7 +30,7 @@ import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { UNIFORM_AT } from '../d3d8/render.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import {
-    DDPF_ALPHAPIXELS, DDPF_RGB, DDSCAPS_3DDEVICE, DDSCAPS_COMPLEX, DDSCAPS_MIPMAP,
+    DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_RGB, DDSCAPS_3DDEVICE, DDSCAPS_COMPLEX, DDSCAPS_MIPMAP,
     DDSCAPS_OFFSCREENPLAIN, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_ZBUFFER, DDSCL_NORMAL,
     DDSD_CAPS, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DDSD_ZBUFFERBITDEPTH,
 } from '../ddraw/constants.js';
@@ -760,6 +760,53 @@ test('recorded: a texture goes up once, and again only after the program wrote i
     assert.equal(target.release(), 0);
     assert.equal(root.release('IDirectDraw7'), 0);
     assert.ok(root.destroyed);
+});
+
+test('recorded: COLORKEYENABLE discards the texels of the texture\'s source colour key', async()=>{
+    // Wine's ddraw7 test_ck_default: a texture filled with its own
+    // DDCKEY_SRCBLT colour draws that colour with the state off, its
+    // default, and draws nothing -- the clear shows through -- with it on.
+    // Only the colour bits are compared, so the unused top byte of an X8R8G8B8
+    // key does not decide it.
+    const f = recorded();
+    const { device, gpu, root, ram, target } = f;
+    const texture = surface(root, {
+        caps: DDSCAPS_TEXTURE | DDSCAPS_OFFSCREENPLAIN, width: 2, height: 2, pixelFormat: ARGB32,
+    });
+    ram.set(new Uint8Array(16).fill(0).map((_, at)=>(at % 4 === 0 || at % 4 === 3 ? 255 : 0)),
+        texture.buffer);
+    assert.equal(texture.setColorKey(DDCKEY_SRCBLT, { low: 0x770000ff, high: 0x770000ff }), D3D_OK);
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.SELECTARG1), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.TEXTURE), D3D_OK);
+    const quad = vertices([[0, 0, 0, 0], [8, 0, 1, 0], [0, 8, 0, 1], [8, 8, 1, 1]], true);
+    const draw = async()=>{
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL_TEX, quad, 4), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        device.present(target.buffer);
+        await device.idle();
+        const modules = gpu.of('createShaderModule');
+        return modules[modules.length - 1].descriptor.code;
+    };
+
+    const plain = await draw();
+    assert.doesNotMatch(plain, /discard/, 'off by default, the key is ordinary colour');
+    assert.equal(device.SetRenderState(D3DRENDERSTATE.COLORKEYENABLE, 1), D3D_OK);
+    const keyed = await draw();
+    assert.ok(keyed.includes('textureLoad(texture0,'), keyed);
+    assert.ok(keyed.includes('vec3f(0.0, 0.0, 1.0)'), 'the key, blue, as the texel expands');
+    assert.match(keyed, /if \(colourKeyed\)\s*\{\s*discard;/);
+    // A key set on the surface afterwards is the one the next draw keys by.
+    assert.equal(texture.setColorKey(DDCKEY_SRCBLT, { low: 0x00ff0000, high: 0x00ff0000 }),
+        D3D_OK);
+    assert.ok((await draw()).includes('vec3f(1.0, 0.0, 0.0)'));
+
+    assert.equal(device.SetTexture(0, null), D3D_OK);
+    assert.equal(texture.release(), 0);
+    assert.equal(device.release(), 0);
+    assert.equal(target.release(), 0);
+    assert.equal(root.release('IDirectDraw7'), 0);
 });
 
 test('recorded: every level of a DirectDraw mip chain goes up, each when it was written', async()=>{

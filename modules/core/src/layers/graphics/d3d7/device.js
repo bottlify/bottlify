@@ -54,7 +54,7 @@ import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { validateDeviceTarget } from '../ddraw/caps.js';
 import { validateStages } from '../d3d8/validity.js';
 import {
-    DDPF_ALPHAPIXELS, DDPF_PALETTEINDEXED_ANY, DDPF_ZBUFFER, DDSCAPS_ZBUFFER,
+    DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_PALETTEINDEXED_ANY, DDPF_ZBUFFER, DDSCAPS_ZBUFFER,
 } from '../ddraw/constants.js';
 
 /**
@@ -517,6 +517,14 @@ export function createDirect3D7(ddraw, services = {}){
                 /** Replaced by the renderer with the one that marks the copy stale. */
                 UnlockRect(){
                     return D3D_OK;
+                },
+                /**
+                 * The source colour key COLORKEYENABLE draws against, as the
+                 * surface holds it now, or null for none.
+                 */
+                colorKey(){
+                    const { key } = surface.getColorKey(DDCKEY_SRCBLT);
+                    return key ? key.low >>> 0 : null;
                 },
             };
             renderer.trackTexture(adapter,
