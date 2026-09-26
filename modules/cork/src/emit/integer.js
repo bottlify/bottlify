@@ -142,22 +142,35 @@ export function emitInstruction(e, instruction, flagsLive){
         case 'cpuid':
         {
             // The leaves the pinned emulator answers, as constants; a leaf
-            // with no entry answers four zeros. The leaf in eax is saved
-            // before the four registers are cleared and the known ones set.
+            // with no entry answers four zeros. The leaf in eax and the
+            // subleaf in ecx are saved before the four registers are cleared
+            // and the known ones set.
             b.localGet(Local.reg).localSet(Local.t1);
+            b.localGet(Local.reg + 1).localSet(Local.t2);
             for (let index = 0; index < 4; index++)
             {
                 b.i32const(0).localSet(Local.reg + index);
             }
-            for (const [leaf, answer] of Object.entries(CPUID_LEAVES))
+            for (const [leaf, entry] of Object.entries(CPUID_LEAVES))
             {
-                b.localGet(Local.t1).i32const(Number(leaf)).op(I32.eq);
-                e.openIf('cpuid', EMPTY);
-                b.i32const(answer.eax).localSet(Local.reg);
-                b.i32const(answer.ecx).localSet(Local.reg + 1);
-                b.i32const(answer.edx).localSet(Local.reg + 2);
-                b.i32const(answer.ebx).localSet(Local.reg + 3);
-                e.close();
+                /** @type {[string | null, import('../cpuid.js').CpuidAnswer][]} */
+                const answers = 'eax' in entry
+                    ? [[null, /** @type {import('../cpuid.js').CpuidAnswer} */ (entry)]]
+                    : Object.entries(entry);
+                for (const [subleaf, answer] of answers)
+                {
+                    b.localGet(Local.t1).i32const(Number(leaf)).op(I32.eq);
+                    if (subleaf !== null)
+                    {
+                        b.localGet(Local.t2).i32const(Number(subleaf)).op(I32.eq).op(I32.and);
+                    }
+                    e.openIf('cpuid', EMPTY);
+                    b.i32const(answer.eax).localSet(Local.reg);
+                    b.i32const(answer.ecx).localSet(Local.reg + 1);
+                    b.i32const(answer.edx).localSet(Local.reg + 2);
+                    b.i32const(answer.ebx).localSet(Local.reg + 3);
+                    e.close();
+                }
             }
             return true;
         }

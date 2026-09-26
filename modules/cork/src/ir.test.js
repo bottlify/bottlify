@@ -401,6 +401,24 @@ test('cpuid and rdtsc answer without a crossing', ()=>{
     assert.equal(leaf.state.reg[3], 0x00010800);
 });
 
+test('cpuid reads a subleaf from ecx; rdrand fills a register and sets CF alone', ()=>{
+    const sub = run([0xb8, 4, 0, 0, 0, 0xb9, 2, 0, 0, 0, 0x0f, 0xa2]); // leaf 4, subleaf 2
+    assert.equal(sub.state.reg[0], 0x143);
+    assert.equal(sub.state.reg[1], 0xfff);
+    const values = new Set();
+    for (let i = 0; i < 4; i++)
+    {
+        // mov eax, -1; add eax, eax (CF, SF, AF set); rdrand ecx
+        const m = run([0xb8, 0xff, 0xff, 0xff, 0xff, 0x01, 0xc0, 0x0f, 0xc7, 0xf1]);
+        assert.equal(m.state.eflags & (CF | PF | AF | ZF | SF | OF), CF,
+            'CF set, the other five clear');
+        values.add(m.state.reg[1]);
+    }
+    assert.ok(values.size > 1, 'the values differ from one to the next');
+    assert.throws(()=>run([0x0f, 0xc7, 0x30]), // rdrand [eax]: #UD
+        (/** @type {any} */ fault)=>fault instanceof Fault && fault.vector === 6);
+});
+
 test('addsubps subtracts the even lanes and adds the odd', ()=>{
     const m = machine();
     const instruction = decode(

@@ -513,6 +513,33 @@ test('generated code goes on into the next module, and the slice still bounds it
     host.stop();
 });
 
+test('cork\'s CPUID table is the emulator\'s answer, leaf and subleaf', async()=>{
+    const { cpuidLeaf } = await import('../../../../../cork/src/cpuid.js');
+    const host = await boot();
+    const leaves = [0, 1, 2, 3, 4, 5, 6, 7, 0xb, 0xd, 0x15, 0x16, 0x17, 0x40000000, 0x80000000,
+        0x80000001, 0x80000004];
+    for (const leaf of leaves)
+    {
+        for (const subleaf of [0, 1, 2, 3])
+        {
+            // mov eax, leaf; mov ecx, subleaf; cpuid; hlt
+            host.writePhysical(GUEST_CODE, new Uint8Array([0xb8, ...u32(leaf), 0xb9,
+                ...u32(subleaf), 0x0f, 0xa2, 0xf4]));
+            host.cpu().in_hlt[0] = 0;
+            host.cpu().instruction_pointer[0] = GUEST_CODE;
+            for (let slices = 0; slices < 8 && !host.cpu().in_hlt[0]; slices++)
+            {
+                host.cpu().run_slice(4);
+            }
+            const expected = cpuidLeaf(leaf, subleaf);
+            assert.deepEqual(['eax', 'ebx', 'ecx', 'edx'].map(name=>host.readReg32(name) >>> 0),
+                [expected.eax, expected.ebx, expected.ecx, expected.edx].map(word=>word >>> 0),
+                `leaf 0x${leaf.toString(16)} subleaf ${subleaf}`);
+        }
+    }
+    host.stop();
+});
+
 test('a data write over code the emulator compiled runs as the new code', async()=>{
     // The heap is one read-write region, so a host write there goes in as
     // data; a program can still have run code from it -- a routine it placed

@@ -26,6 +26,8 @@ import { evaluateX87, fxrstor, fxsave, isX87Op } from './ir-x87.js';
 import { evaluateSimd, isSimdOp, mmxState } from './ir-simd.js';
 
 const ARITH = CF | PF | AF | ZF | SF | OF;
+/** The word `rdrand` fills. */
+const RANDOM = new Uint32Array(1);
 
 /** The width masks by operand size. @type {Readonly<Record<number, number>>} */
 const MASK = [0, 0xff, 0xffff, 0, 0xffffffff];
@@ -491,6 +493,18 @@ export function evaluate(instruction, state){
         case 'imul':
             imul(operands, size, state, read, write, setFlags);
             return;
+        case 'rdrand':
+        {
+            if (operands[0].kind === 'mem')
+            {
+                throw new Fault(6, instruction.eip);
+            }
+            // The host's own randomness, CF set to say a value came.
+            crypto.getRandomValues(RANDOM);
+            write(operands[0], RANDOM[0] & mask);
+            setFlags(CF, ARITH);
+            return;
+        }
         case 'popcnt':
         {
             let value = read(operands[1]);
@@ -866,7 +880,7 @@ export function evaluate(instruction, state){
             return;
         case 'cpuid':
         {
-            const answer = cpuidLeaf(state.reg[0]);
+            const answer = cpuidLeaf(state.reg[0], state.reg[1]);
             state.reg[0] = answer.eax;
             state.reg[1] = answer.ecx;
             state.reg[2] = answer.edx;

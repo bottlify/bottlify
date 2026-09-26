@@ -406,6 +406,24 @@ test('cpuid answers the pinned emulator\'s leaves and zero for the rest', ()=>{
     assert.equal(unknown.reg('edx'), 0);
 });
 
+test('cpuid reads its subleaf from ecx where a leaf has them, as the emulator does', ()=>{
+    /** @param {number} leaf @param {number} subleaf */
+    const ask = (leaf, subleaf)=>{
+        const m = createTestMachine();
+        // mov eax, leaf; mov ecx, subleaf; cpuid; hlt
+        m.write(CODE, [0xb8, leaf & 0xff, leaf >>> 8 & 0xff, leaf >>> 16 & 0xff, leaf >>> 24,
+            0xb9, subleaf, 0, 0, 0, 0x0f, 0xa2, 0xf4]);
+        assert.equal(m.runProgram(CODE).kind, 3);
+        return ['eax', 'ebx', 'ecx', 'edx'].map(name=>m.reg(name) >>> 0);
+    };
+    assert.deepEqual(ask(4, 1), [0x122, 0x01c0003f, 0x3f, 1]);
+    assert.deepEqual(ask(4, 2), [0x143, 0x05c0003f, 0xfff, 1]);
+    assert.deepEqual(ask(4, 3), [0, 0, 0, 0], 'a subleaf the leaf does not list');
+    assert.deepEqual(ask(7, 0), [0, 0x200, 0, 0]);
+    assert.deepEqual(ask(7, 1), [0, 0, 0, 0]);
+    assert.deepEqual(ask(5, 9), [0x40, 0x40, 3, 0x00142120], 'a plain leaf ignores ecx');
+});
+
 test('int3 and int n are left to the other executor, before the instruction', ()=>{
     const m = createTestMachine();
     m.write(CODE, [0x90, 0xcd, 0x21]);
