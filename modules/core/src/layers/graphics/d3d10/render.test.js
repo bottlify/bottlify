@@ -1713,6 +1713,8 @@ test('a shader with an instruction that has no translation refuses its draws by 
         device.Draw(3, 0);
         await h.present();
         assert.equal(h.gpu.count('draw'), 0);
-        assert.equal(h.device.diagnostics().skipped.pipeline, 1);
+        assert.deepEqual([h.device.diagnostics().skipped.untranslatable,
+            h.device.diagnostics().skipped.pipeline], [1, 0],
+        'counted as untranslatable, apart from a pipeline the GPU refused');
         assert.ok(h.divergences.some(line=>line.includes('lod')), h.divergences.join('\n'));
     });

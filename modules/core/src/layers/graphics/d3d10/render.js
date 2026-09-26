@@ -1218,7 +1218,8 @@ export function createRenderer(services){
         const program = linkProgram(vs, ps, { targets: bound });
         if (program.unsupported.length > 0)
         {
-            throw new Error(`the shaders cannot be translated: ${program.unsupported.join('; ')}`);
+            throw Object.assign(new Error('the shaders cannot be translated:'
+                + ` ${program.unsupported.join('; ')}`), { untranslatable: true });
         }
         const layout = vertexLayouts(state.inputLayout, program, state.strides);
         if (typeof layout === 'string')
@@ -2461,7 +2462,9 @@ export function createRenderer(services){
                 const settled = pipelinesNeeded[position];
                 if (settled.status === 'rejected')
                 {
-                    counters.skipped.pipeline++;
+                    counters.skipped[settled.reason?.untranslatable
+                        ? 'untranslatable'
+                        : 'pipeline']++;
                     diverge(`a draw was skipped: ${settled.reason && settled.reason.message
                         || settled.reason}`);
                     continue;
