@@ -329,6 +329,14 @@ Per API:
   `WM_ACTIVATEAPP(1)`, as ddraw's `test_lost_device` has it, and `DD_OK` otherwise; an object in
   normal mode answers `DD_OK` wherever the foreground is, and `DDERR_EXCLUSIVEMODEALREADYSET`
   while another object of the process holds exclusive mode, as the method is documented to.
+  Every deactivation while an object holds exclusive mode -- counted by
+  `win32.applicationDeactivations()`, so one that came and went between two calls is not missed
+  -- loses its video memory: every surface but a system-memory one or a managed texture reads
+  `DDERR_SURFACELOST` from `IsLost`, `Lock` (leaving the descriptor as it was), `GetDC`, `Flip`,
+  `GetAttachedSurface` and a blit into or out of it, until `Restore` or `RestoreAllSurfaces`,
+  which answer `DDERR_WRONGMODE` while the application is still in the background. `Restore`
+  brings back the surfaces created with the one restored (a flip chain's buffers, a texture's
+  levels), not one attached later; taking exclusive mode loses video memory the same way.
   `GetDeviceIdentifier` describes the adapter exactly as Direct3D 8 and 9's `GetAdapterIdentifier`
   do -- one vendor table, description rule and GUID, in `seam/adapter.js` -- because a program
   asking through two of them compares the answers.
@@ -883,8 +891,9 @@ Refused (the program is told no):
   palette or a colour key on a mip sublevel; the event form of `WaitForVerticalBlank`
   (`DDERR_UNSUPPORTED`); an overlay surface (`DDERR_NOOVERLAYHW`), the overlay calls then
   answering `DDERR_NOTAOVERLAYSURFACE`. `TestCooperativeLevel` never answers `DDERR_WRONGMODE`,
-  nothing here changing the display mode under a normal-mode object, and losing exclusive mode
-  does not lose the video-memory surfaces the way the runtime does.
+  nothing here changing the display mode under a normal-mode object; leaving exclusive mode does
+  not lose surfaces, where the runtime does, and a normal-mode object's surfaces are not lost when
+  another object's exclusive mode is.
 - Direct3D of DirectX 3, 5 and 6: the ramp and MMX devices are not made (only RGB and HAL);
   `Pick`, `GetPickRecords`, `TransformVertices` and `LightElements` are absent.
 - GDI: a run-length encoded DIB written back by `GetDIBits`, or top-down (`ERROR_INVALID_PARAMETER`,

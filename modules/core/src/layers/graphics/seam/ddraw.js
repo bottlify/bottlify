@@ -252,13 +252,16 @@ export function versionOf(id){
  * @param {() => boolean} [deps.deactivated]
  *        Whether the application has been told it is not the active one.
  *        Absent, it always is.
+ * @param {() => number} [deps.deactivations]
+ *        How many times it has been told so: an exclusive owner loses its
+ *        video memory each time.
  */
 export function createDirectDrawSeam(
     { publisher, memory, screen, gdi, present, callGuest, currentThread, scratch,
         extraInterfaces = [], extraSurfaceInterfaces = [], now = ()=>performance.now(),
         schedule = (ms, run)=>{
             setTimeout(run, ms);
-        }, identity, gamma, deactivated },
+        }, identity, gamma, deactivated, deactivations },
 )
 {
     const fields = createFields(memory);
@@ -929,6 +932,13 @@ export function createDirectDrawSeam(
                     return DDERR_INVALIDPARAMS;
                 }
                 const locked = surface.lock(readRect(rect), flags >>> 0);
+                if (locked.hr === DDERR_SURFACELOST)
+                {
+                    // Refused before anything is written: the descriptor the
+                    // program passed comes back as it went (Wine's ddraw7
+                    // test_coop_level_d3d_state).
+                    return locked.hr;
+                }
                 if (locked.hr !== DD_OK)
                 {
                     fields.writeU32((desc >>> 0) + layout.lpSurface, 0);
@@ -1552,7 +1562,6 @@ export function createDirectDrawSeam(
                 }
             }
             return root.testCooperativeLevel({
-                deactivated: deactivated?.() === true,
                 heldElsewhere: [...exclusiveHolders].some(holder=>holder !== root),
             });
         },
@@ -1647,6 +1656,13 @@ export function createDirectDrawSeam(
             if (gamma)
             {
                 options.gamma = gamma;
+            }
+            if (deactivated)
+            {
+                options.application = {
+                    deactivated,
+                    deactivations: deactivations ?? (()=>0),
+                };
             }
             const display = screen();
             options.screenWidth = display.width;

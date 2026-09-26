@@ -801,6 +801,7 @@ export const graphicsModule = {
             // What exclusive mode is lost on. Asked on each TestCooperativeLevel
             // rather than now: win32 answers about windows made later.
             deactivated: ()=>win32.applicationDeactivated?.() === true,
+            deactivations: ()=>win32.applicationDeactivations?.() ?? 0,
 
             // What a Direct3D 7 device draws with. Reached when a program
             // first asks its DirectDraw object for Direct3D, not now, so a

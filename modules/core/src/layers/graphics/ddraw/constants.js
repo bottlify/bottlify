@@ -55,6 +55,7 @@ export const DDERR_NOTAOVERLAYSURFACE = dderr(580);
 export const DDERR_NOTFLIPPABLE = dderr(582);
 export const DDERR_NOTLOCKED = dderr(584);
 export const DDERR_NODC = dderr(586);
+export const DDERR_WRONGMODE = dderr(587);
 export const DDERR_IMPLICITLYCREATED = dderr(588);
 export const DDERR_INVALIDSURFACETYPE = dderr(592);
 export const DDERR_NOTONMIPMAPSUBLEVEL = dderr(603);

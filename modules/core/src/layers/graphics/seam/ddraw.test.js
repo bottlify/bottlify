@@ -42,7 +42,7 @@ import {
     DDSCAPS_OFFSCREENPLAIN, DDSCAPS_PRIMARYSURFACE, DDSCAPS_TEXTURE, DDSCL_EXCLUSIVE,
     DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT,
     DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK, DDERR_UNSUPPORTED,
-    DDERR_EXCLUSIVEMODEALREADYSET, DDERR_NOEXCLUSIVEMODE,
+    DDERR_EXCLUSIVEMODEALREADYSET, DDERR_NOEXCLUSIVEMODE, DDERR_SURFACELOST, DDERR_WRONGMODE,
 } from '../ddraw/constants.js';
 
 const HWND = 0x00010044;
@@ -162,9 +162,10 @@ function machine(){
  * The seam over real DirectDraw objects, with spies where GDI and the
  * presenter would be.
  *
- * @param {{ adapter?: any, gamma?: any, deactivated?: () => boolean }} [build]
+ * @param {{ adapter?: any, gamma?: any, deactivated?: () => boolean,
+ *     deactivations?: () => number }} [build]
  *     What the build says the hardware is, where a primary's gamma ramp is
- *     shown, and whether the application has been deactivated.
+ *     shown, and whether (and how often) the application has been deactivated.
  */
 function seamed(build = {}){
     const box = machine();
@@ -216,6 +217,7 @@ function seamed(build = {}){
         present: surface=>presented.push(surface),
         gamma: build.gamma,
         deactivated: build.deactivated,
+        deactivations: build.deactivations,
     });
     const fields = createFields(box.services);
     const ddrawDll = libraries.libraries['DDRAW.dll'];
@@ -1980,4 +1982,107 @@ test('exclusive mode is lost while the application is deactivated, and normal mo
         assert.equal(alone.box.call(unknowing, test7, []), DD_OK,
             'with nothing to ask about activation the application is taken to be active');
         alone.release(unknowing);
+    });
+
+// --- video memory lost with the application, after Wine's ddraw7 test_lost_device ---
+
+test('an exclusive owner loses its video memory when deactivated, and restores it once back',
+    ()=>{
+        // test_lost_device (10722-10794): deactivated, the flip chain and a
+        // video-memory surface are lost, flip and lock answer
+        // DDERR_SURFACELOST, Restore answers DDERR_WRONGMODE, and a
+        // system-memory surface is untouched; active again, they stay lost
+        // until restored.
+        let deactivated = false;
+        let deactivations = 0;
+        const h = seamed({ deactivated: ()=>deactivated, deactivations: ()=>deactivations });
+        const ddraw = h.create7(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        const primary = h.createSurface7(ddraw,
+            { caps: DDSCAPS_PRIMARYSURFACE | DDSCAPS_COMPLEX | DDSCAPS_FLIP, backBufferCount: 1 });
+        const sysmem = h.createSurface7(ddraw,
+            { caps: DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY, width: 16, height: 16 });
+        const vidmem = h.createSurface7(ddraw,
+            { caps: DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, width: 16, height: 16 });
+        const test7 = ()=>h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'TestCooperativeLevel'), []);
+        /** @param {number} surface */
+        const isLost = surface=>h.surface7(surface, 'IsLost', []);
+        const caps = 0x5500;
+        h.box.memory.writeU32(caps, DDSCAPS_BACKBUFFER);
+        const back = ()=>{
+            const hr = h.surface7(primary, 'GetAttachedSurface', [caps, 0x5600]);
+            if (hr === DD_OK)
+            {
+                h.release(h.box.memory.readU32(0x5600));
+            }
+            return hr;
+        };
+        assert.equal(back(), DD_OK);
+        const backBuffer = h.box.memory.readU32(0x5600);
+
+        assert.equal(test7(), DD_OK);
+        assert.deepEqual([primary, sysmem, vidmem].map(isLost), [DD_OK, DD_OK, DD_OK]);
+        assert.equal(h.surface7(primary, 'Flip', [0, 0]), DD_OK);
+
+        deactivated = true;
+        deactivations = 1;
+        assert.equal(test7(), DDERR_NOEXCLUSIVEMODE);
+        assert.deepEqual([primary, sysmem, vidmem].map(isLost),
+            [DDERR_SURFACELOST, DD_OK, DDERR_SURFACELOST]);
+        assert.equal(h.surface7(primary, 'Flip', [0, 0]), DDERR_SURFACELOST);
+        assert.equal(h.surface7(primary, 'Restore', []), DDERR_WRONGMODE);
+        assert.equal(h.surface7(vidmem, 'Restore', []), DDERR_WRONGMODE);
+        assert.equal(h.surface7(sysmem, 'Restore', []), DD_OK);
+        assert.deepEqual([primary, sysmem, vidmem].map(isLost),
+            [DDERR_SURFACELOST, DD_OK, DDERR_SURFACELOST], 'nothing came back');
+        assert.equal(back(), DDERR_SURFACELOST, 'GetAttachedSurface on a lost surface');
+        const desc = 0x5200;
+        h.box.memory.writeU32(desc, DDSURFACEDESC2.SIZE);
+        h.box.memory.writeU32(desc + DDSURFACEDESC2.lpSurface, 0xdeadbeef);
+        assert.equal(h.surface7(vidmem, 'Lock', [0, desc, 0, 0]), DDERR_SURFACELOST);
+        assert.equal(h.box.memory.readU32(desc + DDSURFACEDESC2.lpSurface), 0xdeadbeef,
+            'and the pointer untouched');
+        assert.equal(h.surface7(vidmem, 'Blt', [0, sysmem, 0, 0, 0]), DDERR_SURFACELOST,
+            'a blit into one');
+        assert.equal(h.surface7(sysmem, 'Blt', [0, vidmem, 0, 0, 0]), DDERR_SURFACELOST,
+            'and out of one');
+
+        deactivated = false;
+        assert.equal(test7(), DD_OK);
+        assert.deepEqual([primary, sysmem, vidmem].map(isLost),
+            [DDERR_SURFACELOST, DD_OK, DDERR_SURFACELOST], 'lost until restored');
+        assert.equal(h.surface7(primary, 'Flip', [0, 0]), DDERR_SURFACELOST);
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'RestoreAllSurfaces'), []),
+            DD_OK);
+        assert.deepEqual([primary, sysmem, vidmem].map(isLost), [DD_OK, DD_OK, DD_OK]);
+        assert.equal(h.surface7(primary, 'Flip', [0, 0]), DD_OK);
+
+        // Away and back between two calls, as a program that stops drawing in
+        // the background sees it: the loss is still there when it returns.
+        deactivations = 2;
+        assert.deepEqual([primary, backBuffer, vidmem].map(isLost),
+            [DDERR_SURFACELOST, DDERR_SURFACELOST, DDERR_SURFACELOST]);
+        assert.equal(h.surface7(primary, 'Restore', []), DD_OK);
+        assert.deepEqual([primary, backBuffer, vidmem].map(isLost),
+            [DD_OK, DD_OK, DDERR_SURFACELOST], 'the chain comes back with its front, alone');
+        assert.equal(h.surface7(vidmem, 'Restore', []), DD_OK);
+
+        // Normal mode holds no video memory to lose; taking exclusive mode
+        // again loses it all, system memory aside (10866-10878).
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
+            [HWND, DDSCL_NORMAL]), DD_OK);
+        deactivated = true;
+        deactivations = 3;
+        assert.deepEqual([primary, sysmem, vidmem].map(isLost), [DD_OK, DD_OK, DD_OK]);
+        deactivated = false;
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
+            [HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN]), DD_OK);
+        assert.deepEqual([primary, sysmem, vidmem].map(isLost),
+            [DDERR_SURFACELOST, DD_OK, DDERR_SURFACELOST]);
+
+        for (const surface of [vidmem, sysmem, primary])
+        {
+            assert.equal(h.release(surface), 0);
+        }
+        assert.equal(h.release(ddraw), 0);
+        h.assertAllReleased();
     });

@@ -52,6 +52,7 @@ import {
     DDERR_DCALREADYCREATED,
     DDERR_CLIPPERISUSINGHWND,
     DDERR_EXCLUSIVEMODEALREADYSET,
+    DDERR_WRONGMODE,
     DDERR_INVALIDCAPS,
     DDERR_INVALIDMODE,
     DDERR_INVALIDOBJECT,
@@ -398,6 +399,11 @@ function sameRect(a, b){
  *           The display's gamma ramp, which is the primary surface's: set when
  *           a program sets one through the primary's gamma control, taken back
  *           when the primary goes. Absent, a ramp is kept and read back only.
+ * @property {{ deactivated: () => boolean, deactivations: () => number }} [application]
+ *           Whether the application is not the active one now, and how many
+ *           times it has stopped being. An exclusive owner loses its video
+ *           memory each time, and cannot restore it until the application is
+ *           active again. Absent, the application is always active.
  * @property {(surface: Surface, window: number, exclusive: boolean) => void} [onPresent]
  *           Called whenever what the primary surface shows may have changed: a
  *           flip, an unlock or a released DC on it, a blit into it -- with the
@@ -504,6 +510,46 @@ export function createDirectDraw(options = {}){
 
     /** @returns {boolean} */
     const exclusive = ()=>(cooperativeLevel & DDSCL_EXCLUSIVE) !== 0;
+
+    /**
+     * Whether a surface's memory is the display's, which the display takes
+     * back: anything not in system memory. A managed texture is the
+     * runtime's to keep and reports itself in system memory besides.
+     *
+     * @param {{ caps: number, caps2: number }} surface
+     */
+    const canBeLost = surface=>(surface.caps & DDSCAPS_SYSTEMMEMORY) === 0
+        && (surface.caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) === 0;
+    const loseVideoMemory = ()=>{
+        for (const surface of surfaces)
+        {
+            if (canBeLost(surface))
+            {
+                surface.markLost();
+            }
+        }
+    };
+    /** The deactivations counted when this object last looked. */
+    let deactivationsSeen = options.application?.deactivations() ?? 0;
+    /**
+     * Brings the surfaces up to what the application's activation has done
+     * since they were last looked at: every deactivation while this object
+     * held the screen took its video memory. Asked on every call that can
+     * find a surface lost, because nothing tells this layer when it happens.
+     */
+    const noticeDeactivation = ()=>{
+        const count = options.application?.deactivations() ?? 0;
+        if (count !== deactivationsSeen)
+        {
+            deactivationsSeen = count;
+            if (exclusive())
+            {
+                loseVideoMemory();
+            }
+        }
+    };
+    /** Whether the screen is out of this object's hands: exclusive, and in the background. */
+    const screenWithheld = ()=>exclusive() && options.application?.deactivated() === true;
 
     function destroyIfUnreferenced(){
         if (destroyed)
@@ -1078,11 +1124,36 @@ export function createDirectDraw(options = {}){
             },
 
             isLost(){
+                noticeDeactivation();
                 return lost ? DDERR_SURFACELOST : DD_OK;
             },
 
+            /**
+             * Gives a lost surface its memory back -- not its contents, which
+             * the program redraws -- with the surfaces created with it: a
+             * flip chain's buffers and a texture's levels come back with the
+             * surface they were made for, one attached later does not. Not
+             * while the screen is another application's.
+             */
             restore(){
+                noticeDeactivation();
+                if (!canBeLost(surface))
+                {
+                    return DD_OK;
+                }
+                if (screenWithheld())
+                {
+                    return DDERR_WRONGMODE;
+                }
                 lost = false;
+                if (mipNext?.implicit)
+                {
+                    mipNext.restore();
+                }
+                if (flipNext && flipImplicit)
+                {
+                    flipNext.restore();
+                }
                 return DD_OK;
             },
 
@@ -1149,6 +1220,7 @@ export function createDirectDraw(options = {}){
                 // then faults instead of writing into a surface it does not own.
                 const fail = /** @param {number} hr */ hr=>(
                     { hr, surfacePointer: null, pitch });
+                noticeDeactivation();
                 if (lost)
                 {
                     return fail(DDERR_SURFACELOST);
@@ -1215,6 +1287,7 @@ export function createDirectDraw(options = {}){
                     // no second DC to hand back and none is invented.
                     return { hr: DDERR_DCALREADYCREATED, dc: null };
                 }
+                noticeDeactivation();
                 if (lost)
                 {
                     return { hr: DDERR_SURFACELOST, dc: null };
@@ -1360,6 +1433,11 @@ export function createDirectDraw(options = {}){
              * @returns {{ hr: number, surface: Surface | null }}
              */
             getAttachedSurface(wanted, wanted2 = 0){
+                noticeDeactivation();
+                if (lost)
+                {
+                    return { hr: DDERR_SURFACELOST, surface: null };
+                }
                 const next = flipNext ?? (flipPrev ? chainHead() : null);
                 const found = [mipNext, next, depth].find(candidate=>candidate !== null
                     && candidate !== surface
@@ -1414,6 +1492,7 @@ export function createDirectDraw(options = {}){
                 {
                     return DDERR_NOEXCLUSIVEMODE;
                 }
+                noticeDeactivation();
                 if (lost)
                 {
                     return DDERR_SURFACELOST;
@@ -1802,15 +1881,15 @@ export function createDirectDraw(options = {}){
             // Giving it back does not: the surfaces stay valid until somebody
             // claims the screen again, which is the order a program observes.
             const takingExclusive = (flags & DDSCL_EXCLUSIVE) !== 0 && !exclusive();
+            // A deactivation while the screen was held is settled before the
+            // level changes, and one before it was taken is not this level's.
+            noticeDeactivation();
             cooperativeLevel = flags >>> 0;
             cooperativeWindow = window;
             levelSet = true;
             if (takingExclusive)
             {
-                for (const surface of surfaces)
-                {
-                    surface.markLost();
-                }
+                loseVideoMemory();
             }
             return DD_OK;
         },
@@ -1823,12 +1902,13 @@ export function createDirectDraw(options = {}){
          * mode changed under a normal-mode object (DDERR_WRONGMODE) is not
          * answered: nothing here changes it behind a program's back.
          *
-         * @param {{ deactivated?: boolean, heldElsewhere?: boolean }} [display]
+         * @param {{ heldElsewhere?: boolean }} [display]
          */
-        testCooperativeLevel({ deactivated = false, heldElsewhere = false } = {}){
+        testCooperativeLevel({ heldElsewhere = false } = {}){
+            noticeDeactivation();
             if (exclusive())
             {
-                return deactivated ? DDERR_NOEXCLUSIVEMODE : DD_OK;
+                return screenWithheld() ? DDERR_NOEXCLUSIVEMODE : DD_OK;
             }
             return heldElsewhere ? DDERR_EXCLUSIVEMODEALREADYSET : DD_OK;
         },
@@ -1907,6 +1987,11 @@ export function createDirectDraw(options = {}){
         },
 
         restoreAllSurfaces(){
+            noticeDeactivation();
+            if (screenWithheld())
+            {
+                return DDERR_WRONGMODE;
+            }
             for (const surface of surfaces)
             {
                 surface.restore();

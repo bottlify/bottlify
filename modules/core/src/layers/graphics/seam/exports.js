@@ -91,6 +91,9 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @param {() => boolean} [deps.deactivated]
  *        Whether the application has been told it is not the active one,
  *        which is when a DirectDraw object loses exclusive mode.
+ * @param {() => number} [deps.deactivations]
+ *        How many times it has been, each of which loses an exclusive
+ *        owner's video memory.
  * @param {() => number} [deps.now]
  *        The clock the display's raster runs on, in milliseconds; the host's
  *        when none is given.
@@ -114,7 +117,8 @@ export function createGraphicsLibraries(
         free, exportAddress,
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
-        gamma, deactivated, now = ()=>performance.now(), schedule = (ms, run)=>{
+        gamma, deactivated, deactivations, now = ()=>performance.now(),
+        schedule = (ms, run)=>{
             setTimeout(run, ms);
         } },
 )
@@ -152,6 +156,7 @@ export function createGraphicsLibraries(
         identity: ()=>graphics.adapter?.() ?? null,
         gamma,
         deactivated,
+        deactivations,
     });
 
     /** What a program has actually asked us to make, for a report. */
