@@ -413,7 +413,16 @@ export function evaluate(instruction, state){
                         : subFlags(a, b, 0, size);
             if (op === 'xadd')
             {
+                // The destination's address is the one it had before the source
+                // register was written: `xadd [ebx], bh` changes ebx itself.
+                const destination = operands[0].kind === 'mem'
+                    ? { ...operands[0], base: -1, index: -1, disp: address(operands[0]) | 0,
+                        segment: 3, addressSize: /** @type {32} */ (32) }
+                    : operands[0];
                 write(operands[1], a);
+                write(destination, result);
+                setFlags(flags);
+                return;
             }
             if (op !== 'cmp')
             {

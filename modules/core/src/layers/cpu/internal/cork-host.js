@@ -91,16 +91,21 @@ export function createCorkHost(config){
         }
     }
     const { createEngine, ownLayout, pagesFor, Tables, STATE_BLOCK_SIZE, interpret, blockState,
-        eflagsOf, setEflags } = engine;
+        eflagsOf, setEflags, WasmExit } = engine;
 
     // The guest RAM is the whole memorySize; the tables and the state block are
     // memory of cork's own beside it, not carved out of the guest's the way the
     // hybrid carves the tables from the top of the emulator's RAM.
     const layout = ownLayout({ ramSize: memorySize });
-    // A profiling run (`blockProfile`) has the block profile past the tables.
-    const pages = pagesFor(layout, Tables.SIZE
-        + (import.meta.BOTTLIFY_DIAGNOSTICS !== false && corkConfig?.blockProfile
-            ? Tables.BLOCK_PROFILE_SIZE : 0));
+    // A profiling run (`blockProfile`) has the block profile past the tables,
+    // and the interpreter tier in wasm its hot counts past that.
+    const profileSize = import.meta.BOTTLIFY_DIAGNOSTICS !== false && corkConfig?.blockProfile
+        ? Tables.BLOCK_PROFILE_SIZE : 0;
+    const wasmWanted = typeof engine.createWasmInterpreter === 'function'
+        && corkConfig?.wasmInterpreter !== false;
+    const wasmArea = layout.tables + Tables.SIZE + profileSize;
+    const pages = pagesFor(layout, Tables.SIZE + profileSize
+        + (wasmWanted ? engine.WASM_INTERPRETER_AREA : 0));
     const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
 
     // The memory is fixed (initial === maximum), so the buffer never detaches
@@ -134,13 +139,43 @@ export function createCorkHost(config){
      * @type {{ at: number, end: number, retired: number, traps: number, halted: boolean }[]} */
     const recent = [];
     const RECENT = 16;
-    /** The last run starts the interpreter ran, a ring: the path a run took
-     * into wherever it sits. */
-    const starts = new Uint32Array(256);
-    let startAt = 0;
     // The park loop (hlt; jmp at the thunk base) is where a thread waits, not
     // a path: its starts are left out so the ring keeps how the thread got there.
     const parkBase = (config.thunkBase ?? 0x100000) >>> 0;
+    /**
+     * The interpreter tier in wasm (`interp-wasm.js`): the integer instruction
+     * set run straight from guest memory, the JavaScript interpreter taking
+     * what it leaves. It counts hotness in the same table and keeps the same
+     * ring of starts, in its area past the tables; `wasmInterpreter: false`
+     * runs the JavaScript interpreter alone.
+     *
+     * @type {import('../../../../../cork/src/interp-wasm.js').WasmInterpreter | null}
+     */
+    const wasmTier = wasmWanted
+        ? engine.createWasmInterpreter({ memory, layout, area: wasmArea,
+            hotThreshold: corkConfig?.hotThreshold ?? 2, trapPort, parkBase })
+        : null;
+    /** The last run starts the interpreter ran, a ring: the path a run took
+     * into wherever it sits. The wasm tier's, when there is one. */
+    const starts = wasmTier?.starts ?? new Uint32Array(256);
+    let ownStartAt = 0;
+    const startIndex = wasmTier ? wasmTier.startIndex : ()=>ownStartAt;
+    /** @param {number} at */
+    const noteStart = at=>{
+        const index = startIndex();
+        starts[index & 255] = at;
+        if (wasmTier)
+        {
+            wasmTier.setStartIndex(index + 1);
+        }
+        else
+        {
+            ownStartAt = index + 1;
+        }
+    };
+    // Instructions the wasm tier retired: with the JavaScript interpreter's own
+    // count, what the feed's spacing is measured in.
+    let wasmRetired = 0;
     let halted = false;
     let stopped = false;
     // Set when the interpreter notes a hot start: the slice ends there so the
@@ -309,7 +344,10 @@ export function createCorkHost(config){
     // translation the runtime declines for nothing.
     const HOT_SLOTS = 1 << 22;
     const HOT_MASK = HOT_SLOTS - 1;
-    const hotCounts = new Uint8Array(HOT_SLOTS);
+    const hotCounts = wasmTier?.hotCounts.length === HOT_SLOTS
+        ? wasmTier.hotCounts : new Uint8Array(HOT_SLOTS);
+    /** Instructions either interpreter has retired. */
+    const interpretedSoFar = ()=>(interpreter?.retired ?? 0) + wasmRetired;
     /** Counts one interpreted start and notes the address once it is hot.
      * @param {number} address
      */
@@ -344,7 +382,7 @@ export function createCorkHost(config){
         // spacing allows, here at a later start: a tight loop is noted for the
         // last time on its 128th turn, and with no frame to feed it -- a
         // loader's long stretch -- it ran interpreted to its end.
-        if (notedSinceFeed && (interpreter?.retired ?? 0) - retiredAtFeed >= FEED_MIN_STEPS)
+        if (notedSinceFeed && interpretedSoFar() - retiredAtFeed >= FEED_MIN_STEPS)
         {
             translateDue = true;
         }
@@ -416,7 +454,7 @@ export function createCorkHost(config){
         // far side of. A recorded trap has to leave so the handler can move
         // eip or stop the machine; an address with an entry is translated code
         // and a different register file.
-        shouldStop: ()=>interpreter.trapped.length > 0 || feedDue || translateDue
+        shouldStop: ()=>interpreter.trapped.length > 0 || feedDue || translateDue || hooks.once
             || runtime.entryOf(interpreter.eip, x87Top()) >= 0,
         onStep: (/** @type {number} */ at, /** @type {boolean} */ jumped)=>{
             lastStart = at;
@@ -425,7 +463,7 @@ export function createCorkHost(config){
             // that led there.
             if (((at - parkBase) >>> 0) > 2 && (ram[at] !== 0 || ram[at + 1] !== 0))
             {
-                starts[startAt++ & 255] = at;
+                noteStart(at);
             }
             if (jumped)
             {
@@ -435,6 +473,11 @@ export function createCorkHost(config){
         force: false,
         entered: false,
         asked: false,
+        /** @type {boolean | undefined} set by the interpreter on return */
+        jumped: false,
+        // One run and no more: an instruction the wasm tier left, and the rest
+        // of its run, before the wasm tier goes on.
+        once: false,
     };
     /**
      * The interpreter tier over a whole budget: the decoder and evaluator run
@@ -462,7 +505,133 @@ export function createCorkHost(config){
      * @param {boolean} [jumpedIn]
      * @returns {number}
      */
-    const interpretRange = (address, budget, force = false, jumpedIn = false)=>{
+    const interpretRange = (address, budget, force = false, jumpedIn = false)=>(
+        wasmTier !== null && !force
+            ? interpretWasm(wasmTier, address, budget, jumpedIn)
+            : interpretJs(address, budget, force, jumpedIn, false));
+
+    /**
+     * The interpreter tier in wasm over a range, as `interpretRange` runs one:
+     * it stops where the JavaScript interpreter would -- a hot start noted, a
+     * start with an entry, a trap, a halt, a fault -- and hands each
+     * instruction it leaves to the JavaScript interpreter for one run of it.
+     *
+     * @param {NonNullable<typeof wasmTier>} tier
+     * @param {number} address @param {number} budget @param {boolean} jumpedIn
+     * @returns {number}
+     */
+    const interpretWasm = (tier, address, budget, jumpedIn)=>{
+        blockView.setUint32(layout.eip, address >>> 0, true);
+        lastStart = address;
+        if (jumpedIn)
+        {
+            countHot(address);
+        }
+        let retired = 0;
+        let own = 0;
+        // The first instruction runs whatever is due, as the JavaScript
+        // interpreter's first run does: the jump that brought the range here
+        // may have made its start hot and the feed due, and a range that
+        // retired nothing would be a forced step.
+        let first = true;
+        try
+        {
+            while (retired < budget && (first || (!feedDue && !translateDue)))
+            {
+                const left = budget - retired;
+                // A candidate is waiting: back after the feed's spacing, to feed it.
+                const code = tier.run(first && (feedDue || translateDue) ? 1
+                    : notedSinceFeed ? Math.min(left, FEED_MIN_STEPS) : left);
+                first = false;
+                const ran = tier.retired();
+                retired += ran;
+                own += ran;
+                wasmRetired += ran;
+                const at = eip();
+                if (notedSinceFeed && interpretedSoFar() - retiredAtFeed >= FEED_MIN_STEPS)
+                {
+                    translateDue = true;
+                }
+                if (code === WasmExit.BUDGET || code === WasmExit.CODE_WRITE)
+                {
+                    if (code === WasmExit.CODE_WRITE)
+                    {
+                        invalidate(tier.exitValue(), tier.exitSize());
+                    }
+                    continue;
+                }
+                if (code === WasmExit.HOT || code === WasmExit.ENTRY)
+                {
+                    if (code === WasmExit.HOT)
+                    {
+                        runtime.noteHot(at, x87Top(), tier.exitValue());
+                        if (corkConfig?.feed === 'slice')
+                        {
+                            feedDue = true;
+                        }
+                        else
+                        {
+                            notedSinceFeed = true;
+                        }
+                    }
+                    if (runtime.entryOf(at, x87Top()) >= 0)
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                if (code === WasmExit.TRAP)
+                {
+                    // After the port write, as the JavaScript interpreter raises it.
+                    raiseTrap(tier.exitValue());
+                    break;
+                }
+                if (code === WasmExit.HALT)
+                {
+                    halted = true;
+                    break;
+                }
+                if (code === WasmExit.FAULT)
+                {
+                    takeFault(tier.exitValue());
+                    break;
+                }
+                retired += interpretJs(at, left, false, false, true);
+                if (halted || stopped || runtime.entryOf(eip(), x87Top()) >= 0)
+                {
+                    break;
+                }
+                // The run ended at a jump's target, which the JavaScript interpreter
+                // counts when it goes on there: counted here, where the wasm tier does.
+                if (hooks.jumped === true)
+                {
+                    noteStart(eip());
+                    countHot(eip());
+                }
+            }
+        }
+        finally
+        {
+            // The wasm tier's instructions count in the block's word as the
+            // JavaScript interpreter's do, a range that dies on a no-tier
+            // instruction included.
+            if (own > 0)
+            {
+                const word = blockView.getUint32(layout.counter, true);
+                blockView.setUint32(layout.counter, (word + own) >>> 0, true);
+            }
+        }
+        return retired;
+    };
+
+    /**
+     * The JavaScript interpreter over a range; with `once`, one run of it.
+     *
+     * @param {number} address @param {number} budget @param {boolean} force
+     * @param {boolean} jumpedIn @param {boolean} once
+     * @returns {number}
+     */
+    const interpretJs = (address, budget, force, jumpedIn, once)=>{
         interpreter ??= blockState({
             memory,
             layout,
@@ -487,10 +656,16 @@ export function createCorkHost(config){
         {
             hooks.force = force;
             hooks.entered = jumpedIn;
+            hooks.once = false;
             // The slice loop calls with no entry at the address and no feed
             // due, so only a trap still recorded -- one a fault cut the last
             // range short of raising -- leaves the first start's question open.
             hooks.asked = state.trapped.length === 0;
+            if (once)
+            {
+                hooks.asked = true;
+                hooks.once = true;
+            }
             interpret(state, budget, hooks);
         }
         catch (e){
@@ -592,7 +767,7 @@ export function createCorkHost(config){
                 // that never presents a frame still translates.
                 translateDue = false;
                 notedSinceFeed = false;
-                retiredAtFeed = interpreter?.retired ?? 0;
+                retiredAtFeed = interpretedSoFar();
                 const formAt = clock();
                 runtime.translatePending().catch(()=>{});
                 formMs += clock() - formAt;
@@ -935,7 +1110,7 @@ export function createCorkHost(config){
                 const parts = [];
                 for (let k = 0; k < 2; k++)
                 {
-                    const at = starts[(startAt + i + k) & 255] >>> 0;
+                    const at = starts[(startIndex() + i + k) & 255] >>> 0;
                     let bytes = '';
                     for (let n = 0; n < 8; n++)
                     {

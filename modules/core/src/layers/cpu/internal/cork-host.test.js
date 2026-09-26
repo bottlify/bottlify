@@ -330,10 +330,11 @@ test('a tight loop run with no frame to feed the translator is translated in its
 
 test('a slow slice accounts for itself only when the translator\'s timings are asked for', ()=>{
     // mov ecx, 250000; L: add eax, ecx; xor ebx, eax; dec ecx; jnz L; hlt -- a
-    // million interpreted instructions in one slice, past its 20 ms floor.
+    // million instructions on the JavaScript interpreter in one slice, past its
+    // 20 ms floor (the wasm tier runs them in less).
     for (const timings of [false, true])
     {
-        const h = host({ cork: { translate: false, timings } });
+        const h = host({ cork: { translate: false, wasmInterpreter: false, timings } });
         load(h, 0x1000,
             [0xb9, 0x90, 0xd0, 0x03, 0x00, 0x01, 0xc8, 0x31, 0xc3, 0x49, 0x75, 0xf9, 0xf4]);
         assert.equal(h.runSlice(2_000_000), 1 + 250_000 * 4 + 1);
