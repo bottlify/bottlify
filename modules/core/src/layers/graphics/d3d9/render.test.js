@@ -26,7 +26,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { D3DFMT, D3DPOOL, D3DRS, D3DSWAPEFFECT, D3DUSAGE, D3D_OK } from './constants.js';
-import { D3DCLEAR, D3DPT } from '../d3d8/constants.js';
+import { D3DCLEAR, D3DPT, D3DTA, D3DTEXF, D3DTOP, D3DTSS } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
@@ -839,3 +839,131 @@ test('a fixed-function draw reads a member in another stream from that stream', 
     colours.buffer.release();
     vertices.buffer.release();
 });
+
+/**
+ * A draw of one textured triangle, the stage selecting the texture.
+ *
+ * @param {ReturnType<typeof harness>} h
+ */
+async function drawTextured(h){
+    const { device } = h;
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.SELECTARG1), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.TEXTURE), D3D_OK);
+    assert.equal(device.SetFVF(FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT)), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+}
+
+/**
+ * The passes that made a texture's levels, as the level each drew, the
+ * level it read and the filter it read it through.
+ *
+ * @param {any} gpu @param {any} texture  The GPU texture.
+ * @returns {any[][]}
+ */
+function mipPasses(gpu, texture){
+    return gpu.of('beginRenderPass')
+        .filter((/** @type {any} */ call)=>call.descriptor.label.startsWith('mips:')
+            && call.descriptor.colorAttachments[0].view.texture === texture)
+        .map((/** @type {any} */ call)=>{
+            const binds = gpu.of('setBindGroup').filter(
+                (/** @type {any} */ bound)=>bound.pass === call.pass);
+            const source = binds[0].group.entries[0].resource;
+            return [call.descriptor.colorAttachments[0].view.viewDescriptor.baseMipLevel,
+                source.viewDescriptor.baseMipLevel, binds[0].group.entries[1].resource
+                    .descriptor.magFilter];
+        });
+}
+
+test('recorded: a texture that makes its own levels makes them before a draw samples them',
+    async()=>{
+        // Wine's d3d9 autogen_mipmap_test: the program writes the top level
+        // alone, and a sample far enough away reads a level the device made
+        // from it.
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(8, 8, 0, D3DUSAGE.AUTOGENMIPMAP, D3DFMT.X8R8G8B8,
+            D3DPOOL.MANAGED, out), D3D_OK);
+        const texture = out.texture;
+        assert.equal(texture.levels, 1, 'the program sees one level');
+        const fill = (/** @type {number} */ value)=>{
+            /** @type {{ pBits?: number }} */
+            const locked = {};
+            assert.equal(texture.LockRect(0, locked, null, 0), D3D_OK);
+            h.write(/** @type {number} */ (locked.pBits), new Uint8Array(8 * 8 * 4).fill(value));
+            assert.equal(texture.UnlockRect(0), D3D_OK);
+        };
+        fill(9);
+        assert.equal(device.SetTexture(0, texture), D3D_OK);
+        await drawTextured(h);
+
+        const made = gpu.of('createTexture').find(
+            (/** @type {any} */ call)=>call.descriptor.label === 'texture');
+        assert.equal(made.descriptor.mipLevelCount, 4, 'the GPU holds the whole chain');
+        const uploads = ()=>gpu.of('copyBufferToTexture').filter(
+            (/** @type {any} */ call)=>call.destination.texture === made.texture).length;
+        assert.equal(uploads(), 1, 'the top level alone goes up');
+        assert.deepEqual(mipPasses(gpu, made.texture),
+            [[1, 0, 'linear'], [2, 1, 'linear'], [3, 2, 'linear']],
+            'each level from the one above');
+        const order = gpu.calls.filter((/** @type {any} */ call)=>call.op === 'beginRenderPass'
+            || call.op === 'draw').map((/** @type {any} */ call)=>(call.op === 'draw'
+            ? 'draw' : call.descriptor.label.startsWith('mips:') ? 'mips' : 'pass'));
+        assert.ok(order.lastIndexOf('mips') < order.lastIndexOf('draw'),
+            'the levels are made before the draw that samples them');
+        assert.equal(device.diagnostics().mipsGenerated, 1);
+
+        await drawTextured(h);
+        assert.equal(mipPasses(gpu, made.texture).length, 3, 'nothing changed, nothing made');
+
+        // A new top level, or the program asking, makes them again; a point
+        // filter makes them from one texel of each four.
+        fill(12);
+        await drawTextured(h);
+        assert.equal(mipPasses(gpu, made.texture).length, 6);
+        assert.equal(texture.SetAutoGenFilterType(D3DTEXF.POINT), D3D_OK);
+        texture.GenerateMipSubLevels();
+        await drawTextured(h);
+        assert.deepEqual(mipPasses(gpu, made.texture).slice(6).map(each=>each[2]),
+            ['nearest', 'nearest', 'nearest']);
+    });
+
+test('recorded: a render target that makes its own levels makes them from what was drawn',
+    async()=>{
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(4, 4, 0, D3DUSAGE.RENDERTARGET | D3DUSAGE.AUTOGENMIPMAP,
+            D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT, out), D3D_OK);
+        const texture = out.texture;
+        /** @type {{ surface?: any }} */
+        const level = {};
+        assert.equal(texture.GetSurfaceLevel(0, level), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const back = {};
+        assert.equal(device.GetRenderTarget(0, back), D3D_OK);
+        const frame = async()=>{
+            assert.equal(device.SetRenderTarget(0, level.surface), D3D_OK);
+            assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0xff00ff00, 1, 0), D3D_OK);
+            assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+            assert.equal(device.SetTexture(0, texture), D3D_OK);
+            await drawTextured(h);
+        };
+        await frame();
+        const made = gpu.of('createTexture').find((/** @type {any} */ call)=>
+            call.descriptor.label === 'texture' && call.descriptor.mipLevelCount === 3);
+        assert.ok(made, 'a chain of three behind a target the program sees one level of');
+        assert.deepEqual(mipPasses(gpu, made.texture).map(each=>each.slice(0, 2)),
+            [[1, 0], [2, 1]]);
+        await frame();
+        assert.equal(mipPasses(gpu, made.texture).length, 4, 'drawn into again, made again');
+        level.surface.release();
+        back.surface.release();
+        assert.equal(device.SetTexture(0, null), D3D_OK);
+        texture.release();
+    });

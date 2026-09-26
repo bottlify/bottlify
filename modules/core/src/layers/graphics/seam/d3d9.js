@@ -76,8 +76,6 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
 const D3DENUM_NO_WHQL_LEVEL = 0x00000002;
 /** D3DPRESENTFLAG_LOCKABLE_BACKBUFFER. */
 const LOCKABLE_BACKBUFFER = 0x00000001;
-/** D3DTEXF_LINEAR, what an automatic mip filter reads back as. */
-const D3DTEXF_LINEAR = 2;
 
 /**
  * The adapter formats a display mode is listed in: 32-bit and 16-bit.
@@ -579,9 +577,17 @@ export function createDirect3D9Seam(
         GetLOD: texture=>texture.GetLOD(),
         /** @param {any} texture */
         GetLevelCount: texture=>texture.levels ?? 1,
-        SetAutoGenFilterType: ()=>D3D_OK,
-        GetAutoGenFilterType: ()=>D3DTEXF_LINEAR,
-        GenerateMipSubLevels: ()=>0,
+        /** @param {any} texture @param {number[]} args */
+        SetAutoGenFilterType: (texture, [filter])=>texture.SetAutoGenFilterType(filter >>> 0),
+        // Answers the filter rather than an HRESULT, and GenerateMipSubLevels
+        // nothing at all.
+        /** @param {any} texture */
+        GetAutoGenFilterType: texture=>texture.GetAutoGenFilterType(),
+        /** @param {any} texture */
+        GenerateMipSubLevels: texture=>{
+            texture.GenerateMipSubLevels();
+            return 0;
+        },
     };
 
     /**

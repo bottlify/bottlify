@@ -51,8 +51,8 @@
 
 import {
     D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL, D3DERR_NOTAVAILABLE,
-    D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DPOOL, D3DRS, D3DRTYPE, D3DUSAGE, D3D_OK,
-    FORMAT_INFO, isCompressed, surfaceBytes, surfacePitch,
+    D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DOK_NOAUTOGEN, D3DPOOL, D3DRS, D3DRTYPE, D3DUSAGE,
+    D3D_OK, FORMAT_INFO, isCompressed, surfaceBytes, surfacePitch,
 } from './constants.js';
 import { D3DCLEAR } from '../d3d8/constants.js';
 import {
@@ -486,6 +486,20 @@ export function createDirect3D9(options = {}){
             }
             const wantsTarget = (usage & D3DUSAGE.RENDERTARGET) !== 0;
             const wantsDepth = (usage & D3DUSAGE.DEPTHSTENCIL) !== 0;
+            // Wine's d3d9 test_mipmap_gen: never for a dynamic texture, and
+            // for a format no level is drawn into the texture is made
+            // without them, which D3DOK_NOAUTOGEN says.
+            if ((usage & D3DUSAGE.AUTOGENMIPMAP) !== 0)
+            {
+                if ((usage & D3DUSAGE.DYNAMIC) !== 0
+                    || (resourceType !== D3DRTYPE.TEXTURE && resourceType !== D3DRTYPE.CUBETEXTURE))
+                {
+                    return D3DERR_NOTAVAILABLE;
+                }
+                const plain = root.CheckDeviceFormat(usage & ~D3DUSAGE.AUTOGENMIPMAP,
+                    resourceType, format);
+                return plain === D3D_OK && !generatesMips(format) ? D3DOK_NOAUTOGEN : plain;
+            }
             // Legal on every device of the era regardless of `compressedTextures`,
             // which only chooses how a created texture's bytes travel to the
             // GPU; nothing draws into blocks, so a target or depth usage is
@@ -2909,12 +2923,13 @@ function createDeviceObject(parameters, caps, services, identity){
                 reportRefusedFormat(format);
                 return hr;
             }
-            if (!(width > 0) || !(height > 0))
+            if (!(width > 0) || !(height > 0) || !autoGenAllowed(usage, levels, pool))
             {
                 return D3DERR_INVALIDCALL;
             }
             out.texture = makeTexture({
-                width, height, levels: levels || fullMipCount(width, height), format, pool, usage,
+                width, height, format, pool, usage,
+                ...chainOf(usage, format, levels, fullMipCount(width, height)),
             });
             return D3D_OK;
         },
@@ -2934,18 +2949,18 @@ function createDeviceObject(parameters, caps, services, identity){
                 reportRefusedFormat(format);
                 return hr;
             }
-            if (!(edgeLength > 0))
+            if (!(edgeLength > 0) || !autoGenAllowed(usage, levels, pool))
             {
                 return D3DERR_INVALIDCALL;
             }
             out.texture = makeTexture({
                 width: edgeLength,
                 height: edgeLength,
-                levels: levels || fullMipCount(edgeLength, edgeLength),
                 format,
                 pool,
                 usage,
                 cube: true,
+                ...chainOf(usage, format, levels, fullMipCount(edgeLength, edgeLength)),
             });
             return D3D_OK;
         },
@@ -3197,7 +3212,11 @@ function createDeviceObject(parameters, caps, services, identity){
             {
                 return D3DERR_INVALIDCALL;
             }
-            const skipped = Math.max(0, source.levels - destination.levels);
+            // A destination that makes its own levels takes the source's top
+            // one and makes the rest from it.
+            const skipped = destination.autoGen
+                ? 0
+                : Math.max(0, source.levels - destination.levels);
             const faces = source.cube ? 6 : 1;
             /** @type {{ one: any, other: any, level: number, face: number }[]} */
             const pairs = [];
@@ -3709,6 +3728,41 @@ function createDeviceObject(parameters, caps, services, identity){
     // A GPU that is gone takes the device with it, beyond a reset.
     stopWatchingLoss = services.onDeviceLost?.(()=>device.injectDeviceLoss(false));
     return device;
+}
+
+/**
+ * Whether a texture asking for D3DUSAGE_AUTOGENMIPMAP may have it (Wine's
+ * d3d9 test_mipmap_gen): not in system memory, and with one level or the
+ * whole chain asked for -- the program sees one level either way.
+ *
+ * @param {number} usage @param {number} levels @param {number} pool
+ */
+function autoGenAllowed(usage, levels, pool){
+    return (usage & D3DUSAGE.AUTOGENMIPMAP) === 0 || (pool !== D3DPOOL.SYSTEMMEM && levels <= 1);
+}
+
+/**
+ * The levels a texture shows the program and the levels its GPU copy has.
+ * An automatically mipmapped texture shows its top level alone and the
+ * device makes the rest -- except in a format no level is drawn into, a
+ * block-compressed or depth one, which D3DOK_NOAUTOGEN says gets none.
+ *
+ * @param {number} usage @param {number} format @param {number} levels
+ * @param {number} full  The whole chain's length.
+ * @returns {{ levels: number, gpuLevels: number }}
+ */
+function chainOf(usage, format, levels, full){
+    if ((usage & D3DUSAGE.AUTOGENMIPMAP) === 0)
+    {
+        const chain = levels || full;
+        return { levels: chain, gpuLevels: chain };
+    }
+    return { levels: 1, gpuLevels: generatesMips(format) ? full : 1 };
+}
+
+/** @param {number} format */
+function generatesMips(format){
+    return !isCompressed(format) && !FORMAT_INFO[format]?.depth;
 }
 
 /**

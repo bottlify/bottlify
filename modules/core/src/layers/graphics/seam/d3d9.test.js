@@ -536,6 +536,10 @@ test('a texture is made without a shared handle, described and locked at this ve
         assert.equal(call('GetType', []), 3, 'D3DRTYPE_TEXTURE');
         assert.equal(call('GetLevelCount', []), 1);
         assert.equal(call('GetAutoGenFilterType', []), 2);
+        assert.equal(call('SetAutoGenFilterType', [0]), D3DERR_INVALIDCALL, 'D3DTEXF_NONE');
+        assert.equal(call('SetAutoGenFilterType', [1]), D3D_OK);
+        assert.equal(call('GetAutoGenFilterType', []), 1, 'the filter it was told');
+        call('GenerateMipSubLevels', []);
         const desc = 0x3100;
         assert.equal(call('GetLevelDesc', [0, desc]), D3D_OK);
         assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC9.Width), 8);

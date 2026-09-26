@@ -134,6 +134,34 @@ export function createPriority(pool){
 }
 
 /**
+ * The filter a texture's generated levels are made with (Wine's d3d9
+ * test_mipmap_gen): linear until told otherwise, and D3DTEXF_NONE refused,
+ * since a level has to be made somehow. GenerateMipSubLevels is the
+ * renderer's to answer; here it does nothing.
+ */
+export function createAutoGenFilter(){
+    let filter = D3DTEXF_LINEAR;
+    return {
+        /** @param {number} next @returns {number} */
+        SetAutoGenFilterType(next){
+            if (next === D3DTEXF_NONE)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            filter = next;
+            return D3D_OK;
+        },
+        /** @returns {number} */
+        GetAutoGenFilterType: ()=>filter,
+        GenerateMipSubLevels(){},
+    };
+}
+
+/** D3DTEXF_NONE and D3DTEXF_LINEAR, the same numbers in both versions. */
+const D3DTEXF_NONE = 0;
+const D3DTEXF_LINEAR = 2;
+
+/**
  * @typedef {Object} LockedRect
  * @property {number} pBits   Byte address of the first pixel of the locked area.
  * @property {number} Pitch   Bytes between two rows, unchanged by a partial lock.
@@ -790,7 +818,11 @@ export function createTexture(options){
         cube,
         pool: options.pool,
         type: cube ? D3DRTYPE.CUBETEXTURE : D3DRTYPE.TEXTURE,
+        // Its lower levels are the device's to make, and the program sees
+        // the top one alone.
+        autoGen: (options.usage & D3DUSAGE.AUTOGENMIPMAP) !== 0,
         ...createPriority(options.pool),
+        ...createAutoGenFilter(),
 
         /**
          * Only a managed texture keeps its level of detail; the call returns
@@ -1212,6 +1244,7 @@ export function createVolumeTexture(options){
         depth: options.depth,
         type: D3DRTYPE.VOLUMETEXTURE,
         ...createPriority(options.pool),
+        ...createAutoGenFilter(),
 
         /**
          * As a texture's: a managed texture's alone, the last level at most.

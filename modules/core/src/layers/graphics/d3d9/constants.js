@@ -24,6 +24,8 @@ export const D3DERR_DEVICELOST = 0x88760868;
 export const D3DERR_DEVICENOTRESET = 0x88760869;
 export const D3DERR_NOTAVAILABLE = 0x8876086a;
 export const D3DERR_NOTFOUND = 0x88760866;
+/** A success: the format is available, and a texture made in it gets no generated levels. */
+export const D3DOK_NOAUTOGEN = 0x0876086f;
 
 /** D3DRENDERSTATETYPE. Sparse by design: the gaps are states D3D8 dropped. */
 export const D3DRS = Object.freeze({
@@ -207,6 +209,7 @@ export const D3DUSAGE = Object.freeze({
     DEPTHSTENCIL: 0x00000002,
     WRITEONLY: 0x00000008,
     DYNAMIC: 0x00000200,
+    AUTOGENMIPMAP: 0x00000400,
 });
 
 /** OVERLAY and FLIPEX exist only in the Ex API; plain d3d9 rejects them. */

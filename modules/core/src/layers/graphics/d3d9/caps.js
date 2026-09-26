@@ -25,6 +25,7 @@ import { TEXTURE_OP_CAPS } from '../d3d8/validity.js';
 
 const D3DCAPS_READ_SCANLINE = 0x00020000;
 const D3DCAPS2_DYNAMICTEXTURES = 0x20000000;
+const D3DCAPS2_CANAUTOGENMIPMAP = 0x40000000;
 
 const D3DPRESENT_INTERVAL_ONE = 0x00000001;
 const D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
@@ -144,7 +145,7 @@ export function capabilityWords(caps, identity = {}){
         Caps: D3DCAPS_READ_SCANLINE,
         // Textures may be made dynamic, and are uploaded when they change.
         // Gamma is kept and not applied, so it is not claimed.
-        Caps2: D3DCAPS2_DYNAMICTEXTURES,
+        Caps2: D3DCAPS2_DYNAMICTEXTURES | D3DCAPS2_CANAUTOGENMIPMAP,
         // No copy between video and system memory through StretchRect.
         Caps3: 0,
         PresentationIntervals: D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE,

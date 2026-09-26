@@ -1032,3 +1032,91 @@ test('a palette is kept and read back, and the current one remembered', ()=>{
     assert.equal(current.number, 3);
     assert.equal(device.release(), 0);
 });
+
+test('a texture that makes its own levels shows the program one, in the pools that allow it',
+    ()=>{
+        // Wine's d3d9 test_mipmap_gen and test_cube_texture_mipmap_gen.
+        const { d3d, device } = make();
+        const AUTOGEN = D3DUSAGE.AUTOGENMIPMAP;
+        const D3DOK_NOAUTOGEN = 0x0876086f;
+        assert.equal(d3d.CheckDeviceFormat(AUTOGEN, D3DRTYPE.TEXTURE, D3DFMT.X8R8G8B8), D3D_OK);
+        assert.equal(d3d.CheckDeviceFormat(AUTOGEN, D3DRTYPE.CUBETEXTURE, D3DFMT.X8R8G8B8),
+            D3D_OK);
+        assert.equal(d3d.CheckDeviceFormat(AUTOGEN, D3DRTYPE.TEXTURE, D3DFMT.DXT5),
+            D3DOK_NOAUTOGEN, 'a format no level is drawn into is made without them');
+        assert.equal(d3d.CheckDeviceFormat(AUTOGEN | D3DUSAGE.DYNAMIC, D3DRTYPE.TEXTURE,
+            D3DFMT.X8R8G8B8), D3DERR_NOTAVAILABLE);
+        assert.equal(d3d.CheckDeviceFormat(AUTOGEN, D3DRTYPE.VOLUMETEXTURE, D3DFMT.X8R8G8B8),
+            D3DERR_NOTAVAILABLE);
+
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(64, 64, 0, D3DUSAGE.RENDERTARGET | AUTOGEN,
+            D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT, out), D3D_OK);
+        out.texture.release();
+        assert.equal(device.CreateTexture(64, 64, 0, AUTOGEN, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED,
+            out), D3D_OK);
+        const texture = out.texture;
+        assert.equal(texture.GetAutoGenFilterType(), 2, 'D3DTEXF_LINEAR');
+        assert.equal(texture.SetAutoGenFilterType(0), D3DERR_INVALIDCALL, 'D3DTEXF_NONE');
+        assert.equal(texture.SetAutoGenFilterType(3), D3D_OK);
+        assert.equal(texture.GetAutoGenFilterType(), 3, 'D3DTEXF_ANISOTROPIC');
+        assert.equal(texture.levels, 1);
+        /** @type {any} */
+        const held = {};
+        assert.equal(texture.GetSurfaceLevel(0, held), D3D_OK);
+        /** @type {{ desc?: any }} */
+        const described = {};
+        held.surface.GetDesc(described);
+        assert.equal(described.desc.Usage, AUTOGEN);
+        held.surface.release();
+        for (let level = 1; level < 6; level++)
+        {
+            assert.equal(texture.GetSurfaceLevel(level, {}), D3DERR_INVALIDCALL);
+            assert.equal(texture.LockRect(level, {}, null, 0), D3DERR_INVALIDCALL);
+        }
+        texture.release();
+
+        for (const levels of [2, 6])
+        {
+            assert.equal(device.CreateTexture(64, 64, levels, AUTOGEN, D3DFMT.X8R8G8B8,
+                D3DPOOL.MANAGED, out), D3DERR_INVALIDCALL, `${levels} levels`);
+        }
+        assert.equal(device.CreateTexture(64, 64, 1, AUTOGEN, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED,
+            out), D3D_OK);
+        out.texture.release();
+        assert.equal(device.CreateTexture(64, 64, 0, AUTOGEN, D3DFMT.X8R8G8B8,
+            D3DPOOL.SYSTEMMEM, out), D3DERR_INVALIDCALL);
+        assert.equal(device.CreateTexture(64, 64, 0, AUTOGEN, D3DFMT.DXT5, D3DPOOL.DEFAULT, out),
+            D3D_OK, 'made, without generated levels');
+        assert.equal(out.texture.levels, 1);
+        out.texture.release();
+        assert.equal(device.CreateCubeTexture(64, 0, AUTOGEN, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED,
+            out), D3D_OK);
+        assert.equal(out.texture.levels, 1);
+        out.texture.release();
+        assert.equal(device.CreateVolumeTexture(64, 64, 64, 0, AUTOGEN, D3DFMT.X8R8G8B8,
+            D3DPOOL.DEFAULT, out), D3DERR_INVALIDCALL);
+        assert.equal(device.release(), 0);
+    });
+
+test('UpdateTexture into a texture that makes its own levels carries the source\'s top level',
+    ()=>{
+        const { device } = make();
+        /** @type {{ texture?: any }} */
+        const source = {};
+        assert.equal(device.CreateTexture(16, 16, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM,
+            source), D3D_OK);
+        /** @type {{ texture?: any }} */
+        const destination = {};
+        assert.equal(device.CreateTexture(16, 16, 0, D3DUSAGE.AUTOGENMIPMAP, D3DFMT.A8R8G8B8,
+            D3DPOOL.DEFAULT, destination), D3D_OK);
+        /** @type {{ moves?: any[] }} */
+        const out = {};
+        assert.equal(device.UpdateTexture(source.texture, destination.texture, out), D3D_OK);
+        assert.equal(out.moves?.length, 1);
+        assert.deepEqual([out.moves?.[0].rowBytes, out.moves?.[0].rows], [64, 16]);
+        source.texture.release();
+        destination.texture.release();
+        assert.equal(device.release(), 0);
+    });

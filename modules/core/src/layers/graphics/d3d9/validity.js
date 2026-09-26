@@ -199,10 +199,11 @@ export function volumeLevelCount(width, height, depth){
 
 /**
  * Whether a volume texture of these arguments is made, in either version
- * (Wine's d3d8 and d3d9 test_volume_locking and test_lockbox_invalid): never
- * a render target, a depth buffer or write-only, and dynamic only in the
- * default or system-memory pool. A depth format and a format in blocks are
- * refused too: nothing here uploads either as a volume.
+ * (Wine's d3d8 and d3d9 test_volume_locking and test_lockbox_invalid, d3d9
+ * test_mipmap_gen): never a render target, a depth buffer, write-only or
+ * mipmapped by the device, and dynamic only in the default or system-memory
+ * pool. A depth format and a format in blocks are refused too: nothing here
+ * uploads either as a volume.
  *
  * @param {{ width: number, height: number, depth: number, levels: number, usage: number,
  *           format: number, pool: number, maxExtent: number }} request
@@ -216,7 +217,7 @@ export function volumeCreateResult(request){
         return D3DERR_INVALIDCALL;
     }
     if ((request.usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL
-        | D3DUSAGE.WRITEONLY)) !== 0)
+        | D3DUSAGE.WRITEONLY | D3DUSAGE.AUTOGENMIPMAP)) !== 0)
     {
         return D3DERR_INVALIDCALL;
     }

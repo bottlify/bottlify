@@ -1546,6 +1546,37 @@ const ADDRESS = Object.freeze({
     [D3DTADDRESS.MIRRORONCE]: 'mirror-repeat',
 });
 
+/** GPUShaderStage.FRAGMENT. */
+const FRAGMENT_VISIBILITY = 2;
+
+/**
+ * One level from the level above: a triangle over the target, and each pixel
+ * the sampler's reading of the source at the pixel's centre, which for a
+ * level half the size is the shared corner of the four texels it covers.
+ */
+const MIP_SHADER = `@group(0) @binding(0) var source: texture_2d<f32>;
+@group(0) @binding(1) var sourceSampler: sampler;
+
+struct Corner {
+    @builtin(position) position: vec4f,
+    @location(0) uv: vec2f,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> Corner {
+    let corner = vec2f(f32((index << 1u) & 2u), f32(index & 2u));
+    var out: Corner;
+    out.position = vec4f(corner * 2.0 - 1.0, 0.0, 1.0);
+    out.uv = vec2f(corner.x, 1.0 - corner.y);
+    return out;
+}
+
+@fragment
+fn fs_main(in: Corner) -> @location(0) vec4f {
+    return textureSampleLevel(source, sourceSampler, in.uv, 0.0);
+}
+`;
+
 /**
  * @param {Map<number, number>} states  one stage's states
  * @param {boolean} [mips]  False pins every sample to the top level.
@@ -1794,6 +1825,23 @@ export function createRenderer(options){
      */
     const released = new Set();
     let nextTextureId = 0;
+    /**
+     * Textures that make their own levels and whose top level changed since
+     * they last made them: the levels are made again before the next draw
+     * that samples one.
+     *
+     * @type {Set<any>}
+     */
+    const staleMips = new Set();
+    /** @param {any} record */
+    const markMips = record=>{
+        if (record.autogen)
+        {
+            staleMips.add(record);
+        }
+    };
+    /** @type {Map<string, Promise<any>>} a level-making pipeline per GPU format */
+    const mipPipelines = new Map();
     /** @type {Map<string, any>} one blank texture per dimension a binding may want */
     const placeholders = new Map();
 
@@ -1838,6 +1886,8 @@ export function createRenderer(options){
         },
         /** Draws that ran through a program rather than the fixed-function pipeline. */
         programmable: 0,
+        /** Times a texture that makes its own levels made them again. */
+        mipsGenerated: 0,
         /**
          * How often a draw's preparation was built and how often the previous
          * draw's was reused.
@@ -3038,7 +3088,7 @@ export function createRenderer(options){
             // view of that level alone.
             const level = surfaceLevels.get(surface) ?? 0;
             const face = surfaceFaces.get(surface) ?? 0;
-            return level === 0 && record.levels === 1 && record.faces === 1
+            return level === 0 && record.gpuLevels === 1 && record.faces === 1
                 ? record.gpu
                 : levelSurfaceOf(record, level, face);
         }
@@ -3166,7 +3216,7 @@ export function createRenderer(options){
      */
     const levelSurfaceOf = (record, level, face = 0)=>{
         const views = record.levelSurfaces ??= new Map();
-        const key = face * record.levels + level;
+        const key = face * record.gpuLevels + level;
         let made = views.get(key);
         if (!made)
         {
@@ -3413,7 +3463,7 @@ export function createRenderer(options){
                 width: record.width,
                 height: record.height,
                 format: gpuFormatOf(record.format, record.width, record.height, compressedTextures),
-                mipLevelCount: record.levels,
+                mipLevelCount: record.gpuLevels,
                 ...(record.faces === 6 ? { layers: 6, dimension: 'cube' } : {}),
                 ...(record.volume ? { depth: record.depth, dimension: '3d' } : {}),
                 label: record.faces === 6 ? 'cube' : record.volume ? 'volume' : 'texture',
@@ -3477,6 +3527,10 @@ export function createRenderer(options){
                 uploadTexels(record.gpu,
                     { format: gpuFormat, mipLevel: level, width, height, texels, layer: face },
                     record.ordered);
+                if (level === 0)
+                {
+                    markMips(record);
+                }
                 // Which levels the program has written, and what its smallest
                 // ones hold: a surface sampled far away comes out of those,
                 // and a level the program never wrote is sampled all the same.
@@ -3615,6 +3669,11 @@ export function createRenderer(options){
     const beginPass = (model, clearing)=>{
         const frame = ensureFrame();
         const target = surfaceFor(model.renderTarget);
+        const drawnInto = textures.get(model.renderTarget);
+        if (drawnInto && (surfaceLevels.get(model.renderTarget) ?? 0) === 0)
+        {
+            markMips(drawnInto);
+        }
         const depth = depthFor(model, target);
         frame.commands.push({ kind: 'pass', target, depth, ...clearing });
         frame.pass = { target, depth };
@@ -4269,6 +4328,112 @@ export function createRenderer(options){
     };
 
     /**
+     * The levels of each texture a draw samples that makes its own and whose
+     * top level changed, made again ahead of the draw.
+     *
+     * @param {any} frame @param {any} prepared
+     */
+    const regenerateSampled = (frame, prepared)=>{
+        for (const binding of prepared.stageBindings)
+        {
+            const record = binding.texture ? textures.get(binding.texture) : null;
+            if (!record || !staleMips.has(record) || !record.gpu)
+            {
+                continue;
+            }
+            staleMips.delete(record);
+            const format = record.gpu.format;
+            let pipeline = mipPipelines.get(format);
+            if (!pipeline)
+            {
+                pipeline = mipPipeline(format);
+                mipPipelines.set(format, pipeline);
+            }
+            frame.pipelines.push(pipeline);
+            frame.commands.push({
+                kind: 'mips',
+                record,
+                pipeline: frame.pipelines.length - 1,
+                // D3DTEXF_POINT picks a texel of the four; every other filter
+                // a program may name is made linearly.
+                linear: record.texture.GetAutoGenFilterType?.() !== D3DTEXF.POINT,
+            });
+            counters.mipsGenerated++;
+        }
+    };
+
+    /**
+     * The pipeline that draws one level from the level above: a triangle over
+     * the level, each pixel sampling the four texels above it at their shared
+     * corner.
+     *
+     * @param {string} format
+     */
+    const mipPipeline = async format=>{
+        const layout = backend.createBindGroupLayout({
+            label: 'mips',
+            entries: [
+                { binding: 0, visibility: FRAGMENT_VISIBILITY, texture: {} },
+                { binding: 1, visibility: FRAGMENT_VISIBILITY, sampler: {} },
+            ],
+        });
+        const module = await backend.createShaderModule({ label: 'mips', code: MIP_SHADER });
+        const gpu = await backend.createRenderPipelineAsync({
+            label: `mips:${format}`,
+            layout: backend.createPipelineLayout({ label: 'mips', bindGroupLayouts: [layout] }),
+            vertex: { module, entryPoint: 'vs_main' },
+            fragment: { module, entryPoint: 'fs_main', targets: [{ format }] },
+            primitive: { topology: 'triangle-list' },
+        });
+        return { gpu, layout };
+    };
+
+    /** @type {Map<string, any>} */
+    const mipSamplers = new Map();
+
+    /**
+     * Every level of a texture below the top, each from the one above it, in
+     * the frame where the draw that samples them stands.
+     *
+     * @param {any} frame @param {any} pipeline @param {any} command
+     */
+    function replayMips(frame, pipeline, command){
+        const record = command.record;
+        const filter = command.linear ? 'linear' : 'nearest';
+        let sampler = mipSamplers.get(filter);
+        if (!sampler)
+        {
+            if (!createSampler)
+            {
+                throw new Error('graphics/d3d8: levels are made through a sampler, and this'
+                    + ' renderer was given no way to make one');
+            }
+            sampler = createSampler({
+                label: `mips:${filter}`, magFilter: filter, minFilter: filter,
+                addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
+            });
+            mipSamplers.set(filter, sampler);
+        }
+        for (let face = 0; face < record.faces; face++)
+        {
+            for (let level = 1; level < record.gpuLevels; level++)
+            {
+                const pass = frame.beginPass({
+                    target: levelSurfaceOf(record, level, face),
+                    clear: false,
+                    label: `mips:${record.id}:${face}:${level}`,
+                });
+                pass.setPipeline(pipeline.gpu);
+                pass.setBindings(0, pipeline.layout, [
+                    { binding: 0, resource: levelSurfaceOf(record, level - 1, face).view },
+                    { binding: 1, resource: sampler },
+                ]);
+                pass.draw(3);
+            }
+        }
+    }
+
+    /**
      * Records one draw against the pass the model's targets name.
      *
      * The pipeline is asked for once per prepared state and then named by the
@@ -4319,6 +4484,10 @@ export function createRenderer(options){
         if (drawing.scissored !== false)
         {
             ensureScissor(model, frame);
+        }
+        if (staleMips.size > 0)
+        {
+            regenerateSampled(frame, prepared);
         }
         if (prepared.pipelineFrame !== frame)
         {
@@ -4848,6 +5017,7 @@ export function createRenderer(options){
         const stageBindings = cascade.stages.map((stage, index)=>{
             const texture = cascade.textures[index];
             return {
+                texture,
                 view: texture ? uploadIfDirty(texture).view : placeholderView(),
                 sampler: samplerFor(model.stageStates(index)),
                 // Which of those two it was, recorded rather than inferred: a
@@ -5046,21 +5216,28 @@ export function createRenderer(options){
          *
          * @param {any} texture
          * @param {{ width: number, height: number, format: number, levels?: number,
-         *           usage?: number, depth?: number }} desc  `depth` is a volume's.
+         *           usage?: number, depth?: number, gpuLevels?: number }} desc
+         *        `depth` is a volume's; `gpuLevels` more than `levels` for a
+         *        texture whose lower levels the device makes.
          */
         trackTexture(texture, desc){
             const levels = desc.levels ?? 1;
             // A cube map's six faces are six layers of one texture; a face's
             // level is a subresource numbered face * levels + level.
             const faces = texture.cube === true ? 6 : 1;
+            // The GPU's copy of a texture that makes its own levels holds the
+            // whole chain, of which the program sees the top.
+            const gpuLevels = desc.gpuLevels ?? levels;
             const entry = {
-                gpu: null, dirty: true, base: 0, levels, faces, texture,
+                gpu: null, dirty: true, base: 0, levels, faces, texture, gpuLevels,
+                autogen: gpuLevels > levels,
                 volume: texture.volume === true,
                 // A render-target texture is written by the GPU as well as
                 // by the guest, so its uploads have to keep their place in
                 // the frame; see `uploadTexels`. A copy landing in a plain
                 // texture turns this on too.
-                ordered: ((desc.usage ?? 0) & D3DUSAGE.RENDERTARGET) !== 0,
+                // So is one whose levels the GPU makes from the top.
+                ordered: ((desc.usage ?? 0) & D3DUSAGE.RENDERTARGET) !== 0 || gpuLevels > levels,
                 // Every level, until each has been uploaded once: a program
                 // fills the chain it asked for, and a chain sampled with a
                 // level missing shows the gap at the distance that level
@@ -5208,6 +5385,10 @@ export function createRenderer(options){
                     return hr;
                 };
             }
+            if (entry.autogen)
+            {
+                texture.GenerateMipSubLevels = ()=>markMips(entry);
+            }
             // A level of detail changes how the texture is sampled, which the
             // prepared state of the draw in hand holds: it is prepared again.
             const setLod = texture.SetLOD;
@@ -5294,6 +5475,10 @@ export function createRenderer(options){
                 // The GPU has written this texture now; its uploads from
                 // here on keep their place in the frame.
                 tracked.ordered = true;
+                if ((surfaceLevels.get(destination) ?? 0) === 0)
+                {
+                    markMips(tracked);
+                }
             }
             ensureFrame().commands.push({
                 kind: 'copy',
@@ -5819,6 +6004,7 @@ export function createRenderer(options){
                 draws: counters.draws,
                 clears: counters.clears,
                 programmable: counters.programmable,
+                mipsGenerated: counters.mipsGenerated,
                 prepared: { ...counters.prepared },
                 programs: programs.stats(),
                 skipped: { ...counters.skipped },
@@ -6099,6 +6285,20 @@ export function createRenderer(options){
                     ...(command.layer ? { origin: { x: 0, y: 0, z: command.layer } } : {}),
                     ...(command.depth ? { depthOrArrayLayers: command.depth } : {}),
                 });
+                pass = null;
+                continue;
+            }
+            if (command.kind === 'mips')
+            {
+                const made = pipelines[command.pipeline];
+                if (made.status === 'rejected')
+                {
+                    failure(made.reason);
+                }
+                else
+                {
+                    replayMips(frame, made.value, command);
+                }
                 pass = null;
                 continue;
             }
