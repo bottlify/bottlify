@@ -2691,3 +2691,27 @@ test('the service says the application is deactivated from WM_ACTIVATEAPP(0) unt
     fns.SetForegroundWindow.handler([hwnd]);
     assert.equal(service.deactivated(), false, 'and it came back');
 });
+
+test('the service counts every time the application was deactivated', ()=>{
+    // A layer that reads the state only when a program next calls it has to
+    // learn of a deactivation that came and went in between: DirectDraw's
+    // video memory is lost by one, and a program that stops drawing while it
+    // is in the background calls nothing until it is back.
+    const context = setup();
+    const { fns, memory, service } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+    fns.SetForegroundWindow.handler([hwnd]);
+    assert.equal(service.deactivations(), 0);
+    const desktop = fns.GetDesktopWindow.handler();
+    fns.SetForegroundWindow.handler([desktop]);
+    fns.SetForegroundWindow.handler([desktop]);
+    assert.equal(service.deactivations(), 1, 'once for each time it went, not each call');
+    fns.SetForegroundWindow.handler([hwnd]);
+    assert.equal(service.deactivated(), false);
+    assert.equal(service.deactivations(), 1, 'and the count stays once it is back');
+    fns.SetForegroundWindow.handler([desktop]);
+    fns.SetForegroundWindow.handler([hwnd]);
+    assert.equal(service.deactivations(), 2);
+});

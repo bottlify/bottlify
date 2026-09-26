@@ -201,12 +201,14 @@ export const win32Module = {
         /** @type {{ list: () => any[], clientRect: (hwnd: number) => any,
          *     place: (hwnd: number, x: number, y: number, width: number,
          *     height: number, how?: { announce?: boolean }) => boolean,
-         *     active: () => number, deactivated: () => boolean, refresh: () => void,
+         *     active: () => number, deactivated: () => boolean,
+         *     deactivations: () => number, refresh: () => void,
          *     rawInput: (report: import('./user32/rawinput.js').RawInputEvent) => void,
          *     modalLoop: import('./user32/windows.js').WindowService['modalLoop'] }} */
         let windowService = {
             list: ()=>[], clientRect: ()=>null, place: ()=>false, active: ()=>0,
-            deactivated: ()=>false, refresh: ()=>{}, rawInput: ()=>{}, modalLoop: ()=>0,
+            deactivated: ()=>false, deactivations: ()=>0, refresh: ()=>{}, rawInput: ()=>{},
+            modalLoop: ()=>0,
         };
 
         /** @type {(handle: number, text: string) => void} */
@@ -1897,6 +1899,13 @@ export const win32Module = {
              * what DirectDraw's exclusive mode is lost on.
              */
             applicationDeactivated: ()=>windowService.deactivated(),
+
+            /**
+             * How many times the application has been told it is no longer
+             * the active one: a caller that asks only when a program next
+             * calls it still learns of a deactivation that came and went.
+             */
+            applicationDeactivations: ()=>windowService.deactivations(),
 
             /**
              * One event of the mouse or the keyboard as the device reported
