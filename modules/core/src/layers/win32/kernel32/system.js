@@ -377,6 +377,29 @@ export function createSystemFunctions(host){
         return BigInt(milliseconds) * 10_000n + FILETIME_AT_UNIX_EPOCH;
     };
 
+    /** GetSystemInfo, and GetNativeSystemInfo, which on a 32-bit system is the same. */
+    const systemInfo = {
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([info])=>{
+            const bytes = new Uint8Array(SYSTEM_INFO_SIZE);
+            const view = new DataView(bytes.buffer);
+            view.setUint16(0, PROCESSOR_ARCHITECTURE_INTEL, true);
+            view.setUint32(4, PAGE_SIZE, true);
+            view.setUint32(8, MINIMUM_APPLICATION_ADDRESS, true);
+            view.setUint32(12, MAXIMUM_APPLICATION_ADDRESS, true);
+            view.setUint32(16, (1 << PROCESSOR.count) - 1, true); // the mask
+            view.setUint32(20, PROCESSOR.count, true);
+            view.setUint32(24, PROCESSOR_INTEL_PENTIUM, true);
+            view.setUint32(28, ALLOCATION_GRANULARITY, true);
+            // The family and the model and stepping, as CPUID gives them.
+            view.setUint16(32, PROCESSOR_LEVEL, true);
+            view.setUint16(34, PROCESSOR_REVISION, true);
+            host.writeMemory(info >>> 0, bytes);
+            return 0;
+        },
+    };
+
     /** Both time queries answer the same thing; see GetLocalTime. */
     const nowAsSystemTime = ()=>systemTimeFrom(
         BigInt(Math.trunc(host.systemTimeMs())) * 10_000n + FILETIME_AT_UNIX_EPOCH);
@@ -396,25 +419,33 @@ export function createSystemFunctions(host){
         },
 
         /** VOID GetSystemInfo(LPSYSTEM_INFO lpSystemInfo) */
-        GetSystemInfo: {
-            argBytes: 4,
+        GetSystemInfo: systemInfo,
+
+        /**
+         * VOID GetNativeSystemInfo(LPSYSTEM_INFO lpSystemInfo)
+         *
+         * What the machine is beneath WOW64; with no WOW64 on a 32-bit
+         * system, the same machine GetSystemInfo reports.
+         */
+        GetNativeSystemInfo: systemInfo,
+
+        /**
+         * BOOL IsWow64Process(HANDLE hProcess, PBOOL Wow64Process)
+         *
+         * FALSE for every process: this is a 32-bit system, and a process
+         * runs under WOW64 only on a 64-bit one.
+         */
+        IsWow64Process: {
+            argBytes: 8,
             /** @param {number[]} args */
-            handler: ([info])=>{
-                const bytes = new Uint8Array(SYSTEM_INFO_SIZE);
-                const view = new DataView(bytes.buffer);
-                view.setUint16(0, PROCESSOR_ARCHITECTURE_INTEL, true);
-                view.setUint32(4, PAGE_SIZE, true);
-                view.setUint32(8, MINIMUM_APPLICATION_ADDRESS, true);
-                view.setUint32(12, MAXIMUM_APPLICATION_ADDRESS, true);
-                view.setUint32(16, (1 << PROCESSOR.count) - 1, true); // the mask
-                view.setUint32(20, PROCESSOR.count, true);
-                view.setUint32(24, PROCESSOR_INTEL_PENTIUM, true);
-                view.setUint32(28, ALLOCATION_GRANULARITY, true);
-                // The family and the model and stepping, as CPUID gives them.
-                view.setUint16(32, PROCESSOR_LEVEL, true);
-                view.setUint16(34, PROCESSOR_REVISION, true);
-                host.writeMemory(info >>> 0, bytes);
-                return 0;
+            handler: ([handle, answer])=>{
+                if ((handle >>> 0) !== CURRENT_PROCESS && !object(handle, 'process'))
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                host.writeMemory(answer >>> 0, new Uint8Array(4));
+                return 1;
             },
         },
 
