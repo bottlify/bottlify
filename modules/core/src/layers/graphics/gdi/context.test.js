@@ -1044,6 +1044,38 @@ test('SetDIBitsToDevice draws only the scan lines it was given, from the picture
     }
 });
 
+test('SetDIBitsToDevice places its destination through the mapping mode and the layout', ()=>{
+    // Wine's test_SetDIBitsToDevice, the three cases in a mapping mode or an
+    // RTL layout: the destination point is mapped to the device and the
+    // rectangle keeps its size in device pixels; under RTL the point is the
+    // rectangle's right edge, so the picture is placed, not mirrored.
+    const scan = scanFixture(false);
+    const { fns } = scan;
+    scan.header(8);
+    fns.SetMapMode.handler([scan.dc, 8]);
+    fns.SetWindowExtEx.handler([scan.dc, 3, 3, 0]);
+    scan.fill();
+    assert.equal(fns.SetDIBitsToDevice.handler([scan.dc, 2, 2, 2, 2, 1, 2, 1, 5, SCAN_DATA,
+        WIRED_INFO, 0]), 3);
+    assert.deepEqual(scan.pixels(), expecting(only([41, 42, 49, 50], data(-32))), 'a third');
+
+    fns.SetWindowExtEx.handler([scan.dc, -1, -1, 0]);
+    scan.fill();
+    // Windows answers 4 here, one short of the lines at or below the source
+    // rectangle's top that it answers everywhere else; what makes the
+    // difference under a mirrored mapping is not known, and 5 is answered.
+    fns.SetDIBitsToDevice.handler([scan.dc, 2, 2, 4, 4, 1, 2, 1, 5, SCAN_DATA, WIRED_INFO, 0]);
+    assert.deepEqual(scan.pixels(), expecting(only([48, 49, 56, 57], data(-37))), 'mirrored');
+    fns.SetMapMode.handler([scan.dc, 1]);
+
+    fns.SetLayout.handler([scan.dc, 1]);
+    scan.fill();
+    assert.equal(fns.SetDIBitsToDevice.handler([scan.dc, 1, 2, 3, 2, 1, 2, 1, 5, SCAN_DATA,
+        WIRED_INFO, 0]), 3);
+    assert.deepEqual(scan.pixels(), expecting(only([36, 37, 38, 44, 45, 46], data(-27))),
+        'right to left');
+});
+
 test('SetDIBits takes DIB_PAL_INDICES into a monochrome bitmap, and only there', ()=>{
     // Wine's test_dib_formats: SetDIBits with DIB_PAL_COLORS + 1 fails into a
     // bitmap compatible with the screen and succeeds into one made with

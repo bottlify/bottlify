@@ -312,13 +312,15 @@ function masksFor(shape, bitCount){
  *        => number[]} options.readColorTable
  *        A DIB's colour table as colours, whatever its usage says it holds;
  *        a table of colours has entries `entryBytes` apart, four by default.
+ * @param {(dc: any, point: { x: number, y: number }) => { x: number, y: number }}
+ *        options.toDevice  A logical point as the device sees it, as LPtoDP maps it.
  * @returns The entry points; `bound`, the drawing interface a context is
  *     bound to, for the window manager, which paints its own controls through
  *     the same engine without a guest string to read; and `setDIBits`, which
  *     CreateDIBitmap initialises a bitmap with.
  */
 export function createDrawingFunctions(
-    { host, objects, dcOf, surfaceOf, currentMetrics, lend, readColorTable })
+    { host, objects, dcOf, surfaceOf, currentMetrics, lend, readColorTable, toDevice })
 {
     /** @type {DrawingServices} */
     const services = host.graphics ?? {};
@@ -649,7 +651,10 @@ export function createDrawingFunctions(
          *
          * The bits hold cLines scan lines from StartScan on, and only those are
          * drawn: see the drawing layer's setDIBitsToDevice for how they and the
-         * source rectangle are counted, and what the answer counts.
+         * source rectangle are counted, and what the answer counts. The
+         * destination point is mapped to the device and the rectangle keeps
+         * its size in device pixels; under an RTL layout the point is its
+         * right edge (Wine's test_SetDIBitsToDevice).
          */
         SetDIBitsToDevice: {
             argBytes: 48,
@@ -661,14 +666,19 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                const image = readDib(info >>> 0, bits >>> 0, usage >>> 0, dcOf(dest),
-                    lines >>> 0);
+                const dc = dcOf(dest);
+                const image = readDib(info >>> 0, bits >>> 0, usage >>> 0, dc, lines >>> 0);
                 if (!image)
                 {
                     return 0;
                 }
+                const origin = toDevice(dc, { x: xDest | 0, y: yDest | 0 });
+                if ((dc.layout & 1) !== 0)
+                {
+                    origin.x -= (width | 0) - 1;
+                }
                 return interfaces.setDIBitsToDevice(dest >>> 0, {
-                    xDest: xDest | 0, yDest: yDest | 0, width: width | 0, height: height | 0,
+                    xDest: origin.x, yDest: origin.y, width: width | 0, height: height | 0,
                     xSrc: xSrc | 0, ySrc: ySrc | 0,
                     firstScan: start >>> 0, scans: lines >>> 0,
                     image,
