@@ -133,7 +133,12 @@ machine with no codec installed answers. The graph's `tick` then decodes as far 
 and `src/app.js` copies each frame into the guest-owned surface the graph presents through
 `graphics.present` and writes each audio block into a mixer track of the clip's own rate, holding
 the picture back by how much of the film's sound is still owed when the audio ring is drained,
-and not at all otherwise.
+and not at all otherwise. Each frame carries the graph's video window -- its rectangle in its owner
+and whether it shows -- and a frame whose window the program has hidden is counted (`film.hidden`)
+and not drawn, while its sound and its clock go on. The window starts hidden, as quartz's video
+renderer does, and `AutoShow` (on by default) shows it when the graph pauses or runs. Where the
+window sits is carried but not used: the picture is still fitted to the whole screen, placing it in
+the owner's client area needing a window-geometry query this layer does not have.
 
 ### The hosted JPEG library
 

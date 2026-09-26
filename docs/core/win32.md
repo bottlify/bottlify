@@ -697,7 +697,11 @@ Stated as the code states them.
   `FORMAT_MESSAGE_FROM_SYSTEM`; **`HeapWalk`** ends the walk at once.
 - **DirectShow** decodes forward only: stop does not rewind, seeking and rate are ignored, and a
   graph with no decoder for a file answers `VFW_E_CANNOT_RENDER` and raises `EC_ERRORABORT` — the
-  answer a machine without the codec gives.
+  answer a machine without the codec gives. `IVideoWindow` starts hidden (`SW_HIDE`, `Visible`
+  `OAFALSE`, `AutoShow` `OATRUE`), is shown by `Pause` and `Run` under `AutoShow`, and each frame
+  carries its rectangle and visibility; a hidden window's frames are not drawn, but a shown one's
+  are fitted to the whole screen rather than placed where `SetWindowPosition` put the window
+  ([`media.md`](./media.md)).
 - **The `double`-returning CRT functions exist only with an `fpu` host**; without one an import of
   `sin` is reported missing rather than bound to a function that never sets the result register.
 - **No input method** (`imm32` succeeds by having nothing to do), **no image drawing** in image
