@@ -662,7 +662,8 @@ and read by its masks whatever they are, each channel written as its mask's top 
 widened by repeating them (`gdi/channels.js`, which the DIB codec shares), with 8-8-8, 5-6-5 and
 5-5-5 on their direct paths. A DIB pattern brush whose table was palette indices takes its colours
 from the palette the DC has when it paints. `setDIBitsToDevice` draws only the scan lines it is
-handed, counted from the DIB's bottom as `ySrc` is. A window context draws into a view (`viewOf`) of
+handed, counted from the DIB's bottom as `ySrc` is; a run-length encoded DIB (`decodeRle`) is drawn
+whole, by it and by `stretchDIBits`, and only the pixels its runs reach are put down. A window context draws into a view (`viewOf`) of
 the **desktop** — one 32-bit surface the size of the display, allocated from the guest heap so the
 presenter can show it the way it shows a DirectDraw primary — at the rectangle `win32` names for the
 window. `gdi32` calls `presentDesktop` after every drawing entry point (`BitBlt`, `TextOutA`,
@@ -740,8 +741,8 @@ Refused (the program is told no):
   layout's own; a colour-space colour key (`DDERR_NOCOLORKEYHW`); a colour fill on a Z-buffer; a
   palette or a colour key on a mip sublevel; the event form of `WaitForVerticalBlank`
   (`DDERR_UNSUPPORTED`).
-- GDI: a run-length encoded DIB (`BI_RLE8`, `BI_RLE4`) to `StretchDIBits`, `SetDIBitsToDevice`,
-  `SetDIBits` or `GetDIBits`; a DIB section backed by a file mapping. `StretchDIBits` draws 1- and
+- GDI: a run-length encoded DIB written back by `GetDIBits`, or top-down (`ERROR_INVALID_PARAMETER`,
+  as Windows answers); a DIB section backed by a file mapping. `StretchDIBits` draws 1- and
   4-bit DIBs, and `GetDIBits` writes 1-, 4- and 8-bit ones with their colour table: a section's own at
   its own depth, otherwise black and white, the sixteen VGA colours, or the twenty default-palette
   colours around a 3-3-2 cube, each pixel given its nearest.
