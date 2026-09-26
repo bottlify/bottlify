@@ -137,6 +137,101 @@ function buildSortExe(count, width){
     });
 }
 
+/**
+ * @typedef {Object} Call
+ * @property {string} name
+ * @property {(at: (name: string) => number) => number[]} args  The stack slots, first first.
+ * @property {'eax' | 'st0'} returns
+ * @property {number[]} expected  EAX, or the double's two halves, low first.
+ */
+
+/** @param {number} value */
+const halves = value=>{
+    const view = new DataView(new ArrayBuffer(8));
+    view.setFloat64(0, value, true);
+    return [view.getUint32(0, true), view.getUint32(4, true)];
+};
+
+/** @param {string} text */
+const cString = text=>[...text].map(c=>c.charCodeAt(0)).concat(0);
+
+/**
+ * Calls each import in turn with ESI and EDI holding marks of the program's
+ * own, then checks what came back -- EAX, or the double stored from ST0 --
+ * and that the marks are still there; exits 0, or with the number of the
+ * first call that answered wrong.
+ *
+ * @param {Call[]} calls @param {Record<string, number[]>} data
+ */
+function buildCallsExe(calls, data){
+    const names = [...new Set(calls.map(call=>call.name))];
+    return buildExe({
+        imports: { 'msvcrt.dll': names, 'KERNEL32.dll': ['ExitProcess'] },
+        data: { out: new Array(8).fill(0), ...data },
+        codeSize: 0x800,
+        code: ({ iat, at })=>[...assemble([
+            [0xbe, ...u32(0x5e5e5e5e), 0xbf, ...u32(0xd1d1d1d1)],        // esi, edi: marks
+            ...calls.flatMap((call, i)=>{
+                const args = call.args(at);
+                return [
+                    [0xbb, ...u32(i + 1)],                                // mov ebx, i+1
+                    ...[...args].reverse().map(arg=>[0x68, ...u32(arg)]), // push each, last first
+                    [0xff, 0x15, ...u32(iat(call.name))],                 // call [import]
+                    [0x83, 0xc4, args.length * 4],                        // add esp, 4n
+                    ...(call.returns === 'st0' ? [
+                        [0xdd, 0x1d, ...u32(at('out'))],                  // fstp qword [out]
+                        [0xa1, ...u32(at('out'))],                        // mov eax, [out]
+                        [0x3d, ...u32(call.expected[0])],                 // cmp eax, low
+                        { jump: [0x0f, 0x85], to: 'fail' },
+                        [0xa1, ...u32(at('out') + 4)],                    // mov eax, [out+4]
+                        [0x3d, ...u32(call.expected[1])],                 // cmp eax, high
+                    ] : [
+                        [0x3d, ...u32(call.expected[0])],                 // cmp eax, expected
+                    ]),
+                    { jump: [0x0f, 0x85], to: 'fail' },
+                    [0x81, 0xfe, ...u32(0x5e5e5e5e)],                     // cmp esi, mark
+                    { jump: [0x0f, 0x85], to: 'fail' },
+                    [0x81, 0xff, ...u32(0xd1d1d1d1)],                     // cmp edi, mark
+                    { jump: [0x0f, 0x85], to: 'fail' },
+                ];
+            }),
+            [0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],         // exit 0
+            'fail',
+            [0x53, 0xff, 0x15, ...u32(iat('ExitProcess'))],               // exit ebx
+        ])],
+    });
+}
+
+/** floor, toupper and strncmp through the import, with what the handlers answered. */
+function buildPrototypeExe(){
+    /** @type {Call[]} */
+    const calls = [];
+    for (const value of [2.5, -2.5, -0.5, 1e300, -3.75, 2 ** 52 - 0.5, 0.49999999999999994])
+    {
+        calls.push({ name: 'floor', args: ()=>halves(value), returns: 'st0',
+            expected: halves(Math.floor(value)) });
+    }
+    for (const [c, upper] of [[0x61, 0x41], [0x7a, 0x5a], [0x7b, 0x7b], [0x41, 0x41],
+        [0xe9, 0xe9], [0xffffffff, 0xffffffff], [0x161, 0x161]])
+    {
+        calls.push({ name: 'toupper', args: ()=>[c], returns: 'eax', expected: [upper] });
+    }
+    for (const [left, right, count, answer] of /** @type {[string, string, number, number][]} */ ([
+        ['abcX', 'abcY', 3, 0], ['abcX', 'abcY', 4, -1], ['abcY', 'abcX', 4, 1],
+        ['euro', 'yen', 1, 1], ['ab', 'abc', 99, -1], ['abc', 'abd', 0, 0],
+    ]))
+    {
+        calls.push({ name: 'strncmp', args: at=>[at(left), at(right), count], returns: 'eax',
+            expected: [answer >>> 0] });
+    }
+    return buildCallsExe(calls, {
+        abcX: cString('abcX'), abcY: cString('abcY'), ab: cString('ab'), abc: cString('abc'),
+        abd: cString('abd'),
+        // 0x80, the euro sign, sorts above 0xff: the order the handlers compared in.
+        euro: [0x80, 0], yen: [0xa5, 0],
+    });
+}
+
 /** @param {Uint8Array} executable @param {'emulator' | 'cork'} engine */
 async function exitCodeOf(executable, engine){
     const wasm = await readFile(new URL('v86.wasm', PREBUILT));
@@ -164,6 +259,12 @@ for (const engine of /** @type {const} */ (['cork', 'emulator']))
         async()=>{
             assert.equal(await exitCodeOf(buildCastExe(), engine), 0,
                 'the number of the first cast that came back wrong');
+        });
+
+    test(`floor, toupper and strncmp answer through the import, in the guest, under ${engine}`,
+        { timeout: 60000 }, async()=>{
+            assert.equal(await exitCodeOf(buildPrototypeExe(), engine), 0,
+                'the number of the first call that came back wrong');
         });
 
     test(`qsort sorts through the program's comparator, in the guest, under ${engine}`,

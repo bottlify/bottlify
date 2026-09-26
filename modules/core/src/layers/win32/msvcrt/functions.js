@@ -29,7 +29,9 @@ import {
     createWideFunctions, createWideClassificationFunctions, createMultiByteFunctions,
 } from './mbstring.js';
 import { createCxxFunctions } from './cxx.js';
-import { QSORT_CODE } from './guest-code.js';
+import { QSORT_CODE, guestEntry } from './guest-code.js';
+import * as inGuest from './inguest.js';
+import { COMPILED } from './inguest.x86.js';
 import { createMathFunctions } from './math.js';
 import { readDouble } from './float.js';
 import { createStartupFunctions } from './startup.js';
@@ -411,16 +413,8 @@ export function createMsvcrtFunctions(host){
             handler: ([left, right])=>compare(readString(left), readString(right)),
         },
 
-        /** int strncmp(const char *left, const char *right, size_t count) */
-        strncmp: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([left, right, count])=>compare(
-                readString(left).slice(0, count >>> 0),
-                readString(right).slice(0, count >>> 0),
-            ),
-        },
+        /** int strncmp(const char *left, const char *right, size_t count) -- in the guest */
+        strncmp: guestEntry(inGuest.strncmp, COMPILED.strncmp, host),
 
         /** int _stricmp(const char *left, const char *right) */
         _stricmp: {
@@ -502,13 +496,8 @@ export function createMsvcrtFunctions(host){
             },
         },
 
-        /** int toupper(int ch) */
-        toupper: {
-            convention: 'cdecl',
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([ch])=>(ch >= 0x61 && ch <= 0x7a ? ch - 0x20 : ch),
-        },
+        /** int toupper(int ch) -- in the guest */
+        toupper: guestEntry(inGuest.toupper, COMPILED.toupper, host),
 
         /** int tolower(int ch) */
         tolower: {

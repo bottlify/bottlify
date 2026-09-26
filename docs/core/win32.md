@@ -164,7 +164,9 @@ engine.
 A table entry is `{ argBytes, handler }` — the bytes the callee pops (zero for cdecl, where
 `argBytes` describes the stack layout only) and a function of the argument array. An entry may
 instead carry `guest`, a builder that emits guest code and registers the traps it falls back to
-(critical sections do this). The assembler (`src/app.js`) merges `win32.libraries()` with the
+(critical sections do this), or `data`, the bytes the export's slot holds: a variable the program
+reads through the address it imported, or a function that is code in the guest's own library
+(below). The assembler (`src/app.js`) merges `win32.libraries()` with the
 tables from `graphics`, `audio`, `input` and `media`, registers every handler with the bridge under
 `DLL!Name`, and asks the loader to synthesise one in-guest module per library, with the ordinals
 `win32.ordinals()`, `audio.ordinals()` (`DSOUND.dll`) and `media.ordinals()` declare for the libraries imported by number
@@ -199,6 +201,81 @@ processor exception does.
 (or reads a library the program ships through `modules.load`), and an address taken at the first
 instruction is the address that works at the last -- `FreeLibrary` of one of ours stops it being
 loaded and unmaps nothing.
+
+### Runtime functions that run in the guest
+
+A call into a host handler costs a crossing: out of translated code, the bridge's dispatch, the
+arguments read from guest memory, the way back -- 0.8-4 us a call under cork in node
+(`tools/host-call-bench.mjs`), where a function as small as `toupper` is a few instructions. The
+C runtime's pure functions -- no state, no call into the host -- are therefore code in the guest's
+own `msvcrt`: the export's `data` is x86, and the program's call reaches it as it reaches any
+function, translated with the program's own code. A function that calls back into the program
+(`qsort`'s comparator) makes an ordinary `call`, where a handler ran the guest from the host once
+a comparison.
+
+Such a function is written once, in JavaScript, in `msvcrt/inguest.js`, and marked `@guestCode`:
+
+```js
+/**
+ * int strncmp(const char *left, const char *right, size_t count)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @returns {i32}
+ */
+export function strncmp({ u8 }, left, right, count){ ... }
+```
+
+The tag names the convention (`cdecl` or `stdcall`); `@param` and `@returns` give each value's
+machine type -- `i32`/`u32` a stack slot or EAX, `f64` two slots or ST0, `x87` a double the caller
+left on the x87 stack and the callee pops (`_ftol`), `i64` EDX:EAX (a double truncated as `fisttp`
+truncates, or an integer extended), `void`. A function that touches guest memory takes the helpers
+it uses from its first parameter: loads `u8`, `i8`, `u16`, `i16`, `u32`, `i32`, `f32`, `f64`,
+stores `setU8`, `setU16`, `setU32`, `setF64`, `call(fn, ...args)` through a cdecl pointer, and
+`copyUp`/`copyDown`/`fill` (`rep movsb`, `std; rep movsb`, `rep stosb`).
+
+`npm run build` (and `npm run build:guest-code` alone) compiles every `@guestCode` function under
+`src/` with `scripts/guest-code/compile.mjs` -- parsed by `espree`, the parser ESLint already
+brings; nothing the running product loads -- into the module beside its source, `inguest.x86.js`,
+which is committed: the source tree runs with no build step, and the compiler is a development
+tool. `scripts/build-guest-code.test.js` fails when a committed module is not what its source
+compiles to. The code generation is a plain stack machine -- every variable in the frame, EAX and
+ECX for an expression, EBX for the tables' base -- with no register allocation; each function is
+position-independent (the loader places a `data` export wherever the module's `.data` section
+falls, and nothing tells the bytes their address), a table reached through the address a
+`call $+5` pushes.
+
+The subset is the part of JavaScript 32-bit integer and x87 code reproduces exactly, and everything
+outside it is a compile error naming its place in the source (the full rules are at the top of
+`compile.mjs`): `let`/`const`, `if`, `while`, `do`, `for`, `break`, `continue`, `return`; integers
+typed as asm.js types them (`|0`, `>>>0` and the bitwise operators bring a value back to 32 bits;
+a sum may feed an address, another sum, a bitwise operator, an index or a store, and is brought
+back before a comparison, a variable or a result); a comparison of two signed or two unsigned
+values, never one of each; `*` by a constant, `Math.imul` otherwise, no division; doubles loaded,
+stored, compared, rounded by `Math.floor`/`ceil`/`trunc` (the rounding control set around
+`frndint` and put back, the precision control never touched -- a program under Direct3D runs at
+single precision, and a function that changed it would move the translator's x87 regions to the
+slow mixed form), `Math.abs`, and returned; no double arithmetic, which under a single-precision
+control word would not compute what JavaScript does; a module-level constant folded in; an
+exported module-level typed array read by index, its contents placed after the code; a
+module-level function of one `return` inlined. Objects, arrays, strings, closures, `await` and
+calls to other handlers or the host are refused.
+
+The same function is the export's handler (`guestEntry`, `msvcrt/guest-code.js`): its arguments
+read off the stack as the x86 reads them, its result answered where the x86 leaves it. That is
+the reference `msvcrt/inguest.test.js` holds the x86 to on cork's test machine, input by input --
+boundary values and random ones from a fixed seed, under five control words for the doubles --
+the result registers, the x87 stack and memory byte for byte, and what a callee owes its caller:
+EBX, ESI, EDI and EBP kept, ESP past the return address, the direction flag clear, the control
+word as it was, the x87 stack empty but for a double result. It is also what answers wherever a
+handler is asked for directly (ntdll's `memset` family calls msvcrt's). A function that calls the
+guest has no handler in the engine -- a handler cannot run the guest and wait for it
+synchronously -- and is `guestExport`, the x86 alone; its tests run the JavaScript with a
+stand-in for the call.
+
+In the guest now, compiled: `floor`, `toupper`, `strncmp`; hand-assembled: `qsort`
+(`guest-code.js`) and `_ftol`/`_ftol2`/`_ftol2_sse` (`math.js`). Each keeps the answers of the
+handler it replaced (see the divergences below).
 
 ### The process model
 
@@ -728,6 +805,16 @@ nothing implements).
 
 Stated as the code states them.
 
+- **The C runtime's comparisons answer -1, 0 or 1, in the order of the ANSI page's characters.**
+  `strcmp`, `strncmp` and the case-blind `_stricmp`/`_strnicmp` normalise the sign, where a
+  runtime may answer the difference of the bytes; and they order bytes as the handlers ordered
+  the strings they decoded -- a byte's own value, except for the sixteen of 0x80..0x9F that
+  Windows-1252 gives characters above U+00FF, so 0x80 (the euro sign) sorts after 0xFF, where
+  msvcrt compares unsigned bytes. `strncmp` in the guest keeps that order (`ORDER` in
+  `msvcrt/inguest.js`) so the handler and the x86 answer alike; a string past 1 MiB, which the
+  handlers read no further than, is compared whole by the x86. The classifiers answer 1 rather
+  than msvcrt's class bit.
+
 - **Every listed display mode can be set.** `ChangeDisplaySettingsA`/`ExA` switch the screen to
   any mode `EnumDisplaySettingsA` lists -- the metrics, the desktop rectangle and the current
   settings follow, the refresh rate is accepted as asked, `CDS_TEST` answers without switching, and
@@ -857,7 +944,7 @@ Unit tests are colocated with each file, `node:test`, over `fakeMemory`
 | area | files (all `src/layers/win32/…`) |
 |------|----------------------------------|
 | kernel32 | `apc`, `atoms`, `code-arena`, `consoleio`, `critical`, `drives`, `environment`, `file-holds`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `modules`, `named-objects`, `process`, `processor`, `profile`, `resources`, `seh`, `slimsync`, `spawn`, `sync`, `system`, `teb`, `threading`, `versions`, `vfs` `.test.js` |
-| msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `globals`, `heap`, `io`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `stdio`, `strings`, `threads`, `time`, `widetext` `.test.js` |
+| msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `globals`, `heap`, `inguest`, `io`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `stdio`, `strings`, `threads`, `time`, `widetext` `.test.js` -- `inguest.test.js` holds each `@guestCode` function's x86 to its JavaScript on cork's test machine; the compiler's own tests (every form of the subset against JavaScript, every refusal with its place) are `scripts/guest-code/compile.test.js`, and `scripts/build-guest-code.test.js` fails on a stale `inguest.x86.js` |
 | user32 | `controls`, `cursors`, `dialogs`, `display`, `keys`, `messages`, `objects`, `paint`, `structs`, `system`, `windows` `.test.js` — `controls.test.js` paints a dialog through the real drawing engine and compares it byte for byte with `controls.reference.png` |
 | gdi32 | `drawing`, `functions`, `objects` `.test.js` |
 | the rest | `advapi32/{crypto,functions,registry,services,tokens}`, `advpack/functions`, `cabinet/{cabinet,inflate,lzx}`, `crypto/{der,digest,pkcs7,pki,rc4,rsa,signature,x509}` (`pki.test.js` builds the keys, certificates and signed messages the others read), `comctl32/{functions,imagelist,progress,propsheet,tab,treeview}`, `comdlg32/functions`, `d3dx9/functions`, `imm32/functions`, `lz32/{expand,functions}`, `mpr/functions`, `msacm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{cfb,functions,guid,objects,propvariant,storage,wbem}`, `oleaut32/{errorinfo,functions,invoke,objects,typelib}`, `quartz/graph`, `rpcrt4/functions`, `setupapi/{functions,inf}`, `sfc/functions`, `shell32/{fileop,functions,namespace,shelllink}`, `shlwapi/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,mmio,thread,timers,wave}`, `winspool/functions`, `wintrust/{authenticode,fixtures,functions,roots}` (`fixtures.test.js` signs cabinets and images with a chain of its own), `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |
@@ -865,7 +952,10 @@ Unit tests are colocated with each file, `node:test`, over `fakeMemory`
 
 `kernel32/critical.itest.js` runs the hand-assembled critical-section fast paths on the real
 emulator (`npm run test:integration`), pinning that the bytes the unit test checks are x86 that
-does the job. `src/exceptions.itest.js` runs three compiled fixtures -- `seh.exe`, `cxxeh.exe`,
+does the job. `src/crt-inguest.itest.js` calls the runtime's in-guest functions through the import
+of a small program, under cork and under the emulator: `_ftol`'s two halves, `qsort` through the
+program's comparator, and `floor`, `toupper` and `strncmp` against the handlers' answers with the
+program's ESI and EDI kept across each call. `src/exceptions.itest.js` runs three compiled fixtures -- `seh.exe`, `cxxeh.exe`,
 `unhandled.exe`, built from `test/fixtures/src/` by `scripts/build-fixtures.mjs` with clang and
 lld against the MSVC ABI -- through every path above, processor faults and two threads throwing
 at once included. `src/apc.itest.js` runs `apc.exe`, built the same way: APCs to itself and to

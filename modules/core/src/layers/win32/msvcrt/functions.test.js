@@ -263,7 +263,7 @@ test('toupper and tolower touch letters and nothing else', ()=>{
     assert.equal(fns.toupper.handler([0x61]), 0x41);
     assert.equal(fns.toupper.handler([0x41]), 0x41);
     assert.equal(fns.toupper.handler([0x39]), 0x39);
-    assert.equal(fns.toupper.handler([-1]), -1, 'EOF passes through');
+    assert.equal(fns.toupper.handler([-1]) | 0, -1, 'EOF passes through');
     assert.equal(fns.tolower.handler([0x5a]), 0x7a);
     assert.equal(fns.tolower.handler([0x7a]), 0x7a);
     assert.equal(fns.tolower.handler([0x5f]), 0x5f);

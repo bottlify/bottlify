@@ -19,6 +19,9 @@
  */
 
 import { readDouble, returningDouble } from './float.js';
+import { guestEntry } from './guest-code.js';
+import * as inGuest from './inguest.js';
+import { COMPILED } from './inguest.x86.js';
 
 /**
  * @typedef {Object} MathHost
@@ -133,6 +136,9 @@ export function createMathFunctions(host){
 
     return {
         ...table,
+
+        /** double floor(double x) -- in the guest; `_CIfloor` beside it stays a handler */
+        floor: guestEntry(inGuest.floor, COMPILED.floor, host),
 
         _ftol: ftol,
         _ftol2: ftol,
