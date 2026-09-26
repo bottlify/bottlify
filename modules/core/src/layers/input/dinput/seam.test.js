@@ -416,7 +416,10 @@ test('an unacquired device reports so rather than handing back zeroes', ()=>{
     f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 256)]);
     assert.equal(f.bridge.call(device, 'GetDeviceState', [256, AT.state]),
         DIERR_NOTACQUIRED, 'zeroes read as the player letting go of everything');
-    assert.equal(f.bridge.call(device, 'GetDeviceData',
+    // The buffer is another matter before DirectInput 8 -- see the test of it
+    // outliving Unacquire -- so the read is refused of a device made by 8.
+    const device8th = device8(f, GUID_SysKeyboard, false);
+    assert.equal(f.bridge.call(device8th, 'GetDeviceData',
         [DIDEVICEOBJECTDATA.SIZE, AT.data, AT.count, 0]), DIERR_NOTACQUIRED);
 });
 
@@ -671,6 +674,47 @@ test('unacquiring stops a device taking events, and acquiring resumes it', ()=>{
     assert.equal(f.dinput.post({ kind: 'key', code: DIK_A, down: true }), false);
     assert.equal(f.bridge.call(f.device, 'Acquire', []), DI_OK);
     assert.equal(f.dinput.post({ kind: 'key', code: DIK_A, down: true }), true);
+});
+
+test('the buffer outlives Unacquire, and before 8 it can be read while let go', ()=>{
+    // device8.c test_sys_mouse with a buffer of five, move for move. Before
+    // DirectInput 8 a read between Unacquire and Acquire is DI_OK and takes
+    // an event; from 8 it is DIERR_NOTACQUIRED, and the events it left are
+    // what overflows the buffer after the next move.
+    for (const [version, whileLetGo, afterwards] of [
+        [0x0700, DI_OK, DI_OK], [0x0800, DIERR_NOTACQUIRED, DI_BUFFEROVERFLOW]])
+    {
+        const f = fixture();
+        const name = `0x${version.toString(16)}`;
+        const root = version === 0x0800 ? directInput8(f, false) : f.root;
+        writeGuid(f.memory, AT.guid, GUID_SysMouse);
+        assert.equal(f.bridge.call(root, 'CreateDevice', [AT.guid, AT.out, 0]), DI_OK);
+        const device = f.memory.u32(AT.out);
+        f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 16)]);
+        f.memory.setU32(AT.property + DIPROPDWORD_DATA, 5);
+        f.bridge.call(device, 'SetProperty', [DIPROP_BUFFERSIZE, AT.property]);
+        const read = ()=>{
+            f.memory.setU32(AT.count, 1);
+            return f.bridge.call(device, 'GetDeviceData',
+                [DIDEVICEOBJECTDATA.SIZE, AT.data, AT.count, 0]);
+        };
+        const move = ()=>f.dinput.post({ kind: 'mouseMove', x: 10, y: 10 });
+
+        assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
+        move();
+        assert.equal(read(), DI_OK, name);
+        assert.equal(f.memory.u32(AT.count), 1);
+        move();
+        assert.equal(f.bridge.call(device, 'Unacquire', []), DI_OK);
+        assert.equal(read(), whileLetGo, name);
+        assert.equal(f.memory.u32(AT.count), 1, name);
+        assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
+        move();
+        assert.equal(f.bridge.call(device, 'Unacquire', []), DI_OK);
+        assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
+        assert.equal(read(), afterwards, name);
+        assert.equal(f.memory.u32(AT.count), 1, name);
+    }
 });
 
 test('acquiring what is acquired, or releasing what is not, has no effect and says so', ()=>{

@@ -180,16 +180,25 @@ test('setting a buffer size clears whatever was queued under the old one', ()=>{
     assert.equal(it.queued, 0);
 });
 
-test('unacquiring throws away the backlog and the pending motion', ()=>{
+test('unacquiring keeps the buffer and throws away the pending motion', ()=>{
+    // device8.c test_sys_mouse: events buffered before Unacquire are still
+    // there after it, and an overflow is still reported; what arrives while
+    // nobody holds the device is never buffered at all.
     const { it } = device(MOUSE);
-    it.setBufferSize(32);
+    it.setBufferSize(3);
     it.post({ kind: 'mouseMove', x: 40, y: 40 });
+    it.post({ kind: 'mouseMove', x: 1, y: 0 });
     it.unacquire();
-    assert.equal(it.queued, 0);
+    assert.equal(it.post({ kind: 'mouseMove', x: 5, y: 5 }), false);
+    assert.equal(it.queued, 2);
     it.acquire();
     const state = it.mouseState();
     assert.equal(state.x, 0, 'a program taking the device back reads it fresh');
     assert.equal(state.y, 0);
+    const kept = it.drain(10);
+    assert.equal(kept.overflow, true, 'three events for two places, reported after it');
+    assert.deepEqual(kept.events.map(e=>[e.offset, e.data]),
+        [[DIMOUSE_OFS.Y, 40], [DIMOUSE_OFS.X, 1]]);
 });
 
 test('a mouse event is queued at the offset of the axis it moved', ()=>{

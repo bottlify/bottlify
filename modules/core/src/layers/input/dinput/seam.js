@@ -771,7 +771,10 @@ export function createDirectInput(
             {
                 return DIERR_INVALIDPARAM;
             }
-            if (!device.acquired)
+            // Before DirectInput 8 the buffer stays readable once the device
+            // is let go of; from 8 it waits, kept, for the next Acquire
+            // (Wine's device8.c, test_sys_mouse).
+            if (!device.acquired && device.version >= 0x0800)
             {
                 return DIERR_NOTACQUIRED;
             }

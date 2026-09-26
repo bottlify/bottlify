@@ -313,10 +313,11 @@ export function createInputDevice({ kind, now }){
         },
         unacquire(){
             acquired = false;
-            // What happened while nobody was listening is not a program's to
-            // read when it comes back: it re-reads the state instead.
-            queue = [];
-            overflowed = false;
+            // The motion since the last read is dropped: a program taking the
+            // device back reads its state afresh. The buffer is not -- the
+            // events in it happened while the program held the device, and
+            // Windows keeps them, overflow and all, for the next read. What
+            // arrives while nobody holds it is never buffered (`post`).
             deltaX = 0;
             deltaY = 0;
             deltaWheel = 0;
