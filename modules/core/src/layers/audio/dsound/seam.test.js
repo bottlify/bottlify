@@ -499,6 +499,31 @@ test('two DirectSound objects have primary buffers of their own', ()=>{
     assert.equal(f.bridge.call(first, 'GetVolume', [0x1c00]), DSERR_CONTROLUNAVAIL);
 });
 
+test('CreateSoundBuffer reads a description of either size and refuses any other', ()=>{
+    // Wine's dsound test_primary: a dwSize one short of DSBUFFERDESC is
+    // DSERR_INVALIDPARAM with a null pointer back. The DirectX 3 layout,
+    // DSBUFFERDESC1, is the same without guid3DAlgorithm and is read the same.
+    const f = createRoot();
+    const out = 0x1800;
+    const descriptor = describeBuffer(f.memory, { bytes: 4096 });
+    for (const size of [0, DSBUFFERDESC.SIZE - 1, DSBUFFERDESC.SIZE_DX8 - 1,
+        DSBUFFERDESC.SIZE_DX8 + 1])
+    {
+        f.memory.setU32(out, 0xdeadbeef);
+        f.memory.setU32(descriptor + DSBUFFERDESC.dwSize, size);
+        assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]),
+            DSERR_INVALIDPARAM, `dwSize ${size}`);
+        assert.equal(f.memory.u32(out), 0, `dwSize ${size} writes a null back`);
+    }
+    assert.equal(f.dsound.buffers().length, 0);
+    for (const size of [DSBUFFERDESC.SIZE, DSBUFFERDESC.SIZE_DX8])
+    {
+        f.memory.setU32(descriptor + DSBUFFERDESC.dwSize, size);
+        assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]), DS_OK,
+            `dwSize ${size}`);
+    }
+});
+
 test('CreateSoundBuffer refuses null pointers rather than dereferencing them', ()=>{
     const f = createRoot();
     assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [0, 0x1800, 0]),

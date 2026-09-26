@@ -846,6 +846,14 @@ export function createDirectSound(
             {
                 return DSERR_INVALIDPARAM;
             }
+            // One of the two layouts, or a caller that disagrees with us about
+            // where every later field is.
+            const size = readU32(descriptor + DSBUFFERDESC.dwSize);
+            if (size !== DSBUFFERDESC.SIZE && size !== DSBUFFERDESC.SIZE_DX8)
+            {
+                writeU32(out, 0);
+                return DSERR_INVALIDPARAM;
+            }
             const flags = readU32(descriptor + DSBUFFERDESC.dwFlags);
             const primary = (flags & DSBCAPS_PRIMARYBUFFER) !== 0;
             const wanted = readU32(descriptor + DSBUFFERDESC.dwBufferBytes);
