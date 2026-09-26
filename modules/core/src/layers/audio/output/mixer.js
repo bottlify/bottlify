@@ -24,7 +24,7 @@ import {
  *
  * Two backends share one surface (`open`, `pump`, `consumed`, `diagnostics`,
  * a track's `write`, `played`, `playedBytes`, `pending`, `reset`, `close`,
- * `gain`, `balance`, `paused`), chosen by `shared`:
+ * `gain`, `balance`, `paused`, `retune`), chosen by `shared`:
  *
  * - Without it (the default, and what every caller that does not ask
  *   otherwise gets): `createEngineMixer`, unchanged from before this file grew
@@ -256,7 +256,7 @@ function createEngineMixer(
                  * @returns {number} output frames this became
                  */
                 write(pcm){
-                    const frames = convert(pcm, format, sampleRate, track.resample);
+                    const frames = convert(pcm, track.format, sampleRate, track.resample);
                     if (frames.length > 0)
                     {
                         track.queue.push(frames);
@@ -314,6 +314,24 @@ function createEngineMixer(
                         total += block.length / OUTPUT_CHANNELS;
                     }
                     return Math.max(0, total);
+                },
+
+                /**
+                 * Reads what is written from now on as recorded at another
+                 * rate. What is queued was converted already and stays as it
+                 * was, so the change is heard exactly where the bytes change.
+                 *
+                 * @param {number} rate
+                 */
+                retune(rate){
+                    // A track at the output's rate copies and leaves the seam
+                    // alone, so what it holds is from before that and is no
+                    // place to resume a resample from.
+                    if (track.format.sampleRate === sampleRate)
+                    {
+                        track.resample = { pos: 0, tail: null };
+                    }
+                    track.format = { ...track.format, sampleRate: rate };
                 },
 
                 /** Drops everything queued; the device was stopped. */
@@ -784,7 +802,20 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
                     pcm[(written + i) & PCM_MASK] = data[i];
                 }
                 Atomics.store(header, WRITTEN, written + take);
-                return Math.round(take / stride * sampleRate / format.sampleRate);
+                return Math.round(take / stride * sampleRate / track.format.sampleRate);
+            },
+
+            /**
+             * Tells the reader the rate to resample from. It applies to what
+             * is still unread in the slot as well, a turn's worth at most,
+             * because the slot has one rate and no marker in its bytes.
+             *
+             * @param {number} rate
+             */
+            retune(rate){
+                track.format = { ...track.format, sampleRate: rate };
+                track.capacityFrames = Math.round(rate / 5);
+                Atomics.store(header, RATE, rate);
             },
 
             /** Output frames the audio thread has actually mixed from this slot. */
@@ -860,7 +891,7 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
         let localPaused = false;
         const bytesPerSample = format.bitsPerSample === 8 ? 1 : 2;
         const stride = bytesPerSample * format.channels;
-        return {
+        const track = {
             format,
             slot: -1,
             capacityFrames: Math.round(format.sampleRate / 5),
@@ -886,7 +917,12 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
              */
             write(data){
                 writtenBytes += data.length;
-                return Math.round(data.length / stride * sampleRate / format.sampleRate);
+                return Math.round(data.length / stride * sampleRate / track.format.sampleRate);
+            },
+            /** @param {number} rate */
+            retune(rate){
+                track.format = { ...track.format, sampleRate: rate };
+                track.capacityFrames = Math.round(rate / 5);
             },
             played: ()=>0,
             playedBytes: ()=>writtenBytes,
@@ -895,9 +931,10 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
                 writtenBytes = 0;
             },
             close(){
-                openTracks.delete(this);
+                openTracks.delete(track);
             },
         };
+        return track;
     }
 }
 

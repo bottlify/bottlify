@@ -264,6 +264,15 @@ export const audioModule = {
                     tracks.set(buffer, track);
                     openTracks++;
                 }
+                // A program may retune a buffer while it plays, and its cursor
+                // hands over bytes at the new rate from that moment. A track
+                // left at the old one plays them at the wrong pitch and makes
+                // more or less sound than the guest's clock allows for, which
+                // the backlog policy below then throws away or starves on.
+                if (track.format.sampleRate !== buffer.frequency)
+                {
+                    track.retune(buffer.frequency);
+                }
                 // Too far ahead to be worth playing: the cursor is driven by the
                 // guest's clock and the ring drains at the pace of a real
                 // device, so a queue past the ring's own depth is audio whose

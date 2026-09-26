@@ -11,7 +11,7 @@ import { createMixer } from './mixer.js';
 import { createRing } from './ring.js';
 import {
     WRITTEN, DROP_TO, READ, STATE, STATE_FREE, SLOTS, MIXED_FRAMES, slotHeaderOffset, slotPcmOffset,
-    SLOT_HEADER_INT32, SLOT_BYTES, createSeam, resampleInto,
+    SLOT_HEADER_INT32, SLOT_BYTES, RATE, createSeam, resampleInto,
 } from './mix.js';
 
 /** Sixteen-bit stereo at the output's own rate: no conversion in the way. */
@@ -140,6 +140,28 @@ test('a track\'s balance scales each side on its own, on top of its gain', ()=>{
     const heard = drain(mixer, 1);
     assert.ok(Math.abs(heard[0] - 0.25) < 1e-6, `left ${heard[0]}`);
     assert.ok(Math.abs(heard[1] - 0.0625) < 1e-6, `right ${heard[1]}`);
+});
+
+test('a retuned track resamples what follows at its new rate', ()=>{
+    // A sound buffer's frequency can change while it plays, and the bytes it
+    // hands over from then on are read at that rate.
+    const mixer = createMixer();
+    const track = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
+    const tone = pcm16(new Array(480).fill(8192));
+    assert.equal(track.write(tone), 480, 'at the output\'s rate a frame is a frame');
+
+    track.retune(24000);
+    assert.equal(track.format.sampleRate, 24000);
+    const slower = track.write(tone);
+    assert.ok(Math.abs(slower - 960) <= 2, `half the rate is twice the frames, got ${slower}`);
+    track.retune(96000);
+    const faster = track.write(tone);
+    assert.ok(Math.abs(faster - 240) <= 2, `twice the rate is half, got ${faster}`);
+
+    mixer.pump();
+    const heard = drain(mixer, 480 + slower + faster);
+    assert.ok(heard.every(sample=>Math.abs(sample - 0.25) < 1e-6),
+        'the same level all the way through: no seam from the rate before');
 });
 
 test('a slower source is resampled to the output rate', ()=>{
@@ -365,6 +387,18 @@ test('with a shared table, write puts the guest\'s own bytes into the slot', ()=
         'WRITTEN moved by the guest\'s own bytes, unrounded');
     assert.deepEqual([...pcm.subarray(0, written.length)], [...written],
         'byte-equal: nothing converted it');
+});
+
+test('with a shared table, a retuned track tells the reader its new rate', ()=>{
+    const mixer = createMixer({ shared: true, sampleRate: 48000 });
+    const track = mixer.open({ sampleRate: 22050, channels: 2, bitsPerSample: 16 });
+    track.retune(44100);
+    const { header } = slotView(mixer, track.slot);
+    assert.equal(Atomics.load(header, RATE), 44100, 'the audio thread resamples from it');
+    assert.equal(track.format.sampleRate, 44100);
+    assert.equal(track.capacityFrames, 44100 / 5, 'two hundred milliseconds at the new rate');
+    assert.equal(track.write(pcm16(new Array(882).fill(0))), 480,
+        'what a write became is counted at the new rate too');
 });
 
 test('with a shared table, pump() allocates no Float32Array', ()=>{
