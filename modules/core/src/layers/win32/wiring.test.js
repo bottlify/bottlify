@@ -564,3 +564,140 @@ test('SETUPAPI finds an INF on the volume by bare name and registers into advapi
         await win32Module.dispose();
         await filesystemModule.dispose();
     });
+
+/**
+ * A handle table that refuses what it does not hold, as the kernel's does,
+ * and says what it holds.
+ */
+function handleTable(){
+    /** @type {Map<number, { type: string, object: any }>} */
+    const entries = new Map();
+    let next = 0x100;
+    return {
+        entries,
+        /** @param {string} type @param {any} object */
+        open(type, object){
+            entries.set(next, { type, object });
+            next += 4;
+            return next - 4;
+        },
+        /** @param {number} handle @param {string} [type] */
+        resolve(handle, type){
+            const entry = entries.get(handle);
+            if (!entry || (type && entry.type !== type))
+            {
+                throw new Error(`invalid handle ${handle}`);
+            }
+            return entry.object;
+        },
+        /** @param {number} handle */
+        close(handle){
+            const entry = entries.get(handle);
+            if (!entry)
+            {
+                throw new Error(`invalid handle ${handle}`);
+            }
+            entries.delete(handle);
+            return entry.object;
+        },
+        /** @param {number} handle */
+        typeOf: handle=>entries.get(handle)?.type ?? null,
+    };
+}
+
+test('mmio opens a file by the handle kernel32 gave the program, and closes it with its own',
+    async()=>{
+        // mmio.c test_mmioSeek: the file is read from where the handle stands.
+        const filesystem = await filesystemModule.create({});
+        const handles = handleTable();
+        const thread = { id: 1 };
+        const { bytes, view, libraries } = await build({
+            filesystem, kernel: { handles, currentThread: ()=>thread },
+        });
+        const kernel32 = libraries['KERNEL32.dll'];
+        const winmm = libraries['WINMM.dll'];
+        const GENERIC_READ_WRITE = 0xc0000000;
+        const CREATE_ALWAYS = 2;
+        const FILE_BEGIN = 0;
+        bytes.set([...'C:\\riff.bin\0'].map(ch=>ch.charCodeAt(0)), 0x1000);
+        const file = kernel32.CreateFileA.handler(
+            [0x1000, GENERIC_READ_WRITE, 0, 0, CREATE_ALWAYS, 0, 0]);
+        bytes.set(Array.from({ length: 64 }, (_, index)=>index), 0x2000);
+        assert.equal(kernel32.WriteFile.handler([file, 0x2000, 64, 0x1100, 0]), 1);
+        assert.equal(kernel32.SetFilePointer.handler([file, 16, 0, FILE_BEGIN]), 16);
+
+        const info = 0x3000;
+        view.setUint32(info + 48, file, true);
+        const handle = winmm.mmioOpenA.handler([0, info, 0]);
+        assert.notEqual(handle, 0, `opened, error ${view.getUint32(info + 12, true)}`);
+        assert.equal(winmm.mmioSeek.handler([handle, 0, 1]), 16);
+        assert.equal(winmm.mmioRead.handler([handle, 0x4000, 4]), 4);
+        assert.deepEqual([...bytes.subarray(0x4000, 0x4004)], [16, 17, 18, 19]);
+        assert.equal(winmm.mmioClose.handler([handle, 0]), 0);
+        assert.equal(handles.entries.has(file), false, 'CloseHandle closed the program\'s handle');
+        await win32Module.dispose();
+        await filesystemModule.dispose();
+    });
+
+test('a program\'s own I/O procedure is called through the bridge, on the calling thread',
+    async()=>{
+        const thread = { id: 1 };
+        /** @type {{ entry: number, args: number[], thread: unknown }[]} */
+        const calls = [];
+        const { bytes, view, libraries } = await build({
+            bridge: {
+                /** @param {{ entry: number, args: number[], thread: unknown }} call */
+                callGuest: call=>{
+                    calls.push(call);
+                    return Promise.resolve(0);
+                },
+                callerThread: ()=>thread,
+            },
+        });
+        const winmm = libraries['WINMM.dll'];
+        const PROCEDURE = 0x401000;
+        const XYZ = 0x205a5958;
+        const MMIO_INSTALLPROC = 0x10000;
+        const MMIOM_OPEN = 3;
+        const MMIOM_CLOSE = 4;
+        winmm.mmioInstallIOProcA.handler([XYZ, PROCEDURE, MMIO_INSTALLPROC]);
+        bytes.set([...'movie.xyz\0'].map(ch=>ch.charCodeAt(0)), 0x1000);
+        const info = 0x3000;
+        view.setUint32(info + 4, XYZ, true);
+        const handle = await winmm.mmioOpenA.handler([0x1000, info, 0]);
+        assert.notEqual(handle, 0);
+        assert.deepEqual([calls[0].entry, calls[0].args[1], calls[0].thread],
+            [PROCEDURE, MMIOM_OPEN, thread]);
+        const [record, , name] = calls[0].args;
+        assert.equal(String.fromCharCode(...bytes.subarray(name, bytes.indexOf(0, name))),
+            'movie.xyz');
+        assert.ok(record >= ARENA.base && record < ARENA.base + ARENA.size,
+            'the MMIOINFO the procedure is handed is on the program\'s heap');
+        assert.equal(await winmm.mmioClose.handler([handle, 0]), 0);
+        assert.equal(calls.at(-1)?.args[1], MMIOM_CLOSE);
+        await win32Module.dispose();
+    });
+
+test('a drop target is the property user32 answers for its window', async()=>{
+    // dragdrop.c test_Register_Revoke reads it back with GetPropA. The
+    // desktop is a window user32 answers for without a program making one.
+    const thread = { id: 1 };
+    const { bytes, view, libraries } = await build({
+        kernel: { currentThread: ()=>thread }, bridge: { callerThread: ()=>thread },
+    });
+    const user32 = libraries['USER32.dll'];
+    const ole32 = libraries['ole32.dll'];
+    const window = user32.GetDesktopWindow.handler([]);
+    assert.equal(user32.IsWindow.handler([window]), 1);
+    assert.equal(ole32.OleInitialize.handler([0]), 0);
+    const target = 0x2000;
+    view.setUint32(target, 0x2100, true);
+    assert.equal(await ole32.RegisterDragDrop.handler([window, target]), 0);
+    // Above 0xFFFF, where a pointer is a name rather than an atom.
+    const name = 0x20000;
+    bytes.set([...'OleDropTargetInterface\0'].map(ch=>ch.charCodeAt(0)), name);
+    assert.equal(user32.GetPropA.handler([window, name]), target);
+    assert.equal(await ole32.RevokeDragDrop.handler([window]), 0);
+    assert.equal(user32.GetPropA.handler([window, name]), 0);
+    await win32Module.dispose();
+});
