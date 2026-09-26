@@ -259,6 +259,9 @@ const DEFAULT_ORIGIN = 0;
 const DEFAULT_WIDTH = 640;
 const DEFAULT_HEIGHT = 480;
 
+/** The desktop's style: shown, and clipping what is drawn on it to itself. */
+const DESKTOP_STYLE = 0x96000000;
+
 /** GetWindowLong / SetWindowLong indices: negative ones name a field. */
 const GWL_WNDPROC = -4;
 const GWL_HINSTANCE = -6;
@@ -719,8 +722,41 @@ export function createWindowFunctions(host){
         return 0;
     };
 
+    /**
+     * The desktop: the window every top-level window sits on, as
+     * GetDesktopWindow names it. Made when a program first asks for it, and
+     * kept out of the table the other windows are walked in: it is behind
+     * all of them, never painted over them or found before them.
+     *
+     * @type {any}
+     */
+    let desktop = null;
+    const desktopWindow = ()=>{
+        if (!desktop)
+        {
+            desktop = {
+                hwnd: 0, className: '#32769', title: '', style: DESKTOP_STYLE, exStyle: 0,
+                parent: 0, instance: 0, id: 0, wndProc: 0, menu: 0, x: 0, y: 0,
+                width: 0, height: 0, userData: 0, extra: new DataView(new ArrayBuffer(0)),
+                destroyed: false, updateRect: null, erase: false, ncDirty: false,
+            };
+            desktop.hwnd = host.handles.open('window', desktop);
+        }
+        return desktop;
+    };
+
     /** @param {number} hwnd @returns {any | null} */
     const live = hwnd=>{
+        if (desktop !== null && (hwnd >>> 0) === desktop.hwnd)
+        {
+            // The screen, whatever mode it was last switched to, and nothing
+            // a program placed it at instead.
+            desktop.x = 0;
+            desktop.y = 0;
+            desktop.width = host.screen?.width ?? DEFAULT_WIDTH;
+            desktop.height = host.screen?.height ?? DEFAULT_HEIGHT;
+            return desktop;
+        }
         const record = windows.get(hwnd >>> 0);
         return record && !record.destroyed ? record : null;
     };
@@ -1093,7 +1129,7 @@ export function createWindowFunctions(host){
      */
     const destroyWindow = (hwnd, thread, told = 'all')=>{
         const record = live(hwnd);
-        if (!record)
+        if (!record || record === desktop)
         {
             return 0;
         }
@@ -1392,7 +1428,9 @@ export function createWindowFunctions(host){
             title: (windowName >>> 0) === 0 ? '' : host.readCString(windowName, MAX_WINDOW_TEXT),
             style: style >>> 0,
             exStyle: exStyle >>> 0,
-            parent: parent >>> 0,
+            // A window made on the desktop is a top-level window, which is
+            // what a parent of zero already says.
+            parent: desktop !== null && (parent >>> 0) === desktop.hwnd ? 0 : parent >>> 0,
             instance: instance >>> 0,
             // For a child window hMenu is its control id; for any other --
             // an owned popup included -- it is a menu handle, which the menu
@@ -2647,7 +2685,9 @@ export function createWindowFunctions(host){
                 focus: focusWindow, setFocus, active: activeWindow, activate,
                 capture: ()=>captured, setCapture, releaseCapture,
                 send, callProcedure, geometry, windowFromPoint, isChild, repaint, appear, uncover,
-                shown, raise, restack, sysColorBrush: (/** @type {number} */ index)=>(draw
+                shown, raise, restack, desktop: desktopWindow,
+                isDesktop: (/** @type {any} */ record)=>record !== null && record === desktop,
+                sysColorBrush: (/** @type {number} */ index)=>(draw
                     ? draw.solidBrush(sysColor(index)) : 0),
                 /**
                  * The window of a top-level window's owner chain that was

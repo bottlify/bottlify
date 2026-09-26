@@ -1303,10 +1303,16 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: ([action, , value])=>systemParameter(action, value),
         },
 
-        /** HWND GetDesktopWindow(void) */
+        /**
+         * HWND GetDesktopWindow(void)
+         *
+         * A window like any other to the calls that take one -- IsWindow,
+         * GetWindowRect, a parent for CreateWindowEx -- and never null: a
+         * program measures the screen through it and makes its windows on it.
+         */
         GetDesktopWindow: {
             argBytes: 0,
-            handler: ()=>0,
+            handler: ()=>host.desktop?.().hwnd ?? 0,
         },
 
         /** HMONITOR MonitorFromRect(LPCRECT lprc, DWORD dwFlags) */
@@ -1591,9 +1597,15 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 // a dialog's first control is its GW_CHILD, and its tab order
                 // is GW_HWNDNEXT from there.
                 const child = host.isChild(record);
+                const topLevel = ()=>ordered().filter(other=>!host.isChild(other)).reverse();
+                if (host.isDesktop?.(record))
+                {
+                    // The top-level windows are the desktop's children.
+                    return (command >>> 0) === GW_CHILD ? topLevel()[0]?.hwnd ?? 0 : 0;
+                }
                 const siblings = child
                     ? ordered().filter(other=>other.parent === record.parent && host.isChild(other))
-                    : ordered().filter(other=>!host.isChild(other)).reverse();
+                    : topLevel();
                 const at = siblings.indexOf(record);
                 switch (command >>> 0){
                     case GW_HWNDFIRST:

@@ -343,6 +343,39 @@ test('a child is hit where GetWindow stacks it, and SetWindowPos restacks it', (
     assert.equal(fns.WindowFromPoint.handler([50, 50]), b);
 });
 
+test('the desktop is a window: it exists, it is the screen, and it cannot be destroyed', ()=>{
+    // user32's window tests take GetDesktopWindow for a window throughout: a
+    // parent for top-level windows, a rectangle that is the screen. It is
+    // one window, the same handle every time, of the class #32769.
+    const GW_CHILD = 5;
+    const WS_POPUP = 0x80000000;
+    const { memory, fns } = setup();
+    const desktop = fns.GetDesktopWindow.handler([]);
+    assert.notEqual(desktop, 0);
+    assert.equal(fns.GetDesktopWindow.handler([]), desktop, 'the same one every time');
+    assert.equal(fns.IsWindow.handler([desktop]), 1);
+    assert.equal(fns.IsWindowVisible.handler([desktop]), 1);
+    memory.fill(RECT_BUFFER, 4);
+    assert.equal(fns.GetWindowRect.handler([desktop, RECT_BUFFER]), 1);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)),
+        [0, 0, SCREEN.width, SCREEN.height], 'the screen');
+    fns.GetClientRect.handler([desktop, RECT_BUFFER]);
+    assert.deepEqual([8, 12].map(at=>memory.u32(RECT_BUFFER + at)), [SCREEN.width, SCREEN.height]);
+    assert.equal(fns.GetClassNameA.handler([desktop, TEXT_BUFFER, 32]), 6);
+    assert.equal(memory.readCString(TEXT_BUFFER, 32), '#32769');
+
+    makeWindow(memory, fns);
+    const top = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, WS_POPUP | WS_VISIBLE,
+        0, 0, 50, 50, desktop, 0, HINSTANCE, 0]);
+    assert.notEqual(top, 0);
+    assert.equal(fns.GetParent.handler([top]), 0, 'a window made on the desktop is top-level');
+    assert.equal(fns.GetWindow.handler([desktop, GW_CHILD]), top,
+        'and the topmost of them is the desktop\'s first child');
+
+    assert.equal(fns.DestroyWindow.handler([desktop]), 0);
+    assert.equal(fns.IsWindow.handler([desktop]), 1, 'nothing takes the desktop away');
+});
+
 test('GetLastActivePopup answers the popup of an owner chain that was active last', ()=>{
     // user32's window tests: an owner, a popup it owns, and a popup that one
     // owns, each shown as it is made -- the owner's last active popup is the
