@@ -7,7 +7,8 @@
 /**
  * A RIFF WAVE image, read into PCM the mixer can take.
  *
- * Two encodings are understood: PCM as it is, and Microsoft's ADPCM, which is
+ * Two encodings are understood: PCM as it is, whether its format chunk says so
+ * with the plain tag or the extensible one, and Microsoft's ADPCM, which is
  * what a program of this era ships a compressed sound in and what PlaySound
  * decodes through the audio compression manager. Anything else is refused,
  * and the refusal is the caller's to report.
@@ -15,6 +16,13 @@
 
 const WAVE_FORMAT_PCM = 1;
 const WAVE_FORMAT_ADPCM = 2;
+const WAVE_FORMAT_EXTENSIBLE = 0xfffe;
+
+/**
+ * The tail of every KSDATAFORMAT_SUBTYPE GUID that stands for a plain format
+ * tag: the tag itself is the GUID's first dword, and PCM's is 1.
+ */
+const SUBTYPE_TAIL = [0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71];
 
 /** WAVEFORMATEX, and the ADPCM extension that follows it. */
 const FORMAT = Object.freeze({
@@ -27,6 +35,9 @@ const FORMAT = Object.freeze({
     wSamplesPerBlock: 18,
     wNumCoef: 20,
     aCoef: 22,
+    /** WAVEFORMATEXTENSIBLE's sub-format GUID, and where the structure ends. */
+    SubFormat: 24,
+    extensibleSize: 40,
 });
 
 /** How the step size adapts after each nibble, indexed by the nibble. */
@@ -51,6 +62,24 @@ const i16 = (bytes, at)=>(u16(bytes, at) << 16) >> 16;
  * @property {number} channels
  * @property {number} bitsPerSample
  */
+
+/**
+ * The format tag a format chunk stands for. An extensible format names its
+ * encoding by a GUID after the header rather than by the tag, and the PCM
+ * sub-format is PCM however many channels or bits it carries. Only PCM is
+ * read through it: another encoding's own extension would sit where the
+ * extensible fields are.
+ *
+ * @param {Uint8Array} fmt
+ * @returns {number}
+ */
+function formatTag(fmt){
+    const tag = u16(fmt, FORMAT.wFormatTag);
+    const pcm = tag === WAVE_FORMAT_EXTENSIBLE && fmt.length >= FORMAT.extensibleSize
+        && u32(fmt, FORMAT.SubFormat) === WAVE_FORMAT_PCM
+        && SUBTYPE_TAIL.every((byte, at)=>fmt[FORMAT.SubFormat + 4 + at] === byte);
+    return pcm ? WAVE_FORMAT_PCM : tag;
+}
 
 /**
  * The PCM inside a RIFF WAVE image, or null when it is not one this can play.
@@ -94,7 +123,7 @@ export function parseWave(bytes){
     {
         return null;
     }
-    switch (u16(fmt, FORMAT.wFormatTag)){
+    switch (formatTag(fmt)){
         case WAVE_FORMAT_PCM:
             return { format, pcm: data };
         case WAVE_FORMAT_ADPCM:

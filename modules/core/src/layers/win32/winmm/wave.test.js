@@ -52,6 +52,36 @@ test('what is not a WAVE, or is a format nothing decodes, is refused', ()=>{
     assert.equal(parseWave(riff([...chunk('fmt ', mulaw), ...chunk('data', [1, 2])])), null);
 });
 
+/**
+ * WAVEFORMATEXTENSIBLE: the tag 0xFFFE, then after the 18-byte header the
+ * valid bits, the channel mask and the sub-format GUID that names the
+ * encoding -- here KSDATAFORMAT_SUBTYPE_PCM or _IEEE_FLOAT, which differ only
+ * in their first dword.
+ *
+ * @param {number} subtype
+ */
+const extensible = subtype=>[
+    ...le16(0xfffe), ...le16(2), ...le32(22050), ...le32(22050 * 4), ...le16(4), ...le16(16),
+    ...le16(22), ...le16(16), ...le32(3),
+    ...le32(subtype), ...le16(0), ...le16(0x10),
+    0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
+];
+
+test('an extensible format whose sub-format is PCM is PCM', ()=>{
+    const wave = parseWave(riff([
+        ...chunk('fmt ', extensible(1)), ...chunk('data', [1, 2, 3, 4]),
+    ]));
+    assert.ok(wave, 'KSDATAFORMAT_SUBTYPE_PCM');
+    assert.deepEqual(wave.format, { sampleRate: 22050, channels: 2, bitsPerSample: 16 });
+    assert.deepEqual([...wave.pcm], [1, 2, 3, 4]);
+    assert.equal(parseWave(riff([
+        ...chunk('fmt ', extensible(3)), ...chunk('data', [1, 2, 3, 4]),
+    ])), null, 'KSDATAFORMAT_SUBTYPE_IEEE_FLOAT is not PCM');
+    assert.equal(parseWave(riff([
+        ...chunk('fmt ', extensible(1).slice(0, 24)), ...chunk('data', [1, 2, 3, 4]),
+    ])), null, 'an extensible header too short to carry its sub-format');
+});
+
 test('an ADPCM block opens with its two samples and predicts the rest from them', ()=>{
     // Predictor 0 repeats the previous sample, so a run of zero nibbles holds
     // the level; each nibble then scales the step by the adaptation table's
