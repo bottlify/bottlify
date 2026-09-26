@@ -127,7 +127,7 @@ instantiation of the module reports (method in "Inventory" below):
 | `d3dx9_25.dll`, `d3dx9_26.dll`, `d3dx9_27.dll` | `d3dx9/` | 13 each | Stub tables for the D3DX helper libraries, shadowed by the real DLL whenever the DirectX system volume is mounted and a program does not ship its own ([`decisions.md`](../../roadmap/decisions.md)). |
 | `WININET.dll` | `wininet/` | 12 | HTTP as a handle tree; a request parks the caller. |
 | `IMM32.dll` | `imm32/` | 10 | "There is no input method" — which is the state a game asks for. |
-| `RPCRT4.dll` | `rpcrt4/` | 6 | `UuidCreate` and the other GUID/status helpers a COM-adjacent program links directly. |
+| `RPCRT4.dll` | `rpcrt4/` | 8 | `UuidCreate` and the other GUID/status helpers a COM-adjacent program links directly; `UuidToStringA` spells a UUID without braces, in lower case, into a string the library allocates on the process heap, which `RpcStringFreeA` frees before clearing the caller's pointer. |
 | `VERSION.dll` | `version/` | 8 | The version block read out of a file's own image, A and W: `VerQueryValueA` answers a text value in ANSI, in the room `GetFileVersionInfoSize` reserves behind the block (marked `FE2X`), or in place when the caller copied the block into less; `VerQueryValueW` answers the block's own UTF-16. A library the engine answers for itself, by bare name or in the system directory, has a block built here -- the system's version as `GetVersionEx` reports it, or for a DirectX component the DirectX version the registry holds -- unless a file of that name on the volume answers first. |
 | `LZ32.dll` | `lz32/` | 4 | The LZ compression stubs an older installer links and never has cause to call successfully. |
 | `MSWSOCK.dll` | `wsock32/` | 4 | The Winsock extensions. |
@@ -135,13 +135,15 @@ instantiation of the module reports (method in "Inventory" below):
 | `SHLWAPI.dll` | `shlwapi/` | 10 | Path and string helpers an installer imports for convenience, `PathCombine` and `PathMatchSpec` in both spellings among them, and the HLS colour pair. |
 | `ADVPACK.dll` | `advpack/` | 1 | The Advanced INF helper an installer loads at run time: `IsNTAdmin`, true when the token holds `BUILTIN\Administrators` -- asked through `isTokenMember`, the same membership `CheckTokenMembership` answers from. |
 | `SFC.dll` | `sfc/` | 5 | System File Protection's client, loaded at run time by an installer that replaces system files: `SRSetRestorePoint`/`A`/`W` answer FALSE with `ERROR_SERVICE_DISABLED` in `STATEMGRSTATUS.nStatus` (this machine keeps no restore points), and the undocumented catalog calls exported by ordinal alone -- #8 `SfpInstallCatalog(catalog, dependency)` copies a catalog into `system32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}`, #9 `SfpDeleteCatalog(name)` removes it -- answering an error code, zero for success, the shape their callers push and read. |
+| `SETUPAPI.dll` | `setupapi/` | 20 | The Setup API an installer loads at run time. INF files (`inf.js`: the syntax setupapi's parser is observed to accept -- sections merged by name, quotes and `""`, continuation backslashes, `%strings%` and DIRIDs, the load errors with their line; ANSI, or UTF-16 after a byte-order mark) are opened by path, or by bare name from the INF directory and then the system directory, and read line by line (`SetupFindFirstLineA`, `SetupFindNextLine`, `SetupGetLineTextA`, `SetupGetInfInformationA`). `SetupIterateCabinetA` sends `SPFILENOTIFY_CABINETINFO`, `FILEINCABINET` and `FILEEXTRACTED` to the program's callback on the caller's thread, with the structures in its memory, and extracts where the callback says. `SetupInstallFromInfSectionA` with `SPINST_FILES` queues `CopyFiles`, `DelFiles` and `RenFiles` through `DestinationDirs`, `SourceDisksNames` and `SourceDisksFiles` and commits the queue (`queue.js`) with `SetupCommitFileQueue`'s notification sequence, a source that is not beside the INF taken out of the cabinet its disk's tag file names; `SetupDefaultQueueCallbackA` answers each notification as the default handler does with nobody to ask. `SetupCopyOEMInfA` places an INF as `oemN.inf`, the first number free, and its catalog in the catalog store under the same number; `SetupDiGetClassDevsA` and the four device calls beside it work over a device tree with no devices in it. |
 | `WINSPOOL.DRV` | `winspool/` | 3 | Print spooler entry points, answered as "no printers". |
 | `MPR.dll` | `mpr/` | 2 | Network provider entry points, answered as "not connected to a network". |
 | `MSACM32.dll` | `msacm32/` | 42 | The Audio Compression Manager with no codec drivers installed: the whole exported surface declared for its stack widths, every driver or stream request answered "not supported"/"not possible", so middleware that links against it loads and decodes on its own. |
 | `SHFOLDER.dll` | *(built in `module.js`)* | 2 | A two-export forwarder to shell32's `SHGetFolderPathA`/`SHGetFolderPathW`, sharing shell32's own function objects. |
 | *(no DLL)* | `quartz/` | — | The DirectShow filter graph, reached through `CoCreateInstance(CLSID_FilterGraph)`; registered on the COM registry, not as an import table. |
+| *(no DLL)* | `cabinet/` | — | The cabinet reader SETUPAPI extracts through (`cabinet.js`: `CFHEADER` with its reserved areas and set links, `CFFOLDER`, `CFFILE`, and every `CFDATA` block checked against its checksum when it has one, from the Cabinet SDK's format documents) and its decoders: MSZIP (`inflate.js`, one RFC 1951 stream per block, the 32 KiB history carried across the folder) and LZX (`lzx.js`, windows 2^15 to 2^21; verbatim, aligned-offset and uncompressed blocks; the `E8` call translation undone). A Quantum folder is refused as unsupported. |
 
-Total: 1776 table entries across 30 libraries, 1643 distinct functions.
+Total: 1798 table entries across 31 libraries, 1665 distinct functions.
 
 **Inventory method.** `dbg/docs/count-dlls.mjs` (throwaway; not part of the build) creates the
 module against the same stub host `src/layers/win32/module.test.js` uses
@@ -756,6 +758,15 @@ Stated as the code states them.
   to a C runtime call that fails with -1 or `EOF`; an undecorated name from any other library, or a
   C++ name that does not size its arguments, stops the process on its first call (§3, "From a
   table to a module").
+- **SETUPAPI installs files and nothing else.** `SetupInstallFromInfSectionA` carries out
+  `SPINST_FILES`; any other directive it is asked for (registry, INI, services, registering
+  libraries) is reported once as a divergence and not done. The default queue callback aborts
+  on a copy, rename or delete error rather than asking. There are no Plug and Play devices, so
+  every device set is empty. The OS component calls are undocumented: a component is kept as
+  its two structures under
+  `HKLM\SYSTEM\CurrentControlSet\Control\Setup\OsComponents\{GUID}`, a place of this build's
+  choosing rather than a documented one, and one never registered is `ERROR_FILE_NOT_FOUND`,
+  the code its callers test for. The wide (`W`) spellings do not exist.
 
 Reported at runtime: `divergence` (each once), `unimplemented` (each import once, plus a count per
 name in the application's diagnostics as `unimplementedCalls`), `message-box`, `clipboard` (the
@@ -765,7 +776,7 @@ and the metrics in §2.
 ## 5. Tests
 
 Unit tests are colocated with each file, `node:test`, over `fakeMemory`
-(`src/layers/win32/msvcrt/harness.test.js`) or a stub host; there are 118 `*.test.js` files under
+(`src/layers/win32/msvcrt/harness.test.js`) or a stub host; there are 123 `*.test.js` files under
 `src/layers/win32/`. Run with `npm test` from `modules/core`.
 
 | area | files (all `src/layers/win32/…`) |
@@ -774,8 +785,8 @@ Unit tests are colocated with each file, `node:test`, over `fakeMemory`
 | msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `globals`, `heap`, `io`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `stdio`, `strings`, `threads`, `time`, `widetext` `.test.js` |
 | user32 | `controls`, `cursors`, `dialogs`, `display`, `keys`, `messages`, `objects`, `paint`, `structs`, `system`, `windows` `.test.js` — `controls.test.js` paints a dialog through the real drawing engine and compares it byte for byte with `controls.reference.png` |
 | gdi32 | `drawing`, `functions`, `objects` `.test.js` |
-| the rest | `advapi32/{crypto,functions,registry,services,tokens}`, `advpack/functions`, `comctl32/{functions,progress,propsheet,tab,treeview}`, `comdlg32/functions`, `d3dx9/functions`, `imm32/functions`, `lz32/{expand,functions}`, `mpr/functions`, `msacm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{cfb,functions,guid,objects,storage}`, `oleaut32/{errorinfo,functions,invoke,objects,typelib}`, `quartz/graph`, `rpcrt4/functions`, `sfc/functions`, `shell32/{fileop,functions,namespace,shelllink}`, `shlwapi/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,mmio,thread,timers,wave}`, `winspool/functions`, `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |
-| module | `module.test.js` — a configured screen reaches user32 and gdi32; a DC through user32 is GDI's; both fall back to 640×480 together; the C runtime family is cdecl and every other library stdcall; the runtime's `_sleep` is kernel32's `Sleep`; the KnownDLLs; shfolder's forwarding; comctl32's `_TrackMouseEvent` is user32's. `wiring.test.js` builds the module and asks through it what each library's capabilities were handed: SHLWAPI's wide strings, ADVPACK's `IsNTAdmin` from the account's token, VERSION's system libraries, mmio's buffer from the program's heap, the synchronisation calls' and the profile structures' last errors and guest memory, `LoadLibraryEx`'s flags reaching the assembler, `ExitProcess` and the runtime's `exit` telling the attached libraries last first (and ending at once with none), `MWMO_INPUTAVAILABLE`. |
+| the rest | `advapi32/{crypto,functions,registry,services,tokens}`, `advpack/functions`, `cabinet/{cabinet,inflate,lzx}`, `comctl32/{functions,progress,propsheet,tab,treeview}`, `comdlg32/functions`, `d3dx9/functions`, `imm32/functions`, `lz32/{expand,functions}`, `mpr/functions`, `msacm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{cfb,functions,guid,objects,storage}`, `oleaut32/{errorinfo,functions,invoke,objects,typelib}`, `quartz/graph`, `rpcrt4/functions`, `setupapi/{functions,inf}`, `sfc/functions`, `shell32/{fileop,functions,namespace,shelllink}`, `shlwapi/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,mmio,thread,timers,wave}`, `winspool/functions`, `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |
+| module | `module.test.js` — a configured screen reaches user32 and gdi32; a DC through user32 is GDI's; both fall back to 640×480 together; the C runtime family is cdecl and every other library stdcall; the runtime's `_sleep` is kernel32's `Sleep`; the KnownDLLs; shfolder's forwarding; comctl32's `_TrackMouseEvent` is user32's. `wiring.test.js` builds the module and asks through it what each library's capabilities were handed: SHLWAPI's wide strings, ADVPACK's `IsNTAdmin` from the account's token, SETUPAPI's INF found on the volume by bare name and its OS components in the hive advapi32 reads, VERSION's system libraries, mmio's buffer from the program's heap, the synchronisation calls' and the profile structures' last errors and guest memory, `LoadLibraryEx`'s flags reaching the assembler, `ExitProcess` and the runtime's `exit` telling the attached libraries last first (and ending at once with none), `MWMO_INPUTAVAILABLE`. |
 
 `kernel32/critical.itest.js` runs the hand-assembled critical-section fast paths on the real
 emulator (`npm run test:integration`), pinning that the bytes the unit test checks are x86 that
