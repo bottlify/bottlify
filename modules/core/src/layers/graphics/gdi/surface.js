@@ -443,6 +443,39 @@ export function surfaceForDdb(attributes){
 }
 
 /**
+ * The picture a pattern brush repeats, as a surface: the copy of its bitmap
+ * the brush was made with, in the layout GetBitmapBits hands out -- rows
+ * top-down, each padded to a WORD -- whichever kind of bitmap it came from.
+ * A copy of a device-dependent bitmap reads as that bitmap does, a single bit
+ * being monochrome; a copy of a DIB section keeps the section's colours.
+ *
+ * @param {{ width: number, height: number, bitCount: number, pixels: Uint8Array,
+ *           dib?: boolean, palette?: number[], format?: string }} pattern
+ * @returns {DepthSurface | null}
+ */
+export function surfaceForPattern(pattern){
+    const depth = pattern.bitCount;
+    if (!pattern.dib)
+    {
+        return surfaceForDdb(pattern);
+    }
+    if (!DEPTHS.has(depth) || (depth <= 8 && !pattern.palette))
+    {
+        return null;
+    }
+    return createSurface({
+        width: pattern.width,
+        height: pattern.height,
+        topDown: true,
+        pitch: ddbPitch(pattern.width, depth),
+        bytes: pattern.pixels,
+        bitCount: depth,
+        palette: pattern.palette,
+        format: pattern.format,
+    });
+}
+
+/**
  * The whole surface as a rectangle, which is what a clip region defaults to.
  *
  * @param {import("./contract.js").Surface} surface

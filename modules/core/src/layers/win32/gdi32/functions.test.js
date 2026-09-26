@@ -472,6 +472,26 @@ test('the three brush constructors all make brushes', ()=>{
     assert.equal(fns.CreatePatternBrush.handler([0]), 0);
 });
 
+test('a pattern brush names its bitmap and no colour, and outlives the bitmap', ()=>{
+    // Wine's test_pattern_brush: LOGBRUSH reads back BS_PATTERN, a zero
+    // colour whatever was asked for, and the bitmap's handle even once the
+    // bitmap is deleted -- the brush paints from a copy it took.
+    const { fns, memory } = setup();
+    const bitmap = fns.CreateBitmap.handler([20, 20, 1, 1, 0]);
+    memory.putU32s(STRUCT, [3, 0x12345, bitmap]);
+    const brush = fns.CreateBrushIndirect.handler([STRUCT]);
+    assert.ok(brush > 0);
+    assert.equal(fns.DeleteObject.handler([bitmap]), 1);
+
+    memory.fill(OUT, 3);
+    assert.equal(fns.GetObjectA.handler([brush, LOGBRUSH.SIZE, OUT]), LOGBRUSH.SIZE);
+    assert.deepEqual([memory.u32(OUT), memory.u32(OUT + 4), memory.u32(OUT + 8)],
+        [3, 0, bitmap]);
+
+    memory.putU32s(STRUCT, [3, 0, 0x9999]);
+    assert.equal(fns.CreateBrushIndirect.handler([STRUCT]), 0, 'no bitmap, no pattern');
+});
+
 test('CreateFontIndirectA reads LOGFONTA at the documented offsets', ()=>{
     const { fns, memory, hdc } = withDC();
     putLogFont(memory, { height: -20, weight: 700, italic: 1, charSet: 0xcc });

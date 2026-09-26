@@ -121,6 +121,8 @@ export function createGdiDrawing(options = {}){
             attributes: record && record.type === 'brush' ? record.attributes : DEFAULT_BRUSH,
             bkMode: context.state.bkMode,
             bkColor: context.state.bkColor,
+            textColor: context.state.textColor,
+            mono: context.surface.mono === true,
             origin: context.brushOrigin,
         });
     };

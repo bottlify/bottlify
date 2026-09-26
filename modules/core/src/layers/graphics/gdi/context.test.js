@@ -12,7 +12,9 @@ import { DSTINVERT, PATCOPY, SRCCOPY } from './rop.js';
 import { BS_HATCHED, BS_SOLID, HS_HORIZONTAL, OPAQUE, TRANSPARENT } from './brush.js';
 import { PS_NULL, PS_SOLID } from './shapes.js';
 import { TA_CENTER, TA_UPDATECP } from './text.js';
-import { clearSurface, createSurface, surfaceForDibSection } from './surface.js';
+import {
+    clearSurface, createSurface, surfaceForDdb, surfaceForDibSection,
+} from './surface.js';
 import { createGdiObjects } from '../../win32/gdi32/objects.js';
 import { createGdiFunctions } from '../../win32/gdi32/functions.js';
 import { BITMAPINFOHEADER } from '../../win32/gdi32/structs.js';
@@ -448,4 +450,118 @@ test('a partial lock points at the same bytes a context wrote through', ()=>{
     assert.equal(pool[at], 0xab, 'blue');
     assert.equal(pool[at + 1], 0xcd, 'green');
     assert.equal(pool[at + 2], 0xef, 'red');
+});
+
+// --- gdi32 over this drawing, end to end ---
+
+/** A 16-by-16 32-bit screen, the depth a compatible bitmap then has. */
+const WIRED_SCREEN = Object.freeze({ width: 16, height: 16, bitsPerPixel: 32 });
+
+/**
+ * gdi32's bookkeeping over this layer's drawing, wired as the graphics module
+ * wires them: a memory context draws into its bitmap's own bits, a DIB
+ * section's in guest memory and a device-dependent bitmap's in bytes of its
+ * own, and a window's context into the screen.
+ */
+function wiredGdi(){
+    const bytes = new Uint8Array(0x40000);
+    let next = 0x10000;
+    const screen = createSurface({ width: WIRED_SCREEN.width, height: WIRED_SCREEN.height });
+    const gdi = createGdiFunctions({
+        readMemory: (address, length)=>bytes.slice(address, address + length),
+        writeMemory: (address, data)=>bytes.set(data, address),
+        readCString: ()=>'',
+        handles: fakeHandles(),
+        surfaces: {
+            /** @param {number} size */
+            allocate(size){
+                const address = next;
+                next += (size + 0xff) & ~0xff;
+                return address;
+            },
+            free: ()=>undefined,
+        },
+        screen: WIRED_SCREEN,
+        graphics: {
+            createDrawing: options=>createGdiDrawing(options),
+            surfaceFor(dc, bitmap){
+                if (dc.kind !== 'memory')
+                {
+                    return screen;
+                }
+                return bitmap.pixels
+                    ? surfaceForDdb(bitmap)
+                    : surfaceForDibSection(bitmap, bytes, MEMORY_BASE);
+            },
+        },
+    });
+    // The handlers declare only the arguments they read; a guest call always
+    // carries the whole list.
+    const fns = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
+        /** @type {unknown} */ (gdi.table));
+    const view = new DataView(bytes.buffer);
+    return { bytes, view, fns, screen };
+}
+
+test('a pattern brush paints the bitmap it was made from, even once that bitmap is gone', ()=>{
+    // Wine's test_pattern_brush: the brush keeps the bitmap's pixels as they
+    // were when it was made, and outlives the bitmap itself.
+    const { fns } = wiredGdi();
+    const screen = fns.GetDC.handler([0]);
+    const dc = fns.CreateCompatibleDC.handler([screen]);
+    const bitmap = fns.CreateCompatibleBitmap.handler([screen, 16, 16]);
+    const other = fns.CreateCompatibleBitmap.handler([screen, 16, 16]);
+    fns.SelectObject.handler([dc, bitmap]);
+    fns.SelectObject.handler([dc, fns.CreateSolidBrush.handler([0xff5511])]);
+    assert.equal(fns.PatBlt.handler([dc, 0, 0, 16, 16, PATCOPY]), 1);
+    assert.equal(fns.GetPixel.handler([dc, 10, 10]), 0xff5511);
+
+    const brush = fns.CreatePatternBrush.handler([bitmap]);
+    assert.notEqual(brush, 0);
+    fns.SelectObject.handler([dc, other]);
+    assert.equal(fns.DeleteObject.handler([bitmap]), 1);
+
+    fns.SelectObject.handler([dc, fns.CreateSolidBrush.handler([0xabcdef])]);
+    fns.PatBlt.handler([dc, 0, 0, 16, 16, PATCOPY]);
+    assert.equal(fns.GetPixel.handler([dc, 10, 10]), 0xabcdef);
+
+    fns.SelectObject.handler([dc, brush]);
+    assert.equal(fns.PatBlt.handler([dc, 0, 0, 16, 16, PATCOPY]), 1);
+    assert.equal(fns.GetPixel.handler([dc, 10, 10]), 0xff5511,
+        'the deleted bitmap\'s content, not black and not the brush colour');
+});
+
+test('a monochrome pattern brush takes the context\'s colours, and keeps its bits in a mask', ()=>{
+    // The documented rule: a 0 bit is drawn in the text colour and a 1 bit in
+    // the background colour. Into a monochrome bitmap the bits go as they
+    // are, whatever the colours (Wine's test_bitmap_colors).
+    const { fns, view } = wiredGdi();
+    const PATTERN = 0x100;
+    for (let row = 0; row < 8; row++)
+    {
+        view.setUint16(PATTERN + row * 2, 0x5555, true);
+    }
+    const bitmap = fns.CreateBitmap.handler([16, 8, 1, 1, PATTERN]);
+    const brush = fns.CreatePatternBrush.handler([bitmap]);
+
+    const screen = fns.GetDC.handler([0]);
+    const colour = fns.CreateCompatibleDC.handler([screen]);
+    fns.SelectObject.handler([colour, fns.CreateCompatibleBitmap.handler([screen, 4, 1])]);
+    fns.SelectObject.handler([colour, brush]);
+    fns.SetTextColor.handler([colour, 0x0000ff]);
+    fns.SetBkColor.handler([colour, 0xff0000]);
+    fns.PatBlt.handler([colour, 0, 0, 4, 1, PATCOPY]);
+    assert.deepEqual([0, 1, 2, 3].map(x=>fns.GetPixel.handler([colour, x, 0])),
+        [0x0000ff, 0xff0000, 0x0000ff, 0xff0000]);
+
+    const mono = fns.CreateCompatibleDC.handler([0]);
+    const mask = fns.CreateBitmap.handler([16, 1, 1, 1, 0]);
+    fns.SelectObject.handler([mono, mask]);
+    fns.SelectObject.handler([mono, brush]);
+    fns.SetTextColor.handler([mono, 0x123456]);
+    fns.SetBkColor.handler([mono, 0x654321]);
+    fns.PatBlt.handler([mono, 0, 0, 16, 1, PATCOPY]);
+    fns.SelectObject.handler([mono, fns.CreateBitmap.handler([1, 1, 1, 1, 0])]);
+    assert.equal(fns.GetBitmapBits.handler([mask, 2, 0x200]), 2);
+    assert.equal(view.getUint16(0x200, true), 0x5555);
 });

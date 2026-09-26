@@ -956,6 +956,41 @@ export function createGdiFunctions(host){
     };
 
     /**
+     * A pattern brush over a bitmap, or zero for a handle that is not one.
+     *
+     * The brush keeps a copy of the bitmap's bits, taken now: Windows paints
+     * with the bitmap as it was when the brush was made, and goes on painting
+     * with it once the bitmap is deleted (Wine's brush tests). The copy is in
+     * the layout GetBitmapBits hands out, with what a DIB section's values
+     * mean carried alongside; LOGBRUSH still names the bitmap and no colour.
+     *
+     * @param {number} handle
+     */
+    const patternBrush = handle=>{
+        const bits = bitsOf(handle);
+        if (!bits)
+        {
+            return 0;
+        }
+        const shape = /** @type {import('./objects.js').GdiObject} */ (
+            objects.get(handle)).attributes;
+        return objects.create('brush', {
+            style: BS_PATTERN,
+            color: 0,
+            hatch: handle >>> 0,
+            pattern: {
+                width: shape.width,
+                height: shape.height,
+                bitCount: shape.bitCount,
+                pixels: bits.read().slice(),
+                dib: (shape.section >>> 0) !== 0,
+                palette: shape.palette ? [...shape.palette] : undefined,
+                format: shape.format,
+            },
+        });
+    };
+
+    /**
      * Runs `action` over a memory context of this layer's own with `bitmap`
      * in it, whether or not a program has the bitmap selected somewhere: a
      * bitmap read back or drawn for the window manager is not a selection,
@@ -1266,7 +1301,9 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                return objects.create('brush', fields);
+                return fields.style === BS_PATTERN
+                    ? patternBrush(fields.hatch)
+                    : objects.create('brush', fields);
             },
         },
 
@@ -1280,16 +1317,7 @@ export function createGdiFunctions(host){
         CreatePatternBrush: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([bitmap])=>{
-                const record = objects.get(bitmap);
-                if (!record || record.type !== 'bitmap')
-                {
-                    return 0;
-                }
-                return objects.create('brush', {
-                    style: BS_PATTERN, color: 0, hatch: bitmap >>> 0,
-                });
-            },
+            handler: ([bitmap])=>patternBrush(bitmap),
         },
 
         /** HBRUSH CreateHatchBrush(int iHatch, COLORREF color) */
