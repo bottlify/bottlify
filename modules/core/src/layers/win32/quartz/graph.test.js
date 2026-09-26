@@ -387,6 +387,56 @@ test('IVideoWindow remembers what it was set to', ()=>{
     assert.equal(call(object, IID_IVIDEO_WINDOW, 'get_Owner', [0]), E_POINTER);
 });
 
+test('the video window starts hidden, and AutoShow shows it when the graph pauses or runs',
+    ()=>{
+        // quartz's video renderer tests: before anything shows it the window is
+        // SW_HIDE and not visible, AutoShow is OATRUE, and Pause makes it
+        // visible whatever put_Visible said; with AutoShow off it stays as set,
+        // and Stop leaves it as it was.
+        const OATRUE = -1;
+        const OAFALSE = 0;
+        const SW_HIDE = 0;
+        const { object, host } = createObject();
+        /** @param {string} name */
+        const get = name=>{
+            assert.equal(call(object, IID_IVIDEO_WINDOW, `get_${name}`, [OUT]), S_OK);
+            return host.i32(OUT);
+        };
+        assert.equal(get('WindowState'), SW_HIDE);
+        assert.equal(get('Visible'), OAFALSE);
+        assert.equal(get('AutoShow'), OATRUE);
+
+        call(object, IID_IVIDEO_WINDOW, 'put_Visible', [OAFALSE]);
+        call(object, IID_IMEDIA_CONTROL, 'Pause');
+        assert.equal(get('Visible'), OATRUE, 'shown by pausing');
+        call(object, IID_IMEDIA_CONTROL, 'Stop');
+        assert.equal(get('Visible'), OATRUE, 'and not hidden by stopping');
+
+        call(object, IID_IVIDEO_WINDOW, 'put_AutoShow', [OAFALSE]);
+        call(object, IID_IVIDEO_WINDOW, 'put_Visible', [OAFALSE]);
+        call(object, IID_IMEDIA_CONTROL, 'Run');
+        assert.equal(get('Visible'), OAFALSE, 'without AutoShow it stays hidden');
+    });
+
+test('a frame carries where the program put the video window and whether it is shown', ()=>{
+    // The film is presented in the window the program laid out, not over the
+    // whole screen, and not at all while the window is hidden.
+    const { object, host, tick } = createObject(CLSID_FILTER_GRAPH,
+        { clip: fakeClip({ frameCount: 3, fps: 10 }) });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IVIDEO_WINDOW, 'put_Owner', [0x40b4]);
+    call(object, IID_IVIDEO_WINDOW, 'SetWindowPosition', [16, 32, 160, 120]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+    tick(1000);
+    const shown = tick(1100);
+    assert.deepEqual(shown?.window,
+        { left: 16, top: 32, width: 160, height: 120, visible: true });
+
+    call(object, IID_IVIDEO_WINDOW, 'put_Visible', [0]);
+    assert.equal(tick(1200)?.window.visible, false);
+});
+
 test('IBasicVideo answers a size a caller can lay a window out from', ()=>{
     const { object, host } = createObject();
     assert.equal(call(object, IID_IBASIC_VIDEO, 'get_VideoWidth', [OUT]), S_OK);

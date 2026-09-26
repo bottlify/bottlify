@@ -82,6 +82,14 @@ const VOLUME_MAX = 0;
  * pair. These are the dimensions of the mode this era of program assumes when
  * it has nothing better.
  */
+/** OLE Automation's booleans, which IVideoWindow's Visible and AutoShow are. */
+const OATRUE = -1;
+const OAFALSE = 0;
+
+/** ShowWindow's commands, which WindowState holds. */
+const SW_HIDE = 0;
+const SW_SHOWNORMAL = 1;
+
 const DEFAULT_VIDEO_WIDTH = 640;
 const DEFAULT_VIDEO_HEIGHT = 480;
 
@@ -244,11 +252,12 @@ function newGraphState(){
         events: [],
         window: {
             ...Object.fromEntries(WINDOW_PROPERTIES.map(name=>[name, 0])),
-            // A video window is shown by default and sized to the stream; a
-            // program reads these back before it has set anything.
-            AutoShow: 1,
-            Visible: 1,
-            WindowState: 1, // SW_SHOWNORMAL
+            // A video window starts hidden, sized to the stream, and shows
+            // itself when the graph first pauses or runs; a program reads
+            // these back before it has set anything.
+            AutoShow: OATRUE,
+            Visible: OAFALSE,
+            WindowState: SW_HIDE,
             Width: DEFAULT_VIDEO_WIDTH,
             Height: DEFAULT_VIDEO_HEIGHT,
         },
@@ -441,6 +450,20 @@ export function createQuartz(host){
     };
 
     /**
+     * A video window with AutoShow set shows itself when the graph pauses or
+     * runs, whatever its visibility was left at; stopping leaves it as it is.
+     *
+     * @param {FilterGraphState} graph
+     */
+    const autoShow = graph=>{
+        if (graph.window.AutoShow !== OAFALSE)
+        {
+            graph.window.Visible = OATRUE;
+            graph.window.WindowState = SW_SHOWNORMAL;
+        }
+    };
+
+    /**
      * Running is where a graph that could not be built has to say so: building
      * it failed earlier, and a program that ignored that HRESULT is still owed
      * the event its playback loop waits for.
@@ -449,6 +472,7 @@ export function createQuartz(host){
      */
     const run = graph=>{
         graph.state = STATE_RUNNING;
+        autoShow(graph);
         if (!graph.loaded)
         {
             raise(graph, EC_ERRORABORT, graph.failure, 0);
@@ -569,6 +593,8 @@ export function createQuartz(host){
      *        draining it, a film that has produced no sound yet -- and then
      *        nothing holds the picture back and the graph says so.
      * @returns {{ hwnd: number, width: number, height: number,
+     *             window: { left: number, top: number, width: number, height: number,
+     *                       visible: boolean },
      *             bgra: Uint8Array | null, audio: Int16Array[],
      *             sampleRate: number, channels: number,
      *             positionMs: number, film: number } | null}
@@ -688,6 +714,16 @@ export function createQuartz(host){
                     hwnd: graph.window.Owner >>> 0,
                     width: clip.width,
                     height: clip.height,
+                    // Where the program laid the video window out in its
+                    // owner, and whether it is showing at all: the picture
+                    // belongs there, not over the whole screen.
+                    window: {
+                        left: graph.window.Left | 0,
+                        top: graph.window.Top | 0,
+                        width: graph.window.Width | 0,
+                        height: graph.window.Height | 0,
+                        visible: graph.window.Visible !== OAFALSE,
+                    },
                     bgra: frame,
                     audio,
                     // Where this frame sits in the film, so that whoever plays
@@ -786,6 +822,7 @@ export function createQuartz(host){
          */
         Pause: graph=>{
             graph.state = STATE_PAUSED;
+            autoShow(graph);
             playing.delete(graph);
             return S_OK;
         },
