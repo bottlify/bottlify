@@ -62,6 +62,15 @@ const IOLBF = 0x0040;
 const IONBF = 0x0004;
 
 /**
+ * The records of stdin, stdout and stderr, where `_iob` keeps them: nothing
+ * before the runtime's image has placed `_iob`.
+ *
+ * @param {number} iob
+ */
+export const standardRecords = iob=>(iob === 0 ? []
+    : Array.from({ length: STANDARD_STREAMS }, (_, index)=>iob + index * FILE_SIZE));
+
+/**
  * @typedef {Object} StdioHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory

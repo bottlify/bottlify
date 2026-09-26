@@ -31,7 +31,7 @@ import {
 import { createCxxFunctions } from './cxx.js';
 import { createMathFunctions } from './math.js';
 import { createStartupFunctions } from './startup.js';
-import { createStdioFunctions } from './stdio.js';
+import { createStdioFunctions, standardRecords } from './stdio.js';
 import { createThreadFunctions } from './threads.js';
 import { createGlobals, EINVAL, ERANGE } from './globals.js';
 import { createDescriptors, createIoFunctions } from './io.js';
@@ -800,6 +800,34 @@ export function createMsvcrtFunctions(host){
         })
         : null;
 
+    const stdio = host.files && host.allocate && host.free
+        ? createStdioFunctions({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            readCString: host.readCString,
+            allocate: host.allocate,
+            free: host.free,
+            files: host.files,
+            write: host.write,
+            iob: host.iob,
+            errno,
+            descriptors: descriptors ?? undefined,
+            varargs: varargsAt,
+        })
+        : null;
+
+    /**
+     * What `_cexit` closes: every stream fopen and its kin opened, and a
+     * standard stream freopen moved to a file, which goes back on the console.
+     */
+    const closeStreams = ()=>{
+        if (stdio)
+        {
+            stdio._fcloseall.handler([]);
+            standardRecords(host.iob?.() ?? 0).forEach(record=>stdio.fclose.handler([record]));
+        }
+    };
+
     const narrow = {
         ...table,
         ...createStringFunctions({
@@ -845,6 +873,7 @@ export function createMsvcrtFunctions(host){
                 exit: host.exit,
                 globals,
                 errnoName,
+                closeStreams,
             })
             : {}),
 
@@ -894,21 +923,7 @@ export function createMsvcrtFunctions(host){
                 divergence: host.divergence,
             }, descriptors)
             : {}),
-        ...(host.files && host.allocate && host.free
-            ? createStdioFunctions({
-                readMemory: host.readMemory,
-                writeMemory: host.writeMemory,
-                readCString: host.readCString,
-                allocate: host.allocate,
-                free: host.free,
-                files: host.files,
-                write: host.write,
-                iob: host.iob,
-                errno,
-                descriptors: descriptors ?? undefined,
-                varargs: varargsAt,
-            })
-            : {}),
+        ...(stdio ?? {}),
         ...(host.threads ? createThreadFunctions(host.threads) : {}),
         ...(host.fpu
             ? createMathFunctions({ writeMemory: host.writeMemory, fpu: host.fpu })

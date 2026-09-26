@@ -696,6 +696,25 @@ test('printf, puts and vprintf write through stdout, so freopen moves them with 
     assert.equal(String.fromCharCode(...files.files['C:\\log.txt']), 'x=1\r\nhi\r\nx=3\r\n');
 });
 
+test('_cexit closes every open stream after the handlers, a temporary file with it', async()=>{
+    // "_cexit ... flushes all I/O buffers and closes all open streams before
+    // returning" -- a standard stream freopen moved to a file included.
+    const IOB = 0x3800;
+    const files = fakeVolume({}, { directories: ['C:\\'] });
+    const { host, fns, put } = wholeRuntime(files, undefined, { iob: ()=>IOB });
+    assert.notEqual(fns.fopen.handler([put(0x100, 'C:\\scratch.tmp'), put(0x120, 'w+D')]), 0);
+    const kept = fns.fopen.handler([put(0x140, 'C:\\kept.txt'), put(0x160, 'w')]);
+    fns.freopen.handler([put(0x180, 'C:\\log.txt'), put(0x1a0, 'w'), IOB + 64]);
+
+    assert.equal(await fns._cexit.handler([]), 0);
+    assert.equal(files.files['C:\\scratch.tmp'], undefined);
+    assert.deepEqual([...files.closed].sort(),
+        ['C:\\kept.txt', 'C:\\log.txt', 'C:\\scratch.tmp']);
+    assert.equal(fns.fputc.handler([0x41, kept]), -1, 'the stream is gone');
+    assert.equal(fns.fputc.handler([0x42, IOB + 64]), 0x42, 'stderr is the console again');
+    assert.deepEqual(host.output.map(entry=>[entry.handle, entry.text]), [[3, 'B']]);
+});
+
 test('sprintf_s and vsprintf_s write what fits with its terminator, and refuse the rest', ()=>{
     // "If the buffer is too small for the formatted text, including the
     // terminating null, then the buffer is set to an empty string"; a null
