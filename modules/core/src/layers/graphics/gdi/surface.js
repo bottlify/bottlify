@@ -15,8 +15,8 @@
 
 /**
  * The depth a surface has unless told otherwise, and the one every raster
- * operation is written for. An 8- or 16-bit surface converts at `read` and
- * `write`, so the operations still see this depth.
+ * operation is written for. A surface of any other depth converts at `read`
+ * and `write`, so the operations still see this depth.
  */
 export const SURFACE_BIT_COUNT = 32;
 
@@ -131,20 +131,25 @@ export function pixelToColor(pixel){
  * @property {number} [pitch]      Overrides the DIB rule for a surface someone else strided.
  * @property {Uint8Array} [bytes]  Existing memory to draw into, rather than fresh memory.
  * @property {number} [offset]     Where row zero starts inside `bytes`.
- * @property {number} [bitCount]   1, 8, 16 or 32; the operations still see 32.
- * @property {number[]} [palette]  What an index means, for 1 and 8 bits: 32-bit pixels.
+ * @property {number} [bitCount]   1, 4, 8, 16, 24 or 32; the operations still see 32.
+ * @property {number[]} [palette]  What an index means, up to 8 bits: 32-bit pixels.
  * @property {string} [format]     RGB_555 (default) or RGB_565, for 16 bits.
+ * @property {boolean} [mono]      A monochrome device bitmap, not a DIB: see the contract.
  */
 
 /** What a monochrome bitmap's two bit values mean: black, and white. */
 export const MONOCHROME = Object.freeze([0x00000000, 0x00ffffff]);
+
+/** The depths a surface can have. */
+const DEPTHS = new Set([1, 4, 8, 16, 24, 32]);
 
 /**
  * A surface that also says how deep it is. The operations need only the
  * contract's half; the depth is for whoever presents or re-reads the bytes.
  *
  * @typedef {import("./contract.js").Surface & {
- *     bitCount: number, palette: number[] | null, format: string }} DepthSurface
+ *     bitCount: number, palette: number[] | null, format: string, mono: boolean,
+ *     nearest: (pixel: number) => number }} DepthSurface
  */
 
 /**
@@ -159,7 +164,7 @@ export function createSurface(options){
         throw new RangeError('A surface needs a positive width and height');
     }
     const bitCount = options.bitCount ?? SURFACE_BIT_COUNT;
-    if (bitCount !== 1 && bitCount !== 8 && bitCount !== 16 && bitCount !== 32)
+    if (!DEPTHS.has(bitCount))
     {
         throw new RangeError(`A surface cannot be ${bitCount} bits deep`);
     }
@@ -259,6 +264,7 @@ export function createSurface(options){
         bitCount,
         palette,
         format,
+        mono: options.mono === true,
 
         /** @param {number} x @param {number} y */
         read(x, y){
@@ -268,6 +274,13 @@ export function createSurface(options){
                 const bit = (bytes[rowOffset(y) + (x >>> 3)] >>> (7 - (x & 7))) & 1;
                 return (/** @type {number[]} */ (palette)[bit] ?? 0) >>> 0;
             }
+            if (bitCount === 4)
+            {
+                // And of two pixels in a byte, the high nibble.
+                const pair = bytes[rowOffset(y) + (x >>> 1)];
+                const index = (x & 1) === 0 ? pair >>> 4 : pair & 0x0f;
+                return (/** @type {number[]} */ (palette)[index] ?? 0) >>> 0;
+            }
             if (bitCount === 8)
             {
                 return (/** @type {number[]} */ (palette)[bytes[rowOffset(y) + x]] ?? 0) >>> 0;
@@ -276,6 +289,11 @@ export function createSurface(options){
             {
                 const at = rowOffset(y) + (x * 2);
                 return expand16(bytes[at] | (bytes[at + 1] << 8), format);
+            }
+            if (bitCount === 24)
+            {
+                const at = rowOffset(y) + (x * 3);
+                return (bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16)) >>> 0;
             }
             const at = rowOffset(y) + (x * 4);
             if (words)
@@ -295,6 +313,15 @@ export function createSurface(options){
                 bytes[at] = (indexOf(pixel >>> 0) & 1) !== 0 ? bytes[at] | mask : bytes[at] & ~mask;
                 return;
             }
+            if (bitCount === 4)
+            {
+                const at = rowOffset(y) + (x >>> 1);
+                const index = indexOf(pixel >>> 0) & 0x0f;
+                bytes[at] = (x & 1) === 0
+                    ? (bytes[at] & 0x0f) | (index << 4)
+                    : (bytes[at] & 0xf0) | index;
+                return;
+            }
             if (bitCount === 8)
             {
                 bytes[rowOffset(y) + x] = indexOf(pixel >>> 0);
@@ -308,6 +335,14 @@ export function createSurface(options){
                 bytes[at + 1] = (value >>> 8) & 0xff;
                 return;
             }
+            if (bitCount === 24)
+            {
+                const at = rowOffset(y) + (x * 3);
+                bytes[at] = pixel & 0xff;
+                bytes[at + 1] = (pixel >>> 8) & 0xff;
+                bytes[at + 2] = (pixel >>> 16) & 0xff;
+                return;
+            }
             const at = rowOffset(y) + (x * 4);
             if (words)
             {
@@ -318,6 +353,19 @@ export function createSurface(options){
             bytes[at + 1] = (pixel >>> 8) & 0xff;
             bytes[at + 2] = (pixel >>> 16) & 0xff;
             bytes[at + 3] = (pixel >>> 24) & 0xff;
+        },
+
+        /** @param {number} pixel @returns {number} what a write of it reads back as */
+        nearest(pixel){
+            if (bitCount <= 8)
+            {
+                return (/** @type {number[]} */ (palette)[indexOf(pixel >>> 0)] ?? 0) >>> 0;
+            }
+            if (bitCount === 16)
+            {
+                return expand16(narrow16(pixel >>> 0, format), format);
+            }
+            return bitCount === 24 ? (pixel & 0xffffff) >>> 0 : pixel >>> 0;
         },
     };
 }
@@ -330,8 +378,9 @@ export function createSurface(options){
  * `topDown` flag is the one thing that cannot be recovered from the numbers,
  * which is why the bookkeeping half stores it rather than the signed height.
  *
- * Eight bits needs the palette the indices mean; sixteen bits is 5-5-5 unless
- * the attributes say 5-6-5. Anything else is not a depth this layer draws.
+ * One, four and eight bits need the colour table the indices mean -- a
+ * one-bit section is two colours of its own, not a monochrome bitmap --
+ * and sixteen bits is 5-5-5 unless the attributes say 5-6-5.
  *
  * @param {{ width: number, height: number, bitCount: number, bits: number,
  *           topDown?: boolean, palette?: number[], format?: string }} attributes
@@ -342,8 +391,8 @@ export function createSurface(options){
  */
 export function surfaceForDibSection(attributes, memory, base = 0){
     const depth = attributes.bitCount;
-    if ((depth !== 8 && depth !== 16 && depth !== 32) || (attributes.bits >>> 0) === 0
-        || (depth === 8 && !attributes.palette))
+    if (!DEPTHS.has(depth) || (attributes.bits >>> 0) === 0
+        || (depth <= 8 && !attributes.palette))
     {
         return null;
     }
@@ -366,16 +415,17 @@ export function surfaceForDibSection(attributes, memory, base = 0){
  * Its bits are not in guest memory: Windows keeps them where the program
  * cannot address them, and the bookkeeping half hands them over as bytes of
  * their own, in the layout GetBitmapBits exchanges -- rows top-down, each
- * padded to a WORD. One bit is monochrome, black and white; sixteen is the
- * 5-6-5 a display mode of that depth has. A depth that needs a palette the
- * bitmap does not carry has no surface.
+ * padded to a WORD. One bit is monochrome, black and white, and blits to and
+ * from other depths by the monochrome rules; sixteen is the 5-6-5 a display
+ * mode of that depth has. A depth that needs a palette the bitmap does not
+ * carry has no surface.
  *
  * @param {{ width: number, height: number, bitCount: number, pixels?: Uint8Array }} attributes
  * @returns {DepthSurface | null}
  */
 export function surfaceForDdb(attributes){
     const depth = attributes.bitCount;
-    if (!attributes.pixels || (depth !== 1 && depth !== 16 && depth !== 32))
+    if (!attributes.pixels || (depth !== 1 && depth !== 16 && depth !== 24 && depth !== 32))
     {
         return null;
     }
@@ -388,6 +438,7 @@ export function surfaceForDdb(attributes){
         bitCount: depth,
         palette: depth === 1 ? [...MONOCHROME] : undefined,
         format: RGB_565,
+        mono: depth === 1,
     });
 }
 

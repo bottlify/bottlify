@@ -13,10 +13,11 @@ import {
     WHITEONBLACK,
     bitBlt,
     patBlt,
+    sourceConversion,
     stretchBlt,
 } from './blit.js';
 import { BLACKNESS, DSTINVERT, PATCOPY, SRCCOPY, SRCINVERT, WHITENESS } from './rop.js';
-import { clearSurface, createSurface } from './surface.js';
+import { MONOCHROME, clearSurface, createSurface } from './surface.js';
 
 const BACKGROUND = 0x00202020;
 const RED = 0x00ff0000;
@@ -290,4 +291,70 @@ test('a stretch clipped on the destination keeps its scale', ()=>{
     assert.equal(dest.read(3, 0), BACKGROUND);
     assert.equal(dest.read(4, 0), GREEN, 'the second half of a doubled two-pixel source');
     assert.equal(dest.read(7, 0), GREEN);
+});
+
+/** A monochrome device bitmap: one bit a pixel, black and white. */
+function monochrome(/** @type {number} */ width, /** @type {number} */ height){
+    return createSurface({ width, height, bitCount: 1, palette: [...MONOCHROME], mono: true });
+}
+
+test('a monochrome source takes the destination\'s text and background colours', ()=>{
+    // Wine's bitmap.c: a 0 bit becomes the destination DC's text colour and a
+    // 1 bit its background colour, whatever black and white would have been.
+    const src = monochrome(4, 1);
+    src.write(1, 0, 0x00ffffff);
+    src.write(2, 0, 0x00ffffff);
+    const dest = surfaceFilled(4, 1, BACKGROUND);
+    const convert = sourceConversion({ src, dest, textColor: 0x00664422, bkColor: 0x00214365,
+        srcBkColor: 0 });
+    assert.ok(convert);
+    bitBlt({ dest, x: 0, y: 0, width: 4, height: 1, src, rop: SRCCOPY, convert });
+    assert.deepEqual([0, 1, 2, 3].map(x=>dest.read(x, 0)),
+        [0x00224466, 0x00654321, 0x00654321, 0x00224466]);
+
+    const stretched = surfaceFilled(8, 1, BACKGROUND);
+    stretchBlt({ dest: stretched, x: 0, y: 0, width: 8, height: 1, src, srcX: 0, srcY: 0,
+        srcWidth: 4, srcHeight: 1, rop: SRCCOPY, convert });
+    assert.equal(stretched.read(2, 0), 0x00654321, 'a stretch converts the same way');
+});
+
+test('a colour source is 1 in a monochrome destination exactly where it is its background', ()=>{
+    const dest = monochrome(3, 1);
+    const src = surfaceFilled(3, 1, 0x00ffffff);
+    // The raw pixel is compared, unused byte included, as Wine's test of a
+    // 0x0fffffff pixel against a white background shows.
+    src.write(1, 0, 0x0fffffff);
+    src.write(2, 0, 0x00fefefe);
+    const convert = sourceConversion({ src, dest, textColor: 0, bkColor: 0,
+        srcBkColor: 0x00ffffff });
+    bitBlt({ dest, x: 0, y: 0, width: 3, height: 1, src, rop: SRCCOPY, convert });
+    assert.deepEqual([0, 1, 2].map(x=>dest.read(x, 0)), [0x00ffffff, 0, 0]);
+    assert.equal(dest.bytes[0], 0x80);
+});
+
+test('an indexed source matches its background by the table entry nearest it', ()=>{
+    // Wine's test_bitmap_colors: a one-bit DIB section onto a monochrome
+    // bitmap keeps its bits where the background is nearest entry 1 and
+    // inverts them where it is nearest entry 0.
+    const src = createSurface({ width: 8, height: 1, bitCount: 1,
+        palette: [0x00ffffff, 0x00200000] });
+    src.bytes[0] = 0x55;
+    for (const [background, expected] of [[0, 0x55], [0x00f0f0f0, 0xaa]])
+    {
+        const dest = monochrome(8, 1);
+        bitBlt({ dest, x: 0, y: 0, width: 8, height: 1, src, rop: SRCCOPY,
+            convert: sourceConversion({ src, dest, textColor: 0, bkColor: 0,
+                srcBkColor: background }) });
+        assert.equal(dest.bytes[0], expected);
+    }
+});
+
+test('between two monochrome bitmaps, and between two colour ones, the bits are the bits', ()=>{
+    const a = monochrome(8, 1);
+    const b = monochrome(8, 1);
+    assert.equal(sourceConversion({ src: a, dest: b, textColor: 0x00ff, bkColor: 0xff00,
+        srcBkColor: 0 }), null);
+    const indexed = createSurface({ width: 8, height: 1, bitCount: 1, palette: [0, 0xffffff] });
+    assert.equal(sourceConversion({ src: indexed, dest: surfaceFilled(1, 1, 0), textColor: 0x00ff,
+        bkColor: 0xff00, srcBkColor: 0 }), null, 'a one-bit DIB reads through its own table');
 });

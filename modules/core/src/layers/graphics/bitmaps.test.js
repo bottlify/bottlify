@@ -195,3 +195,141 @@ test('CreateBitmap copies the bits it is given, and a monochrome bitmap draws', 
         await graphicsModule.dispose();
     }
 });
+
+/**
+ * A DIB section selected into a memory DC of its own.
+ *
+ * @param {Awaited<ReturnType<typeof assemble>>} h
+ * @param {{ width: number, height: number, bitCount: number, colors?: number[] }} shape
+ *        `colors` as RGBQUAD dwords, 0x00RRGGBB.
+ */
+function section(h, { width, height, bitCount, colors = [] }){
+    const { view, fns } = h;
+    view.setUint32(INFO + BITMAPINFOHEADER.biSize, BITMAPINFOHEADER.SIZE, true);
+    view.setInt32(INFO + BITMAPINFOHEADER.biWidth, width, true);
+    view.setInt32(INFO + BITMAPINFOHEADER.biHeight, height, true);
+    view.setUint16(INFO + BITMAPINFOHEADER.biPlanes, 1, true);
+    view.setUint16(INFO + BITMAPINFOHEADER.biBitCount, bitCount, true);
+    view.setUint32(INFO + BITMAPINFOHEADER.biCompression, 0, true);
+    view.setUint32(INFO + BITMAPINFOHEADER.biClrUsed, colors.length, true);
+    colors.forEach((color, index)=>
+        view.setUint32(INFO + BITMAPINFOHEADER.SIZE + index * 4, color, true));
+    const bitmap = fns.CreateDIBSection.handler([0, INFO, 0, ROWS, 0, 0]);
+    assert.ok(bitmap > 0);
+    const dc = fns.CreateCompatibleDC.handler([0]);
+    fns.SelectObject.handler([dc, bitmap]);
+    return { dc, bits: view.getUint32(ROWS, true) };
+}
+
+test('one-, four- and twenty-four-bit DIB sections are drawn into and blitted from', async()=>{
+    const h = await assemble();
+    try
+    {
+        const { ram, fns } = h;
+        // Wine's test_mono_dibsection: a one-bit section whose table is white
+        // then black; a Rectangle in the default pen and brush is a black
+        // border round a white inside, and black is the entry that is set.
+        const mono = section(h, { width: 10, height: 10, bitCount: 1,
+            colors: [0x00ffffff, 0x00000000] });
+        assert.equal(fns.Rectangle.handler([mono.dc, 0, 0, 10, 10]), 1);
+        assert.equal(ram[mono.bits], 0xff, 'the bottom row, all border');
+        assert.equal(ram[mono.bits + 4], 0x80, 'the row above it: border, then inside');
+
+        const nibbles = section(h, { width: 4, height: -1, bitCount: 4,
+            colors: [0, 0x00ff0000, 0x00ffffff] });
+        assert.equal(fns.PatBlt.handler([nibbles.dc, 0, 0, 4, 1, WHITENESS]), 1);
+        assert.deepEqual([...ram.subarray(nibbles.bits, nibbles.bits + 2)], [0x22, 0x22]);
+        assert.equal(fns.SetPixel.handler([nibbles.dc, 1, 0, 0x000000f0]), 0x000000ff);
+
+        const deep = section(h, { width: 2, height: -1, bitCount: 24 });
+        assert.equal(fns.SetPixel.handler([deep.dc, 1, 0, 0x00123456]), 0x00123456);
+        assert.deepEqual([...ram.subarray(deep.bits, deep.bits + 6)],
+            [0, 0, 0, 0x12, 0x34, 0x56]);
+
+        const screen = fns.GetDC.handler([0]);
+        for (const { dc } of [mono, nibbles, deep])
+        {
+            assert.equal(fns.BitBlt.handler([screen, 0, 0, 2, 1, dc, 0, 0, SRCCOPY]), 1);
+        }
+        assert.equal(fns.GetPixel.handler([screen, 1, 0]), 0x00123456);
+        fns.BitBlt.handler([screen, 0, 0, 4, 1, nibbles.dc, 0, 0, SRCCOPY]);
+        assert.equal(fns.GetPixel.handler([screen, 1, 0]), 0x000000ff);
+    }
+    finally
+    {
+        await graphicsModule.dispose();
+    }
+});
+
+test('a monochrome blit converts by the device contexts\' colours', async()=>{
+    const h = await assemble();
+    try
+    {
+        const { view, fns } = h;
+        const target = section(h, { width: 4, height: -1, bitCount: 32 });
+        /** @returns {number[]} */
+        const row = ()=>[0, 1, 2, 3].map(x=>view.getUint32(target.bits + x * 4, true));
+
+        // Wine's bitmap.c: a one-bit DIB section reads through its own table,
+        // whatever the destination's text and background colours are.
+        const indexed = section(h, { width: 4, height: -1, bitCount: 1,
+            colors: [0x00123456, 0x00335577] });
+        h.ram[indexed.bits] = 0x55;
+        fns.SetTextColor.handler([target.dc, 0]);
+        fns.SetBkColor.handler([target.dc, 0]);
+        assert.equal(fns.StretchBlt.handler([target.dc, 0, 0, 4, 1, indexed.dc, 0, 0, 4, 1,
+            SRCCOPY]), 1);
+        assert.deepEqual(row(), [0x00123456, 0x00335577, 0x00123456, 0x00335577]);
+
+        // A monochrome bitmap's 0 is the destination's text colour and its 1
+        // the background colour.
+        const maskDc = fns.CreateCompatibleDC.handler([0]);
+        fns.SelectObject.handler([maskDc, fns.CreateBitmap.handler([16, 16, 1, 1, 0])]);
+        fns.SetPixel.handler([maskDc, 0, 0, 0]);
+        fns.SetPixel.handler([maskDc, 1, 0, 0x00ffffff]);
+        fns.SetPixel.handler([maskDc, 2, 0, 0x00ffffff]);
+        fns.SetPixel.handler([maskDc, 3, 0, 0]);
+        fns.SetTextColor.handler([target.dc, 0x00664422]);
+        fns.SetBkColor.handler([target.dc, 0x00214365]);
+        assert.equal(fns.StretchBlt.handler([target.dc, 0, 0, 4, 1, maskDc, 0, 0, 4, 1,
+            SRCCOPY]), 1);
+        assert.deepEqual(row(), [0x00224466, 0x00654321, 0x00654321, 0x00224466]);
+
+        // Into a monochrome bitmap, a pixel is 1 only where it is the source's
+        // background colour -- the raw pixel, so 0x0fffffff is not white.
+        const single = fns.CreateCompatibleDC.handler([0]);
+        fns.SelectObject.handler([single, fns.CreateBitmap.handler([1, 1, 1, 1, 0])]);
+        const source = section(h, { width: 1, height: 1, bitCount: 32 });
+        view.setUint32(source.bits, 0x0fffffff, true);
+        fns.SetBkColor.handler([source.dc, 0x00ffffff]);
+        fns.StretchBlt.handler([single, 0, 0, 1, 1, source.dc, 0, 0, 1, 1, SRCCOPY]);
+        fns.SetBkColor.handler([source.dc, 0x000000ff]);
+        fns.StretchBlt.handler([source.dc, 0, 0, 1, 1, single, 0, 0, 1, 1, SRCCOPY]);
+        assert.equal(fns.GetPixel.handler([source.dc, 0, 0]), 0);
+
+        // Wine's test_bitmap_colors: a one-bit section onto a monochrome bitmap
+        // compares with the table entry nearest the source's background.
+        const mask = fns.CreateCompatibleDC.handler([0]);
+        const maskBitmap = fns.CreateBitmap.handler([16, 8, 1, 1, 0]);
+        fns.SelectObject.handler([mask, maskBitmap]);
+        for (const [colors, expected] of [
+            [[0x00fffff0, 0x00200000], 0x55],
+            [[0x00000010, 0x00fff0ff], 0xaa],
+        ])
+        {
+            const striped = section(h, { width: 16, height: -8, bitCount: 1,
+                colors: /** @type {number[]} */ (colors) });
+            h.ram.fill(0x55, striped.bits, striped.bits + 32);
+            fns.SetTextColor.handler([striped.dc, 0x00ffffff]);
+            fns.SetBkColor.handler([striped.dc, 0]);
+            fns.BitBlt.handler([mask, 0, 0, 16, 8, striped.dc, 0, 0, SRCCOPY]);
+            fns.GetBitmapBits.handler([maskBitmap, 2, ROWS + 0x40]);
+            assert.deepEqual([...h.ram.subarray(ROWS + 0x40, ROWS + 0x42)],
+                [expected, expected]);
+        }
+    }
+    finally
+    {
+        await graphicsModule.dispose();
+    }
+});
