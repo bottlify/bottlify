@@ -184,6 +184,42 @@ const GAMMA_CHANNEL_ENTRIES = 256;
 const GAMMA_RAMP_BYTES = 3 * GAMMA_CHANNEL_ENTRIES * 2;
 
 /**
+ * How far an entry may stray from the identity (index times 256) before
+ * SetDeviceGammaRamp refuses the ramp. Wine's dc.c test_gamma takes a ramp
+ * that wraps round midway -- exactly this far out at index 128 -- and refuses
+ * every ramp that goes further (a channel of zeros, of the low byte alone, or
+ * one at full from its second entry), so half the range is the bound.
+ */
+const GAMMA_MAX_DEVIATION = 0x8000;
+
+/**
+ * @typedef {{ red: Uint16Array, green: Uint16Array, blue: Uint16Array }} GammaRamp
+ */
+
+/**
+ * The ramp at `bytes`, or null when SetDeviceGammaRamp would refuse it.
+ *
+ * @param {Uint8Array} bytes  768 little-endian words: red, green, blue.
+ * @returns {GammaRamp | null}
+ */
+function readGammaRamp(bytes){
+    const view = new DataView(bytes.buffer, bytes.byteOffset, GAMMA_RAMP_BYTES);
+    const channels = [0, 1, 2].map(channel=>Uint16Array.from({ length: GAMMA_CHANNEL_ENTRIES },
+        (_, index)=>view.getUint16((channel * GAMMA_CHANNEL_ENTRIES + index) * 2, true)));
+    for (const channel of channels)
+    {
+        for (let index = 0; index < GAMMA_CHANNEL_ENTRIES; index++)
+        {
+            if (Math.abs(channel[index] - index * 256) > GAMMA_MAX_DEVIATION)
+            {
+                return null;
+            }
+        }
+    }
+    return { red: channels[0], green: channels[1], blue: channels[2] };
+}
+
+/**
  * @typedef {Object} DrawingServices
  * @property {(options: { objects: any, metrics: (font: number) => any }) => any}
  *           [createDrawing]
@@ -214,6 +250,14 @@ const GAMMA_RAMP_BYTES = 3 * GAMMA_CHANNEL_ENTRIES * 2;
  *           Presents the frame an OpenGL context drew into a device context.
  *           Absent in a build that cannot draw, where SwapBuffers fails rather
  *           than presenting nothing.
+ * @property {(ramp: GammaRamp) => void} [setGammaRamp]
+ *           Makes a ramp the display's, which every frame is then shown
+ *           through. Absent, a ramp set is kept here and read back only.
+ * @property {() => GammaRamp | null} [gammaRamp]
+ *           The ramp the display shows through, whoever set it -- a
+ *           full-screen device's included -- or null for the identity.
+ * @property {() => boolean} [appliesGamma]
+ *           Whether a ramp set reaches the picture at all.
  */
 
 /**
@@ -324,6 +368,8 @@ export function createDrawingFunctions(
 {
     /** @type {DrawingServices} */
     const services = host.graphics ?? {};
+    /** The display's ramp, when there is no graphics layer to hold it. @type {GammaRamp | null} */
+    let keptGammaRamp = null;
 
     /**
      * The drawing interface, built on first use and only if there is one.
@@ -1450,9 +1496,10 @@ export function createDrawingFunctions(
         /**
          * BOOL GetDeviceGammaRamp(HDC hdc, LPVOID lpRamp)
          *
-         * The identity ramp, written out in full. A program that reads it,
-         * adjusts it and writes it back must get something it can adjust, and
-         * an untouched buffer would leave it multiplying by whatever was there.
+         * The ramp the display shows through, written out in full, and the
+         * identity when none was set: a program that reads it, adjusts it and
+         * writes it back must get something it can adjust, and an untouched
+         * buffer would leave it multiplying by whatever was there.
          */
         GetDeviceGammaRamp: {
             argBytes: 8,
@@ -1462,14 +1509,16 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
+                const shown = services.setGammaRamp ? services.gammaRamp?.() : keptGammaRamp;
                 const bytes = new Uint8Array(GAMMA_RAMP_BYTES);
                 const view = new DataView(bytes.buffer);
                 for (let channel = 0; channel < 3; channel++)
                 {
+                    const entries = shown ? [shown.red, shown.green, shown.blue][channel] : null;
                     for (let index = 0; index < GAMMA_CHANNEL_ENTRIES; index++)
                     {
                         const at = (channel * GAMMA_CHANNEL_ENTRIES + index) * 2;
-                        view.setUint16(at, index * 257, true);
+                        view.setUint16(at, entries ? entries[index] : index * 257, true);
                     }
                 }
                 host.writeMemory(ramp >>> 0, bytes);
@@ -1480,13 +1529,33 @@ export function createDrawingFunctions(
         /**
          * BOOL SetDeviceGammaRamp(HDC hdc, LPVOID lpRamp)
          *
-         * Accepted and discarded. Refusing would send a program down a fallback
-         * path over a setting that changes no pixel it can observe here.
+         * The display's ramp, handed to the graphics layer, which shows every
+         * frame through it. A ramp too far from the identity is refused, as
+         * Windows refuses it, and leaves the one before it in effect.
          */
         SetDeviceGammaRamp: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([handle])=>(dcOf(handle) ? 1 : 0),
+            handler: ([handle, ramp])=>{
+                if (!dcOf(handle) || (ramp >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const read = readGammaRamp(host.readMemory(ramp >>> 0, GAMMA_RAMP_BYTES));
+                if (!read)
+                {
+                    return 0;
+                }
+                if (services.setGammaRamp)
+                {
+                    services.setGammaRamp(read);
+                }
+                else
+                {
+                    keptGammaRamp = read;
+                }
+                return 1;
+            },
         },
 
         /** BOOL OffsetViewportOrgEx(HDC hdc, int x, int y, LPPOINT lppt) */

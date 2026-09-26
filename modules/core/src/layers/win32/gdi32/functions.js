@@ -161,6 +161,10 @@ const LOGPIXELSX = 88;
 const LOGPIXELSY = 90;
 const SIZEPALETTE = 104;
 const COLORRES = 108;
+const COLORMGMTCAPS = 121;
+
+/** CM_GAMMA_RAMP: the device takes a gamma ramp that reaches the picture. */
+const CM_GAMMA_RAMP = 0x00000002;
 
 /** DT_RASDISPLAY: the device is a raster display, not a plotter or a printer. */
 const DT_RASDISPLAY = 1;
@@ -950,6 +954,8 @@ export function createGdiFunctions(host){
                 return depth === PALETTE_DEPTH ? 1 << depth : 0;
             case COLORRES:
                 return depth;
+            case COLORMGMTCAPS:
+                return host.graphics?.appliesGamma?.() ? CM_GAMMA_RAMP : 0;
             default:
                 // An index with no answer reads as zero rather than as a
                 // plausible number from a neighbouring capability.

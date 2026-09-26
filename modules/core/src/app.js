@@ -3206,6 +3206,12 @@ async function buildApp(options){
                 // a paint pass. The window manager decides when a pass is
                 // over; the graphics layer owns the surface and the screen.
                 presentDesktop: ()=>core.api('graphics').gdiDrawing().presentDesktop(),
+                // The display's gamma ramp, which the presenter shows every
+                // frame through, whichever API set it last.
+                /** @param {any} ramp */
+                setGammaRamp: ramp=>core.api('graphics').gdiDrawing().setDisplayGamma(ramp),
+                gammaRamp: ()=>core.api('graphics').gdiDrawing().displayGamma(),
+                appliesGamma: ()=>core.api('graphics').gdiDrawing().appliesGamma(),
             },
             // What a filter graph plays. Handed down rather than reached for:
             // win32 sits below the media layer and may not import it, and the

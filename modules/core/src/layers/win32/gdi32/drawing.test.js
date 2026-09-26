@@ -1042,3 +1042,91 @@ test('TextOutW reads code units and draws through the same engine as the narrow 
     assert.equal(bare.fns.TextOutW.handler([bare.hdc, 0, 0, STRUCT, 1]), 0,
         'and it fails the same way without a drawing service');
 });
+
+/**
+ * Writes a ramp into guest memory as SetDeviceGammaRamp reads it: red, green
+ * and blue, 256 words each.
+ *
+ * @param {ReturnType<typeof fakeMemory>} memory
+ * @param {(channel: number, index: number) => number} entry
+ */
+function putRamp(memory, entry){
+    const bytes = new Uint8Array(3 * 256 * 2);
+    const view = new DataView(bytes.buffer);
+    for (let channel = 0; channel < 3; channel++)
+    {
+        for (let index = 0; index < 256; index++)
+        {
+            view.setUint16((channel * 256 + index) * 2, entry(channel, index) & 0xffff, true);
+        }
+    }
+    memory.writeMemory(RAMP, bytes);
+}
+
+test('SetDeviceGammaRamp refuses a ramp that strays too far from the identity', ()=>{
+    // Wine's gdi32 dc.c test_gamma, one channel changed at a time with the
+    // others the identity: a channel of zeros, a flat line of the low byte
+    // alone, and one jumping to full at the second entry are refused; a steep
+    // line, one that wraps round midway and a staircase are taken. A refused
+    // ramp leaves the one before it in effect.
+    const { memory, fns, hdc } = setup();
+    const identity = (/** @type {number} */ channel, /** @type {number} */ index)=>index * 256;
+    /** @param {(index: number) => number} red */
+    const tryRed = red=>{
+        putRamp(memory, (channel, index)=>(channel === 0 ? red(index) : identity(channel, index)));
+        return fns.SetDeviceGammaRamp.handler([hdc, RAMP]);
+    };
+    assert.equal(tryRed(()=>0), 0, 'zeroes');
+    assert.equal(tryRed(index=>index), 0, 'low');
+    assert.equal(tryRed(index=>index * 256), 1, 'steep');
+    assert.equal(tryRed(index=>(index === 0 ? 0 : index === 1 ? 0x7fff : 0xffff)), 0, 'bright');
+    assert.equal(fns.GetDeviceGammaRamp.handler([hdc, RAMP]), 1);
+    assert.equal(memory.u16(RAMP + 2 * 2), 2 * 256, 'the steep ramp is still the one in effect');
+    assert.equal(tryRed(index=>512 * index), 1, 'wraps midway, exactly half the range out');
+    assert.equal(tryRed(index=>256 * (index & ~1)), 1, 'stairs');
+    assert.equal(fns.GetDeviceGammaRamp.handler([hdc, RAMP]), 1);
+    assert.equal(memory.u16(RAMP + 3 * 2), 2 * 256, 'the staircase reads back as set');
+    assert.equal(fns.SetDeviceGammaRamp.handler([hdc, 0]), 0, 'a null ramp is a failure');
+});
+
+test('the display\'s ramp is the graphics layer\'s: set there, read back from there', ()=>{
+    /** @type {any[]} */
+    const set = [];
+    /** @type {{ red: Uint16Array, green: Uint16Array, blue: Uint16Array } | null} */
+    let inEffect = null;
+    let applies = true;
+    const graphics = {
+        ...fakeDrawing().services,
+        /** @param {any} ramp */
+        setGammaRamp: ramp=>set.push(ramp),
+        gammaRamp: ()=>inEffect,
+        appliesGamma: ()=>applies,
+    };
+    const { memory, fns, hdc } = setup(graphics);
+
+    putRamp(memory, (channel, index)=>(channel === 2 ? 0xffff - index * 256 : index * 256));
+    assert.equal(fns.SetDeviceGammaRamp.handler([hdc, RAMP]), 0,
+        'an inverted channel is refused before it reaches anything');
+    assert.equal(set.length, 0);
+    putRamp(memory, (channel, index)=>Math.min(0xffff, index * 256 + channel * 64));
+    assert.equal(fns.SetDeviceGammaRamp.handler([hdc, RAMP]), 1);
+    assert.equal(set.length, 1);
+    assert.deepEqual([set[0].red.length, set[0].green.length, set[0].blue.length],
+        [256, 256, 256]);
+    assert.deepEqual([set[0].red[1], set[0].green[1], set[0].blue[1]], [256, 320, 384]);
+
+    assert.equal(fns.GetDeviceGammaRamp.handler([hdc, RAMP]), 1);
+    assert.equal(memory.u16(RAMP + 2), 257, 'nothing in effect reads back as the identity');
+    const shown = Uint16Array.from({ length: 256 }, (_, index)=>(255 - index) * 257);
+    inEffect = { red: shown, green: shown, blue: shown };
+    assert.equal(fns.GetDeviceGammaRamp.handler([hdc, RAMP]), 1);
+    assert.equal(memory.u16(RAMP), 0xffff, 'whatever ramp the display shows, whoever set it');
+    assert.equal(memory.u16(RAMP + (512 + 255) * 2), 0);
+
+    const COLORMGMTCAPS = 121;
+    const CM_GAMMA_RAMP = 2;
+    assert.equal(fns.GetDeviceCaps.handler([hdc, COLORMGMTCAPS]), CM_GAMMA_RAMP);
+    applies = false;
+    assert.equal(fns.GetDeviceCaps.handler([hdc, COLORMGMTCAPS]), 0,
+        'claimed only where a ramp reaches the picture');
+});

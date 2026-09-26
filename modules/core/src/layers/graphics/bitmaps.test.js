@@ -36,8 +36,10 @@ const SCREEN = { width: 16, height: 8, bitsPerPixel: 32 };
 /**
  * One flat guest memory, the graphics module over a fake device, and the
  * gdi32 table on its drawing engine.
+ *
+ * @param {{ canvas?: boolean }} [options]  Whether the device has a canvas to show on.
  */
-async function assemble(){
+async function assemble({ canvas = false } = {}){
     const ram = new Uint8Array(0x40000);
     const view = new DataView(ram.buffer);
     /** @type {Map<number, { type: string, object: any }>} */
@@ -55,7 +57,10 @@ async function assemble(){
     };
     const gpu = createFakeDevice();
     const graphics = await graphicsModule.create({
-        device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
+        device: {
+            device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+            ...(canvas ? { screen: gpu.screen, canvas: gpu.canvas } : {}),
+        },
         screen: SCREEN,
         now: ()=>0,
         schedule: ()=>{},
@@ -101,13 +106,16 @@ async function assemble(){
             createDrawing: options=>drawing.create(options),
             surfaceFor: (dc, bitmap)=>drawing.surfaceFor(dc, bitmap),
             presentDesktop: ()=>{},
+            setGammaRamp: ramp=>drawing.setDisplayGamma(ramp),
+            gammaRamp: ()=>drawing.displayGamma(),
+            appliesGamma: ()=>drawing.appliesGamma(),
         },
     });
     // The handlers declare only the arguments they read; a guest call always
     // carries the whole list.
     const fns = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
         /** @type {unknown} */ (gdi.table));
-    return { ram, view, fns };
+    return { ram, view, fns, graphics };
 }
 
 test('a compatible bitmap is a double buffer: drawn into, blitted out, read back', async()=>{
@@ -333,3 +341,43 @@ test('a monochrome blit converts by the device contexts\' colours', async()=>{
         await graphicsModule.dispose();
     }
 });
+
+test('a ramp gdi32 sets is the display\'s, and a full-screen device\'s is shown over it',
+    async()=>{
+        const { view, fns, graphics } = await assemble({ canvas: true });
+        try
+        {
+            const screen = fns.GetDC.handler([0]);
+            const COLORMGMTCAPS = 121;
+            assert.equal(fns.GetDeviceCaps.handler([screen, COLORMGMTCAPS]), 2, 'CM_GAMMA_RAMP');
+            /** @param {number} index @returns {number} red's entry, as GetDeviceGammaRamp reads */
+            const readBack = index=>{
+                assert.equal(fns.GetDeviceGammaRamp.handler([screen, ROWS + 0x800]), 1);
+                return view.getUint16(ROWS + 0x800 + index * 2, true);
+            };
+            for (let index = 0; index < 3 * 256; index++)
+            {
+                view.setUint16(ROWS + index * 2, Math.min(0xffff, (index % 256) * 256 + 0x100),
+                    true);
+            }
+            assert.equal(fns.SetDeviceGammaRamp.handler([screen, ROWS]), 1);
+            assert.equal(readBack(1), 0x200, 'the ramp set, as the display holds it');
+
+            const d3d9 = graphics.create('d3d9');
+            /** @type {{ device?: any }} */
+            const out = {};
+            assert.equal(d3d9.CreateDevice({
+                swapEffect: 1, backBufferCount: 1, backBufferWidth: 16, backBufferHeight: 8,
+                backBufferFormat: 22, windowed: false,
+            }, out), 0);
+            const inverted = Uint16Array.from({ length: 256 }, (_, index)=>(255 - index) * 257);
+            out.device.SetGammaRamp({ red: inverted, green: inverted, blue: inverted });
+            assert.equal(readBack(0), 0xffff, 'the full-screen device\'s ramp is the display\'s');
+            assert.equal(out.device.release(), 0);
+            assert.equal(readBack(1), 0x200, 'and once it goes, GDI\'s is again');
+        }
+        finally
+        {
+            await graphicsModule.dispose();
+        }
+    });
