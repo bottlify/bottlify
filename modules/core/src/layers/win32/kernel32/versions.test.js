@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    DEFAULT_WINDOWS, VER, WINDOWS_VERSIONS, setCondition, verifyVersion, windowsVersion,
+    DEFAULT_WINDOWS, VER, WINDOWS_VERSIONS, reportedVersion, setCondition, supportedOsOf,
+    verifyVersion, windowsVersion,
 } from './versions.js';
 
 const VER_EQUAL = 1;
@@ -161,4 +162,65 @@ test('a request that names nothing to compare is refused as a bad argument', ()=
     assert.equal(verifyVersion(xp, xp, 0, conditions([VER.MAJORVERSION, VER_EQUAL])),
         'invalid');
     assert.equal(verifyVersion(xp, xp, VER.MAJORVERSION, 0n), 'invalid');
+});
+
+/** The supportedOS GUIDs, as the application manifest documentation lists them. */
+const WINDOWS_7 = '35138b9a-5d96-4fbd-8e2d-a2440225f93a';
+const WINDOWS_8 = '4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38';
+const WINDOWS_8_1 = '1f676c76-80e1-4239-95bb-83d0f6d0da78';
+const WINDOWS_10 = '8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a';
+
+test('a manifest\'s supportedOS elements are read, and nothing else is', ()=>{
+    const manifest = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <supportedOS Id="{${WINDOWS_10.toUpperCase()}}"/>
+      <!-- <supportedOS Id="{${WINDOWS_8_1}}"/> -->
+      <ms_compatibility:supportedOS xmlns:ms_compatibility="x" Id='{${WINDOWS_7}}' />
+      <maxversiontested Id="10.0.18362.1"/>
+    </application>
+  </compatibility>
+</assembly>`;
+    assert.deepEqual(supportedOsOf(manifest), [WINDOWS_10, WINDOWS_7]);
+    assert.deepEqual(supportedOsOf('<assembly/>'), []);
+});
+
+test('Windows 10 tells a program the newest Windows it says it knows, and no newer', ()=>{
+    // Wine's kernel32 version tests (test_pe_os_version): with no Windows
+    // 8.1 or 10 in its manifest a program is answered 6.2, unless its PE
+    // header names a newer system; the manifest, when it names any, decides.
+    const ten = WINDOWS_VERSIONS.win10;
+    /** @param {number} major @param {number} minor @param {string[]} [supportedOS] */
+    const told = (major, minor, supportedOS = [])=>{
+        const version = reportedVersion(ten, { imageVersion: { major, minor }, supportedOS });
+        return `${version.major}.${version.minor}.${version.build}`;
+    };
+    assert.equal(told(4, 0), '6.2.9200');
+    assert.equal(told(4, 0, [WINDOWS_10]), '10.0.19045');
+    assert.equal(told(6, 3, [WINDOWS_8]), '6.2.9200');
+    assert.equal(told(10, 0), '10.0.19045');
+    assert.equal(told(6, 3), '6.3.9600');
+    assert.equal(told(6, 4), '6.3.9600');
+    assert.equal(told(9, 0), '6.3.9600');
+    assert.equal(told(11, 0), '10.0.19045');
+    assert.equal(told(10, 0, [WINDOWS_7, WINDOWS_8, WINDOWS_8_1]), '6.3.9600');
+    assert.equal(reportedVersion(ten).major, 6, 'nothing known about the program is no manifest');
+
+    const eight = reportedVersion(ten, {});
+    assert.equal(eight.servicePackMajor, 0);
+    assert.equal(eight.csdVersion, '');
+    assert.equal(eight.suiteMask, ten.suiteMask);
+    assert.equal(reportedVersion(ten, { supportedOS: [WINDOWS_10] }), ten,
+        'the truth is the record itself');
+});
+
+test('a Windows older than 8.1 answers every program the truth', ()=>{
+    for (const name of /** @type {const} */ (['win2000', 'winxp', 'win7']))
+    {
+        const version = WINDOWS_VERSIONS[name];
+        assert.equal(reportedVersion(version, {}), version, name);
+        assert.equal(reportedVersion(version, { supportedOS: [WINDOWS_10],
+            imageVersion: { major: 10, minor: 0 } }), version, name);
+    }
 });

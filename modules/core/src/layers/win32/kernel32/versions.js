@@ -147,6 +147,88 @@ export function windowsVersion(name){
     return WINDOWS_VERSIONS[/** @type {WindowsName} */ (wanted)];
 }
 
+/**
+ * The Windows a manifest's supportedOS element can name, by the GUID it
+ * names it with (the application manifest documentation's list).
+ *
+ * @type {Readonly<Record<string, readonly [number, number]>>}
+ */
+const SUPPORTED_OS = Object.freeze({
+    'e2011457-1546-43c5-a5fe-008deee3d3f0': [6, 0],
+    '35138b9a-5d96-4fbd-8e2d-a2440225f93a': [6, 1],
+    '4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38': [6, 2],
+    '1f676c76-80e1-4239-95bb-83d0f6d0da78': [6, 3],
+    '8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a': [10, 0],
+});
+
+/**
+ * The GUIDs a manifest's supportedOS elements name, lower case and without
+ * braces, in the order they appear. Commented-out elements do not count.
+ *
+ * @param {string} manifest  The manifest's text.
+ * @returns {string[]}
+ */
+export function supportedOsOf(manifest){
+    const text = manifest.replace(/<!--[\s\S]*?-->/g, '');
+    const element = /<(?:[\w.-]+:)?supportedOS\b[^>]*?\bId\s*=\s*(["'])\s*\{?([0-9a-fA-F-]+)\}?\s*\1/g;
+    return [...text.matchAll(element)].map(match=>match[2].toLowerCase());
+}
+
+/**
+ * What a program says about the Windows it was written for.
+ *
+ * @typedef {Object} ProgramCompatibility
+ * @property {string[]} [supportedOS]  The GUIDs of its manifest's supportedOS
+ *           elements (`supportedOsOf`).
+ * @property {{ major: number, minor: number }} [imageVersion]  The operating
+ *           system version its PE header names.
+ */
+
+/** @param {readonly number[]} a @param {readonly number[]} b */
+const compareVersions = (a, b)=>a[0] - b[0] || a[1] - b[1];
+
+/**
+ * The version GetVersion, GetVersionEx and VerifyVersionInfo answer a program.
+ *
+ * Windows 8.1 and later answer a program with the newest Windows it says it
+ * knows, and never newer than themselves: the newest its manifest's
+ * supportedOS elements name, or when they name none the version its PE header
+ * names, rounded down to one that exists -- and 8 (6.2) when that is older
+ * still: the rule came with 8.1, and a program that knows nothing of it is
+ * told the Windows before it (Wine's kernel32 version tests). RtlGetVersion,
+ * the process block and the registry keep the truth. Of the four choices only
+ * 10 is that new; the others answer every program the same.
+ *
+ * @param {WindowsVersion} version  The machine's.
+ * @param {ProgramCompatibility} [compatibility]  The running program's.
+ * @returns {WindowsVersion}
+ */
+export function reportedVersion(version, compatibility = {}){
+    const truth = [version.major, version.minor];
+    if (compareVersions(truth, [6, 3]) < 0)
+    {
+        return version;
+    }
+    const declared = (compatibility.supportedOS ?? [])
+        .map(id=>SUPPORTED_OS[id.toLowerCase()])
+        .filter(known=>known !== undefined)
+        .sort(compareVersions);
+    const image = compatibility.imageVersion;
+    const asked = declared.length > 0
+        ? declared[declared.length - 1]
+        : [[10, 0], [6, 3]].find(known=>image && compareVersions(
+            [image.major, image.minor], known) >= 0) ?? [6, 2];
+    if (compareVersions(asked, truth) >= 0)
+    {
+        return version;
+    }
+    const [major, minor] = compareVersions(asked, [6, 3]) >= 0 ? [6, 3] : [6, 2];
+    return Object.freeze({
+        ...version, major, minor, build: minor === 3 ? 9600 : 9200,
+        servicePackMajor: 0, servicePackMinor: 0, csdVersion: '',
+    });
+}
+
 /** VerifyVersionInfo's type bits, which are also VerSetConditionMask's. */
 export const VER = Object.freeze({
     MINORVERSION: 0x01,
