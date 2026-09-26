@@ -925,10 +925,19 @@ export function createDrawingFunctions(
                 {
                     return 1;
                 }
-                const wanted = Math.min(lines >>> 0, shape.height);
-                const buffer = new Uint8Array(
-                    (((header.width * header.bitCount + 31) / 32 | 0) * 4) * wanted);
-                /** @param {number} source */
+                // The DIB's picture lies against the bitmap's top-left, and the
+                // lines are counted from the DIB's bottom whichever way it is
+                // stored, written in its own order: a line of the DIB outside
+                // the bitmap is zeros, and only the lines inside it are
+                // counted (Wine's test_GetDIBits_scanlines).
+                const height = Math.abs(header.height);
+                if ((start >>> 0) >= height)
+                {
+                    return 1;
+                }
+                const wanted = Math.min(lines >>> 0, height - (start >>> 0));
+                const buffer = new Uint8Array(dibStride(header.width, header.bitCount) * wanted);
+                /** @param {number} source @returns {number | null} */
                 const read = source=>{
                     const interfaces = bound(source, false);
                     return interfaces
@@ -937,16 +946,19 @@ export function createDrawingFunctions(
                             bits: buffer,
                             masks,
                             colors,
-                            startScan: start >>> 0,
+                            startScan: header.height < 0
+                                ? height - (start >>> 0) - wanted
+                                : start >>> 0,
                             scanLines: wanted,
                         })
-                        : 0;
+                        : null;
                 };
                 const written = dc.bitmap === (bitmap >>> 0) ? read(handle) : lend(bitmap, read);
-                if (written > 0)
+                if (written === null)
                 {
-                    host.writeMemory(bits >>> 0, buffer);
+                    return 0;
                 }
+                host.writeMemory(bits >>> 0, buffer);
                 return written;
             },
         },

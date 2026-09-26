@@ -882,6 +882,13 @@ function scanFixture(topDown){
         },
         /** @returns {number[]} the section's 64 DWORDs */
         pixels: ()=>[...Array(64).keys()].map(index=>view.getUint32(bits + index * 4, true)),
+        /** The section's own DWORDs counting from zero, as GetDIBits' tests set them. */
+        count: ()=>{
+            for (let index = 0; index < 64; index++)
+            {
+                view.setUint32(bits + index * 4, index, true);
+            }
+        },
     };
 }
 
@@ -1003,5 +1010,84 @@ test('SetDIBits lays the scan lines it is given against the top of the bitmap', 
         assert.equal(scan.fns.SetDIBits.handler([screen, scan.section, start, lines,
             SCAN_DATA, WIRED_INFO, 0]), lines, name);
         assert.deepEqual(scan.pixels(), expecting(ranges), name);
+    }
+});
+
+test('GetDIBits hands back the scan lines asked for, zeros where the bitmap is not', ()=>{
+    // Wine's test_GetDIBits_scanlines, every case: a section whose DWORDs
+    // count from zero, read back as bottom-up and top-down DIBs of 5, 8 and
+    // 16 rows from uStartScan for cLines. Each range names what lands in the
+    // 128-DWORD buffer; everything else is left as it was.
+    /** @param {number} index @returns {number} the tests' 64-DWORD inverted_bits */
+    const inverted64 = index=>56 - (index & ~7) + (index & 7);
+    /** @param {number} shift */
+    const own = shift=>(/** @type {number} */ index)=>index + shift;
+    /** @param {number} shift */
+    const turned = shift=>(/** @type {number} */ index)=>inverted64(index + shift);
+    const zero = ()=>0;
+    /** @type {[boolean, number, number, number, number, [number, number, any][]][]} */
+    const cases = [
+        [false, 8, 0, 8, 8, [[0, 64, own(0)]]],
+        [false, 8, 1, 5, 5, [[0, 40, own(8)]]],
+        [false, 8, 1, 12, 7, [[0, 56, own(8)]]],
+        [false, 8, 9, 12, 1, []],
+        [false, 16, 1, 12, 5, [[0, 56, zero], [56, 96, own(-56)]]],
+        [false, 16, 2, 12, 6, [[0, 48, zero], [48, 96, own(-48)]]],
+        [false, 16, 2, 3, 0, [[0, 24, zero]]],
+        [false, 5, 1, 2, 2, [[0, 16, own(32)]]],
+        [false, -8, 0, 8, 8, [[0, 64, turned(0)]]],
+        [false, -8, 1, 5, 5, [[0, 40, turned(16)]]],
+        [false, -8, 1, 12, 7, [[0, 56, turned(0)]]],
+        [false, -8, 4, 12, 4, [[0, 32, turned(0)]]],
+        [false, -8, 3, 12, 5, [[0, 40, turned(0)]]],
+        [false, -8, 3, 13, 5, [[0, 40, turned(0)]]],
+        [false, -16, 0, 16, 8, [[0, 64, turned(0)], [64, 128, zero]]],
+        [false, -16, 1, 12, 5, [[0, 40, turned(24)], [40, 96, zero]]],
+        [false, -16, 4, 12, 8, [[0, 64, turned(0)], [64, 96, zero]]],
+        [false, -16, 5, 12, 8, [[0, 64, turned(0)], [64, 88, zero]]],
+        [false, -16, 9, 12, 7, [[0, 56, turned(0)]]],
+        [false, -16, 18, 12, 1, []],
+        [false, -5, 1, 2, 2, [[0, 16, turned(16)]]],
+        [true, -8, 0, 8, 8, [[0, 64, own(0)]]],
+        [true, -8, 1, 5, 5, [[0, 40, own(16)]]],
+        [true, -8, 1, 12, 7, [[0, 56, own(0)]]],
+        [true, -8, 4, 12, 4, [[0, 32, own(0)]]],
+        [true, -8, 3, 12, 5, [[0, 40, own(0)]]],
+        [true, -8, 3, 13, 5, [[0, 40, own(0)]]],
+        [true, -16, 0, 16, 8, [[0, 64, own(0)], [64, 128, zero]]],
+        [true, -16, 1, 12, 5, [[0, 40, own(24)], [40, 96, zero]]],
+        [true, -16, 4, 12, 8, [[0, 64, own(0)], [64, 96, zero]]],
+        [true, -16, 5, 12, 8, [[0, 64, own(0)], [64, 88, zero]]],
+        [true, -16, 9, 12, 7, [[0, 56, own(0)]]],
+        [true, -5, 1, 2, 2, [[0, 16, own(16)]]],
+        [true, 8, 0, 8, 8, [[0, 64, turned(0)]]],
+        [true, 8, 1, 5, 5, [[0, 40, turned(8)]]],
+        [true, 8, 1, 12, 7, [[0, 56, turned(8)]]],
+        [true, 8, 9, 12, 1, []],
+        [true, 16, 1, 12, 5, [[0, 56, zero], [56, 96, turned(-56)]]],
+        [true, 16, 2, 12, 6, [[0, 48, zero], [48, 96, turned(-48)]]],
+        [true, 16, 2, 3, 0, [[0, 24, zero]]],
+        [true, 5, 1, 2, 2, [[0, 16, turned(32)]]],
+    ];
+    const OUT = 0x3000;
+    for (const [topDown, height, start, lines, answer, ranges] of cases)
+    {
+        const scan = scanFixture(topDown);
+        scan.count();
+        scan.header(height);
+        for (let index = 0; index < 128; index++)
+        {
+            scan.view.setUint32(OUT + index * 4, 0xaaaaaaaa, true);
+        }
+        const screen = scan.fns.GetDC.handler([0]);
+        const name = `${topDown ? 't-d' : 'b-u'} section, biHeight ${height}, ${start}+${lines}`;
+        assert.equal(scan.fns.GetDIBits.handler([screen, scan.section, start, lines, OUT,
+            WIRED_INFO, 0]), answer, name);
+        const got = [...Array(128).keys()].map(index=>scan.view.getUint32(OUT + index * 4, true));
+        const wanted = [...Array(128).keys()].map(index=>{
+            const range = ranges.find(([from, to])=>index >= from && index < to);
+            return range ? range[2](index) : 0xaaaaaaaa;
+        });
+        assert.deepEqual(got, wanted, name);
     }
 });
