@@ -1518,6 +1518,30 @@ test('QueryInterface finds each device generation by the IID the header defines'
     }
 });
 
+test('a device whose last reference goes is gone through every generation asked for', ()=>{
+    // The pointer CreateDevice answered is released first, while the one a
+    // QueryInterface answered still holds the device; once that goes too,
+    // neither may reach the released device.
+    const g = guestMachine();
+    assert.equal(g.dinput.libraries['DINPUT.dll']
+        .DirectInputCreateA.handler([0, 0x0500, AT.out, 0]), DI_OK);
+    const root = g.memory.u32(AT.out);
+    writeGuid(g.memory, AT.guid, GUID_SysMouse);
+    assert.equal(g.call(root, slotOf(IDIRECTINPUT_SLOTS, 'CreateDevice'),
+        [AT.guid, AT.out, 0]), DI_OK);
+    const device = g.memory.u32(AT.out);
+    writeGuid(g.memory, AT.iid, '{5944E682-C92E-11CF-BFC7-444553540000}');
+    assert.equal(g.call(device, 0, [AT.iid, AT.state]), 0);
+    const second = g.memory.u32(AT.state);
+
+    assert.equal(g.call(device, 2), 1);
+    assert.equal(g.call(second, slotOf(IDIRECTINPUTDEVICE2_SLOTS, 'SetDataFormat'),
+        [dataFormat(g.memory, 16)]), DI_OK, 'the device lives while the second is held');
+    assert.equal(g.call(second, 2), 0);
+    assert.equal(g.call(device, slotOf(IDIRECTINPUTDEVICE_SLOTS, 'Acquire')), E_POINTER);
+    assert.equal(g.call(second, slotOf(IDIRECTINPUTDEVICE2_SLOTS, 'Acquire')), E_POINTER);
+});
+
 test('diagnostics report what a run actually did', ()=>{
     const f = keyboard();
     setBufferSize(f, f.device, 8);

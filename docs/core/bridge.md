@@ -393,11 +393,11 @@ reachable; without that word only the interface released through goes, which is 
 way of counting (DirectDraw's generations each end apart). A pointer is kept instead when the object
 answers an optional `reachable(interfaceId)` with yes: something besides the program keeps it (a
 DirectSound device keeps its primary buffer), so the pointer stays, and every such pointer is asked
-again after each later release and forgotten once the answer is no. `ole32`'s objects report
-`destroyed`; the DirectDraw/Direct3D, DirectSound, DirectInput and `oleaut32` adapters do not yet,
-so theirs still end one interface at a time. A method without `invoke` answers `E_NOTIMPL`; a call
-through an unpublished pointer answers `E_POINTER`. A method's `invoke` may return a promise, and
-the caller is parked on it.
+again after each later release and forgotten once the answer is no. `ole32`'s objects and
+DirectInput's devices report `destroyed`; the DirectDraw/Direct3D, DirectSound and `oleaut32`
+adapters do not yet, so theirs still end one interface at a time. A method without `invoke`
+answers `E_NOTIMPL`; a call through an unpublished pointer answers `E_POINTER`. A method's
+`invoke` may return a promise, and the caller is parked on it.
 
 A table that cannot be built — stub table full, or the arena refusing — is counted as a refusal
 with its reason, and the guest gets a failure code rather than a null pointer with `S_OK`.
