@@ -419,6 +419,37 @@ test('cpuid reads a subleaf from ecx; rdrand fills a register and sets CF alone'
         (/** @type {any} */ fault)=>fault instanceof Fault && fault.vector === 6);
 });
 
+test('lea with an fs: override computes the offset alone, as the processor does', ()=>{
+    // lea eax, fs:[ebx+0x18]
+    const m = run([0x64, 0x8d, 0x43, 0x18], state=>{
+        state.reg[3] = 0x100;
+        state.fsBase = 0x7000;
+    });
+    assert.equal(m.state.reg[0], 0x118);
+});
+
+test('an extended load keeps an infinity, a NaN\'s sign, and flags only a signalling NaN', ()=>{
+    /** @param {bigint} mantissa @param {number} signExponent */
+    const through = (mantissa, signExponent)=>{
+        // fld tword [0x2000]; fstp qword [0x2010]
+        const m = run([0xdb, 0x2d, 0x00, 0x20, 0, 0, 0xdd, 0x1d, 0x10, 0x20, 0, 0], state=>{
+            state.memory.write(0x2000, 4, Number(mantissa & 0xffffffffn));
+            state.memory.write(0x2004, 4, Number(mantissa >> 32n));
+            state.memory.write(0x2008, 2, signExponent);
+        });
+        return { bits: m.view.getBigUint64(0x2010, true), ie: m.state.status & 1 };
+    };
+    assert.equal(through(0x8000000000000000n, 0xffff).bits, 0xfff0000000000000n, '-inf');
+    assert.equal(through(0x8000000000000000n, 0x7fff).bits, 0x7ff0000000000000n, '+inf');
+    const negativeNaN = through(0xc000000000000000n, 0xffff);
+    assert.equal(negativeNaN.bits >> 63n, 1n, 'a negative NaN keeps its sign');
+    assert.ok((negativeNaN.bits & 0x7ff0000000000000n) === 0x7ff0000000000000n
+        && (negativeNaN.bits & 0xfffffffffffffn) !== 0n, 'and is a NaN');
+    assert.equal(negativeNaN.ie, 0, 'a quiet NaN raises nothing');
+    assert.equal(through(0xc000000000000001n, 0x7fff).ie, 0, 'nor one with a payload');
+    assert.equal(through(0x8000000000000001n, 0x7fff).ie, 1, 'a signalling one raises IE');
+});
+
 test('addsubps subtracts the even lanes and adds the odd', ()=>{
     const m = machine();
     const instruction = decode(

@@ -334,6 +334,42 @@ test('a run of instructions sees a store into its own bytes decoded before it', 
     assert.deepEqual(starts, [0x1000, 0x1006], 'the run ended after the store and resumed');
 });
 
+test('a compiled lea step with an fs: override leaves the segment out', ()=>{
+    const layout = ownLayout({ ramSize: 1 << 20 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
+    ram.set([0x64, 0x8d, 0x43, 0x18, 0xf4], 0x1000); // lea eax, fs:[ebx+0x18]; hlt
+    const state = blockState({ memory, layout });
+    state.eip = 0x1000;
+    state.reg[3] = 0x100;
+    state.fsBase = 0x7000;
+    interpret(state, 10);
+    assert.equal(state.reg[0], 0x118);
+});
+
+test('a cached run over a page made inaccessible since runs up to that page and faults there',
+    ()=>{
+        const layout = ownLayout({ ramSize: 1 << 20 });
+        const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+        const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
+        const flags = new Uint8Array(
+            memory.buffer, layout.tables + Tables.PAGE_FLAGS, Tables.PAGE_FLAGS_SIZE);
+        // At 0x1ffc: inc eax; inc eax; nop; nop | 0x2000: inc eax; hlt -- a run over two pages.
+        ram.set([0x40, 0x40, 0x90, 0x90, 0x40, 0xf4], 0x1ffc);
+        const state = blockState({ memory, layout });
+        state.eip = 0x1ffc;
+        interpret(state, 100);
+        assert.equal(state.reg[0], 3, 'the run ran whole once, and is cached');
+        flags[0x2] = PageFlag.INACCESSIBLE;
+        state.eip = 0x1ffc;
+        state.halted = false;
+        state.reg[0] = 0;
+        assert.throws(()=>interpret(state, 100),
+            e=>e instanceof Fault && e.vector === 13 && e.eip === 0x2000,
+            'the fault names the instruction on the page, not the run\'s start');
+        assert.equal(state.reg[0], 2, 'the instructions before the page ran');
+    });
+
 test('a run is reported once, at its start, and a fetch from an inaccessible page faults there',
     ()=>{
         const layout = ownLayout({ ramSize: 1 << 20 });

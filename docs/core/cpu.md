@@ -476,6 +476,14 @@ storing instruction (the memory's `watch`), so an instruction a program patches 
 already decoded runs as written. The stop test, the hotness count and the ring of recent starts
 are per run rather than per instruction, and a jump's target always starts one, so every start a
 jump reaches is still counted; a fetch from an inaccessible page faults at the address fetched.
+A cached run some of whose bytes cannot be fetched now (a page it spans freed or protected since)
+is decoded afresh rather than failing its check: its leading instructions run and the fetch
+faults at the one that reaches the page -- the check faulted at the run's start with the EIP of
+the instruction before it, so a faulting `call` was re-executed and ran twice. The interpreter's
+extended reader keeps an infinity and a NaN's sign as the translator's does (every infinity read
+from a ten-byte value had become a NaN) and raises IE for a signalling NaN only (it had for a
+quiet one with a payload), and `lea` with an `fs:` override computes the offset alone, as the
+processor and the translator do (the interpreter had added the thread block's base).
 `blockState` keeps eip and the flags word as fields of its own between `syncIn` and `syncOut`
 (which write them back), and the width and sign tables the flag arithmetic reads per instruction
 are arrays -- frozen objects with numeric keys are dictionaries to V8. Measured on compiled C

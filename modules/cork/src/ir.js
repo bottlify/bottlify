@@ -392,7 +392,8 @@ export function evaluate(instruction, state){
             return;
         }
         case 'lea':
-            write(operands[0], address(operands[1]) & mask);
+            // The effective address alone: a segment override has no part in it.
+            write(operands[0], address({ ...operands[1], segment: undefined }) & mask);
             return;
         case 'xchg':
         {

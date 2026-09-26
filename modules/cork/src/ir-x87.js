@@ -240,7 +240,10 @@ function writeQuad(state, address, value){
 function f80ToF64(low, high){
     if ((high & 0x7fff) === 0x7fff)
     {
-        return low << 1n === 0n ? Infinity : NaN;
+        // The fraction without the integer bit tells an infinity from a NaN,
+        // and either keeps the sign -- as the translator's reader has them.
+        const special = (low & 0x7fffffffffffffffn) === 0n ? Infinity : NaN;
+        return (high & 0x8000) !== 0 ? -special : special;
     }
     if (low === 0n)
     {
@@ -316,7 +319,9 @@ function loadFloat(state, address, size){
     {
         const high = state.memory.read(address + 8, 2);
         const low = BigInt.asUintN(64, readMem(state, address, 8));
-        if ((high & 0x7fff) === 0x7fff && (low & 0x7fffffffffffffffn) > 0x4000000000000000n)
+        // A signalling NaN: the quiet bit (62) clear, some other fraction bit set.
+        if ((high & 0x7fff) === 0x7fff && (low & 0x4000000000000000n) === 0n
+            && (low & 0x3fffffffffffffffn) !== 0n)
         {
             state.status |= Status.IE;
         }

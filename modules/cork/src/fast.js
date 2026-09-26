@@ -212,7 +212,9 @@ export function compileFast(instruction){
         }
         case 'lea':
         {
-            const address = src.kind === 'mem' ? addressOf(src) : null;
+            // The effective address alone: a segment override has no part in
+            // it, fs: included.
+            const address = src.kind === 'mem' ? addressOf({ ...src, segment: undefined }) : null;
             const write = writer(dst);
             return address && write && (state=>write(state, address(state) & mask));
         }

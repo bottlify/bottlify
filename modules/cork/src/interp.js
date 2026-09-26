@@ -144,19 +144,35 @@ function extendRun(state, run){
  */
 function runAt(state, cache){
     const { memory, eip } = state;
+    // A fetch fault is raised at the instruction being fetched.
+    state.faultEip = eip;
     const hit = cache.get(eip);
-    if (hit !== undefined && (memory.same !== undefined
-        ? memory.same(eip, hit.bytes) : sameBytes(memory, eip, hit.bytes)))
+    if (hit !== undefined)
     {
-        return hit;
+        try
+        {
+            if (memory.same !== undefined
+                ? memory.same(eip, hit.bytes) : sameBytes(memory, eip, hit.bytes))
+            {
+                return hit;
+            }
+        }
+        catch (e){
+            // Some of the run's bytes cannot be fetched now (a page it spans
+            // was freed or protected): decoded afresh, its leading
+            // instructions run and the fetch faults at the one that reaches
+            // the page, as the processor's own fetch would.
+            if (!(e instanceof Fault))
+            {
+                throw e;
+            }
+        }
     }
     /** @type {Run} */
     const run = {
         start: eip, bytes: NO_BYTES, count: 0, closed: false, starts: [], nexts: [], steps: [],
         decoded: [], refused: null,
     };
-    // A fetch fault is raised at the instruction being fetched.
-    state.faultEip = eip;
     extendRun(state, run);
     if (run.refused === null)
     {
