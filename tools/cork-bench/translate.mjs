@@ -12,7 +12,7 @@
  *   node tools/cork-bench/translate.mjs capture DIR [name...] [--iters N] [--seconds S]
  *       [--root TREE] [--cork JSON]
  *   node tools/cork-bench/translate.mjs replay DIR [name...] [--passes N] [--root TREE]
- *       [--roots '{"base":"TREE","new":"TREE"}'] [--json]
+ *       [--roots '{"base":"TREE","new":"TREE"}'] [--no-cache] [--json]
  *
  * `capture` runs each workload of `bench.mjs` on the cork host with a
  * translation worker, as a browser launch runs one, for at least `--iters`
@@ -33,6 +33,8 @@
  * emitter to run; `--roots` runs several in this process, their passes
  * alternating, so each round's figures share the machine's conditions, and
  * `ratio` is the median over the rounds of each tree's time over the first's.
+ * `--no-cache` replays without what a worker keeps of what it emitted
+ * (`createEmitCache`), for how much of a tree's figure is that.
  */
 
 import { createHash } from 'node:crypto';
@@ -135,7 +137,7 @@ function pass(built, messages){
     const seen = new Set();
     const sum = { total: 0, form: 0, emit: 0, encode: 0, compile: 0, gcMs: 0, allocatedMb: 0,
         jobs: 0, again: 0, failed: 0, instructions: 0, bytesOut: 0, digest: '' };
-    const cache = built.createEmitCache?.();
+    const cache = args.includes('--no-cache') ? undefined : built.createEmitCache?.();
     const profiler = new GCProfiler();
     const usedAt = process.memoryUsage().heapUsed;
     profiler.start();

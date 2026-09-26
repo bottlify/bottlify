@@ -160,12 +160,16 @@ const SIMD_STORE = 11;
  * of emitting it.
  */
 export class Body {
-    constructor(){
-        // Sixty-four bytes to start, which V8 keeps in the object itself: a
-        // larger typed array is a separate allocation the collector tracks,
-        // and a region makes a body for every exit's register stores.
+    /**
+     * @param {number} [capacity]  bytes to start with: sixty-four by default,
+     *     which V8 keeps in the object itself, as a region makes a body for
+     *     every exit's register stores; a body known to grow big starts big,
+     *     where doubling from sixty-four copied a region's tens of kilobytes
+     *     ten times over.
+     */
+    constructor(capacity = 64){
         /** @type {Uint8Array} */
-        this.buffer = new Uint8Array(64);
+        this.buffer = new Uint8Array(capacity);
         /** Bytes written. */
         this.length = 0;
         this.depth = 0;

@@ -566,7 +566,10 @@ export class RegionEmitter {
         /** Where the layout keeps the flag record between regions, or -1. */
         this.flagRecord = context.layout.flagRecord ?? -1;
         this.region = region;
-        this.b = new Body();
+        // Room for what a region's code comes to, a good sixteen bytes of wasm
+        // for each of its bytes, rather than doubling up to it.
+        this.b = new Body(Math.min(1 << 16, 2 ** Math.ceil(Math.log2(Math.max(64,
+            (region.bytes ?? 0) * 16)))));
         /** @type {Map<number, number>} */
         this.labels = new Map(region.blocks.map((block, index)=>[block.start, index]));
         /** By ret block: the return addresses it jumps to rather than leaves by. */
