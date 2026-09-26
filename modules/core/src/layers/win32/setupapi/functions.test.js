@@ -57,14 +57,19 @@ async function machine(){
     const callbacks = new Map();
     const hive = createHive();
 
-    /** @param {number} at @param {number} max */
+    /**
+     * As the memory layer reads an ANSI string: in Windows-1252, which is what
+     * the Encoding standard calls latin1.
+     *
+     * @param {number} at @param {number} max
+     */
     const readCString = (at, max)=>{
-        let text = '';
-        for (let i = at; i < at + max && bytes[i] !== 0; i++)
+        let end = at;
+        while (end < at + max && bytes[end] !== 0)
         {
-            text += String.fromCharCode(bytes[i]);
+            end++;
         }
-        return text;
+        return new TextDecoder('latin1').decode(bytes.subarray(at, end));
     };
     const fns = createSetupapiFunctions({
         readMemory: (at, length)=>bytes.subarray(at, at + length),
@@ -528,6 +533,71 @@ test('a source that is nowhere is a copy error, which the default callback abort
     assert.equal(m.lastError(), ERROR_FILE_NOT_FOUND);
     assert.ok(messages.includes(SPFILENOTIFY.COPYERROR));
     assert.equal(messages.at(-1), SPFILENOTIFY.ENDQUEUE);
+});
+
+test('an INF\'s text and the paths it names are the ANSI page\'s', async()=>{
+    // An ANSI INF is in the ANSI page, where 0x80 is the euro sign and 0x99
+    // the trade mark, as a program's own strings are read: a file it names by
+    // 0x80 is the file CreateFileA would open by those bytes, a Unicode INF's
+    // euro sign is 0x80 when handed to an ANSI caller, and so is a path the
+    // default callback copies.
+    const m = await machine();
+    const unicode = '[Version]\r\nSignature="$Windows NT$"\r\n[Section]\r\nKey=\u20ac\u2122\r\n';
+    m.file('C:\\src\\u.inf', Uint8Array.from([0xff, 0xfe,
+        ...[...unicode].flatMap(c=>[c.charCodeAt(0) & 0xff, c.charCodeAt(0) >>> 8])]));
+    const wide = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\u.inf'), 0,
+        INF_STYLE_WIN4, 0]);
+    const out = m.buffer(16);
+    assert.equal(m.fns.SetupGetLineTextA.handler([0, wide, m.str('Section'), m.str('Key'), out,
+        16, 0]), 1);
+    assert.deepEqual([...new Uint8Array(m.view.buffer, out, 3)], [0x80, 0x99, 0]);
+
+    m.file('C:\\src\\euro.inf', ['[Version]', 'Signature="$Windows NT$"', '[Install]',
+        'CopyFiles=Files', '[SourceDisksNames]', '1="The disk"', '[SourceDisksFiles]',
+        '\x80.dll=1', '[DestinationDirs]', 'DefaultDestDir=11', '[Files]', '\x80.dll', '']
+        .join('\r\n'));
+    m.file('C:\\src\\\u20ac.dll', 'EURO');
+    const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\euro.inf'), 0,
+        INF_STYLE_WIN4, 0]);
+    const forward = m.callback(([context, message, param1, param2])=>
+        m.fns.SetupDefaultQueueCallbackA.handler([context, message, param1, param2]));
+    assert.equal(await m.fns.SetupInstallFromInfSectionA.handler([0, inf, m.str('Install'),
+        SPINST_FILES, 0, m.str('C:\\src'), 0, forward, 0, 0, 0]), 1);
+    assert.equal(m.contents('C:\\WINDOWS\\system32\\\u20ac.dll'), 'EURO');
+
+    // A cabinet keeps its names in the same page, so the INF's name finds the
+    // cabinet's file, and a walk hands the name over as its bytes.
+    m.file('C:\\src\\packed.inf', ['[Version]', 'Signature="$Windows NT$"', '[Install]',
+        'CopyFiles=Files', '[SourceDisksNames]', '99="The disk","PACKED.cab",0,,-1',
+        '[SourceDisksFiles]', '\x99.dll=99', '[DestinationDirs]', 'DefaultDestDir=11',
+        '[Files]', '\x99.dll', ''].join('\r\n'));
+    m.file('C:\\src\\packed.cab', storedCabinet([['\x99.dll', 'PACKED']]));
+    const packed = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\packed.inf'), 0,
+        INF_STYLE_WIN4, 0]);
+    assert.equal(await m.fns.SetupInstallFromInfSectionA.handler([0, packed, m.str('Install'),
+        SPINST_FILES, 0, m.str('C:\\src'), 0, forward, 0, 0, 0]), 1);
+    assert.equal(m.contents('C:\\WINDOWS\\system32\\\u2122.dll'), 'PACKED');
+    /** @type {number[][]} */
+    const named = [];
+    const walk = m.callback(([, message, param1])=>{
+        if (message === SPFILENOTIFY.FILEINCABINET)
+        {
+            const at = m.u32(param1);
+            named.push([...new Uint8Array(m.view.buffer, at, 6)]);
+            return FILEOP.SKIP;
+        }
+        return 0;
+    });
+    assert.equal(await m.fns.SetupIterateCabinetA.handler([m.str('C:\\src\\packed.cab'), 0,
+        walk, 0]), 1);
+    assert.deepEqual(named, [[0x99, 0x2e, 0x64, 0x6c, 0x6c, 0]]);
+
+    const media = m.buffer(24);
+    m.view.setUint32(media + 12, m.str('C:\\\x80'), true);
+    const path = m.buffer(260);
+    assert.equal(m.fns.SetupDefaultQueueCallbackA.handler([0, SPFILENOTIFY.NEEDMEDIA, media,
+        path]), FILEOP.DOIT);
+    assert.deepEqual([...new Uint8Array(m.view.buffer, path, 5)], [0x43, 0x3a, 0x5c, 0x80, 0]);
 });
 
 test('the default callback: go on with everything, and where the media is', async()=>{

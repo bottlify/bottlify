@@ -6,6 +6,7 @@
 
 import { createInflater, inflateMszipBlock } from './inflate.js';
 import { createLzxDecoder } from './lzx.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 
 /**
  * The cabinet container, as the Cabinet SDK's "Microsoft Cabinet File
@@ -95,7 +96,12 @@ export function cabinetChecksum(bytes, seed){
     return (sum ^ tail) >>> 0;
 }
 
-/** @param {Uint8Array} bytes @param {number} at */
+/**
+ * A name, in the ANSI page a cabinet keeps its names in, which is also the
+ * page the names an INF and a program pass beside it are read in.
+ *
+ * @param {Uint8Array} bytes @param {number} at
+ */
 const cString = (bytes, at)=>{
     let end = at;
     while (end < bytes.length && bytes[end] !== 0)
@@ -106,7 +112,7 @@ const cString = (bytes, at)=>{
     {
         throw new CabinetError('a name runs off the end of the cabinet', 'format');
     }
-    return { text: String.fromCharCode(...bytes.subarray(at, end)), next: end + 1 };
+    return { text: decodeAnsi(bytes.subarray(at, end)), next: end + 1 };
 };
 
 /**
