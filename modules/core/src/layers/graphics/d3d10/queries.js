@@ -21,12 +21,14 @@
  *
  * - The counts the input assembler and the vertex shader see are exact: they
  *   follow from the draw's arguments and topology.
- * - What the rasteriser produced is not counted by anything here. An occlusion
- *   query answers the samples its draws' viewports cover on their targets --
- *   the answer that never hides what should have been drawn -- and says so.
- * - A timestamp is the host's clock at the query's end, not the GPU's, and the
- *   disjoint query that brackets it says so the documented way: `Disjoint` is
- *   TRUE, which tells a program to discard what it measured.
+ * - An occlusion query answers the samples the GPU counted for its draws. With
+ *   no GPU, or when the count did not arrive, it answers the samples its
+ *   draws' viewports cover on their targets -- the answer that never hides
+ *   what should have been drawn -- and says so.
+ * - A timestamp is the clock the device was given at the query's end -- the
+ *   guest's, in an assembled build -- not the GPU's, and the disjoint query
+ *   that brackets it says so the documented way: `Disjoint` is TRUE, which
+ *   tells a program to discard what it measured.
  * - Nothing is ever written to a stream-output buffer, so stream-output counts
  *   are zero and nothing overflows.
  */
@@ -218,8 +220,9 @@ export function createQueryObject(desc, interfaces, services, owner){
     let estimated = false;
     if (kind === D3D10_QUERY.TIMESTAMP || kind === D3D10_QUERY.TIMESTAMP_DISJOINT)
     {
-        services.diverge('a timestamp is the host\'s clock when the query ended, and the'
-            + ' disjoint query around it reports Disjoint so a program discards it');
+        services.diverge('a timestamp is the clock the device was given, not the GPU\'s, read'
+            + ' when the query ended, and the disjoint query around it reports Disjoint so a'
+            + ' program discards it');
     }
 
     /**

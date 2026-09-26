@@ -1728,8 +1728,13 @@ test('a timestamp ends where it is issued, and its disjoint query says to discar
     let clock = 5;
     /** @type {{ device?: any }} */
     const out = {};
+    /** @type {string[]} */
+    const divergences = [];
     assert.equal(D3D10CreateDevice(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0,
-        D3D10_SDK_VERSION, out, { now: ()=>clock }), S_OK);
+        D3D10_SDK_VERSION, out, {
+            now: ()=>clock,
+            divergence: (api, detail)=>divergences.push(detail),
+        }), S_OK);
     const device = out.device;
     const disjoint = createQuery(device, D3D10_QUERY.TIMESTAMP_DISJOINT);
     const stamp = createQuery(device, D3D10_QUERY.TIMESTAMP);
@@ -1747,7 +1752,11 @@ test('a timestamp ends where it is issued, and its disjoint query says to discar
     const answer = queryData(disjoint);
     assert.equal(answer.hr, S_OK);
     assert.equal(answer.view?.getBigUint64(0, true), 1_000_000_000n, 'Frequency');
-    assert.equal(answer.view?.getUint32(8, true), 1, 'Disjoint: the host clock is not the GPU\'s');
+    assert.equal(answer.view?.getUint32(8, true), 1, 'Disjoint: this clock is not the GPU\'s');
+    // The clock is the one the device was handed -- the guest's, in an
+    // assembled build -- so the report names neither.
+    assert.ok(divergences.some(line=>line.includes('the clock the device was given, not the'
+        + ' GPU\'s')), divergences.join('; '));
     stamp.release();
     disjoint.release();
     assertFullyReleased(device);

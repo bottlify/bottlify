@@ -179,9 +179,9 @@ const FEATURE_LEVELS_1 = Object.freeze([
 /**
  * Whether a Direct3D 10.1 entry point's version and level can be met: its own
  * SDK version, and of the levels it may name, 10.0 -- the one this device
- * is. 10.1 needs per-target blending, cube arrays and more samples than this
- * renderer has, and the 9.x levels restrictions it does not enforce, so both
- * are refused the way an adapter without them refuses them.
+ * is. 10.1 needs cube arrays and more samples than this renderer has, and the
+ * 9.x levels restrictions it does not enforce, so both are refused the way an
+ * adapter without them refuses them.
  *
  * @param {number} featureLevel
  * @param {number} sdkVersion
