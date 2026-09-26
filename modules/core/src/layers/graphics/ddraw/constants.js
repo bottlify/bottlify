@@ -69,6 +69,7 @@ export const DDBLT_KEYDESTOVERRIDE = 0x00004000;
 export const DDBLT_KEYSRC = 0x00008000;
 export const DDBLT_KEYSRCOVERRIDE = 0x00010000;
 export const DDBLT_COLORFILL = 0x00000400;
+export const DDBLT_DEPTHFILL = 0x02000000;
 export const DDBLT_WAIT = 0x01000000;
 
 /** BltFast flags. */

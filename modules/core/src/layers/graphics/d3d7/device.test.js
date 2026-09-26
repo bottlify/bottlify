@@ -633,6 +633,35 @@ test('recorded: a draw and a present are one encoder, one submit, one frame', as
     assert.ok(f.root.destroyed);
 });
 
+test('recorded: a depth fill of the device\'s depth buffer clears the depth it draws against',
+    async()=>{
+        // The depth a device draws against lives on the GPU, so a DirectDraw
+        // depth fill of that surface reaches it there, not only in memory.
+        const f = recorded();
+        const { device, gpu, root, target } = f;
+        const depth = surface(root, { caps: DDSCAPS_ZBUFFER, zBufferBitDepth: 16 });
+        assert.equal(target.addAttachedSurface(depth), D3D_OK);
+        const other = surface(root, { caps: DDSCAPS_ZBUFFER, zBufferBitDepth: 16 });
+
+        other.depthFilled(null, 0x1234);
+        assert.equal(device.diagnostics().clears, 0, 'a depth buffer the device does not use');
+        depth.depthFilled(null, 0x8000);
+        assert.equal(device.diagnostics().clears, 1);
+        device.present(target.buffer);
+        await device.idle();
+        const pass = gpu.of('beginRenderPass')[0].descriptor;
+        assert.equal(pass.depthStencilAttachment.depthLoadOp, 'clear');
+        assert.equal(pass.depthStencilAttachment.depthClearValue, 0x8000 / 0xffff);
+
+        assert.equal(target.deleteAttachedSurface(depth), D3D_OK);
+        assert.equal(depth.release(), 0);
+        assert.equal(other.release(), 0);
+        assert.equal(device.release(), 0);
+        assert.equal(target.release(), 0);
+        assert.equal(root.release('IDirectDraw7'), 0);
+        assert.ok(root.destroyed);
+    });
+
 test('recorded: a texture goes up once, and again only after the program wrote it', async()=>{
     const f = recorded();
     const { device, gpu, root, ram, target } = f;

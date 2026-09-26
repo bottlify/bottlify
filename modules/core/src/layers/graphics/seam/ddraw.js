@@ -60,15 +60,16 @@ import {
     writeSurfaceDesc,
 } from '../ddraw/structs.js';
 import {
-    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_KEYDESTOVERRIDE, DDBLT_KEYSRCOVERRIDE,
-    DDCAPS2_CANRENDERWINDOWED, DDCAPS2_CERTIFIED, DDCAPS2_WIDESURFACES, DDCAPS_BLT,
-    DDCAPS_BLTCOLORFILL, DDCAPS_BLTSTRETCH, DDCAPS_CANBLTSYSMEM, DDCAPS_COLORKEY, DDCAPS_GDI,
-    DDCAPS_PALETTE, DDCKEYCAPS_DESTBLT, DDCKEYCAPS_SRCBLT, DDCKEY_DESTBLT, DDCKEY_SRCBLT,
-    DDERR_ALREADYINITIALIZED, DDERR_INVALIDPARAMS, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND,
-    DDERR_SURFACEBUSY, DDERR_SURFACELOST, DDERR_UNSUPPORTED, DDPCAPS_1BIT, DDPCAPS_2BIT,
-    DDPCAPS_4BIT, DDPCAPS_8BIT, DDPCAPS_ALLOW256, DDPCAPS_PRIMARYSURFACE, DDPF_RGB, DDSCAPS_FLIP,
-    DDSCAPS_ZBUFFER, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT,
-    DDSD_PITCH, DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK,
+    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_DEPTHFILL, DDBLT_KEYDESTOVERRIDE,
+    DDBLT_KEYSRCOVERRIDE, DDPF_ZBUFFER, DDCAPS2_CANRENDERWINDOWED, DDCAPS2_CERTIFIED,
+    DDCAPS2_WIDESURFACES, DDCAPS_BLT, DDCAPS_BLTCOLORFILL, DDCAPS_BLTSTRETCH, DDCAPS_CANBLTSYSMEM,
+    DDCAPS_COLORKEY, DDCAPS_GDI, DDCAPS_PALETTE, DDCKEYCAPS_DESTBLT, DDCKEYCAPS_SRCBLT,
+    DDCKEY_DESTBLT, DDCKEY_SRCBLT, DDERR_ALREADYINITIALIZED, DDERR_INVALIDPARAMS,
+    DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_SURFACEBUSY, DDERR_SURFACELOST, DDERR_UNSUPPORTED,
+    DDPCAPS_1BIT, DDPCAPS_2BIT, DDPCAPS_4BIT, DDPCAPS_8BIT, DDPCAPS_ALLOW256,
+    DDPCAPS_PRIMARYSURFACE, DDPF_RGB, DDSCAPS_FLIP, DDSCAPS_ZBUFFER, DDSD_BACKBUFFERCOUNT,
+    DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT, DDSD_PITCH, DDSD_PIXELFORMAT,
+    DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK,
 } from '../ddraw/constants.js';
 import { pixelFormatForDepth } from '../ddraw/objects.js';
 import { blt, bltFast } from '../ddraw/blit.js';
@@ -507,6 +508,10 @@ export function createDirectDrawSeam(
             height: surface.height,
             bytesPerPixel: surface.bytesPerPixel,
             depth: (surface.caps & DDSCAPS_ZBUFFER) !== 0,
+            // DDPIXELFORMAT keeps dwZBitMask where an RGB format keeps green.
+            ...((format.flags & DDPF_ZBUFFER) !== 0 && format.greenMask !== 0
+                ? { depthMask: format.greenMask >>> 0 }
+                : {}),
             ...(colour !== 0 ? { keyMask: colour } : {}),
         };
     };
@@ -616,17 +621,21 @@ export function createDirectDrawSeam(
                 {
                     return hr;
                 }
+                // dwFillDepth shares dwFillColor's place in the structure.
+                const fill = (fx >>> 0) === 0
+                    ? 0
+                    : fields.readU32((fx >>> 0) + DDBLTFX.dwFillColor);
+                const rect = readRect(destRect);
                 const outcome = blt({
                     memory,
                     dest: blitView(surface),
-                    destRect: readRect(destRect),
+                    destRect: rect,
                     src: from ? blitView(from) : undefined,
                     srcRect: readRect(sourceRect),
                     flags: flags >>> 0,
                     fx: {
-                        fillColor: (fx >>> 0) === 0
-                            ? 0
-                            : fields.readU32((fx >>> 0) + DDBLTFX.dwFillColor),
+                        fillColor: fill,
+                        fillDepth: fill,
                         srcColorKey: from
                             ? keyFor(from, DDCKEY_SRCBLT,
                                 (flags & DDBLT_KEYSRCOVERRIDE) !== 0, fx, DDBLTFX.ddckSrcColorkey)
@@ -640,6 +649,10 @@ export function createDirectDrawSeam(
                 {
                     surface.changeUniquenessValue();
                     surface.present();
+                    if ((flags & DDBLT_DEPTHFILL) !== 0)
+                    {
+                        surface.depthFilled(rect, fill);
+                    }
                 }
                 return outcome;
             },

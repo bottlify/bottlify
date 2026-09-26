@@ -222,6 +222,7 @@ export function depthFormatForDepth(bitDepth){
  * @property {boolean} locked
  * @property {number | null} dc
  * @property {() => void} present
+ * @property {(rect: Rect | null, value: number) => void} depthFilled
  * @property {(which: number, key: ColorKey | null) => number} setColorKey
  * @property {(which: number) => { hr: number, key: ColorKey | null }} getColorKey
  * @property {() => number} uniquenessValue
@@ -393,6 +394,13 @@ export function createDirectDraw(options = {}){
     });
     const releaseDc = options.releaseDc ?? (()=>{});
     const onPresent = options.onPresent ?? (()=>{});
+    /**
+     * Who draws against a depth buffer somewhere else -- a Direct3D device,
+     * on the GPU -- and so must hear of a fill of its memory.
+     *
+     * @type {Set<(surface: Surface, rect: Rect | null, value: number) => void>}
+     */
+    const depthFillWatchers = new Set();
 
     /**
      * The display mode, which is what a primary surface takes its size and
@@ -854,6 +862,19 @@ export function createDirectDraw(options = {}){
                 if ((caps & DDSCAPS_PRIMARYSURFACE) !== 0 && (caps & DDSCAPS_VISIBLE) !== 0)
                 {
                     onPresent(surface, cooperativeWindow, exclusive());
+                }
+            },
+
+            /**
+             * A depth fill wrote this surface's depth bits.
+             *
+             * @param {Rect | null} rect  Null for all of it.
+             * @param {number} value      The fill, in the surface's own depth bits.
+             */
+            depthFilled(rect, value){
+                for (const watcher of depthFillWatchers)
+                {
+                    watcher(surface, rect, value);
                 }
             },
 
@@ -1409,6 +1430,17 @@ export function createDirectDraw(options = {}){
         },
         get surfaceCount(){
             return surfaces.size;
+        },
+
+        /**
+         * @param {(surface: Surface, rect: Rect | null, value: number) => void} watcher
+         * @returns {() => void} what stops it
+         */
+        watchDepthFills(watcher){
+            depthFillWatchers.add(watcher);
+            return ()=>{
+                depthFillWatchers.delete(watcher);
+            };
         },
 
         /** @param {string} [generation] */

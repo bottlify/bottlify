@@ -714,6 +714,43 @@ test('a colour fill is refused on a depth buffer, which it would leave as it was
     h.assertAllReleased();
 });
 
+test('a depth fill writes a depth buffer\'s depth bits, and nothing else takes one', ()=>{
+    // After Wine's ddraw7 test_color_fill: DDBLT_DEPTHFILL is DD_OK on a
+    // Z-buffer and DDERR_INVALIDPARAMS on anything else, the depth being
+    // dwFillDepth, which shares dwFillColor's place.
+    const DDBLT_DEPTHFILL = 0x02000000;
+    const h = seamed();
+    const ddraw = h.create7();
+    const depth = createDepth(h, ddraw, 4);
+    const model = h.publisher.objectAt(depth);
+    const fx = 0x5700;
+    h.box.bytes.fill(0, fx, fx + DDBLTFX.SIZE);
+    h.box.memory.writeU32(fx + DDBLTFX.dwSize, DDBLTFX.SIZE);
+    h.box.memory.writeU32(fx + DDBLTFX.dwFillColor, 0xdeadbeef);
+
+    assert.equal(h.surface7(depth, 'Blt', [0, 0, 0, DDBLT_DEPTHFILL, fx]), DD_OK);
+    const values = ()=>[0, 1, 2, 3].map(x=>h.box.bytes[model.buffer + x * 2]
+        | h.box.bytes[model.buffer + x * 2 + 1] << 8);
+    assert.deepEqual(values(), [0xbeef, 0xbeef, 0xbeef, 0xbeef], 'the Z mask of the value');
+
+    const rect = 0x5800;
+    h.box.memory.writeU32(rect, 1);
+    h.box.memory.writeU32(rect + 4, 0);
+    h.box.memory.writeU32(rect + 8, 3);
+    h.box.memory.writeU32(rect + 12, 1);
+    h.box.memory.writeU32(fx + DDBLTFX.dwFillColor, 0x1234);
+    assert.equal(h.surface7(depth, 'Blt', [rect, 0, 0, DDBLT_DEPTHFILL, fx]), DD_OK);
+    assert.deepEqual(values(), [0xbeef, 0x1234, 0x1234, 0xbeef], 'and only inside the rectangle');
+
+    const plain = h.createSurface7(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 4, height: 1 });
+    assert.equal(h.surface7(plain, 'Blt', [0, 0, 0, DDBLT_DEPTHFILL, fx]), DDERR_INVALIDPARAMS);
+
+    assert.equal(h.release(plain), 0);
+    assert.equal(h.release(depth), 0);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
 test('DeleteAttachedSurface with no surface detaches all of them', ()=>{
     const h = seamed();
     const ddraw = h.create7();

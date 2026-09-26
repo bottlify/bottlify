@@ -23,7 +23,7 @@
  */
 
 import {
-    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_COLORFILL, DDBLT_KEYDEST,
+    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_COLORFILL, DDBLT_DEPTHFILL, DDBLT_KEYDEST,
     DDBLT_KEYDESTOVERRIDE, DDBLT_KEYSRC, DDBLT_KEYSRCOVERRIDE, DDERR_INVALIDPARAMS,
     DDERR_INVALIDRECT, DDERR_UNSUPPORTED, DD_OK,
 } from './constants.js';
@@ -37,6 +37,7 @@ import {
  * @property {number} bytesPerPixel   1, 2 or 4.
  * @property {number} [keyMask]       The bits a colour key compares; the whole pixel if absent.
  * @property {boolean} [depth]        A depth buffer, which holds no colour to fill.
+ * @property {number} [depthMask]     A depth buffer's depth bits; the whole pixel if absent.
  */
 
 /**
@@ -225,6 +226,32 @@ function stretched(destRect, srcRect, sample){
 }
 
 /**
+ * A depth buffer's depth bits, set to one value over a rectangle; the stencil
+ * bits beside them keep what they held.
+ *
+ * @param {BlitMemory} memory @param {BlitSurface} dest @param {Rect} rect
+ * @param {number} value @param {Rect[] | undefined} clipList
+ * @returns {number} HRESULT
+ */
+function depthFill(memory, dest, rect, value, clipList){
+    const mask = (dest.depthMask ?? pixelMask(dest)) >>> 0;
+    const width = rect.right - rect.left;
+    for (let y = rect.top; y < rect.bottom; y++)
+    {
+        const row = readRow(memory, dest, y, rect.left, width);
+        for (let column = 0; column < width; column++)
+        {
+            if (!clippedOut(clipList, rect.left + column, y))
+            {
+                row[column] = ((row[column] & ~mask) | (value & mask)) >>> 0;
+            }
+        }
+        writeRow(memory, dest, y, rect.left, row);
+    }
+    return DD_OK;
+}
+
+/**
  * IDirectDrawSurface::Blt.
  *
  * @param {Object} request
@@ -234,7 +261,8 @@ function stretched(destRect, srcRect, sample){
  * @param {BlitSurface | null} [request.src]
  * @param {Rect | null} [request.srcRect]
  * @param {number} request.flags   DDBLT
- * @param {{ fillColor?: number, srcColorKey?: ColorKey, destColorKey?: ColorKey }} [request.fx]
+ * @param {{ fillColor?: number, fillDepth?: number, srcColorKey?: ColorKey,
+ *            destColorKey?: ColorKey }} [request.fx]
  * @param {Rect[]} [request.clipList]
  * @returns {number} HRESULT
  */
@@ -255,6 +283,12 @@ export function blt(request){
         : undefined;
     const common = { memory, dest, destRect, destColorKey, clipList: request.clipList };
 
+    if ((flags & DDBLT_DEPTHFILL) !== 0)
+    {
+        return dest.depth
+            ? depthFill(memory, dest, destRect, fx.fillDepth ?? 0, request.clipList)
+            : DDERR_INVALIDPARAMS;
+    }
     if ((flags & DDBLT_COLORFILL) !== 0)
     {
         if (dest.depth)

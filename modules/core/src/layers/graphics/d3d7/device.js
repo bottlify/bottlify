@@ -43,7 +43,7 @@ import {
     DDERR_NOTFOUND, DDLOCK_DISCARDCONTENTS, DDLOCK_NOOVERWRITE, DDLOCK_READONLY, transformStateOf,
 } from './constants.js';
 import { DEVICE_DESCRIPTIONS } from './caps.js';
-import { D3DLOCK, D3DFMT_INDEX, D3DTSS } from '../d3d8/constants.js';
+import { D3DCLEAR, D3DLOCK, D3DFMT_INDEX, D3DTSS } from '../d3d8/constants.js';
 import { createDefaultRenderStates } from '../d3d8/renderstates.js';
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import { IDENTITY, STAGE_COUNT, createRenderer, vertexCountOf } from '../d3d8/render.js';
@@ -661,6 +661,26 @@ export function createDirect3D7(ddraw, services = {}){
             }
         };
 
+        /**
+         * The depth this device draws against is the GPU's copy, so a
+         * DirectDraw depth fill of the buffer attached to its target is a
+         * depth clear there, over the rectangle filled and nothing else.
+         */
+        const stopWatchingDepth = ddraw.watchDepthFills?.(
+            (/** @type {any} */ surface, /** @type {any} */ rect, /** @type {number} */ value)=>{
+                if (!renderer || attachedDepth(renderTarget) !== surface)
+                {
+                    return;
+                }
+                const range = surface.pixelFormat.greenMask >>> 0 || 0xffff;
+                const kept = viewport;
+                viewport = fullTarget({ width: renderTarget.width, height: renderTarget.height });
+                renderer.clear(model, rect
+                    ? [{ x1: rect.left, y1: rect.top, x2: rect.right, y2: rect.bottom }]
+                    : [], D3DCLEAR.ZBUFFER, 0, ((value & range) >>> 0) / range, 0);
+                viewport = kept;
+            }) ?? (()=>{});
+
         const device = {
             description,
             get refCount(){
@@ -688,6 +708,7 @@ export function createDirect3D7(ddraw, services = {}){
                     surface.release();
                 }
                 textures.clear();
+                stopWatchingDepth();
                 renderTarget.release();
                 ddraw.release('IDirectDraw7');
                 return 0;
