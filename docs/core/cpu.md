@@ -90,7 +90,14 @@ are the region's), and the jump picks its case by a `br_table` on the index and 
 when the entry it loaded still names the case it was formed with; an index past the table, an
 entry written since or a case the caps left out leaves as any indirect jump does. A bytecode
 interpreter's dispatch loop went 800 -> 385 us an iteration, a message pump and a tokenizer
-250 -> 162. A batch does not form a candidate that a region it formed before already holds
+250 -> 162. A switch on an index masked to its low bits (`x & 15`, or `x % 16` unsigned), whose
+table has every case and so no bound test, is bounded by the `and r, m` in the jump's own block
+(only register writes that leave r alone after it) and formed with its m + 1 entries: its cases
+were each a region of their own, formed the second time the machine met one, so a loading phase
+that meets a new case now and then translated one more small module every few iterations long
+after its code was warm -- cork-bench's loading workload, whose switches on `x % 16` and the
+like are 29 of 178, formed 73 regions in its iterations 10 to 39 and now forms one in its
+iterations 3 to 39, and its steady state went 1.62 -> 0.88 ms an iteration. A batch does not form a candidate that a region it formed before already holds
 as a block (one with no x87, whose blocks are entries at any top): a loop's head and its cases
 are hot together, and each formed the whole loop again -- the bytecode interpreter's first
 iteration made fourteen regions of it and now one, and a program of 1 500 small functions its

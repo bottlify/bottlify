@@ -258,6 +258,36 @@ test('a jump through a bounded table takes the table\'s cases into the region', 
     assert.deepEqual(plain?.exit.targets, []);
 });
 
+test('a switch whose index its own block masks takes every case of the mask', ()=>{
+    // and eax, 3; mov ecx, edx; jmp [0x3000 + eax*4]; C0..C3: ret -- `switch (x & 3)` with
+    // every case written, which a compiler lays out with no bound test.
+    /** @param {number[]} code @param {number[]} table */
+    const formed = (code, table)=>{
+        const memory = new Map([
+            ...code.map((byte, i)=>/** @type {[number, number]} */ ([0x1000 + i, byte])),
+            ...table.flatMap((target, i)=>[0, 1, 2, 3].map(k=>/** @type {[number, number]} */ (
+                [0x3000 + i * 4 + k, target >>> (k * 8) & 0xff]))),
+        ]);
+        return formRegion(address=>memory.get(address) ?? 0, 0x1000);
+    };
+    const jump = [0xff, 0x24, 0x85, 0x00, 0x30, 0x00, 0x00];
+    const table = [0x100c, 0x100d, 0x100e, 0x100f];
+    const region = formed([0x83, 0xe0, 0x03, 0x89, 0xd1, ...jump, 0xc3, 0xc3, 0xc3, 0xc3],
+        [...table, 0x1000]);
+    assert.deepEqual(region.blocks[0].exit.table, { index: 0, address: 0x3000, entries: table },
+        'four entries, not the fifth word past them');
+    assert.deepEqual(region.entries, [0x1000, ...table]);
+    // A write to the index after the mask unbounds it.
+    const moved = formed([0x83, 0xe0, 0x03, 0x40, ...jump, 0xc3, 0xc3, 0xc3, 0xc3],
+        [0x100b, 0x100c, 0x100d, 0x100e]);
+    assert.equal(moved.blocks[0].exit.table, undefined);
+    assert.deepEqual(moved.entries, [0x1000]);
+    // So does a mask of another register.
+    const other = formed([0x83, 0xe1, 0x03, ...jump, 0xc3, 0xc3, 0xc3, 0xc3],
+        [0x100a, 0x100b, 0x100c, 0x100d]);
+    assert.equal(other.blocks[0].exit.table, undefined);
+});
+
 test('a switch whose index is loaded after the bound test of the memory it comes from', ()=>{
     // cmp dword [eax], 1; lea ebx, [ebx*3]; ja D; mov edx, [eax]; jmp [0x3000 + edx*4];
     // C0: ret; C1: ret; D: hlt -- as a compiler lays out a switch on a field.

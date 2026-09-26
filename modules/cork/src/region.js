@@ -244,7 +244,9 @@ const sameOperand = (a, b)=>a.kind === b.kind && a.size === b.size && a.reg === 
  * loaded from), then `ja`/`jae` falling through to the block or `jbe`/`jb`
  * taken to it, with only register writes that leave x alone between. The
  * bound holds on that edge only; another way into the block reaches the same
- * code, whose index test sends an index past the table out of the region.
+ * code, whose index test sends an index past the table out of the region. Or
+ * the block masks the index itself, `and r, m` with only such writes after it,
+ * and the table has m + 1 entries.
  *
  * @param {(address: number) => number} read @param {Block} block
  * @param {Iterable<Block>} blocks
@@ -261,6 +263,38 @@ function switchTable(read, block, blocks){
         return null;
     }
     const index = /** @type {number} */ (operand.index);
+    /** @param {number} count */
+    const tableOf = count=>{
+        const address = (operand.disp ?? 0) >>> 0;
+        /** @type {number[]} */
+        const entries = [];
+        for (let i = 0; i < count; i++)
+        {
+            const entry = address + i * 4;
+            entries.push((read(entry) | read(entry + 1) << 8 | read(entry + 2) << 16
+                | read(entry + 3) << 24) >>> 0);
+        }
+        return { index, address, entries };
+    };
+    // A switch on a value masked to its low bits (`x & 15`, `x % 16` unsigned)
+    // has every case in its table and no bound test: the `and` in the jump's
+    // own block bounds the index on every way in.
+    for (let at = instructions.length - 2; at >= 0; at--)
+    {
+        const one = instructions[at];
+        const [into, by] = one.operands;
+        if (one.op === 'and' && into?.kind === 'reg' && into.size === 4 && into.reg === index
+            && by?.kind === 'imm')
+        {
+            const count = (/** @type {number} */ (by.value) >>> 0) + 1;
+            return count <= SWITCH_ENTRIES ? tableOf(count) : null;
+        }
+        if (!(PLAIN_WRITES.has(one.op) && into?.kind === 'reg' && into.reg !== index
+            && !(one.op === 'imul' && one.operands.length === 1)))
+        {
+            break;
+        }
+    }
     // What the bound test must have compared: the index register itself, or
     // the memory a `mov` at the block's start loads it from.
     /** @type {import('./decode/decoder.js').Operand} */
@@ -322,16 +356,7 @@ function switchTable(read, block, blocks){
         {
             continue;
         }
-        const address = (operand.disp ?? 0) >>> 0;
-        /** @type {number[]} */
-        const entries = [];
-        for (let i = 0; i < count; i++)
-        {
-            const entry = address + i * 4;
-            entries.push((read(entry) | read(entry + 1) << 8 | read(entry + 2) << 16
-                | read(entry + 3) << 24) >>> 0);
-        }
-        return { index, address, entries };
+        return tableOf(count);
     }
     return null;
 }
