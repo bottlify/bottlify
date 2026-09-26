@@ -408,12 +408,25 @@ test('a room stops admitting peers at its limit', ()=>{
 });
 
 test('a peer cannot open unlimited sockets', async t=>{
+    // A local listener that holds what it accepts: the two dials allowed stay
+    // open whatever a network outside the machine would do with them -- one
+    // that refuses at once frees the slots before the third dial is made.
+    /** @type {import('node:net').Socket[]} */
+    const held = [];
+    const sink = createServer(socket=>held.push(socket));
+    await new Promise(resolve=>sink.listen(0, '127.0.0.1', ()=>resolve(null)));
+    const port = /** @type {any} */ (sink.address()).port;
+    t.after(()=>{
+        held.forEach(socket=>socket.destroy());
+        sink.close();
+    });
+
     const relay = createRelay({ policy: ()=>true, maxSocketsPerPeer: 2 });
     const client = join(relay);
     t.after(()=>client.session.close());
     for (let tag = 1; tag <= 3; tag++)
     {
-        client.send({ op: Op.DIAL, tag, toIp: parseIp('192.0.2.1'), toPort: 80 });
+        client.send({ op: Op.DIAL, tag, toIp: parseIp('127.0.0.1'), toPort: port });
         await settle();
     }
 
