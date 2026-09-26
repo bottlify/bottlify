@@ -21,12 +21,13 @@ const STACK = 0x80000;
  *
  * @param {number[]} bytes
  * @param {{ regs?: Record<string, number>, eflags?: number,
- *     memory?: [number, number[]][] }} [start]
+ *     memory?: [number, number[]][], fsBase?: number }} [start]
  */
 function both(bytes, start = {}){
     const m = createTestMachine();
     m.write(CODE, bytes);
     m.setReg('esp', STACK);
+    m.setFsBase(start.fsBase ?? 0);
     for (const [address, data] of start.memory ?? [])
     {
         m.write(address, data);
@@ -63,7 +64,7 @@ function both(bytes, start = {}){
                 view.setUint32(address, value, true);
             }
         },
-    }, { eip: CODE, esp: STACK });
+    }, { eip: CODE, esp: STACK, fsBase: start.fsBase ?? 0 });
     for (const [name, value] of Object.entries(start.regs ?? {}))
     {
         const index = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'].indexOf(name);
@@ -382,6 +383,34 @@ test('the direction flag runs a rep backwards, and the first iteration always ru
     assert.deepEqual([...one.m.read(0x4000, 1)], [0x41]);
     assert.equal(one.m.reg('edi'), 0x4001);
     assert.equal(one.m.reg('ecx'), 0);
+});
+
+test('a string instruction\'s fs: source adds the thread base; its destination is es:[edi]', ()=>{
+    // With the thread block at 0x7000 and esi at 0, a source read without the
+    // base would read the 0x99s at linear 0.
+    const r = both([
+        0x64, 0xad,                     // fs: lodsd       eax = fs:[0]
+        0xbf, 0x00, 0x30, 0, 0,         // mov edi, 0x3000
+        0x64, 0xa5,                     // fs: movsd       [0x3000] = fs:[4]
+        0x64, 0xa7,                     // fs: cmpsd       fs:[8] with [0x3004]
+        0x0f, 0x94, 0xc3,               // sete bl
+        0xb9, 4, 0, 0, 0,               // mov ecx, 4
+        0xf3, 0x64, 0xa4,               // rep fs: movsb   [0x3008..] = fs:[0xc..]
+        0xf4,
+    ], { fsBase: 0x7000, memory: [
+        [0x0000, new Array(16).fill(0x99)],
+        [0x7000, [0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x22, 0x33, 0x33, 0x33, 0x33,
+            1, 2, 3, 4]],
+        [0x3004, [0x33, 0x33, 0x33, 0x33]],
+    ] });
+    assert.equal(r.exit.kind, 3);
+    agree(r);
+    assert.equal(r.m.reg('eax'), 0x11111111, 'lodsd');
+    assert.equal(r.m.readU32(0x3000), 0x22222222, 'movsd');
+    assert.equal(r.m.reg('ebx') & 0xff, 1, 'cmpsd found the two equal');
+    assert.deepEqual([...r.m.read(0x3008, 4)], [1, 2, 3, 4], 'rep movsb');
+    assert.equal(r.m.reg('esi'), 0x10);
+    assert.equal(r.m.reg('edi'), 0x300c);
 });
 
 test('fs-relative reads add the thread base, and 16-bit lea wraps', ()=>{

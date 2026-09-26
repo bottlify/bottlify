@@ -1990,6 +1990,10 @@ function stringInstruction(e, instruction){
         return false;
     }
     const repeat = prefixes.rep || prefixes.repne;
+    // The source, [esi], takes a segment override; the destination, es:[edi],
+    // does not. Of the segments only fs has a base.
+    const fsSource = instruction.operands.some(operand=>operand.kind === 'mem'
+        && operand.base === 6 && operand.segment === 4);
     // The step: -size when DF is set, +size otherwise, in t2 (select takes
     // its two values first and the condition last).
     b.i32const(-size).i32const(size);
@@ -2013,7 +2017,7 @@ function stringInstruction(e, instruction){
         b.localGet(ecx).op(I32.eqz);
         b.brIf(e.depthOf('done'));
         if ((op === 'movs' || op === 'stos') && e.context.undo === undefined
-            && e.layout.codePages < 0)
+            && e.layout.codePages < 0 && !fsSource)
         {
             bulkString(e, instruction);
         }
@@ -2028,7 +2032,12 @@ function stringInstruction(e, instruction){
     const counted = !repeat;
     /** @param {number} pointer */
     const checkedLoad = pointer=>{
-        b.localGet(pointer).localSet(Local.addr);
+        b.localGet(pointer);
+        if (pointer === esi && fsSource)
+        {
+            b.i32const(0).load('i32', { offset: e.layout.fsBase }).op(I32.add);
+        }
+        b.localSet(Local.addr);
         checkAccess(e, size, { counted });
         b.localGet(Local.addr).load(loadKind(size), { offset: e.layout.ramBase });
     };

@@ -457,7 +457,10 @@ per-element path. `rep movsd` 5.2 -> 0.7 ns an element, `rep stosd` 2.9 -> 0.6. 
 iteration of a `rep` counts against the slice's budget, and a `rep cmps` or `rep scas` tests its
 stop condition before the budget: a slice that runs out on the iteration that stops it leaves the
 instruction done, where it had left on it and the instruction run again scanned on past the match
-(a `repne scasb` strlen of "abc" answered 9).
+(a `repne scasb` strlen of "abc" answered 9). The source of `lods`, `movs` and `cmps` takes an
+`fs:` override as any memory operand does, the thread block's base added to esi, where translated
+code had read linear esi; the destination is es:[edi] whatever the prefix, and a `rep movs` with an
+`fs:` source takes the per-element path.
 
 The null page is *not* marked, because the emulator lets a program read
 address 0 today and the two engines must agree; marking it, and projecting the memory
