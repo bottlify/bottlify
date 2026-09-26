@@ -30,18 +30,20 @@
  */
 
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
-import { createSoundBuffer, normaliseFormat } from './buffers.js';
+import { createSoundBuffer, normaliseFormat, DSBSTATUS_PLAYING } from './buffers.js';
 
 export const DS_OK = 0;
 const DSERR_INVALIDPARAM = 0x80070057 | 0;
 const DSERR_OUTOFMEMORY = 0x8007000e | 0;
 const DSERR_UNSUPPORTED = 0x80004001 | 0;
 const DSERR_INVALIDCALL = 0x88780032 | 0;
+const DSERR_CONTROLUNAVAIL = 0x8878001e | 0;
 
 /** DSBCAPS flags a program sets when it describes a buffer it wants. */
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
 const DSBCAPS_LOCHARDWARE = 0x00000004;
 const DSBCAPS_LOCSOFTWARE = 0x00000008;
+const DSBCAPS_CTRLFX = 0x00000200;
 
 /** Interface identifiers. Facts about somebody else's ABI; there is no partial credit. */
 export const IID_IDirectSound = '{279AFA83-4981-11CE-A521-0020AF0BE560}';
@@ -705,6 +707,34 @@ export function createDirectSound(
         SetFrequency(buffer, [hz]){
             buffer.setFrequency(hz >>> 0);
             return DS_OK;
+        },
+
+        /**
+         * HRESULT SetFX(DWORD count, LPDSEFFECTDESC effects, LPDWORD results)
+         *
+         * Effects are a control like volume and pan, and a buffer created
+         * without it refuses them as it would refuse either. With it, the
+         * arguments are checked and clearing a chain that was never set is
+         * done; setting one answers E_NOTIMPL, because no effect is hosted.
+         */
+        SetFX(buffer, [count, effects, results]){
+            if ((buffer.capabilities & DSBCAPS_CTRLFX) === 0)
+            {
+                return DSERR_CONTROLUNAVAIL;
+            }
+            // A count names that many descriptions; none names none, and a
+            // result array with nothing to report on is a caller's mistake.
+            if ((count >>> 0) === 0
+                ? (effects >>> 0) !== 0 || (results >>> 0) !== 0
+                : (effects >>> 0) === 0)
+            {
+                return DSERR_INVALIDPARAM;
+            }
+            if (buffer.locked || (buffer.status() & DSBSTATUS_PLAYING) !== 0)
+            {
+                return DSERR_INVALIDCALL;
+            }
+            return (count >>> 0) === 0 ? DS_OK : DSERR_UNSUPPORTED;
         },
 
         /**

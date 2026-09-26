@@ -18,6 +18,8 @@ import {
 import { DSBSTATUS_PLAYING, DSBPLAY_LOOPING, DSBLOCK_ENTIREBUFFER } from './buffers.js';
 
 const DSERR_INVALIDPARAM = 0x80070057 | 0;
+const DSERR_CONTROLUNAVAIL = 0x8878001e | 0;
+const DSERR_INVALIDCALL = 0x88780032 | 0;
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
 const DSBCAPS_LOCHARDWARE = 0x00000004;
 const DSBCAPS_LOCSOFTWARE = 0x00000008;
@@ -25,6 +27,7 @@ const DSBCAPS_CTRLFREQUENCY = 0x00000020;
 const DSBCAPS_CTRLPAN = 0x00000040;
 const DSBCAPS_CTRLVOLUME = 0x00000080;
 const DSBCAPS_CTRLPOSITIONNOTIFY = 0x00000100;
+const DSBCAPS_CTRLFX = 0x00000200;
 const DSBCAPS_GETCURRENTPOSITION2 = 0x00010000;
 
 /** Flat guest memory, one megabyte, addressed from zero. */
@@ -445,6 +448,26 @@ test('GetCaps reports the flags a buffer was created with, and where it is mixed
     const primary = createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME });
     assert.equal(flagsOf(primary) & (DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME),
         DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME);
+});
+
+test('SetFX is refused as a control the buffer was not created with', ()=>{
+    // Wine's dsound8 test_effects: SetFX on a buffer without DSBCAPS_CTRLFX.
+    const f = createRoot();
+    const effects = 0x1c00;
+    const results = 0x1c40;
+    const plain = f.bridge.query(createBuffer(f), IID_IDirectSoundBuffer8);
+    assert.equal(f.bridge.call(plain, 'SetFX', [1, effects, results]), DSERR_CONTROLUNAVAIL);
+
+    // With the control, the arguments are checked as the same test checks them,
+    // and a buffer that is playing refuses a change to its effects.
+    const fx = f.bridge.query(createBuffer(f, { flags: DSBCAPS_CTRLFX }), IID_IDirectSoundBuffer8);
+    assert.equal(f.bridge.call(fx, 'SetFX', [1, 0, 0]), DSERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(fx, 'SetFX', [0, effects, 0]), DSERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(fx, 'SetFX', [0, 0, results]), DSERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(fx, 'SetFX', [0, 0, 0]), DS_OK,
+        'clearing the effects of a buffer that has none is done');
+    f.bridge.call(fx, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    assert.equal(f.bridge.call(fx, 'SetFX', [0, 0, 0]), DSERR_INVALIDCALL);
 });
 
 test('a size that splits a frame is rounded up to the next whole one', ()=>{
