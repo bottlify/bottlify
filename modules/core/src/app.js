@@ -5468,6 +5468,16 @@ async function buildApp(options){
             apply: changes=>filesystem.apply(changes),
         },
 
+        /**
+         * What the translator has made of this bundle's code, as the seed a
+         * bundle carries (`attachTranslations`); null without a translating
+         * engine or a store. Asked before `dispose`, which takes the
+         * translator away.
+         *
+         * @returns {Promise<Uint8Array | null>}
+         */
+        exportTranslations: ()=>cpu.exportTranslations(),
+
         exitCode: ()=>win32.exitCode(),
 
         /**

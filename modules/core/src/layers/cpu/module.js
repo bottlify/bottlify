@@ -19,6 +19,7 @@ import {
     captureContext, freshThreadFpu, restoreContext, setThreadBase,
 } from './internal/context.js';
 import { createSampleTable, creditSample, topSamples } from './internal/samples.js';
+import { fileNameOf } from './internal/translation-store.js';
 
 /**
  * Guest RAM when nobody says otherwise. A gigabyte, because a program of this
@@ -611,6 +612,26 @@ export const cpuModule = {
              */
             onFault(handler){
                 state.faultHandler = handler;
+            },
+
+            /**
+             * The translation store as a seed a bundle can carry, kept to the
+             * records this translator's lookups can reach; null without a
+             * store that exports, or before the translator is up.
+             *
+             * @returns {Promise<Uint8Array | null>}
+             */
+            async exportTranslations(){
+                const store = /** @type {any} */ (settings.cork?.store);
+                const select = state.cork?.seedRecords;
+                if (typeof store?.exportSeed !== 'function' || typeof select !== 'function')
+                {
+                    return null;
+                }
+                return store.exportSeed({
+                    select: (/** @type {[string, Uint8Array][]} */ records)=>
+                        select(records, fileNameOf),
+                });
             },
 
             /**

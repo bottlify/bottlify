@@ -330,6 +330,10 @@ seed is as trusted as the bundle's code, which it rides with: the index names it
 manifest the index's. And it is never taken for code bytes it was not made from: the lookup's key is
 made here, from the bytes the program holds when a region is formed, so a seed made from another
 build of the program answers only the regions whose bytes did not change.
+A launch hands its store out as such a seed through `app.exportTranslations()` (the cpu layer's
+`exportTranslations`, with the translator's own `seedRecords` as the `select`; null without a
+translating engine or a store), asked before `dispose`; `tools/cdp_test/game.mjs
+--export-translations FILE` writes a browser run's to a file.
 `tools/cork-bench/bench.mjs --capture DIR` writes a benchmark program's seed, `--seed DIR` starts
 every rep from one and `--store fresh` from an empty store, the event loop turning between slices
 so the store's answers come back. A seeded first iteration against an empty store, the median of

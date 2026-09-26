@@ -23,7 +23,7 @@
  *                                  [--command-line STRING]
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
- *                                  [--exact] [--cpu-profile SECONDS]
+ *                                  [--exact] [--cpu-profile SECONDS] [--export-translations FILE]
  */
 
 import { deflateSync } from 'node:zlib';
@@ -177,6 +177,10 @@ function parse(argv){
         // beyond whatever the run itself reads -- a fuller warm-up between
         // runs, at the cost of the bandwidth to do it.
         prefetch: argv.includes('--prefetch'),
+        // Where the run's translations go once it ends, as the seed a bundle
+        // carries (`node tools/make-btl.mjs translations <id> <file>`).
+        exportTranslations: argv.includes('--export-translations')
+            ? argv[argv.indexOf('--export-translations') + 1] : null,
         // How long the engine itself runs before it stops and reports, for a
         // title that reaches its loop and would otherwise run out the turns
         // hours later. Zero means the turns alone decide.
@@ -1155,6 +1159,7 @@ export async function game(options){
             wholeFiles: options.saveFiles,
             store: options.store ?? undefined,
             prefetch: options.prefetch,
+            exportTranslations: options.exportTranslations !== null,
             bundleId: options.id,
             exact: options.exact,
         });
@@ -1327,6 +1332,22 @@ export async function game(options){
             writeFileSync(saved, file.base64 ? Buffer.from(file.base64, 'base64') : file.text,
                 file.base64 ? undefined : 'latin1');
             file.saved = saved;
+        }
+
+        // The seed goes to its own file, not into the report.
+        if (options.exportTranslations !== null)
+        {
+            if (result.translations)
+            {
+                writeFileSync(options.exportTranslations,
+                    Buffer.from(result.translations, 'base64'));
+                console.log(`translations: ${options.exportTranslations}`);
+            }
+            else
+            {
+                console.log('translations: none (no translating engine, or no store)');
+            }
+            delete result.translations;
         }
 
         const text = describe(result, {

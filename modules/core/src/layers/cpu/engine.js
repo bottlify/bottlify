@@ -121,6 +121,8 @@
  *     phases and the host's slices, for the milliseconds of `EngineDiagnostics` and the record of
  *     long holds. Default false -- a shipped build reads no clock for its own account, and those
  *     figures stay 0.
+ * @property {boolean} [traceStore]      A diagnostic: every store key put and missed, in the
+ *     diagnostics' `storeTrace`.
  * @property {number} [batchRegions]     Regions per wasm module. Default 32.
  * @property {number} [maxBatchRegions]  The most regions one batch takes when the queue is deep
  *     (a quarter of the queue past `batchRegions`). Default 256.
@@ -321,6 +323,9 @@
  *     Regions published; resolves when the batch is instantiated.
  * @property {() => Promise<void>} flush  Writes the store's own bookkeeping (a directory
  *     store's index) before a run ends.
+ * @property {(records: [string, Uint8Array][], nameOf: (key: string) => string)
+ *     => [string, Uint8Array][]} [seedRecords]  Of a store's records (name, bytes), the ones
+ *     a seed for this translator needs: its region records and the modules they name.
  * @property {(page: number) => void} invalidatePage  A host or guest write into code.
  * @property {(entry: (budget: number) => number, entered: () => number) => boolean}
  *     [interpretWith]  Cork alone: the interpreter tier in wasm's `entry`, which translated

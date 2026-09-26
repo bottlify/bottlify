@@ -23,7 +23,7 @@ import { createApp } from './app.js';
 import { cpuModule } from './layers/cpu/module.js';
 import { openBundle, writeBundle } from './bundle-node.js';
 import {
-    createDirectoryTranslationStore, createMemoryDirectory,
+    createDirectoryTranslationStore, createMemoryDirectory, unpackSeed,
 } from './layers/cpu/internal/translation-store.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 
@@ -108,7 +108,7 @@ async function run(engine, store, source){
     const app = await createApp({
         executable: LOOP,
         engine,
-        cork: { config: { feed: 'slice', timings: true, store } },
+        cork: { config: { feed: 'slice', timings: true, traceStore: true, store } },
         v86: {
             moduleUrl: new URL('libv86.mjs', PREBUILT).href,
             wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
@@ -122,7 +122,8 @@ async function run(engine, store, source){
     {
         const code = await app.run({ timeoutMs: 30000 });
         const { metrics } = cpuModule.diagnostics();
-        return { code, cork: /** @type {any} */ (metrics).cork, seeded };
+        return { code, cork: /** @type {any} */ (metrics).cork, seeded,
+            exported: await app.exportTranslations() };
     }
     finally
     {
@@ -140,7 +141,10 @@ test('a bundle\'s seed gives the first run on a fresh store the regions a run el
         assert.ok(first.cork.regions >= 1, 'the loop was translated');
         assert.equal(first.cork.cacheHits, 0);
         assert.deepEqual(first.seeded, [], 'a bundle without a seed seeds nothing');
-        const seed = await elsewhere.exportSeed();
+        // The launch hands its translations out as the seed a bundle carries.
+        const seed = /** @type {Uint8Array} */ (first.exported);
+        assert.ok((unpackSeed(seed)?.length ?? 0) >= first.cork.regions + 1,
+            'a region record each and the module they name');
 
         const carrying = await bundleOf(seed);
         t.after(()=>carrying.cleanup());
@@ -153,10 +157,13 @@ test('a bundle\'s seed gives the first run on a fresh store the regions a run el
         const here = await createDirectoryTranslationStore(machine, BUNDLE_ID);
         const second = await run(undefined, here, carrying);
         assert.equal(second.code, first.code, 'the program ends as it did');
-        // Which starts turn hot depends on where the run's slices end, so this
-        // run may form a region the first did not; each the first made is here.
-        assert.ok(second.cork.cacheHits >= first.cork.regions,
-            `hits ${second.cork.cacheHits} of the ${first.cork.regions} regions made elsewhere`);
+        // Which starts turn hot depends on where the run's slices end, so the
+        // two runs need not form the same regions; none the first made and
+        // stored is made again here.
+        const madeThere = new Set(first.cork.storeTrace.put);
+        assert.ok(second.cork.cacheHits >= 1, `hits: ${second.cork.cacheHits}`);
+        assert.deepEqual(second.cork.storeTrace.missed.filter(
+            (/** @type {string} */ key)=>madeThere.has(key)), []);
         assert.equal(second.seeded.length, 1);
         assert.ok(second.seeded[0].added > 0 && second.seeded[0].taken);
         assert.equal(await here.seededWith(), member.sha256);

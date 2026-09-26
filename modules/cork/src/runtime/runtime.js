@@ -38,7 +38,9 @@ import { ANY_TOP, createEntries } from './entries.js';
 import { PageFlag, createPageTable } from './pages.js';
 import { Tables } from './layout.js';
 import { blockCounts, resetBlockCounts, topBlocks } from './block-profile.js';
-import { CACHE_VERSION, cacheKey, moduleKey, packRegion, unpackRegion } from './cache.js';
+import {
+    CACHE_VERSION, cacheKey, moduleKey, packRegion, seedRecords, unpackRegion,
+} from './cache.js';
 
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').EngineEnv} EngineEnv */
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').Runtime} Runtime */
@@ -2106,6 +2108,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
             enqueue(key, eip, hotness);
         },
+        seedRecords,
         /** Writes whatever the store keeps aside from its records, so the
          * names of this run's regions are on disk before the run ends and the
          * next run's index can find them. */

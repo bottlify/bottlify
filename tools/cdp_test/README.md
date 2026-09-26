@@ -37,7 +37,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
     [--run-seconds N] [--command-line STRING] [--file HOST=GUEST] [--save-files]
     [--profile-calls] [--no-video] [--no-fog] [--no-mips] [--trace]
     [--worker [--pacing page|event]] [--coi]
-    [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
+    [--user-data-dir DIR] [--port N] [--store local] [--prefetch] [--export-translations FILE]
 ```
 
 | flag | default | what it does |
@@ -84,6 +84,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--port N` | random | fixes the static server's port, so `http://127.0.0.1:<port>` -- the origin OPFS is scoped to -- is the same origin every run. Pair with `--user-data-dir` for a warm store to survive between separate invocations of this tool; without a fixed port each run is a different origin no matter which profile it opens |
 | `--store local` | none (nothing kept) | fetched bundle blocks are cached in OPFS instead of thrown away with the page. Requires `--worker` (only a worker can open OPFS synchronously) and, to survive to a later run, `--user-data-dir` and `--port` held fixed |
 | `--prefetch` | off | with `--store local`: fill the rest of the cache from the bundle in the background beyond whatever the run itself reads, for a fuller warm-up between runs at the cost of the bandwidth to do it |
+| `--export-translations FILE` | off | once the run ends, what the translator made of the title (`app.exportTranslations()`, the store kept to what its lookups can reach) is written to FILE as the seed a bundle carries; `node tools/make-btl.mjs translations <bundle-id> FILE` puts it into the bundle, so every first run of it starts from those translations. Needs a translating `--engine`; the store is the origin's file system (`--worker` for its synchronous handles), so a run on a kept profile (`--user-data-dir`, `--port`) exports what earlier runs made as well |
 
 The run is headless and always on a fresh profile. The browser flags it needs
 are in `browser.mjs` (below).
