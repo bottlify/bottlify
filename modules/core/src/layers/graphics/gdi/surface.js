@@ -174,6 +174,37 @@ export const MONOCHROME = Object.freeze([0x00000000, 0x00ffffff]);
 const DEPTHS = new Set([1, 4, 8, 16, 24, 32]);
 
 /**
+ * The entry of a colour table nearest a pixel, by squared distance in RGB:
+ * the first that matches it exactly, else the closest.
+ *
+ * @param {number[]} entries  32-bit pixels, at most 256 of them consulted.
+ * @param {number} pixel
+ * @returns {{ index: number, exact: boolean }}
+ */
+export function nearestEntry(entries, pixel){
+    let best = 0;
+    let bestDistance = Infinity;
+    for (let index = 0; index < entries.length && index < 256; index++)
+    {
+        const entry = entries[index] >>> 0;
+        if ((entry & 0xffffff) === (pixel & 0xffffff))
+        {
+            return { index, exact: true };
+        }
+        const dr = ((entry >>> 16) & 0xff) - ((pixel >>> 16) & 0xff);
+        const dg = ((entry >>> 8) & 0xff) - ((pixel >>> 8) & 0xff);
+        const db = (entry & 0xff) - (pixel & 0xff);
+        const distance = dr * dr + dg * dg + db * db;
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            best = index;
+        }
+    }
+    return { index: best, exact: false };
+}
+
+/**
  * A surface that also says how deep it is. The operations need only the
  * contract's half; the depth is for whoever presents or re-reads the bytes.
  *
@@ -247,41 +278,20 @@ export function createSurface(options){
         {
             return remembered;
         }
-        let best = 0;
-        let bestDistance = Infinity;
-        let exact = false;
-        for (let index = 0; index < entries.length && index < 256; index++)
-        {
-            const entry = entries[index] >>> 0;
-            if ((entry & 0xffffff) === (pixel & 0xffffff))
-            {
-                best = index;
-                exact = true;
-                break;
-            }
-            const dr = ((entry >>> 16) & 0xff) - ((pixel >>> 16) & 0xff);
-            const dg = ((entry >>> 8) & 0xff) - ((pixel >>> 8) & 0xff);
-            const db = (entry & 0xff) - (pixel & 0xff);
-            const distance = dr * dr + dg * dg + db * db;
-            if (distance < bestDistance)
-            {
-                bestDistance = distance;
-                best = index;
-            }
-        }
+        const found = nearestEntry(entries, pixel);
         if (nearest.size >= 4096)
         {
             nearest.clear();
         }
-        if (exact)
+        if (found.exact)
         {
-            nearest.set(pixel, best);
+            nearest.set(pixel, found.index);
         }
         else
         {
             nearest.delete(pixel);
         }
-        return best;
+        return found.index;
     };
 
     return {

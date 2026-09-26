@@ -566,9 +566,13 @@ test('a monochrome pattern brush takes the context\'s colours, and keeps its bit
     assert.equal(view.getUint16(0x200, true), 0x5555);
 });
 
-/** Where the wired tests below put a BITMAPINFO and the bits it describes. */
+/**
+ * Where the wired tests below put a BITMAPINFO -- room for a full table of
+ * 256 behind it -- the bits it describes, and a pointer handed back.
+ */
 const WIRED_INFO = 0x300;
-const WIRED_BITS = 0x400;
+const WIRED_BITS = 0x800;
+const WIRED_POINTER = 0x2f0;
 
 /**
  * A BITMAPINFOHEADER and what follows it: a colour table of RGBQUADs, or a
@@ -608,7 +612,7 @@ test('a 5-6-5 DIB draws as 5-6-5, from StretchDIBits and in a section of its own
     assert.deepEqual([fns.GetPixel.handler([dc, 0, 0]), fns.GetPixel.handler([dc, 1, 0])],
         [0x00ff00, 0x0000ff], 'full green and full red, as COLORREFs');
 
-    const BITS_OUT = 0x500;
+    const BITS_OUT = WIRED_POINTER;
     const section = fns.CreateDIBSection.handler([dc, WIRED_INFO, 0, BITS_OUT, 0, 0]);
     assert.notEqual(section, 0);
     fns.SelectObject.handler([dc, section]);
@@ -638,4 +642,118 @@ test('GetDIBits into BI_BITFIELDS writes the masks it packs the pixels by', ()=>
     assert.equal(view.getUint32(WIRED_INFO + BITMAPINFOHEADER.biSizeImage, true), 4);
     assert.deepEqual([view.getUint16(WIRED_BITS, true), view.getUint16(WIRED_BITS + 2, true)],
         [0xf800, 0x07e0], 'red and green, packed by those masks');
+});
+
+/** @param {DataView} view @param {number} count @returns {number[]} the table after the header */
+const tableOf = (view, count)=>[...Array(count).keys()]
+    .map(index=>view.getUint32(WIRED_INFO + 40 + index * 4, true));
+
+test('GetDIBits reads a monochrome bitmap out as one bit, black and white, bottom-up', ()=>{
+    // Wine's test_GetDIBits: a 16x16 bitmap of alternate rows, read back as a
+    // one-bit DIB; the table is two entries and nothing past them is touched.
+    const { fns, view, bytes } = wiredGdi();
+    const screen = fns.GetDC.handler([0]);
+    const ROWS = 0x600;
+    for (let y = 0; y < 16; y++)
+    {
+        view.setUint16(ROWS + y * 2, y % 2 === 0 ? 0xffff : 0, true);
+    }
+    const mono = fns.CreateBitmap.handler([16, 16, 1, 1, ROWS]);
+    putInfo(view, { width: 16, height: 16, bitCount: 1, table: new Array(4).fill(0xaaaaaaaa) });
+    view.setUint32(WIRED_INFO + BITMAPINFOHEADER.biClrUsed, 37, true);
+
+    assert.equal(fns.GetDIBits.handler([screen, mono, 0, 16, WIRED_BITS, WIRED_INFO, 0]), 16);
+    assert.deepEqual(tableOf(view, 4), [0, 0x00ffffff, 0xaaaaaaaa, 0xaaaaaaaa]);
+    assert.equal(view.getUint32(WIRED_INFO + BITMAPINFOHEADER.biClrUsed, true), 0);
+    assert.equal(view.getUint32(WIRED_INFO + BITMAPINFOHEADER.biSizeImage, true), 64);
+    assert.deepEqual([...bytes.subarray(WIRED_BITS, WIRED_BITS + 8)],
+        [0, 0, 0, 0, 0xff, 0xff, 0, 0], 'the last row first, each padded to a DWORD');
+
+    view.setUint32(WIRED_INFO + 40, 0xaaaaaaaa, true);
+    view.setUint32(WIRED_INFO + 44, 0xaaaaaaaa, true);
+    fns.GetDIBits.handler([screen, mono, 0, 0, 0, WIRED_INFO, 1]);
+    assert.deepEqual(tableOf(view, 2), [0x00010000, 0xaaaaaaaa],
+        'DIB_PAL_COLORS: the table is the indices 0 and 1, as WORDs');
+});
+
+test('GetDIBits reads colour out as four and eight bits against the default palette', ()=>{
+    // Wine's test_GetDIBits: at four bits the sixteen VGA colours, at eight the
+    // default palette's twenty around a 3-3-2 cube, and each pixel the index
+    // of its colour there.
+    const { fns, view, bytes } = wiredGdi();
+    const screen = fns.GetDC.handler([0]);
+    const dc = fns.CreateCompatibleDC.handler([screen]);
+    const bitmap = fns.CreateCompatibleBitmap.handler([screen, 2, 1]);
+    fns.SelectObject.handler([dc, bitmap]);
+    fns.SetPixel.handler([dc, 0, 0, 0x0000ff]);
+    fns.SetPixel.handler([dc, 1, 0, 0x804020]);
+    fns.SelectObject.handler([dc, fns.CreateBitmap.handler([1, 1, 1, 1, 0])]);
+
+    putInfo(view, { width: 2, height: 1, bitCount: 4 });
+    assert.equal(fns.GetDIBits.handler([screen, bitmap, 0, 1, WIRED_BITS, WIRED_INFO, 0]), 1);
+    assert.deepEqual(tableOf(view, 16), [
+        0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0x808080,
+        0xc0c0c0, 0xff0000, 0x00ff00, 0xffff00, 0x0000ff, 0xff00ff, 0x00ffff, 0xffffff,
+    ]);
+    assert.equal(bytes[WIRED_BITS] >>> 4, 9, 'red is the ninth');
+
+    putInfo(view, { width: 2, height: 1, bitCount: 8 });
+    assert.equal(fns.GetDIBits.handler([screen, bitmap, 0, 1, WIRED_BITS, WIRED_INFO, 0]), 1);
+    const table = tableOf(view, 256);
+    assert.deepEqual(table.slice(0, 10), [0x000000, 0x800000, 0x008000, 0x808000, 0x000080,
+        0x800080, 0x008080, 0xc0c0c0, 0xc0dcc0, 0xa6caf0]);
+    assert.deepEqual(table.slice(246), [0xfffbf0, 0xa0a0a4, 0x808080, 0xff0000, 0x00ff00,
+        0xffff00, 0x0000ff, 0xff00ff, 0x00ffff, 0xffffff]);
+    assert.equal(table[145], 0x204080,
+        'red (145 & 7) << 5, green (145 & 0x38) << 2, blue 145 & 0xc0');
+    assert.deepEqual([bytes[WIRED_BITS], bytes[WIRED_BITS + 1]], [249, 145]);
+});
+
+test('GetDIBits hands an indexed section back in its own table and its own indices', ()=>{
+    // Wine's test_GetDIBits_selected_DIB, at eight and four bits.
+    for (const bitCount of [8, 4])
+    {
+        const { fns, view, bytes } = wiredGdi();
+        const ramp = [...Array(1 << bitCount).keys()].map(index=>{
+            const grey = index * (1 << (8 - bitCount));
+            return (grey << 16) | (grey << 8) | grey;
+        });
+        putInfo(view, { width: 32, height: 32, bitCount, table: ramp });
+        const OUT = WIRED_POINTER;
+        const section = fns.CreateDIBSection.handler([0, WIRED_INFO, 0, OUT, 0, 0]);
+        const bits = view.getUint32(OUT, true);
+        const size = (bitCount * 32 * 32) / 8;
+        for (let index = 0; index < size; index++)
+        {
+            bytes[bits + index] = index % 256;
+        }
+        const dc = fns.CreateCompatibleDC.handler([0]);
+        putInfo(view, { width: 32, height: 32, bitCount, table: ramp.map(()=>0xcccccccc) });
+        assert.equal(fns.GetDIBits.handler([dc, section, 0, 32, WIRED_BITS, WIRED_INFO, 0]), 32);
+        assert.deepEqual(tableOf(view, 1 << bitCount), ramp);
+        assert.deepEqual([...bytes.subarray(WIRED_BITS, WIRED_BITS + size)],
+            [...bytes.subarray(bits, bits + size)], `${bitCount} bits`);
+    }
+});
+
+test('StretchDIBits draws one- and four-bit DIBs through their colour tables', ()=>{
+    const { fns, view } = wiredGdi();
+    const screen = fns.GetDC.handler([0]);
+    const dc = fns.CreateCompatibleDC.handler([screen]);
+    fns.SelectObject.handler([dc, fns.CreateCompatibleBitmap.handler([screen, 3, 1])]);
+    /** @returns {number[]} */
+    const row = ()=>[0, 1, 2].map(x=>fns.GetPixel.handler([dc, x, 0]));
+
+    putInfo(view, { width: 3, height: -1, bitCount: 1, table: [0x00ff0000, 0x000000ff] });
+    view.setUint8(WIRED_BITS, 0b10100000);
+    assert.equal(fns.StretchDIBits.handler([dc, 0, 0, 3, 1, 0, 0, 3, 1,
+        WIRED_BITS, WIRED_INFO, 0, 0x00cc0020]), 1);
+    assert.deepEqual(row(), [0xff0000, 0x0000ff, 0xff0000], 'blue, red, blue as COLORREFs');
+
+    putInfo(view, { width: 3, height: -1, bitCount: 4,
+        table: [0, 0x00ff0000, 0x0000ff00, 0x000000ff] });
+    view.setUint16(WIRED_BITS, 0x1023, false);
+    assert.equal(fns.StretchDIBits.handler([dc, 0, 0, 3, 1, 0, 0, 3, 1,
+        WIRED_BITS, WIRED_INFO, 0, 0x00cc0020]), 1);
+    assert.deepEqual(row(), [0x0000ff, 0x000000, 0x00ff00]);
 });

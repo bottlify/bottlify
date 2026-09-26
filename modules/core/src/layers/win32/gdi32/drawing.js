@@ -58,6 +58,55 @@ const DIB_PAL_COLORS = 1;
 
 /** The drawing layer's name for a sixteen-bit surface made in 5-6-5. */
 const RGB_565 = '565';
+
+/**
+ * The default palette's twenty colours, the ones a palette device keeps for
+ * itself: eight dark, four pale, eight bright. 0x00RRGGBB.
+ */
+const DEFAULT_PALETTE_COLORS = Object.freeze([
+    0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0xc0c0c0,
+    0xc0dcc0, 0xa6caf0, 0xfffbf0, 0xa0a0a4,
+    0x808080, 0xff0000, 0x00ff00, 0xffff00, 0x0000ff, 0xff00ff, 0x00ffff, 0xffffff,
+]);
+
+/** The sixteen VGA colours, in the order a four-bit DIB indexes them. */
+const VGA_COLORS = Object.freeze([0, 1, 2, 3, 4, 5, 6, 12, 7, 13, 14, 15, 16, 17, 18, 19]
+    .map(entry=>DEFAULT_PALETTE_COLORS[entry]));
+
+/**
+ * What an eight-bit DIB indexes when the bitmap has no table of its own: the
+ * default palette's first ten and last ten colours at either end, and between
+ * them a cube of three bits of red, three of green and two of blue.
+ */
+const EIGHT_BIT_COLORS = Object.freeze([...Array(256).keys()].map(index=>{
+    if (index < 10 || index >= 246)
+    {
+        return DEFAULT_PALETTE_COLORS[index < 10 ? index : index - 236];
+    }
+    return ((index & 0x07) << 21) | ((index & 0x38) << 10) | (index & 0xc0);
+}));
+
+/**
+ * The colour table GetDIBits reads a bitmap out against at an indexed depth:
+ * an indexed section's own at its own depth, and otherwise black and white at
+ * one bit, the VGA colours at four and the default table at eight -- what
+ * Wine's test_GetDIBits finds for a device-dependent bitmap.
+ *
+ * @param {any} shape  The bitmap's attributes.
+ * @param {number} bitCount  1, 4 or 8.
+ * @returns {readonly number[]}
+ */
+function colorTableFor(shape, bitCount){
+    if ((shape.section >>> 0) !== 0 && shape.bitCount === bitCount && shape.palette)
+    {
+        return [...shape.palette];
+    }
+    if (bitCount === 1)
+    {
+        return [0x000000, 0xffffff];
+    }
+    return bitCount === 4 ? VGA_COLORS : EIGHT_BIT_COLORS;
+}
 /**
  * The compressions the DIB decoder reads: none, and BI_BITFIELDS -- no
  * compression either, the three channels named by masks -- at 16 and 32 bits.
@@ -765,6 +814,18 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                 {
                     writeU32s(host, info + BITMAPINFOHEADER.SIZE, masks);
                 }
+                const colors = header.bitCount <= 8 ? colorTableFor(shape, header.bitCount) : [];
+                if ((usage >>> 0) === DIB_PAL_COLORS)
+                {
+                    // Indices into the DC's palette instead of colours, and
+                    // the identity is the table that matches.
+                    colors.forEach((_, index)=>
+                        writeU16(host, info + header.size + index * 2, index));
+                }
+                else if (colors.length > 0)
+                {
+                    writeU32s(host, info + header.size, [...colors]);
+                }
                 if (describing)
                 {
                     return 1;
@@ -780,6 +841,7 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                             header,
                             bits: buffer,
                             masks,
+                            colors,
                             startScan: start >>> 0,
                             scanLines: wanted,
                         })

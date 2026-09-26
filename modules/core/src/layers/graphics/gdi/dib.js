@@ -23,20 +23,21 @@
  * little-endian DWORD read of one is already the 32-bit pixel this layer uses.
  * Callers hand the table in as that array of pixels rather than as bytes.
  *
- * Depths handled: 32, 24, 16 and 8. Four and one bit per pixel are not, and a
- * call naming one fails rather than producing a plausible wrong picture.
+ * Every uncompressed depth is handled: 32, 24 and 16 bits by channel, and 8,
+ * 4 and 1 by index into the colour table. Writing an indexed DIB needs a
+ * table to index, and the caller chooses it; this layer never invents one.
  */
 
 import { bitBlt, stretchBlt } from './blit.js';
 import { SRCCOPY } from './rop.js';
-import { BI_BITFIELDS, createSurface, dibPitch } from './surface.js';
+import { BI_BITFIELDS, createSurface, dibPitch, nearestEntry } from './surface.js';
 
 /** BI_RGB: uncompressed, with the channel layout the bit count implies. */
 export const BI_RGB = 0;
 export { BI_BITFIELDS };
 
 /** The depths this layer converts. */
-const SUPPORTED_DEPTHS = new Set([8, 16, 24, 32]);
+const SUPPORTED_DEPTHS = new Set([1, 4, 8, 16, 24, 32]);
 
 /**
  * The masks a BI_RGB DIB's depth implies: X1R5G5B5 at sixteen bits and
@@ -148,6 +149,24 @@ function pack(pixel, channels){
 }
 
 /**
+ * The colour-table index a pixel of an indexed row holds: a byte at eight
+ * bits, and below that the leftmost pixel in the byte's top bits.
+ *
+ * @param {Uint8Array} bits @param {number} row @param {number} x @param {number} bitCount
+ */
+function indexAt(bits, row, x, bitCount){
+    if (bitCount === 8)
+    {
+        return bits[row + x];
+    }
+    if (bitCount === 4)
+    {
+        return (bits[row + (x >>> 1)] >>> ((x & 1) === 0 ? 4 : 0)) & 0x0f;
+    }
+    return (bits[row + (x >>> 3)] >>> (7 - (x & 7))) & 1;
+}
+
+/**
  * Decodes a DIB into a top-down 32-bit surface, which is the only pixel format
  * anything downstream of here knows about.
  *
@@ -204,7 +223,7 @@ export function decodeDib(image){
             }
             else
             {
-                pixel = colors[bits[row + x]] ?? 0;
+                pixel = colors[indexAt(bits, row, x, header.bitCount)] ?? 0;
             }
             out.write(x, y, pixel);
         }
@@ -220,10 +239,9 @@ export function decodeDib(image){
  * @returns {number} how many scan lines were written
  */
 export function encodeDib(surface, image){
-    if (!isConvertibleDib(image) || image.header.bitCount === 8)
+    const table = image.colors ?? [];
+    if (!isConvertibleDib(image) || (image.header.bitCount <= 8 && table.length === 0))
     {
-        // Writing an eight-bit DIB back means choosing a palette entry for every
-        // colour, which is a quantiser and not a format conversion.
         return 0;
     }
     const header = image.header;
@@ -236,6 +254,19 @@ export function encodeDib(surface, image){
     const startScan = image.startScan ?? 0;
     const scanLines = Math.min(image.scanLines ?? height, height - startScan);
     const channels = header.bitCount === 16 || header.bitCount === 32 ? channelsOf(image) : [];
+    // The table is fixed for the whole call, so every answer can be kept.
+    /** @type {Map<number, number>} */
+    const indices = new Map();
+    /** @param {number} pixel */
+    const indexOf = pixel=>{
+        let found = indices.get(pixel);
+        if (found === undefined)
+        {
+            found = nearestEntry(table, pixel).index;
+            indices.set(pixel, found);
+        }
+        return found;
+    };
 
     let written = 0;
     for (let index = 0; index < scanLines; index++)
@@ -247,10 +278,31 @@ export function encodeDib(surface, image){
             continue;
         }
         const row = base + (index * pitch);
+        if (header.bitCount < 8)
+        {
+            // Several pixels share a byte, and each is ORed into it.
+            bits.fill(0, row, row + pitch);
+        }
         for (let x = 0; x < width; x++)
         {
             const pixel = surface.read(x, y);
-            if (header.bitCount === 32)
+            if (header.bitCount <= 8)
+            {
+                const entry = indexOf(pixel);
+                if (header.bitCount === 8)
+                {
+                    bits[row + x] = entry;
+                }
+                else if (header.bitCount === 4)
+                {
+                    bits[row + (x >>> 1)] |= (x & 1) === 0 ? (entry & 0x0f) << 4 : entry & 0x0f;
+                }
+                else if ((entry & 1) !== 0)
+                {
+                    bits[row + (x >>> 3)] |= 0x80 >>> (x & 7);
+                }
+            }
+            else if (header.bitCount === 32)
             {
                 const at = row + (x * 4);
                 const value = pack(pixel, channels);
