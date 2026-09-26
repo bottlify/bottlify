@@ -24,7 +24,7 @@
     "typecheck": "npm run typecheck -w @bottlify/core && npm run typecheck -w @bottlify/networking && npm run typecheck -w @bottlify/installer && npm run typecheck -w @bottlify/cork",
     "lint": "eslint . --max-warnings 0",
     "test": "npm run test -w @bottlify/core && npm run test -w @bottlify/networking && npm run test -w @bottlify/installer && npm run test -w @bottlify/cork",
-    "test:integration": "npm run test:integration -w @bottlify/core",
+    "test:integration": "npm run test:integration -w @bottlify/core && npm run test:integration -w @bottlify/cork",
     "test:tools": "node --test \"tools/*.test.js\"",
     "check:boundaries": "npm run check:boundaries -w @bottlify/core",
     "cdp:probe": "node tools/cdp_test/cli.mjs probe",

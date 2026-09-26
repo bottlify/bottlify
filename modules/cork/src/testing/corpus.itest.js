@@ -18,7 +18,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { skipWithout } from './fetched.js';
 import { readFile } from 'node:fs/promises';
 import { createV86Host } from '../../../core/src/layers/cpu/internal/v86-host.js';
 import { readFault } from '../../../core/src/layers/cpu/internal/faults.js';
@@ -61,11 +61,8 @@ const EMULATOR_KNOWN = [
         reason: 'fild m64 past 53 bits: f64 x87', seen: true },
 ];
 
-const missing = [PREBUILT.href + 'v86.wasm', CORPUS.href]
-    .filter(url=>!existsSync(new URL(url)));
-
 test('the corpus passes on the emulator through the harness',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 30 * 60 * 1000 },
+    { skip: skipWithout(new URL('v86.wasm', PREBUILT), CORPUS), timeout: 30 * 60 * 1000 },
     async()=>{
         const wasm = await readFile(new URL('v86.wasm', PREBUILT));
         const host = await createV86Host({

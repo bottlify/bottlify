@@ -35,7 +35,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { skipWithout } from '../testing/fetched.js';
 import { readFile } from 'node:fs/promises';
 import { createV86Host } from '../../../core/src/layers/cpu/internal/v86-host.js';
 import { createHybridHost } from '../../../core/src/layers/cpu/internal/hybrid-host.js';
@@ -61,7 +61,6 @@ const LIMIT = 256;
 /** The state every sequence starts from is a fresh FPU: `fninit; hlt`. */
 const RESET = new Uint8Array([0xdb, 0xe3, HALT]);
 
-const missing = ['v86.wasm', 'libv86.mjs'].filter(name=>!existsSync(new URL(name, PREBUILT)));
 
 /** @param {number} value */
 const u32 = value=>Uint8Array.from([value & 0xff, value >>> 8 & 0xff,
@@ -259,7 +258,8 @@ async function createJudge(){
 }
 
 test('sequences of x87, MMX and SSE leave what the emulator leaves',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 30 * 60 * 1000 },
+    { skip: skipWithout(new URL('v86.wasm', PREBUILT), new URL('libv86.mjs', PREBUILT)),
+        timeout: 30 * 60 * 1000 },
     async()=>{
         const machine = await createJudge();
         const started = Date.now();
