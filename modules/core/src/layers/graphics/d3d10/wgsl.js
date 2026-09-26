@@ -56,6 +56,45 @@ const REG = 'vec4<u32>';
 const COMPONENT = ['x', 'y', 'z', 'w'];
 
 /**
+ * Functions a translation may call, written into the module of a stage that
+ * uses one, after the ones it calls. WGSL has no high half of a 32x32
+ * multiply, so it is assembled from sixteen-bit halves, whose products and
+ * partial sums all fit in 32 bits; the signed high half is the unsigned one
+ * less each operand wherever the other is negative, modulo 2^32.
+ *
+ * @type {Readonly<Record<string, { needs: string[], text: string[] }>>}
+ */
+export const HELPERS = Object.freeze({
+    umulhi: {
+        needs: [],
+        text: [
+            `fn umulhi(a: ${REG}, b: ${REG}) -> ${REG} {`,
+            `    let al = a & ${REG}(0xffffu);`,
+            `    let ah = a >> ${REG}(16u);`,
+            `    let bl = b & ${REG}(0xffffu);`,
+            `    let bh = b >> ${REG}(16u);`,
+            '    let middle1 = ah * bl;',
+            '    let middle2 = al * bh;',
+            `    let carry = (((al * bl) >> ${REG}(16u)) + (middle1 & ${REG}(0xffffu))`
+                + ` + (middle2 & ${REG}(0xffffu))) >> ${REG}(16u);`,
+            `    return ah * bh + (middle1 >> ${REG}(16u)) + (middle2 >> ${REG}(16u)) + carry;`,
+            '}',
+        ],
+    },
+    imulhi: {
+        needs: ['umulhi'],
+        text: [
+            `fn imulhi(a: ${REG}, b: ${REG}) -> ${REG} {`,
+            `    let aNegative = (a >> ${REG}(31u)) != ${REG}(0u);`,
+            `    let bNegative = (b >> ${REG}(31u)) != ${REG}(0u);`,
+            `    return umulhi(a, b) - select(${REG}(0u), b, aNegative)`
+                + ` - select(${REG}(0u), a, bNegative);`,
+            '}',
+        ],
+    },
+});
+
+/**
  * @typedef {Object} ConstantBufferDecl
  * @property {number} slot
  * @property {number} size   In vec4 registers.
@@ -91,6 +130,7 @@ const COMPONENT = ['x', 'y', 'z', 'w'];
  * @property {number} outputRegisters              How many `o` registers the body writes.
  * @property {boolean} writesDepth
  * @property {string[]} unsupported                Opcode names with no translation.
+ * @property {string[]} helpers                    HELPERS the body calls, callees first.
  */
 
 /** @param {number} mask @returns {string} the components a mask names */
@@ -135,6 +175,7 @@ export function translateShader(container){
         outputRegisters: 0,
         writesDepth: false,
         unsupported: [],
+        helpers: [],
     };
     let nextTemp = 0;
     let depth = 1;
@@ -357,6 +398,16 @@ export function translateShader(container){
         result.unsupported.push(name);
     };
 
+    /** @param {string} name  A HELPERS entry the body is about to call. */
+    const need = name=>{
+        if (result.helpers.includes(name))
+        {
+            return;
+        }
+        HELPERS[name].needs.forEach(need);
+        result.helpers.push(name);
+    };
+
     /**
      * Two-destination integer multiplies and divides: the destination that is
      * `null` is simply not stored.
@@ -366,8 +417,19 @@ export function translateShader(container){
      * @param {string} low
      */
     const storePair = (instruction, high, low)=>{
-        store(instruction.operands[0], high);
-        store(instruction.operands[1], low);
+        const [first, second] = instruction.operands;
+        if (first.type === OPERAND.NULL || second.type === OPERAND.NULL)
+        {
+            store(first, high);
+            store(second, low);
+            return;
+        }
+        // Both results are read before either is written: `udiv r0, r1, r0,
+        // r2` divides the r0 it is about to replace.
+        const held = `t${nextTemp++}`;
+        emit(`let ${held} = ${low};`);
+        store(first, high);
+        store(second, held);
     };
 
     /**
@@ -694,25 +756,29 @@ export function translateShader(container){
                 store(dest, `(${u(a)} * ${u(b)} + ${u(c)})`);
                 break;
             case OPCODE.IMUL:
-                // The high half of a 32x32 product is not something WGSL can
-                // ask for; only the low half is honoured, and a shader that
-                // reads the high half is refused rather than fed zeros.
                 if (dest.type !== OPERAND.NULL)
                 {
-                    unsupported('imul with a high destination');
+                    need('imulhi');
                 }
-                store(a, fromInt(`(${i(b)} * ${i(c)})`));
+                storePair(instruction, `imulhi(${fromInt(i(b))}, ${fromInt(i(c))})`,
+                    fromInt(`(${i(b)} * ${i(c)})`));
                 break;
             case OPCODE.UMUL:
                 if (dest.type !== OPERAND.NULL)
                 {
-                    unsupported('umul with a high destination');
+                    need('umulhi');
                 }
-                store(a, `(${u(b)} * ${u(c)})`);
+                storePair(instruction, `umulhi(${u(b)}, ${u(c)})`, `(${u(b)} * ${u(c)})`);
                 break;
-            case OPCODE.UDIV:
-                storePair(instruction, `(${u(b)} / ${u(c)})`, `(${u(b)} % ${u(c)})`);
+            case OPCODE.UDIV: {
+                // Division by zero answers all ones in both halves; WGSL's
+                // answers the dividend and zero.
+                const byZero = `${u(c)} == ${REG}(0u)`;
+                storePair(instruction,
+                    `select((${u(b)} / ${u(c)}), ${REG}(0xffffffffu), ${byZero})`,
+                    `select((${u(b)} % ${u(c)}), ${REG}(0xffffffffu), ${byZero})`);
                 break;
+            }
             case OPCODE.IMAX:
                 store(dest, fromInt(`max(${i(a)}, ${i(b)})`));
                 break;
@@ -1103,6 +1169,10 @@ function declarations(shader, group, visibility){
         const rows = shader.immediateConstants
             .map(row=>`${REG}(${row.map(u32Literal).join(', ')})`);
         text.push(`const icb = array<${REG}, ${rows.length}>(${rows.join(', ')});`);
+    }
+    for (const helper of shader.helpers)
+    {
+        text.push(...HELPERS[helper].text);
     }
     return { text, entries, unsupported: problems };
 }

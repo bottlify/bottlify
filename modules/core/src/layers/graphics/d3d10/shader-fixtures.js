@@ -289,6 +289,11 @@ export const imul = (high, low, a, b)=>op(OPCODE.IMUL, [high, low, a, b], { dest
  */
 export const udiv = (quotient, remainder, a, b)=>
     op(OPCODE.UDIV, [quotient, remainder, a, b], { destinations: 2 });
+/**
+ * @param {AsmOperand} high @param {AsmOperand} low
+ * @param {AsmOperand} a @param {AsmOperand} b
+ */
+export const umul = (high, low, a, b)=>op(OPCODE.UMUL, [high, low, a, b], { destinations: 2 });
 
 /** @param {AsmOperand} dest @param {AsmOperand} coordinate @param {AsmOperand} texture @param {AsmOperand} sampler */
 export const sample = (dest, coordinate, texture, sampler)=>

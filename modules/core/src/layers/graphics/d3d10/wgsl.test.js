@@ -19,7 +19,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE, parseDxbc } from './dxbc.js';
 import { MODIFIER, RESOURCE_DIMENSION, RETURN_TYPE, SAMPLER_MODE } from './sm4.js';
-import { BINDING, STAGE, linkProgram, translateShader } from './wgsl.js';
+import { BINDING, HELPERS, STAGE, linkProgram, translateShader } from './wgsl.js';
 import {
     add, addSat, and, assemble, breakOut, breakcNz, call, callcNz, caseOf, cb,
     colouredPixelShader, colouredVertexShader, defaultCase, endswitch, label, switchOn,
@@ -30,7 +30,7 @@ import {
     immediateConstantBuffer, indexedBy, ineg, ishl, ishr, itof, l, ld, log, loop, lt, lu, mad, max,
     min, modified, mov, movc, mul, ne, not, nullDest, o, oDepth, or, passThroughVertexShader,
     r, resinfo, ret, retcNz, roundNe, roundNi, rsq, s, sample, sampleCLz, sampleL, sincos,
-    solidPixelShader, sqrt, t, udiv, ult, umax, umin, ushr, utof, v, xor,
+    solidPixelShader, sqrt, t, udiv, ult, umax, umin, umul, ushr, utof, v, xor,
 } from './shader-fixtures.js';
 
 /**
@@ -146,7 +146,10 @@ test('the unary float functions map one to one', ()=>{
 
 test('sincos writes the sine and the cosine to its two destinations', ()=>{
     assert.equal(emitted([sincos(r(0), r(1), r(2))]),
-        `r0 = ${U}(sin(${F}(r2.xyzw)));\nr1 = ${U}(cos(${F}(r2.xyzw)));`);
+        `let t0 = ${U}(cos(${F}(r2.xyzw)));\nr0 = ${U}(sin(${F}(r2.xyzw)));\nr1 = t0;`);
+    assert.equal(emitted([sincos(r(2), r(1), r(2))]),
+        `let t0 = ${U}(cos(${F}(r2.xyzw)));\nr2 = ${U}(sin(${F}(r2.xyzw)));\nr1 = t0;`,
+        'the cosine is of the source as it was, not of the sine written over it');
     assert.equal(emitted([sincos(nullDest(), r(1), r(2))]),
         `r1 = ${U}(cos(${F}(r2.xyzw)));`, 'a null destination is not stored');
 });
@@ -208,16 +211,63 @@ test('bitwise operations and shifts stay unsigned, with the shift count masked',
         `r0 = ${U}((${I}(r1.xyzw) >> (r2.xyzw & vec4<u32>(31u))));`);
 });
 
-test('imul keeps the low half and refuses a shader that wants the high half', ()=>{
+test('imul and umul write the high half of the product beside the low one', ()=>{
     assert.equal(emitted([imul(nullDest(), r(0), r(1), r(2))]),
         `r0 = ${U}((${I}(r1.xyzw) * ${I}(r2.xyzw)));`);
-    const wantsHigh = translate([imul(r(3), r(0), r(1), r(2))]);
-    assert.deepEqual(wantsHigh.unsupported, ['imul with a high destination']);
+    const signed = translate([imul(r(3), r(0), r(1), r(2))]);
+    assert.equal(bodyOf(signed), [
+        `let t0 = ${U}((${I}(r1.xyzw) * ${I}(r2.xyzw)));`,
+        `r3 = imulhi(${U}(${I}(r1.xyzw)), ${U}(${I}(r2.xyzw)));`,
+        'r0 = t0;',
+    ].join('\n'));
+    assert.deepEqual(signed.unsupported, []);
+    assert.deepEqual(signed.helpers, ['umulhi', 'imulhi'], 'the helper and what it calls');
+    const unsigned = translate([umul(r(3), nullDest(), r(1), r(2))]);
+    assert.equal(bodyOf(unsigned), 'r3 = umulhi(r1.xyzw, r2.xyzw);');
+    assert.deepEqual(unsigned.helpers, ['umulhi']);
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const fragment = linkProgram(vs, signed).fragment;
+    assert.ok(fragment.indexOf('fn umulhi(') < fragment.indexOf('fn imulhi('),
+        'written into the module, callee first');
+    assert.ok(!linkProgram(vs, translate([mov(r(0), r(1))])).fragment.includes('fn umulhi'));
 });
 
-test('udiv writes the quotient and the remainder', ()=>{
-    assert.equal(emitted([udiv(r(0), r(1), r(2), r(3))]),
-        'r0 = (r2.xyzw / r3.xyzw);\nr1 = (r2.xyzw % r3.xyzw);');
+test('the high halves the helpers compute are the high halves of the products', ()=>{
+    // The helpers' WGSL, read one lane at a time: every operation in them is
+    // one JavaScript has on unsigned 32-bit values once >> is read as >>>.
+    const source = [...HELPERS.umulhi.text, ...HELPERS.imulhi.text].join('\n')
+        .replace(/fn (\w+)\(a: [^)]*\) -> [^{]*\{/g, 'function $1(a, b) {')
+        .replace(/vec4<u32>\(([^()]*)\)/g, '($1)')
+        .replace(/(0x[0-9a-f]+|\d+)u\b/g, '$1')
+        .replace(/>>/g, '>>>')
+        .replace(/let (\w+) = ([^;]*);/g, 'const $1 = ($2) >>> 0;')
+        .replace(/return ([^;]*);/g, 'return ($1) >>> 0;')
+        .replace(/select\(/g, 'pick(');
+    const helpers = new Function('pick', `${source}\nreturn { umulhi, imulhi };`)(
+        (/** @type {number} */ no, /** @type {number} */ yes, /** @type {boolean} */ when)=>
+            (when ? yes : no));
+    const samples = [0, 1, 2, 0xffff, 0x10000, 0x7fffffff, 0x80000000, 0x80000001, 0xffffffff,
+        0x12345678, 0xdeadbeef, 0xcafef00d, 3000000000, 65537];
+    for (const a of samples)
+    {
+        for (const b of samples)
+        {
+            const unsigned = Number((BigInt(a) * BigInt(b)) >> 32n);
+            assert.equal(helpers.umulhi(a, b), unsigned, `umulhi(${a}, ${b})`);
+            const product = BigInt(a | 0) * BigInt(b | 0);
+            const signed = Number(BigInt.asUintN(32, product >> 32n));
+            assert.equal(helpers.imulhi(a, b), signed, `imulhi(${a | 0}, ${b | 0})`);
+        }
+    }
+});
+
+test('udiv writes the quotient and the remainder, all ones for a zero divisor', ()=>{
+    const byZero = 'r3.xyzw == vec4<u32>(0u)';
+    assert.equal(emitted([udiv(r(0), r(1), r(2), r(3))]), [
+        `let t0 = select((r2.xyzw % r3.xyzw), vec4<u32>(0xffffffffu), ${byZero});`,
+        `r0 = select((r2.xyzw / r3.xyzw), vec4<u32>(0xffffffffu), ${byZero});`,
+        'r1 = t0;',
+    ].join('\n'));
 });
 
 // --- flow control ---
