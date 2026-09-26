@@ -44,6 +44,7 @@
  */
 
 import { GL } from './constants.js';
+import { createBufferReads } from './buffer-reads.js';
 import { identity, invert, multiply, transpose } from './matrix.js';
 import { normalMatrix } from './lighting.js';
 import { FACE_STRIDE, createTextureObject, levelKey } from './objects.js';
@@ -378,6 +379,8 @@ export function createGpuRenderer(services){
     /** Frames recorded and not yet flushed: what a buffer write may still collide with. */
     /** @type {Set<number>} */
     const unflushed = new Set();
+    /** @param {number} frame */
+    const isUnflushed = frame=>unflushed.has(frame);
 
     /** @type {Map<string, Promise<any>>} */
     const pipelines = new Map();
@@ -601,7 +604,7 @@ export function createGpuRenderer(services){
      * @typedef {Object} BufferRecord
      * @property {any} gpu    the dynamic buffer
      * @property {number} size
-     * @property {{ frame: number, start: number, end: number }[]} reads
+     * @property {ReturnType<typeof createBufferReads>} reads
      */
     /** @type {WeakMap<import('./objects.js').BufferObject, BufferRecord>} */
     const buffers = new WeakMap();
@@ -932,7 +935,7 @@ export function createGpuRenderer(services){
                     label: `gl-buffer:${buffer.name}`,
                 }),
                 size: buffer.size,
-                reads: [],
+                reads: createBufferReads(isUnflushed),
             };
             buffers.set(buffer, record);
             // A fresh backing has the whole store to receive.
@@ -944,13 +947,11 @@ export function createGpuRenderer(services){
             return record;
         }
         buffer.written = null;
-        record.reads = record.reads.filter(read=>unflushed.has(read.frame));
-        const collides = record.reads.some(read=>
-            read.start < written.end && written.start < read.end);
+        const collides = record.reads.overlaps(written.start, written.end);
         if (collides)
         {
             stats.renames++;
-            record.reads = [];
+            record.reads.clear();
         }
         const lock = record.gpu.lock(written.start, written.end - written.start,
             collides ? backend.LockFlags.RENAME : backend.LockFlags.NOOVERWRITE);
@@ -1970,11 +1971,8 @@ export function createGpuRenderer(services){
                 }
                 const gpuBuffer = bufferFor(object);
                 const recording = recordingOf(context);
-                gpuBuffer.reads.push({
-                    frame: recording.id,
-                    start: slot.base + min * slot.stride,
-                    end: slot.base + (max + 1) * slot.stride,
-                });
+                gpuBuffer.reads.note(recording.id, slot.base + min * slot.stride,
+                    slot.base + (max + 1) * slot.stride);
                 return { gpu: gpuBuffer.gpu.gpu, offset: slot.base };
             }
             const bytes = request.read(slot.base + from * slot.stride,
