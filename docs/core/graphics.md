@@ -103,7 +103,7 @@ reading each table:
 | `OPENGL32.dll` | 507 | The whole of OpenGL 1.1, all of WGL, and every extension function this implementation answers. Every name is bound, implemented or not, because a stdcall stub that pops the wrong number of bytes loses the process far from the call. Unimplemented names answer zero and are counted. |
 | `vulkan-1.dll` | 149 | Every command with its 32-bit argument size (`src/layers/graphics/vulkan/commands.js`). 65 are implemented (20 instance-level, 45 device-level); the rest answer `VK_ERROR_FEATURE_NOT_PRESENT` and are counted by name. |
 | `DDRAW.dll` | 7 | `DirectDrawCreate`, `DirectDrawCreateEx` and `DirectDrawCreateClipper`; `DirectDrawEnumerateA` and `DirectDrawEnumerateExA`, which call the program's callback once, for the primary display driver (a null GUID, `"Primary Display Driver"`, `"display"`, and a null monitor in the Ex form); and `DirectDrawEnumerateW` and `DirectDrawEnumerateExW`, which the runtime never implemented and which answer `DDERR_UNSUPPORTED` having called nothing. A null callback is `DDERR_INVALIDPARAMS` in every form but `DirectDrawEnumerateExW`. |
-| `D3D10.dll` | 27 | `D3D10CreateDevice` and `D3D10CreateDeviceAndSwapChain`; blobs and reflection (`D3D10CreateBlob`, the three signature-blob functions, `D3D10GetShaderDebugInfo`, `D3D10ReflectShader`); the three profile names; the state block (`D3D10CreateStateBlock` and the eight `D3D10StateBlockMask*` functions); and seven that refuse by name, each reporting why: the two compilers answer `E_FAIL` with the reason in the error blob, the two disassemblers, `D3D10PreprocessShader` and the two effect constructors `E_NOTIMPL`. |
+| `D3D10.dll` | 27 | `D3D10CreateDevice` and `D3D10CreateDeviceAndSwapChain`; blobs and reflection (`D3D10CreateBlob`, the three signature-blob functions, `D3D10GetShaderDebugInfo`, `D3D10ReflectShader`); the three profile names; the state block (`D3D10CreateStateBlock` and the eight `D3D10StateBlockMask*` functions); the effect framework's `D3D10CreateEffectFromMemory`; and six that refuse by name, each reporting why: the two compilers answer `E_FAIL` with the reason in the error blob, the two disassemblers, `D3D10PreprocessShader` and `D3D10CreateEffectPoolFromMemory` `E_NOTIMPL`. |
 | `D3D10_1.dll` | 27 | `D3D10CreateDevice1` and `D3D10CreateDeviceAndSwapChain1`, which make an `ID3D10Device1` at feature level 10.0 and answer `DXGI_ERROR_UNSUPPORTED` for 10.1 and the 9.x levels, and the other 25 of `D3D10.dll`. |
 | `DXGI.dll` | 2 | `CreateDXGIFactory`, and `CreateDXGIFactory1`, whose factory and adapters answer as DXGI 1.1's. |
 | `D3D8.dll` | 1 | `Direct3DCreate8`. |
@@ -114,8 +114,11 @@ everything a program does afterwards goes through the vtable. The vtable slot li
 `src/layers/graphics/seam/vtables.js` (DirectDraw, Direct3D 7 and 8, and `IDirect3D9`: 27 lists,
 582 slots), `src/layers/graphics/seam/vtables-ddraw.js` (the Direct3D of DirectX 3, 5 and 6 and
 `IDirectDrawGammaControl`: 18 lists, 192 slots), `src/layers/graphics/d3d9/interfaces.js` (18
-lists, three of them 9Ex's) and `src/layers/graphics/seam/d3d10.js` (29 lists for DXGI and
-Direct3D 10, three of them the shader reflection's tables without `IUnknown`).
+lists, three of them 9Ex's), `src/layers/graphics/seam/d3d10.js` (29 lists for DXGI and Direct3D
+10, three of them the shader reflection's tables without `IUnknown`) and
+`src/layers/graphics/seam/d3d10-effect.js` (18 lists: `ID3D10Effect`'s, and the technique's,
+pass's, type's and variable's tables without `IUnknown` with those of the thirteen interfaces that
+extend the variable's).
 
 ### `diagnostics()`
 
@@ -376,6 +379,14 @@ Per API:
   frees them with it; the invalid object of each kind belongs to no reflection and stays. Arrays of
   interfaces arrive as pointer and count; a map allocates a guest block of the subresource's size,
   shows it the current bytes, and the unmap reads it back.
+- **`d3d10-effect.js`** publishes what `D3D10CreateEffectFromMemory` makes: `ID3D10Effect`, which
+  counts references, and its techniques, passes, types and variables, which derive from no
+  interface and are marked `bare` like the reflection's. A variable is published once, as the
+  interface its type makes it (`ID3D10EffectScalarVariable` for a float), which extends
+  `ID3D10EffectVariable`, so `AsScalar` answers the pointer `GetVariableByName` did. Every name,
+  string, bytecode and input signature an effect hands out points into a copy of its image kept in
+  guest memory; the effect's last Release gives back, through `unpublishInterface`, every table it
+  published, and frees the copy. The invalid objects belong to no effect and stay.
 - **`vulkan.js`** is a C ABI rather than COM. Every command is placed as a trap once through the
   loader's `guest` builder, so an export's address and the address `vkGetInstanceProcAddr` answers
   are the same one, minted before the program's first instruction. The runtime decides whether a
@@ -653,6 +664,32 @@ layout or the longer one a Shader Model 5 compiler announces in its `RD11` heade
 resources, the signatures and the compiler's counts; a lookup that finds nothing answers one
 invalid object of its kind rather than null, as the runtime does.
 
+The effect framework reads a compiled `fx_4_0` or `fx_4_1` effect (`effect.js`: the `FX10`
+chunk's nineteen counts, the unstructured block of names, types, values and bytecode, then the
+constant buffers, object variables and techniques in order) and builds its objects over it
+(`effect-object.js`), each made when first asked for and the same object ever after; a lookup that
+finds nothing answers the one invalid object of its kind, as the reflection's do. Numeric
+variables live in their constant buffer's bytes, laid out in its registers with any default value
+spread into them, and every typed call converts as the framework does (`effect-values.js`: `TRUE`
+given to a number is -1, a number read as a bool is -1, and only a bool keeps what a bool gave it;
+a scalar array's offset goes unused, a vector's and a matrix's are honoured); a raw value runs on
+past its variable into the next. Shader, blend, depth-stencil, rasterizer and sampler variables
+count an index on through every object of their kind from their own first element -- the global
+ones in order, then the shaders the passes compile in place; `NULL` is one `$Anonymous` variable
+per stage and is not counted. The effect makes its device objects when it is made: a default-usage
+constant buffer per buffer, every shader, and a state object for each element of each state block,
+from a backing store that starts at the framework's own defaults (`effect-states.js`:
+point-filtered, wrapping samplers of sixteen-times anisotropy, blend states blending by source
+alpha) and takes the constants the block assigns. A pass's `Apply` sets what the pass assigns, in
+its order -- the rasterizer state, the depth-stencil state with the pass's stencil reference, the
+blend state with its factor and sample mask, each shader -- and binds what each shader's resource
+definitions say it reads, by the effect's names: the constant buffer of that name, uploaded first
+when its bytes changed (or the program's own, given with `SetConstantBuffer`), and the views and
+samplers of the variables of those names. What a pass does not assign stays as it is.
+`ComputeStateBlockMask` marks what `Apply` would set. A shader's input signature, which a pass's
+and a shader's descriptions hand out, is cut into a container of its own, laid after the
+unstructured block in the effect's image.
+
 **OpenGL** (`src/layers/graphics/opengl/`). Reports `GL_VERSION` 1.1, vendor `Bottlify Project`,
 renderer `Bottlify OpenGL`, 25 GL extensions and 4 WGL extensions (`extensions.js`; a name in the
 string is a promise that every function it defines is obtainable, and the test checks the list, the
@@ -889,8 +926,10 @@ Refused (the program is told no):
 - Direct3D 10: a shader using an untranslated instruction has its draws refused by name (counted in
   `skipped.untranslatable`); a geometry shader with stream output answers `E_NOTIMPL`; a
   multisampled resource (`CheckMultisampleQualityLevels` offers one sample only); a 10.1 device at
-  feature level 10.1 or 9.x; the effect framework (`D3D10CreateEffectFromMemory`,
-  `D3D10CreateEffectPoolFromMemory`), the compilers, the disassemblers and the preprocessor.
+  feature level 10.1 or 9.x; effect pools (`D3D10CreateEffectPoolFromMemory`, and an effect made
+  as a pool's child) and an effect of another version than `fx_4_0` and `fx_4_1`; a texture
+  buffer's view through an effect (`SetTextureBuffer`, `GetTextureBuffer`); the compilers, the
+  disassemblers (`D3D10DisassembleEffect` among them) and the preprocessor.
 - Vulkan: 84 of 149 commands, including every draw and pipeline creation; a SPIR-V module
   declaring `Geometry` or `Tessellation`; secondary command buffers; an instance whose
   `apiVersion` is out of range; features the device lacks.
@@ -946,6 +985,12 @@ Accepted and reported through `divergence`:
   used as a point sampler; a view of a typeless texture in a format WebGPU cannot cast it to reads
   it in one it can; a view into a slice of a 3D texture draws into its first slice; a texture
   format the device cannot back.
+- Direct3D 10 effects: nothing the effect's expression machine computes is evaluated -- a shader a
+  pass picks by an index expression is none, a pass value or state object given by an expression
+  is left as it is, and a state block's field given by a variable or an expression keeps its
+  starting value; a geometry shader with stream output is made without it; a texture buffer a
+  shader reads is not bound; a pass state other than the shaders, the three state objects and
+  their three values is not applied.
 - Vulkan: more than one subpass, more than one colour attachment, a render area smaller than the
   framebuffer (the whole attachment is cleared), a viewport or scissor other than the first, a
   present of more than one swapchain, and every unimplemented command on first call.
@@ -995,7 +1040,8 @@ position is read from the guest's clock, but `WaitForVerticalBlank` waits the ti
 host timer, the layer having no hook into the kernel's scheduler. A GDI `StretchDIBits` whose
 destination alone is mirrored places its pixels as a mirror would, where Wine's tests find Windows
 placing one that no mirroring gives, though it answers as Windows does; and a 32-bit DIB's top byte,
-which Windows carries through `StretchDIBits`, is not kept.
+which Windows carries through `StretchDIBits`, is not kept. A Direct3D 10 effect's
+`Optimize` keeps what the runtime would drop, which only the effect's own reflection reads.
 
 ## Tests
 
@@ -1008,7 +1054,7 @@ which Windows carries through `StretchDIBits`, is not kept.
 | Layer assembly | `graphics.test.js` -- a build with no GPU comes up; the backend is built once; APIs are made by name; diagnostics report what was asked for; the pacer honours `maxFps`; a second instance in one realm does not take the first one's backend; a disposed machine answers as a build with graphics disabled (the stub's refusal); `dispose()` releases this machine's backend and leaves a presenter handed to the run untouched; the raster reads the clock handed over as `guestNow`; a lost device loses the Direct3D devices made on it. `bitmaps.test.js` -- gdi32's bookkeeping over this layer's drawing, wired as `app.js` wires them: a double buffer, a monochrome mask made from the program's bits. |
 | Byte-exact against the reference rasteriser or a stored image (base64 of the raw BGRX buffer beside the code, no tolerance) | `webgpu/internal/reference.test.js`, `d3d8/render.test.js`, `d3d9/render.test.js`, `d3d9/program.test.js`, `opengl/raster.test.js`, `opengl/pipeline.test.js`, `gdi/*.test.js`, `ddraw/blit.test.js`. A triangle is asserted at named pixels rather than as a whole image, so no rasterisation rule is pinned. |
 | Recorded commands through the fake device (what the GPU was asked to do, never what a frame looks like) | `webgpu/backend.test.js`, `webgpu/internal/*.test.js` (including `presenter.test.js`: one presenter serves two machine lifetimes, configures the canvas once, and shows the second lifetime's frame rather than a cleared target), `d3d7/device.test.js`, `d3d8/render.test.js`, `d3d8/program.test.js`, `d3d10/render.test.js`, `opengl/gpu.test.js` (a context on the renderer: buffer objects bound as they lie, the rename-or-range rule, client copies by index range, the canonical packing, uniform contents, uploads per written level, the clear's masks, the opaque shown copies, program draws and their blocks, the draw dump with its cut, skip and probe). |
-| Contract, against documented behaviour and conformance expectations of the real runtime | `d3d7/load.test.js`, `d3d7/process.test.js`, `seam/raster.test.js`, `d3d9/contract.test.js`, `d3d9/ex.test.js`, `d3d9/validity.test.js`, `d3d8/validity.test.js`, `d3d8/declaration.test.js`, `d3d8/process.test.js`, `d3d10/validity.test.js`, `d3d10/device.test.js`, `d3d10/dxgi.test.js`, `d3d10/structs.test.js`, `ddraw/objects.test.js`, `ddraw/caps.test.js`, `ddraw/structs.test.js`, `opengl/wgl.test.js`, `opengl/pixelformat.test.js`, `opengl/context.test.js`, `opengl/context-calls.test.js`, `opengl/context-programs.test.js`, `vulkan/*.test.js`, `d3d7/caps.test.js`, `d3d9/caps.test.js`. |
+| Contract, against documented behaviour and conformance expectations of the real runtime | `d3d7/load.test.js`, `d3d7/process.test.js`, `seam/raster.test.js`, `d3d9/contract.test.js`, `d3d9/ex.test.js`, `d3d9/validity.test.js`, `d3d8/validity.test.js`, `d3d8/declaration.test.js`, `d3d8/process.test.js`, `d3d10/validity.test.js`, `d3d10/device.test.js`, `d3d10/dxgi.test.js`, `d3d10/structs.test.js`, `d3d10/effect.test.js`, `d3d10/effect-object.test.js` (the effect framework, after Wine's d3d10 effect tests, over effects a fixture lays out), `ddraw/objects.test.js`, `ddraw/caps.test.js`, `ddraw/structs.test.js`, `opengl/wgl.test.js`, `opengl/pixelformat.test.js`, `opengl/context.test.js`, `opengl/context-calls.test.js`, `opengl/context-programs.test.js`, `vulkan/*.test.js`, `d3d7/caps.test.js`, `d3d9/caps.test.js`. |
 | Observed behaviour, pinned | `d3d9/observed.test.js` -- lock-flag traffic, matrix order, render-target alpha, viewport placement. |
 | Translators | `d3d9/shader.test.js`, `d3d9/wgsl.test.js`, `d3d10/dxbc.test.js`, `d3d10/sm4.test.js`, `d3d10/wgsl.test.js`, `vulkan/spirv.test.js`, `opengl/wgsl.test.js` (the GL formula as WGSL and the descriptor, and that every field the key must fold changes it), `opengl/arb-program.test.js` (the ARB program grammar, its error positions and limits), `opengl/arb-wgsl.test.js` (one stage at a time: every instruction, the parameters as one materialised block, the attribute aliasing, a real program's coordinate sets and image units), `opengl/gpu-layout.test.js` (array shapes to vertex formats and slots, mode expansion, index scanning). |
 | Seam and ABI | `seam/*.test.js` drive the bridge's real vtable publisher over a flat buffer and read the same words a guest would; `seam/shadow.test.js` pins the guest-side code's bytes and layout; `seam/shadow.itest.js` runs that code on the real emulated processor. |
