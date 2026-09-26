@@ -15,7 +15,9 @@ import {
     REG_DWORD,
     REG_MULTI_SZ,
     REG_SZ,
+    shellFolders,
 } from './registry.js';
+import { WINDOWS_VERSIONS } from '../kernel32/versions.js';
 
 /** A root id no hive hosts, used to prove a save cannot invent one. */
 const HKEY_UNKNOWN_ROOT = 0x80000050;
@@ -116,6 +118,114 @@ test('the processor key reports the engine\'s speed, and a restored hive takes i
     // the slower engine does not keep its speed on the faster one.
     fast.fromJSON(slow.toJSON());
     assert.equal(mhzOf(fast), 3000);
+});
+
+/**
+ * A value as a program reads it: text without its terminator, a DWORD as a
+ * number, and null when there is none.
+ *
+ * @param {ReturnType<typeof createHive>} hive @param {number} rootId
+ * @param {string} path @param {string} name
+ */
+const valueOf = (hive, rootId, path, name)=>{
+    const key = hive.open(/** @type {any} */ (hive.root(rootId)), path);
+    const value = key && hive.getValue(key, name);
+    if (!value)
+    {
+        return null;
+    }
+    return value.type === REG_DWORD
+        ? new DataView(value.data.buffer, value.data.byteOffset).getUint32(0, true)
+        : String.fromCharCode(...value.data.subarray(0, value.data.length - 1));
+};
+
+const NT_VERSION = 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion';
+const USER_FOLDERS = 'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders';
+const COMMON_FOLDERS = 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders';
+
+test('the Windows NT version key describes the Windows the hive was made for', ()=>{
+    /** @param {import('../kernel32/versions.js').WindowsVersion} version */
+    const describe = version=>{
+        const hive = createHive({ windows: version });
+        return ['CurrentVersion', 'CurrentBuildNumber', 'CurrentBuild', 'CSDVersion',
+            'ProductName', 'CurrentMajorVersionNumber', 'CurrentMinorVersionNumber']
+            .map(name=>valueOf(hive, HKEY_LOCAL_MACHINE, NT_VERSION, name));
+    };
+    // XP and 2000 keep an obsolete placeholder in CurrentBuild; 10 keeps
+    // CurrentVersion at 6.3 for the programs that parse it, and says 10.0 in
+    // two DWORDs of its own.
+    const obsolete = '1.511.1 () (Obsolete data - do not use)';
+    assert.deepEqual(describe(WINDOWS_VERSIONS.win2000), ['5.0', '2195', obsolete,
+        'Service Pack 4', 'Microsoft Windows 2000', null, null]);
+    assert.deepEqual(describe(WINDOWS_VERSIONS.winxp), ['5.1', '2600', obsolete,
+        'Service Pack 3', 'Microsoft Windows XP', null, null]);
+    assert.deepEqual(describe(WINDOWS_VERSIONS.win7), ['6.1', '7601', '7601',
+        'Service Pack 1', 'Windows 7 Professional', null, null]);
+    assert.deepEqual(describe(WINDOWS_VERSIONS.win10), ['6.3', '19045', '19045',
+        null, 'Windows 10 Pro', 10, 0]);
+    assert.equal(valueOf(createHive(), HKEY_LOCAL_MACHINE, NT_VERSION, 'CSDVersion'),
+        'Service Pack 3', 'a hive made without a version is XP\'s');
+});
+
+test('the shell folders are Documents and Settings to XP and Users from 7 on', ()=>{
+    const xp = shellFolders(WINDOWS_VERSIONS.winxp);
+    assert.equal(xp.Profile, 'C:\\Documents and Settings\\User');
+    assert.equal(xp.AppData, 'C:\\Documents and Settings\\User\\Application Data');
+    assert.equal(xp['Local AppData'],
+        'C:\\Documents and Settings\\User\\Local Settings\\Application Data');
+    assert.equal(xp.Personal, 'C:\\Documents and Settings\\User\\My Documents');
+    assert.equal(xp['Common AppData'], 'C:\\Documents and Settings\\All Users\\Application Data');
+    assert.equal(xp['Common Documents'], 'C:\\Documents and Settings\\All Users\\Documents');
+    assert.deepEqual(shellFolders(WINDOWS_VERSIONS.win2000), xp);
+
+    const seven = shellFolders(WINDOWS_VERSIONS.win7);
+    assert.equal(seven.Profile, 'C:\\Users\\User');
+    assert.equal(seven.AppData, 'C:\\Users\\User\\AppData\\Roaming');
+    assert.equal(seven['Local AppData'], 'C:\\Users\\User\\AppData\\Local');
+    assert.equal(seven.Personal, 'C:\\Users\\User\\Documents');
+    assert.equal(seven.Desktop, 'C:\\Users\\User\\Desktop');
+    assert.equal(seven.Programs,
+        'C:\\Users\\User\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs');
+    assert.equal(seven['Common AppData'], 'C:\\ProgramData');
+    assert.equal(seven['Common Programs'],
+        'C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs');
+    assert.equal(seven['Common Documents'], 'C:\\Users\\Public\\Documents');
+    assert.equal(seven['Common Desktop'], 'C:\\Users\\Public\\Desktop');
+    assert.deepEqual(shellFolders(WINDOWS_VERSIONS.win10), seven);
+
+    for (const folders of [xp, seven])
+    {
+        assert.equal(folders.Windows, 'C:\\WINDOWS');
+        assert.equal(folders.ProgramFiles, 'C:\\Program Files', 'a 32-bit system has one');
+    }
+
+    // The registry and the shell read one table: what a program reads from
+    // one it finds in the other.
+    const hive = createHive({ windows: WINDOWS_VERSIONS.win7 });
+    assert.equal(valueOf(hive, HKEY_CURRENT_USER, USER_FOLDERS, 'AppData'), seven.AppData);
+    assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, COMMON_FOLDERS, 'Common Documents'),
+        seven['Common Documents']);
+});
+
+test('a hive restored under another Windows describes that one, and keeps the rest', ()=>{
+    // A bottle's registry is kept between runs, and its version is a setting
+    // that can change: the values that describe the machine are the
+    // machine's, rewritten at every start, while a program's own survive.
+    const saved = createHive({ windows: WINDOWS_VERSIONS.win10 });
+    const { key } = saved.create(/** @type {any} */ (saved.root(HKEY_CURRENT_USER)),
+        'Software\\Vendor');
+    saved.setValue(key, 'Path', REG_SZ, latin1('C:\\Games\0'));
+
+    const hive = createHive({ windows: WINDOWS_VERSIONS.winxp });
+    hive.fromJSON(saved.toJSON());
+
+    assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, NT_VERSION, 'CurrentVersion'), '5.1');
+    assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, NT_VERSION, 'CSDVersion'), 'Service Pack 3');
+    assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, NT_VERSION, 'CurrentMajorVersionNumber'),
+        null, 'what only 10 has is gone');
+    assert.equal(valueOf(hive, HKEY_CURRENT_USER, USER_FOLDERS, 'AppData'),
+        shellFolders(WINDOWS_VERSIONS.winxp).AppData);
+    assert.equal(valueOf(hive, HKEY_CURRENT_USER, 'Software\\Vendor', 'Path'), 'C:\\Games');
 });
 
 test('a key path is created once and found again whatever its case', ()=>{

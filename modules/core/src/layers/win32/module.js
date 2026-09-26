@@ -40,7 +40,7 @@ import { createRegistryFunctions } from './advapi32/functions.js';
 import { ADMINISTRATORS_SID, createTokenFunctions, isTokenMember } from './advapi32/tokens.js';
 import { createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
-import { createHive, SHELL_FOLDERS } from './advapi32/registry.js';
+import { createHive, shellFolders } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
 import { createSocketRegistry } from './wsock32/sockets.js';
@@ -1288,7 +1288,7 @@ export const win32Module = {
                 // with CoTaskMemFree, which is this same heap.
                 /** @param {number} bytes */
                 allocate: bytes=>heap.allocate(bytes),
-                folders: SHELL_FOLDERS,
+                folders: shellFolders(),
                 // The namespace a folder browser walks is the volume every
                 // file call uses, published through the same vtables COM uses.
                 volume: { ...volume, drives: ()=>filesystem.drives() },
