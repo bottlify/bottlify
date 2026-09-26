@@ -28,9 +28,13 @@
  * never dropped on a window here, so a window may accept drops and a query
  * against a drop that never arrived reports no files. Both are what a real
  * system answers when nobody has dragged anything.
+ *
+ * Nor is the file operation an installer lays its files out with: the volume
+ * is there to copy, move, rename and delete on (`fileop.js`).
  */
 
 import { MY_COMPUTER, createShellNamespace, listBytes, pathOfList } from './namespace.js';
+import { createDirectoryPath, runFileOperation } from './fileop.js';
 
 /** ShellExecute reports failure as a value of 32 or less, not as zero. */
 const SE_ERR_FNF = 2;
@@ -61,6 +65,8 @@ const S_OK = 0;
 
 /** What SHFileOperation answers when it will not operate. */
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
+const ERROR_ACCESS_DENIED = 5;
+const ERROR_INVALID_PARAMETER = 87;
 
 /** SHELLEXECUTEINFOA: the fields a launch reads, and the two it writes back. */
 const SEI_MASK = 4;
@@ -81,11 +87,22 @@ const SEE_MASK_NOCLOSEPROCESS = 0x00000040;
 const SEE_MASK_CLASSNAME = 0x00000400;
 
 /**
- * SHFILEOPSTRUCTA: where fAnyOperationsAborted lives. shellapi.h packs the
- * structure to one byte on Win32 and fFlags is a WORD, so the BOOL after it
- * sits at 18, not at the 20 natural alignment would give it.
+ * SHFILEOPSTRUCT, either spelling. shellapi.h packs the structure to one byte
+ * on Win32 and fFlags is a WORD, so the BOOL after it sits at 18, not at the
+ * 20 natural alignment would give it, and hNameMappings at 22.
  */
+const SHFILEOPSTRUCT_FUNC = 4;
+const SHFILEOPSTRUCT_FROM = 8;
+const SHFILEOPSTRUCT_TO = 12;
+const SHFILEOPSTRUCT_FLAGS = 16;
 const SHFILEOPSTRUCT_ABORTED = 18;
+const SHFILEOPSTRUCT_MAPPINGS = 22;
+
+/** Asks for the renames FOF_RENAMEONCOLLISION made, in hNameMappings. */
+const FOF_WANTMAPPINGHANDLE = 0x0020;
+
+/** How much of a pFrom or pTo list is read, every name included. */
+const MAX_LIST = 0x8000;
 const E_OUTOFMEMORY = 0x8007000e | 0;
 /** E_FAIL, for a namespace call in a build with no volume behind it. */
 const E_FAIL = 0x80004005 | 0;
@@ -161,8 +178,10 @@ const CSIDL_FOLDERS = Object.freeze({
  * @property {Readonly<Record<string, string>>} [folders]
  *           The shell folders by the registry's names; absent, no CSIDL is known.
  * @property {import('./namespace.js').NamespaceVolume} [volume]
- *           The volume the namespace walks. Absent, there is no namespace and
- *           SHGetDesktopFolder is refused.
+ *           The volume the namespace walks, and the file operation works on
+ *           when it is the whole of kernel32's (`fileop.js`). Absent, there is
+ *           no namespace and SHGetDesktopFolder is refused, and a file
+ *           operation is refused as not implemented.
  * @property {(object: import('../oleaut32/objects.js').ComAdapter, interfaceId: string) => number} [publish]
  *           Puts a namespace object's interface into guest memory. Absent, as
  *           without the volume.
@@ -327,6 +346,148 @@ export function createShellFunctions(host){
      */
     const unquote = name=>name.length > 1 && name.startsWith('"') && name.endsWith('"')
         ? name.slice(1, -1).trim() : name;
+
+    /**
+     * The volume as the file operation needs it, or null in a build whose
+     * volume cannot do all of it.
+     *
+     * @returns {import('./fileop.js').FileOpVolume | null}
+     */
+    const fileVolume = ()=>{
+        const volume = /** @type {any} */ (host.volume);
+        const needed = ['stat', 'list', 'open', 'read', 'write', 'close', 'remove', 'mkdir',
+            'rename', 'currentDirectory'];
+        return volume && host.readMemory && needed.every(name=>typeof volume[name] === 'function')
+            ? /** @type {import('./fileop.js').FileOpVolume} */ (volume) : null;
+    };
+
+    /**
+     * A pFrom or pTo list: names each ended by a terminator, the list by an
+     * empty name. Null for a null pointer, which is not an empty list.
+     *
+     * @param {number} address @param {boolean} wide
+     * @returns {string[] | null}
+     */
+    const listAt = (address, wide)=>{
+        if ((address >>> 0) === 0 || !host.readMemory)
+        {
+            return null;
+        }
+        /** @type {string[]} */
+        const names = [];
+        let name = '';
+        const unit = wide ? 2 : 1;
+        for (let at = address >>> 0; at - (address >>> 0) < MAX_LIST * unit; at += 256)
+        {
+            const bytes = host.readMemory(at, 256);
+            for (let index = 0; index + unit <= bytes.length; index += unit)
+            {
+                const code = wide ? bytes[index] | bytes[index + 1] << 8 : bytes[index];
+                if (code !== 0)
+                {
+                    name += String.fromCharCode(code);
+                    continue;
+                }
+                if (name === '')
+                {
+                    return names;
+                }
+                names.push(name);
+                name = '';
+            }
+        }
+        return names;
+    };
+
+    /**
+     * The UTF-16 string an argument points at, or null for a null pointer.
+     *
+     * @param {number} address
+     * @returns {string | null}
+     */
+    const wideStringOf = address=>{
+        if ((address >>> 0) === 0 || !host.readMemory)
+        {
+            return null;
+        }
+        let text = '';
+        for (let at = address >>> 0; text.length < MAX_PATH; at += 64)
+        {
+            const bytes = host.readMemory(at, 64);
+            for (let index = 0; index + 1 < bytes.length; index += 2)
+            {
+                const code = bytes[index] | bytes[index + 1] << 8;
+                if (code === 0)
+                {
+                    return text;
+                }
+                text += String.fromCharCode(code);
+            }
+        }
+        return text;
+    };
+
+    /**
+     * SHFileOperation, for either spelling of the record: its lists read,
+     * FALSE written where the caller reads whether anything was cancelled --
+     * nothing is, there being nobody to cancel it -- and the operation run.
+     *
+     * @param {boolean} wide
+     */
+    const fileOperation = wide=>({
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [operation])=>{
+            const at = operation >>> 0;
+            if (at === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const volume = fileVolume();
+            if (!volume)
+            {
+                host.writeMemory(at + SHFILEOPSTRUCT_ABORTED, dword(1));
+                return ERROR_CALL_NOT_IMPLEMENTED;
+            }
+            const from = listAt(dwordAt(at, SHFILEOPSTRUCT_FROM), wide);
+            const flags = dwordAt(at, SHFILEOPSTRUCT_FLAGS) & 0xffff;
+            if (from !== null)
+            {
+                host.writeMemory(at + SHFILEOPSTRUCT_ABORTED, dword(0));
+            }
+            if ((flags & FOF_WANTMAPPINGHANDLE) !== 0)
+            {
+                // Renames made on a collision are not kept as a mapping
+                // object, so there is none to hand over.
+                host.writeMemory(at + SHFILEOPSTRUCT_MAPPINGS, dword(0));
+            }
+            const deps = { volume, resolve: host.resolve, divergence: host.divergence };
+            return runFileOperation(deps, {
+                func: dwordAt(at, SHFILEOPSTRUCT_FUNC),
+                from,
+                to: listAt(dwordAt(at, SHFILEOPSTRUCT_TO), wide),
+                flags,
+            });
+        },
+    });
+
+    /**
+     * SHCreateDirectoryEx, for either spelling of the path.
+     *
+     * @param {boolean} wide
+     */
+    const createDirectory = wide=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [, path])=>{
+            const volume = fileVolume();
+            if (!volume)
+            {
+                return ERROR_ACCESS_DENIED;
+            }
+            return createDirectoryPath({ volume }, wide ? wideStringOf(path) : stringOf(path));
+        },
+    });
 
     /**
      * The dword a record holds at an offset, or zero with no memory to read.
@@ -649,23 +810,24 @@ export function createShellFunctions(host){
 
         /**
          * int SHFileOperationA(LPSHFILEOPSTRUCTA lpFileOp)
+         * int SHFileOperationW(LPSHFILEOPSTRUCTW lpFileOp)
          *
-         * A copy, move or delete with the shell's progress window and its
-         * recycle bin. Neither exists here, and a program that asks for one
-         * has the plain file calls to fall back on -- so it is refused as not
-         * implemented and told that nothing it asked for was done.
+         * A copy, move, rename or delete of a list of files, on the volume.
+         * A build with no volume to work on refuses it as not implemented and
+         * says nothing it asked for was done.
          */
-        SHFileOperationA: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([operation])=>{
-                if ((operation >>> 0) !== 0)
-                {
-                    host.writeMemory((operation >>> 0) + SHFILEOPSTRUCT_ABORTED, dword(1));
-                }
-                return ERROR_CALL_NOT_IMPLEMENTED;
-            },
-        },
+        SHFileOperationA: fileOperation(false),
+        SHFileOperationW: fileOperation(true),
+
+        /**
+         * int SHCreateDirectoryExA(HWND hwnd, LPCSTR pszPath,
+         *                          const SECURITY_ATTRIBUTES *psa)
+         * int SHCreateDirectoryExW(HWND, LPCWSTR, const SECURITY_ATTRIBUTES *)
+         *
+         * Every directory of a full path that is not there yet.
+         */
+        SHCreateDirectoryExA: createDirectory(false),
+        SHCreateDirectoryExW: createDirectory(true),
 
         /**
          * void SHChangeNotify(LONG wEventId, UINT uFlags, LPCVOID dwItem1, LPCVOID dwItem2)
