@@ -217,6 +217,54 @@ END
         assert.match(scalarNeedsSuffix.error.message, /scalar source/);
     });
 
+test('a colour binding takes a swizzle or a mask after it, with or without its type', ()=>{
+    // The grammars: a colour attribute is "color" <optColorType> followed by
+    // the operand's own suffix, and a colour result "color" <optFaceType>
+    // <optColorType> followed by the destination's mask.
+    const vertex = parsed(`!!ARBvp1.0
+TEMP r0;
+MOV r0, vertex.color.zyxw;
+MOV r0, vertex.color.secondary.x;
+MOV result.position, r0;
+MOV result.color.xyz, r0;
+MOV result.color.w, r0;
+MOV result.color.front.xyz, r0;
+MOV result.color.front.primary.w, r0;
+END
+`);
+    /** @param {number} index @param {'src' | 'dst'} which */
+    const binding = (index, which)=>{
+        const instruction = vertex.instructions[index];
+        return /** @type {any} */ (which === 'dst' ? instruction.dst : instruction.src[0])
+            .binding;
+    };
+    assert.deepEqual(vertex.instructions[0].src[0].components, ['z', 'y', 'x', 'w']);
+    assert.equal(binding(0, 'src').name, 'color-primary');
+    assert.equal(binding(1, 'src').name, 'color-secondary');
+    assert.deepEqual(vertex.instructions[1].src[0].components, ['x', 'x', 'x', 'x']);
+    assert.equal(vertex.instructions[3].dst?.mask, 'xyz');
+    assert.equal(vertex.instructions[4].dst?.mask, 'w');
+    assert.equal(binding(5, 'dst').face, 'front');
+    assert.equal(vertex.instructions[5].dst?.mask, 'xyz');
+    assert.equal(binding(6, 'dst').colour, 'primary');
+    assert.equal(vertex.instructions[6].dst?.mask, 'w');
+
+    const fragment = parsed(`!!ARBfp1.0
+TEMP r0;
+MOV r0, fragment.color.yxyx;
+MUL r0, fragment.color.x, r0;
+MOV r0, fragment.color.primary.x;
+MOV result.color.xyz, r0;
+END
+`);
+    assert.deepEqual(fragment.instructions[0].src[0].components, ['y', 'x', 'y', 'x']);
+    assert.deepEqual(fragment.instructions[1].src[0].components, ['x', 'x', 'x', 'x']);
+    assert.equal(fragment.instructions[3].dst?.mask, 'xyz');
+
+    const wrong = parseProgram('!!ARBvp1.0\nTEMP r0;\nMOV r0, vertex.color.tertiary;\nEND\n');
+    assert.ok('error' in wrong, 'what is neither a type nor a swizzle is still refused');
+});
+
 test('declarations establish names, and a second definition or a missing one is refused', ()=>{
     const program = parsed(`!!ARBvp1.0
 TEMP a, b, r0;
