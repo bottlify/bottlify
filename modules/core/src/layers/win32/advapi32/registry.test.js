@@ -168,6 +168,26 @@ test('the Windows NT version key describes the Windows the hive was made for', (
         'Service Pack 3', 'a hive made without a version is XP\'s');
 });
 
+test('Windows 10 names its release and its update revision, and nothing older does', ()=>{
+    // 19045 is 22H2, the release whose ReleaseId stayed at 2009 when the
+    // name moved to DisplayVersion; UBR is the revision after the build.
+    /** @param {import('../kernel32/versions.js').WindowsVersion} version */
+    const release = version=>{
+        const hive = createHive({ windows: version });
+        return ['DisplayVersion', 'ReleaseId', 'UBR']
+            .map(name=>valueOf(hive, HKEY_LOCAL_MACHINE, NT_VERSION, name));
+    };
+    const [displayVersion, releaseId, ubr] = release(WINDOWS_VERSIONS.win10);
+    assert.equal(displayVersion, '22H2');
+    assert.equal(releaseId, '2009');
+    assert.equal(typeof ubr, 'number', 'UBR is a DWORD');
+    assert.equal(ubr, WINDOWS_VERSIONS.win10.release?.ubr);
+    for (const name of /** @type {const} */ (['win2000', 'winxp', 'win7']))
+    {
+        assert.deepEqual(release(WINDOWS_VERSIONS[name]), [null, null, null], name);
+    }
+});
+
 test('the shell folders are Documents and Settings to XP and Users from 7 on', ()=>{
     const xp = shellFolders(WINDOWS_VERSIONS.winxp);
     assert.equal(xp.Profile, 'C:\\Documents and Settings\\User');
@@ -224,6 +244,8 @@ test('a hive restored under another Windows describes that one, and keeps the re
     assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, NT_VERSION, 'CSDVersion'), 'Service Pack 3');
     assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, NT_VERSION, 'CurrentMajorVersionNumber'),
         null, 'what only 10 has is gone');
+    assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, NT_VERSION, 'UBR'), null);
+    assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, NT_VERSION, 'DisplayVersion'), null);
     assert.equal(valueOf(hive, HKEY_CURRENT_USER, USER_FOLDERS, 'AppData'),
         shellFolders(WINDOWS_VERSIONS.winxp).AppData);
     assert.equal(valueOf(hive, HKEY_CURRENT_USER, 'Software\\Vendor', 'Path'), 'C:\\Games');
