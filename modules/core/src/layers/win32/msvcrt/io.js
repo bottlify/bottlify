@@ -26,6 +26,7 @@
  */
 
 import { HANDLE_STDERR, HANDLE_STDIN, HANDLE_STDOUT } from '../kernel32/console.js';
+import { decodeAnsi } from '../kernel32/locale.js';
 import { EACCES, EBADF, EEXIST, EINVAL, EMFILE, ENOENT, ENOSPC } from './globals.js';
 import {
     O_UNICODE, O_WTEXT, bytesOfUnits, decodeUnits, encodeUnits, encodingOf, foldUnits, markIn,
@@ -133,20 +134,6 @@ function lineEnd(raw, width){
         }
     }
     return raw.length;
-}
-
-/**
- * Bytes as the string the console sink takes, a byte to a character.
- *
- * @param {Uint8Array} bytes
- */
-export function latin1(bytes){
-    let text = '';
-    for (let at = 0; at < bytes.length; at += 0x2000)
-    {
-        text += String.fromCharCode(...bytes.subarray(at, at + 0x2000));
-    }
-    return text;
 }
 
 /**
@@ -662,7 +649,7 @@ export function createDescriptors(host){
             if (descriptor.node === null)
             {
                 host.write?.(/** @type {number} */ (descriptor.console), descriptor.unicode === 0
-                    ? latin1(bytes)
+                    ? decodeAnsi(bytes)
                     : textOfUnits(unitsOf(bytes)));
                 return bytes.length;
             }

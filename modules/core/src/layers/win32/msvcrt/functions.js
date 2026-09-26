@@ -37,6 +37,7 @@ import { createThreadFunctions } from './threads.js';
 import { createGlobals, EINVAL, ERANGE } from './globals.js';
 import { createDescriptors, createIoFunctions } from './io.js';
 import { bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
@@ -169,12 +170,14 @@ export function createMsvcrtFunctions(host){
      */
     const charTable = new Uint8Array(256);
 
-    /** @param {Uint8Array} bytes @param {string} text */
+    /**
+     * Text into bytes that may be longer than it, in the ANSI page the text
+     * was read in: a string a program passed is copied as its own bytes.
+     *
+     * @param {Uint8Array} bytes @param {string} text
+     */
     const packInto = (bytes, text)=>{
-        for (let i = 0; i < text.length; i++)
-        {
-            bytes[i] = text.charCodeAt(i) & 0xff;
-        }
+        bytes.set(encodeAnsi(text));
         return bytes;
     };
 
@@ -195,12 +198,13 @@ export function createMsvcrtFunctions(host){
 
     /**
      * What a narrow printer writes: %S and %ls read wide strings, and the
-     * text is bytes under the C locale (see `formatToString`).
+     * text is bytes under the C locale (see `formatToString`), held in the
+     * ANSI page the format and its strings are read in.
      *
      * @param {number} format @param {number[]} values
      */
     const narrowText = (format, values)=>formatToString(readString(format), values, readString,
-        { readWideString: readWide, cLocale: true });
+        { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi });
 
     /** @param {number[]} args @param {number} fixed */
     const render = (args, fixed)=>narrowText(args[fixed - 1], args.slice(fixed));

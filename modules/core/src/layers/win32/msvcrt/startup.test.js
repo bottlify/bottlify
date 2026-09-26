@@ -168,6 +168,22 @@ test('__getmainargs writes nothing through a null pointer', ()=>{
     assert.equal(fns.__getmainargs.handler([0, 0, 0, 0, 0]), 0);
 });
 
+test('the arguments and _acmdln are in the ANSI page, as GetCommandLineA is', ()=>{
+    // A program may read the command line through either and compare, so a
+    // character outside ASCII is one byte of the page in both -- the euro sign
+    // 0x80, e acute 0xe9 -- and not the several a UTF-8 spelling takes.
+    const { machine, fns } = fakeMachine('C:\\\u20ac\\caf\u00e9.exe /\u2122');
+    const ARGV = 0x1010;
+    fns.__getmainargs.handler([0x1000, ARGV, 0x1020, 0, 0]);
+    const argv = machine.u32(ARGV);
+    assert.deepEqual([...machine.bytes.subarray(machine.u32(argv), machine.u32(argv) + 12)],
+        [0x43, 0x3a, 0x5c, 0x80, 0x5c, 0x63, 0x61, 0x66, 0xe9, 0x2e, 0x65, 0x78]);
+    assert.deepEqual([...machine.bytes.subarray(machine.u32(argv + 4), machine.u32(argv + 4) + 3)],
+        [0x2f, 0x99, 0]);
+    const line = new DataView(fns._acmdln.data().buffer).getUint32(0, true);
+    assert.deepEqual([...machine.bytes.subarray(line + 3, line + 5)], [0x80, 0x5c]);
+});
+
 // --- the static constructors ---
 
 test('_initterm calls every entry in the table, in order', ()=>{

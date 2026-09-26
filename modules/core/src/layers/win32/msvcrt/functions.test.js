@@ -60,19 +60,24 @@ function fakeHost(size = 0x1000){
         fillMemory(address, value, length){
             bytes.fill(value, address, address + length);
         },
-        /** @param {number} address @param {number} maxLength */
+        /**
+         * As the memory layer reads an ANSI string: in Windows-1252, which is
+         * what the Encoding standard calls latin1.
+         *
+         * @param {number} address @param {number} maxLength
+         */
         readCString(address, maxLength){
-            let text = '';
-            for (let i = 0; i < maxLength && address + i < bytes.length; i++)
+            let end = address;
+            while (end - address < maxLength && end < bytes.length)
             {
                 asked++;
-                if (bytes[address + i] === 0)
+                if (bytes[end] === 0)
                 {
                     break;
                 }
-                text += String.fromCharCode(bytes[address + i]);
+                end++;
             }
-            return text;
+            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
         },
         /**
          * @param {number} address @param {number} limit
@@ -885,4 +890,26 @@ test('sprintf_s and vsprintf_s write what fits with its terminator, and refuse t
     assert.equal(u32(errno), EINVAL);
     assert.deepEqual([fns.sprintf_s.convention, fns.vsprintf_s.argBytes], ['cdecl', 16]);
     assert.ok(fns.sprintf_s.argBytes >= 12 + 4 * 4, 'sprintf_s reads a tail');
+});
+
+test('bytes in the upper half of the ANSI page are copied and printed as themselves', ()=>{
+    // The memory layer reads an ANSI string as Windows-1252, where 0x80 is the
+    // euro sign, 0x99 the trade mark and 0x97 an em dash. Under the C locale a
+    // copy and a printer are byte for byte: what a format, a %s and a %c carry
+    // is what reaches the buffer, and so is a wide character up to U+00FF.
+    const { fns, host } = setup();
+    /** @param {number} address @param {number} length */
+    const bytesAt = (address, length)=>[...host.bytes.subarray(address, address + length)];
+    host.bytes.set([0x80, 0x99, 0x97, 0], 0x100);
+    assert.equal(fns.strcpy.handler([0x200, 0x100]), 0x200);
+    assert.deepEqual(bytesAt(0x200, 4), [0x80, 0x99, 0x97, 0]);
+    assert.equal(fns.strncpy.handler([0x210, 0x100, 5]), 0x210);
+    assert.deepEqual(bytesAt(0x210, 5), [0x80, 0x99, 0x97, 0, 0]);
+
+    host.bytes.set([0x80, 0x25, 0x73, 0x25, 0x63, 0x25, 0x53, 0], 0x140);
+    host.bytes.set([0x80, 0, 0, 0], 0x180);
+    assert.equal(fns.sprintf.handler([0x300, 0x140, 0x101, 0x97, 0x180]), 5);
+    assert.deepEqual(bytesAt(0x300, 6), [0x80, 0x99, 0x97, 0x97, 0x80, 0]);
+    assert.equal(fns._snprintf.handler([0x320, 3, 0x140, 0x101, 0x97, 0x180]), -1);
+    assert.deepEqual(bytesAt(0x320, 3), [0x80, 0x99, 0x97]);
 });

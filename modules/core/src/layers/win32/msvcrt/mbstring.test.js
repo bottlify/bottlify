@@ -78,6 +78,26 @@ test('mbstowcs terminates only when the terminator fits inside the count', ()=>{
         'a full buffer comes back unterminated');
 });
 
+test('mbstowcs widens a byte to the unit of its value, as mbtowc does and wcstombs undoes', ()=>{
+    // The C locale's conversion is one byte to one unit of the same number:
+    // 0x80 is U+0080 there, not the euro sign the ANSI page reads it as, so a
+    // string and its characters widen alike and narrow back to the same bytes.
+    const { memory, table } = build();
+    const source = memory.allocate(8);
+    memory.writeMemory(source, Uint8Array.of(0x80, 0x99, 0x97, 0));
+    const wide = memory.allocate(16);
+    assert.equal(table.mbstowcs.handler([wide, source, 8]), 3);
+    const units = new DataView(memory.bytes.buffer);
+    assert.deepEqual([0, 1, 2, 3].map(at=>units.getUint16(wide + at * 2, true)),
+        [0x80, 0x99, 0x97, 0]);
+    const unit = memory.allocate(4);
+    table.mbtowc.handler([unit, source, 1]);
+    assert.equal(units.getUint16(unit, true), units.getUint16(wide, true));
+    const narrow = memory.allocate(8);
+    assert.equal(table.wcstombs.handler([narrow, wide, 8]), 3);
+    assert.deepEqual([...memory.bytes.subarray(narrow, narrow + 4)], [0x80, 0x99, 0x97, 0]);
+});
+
 test('wcstombs narrows, and answers the count without a destination', ()=>{
     const { memory, table } = build();
     const destination = memory.allocate(64);

@@ -385,3 +385,33 @@ test('_findfirsti64 reports a size past 4 GiB whole', ()=>{
     const view = new DataView(memory.bytes.buffer, data, FIND64.BYTES);
     assert.equal(view.getBigUint64(FIND64.SIZE, true), BigInt(big));
 });
+
+test('a path\'s pieces and a found name are written in the ANSI page', ()=>{
+    // The memory layer reads an ANSI string as Windows-1252, where 0x80 is the
+    // euro sign, 0x99 the trade mark and 0x97 an em dash; what goes back is in
+    // the same page, so the pieces of a path are its own bytes, and a file
+    // found on the volume is named in the bytes a program would open it by.
+    const memory = fakeMemory();
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory,
+        files: {
+            stat: ()=>({ exists: true, isDirectory: true, size: 0 }),
+            list: ()=>[{ name: '\u20ac\u2122\u2014\u00e9.dat', isDirectory: false, size: 1 }],
+        },
+    }));
+    const path = memory.allocate(16);
+    memory.writeMemory(path,
+        Uint8Array.of(0x43, 0x3a, 0x5c, 0x80, 0x5c, 0x99, 0x97, 0x2e, 0x97, 0));
+    const directory = memory.allocate(16);
+    const name = memory.allocate(16);
+    const extension = memory.allocate(16);
+    table._splitpath.handler([path, 0, directory, name, extension]);
+    assert.deepEqual([...memory.bytes.subarray(directory, directory + 4)], [0x5c, 0x80, 0x5c, 0]);
+    assert.deepEqual([...memory.bytes.subarray(name, name + 3)], [0x99, 0x97, 0]);
+    assert.deepEqual([...memory.bytes.subarray(extension, extension + 3)], [0x2e, 0x97, 0]);
+
+    const data = memory.allocate(FIND.BYTES);
+    assert.notEqual(table._findfirst.handler([memory.put('C:\\game\\*.dat'), data]), -1);
+    assert.deepEqual([...memory.bytes.subarray(data + FIND.NAME, data + FIND.NAME + 5)],
+        [0x80, 0x99, 0x97, 0xe9, 0x2e]);
+});

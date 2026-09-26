@@ -125,6 +125,15 @@ test('the end of the process closes every descriptor, and a temporary file goes 
     assert.deepEqual(console, [[2, 'still']]);
 });
 
+test('bytes written to the console read in the ANSI page, as WriteFile\'s to it do', ()=>{
+    // 0x80 is the euro sign there, 0x99 the trade mark and 0x97 an em dash.
+    const { memory, fns, console } = build();
+    const text = memory.allocate(4);
+    memory.writeMemory(text, Uint8Array.of(0x80, 0x99, 0x97, 0xe9));
+    assert.equal(fns._write.handler([1, text, 4]), 4);
+    assert.deepEqual(console, [[2, '€™—é']]);
+});
+
 test('_open says why it failed', ()=>{
     const { memory, fns, errno, open } = build({ 'C:\\game\\data.bin': bytesOf('x') });
 

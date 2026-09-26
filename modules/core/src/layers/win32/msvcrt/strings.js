@@ -18,6 +18,8 @@
  * position between calls, because that is what the C library promises.
  */
 
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+
 /**
  * @typedef {Object} StringHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -76,15 +78,16 @@ const foldCase = (/** @type {string} */ text)=>
  * Membership is by byte value rather than by one-character string, because a
  * scan asks once per byte of strings that reach megabytes.
  *
- * @param {string} text    The set string, as the caller passed it.
+ * @param {string} text    The set string, as the caller passed it: read in the
+ *     ANSI page, so its bytes are that page's and not its characters' codes.
  * @param {Uint8Array} table  Scratch, 256 entries; answered with, marked.
  * @param {number} mark   What the set's own bytes get.
  */
 function markBytes(text, table, mark){
     table.fill(mark === 0 ? 1 : 0);
-    for (let at = 0; at < text.length; at++)
+    for (const byte of encodeAnsi(text))
     {
-        table[text.charCodeAt(at) & 0xff] = mark;
+        table[byte] = mark;
     }
     return table;
 }
@@ -96,14 +99,9 @@ export function createStringFunctions(host){
     /** @param {number} pointer */
     const readString = pointer=>host.readCString(pointer, MAX_STRING);
 
-    /** @param {number} pointer @param {string} text */
+    /** In the ANSI page the string was read in. @param {number} pointer @param {string} text */
     const writeString = (pointer, text)=>{
-        const bytes = new Uint8Array(text.length + 1);
-        for (let at = 0; at < text.length; at++)
-        {
-            bytes[at] = text.charCodeAt(at) & 0xff;
-        }
-        host.writeMemory(pointer, bytes);
+        host.writeMemory(pointer, encodeAnsi(`${text}\0`));
     };
 
     /**
@@ -152,7 +150,7 @@ export function createStringFunctions(host){
                 {
                     return string + text.length;
                 }
-                const index = text.lastIndexOf(String.fromCharCode(byte));
+                const index = text.lastIndexOf(decodeAnsi(Uint8Array.of(byte)));
                 return index === -1 ? 0 : string + index;
             },
         },

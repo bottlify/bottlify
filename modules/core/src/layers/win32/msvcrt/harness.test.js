@@ -50,15 +50,20 @@ export function fakeMemory(base = 0x10000, size = 1 << 20){
         /** @param {number} address @param {number} value @param {number} length */
         fillMemory: (address, value, length)=>bytes.fill(value, address, address + length),
 
-        /** @param {number} address @param {number} max */
+        /**
+         * As the memory layer reads an ANSI string: in Windows-1252, which is
+         * what the Encoding standard calls latin1.
+         *
+         * @param {number} address @param {number} max
+         */
         readCString: (address, max)=>{
-            let text = '';
-            for (let at = 0; at < max && bytes[address + at] !== 0; at++)
+            let end = address;
+            while (end - address < max && bytes[end] !== 0)
             {
                 memory.asked++;
-                text += String.fromCharCode(bytes[address + at]);
+                end++;
             }
-            return text;
+            return new TextDecoder('latin1').decode(bytes.subarray(address, end));
         },
 
         /**

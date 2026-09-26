@@ -138,6 +138,24 @@ test('fprintf reads %ls as a wide string, stopping where the C locale has no byt
     assert.equal(String.fromCharCode(...files.files['C:\\new.txt']), 'caf\xe9|ab');
 });
 
+test('a stream is written the bytes of the strings and format it was given', ()=>{
+    // The memory layer reads an ANSI string as Windows-1252, where 0x80 is the
+    // euro sign, 0x99 the trade mark and 0x97 an em dash; fputs and fprintf
+    // put them in the file as the bytes they were, and so is a %c.
+    const { memory, files, fns } = build();
+    const stream = fns.fopen.handler([memory.put('C:\\new.txt'), memory.put('wb')]);
+    /** @param {number[]} bytes */
+    const place = bytes=>{
+        const at = memory.allocate(bytes.length + 1);
+        memory.writeMemory(at, Uint8Array.from([...bytes, 0]));
+        return at;
+    };
+    assert.ok(fns.fputs.handler([place([0x80, 0x99]), stream]) >= 0);
+    assert.equal(fns.fprintf.handler([stream, place([0x97, 0x25, 0x73, 0x25, 0x63]),
+        place([0xe9, 0x80]), 0x99]), 4);
+    assert.deepEqual([...files.files['C:\\new.txt']], [0x80, 0x99, 0x97, 0xe9, 0x80, 0x99]);
+});
+
 test('fprintf on a stream not open for writing is a negative count, nothing written', ()=>{
     const { memory, fns } = build();
     const stream = fns.fopen.handler([memory.put('C:\\data.bin'), memory.put('rb')]);

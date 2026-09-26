@@ -104,6 +104,20 @@ test('strftime writes nothing at all when the result would not fit', ()=>{
     assert.equal(memory.text(buffer)[0], '.', 'the buffer is untouched');
 });
 
+test('strftime keeps the upper-half bytes of its format as they were', ()=>{
+    // The memory layer reads the format as Windows-1252, where 0x80 is the
+    // euro sign, 0x99 the trade mark and 0x97 an em dash; the result is
+    // written in the same page, so the text around the fields is the caller's.
+    const { memory, table } = build();
+    const buffer = memory.allocate(32);
+    const block = table.localtime.handler([memory.allocate(4)]);
+    const format = memory.allocate(8);
+    memory.writeMemory(format, Uint8Array.of(0x80, 0x25, 0x59, 0x99, 0x97, 0));
+    assert.equal(table.strftime.handler([buffer, 32, format, block]), 7);
+    assert.deepEqual([...memory.bytes.subarray(buffer, buffer + 8)],
+        [0x80, 0x31, 0x39, 0x37, 0x30, 0x99, 0x97, 0]);
+});
+
 test('_strdate and _strtime are the two fixed nine-byte forms', ()=>{
     const { memory, table } = build();
     const date = memory.allocate(16);

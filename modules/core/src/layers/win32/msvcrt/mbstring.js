@@ -21,6 +21,7 @@
  */
 
 import { EILSEQ } from './globals.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -86,8 +87,15 @@ const CLASSES = {
  * @param {WideHost} host
  */
 export function createWideFunctions(host){
-    /** @param {number} pointer */
-    const readNarrow = pointer=>host.readCString(pointer, MAX_STRING);
+    /**
+     * A narrow string as the C locale widens it, each byte to the unit of its
+     * own value as mbtowc widens one: the memory layer reads the string in the
+     * ANSI page, whose characters above 0x7f are not those units.
+     *
+     * @param {number} pointer
+     */
+    const readNarrowUnits = pointer=>Array.from(encodeAnsi(host.readCString(pointer, MAX_STRING)),
+        byte=>String.fromCharCode(byte)).join('');
 
     /** @param {number} pointer @param {number} [limit] */
     const readWide = (pointer, limit = MAX_WIDE)=>{
@@ -258,7 +266,7 @@ export function createWideFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
-                const text = readNarrow(source);
+                const text = readNarrowUnits(source);
                 if ((destination >>> 0) === 0)
                 {
                     return text.length;
