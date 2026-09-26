@@ -538,6 +538,31 @@ test('LoadTypeLib reads the file off the volume, and the library registers and l
         assert.ok(lib.said.some(line=>line.includes('missing.tlb')));
     });
 
+test('a library registered from a path in the upper half of the ANSI page loads back from it',
+    async()=>{
+        // The registry keeps a string in the ANSI page, where 0x80 is the euro
+        // sign: the path RegisterTypeLib keeps is in that page, and
+        // LoadRegTypeLib reads it back in that page, so it names the same file.
+        const lib = libraryHost();
+        const original = lib.files;
+        lib.files = { ...original,
+            stat: (/** @type {string} */ path)=>original.stat(path.replace('\u20ac', '')) };
+        const fns = createAutomationFunctions(lib);
+        lib.putWide(TEXT, 'C:\\lib\u20ac\\engine.tlb');
+        assert.equal(fns.LoadTypeLib.handler([TEXT, SLOT]), 0);
+        assert.equal(fns.RegisterTypeLib.handler([lib.u32(SLOT), TEXT, 0]), 0);
+        const root = /** @type {any} */ (lib.hive.root(HKEY_CLASSES_ROOT));
+        const win32 = /** @type {any} */ (lib.hive.open(root,
+            'TypeLib\\{94636247-BC39-4B8B-A728-2D1FBEBFA76A}\\1.0\\0\\win32'));
+        assert.deepEqual([.../** @type {any} */ (lib.hive.getValue(win32, '')).data
+            .subarray(6, 8)], [0x80, 0x5c]);
+
+        lib.writeMemory(0x3000, Uint8Array.from([0x47, 0x62, 0x63, 0x94, 0x39, 0xbc, 0x8b, 0x4b,
+            0xa7, 0x28, 0x2d, 0x1f, 0xbe, 0xbf, 0xa7, 0x6a]));
+        assert.equal(await fns.LoadRegTypeLib.handler([0x3000, 1, 0, 0, SLOT]), 0);
+        assert.ok(lib.opened.at(-1)?.includes('\u20ac'), 'the file it was registered from');
+    });
+
 test('LoadTypeLibEx registers when asked to, and DispGetIDsOfNames reaches a type', async()=>{
     const lib = libraryHost();
     const fns = createAutomationFunctions(lib);

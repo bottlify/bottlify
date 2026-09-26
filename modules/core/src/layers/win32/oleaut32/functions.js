@@ -31,6 +31,7 @@ import { readGuid } from '../ole32/guid.js';
 import { createAdapter, createTypeLibraryObjects } from './objects.js';
 import { createErrorInfoObjects } from './errorinfo.js';
 import { parseTypeLib } from './typelib.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 /** The prefix, in bytes, and where the caller's pointer sits relative to it. */
 const PREFIX_BYTES = 4;
@@ -727,14 +728,7 @@ export function createAutomationFunctions(host){
     };
 
     /** @param {string} text @returns {Uint8Array} ANSI bytes, terminated */
-    const ansi = text=>{
-        const bytes = new Uint8Array(text.length + 1);
-        for (let at = 0; at < text.length; at++)
-        {
-            bytes[at] = text.charCodeAt(at) & 0xff;
-        }
-        return bytes;
-    };
+    const ansi = text=>encodeAnsi(`${text}\0`);
 
     /** The registered string type. */
     const REG_SZ = 1;
@@ -1177,15 +1171,8 @@ export function createAutomationFunctions(host){
                 {
                     return TYPE_E_LIBNOTREGISTERED;
                 }
-                let path = '';
-                for (const byte of value.data)
-                {
-                    if (byte === 0)
-                    {
-                        break;
-                    }
-                    path += String.fromCharCode(byte);
-                }
+                const end = value.data.indexOf(0);
+                const path = decodeAnsi(value.data.subarray(0, end < 0 ? value.data.length : end));
                 const bstr = allocateBstr(encode(path));
                 if (bstr === 0)
                 {
