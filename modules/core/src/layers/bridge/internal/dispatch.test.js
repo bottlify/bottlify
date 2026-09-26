@@ -509,6 +509,7 @@ test('which crossing is timed does not follow the program\'s own sequence of cal
             },
             end: ()=>{
                 inside = false;
+                return 0;
             },
         },
     });
