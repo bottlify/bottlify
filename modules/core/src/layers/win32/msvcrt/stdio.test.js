@@ -666,6 +666,23 @@ test('_fdopen keeps the descriptor\'s own translation, whatever the mode says', 
     assert.equal(memory.text(buffer).slice(0, 3), 'a\nb');
 });
 
+test('a file fopen opened with D in its mode is removed when the stream closes', ()=>{
+    const { memory, files, fns, open, gets } = runtime({ 'C:\\keep.txt': 'k' });
+    const scratch = open('C:\\scratch.tmp', 'w+D');
+    assert.equal(fns.fputs.handler([memory.put('line\n'), scratch]), 0);
+    fns.rewind.handler([scratch]);
+    assert.equal(gets(scratch), 'line\n', 'it reads and writes like any other');
+    assert.equal(fns.fclose.handler([scratch]), 0);
+    assert.equal(files.files['C:\\scratch.tmp'], undefined);
+
+    const another = open('C:\\another.tmp', 'wbD');
+    const kept = open('C:\\keep.txt', 'r');
+    assert.equal(fns._fcloseall.handler([]), 2);
+    assert.equal(files.files['C:\\another.tmp'], undefined, '_fcloseall removes one too');
+    assert.ok(files.files['C:\\keep.txt']);
+    assert.notEqual(another, kept);
+});
+
 test('_fcloseall closes every stream but the standard three and counts them', ()=>{
     // Wine's msvcrt test_fopen_fclose_fcloseall.
     const { memory, fns, open, files, console } = runtime({});

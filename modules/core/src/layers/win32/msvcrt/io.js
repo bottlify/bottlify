@@ -27,6 +27,7 @@ const O_WRONLY = 0x0001;
 const O_RDWR = 0x0002;
 const O_ACCMODE = 0x0003;
 const O_APPEND = 0x0008;
+const O_TEMPORARY = 0x0040;
 const O_CREAT = 0x0100;
 const O_TRUNC = 0x0200;
 const O_EXCL = 0x0400;
@@ -121,6 +122,7 @@ export function latin1(bytes){
  * @property {boolean} append    Every write goes to the end of the file first.
  * @property {boolean} text
  * @property {boolean} ended     A ^Z was read: reads answer nothing until a seek.
+ * @property {boolean} [temporary]  The file is removed when the descriptor closes.
  * @property {number} [console]  The standard handle a console descriptor stands for.
  * @property {{ offset: number, bytes: Uint8Array, whole: boolean } | null} ahead
  *           What a stream read last took from the volume; `whole` when that
@@ -136,6 +138,7 @@ export function latin1(bytes){
  * @property {boolean} [exclusive]  Refuse a file that is already there.
  * @property {boolean} [append]
  * @property {boolean | null} [text]  Null: whatever `_fmode` says.
+ * @property {boolean} [temporary]  Remove the file when the descriptor closes.
  */
 
 /**
@@ -236,7 +239,7 @@ export function createDescriptors(host){
                 node, path, position: 0, read: request.read, write: request.write,
                 append: Boolean(request.append),
                 text: request.text ?? ((host.fmode?.() ?? 0) & O_BINARY) === 0,
-                ended: false, ahead: null,
+                ended: false, temporary: Boolean(request.temporary), ahead: null,
             });
             return fd;
         },
@@ -244,7 +247,9 @@ export function createDescriptors(host){
         /**
          * Gives a descriptor back. The console's three stay: they are the
          * runtime's, and a program that closes one to silence it still has
-         * its standard streams.
+         * its standard streams. A temporary file is removed once its node is
+         * let go -- when the descriptor that asked for that closes, which
+         * with one descriptor on the file, the usual case, is the last.
          *
          * @param {number} fd @returns {boolean} false for a number not open
          */
@@ -258,6 +263,10 @@ export function createDescriptors(host){
             {
                 table.delete(fd | 0);
                 host.files.close(descriptor.node);
+                if (descriptor.temporary)
+                {
+                    host.files.remove(descriptor.path);
+                }
             }
             return true;
         },
@@ -560,6 +569,7 @@ export function createIoFunctions(host, descriptors){
                 exclusive: (flags & (O_CREAT | O_EXCL)) === (O_CREAT | O_EXCL),
                 append: (flags & O_APPEND) !== 0,
                 text: (flags & O_BINARY) !== 0 ? false : ((flags & O_TEXT) !== 0 ? true : null),
+                temporary: (flags & O_TEMPORARY) !== 0,
             });
         }),
 

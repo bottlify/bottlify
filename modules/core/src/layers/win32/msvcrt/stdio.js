@@ -90,26 +90,29 @@ const IONBF = 0x0004;
 /**
  * The mode string, read as the runtime reads it: the first letter says what,
  * `+` widens it, and `b` or `t` names the translation; neither leaves it to
- * the runtime's `_fmode`.
+ * the runtime's `_fmode`. `D` makes the file temporary, removed when the
+ * stream closes.
  *
  * @param {string} mode
  * @returns {{ read: boolean, write: boolean, create: boolean, truncate: boolean,
- *            append: boolean, flags: number, text: boolean | null } | null}
+ *            append: boolean, flags: number, text: boolean | null,
+ *            temporary: boolean } | null}
  */
 function parseMode(mode){
     const rest = mode.slice(1);
     const plus = rest.includes('+');
     const text = /[bt]/.test(rest) ? rest.lastIndexOf('t') > rest.lastIndexOf('b') : null;
+    const temporary = rest.includes('D');
     switch (mode[0]){
         case 'r':
             return { read: true, write: plus, create: false, truncate: false, append: false,
-                flags: plus ? IORW : IOREAD, text };
+                flags: plus ? IORW : IOREAD, text, temporary };
         case 'w':
             return { read: plus, write: true, create: true, truncate: true, append: false,
-                flags: plus ? IORW : IOWRT, text };
+                flags: plus ? IORW : IOWRT, text, temporary };
         case 'a':
             return { read: plus, write: true, create: true, truncate: false, append: true,
-                flags: plus ? IORW : IOWRT, text };
+                flags: plus ? IORW : IOWRT, text, temporary };
         default:
             return null;
     }

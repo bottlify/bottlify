@@ -13,6 +13,7 @@ const O_RDONLY = 0x0000;
 const O_WRONLY = 0x0001;
 const O_RDWR = 0x0002;
 const O_APPEND = 0x0008;
+const O_TEMPORARY = 0x0040;
 const O_CREAT = 0x0100;
 const O_TRUNC = 0x0200;
 const O_EXCL = 0x0400;
@@ -91,6 +92,20 @@ test('a descriptor opens, writes, seeks, reads and closes, numbered from 3', ()=
     assert.equal(fns._close.handler([fd]), 0);
     assert.deepEqual(files.closed, ['C:\\game\\new.bin']);
     assert.equal(open('C:\\game\\new.bin', O_RDONLY), 3, 'a closed number is used again');
+});
+
+test('a file opened _O_TEMPORARY is removed when its descriptor closes', ()=>{
+    const { memory, files, fns, open } = build({ 'C:\\game\\keep.bin': bytesOf('k') });
+    const fd = open('C:\\game\\scratch.tmp', O_CREAT | O_RDWR | O_BINARY | O_TEMPORARY);
+    assert.equal(fns._write.handler([fd, memory.put('abc'), 3]), 3);
+    assert.equal(fns._lseek.handler([fd, 0, SEEK_SET]), 0, 'it is a file like any other');
+    assert.ok(files.files['C:\\game\\scratch.tmp']);
+    assert.equal(fns._close.handler([fd]), 0);
+    assert.equal(files.files['C:\\game\\scratch.tmp'], undefined);
+
+    const kept = open('C:\\game\\keep.bin', O_RDONLY);
+    fns._close.handler([kept]);
+    assert.ok(files.files['C:\\game\\keep.bin'], 'a file opened without it stays');
 });
 
 test('_open says why it failed', ()=>{

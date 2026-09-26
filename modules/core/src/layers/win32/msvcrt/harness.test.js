@@ -199,6 +199,15 @@ export function fakeVolume(files, { late = false, directories = [], modified = 0
         },
         /** @param {string} node */
         close: node=>closed.push(node),
+        /** @param {string} path */
+        remove(path){
+            if (!files[path])
+            {
+                return false;
+            }
+            delete files[path];
+            return true;
+        },
         currentDirectory: ()=>'C:\\game',
         /**
          * What a directory holds whose names match a pattern of `*` and `?`,
