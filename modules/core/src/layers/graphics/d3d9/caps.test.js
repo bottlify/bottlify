@@ -90,6 +90,9 @@ test('table fog is claimed over both depths it is taken over', ()=>{
 
 test('what the renderer does not do is not claimed', ()=>{
     const words = capabilityWords(DEFAULT_CAPS);
+    assert.equal(words.TextureOpCaps, 0x0000ffff, 'the operations the combiner draws');
+    assert.equal(words.StencilCaps, 0, 'no stencil test in the pipeline');
+    assert.equal(words.RasterCaps & 0x00010000, 0x00010000, 'D3DPRASTERCAPS_FOGRANGE');
     assert.equal(words.MaxUserClipPlanes, 0, 'no clipping against user planes');
     assert.equal(words.RasterCaps & 0x01000000, 0, 'no scissor test');
     assert.equal(words.StencilCaps & 0x100, 0, 'no two-sided stencil');

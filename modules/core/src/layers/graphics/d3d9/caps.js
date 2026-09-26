@@ -21,6 +21,8 @@
  * that cannot.
  */
 
+import { TEXTURE_OP_CAPS } from '../d3d8/validity.js';
+
 const D3DCAPS_READ_SCANLINE = 0x00020000;
 const D3DCAPS2_DYNAMICTEXTURES = 0x20000000;
 
@@ -57,6 +59,7 @@ const D3DPRASTERCAPS_DITHER = 0x00000001;
 const D3DPRASTERCAPS_ZTEST = 0x00000010;
 const D3DPRASTERCAPS_FOGVERTEX = 0x00000080;
 const D3DPRASTERCAPS_FOGTABLE = 0x00000100;
+const D3DPRASTERCAPS_FOGRANGE = 0x00010000;
 const D3DPRASTERCAPS_WFOG = 0x00100000;
 const D3DPRASTERCAPS_ZFOG = 0x00200000;
 
@@ -93,13 +96,7 @@ const D3DLINECAPS_BLEND = 0x00000004;
 const D3DLINECAPS_ALPHACMP = 0x00000008;
 const D3DLINECAPS_FOG = 0x00000010;
 
-/** Keep, zero, replace, incr/decr saturating and wrapping, invert; not two-sided. */
-const STENCIL_CAPS = 0x000000ff;
-
 const D3DFVFCAPS_PSIZE = 0x00100000;
-
-/** Every texture-stage operation the header defines, which is bits 1..25. */
-const ALL_TEXTURE_OP_CAPS = 0x03ffffff;
 
 const D3DVTXPCAPS_TEXGEN = 0x00000001;
 const D3DVTXPCAPS_MATERIALSOURCE7 = 0x00000002;
@@ -155,7 +152,8 @@ export function capabilityWords(caps, identity = {}){
         // No scissor, no depth bias, no anisotropy, no level bias: the renderer
         // reads none of those states.
         RasterCaps: D3DPRASTERCAPS_DITHER | D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_FOGVERTEX
-            | D3DPRASTERCAPS_FOGTABLE | D3DPRASTERCAPS_WFOG | D3DPRASTERCAPS_ZFOG,
+            | D3DPRASTERCAPS_FOGTABLE | D3DPRASTERCAPS_FOGRANGE | D3DPRASTERCAPS_WFOG
+            | D3DPRASTERCAPS_ZFOG,
         ZCmpCaps: ALL_COMPARE_CAPS,
         SrcBlendCaps: BLEND_CAPS,
         DestBlendCaps: BLEND_CAPS,
@@ -188,9 +186,10 @@ export function capabilityWords(caps, identity = {}){
         GuardBandRight: 1e9,
         GuardBandBottom: 1e9,
         ExtentsAdjust: 0,
-        StencilCaps: STENCIL_CAPS,
+        // The pipeline has no stencil test, so no stencil operation is promised.
+        StencilCaps: 0,
         FVFCaps: D3DFVFCAPS_PSIZE | 8,
-        TextureOpCaps: ALL_TEXTURE_OP_CAPS,
+        TextureOpCaps: TEXTURE_OP_CAPS,
         MaxTextureBlendStages: caps.maxTextureBlendStages,
         MaxSimultaneousTextures: caps.maxSimultaneousTextures,
         VertexProcessingCaps: D3DVTXPCAPS_TEXGEN | D3DVTXPCAPS_MATERIALSOURCE7

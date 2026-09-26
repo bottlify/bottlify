@@ -47,6 +47,7 @@ import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
 import { vertexCountOf } from '../d3d8/render.js';
 import { createCursorTeller } from './cursor.js';
 import { createRaster, rasterStatus } from './raster.js';
+import { TEXTURE_OP_CAPS } from '../d3d8/validity.js';
 import {
     createShadow, getSurfaceLevelCode, lockCode, materialFloats, materialOf, setIndicesCode,
     setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
@@ -93,9 +94,7 @@ const D3DPRASTERCAPS_DITHER = 0x00000001;
 const D3DPRASTERCAPS_ZTEST = 0x00000010;
 const D3DPRASTERCAPS_FOGVERTEX = 0x00000080;
 const D3DPRASTERCAPS_FOGTABLE = 0x00000100;
-const D3DPRASTERCAPS_MIPMAPLODBIAS = 0x00002000;
-const D3DPRASTERCAPS_ZBIAS = 0x00004000;
-const D3DPRASTERCAPS_ANISOTROPY = 0x00020000;
+const D3DPRASTERCAPS_FOGRANGE = 0x00010000;
 const D3DPRASTERCAPS_WFOG = 0x00100000;
 const D3DPRASTERCAPS_ZFOG = 0x00200000;
 
@@ -117,20 +116,20 @@ const D3DPSHADECAPS_FOGGOURAUD = 0x00080000;
 const D3DPTEXTURECAPS_PERSPECTIVE = 0x00000001;
 const D3DPTEXTURECAPS_ALPHA = 0x00000004;
 const D3DPTEXTURECAPS_PROJECTED = 0x00000400;
-const D3DPTEXTURECAPS_CUBEMAP = 0x00000800;
 const D3DPTEXTURECAPS_MIPMAP = 0x00004000;
-const D3DPTEXTURECAPS_MIPCUBEMAP = 0x00010000;
 const D3DPTEXTURECAPS_ALPHAPALETTE = 0x00000080;
 
-/** Point, linear and anisotropic, for minification, magnification and mip. */
-const ALL_FILTER_CAPS = 0x07070700 | 0x00000700;
+/**
+ * Point and linear, for minification, magnification and mip. An anisotropic
+ * filter is sampled linearly and D3DTSS_MAXANISOTROPY is not read, so neither
+ * it nor a maximum above one is claimed.
+ */
+const FILTER_CAPS = 0x03030300;
 
 const D3DPTADDRESSCAPS_WRAP = 0x00000001;
 const D3DPTADDRESSCAPS_MIRROR = 0x00000002;
 const D3DPTADDRESSCAPS_CLAMP = 0x00000004;
-const D3DPTADDRESSCAPS_BORDER = 0x00000008;
 const D3DPTADDRESSCAPS_INDEPENDENTUV = 0x00000010;
-const D3DPTADDRESSCAPS_MIRRORONCE = 0x00000020;
 
 const D3DLINECAPS_TEXTURE = 0x00000001;
 const D3DLINECAPS_ZTEST = 0x00000002;
@@ -138,11 +137,6 @@ const D3DLINECAPS_BLEND = 0x00000004;
 const D3DLINECAPS_ALPHACMP = 0x00000008;
 const D3DLINECAPS_FOG = 0x00000010;
 
-/** Keep, zero, replace, incr/decr saturating and wrapping, invert. */
-const ALL_STENCIL_CAPS = 0x000001ff;
-
-/** Every texture-stage operation d3d8caps.h defines, which is bits 1..25. */
-const ALL_TEXTURE_OP_CAPS = 0x03ffffff;
 
 const D3DFVFCAPS_PSIZE = 0x00100000;
 
@@ -1800,10 +1794,11 @@ export function createDirect3D8Seam(
             PrimitiveMiscCaps: D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW
                 | D3DPMISCCAPS_CULLCCW | D3DPMISCCAPS_MASKZ
                 | D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP,
+            // No depth bias, level bias or anisotropy: the renderer reads
+            // none of D3DRS_ZBIAS, D3DTSS_MIPMAPLODBIAS and MAXANISOTROPY.
             RasterCaps: D3DPRASTERCAPS_DITHER | D3DPRASTERCAPS_ZTEST
-                | D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGTABLE
-                | D3DPRASTERCAPS_MIPMAPLODBIAS | D3DPRASTERCAPS_ZBIAS
-                | D3DPRASTERCAPS_ANISOTROPY | D3DPRASTERCAPS_WFOG | D3DPRASTERCAPS_ZFOG,
+                | D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGTABLE | D3DPRASTERCAPS_FOGRANGE
+                | D3DPRASTERCAPS_WFOG | D3DPRASTERCAPS_ZFOG,
             // Every comparison a depth test can ask for; the backend maps them
             // one to one onto its own.
             ZCmpCaps: ALL_COMPARE_CAPS,
@@ -1812,15 +1807,15 @@ export function createDirect3D8Seam(
             AlphaCmpCaps: ALL_COMPARE_CAPS,
             ShadeCaps: D3DPSHADECAPS_COLORGOURAUDRGB | D3DPSHADECAPS_SPECULARGOURAUDRGB
                 | D3DPSHADECAPS_ALPHAGOURAUDBLEND | D3DPSHADECAPS_FOGGOURAUD,
+            // No cube maps, which CreateCubeTexture refuses.
             TextureCaps: D3DPTEXTURECAPS_PERSPECTIVE | D3DPTEXTURECAPS_ALPHA
-                | D3DPTEXTURECAPS_PROJECTED | D3DPTEXTURECAPS_CUBEMAP
-                | D3DPTEXTURECAPS_MIPMAP | D3DPTEXTURECAPS_MIPCUBEMAP
+                | D3DPTEXTURECAPS_PROJECTED | D3DPTEXTURECAPS_MIPMAP
                 | D3DPTEXTURECAPS_ALPHAPALETTE,
-            TextureFilterCaps: ALL_FILTER_CAPS,
-            CubeTextureFilterCaps: ALL_FILTER_CAPS,
+            TextureFilterCaps: FILTER_CAPS,
+            // Border and mirror-once are folded into clamp and mirror by the
+            // sampler, so neither is promised.
             TextureAddressCaps: D3DPTADDRESSCAPS_WRAP | D3DPTADDRESSCAPS_MIRROR
-                | D3DPTADDRESSCAPS_CLAMP | D3DPTADDRESSCAPS_BORDER
-                | D3DPTADDRESSCAPS_INDEPENDENTUV | D3DPTADDRESSCAPS_MIRRORONCE,
+                | D3DPTADDRESSCAPS_CLAMP | D3DPTADDRESSCAPS_INDEPENDENTUV,
             LineCaps: D3DLINECAPS_TEXTURE | D3DLINECAPS_ZTEST | D3DLINECAPS_BLEND
                 | D3DLINECAPS_ALPHACMP | D3DLINECAPS_FOG,
             MaxTextureWidth: caps.maxTextureWidth ?? 4096,
@@ -1828,18 +1823,22 @@ export function createDirect3D8Seam(
             MaxVolumeExtent: caps.maxVolumeExtent ?? 256,
             MaxTextureRepeat: caps.maxTextureRepeat ?? 8192,
             MaxTextureAspectRatio: caps.maxTextureAspectRatio ?? 4096,
-            MaxAnisotropy: caps.maxAnisotropy ?? 16,
-            StencilCaps: ALL_STENCIL_CAPS,
+            MaxAnisotropy: caps.maxAnisotropy ?? 1,
+            // The pipeline has no stencil test, so no stencil operation is
+            // promised.
+            StencilCaps: 0,
             FVFCaps: D3DFVFCAPS_PSIZE | 8,
-            TextureOpCaps: ALL_TEXTURE_OP_CAPS,
+            TextureOpCaps: TEXTURE_OP_CAPS,
             MaxTextureBlendStages: caps.maxTextureBlendStages ?? 8,
             MaxSimultaneousTextures: caps.maxSimultaneousTextures ?? 8,
             VertexProcessingCaps: D3DVTXPCAPS_TEXGEN | D3DVTXPCAPS_MATERIALSOURCE7
                 | D3DVTXPCAPS_DIRECTIONALLIGHTS | D3DVTXPCAPS_POSITIONALLIGHTS
                 | D3DVTXPCAPS_LOCALVIEWER,
             MaxActiveLights: caps.maxActiveLights ?? 8,
-            MaxUserClipPlanes: caps.maxUserClipPlanes ?? 6,
-            MaxVertexBlendMatrices: caps.maxVertexBlendMatrices ?? 4,
+            // Nothing clips against a program's planes or blends by vertex
+            // weights, which is what Direct3D 9 answers for the same reason.
+            MaxUserClipPlanes: caps.maxUserClipPlanes ?? 0,
+            MaxVertexBlendMatrices: caps.maxVertexBlendMatrices ?? 0,
             MaxVertexBlendMatrixIndex: caps.maxVertexBlendMatrixIndex ?? 0,
             MaxPrimitiveCount: caps.maxPrimitiveCount ?? 0xffff,
             MaxVertexIndex: caps.maxVertexIndex ?? 0xffff,

@@ -1125,11 +1125,11 @@ test('the capabilities a device reports are answers, not gaps', ()=>{
             'ExtentsAdjust', 'MaxPointSize']);
     assert.equal(caps.DeviceType, D3DDEVTYPE.HAL, 'the first field, so the whole run starts right');
     assert.equal(caps.MaxTextureAspectRatio, 4096);
-    assert.equal(caps.MaxAnisotropy, 16);
+    assert.equal(caps.MaxAnisotropy, 1, 'the sampler filters no more than linearly');
     assert.equal(caps.MaxTextureBlendStages, 8);
     assert.equal(caps.MaxSimultaneousTextures, 8);
     assert.equal(caps.MaxActiveLights, 8);
-    assert.equal(caps.MaxUserClipPlanes, 6);
+    assert.equal(caps.MaxUserClipPlanes, 0, 'nothing clips against a plane of the program\'s');
     assert.equal(caps.MaxStreams, 16);
     assert.equal(caps.MaxPointSize, 64, 'a float in the middle of the dwords');
     assert.equal(caps.ExtentsAdjust, 0);
@@ -1169,6 +1169,37 @@ test('the fog the raster caps claim is named by the bits d3d8caps.h gives it', (
     const raster = h.fields.readU32(at + D3DCAPS8.RasterCaps);
     assert.ok((raster & 0x00200000) !== 0, 'D3DPRASTERCAPS_ZFOG');
     assert.ok((raster & 0x00100000) !== 0, 'D3DPRASTERCAPS_WFOG');
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('every capability claimed is one the renderer honours', ()=>{
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const at = 0x3200;
+    assert.equal(h.device(device, 'GetDeviceCaps', [at]), D3D_OK);
+    const caps = h.fields.readStruct(at, D3DCAPS8,
+        ['MaxVertexW', 'GuardBandLeft', 'GuardBandTop', 'GuardBandRight', 'GuardBandBottom',
+            'ExtentsAdjust', 'MaxPointSize']);
+
+    assert.equal(caps.TextureOpCaps, 0x0000ffff,
+        'DISABLE through BLENDCURRENTALPHA, the operations the combiner draws');
+    assert.equal(caps.TextureCaps & (0x00000800 | 0x00010000), 0,
+        'no cube maps, which CreateCubeTexture refuses');
+    assert.equal(caps.CubeTextureFilterCaps, 0);
+    assert.equal(caps.RasterCaps & 0x00004000, 0, 'no D3DRS_ZBIAS, which nothing reads');
+    assert.equal(caps.RasterCaps & 0x00020000, 0, 'no anisotropy');
+    assert.equal(caps.TextureFilterCaps & (0x00000400 | 0x04000000), 0,
+        'no anisotropic minification or magnification');
+    assert.equal(caps.RasterCaps & 0x00002000, 0, 'no D3DTSS_MIPMAPLODBIAS, which nothing reads');
+    assert.equal(caps.StencilCaps, 0, 'no stencil test in the pipeline');
+    assert.equal(caps.MaxVertexBlendMatrices, 0, 'no vertex blending');
+    assert.equal(caps.TextureAddressCaps & (0x00000008 | 0x00000020), 0,
+        'no border colour and no mirror-once, which the sampler folds into others');
+    assert.equal(caps.RasterCaps & 0x00010000, 0x00010000,
+        'D3DPRASTERCAPS_FOGRANGE: range fog fades by the distance from the eye');
+
     assert.equal(h.release(device), 0);
     h.release(root);
 });
