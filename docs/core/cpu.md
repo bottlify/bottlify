@@ -542,7 +542,11 @@ code with a `stale` exit right after the instruction, so the runtime can drop wh
 translated there -- a store into the code's own bytes, that is: beside the flag the table
 keeps, per page, the first and last 32-byte granule holding translated code, and a store
 into the page's data next to its code (a small image keeps both in one page, and a loop
-storing into its own page went volatile after eight such stores) is no store into code. A
+storing into its own page went volatile after eight such stores) is no store into code. The
+range is kept as counts, per page, of the regions whose blocks there begin and end in each
+granule, so a region that goes takes its own extent out: made again from every region left on
+the page, a page of small functions formed into their callers -- where nearly every region lies
+-- was a pass over all of them each time one went, the engine thread's largest cost (cork-bench's `churn.mjs` in node, the translation worker in lock step, `callTargets` and `dispatch` on: 38.2 -> 13.0 ms of the engine thread's time a million guest instructions, its 99.9th percentile turn 154 -> 30 ms). A
 store is tested at its first byte, its last and one byte in every granule between, since a state
 save spans several (`fnsave`'s 108 bytes over code that lay in neither end's granule went
 unnoticed), and the emulator's "has code" table above is read for the store's last page as well as

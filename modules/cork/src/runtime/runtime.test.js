@@ -455,6 +455,27 @@ test('an invalidation between noteHot and translatePending drops the region', as
     assert.equal(m.runtime.entryOf(CODE), -1);
 });
 
+test('a page whose regions partly go keeps the code range of the ones left on it', async()=>{
+    const m = machine();
+    // One loop across the boundary into the next page, one inside that page further on.
+    const across = CODE + 0xffa;
+    const inside = CODE + 0x1800;
+    m.write(across, COUNTDOWN);
+    m.write(inside, COUNTDOWN);
+    m.runtime.noteHot(across);
+    m.runtime.noteHot(inside);
+    assert.equal(await m.runtime.translatePending(), 2);
+    const next = (CODE >>> 12) + 1;
+    assert.deepEqual(m.runtime.pages.codeRange(next), [0, (0x808 >> 5) + 1], 'both regions');
+    m.runtime.invalidatePage(CODE >>> 12);
+    assert.equal(m.runtime.diagnostics().regions, 1);
+    assert.deepEqual(m.runtime.pages.codeRange(next), [0x800 >> 5, (0x808 >> 5) + 1],
+        'the one left alone');
+    assert.deepEqual(m.runtime.pages.codeRange(CODE >>> 12), [0, 0]);
+    m.runtime.invalidatePage(next);
+    assert.deepEqual(m.runtime.pages.codeRange(next), [0, 0]);
+});
+
 test('a store into a code page leaves stale and drops the page\'s regions', async()=>{
     const m = machine();
     // The loop at CODE; a writer at CODE + 0x100 that stores into the loop's page.

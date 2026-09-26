@@ -441,6 +441,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @property {number[]} slots   entry indices
      * @property {number} table     the function's index in the table, or -1
      * @property {[number, number][]} spans   the blocks' [start, end)
+     * @property {Map<number, [number, number]>} extents  by page, the code granules its
+     *     blocks cover there, [from, to)
      * @property {number} entryTop  the x87 top it was formed for
      * @property {string} hash      of its bytes, which a relink forms it from again
      * @property {string} labels    its block starts and labels, which a relinked function
@@ -496,6 +498,31 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const copiesWanted = new Set();
     /** @type {Map<number, Set<RegionRecord>>} page → regions on it */
     const byPage = new Map();
+    const GRANULES = 1 << (12 - Tables.CODE_GRANULE_SHIFT);
+    /**
+     * By code page, how many regions' extents there start at each granule and
+     * end at each: the page's code range is the first start and the last end,
+     * so a region that goes takes its own out rather than the range being made
+     * again from every region left -- a page of small functions formed into
+     * their callers holds nearly every region there is, and making its range
+     * again was a pass over all of them each time one went.
+     * @type {Map<number, Uint32Array>}  granule g's starts at g, its ends at GRANULES + 1 + g
+     */
+    const pageExtents = new Map();
+    /** @param {RegionRecord} record @param {1 | -1} sign */
+    const countExtents = (record, sign)=>{
+        for (const [page, [from, to]] of record.extents)
+        {
+            let tally = pageExtents.get(page);
+            if (tally === undefined)
+            {
+                tally = new Uint32Array(2 * GRANULES + 2);
+                pageExtents.set(page, tally);
+            }
+            tally[from] += sign;
+            tally[GRANULES + 1 + to] += sign;
+        }
+    };
     /** By the address of an indirect call in translated code, its targets sampled and how
      * often. @type {Map<number, Map<number, number>>} */
     const callSamples = new Map();
@@ -628,6 +655,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 byPage.get(p)?.delete(record);
             }
+            countExtents(record, -1);
             for (const start of record.closed ?? [])
             {
                 forgetClosed(start, record);
@@ -647,19 +675,30 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             pages.clearCode(p);
             if (!left?.size)
             {
+                pageExtents.delete(p);
                 imports.handoffPage?.(p, false);
                 continue;
             }
-            // The page's range from the regions still on it.
-            for (const record of left)
+            // The page's range from the extents of the regions still on it.
+            const tally = pageExtents.get(p);
+            if (tally === undefined)
             {
-                for (const [start, end] of record.spans)
-                {
-                    if ((start >>> 12) <= p && ((end - 1) >>> 12) >= p)
-                    {
-                        pages.markCode(start, end - start);
-                    }
-                }
+                continue;
+            }
+            let from = 0;
+            while (from < GRANULES && tally[from] === 0)
+            {
+                from++;
+            }
+            let to = GRANULES;
+            while (to > from && tally[GRANULES + 1 + to] === 0)
+            {
+                to--;
+            }
+            if (to > from)
+            {
+                pages.markCode(p * 4096 + (from << Tables.CODE_GRANULE_SHIFT),
+                    (to - from) << Tables.CODE_GRANULE_SHIFT);
             }
         }
     };
@@ -1111,10 +1150,40 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             barrenAdd(eip, top);
             return 0;
         }
+        /** @type {Map<number, [number, number]>} */
+        const extents = new Map();
+        for (const block of region.blocks)
+        {
+            if (block.end <= block.start)
+            {
+                continue;
+            }
+            // As `markCode` takes the block: the granules of its first and last
+            // byte on each page it touches.
+            const first = block.start >>> 12;
+            const last = (block.end - 1) >>> 12;
+            for (let page = first; page <= last; page++)
+            {
+                const from = page === first
+                    ? (block.start & 0xfff) >>> Tables.CODE_GRANULE_SHIFT : 0;
+                const to = page === last
+                    ? (((block.end - 1) & 0xfff) >>> Tables.CODE_GRANULE_SHIFT) + 1 : GRANULES;
+                const extent = extents.get(page);
+                if (extent === undefined)
+                {
+                    extents.set(page, [from, to]);
+                }
+                else
+                {
+                    extent[0] = Math.min(extent[0], from);
+                    extent[1] = Math.max(extent[1], to);
+                }
+            }
+        }
         /** @type {RegionRecord} */
         const record = {
             entry: region.entry, pages: region.pages, slots: [], table: -1,
-            spans: region.blocks.map(block=>[block.start, block.end]),
+            spans: region.blocks.map(block=>[block.start, block.end]), extents,
             entryTop: one.entryTop, hash: region.hash, labels: JSON.stringify(built.labels),
             linked: built.linked === true, wide: one.wide === true,
             narrow: one.narrow === true, checked: one.checked === true,
@@ -1225,6 +1294,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
             set.add(record);
         }
+        countExtents(record, 1);
         regions.add(record);
         counts.publishMs += clock() - publishAt;
         return 1;
