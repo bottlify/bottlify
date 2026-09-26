@@ -60,15 +60,15 @@ import {
     writeSurfaceDesc,
 } from '../ddraw/structs.js';
 import {
-    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_KEYDESTOVERRIDE,
-    DDBLT_KEYSRCOVERRIDE, DDCAPS2_CANRENDERWINDOWED, DDCAPS2_CERTIFIED,
-    DDCAPS2_WIDESURFACES, DDCAPS_BLT, DDCAPS_BLTCOLORFILL, DDCAPS_BLTSTRETCH,
-    DDCAPS_CANBLTSYSMEM, DDCAPS_COLORKEY, DDCAPS_GDI, DDCAPS_PALETTE, DDCKEYCAPS_DESTBLT,
-    DDCKEYCAPS_SRCBLT, DDCKEY_DESTBLT, DDCKEY_SRCBLT, DDERR_ALREADYINITIALIZED,
-    DDERR_INVALIDPARAMS, DDERR_SURFACEBUSY, DDERR_SURFACELOST, DDERR_UNSUPPORTED, DDPCAPS_1BIT,
-    DDPCAPS_2BIT, DDPCAPS_4BIT, DDPCAPS_8BIT, DDPCAPS_ALLOW256, DDPCAPS_PRIMARYSURFACE,
-    DDPF_RGB, DDSCAPS_ZBUFFER, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT,
-    DDSD_HEIGHT, DDSD_PITCH, DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK,
+    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_KEYDESTOVERRIDE, DDBLT_KEYSRCOVERRIDE,
+    DDCAPS2_CANRENDERWINDOWED, DDCAPS2_CERTIFIED, DDCAPS2_WIDESURFACES, DDCAPS_BLT,
+    DDCAPS_BLTCOLORFILL, DDCAPS_BLTSTRETCH, DDCAPS_CANBLTSYSMEM, DDCAPS_COLORKEY, DDCAPS_GDI,
+    DDCAPS_PALETTE, DDCKEYCAPS_DESTBLT, DDCKEYCAPS_SRCBLT, DDCKEY_DESTBLT, DDCKEY_SRCBLT,
+    DDERR_ALREADYINITIALIZED, DDERR_INVALIDPARAMS, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND,
+    DDERR_SURFACEBUSY, DDERR_SURFACELOST, DDERR_UNSUPPORTED, DDPCAPS_1BIT, DDPCAPS_2BIT,
+    DDPCAPS_4BIT, DDPCAPS_8BIT, DDPCAPS_ALLOW256, DDPCAPS_PRIMARYSURFACE, DDPF_RGB, DDSCAPS_FLIP,
+    DDSCAPS_ZBUFFER, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT,
+    DDSD_PITCH, DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK,
 } from '../ddraw/constants.js';
 import { pixelFormatForDepth } from '../ddraw/objects.js';
 import { blt, bltFast } from '../ddraw/blit.js';
@@ -1117,7 +1117,20 @@ export function createDirectDrawSeam(
                 callback >>> 0, context >>> 0);
         },
 
-        FlipToGDISurface: ()=>DD_OK,
+        /**
+         * The primary is what GDI draws on, so flipping to it needs one, and
+         * one that flips.
+         *
+         * @param {any} root
+         */
+        FlipToGDISurface: root=>{
+            const primary = root.primarySurface();
+            if (!primary)
+            {
+                return DDERR_NOTFOUND;
+            }
+            return (primary.caps & DDSCAPS_FLIP) !== 0 ? DD_OK : DDERR_NOTFLIPPABLE;
+        },
 
         /** @param {any} root @param {number[]} args */
         GetCaps: (root, [hal, hel])=>{
@@ -1174,10 +1187,15 @@ export function createDirectDrawSeam(
 
         /** @param {any} root @param {number[]} args */
         GetGDISurface: (root, [out])=>{
-            const primary = root.primarySurface();
-            if (!primary || (out >>> 0) === 0)
+            if ((out >>> 0) === 0)
             {
                 return DDERR_INVALIDPARAMS;
+            }
+            const primary = root.primarySurface();
+            if (!primary)
+            {
+                fields.writeU32(out >>> 0, 0);
+                return DDERR_NOTFOUND;
             }
             primary.addRef();
             handBack(primary, surfaceInterfaces, generation.surface, out >>> 0);

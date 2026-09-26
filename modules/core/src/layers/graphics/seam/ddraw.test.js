@@ -686,6 +686,42 @@ test('DeleteAttachedSurface with no surface detaches all of them', ()=>{
     h.assertAllReleased();
 });
 
+test('the GDI surface is the primary: none without one, flipped to only on a flip chain', ()=>{
+    // After Wine's ddraw1 test_gdi_surface.
+    const h = seamed();
+    const ddraw = h.create7();
+    const out = 0x7800;
+    const gdi = ()=>h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'GetGDISurface'), [out]);
+    const flipToGdi = ()=>h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'FlipToGDISurface'), []);
+
+    h.box.memory.writeU32(out, 0xc0dec0de);
+    assert.equal(gdi(), DDERR_NOTFOUND, 'no primary, no GDI surface');
+    assert.equal(h.box.memory.readU32(out), 0, 'and the out-parameter says so');
+    assert.equal(flipToGdi(), DDERR_NOTFOUND);
+
+    const primary = h.createSurface7(ddraw, { caps: DDSCAPS_PRIMARYSURFACE });
+    assert.equal(gdi(), DD_OK);
+    assert.equal(h.box.memory.readU32(out), primary);
+    assert.equal(h.release(primary), 1, 'GetGDISurface took a reference');
+    assert.equal(flipToGdi(), DDERR_NOTFLIPPABLE, 'a primary without a chain has nothing to flip');
+    assert.equal(h.release(primary), 0);
+
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
+        [HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN]), DD_OK);
+    const front = h.createSurface7(ddraw, {
+        caps: DDSCAPS_PRIMARYSURFACE | DDSCAPS_COMPLEX | DDSCAPS_FLIP, backBufferCount: 1,
+    });
+    assert.equal(h.surface7(front, 'Flip', [0, 0]), DD_OK);
+    assert.equal(flipToGdi(), DD_OK);
+    assert.equal(gdi(), DD_OK);
+    assert.equal(h.box.memory.readU32(out), front);
+    assert.equal(h.release(front), 1);
+
+    assert.equal(h.release(front), 0);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
 test('a palette round-trips its entries and is owned by the surface it is set on', ()=>{
     const h = seamed();
     const ddraw = h.create7();
