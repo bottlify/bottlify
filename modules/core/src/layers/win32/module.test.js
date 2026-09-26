@@ -223,3 +223,34 @@ test('shfolder is the shell folder call under the name a program linked against'
 
     await win32Module.dispose();
 });
+
+test('comctl32\'s _TrackMouseEvent is user32\'s TrackMouseEvent', async()=>{
+    // comctl32 documents _TrackMouseEvent as calling TrackMouseEvent where the
+    // system has one. A query shows it: user32 fills in what it tracks --
+    // nothing -- where a request only accepted would leave the fields alone.
+    const TME_QUERY = 0x40000000;
+    const REQUEST = 0x100;
+    const bytes = new Uint8Array(0x200);
+    const view = new DataView(bytes.buffer);
+    const host = stubHost();
+    const memory = {
+        readBytes: (/** @type {number} */ at, /** @type {number} */ length)=>
+            bytes.slice(at, at + length),
+        writeBytes: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>bytes.set(data, at),
+        readCString: ()=>'',
+        readWideString: ()=>'',
+        readU32: (/** @type {number} */ at)=>view.getUint32(at, true),
+    };
+    const api = await win32Module.create({}, /** @type {any} */ ({
+        ...host,
+        requireApi: (/** @type {string} */ name)=>(name === 'memory'
+            ? memory : host.requireApi(name)),
+    }));
+    [16, TME_QUERY, 0xdeadbeef, 0xdeadbeef].forEach((value, index)=>
+        view.setUint32(REQUEST + index * 4, value, true));
+
+    assert.equal(api.libraries()['COMCTL32.dll']._TrackMouseEvent.handler([REQUEST]), 1);
+    assert.deepEqual([4, 8, 12].map(at=>view.getUint32(REQUEST + at, true)), [0, 0, 0]);
+
+    await win32Module.dispose();
+});

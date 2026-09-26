@@ -1169,6 +1169,11 @@ export const win32Module = {
 
             'COMCTL32.dll': createComctlFunctions({
                 readMemory, writeMemory, divergence: config?.divergence,
+                // What _TrackMouseEvent is documented to call where the
+                // system has it; looked up when called, as user32 is built
+                // beside it.
+                trackMouseEvent: request=>
+                    libraries['USER32.dll'].TrackMouseEvent.handler([request]),
             }),
 
             'SHELL32.dll': createShellFunctions({
