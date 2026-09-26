@@ -169,7 +169,6 @@ const WM_CTLCOLORSTATIC = 0x0138;
 const DM_GETDEFID = 0x0400;
 const DM_SETDEFID = 0x0401;
 const DWLP_MSGRESULT = 0;
-const GWL_STYLE = -16;
 const BN_CLICKED = 0;
 const DLGC_WANTMESSAGE = 0x0004;
 const VK_TAB = 0x09;
@@ -1351,27 +1350,6 @@ export function createPropertySheetFunctions(host){
         : sheet.entries.findIndex(entry=>entry.hwnd === hwnd));
 
     /**
-     * Whether a window is the sheet or one of the windows inside it.
-     *
-     * @param {Sheet} sheet @param {number} hwnd
-     */
-    const inside = (sheet, hwnd)=>{
-        for (let at = hwnd >>> 0, depth = 0; at !== 0 && depth < 64; depth++)
-        {
-            if (at === sheet.hwnd)
-            {
-                return true;
-            }
-            if (((api('GetWindowLongA', [at, GWL_STYLE]) >>> 0) & WS_CHILD) === 0)
-            {
-                return false;
-            }
-            at = api('GetParent', [at]) >>> 0;
-        }
-        return false;
-    };
-
-    /**
      * The keys the sheet itself answers in a message loop: with Ctrl held,
      * PgDn and Tab turn to the next page and PgUp and Shift+Tab to the one
      * before, round from either end, the page on show asked to let go as a
@@ -1388,7 +1366,7 @@ export function createPropertySheetFunctions(host){
         const turn = key === VK_NEXT ? 1 : key === VK_PRIOR ? -1
             : key === VK_TAB ? (held(VK_SHIFT) ? -1 : 1) : 0;
         if (u32(msg + 4) !== WM_KEYDOWN || turn === 0 || !held(VK_CONTROL)
-            || !inside(sheet, target))
+            || (target !== sheet.hwnd && api('IsChild', [sheet.hwnd, target]) === 0))
         {
             return false;
         }

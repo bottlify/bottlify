@@ -414,6 +414,57 @@ test('GetLastActivePopup answers the popup of an owner chain that was active las
     assert.equal(fns.GetLastActivePopup.handler([0x7777]), 0);
 });
 
+test('GetAncestor walks parents and owners as GA_PARENT, GA_ROOT and GA_ROOTOWNER ask, and '
+    + 'IsChild walks the chain of child windows only', ()=>{
+    // user32's window tests (test_SetParent, check_parents): a child, a popup
+    // made on that child, a child of the popup and a popup made on that one.
+    // GA_PARENT of a window that is no child is the desktop, GA_ROOT stops
+    // at the first window that is no child, GA_ROOTOWNER goes on through the
+    // owners; IsChild is true only through WS_CHILD windows, never for the
+    // desktop, and follows a style changed afterwards.
+    const GA_PARENT = 1;
+    const GA_ROOT = 2;
+    const GA_ROOTOWNER = 3;
+    const GWL_STYLE = -16;
+    const WS_CHILD = 0x40000000;
+    const WS_POPUP = 0x80000000;
+    const { memory, fns } = setup();
+    const desktop = fns.GetDesktopWindow.handler([]);
+    const parent = makeWindow(memory, fns);
+    /** @param {number} style @param {number} over */
+    const make = (style, over)=>fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, style,
+        0, 0, 50, 50, over, 0, HINSTANCE, 0]);
+    const child1 = make(WS_CHILD, parent);
+    const child2 = make(WS_POPUP, child1);
+    const child3 = make(WS_CHILD, child2);
+    const child4 = make(WS_POPUP, child3);
+    /** @param {number} hwnd */
+    const ancestors = hwnd=>[GA_PARENT, GA_ROOT, GA_ROOTOWNER].map(flags=>
+        fns.GetAncestor.handler([hwnd, flags]));
+    assert.deepEqual(ancestors(parent), [desktop, parent, parent]);
+    assert.deepEqual(ancestors(child1), [parent, parent, parent]);
+    assert.deepEqual(ancestors(child2), [desktop, child2, parent]);
+    assert.deepEqual(ancestors(child3), [child2, child2, parent]);
+    assert.deepEqual(ancestors(child4), [desktop, child4, parent]);
+    assert.deepEqual(ancestors(desktop), [0, 0, 0], 'the desktop has no ancestor');
+    assert.deepEqual(ancestors(0x7777), [0, 0, 0]);
+
+    const pairs = [[desktop, parent, 0], [desktop, child1, 0], [desktop, child3, 0],
+        [parent, child1, 1], [parent, child2, 0], [child1, child2, 0], [parent, child3, 0],
+        [child2, child3, 1], [parent, child4, 0], [child3, child4, 0]];
+    for (const [over, under, answer] of pairs)
+    {
+        assert.equal(fns.IsChild.handler([over, under]), answer, `IsChild(${over}, ${under})`);
+    }
+    fns.SetWindowLongA.handler([child4, GWL_STYLE, WS_CHILD]);
+    assert.equal(fns.IsChild.handler([child3, child4]), 1);
+    assert.equal(fns.IsChild.handler([child2, child4]), 1);
+    assert.equal(fns.IsChild.handler([child1, child4]), 0, 'a popup ends the chain');
+    fns.SetWindowLongA.handler([child2, GWL_STYLE, WS_CHILD]);
+    assert.equal(fns.IsChild.handler([child1, child4]), 1);
+    assert.equal(fns.IsChild.handler([parent, child4]), 1);
+});
+
 // --- painting ---
 
 test('RedrawWindow invalidates, validates and updates as its flags say', ()=>{
