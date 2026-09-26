@@ -748,6 +748,10 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CLSIDFromString: 8,
         IIDFromString: 8,
         IsEqualGUID: 8,
+        RegisterDragDrop: 8,
+        RevokeDragDrop: 4,
+        OleFlushClipboard: 0,
+        OleIsCurrentClipboard: 4,
     };
     assert.deepEqual(Object.keys(table).sort(), Object.keys(expected).sort());
     for (const [name, argBytes] of Object.entries(expected))
@@ -921,3 +925,81 @@ test('a class the registry names an InprocServer32 for is made by the server\'s 
         assert.equal(host.u32(PPV), CREATED);
         void fns;
     });
+
+// --- drag and drop, and the OLE clipboard ---
+
+const E_FAIL = 0x80004005;
+const DRAGDROP_E_NOTREGISTERED = 0x80040100;
+const DRAGDROP_E_ALREADYREGISTERED = 0x80040101;
+const DRAGDROP_E_INVALIDHWND = 0x80040102;
+const WINDOW = 0x10040;
+
+/**
+ * The guest-call host with one live window, the way user32 would answer for
+ * it, and the apartment left for the test to enter.
+ */
+function withWindow(){
+    const context = withGuestCalls();
+    const { host, calls } = context;
+    const live = new Set([WINDOW]);
+    /** @type {any} */ (host).isWindow = (/** @type {number} */ window)=>live.has(window);
+    const fns = createOleFunctions(/** @type {any} */ (host));
+    host.currentThread().ole32 = null;
+    calls.length = 0;
+    return { ...context, fns, live };
+}
+
+test('a drop target is registered once per window and holds a reference until revoked',
+    async()=>{
+        // dragdrop.c test_Register_Revoke.
+        const { fns, calls, live } = withWindow();
+        assert.equal(await fns.RegisterDragDrop.handler([WINDOW, GUEST_OBJECT]), E_OUTOFMEMORY,
+            'OLE was never initialised in this process');
+        assert.equal(fns.OleInitialize.handler(), S_OK);
+        assert.equal(await fns.RegisterDragDrop.handler([WINDOW, 0]), E_INVALIDARG);
+        assert.equal(await fns.RegisterDragDrop.handler([0, GUEST_OBJECT]),
+            DRAGDROP_E_INVALIDHWND);
+        assert.equal(await fns.RegisterDragDrop.handler([0xdeadbeef, GUEST_OBJECT]),
+            DRAGDROP_E_INVALIDHWND);
+        assert.equal(calls.length, 0, 'no reference is taken by a refusal');
+
+        assert.equal(await fns.RegisterDragDrop.handler([WINDOW, GUEST_OBJECT]), S_OK);
+        assert.deepEqual(calls.map(call=>call.slot), [1], 'AddRef');
+        assert.equal(await fns.RegisterDragDrop.handler([WINDOW, GUEST_OBJECT]),
+            DRAGDROP_E_ALREADYREGISTERED);
+
+        assert.equal(await fns.RevokeDragDrop.handler([WINDOW]), S_OK);
+        assert.deepEqual(calls.map(call=>call.slot), [1, 2], 'Release');
+        assert.equal(await fns.RevokeDragDrop.handler([WINDOW]), DRAGDROP_E_NOTREGISTERED);
+        assert.equal(await fns.RevokeDragDrop.handler([0]), DRAGDROP_E_INVALIDHWND);
+
+        // A window destroyed with its target still registered.
+        assert.equal(await fns.RegisterDragDrop.handler([WINDOW, GUEST_OBJECT]), S_OK);
+        live.delete(WINDOW);
+        assert.equal(await fns.RevokeDragDrop.handler([WINDOW]), DRAGDROP_E_INVALIDHWND);
+        live.add(WINDOW);
+        assert.equal(await fns.RegisterDragDrop.handler([WINDOW, GUEST_OBJECT]), S_OK,
+            'a new window with the same handle starts with nothing registered');
+    });
+
+test('once OLE has run, a thread without an apartment is told it is not initialised', async()=>{
+    // dragdrop.c test_mismatched_cleanup: OleInitialize, then CoUninitialize.
+    const { fns } = withWindow();
+    assert.equal(fns.OleInitialize.handler(), S_OK);
+    await fns.CoUninitialize.handler();
+    assert.equal(await fns.RegisterDragDrop.handler([WINDOW, GUEST_OBJECT]), CO_E_NOTINITIALIZED);
+    assert.equal(initialize(fns, COINIT_MULTITHREADED), S_OK);
+    assert.equal(await fns.RegisterDragDrop.handler([WINDOW, GUEST_OBJECT]), S_OK,
+        'any apartment will do');
+});
+
+test('the OLE clipboard never holds an object, and flushing it needs OLE', ()=>{
+    // clipboard.c: OleFlushClipboard is E_FAIL before COM is initialised and
+    // S_OK after, and OleIsCurrentClipboard is S_FALSE for what was never set.
+    const { fns } = withWindow();
+    assert.equal(fns.OleFlushClipboard.handler(), E_FAIL);
+    assert.equal(fns.OleIsCurrentClipboard.handler(), S_FALSE);
+    assert.equal(fns.OleInitialize.handler(), S_OK);
+    assert.equal(fns.OleFlushClipboard.handler(), S_OK);
+    assert.equal(fns.OleIsCurrentClipboard.handler(), S_FALSE, 'whatever the object');
+});
