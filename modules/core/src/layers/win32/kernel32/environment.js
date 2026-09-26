@@ -44,7 +44,9 @@ const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
 
 /**
  * The variables a process starts with: where Windows is, the scratch
- * directory GetTempPath answers, and the profile folders of the machine's
+ * directory GetTempPath answers -- as TEMP and as TMP, which Windows defines
+ * beside it and a C runtime's `_tempnam` reads first -- and the profile
+ * folders of the machine's
  * layout -- ALLUSERSPROFILE, APPDATA and USERPROFILE everywhere, and from
  * Vista's layout on LOCALAPPDATA, ProgramData and PUBLIC too. The folders are
  * the ones the registry and the shell name, so a program that joins %APPDATA%
@@ -67,6 +69,7 @@ export function defaultEnvironment(windows, folders){
         },
         SystemRoot: WINDOWS_DIRECTORY,
         TEMP: `${WINDOWS_DIRECTORY}\\TEMP`,
+        TMP: `${WINDOWS_DIRECTORY}\\TEMP`,
         USERPROFILE: folders.Profile,
         windir: WINDOWS_DIRECTORY,
     };

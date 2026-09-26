@@ -285,6 +285,7 @@ test('a process starts with the profile variables of the machine\'s layout', ()=
         APPDATA: 'C:\\Documents and Settings\\User\\Application Data',
         SystemRoot: 'C:\\WINDOWS',
         TEMP: 'C:\\WINDOWS\\TEMP',
+        TMP: 'C:\\WINDOWS\\TEMP',
         USERPROFILE: 'C:\\Documents and Settings\\User',
         windir: 'C:\\WINDOWS',
     }, 'XP has no LOCALAPPDATA, ProgramData or PUBLIC: they came with Vista');
@@ -301,6 +302,7 @@ test('a process starts with the profile variables of the machine\'s layout', ()=
         PUBLIC: 'C:\\Users\\Public',
         SystemRoot: 'C:\\WINDOWS',
         TEMP: 'C:\\WINDOWS\\TEMP',
+        TMP: 'C:\\WINDOWS\\TEMP',
         USERPROFILE: 'C:\\Users\\User',
         windir: 'C:\\WINDOWS',
     });
