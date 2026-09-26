@@ -25,7 +25,8 @@ import {
     colouredPixelShader, colouredVertexShader, defaultCase, endswitch, label, switchOn,
     dclConstantBuffer, dclIndexableTemp, dclInput, dclInputPs, dclInputPsSiv, dclInputSiv,
     dclOutput, dclOutputSiv, dclResource, dclSampler, dclTemps, discardNz, div, dp3, dp4,
-    elseBranch, endif, endloop, eq, exp, frc, ftoi, ftou, ge, iadd, ieq, ifNz, ifZ, ige, ilt, imad,
+    elseBranch, endif, endloop, eq, exp, frc, ftoi, ftou, gather4, ge, iadd, ieq, ifNz, ifZ, ige,
+    ilt, imad, ldMs, resinfoRcp, sampleD,
     imul,
     immediateConstantBuffer, indexedBy, ineg, ishl, ishr, itof, l, ld, log, loop, lt, lu, mad, max,
     min, modified, mov, movc, mul, ne, not, nullDest, o, oDepth, or, passThroughVertexShader,
@@ -85,7 +86,7 @@ test('mov copies bit patterns without a type', ()=>{
 
 test('a partial write mask stores through a let, one component at a time', ()=>{
     assert.equal(emitted([mov(r(0, 'xy'), r(0, 'yx'))]),
-        'let t0 = r0.yxxx;\nr0.x = t0.x;\nr0.y = t0.y;');
+        'let held0 = r0.yxxx;\nr0.x = held0.x;\nr0.y = held0.y;');
 });
 
 test('a saturated move clamps as floats', ()=>{
@@ -129,7 +130,7 @@ test('saturate wraps the float result in a clamp', ()=>{
 
 test('a dot product takes as many components as its width and splats the scalar', ()=>{
     assert.equal(emitted([dp3(r(0, 'x'), r(1), r(2))]),
-        `let t0 = ${U}(vec4<f32>(dot(${F}(r1.xyzw).xyz, ${F}(r2.xyzw).xyz)));\nr0.x = t0.x;`);
+        `let held0 = ${U}(vec4<f32>(dot(${F}(r1.xyzw).xyz, ${F}(r2.xyzw).xyz)));\nr0.x = held0.x;`);
     assert.equal(emitted([dp4(r(0), r(1), cb(0, 3))]),
         `r0 = ${U}(vec4<f32>(dot(${F}(r1.xyzw), ${F}(cb0[3u].xyzw))));`);
 });
@@ -146,9 +147,9 @@ test('the unary float functions map one to one', ()=>{
 
 test('sincos writes the sine and the cosine to its two destinations', ()=>{
     assert.equal(emitted([sincos(r(0), r(1), r(2))]),
-        `let t0 = ${U}(cos(${F}(r2.xyzw)));\nr0 = ${U}(sin(${F}(r2.xyzw)));\nr1 = t0;`);
+        `let held0 = ${U}(cos(${F}(r2.xyzw)));\nr0 = ${U}(sin(${F}(r2.xyzw)));\nr1 = held0;`);
     assert.equal(emitted([sincos(r(2), r(1), r(2))]),
-        `let t0 = ${U}(cos(${F}(r2.xyzw)));\nr2 = ${U}(sin(${F}(r2.xyzw)));\nr1 = t0;`,
+        `let held0 = ${U}(cos(${F}(r2.xyzw)));\nr2 = ${U}(sin(${F}(r2.xyzw)));\nr1 = held0;`,
         'the cosine is of the source as it was, not of the sine written over it');
     assert.equal(emitted([sincos(nullDest(), r(1), r(2))]),
         `r1 = ${U}(cos(${F}(r2.xyzw)));`, 'a null destination is not stored');
@@ -216,9 +217,9 @@ test('imul and umul write the high half of the product beside the low one', ()=>
         `r0 = ${U}((${I}(r1.xyzw) * ${I}(r2.xyzw)));`);
     const signed = translate([imul(r(3), r(0), r(1), r(2))]);
     assert.equal(bodyOf(signed), [
-        `let t0 = ${U}((${I}(r1.xyzw) * ${I}(r2.xyzw)));`,
+        `let held0 = ${U}((${I}(r1.xyzw) * ${I}(r2.xyzw)));`,
         `r3 = imulhi(${U}(${I}(r1.xyzw)), ${U}(${I}(r2.xyzw)));`,
-        'r0 = t0;',
+        'r0 = held0;',
     ].join('\n'));
     assert.deepEqual(signed.unsupported, []);
     assert.deepEqual(signed.helpers, ['umulhi', 'imulhi'], 'the helper and what it calls');
@@ -264,9 +265,9 @@ test('the high halves the helpers compute are the high halves of the products', 
 test('udiv writes the quotient and the remainder, all ones for a zero divisor', ()=>{
     const byZero = 'r3.xyzw == vec4<u32>(0u)';
     assert.equal(emitted([udiv(r(0), r(1), r(2), r(3))]), [
-        `let t0 = select((r2.xyzw % r3.xyzw), vec4<u32>(0xffffffffu), ${byZero});`,
+        `let held0 = select((r2.xyzw % r3.xyzw), vec4<u32>(0xffffffffu), ${byZero});`,
         `r0 = select((r2.xyzw / r3.xyzw), vec4<u32>(0xffffffffu), ${byZero});`,
-        'r1 = t0;',
+        'r1 = held0;',
     ].join('\n'));
 });
 
@@ -431,6 +432,14 @@ test('an immediate constant buffer becomes a module constant', ()=>{
 
 const TEXTURE = [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT), dclSampler(0)];
 
+test('a value held for a partial store does not take a texture\'s name', ()=>{
+    // A `let t0` would hide texture t0 from the second sample.
+    const body = bodyOf(translate([sample(r(0, 'xy'), v(0), t(0), s(0)),
+        sample(r(1), v(0), t(0), s(0))], { declarations: TEXTURE }));
+    assert.match(body, /^let held0 = /);
+    assert.doesNotMatch(body, /let t\d/);
+});
+
 test('sample reads a float texture through its sampler and applies the swizzle', ()=>{
     const translated = translate([sample(r(0), v(0, 'xy'), t(0, 'wzyx'), s(0))],
         { declarations: TEXTURE });
@@ -489,20 +498,106 @@ test('a 3D texture samples with three coordinates and an array with a layer', ()
 });
 
 test('resinfo answers the size and level count, as floats or as integers', ()=>{
-    const floats = translate([resinfo(r(0), lu(0), t(0))], { declarations: TEXTURE });
-    assert.equal(bodyOf(floats),
-        `r0 = ${U}(vec4<f32>(vec4<u32>(textureDimensions(t0, vec4<u32>(0u).x).x, `
-        + 'textureDimensions(t0, vec4<u32>(0u).x).y, 0u, textureNumLevels(t0))));');
-    const integers = translate([resinfo(r(0), lu(0), t(0), true)], { declarations: TEXTURE });
-    assert.match(bodyOf(integers), /^r0 = vec4<u32>\(textureDimensions/);
+    const level = 'vec4<u32>(1u).x';
+    const inRange = `${level} < textureNumLevels(t0)`;
+    const floats = translate([resinfo(r(0), lu(1), t(0))], { declarations: TEXTURE });
+    assert.equal(bodyOf(floats), [
+        `let held0 = textureDimensions(t0, min(${level}, textureNumLevels(t0) - 1u));`,
+        `r0 = (${U}(vec4<f32>(f32(select(0u, held0.x, ${inRange})), `
+            + `f32(select(0u, held0.y, ${inRange})), f32(0u), f32(textureNumLevels(t0))))).xyzw;`,
+    ].join('\n'), 'a level past the last has no size');
+    const integers = translate([resinfo(r(0), lu(1), t(0, 'wzyx'), true)],
+        { declarations: TEXTURE });
+    assert.equal(bodyOf(integers).split('\n')[1],
+        `r0 = (vec4<u32>(select(0u, held0.x, ${inRange}), select(0u, held0.y, ${inRange}), 0u, `
+        + 'textureNumLevels(t0))).wzyx;', 'and the resource\'s swizzle picks among them');
+});
+
+test('resinfo answers every shape: depth, array size, and reciprocals when asked', ()=>{
+    /**
+     * @param {number} dimension
+     * @param {import('./shader-fixtures.js').AsmInstruction} instruction
+     */
+    const resinfoOf = (dimension, instruction)=>bodyOf(translate([instruction], {
+        declarations: [dclResource(0, dimension, RETURN_TYPE.FLOAT)],
+    })).split('\n')[1];
+    const inRange = 'vec4<u32>(0u).x < textureNumLevels(t0)';
+    assert.equal(resinfoOf(RESOURCE_DIMENSION.TEXTURE3D, resinfo(r(0), lu(0), t(0), true)),
+        `r0 = (vec4<u32>(select(0u, held0.x, ${inRange}), select(0u, held0.y, ${inRange}), `
+        + `select(0u, held0.z, ${inRange}), textureNumLevels(t0))).xyzw;`);
+    assert.equal(resinfoOf(RESOURCE_DIMENSION.TEXTURE2DARRAY, resinfo(r(0), lu(0), t(0), true)),
+        `r0 = (vec4<u32>(select(0u, held0.x, ${inRange}), select(0u, held0.y, ${inRange}), `
+        + 'textureNumLayers(t0), textureNumLevels(t0))).xyzw;');
+    assert.equal(resinfoOf(RESOURCE_DIMENSION.TEXTURE1DARRAY, resinfo(r(0), lu(0), t(0), true)),
+        `r0 = (vec4<u32>(select(0u, held0.x, ${inRange}), textureNumLayers(t0), 0u, `
+        + 'textureNumLevels(t0))).xyzw;');
+    const width = `select(0u, held0.x, ${inRange})`;
+    assert.equal(resinfoOf(RESOURCE_DIMENSION.TEXTURE1D, resinfoRcp(r(0), lu(0), t(0))),
+        `r0 = (${U}(vec4<f32>(select(0.0, 1.0 / f32(${width}), ${width} != 0u), f32(0u), `
+        + 'f32(0u), f32(textureNumLevels(t0))))).xyzw;');
+});
+
+test('a one-dimensional texture is read as a row of a two-dimensional one', ()=>{
+    const ONE_D = [dclResource(0, RESOURCE_DIMENSION.TEXTURE1D, RETURN_TYPE.FLOAT),
+        dclSampler(0)];
+    const sampled = translate([sample(r(0), v(0), t(0), s(0))], { declarations: ONE_D });
+    assert.equal(bodyOf(sampled),
+        `r0 = ${U}((textureSample(t0, s0, vec2<f32>(${F}(v0.xyzw).x, 0.5))).xyzw);`);
+    const graded = translate([sampleD(r(0), v(0), t(0), s(0), r(1), r(2))],
+        { declarations: ONE_D });
+    assert.match(bodyOf(graded), new RegExp(
+        `, vec2<f32>\\(bitcast<vec4<f32>>\\(r1\\.xyzw\\)\\.x, 0\\.0\\), `
+        + 'vec2<f32>\\(bitcast<vec4<f32>>\\(r2\\.xyzw\\)\\.x, 0\\.0\\)\\)'));
+    const loaded = translate([ld(r(0), r(1), t(0))], { declarations: ONE_D });
+    assert.equal(bodyOf(loaded), `r0 = ${U}((textureLoad(t0, vec2<i32>(${I}(r1.xyzw).x, 0), `
+        + `${I}(r1.xyzw).w)).xyzw);`);
+    const array = translate([sample(r(0), v(0), t(0), s(0))], {
+        declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE1DARRAY, RETURN_TYPE.FLOAT),
+            dclSampler(0)],
+    });
+    assert.match(bodyOf(array), /vec2<f32>\(bitcast<vec4<f32>>\(v0.xyzw\).x, 0.5\), i32\(/);
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    assert.match(linkProgram(vs, sampled).fragment, /var t0: texture_2d<f32>;/);
+    assert.deepEqual(linkProgram(vs, array).groups[1][0].texture,
+        { sampleType: 'float', viewDimension: '2d-array' });
+});
+
+test('ld_ms reads the one sample every texture here has, and zero for any other', ()=>{
+    const translated = translate([ldMs(r(0), r(1), t(0), r(2, 'x'))], {
+        declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2DMS, RETURN_TYPE.FLOAT)],
+    });
+    assert.equal(bodyOf(translated), `r0 = select(${U}((textureLoad(t0, ${I}(r1.xyzw).xy, 0))`
+        + '.xyzw), vec4<u32>(0u), r2.xxxx.x != 0u);');
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    assert.match(linkProgram(vs, translated).fragment, /var t0: texture_2d<f32>;/);
+    const plain = translate([ld(r(0), r(1), t(0))], {
+        declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2DMSARRAY, RETURN_TYPE.FLOAT)],
+    });
+    assert.equal(bodyOf(plain), `r0 = ${U}((textureLoad(t0, ${I}(r1.xyzw).xy, `
+        + `${I}(r1.xyzw).z, 0)).xyzw);`);
+});
+
+test('gather4 gathers the first component of four texels', ()=>{
+    const translated = translate([gather4(r(0), v(0), t(0, 'yxzw'), s(0))], {
+        declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+            dclSampler(0)],
+    });
+    assert.equal(bodyOf(translated),
+        `r0 = ${U}((textureGather(0, t0, s0, ${F}(v0.xyzw).xy)).yxzw);`);
+    const integer = translate([gather4(r(0), v(0), t(0), s(0))], {
+        declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.UINT),
+            dclSampler(0)],
+    });
+    assert.deepEqual(integer.unsupported,
+        ['gather4 on an integer, one- or three-dimensional texture']);
 });
 
 test('an instruction with no translation is named, and nothing plausible is emitted', ()=>{
-    const translated = translate([{ opcode: 46, operands: [r(0), r(1), t(0), lu(0)] }],
+    const translated = translate([{ opcode: 108, operands: [r(0), r(1), t(0), s(0)] }],
         { declarations: TEXTURE });
-    assert.deepEqual(translated.unsupported, ['ld_ms']);
+    assert.deepEqual(translated.unsupported, ['lod']);
     const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
-    assert.ok(linkProgram(vs, translated).unsupported.includes('ld_ms'),
+    assert.ok(linkProgram(vs, translated).unsupported.includes('lod'),
         'and the pair carries the refusal');
 });
 

@@ -510,9 +510,11 @@ export function createRenderer(services){
                 size,
                 mipLevelCount: desc.MipLevels,
                 sampleCount: desc.SampleDesc.Count,
+                // A one-dimensional texture is one row of a two-dimensional
+                // one: WebGPU's own has neither mip levels nor array layers.
                 dimension: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
                     ? '3d'
-                    : resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE1D ? '1d' : '2d',
+                    : '2d',
                 format: layout.format,
                 ...(viewFormats.length > 0 ? { viewFormats } : {}),
                 usage,
@@ -782,9 +784,7 @@ export function createRenderer(services){
             ...(chosen.aspect ? { aspect: chosen.aspect } : {}),
             dimension: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
                 ? '3d'
-                : resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE1D
-                    ? '1d'
-                    : isCube ? 'cube' : array ? '2d-array' : '2d',
+                : isCube ? 'cube' : array ? '2d-array' : '2d',
             baseMipLevel: desc.MostDetailedMip ?? desc.MipSlice ?? 0,
             mipLevelCount: desc.MipLevels ?? 1,
             baseArrayLayer: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D

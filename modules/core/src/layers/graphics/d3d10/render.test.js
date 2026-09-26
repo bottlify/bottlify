@@ -985,6 +985,22 @@ test('a GPU with BC sampling keeps the blocks, sent through a staging buffer', a
             MipLevels: 1 }, view), S_OK);
 });
 
+test('a one-dimensional texture is kept as one row of a two-dimensional one', ()=>{
+    // WebGPU's 1D texture has one level and one layer; Direct3D's has both.
+    const h = harness();
+    /** @type {{ resource?: any }} */
+    const texture = {};
+    assert.equal(h.device.CreateTexture1D({
+        Width: 8, MipLevels: 4, ArraySize: 2, Format: DXGI_FORMAT.R8G8B8A8_UNORM,
+        Usage: D3D10_USAGE.DEFAULT, BindFlags: D3D10_BIND.SHADER_RESOURCE, CPUAccessFlags: 0,
+        MiscFlags: 0,
+    }, null, texture), S_OK);
+    const made = h.gpu.of('createTexture').at(-1);
+    assert.equal(made.descriptor.dimension, '2d');
+    assert.deepEqual(made.descriptor.size, { width: 8, height: 1, depthOrArrayLayers: 2 });
+    assert.equal(made.descriptor.mipLevelCount, 4);
+});
+
 test('a typeless depth buffer is kept as depth, drawn through one view and read through'
     + ' another', async()=>{
     const h = harness();
@@ -1274,9 +1290,10 @@ test('a shader with an instruction that has no translation refuses its draws by 
             kind: SHADER_KIND.PIXEL,
             outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
             instructions: [
-                dclResource(0, RESOURCE_DIMENSION.TEXTURE2DMS, RETURN_TYPE.FLOAT),
+                dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+                dclSampler(0),
                 dclOutput(o(0)),
-                { opcode: 46, operands: [o(0), r(0), t(0), r(1, 'x')] },
+                { opcode: 108, operands: [o(0), r(0), t(0), s(0)] },
                 ret(),
             ],
         }), ps), S_OK, 'the create accepts it: the refusal is the draw\'s');
@@ -1285,5 +1302,5 @@ test('a shader with an instruction that has no translation refuses its draws by 
         await h.present();
         assert.equal(h.gpu.count('draw'), 0);
         assert.equal(h.device.diagnostics().skipped.pipeline, 1);
-        assert.ok(h.divergences.some(line=>line.includes('ld_ms')), h.divergences.join('\n'));
+        assert.ok(h.divergences.some(line=>line.includes('lod')), h.divergences.join('\n'));
     });

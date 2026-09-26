@@ -310,11 +310,32 @@ export const sampleL = (dest, coordinate, texture, sampler, level)=>
  */
 export const sampleCLz = (dest, coordinate, texture, sampler, reference)=>
     op(OPCODE.SAMPLE_C_LZ, [dest, coordinate, texture, sampler, reference]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} coordinate @param {AsmOperand} texture
+ * @param {AsmOperand} sampler @param {AsmOperand} ddx @param {AsmOperand} ddy
+ */
+export const sampleD = (dest, coordinate, texture, sampler, ddx, ddy)=>
+    op(OPCODE.SAMPLE_D, [dest, coordinate, texture, sampler, ddx, ddy]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} coordinate @param {AsmOperand} texture
+ * @param {AsmOperand} sampler
+ */
+export const gather4 = (dest, coordinate, texture, sampler)=>
+    op(OPCODE.GATHER4, [dest, coordinate, texture, sampler]);
 /** @param {AsmOperand} dest @param {AsmOperand} address @param {AsmOperand} texture */
 export const ld = (dest, address, texture)=>op(OPCODE.LD, [dest, address, texture]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} address @param {AsmOperand} texture
+ * @param {AsmOperand} sampleIndex
+ */
+export const ldMs = (dest, address, texture, sampleIndex)=>
+    op(OPCODE.LD_MS, [dest, address, texture, sampleIndex]);
 /** @param {AsmOperand} dest @param {AsmOperand} level @param {AsmOperand} texture @param {boolean} [asUint] */
 export const resinfo = (dest, level, texture, asUint = false)=>
     op(OPCODE.RESINFO, [dest, level, texture], { control: asUint ? 2 : 0 });
+/** @param {AsmOperand} dest @param {AsmOperand} level @param {AsmOperand} texture */
+export const resinfoRcp = (dest, level, texture)=>
+    op(OPCODE.RESINFO, [dest, level, texture], { control: 1 });
 
 /** @param {AsmOperand} condition */
 export const ifNz = condition=>op(OPCODE.IF, [condition], { nonZero: true, destinations: 0 });

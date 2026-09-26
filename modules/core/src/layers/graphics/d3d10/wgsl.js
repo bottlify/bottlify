@@ -179,6 +179,9 @@ export function translateShader(container){
     };
     let nextTemp = 0;
     let depth = 1;
+    // Not `t`: that is a texture's name, and a `let` of the same name would
+    // hide the texture from every instruction after it in the block.
+    const held = ()=>`held${nextTemp++}`;
 
     /** @param {string} line */
     const emit = line=>{
@@ -297,7 +300,7 @@ export function translateShader(container){
             emit(`${target} = ${value};`);
             return;
         }
-        const temp = `t${nextTemp++}`;
+        const temp = held();
         emit(`let ${temp} = ${value};`);
         for (const component of maskComponents(dest.mask))
         {
@@ -325,29 +328,71 @@ export function translateShader(container){
 
     /**
      * The coordinate a texture instruction samples at, sized to the texture,
-     * and the array index when it has one.
+     * and the array index when it has one. A one-dimensional texture is kept
+     * as a two-dimensional one a row high (see `textureType`), and read at the
+     * middle of that row, or at row zero by an integer address.
      *
      * @param {TextureDecl} texture
      * @param {string} coordinate a vec4<f32> or vec4<i32> expression
-     * @returns {{ coordinate: string, layer: string | null } | null}
+     * @param {boolean} [integer]  An address rather than a coordinate.
+     * @returns {{ coordinate: string, layer: string | null, width: number,
+     *             row: boolean } | null}
      */
-    const coordinateFor = (texture, coordinate)=>{
+    const coordinateFor = (texture, coordinate, integer = false)=>{
+        const row = integer ? `vec2<i32>(${coordinate}.x, 0)` : `vec2<f32>(${coordinate}.x, 0.5)`;
         switch (texture.dimension)
         {
             case RESOURCE_DIMENSION.TEXTURE1D:
-                return { coordinate: `${coordinate}.x`, layer: null };
+                return { coordinate: row, layer: null, width: 2, row: true };
             case RESOURCE_DIMENSION.TEXTURE2D:
             case RESOURCE_DIMENSION.TEXTURE2DMS:
-                return { coordinate: `${coordinate}.xy`, layer: null };
+                return { coordinate: `${coordinate}.xy`, layer: null, width: 2, row: false };
             case RESOURCE_DIMENSION.TEXTURE3D:
             case RESOURCE_DIMENSION.TEXTURECUBE:
-                return { coordinate: `${coordinate}.xyz`, layer: null };
+                return { coordinate: `${coordinate}.xyz`, layer: null, width: 3, row: false };
             case RESOURCE_DIMENSION.TEXTURE1DARRAY:
-                return { coordinate: `${coordinate}.x`, layer: `${coordinate}.y` };
+                return { coordinate: row, layer: `${coordinate}.y`, width: 2, row: true };
             case RESOURCE_DIMENSION.TEXTURE2DARRAY:
-                return { coordinate: `${coordinate}.xy`, layer: `${coordinate}.z` };
+            case RESOURCE_DIMENSION.TEXTURE2DMSARRAY:
+                return {
+                    coordinate: `${coordinate}.xy`, layer: `${coordinate}.z`, width: 2, row: false,
+                };
             case RESOURCE_DIMENSION.TEXTURECUBEARRAY:
-                return { coordinate: `${coordinate}.xyz`, layer: `${coordinate}.w` };
+                return {
+                    coordinate: `${coordinate}.xyz`, layer: `${coordinate}.w`, width: 3, row: false,
+                };
+            default:
+                return null;
+        }
+    };
+
+    /**
+     * What `resinfo` answers for each shape, before its level is checked:
+     * the sizes a level has, then what the third component is when it is
+     * not a size.
+     *
+     * @param {TextureDecl} texture
+     * @param {string} size  The level's `textureDimensions`.
+     * @param {string} name  The texture.
+     * @returns {{ sizes: string[], layers: string | null } | null}
+     */
+    const extentFor = (texture, size, name)=>{
+        switch (texture.dimension)
+        {
+            case RESOURCE_DIMENSION.TEXTURE1D:
+                return { sizes: [`${size}.x`], layers: null };
+            case RESOURCE_DIMENSION.TEXTURE1DARRAY:
+                return { sizes: [`${size}.x`], layers: `textureNumLayers(${name})` };
+            case RESOURCE_DIMENSION.TEXTURE2D:
+            case RESOURCE_DIMENSION.TEXTURE2DMS:
+            case RESOURCE_DIMENSION.TEXTURECUBE:
+                return { sizes: [`${size}.x`, `${size}.y`], layers: null };
+            case RESOURCE_DIMENSION.TEXTURE2DARRAY:
+            case RESOURCE_DIMENSION.TEXTURE2DMSARRAY:
+            case RESOURCE_DIMENSION.TEXTURECUBEARRAY:
+                return { sizes: [`${size}.x`, `${size}.y`], layers: `textureNumLayers(${name})` };
+            case RESOURCE_DIMENSION.TEXTURE3D:
+                return { sizes: [`${size}.x`, `${size}.y`, `${size}.z`], layers: null };
             default:
                 return null;
         }
@@ -373,8 +418,8 @@ export function translateShader(container){
 
     /**
      * @param {import('./sm4.js').Instruction} instruction
-     * @param {(texture: TextureDecl, coordinate: { coordinate: string, layer: string | null },
-     *          sampler: string) => string} call
+     * @param {(texture: TextureDecl, coordinate: { coordinate: string, layer: string | null,
+     *          width: number, row: boolean }, sampler: string) => string} call
      */
     const sampleWith = (instruction, call)=>{
         const [dest, coordinate, resource, sampler] = instruction.operands;
@@ -417,19 +462,20 @@ export function translateShader(container){
      * @param {string} low
      */
     const storePair = (instruction, high, low)=>{
-        const [first, second] = instruction.operands;
-        if (first.type === OPERAND.NULL || second.type === OPERAND.NULL)
+        const pair = instruction.operands;
+        const first = pair[0];
+        if (first.type === OPERAND.NULL || pair[1].type === OPERAND.NULL)
         {
             store(first, high);
-            store(second, low);
+            store(pair[1], low);
             return;
         }
         // Both results are read before either is written: `udiv r0, r1, r0,
         // r2` divides the r0 it is about to replace.
-        const held = `t${nextTemp++}`;
-        emit(`let ${held} = ${low};`);
+        const second = held();
+        emit(`let ${second} = ${low};`);
         store(first, high);
-        store(second, held);
+        store(pair[1], second);
     };
 
     /**
@@ -992,13 +1038,14 @@ export function translateShader(container){
                 break;
             case OPCODE.SAMPLE_D:
                 sampleWith(instruction, (texture, shaped, sampler)=>{
-                    const width = shaped.coordinate.endsWith('.x')
-                        ? 1
-                        : shaped.coordinate.endsWith('.xy') ? 2 : 3;
+                    /** @param {import('./sm4.js').Operand} operand */
+                    const gradient = operand=>(shaped.row
+                        ? `vec2<f32>(${f(operand)}.x, 0.0)`
+                        : floats(operand, shaped.width));
                     return `textureSampleGrad(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
                         + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
-                        + `, ${floats(instruction.operands[4], width)}`
-                        + `, ${floats(instruction.operands[5], width)})`;
+                        + `, ${gradient(instruction.operands[4])}`
+                        + `, ${gradient(instruction.operands[5])})`;
                 });
                 break;
             case OPCODE.SAMPLE_C:
@@ -1023,39 +1070,97 @@ export function translateShader(container){
                     + `, ${f(instruction.operands[4])}.x))`);
                 break;
             }
-            case OPCODE.LD: {
-                const [target, address, resource] = instruction.operands;
+            case OPCODE.LD:
+            case OPCODE.LD_MS: {
+                const [target, address, resource, sampleIndex] = instruction.operands;
                 const texture = textureOf(resource.indices[0].value);
-                const shaped = texture ? coordinateFor(texture, i(address)) : null;
+                const shaped = texture ? coordinateFor(texture, i(address), true) : null;
                 if (!texture || !shaped
                     || texture.dimension === RESOURCE_DIMENSION.TEXTURECUBE
                     || texture.dimension === RESOURCE_DIMENSION.TEXTURECUBEARRAY)
                 {
-                    unsupported('ld on an undeclared or unsupported texture');
+                    unsupported(`${instruction.name} on an undeclared or unsupported texture`);
                     break;
                 }
-                const level = texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMS
-                    ? ''
-                    : `, ${i(address)}.w`;
-                store(target, sampledBits(texture, resource,
+                // A multisample view here is of a one-sample texture, whose
+                // one level is its only level and whose sample 0 is its only
+                // sample; any other sample reads as zero, as one out of
+                // range does.
+                const multisample = texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMS
+                    || texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMSARRAY;
+                const level = multisample ? '0' : `${i(address)}.w`;
+                const loaded = sampledBits(texture, resource,
                     `textureLoad(t${texture.slot}, ${shaped.coordinate}`
-                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`}${level})`));
+                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`}, ${level})`);
+                store(target, instruction.opcode === OPCODE.LD_MS && sampleIndex
+                    ? `select(${loaded}, ${REG}(0u), ${u(sampleIndex)}.x != 0u)`
+                    : loaded);
                 break;
             }
             case OPCODE.RESINFO: {
                 const [target, level, resource] = instruction.operands;
                 const texture = textureOf(resource.indices[0].value);
-                if (!texture || texture.dimension !== RESOURCE_DIMENSION.TEXTURE2D)
+                const name = texture ? `t${texture.slot}` : '';
+                const levels = `textureNumLevels(${name})`;
+                const wanted = `${u(level)}.x`;
+                const size = held();
+                const extent = texture ? extentFor(texture, size, name) : null;
+                if (!texture || !extent)
                 {
-                    unsupported('resinfo on anything but a 2D texture');
+                    unsupported('resinfo on an undeclared or unsupported texture');
                     break;
                 }
-                const name = `t${texture.slot}`;
-                const size = `textureDimensions(${name}, ${u(level)}.x)`;
-                const levels = `textureNumLevels(${name})`;
-                const asUint = (instruction.control & 0x3) === 2;
-                const value = `${REG}(${size}.x, ${size}.y, 0u, ${levels})`;
-                store(target, asUint ? value : `bitcast<${REG}>(vec4<f32>(${value}))`);
+                // A level past the last answers zero for its sizes; the
+                // array size and the level count are still the texture's.
+                emit(`let ${size} = textureDimensions(${name}, min(${wanted}, ${levels} - 1u));`);
+                const sizes = extent.sizes.map(component=>
+                    `select(0u, ${component}, ${wanted} < ${levels})`);
+                const mode = instruction.control & 0x3;
+                /** @type {string[]} */
+                const components = [...sizes];
+                if (extent.layers)
+                {
+                    components.push(extent.layers);
+                }
+                while (components.length < 3)
+                {
+                    components.push('0u');
+                }
+                components.push(levels);
+                let value;
+                if (mode === 2)
+                {
+                    value = `${REG}(${components.join(', ')})`;
+                }
+                else
+                {
+                    // resinfo_rcpFloat answers the reciprocal of each size,
+                    // and zero where there is no size to take it of.
+                    const floated = components.map((component, index)=>(mode === 1
+                        && index < sizes.length
+                        ? `select(0.0, 1.0 / f32(${component}), ${component} != 0u)`
+                        : `f32(${component})`));
+                    value = `bitcast<${REG}>(vec4<f32>(${floated.join(', ')}))`;
+                }
+                store(target, `(${value}).${swizzleText(resource.swizzle)}`);
+                break;
+            }
+            case OPCODE.GATHER4: {
+                const gathered = textureOf(instruction.operands[2].indices[0].value);
+                if (gathered && (gathered.returnType === RETURN_TYPE.UINT
+                    || gathered.returnType === RETURN_TYPE.SINT
+                    || gathered.dimension === RESOURCE_DIMENSION.TEXTURE1D
+                    || gathered.dimension === RESOURCE_DIMENSION.TEXTURE1DARRAY
+                    || gathered.dimension === RESOURCE_DIMENSION.TEXTURE3D))
+                {
+                    unsupported('gather4 on an integer, one- or three-dimensional texture');
+                    break;
+                }
+                // The four texels' first components, in the order WGSL and
+                // Direct3D agree on.
+                sampleWith(instruction, (texture, shaped, sampler)=>
+                    `textureGather(0, t${texture.slot}, ${sampler}, ${shaped.coordinate}`
+                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`})`);
                 break;
             }
 
@@ -1080,13 +1185,20 @@ function textureType(texture){
         : texture.returnType === RETURN_TYPE.SINT
             ? { scalar: 'i32', sampleType: 'sint' }
             : { scalar: 'f32', sampleType: 'float' };
+    // WebGPU's one-dimensional texture has one level and no layers, so a
+    // Direct3D one, which may have both, is kept as a two-dimensional texture
+    // one row high; and every texture here has one sample, so a multisample
+    // view of one is a plain view of it.
     /** @type {Record<number, [string, string]>} */
     const shapes = {
-        [RESOURCE_DIMENSION.TEXTURE1D]: ['1d', '1d'],
+        [RESOURCE_DIMENSION.TEXTURE1D]: ['2d', '2d'],
+        [RESOURCE_DIMENSION.TEXTURE1DARRAY]: ['2d_array', '2d-array'],
         [RESOURCE_DIMENSION.TEXTURE2D]: ['2d', '2d'],
+        [RESOURCE_DIMENSION.TEXTURE2DMS]: ['2d', '2d'],
         [RESOURCE_DIMENSION.TEXTURE3D]: ['3d', '3d'],
         [RESOURCE_DIMENSION.TEXTURECUBE]: ['cube', 'cube'],
         [RESOURCE_DIMENSION.TEXTURE2DARRAY]: ['2d_array', '2d-array'],
+        [RESOURCE_DIMENSION.TEXTURE2DMSARRAY]: ['2d_array', '2d-array'],
         [RESOURCE_DIMENSION.TEXTURECUBEARRAY]: ['cube_array', 'cube-array'],
     };
     const shape = shapes[texture.dimension];
