@@ -46,6 +46,7 @@ const DIERR_ACQUIRED = 0x800700aa | 0;
 const DIERR_UNSUPPORTED = 0x80004001 | 0;
 const DIERR_DEVICENOTREG = 0x80040154 | 0;
 const DIERR_NOTFOUND = 0x80070002 | 0;
+const DIERR_NOTBUFFERED = 0x80040207 | 0;
 const E_POINTER = 0x80004003 | 0;
 
 /** What a program's enumeration callback answers: another, or no more. */
@@ -779,6 +780,12 @@ export function createDirectInput(
                 && entrySize !== DIDEVICEOBJECTDATA.SIZE_DX8)
             {
                 return DIERR_INVALIDPARAM;
+            }
+            // A device that was never given a buffer has no events to hand
+            // out, which is not the same as having none waiting.
+            if (device.bufferSize === 0)
+            {
+                return DIERR_NOTBUFFERED;
             }
 
             const asked = readU32(count);

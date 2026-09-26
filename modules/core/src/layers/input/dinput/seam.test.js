@@ -30,6 +30,7 @@ const DIERR_NOTACQUIRED = 0x8007000c | 0;
 const DIERR_UNSUPPORTED = 0x80004001 | 0;
 const DIERR_DEVICENOTREG = 0x80040154 | 0;
 const DIERR_ACQUIRED = 0x800700aa | 0;
+const DIERR_NOTBUFFERED = 0x80040207 | 0;
 /** MAKEDIPROP numbers the seam does not export. */
 const DIPROP_AXISMODE = 2;
 const DIPROP_RANGE = 4;
@@ -570,6 +571,22 @@ test('GetDeviceData refuses an entry size that is neither of the two', ()=>{
         DIERR_INVALIDPARAM);
     assert.equal(f.bridge.call(f.device, 'GetDeviceData',
         [DIDEVICEOBJECTDATA.SIZE, AT.data, 0, 0]), DIERR_INVALIDPARAM);
+});
+
+test('GetDeviceData on a device with no buffer says it has none', ()=>{
+    // joystick8.c: DIERR_NOTBUFFERED until DIPROP_BUFFERSIZE is set, with a
+    // well-formed call on a held device -- not an empty read, which a program
+    // would take as a device where nothing happened.
+    const f = keyboard();
+    f.dinput.post({ kind: 'key', code: DIK_A, down: true });
+    f.memory.setU32(AT.count, 1);
+    assert.equal(f.bridge.call(f.device, 'GetDeviceData',
+        [DIDEVICEOBJECTDATA.SIZE, AT.data, AT.count, 1]), DIERR_NOTBUFFERED);
+    assert.equal(f.bridge.call(f.device, 'GetDeviceData',
+        [DIDEVICEOBJECTDATA.SIZE, 0, AT.count, 0]), DIERR_NOTBUFFERED);
+    setBufferSize(f, f.device, 8);
+    assert.equal(f.bridge.call(f.device, 'GetDeviceData',
+        [DIDEVICEOBJECTDATA.SIZE, AT.data, AT.count, 0]), DI_OK);
 });
 
 test('GetDeviceData with a null array counts without consuming', ()=>{
