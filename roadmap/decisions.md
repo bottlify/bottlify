@@ -180,6 +180,29 @@ the method's own trap. Measured on one title's menu; the block takes a dedicated
 writing it never evicts compiled guest code sitting next to the routines that write it. *2026-09-10,
 `109d90f6`.*
 
+**A29 — Video memory is a constant 256 MiB that creating a surface or texture never reduces.**
+`GetAvailableTextureMem` (Direct3D 8 and 9) and `GetAvailableVidMem` (DirectDraw) answer the same
+number however much has been created, where Wine's tests (`d3d9/tests/device.c`,
+`ddraw/tests/ddraw7.c` and its older siblings) see it fall as render targets are made. A program
+asks to size a cache, and what it does with a falling answer is evict and reload; here nothing is
+ever evicted, because a texture's storage is the guest's own memory and its GPU copy lives as long
+as it does, so a shrinking figure would make a program work around a pressure that does not exist.
+The figure sits well below a signed 32-bit boundary so a caller treating it as signed cannot go
+negative. Revisit if a program is found that checks the figure falls, or that refuses to run when
+it doesn't. *Recorded 2026-09-26; the choice predates this repository's history (`7a469c3`).*
+
+**A30 — `Present` never waits for the display, whatever presentation interval was asked for.**
+The caps advertise `D3DPRESENT_INTERVAL_ONE` and `IMMEDIATE`, and the interval a program asks for
+is parsed and handed back, but no path reads it: two presents in a row both return at once, where
+the documented contract is at most one per refresh period. The pacer
+(`webgpu/internal/pacer.js`) takes the newest frame at each display tick instead, so a frame
+presented too soon is superseded rather than shown, and the guest thread is never held for a frame.
+A guest thread parked for a refresh period costs more than any number of frames drawn. What this
+gives up: a program that
+relies on `Present` to throttle its loop runs that loop faster than the display, and burns guest
+time on frames nobody sees. *Recorded 2026-09-26; the choice predates this repository's history
+(`7a469c3`).*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
