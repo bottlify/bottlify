@@ -521,7 +521,8 @@ test('flat shading makes the two colour varyings flat on both sides, and nothing
         { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
         { usage: D3DDECLUSAGE.COLOR, usageIndex: 0, register: 1 },
     ], new Map([[0, { components: 3, scalar: 'f32', bgra: false }],
-        [1, { components: 4, scalar: 'f32', bgra: true }]]), [1], [], 0, undefined, true);
+        [1, { components: 4, scalar: 'f32', bgra: true }]]), [1], [], 0, undefined,
+    { flatColours: true });
     assertLine(hybrid.wgsl, '@location(0) @interpolate(flat) o0: vec4f,');
     assertLine(hybrid.wgsl, '@location(1) @interpolate(flat) o1: vec4f,');
     assert.ok(!translateShader(parseShader([PS_2_0, ...dclInput(0, 0),
@@ -582,7 +583,7 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
         [0, { components: 3, scalar: 'f32', bgra: false }],
         [1, { components: 3, scalar: 'f32', bgra: false }],
         [2, { components: 2, scalar: 'f32', bgra: false }],
-    ]), [], [0x20000, 0x10000, 0, 0, 0x20000]);
+    ]), [], [0x20000, 0x10000, 0, 0, 0x20000], 0, undefined, { normalizeNormals: true });
     assert.equal(generated.error, null);
     const t0 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 0);
     const t1 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 1);
@@ -606,6 +607,19 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
         + ' dot(c[14], vec4f(cameraNormal, 1.0)), dot(c[15], vec4f(cameraNormal, 1.0)),'
         + ' dot(c[16], vec4f(cameraNormal, 1.0)));');
     assert.ok(!generated.wgsl.includes(`out.o${t0} = vec4f(in.v2`), 'the carried set is not sent');
+
+    // With D3DRS_NORMALIZENORMALS off -- its default -- the camera-space
+    // normal keeps the length the transform gave it, as the fixed-function
+    // stage's does.
+    const unnormalized = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
+        { usage: D3DDECLUSAGE.NORMAL, usageIndex: 0, register: 1 },
+    ], new Map([
+        [0, { components: 3, scalar: 'f32', bgra: false }],
+        [1, { components: 3, scalar: 'f32', bgra: false }],
+    ]), [], [0x10000]);
+    assertLine(unnormalized.wgsl,
+        'let cameraNormal = (worldView * vec4f(vec4f(in.v1, 1.0).xyz, 0.0)).xyz;');
 
     const transformed = fixedVertexStage([
         { usage: D3DDECLUSAGE.POSITIONT, usageIndex: 0, register: 0 },

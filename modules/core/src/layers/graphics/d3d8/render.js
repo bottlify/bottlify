@@ -3520,6 +3520,7 @@ export function createRenderer(options){
         // Flat shading is declared on both sides of the two colour varyings,
         // so every translation of the pair is made for it.
         const flat = isFlatShaded(model);
+        const normalizeNormals = (model.renderStates.get(D3DRS.NORMALIZENORMALS) ?? 0) !== 0;
         const pixel = translationOf(pixelShader,
             `ps|fog${fog.source}/${fog.mode}${flat ? '|flat' : ''}`,
             ()=>translateShader(
@@ -3600,8 +3601,10 @@ export function createRenderer(options){
                     { inputs: layout.shapes, alsoWrite: missing, flatColours: flat }))
             : hybridStageFor(
                 `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`
-                    + `|f${fog.source}/${fog.mode}${flat ? '|flat' : ''}`,
-                wanted, layout.shapes, missing, generated, fog, flat);
+                    + `|f${fog.source}/${fog.mode}${flat ? '|flat' : ''}`
+                    + `${normalizeNormals ? '|normalize' : ''}`,
+                wanted, layout.shapes, missing, generated, fog,
+                { flatColours: flat, normalizeNormals });
         if (vertex.error)
         {
             skip('program');
@@ -3758,16 +3761,17 @@ export function createRenderer(options){
      * @param {number[]} alsoWrite
      * @param {number[]} generated
      * @param {{ source: number, mode: number }} fog  See `fogOf`.
-     * @param {boolean} flat  D3DSHADE_FLAT.
+     * @param {{ flatColours: boolean, normalizeNormals: boolean }} shading
+     *     See `fixedVertexStage`.
      */
-    const hybridStageFor = (key, wanted, shapes, alsoWrite, generated, fog, flat)=>{
+    const hybridStageFor = (key, wanted, shapes, alsoWrite, generated, fog, shading)=>{
         const existing = hybridStages.get(key);
         if (existing)
         {
             return existing;
         }
         const made = fixedVertexStage(wanted, shapes, alsoWrite, generated, fog.mode, fog.source,
-            flat);
+            shading);
         hybridStages.set(key, made);
         return made;
     };

@@ -1236,13 +1236,17 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  *        the specular alpha for a pre-transformed vertex or with no mode set,
  *        and for table fog the colour alone, with the curve's range beside it
  *        for the pixel shader to evaluate per pixel.
- * @param {boolean} [flatColours]  The two colour varyings flat, for
- *        D3DSHADE_FLAT, as the pixel shader must read them.
+ * @param {{ flatColours?: boolean, normalizeNormals?: boolean }} [options]
+ *        `flatColours`: the two colour varyings flat, for D3DSHADE_FLAT, as
+ *        the pixel shader must read them. `normalizeNormals`:
+ *        D3DRS_NORMALIZENORMALS, whether the camera-space normal a
+ *        coordinate is generated from is renormalised.
  * @returns {TranslatedShader}
  */
 export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [], fog = 0,
-    fogSource = fog === 0 ? FOG_SOURCE.NONE : FOG_SOURCE.VERTEX, flatColours = false)
+    fogSource = fog === 0 ? FOG_SOURCE.NONE : FOG_SOURCE.VERTEX, options = {})
 {
+    const flatColours = options.flatColours === true;
     /** @type {string[]} */
     const inputFields = [];
     /** @type {string[]} */
@@ -1306,7 +1310,9 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         body.push(
             `    let worldView = mat4x4f(c[${wv}], c[${wv + 1}], c[${wv + 2}], c[${wv + 3}]);`,
             `    let cameraPosition = (worldView * vec4f(${vertex}, 1.0)).xyz;`,
-            `    let cameraNormal = normalize((worldView * vec4f(${normal}, 0.0)).xyz);`);
+            options.normalizeNormals
+                ? `    let cameraNormal = normalize((worldView * vec4f(${normal}, 0.0)).xyz);`
+                : `    let cameraNormal = (worldView * vec4f(${normal}, 0.0)).xyz;`);
     }
     for (const [set, mode] of generated.entries())
     {

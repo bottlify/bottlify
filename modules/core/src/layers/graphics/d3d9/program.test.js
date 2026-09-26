@@ -654,6 +654,16 @@ test('a pixel shader over fixed-function vertices reads a coordinate the stages 
             HYBRID_CONSTANTS.TRANSFORMS * 4 + 16)],
         [0.5, 0, 0, 0.25, 0, -0.5, 0, 0.75, 0, 0, 1, 0, 0, 0, 0, 1]);
 
+        // D3DRS_NORMALIZENORMALS reaches the made stage's camera-space
+        // normal, as it reaches the fixed-function stage's: off by default,
+        // and set, a stage of its own.
+        assert.ok(vertexModule.code.includes('let cameraNormal = (worldView'));
+        h.device.SetRenderState(D3DRS.NORMALIZENORMALS, 1);
+        await h.draw();
+        assert.ok(h.gpu.of('createShaderModule').map(call=>call.descriptor)
+            .some(module=>module.label.startsWith('vs:')
+                && module.code.includes('let cameraNormal = normalize((worldView')));
+
         h.device.SetTexture(0, null);
         h.device.SetPixelShader(null);
         h.device.SetVertexDeclaration(null);
