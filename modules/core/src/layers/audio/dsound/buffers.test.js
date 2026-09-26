@@ -214,6 +214,66 @@ test('a notification behind the cursor fires when the buffer wraps past it', ()=
         'comparing offsets instead of testing the crossing would miss this');
 });
 
+test('a position where playback starts is passed first, as the cursor leaves it', ()=>{
+    // Wine's dsound test_notifications, which Windows passes: positions at 0
+    // and half way in a looping half-second buffer come in the order 0, half,
+    // 0, half -- the start is the first thing playback passes.
+    const { sound, time } = buffer({ bytes: SECOND / 2 });
+    sound.setNotifications([
+        { offset: 0, event: 10 },
+        { offset: aligned(SECOND / 4), event: 20 },
+    ]);
+    sound.play(DSBPLAY_LOOPING);
+    /** @type {number[]} */
+    const heard = [];
+    for (let step = 0; step < 30; step++)
+    {
+        time.advance(50);
+        heard.push(...sound.drainNotifications());
+    }
+    assert.deepEqual(heard, [10, 20, 10, 20, 10, 20]);
+});
+
+test('a one-shot passes its first position as it starts and its last as it ends', ()=>{
+    // Wine's dsound test_notifications_noloop: the position at 0 while the
+    // buffer is still playing, the one at its last frame once it has stopped,
+    // and the start not a second time when the cursor reads zero again.
+    const bytes = SECOND / 2;
+    const { sound, time } = buffer({ bytes });
+    sound.setNotifications([
+        { offset: 0, event: 1 },
+        { offset: bytes - FORMAT.blockAlign, event: 2 },
+    ]);
+    sound.play(0);
+    time.advance(20);
+    assert.deepEqual(sound.drainNotifications(), [1]);
+    assert.equal(sound.status(), DSBSTATUS_PLAYING);
+    time.advance(600);
+    assert.deepEqual(sound.drainNotifications(), [2]);
+    assert.equal(sound.status(), 0);
+    time.advance(100);
+    assert.deepEqual(sound.drainNotifications(), []);
+});
+
+test('a one-shot that ends and starts again between two looks passes both runs', ()=>{
+    // A tenth of a second: short enough to end and be played again between
+    // two turns of the machine.
+    const bytes = SECOND / 10;
+    const { sound, time } = buffer({ bytes });
+    sound.setNotifications([
+        { offset: aligned(bytes / 4), event: 4 },
+        { offset: aligned(bytes * 3 / 4), event: 6 },
+    ]);
+    sound.play(0);
+    time.advance(40);
+    assert.deepEqual(sound.drainNotifications(), [4]);
+    time.advance(60);
+    sound.play(0);
+    time.advance(30);
+    assert.deepEqual(sound.drainNotifications(), [6, 4],
+        'the rest of the first run and then the start of the second, in that order');
+});
+
 test('DSBPN_OFFSETSTOP fires when playback stops, and not while a loop goes round', ()=>{
     // dsound.h defines it as -1: a marker for the stop, not a place in the
     // buffer. A streaming thread waits on it to learn its sound has ended, and
