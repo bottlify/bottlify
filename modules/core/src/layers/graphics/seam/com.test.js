@@ -284,7 +284,10 @@ function overTheBridge(){
         } },
     });
     return {
-        seam: createPublisher({ publishInterface: (object, id)=>vtables.publish(object, id) }),
+        seam: createPublisher({
+            publishInterface: (object, id)=>vtables.publish(object, id),
+            unpublishInterface: (object, id)=>vtables.unpublish(object, id),
+        }),
         /** @param {string} id @param {string} name @param {number} pointer */
         call: (id, name, pointer)=>handlers.get(`${id}::${name}`).handler([pointer]) >>> 0,
     };
@@ -348,4 +351,30 @@ test('an object that says it outlives its count is not ended by reaching zero', 
     assert.equal(call(IID_ONE, 'Release', one), 0);
     assert.equal(seam.adapterFor(api).destroyed, false);
     assert.equal(call(IID_TWO, 'AddRef', two), 1, 'the other pointer still reaches it');
+});
+
+test('an object with no Release is given back, every interface it was published as', ()=>{
+    // A reflection's constant buffer has no IUnknown: nothing the program
+    // calls ends it, so whatever made it gives it back when it ends itself.
+    const { seam, call } = overTheBridge();
+    const bare = { id: IID_ONE, bare: true, methods: [
+        { name: 'GetDesc', argBytes: 8, invoke: ()=>5 },
+    ] };
+    const api = {};
+    const pointer = seam.publish(api, [bare], IID_ONE);
+    assert.equal(call(IID_ONE, 'GetDesc', pointer), 5);
+    assert.equal(seam.objectAt(pointer), api);
+
+    seam.unpublish(api);
+    assert.equal(call(IID_ONE, 'GetDesc', pointer), E_POINTER, 'the bridge let it go');
+    assert.equal(seam.objectAt(pointer), null, 'and so did the way back');
+    assert.equal(seam.count(), 0);
+    seam.unpublish(api);
+    seam.unpublish({});
+
+    const alone = publisher();
+    const other = {};
+    const kept = alone.publish(other, [bare], IID_ONE);
+    alone.unpublish(other);
+    assert.equal(alone.objectAt(kept), null, 'with no bridge to tell, the way back still goes');
 });

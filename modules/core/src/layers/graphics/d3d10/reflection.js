@@ -629,12 +629,25 @@ const describing = desc=>out=>{
  *
  * The constant buffers, their variables and their types are objects of their
  * own, made as they are asked for and kept for the reflection's life. They
- * do not count references: the runtime frees them with the reflection.
+ * do not count references: the runtime frees them with the reflection, and
+ * `children()` names them for whoever published them to give back then.
  *
  * @param {ShaderReflection} reflection
  * @param {() => void} [onLastRef]
  */
 export function createShaderReflection(reflection, onLastRef){
+    /** @type {object[]} */
+    const made = [];
+    /**
+     * @template {object} T
+     * @param {T} object
+     * @returns {T}
+     */
+    const kept = object=>{
+        made.push(object);
+        return object;
+    };
+
     /**
      * @param {ReflectedType} type
      * @param {number} offset  From the start of the structure it is a member
@@ -645,7 +658,7 @@ export function createShaderReflection(reflection, onLastRef){
     const typeObject = (type, offset)=>{
         const memberAt = objectsOf(type.members, member=>typeObject(member.type, member.offset),
             INVALID_TYPE);
-        return {
+        return kept({
             owner: self,
             GetDesc: describing({
                 Class: type.class, Type: type.type, Rows: type.rows, Columns: type.columns,
@@ -656,27 +669,27 @@ export function createShaderReflection(reflection, onLastRef){
             GetMemberTypeName: index=>(index >= 0 && index < type.members.length
                 ? { at: type.members[index].nameAt }
                 : null),
-        };
+        });
     };
 
     /** @param {ReflectedVariable} variable @returns {ReflectionVariable} */
     const variableObject = variable=>{
         /** @type {ReflectionType | null} */
         let type = null;
-        return {
+        return kept({
             owner: self,
             GetDesc: describing({
                 Name: variable.nameAt, StartOffset: variable.startOffset, Size: variable.size,
                 uFlags: variable.flags, DefaultValue: variable.defaultAt,
             }),
             GetType: ()=>(type ??= typeObject(variable.type, 0)),
-        };
+        });
     };
 
     /** @param {ReflectedConstantBuffer} buffer @returns {ReflectionConstantBuffer} */
     const bufferObject = buffer=>{
         const variableAt = objectsOf(buffer.variableList, variableObject, INVALID_VARIABLE);
-        return {
+        return kept({
             owner: self,
             GetDesc: describing({
                 Name: buffer.nameAt, Type: buffer.type, Variables: buffer.variables,
@@ -684,7 +697,7 @@ export function createShaderReflection(reflection, onLastRef){
             }),
             GetVariableByIndex: variableAt,
             GetVariableByName: name=>variableAt(indexByName(buffer.variableList, name)),
-        };
+        });
     };
 
     const bufferAt = objectsOf(reflection.constantBuffers, bufferObject,
@@ -706,6 +719,8 @@ export function createShaderReflection(reflection, onLastRef){
     };
     const self = attachCom({
         reflection,
+        /** Every constant buffer, variable and type made so far. */
+        children: ()=>[...made],
         /** @param {{ desc?: Record<string, number> } | null} out */
         GetDesc(out){
             if (!out)

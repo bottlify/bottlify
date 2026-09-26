@@ -49,6 +49,9 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @param {any} deps.graphics   The graphics api: create(name), available().
  * @param {any} deps.memory     readMemory/writeMemory.
  * @param {(object: any, interfaceId: string) => number} deps.publishInterface
+ * @param {(object: any, interfaceId: string) => boolean} [deps.unpublishInterface]
+ *        The bridge's way to give back an interface the program has no
+ *        Release for.
  * @param {() => any} deps.screen
  * @param {import('./ddraw.js').SurfaceDcServices} [deps.gdi]
  *        How a DirectDraw surface gets a device context GDI can draw through.
@@ -113,7 +116,8 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *             shadow: () => any }}
  */
 export function createGraphicsLibraries(
-    { graphics, memory, publishInterface, screen, gdi, present, publisher: shared, callGuest,
+    { graphics, memory, publishInterface, unpublishInterface, screen, gdi, present,
+        publisher: shared, callGuest,
         free, exportAddress,
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
@@ -123,7 +127,7 @@ export function createGraphicsLibraries(
         } },
 )
 {
-    const publisher = shared ?? createPublisher({ publishInterface });
+    const publisher = shared ?? createPublisher({ publishInterface, unpublishInterface });
     const fields = createFields(memory);
     const d3d8 = createDirect3D8Seam({
         publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution,

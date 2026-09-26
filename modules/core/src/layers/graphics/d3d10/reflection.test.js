@@ -305,6 +305,19 @@ test('a lookup that finds nothing answers one invalid object of its kind, never 
 
     assert.equal(a.owner, reflection, 'what its names point into');
     assert.equal(invalid.owner, null);
+
+    // What the reflection made is what goes with it; the invalid objects
+    // belong to no reflection and stay.
+    const made = reflection.children();
+    for (const object of [c1, a, t, second, c1.GetVariableByName('t')])
+    {
+        assert.ok(made.includes(object));
+    }
+    for (const object of [invalid, invalidVariable, invalidType])
+    {
+        assert.ok(!made.includes(object));
+    }
+    assert.equal(new Set(made).size, made.length, 'each once');
 });
 
 test('a buffer, a variable and a type describe themselves as the runtime does', ()=>{

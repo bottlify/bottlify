@@ -47,6 +47,7 @@ allows because `win32` is declared.
 | `cursor` | `(notice: CursorNotice) => void` | absent | Receives a Direct3D program's cursor bitmap (`width`, `height`, `hotSpot`, `bgra`, `shown`) -- once per change, not per `SetCursorProperties`/`ShowCursor` call, since a program sets the same cursor every frame. Without it `SetCursorProperties` is refused with `D3DERR_INVALIDCALL`, which tells the program to draw its own. |
 | `resolution` | `(width, height, where?: { window?, fullscreen? }) => void` | absent | Told the back-buffer size a device is created or reset at, and which window it presents into; the reported screen follows it. `where.window` is the device's `HWND` and `where.fullscreen` says whether it is exclusive; a fullscreen device's window is placed at the mode's size, so a program clipping its cursor to that window reaches the picture's corners, and a reset back to windowed reports the window at its own size again. |
 | `publishInterface` | `(object, iid) => address` | `() => 0` | The bridge's vtable publisher. The default publishes nothing, so a build without a bridge gets tables that refuse rather than pointers into nowhere. |
+| `unpublishInterface` | `(object, iid) => boolean` | none | The bridge's way to give back an interface with no `Release` (a table without `IUnknown`) when what handed it out ends. Without it such a table's words stay in the guest for the run; the way back from its pointer still goes. |
 | `exportAddress` | `(name) => address` | absent | The guest address of one of `OPENGL32.dll`'s own exports, which `wglGetProcAddress` needs to answer honestly for core names. |
 
 The six `device.*` diagnostic knobs reach the shared Direct3D renderer
@@ -370,9 +371,11 @@ Per API:
   the Direct3D 10 and 10.1 device, resources, views, state objects, shaders, queries, state
   blocks, blobs and the shader reflection. The reflection's constant buffers, variables and types
   derive from no interface: their descriptors are marked `bare`, so `com.js` lays their tables out
-  from their own first method, and since nothing can Release one, each a program looks up stays
-  published for the run. Arrays of interfaces arrive as pointer and count; a map allocates a guest
-  block of the subresource's size, shows it the current bytes, and the unmap reads it back.
+  from their own first method. Nothing the program calls can Release one, so each is given back
+  through the bridge's `unpublishInterface` with the reflection's last Release, as the runtime
+  frees them with it; the invalid object of each kind belongs to no reflection and stays. Arrays of
+  interfaces arrive as pointer and count; a map allocates a guest block of the subresource's size,
+  shows it the current bytes, and the unmap reads it back.
 - **`vulkan.js`** is a C ABI rather than COM. Every command is placed as a trap once through the
   loader's `guest` builder, so an export's address and the address `vkGetInstanceProcAddr` answers
   are the same one, minted before the program's first instruction. The runtime decides whether a

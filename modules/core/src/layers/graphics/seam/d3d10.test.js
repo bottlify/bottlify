@@ -103,6 +103,8 @@ function machine(){
         services: { readMemory: readBytes, writeMemory: writeBytes },
         /** @param {any} object @param {string} id */
         publishInterface: (object, id)=>vtables.publish(object, id),
+        /** @param {any} object @param {string} id */
+        unpublishInterface: (object, id)=>vtables.unpublish(object, id),
         /** @param {number} pointer @param {number} index @param {number[]} args */
         call(pointer, index, args = []){
             const table = memory.readU32(pointer);
@@ -181,7 +183,10 @@ function seamed(){
         presentTo: frame=>presented.push(frame),
         now: ()=>0,
     });
-    const publisher = createPublisher({ publishInterface: box.publishInterface });
+    const publisher = createPublisher({
+        publishInterface: box.publishInterface,
+        unpublishInterface: box.unpublishInterface,
+    });
     const seam = createDirect3D10Seam({
         publisher,
         memory: box.services,
@@ -1085,6 +1090,18 @@ test('a reflection\'s constant buffers, variables and types are tables without I
     assert.equal(type(invalidType, 'GetDesc', [desc]), E_FAIL);
     assert.equal(text(type(invalidType, 'GetMemberTypeName', [0])), '$Invalid');
     assert.equal(h.box.argBytesOf(t, 1), 4, 'GetType takes the interface alone');
+
+    // They go with the reflection's last Release, as the runtime frees them
+    // with it; the invalid objects belong to no reflection and stay.
+    const E_POINTER = 0x80004003;
+    assert.equal(h.box.call(reflection, 2), 0, 'the last release');
+    for (const [call, pointer] of /** @type {[any, number][]} */ ([[buffer, c1],
+        [variable, t], [type, structure], [type, second]]))
+    {
+        assert.equal(call(pointer, 'GetDesc', [desc]), E_POINTER);
+    }
+    assert.equal(buffer(invalid, 'GetDesc', [desc]), E_FAIL, 'still answering');
+    assert.equal(variable(invalidVariable, 'GetType'), invalidType);
 });
 
 test('a compile is refused as a failed compile, with the reason in the error blob', ()=>{

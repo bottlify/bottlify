@@ -2821,12 +2821,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
 
     /**
      * The reflection's constant buffers, variables and types, whose tables
-     * have no IUnknown. Nothing can Release one, so each stays published for
-     * the rest of the run, and so does the reflection it came from: a few
-     * words of guest memory for each one a program looks up, the same pointer
-     * however often it asks. The copy of the container their names point
-     * into still goes with the reflection's last Release, as the runtime's
-     * does.
+     * have no IUnknown. Nothing the program calls ends one: each is given
+     * back with the reflection's last Release, with the copy of the
+     * container its names point into, as the runtime frees them with it.
+     * The invalid object of each kind belongs to no reflection and stays.
      *
      * @param {import('./com.js').InterfaceDescriptor} descriptor
      */
@@ -3305,7 +3303,13 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                     return E_OUTOFMEMORY;
                 }
                 memory.writeMemory(copy, bytes);
-                const reflection = createShaderReflection(reflected, ()=>free?.(copy));
+                const reflection = createShaderReflection(reflected, ()=>{
+                    for (const child of reflection.children())
+                    {
+                        publisher.unpublish(child);
+                    }
+                    free?.(copy);
+                });
                 reflectionCopies.set(reflection, copy);
                 return handBack(reflection, reflectionInterfaces,
                     IID.ID3D10ShaderReflection, out);

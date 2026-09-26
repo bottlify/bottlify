@@ -2997,6 +2997,8 @@ async function buildApp(options){
             // nowhere, which is what a build with no bridge should do.
             publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
                 core.api('bridge').publishInterface(object, iid),
+            unpublishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
+                core.api('bridge').unpublishInterface(object, iid),
             // The device, with the frame boundary marked around what it
             // presents. The profiler has always been able to account per frame
             // and nothing ever told it where a frame ends, so every report said

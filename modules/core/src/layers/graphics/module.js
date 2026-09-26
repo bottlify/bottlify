@@ -779,6 +779,9 @@ export const graphicsModule = {
             // inspection -- which then gets tables that refuse rather than
             // tables that publish into nowhere.
             publishInterface: config?.publishInterface ?? (()=>0),
+            // And the way to give back an interface with no Release -- a
+            // reflection's constant buffer -- when what handed it out ends.
+            unpublishInterface: config?.unpublishInterface,
             screen: ()=>services.screen,
             // What makes GetDC on a surface mean anything: gdi32 hands back a
             // context whose bitmap addresses the surface's own bytes, so a

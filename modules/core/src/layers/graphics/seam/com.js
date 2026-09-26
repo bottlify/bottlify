@@ -89,9 +89,11 @@ function methodsFor(descriptor){
  * @param {(adapter: any) => void} onGone  Called when the last reference goes.
  * @param {(adapter: any, id: string) => void} onReferenced
  *        Called when a reference is taken through an interface.
+ * @param {(adapter: any, pointer: number) => void} onForgotten
+ *        Called when the bridge forgets one of the object's pointers.
  * @returns {any} something the bridge's publisher will accept
  */
-function adapt(api, interfaces, onGone, onReferenced){
+function adapt(api, interfaces, onGone, onReferenced, onForgotten){
     const declared = new Map(interfaces.map(entry=>[entry.id, entry]));
 
     /**
@@ -122,6 +124,17 @@ function adapt(api, interfaces, onGone, onReferenced){
          * @type {Set<number>}
          */
         pointers: new Set(),
+        /**
+         * The interfaces it was published as, which is what the bridge is
+         * told to give back for an object with no Release.
+         *
+         * @type {Set<string>}
+         */
+        ids: new Set(),
+        /** @param {number} pointer */
+        forgotten(pointer){
+            onForgotten(adapter, pointer >>> 0);
+        },
         /** @param {string} id */
         interfaceFor(id){
             // IUnknown is every object's, and answers with one record whichever
@@ -195,11 +208,15 @@ function adapt(api, interfaces, onGone, onReferenced){
  * @param {Object} deps
  * @param {(object: any, interfaceId: string) => number} deps.publishInterface
  *        The bridge's, which lays the vtable out in guest memory.
+ * @param {(object: any, interfaceId: string) => boolean} [deps.unpublishInterface]
+ *        The bridge's, which gives an interface back; without it an object
+ *        given back leaves only this file's way back to it.
  * @returns {{ publish: (api: any, interfaces: InterfaceDescriptor[], id: string) => number,
+ *             unpublish: (api: any) => void,
  *             objectAt: (pointer: number) => any,
  *             adapterFor: (api: any) => any, count: () => number }}
  */
-export function createPublisher({ publishInterface }){
+export function createPublisher({ publishInterface, unpublishInterface }){
     /** Keyed by the API object, so one object is one identity. */
     const adapters = new WeakMap();
 
@@ -211,7 +228,7 @@ export function createPublisher({ publishInterface }){
         let adapter = adapters.get(api);
         if (!adapter)
         {
-            adapter = adapt(api, interfaces, forget, remember);
+            adapter = adapt(api, interfaces, forget, remember, forgetPointer);
             adapters.set(api, adapter);
         }
         return adapter;
@@ -234,6 +251,7 @@ export function createPublisher({ publishInterface }){
         {
             byPointer.set(pointer >>> 0, adapter.api);
             adapter.pointers.add(pointer >>> 0);
+            adapter.ids.add(id);
         }
     };
 
@@ -244,6 +262,19 @@ export function createPublisher({ publishInterface }){
             byPointer.delete(pointer);
         }
         adapter.pointers.clear();
+    };
+
+    /**
+     * One pointer the bridge let go of: its words may be another object's
+     * interface by the next call that hands them in.
+     *
+     * @param {any} adapter @param {number} pointer
+     */
+    const forgetPointer = (adapter, pointer)=>{
+        if (adapter.pointers.delete(pointer))
+        {
+            byPointer.delete(pointer);
+        }
     };
 
     /**
@@ -281,8 +312,30 @@ export function createPublisher({ publishInterface }){
             {
                 byPointer.set(pointer >>> 0, api);
                 adapter.pointers.add(pointer >>> 0);
+                adapter.ids.add(id);
             }
             return pointer;
+        },
+
+        /**
+         * Gives back every interface an object was published as, for an
+         * object the program has no Release for: a table without IUnknown,
+         * which ends when whatever handed it out ends.
+         *
+         * @param {any} api
+         */
+        unpublish(api){
+            const adapter = adapters.get(api);
+            if (!adapter)
+            {
+                return;
+            }
+            for (const id of adapter.ids)
+            {
+                unpublishInterface?.(adapter, id);
+            }
+            adapter.ids.clear();
+            forget(adapter);
         },
 
         /**
