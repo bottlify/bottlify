@@ -588,12 +588,14 @@ test('rand starts where this runtime starts, without any srand at all', ()=>{
  * the functions that need those seams are exported.
  *
  * @param {any} files
+ * @param {() => any} [currentThread]
  */
-function wholeRuntime(files){
+function wholeRuntime(files, currentThread){
     const host = fakeHost(0x4000);
     let next = 0x2000;
     const fns = /** @type {Record<string, any>} */ (createMsvcrtFunctions({
         ...host,
+        currentThread,
         allocate: bytes=>{
             const at = next;
             next += bytes + 7 & ~7;
@@ -631,6 +633,29 @@ test('errno is one variable: a failing call sets what _errno points at', ()=>{
 
     assert.equal(fns.strtol.handler([put(0x100, '99999999999'), 0, 10]), 0x7fffffff);
     assert.equal(u32(cell), ERANGE, 'and written through the cell after');
+});
+
+test('each thread has its own errno: another thread\'s failure does not overwrite it', ()=>{
+    // The scheduler may switch threads between a failing call and the line
+    // that reads errno after it; the runtime keeps the variable per thread.
+    const main = { name: 'main' };
+    const worker = { name: 'worker' };
+    let current = main;
+    const { fns, put, u32 } = wholeRuntime({
+        stat: ()=>null, currentDirectory: ()=>'C:\\', setCurrentDirectory: ()=>true,
+    }, ()=>current);
+
+    assert.equal(fns._chdir.handler([put(0x100, 'C:\\nowhere')]), -1);
+    current = worker;
+    assert.equal(fns.strtol.handler([put(0x100, '99999999999'), 0, 10]), 0x7fffffff);
+    const workerErrno = fns._errno.handler([]);
+    current = main;
+    const mainErrno = fns._errno.handler([]);
+
+    assert.notEqual(mainErrno, workerErrno);
+    assert.equal(u32(mainErrno), 2, 'ENOENT, from the main thread\'s own call');
+    assert.equal(u32(workerErrno), 34, 'ERANGE, from the worker\'s');
+    assert.equal(fns._errno.handler([]), mainErrno, 'the same cell every time');
 });
 
 test('sprintf_s and vsprintf_s write what fits with its terminator, and refuse the rest', ()=>{

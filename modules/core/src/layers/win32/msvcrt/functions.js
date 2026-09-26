@@ -804,8 +804,32 @@ export function createMsvcrtFunctions(host){
     const globals = createGlobals({
         allocate, readMemory: host.readMemory, writeMemory: host.writeMemory,
     });
+
+    /**
+     * errno is the calling thread's own, as the runtime keeps it: the
+     * scheduler may switch threads between a failing call and the line that
+     * reads errno after it. Without a thread to ask, there is the one.
+     *
+     * @type {WeakMap<object, string>}
+     */
+    const errnoOf = new WeakMap();
+    let threadsSeen = 0;
+    const errnoName = ()=>{
+        const thread = host.currentThread?.();
+        if (thread === null || typeof thread !== 'object')
+        {
+            return 'errno';
+        }
+        let name = errnoOf.get(thread);
+        if (name === undefined)
+        {
+            name = `errno:${++threadsSeen}`;
+            errnoOf.set(thread, name);
+        }
+        return name;
+    };
     /** @param {number} code */
-    const errno = code=>globals.set('errno', code);
+    const errno = code=>globals.set(errnoName(), code);
 
     // The descriptor table the low-level calls hand out numbers from and the
     // streams stand on, so `_fileno(f)` is a number `_read` accepts.
@@ -859,6 +883,7 @@ export function createMsvcrtFunctions(host){
                 exitProcess: host.exitProcess,
                 exit: host.exit,
                 globals,
+                errnoName,
             })
             : {}),
 

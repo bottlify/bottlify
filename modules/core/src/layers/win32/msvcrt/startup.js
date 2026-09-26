@@ -130,6 +130,8 @@ export function splitCommandLine(line){
  * @property {import('./globals.js').Globals} [globals]
  *           The runtime's variables, shared with the functions that set them:
  *           errno is set by whichever call fails. Absent, these are private.
+ * @property {() => string} [errnoName]
+ *           Which of them is the calling thread's errno. Absent, one for all.
  */
 
 /**
@@ -437,15 +439,13 @@ export function createStartupFunctions(host){
          * The runtime's error cells, reached the same way: a library that
          * resolves them by name at load time (a packed one restoring its
          * import table) must get an address, or the call it later makes
-         * through the table goes nowhere. One cell for the process rather
-         * than one per thread: what is read after a failing call is the
-         * failing call's own, on the thread that made it, since a call
-         * answers before any other thread runs.
+         * through the table goes nowhere. errno is a cell per thread, the one
+         * the calling thread's own failing calls set.
          */
         _errno: {
             convention: 'cdecl',
             argBytes: 0,
-            handler: ()=>cell('errno', 0),
+            handler: ()=>cell(host.errnoName?.() ?? 'errno', 0),
         },
 
         __doserrno: {
