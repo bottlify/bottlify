@@ -208,8 +208,10 @@ consumed by reading, so `GetDeviceState` reports motion since the previous call;
 queue holds one event fewer than the `DIPROP_BUFFERSIZE` stated -- a buffer of one holds nothing
 and only overflows -- the oldest event going when it is full, and running it over is remembered
 and reported once, by a read or a peek, as `DI_BUFFEROVERFLOW`, the `S_FALSE` a program has to
-look at. `Unacquire` keeps the buffered events and the overflow, as Windows does, and drops only
-the motion not yet read; what arrives while nobody holds the device is not buffered. An
+look at. `Unacquire` keeps the buffered events and the overflow, as Windows does, and drops the
+motion not yet read and the keyboard's key state, so a key still held across `Unacquire` and
+`Acquire` reads up until it is pressed again; what arrives while nobody holds the device is not
+buffered. An
 unacquired device's `GetDeviceState` answers `DIERR_NOTACQUIRED`, never zeroes; its buffer can
 still be read before DirectInput 8 and answers `DIERR_NOTACQUIRED` from 8. The device's objects --
 the mouse's three axes and five buttons at their `DIMOUSESTATE2` offsets, a push button per key a
@@ -276,9 +278,9 @@ four slots.
   device's own `RunControlPanel` and `Initialize`** are declared and answer `E_NOTIMPL`.
 - **`SetProperty` acts on the buffer size alone**; the axis mode, ranges and dead zones are
   accepted and ignored. `GetProperty` for anything but the buffer size is `DIERR_UNSUPPORTED`.
-- **A device's key and button state is not cleared by `Unacquire`** and changes only while the
-  device is acquired, so a key let go while a program had given the device up still reads as held
-  after its next `Acquire`.
+- **A mouse's button state is not cleared by `Unacquire`** and changes only while the device is
+  acquired, so a button let go while a program had given the mouse up still reads as held after its
+  next `Acquire`.
 - **The keyboard's objects are the keys a host can press**, one per DIK code the key table maps,
   fewer than the 128 buttons `GetCapabilities` counts.
 - **Two-pad play** is not modelled; the first pad present is the pad.
