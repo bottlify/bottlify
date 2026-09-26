@@ -609,6 +609,32 @@ test('placing a window as the system would moves it and tells the program', ()=>
     assert.equal(queue.peek({ hwnd: null, first: 0, last: 0, remove: true }), null);
 });
 
+test('the service measures a client area where it is on the screen, as ClientToScreen does', ()=>{
+    // Read from outside this layer by whoever places a picture in a window it
+    // did not draw -- a film in the window a program named its owner -- so
+    // the origin is the screen's, a child's inside its parent's frame.
+    const WS_CAPTION = 0x00c00000;
+    const { fns, memory, hwnd, service } = withWindow({ style: WS_CAPTION });
+    const child = createWindow(fns, memory,
+        { style: WS_CHILD, parent: hwnd, x: 7, y: 9, width: 50, height: 40 });
+    for (const window of [hwnd, child])
+    {
+        memory.putU32s(TEXT_BUFFER, [0, 0]);
+        fns.ClientToScreen.handler([window, TEXT_BUFFER]);
+        fns.GetClientRect.handler([window, RECT_BUFFER]);
+        assert.deepEqual(service.clientRect(window), {
+            left: memory.u32(TEXT_BUFFER),
+            top: memory.u32(TEXT_BUFFER + 4),
+            right: memory.u32(TEXT_BUFFER) + memory.u32(RECT_BUFFER + RECT.right),
+            bottom: memory.u32(TEXT_BUFFER + 4) + memory.u32(RECT_BUFFER + RECT.bottom),
+        });
+    }
+    const outer = /** @type {any} */ (service.clientRect(hwnd));
+    assert.deepEqual([service.clientRect(child)?.left, service.clientRect(child)?.top],
+        [outer.left + 7, outer.top + 9], 'the child is placed inside its parent\'s client area');
+    assert.equal(service.clientRect(0x9999), null);
+});
+
 test('MoveWindow changes both rectangles', ()=>{
     const { fns, memory, hwnd } = withWindow();
 
