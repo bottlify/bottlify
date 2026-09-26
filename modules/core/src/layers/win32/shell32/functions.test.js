@@ -432,13 +432,15 @@ async function machineWithVolume(){
     const shell = /** @type {any} */ (createShellFunctions({
         readMemory: (address, length)=>memory.slice(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
+        // As the memory layer reads an ANSI string: in Windows-1252, which is
+        // what the Encoding standard calls latin1.
         readCString: (address, limit)=>{
-            let text = '';
-            for (let at = address; at < address + limit && memory[at] !== 0; at++)
+            let end = address;
+            while (end < address + limit && memory[end] !== 0)
             {
-                text += String.fromCharCode(memory[at]);
+                end++;
             }
-            return text;
+            return new TextDecoder('latin1').decode(memory.subarray(address, end));
         },
         resolve: path=>fs.resolve(path).path,
         volume: { ...volume, drives: ()=>['C'] },
@@ -518,6 +520,42 @@ test('SHFileOperation copies, moves, renames and deletes on the volume', async()
     assert.equal(m.view.getUint32(0x112, true), 0xaaaaaaaa, 'and the record left alone');
     assert.deepEqual([m.shell.SHFileOperationA.argBytes, m.shell.SHFileOperationW.argBytes],
         [4, 4]);
+});
+
+test('an ANSI name in the upper half of the page names the file CreateFileA made by it', async()=>{
+    // 0x80 is the euro sign in Windows-1252 and 0x99 the trade mark, as every
+    // ANSI path is read: a list of them names the same file, not one called
+    // by the control characters of the same codes.
+    const m = await machineWithVolume();
+    const node = m.volume.open('\u20ac\u2122.txt', { write: true, create: true, truncate: true });
+    m.volume.close(node);
+    const remove = m.record(3, m.list(['\x80\x99.txt'], false), 0, 0x0614);
+    assert.equal(await m.shell.SHFileOperationA.handler([remove]), 0);
+    assert.ok(!m.volume.stat('\u20ac\u2122.txt'));
+});
+
+test('a folder path in the upper half of the ANSI page goes back in that page', ()=>{
+    // Through the item id list and out of SHGetPathFromIDListA, and straight
+    // out of SHGetSpecialFolderPathA: the euro sign 0x80, the trade mark 0x99.
+    const memory = new Uint8Array(0x1000).fill(0xaa);
+    let free = 0x800;
+    const shell = /** @type {any} */ (createShellFunctions({
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
+        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = free;
+            free += bytes;
+            return at;
+        },
+        folders: { Desktop: 'C:\\\u20ac\u2122' },
+    }));
+    const CSIDL_DESKTOPDIRECTORY = 0x10;
+    assert.equal(shell.SHGetSpecialFolderLocation.handler([0, CSIDL_DESKTOPDIRECTORY, 0x100]), 0);
+    const list = new DataView(memory.buffer).getUint32(0x100, true);
+    assert.equal(shell.SHGetPathFromIDListA.handler([list, 0x200]), 1);
+    assert.deepEqual([...memory.subarray(0x200, 0x206)], [0x43, 0x3a, 0x5c, 0x80, 0x99, 0]);
+    assert.equal(shell.SHGetSpecialFolderPathA.handler([0, 0x300, CSIDL_DESKTOPDIRECTORY, 0]), 1);
+    assert.deepEqual([...memory.subarray(0x300, 0x306)], [0x43, 0x3a, 0x5c, 0x80, 0x99, 0]);
 });
 
 test('SHCreateDirectoryEx makes the whole path, and says when it was there', async()=>{

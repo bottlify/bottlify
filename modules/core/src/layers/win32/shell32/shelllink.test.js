@@ -53,14 +53,19 @@ function setup(){
     const readMemory = (address, length)=>bytes.subarray(address, address + length);
     /** @param {number} address @param {Uint8Array} data */
     const writeMemory = (address, data)=>bytes.set(data, address);
-    /** @param {number} address @param {number} maxLength */
+    /**
+     * As the memory layer reads an ANSI string: in Windows-1252, which is what
+     * the Encoding standard calls latin1.
+     *
+     * @param {number} address @param {number} maxLength
+     */
     const readCString = (address, maxLength)=>{
-        let text = '';
-        for (let at = 0; at < maxLength && bytes[address + at] !== 0; at++)
+        let end = address;
+        while (end - address < maxLength && bytes[end] !== 0)
         {
-            text += String.fromCharCode(bytes[address + at]);
+            end++;
         }
-        return text;
+        return new TextDecoder('latin1').decode(bytes.subarray(address, end));
     };
     /** @param {number} address @param {number} maxLength */
     const readWideString = (address, maxLength)=>{
@@ -284,6 +289,29 @@ test('a target set through the wide interface reads back through the ANSI one', 
     fx.bytes.fill(0, BUF, BUF + 512);
     assert.equal(call(object, IID_ISHELL_LINK_A, 'GetPath', [BUF, 260, 0, 0]), S_OK);
     assert.equal(fx.ansiAt(BUF), 'C:\\App\\game.exe', 'one object, one target');
+});
+
+test('a target in the upper half of the ANSI page reads back through GetPath in that page', ()=>{
+    // 0x80 is the euro sign in Windows-1252, 0x99 the trade mark and 0x97 an
+    // em dash: an ANSI target keeps its bytes, and a wide one reaches the
+    // ANSI getter, and its WIN32_FIND_DATAA, as WideCharToMultiByte(CP_ACP)
+    // writes it.
+    const fx = setup();
+    const object = createLink(fx);
+    fx.bytes.set([0x43, 0x3a, 0x5c, 0x80, 0x99, 0x97, 0], STR);
+    assert.equal(call(object, IID_ISHELL_LINK_A, 'SetPath', [STR]), S_OK);
+    fx.bytes.fill(0, BUF, BUF + 512);
+    assert.equal(call(object, IID_ISHELL_LINK_A, 'GetPath', [BUF, 260, 0, 0]), S_OK);
+    assert.deepEqual([...fx.bytes.subarray(BUF, BUF + 7)], [0x43, 0x3a, 0x5c, 0x80, 0x99, 0x97, 0]);
+
+    const wide = createLink(fx, IID_ISHELL_LINK_W);
+    fx.putWide(STR, 'C:\\\u2014\u00e9');
+    assert.equal(call(wide, IID_ISHELL_LINK_W, 'SetPath', [STR]), S_OK);
+    fx.bytes.fill(0, BUF, BUF + 512);
+    assert.equal(call(wide, IID_ISHELL_LINK_A, 'GetPath', [BUF, 260, BUF + 0x100, 0]), S_OK);
+    assert.deepEqual([...fx.bytes.subarray(BUF, BUF + 6)], [0x43, 0x3a, 0x5c, 0x97, 0xe9, 0]);
+    assert.deepEqual([...fx.bytes.subarray(BUF + 0x100 + 44, BUF + 0x100 + 50)],
+        [0x43, 0x3a, 0x5c, 0x97, 0xe9, 0], 'cFileName');
 });
 
 test('Save leaves a file at the path, which the existence check then finds', ()=>{

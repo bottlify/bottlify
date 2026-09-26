@@ -35,6 +35,7 @@
 
 import { MY_COMPUTER, createShellNamespace, listBytes, pathOfList } from './namespace.js';
 import { createDirectoryPath, runFileOperation } from './fileop.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 /** ShellExecute reports failure as a value of 32 or less, not as zero. */
 const SE_ERR_FNF = 2;
@@ -187,15 +188,8 @@ const CSIDL_FOLDERS = Object.freeze({
  *           without the volume.
  */
 
-/** @param {string} text @returns {Uint8Array} eight-bit text with its terminator */
-const sz = text=>{
-    const bytes = new Uint8Array(text.length + 1);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at] = text.charCodeAt(at) & 0xff;
-    }
-    return bytes;
-};
+/** @param {string} text @returns {Uint8Array} text in the ANSI page, with its terminator */
+const sz = text=>encodeAnsi(`${text}\0`);
 
 /** @param {number} value */
 const dword = value=>new Uint8Array([
@@ -377,6 +371,9 @@ export function createShellFunctions(host){
         const names = [];
         let name = '';
         const unit = wide ? 2 : 1;
+        // An ANSI name is the page's, as the path of every other ANSI call is.
+        const text = (/** @type {string} */ units)=>(wide ? units
+            : decodeAnsi(Uint8Array.from(units, character=>character.charCodeAt(0))));
         for (let at = address >>> 0; at - (address >>> 0) < MAX_LIST * unit; at += 256)
         {
             const bytes = host.readMemory(at, 256);
@@ -392,7 +389,7 @@ export function createShellFunctions(host){
                 {
                     return names;
                 }
-                names.push(name);
+                names.push(text(name));
                 name = '';
             }
         }
