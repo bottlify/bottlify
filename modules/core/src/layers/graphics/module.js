@@ -760,6 +760,9 @@ export const graphicsModule = {
             render: ()=>({
                 backend: device ? api.backend() : undefined,
                 readMemory: services.readMemory,
+                // A lock, a device context or a blit of a render target brings
+                // what the GPU drew back into the guest's bytes first.
+                writeMemory: services.writeMemory,
                 createSampler: device
                     ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
                     : undefined,
