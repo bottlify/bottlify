@@ -675,6 +675,11 @@ export const graphicsModule = {
             exportAddress: config?.exportAddress,
             // Where a program's cursor goes, when the host shows one.
             cursor: config?.cursor,
+            // The clock the display's raster -- the vertical blank and the
+            // scan line -- runs on: the guest's, from the assembling caller
+            // that owns it, because a program that spins on the blank times
+            // the spin with its own timers. The host's without one.
+            now: config?.guestNow,
             // Told the resolution a device is created at, so the reported
             // screen becomes that resolution.
             resolution: config?.resolution,

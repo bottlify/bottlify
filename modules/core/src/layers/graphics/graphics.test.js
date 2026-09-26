@@ -18,6 +18,7 @@ import { createFakeDevice } from './webgpu/internal/fake-device.js';
 import { FVF } from './webgpu/internal/vertexformat.js';
 import { D3DFMT, D3DPOOL, D3DRTYPE, D3D_OK } from './d3d9/constants.js';
 import { D3DPT, D3DTA, D3DTOP, D3DTSS } from './d3d8/constants.js';
+import { IID_IDirectDraw } from './seam/iids.js';
 
 /** A host that hands over only what the module declares it requires. */
 function hostWith(/** @type {any} */ memory){
@@ -347,6 +348,43 @@ test('a frame is not delivered faster than the cap the caller set', async()=>{
     assert.ok(armed.length > 0 || clock >= 1000 / 60,
         'it was held rather than delivered inside the cap');
 
+    await graphicsModule.dispose();
+});
+
+test('the display\'s raster runs on the guest\'s clock when the caller hands one over', async()=>{
+    // A program that spins on the vertical blank or the scan line and times
+    // the spin with its own timers is comparing two readings of one clock --
+    // the guest's -- so the raster has to be on it too; on the host's, the
+    // two drift apart whenever the machine runs slower or faster than real
+    // time.
+    const ram = new Uint8Array(0x1000);
+    /** @type {any[]} */
+    const published = [];
+    let guest = 0;
+    const api = await graphicsModule.create({
+        guestNow: ()=>guest,
+        publishInterface: (/** @type {any} */ object)=>{
+            published.push(object);
+            return 0x100 + published.length * 4;
+        },
+    }, hostWith({
+        readBytes: (/** @type {number} */ at, /** @type {number} */ n)=>ram.slice(at, at + n),
+        writeBytes: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>ram.set(bytes, at),
+    }));
+    assert.equal(api.libraries()['DDRAW.dll'].DirectDrawCreate.handler([0, 0x800, 0]), 0);
+    const adapter = published[0];
+    const scanLine = adapter.interfaceFor(IID_IDirectDraw).methods
+        .find((/** @type {any} */ method)=>method.name === 'GetScanLine');
+    /** @param {number} at @returns {number} the line the raster is on, at that guest time */
+    const lineAt = at=>{
+        guest = at;
+        assert.equal(scanLine.invoke(adapter, [0x900]), 0);
+        return new DataView(ram.buffer).getUint32(0x900, true);
+    };
+    assert.equal(lineAt(0), 0, 'the top of the frame at guest time zero');
+    const later = lineAt(1000 / 120);
+    assert.ok(later > 100, `half a frame of guest time later the beam is lower (${later})`);
+    assert.equal(lineAt(0), 0, 'and it is the guest\'s clock it follows, not the host\'s');
     await graphicsModule.dispose();
 });
 
