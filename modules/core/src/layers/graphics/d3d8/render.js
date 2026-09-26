@@ -36,7 +36,7 @@
  */
 
 import {
-    COLORWRITEENABLE_ALPHA, COORD_SET_MASK, D3DBLEND, D3DCLEAR, D3DCMP, D3DCULL, D3DFMT,
+    COLORWRITEENABLE_ALPHA, COORD_SET_MASK, D3DBLEND, D3DCLEAR, D3DCMP, D3DCULL, D3DFILL, D3DFMT,
     D3DFMT_INDEX, D3DFOG, D3DLOCK, D3DPT, D3DRS, D3DSHADE, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP,
     D3DTS,
     D3DTSS, D3DUSAGE, D3DZB, D3D_OK, FORMAT_INFO, argumentsRead, dwordToFloat, isCompressed,
@@ -437,6 +437,37 @@ export function listIndices(type, indices){
             break;
         default:
             throw new Error(`Primitive type ${type} is already a list`);
+    }
+    const wide = out.some(value=>value > 0xffff);
+    return wide ? Uint32Array.from(out) : Uint16Array.from(out);
+}
+
+/**
+ * Triangles under D3DRS_FILLMODE WIREFRAME or POINT, rewritten as the lines
+ * or points they draw: each triangle's three edges, or its three vertices.
+ * WebGPU has no fill mode, so the topology is what carries it.
+ *
+ * @param {number} type  D3DPT, a triangle type
+ * @param {ArrayLike<number>} indices  The vertex indices in the type's order.
+ * @param {number} fill  D3DFILL, WIREFRAME or POINT
+ * @returns {Uint16Array | Uint32Array}
+ */
+export function filledIndices(type, indices, fill){
+    const triangles = type === D3DPT.TRIANGLELIST ? indices : listIndices(type, indices);
+    const whole = triangles.length - triangles.length % 3;
+    /** @type {number[]} */
+    const out = [];
+    for (let at = 0; at < whole; at += 3)
+    {
+        const [a, b, c] = [triangles[at], triangles[at + 1], triangles[at + 2]];
+        if (fill === D3DFILL.WIREFRAME)
+        {
+            out.push(a, b, b, c, c, a);
+        }
+        else
+        {
+            out.push(a, b, c);
+        }
     }
     const wide = out.some(value=>value > 0xffff);
     return wide ? Uint32Array.from(out) : Uint16Array.from(out);
@@ -4417,9 +4448,12 @@ export function createRenderer(options){
      * @param {number} type
      * @param {ArrayLike<number>} indices  in strip or fan order
      * @param {number} baseVertex
+     * @param {number} [fill]  D3DFILL; SOLID rewrites a strip or fan as a list.
      */
-    const expandedGeometry = (type, indices, baseVertex)=>{
-        const expanded = listIndices(type, indices);
+    const expandedGeometry = (type, indices, baseVertex, fill = D3DFILL.SOLID)=>{
+        const expanded = fill === D3DFILL.SOLID
+            ? listIndices(type, indices)
+            : filledIndices(type, indices, fill);
         return {
             indices: {
                 ...scratchIndices.write(expanded),
@@ -4442,6 +4476,30 @@ export function createRenderer(options){
      */
     const listed = (model, type)=>type === D3DPT.TRIANGLEFAN
         || (type === D3DPT.TRIANGLESTRIP && isFlatShaded(model));
+
+    /**
+     * The fill mode a draw's triangles are drawn under; anything that is not
+     * a triangle is SOLID, as D3DRS_FILLMODE leaves it. WebGPU cannot cull a
+     * line or a point, so a culled wireframe also draws its back faces'
+     * edges, where Direct3D culls the triangle before it is turned to lines.
+     *
+     * @param {RenderModel} model @param {number} type
+     */
+    const fillOf = (model, type)=>{
+        if (type !== D3DPT.TRIANGLELIST && type !== D3DPT.TRIANGLESTRIP
+            && type !== D3DPT.TRIANGLEFAN)
+        {
+            return D3DFILL.SOLID;
+        }
+        const fill = model.renderStates.get(D3DRS.FILLMODE) ?? D3DFILL.SOLID;
+        return fill === D3DFILL.POINT || fill === D3DFILL.WIREFRAME ? fill : D3DFILL.SOLID;
+    };
+
+    /** @type {Readonly<Record<number, string>>} the topology a fill mode draws triangles as */
+    const FILLED = Object.freeze({
+        [D3DFILL.POINT]: 'point-list',
+        [D3DFILL.WIREFRAME]: 'line-list',
+    });
 
     /** The vertices zero to count, which is what a non-indexed fan is a fan of. */
     const ascending = (/** @type {number} */ count)=>
@@ -4834,9 +4892,10 @@ export function createRenderer(options){
         drawPrimitive(model, type, startVertex, primitiveCount){
             const stream = model.stream;
             const count = vertexCountOf(type, primitiveCount);
-            const rewrite = listed(model, type);
+            const fill = fillOf(model, type);
+            const rewrite = fill !== D3DFILL.SOLID || listed(model, type);
             const prepared = prepare(model, stream.stride,
-                rewrite ? LIST_OF[type] : TOPOLOGY[type]);
+                FILLED[fill] ?? (rewrite ? LIST_OF[type] : TOPOLOGY[type]));
             if (!prepared)
             {
                 return;
@@ -4848,7 +4907,7 @@ export function createRenderer(options){
             record(model, prepared, {
                 vertices: { gpu: streamBuffer.gpu, offset: 0 },
                 ...(rewrite
-                    ? expandedGeometry(type, ascending(count), startVertex)
+                    ? expandedGeometry(type, ascending(count), startVertex, fill)
                     : { indices: null, count, first: startVertex }),
             });
             if (dumpDraws && prepared.program)
@@ -4879,7 +4938,10 @@ export function createRenderer(options){
                 return;
             }
             const count = vertexCountOf(type, primitiveCount);
-            const list = LIST_OF[type];
+            const fill = fillOf(model, type);
+            // A list drawn solid binds the program's own indices; anything
+            // else is rewritten from them.
+            const list = fill === D3DFILL.SOLID ? LIST_OF[type] : FILLED[fill];
             const prepared = prepare(model, stream.stride,
                 list === undefined ? TOPOLOGY[type] : list);
             if (!prepared)
@@ -4922,7 +4984,7 @@ export function createRenderer(options){
                 readMemory(model.indices.base + byteOffset, count * format.bytes), format.bytes);
             record(model, prepared, {
                 vertices,
-                ...expandedGeometry(type, order, model.baseVertexIndex),
+                ...expandedGeometry(type, order, model.baseVertexIndex, fill),
             });
             if (dumpDraws && prepared.program)
             {
@@ -4943,8 +5005,9 @@ export function createRenderer(options){
          */
         drawPrimitiveUp(model, type, primitiveCount, vertexData, stride){
             const count = vertexCountOf(type, primitiveCount);
-            const rewrite = listed(model, type);
-            const topology = rewrite ? LIST_OF[type] : TOPOLOGY[type];
+            const fill = fillOf(model, type);
+            const rewrite = fill !== D3DFILL.SOLID || listed(model, type);
+            const topology = FILLED[fill] ?? (rewrite ? LIST_OF[type] : TOPOLOGY[type]);
             const prepared = prepare(model, stride, topology);
             if (!prepared)
             {
@@ -4952,7 +5015,7 @@ export function createRenderer(options){
             }
             const vertices = scratchVertices.write(vertexData.subarray(0, count * stride));
             const geometry = rewrite
-                ? expandedGeometry(type, ascending(count), 0)
+                ? expandedGeometry(type, ascending(count), 0, fill)
                 : { indices: null, count, first: 0 };
             record(model, prepared, { vertices, ...geometry });
             if (dumpDraws && prepared.program)
@@ -4987,7 +5050,8 @@ export function createRenderer(options){
                 return;
             }
             const count = vertexCountOf(type, primitiveCount);
-            const list = LIST_OF[type];
+            const fill = fillOf(model, type);
+            const list = fill === D3DFILL.SOLID ? LIST_OF[type] : FILLED[fill];
             const prepared = prepare(model, stride, list === undefined ? TOPOLOGY[type] : list);
             if (!prepared)
             {
@@ -5004,7 +5068,7 @@ export function createRenderer(options){
                         first: 0,
                         baseVertex: 0,
                     }
-                    : expandedGeometry(type, indices, 0)),
+                    : expandedGeometry(type, indices, 0, fill)),
             });
             if (dumpDraws && prepared.program)
             {

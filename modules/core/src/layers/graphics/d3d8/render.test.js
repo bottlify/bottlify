@@ -34,7 +34,8 @@ import {
 import { createDirect3D8 } from './device.js';
 import {
     IDENTITY, LIGHT_FLOATS, UNIFORM_AT, UNIFORM_FLOATS, colorToFloats, expandTexels, eyePosition,
-    HARDWARE_SAMPLER, listIndices, multiplyMatrices, packLight, pipelineStateOf, samplerFlagsOf,
+    HARDWARE_SAMPLER, filledIndices, listIndices, multiplyMatrices, packLight, pipelineStateOf,
+    samplerFlagsOf,
     screenExtent, transformPosition, uniformBlock, fogModeOf, fogOf, isAffine,
     vertexCountOf,
 } from './render.js';
@@ -652,6 +653,20 @@ test('byte-exact: strips and fans expand to the lists they draw, winding kept', 
     assert.equal(vertexCountOf(D3DPT.TRIANGLELIST, 2), 6);
     assert.equal(vertexCountOf(7, 2), 0, 'not a primitive type');
     assert.equal(vertexCountOf(D3DPT.POINTLIST, 0), 0);
+});
+
+test('byte-exact: triangles under a fill mode become their edges or their vertices', ()=>{
+    // D3DFILL_WIREFRAME draws each triangle's three edges and D3DFILL_POINT
+    // its three vertices (Microsoft's D3DFILLMODE), whatever type of
+    // triangles they are.
+    assert.deepEqual([...filledIndices(D3DPT.TRIANGLELIST, [0, 1, 2, 3, 4, 5], 2)],
+        [0, 1, 1, 2, 2, 0, 3, 4, 4, 5, 5, 3]);
+    assert.deepEqual([...filledIndices(D3DPT.TRIANGLESTRIP, [0, 1, 2, 3], 2)],
+        [0, 1, 1, 2, 2, 0, 1, 3, 3, 2, 2, 1]);
+    assert.deepEqual([...filledIndices(D3DPT.TRIANGLEFAN, [0, 1, 2, 3], 1)],
+        [1, 2, 0, 2, 3, 0]);
+    assert.deepEqual([...filledIndices(D3DPT.TRIANGLELIST, [7, 8, 9, 10], 1)], [7, 8, 9],
+        'an incomplete triangle draws nothing');
 });
 
 // --- recorded commands: what the GPU was asked to do ---
@@ -1832,6 +1847,53 @@ test('recorded: a flat-shaded strip is drawn as a list, each triangle from its f
         assert.equal(gouraud.draw.state.flatShading, false);
         assert.equal(gouraud.draw.state.topology, 'triangle-strip');
     });
+
+test('recorded: FILLMODE WIREFRAME and POINT draw triangles as lines and points', async()=>{
+    // WebGPU has no fill mode, so the topology carries it: the triangles'
+    // edges as a line list, their vertices as a point list, rewritten from
+    // the program's own vertices or indices; lines and points are left as
+    // they are.
+    const drawWith = async(/** @type {number} */ fill, /** @type {boolean} */ indexed)=>{
+        const h = harness();
+        const { device } = h;
+        assert.equal(device.SetRenderState(D3DRS.LIGHTING, 0), D3D_OK);
+        assert.equal(device.SetRenderState(D3DRS.FILLMODE, fill), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF.XYZ | FVF.DIFFUSE), D3D_OK);
+        const vertices = new Uint8Array(16 * 4);
+        assert.equal(indexed
+            ? device.DrawIndexedPrimitiveUP(D3DPT.TRIANGLELIST, 0, 4, 2,
+                new Uint8Array(Uint16Array.from([0, 1, 2, 2, 1, 3]).buffer),
+                D3DFMT_INDEX.INDEX16, vertices, 16)
+            : device.DrawPrimitiveUP(D3DPT.TRIANGLESTRIP, 2, vertices, 16), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.LINELIST, 1, vertices, 16), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        const draws = h.device.diagnostics().lastFrame
+            .filter((/** @type {any} */ c)=>c.kind === 'draw');
+        const scratch = h.gpu.of('writeBuffer').filter((/** @type {any} */ call)=>
+            call.buffer.descriptor.label.startsWith('scratch-indices'));
+        const written = scratch.length > 0 ? scratch[scratch.length - 1].bytes : null;
+        return { draws, written };
+    };
+    const wire = await drawWith(2, false);
+    assert.equal(wire.draws[0].state.topology, 'line-list');
+    assert.equal(wire.draws[0].count, 12);
+    assert.deepEqual([...new Uint16Array(/** @type {Uint8Array} */ (wire.written).buffer,
+        /** @type {Uint8Array} */ (wire.written).byteOffset, 12)],
+    [0, 1, 1, 2, 2, 0, 1, 3, 3, 2, 2, 1]);
+    assert.equal(wire.draws[1].state.topology, 'line-list', 'a line list is left a line list');
+    assert.equal(wire.draws[1].count, 2);
+
+    const points = await drawWith(1, true);
+    assert.equal(points.draws[0].state.topology, 'point-list');
+    assert.deepEqual([...new Uint16Array(/** @type {Uint8Array} */ (points.written).buffer,
+        /** @type {Uint8Array} */ (points.written).byteOffset, 6)], [0, 1, 2, 2, 1, 3]);
+
+    const solid = await drawWith(3, true);
+    assert.equal(solid.draws[0].state.topology, 'triangle-list');
+    assert.equal(solid.draws[0].count, 6, 'solid is the triangles as given');
+});
 
 test('a state renormalises its normals only when NORMALIZENORMALS asks', ()=>{
     const model = /** @type {any} */ ({
