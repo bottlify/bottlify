@@ -11,8 +11,8 @@
  *
  * Test support only, like `corpus.js`: nothing in the product reads a pool.
  * The single-instruction corpus judges one instruction at a time against the
- * hardware recording and finds nothing left; this is what `emit/
- * sequences.itest.js` judges *interactions* with -- sequences of two to eight
+ * hardware recording and finds nothing left; this is what
+ * `sequences-judge.js` judges *interactions* with -- sequences of two to eight
  * instructions run live against the emulator, which is where a defect one
  * instruction cannot show lives.
  */

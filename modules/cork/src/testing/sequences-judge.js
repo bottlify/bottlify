@@ -15,7 +15,7 @@
  * status word -- is an interaction: MMX, x87 and SSE across several
  * instructions, and across the two executors. This file generates sequences of
  * two to eight instructions from a pool of hand-encoded forms
- * (`../testing/sequences.js`), runs each on the emulator and on the translator
+ * (`sequences.js`), runs each on the emulator and on the translator
  * from one state, and compares everything a program can read: every register,
  * the flags, the x87 block with its top, its empty mask and its status word,
  * the SSE registers and MXCSR, and the memory the sequence wrote.
@@ -28,6 +28,11 @@
  * still reproduces each, found by dropping instructions while the divergence
  * stays.
  *
+ * Run in parts, `emit/sequences-N.itest.js`: every part generates the whole
+ * run from the seed and judges the sequences whose index is its own modulo the
+ * number of parts, so the sequences and their names are those of one run, and
+ * a part stays inside the minute the runner gives a file.
+ *
  * Needs the prebuilt emulator (`npm run fetch:v86`). `SEQUENCES` raises the
  * count, `SEQUENCE_SEED` names another run, `SEQUENCE_SHRINK` how many of the
  * diverging sequences are minimised.
@@ -35,20 +40,20 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { skipWithout } from '../testing/fetched.js';
+import { skipWithout } from './fetched.js';
 import { readFile } from 'node:fs/promises';
 import { createV86Host } from '../../../core/src/layers/cpu/internal/v86-host.js';
 import { createHybridHost } from '../../../core/src/layers/cpu/internal/hybrid-host.js';
 import { TABLES_RESERVE } from '../../../core/src/layers/cpu/engine.js';
 import { createCorkRuntime } from '../runtime/runtime.js';
 import { PageFlag } from '../runtime/pages.js';
-import { restore, snapshot } from '../testing/snapshot.js';
-import { replaySlice, retireExactly } from '../testing/differential.js';
+import { restore, snapshot } from './snapshot.js';
+import { replaySlice, retireExactly } from './differential.js';
 import {
     CODE, DATA, DATA_BYTES, HALT, POOL, REGISTERS, SETUP, SPANS, XMM, bodyOf, minimise, namesOf,
     preambleOf, programBytes, random,
-} from '../testing/sequences.js';
-import { theEmulatorsOwn } from '../testing/excuses.js';
+} from './sequences.js';
+import { theEmulatorsOwn } from './excuses.js';
 
 const PREBUILT = new URL('../../../core/vendor/prebuilt/', import.meta.url);
 const ENTRY_VECTOR = 0x7000;
@@ -69,8 +74,8 @@ const u32 = value=>Uint8Array.from([value & 0xff, value >>> 8 & 0xff,
 /**
  * The ways the pinned emulator leaves what the hardware recording holds, or
  * what the manual says, named here so that this corpus does not ask the
- * translator to match them. `testing/corpus.itest.js` keeps the same kind of
- * list for the single instructions, and `emit/corpus.itest.js` the same for
+ * translator to match them. `corpus.itest.js` keeps the same kind of
+ * list for the single instructions, and `translated-corpus.js` the same for
  * the translator against the recording; in every class below the translator
  * is the side the recording agrees with.
  *
@@ -258,89 +263,99 @@ async function createJudge(){
     };
 }
 
-test('sequences of x87, MMX and SSE leave what the emulator leaves',
-    { skip: skipWithout(new URL('v86.wasm', PREBUILT), new URL('libv86.mjs', PREBUILT)),
-        timeout: 30 * 60 * 1000 },
-    async()=>{
-        const machine = await createJudge();
-        const started = Date.now();
-        const next = random(SEED);
-        /** @type {Map<string, { count: number, at: string, what: string }>} */
-        const groups = new Map();
-        /** @type {string[]} */
-        const failures = [];
-        /** @param {import('../testing/snapshot.js').Divergence[]} divergences */
-        const what = divergences=>divergences.slice(0, 5)
-            .map(one=>`${one.name} ${String(one.expected)} != ${String(one.actual)}`).join('; ');
-        /**
+/**
+ * One part of the run: the sequences whose index is `part` modulo `of`.
+ *
+ * @param {number} part @param {number} of
+ */
+export function testSequences(part, of){
+    test(`sequences of x87, MMX and SSE leave what the emulator leaves (part ${part + 1} of ${of})`,
+        { skip: skipWithout(new URL('v86.wasm', PREBUILT), new URL('libv86.mjs', PREBUILT)) },
+        async()=>{
+            const machine = await createJudge();
+            const started = Date.now();
+            const next = random(SEED);
+            /** @type {Map<string, { count: number, at: string, what: string }>} */
+            const groups = new Map();
+            /** @type {string[]} */
+            const failures = [];
+            /** @param {import('./snapshot.js').Divergence[]} divergences */
+            const what = divergences=>divergences.slice(0, 5)
+                .map(one=>`${one.name} ${String(one.expected)} != ${String(one.actual)}`)
+                .join('; ');
+            /**
          * @param {number} index @param {number[]} body @param {number[]} setup
-         * @param {import('../testing/snapshot.js').Divergence[]} divergences
+         * @param {import('./snapshot.js').Divergence[]} divergences
          */
-        const render = (index, body, setup, divergences)=>`seed ${SEED} #${index}`
+            const render = (index, body, setup, divergences)=>`seed ${SEED} #${index}`
             + `${setup.length > 0 ? ` [${namesOf(setup)}]` : ''} ${namesOf(body)}: `
             + what(divergences);
-        let judged = 0;
-        let diverged = 0;
-        let shrunk = 0;
-        let unrun = 0;
-        try
-        {
-            for (let index = 0; index < COUNT; index++)
+            let judged = 0;
+            let diverged = 0;
+            let shrunk = 0;
+            let unrun = 0;
+            try
             {
-                const body = bodyOf(next);
-                const setup = preambleOf(next);
-                const result = await machine.judge(body, setup);
-                if (result === null)
+                for (let index = 0; index < COUNT; index++)
                 {
-                    unrun++;
-                    continue;
-                }
-                judged++;
-                const { divergences } = result;
-                if (divergences.length === 0)
-                {
-                    continue;
-                }
-                diverged++;
-                if (failures.length < 40)
-                {
-                    failures.push(render(index, body, setup, divergences));
-                }
-                if (shrunk >= SHRINK)
-                {
-                    continue;
-                }
-                shrunk++;
-                const minimal = await minimise(body, async trial=>{
-                    const again = await machine.judge(trial, setup);
-                    return again !== null && again.divergences.length > 0;
-                });
-                // Judged again on its own: the group is named by what the
-                // shortest sequence reproducing the divergence actually shows,
-                // not by what the longer one it was found in showed.
-                const own = await machine.judge(minimal, setup);
-                const least = own === null ? divergences : own.divergences;
-                const key = namesOf(minimal);
-                const found = groups.get(key);
-                if (found)
-                {
-                    found.count++;
-                }
-                else
-                {
-                    groups.set(key, {
-                        count: 1,
-                        at: render(index, minimal, setup, least),
-                        what: what(least),
+                    const body = bodyOf(next);
+                    const setup = preambleOf(next);
+                    if (index % of !== part)
+                    {
+                        continue;
+                    }
+                    const result = await machine.judge(body, setup);
+                    if (result === null)
+                    {
+                        unrun++;
+                        continue;
+                    }
+                    judged++;
+                    const { divergences } = result;
+                    if (divergences.length === 0)
+                    {
+                        continue;
+                    }
+                    diverged++;
+                    if (failures.length < 40)
+                    {
+                        failures.push(render(index, body, setup, divergences));
+                    }
+                    if (shrunk >= SHRINK)
+                    {
+                        continue;
+                    }
+                    shrunk++;
+                    const minimal = await minimise(body, async trial=>{
+                        const again = await machine.judge(trial, setup);
+                        return again !== null && again.divergences.length > 0;
                     });
+                    // Judged again on its own: the group is named by what the
+                    // shortest sequence reproducing the divergence actually shows,
+                    // not by what the longer one it was found in showed.
+                    const own = await machine.judge(minimal, setup);
+                    const least = own === null ? divergences : own.divergences;
+                    const key = namesOf(minimal);
+                    const found = groups.get(key);
+                    if (found)
+                    {
+                        found.count++;
+                    }
+                    else
+                    {
+                        groups.set(key, {
+                            count: 1,
+                            at: render(index, minimal, setup, least),
+                            what: what(least),
+                        });
+                    }
                 }
-            }
-            const report = machine.diagnostics();
-            const leftOut = Object.entries(report.refused).sort((a, b)=>b[1] - a[1])
-                .slice(0, 8).map(([opcode, count])=>`${opcode}x${count}`).join(' ');
-            const ranked = [...groups].sort((a, b)=>b[1].count - a[1].count);
-            const share = machine.share();
-            console.log(`sequences: ${judged} judged, ${diverged} diverged, ${unrun} not run, `
+                const report = machine.diagnostics();
+                const leftOut = Object.entries(report.refused).sort((a, b)=>b[1] - a[1])
+                    .slice(0, 8).map(([opcode, count])=>`${opcode}x${count}`).join(' ');
+                const ranked = [...groups].sort((a, b)=>b[1].count - a[1].count);
+                const share = machine.share();
+                console.log(`sequences: ${judged} judged, ${diverged} diverged, ${unrun} not run, `
                 + `${machine.published()} translated, ${share.toFixed(2)} of the subject's `
                 + `instructions the translator's, ${machine.excused()} findings the `
                 + `emulator's own, ${shrunk} minimised into ${groups.size} groups, `
@@ -348,21 +363,23 @@ test('sequences of x87, MMX and SSE leave what the emulator leaves',
                 + `${ranked.length > 0 ? '; ' : ''}`
                 + ranked.slice(0, 10).map(([key, one])=>`${key} x${one.count}`).join(' | ')
                 + `${leftOut === '' ? '' : `; left out: ${leftOut}`}`);
-            assert.ok(judged > COUNT * 0.9, `only ${judged} of ${COUNT} sequences ran`);
-            // Every sequence translates whole now: a region with both classes
-            // is no longer cut at its first x87 instruction, so the translator
-            // publishes an entry for all of them and runs almost every
-            // instruction (was a half and a fifth when the crossover was left
-            // out). A regression that cuts the crossover again drops both.
-            assert.ok(machine.published() > judged * 0.98,
-                `the translator published an entry for ${machine.published()} of ${judged}`);
-            assert.ok(share > 0.85, `the translator ran ${share} of the subject's instructions`);
-            assert.equal(diverged, 0, `${diverged} diverged:\n${failures.join('\n')}\n`
+                assert.ok(judged > COUNT / of * 0.9, `only ${judged} of ${COUNT / of} sequences ran`);
+                // Every sequence translates whole now: a region with both classes
+                // is no longer cut at its first x87 instruction, so the translator
+                // publishes an entry for all of them and runs almost every
+                // instruction (was a half and a fifth when the crossover was left
+                // out). A regression that cuts the crossover again drops both.
+                assert.ok(machine.published() > judged * 0.98,
+                    `the translator published an entry for ${machine.published()} of ${judged}`);
+                assert.ok(share > 0.85,
+                    `the translator ran ${share} of the subject's instructions`);
+                assert.equal(diverged, 0, `${diverged} diverged:\n${failures.join('\n')}\n`
                 + [...groups].map(([key, one])=>`  ${key} x${one.count}\n    ${one.at}`)
                     .join('\n'));
-        }
-        finally
-        {
-            machine.stop();
-        }
-    });
+            }
+            finally
+            {
+                machine.stop();
+            }
+        });
+}

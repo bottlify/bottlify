@@ -310,7 +310,7 @@ async function run(executable, engine, config = {}){
 }
 
 test('x87 in the shapes a compiled C program has translates whole under hybrid',
-    { timeout: 120000 }, async()=>{
+    async()=>{
         const exe = buildX87Exe();
         const reference = await run(exe, 'emulator');
         assert.equal(reference.code, EXPECTED);
@@ -338,7 +338,7 @@ test('x87 in the shapes a compiled C program has translates whole under hybrid',
     });
 
 test('a transparent callee leaves the return block a region of its own',
-    { timeout: 120000 }, async()=>{
+    async()=>{
         const exe = buildTransparentExe();
         const reference = await run(exe, 'emulator');
         assert.equal(reference.code, 7, 'the callee\'s sum, stored after the return');
@@ -369,7 +369,7 @@ test('a transparent callee leaves the return block a region of its own',
     });
 
 test('the mixer shape runs its loop whole and no slower than the emulator under hybrid',
-    { timeout: 180000 }, async()=>{
+    async()=>{
         const exe = buildMixerExe();
         const reference = await run(exe, 'emulator');
         assert.equal(reference.code, 200, 'the x87 accumulation, mod 256');
@@ -399,7 +399,7 @@ const parts = cork=>cork.formingMs + cork.lookupMs + cork.emitMs + cork.encodeMs
     + cork.storeMs + cork.instantiateMs + cork.publishMs;
 
 test('a second run against one store emits nothing, and the split says where the time goes',
-    { timeout: 120000 }, async()=>{
+    async()=>{
         const { memoryTranslationStore } = await import('../../cork/src/runtime/cache.js');
         const store = memoryTranslationStore();
         const exe = buildX87Exe();

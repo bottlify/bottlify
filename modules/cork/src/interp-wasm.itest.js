@@ -34,7 +34,7 @@ const ONLY = new RegExp(process.env.CORPUS_ONLY ?? '', 'i');
 const X87_PRECISION = new Set(['x87-int-binop', 'fscale-wide']);
 
 test('the wasm tier leaves what the hardware left, on every case the interpreters model',
-    { skip: !existsSync(CORPUS) && `missing ${CORPUS.href}`, timeout: 30 * 60 * 1000 },
+    { skip: !existsSync(CORPUS) && `missing ${CORPUS.href}` },
     async()=>{
         const { cases } = loadCorpus(await readFile(CORPUS));
         const selected = cases.filter(one=>ONLY.test(one.name));

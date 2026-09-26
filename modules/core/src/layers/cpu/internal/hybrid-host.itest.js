@@ -11,7 +11,7 @@
  * instruction count of an emulator-only run.
  */
 
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { CPU_COUNTERS, cpuModule } from '../module.js';
@@ -19,6 +19,11 @@ import { createMetrics } from '../../log/internal/metrics.js';
 
 const PREBUILT = new URL('../../../../vendor/prebuilt/', import.meta.url);
 const ENGINE = new URL('../../../../../cork/src/index.js', import.meta.url).href;
+
+// A test that fails before its own dispose would leave the translator's worker
+// thread holding the process open, and the file would never end.
+afterEach(()=>cpuModule.dispose());
+
 const GUEST_CODE = 0x8000;
 /** @param {number} value */
 const u32 = value=>[

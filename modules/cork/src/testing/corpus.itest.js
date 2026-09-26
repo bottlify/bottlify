@@ -62,7 +62,7 @@ const EMULATOR_KNOWN = [
 ];
 
 test('the corpus passes on the emulator through the harness',
-    { skip: skipWithout(new URL('v86.wasm', PREBUILT), CORPUS), timeout: 30 * 60 * 1000 },
+    { skip: skipWithout(new URL('v86.wasm', PREBUILT), CORPUS) },
     async()=>{
         const wasm = await readFile(new URL('v86.wasm', PREBUILT));
         const host = await createV86Host({

@@ -35,7 +35,7 @@ const u32 = value=>Uint8Array.from(
     [value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff]);
 
 test('the emulator replayed against itself diffs to nothing on every corpus case',
-    { skip: skipWithout(new URL('v86.wasm', PREBUILT), CORPUS), timeout: 30 * 60 * 1000 },
+    { skip: skipWithout(new URL('v86.wasm', PREBUILT), CORPUS) },
     async()=>{
         const wasm = await readFile(new URL('v86.wasm', PREBUILT));
         const host = await createV86Host({

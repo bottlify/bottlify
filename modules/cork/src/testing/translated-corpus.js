@@ -14,15 +14,18 @@
  * is counted by that instruction's opcode and not judged -- the list of
  * opcodes is the emitter's work list, printed with the count.
  *
+ * Run in parts, `emit/corpus-N.itest.js`, each every `of`-th case from its
+ * own offset, so a part stays inside the minute the runner gives a file.
+ *
  * Needs the corpus (`npm run fetch:corpus`); no emulator.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { skipWithout } from '../testing/fetched.js';
+import { skipWithout } from './fetched.js';
 import { readFile } from 'node:fs/promises';
-import { createTestMachine } from '../testing/machine.js';
-import { BSS, BSS_SIZE, diffFixture, loadCorpus } from '../testing/corpus.js';
+import { createTestMachine } from './machine.js';
+import { BSS, BSS_SIZE, diffFixture, loadCorpus } from './corpus.js';
 
 const CORPUS = new URL('../../vendor/nasm-corpus.json.gz', import.meta.url);
 const ONLY = new RegExp(process.env.CORPUS_ONLY ?? '', 'i');
@@ -36,11 +39,18 @@ const VECTOR_NAMES = new Map([[0, 'DE'], [6, 'UD'], [13, 'GP']]);
  */
 const X87_PRECISION = new Set(['x87-int-binop', 'fscale-wide']);
 
-test('translated code leaves what the hardware left, on every case it translates in full',
-    { skip: skipWithout(CORPUS), timeout: 30 * 60 * 1000 },
+/**
+ * One part of the corpus: the cases whose index is `part` modulo `of`.
+ *
+ * @param {number} part @param {number} of
+ */
+export function testTranslatedCorpus(part, of){
+    test(`translated code leaves what the hardware left, on every case it translates in full`
+        + ` (part ${part + 1} of ${of})`,
+    { skip: skipWithout(CORPUS) },
     async()=>{
         const { cases } = loadCorpus(await readFile(CORPUS));
-        const selected = cases.filter(one=>ONLY.test(one.name));
+        const selected = cases.filter((one, index)=>index % of === part && ONLY.test(one.name));
         /** @type {string[]} */
         const failures = [];
         /** @type {Map<string, number>} */
@@ -136,6 +146,7 @@ test('translated code leaves what the hardware left, on every case it translates
         assert.equal(failures.length, 0,
             `${failures.length} diverged:\n${failures.slice(0, 40).join('\n')}`);
         assert.ok(judged > 0);
-        assert.equal(precision, X87_PRECISION.size,
+        assert.equal(precision, selected.filter(one=>X87_PRECISION.has(one.name)).length,
             'every named precision case still diverges, and no other');
     });
+}

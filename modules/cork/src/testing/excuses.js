@@ -6,9 +6,9 @@
 
 /**
  * The divergences that are the pinned emulator's own, named so both sequence
- * corpora -- `emit/sequences.itest.js` (the translator as the subject) and
+ * corpora -- `testing/sequences-judge.js` (the translator as the subject) and
  * `interp.itest.js` (the interpreter) -- judge only what the two subjects can
- * be held to. The classes are the ones `emit/sequences.itest.js` documents:
+ * be held to. The classes are the ones `testing/sequences-judge.js` documents:
  * the sign of the indefinite a masked fault leaves, the environment's pointer
  * fields, `fnclex` and the condition codes, and the NaN an MMX write and an
  * x87 read leave differently.

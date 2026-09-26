@@ -133,7 +133,7 @@ async function run(executable, engine){
 }
 
 test('hello ends under cork as it ends on the emulator, with the emulator absent',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 60000 }, async()=>{
+    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
         const exe = new Uint8Array(await readFile(FIXTURE('hello.exe')));
         const reference = await run(exe, 'emulator');
         const cork = await run(exe, 'cork');
@@ -145,7 +145,7 @@ test('hello ends under cork as it ends on the emulator, with the emulator absent
 for (const name of ['qsort.exe', 'threads.exe', 'session.exe'])
 {
     test(`${name} ends under cork as it ends on the emulator`,
-        { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 60000 }, async()=>{
+        { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
             const exe = new Uint8Array(await readFile(FIXTURE(name)));
             const reference = await run(exe, 'emulator');
             const cork = await run(exe, 'cork');
@@ -191,7 +191,7 @@ for (const name of ['qsort.exe', 'threads.exe', 'session.exe'])
 }
 
 test('a return into the entry vector runs BOUND under cork as on the emulator',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 60000 }, async()=>{
+    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
         const exe = buildVectorReturnExe();
         const reference = await run(exe, 'emulator');
         const cork = await run(exe, 'cork');
@@ -202,7 +202,7 @@ test('a return into the entry vector runs BOUND under cork as on the emulator',
     });
 
 test('a loop calling an import runs and translates under cork',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 60000 }, async()=>{
+    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
         const exe = buildLoopExe();
         const reference = await run(exe, 'emulator');
         assert.equal(reference.code, (3 * ITERATIONS) & 0xff);
@@ -281,7 +281,7 @@ function buildComputeExe(count = 2_000_000){
 }
 
 test('a cold loop becomes a region on its second visit',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 60000 }, async()=>{
+    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
         // Eight iterations are more than the default threshold of two and far
         // fewer than the sampler's old two thousand: before the translation
         // policy was lowered for cork this loop stayed interpreted and formed
@@ -293,7 +293,7 @@ test('a cold loop becomes a region on its second visit',
     });
 
 test('a compute loop runs under cork not below the emulator',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 120000 }, async()=>{
+    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
         const exe = buildComputeExe();
         const reference = await run(exe, 'emulator');
         const cork = await run(exe, 'cork');
@@ -311,7 +311,7 @@ test('a compute loop runs under cork not below the emulator',
     });
 
 test('the trap count and the trap log agree with the emulator\'s run of the loop',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 120000 }, async()=>{
+    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
         const exe = buildLoopExe();
         const reference = await run(exe, 'emulator');
         const cork = await run(exe, 'cork');
@@ -354,7 +354,7 @@ async function fault(executable, engine){
 }
 
 test('a fault under cork is reported as the emulator reports it',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 120000 }, async()=>{
+    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
         const exe = buildFaultExe();
         const reference = await fault(exe, 'emulator');
         assert.equal(reference.error.reason, 'guest-fault');
@@ -435,7 +435,7 @@ function buildUnpackerExe(){
 }
 
 test('an unpacker-shaped program runs under cork',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 180000 }, async()=>{
+    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
         const exe = buildUnpackerExe();
         const reference = await run(exe, 'emulator');
         assert.equal(reference.code, (0x11 * 200000 + 0x22 * 200000) & 0xff);
@@ -448,7 +448,7 @@ test('an unpacker-shaped program runs under cork',
     });
 
 test('a call area switched on mid-run is traced from the next call on',
-    { timeout: 60000 }, async()=>{
+    async()=>{
     // The journal's answer for a call's area is kept per name until a level
     // moves; switching tracing on while the program runs must reach the very
     // next call under that name.

@@ -42,7 +42,7 @@ const ONLY = new RegExp(process.env.CORPUS_ONLY ?? '', 'i');
 const X87_PRECISION = new Set(['x87-int-binop', 'fscale-wide']);
 
 test('the interpreter leaves what the hardware left, on every case it models',
-    { skip: skipWithout(CORPUS), timeout: 30 * 60 * 1000 },
+    { skip: skipWithout(CORPUS) },
     async()=>{
         const { cases } = loadCorpus(await readFile(CORPUS));
         const selected = cases.filter(one=>ONLY.test(one.name));
@@ -214,7 +214,7 @@ const u32 = value=>Uint8Array.from(
 
 /**
  * The sequence corpus with the interpreter as the subject: the same generated
- * chains `emit/sequences.itest.js` judges on translated code, run here on the
+ * chains `testing/sequences-judge.js` judges on translated code, run here on the
  * interpreter tier alone. The oracle is the emulator, over a host of its own
  * (cork-alone has no emulator to share), so the two machines start from one
  * snapshot: the interpreter's state block is restored from the emulator's
@@ -227,7 +227,7 @@ const u32 = value=>Uint8Array.from(
  * count, `SEQUENCE_SEED` names another run.
  */
 test('sequences of x87, MMX and SSE leave what the emulator leaves, on the interpreter',
-    { skip: skipWithout(new URL('v86.wasm', PREBUILT)), timeout: 30 * 60 * 1000 },
+    { skip: skipWithout(new URL('v86.wasm', PREBUILT)) },
     async()=>{
         const seed = Number(process.env.SEQUENCE_SEED ?? 0xc05eed);
         const count = Number(process.env.SEQUENCES ?? 2000);
@@ -252,7 +252,7 @@ test('sequences of x87, MMX and SSE leave what the emulator leaves, on the inter
         }));
         emulator.onTrap(()=>{});
         // The reset `fninit; hlt`, a fresh FPU, the known XMM/MXCSR and the
-        // registers, exactly as `emit/sequences.itest.js` sets the oracle up.
+        // registers, exactly as `testing/sequences-judge.js` sets the oracle up.
         emulator.writePhysical(SETUP, new Uint8Array([0xdb, 0xe3, 0xf4]));
         emulator.writePhysical(ENTRY_VECTOR, u32(SETUP));
         emulator.cpu().run_slice(100);
