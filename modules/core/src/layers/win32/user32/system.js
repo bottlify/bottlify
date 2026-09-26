@@ -463,6 +463,14 @@ const messageBoxDefault = type=>{
  */
 export function createSystemFunctions({ host, live, windows, classes }){
     /**
+     * A window as the program is told of it: the desktop, the one window
+     * here that is not the program's, as none.
+     *
+     * @param {number} hwnd
+     */
+    const programs = hwnd=>(hwnd !== 0 && host.isDesktop?.(live(hwnd)) ? 0 : hwnd);
+
+    /**
      * ToUnicode and ToAscii, spelt once: the character the key makes under
      * the caller's key state, written as a code unit of `unit` bytes.
      *
@@ -3129,16 +3137,21 @@ export function createSystemFunctions({ host, live, windows, classes }){
             },
         },
 
-        /** HWND GetActiveWindow(void) */
+        /**
+         * HWND GetActiveWindow(void) / HWND GetForegroundWindow(void)
+         *
+         * Nothing while the desktop has the activation: it is no window of
+         * the program's, as another program's window would not be.
+         */
         GetActiveWindow: {
             argBytes: 0,
-            handler: ()=>host.active?.() ?? 0,
+            handler: ()=>programs(host.active?.() ?? 0),
         },
 
         /** HWND GetForegroundWindow(void) */
         GetForegroundWindow: {
             argBytes: 0,
-            handler: ()=>host.active?.() ?? 0,
+            handler: ()=>programs(host.active?.() ?? 0),
         },
 
         /**
@@ -3146,11 +3159,12 @@ export function createSystemFunctions({ host, live, windows, classes }){
          *
          * The window the keyboard goes to, which is a control more often
          * than a top-level window -- and nothing at all until something
-         * took it, which is a state a program checks for.
+         * took it, which is a state a program checks for, or while the
+         * desktop has it.
          */
         GetFocus: {
             argBytes: 0,
-            handler: ()=>host.focus?.() ?? 0,
+            handler: ()=>programs(host.focus?.() ?? 0),
         },
 
         /**
@@ -3238,7 +3252,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([hwnd])=>{
-                const previous = host.active?.() ?? 0;
+                const previous = programs(host.active?.() ?? 0);
                 if (!live(hwnd))
                 {
                     return 0;
