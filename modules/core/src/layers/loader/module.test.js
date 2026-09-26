@@ -557,3 +557,43 @@ test('bindHooks wired to the real bridge.siteHook writes a stub address the brid
 
     await bridgeModule.dispose();
 });
+
+test('a synthesised module\'s variables are a writable region beside its read-only code',
+    async()=>{
+        // The runtime writes its own variables -- a standard stream's flags --
+        // through the checked host path, which refuses a write to code.
+        /** @type {{ name: string, base: number, size: number, access: string }[]} */
+        const regions = [];
+        const memory = {
+            /** @param {any} region */
+            register: region=>regions.push({ ...region }),
+            writeBytes: ()=>{},
+            /** @param {string} name @param {string} access */
+            protect(name, access){
+                const region = regions.find(entry=>entry.name === name);
+                if (region)
+                {
+                    region.access = access;
+                }
+            },
+            RegionKind: { IMAGE: 'image' },
+            Access: { READ_WRITE_EXECUTE: 'rwx', READ_EXECUTE: 'rx', READ_WRITE: 'rw' },
+        };
+        const host = /** @type {any} */ ({
+            requireApi: /** @param {string} name */ name=>({ memory })[name],
+        });
+        const loader = await loaderModule.create({}, host);
+        const base = 0x70000000;
+        const placed = loader.synthesise({ name: 'MSVCRT.dll', base, exports: [
+            { name: 'exit', target: 0x2000 }, { name: '_iob', data: new Uint8Array(640) }] });
+
+        assert.deepEqual(regions.map(({ name, access })=>({ name, access })), [
+            { name: 'MSVCRT.dll', access: 'rx' },
+            { name: 'MSVCRT.dll .data', access: 'rw' },
+        ]);
+        const data = regions[1];
+        const iob = /** @type {number} */ (placed.addressOf('_iob'));
+        assert.ok(iob >= data.base && iob + 640 <= data.base + data.size);
+        assert.equal(regions[0].base + regions[0].size, data.base, 'the two are one image');
+        assert.equal(data.base + data.size, base + placed.size);
+    });
