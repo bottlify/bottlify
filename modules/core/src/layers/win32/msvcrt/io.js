@@ -21,11 +21,16 @@
  * Text mode belongs to the descriptor: a read folds CR LF into LF and stops at
  * a ^Z, a write puts CR before every LF. Which mode a file opens in is the
  * caller's `_O_TEXT` or `_O_BINARY`, and when it names neither, the runtime's
- * `_fmode`, which starts out text.
+ * `_fmode`, which starts out text. A Unicode translation is text mode over
+ * UTF-16, which the file keeps as UTF-16 or UTF-8 (see widetext.js).
  */
 
 import { HANDLE_STDERR, HANDLE_STDIN, HANDLE_STDOUT } from '../kernel32/console.js';
 import { EACCES, EBADF, EEXIST, EINVAL, EMFILE, ENOENT, ENOSPC } from './globals.js';
+import {
+    O_UNICODE, O_WTEXT, bytesOfUnits, decodeUnits, encodeUnits, encodingOf, foldUnits, markIn,
+    markOf, textOfUnits, unitsOf, unmarkedEncodingOf,
+} from './widetext.js';
 
 /** `_open` flags, at msvcrt's values (fcntl.h). */
 const O_WRONLY = 0x0001;
@@ -39,8 +44,12 @@ const O_EXCL = 0x0400;
 const O_TEXT = 0x4000;
 export const O_BINARY = 0x8000;
 
-/** The Unicode translations `_setmode` names, which this runtime does not carry. */
-const O_UNICODE = [0x10000, 0x20000, 0x40000];
+/**
+ * The Unicode translation a set of flags names, or 0.
+ *
+ * @param {number} flags
+ */
+const unicodeOf = flags=>O_UNICODE.find(mode=>(flags & mode) !== 0) ?? 0;
 
 /** msvcrt's own ceiling on open descriptors. */
 const MAX_DESCRIPTORS = 2048;
@@ -149,6 +158,13 @@ export function latin1(bytes){
  *           0 before. Closing the descriptor closes it.
  * @property {boolean} append    Every write goes to the end of the file first.
  * @property {boolean} text
+ * @property {number} unicode    The Unicode translation the descriptor is in,
+ *           `_O_WTEXT`, `_O_U16TEXT` or `_O_U8TEXT`; 0 for none.
+ * @property {import('./widetext.js').Encoding} encoding
+ *           How the file keeps the UTF-16 of a Unicode translation.
+ * @property {Promise<void> | null} ready
+ *           The file's mark being read, when the volume has not got the
+ *           bytes yet; a read waits for it.
  * @property {boolean} ended     A ^Z was read: reads answer nothing until a seek.
  * @property {boolean} temporary The file is removed when the descriptor closes.
  * @property {number} [console]  The standard handle a console descriptor stands for.
@@ -174,7 +190,7 @@ export function latin1(bytes){
  *
  * @param {OpenFile} file
  * @param {{ text: boolean, append?: boolean, temporary?: boolean, handle?: number,
- *           console?: number }} settings
+ *           console?: number, unicode?: number }} settings
  * @returns {Descriptor}
  */
 const over = (file, settings)=>({
@@ -199,7 +215,10 @@ const over = (file, settings)=>({
     },
     handle: settings.handle ?? 0,
     append: Boolean(settings.append),
-    text: settings.text,
+    text: settings.text || Boolean(settings.unicode),
+    unicode: settings.unicode ?? 0,
+    encoding: encodingOf(settings.unicode ?? 0),
+    ready: null,
     ended: false,
     temporary: Boolean(settings.temporary),
     console: settings.console,
@@ -209,7 +228,8 @@ const over = (file, settings)=>({
 /**
  * A descriptor on the console, for the standard handle it stands for.
  *
- * @param {number} handle @param {{ text: boolean, append?: boolean }} settings
+ * @param {number} handle
+ * @param {{ text: boolean, append?: boolean, unicode?: number }} settings
  */
 const onConsole = (handle, settings)=>{
     const read = handle === HANDLE_STDIN;
@@ -227,6 +247,7 @@ const onConsole = (handle, settings)=>{
  * @property {boolean} [append]
  * @property {boolean | null} [text]  Null: whatever `_fmode` says.
  * @property {boolean} [temporary]  Remove the file when the descriptor closes.
+ * @property {number} [unicode]  A Unicode translation to open it in.
  */
 
 /**
@@ -292,6 +313,44 @@ export function createDescriptors(host){
     const sizeOf = descriptor=>host.files.stat(descriptor.path)?.size ?? 0;
 
     /**
+     * A file opened in a Unicode translation: an empty one open for writing
+     * starts with the mark of the translation's encoding, and one with
+     * something in it that is open for reading is read the way its own mark
+     * says -- skipped, so the first read is of the text -- or, with no mark,
+     * the way the translation reads such a file (Wine's msvcrt
+     * test_file_write_read).
+     *
+     * @param {Descriptor} descriptor
+     */
+    const markFile = descriptor=>{
+        const size = sizeOf(descriptor);
+        if (size === 0 && descriptor.write)
+        {
+            const mark = markOf(descriptor.encoding);
+            descriptor.position = host.files.write(descriptor.node, 0, mark);
+            return;
+        }
+        if (size === 0 || !descriptor.read)
+        {
+            return;
+        }
+        const reading = settle(host.files.read(descriptor.node, 0, 3), head=>{
+            const mark = markIn(head);
+            descriptor.encoding = mark?.encoding ?? unmarkedEncodingOf(descriptor.unicode);
+            if (mark && descriptor.position === 0)
+            {
+                descriptor.position = mark.length;
+            }
+        });
+        if (reading instanceof Promise)
+        {
+            descriptor.ready = reading.then(()=>{
+                descriptor.ready = null;
+            });
+        }
+    };
+
+    /**
      * A stretch of the file for a stream, from what the last one read when it
      * holds the stretch -- or holds the end of the file, when that read found
      * it and some of what it read is still unconsumed. Past that, the volume
@@ -354,11 +413,17 @@ export function createDescriptors(host){
                 return -1;
             }
             const file = { node, path, position: 0, read: request.read, write: request.write };
-            table.set(fd, over(file, {
+            const descriptor = over(file, {
                 append: request.append,
                 text: request.text ?? ((host.fmode?.() ?? 0) & O_BINARY) === 0,
                 temporary: request.temporary,
-            }));
+                unicode: request.unicode,
+            });
+            table.set(fd, descriptor);
+            if (descriptor.unicode !== 0)
+            {
+                markFile(descriptor);
+            }
             return fd;
         },
 
@@ -383,7 +448,8 @@ export function createDescriptors(host){
          * then on: the lowest number free, or -1 with EBADF for a handle
          * that is not an open file. A standard handle is the console.
          *
-         * @param {number} handle @param {{ text: boolean, append: boolean }} settings
+         * @param {number} handle
+         * @param {{ text: boolean, append: boolean, unicode: number }} settings
          */
         adopt(handle, settings){
             const standard = handle === HANDLE_STDIN || handle === HANDLE_STDOUT
@@ -539,19 +605,31 @@ export function createDescriptors(host){
         /**
          * Writes at the position -- at the end first when the descriptor
          * appends -- and answers with how many of the caller's bytes were
-         * stored whole; in text mode each LF goes out as CR LF.
+         * stored whole; in text mode each LF goes out as CR LF. In a Unicode
+         * translation the caller's bytes are UTF-16, kept in the file's
+         * encoding, and on the console they are the characters they spell.
          *
          * @param {Descriptor} descriptor @param {Uint8Array} bytes
          */
         put(descriptor, bytes){
             if (descriptor.node === null)
             {
-                host.write?.(/** @type {number} */ (descriptor.console), latin1(bytes));
+                host.write?.(/** @type {number} */ (descriptor.console), descriptor.unicode === 0
+                    ? latin1(bytes)
+                    : textOfUnits(unitsOf(bytes)));
                 return bytes.length;
             }
             if (descriptor.append)
             {
                 descriptor.position = sizeOf(descriptor);
+            }
+            if (descriptor.unicode !== 0)
+            {
+                const { bytes: raw, ends } = encodeUnits(unitsOf(bytes), descriptor.encoding);
+                const stored = host.files.write(descriptor.node, descriptor.position, raw);
+                descriptor.position += stored;
+                descriptor.ahead = null;
+                return ends.filter(end=>end <= stored).length * 2;
             }
             let raw = bytes;
             if (descriptor.text)
@@ -668,6 +746,29 @@ export function createIoFunctions(host, descriptors){
         view.setUint32(layout.MTIME, time, true);
         view.setUint32(layout.CTIME, time, true);
         host.writeMemory(address >>> 0, bytes);
+    };
+
+    /**
+     * `_read` in a Unicode translation: up to `limit` UTF-16 units of the
+     * file, CR LF folded to LF, delivered as UTF-16LE; the position moves
+     * past the bytes of the file they came from. As many bytes are asked for
+     * as the units could take, and a unit more, which says whether a CR is
+     * the first half of a CR LF.
+     *
+     * @param {Descriptor} descriptor @param {number} buffer @param {number} limit
+     */
+    const readUnicode = (descriptor, buffer, limit)=>{
+        const widest = descriptor.encoding === 'utf16' ? 2 : descriptor.encoding === 'utf8' ? 3 : 1;
+        const start = descriptor.position;
+        return settle(host.files.read(descriptor.node, start, (limit + 2) * widest + 2), raw=>{
+            const { units, consumed } = foldUnits(decodeUnits(raw, descriptor.encoding), limit);
+            if (units.length > 0)
+            {
+                host.writeMemory(buffer >>> 0, bytesOfUnits(units));
+            }
+            descriptor.position = start + consumed;
+            return units.length * 2;
+        });
     };
 
     /**
@@ -836,24 +937,16 @@ export function createIoFunctions(host, descriptors){
              * A descriptor on a handle, which it owns from then on: `_close`
              * closes the handle, and a second descriptor on it finds it closed
              * (Wine's msvcrt test__open_osfhandle and test_close). Binary
-             * unless `_O_TEXT` is named; the access is the handle's. -1 with
-             * EBADF for a handle that is not an open file. A Unicode
-             * translation is refused as `_setmode` refuses it.
+             * unless `_O_TEXT` or a Unicode translation is named, which
+             * writes no mark into a file the handle already has; the access
+             * is the handle's. -1 with EBADF for a handle that is not an
+             * open file.
              */
-            _open_osfhandle: cdecl(8, ([handle, flags])=>{
-                const unicode = O_UNICODE.find(mode=>((flags >>> 0) & mode) !== 0);
-                if (unicode !== undefined)
-                {
-                    host.divergence?.('_open_osfhandle',
-                        `Unicode translation 0x${unicode.toString(16)} is not carried`);
-                    fail(EINVAL);
-                    return -1;
-                }
-                return descriptors.adopt(handle >>> 0, {
-                    text: ((flags >>> 0) & O_TEXT) !== 0,
-                    append: ((flags >>> 0) & O_APPEND) !== 0,
-                });
-            }),
+            _open_osfhandle: cdecl(8, ([handle, flags])=>descriptors.adopt(handle >>> 0, {
+                text: ((flags >>> 0) & O_TEXT) !== 0,
+                append: ((flags >>> 0) & O_APPEND) !== 0,
+                unicode: unicodeOf(flags >>> 0),
+            })),
         }
         : {};
 
@@ -883,6 +976,7 @@ export function createIoFunctions(host, descriptors){
                 append: (flags & O_APPEND) !== 0,
                 text: (flags & O_BINARY) !== 0 ? false : ((flags & O_TEXT) !== 0 ? true : null),
                 temporary: (flags & O_TEMPORARY) !== 0,
+                unicode: (flags & O_BINARY) !== 0 ? 0 : unicodeOf(flags),
             });
         }),
 
@@ -914,9 +1008,22 @@ export function createIoFunctions(host, descriptors){
                 return -1;
             }
             const wanted = count >>> 0;
-            if (wanted === 0 || descriptor.node === null || descriptor.ended)
+            if (wanted === 0)
             {
                 return 0;
+            }
+            if (descriptor.unicode !== 0 && wanted % 2 !== 0)
+            {
+                fail(EINVAL);
+                return -1;
+            }
+            if (descriptor.node === null || descriptor.ended)
+            {
+                return 0;
+            }
+            if (descriptor.unicode !== 0)
+            {
+                return settle(descriptor.ready, ()=>readUnicode(descriptor, buffer, wanted / 2));
             }
             const start = descriptor.position;
             /** @param {Uint8Array} bytes @param {number} consumed */
@@ -970,6 +1077,11 @@ export function createIoFunctions(host, descriptors){
             {
                 return 0;
             }
+            if (descriptor.unicode !== 0 && wanted % 2 !== 0)
+            {
+                fail(EINVAL);
+                return -1;
+            }
             const bytes = host.readMemory(buffer >>> 0, wanted).slice();
             if (descriptors.put(descriptor, bytes) < wanted)
             {
@@ -1014,11 +1126,11 @@ export function createIoFunctions(host, descriptors){
         /**
          * int _setmode(int fd, int mode)
          *
-         * The translation the descriptor had, `_O_TEXT` or `_O_BINARY`. The
-         * mode is checked before the number and must be exactly one mode
-         * (Wine's msvcrt test_setmode). The Unicode translations are refused:
-         * the byte calls here would write their text untranslated, and a
-         * program told -1 knows its wide output is not being converted.
+         * The translation the descriptor had: `_O_TEXT`, `_O_BINARY`, or
+         * `_O_WTEXT` for any of the three Unicode ones. The mode is checked
+         * before the number and must be exactly one mode (Wine's msvcrt
+         * test_setmode). A Unicode translation keeps its text in the
+         * encoding it names, with no mark written.
          */
         _setmode: cdecl(8, ([fd, mode])=>{
             const wanted = mode >>> 0;
@@ -1033,15 +1145,11 @@ export function createIoFunctions(host, descriptors){
                 fail(EBADF);
                 return -1;
             }
-            if (O_UNICODE.includes(wanted))
-            {
-                host.divergence?.('_setmode',
-                    `Unicode translation 0x${wanted.toString(16)} is not carried`);
-                fail(EINVAL);
-                return -1;
-            }
-            const previous = descriptor.text ? O_TEXT : O_BINARY;
-            descriptor.text = wanted === O_TEXT;
+            const previous = descriptor.unicode !== 0 ? O_WTEXT
+                : (descriptor.text ? O_TEXT : O_BINARY);
+            descriptor.text = wanted !== O_BINARY;
+            descriptor.unicode = O_UNICODE.includes(wanted) ? wanted : 0;
+            descriptor.encoding = encodingOf(descriptor.unicode);
             return previous;
         }),
 

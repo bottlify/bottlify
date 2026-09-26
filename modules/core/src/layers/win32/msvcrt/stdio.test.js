@@ -755,6 +755,24 @@ test('a stream on a descriptor on a handle: fclose closes all three', ()=>{
     assert.deepEqual(console, [[2, '42']]);
 });
 
+test('the narrow stream calls refuse a stream whose descriptor is in a Unicode mode', ()=>{
+    // "Use of a narrow print function on a Unicode mode stream triggers an
+    // assert": an error on the stream and EINVAL, and nothing written.
+    const O_U16TEXT = 0x20000;
+    const { memory, fns, open, flag, errno, files } = runtime({ 'C:\\u.txt': 'ab' });
+    const out = open('C:\\n.txt', 'w');
+    fns._setmode.handler([fns._fileno.handler([out]), O_U16TEXT]);
+    assert.equal(fns.fputs.handler([memory.put('x'), out]), EOF);
+    assert.equal(flag(out) & IOERR, IOERR);
+    assert.equal(files.files['C:\\n.txt'].length, 0);
+
+    const input = open('C:\\u.txt', 'r');
+    fns._setmode.handler([fns._fileno.handler([input]), O_U16TEXT]);
+    assert.equal(fns.fgetc.handler([input]), EOF);
+    assert.equal(flag(input) & IOERR, IOERR);
+    assert.deepEqual(errno, [22, 22]);
+});
+
 test('the stream calls are cdecl with the argument count each reads', ()=>{
     const { fns } = runtime({});
     const expected = {

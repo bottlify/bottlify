@@ -339,6 +339,24 @@ export function createStdioFunctions(host){
     };
 
     /**
+     * Whether a stream's descriptor is in a Unicode translation, which the
+     * byte calls here cannot read or write: the runtime asserts on a narrow
+     * call made on such a stream, and here it is an error on the stream and
+     * EINVAL instead.
+     *
+     * @param {Stream} stream
+     */
+    const narrowRefused = stream=>{
+        if ((descriptorOf(stream)?.unicode ?? 0) === 0)
+        {
+            return false;
+        }
+        raise(stream, IOERR);
+        fail(EINVAL);
+        return true;
+    };
+
+    /**
      * Up to `limit` bytes as the program reads them: what ungetc gave back
      * first, then the file, stopping after a line feed when `line` says so.
      *
@@ -346,6 +364,10 @@ export function createStdioFunctions(host){
      * @returns {Uint8Array | Promise<Uint8Array>}
      */
     const take = (stream, limit, line)=>{
+        if (narrowRefused(stream))
+        {
+            return new Uint8Array(0);
+        }
         /** @type {number[]} */
         const head = [];
         while (stream.pushback.length > 0 && head.length < limit)
@@ -381,7 +403,7 @@ export function createStdioFunctions(host){
      * @param {Stream} stream @param {Uint8Array} bytes
      */
     const emit = (stream, bytes)=>{
-        const descriptor = descriptorOf(stream);
+        const descriptor = narrowRefused(stream) ? null : descriptorOf(stream);
         const stored = descriptor ? descriptors.put(descriptor, bytes) : 0;
         if (stored < bytes.length)
         {
