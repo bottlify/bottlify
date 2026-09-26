@@ -257,6 +257,33 @@ test('a store into a page the other executor compiled leaves stale too, with the
     assert.equal(plain.runProgram(CODE).kind, Exit.HALT, 'an unmarked page: no exit');
 });
 
+test('a store wider than a granule notes code anywhere in it, and across a page the other '
+    + 'executor\'s next page', ()=>{
+    // fnsave writes 108 bytes: over translated code at 0x5020..0x503f from
+    // 0x5000 and from 0x5010, the code lies in neither its first byte's
+    // granule nor its last's.
+    for (const at of [0x5000, 0x5010])
+    {
+        const m = createTestMachine();
+        m.write(CODE, [0xdd, 0x35, at & 0xff, at >> 8, 0, 0, 0xf4]); // fnsave [at]
+        m.setReg('esp', STACK);
+        m.pages.markCode(0x5020, 0x20);
+        assert.equal(m.translate(CODE).run(CODE).kind, Exit.STALE, `fnsave [0x${at.toString(16)}]`);
+        assert.equal(m.pages.staleSize(), 108);
+    }
+    const past = createTestMachine();
+    past.write(CODE, [0xdd, 0x35, 0x00, 0x50, 0, 0, 0xf4]);
+    past.setReg('esp', STACK);
+    past.pages.markCode(0x5080, 0x20);
+    assert.equal(past.translate(CODE).run(CODE).kind, Exit.HALT, 'code past its last byte');
+    // mov [0x3ffe], eax reaches page 4, which the other executor compiled.
+    const m = createTestMachine({ codePages: true });
+    new Uint8Array(m.memory.buffer)[/** @type {number} */ (m.layout.codePages) + 4] = 1;
+    m.write(CODE, [0xa3, 0xfe, 0x3f, 0, 0, 0xf4]);
+    m.setReg('esp', STACK);
+    assert.equal(m.runProgram(CODE).kind, Exit.STALE, 'the store\'s last page');
+});
+
 test('a store into a code page outside the code\'s own granules is no stale', ()=>{
     // mov [0x1800], eax: the code sits at 0x1000..0x1010, the store 2 KiB
     // past it on the same page.

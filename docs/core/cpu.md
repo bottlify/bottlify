@@ -357,7 +357,11 @@ code with a `stale` exit right after the instruction, so the runtime can drop wh
 translated there -- a store into the code's own bytes, that is: beside the flag the table
 keeps, per page, the first and last 32-byte granule holding translated code, and a store
 into the page's data next to its code (a small image keeps both in one page, and a loop
-storing into its own page went volatile after eight such stores) is no store into code.
+storing into its own page went volatile after eight such stores) is no store into code. A
+store is tested at its first byte, its last and one byte in every granule between, since a state
+save spans several (`fnsave`'s 108 bytes over code that lay in neither end's granule went
+unnoticed), and the emulator's "has code" table above is read for the store's last page as well as
+its first.
 The common case is one test per access: the flags of the access's page and of the next one,
 read as one halfword (the last byte of an access lies in one of the two), against
 inaccessible -- and, for an access that is only written (`mov` to memory, a push, `stos`, an SSE
