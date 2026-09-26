@@ -2893,6 +2893,34 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
     /** @param {string} profile */
     const profileEntry = profile=>({ argBytes: 4, handler: ()=>profileString(profile) });
 
+    /**
+     * An entry point this build answers with a refusal: the out pointer, when
+     * the program gave one, cleared, and the reason reported.
+     *
+     * @param {number} argBytes
+     * @param {number} outIndex  Which argument is the out pointer.
+     * @param {string} reason
+     */
+    const refusal = (argBytes, outIndex, reason)=>({
+        argBytes,
+        /** @param {number[]} args */
+        handler: args=>{
+            if ((args[outIndex] >>> 0) !== 0)
+            {
+                fields.writeU32(args[outIndex], 0);
+            }
+            report(reason);
+            return E_NOTIMPL;
+        },
+    });
+
+    // An effect's techniques, passes and variables are interfaces without
+    // IUnknown's three methods, which the publisher lays out for every
+    // interface; an effect whose every getter answered null would fail far
+    // from here, so the effect is refused where it is made.
+    const EFFECT_REFUSAL = 'the effect framework is not available: its techniques, passes and'
+        + ' variables are interfaces the publisher cannot lay out';
+
     // --- state blocks ---
 
     const stateBlockInterfaces = [describe(IID.ID3D10StateBlock, ID3D10STATEBLOCK_SLOTS, {
@@ -3170,6 +3198,25 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             },
         },
         /**
+         * HRESULT D3D10CreateEffectFromMemory(void*, SIZE_T, UINT, ID3D10Device*,
+         *     ID3D10EffectPool*, ID3D10Effect**)
+         */
+        D3D10CreateEffectFromMemory: refusal(24, 5, EFFECT_REFUSAL),
+        /**
+         * HRESULT D3D10CreateEffectPoolFromMemory(void*, SIZE_T, UINT, ID3D10Device*,
+         *     ID3D10EffectPool**)
+         */
+        D3D10CreateEffectPoolFromMemory: refusal(20, 4, EFFECT_REFUSAL),
+        /** HRESULT D3D10DisassembleEffect(ID3D10Effect*, BOOL, ID3D10Blob**) */
+        D3D10DisassembleEffect: refusal(12, 2, 'D3D10DisassembleEffect: no effect is ever'
+            + ' made here to disassemble'),
+        /**
+         * HRESULT D3D10PreprocessShader(const char*, SIZE_T, const char*,
+         *     const D3D10_SHADER_MACRO*, ID3D10Include*, ID3D10Blob**, ID3D10Blob**)
+         */
+        D3D10PreprocessShader: refusal(28, 5, 'D3D10PreprocessShader: this runtime has no'
+            + ' HLSL preprocessor'),
+        /**
          * HRESULT D3D10CreateStateBlock(ID3D10Device*, D3D10_STATE_BLOCK_MASK*,
          *     ID3D10StateBlock**)
          */
@@ -3250,19 +3297,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         },
         /**
          * HRESULT D3D10DisassembleShader(const void*, SIZE_T, BOOL, const char*,
-         *     ID3D10Blob**): no disassembler is kept here.
+         *     ID3D10Blob**)
          */
-        D3D10DisassembleShader: {
-            argBytes: 20,
-            /** @param {number[]} args */
-            handler: ([, , , , out])=>{
-                if ((out >>> 0) !== 0)
-                {
-                    fields.writeU32(out, 0);
-                }
-                return E_NOTIMPL;
-            },
-        },
+        D3D10DisassembleShader: refusal(20, 4, 'D3D10DisassembleShader: no disassembler is'
+            + ' kept here'),
     };
 
     return {

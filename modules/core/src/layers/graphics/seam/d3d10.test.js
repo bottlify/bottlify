@@ -1023,6 +1023,22 @@ test('a compile is refused as a failed compile, with the reason in the error blo
     assert.equal(h.d3d10.D3D10DisassembleShader.argBytes, 20);
     assert.equal(h.d3d10.D3D10DisassembleShader.handler([0, 0, 0, 0, outs]) >>> 0, E_NOTIMPL);
     assert.ok(h.divergences.some(line=>line.includes('D3D10CompileShader')));
+
+    // The effect framework is refused where an effect is made, with the out
+    // pointer cleared and the argument bytes the header gives.
+    const effectAt = h.box.place([0xdeadbeef]);
+    assert.equal(h.d3d10.D3D10CreateEffectFromMemory.argBytes, 24);
+    assert.equal(h.d3d10.D3D10CreateEffectFromMemory.handler([0, 0, 0, 0, 0, effectAt]) >>> 0,
+        E_NOTIMPL);
+    assert.equal(h.box.memory.readU32(effectAt), 0);
+    assert.ok(h.divergences.some(line=>line.includes('effect framework')));
+    h.box.memory.writeU32(effectAt, 0xdeadbeef);
+    assert.equal(h.d3d10.D3D10CreateEffectPoolFromMemory.argBytes, 20);
+    assert.equal(h.d3d10.D3D10CreateEffectPoolFromMemory.handler([0, 0, 0, 0, effectAt])
+        >>> 0, E_NOTIMPL);
+    assert.equal(h.box.memory.readU32(effectAt), 0);
+    assert.equal(h.d3d10.D3D10DisassembleEffect.argBytes, 12);
+    assert.equal(h.d3d10.D3D10PreprocessShader.argBytes, 28);
     /** @type {Record<string, any>} */
     const entries = h.d3d10;
     /** @type {[string, number][]} */
