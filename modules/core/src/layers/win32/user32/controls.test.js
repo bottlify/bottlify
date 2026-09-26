@@ -753,6 +753,103 @@ test('an edit takes typing at its caret, selects, and tells its parent EN_CHANGE
     assert.equal(context.memory.readCString(OUT, 16), 'replaced!', 'read-only takes nothing');
 });
 
+/**
+ * A dialog that records the owner-draw messages its procedure is handed, the
+ * DRAWITEMSTRUCT read while it is still there.
+ */
+async function ownerDrawDialog(){
+    const WM_DRAWITEM = 0x002b;
+    /** @type {any[]} */
+    const seen = [];
+    /** @type {any} */
+    let context = null;
+    context = setup({
+        reply: message=>{
+            if (message.message === WM_DRAWITEM)
+            {
+                const at = message.lParam;
+                const [type, id, item, action, state, hwnd, hdc, left, top, right, bottom]
+                    = Array.from({ length: 11 }, (_, index)=>context.memory.u32(at + index * 4));
+                seen.push({ message: 'draw', wParam: message.wParam, type, id, item, action,
+                    state, hwnd, hdc, rect: [left, top, right, bottom] });
+            }
+            else if (message.message >= 0x0133 && message.message <= 0x0138)
+            {
+                seen.push({ message: `ctlcolor 0x${message.message.toString(16)}` });
+            }
+            else if (message.message === WM_COMMAND)
+            {
+                seen.push({ message: 'command', code: message.wParam >>> 16 });
+            }
+            return 0;
+        },
+    });
+    const dialog = await openDialog(context);
+    seen.length = 0;
+    return { context, dialog, seen };
+}
+
+test('an owner-drawn button is drawn by its parent, told what changed', async()=>{
+    // user32's message tests: a BS_OWNERDRAW button asks WM_CTLCOLORBTN and
+    // then hands WM_DRAWITEM to its parent -- ODA_DRAWENTIRE when it paints,
+    // ODA_FOCUS with ODS_FOCUS when it takes the focus, ODA_SELECT with
+    // ODS_SELECTED when BM_SETSTATE pushes it.
+    const BS_OWNERDRAW = 0x000b;
+    const BS_NOTIFY = 0x4000;
+    const BM_SETSTATE = 0x00f3;
+    const ODT_BUTTON = 4;
+    const ODA_DRAWENTIRE = 1;
+    const ODA_SELECT = 2;
+    const ODA_FOCUS = 4;
+    const ODS_SELECTED = 1;
+    const ODS_FOCUS = 0x10;
+    const BN_SETFOCUS = 6;
+    const { context, dialog, seen } = await ownerDrawDialog();
+    context.memory.putString(TEXT, 'Button');
+    const button = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_NOTIFY, 150, 110, 50, 14, dialog, 0xe,
+        HINSTANCE, 0]);
+    await context.pump(dialog);
+    assert.deepEqual(seen.map(one=>one.message), ['ctlcolor 0x135', 'draw']);
+    const [, painted] = seen;
+    assert.deepEqual([painted.wParam, painted.type, painted.id, painted.item, painted.action,
+        painted.state, painted.hwnd], [0xe, ODT_BUTTON, 0xe, 0, ODA_DRAWENTIRE, 0, button]);
+    assert.notEqual(painted.hdc, 0, 'a context to draw in');
+    assert.deepEqual(painted.rect, [0, 0, 50, 14], 'the client area');
+
+    seen.length = 0;
+    await context.fns.SetFocus.handler([button]);
+    assert.deepEqual(seen.map(one=>[one.message, one.action, one.state, one.code]), [
+        ['ctlcolor 0x135', undefined, undefined, undefined],
+        ['draw', ODA_FOCUS, ODS_FOCUS, undefined],
+        ['command', undefined, undefined, BN_SETFOCUS],
+    ]);
+
+    seen.length = 0;
+    await context.fns.SendMessageA.handler([button, BM_SETSTATE, 1, 0]);
+    assert.deepEqual(seen.map(one=>[one.message, one.action, one.state]), [
+        ['ctlcolor 0x135', undefined, undefined],
+        ['draw', ODA_SELECT, ODS_SELECTED | ODS_FOCUS],
+    ]);
+});
+
+test('an owner-drawn static is drawn by its parent', async()=>{
+    // As documented for SS_OWNERDRAW: the parent draws it on WM_DRAWITEM,
+    // having been asked WM_CTLCOLORSTATIC first.
+    const SS_OWNERDRAW = 0x000d;
+    const ODT_STATIC = 5;
+    const ODA_DRAWENTIRE = 1;
+    const { context, dialog, seen } = await ownerDrawDialog();
+    context.memory.putString(TEXT, 'Static');
+    const shown = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | SS_OWNERDRAW, 150, 110, 40, 20, dialog, 7, HINSTANCE, 0]);
+    await context.pump(dialog);
+    assert.deepEqual(seen.map(one=>one.message), ['ctlcolor 0x138', 'draw']);
+    assert.deepEqual([seen[1].wParam, seen[1].type, seen[1].id, seen[1].action, seen[1].state,
+        seen[1].hwnd], [7, ODT_STATIC, 7, ODA_DRAWENTIRE, 0, shown]);
+    assert.deepEqual(seen[1].rect, [0, 0, 40, 20]);
+});
+
 test('statics and check boxes write their text in the colour WM_CTLCOLORSTATIC set',
     async()=>{
         // As documented for WM_CTLCOLORSTATIC: the parent sets the text

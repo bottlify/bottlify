@@ -114,6 +114,22 @@ const BS_AUTO3STATE = 0x06;
 const BS_GROUPBOX = 0x07;
 const BS_AUTORADIOBUTTON = 0x09;
 const BS_OWNERDRAW = 0x0b;
+
+/**
+ * Owner drawing: WM_DRAWITEM and its DRAWITEMSTRUCT -- CtlType, CtlID, itemID,
+ * itemAction, itemState, hwndItem, hDC, rcItem and itemData, forty-eight
+ * bytes -- with the kinds of control, the reasons to draw and the states.
+ */
+const WM_DRAWITEM = 0x002b;
+const DRAWITEMSTRUCT_SIZE = 48;
+const ODT_BUTTON = 4;
+const ODT_STATIC = 5;
+const ODA_DRAWENTIRE = 0x1;
+const ODA_SELECT = 0x2;
+const ODA_FOCUS = 0x4;
+const ODS_SELECTED = 0x1;
+const ODS_DISABLED = 0x4;
+const ODS_FOCUS = 0x10;
 const BS_LEFTTEXT = 0x20;
 const BS_MULTILINE = 0x2000;
 /** Without this a button reports clicks and nothing else. */
@@ -780,6 +796,34 @@ export function createControlProcedures(host){
     const disabled = record=>(record.style & 0x08000000) !== 0;
 
     /**
+     * Hands a control's drawing to its parent: WM_DRAWITEM, the structure
+     * in guest memory for as long as the message is being answered. A build
+     * with no heap has nowhere to put it, and the control is left undrawn.
+     *
+     * @param {any} record @param {number} hdc @param {Rect} rect
+     * @param {{ type: number, action: number, state: number, item?: number, data?: number }} what
+     * @param {unknown} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const drawItem = (record, hdc, rect, what, thread)=>{
+        const at = record.parent && host.allocate ? host.allocate(DRAWITEMSTRUCT_SIZE) : 0;
+        if (at === 0)
+        {
+            return 0;
+        }
+        const fields = [what.type, record.id, what.item ?? 0, what.action, what.state,
+            record.hwnd, hdc, rect.left, rect.top, rect.right, rect.bottom, what.data ?? 0];
+        const bytes = new Uint8Array(DRAWITEMSTRUCT_SIZE);
+        const view = new DataView(bytes.buffer);
+        fields.forEach((value, index)=>view.setUint32(index * 4, value >>> 0, true));
+        host.writeMemory(at, bytes);
+        return after(host.send(record.parent, WM_DRAWITEM, record.id, at, thread), ()=>{
+            host.release?.(at);
+            return 0;
+        });
+    };
+
+    /**
      * The colour a control painted on WM_CTLCOLORSTATIC writes its text in:
      * whatever the parent left in the context it was handed -- the window
      * text colour unless the parent set its own -- and grey while disabled.
@@ -874,7 +918,7 @@ export function createControlProcedures(host){
         const ink = color(disabled(record) ? COLOR_GRAYTEXT : COLOR_BTNTEXT);
         const multi = (record.style & BS_MULTILINE) !== 0 ? DT_WORDBREAK : DT_SINGLELINE;
 
-        if (PUSH_KINDS.has(kind) || kind === BS_OWNERDRAW)
+        if (PUSH_KINDS.has(kind))
         {
             let box = rect;
             draw.fill(hdc, rect, color(COLOR_3DFACE));
@@ -947,6 +991,58 @@ export function createControlProcedures(host){
         drawText(hdc, text, textRect, DT_VCENTER | multi, staticInk(record, hdc));
     };
 
+    /** @param {any} record  How an owner-drawn button's parent is told it stands. */
+    const buttonItemState = record=>{
+        const state = stateOf(record);
+        return (state.pushed ? ODS_SELECTED : 0) | (disabled(record) ? ODS_DISABLED : 0)
+            | (state.focused ? ODS_FOCUS : 0);
+    };
+
+    /**
+     * An owner-drawn button's change drawn at once, as the button draws it
+     * rather than waiting for a paint: its parent asked for the colour and
+     * then told what changed.
+     *
+     * @param {any} record @param {number} action @param {unknown} [thread]
+     */
+    const redrawOwnerButton = (record, action, thread)=>{
+        if ((record.style & WS_VISIBLE) === 0)
+        {
+            return 0;
+        }
+        const { hdc, rect } = host.contextOn(record);
+        if (hdc === 0)
+        {
+            host.endPaint(record, hdc);
+            return 0;
+        }
+        return after(controlColor(record, WM_CTLCOLORBTN, hdc, thread), ()=>after(
+            drawItem(record, hdc, rect,
+                { type: ODT_BUTTON, action, state: buttonItemState(record) }, thread),
+            ()=>{
+                host.endPaint(record, hdc);
+                return 0;
+            }));
+    };
+
+    /**
+     * A button pushed in or let out: repainted, or for an owner-drawn one
+     * drawn by its parent there and then.
+     *
+     * @param {any} record @param {boolean} pushed @param {unknown} [thread]
+     */
+    const setPushed = (record, pushed, thread)=>{
+        const state = stateOf(record);
+        const changed = (state.pushed === true) !== pushed;
+        state.pushed = pushed;
+        if (buttonKind(record) === BS_OWNERDRAW)
+        {
+            return changed ? redrawOwnerButton(record, ODA_SELECT, thread) : 0;
+        }
+        host.invalidate(record);
+        return 0;
+    };
+
     /**
      * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
      */
@@ -955,6 +1051,13 @@ export function createControlProcedures(host){
         const kind = buttonKind(record);
         switch (message.message){
             case WM_PAINT:
+                if (kind === BS_OWNERDRAW)
+                {
+                    return painting(record, (hdc, rect)=>after(
+                        controlColor(record, WM_CTLCOLORBTN, hdc, thread), ()=>drawItem(record,
+                            hdc, rect, { type: ODT_BUTTON, action: ODA_DRAWENTIRE,
+                                state: buttonItemState(record) }, thread)));
+                }
                 return painting(record, (hdc, rect)=>{
                     const asked = PUSH_KINDS.has(kind) ? WM_CTLCOLORBTN : WM_CTLCOLORSTATIC;
                     return after(controlColor(record, asked, hdc, thread), brush=>{
@@ -987,9 +1090,8 @@ export function createControlProcedures(host){
                     return 0;
                 }
                 host.setCapture(record.hwnd);
-                state.pushed = true;
-                host.invalidate(record);
-                return after(host.setFocus(record.hwnd, thread), ()=>0);
+                return after(setPushed(record, true, thread),
+                    ()=>after(host.setFocus(record.hwnd, thread), ()=>0));
             case WM_MOUSEMOVE: {
                 if (host.capture() !== record.hwnd)
                 {
@@ -997,12 +1099,7 @@ export function createControlProcedures(host){
                 }
                 const point = pointOf(message.lParam);
                 const inside = contains(clientRect(record), point.x, point.y);
-                if (inside !== (state.pushed === true))
-                {
-                    state.pushed = inside;
-                    host.invalidate(record);
-                }
-                return 0;
+                return inside !== (state.pushed === true) ? setPushed(record, inside, thread) : 0;
             }
             case WM_LBUTTONUP: {
                 if (host.capture() !== record.hwnd)
@@ -1011,47 +1108,44 @@ export function createControlProcedures(host){
                 }
                 host.releaseCapture();
                 const wasPushed = state.pushed === true;
-                state.pushed = false;
-                host.invalidate(record);
                 const point = pointOf(message.lParam);
-                return wasPushed && contains(clientRect(record), point.x, point.y)
-                    ? clickButton(record, thread)
-                    : 0;
+                return after(setPushed(record, false, thread), ()=>
+                    (wasPushed && contains(clientRect(record), point.x, point.y)
+                        ? clickButton(record, thread)
+                        : 0));
             }
             case WM_KEYDOWN:
                 if (message.wParam === VK_SPACE && !disabled(record) && kind !== BS_GROUPBOX)
                 {
-                    state.pushed = true;
-                    host.invalidate(record);
+                    return after(setPushed(record, true, thread), ()=>0);
                 }
                 return 0;
             case WM_KEYUP:
                 if (message.wParam === VK_SPACE && state.pushed)
                 {
-                    state.pushed = false;
-                    host.invalidate(record);
-                    return clickButton(record, thread);
+                    return after(setPushed(record, false, thread),
+                        ()=>clickButton(record, thread));
                 }
                 return 0;
             // The focus notifications go out only with BS_NOTIFY, as
             // documented: a parent that looks at the id alone and not the
             // code would otherwise take a focus change for a click.
             case WM_SETFOCUS:
-                state.focused = true;
-                host.invalidate(record);
-                return (record.style & BS_NOTIFY) !== 0 ? notify(record, BN_SETFOCUS, thread) : 0;
-            case WM_KILLFOCUS:
-                state.focused = false;
-                state.pushed = false;
-                host.invalidate(record);
-                return (record.style & BS_NOTIFY) !== 0 ? notify(record, BN_KILLFOCUS, thread) : 0;
-            case WM_CAPTURECHANGED:
-                if (state.pushed)
+            case WM_KILLFOCUS: {
+                const gained = message.message === WM_SETFOCUS;
+                state.focused = gained;
+                if (!gained)
                 {
                     state.pushed = false;
-                    host.invalidate(record);
                 }
-                return 0;
+                const drawn = kind === BS_OWNERDRAW
+                    ? redrawOwnerButton(record, ODA_FOCUS, thread)
+                    : (host.invalidate(record), 0);
+                return after(drawn, ()=>((record.style & BS_NOTIFY) !== 0
+                    ? notify(record, gained ? BN_SETFOCUS : BN_KILLFOCUS, thread) : 0));
+            }
+            case WM_CAPTURECHANGED:
+                return state.pushed ? after(setPushed(record, false, thread), ()=>0) : 0;
             case BM_GETCHECK:
                 return state.check ?? BST_UNCHECKED;
             case BM_SETCHECK:
@@ -1072,9 +1166,7 @@ export function createControlProcedures(host){
                 return (state.check ?? BST_UNCHECKED)
                     | (state.pushed ? BST_PUSHED : 0) | (state.focused ? BST_FOCUS : 0);
             case BM_SETSTATE:
-                state.pushed = message.wParam !== 0;
-                host.invalidate(record);
-                return 0;
+                return after(setPushed(record, message.wParam !== 0, thread), ()=>0);
             case BM_SETSTYLE:
                 record.style = ((record.style & ~BS_TYPEMASK)
                     | (message.wParam & BS_TYPEMASK)) >>> 0;
@@ -1132,8 +1224,6 @@ export function createControlProcedures(host){
                 }
                 return true;
             }
-            case SS_OWNERDRAW:
-                return background(hdc, rect, brush, COLOR_3DFACE);
             default:
                 break;
         }
@@ -1160,8 +1250,16 @@ export function createControlProcedures(host){
         const state = stateOf(record);
         switch (message.message){
             case WM_PAINT:
+                // An owner-drawn static is its parent's to draw, all of it:
+                // asked for a colour first, as every static asks.
                 return painting(record, (hdc, rect)=>after(
                     controlColor(record, WM_CTLCOLORSTATIC, hdc, thread), brush=>{
+                        if ((record.style & SS_TYPEMASK) === SS_OWNERDRAW)
+                        {
+                            return drawItem(record, hdc, rect, { type: ODT_STATIC,
+                                action: ODA_DRAWENTIRE,
+                                state: disabled(record) ? ODS_DISABLED : 0 }, thread);
+                        }
                         paintStatic(record, hdc, rect, brush);
                         return 0;
                     }));
