@@ -292,6 +292,29 @@ test('an API is made by name, and an unknown one says so', async()=>{
     await graphicsModule.dispose();
 });
 
+test('a DirectDraw surface\'s pixels are guest memory the configuration hands out', async()=>{
+    // A lock hands the program an address it writes through, and the presenter
+    // reads the primary back from the same address; neither works on bytes the
+    // guest cannot reach.
+    /** @type {number[]} */
+    const freed = [];
+    const api = await graphicsModule.create({
+        allocate: ()=>0x123000,
+        free: (/** @type {number} */ address)=>{
+            freed.push(address);
+        },
+    }, hostWith(fakeMemory()));
+    const ddraw = api.create('ddraw');
+    ddraw.setCooperativeLevel(0, 8);
+    const created = ddraw.createSurface({ flags: 7, caps: 0x40, width: 4, height: 4 });
+    const locked = created.surface.lock();
+    assert.equal(locked.surfacePointer, 0x123000);
+    created.surface.unlock(null);
+    created.surface.release();
+    assert.deepEqual(freed, [0x123000], 'and gives them back');
+    await graphicsModule.dispose();
+});
+
 test('diagnostics report what a program asked for, not what was on offer', async()=>{
     const api = await graphicsModule.create({}, hostWith(fakeMemory()));
     api.create('ddraw');

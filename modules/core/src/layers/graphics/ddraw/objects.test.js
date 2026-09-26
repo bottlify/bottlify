@@ -1468,3 +1468,48 @@ test('a copy of a surface\'s pixels kept elsewhere is asked for them, and told o
         assert.equal(other.release(), 0);
         assert.equal(ddraw.release('IDirectDraw7'), 0);
     });
+
+test('a surface gives its pixels back with its last reference, a flip chain each buffer once', ()=>{
+    // Pixels come out of the guest's heap, and a program that makes and drops
+    // surfaces -- a mode change, a level loaded -- would otherwise exhaust it.
+    // A flip swaps the buffers between the chain's members, so what each one
+    // frees is whatever it holds when it goes.
+    let next = 0x100000;
+    /** @type {number[]} */
+    const handedOut = [];
+    /** @type {number[]} */
+    const freed = [];
+    const ddraw = createDirectDraw({
+        version: 7,
+        allocate: bytes=>{
+            const address = next;
+            next += (bytes + 0xfff) & ~0xfff;
+            handedOut.push(address);
+            return address;
+        },
+        free: address=>{
+            freed.push(address);
+        },
+    });
+    ddraw.setCooperativeLevel(HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+
+    const plain = makeOffscreen(ddraw);
+    assert.equal(plain.lock().surfacePointer, handedOut[0], 'the lock hands out that address');
+    plain.unlock(null);
+    assert.equal(plain.release(), 0);
+    assert.deepEqual(freed, [handedOut[0]]);
+
+    const created = ddraw.createSurface({
+        flags: DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        caps: DDSCAPS_PRIMARYSURFACE | DDSCAPS_COMPLEX | DDSCAPS_FLIP,
+        backBufferCount: 2,
+    });
+    assert.equal(created.hr, DD_OK);
+    const front = /** @type {NonNullable<typeof created.surface>} */ (created.surface);
+    assert.equal(front.flip(null), DD_OK);
+    const chain = handedOut.slice(1);
+    assert.equal(chain.length, 3);
+    assert.equal(front.release(), 0);
+    assert.deepEqual([...freed.slice(1)].sort(), [...chain].sort(),
+        'every buffer of the chain once, whichever member held it at the end');
+});
