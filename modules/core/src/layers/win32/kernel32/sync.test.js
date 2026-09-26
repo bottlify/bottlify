@@ -20,6 +20,7 @@ const WAIT_OBJECT_0 = 0x00000000;
 const WAIT_ABANDONED_0 = 0x00000080;
 const WAIT_TIMEOUT = 0x00000102;
 const WAIT_FAILED = 0xffffffff;
+const ERROR_SIGNAL_REFUSED = 156;
 
 /** What the bridge hands back for a call that cannot answer yet. */
 const PARKED = Object.freeze({ parked: true });
@@ -157,6 +158,23 @@ function fakeKernel(){
         block: (thread, reason)=>state.blocked.push({ thread, reason }),
         /** @param {any} thread */
         wake: thread=>state.woken.push(thread),
+        /** The count lives on the thread, and 127 is the most it carries. */
+        /** @param {any} thread */
+        suspendThread(thread){
+            const previous = thread.suspendCount ?? 0;
+            if (previous >= 127)
+            {
+                return null;
+            }
+            thread.suspendCount = previous + 1;
+            return previous;
+        },
+        /** @param {any} thread */
+        resumeThread(thread){
+            const previous = thread.suspendCount ?? 0;
+            thread.suspendCount = Math.max(0, previous - 1);
+            return previous;
+        },
         /** @param {any} thread @param {number} code */
         exitThread: (thread, code)=>state.woken.push({ exited: thread, code }),
         handles: {
@@ -204,6 +222,10 @@ function fakeHost(){
             bytes.set(data, address);
         },
         park: ()=>PARKED,
+        /** @type {number[]} */
+        errors: [],
+        /** @param {number} code */
+        setLastError: code=>host.errors.push(code),
         /** @param {number} milliseconds */
         advanceClock: milliseconds=>kernel.state.advanced.push(milliseconds),
         /** Guest memory for code and counters, from the top of this little machine. */
@@ -515,7 +537,24 @@ test('suspending another thread reports the count before, and resuming undoes it
     assert.equal(fns.ResumeThread.handler([0x20]), 2);
     assert.equal(fns.ResumeThread.handler([0x20]), 1);
     assert.equal(other.suspendCount, 0);
-    assert.equal(host.kernel.state.woken.includes(other), true, 'and it was woken exactly once');
+    assert.equal(fns.ResumeThread.handler([0x20]), 0, 'resuming a running thread changes nothing');
+    assert.equal(host.kernel.state.blocked.length, 0,
+        'suspension is a count beside the thread\'s state, not a wait of its own');
+});
+
+test('a suspension past MAXIMUM_SUSPEND_COUNT fails and leaves the count alone', ()=>{
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    const other = host.threads.second;
+    host.register(0x20, 'thread', other);
+
+    for (let count = 0; count < 127; count++)
+    {
+        assert.equal(fns.SuspendThread.handler([0x20]), count);
+    }
+    assert.equal(fns.SuspendThread.handler([0x20]), 0xffffffff, '(DWORD)-1');
+    assert.equal(other.suspendCount, 127);
+    assert.deepEqual(host.errors, [ERROR_SIGNAL_REFUSED]);
 });
 
 test('resuming a suspended child is what arms the replacement', ()=>{

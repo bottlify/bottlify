@@ -68,6 +68,8 @@ const THREAD_PRIORITY_IDLE = -15;
 const THREAD_PRIORITY_TIME_CRITICAL = 15;
 /** Above anything a thread can ask for: what a starved thread is raised to for one turn. */
 const STARVED = 16;
+/** MAXIMUM_SUSPEND_COUNT: how many suspensions a thread can carry at once. */
+const MAXIMUM_SUSPEND_COUNT = 127;
 
 /**
  * A thread's absolute priority, from the relative one a program set on it.
@@ -222,8 +224,13 @@ export function createScheduler(options){
     // the scheduler always had someone to give a turn to, so it never moved the
     // clock to the next deadline and every timed wait in the guest expired in
     // host time instead of guest time.
+    //
+    // Nor is a suspended one. Suspension is a count beside the state rather
+    // than a state of its own: a thread suspended in the middle of a wait is
+    // still in that wait, with its deadline, and has to come back to it.
     const ready = ()=>threads.filter(thread=>
-        thread.state === ThreadState.READY && !thread.awaitingHost);
+        thread.state === ThreadState.READY && !thread.awaitingHost
+        && !(thread.suspendCount > 0));
 
     /**
      * Where a thread's stack pointer stood at the end of its slice.
@@ -716,6 +723,42 @@ export function createScheduler(options){
         /** Whether any thread is waiting on a time rather than on another thread. */
         nextDeadline: ()=>soonest(),
 
+        /**
+         * Adds one to a thread's suspend count. Past the most a thread can
+         * carry the count is left as it was and the call refused.
+         *
+         * @param {any} thread
+         * @returns {number | null} the count before, or null when refused
+         */
+        suspend(thread){
+            const previous = thread.suspendCount ?? 0;
+            if (previous >= MAXIMUM_SUSPEND_COUNT)
+            {
+                return null;
+            }
+            thread.suspendCount = previous + 1;
+            return previous;
+        },
+
+        /**
+         * Takes one from a thread's suspend count; nothing below zero.
+         *
+         * @param {any} thread
+         * @returns {number} the count before
+         */
+        resume(thread){
+            const previous = thread.suspendCount ?? 0;
+            if (previous > 0)
+            {
+                thread.suspendCount = previous - 1;
+                // Measured from here: time spent suspended is not time spent
+                // passed over, and counting it would boost the thread over
+                // every other on its first turn back.
+                thread.readySince = now();
+            }
+            return previous;
+        },
+
         /** @param {any} thread @param {number} exitCode */
         terminate(thread, exitCode){
             thread.state = ThreadState.TERMINATED;
@@ -881,9 +924,13 @@ export function createScheduler(options){
                 current: current ? current.name : null,
                 // A thread that has been waiting on the same thing for a long
                 // time is the shape of a deadlock, so name what each is waiting on.
+                // A suspended thread is stopped too, whatever its state says.
                 waiting: threads
-                    .filter(thread=>thread.state === ThreadState.BLOCKED)
-                    .map(thread=>`${thread.name}: ${thread.waitingOn ?? 'unknown'}`),
+                    .filter(thread=>thread.state === ThreadState.BLOCKED || thread.suspendCount > 0)
+                    .map(thread=>`${thread.name}: ${[
+                        thread.state === ThreadState.BLOCKED ? thread.waitingOn ?? 'unknown' : null,
+                        thread.suspendCount > 0 ? `suspended ${thread.suspendCount}` : null,
+                    ].filter(Boolean).join(', ')}`),
             };
         },
     };

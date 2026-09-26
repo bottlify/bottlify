@@ -333,3 +333,74 @@ test('alert ends an alertable wait with the answer given, and leaves any other a
     assert.deepEqual(event.waiters, [], 'and it is no longer queued on the event');
     assert.equal(kernel.alert(thread, 0xc0), false, 'a thread not waiting is left alone');
 });
+
+test('a suspended waiter is passed over by what it waits on, and a resume does not end the wait',
+    async()=>{
+        // Suspended, a thread runs nothing, so a signal handed to it is a
+        // signal nobody can act on: the other waiter starves for as long as
+        // the suspension lasts. And resumed, it goes back to its wait, which
+        // only its object can end.
+        const { kernel } = await makeKernel();
+        const first = kernel.createThread({ entry: 0x00402000, name: 'first' });
+        const second = kernel.createThread({ entry: 0x00402000, name: 'second' });
+        const event = kernel.createEvent({});
+
+        assert.equal(kernel.wait(event, first), null);
+        assert.equal(kernel.suspendThread(first), 0);
+        assert.equal(kernel.wait(event, second), null);
+        kernel.setEvent(event);
+        assert.equal(second.state, 'ready', 'the signal goes to the waiter that can run');
+        assert.equal(first.state, 'blocked', 'the suspended one is still waiting');
+        assert.equal(event.signalled, false);
+
+        assert.equal(kernel.resumeThread(first), 1);
+        assert.equal(first.state, 'blocked', 'nothing signalled it, so it is still waiting');
+        kernel.setEvent(event);
+        assert.equal(first.state, 'ready', 'and the next signal is its own');
+        assert.equal(first.waitResult, kernel.WaitResult.OBJECT_0);
+    });
+
+test('a wait satisfied while its thread was suspended ends when the thread is resumed', async()=>{
+    const { kernel } = await makeKernel();
+    const thread = kernel.createThread({ entry: 0x00402000, name: 'worker' });
+    const quiet = kernel.createEvent({});
+    const open = kernel.createEvent({ manualReset: true });
+
+    assert.equal(kernel.waitAny([quiet, open], thread), null);
+    kernel.suspendThread(thread);
+    kernel.suspendThread(thread);
+    kernel.setEvent(open);
+    assert.equal(thread.state, 'blocked');
+
+    assert.equal(kernel.resumeThread(thread), 2);
+    assert.equal(thread.state, 'blocked', 'still suspended once');
+    assert.equal(kernel.resumeThread(thread), 1);
+    assert.equal(thread.state, 'ready');
+    assert.equal(thread.waitResult, 1, 'with the index of the object that came');
+    assert.deepEqual(quiet.waiters, [], 'and out of the queue of the one that did not');
+});
+
+test('a resumed thread whose last wait was answered is not handed its old objects', async()=>{
+    const { kernel } = await makeKernel();
+    const thread = kernel.createThread({ entry: 0x00402000, name: 'worker' });
+    const event = kernel.createEvent({ manualReset: true });
+
+    assert.equal(kernel.wait(event, thread), null);
+    kernel.setEvent(event);
+    kernel.block(thread, 'something of its own');
+    kernel.suspendThread(thread);
+    kernel.resumeThread(thread);
+    assert.equal(thread.state, 'blocked', 'the block it is in now is not the old wait');
+});
+
+test('a thread carries at most MAXIMUM_SUSPEND_COUNT suspensions', async()=>{
+    const { kernel } = await makeKernel();
+    const thread = kernel.createThread({ entry: 0x00402000, name: 'worker' });
+
+    for (let count = 0; count < 127; count++)
+    {
+        assert.equal(kernel.suspendThread(thread), count);
+    }
+    assert.equal(kernel.suspendThread(thread), null, 'the next one is refused');
+    assert.equal(kernel.resumeThread(thread), 127, 'and did not add to the count');
+});

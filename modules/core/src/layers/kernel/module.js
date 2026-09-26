@@ -371,6 +371,34 @@ export const kernelModule = {
             },
 
             /**
+             * Suspends a thread: it keeps its state -- a wait stays a wait,
+             * deadline and all -- and gets no turn, and no object it waits on
+             * is handed to it, until it has been resumed as often.
+             *
+             * @param {any} thread
+             * @returns {number | null} the count before, or null when the
+             *     thread already carries the most suspensions it can
+             */
+            suspendThread: thread=>live() ? state.scheduler.suspend(thread) : null,
+
+            /**
+             * @param {any} thread
+             * @returns {number} the count before
+             */
+            resumeThread(thread){
+                if (!live())
+                {
+                    return 0;
+                }
+                const previous = state.scheduler.resume(thread);
+                if (previous === 1)
+                {
+                    state.sync.retry(thread);
+                }
+                return previous;
+            },
+
+            /**
              * @param {any} thread @param {string} [reason]
              * @param {{ deadline?: number, result?: number }} [timed]
              *   For a waiter the kernel does not hold a queue for -- a

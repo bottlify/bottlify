@@ -68,6 +68,9 @@ const CURRENT_THREAD = 0xfffffffe;
 /** More than this in one wait is a caller that has lost track of its handles. */
 const MAXIMUM_WAIT_OBJECTS = 64;
 
+/** A thread already carries MAXIMUM_SUSPEND_COUNT suspensions. */
+const ERROR_SIGNAL_REFUSED = 156;
+
 /**
  * @typedef {Object} SyncHost
  * @property {any} kernel                        The kernel layer's API.
@@ -85,6 +88,7 @@ const MAXIMUM_WAIT_OBJECTS = 64;
  * @property {(milliseconds: number) => void} [advanceClock]
  *   Credits the guest clock for time a wait was supposed to spend. See the
  *   timeout note on WaitForMultipleObjects.
+ * @property {(code: number) => void} [setLastError]
  */
 
 /**
@@ -489,11 +493,11 @@ export function createSyncFunctions(host){
                 }
                 // The count before, which is what tells a caller whether it was
                 // the one that stopped the thread or merely the second to ask.
-                const previous = thread.suspendCount ?? 0;
-                thread.suspendCount = previous + 1;
-                if (previous === 0)
+                const previous = kernel.suspendThread(thread);
+                if (previous === null)
                 {
-                    kernel.block(thread, 'suspended');
+                    host.setLastError?.(ERROR_SIGNAL_REFUSED);
+                    return WAIT_FAILED;
                 }
                 return thread === host.currentThread() ? host.park(thread) : previous >>> 0;
             },
@@ -521,17 +525,7 @@ export function createSyncFunctions(host){
                 {
                     return WAIT_FAILED;
                 }
-                const previous = thread.suspendCount ?? 0;
-                if (previous === 0)
-                {
-                    return 0;
-                }
-                thread.suspendCount = previous - 1;
-                if (thread.suspendCount === 0)
-                {
-                    kernel.wake(thread);
-                }
-                return previous >>> 0;
+                return kernel.resumeThread(thread) >>> 0;
             },
         },
 
