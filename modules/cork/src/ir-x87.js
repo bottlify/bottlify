@@ -1203,6 +1203,8 @@ function stepX87(instruction, state, address){
             return true;
         case 'fnstenv': case 'fnsave':
         {
+            // As the translator's: the control word stays after fnstenv,
+            // where the processor masks every exception (`emit/x87.js`).
             const save = op === 'fnsave';
             const where = at(dst);
             state.memory.write(where, 4, (state.control | 0xffff0000) >>> 0);

@@ -15,14 +15,16 @@
  * indefinite" 0x80000000 for a NaN or a value out of range (a saturating
  * conversion and a fix-up); `rsqrtps` and `rcpps` are computed exactly, as
  * the emulator does, so results stay bit-identical to what the library's
- * programs already run against. MMX operations run in the low lane of a
- * `v128` and come back as an `i64`; an MMX instruction also marks the x87
- * stack as it does on the processor (top at zero, every register held),
- * which the region's exit writes out when one ran.
+ * programs already run against. MXCSR is read by the conversions that round
+ * alone: the arithmetic rounds to nearest, keeps denormals (no FTZ, no DAZ)
+ * and raises no flag, as the host's f32 and f64 lanes do. MMX operations run
+ * in the low lane of a `v128` and come back as an `i64`; an MMX instruction
+ * also marks the x87 stack as it does on the processor (top at zero, every
+ * register held), which the region's exit writes out when one ran.
  */
 
 import { CF, OF, PF, SF, ZF, AF } from '../decode/table.js';
-import { EMPTY, ValType } from '../wasm/encoder.js';
+import { EMPTY } from '../wasm/encoder.js';
 import { SIMD } from '../wasm/simd.js';
 import { I32 } from './flags.js';
 import { Local, MMX_HELD, MMX_TOP } from './region.js';
@@ -47,16 +49,13 @@ const F64 = Object.freeze({
  * @typedef {import('../decode/decoder.js').Operand} Operand
  */
 
-/** A lane-0 mask: the low four bytes set. */
 /** The processor's default NaN in every lane: sign set, quiet bit set. */
 const DEFAULT_NAN_32 = [0, 0, 0xc0, 0xff, 0, 0, 0xc0, 0xff, 0, 0, 0xc0, 0xff, 0, 0, 0xc0, 0xff];
 const DEFAULT_NAN_64 = [0, 0, 0, 0, 0, 0, 0xf8, 0xff, 0, 0, 0, 0, 0, 0, 0xf8, 0xff];
+/** A lane-0 mask: the low four bytes set. */
 const LANE0_32 = [0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 /** A lane-0 mask: the low eight bytes set. */
 const LANE0_64 = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0];
-
-/** @param {number[]} bytes @returns {number[]} a 16-byte pattern */
-const pattern = bytes=>bytes;
 
 /** The shuffle that picks dwords `[a, b, c, d]` out of two operands (0..3 first, 4..7 second). @param {number[]} dwords */
 const dwordShuffle = dwords=>dwords.flatMap(d=>[d * 4, d * 4 + 1, d * 4 + 2, d * 4 + 3]);
@@ -811,7 +810,7 @@ function emitForm(e, instruction, flagsLive){
                     }
                     else
                     {
-                        shuffle(pattern([0, 1, 2, 3, 8, 9, 10, 11, 0, 0, 0, 0, 0, 0, 0, 0]));
+                        shuffle([0, 1, 2, 3, 8, 9, 10, 11, 0, 0, 0, 0, 0, 0, 0, 0]);
                     }
                 }
                 else
@@ -1545,5 +1544,3 @@ function packedToInt(e){
     b.localGet(vecTemp2(e));
     b.simd(SIMD.bitselect);
 }
-
-export { EMPTY, ValType, F32, F64 };

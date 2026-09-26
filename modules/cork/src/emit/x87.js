@@ -35,19 +35,20 @@
  * arithmetic would differ the difference is the `x87.precision` class the
  * plan names and counts (the emulator computes in f64 as well). The control
  * word is honoured at run time: its rounding control rounds the integer
- * stores and `frndint`, and precision control set to single rounds every
- * arithmetic result to a float (extended is treated as double). Exception
- * masks are not honoured: an exception behaves as masked. The
- * transcendentals go through the host's `Math`, as the emulator's do, so
- * the two agree bit for bit on one engine; the environment forms end a
- * region.
+ * stores and `frndint` -- the arithmetic itself rounds to nearest whatever
+ * it says, as the host's f64 operations do -- and precision control set to
+ * single rounds every arithmetic result to a float (extended is treated as
+ * double). Exception masks are not honoured: an exception behaves as
+ * masked. The transcendentals go through the host's `Math`, as the
+ * emulator's do, so the two agree bit for bit on one engine; the environment
+ * forms end a region.
  */
 
 import { CF, PF, ZF, AF, SF, OF } from '../decode/table.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { I32 } from './flags.js';
 import { Local, Exit, STATE_PARAMS } from './region.js';
-import { prepare, writeReg, readOp } from './integer.js';
+import { prepare, writeReg } from './integer.js';
 import { PRECISION, noteStore } from './memory.js';
 import { inlineReturns } from '../region.js';
 import { exactWrites } from '../ir-x87.js';
@@ -106,8 +107,6 @@ const LEFT_OUT = new Set([
     'fxsave', 'fxrstor', 'fbld',
 ]);
 
-/** x87 operations whose only effect on the empty mask is their pushes and pops
- * (the emitter's push and popN), so what a block knows of the mask survives them. */
 /** The forms precision control rounds (`byPrecision`): the arithmetic and the square root. */
 const ROUNDS = new Set([
     'fadd', 'fsub', 'fsubr', 'fmul', 'fdiv', 'fdivr',
@@ -115,6 +114,8 @@ const ROUNDS = new Set([
     'fiadd', 'fisub', 'fisubr', 'fimul', 'fidiv', 'fidivr', 'fsqrt',
 ]);
 
+/** x87 operations whose only effect on the empty mask is their pushes and pops
+ * (the emitter's push and popN), so what a block knows of the mask survives them. */
 const MASK_SAFE = new Set([
     'fld', 'fild', 'fld1', 'fldz', 'fldpi', 'fldl2e', 'fldln2', 'fldlg2', 'fldl2t',
     'fst', 'fstp', 'fist', 'fistp', 'fisttp',
@@ -1358,7 +1359,6 @@ export function emitX87(e, instruction, flagsLive){
         b.localGet(stLocal).op(I64.reinterpretF64).localSet(e.mmLocal(physical));
         b.localGet(x.form).i32const(~(1 << physical)).op(I32.and).localSet(x.form);
     };
-    /** Marks ST(i) written. @param {number} i */
     /** Marks a physical register dirty, unless the block has already. @param {number} physical */
     const markDirty = physical=>{
         if (safe && (known.dirty & (1 << physical)) !== 0)
@@ -2370,6 +2370,9 @@ export function emitX87(e, instruction, flagsLive){
             // which this engine does not keep (zero, as the other executor
             // has them). fnsave follows with the eight registers in stack
             // order as ten-byte values, and leaves the unit as fninit does.
+            // After fnstenv the processor masks every exception; the control
+            // word stays as it was here, since an exception behaves as masked
+            // whatever the masks say (see the head of the file).
             const save = op === 'fnsave';
             prepare(e, { ...dst, size: save ? 108 : 28 });
             noteStore(e, save ? 108 : 28);
@@ -2972,5 +2975,3 @@ export function addBcdHelper(m){
         [ValType.i64, ValType.i32, ValType.f64, ValType.i64, ValType.i64, ValType.i32,
             ValType.i64, ValType.i64], b.toBytes());
 }
-
-export { Exit, readOp };

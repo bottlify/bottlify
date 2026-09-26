@@ -128,7 +128,8 @@ const SIMD_STORE = 11;
  *
  * The bytes go straight into a buffer that grows by doubling, each number
  * LEB128-encoded in place: a region's body is thousands of instructions, and
- * building each one's bytes as an array of its own was most of emitting it.
+ * building each one's bytes as an array of its own would be most of the cost
+ * of emitting it.
  */
 export class Body {
     constructor(){
