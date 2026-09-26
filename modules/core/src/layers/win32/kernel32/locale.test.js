@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLocaleFunctions } from './locale.js';
+import { UI_LANGUAGE } from '../../loader/internal/resources.js';
 
 const CP_ACP = 0;
 const CP_UTF8 = 65001;
@@ -359,6 +360,8 @@ test('the UI language is the language everything else here is in', ()=>{
     assert.equal(fns.GetUserDefaultUILanguage.handler(), fns.GetUserDefaultLangID.handler(),
         'the user\'s UI language too');
     assert.equal(fns.GetUserDefaultUILanguage.argBytes, 0);
+    assert.equal(fns.GetUserDefaultUILanguage.handler(), UI_LANGUAGE,
+        'the language a resource lookup naming none prefers');
 });
 
 test('a number is grouped and given the locale decimals when no picture is passed', ()=>{
