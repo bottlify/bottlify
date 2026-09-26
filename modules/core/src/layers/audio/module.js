@@ -5,6 +5,7 @@
  */
 
 import { createDirectSound } from './dsound/seam.js';
+import { DSBSTATUS_PLAYING } from './dsound/buffers.js';
 import { createMixer } from './output/mixer.js';
 import { createMp3Provider } from './asi/provider.js';
 import { createSynchronousDecoder, createWebCodecsDecoder } from './asi/mp3.js';
@@ -85,6 +86,8 @@ export function createAudioModule(){
             // question -- did anything come out of a buffer at all -- has no answer.
             let fills = 0;
             let refusedFills = 0;
+            /** Sound buffers handed to the sound device, over the run. */
+            let voices = 0;
             let fedBytes = 0;
             let fedRanges = 0;
             let openTracks = 0;
@@ -114,6 +117,8 @@ export function createAudioModule(){
                 // the engine mixer is the only backend that thread can drive.
                 shared: config?.shared ?? false,
             });
+            /** The sound device, when there is one: the shared backend opens voices. @type {any} */
+            const output = mixer;
 
             const dsound = createDirectSound({
                 memory: {
@@ -257,6 +262,45 @@ export function createAudioModule(){
                     {
                         tracks.get(buffer)?.close();
                         tracks.delete(buffer);
+                        buffer.device?.close();
+                        continue;
+                    }
+                    // The sound device plays it, as a sound card does: a voice with
+                    // a mirror of the whole buffer, read on the device's own clock,
+                    // so what the engine thread is doing is not heard. Given once;
+                    // after that only what a program can change between two looks
+                    // is carried over, and nothing is read out here.
+                    const sounding = (buffer.status() & DSBSTATUS_PLAYING) !== 0;
+                    if (buffer.device && !sounding)
+                    {
+                        buffer.detachDevice()?.close();
+                    }
+                    if (!buffer.device && sounding && output.openVoice)
+                    {
+                        const voice = output.openVoice({
+                            sampleRate: buffer.frequency,
+                            channels: buffer.format.channels,
+                            bitsPerSample: buffer.format.bitsPerSample,
+                            bytes: buffer.bytes,
+                        });
+                        if (voice)
+                        {
+                            /** @param {number} from @param {number} count */
+                            const copy = (from, count)=>{
+                                if (count > 0)
+                                {
+                                    voice.write(from, memory.window(buffer.address + from, count));
+                                }
+                            };
+                            buffer.attachDevice(voice, copy);
+                            voices++;
+                        }
+                    }
+                    const voice = buffer.device;
+                    if (voice)
+                    {
+                        voice.gain = buffer.gain;
+                        voice.balance = buffer.balance;
                         continue;
                     }
                     let track = tracks.get(buffer);
@@ -375,6 +419,7 @@ export function createAudioModule(){
                 feeding: ()=>({
                     sink: drained,
                     fills,
+                    voices,
                     refusedFills,
                     notified,
                     fedRanges,

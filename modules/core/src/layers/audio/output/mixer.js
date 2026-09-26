@@ -8,7 +8,8 @@ import { createRing } from './ring.js';
 import {
     SLOTS, SLOT_BYTES, PCM_MASK, SLOT_HEADER_INT32, GLOBAL_HEADER_INT32, TABLE_BYTES,
     STATE, GENERATION, RATE, CHANNELS, BITS, GAIN, PAUSED, WRITTEN, READ, DROP_TO, MIXED_FRAMES,
-    LEFT_CUT, RIGHT_CUT,
+    LEFT_CUT, RIGHT_CUT, KIND, KIND_QUEUE, KIND_DMA, BASE, LENGTH, POSITION, LOOPING, PLAYING,
+    LAPS, ENDS, ARENA_OFFSET, ARENA_BYTES,
     STATE_FREE, STATE_OPEN, STATE_CLOSING, GAIN_SCALE,
     OUTPUT_RATE, BLOCKS, STARVED_BLOCKS, STARVED_FRAMES,
     slotHeaderOffset, slotPcmOffset,
@@ -644,6 +645,61 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
     /** @type {Set<any>} */
     const openTracks = new Set();
     let fallbackTracks = 0;
+
+    // The arena behind the slots: the DMA voices' mirrors. A table made before
+    // it had one has none, and every sound buffer then plays through a queue.
+    const arena = buffer.byteLength >= ARENA_OFFSET + ARENA_BYTES
+        ? new Uint8Array(buffer, ARENA_OFFSET, ARENA_BYTES) : null;
+    /**
+     * Its free spans, [offset, bytes], in offset order. A voice takes the first
+     * that fits, rounded to sixteen bytes; closing one gives its span back and
+     * joins it to its neighbours. A replaced process starts with all of it
+     * free, since every slot its predecessor held is closed above.
+     * @type {[number, number][]}
+     */
+    const free = arena ? [[0, ARENA_BYTES]] : [];
+    let voices = 0;
+    let refusedVoices = 0;
+    /** @param {number} bytes @returns {number} the span's offset, or -1 */
+    const claimSpan = bytes=>{
+        const need = (bytes + 15) & ~15;
+        const at = free.findIndex(([, length])=>length >= need);
+        if (at === -1)
+        {
+            return -1;
+        }
+        const [offset, length] = free[at];
+        if (length === need)
+        {
+            free.splice(at, 1);
+        }
+        else
+        {
+            free[at] = [offset + need, length - need];
+        }
+        return offset;
+    };
+    /** @param {number} offset @param {number} bytes */
+    const returnSpan = (offset, bytes)=>{
+        const need = (bytes + 15) & ~15;
+        let at = free.findIndex(([start])=>start > offset);
+        if (at === -1)
+        {
+            at = free.length;
+        }
+        free.splice(at, 0, [offset, need]);
+        // Joined with the span after it, then with the one before.
+        if (at + 1 < free.length && free[at][0] + free[at][1] === free[at + 1][0])
+        {
+            free[at][1] += free[at + 1][1];
+            free.splice(at + 1, 1);
+        }
+        if (at > 0 && free[at - 1][0] + free[at - 1][1] === free[at][0])
+        {
+            free[at - 1][1] += free[at][1];
+            free.splice(at, 1);
+        }
+    };
     let pumps = 0;
     let idlePumps = 0;
 
@@ -672,6 +728,108 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
             }
             openTracks.add(track);
             return track;
+        },
+
+        /**
+         * A sound buffer as a sound card holds one: a slot and a mirror of the
+         * whole buffer in the arena, which the device (`worklet.js`) plays on
+         * its own clock from `POSITION`. The engine writes what the program
+         * unlocks into the mirror and reads the play cursor back; nothing is
+         * pushed per turn, so a busy engine thread is not heard. Null when no
+         * slot or no room is left -- the caller then plays the buffer through
+         * a queue as before.
+         *
+         * @param {PcmFormat & { bytes: number }} format
+         */
+        openVoice(format){
+            if (!arena || !(format.sampleRate > 0) || !(format.channels > 0) || !(format.bytes > 0))
+            {
+                return null;
+            }
+            const slot = slots.findIndex(s=>Atomics.load(s.header, STATE) === STATE_FREE);
+            const base = slot === -1 ? -1 : claimSpan(format.bytes);
+            if (base === -1)
+            {
+                refusedVoices++;
+                return null;
+            }
+            const { header } = slots[slot];
+            for (const [field, value] of [
+                [KIND, KIND_DMA], [BASE, base], [LENGTH, format.bytes],
+                [RATE, format.sampleRate], [CHANNELS, format.channels],
+                [BITS, format.bitsPerSample],
+                [GAIN, GAIN_SCALE], [LEFT_CUT, 0], [RIGHT_CUT, 0], [PAUSED, 0],
+                [POSITION, 0], [LOOPING, 0], [PLAYING, 0], [MIXED_FRAMES, 0],
+            ])
+            {
+                Atomics.store(header, field, value);
+            }
+            Atomics.add(header, GENERATION, 1);
+            Atomics.store(header, STATE, STATE_OPEN);
+            voices++;
+            let closed = false;
+            return {
+                slot,
+                /** Bytes of the program's buffer into the mirror, at `offset`. @param {number} offset @param {Uint8Array} data */
+                write(offset, data){
+                    const room = Math.max(0, format.bytes - offset);
+                    arena.set(data.length > room ? data.subarray(0, room) : data, base + offset);
+                },
+                /** @param {boolean} looping */
+                play(looping){
+                    Atomics.store(header, LOOPING, looping ? 1 : 0);
+                    Atomics.store(header, PLAYING, 1);
+                },
+                stop(){
+                    Atomics.store(header, PLAYING, 0);
+                },
+                get playing(){
+                    return Atomics.load(header, PLAYING) !== 0;
+                },
+                /** The play cursor, bytes into the buffer: the device's. */
+                get position(){
+                    return Atomics.load(header, POSITION);
+                },
+                /** Moves the cursor; the device starts its interpolation afresh there. */
+                set position(value){
+                    Atomics.store(header, POSITION, value);
+                    Atomics.add(header, GENERATION, 1);
+                },
+                get laps(){
+                    return Atomics.load(header, LAPS);
+                },
+                get ends(){
+                    return Atomics.load(header, ENDS);
+                },
+                /** @param {number} value */
+                set gain(value){
+                    Atomics.store(header, GAIN, Math.round(value * GAIN_SCALE));
+                },
+                /** @param {number[]} sides */
+                set balance([left, right]){
+                    Atomics.store(header, LEFT_CUT, Math.round((1 - left) * GAIN_SCALE));
+                    Atomics.store(header, RIGHT_CUT, Math.round((1 - right) * GAIN_SCALE));
+                },
+                /** @param {number} rate */
+                retune(rate){
+                    if (rate > 0)
+                    {
+                        Atomics.store(header, RATE, rate);
+                    }
+                },
+                close(){
+                    if (closed)
+                    {
+                        return;
+                    }
+                    closed = true;
+                    Atomics.store(header, PLAYING, 0);
+                    Atomics.add(header, GENERATION, 1);
+                    Atomics.store(header, STATE, STATE_CLOSING);
+                    returnSpan(base, format.bytes);
+                    voices--;
+                },
+            };
         },
 
         /** Not meaningful for a table with no single output cursor. */
@@ -706,6 +864,9 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
             idlePumps,
             pumps,
             fallbackTracks,
+            voices,
+            refusedVoices,
+            arenaFree: free.reduce((sum, [, bytes])=>sum + bytes, 0),
         }),
     };
 
@@ -718,6 +879,7 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
         const bytesPerSample = format.bitsPerSample === 8 ? 1 : 2;
         const stride = bytesPerSample * format.channels;
 
+        Atomics.store(header, KIND, KIND_QUEUE);
         Atomics.store(header, RATE, format.sampleRate);
         Atomics.store(header, CHANNELS, format.channels);
         Atomics.store(header, BITS, format.bitsPerSample);
