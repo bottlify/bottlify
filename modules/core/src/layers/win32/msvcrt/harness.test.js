@@ -143,6 +143,137 @@ export function fakeMemory(base = 0x10000, size = 1 << 20){
 }
 
 /**
+ * A volume of byte arrays: a node is a path, reads and writes go straight
+ * to the array, and a read may be handed back late to stand for a block
+ * that is still on its way. A name in `directories` is a directory, listed
+ * with the files whose names it holds.
+ *
+ * @param {Record<string, Uint8Array>} files
+ * @param {{ late?: boolean, directories?: string[], modified?: number }} [options]
+ */
+export function fakeVolume(files, { late = false, directories = [], modified = 0 } = {}){
+    /** @type {string[]} */
+    const closed = [];
+    const folders = new Set(directories);
+    const volume = {
+        files,
+        closed,
+        folders,
+        /** How many reads reached the volume. */
+        reads: 0,
+        /**
+         * @param {string} path
+         * @param {{ create?: boolean, truncate?: boolean, failIfExists?: boolean }} mode
+         */
+        open(path, mode){
+            if (folders.has(path) || (files[path] && mode.failIfExists)
+                || (!files[path] && !mode.create))
+            {
+                return null;
+            }
+            if (!files[path] || mode.truncate)
+            {
+                files[path] = new Uint8Array(0);
+            }
+            return path;
+        },
+        /** @param {string} path */
+        stat: path=>(folders.has(path)
+            ? { exists: true, isDirectory: true, size: 0, modified }
+            : (files[path]
+                ? { exists: true, isDirectory: false, size: files[path].length, modified }
+                : null)),
+        /** @param {string} node @param {number} at @param {number} length */
+        read(node, at, length){
+            volume.reads++;
+            const bytes = files[node].slice(at, at + length);
+            return late ? Promise.resolve(bytes) : bytes;
+        },
+        /** @param {string} node @param {number} at @param {Uint8Array} bytes */
+        write(node, at, bytes){
+            const grown = new Uint8Array(Math.max(files[node].length, at + bytes.length));
+            grown.set(files[node]);
+            grown.set(bytes, at);
+            files[node] = grown;
+            return bytes.length;
+        },
+        /** @param {string} node */
+        close: node=>closed.push(node),
+        /** @param {string} path */
+        remove(path){
+            if (!files[path])
+            {
+                return false;
+            }
+            delete files[path];
+            return true;
+        },
+        currentDirectory: ()=>'C:\\game',
+        /**
+         * What a directory holds whose names match a pattern of `*` and `?`,
+         * `*.*` matching every name as it does on Windows.
+         *
+         * @param {string} directory @param {string} pattern
+         */
+        list(directory, pattern){
+            const inside = `${directory.replace(/\\$/, '')}\\`;
+            const wanted = new RegExp(`^${(pattern === '*.*' ? '*' : pattern)
+                .replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`,
+            'i');
+            return [...folders, ...Object.keys(files)]
+                .filter(path=>path.startsWith(inside) && !path.slice(inside.length).includes('\\'))
+                .map(path=>path.slice(inside.length))
+                .filter(name=>name !== '' && wanted.test(name))
+                .map(name=>({ name, ...volume.stat(inside + name) }));
+        },
+    };
+    return volume;
+}
+
+/**
+ * kernel32's handle table as far as files go: what CreateFile files there,
+ * and a CloseHandle that gives the file's node back to the volume.
+ *
+ * @param {ReturnType<typeof fakeVolume>} files
+ */
+export function fakeHandles(files){
+    /** @type {Map<number, any>} */
+    const table = new Map();
+    let next = 0x100;
+    /** @param {any} file */
+    const open = file=>{
+        const handle = next;
+        next += 4;
+        table.set(handle, file);
+        return handle;
+    };
+    return {
+        table,
+        open,
+        /** @param {number} handle */
+        file: handle=>table.get(handle >>> 0) ?? null,
+        /** @param {number} handle */
+        close: handle=>{
+            const file = table.get(handle >>> 0);
+            if (!file)
+            {
+                return false;
+            }
+            table.delete(handle >>> 0);
+            files.close(file.node);
+            return true;
+        },
+        /**
+         * CreateFile's answer for a path already on the volume.
+         *
+         * @param {string} path @param {boolean} [read] @param {boolean} [write]
+         */
+        create: (path, read = true, write = true)=>
+            open({ path, node: files.open(path, {}), read, write, position: 0 }),
+    };
+}
+
+/**
  * The double a cdecl caller pushed, as the two slots a handler receives.
  *
  * @param {number} value

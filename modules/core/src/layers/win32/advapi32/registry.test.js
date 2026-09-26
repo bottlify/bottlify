@@ -15,7 +15,10 @@ import {
     REG_DWORD,
     REG_MULTI_SZ,
     REG_SZ,
+    profileDirectories,
+    shellFolders,
 } from './registry.js';
+import { WINDOWS_VERSIONS } from '../kernel32/versions.js';
 
 /** A root id no hive hosts, used to prove a save cannot invent one. */
 const HKEY_UNKNOWN_ROOT = 0x80000050;
@@ -116,6 +119,136 @@ test('the processor key reports the engine\'s speed, and a restored hive takes i
     // the slower engine does not keep its speed on the faster one.
     fast.fromJSON(slow.toJSON());
     assert.equal(mhzOf(fast), 3000);
+});
+
+/**
+ * A value as a program reads it: text without its terminator, a DWORD as a
+ * number, and null when there is none.
+ *
+ * @param {ReturnType<typeof createHive>} hive @param {number} rootId
+ * @param {string} path @param {string} name
+ */
+const valueOf = (hive, rootId, path, name)=>{
+    const key = hive.open(/** @type {any} */ (hive.root(rootId)), path);
+    const value = key && hive.getValue(key, name);
+    if (!value)
+    {
+        return null;
+    }
+    return value.type === REG_DWORD
+        ? new DataView(value.data.buffer, value.data.byteOffset).getUint32(0, true)
+        : String.fromCharCode(...value.data.subarray(0, value.data.length - 1));
+};
+
+const NT_VERSION = 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion';
+const USER_FOLDERS = 'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders';
+const COMMON_FOLDERS = 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders';
+
+test('the Windows NT version key describes the Windows the hive was made for', ()=>{
+    /** @param {import('../kernel32/versions.js').WindowsVersion} version */
+    const describe = version=>{
+        const hive = createHive({ windows: version });
+        return ['CurrentVersion', 'CurrentBuildNumber', 'CurrentBuild', 'CSDVersion',
+            'ProductName', 'CurrentMajorVersionNumber', 'CurrentMinorVersionNumber']
+            .map(name=>valueOf(hive, HKEY_LOCAL_MACHINE, NT_VERSION, name));
+    };
+    // XP and 2000 keep an obsolete placeholder in CurrentBuild; 10 keeps
+    // CurrentVersion at 6.3 for the programs that parse it, and says 10.0 in
+    // two DWORDs of its own.
+    const obsolete = '1.511.1 () (Obsolete data - do not use)';
+    assert.deepEqual(describe(WINDOWS_VERSIONS.win2000), ['5.0', '2195', obsolete,
+        'Service Pack 4', 'Microsoft Windows 2000', null, null]);
+    assert.deepEqual(describe(WINDOWS_VERSIONS.winxp), ['5.1', '2600', obsolete,
+        'Service Pack 3', 'Microsoft Windows XP', null, null]);
+    assert.deepEqual(describe(WINDOWS_VERSIONS.win7), ['6.1', '7601', '7601',
+        'Service Pack 1', 'Windows 7 Professional', null, null]);
+    assert.deepEqual(describe(WINDOWS_VERSIONS.win10), ['6.3', '19045', '19045',
+        null, 'Windows 10 Pro', 10, 0]);
+    assert.equal(valueOf(createHive(), HKEY_LOCAL_MACHINE, NT_VERSION, 'CSDVersion'),
+        'Service Pack 3', 'a hive made without a version is XP\'s');
+});
+
+test('Windows 10 names its release and its update revision, and nothing older does', ()=>{
+    // 19045 is 22H2, the release whose ReleaseId stayed at 2009 when the
+    // name moved to DisplayVersion; UBR is the revision after the build.
+    /** @param {import('../kernel32/versions.js').WindowsVersion} version */
+    const release = version=>{
+        const hive = createHive({ windows: version });
+        return ['DisplayVersion', 'ReleaseId', 'UBR']
+            .map(name=>valueOf(hive, HKEY_LOCAL_MACHINE, NT_VERSION, name));
+    };
+    const [displayVersion, releaseId, ubr] = release(WINDOWS_VERSIONS.win10);
+    assert.equal(displayVersion, '22H2');
+    assert.equal(releaseId, '2009');
+    assert.equal(typeof ubr, 'number', 'UBR is a DWORD');
+    assert.equal(ubr, WINDOWS_VERSIONS.win10.release?.ubr);
+    for (const name of /** @type {const} */ (['win2000', 'winxp', 'win7']))
+    {
+        assert.deepEqual(release(WINDOWS_VERSIONS[name]), [null, null, null], name);
+    }
+});
+
+test('the shell folders are Documents and Settings to XP and Users from 7 on', ()=>{
+    const xp = shellFolders(WINDOWS_VERSIONS.winxp);
+    assert.equal(xp.Profile, 'C:\\Documents and Settings\\User');
+    assert.equal(xp.AppData, 'C:\\Documents and Settings\\User\\Application Data');
+    assert.equal(xp['Local AppData'],
+        'C:\\Documents and Settings\\User\\Local Settings\\Application Data');
+    assert.equal(xp.Personal, 'C:\\Documents and Settings\\User\\My Documents');
+    assert.equal(xp['Common AppData'], 'C:\\Documents and Settings\\All Users\\Application Data');
+    assert.equal(xp['Common Documents'], 'C:\\Documents and Settings\\All Users\\Documents');
+    assert.deepEqual(shellFolders(WINDOWS_VERSIONS.win2000), xp);
+
+    const seven = shellFolders(WINDOWS_VERSIONS.win7);
+    assert.equal(seven.Profile, 'C:\\Users\\User');
+    assert.equal(seven.AppData, 'C:\\Users\\User\\AppData\\Roaming');
+    assert.equal(seven['Local AppData'], 'C:\\Users\\User\\AppData\\Local');
+    assert.equal(seven.Personal, 'C:\\Users\\User\\Documents');
+    assert.equal(seven.Desktop, 'C:\\Users\\User\\Desktop');
+    assert.equal(seven.Programs,
+        'C:\\Users\\User\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs');
+    assert.equal(seven['Common AppData'], 'C:\\ProgramData');
+    assert.equal(seven['Common Programs'],
+        'C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs');
+    assert.equal(seven['Common Documents'], 'C:\\Users\\Public\\Documents');
+    assert.equal(seven['Common Desktop'], 'C:\\Users\\Public\\Desktop');
+    assert.deepEqual(shellFolders(WINDOWS_VERSIONS.win10), seven);
+
+    for (const folders of [xp, seven])
+    {
+        assert.equal(folders.Windows, 'C:\\WINDOWS');
+        assert.equal(folders.ProgramFiles, 'C:\\Program Files', 'a 32-bit system has one');
+    }
+
+    // The registry and the shell read one table: what a program reads from
+    // one it finds in the other.
+    const hive = createHive({ windows: WINDOWS_VERSIONS.win7 });
+    assert.equal(valueOf(hive, HKEY_CURRENT_USER, USER_FOLDERS, 'AppData'), seven.AppData);
+    assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, COMMON_FOLDERS, 'Common Documents'),
+        seven['Common Documents']);
+});
+
+test('a hive restored under another Windows describes that one, and keeps the rest', ()=>{
+    // A bottle's registry is kept between runs, and its version is a setting
+    // that can change: the values that describe the machine are the
+    // machine's, rewritten at every start, while a program's own survive.
+    const saved = createHive({ windows: WINDOWS_VERSIONS.win10 });
+    const { key } = saved.create(/** @type {any} */ (saved.root(HKEY_CURRENT_USER)),
+        'Software\\Vendor');
+    saved.setValue(key, 'Path', REG_SZ, latin1('C:\\Games\0'));
+
+    const hive = createHive({ windows: WINDOWS_VERSIONS.winxp });
+    hive.fromJSON(saved.toJSON());
+
+    assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, NT_VERSION, 'CurrentVersion'), '5.1');
+    assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, NT_VERSION, 'CSDVersion'), 'Service Pack 3');
+    assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, NT_VERSION, 'CurrentMajorVersionNumber'),
+        null, 'what only 10 has is gone');
+    assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, NT_VERSION, 'UBR'), null);
+    assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, NT_VERSION, 'DisplayVersion'), null);
+    assert.equal(valueOf(hive, HKEY_CURRENT_USER, USER_FOLDERS, 'AppData'),
+        shellFolders(WINDOWS_VERSIONS.winxp).AppData);
+    assert.equal(valueOf(hive, HKEY_CURRENT_USER, 'Software\\Vendor', 'Path'), 'C:\\Games');
 });
 
 test('a key path is created once and found again whatever its case', ()=>{
@@ -276,4 +409,60 @@ test('a restore discards what the hive was holding', ()=>{
 
     assert.equal(
         hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)), 'Software\\Stale'), null);
+});
+
+test('the classes root is saved as the two roots it shows, and an older save folds in', ()=>{
+    const hive = createHive();
+    const classes = /** @type {any} */ (hive.root(HKEY_CLASSES_ROOT));
+    const { key } = hive.create(classes, 'CLSID\\{00000000-0000-0000-0000-00000000C0DE}');
+    hive.setValue(key, '', REG_SZ, latin1('Registered'));
+    assert.ok(hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)),
+        'Software\\Classes\\CLSID\\{00000000-0000-0000-0000-00000000C0DE}'));
+    const saved = hive.toJSON();
+    assert.equal(saved.roots.some(root=>root.id === HKEY_CLASSES_ROOT), false,
+        'not a third copy of what the machine and the user already hold');
+
+    // A save made while the classes root was a tree of its own still has its
+    // classes found, and what the machine side says wins where both have it.
+    const older = /** @type {any} */ (saved);
+    older.roots.push({ id: HKEY_CLASSES_ROOT, key: { name: 'HKEY_CLASSES_ROOT', values: [], keys: [
+        { name: '.xyz', values: [{ name: '', type: REG_SZ, data: [...latin1('xyzfile\0')] }],
+            keys: [] },
+        { name: 'CLSID', values: [], keys: [
+            { name: '{00000000-0000-0000-0000-00000000C0DE}',
+                values: [{ name: '', type: REG_SZ, data: [...latin1('Stale\0')] }], keys: [] },
+        ] },
+    ] } });
+    const restored = createHive();
+    restored.fromJSON(JSON.parse(JSON.stringify(older)));
+    const root = /** @type {any} */ (restored.root(HKEY_CLASSES_ROOT));
+    /** @param {any} at */
+    const text = at=>String.fromCharCode(...restored.getValue(at, '')?.data ?? []);
+    assert.equal(text(restored.open(root, '.XYZ')), 'xyzfile\0');
+    assert.equal(text(restored.open(root, 'CLSID\\{00000000-0000-0000-0000-00000000C0DE}')),
+        'Registered\0');
+});
+
+test('the profile\'s directories are every folder under it, each parent before its children', ()=>{
+    for (const windows of Object.values(WINDOWS_VERSIONS))
+    {
+        const directories = profileDirectories(windows);
+        const folders = shellFolders(windows);
+        for (const name of ['Profile', 'Desktop', 'Startup', 'Personal', 'AppData',
+            'Local AppData', 'Common Desktop', 'Common Startup', 'Common Documents',
+            'Common AppData'])
+        {
+            assert.ok(directories.includes(folders[name]), `${windows.name}: ${name}`);
+        }
+        directories.forEach((path, index)=>{
+            const parent = path.slice(0, path.lastIndexOf('\\'));
+            assert.ok(parent === 'C:' || directories.indexOf(parent) < index,
+                `${windows.name}: ${parent} before ${path}`);
+        });
+        assert.ok(!directories.some(path=>/^C:\\(WINDOWS|Program Files)/i.test(path)),
+            'the system\'s own directories are not the profile\'s');
+    }
+    assert.ok(profileDirectories(WINDOWS_VERSIONS.win7).includes('C:\\Users\\Public'));
+    assert.ok(profileDirectories(WINDOWS_VERSIONS.winxp)
+        .includes('C:\\Documents and Settings\\User\\Local Settings'));
 });

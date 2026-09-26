@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createFontEngine, familyOf } from './fonts.js';
+import { NONANTIALIASED_QUALITY, createFontEngine, familyOf } from './fonts.js';
 import { extTextOut, textExtent } from './text.js';
 import { createGdiDrawing } from './context.js';
 import { TRANSPARENT } from './brush.js';
@@ -158,6 +158,23 @@ test('a glyph is the canvas coverage, placed against the pen and the cell top', 
     const space = engine.glyph(0x20, font({ height: -10 }));
     assert.equal(space?.advance, 5);
     assert.equal(space?.width, 0, 'a space covers nothing but still advances');
+});
+
+test('a font asked for with NONANTIALIASED_QUALITY has no partly covered pixel', ()=>{
+    // LOGFONT's lfQuality: "Font is never antialiased." The fake paints the
+    // glyph's first column half covered, which a smoothed glyph keeps.
+    const fake = fakeCanvas();
+    const engine = createFontEngine({ canvas: fake.canvas });
+    const smooth = engine.glyph(0x41, font({ height: -10 }));
+    const sharp = engine.glyph(0x41, font({ height: -10, quality: NONANTIALIASED_QUALITY }));
+    assert.ok(smooth && sharp);
+    assert.equal(smooth.coverage[0], 128);
+    assert.equal(sharp.coverage[0], 255, 'half covered or more is inked');
+    assert.deepEqual([...new Set(sharp.coverage)].sort((a, b)=>a - b), [255],
+        'nothing in between');
+    assert.equal(fake.calls.fillText, 2, 'the two are different glyphs');
+    engine.glyph(0x41, font({ height: -10, quality: 4 }));
+    assert.equal(fake.calls.fillText, 2, 'every smoothed quality shares one');
 });
 
 test('a glyph is rasterised once per font and served from the cache after', ()=>{

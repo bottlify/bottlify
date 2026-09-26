@@ -223,6 +223,10 @@ export const audioModule = {
             if (!drained)
             {
                 refusedFills++;
+                // No tracks are ever opened here, so a released buffer has
+                // nothing to close first; it still has to leave the walk
+                // above, or that walk grows with every buffer ever made.
+                dsound.pruneReleased();
                 return;
             }
             for (const buffer of dsound.buffers())
@@ -264,6 +268,15 @@ export const audioModule = {
                     tracks.set(buffer, track);
                     openTracks++;
                 }
+                // A program may retune a buffer while it plays, and its cursor
+                // hands over bytes at the new rate from that moment. A track
+                // left at the old one plays them at the wrong pitch and makes
+                // more or less sound than the guest's clock allows for, which
+                // the backlog policy below then throws away or starves on.
+                if (track.format.sampleRate !== buffer.frequency)
+                {
+                    track.retune(buffer.frequency);
+                }
                 // Too far ahead to be worth playing: the cursor is driven by the
                 // guest's clock and the ring drains at the pace of a real
                 // device, so a queue past the ring's own depth is audio whose
@@ -280,6 +293,7 @@ export const audioModule = {
                     behind++;
                 }
                 track.gain = buffer.gain;
+                track.balance = buffer.balance;
                 for (const range of ranges)
                 {
                     fedBytes += range.bytes;
@@ -309,6 +323,13 @@ export const audioModule = {
             libraries: ()=>(config?.mp3 === false
                 ? { ...dsound.libraries }
                 : { ...dsound.libraries, ...mp3.libraries }),
+
+            /**
+             * Which ordinal is which export, for the libraries a program
+             * imports by number, keyed like `libraries`. The assembling caller
+             * synthesises each library with these, as it does win32's.
+             */
+            ordinals: ()=>({ ...dsound.ordinals }),
 
             /**
              * Which of those are redistributable runtimes this engine answers

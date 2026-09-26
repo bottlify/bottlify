@@ -16,6 +16,7 @@ const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NO_MORE_FILES = 18;
 const ERROR_FILE_EXISTS = 80;
+const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NEGATIVE_SEEK = 131;
 const ERROR_ALREADY_EXISTS = 183;
 const ERROR_NOT_SUPPORTED = 50;
@@ -292,7 +293,8 @@ function fakeHandles(){
     };
 }
 
-function setup(){
+/** @param {Record<string, any>} [extra]  More of the host, for the calls that need it. */
+function setup(extra = {}){
     const memory = fakeMemory();
     const files = fakeFiles();
     const handles = fakeHandles();
@@ -326,6 +328,7 @@ function setup(){
         },
         writeConsole: (handle, text)=>console.push({ handle, text }),
         handles,
+        ...extra,
     });
 
     /**
@@ -809,6 +812,149 @@ test('a search runs out with its own code, not with a general failure', ()=>{
     assert.equal(fns.FindNextFileA.handler([handle, FIND_DATA]), 0, 'and the handle is gone');
 });
 
+test('FindFirstFileEx searches as FindFirstFile does, at either level, in both spellings', ()=>{
+    const FIND_EX_INFO_BASIC = 1;
+    const FIND_EX_SEARCH_LIMIT_TO_DIRECTORIES = 1;
+    const FIND_FIRST_EX_LARGE_FETCH = 2;
+    const { files, memory, error, fns, at } = setup();
+    files.put('C:\\GAME\\A.SAV', 'a');
+    files.put('C:\\GAME\\B.SAV', 'bb');
+
+    const handle = fns.FindFirstFileExA.handler(
+        [at(NAME, 'C:\\GAME\\*.SAV'), FIND_EX_INFO_BASIC, FIND_DATA, 0, 0,
+            FIND_FIRST_EX_LARGE_FETCH]);
+    assert.notEqual(handle, INVALID_HANDLE_VALUE);
+    assert.equal(memory.string(FIND_DATA + 44), 'A.SAV');
+    assert.equal(fns.FindNextFileA.handler([handle, FIND_DATA]), 1, 'the handle is a search');
+    assert.equal(memory.string(FIND_DATA + 44), 'B.SAV');
+    fns.FindClose.handler([handle]);
+
+    // Limiting to directories is advice a file system may not take.
+    const wide = fns.FindFirstFileExW.handler([putWide(memory, NAME, 'C:\\GAME\\*'), 0,
+        FIND_DATA, FIND_EX_SEARCH_LIMIT_TO_DIRECTORIES, 0, 0]);
+    assert.notEqual(wide, INVALID_HANDLE_VALUE);
+    fns.FindClose.handler([wide]);
+
+    assert.equal(fns.FindFirstFileExA.handler(
+        [at(NAME, 'C:\\GAME\\*.SAV'), 0, FIND_DATA, 0, 0x1234, 0]), INVALID_HANDLE_VALUE,
+    'no search filter is defined');
+    assert.equal(error.code, ERROR_INVALID_PARAMETER);
+    assert.equal(fns.FindFirstFileExA.handler(
+        [at(NAME, 'C:\\GAME\\*.SAV'), 2, FIND_DATA, 0, 0, 0]), INVALID_HANDLE_VALUE,
+    'nor a third level');
+    assert.equal(fns.FindFirstFileExA.handler(
+        [at(NAME, 'C:\\NOWHERE\\*'), 0, FIND_DATA, 0, 0, 0]), INVALID_HANDLE_VALUE);
+    assert.equal(error.code, ERROR_PATH_NOT_FOUND);
+    assert.equal(fns.FindFirstFileExA.argBytes, 24);
+    assert.equal(fns.FindFirstFileExW.argBytes, 24);
+});
+
+test('LockFileEx and UnlockFileEx take a range out of an OVERLAPPED, as LockFile takes one', ()=>{
+    const LOCKFILE_EXCLUSIVE_LOCK = 0x2;
+    const LOCKFILE_FAIL_IMMEDIATELY = 0x1;
+    const OVERLAPPED = 0x700;
+    const { files, error, fns, open } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'x');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+
+    assert.equal(fns.LockFileEx.handler([handle,
+        LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 16, 0, OVERLAPPED]), 1);
+    assert.equal(fns.UnlockFileEx.handler([handle, 0, 16, 0, OVERLAPPED]), 1);
+
+    assert.equal(fns.LockFileEx.handler([handle, 0, 1, 16, 0, OVERLAPPED]), 0,
+        'the reserved word must be zero');
+    assert.equal(error.code, ERROR_INVALID_PARAMETER);
+    assert.equal(fns.UnlockFileEx.handler([handle, 1, 16, 0, OVERLAPPED]), 0);
+    assert.equal(error.code, ERROR_INVALID_PARAMETER);
+    assert.equal(fns.LockFileEx.handler([handle, 0, 0, 16, 0, 0]), 0, 'the range is in it');
+    assert.equal(error.code, ERROR_INVALID_PARAMETER);
+    assert.equal(fns.LockFileEx.handler([0x1234, 0, 0, 16, 0, OVERLAPPED]), 0);
+    assert.equal(error.code, ERROR_INVALID_HANDLE);
+    assert.equal(fns.LockFileEx.argBytes, 24);
+    assert.equal(fns.UnlockFileEx.argBytes, 20);
+});
+
+test('ReadFileEx reads at the OVERLAPPED\'s offset and queues its routine to the caller', ()=>{
+    // Wine's file and pipe tests: the completion routine is not called before
+    // ReadFileEx returns -- it is an APC, run at the thread's next alertable
+    // wait -- with the error, the count and the OVERLAPPED; Internal and
+    // InternalHigh are already written for GetOverlappedResult, and hEvent is
+    // the program's own and left alone.
+    const OVERLAPPED = 0x700;
+    const ROUTINE = 0x401000;
+    const thread = { id: 1 };
+    /** @type {any[][]} */
+    const queued = [];
+    const { memory, files, fns, open } = setup({
+        currentThread: ()=>thread,
+        queueApc: (/** @type {any} */ to, /** @type {number} */ routine,
+            /** @type {number[]} */ args)=>queued.push([to, routine, args]),
+    });
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdef');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    memory.putDword(OVERLAPPED, 0xdeadbeef);
+    memory.putDword(OVERLAPPED + 4, 0xdeadbeef);
+    memory.putDword(OVERLAPPED + 8, 2);
+    memory.putDword(OVERLAPPED + 12, 0);
+    memory.putDword(OVERLAPPED + 16, 0x1234);
+
+    assert.equal(fns.ReadFileEx.handler([handle, BUFFER, 3, OVERLAPPED, ROUTINE]), 1);
+    assert.equal(String.fromCharCode(...memory.bytes.subarray(BUFFER, BUFFER + 3)), 'cde');
+    assert.deepEqual(queued, [[thread, ROUTINE, [0, 3, OVERLAPPED]]]);
+    assert.equal(memory.dword(OVERLAPPED), 0, 'Internal: the status');
+    assert.equal(memory.dword(OVERLAPPED + 4), 3, 'InternalHigh: the count');
+    assert.equal(memory.dword(OVERLAPPED + 16), 0x1234, 'hEvent untouched');
+    assert.equal(fns.ReadFileEx.argBytes, 20);
+});
+
+test('ReadFileEx at the end of the file fails and queues nothing', ()=>{
+    // The loop in Wine's file test reads until ReadFileEx fails, and checks the
+    // routine ran only for the reads that succeeded.
+    const ERROR_HANDLE_EOF = 38;
+    const OVERLAPPED = 0x700;
+    /** @type {any[][]} */
+    const queued = [];
+    const { memory, files, error, fns, open } = setup({
+        currentThread: ()=>({}),
+        queueApc: (/** @type {any[]} */ ...args)=>queued.push(args),
+    });
+    files.put('C:\\GAME\\SAVE.DAT', 'abcd');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    memory.putDword(OVERLAPPED + 8, 4);
+
+    assert.equal(fns.ReadFileEx.handler([handle, BUFFER, 16, OVERLAPPED, 0x401000]), 0);
+    assert.equal(error.code, ERROR_HANDLE_EOF);
+    assert.deepEqual(queued, []);
+    assert.equal(fns.ReadFileEx.handler([0x1234, BUFFER, 16, OVERLAPPED, 0x401000]), 0);
+    assert.equal(error.code, ERROR_INVALID_HANDLE);
+    assert.equal(fns.ReadFileEx.handler([handle, BUFFER, 16, 0, 0x401000]), 0,
+        'there is no offset without an OVERLAPPED');
+    assert.equal(error.code, ERROR_INVALID_PARAMETER);
+});
+
+test('WriteFileEx writes at the OVERLAPPED\'s offset and queues its routine', ()=>{
+    const OVERLAPPED = 0x700;
+    const ROUTINE = 0x401000;
+    const thread = { id: 1 };
+    /** @type {any[][]} */
+    const queued = [];
+    const { memory, files, fns, open } = setup({
+        currentThread: ()=>thread,
+        queueApc: (/** @type {any} */ to, /** @type {number} */ routine,
+            /** @type {number[]} */ args)=>queued.push([to, routine, args]),
+    });
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdef');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    memory.putString(BUFFER, 'XY');
+    memory.putDword(OVERLAPPED + 8, 4);
+
+    assert.equal(fns.WriteFileEx.handler([handle, BUFFER, 2, OVERLAPPED, ROUTINE]), 1);
+    assert.equal(files.text('C:\\GAME\\SAVE.DAT'), 'abcdXY');
+    assert.deepEqual(queued, [[thread, ROUTINE, [0, 2, OVERLAPPED]]]);
+    assert.equal(memory.dword(OVERLAPPED + 4), 2);
+    assert.equal(fns.WriteFileEx.argBytes, 20);
+});
+
 test('a search handle is not a file handle', ()=>{
     const { files, fns, at, open } = setup();
     files.put('C:\\GAME\\A.SAV', 'a');
@@ -925,6 +1071,21 @@ test('a file made one spelling is found by the other', ()=>{
     assert.equal(fns.GetFileAttributesA.handler([at(NAME, 'C:\\GAME\\WIDE.DAT')]), 0xffffffff);
 });
 
+test('MoveFileExW is the same move in wide names, flags and all', ()=>{
+    const { files, memory, fns, error } = setup();
+    files.put('C:\\GAME\\NEW.DLL', 'fresh');
+    files.put('C:\\GAME\\OLD.DLL', 'stale');
+    const from = putWide(memory, NAME, 'C:\\GAME\\NEW.DLL');
+    const to = putWide(memory, NAME2, 'C:\\GAME\\OLD.DLL');
+
+    assert.equal(fns.MoveFileExW.handler([from, to, 0]), 0, 'no overwrite without the flag');
+    assert.equal(error.code, ERROR_ALREADY_EXISTS);
+    assert.equal(fns.MoveFileExW.handler([from, to, 1]), 1);
+    assert.equal(files.text('C:\\GAME\\OLD.DLL'), 'fresh');
+    assert.equal(files.stat('C:\\GAME\\NEW.DLL')?.exists, undefined);
+    assert.equal(fns.MoveFileExW.argBytes, 12);
+});
+
 test('a wide directory listing writes twice as wide a name, at the same offset', ()=>{
     // WIN32_FIND_DATAW shares every offset up to cFileName with the ANSI form
     // and then does not, which is exactly why the tail is easy to get wrong.
@@ -1016,6 +1177,19 @@ test('the temporary directory exists before a program asks for it', ()=>{
     assert.ok(files.stat(path)?.exists, 'the name is reserved by a file');
     assert.notEqual(fns._lopen.handler([at(NAME, path), 2]), HFILE_ERROR,
         'which the caller can open for writing: the reservation did not hold it open');
+});
+
+test('the profile\'s directories exist before a program asks for them', ()=>{
+    // The registry, the environment and SHGetFolderPath all name them, and a
+    // program makes its own directory inside one without looking: with the
+    // folder missing, CreateDirectory fails with ERROR_PATH_NOT_FOUND.
+    const APPDATA = 'C:\\Users\\User\\AppData\\Roaming';
+    const { files, fns, at } = setup({ directories: ['C:\\Users', 'C:\\Users\\User',
+        'C:\\Users\\User\\AppData', APPDATA] });
+    assert.ok(files.stat(APPDATA)?.isDirectory);
+
+    assert.equal(fns.CreateDirectoryA.handler([at(NAME, `${APPDATA}\\Title`), 0]), 1);
+    assert.ok(files.stat(`${APPDATA}\\Title`)?.isDirectory);
 });
 
 test('_lopen refuses a file that is not there', ()=>{

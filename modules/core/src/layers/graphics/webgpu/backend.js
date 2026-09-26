@@ -40,7 +40,11 @@ const BufferUsage = {
     UNIFORM: 0x0040,
     STORAGE: 0x0080,
     INDIRECT: 0x0100,
+    QUERY_RESOLVE: 0x0200,
 };
+
+/** The most occlusion queries a frame counts: WebGPU's own limit on one set. */
+const OCCLUSION_CAPACITY = 4096;
 
 /** `GPUMapMode` bits, likewise. */
 const MapMode = {
@@ -98,12 +102,17 @@ export function createBackend(options){
      * automatic layout -- which drops a binding the generated shader happened
      * not to use -- is never reached.
      */
-    /** @type {Map<number, any>} */
+    /** @type {Map<string, any>} */
     const fixedFunctionLayouts = new Map();
 
-    /** @param {number} stageCount */
-    const layoutForStages = stageCount=>{
-        const existing = fixedFunctionLayouts.get(stageCount);
+    /**
+     * @param {readonly string[]} dimensions  Each stage's texture: '2d', 'cube' or '3d'.
+     *     A binding of one kind does not take a view of another.
+     */
+    const layoutForStages = dimensions=>{
+        const key = dimensions.join(',');
+        const stageCount = dimensions.length;
+        const existing = fixedFunctionLayouts.get(key);
         if (existing)
         {
             return existing;
@@ -116,21 +125,22 @@ export function createBackend(options){
         ];
         for (let index = 0; index < stageCount; index++)
         {
-            entries.push({ binding: 1 + index * 2, visibility: 2, texture: {} });
+            entries.push({ binding: 1 + index * 2, visibility: 2,
+                texture: dimensions[index] === '2d' ? {} : { viewDimension: dimensions[index] } });
             entries.push({ binding: 2 + index * 2, visibility: 2, sampler: {} });
         }
         const group = device.createBindGroupLayout({
-            label: `fixed-function:${stageCount}`,
+            label: `fixed-function:${key}`,
             entries,
         });
         const made = {
             group,
             pipeline: device.createPipelineLayout({
-                label: `fixed-function:${stageCount}`,
+                label: `fixed-function:${key}`,
                 bindGroupLayouts: [group],
             }),
         };
-        fixedFunctionLayouts.set(stageCount, made);
+        fixedFunctionLayouts.set(key, made);
         return made;
     };
 
@@ -148,7 +158,8 @@ export function createBackend(options){
             const generated = generateFixedFunction(state, layout);
             const module = await shaders.build(generated);
             const descriptor = pipelineDescriptor(state, layout);
-            const layouts = layoutForStages(state.stages.length);
+            const layouts = layoutForStages(
+                state.stages.map(stage=>stage.dimension ?? '2d'));
 
             return {
                 bindGroupLayout: layouts.group,
@@ -159,7 +170,7 @@ export function createBackend(options){
                     vertex: {
                         module,
                         entryPoint: 'vertexMain',
-                        buffers: [descriptor.vertexLayout],
+                        buffers: descriptor.vertexBuffers,
                     },
                     fragment: {
                         module,
@@ -254,10 +265,15 @@ export function createBackend(options){
         const mipLevelCount = descriptor.mipLevelCount === undefined ? 1 : descriptor.mipLevelCount;
         // A cube map is six layers of one texture and a view that says so; a
         // sampler given a plain 2D view of it reads one face and the shader
-        // that declared a cube fails to bind.
-        const layers = descriptor.layers === undefined ? 1 : descriptor.layers;
+        // that declared a cube fails to bind. A volume is a texture of three
+        // dimensions, its depth where the layers would be.
+        const volume = descriptor.dimension === '3d';
+        const layers = volume
+            ? descriptor.depth ?? 1
+            : descriptor.layers === undefined ? 1 : descriptor.layers;
         const texture = device.createTexture({
             label,
+            ...(volume ? { dimension: '3d' } : {}),
             size: {
                 width: descriptor.width,
                 height: descriptor.height,
@@ -290,27 +306,74 @@ export function createBackend(options){
     };
 
     /**
+     * The colour attachments a pass descriptor names. One `target` is the
+     * common case; `targets` lists several by location, a null leaving that
+     * location empty, with `clearValues` saying per target whether it is
+     * cleared, and to what. A pass with no colour target at all draws depth
+     * alone and takes its size from `depthTarget`.
+     *
+     * @param {any} descriptor
+     * @returns {{ sizing: any, attachments: any[] }}
+     */
+    const colourAttachmentsOf = descriptor=>{
+        /** @type {any[]} */
+        const targets = descriptor.targets ?? [descriptor.target];
+        const present = targets.filter(target=>target);
+        const sizing = present[0] ?? descriptor.depthTarget;
+        if (!sizing)
+        {
+            throw new Error('A pass with no target cannot be sized');
+        }
+        if (present.some(target=>target.width !== sizing.width
+            || target.height !== sizing.height))
+        {
+            throw new Error('The colour targets of one pass must be one size');
+        }
+        const attachments = targets.map((target, index)=>{
+            if (!target)
+            {
+                return null;
+            }
+            const clearValue = descriptor.targets
+                ? descriptor.clearValues?.[index] ?? null
+                : descriptor.clear
+                    ? descriptor.clearValue ?? OPAQUE_BLACK
+                    : null;
+            return {
+                view: target.view,
+                loadOp: clearValue ? 'clear' : 'load',
+                storeOp: 'store',
+                clearValue: clearValue ?? descriptor.clearValue ?? OPAQUE_BLACK,
+            };
+        });
+        return { sizing, attachments };
+    };
+
+    /**
      * @param {any} encoder
      * @param {any} descriptor
+     * @param {{ set: any, used: number } | null} [occlusion]  The frame's query
+     *     set, for a pass opened with `occlusion: true`.
      * @returns {any}
      */
-    function beginPass(encoder, descriptor){
-        const target = descriptor.target;
+    function beginPass(encoder, descriptor, occlusion = null){
+        const { sizing: target, attachments } = colourAttachmentsOf(descriptor);
         if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
         {
-            remember(surfaceWrites,
-                { index: frameIndex, label: target.label ?? 'surface', at: now() });
+            for (const written of descriptor.targets ?? [descriptor.target])
+            {
+                if (written)
+                {
+                    remember(surfaceWrites,
+                        { index: frameIndex, label: written.label ?? 'surface', at: now() });
+                }
+            }
         }
-        const attachment = {
-            view: target.view,
-            loadOp: descriptor.clear ? 'clear' : 'load',
-            storeOp: 'store',
-            clearValue: descriptor.clearValue === undefined ? OPAQUE_BLACK : descriptor.clearValue,
-        };
         const raw = encoder.beginRenderPass({
             label: descriptor.label === undefined ? `pass:${target.label}` : descriptor.label,
-            colorAttachments: [attachment],
+            colorAttachments: attachments,
             depthStencilAttachment: descriptor.depthStencilAttachment,
+            ...(occlusion ? { occlusionQuerySet: occlusion.set } : {}),
         });
         profiler.count('passes');
 
@@ -318,6 +381,22 @@ export function createBackend(options){
         let viewport = null;
         /** @type {any} */
         let pipeline = null;
+
+        /**
+         * A scissor rectangle kept on the attachment. The viewport may reach
+         * past the target, the scissor may not: one past it invalidates the
+         * encoder, and a negative origin is refused before it gets there --
+         * either way the frame is lost rather than the part off the target.
+         *
+         * @param {{ x: number, y: number, width: number, height: number }} rect
+         */
+        const scissor = rect=>{
+            const x0 = Math.min(Math.max(Math.floor(rect.x), 0), target.width);
+            const y0 = Math.min(Math.max(Math.floor(rect.y), 0), target.height);
+            const x1 = Math.min(Math.max(Math.ceil(rect.x + rect.width), x0), target.width);
+            const y1 = Math.min(Math.max(Math.ceil(rect.y + rect.height), y0), target.height);
+            raw.setScissorRect(x0, y0, x1 - x0, y1 - y0);
+        };
 
         const pass = {
             target,
@@ -331,14 +410,13 @@ export function createBackend(options){
                 raw.setViewport(viewport.rect.x, viewport.rect.y,
                     viewport.rect.width, viewport.rect.height,
                     viewport.rect.minDepth, viewport.rect.maxDepth);
-                raw.setScissorRect(viewport.rect.x, viewport.rect.y,
-                    viewport.rect.width, viewport.rect.height);
+                scissor(viewport.rect);
                 return viewport;
             },
 
             /** @param {{ x: number, y: number, width: number, height: number }} rect */
             setScissor(rect){
-                raw.setScissorRect(rect.x, rect.y, rect.width, rect.height);
+                scissor(rect);
             },
 
             /**
@@ -350,6 +428,43 @@ export function createBackend(options){
              */
             setStencilReference(reference){
                 raw.setStencilReference(reference);
+            },
+
+            /**
+             * The colour a pipeline's constant blend factor stands for. Dynamic
+             * state like the stencil reference, and black at the start of
+             * every pass until set.
+             *
+             * @param {{ r: number, g: number, b: number, a: number }} color
+             */
+            setBlendConstant(color){
+                raw.setBlendConstant(color);
+            },
+
+            /**
+             * Starts counting the samples that pass the depth and stencil
+             * tests, in the next slot of the frame's set. Queries do not nest
+             * and cannot span passes; a frame that has used every slot counts
+             * no more, and says so with null.
+             *
+             * @returns {number | null} the slot, for `frame.occlusionResults`
+             */
+            beginOcclusionQuery(){
+                if (!occlusion)
+                {
+                    throw new Error('This pass was not opened for occlusion queries');
+                }
+                if (occlusion.used >= OCCLUSION_CAPACITY)
+                {
+                    return null;
+                }
+                const index = occlusion.used++;
+                raw.beginOcclusionQuery(index);
+                return index;
+            },
+
+            endOcclusionQuery(){
+                raw.endOcclusionQuery();
             },
 
             /** @param {any} next */
@@ -590,6 +705,14 @@ export function createBackend(options){
             // this frame's encoder now, so it is this frame's submit that
             // frees them.
             const stagingBuffers = [];
+            /**
+             * The frame's occlusion queries: one set, made by the first pass
+             * that counts, its slots handed out in order across passes.
+             *
+             * @type {{ set: any, used: number, readback: any } | null}
+             */
+            let occlusion = null;
+            let occlusionWanted = false;
             const endUploads = profiler.phase('uploads');
             while (pendingCopies.length > 0)
             {
@@ -706,22 +829,59 @@ export function createBackend(options){
                     }
                     closeCurrentPass();
                     const endPhase = profiler.phase('passes');
-                    currentPass = beginPass(encoder, descriptor);
+                    if (descriptor.occlusion && !occlusion)
+                    {
+                        occlusion = {
+                            set: device.createQuerySet({ label: `occlusion#${index}`,
+                                type: 'occlusion', count: OCCLUSION_CAPACITY }),
+                            used: 0,
+                            readback: null,
+                        };
+                    }
+                    currentPass = beginPass(encoder, descriptor,
+                        descriptor.occlusion ? occlusion : null);
                     endPhase();
                     return currentPass;
                 },
 
                 /**
+                 * What every occlusion query of the frame counted, by slot, for
+                 * a reader after `end`: the set is resolved and copied out as
+                 * the frame's last commands.
+                 *
+                 * @returns {() => Promise<number[]>}
+                 */
+                occlusionResults(){
+                    occlusionWanted = true;
+                    return async()=>{
+                        const readback = occlusion?.readback;
+                        if (!readback)
+                        {
+                            return [];
+                        }
+                        await readback.buffer.mapAsync(MapMode.READ);
+                        const counts = new BigUint64Array(
+                            readback.buffer.getMappedRange().slice(0, readback.count * 8));
+                        readback.buffer.unmap();
+                        readback.buffer.destroy();
+                        return [...counts].map(Number);
+                    };
+                },
+
+                /**
                  * The target's pixels as they are at this point of the frame,
                  * for a reader after `end`. The pass is closed for the copy;
-                 * the caller reopens one that loads what is there.
+                 * the caller reopens one that loads what is there. The level
+                 * and layer are the surface's; its texels are four bytes
+                 * unless it says otherwise.
                  *
-                 * @param {import('./contract.js').Surface} surface
+                 * @param {import('./contract.js').Surface & { bytesPerTexel?: number }} surface
                  * @returns {() => Promise<{ width: number, height: number, data: Uint8Array }>}
                  */
                 snapshot(surface){
                     closeCurrentPass();
-                    const bytesPerRow = Math.ceil(surface.width * 4 / 256) * 256;
+                    const texel = surface.bytesPerTexel ?? 4;
+                    const bytesPerRow = Math.ceil(surface.width * texel / 256) * 256;
                     const size = bytesPerRow * surface.height;
                     let staging;
                     if (spareStaging && spareStaging.size === size)
@@ -738,17 +898,19 @@ export function createBackend(options){
                         });
                     }
                     encoder.copyTextureToBuffer(
-                        { texture: surface.texture, mipLevel: surface.mipLevel ?? 0 },
+                        { texture: surface.texture, mipLevel: surface.mipLevel ?? 0,
+                            origin: { x: 0, y: 0, z: surface.layer ?? 0 } },
                         { buffer: staging, bytesPerRow, rowsPerImage: surface.height },
                         { width: surface.width, height: surface.height, depthOrArrayLayers: 1 });
                     return async()=>{
                         await staging.mapAsync(MapMode.READ);
                         const mapped = new Uint8Array(staging.getMappedRange());
-                        const data = new Uint8Array(surface.width * surface.height * 4);
+                        const rowBytes = surface.width * texel;
+                        const data = new Uint8Array(rowBytes * surface.height);
                         for (let row = 0; row < surface.height; row++)
                         {
                             data.set(mapped.subarray(row * bytesPerRow,
-                                row * bytesPerRow + surface.width * 4), row * surface.width * 4);
+                                row * bytesPerRow + rowBytes), row * rowBytes);
                         }
                         staging.unmap();
                         // A snapshot that was in flight when `dispose()` ran has
@@ -787,6 +949,20 @@ export function createBackend(options){
                     frame.ended = true;
                     closeCurrentPass();
 
+                    /** @type {any} */
+                    let resolved = null;
+                    if (occlusion && occlusion.used > 0 && occlusionWanted)
+                    {
+                        const size = occlusion.used * 8;
+                        resolved = device.createBuffer({ label: 'occlusion-resolve', size,
+                            usage: BufferUsage.QUERY_RESOLVE | BufferUsage.COPY_SRC });
+                        const readback = device.createBuffer({ label: 'occlusion', size,
+                            usage: BufferUsage.MAP_READ | BufferUsage.COPY_DST });
+                        encoder.resolveQuerySet(occlusion.set, 0, occlusion.used, resolved, 0);
+                        encoder.copyBufferToBuffer(resolved, 0, readback, 0, size);
+                        occlusion.readback = { buffer: readback, count: occlusion.used };
+                    }
+
                     const endUpload = profiler.phase('uploads');
                     for (const buffer of dynamicBuffers)
                     {
@@ -807,6 +983,8 @@ export function createBackend(options){
                     {
                         staging.destroy();
                     }
+                    resolved?.destroy();
+                    occlusion?.set.destroy();
 
                     for (const buffer of dynamicBuffers)
                     {

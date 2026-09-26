@@ -47,8 +47,9 @@
 import { ANY_WINDOW, WM_QUIT } from './messages.js';
 import { readMessage, readRect, writeRect } from './structs.js';
 import { WS_VISIBLE, frameOf } from './frame.js';
+import { createTabWalk } from './tabwalk.js';
 import {
-    DLGC_BUTTON, DLGC_DEFPUSHBUTTON, DLGC_HASSETSEL, DLGC_UNDEFPUSHBUTTON, DLGC_WANTALLKEYS,
+    DLGC_BUTTON, DLGC_DEFPUSHBUTTON, DLGC_HASSETSEL, DLGC_WANTALLKEYS,
     DLGC_WANTTAB, DLGWINDOWEXTRA, DWLP_DLGPROC, IDCANCEL, IDOK, WM_GETDLGCODE, WM_SETFONT,
     WM_SETTEXT, after,
 } from './controls.js';
@@ -79,6 +80,26 @@ const DLGITEMTEMPLATE = Object.freeze({
 
 /** The template says a font follows; without this bit there is none to skip. */
 const DS_SETFONT = 0x0040;
+/** The dialog is made even when one of its controls cannot be, without that one. */
+const DS_NOFAILCREATE = 0x0010;
+/** What a dialog that names a class nobody has leaves in GetLastError. */
+const ERROR_CANNOT_FIND_WND_CLASS = 1407;
+
+/**
+ * The classes Windows' own libraries register besides user32's, lower-case:
+ * a template naming one that this build has no procedure for still gets its
+ * control -- a window answering nothing -- where a class that exists nowhere
+ * fails the dialog.
+ */
+const STANDARD_CLASSES = new Set([
+    'mdiclient', 'combolbox', 'sysheader32', 'toolbarwindow32', 'rebarwindow32',
+    'tooltips_class32', 'msctls_statusbar32', 'msctls_trackbar32', 'msctls_updown32',
+    'msctls_progress32', 'msctls_hotkey32', 'syslistview32', 'systreeview32',
+    'comboboxex32', 'systabcontrol32', 'sysanimate32', 'sysmonthcal32', 'sysdatetimepick32',
+    'sysipaddress32', 'syspager', 'nativefontctl', 'syslink',
+    'richedit', 'richedit20a', 'richedit20w', 'richedit50w',
+]);
+
 /**
  * The point size that means "the shell's dialog font" rather than a size,
  * and the font it means: what a DS_SHELLFONT template is compiled to.
@@ -98,10 +119,19 @@ const SHELL_FONT_FACE = 'MS Shell Dlg';
  * @property {number} charSet
  */
 
+/**
+ * Asked first of each message a modal loop takes, before the dialog manager:
+ * true when it took the message, which goes no further. It sends through the
+ * `send` it is handed, which names the loop's own thread.
+ *
+ * @typedef {(message: { hwnd: number, message: number, wParam: number, lParam: number,
+ *     time?: number, x?: number, y?: number },
+ *     send: (hwnd: number, message: number, wParam: number, lParam: number)
+ *         => number | Promise<number>) => boolean | Promise<boolean>} ModalHook
+ */
+
 /** The style bits a dialog's own window carries. */
 const WS_CHILD = 0x40000000;
-const WS_TABSTOP = 0x00010000;
-const WS_GROUP = 0x00020000;
 const WS_DISABLED = 0x08000000;
 /** The dialog styles that decide where it goes and what frame it has. */
 const DS_MODALFRAME = 0x0080;
@@ -209,12 +239,18 @@ const MAX_RESOURCE_NAME = 256;
  *     thread?: unknown) => number | Promise<number>} send
  * @property {(record: any, message: { hwnd: number, message: number, wParam: number,
  *     lParam: number }, thread?: unknown) => number | Promise<number>} defDlgProc
+ *           The dialog class's procedure: DWLP_DLGPROC first, then the default.
  * @property {() => number} focus
  * @property {(hwnd: number, thread?: unknown) => number | Promise<number>} setFocus
- * @property {(hwnd: number) => void} [show]  Shows a window as ShowWindow(SW_SHOW) would.
+ * @property {(hwnd: number) => number | Promise<number>} [show]
+ *           Shows a window as ShowWindow(SW_SHOW) would, answering once the
+ *           procedures it sent to have.
  * @property {(message: { hwnd: number, message: number, wParam: number, lParam: number })
  *     => number} [translate]  What TranslateMessage does with a key message.
  * @property {(record: any) => any[]} children
+ * @property {(dialog: any, focused: number) => void} [markDefault]
+ *           Styles the push button Enter would press as the default, as the
+ *           dialog manager does when it moves the focus.
  * @property {(key: number) => boolean} keyDown
  * @property {{ clientOrigin: (record: any) => { x: number, y: number } }} geometry
  * @property {{ baseUnits?: () => { width: number, height: number } | null,
@@ -224,6 +260,13 @@ const MAX_RESOURCE_NAME = 256;
  *           or a dialog's own -- measures as, and the font a template
  *           names. Absent, or answering null, without a font engine.
  * @property {() => unknown} [callerThread]
+ * @property {(thread: unknown) => any} [take]
+ *           The next message for the thread, taken as GetMessage takes it:
+ *           a mouse message placed where the program's procedures say it
+ *           goes, a press having activated its window and the window under
+ *           the pointer asked for its cursor. A promise when that runs the
+ *           program; null when there is nothing.
+ * @property {(code: number) => void} [setLastError]
  * @property {(hwnd: number) => void} [created]
  * @property {() => Promise<void>} idle
  * @property {(instance: number, type: number, name: number | string) => unknown} [findResource]
@@ -241,13 +284,21 @@ const MAX_RESOURCE_NAME = 256;
  *     => number | Promise<number>} options.deliver  Hands a retrieved message to its procedure.
  * @param {(name: string) => ({ wndProc: number, windowExtra: number } | null)} options.classNamed
  *     A class the program registered, by the name a template spells it.
+ * @param {(name: string) => boolean} [options.classKnown]
+ *     Whether a class of that name, or `#atom`, is the program's or the system's.
  * @param {(record: any, args: number[]) => number | Promise<number>} options.announce
  *     Tells a new window's procedure that it exists, as CreateWindowEx does.
+ * @param {(run: (hwnd: number, thread: unknown, first?: ModalHook) => Promise<number>)
+ *     => void} [options.modalLoop]  Handed the modal loop, for a dialog another
+ *     library made to be run the way DialogBox runs one.
  */
 export function createDialogFunctions(options){
     const {
-        host, live, windows, makeWindow, destroyWindow, deliver, classNamed, announce,
+        host, live, windows, makeWindow, destroyWindow, deliver, classNamed, classKnown, announce,
     } = options;
+    /** @param {string} name */
+    const classExists = name=>(classKnown ? classKnown(name) : classNamed(name) !== null)
+        || STANDARD_CLASSES.has(name.toLowerCase());
     /**
      * A cursor over the template, so that every read advances it. The parts are
      * variable-length and consecutive, so an offset carried by hand is an
@@ -488,6 +539,17 @@ export function createDialogFunctions(options){
         {
             return 0;
         }
+        // A control whose class exists nowhere fails the dialog, unless the
+        // template asked to be made without whatever cannot be: checked
+        // before anything is made, so a procedure never hears of it.
+        const makeable = described.controls.filter((/** @type {any} */ control)=>
+            classExists(control.className));
+        if (makeable.length < described.controls.length
+            && (described.style & DS_NOFAILCREATE) === 0)
+        {
+            host.setLastError?.(ERROR_CANNOT_FIND_WND_CLASS);
+            return 0;
+        }
         // The font the template names is the dialog's for as long as it
         // lives: the cell its units scale by, and what every control is
         // handed to paint in.
@@ -545,7 +607,7 @@ export function createDialogFunctions(options){
         const creating = [];
         /** @type {any[]} */
         const controls = [];
-        for (const control of described.controls)
+        for (const control of makeable)
         {
             // A class the program registered is the program's, procedure and
             // all: a template names its own controls this way, and one of
@@ -575,6 +637,12 @@ export function createDialogFunctions(options){
                     ? { extra: new DataView(new ArrayBuffer(Math.max(cls.windowExtra, 0))) }
                     : {}),
             });
+            // The template's default push button is the dialog's default id
+            // until DM_SETDEFID names another.
+            if (record.className === 'Button' && (record.style & BS_TYPEMASK) === BS_DEFPUSHBUTTON)
+            {
+                dialog.defaultId = control.id & 0xffff;
+            }
             if (cls)
             {
                 // The class and title are in the template, not in guest
@@ -614,7 +682,7 @@ export function createDialogFunctions(options){
                 // from WM_INITDIALOG has left nothing to show.
                 if (wantsVisible && live(dialog.hwnd))
                 {
-                    host.show?.(dialog.hwnd);
+                    return after(host.show?.(dialog.hwnd) ?? 0, ()=>dialog.hwnd);
                 }
                 return dialog.hwnd;
             });
@@ -634,69 +702,8 @@ export function createDialogFunctions(options){
         ? /** @type {Promise<number>} */ (created).then(then)
         : then(/** @type {number} */ (created)));
 
-    /**
-     * The controls of a dialog in the order Tab walks them, disabled and
-     * hidden ones left out.
-     *
-     * @param {any} dialog
-     */
-    const tabOrder = dialog=>host.children(dialog).filter(child=>
-        (child.style & WS_VISIBLE) !== 0 && (child.style & WS_DISABLED) === 0);
-
-    /**
-     * The control after -- or before -- one, among those with WS_TABSTOP,
-     * wrapping round. From nothing, the first or the last.
-     *
-     * @param {any} dialog @param {number} from  A control's handle, or zero.
-     * @param {boolean} forward
-     * @returns {any | null}
-     */
-    const nextTabStop = (dialog, from, forward)=>{
-        const stops = tabOrder(dialog).filter(child=>(child.style & WS_TABSTOP) !== 0);
-        if (stops.length === 0)
-        {
-            return null;
-        }
-        const at = stops.findIndex(child=>child.hwnd === from);
-        if (at === -1)
-        {
-            return forward ? stops[0] : stops[stops.length - 1];
-        }
-        return stops[(at + (forward ? 1 : stops.length - 1)) % stops.length];
-    };
-
-    /**
-     * The control after -- or before -- one within its group: the run of
-     * siblings from one WS_GROUP to the next, which is what the arrow keys
-     * walk.
-     *
-     * @param {any} dialog @param {number} from @param {boolean} forward
-     * @returns {any | null}
-     */
-    const nextGroupItem = (dialog, from, forward)=>{
-        const all = host.children(dialog);
-        const at = all.findIndex(child=>child.hwnd === from);
-        if (at === -1)
-        {
-            return null;
-        }
-        let first = at;
-        while (first > 0 && (all[first].style & WS_GROUP) === 0)
-        {
-            first--;
-        }
-        let last = at;
-        while (last + 1 < all.length && (all[last + 1].style & WS_GROUP) === 0)
-        {
-            last++;
-        }
-        const group = all.slice(first, last + 1).filter(child=>
-            (child.style & WS_VISIBLE) !== 0 && (child.style & WS_DISABLED) === 0);
-        const index = group.findIndex(child=>child.hwnd === from);
-        return group.length === 0
-            ? null
-            : group[(index + (forward ? 1 : group.length - 1)) % group.length];
-    };
+    const { nextTabStop, nextGroupItem } = createTabWalk({ children: host.children,
+        recordOf: hwnd=>windows.get(hwnd) });
 
     /** @param {number} hwnd @param {number} dialog  Whether hwnd is the dialog or inside it. */
     const within = (hwnd, dialog)=>{
@@ -789,21 +796,23 @@ export function createDialogFunctions(options){
                     return 1;
                 }
                 // Tabbing into an edit selects its text, which is what the
-                // control asks for with DLGC_HASSETSEL.
-                return after(host.setFocus(next.hwnd, thread), ()=>after(
-                    host.send(next.hwnd, WM_GETDLGCODE, 0, 0, thread), asks=>after(
+                // control asks for with DLGC_HASSETSEL; tabbing onto a push
+                // button makes it the one Enter presses.
+                return after(host.setFocus(next.hwnd, thread), ()=>{
+                    host.markDefault?.(record, next.hwnd);
+                    return after(host.send(next.hwnd, WM_GETDLGCODE, 0, 0, thread), asks=>after(
                         ((asks >>> 0) & DLGC_HASSETSEL) !== 0
                             ? host.send(next.hwnd, EM_SETSEL, 0, -1 >>> 0, thread) : 0,
-                        ()=>1)));
+                        ()=>1));
+                });
             }
             if (key === VK_ESCAPE)
             {
                 return after(command(dialog, IDCANCEL, thread), ()=>1);
             }
-            // Enter: a push button with the focus is the one clicked; any
-            // other control leaves it to the default button.
-            if ((wants & DLGC_BUTTON) !== 0
-                && (wants & (DLGC_DEFPUSHBUTTON | DLGC_UNDEFPUSHBUTTON)) !== 0)
+            // Enter: the push button with the focus when it is the default --
+            // tabbing onto one makes it so -- and the default id otherwise.
+            if ((wants & DLGC_BUTTON) !== 0 && (wants & DLGC_DEFPUSHBUTTON) !== 0)
             {
                 return after(host.send(focused, BM_CLICK, 0, 0, thread), ()=>1);
             }
@@ -820,16 +829,23 @@ export function createDialogFunctions(options){
      * quit belongs to the loop outside this one, which has not seen it yet.
      *
      * @param {number} hwnd
+     * @param {unknown} thread  Whose loop it is, read when its call was made:
+     *     afterwards the thread on the processor may be another, and every
+     *     delivery below has to name this one.
+     * @param {ModalHook} [first]
      * @returns {Promise<number>}
      */
-    const runModal = async hwnd=>{
-        // Read before the first await: afterwards the thread on the processor
-        // may be another, and every delivery below has to name this one.
-        const thread = host.callerThread?.();
+    const runModal = async(hwnd, thread, first)=>{
         const record = windows.get(hwnd);
         if (!record)
         {
             return 0;
+        }
+        // Destroyed while it was being made, and not by EndDialog: there is
+        // no dialog to run, as though it could not be made.
+        if (record.destroyed && record.dialogResult === undefined)
+        {
+            return DIALOG_FAILED;
         }
         // The owner is disabled for as long as the dialog is up, as Windows
         // disables it: a program asking IsWindowEnabled of its own frame
@@ -842,10 +858,13 @@ export function createDialogFunctions(options){
         }
         // A modal dialog is shown by the call whether or not its template
         // says WS_VISIBLE: most templates leave the bit off and rely on this.
-        host.show?.(hwnd);
+        await host.show?.(hwnd);
         while (!record.destroyed)
         {
-            const entry = host.queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true });
+            // The program's own loop would have been GetMessage, and what
+            // that does as it takes a message the dialog's loop does too.
+            const entry = host.take ? await host.take(thread)
+                : host.queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true });
             if (!entry)
             {
                 await host.idle();
@@ -856,6 +875,11 @@ export function createDialogFunctions(options){
                 host.queue.postQuit(entry.wParam | 0);
                 await destroyWindow(hwnd, thread);
                 break;
+            }
+            if (first && await first(entry, (target, message, wParam, lParam)=>
+                host.send(target, message, wParam, lParam, thread)))
+            {
+                continue;
             }
             const taken = dialogKey(hwnd, entry, thread);
             if (taken !== null)
@@ -876,6 +900,8 @@ export function createDialogFunctions(options){
         }
         return record.dialogResult ?? 0;
     };
+
+    options.modalLoop?.(runModal);
 
     /**
      * The address of a dialog template named in a module's resources, or zero.
@@ -933,9 +959,11 @@ export function createDialogFunctions(options){
         DialogBoxIndirectParamA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([instance, template, parent, dialogFunc, initParam])=>
-                once(createDialog(instance, template, parent, dialogFunc, initParam),
-                    hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd))),
+            handler: ([instance, template, parent, dialogFunc, initParam])=>{
+                const thread = host.callerThread?.();
+                return once(createDialog(instance, template, parent, dialogFunc, initParam),
+                    hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd, thread)));
+            },
         },
 
         /**
@@ -945,17 +973,21 @@ export function createDialogFunctions(options){
         DialogBoxParamA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([instance, name, parent, dialogFunc, initParam])=>
-                once(createDialog(instance, templateAddress(instance, name), parent,
+            handler: ([instance, name, parent, dialogFunc, initParam])=>{
+                const thread = host.callerThread?.();
+                return once(createDialog(instance, templateAddress(instance, name), parent,
                     dialogFunc, initParam),
-                hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd))),
+                hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd, thread)));
+            },
         },
 
         /**
          * LRESULT DefDlgProcA(HWND hDlg, UINT Msg, WPARAM wParam, LPARAM lParam)
          *
-         * What a dialog procedure falls through to, and what a program's own
-         * dialog class is built on: the background, the default button, and
+         * The dialog class's own procedure, which a program's own dialog
+         * class is built on: the message goes to the dialog procedure in
+         * DWLP_DLGPROC first, and what that answers FALSE gets the default --
+         * the background, the default button, the focus passed to a control,
          * WM_CLOSE as Cancel.
          */
         DefDlgProcA: {
@@ -1163,17 +1195,21 @@ export function createDialogFunctions(options){
          * HWND GetNextDlgTabItem(HWND hDlg, HWND hCtl, BOOL bPrevious)
          *
          * The control Tab would move to from the one named -- the next with
-         * WS_TABSTOP, shown and enabled, wrapping round -- or the first from
-         * nothing.
+         * WS_TABSTOP, shown and enabled, wrapping round, inside the children
+         * it searches through -- or the first from nothing or the dialog
+         * itself, before which there is none.
          */
         GetNextDlgTabItem: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hwnd, from, previous])=>{
                 const dialog = live(hwnd);
-                return dialog
-                    ? nextTabStop(dialog, from >>> 0, (previous >>> 0) === 0)?.hwnd ?? 0
-                    : 0;
+                const start = (from >>> 0) === (hwnd >>> 0) ? 0 : from >>> 0;
+                if (!dialog || (start === 0 && (previous >>> 0) !== 0))
+                {
+                    return 0;
+                }
+                return nextTabStop(dialog, start, (previous >>> 0) === 0)?.hwnd ?? 0;
             },
         },
 
@@ -1181,16 +1217,21 @@ export function createDialogFunctions(options){
          * HWND GetNextDlgGroupItem(HWND hDlg, HWND hCtl, BOOL bPrevious)
          *
          * The next control in the same group, which is what the arrow keys
-         * move between.
+         * move between -- inside the children the walk searches through --
+         * or the first from nothing or the dialog itself, before which there
+         * is none.
          */
         GetNextDlgGroupItem: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hwnd, from, previous])=>{
                 const dialog = live(hwnd);
-                return dialog
-                    ? nextGroupItem(dialog, from >>> 0, (previous >>> 0) === 0)?.hwnd ?? 0
-                    : 0;
+                const start = (from >>> 0) === (hwnd >>> 0) ? 0 : from >>> 0;
+                if (!dialog || (start === 0 && (previous >>> 0) !== 0))
+                {
+                    return 0;
+                }
+                return nextGroupItem(dialog, start, (previous >>> 0) === 0)?.hwnd ?? 0;
             },
         },
 

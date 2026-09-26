@@ -30,12 +30,14 @@
 import { GUID_NULL, GUID_SIZE, GUID_STRING_LENGTH, readGuid, writeGuid } from './guid.js';
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { createStorageFunctions } from './storage.js';
+import { createPropVariantFunctions } from './propvariant.js';
 
 /** HRESULTs this file produces. */
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
 const E_NOINTERFACE = 0x80004002;
 const E_POINTER = 0x80004003;
+const E_FAIL = 0x80004005;
 const E_OUTOFMEMORY = 0x8007000e;
 const E_INVALIDARG = 0x80070057;
 const RPC_E_CHANGED_MODE = 0x80010106;
@@ -47,6 +49,9 @@ const CO_E_CLASSSTRING = 0x800401f3;
 const CO_E_OBJNOTREG = 0x800401fb;
 const CO_E_DLLNOTFOUND = 0x800401f8;
 const CO_E_ERRORINDLL = 0x800401f9;
+const DRAGDROP_E_NOTREGISTERED = 0x80040100;
+const DRAGDROP_E_ALREADYREGISTERED = 0x80040101;
+const DRAGDROP_E_INVALIDHWND = 0x80040102;
 
 /** IID_IClassFactory: what a class object answers to. */
 const IID_ICLASSFACTORY = '{00000001-0000-0000-C000-000000000046}';
@@ -116,6 +121,21 @@ const MAX_PROGID = 255;
  *           => import('./objects.js').ComObject} [makeObject]
  *           An object of our own that no CLSID produces: the class object
  *           CoGetClassObject answers with for a class implemented here.
+ * @property {{ copy: (bstr: number) => number, free: (bstr: number) => unknown }} [bstr]
+ *           oleaut32's SysAllocString and SysFreeString, for a BSTR a
+ *           PROPVARIANT holds. Absent, such a value cannot be copied.
+ * @property {{ copy: (array: number, out: number) => number,
+ *              destroy: (array: number) => number }} [safeArray]
+ *           oleaut32's SafeArrayCopy and SafeArrayDestroy, likewise.
+ * @property {(window: number) => boolean} [isWindow]
+ *           Whether a handle names a window that exists, as user32's IsWindow
+ *           answers. Absent, no handle is known to be one, and a drop target
+ *           is refused for want of a window to hang it on.
+ * @property {{ set: (window: number, name: number, value: number) => number,
+ *              remove: (window: number, name: number) => number }} [windowProperty]
+ *           user32's SetPropA and RemovePropA, the name an ANSI string in
+ *           guest memory: a drop target is also a property of its window,
+ *           where a program finds it. Absent, the target is kept here alone.
  * @property {{ publish: (object: import('./objects.js').ComObject,
  *                        interfaceId: string) => number }} vtables
  *           Puts an interface into guest memory and answers with the interface
@@ -295,6 +315,55 @@ export function createOleFunctions(host){
         const entry = readU32(readU32(object) + slot * 4);
         return host.call(entry, [object >>> 0, ...args], thread);
     };
+
+    /**
+     * The drop targets a program registered, by window, each holding the
+     * reference RegisterDragDrop took. Nothing is ever dropped on a window
+     * here, so a target is kept and let go of and never called otherwise.
+     *
+     * @type {Map<number, number>}
+     */
+    const dropTargets = new Map();
+
+    /**
+     * Sets a window's drop-target property through user32, or removes it
+     * for a null target. The name is lent guest memory for the call alone,
+     * since user32 keeps a copy of it.
+     *
+     * @param {number} window @param {number | null} target
+     * @returns {boolean} false when there was no memory to lend the name
+     */
+    const dropTargetProperty = (window, target)=>{
+        const property = host.windowProperty;
+        if (!property)
+        {
+            return true;
+        }
+        const text = 'OleDropTargetInterface';
+        const name = host.heap.allocate(text.length + 1) >>> 0;
+        if (name === 0)
+        {
+            return false;
+        }
+        host.writeMemory(name, Uint8Array.from([...text].map(c=>c.charCodeAt(0)).concat(0)));
+        if (target === null)
+        {
+            property.remove(window, name);
+        }
+        else
+        {
+            property.set(window, name, target);
+        }
+        host.heap.free(name);
+        return true;
+    };
+
+    /**
+     * Whether OleInitialize ever succeeded in this process. A thread outside
+     * any apartment is refused a drop target either way, with a different
+     * code once OLE has run, which is how Windows tells the two apart.
+     */
+    let oleStarted = false;
 
     /**
      * The class objects a program registered with CoRegisterClassObject, by
@@ -689,13 +758,100 @@ export function createOleFunctions(host){
          *
          * The apartment calls under another name: OleInitialize is documented
          * as CoInitializeEx with the single-threaded model, plus the clipboard
-         * and drag-and-drop services, which nothing here provides and nothing
-         * fails for want of. It nests with the Co* pair, so one leave serves
-         * either.
+         * and drag-and-drop services, which here go no further than the calls
+         * below. It nests with the Co* pair, so one leave serves either.
          */
         OleInitialize: {
             argBytes: 4,
-            handler: ()=>enterApartment(COINIT_APARTMENTTHREADED),
+            handler: ()=>{
+                const answer = enterApartment(COINIT_APARTMENTTHREADED);
+                oleStarted ||= answer === S_OK || answer === S_FALSE;
+                return answer;
+            },
+        },
+
+        /**
+         * HRESULT RegisterDragDrop(HWND hwnd, LPDROPTARGET pDropTarget)
+         *
+         * The window accepts drops, and the target is kept with a reference
+         * of its own until RevokeDragDrop, and is the window's
+         * "OleDropTargetInterface" property meanwhile. Nothing ever drags
+         * onto a window here, so it is never called -- the same as on a
+         * desktop where nobody drags anything.
+         */
+        RegisterDragDrop: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([window, target])=>{
+                if ((target >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                if ((window >>> 0) === 0 || !host.isWindow?.(window >>> 0))
+                {
+                    return DRAGDROP_E_INVALIDHWND;
+                }
+                if (!host.currentThread()?.ole32)
+                {
+                    return oleStarted ? CO_E_NOTINITIALIZED : E_OUTOFMEMORY;
+                }
+                if (dropTargets.has(window >>> 0))
+                {
+                    return DRAGDROP_E_ALREADYREGISTERED;
+                }
+                if (!dropTargetProperty(window >>> 0, target >>> 0))
+                {
+                    return E_OUTOFMEMORY;
+                }
+                dropTargets.set(window >>> 0, target >>> 0);
+                return host.call
+                    ? callMethod(target >>> 0, SLOT_ADD_REF, [], host.callerThread?.())
+                        .then(()=>S_OK)
+                    : S_OK;
+            },
+        },
+
+        /** HRESULT RevokeDragDrop(HWND hwnd) */
+        RevokeDragDrop: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([window])=>{
+                const target = dropTargets.get(window >>> 0);
+                if ((window >>> 0) === 0 || !host.isWindow?.(window >>> 0))
+                {
+                    // The window went without revoking, and its handle may
+                    // come back as another window's.
+                    dropTargets.delete(window >>> 0);
+                    return DRAGDROP_E_INVALIDHWND;
+                }
+                if (target === undefined)
+                {
+                    return DRAGDROP_E_NOTREGISTERED;
+                }
+                dropTargets.delete(window >>> 0);
+                dropTargetProperty(window >>> 0, null);
+                return host.call
+                    ? callMethod(target, SLOT_RELEASE, [], host.callerThread?.()).then(()=>S_OK)
+                    : S_OK;
+            },
+        },
+
+        /**
+         * HRESULT OleFlushClipboard(void)
+         * HRESULT OleIsCurrentClipboard(LPDATAOBJECT pDataObject)
+         *
+         * Only OleSetClipboard puts an object on the clipboard, and this
+         * build does not export it: no object is ever current, and flushing
+         * has nothing to render or release. A thread that never entered an
+         * apartment is refused the flush, as Windows refuses it.
+         */
+        OleFlushClipboard: {
+            argBytes: 0,
+            handler: ()=>(host.currentThread()?.ole32 ? S_OK : E_FAIL),
+        },
+        OleIsCurrentClipboard: {
+            argBytes: 4,
+            handler: ()=>S_FALSE,
         },
 
         OleUninitialize: {
@@ -997,6 +1153,9 @@ export function createOleFunctions(host){
         // Structured storage: the docfile, its objects and the entry points
         // that hand them out, over the same heap, registry and vtables.
         ...createStorageFunctions(host),
+
+        // The property value, whose copy owns what it points at in task memory.
+        ...createPropVariantFunctions(host),
 
         /**
          * HRESULT ProgIDFromCLSID(REFCLSID clsid, LPOLESTR *lplpszProgID)

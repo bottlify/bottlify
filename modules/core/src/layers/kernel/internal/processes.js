@@ -77,7 +77,7 @@ export function createProcessTable(){
          * @param {boolean} [options.completed]
          *        The child has already run and exited 0. Used for a
          *        redistributable installer the engine answers for: a title
-         *        starting `DXSETUP.exe` gets a process that is over, not a
+         *        starting `vcredist_x86.exe` gets a process that is over, not a
          *        replacement.
          * @returns {ProcessRecord}
          */

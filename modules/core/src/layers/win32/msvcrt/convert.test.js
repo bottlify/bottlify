@@ -24,8 +24,13 @@ test('base zero reads the prefix: 0x is hex, a leading zero is octal', ()=>{
     assert.equal(scanInteger('17', 0)?.magnitude, 17n);
 });
 
-test('0x with no hex digit after it converts the zero and stops at the x', ()=>{
-    const scanned = scanInteger('0xzz', 16);
+test('0x with no hex digit after it is a prefix with nothing after it', ()=>{
+    assert.equal(scanInteger('0xzz', 16), null);
+    assert.equal(scanInteger('-0x', 0), null);
+});
+
+test('scanf\'s reading of a bare 0x converts the zero and stops at the x', ()=>{
+    const scanned = scanInteger('0xzz', 16, true);
     assert.equal(scanned?.magnitude, 0n);
     assert.equal(scanned?.end, 1, 'the x is where the caller resumes');
 });
@@ -64,6 +69,65 @@ test('strtoul negates within 32 bits: "-1" is ULONG_MAX, not a failure', ()=>{
     const { memory, table } = build();
     const end = memory.allocate(4);
     assert.equal(table.strtoul.handler([memory.put('-1'), end, 10]) >>> 0, 0xffffffff);
+});
+
+test('strtol and strtoul set ERANGE when they clamp, and leave errno alone in range', ()=>{
+    // The cases of Wine's msvcrt string tests: the limits themselves are in
+    // range, and so is "-4294967295" for strtoul, which negates to 1.
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (createConversionFunctions({
+        ...memory, errno: code=>errno.push(code),
+    }));
+    const end = memory.allocate(4);
+    const ERANGE = 34;
+
+    assert.equal(table.strtol.handler([memory.put('2147483647L'), end, 0]), 0x7fffffff);
+    assert.equal(table.strtol.handler([memory.put('-2147483648L'), end, 0]), -0x80000000);
+    assert.equal(table.strtoul.handler([memory.put('4294967295UL'), end, 0]) >>> 0, 0xffffffff);
+    assert.equal(table.strtoul.handler([memory.put('-4294967295'), end, 0]) >>> 0, 1);
+    assert.deepEqual(errno, []);
+
+    assert.equal(table.strtol.handler([memory.put('9223372036854775807L'), end, 0]),
+        0x7fffffff);
+    assert.equal(table.strtol.handler([memory.put('-99999999999'), end, 10]), -0x80000000);
+    assert.equal(table.strtoul.handler([memory.put('9223372036854775807L'), end, 0]) >>> 0,
+        0xffffffff);
+    assert.deepEqual(errno, [ERANGE, ERANGE, ERANGE]);
+});
+
+test('strtoul clamps a negative magnitude to ULONG_MAX before negating it', ()=>{
+    // Wine's msvcrt test_strtol: "-4294967296" is out of range and answers 1,
+    // the clamped ULONG_MAX negated, with ERANGE.
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (createConversionFunctions({
+        ...memory, errno: code=>errno.push(code),
+    }));
+    assert.equal(table.strtoul.handler([memory.put('-4294967296'), 0, 0]) >>> 0, 1);
+    assert.equal(table.strtoul.handler([memory.put('-99999999999'), 0, 10]) >>> 0, 1);
+    assert.deepEqual(errno, [34, 34]);
+});
+
+test('strtol reads "0x" as a prefix, so with no digit after it nothing converts', ()=>{
+    // Wine's msvcrt test_strtol: strtol("-0x", &e, 0) is 0 with errno left
+    // alone and e at the start of the string.
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (createConversionFunctions({
+        ...memory, errno: code=>errno.push(code),
+    }));
+    const end = memory.allocate(4);
+    const negative = memory.put('-0x');
+    assert.equal(table.strtol.handler([negative, end, 0]), 0);
+    assert.equal(memory.u32(end), negative);
+    const bare = memory.put('0xzz');
+    assert.equal(table.strtoul.handler([bare, end, 16]), 0);
+    assert.equal(memory.u32(end), bare);
+    assert.deepEqual(errno, []);
 });
 
 test('_ltoa signs base ten and prints the bit pattern in every other base', ()=>{

@@ -5,6 +5,7 @@
  */
 
 import { TAKEN } from './named-objects.js';
+import { STATUS, toDosError } from '../ntdll/status.js';
 
 /**
  * The kernel32 surface a threaded program calls.
@@ -43,6 +44,33 @@ const ERROR_FILE_NOT_FOUND = 2;
 const MAX_NAME = 260;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_SUPPORTED = 50;
+const ERROR_INVALID_PARAMETER = 87;
+const ERROR_NOT_ENOUGH_MEMORY = 8;
+
+/** GetOverlappedResult on an operation still in progress, asked not to wait. */
+const ERROR_IO_INCOMPLETE = 996;
+
+/** OVERLAPPED: the operation's status, its byte count, and the event it signals. */
+const OVERLAPPED_INTERNAL = 0;
+const OVERLAPPED_INTERNAL_HIGH = 4;
+const OVERLAPPED_EVENT = 16;
+
+/**
+ * How long SwitchToThread stands aside when only threads of lower priority are
+ * ready, in guest milliseconds: without it the scheduler, which runs the
+ * highest priority ready, would hand the caller its turn straight back.
+ */
+const SWITCH_ASIDE_MS = 1;
+
+/** The Ex creators' flags. */
+const CREATE_EVENT_MANUAL_RESET = 0x1;
+const CREATE_EVENT_INITIAL_SET = 0x2;
+const CREATE_MUTEX_INITIAL_OWNER = 0x1;
+
+/** CreateThread's flag that makes dwStackSize the stack's reserve, not its commit. */
+const STACK_SIZE_PARAM_IS_A_RESERVATION = 0x00010000;
+/** CreateThread's flag for a thread that waits for ResumeThread before it first runs. */
+const CREATE_SUSPENDED = 0x4;
 
 /** DuplicateHandle's one option that changes what it does. */
 const DUPLICATE_CLOSE_SOURCE = 0x00000001;
@@ -73,6 +101,10 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  * @property {number} [processId]      What the running process is numbered.
  * @property {() => string} [imagePath]  Where its image is, for a snapshot's entry.
  * @property {(handle: number) => string | null} [handleType]
+ * @property {(node: any) => void} [retainNode]
+ *           One more hold on an open file's node, given back when the handle
+ *           that holds it is closed: what a duplicate of a file or mapping
+ *           handle takes, so closing its source leaves the file open.
  * @property {(thread: any, routine: number, args: number[]) => void} [queueApc]
  *           Queues a routine to a thread, to run when it next waits alertably:
  *           what a waitable timer's completion routine becomes at each expiry.
@@ -211,6 +243,15 @@ export function createThreadingFunctions(host){
      */
     const settle = result=>result === null ? host.park() : result;
 
+    /** @type {any} */
+    let never = null;
+    /** An event nothing ever sets, made the first time it is needed. */
+    const neverSignalled = ()=>{
+        never ??= kernel.createEvent({ manualReset: true, signalled: false,
+            name: 'GetOverlappedResult' });
+        return never;
+    };
+
     /**
      * One entry point, in both spellings. A name is the only thing that ever
      * differs between an ANSI create/open and its wide sibling, so the body
@@ -348,6 +389,7 @@ export function createThreadingFunctions(host){
             const limit = maximum | 0;
             if (limit <= 0 || start < 0 || start > limit)
             {
+                host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
         }
@@ -362,6 +404,19 @@ export function createThreadingFunctions(host){
         }
         return handle;
     });
+
+    // The Ex forms: what the plain ones take as BOOLs arrives as flags, and an
+    // access mask follows that nothing here checks, since every handle here
+    // can do everything.
+    const createEventEx = bothNamedForms(16, ([security, namePointer, flags], wide)=>
+        (wide ? createEvent.wide : createEvent.ansi).handler([security,
+            flags & CREATE_EVENT_MANUAL_RESET, flags & CREATE_EVENT_INITIAL_SET, namePointer]));
+    const createMutexEx = bothNamedForms(16, ([security, namePointer, flags], wide)=>
+        (wide ? createMutex.wide : createMutex.ansi).handler(
+            [security, flags & CREATE_MUTEX_INITIAL_OWNER, namePointer]));
+    const createSemaphoreEx = bothNamedForms(24, ([security, initial, maximum, namePointer], wide)=>
+        (wide ? createSemaphore.wide : createSemaphore.ansi).handler(
+            [security, initial, maximum, namePointer]));
 
     const createWaitableTimer = bothNamedForms(12, ([, manualReset, namePointer], wide)=>{
         const name = nameOf(namePointer, wide);
@@ -389,10 +444,16 @@ export function createThreadingFunctions(host){
         CreateThread: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([, stackSize, start, parameter, , threadIdOut])=>{
+            handler: ([, stackSize, start, parameter, flags, threadIdOut])=>{
+                // The size is the stack's commit unless the caller says it is
+                // the reserve; the kernel turns either into the reserve by the
+                // rules CreateThread documents.
+                const reservation = ((flags >>> 0) & STACK_SIZE_PARAM_IS_A_RESERVATION) !== 0;
                 const thread = kernel.createThread({
                     entry: start >>> 0,
-                    stackSize: stackSize >>> 0,
+                    ...reservation
+                        ? { stackReserve: stackSize >>> 0 }
+                        : { stackSize: stackSize >>> 0 },
                     parameter: parameter >>> 0,
                     // Returning from the start routine is how most threads end,
                     // and it means exactly what calling ExitThread with the
@@ -400,7 +461,16 @@ export function createThreadingFunctions(host){
                     // it returns to.
                     returnTo: host.threadReturn?.(),
                 });
+                if (!thread)
+                {
+                    host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
+                    return 0;
+                }
                 host.threadBlock?.(thread);
+                if (((flags >>> 0) & CREATE_SUSPENDED) !== 0)
+                {
+                    kernel.suspendThread(thread);
+                }
                 if (threadIdOut !== 0)
                 {
                     kernel.writeThreadId(threadIdOut, thread.id);
@@ -408,6 +478,108 @@ export function createThreadingFunctions(host){
                 // Deliberately no switch: the creator has not necessarily
                 // finished setting up what the new thread is about to read.
                 return thread.handle;
+            },
+        },
+
+        /**
+         * BOOL SwitchToThread(void)
+         *
+         * Gives the rest of the caller's turn to another thread ready to run
+         * and answers whether there was one: zero, at once, when there was
+         * not. Unlike Sleep(0) it yields to a thread of lower priority too, so
+         * with only such threads ready the caller sits out a moment of guest
+         * time; with one of its own priority or higher ready, going behind it
+         * is enough.
+         */
+        SwitchToThread: {
+            argBytes: 0,
+            handler: ()=>{
+                const self = host.currentThread();
+                const ready = (kernel.threads?.() ?? []).filter((/** @type {any} */ thread)=>
+                    thread !== self && thread.state === 'ready' && !thread.awaitingHost);
+                if (ready.length === 0)
+                {
+                    return 0;
+                }
+                const mine = self?.priority ?? 0;
+                const lowerOnly = ready.every((/** @type {any} */ thread)=>
+                    (thread.priority ?? 0) < mine);
+                kernel.block(self, 'SwitchToThread', {
+                    deadline: kernel.clock.virtualTime() + (lowerOnly ? SWITCH_ASIDE_MS : 0),
+                    result: 1,
+                });
+                return host.park();
+            },
+        },
+
+        /**
+         * BOOL GetOverlappedResult(HANDLE hFile, LPOVERLAPPED lpOverlapped,
+         *     LPDWORD lpNumberOfBytesTransferred, BOOL bWait)
+         *
+         * Reads the operation's outcome where the I/O left it, in the
+         * OVERLAPPED: InternalHigh is the byte count, and Internal the status,
+         * an error status answering FALSE with its Win32 error. One still
+         * pending is ERROR_IO_INCOMPLETE without bWait, the count left
+         * unwritten; with it, the call waits for the OVERLAPPED's event (its
+         * low bit is a flag, not part of the handle), or the file's handle
+         * when there is none, and then answers TRUE with the count even if
+         * Internal still says pending (Wine's kernel32 file tests,
+         * test_overlapped).
+         */
+        GetOverlappedResult: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([file, overlapped, transferred, wait])=>{
+                /** @param {number} offset */
+                const field = offset=>{
+                    const bytes = host.readMemory((overlapped + offset) >>> 0, 4);
+                    return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
+                };
+                const count = ()=>{
+                    const bytes = new Uint8Array(4);
+                    new DataView(bytes.buffer).setUint32(0, field(OVERLAPPED_INTERNAL_HIGH), true);
+                    host.writeMemory(transferred >>> 0, bytes);
+                };
+                let status = field(OVERLAPPED_INTERNAL);
+                if (status === STATUS.PENDING)
+                {
+                    if (wait === 0)
+                    {
+                        host.setLastError(ERROR_IO_INCOMPLETE);
+                        return 0;
+                    }
+                    const eventHandle = (field(OVERLAPPED_EVENT) & ~1) >>> 0;
+                    const target = object(eventHandle !== 0 ? eventHandle : file >>> 0);
+                    if (!target)
+                    {
+                        host.setLastError(ERROR_INVALID_HANDLE);
+                        return 0;
+                    }
+                    // A thread woken from a wait on a set resumes answering the
+                    // index of the object that came. Putting the one awaited
+                    // second, behind an event nothing signals, makes that
+                    // answer TRUE -- the answer this call owes once it ends.
+                    const answered = kernel.waitAny([neverSignalled(), target],
+                        host.currentThread());
+                    if (answered === null)
+                    {
+                        count();
+                        return host.park();
+                    }
+                    status = field(OVERLAPPED_INTERNAL);
+                    if (status === STATUS.PENDING)
+                    {
+                        count();
+                        return 1;
+                    }
+                }
+                count();
+                if (status !== STATUS.SUCCESS)
+                {
+                    host.setLastError(toDosError(status));
+                    return 0;
+                }
+                return 1;
             },
         },
 
@@ -497,6 +669,14 @@ export function createThreadingFunctions(host){
          */
         CreateSemaphoreA: createSemaphore.ansi,
         CreateSemaphoreW: createSemaphore.wide,
+
+        /**
+         * HANDLE CreateSemaphoreExA/W(LPSECURITY_ATTRIBUTES, LONG lInitialCount,
+         *     LONG lMaximumCount, LPCSTR/LPCWSTR lpName, DWORD dwFlags,
+         *     DWORD dwDesiredAccess)
+         */
+        CreateSemaphoreExA: createSemaphoreEx.ansi,
+        CreateSemaphoreExW: createSemaphoreEx.wide,
 
         /**
          * BOOL ReleaseSemaphore(HANDLE, LONG lReleaseCount, LPLONG lpPreviousCount)
@@ -596,6 +776,12 @@ export function createThreadingFunctions(host){
                 // duplicate onto a mutex is a real handle onto it, the same
                 // as the one DuplicateHandle was given.
                 host.namedObjects.reference(held);
+                const closesSource = (options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0
+                    && !pseudo(source);
+                if (held.node && (kind === 'file' || kind === 'mapping') && !closesSource)
+                {
+                    host.retainNode?.(held.node);
+                }
                 const duplicate = kernel.handles.open(kind, held);
                 host.writeMemory(target >>> 0, new Uint8Array([
                     duplicate & 0xff, duplicate >>> 8 & 0xff,
@@ -603,7 +789,7 @@ export function createThreadingFunctions(host){
                 ]));
                 // A pseudo-handle cannot be closed: duplicating one and closing
                 // the source leaves both usable, as it does on Windows.
-                if ((options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0 && !pseudo(source))
+                if (closesSource)
                 {
                     kernel.handles.close(source >>> 0);
                     host.namedObjects.forget(held);
@@ -615,6 +801,10 @@ export function createThreadingFunctions(host){
         /** HANDLE CreateMutexA/W(LPSECURITY_ATTRIBUTES, BOOL bInitialOwner, LPCSTR/LPCWSTR) */
         CreateMutexA: createMutex.ansi,
         CreateMutexW: createMutex.wide,
+
+        /** HANDLE CreateMutexExA/W(LPSECURITY_ATTRIBUTES, LPCSTR/LPCWSTR, DWORD dwFlags, DWORD) */
+        CreateMutexExA: createMutexEx.ansi,
+        CreateMutexExW: createMutexEx.wide,
 
         /** BOOL ReleaseMutex(HANDLE) */
         ReleaseMutex: {
@@ -636,6 +826,10 @@ export function createThreadingFunctions(host){
          */
         CreateEventA: createEvent.ansi,
         CreateEventW: createEvent.wide,
+
+        /** HANDLE CreateEventExA/W(LPSECURITY_ATTRIBUTES, LPCSTR/LPCWSTR, DWORD dwFlags, DWORD) */
+        CreateEventExA: createEventEx.ansi,
+        CreateEventExW: createEventEx.wide,
 
         /** BOOL SetEvent(HANDLE) */
         SetEvent: {

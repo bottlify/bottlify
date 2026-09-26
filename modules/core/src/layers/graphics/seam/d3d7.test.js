@@ -37,8 +37,8 @@ import { guidBytes } from './d3d7.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import { DDSURFACEDESC2, writeSurfaceDesc } from '../ddraw/structs.js';
 import {
-    DDPF_RGB, DDPF_ZBUFFER, DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN, DDSCL_NORMAL, DDSD_CAPS,
-    DDSD_HEIGHT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
+    DDPF_RGB, DDPF_ZBUFFER, DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN, DDSCAPS_TEXTURE,
+    DDSCL_NORMAL, DDSD_CAPS, DDSD_HEIGHT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
 } from '../ddraw/constants.js';
 import {
     D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DERR_INVALIDVERTEXFORMAT,
@@ -313,6 +313,78 @@ test('CreateDevice refuses what cannot be a target, and publishes what can', ()=
     h.assertAllReleased();
 });
 
+test('ComputeSphereVisibility reads the spheres and writes a status word for each', ()=>{
+    const h = seamed();
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const device = h.createDevice(d3d, target).device;
+
+    // With every transform the identity the volume is -1..1 across and 0..1
+    // deep: one sphere inside it, one wholly left of it.
+    const centers = 0x6100;
+    const radii = 0x6200;
+    const results = 0x6300;
+    new DataView(h.box.bytes.buffer).setFloat32(centers + 8, 0.5, true);
+    [-20, 0, 0.5].forEach((value, k)=>
+        new DataView(h.box.bytes.buffer).setFloat32(centers + 12 + k * 4, value, true));
+    new DataView(h.box.bytes.buffer).setFloat32(radii, 0.25, true);
+    new DataView(h.box.bytes.buffer).setFloat32(radii + 4, 3, true);
+    h.box.bytes.fill(0xcd, results, results + 12);
+    assert.equal(h.device(device, 'ComputeSphereVisibility', [centers, radii, 2, 0, results]),
+        D3D_OK);
+    assert.equal(h.box.memory.readU32(results), 0);
+    assert.equal(h.box.memory.readU32(results + 4), 0x103d, 'Wine\'s answer for the same sphere');
+    assert.equal(h.box.memory.readU32(results + 8), 0xcdcdcdcd, 'and nothing past the count');
+    assert.equal(h.device(device, 'ComputeSphereVisibility', [centers, radii, 2, 0, 0]),
+        DDERR_INVALIDPARAMS >>> 0);
+
+    assert.equal(h.release(device), 0);
+    h.release(d3d);
+    h.release(target);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('Load reads the destination point and the source rectangle, either of which may be null', ()=>{
+    const h = seamed();
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const device = h.createDevice(d3d, target).device;
+    const src = h.surface(ddraw, DDSCAPS_TEXTURE);
+    const dest = h.surface(ddraw, DDSCAPS_TEXTURE);
+    const srcAt = h.publisher.objectAt(src).buffer;
+    const destAt = h.publisher.objectAt(dest).buffer;
+    for (let index = 0; index < 64; index++)
+    {
+        h.box.memory.writeU32(srcAt + index * 4, 0x100 + index);
+    }
+
+    const rect = 0x6100;
+    const point = 0x6200;
+    [1, 2, 3, 4].forEach((value, k)=>h.box.memory.writeU32(rect + k * 4, value));
+    h.box.memory.writeU32(point, 5);
+    h.box.memory.writeU32(point + 4, 6);
+    assert.equal(h.device(device, 'Load', [dest, point, src, rect, 0]), D3D_OK);
+    assert.equal(h.box.memory.readU32(destAt + (6 * 8 + 5) * 4), 0x100 + 2 * 8 + 1,
+        'the rectangle\'s corner lands on the point');
+    assert.equal(h.box.memory.readU32(destAt + (7 * 8 + 6) * 4), 0x100 + 3 * 8 + 2);
+    assert.equal(h.box.memory.readU32(destAt + (5 * 8 + 5) * 4), 0, 'and nothing outside it');
+
+    assert.equal(h.device(device, 'Load', [dest, 0, src, 0, 0]), D3D_OK);
+    assert.equal(h.box.memory.readU32(destAt + 63 * 4), 0x100 + 63, 'the whole of it');
+    assert.equal(h.device(device, 'Load', [dest, 0, 0, 0, 0]), DDERR_INVALIDPARAMS >>> 0);
+
+    h.release(src);
+    h.release(dest);
+    assert.equal(h.release(device), 0);
+    h.release(d3d);
+    h.release(target);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
 test('GetCaps writes a description a program reads field by field', ()=>{
     const h = seamed();
     const ddraw = h.create7();
@@ -437,6 +509,157 @@ test('a draw reads exactly as many vertex bytes as the format implies', ()=>{
     h.assertAllReleased();
 });
 
+test('a strided draw gathers each stream into packed vertices and draws those', ()=>{
+    // ddraw7.c test_draw_strided (4784-4841): positions and colours in two
+    // arrays, each at its own stride, drawn indexed; the rest of the
+    // structure is 0x55 garbage the format never names.
+    const h = seamed();
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const device = h.createDevice(d3d, target).device;
+    const model = h.publisher.objectAt(device);
+    /** @type {any[][]} */
+    const drawn = [];
+    for (const name of ['DrawPrimitive', 'DrawIndexedPrimitive'])
+    {
+        const original = model[name];
+        model[name] = (/** @type {any[]} */ ...args)=>{
+            drawn.push([name, ...args]);
+            return original(...args);
+        };
+    }
+
+    const positions = 0x7000;
+    const colours = 0x7100;
+    const indices = 0x7200;
+    const strided = 0x7300;
+    const corners = [[-1, -1, 0], [-1, 1, 0], [1, 1, 0], [1, -1, 0]];
+    corners.forEach((corner, k)=>corner.forEach((value, axis)=>
+        h.box.memory.writeU32(positions + k * 12 + axis * 4, floatToDword(value))));
+    corners.forEach((_, k)=>h.box.memory.writeU32(colours + k * 4, 0x0000ff00 + k));
+    [0, 1, 2, 2, 3, 0].forEach((index, k)=>{
+        h.box.bytes[indices + k * 2] = index;
+        h.box.bytes[indices + k * 2 + 1] = 0;
+    });
+    h.box.bytes.fill(0x55, strided, strided + 12 * 8);
+    h.box.memory.writeU32(strided, positions);
+    h.box.memory.writeU32(strided + 4, 12);
+    h.box.memory.writeU32(strided + 2 * 8, colours);
+    h.box.memory.writeU32(strided + 2 * 8 + 4, 4);
+
+    const fvf = FVF.XYZ | FVF.DIFFUSE;
+    assert.equal(h.device(device, 'BeginScene'), D3D_OK);
+    assert.equal(h.device(device, 'DrawIndexedPrimitiveStrided',
+        [D3DPT.TRIANGLELIST, fvf, strided, 4, indices, 6, 0]), D3D_OK);
+    assert.equal(drawn.length, 1);
+    const [name, type, format, packed, count, indexBytes, indexCount] = drawn[0];
+    assert.deepEqual([name, type, format, count, indexCount],
+        ['DrawIndexedPrimitive', D3DPT.TRIANGLELIST, fvf, 4, 6]);
+    const view = new DataView(packed.buffer, packed.byteOffset, packed.byteLength);
+    assert.equal(packed.byteLength, 4 * 16, 'twelve bytes of position and four of colour each');
+    corners.forEach((corner, k)=>{
+        assert.deepEqual([0, 1, 2].map(axis=>view.getFloat32(k * 16 + axis * 4, true)), corner);
+        assert.equal(view.getUint32(k * 16 + 12, true), 0x0000ff00 + k);
+    });
+    assert.deepEqual([...indexBytes], [0, 0, 1, 0, 2, 0, 2, 0, 3, 0, 0, 0]);
+
+    // The same streams unindexed, with a texture coordinate set from a third
+    // array: the eight sets follow the specular entry in the structure.
+    const uvs = 0x7400;
+    corners.forEach((_, k)=>{
+        h.box.memory.writeU32(uvs + k * 8, floatToDword(k));
+        h.box.memory.writeU32(uvs + k * 8 + 4, floatToDword(-k));
+    });
+    h.box.memory.writeU32(strided + 4 * 8, uvs);
+    h.box.memory.writeU32(strided + 4 * 8 + 4, 8);
+    const textured = fvf | 1 << FVF.TEXCOUNT_SHIFT;
+    assert.equal(h.device(device, 'DrawPrimitiveStrided',
+        [D3DPT.TRIANGLESTRIP, textured, strided, 4, 0]), D3D_OK);
+    const [, , , flat, flatCount] = drawn[1];
+    assert.equal(flatCount, 4);
+    const flatView = new DataView(flat.buffer, flat.byteOffset, flat.byteLength);
+    assert.equal(flat.byteLength, 4 * 24);
+    assert.equal(flatView.getUint32(3 * 24 + 12, true), 0x0000ff03);
+    assert.deepEqual([flatView.getFloat32(3 * 24 + 16, true), flatView.getFloat32(3 * 24 + 20,
+        true)], [3, -3]);
+
+    assert.equal(h.device(device, 'DrawPrimitiveStrided',
+        [D3DPT.TRIANGLESTRIP, textured, 0, 4, 0]), DDERR_INVALIDPARAMS >>> 0,
+    'no structure is no vertices');
+    assert.equal(h.device(device, 'EndScene'), D3D_OK);
+
+    assert.equal(h.release(device), 0);
+    h.release(d3d);
+    h.release(target);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('a draw of nothing draws nothing and succeeds, by pointer, by buffer and strided', ()=>{
+    // ddraw7.c test_draw_primitive (14614-14630): zero vertices or zero
+    // indices, with null arrays where there is nothing to read.
+    const h = seamed();
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const device = h.createDevice(d3d, target).device;
+    const strided = 0x7300;
+    h.box.bytes.fill(0, strided, strided + 12 * 8);
+    const desc = 0x6400;
+    h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwSize, D3DVERTEXBUFFERDESC.SIZE);
+    h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwFVF, FVF.XYZ);
+    h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwNumVertices, 4);
+    assert.equal(h.box.call(d3d, slot(IDIRECT3D7_SLOTS, 'CreateVertexBuffer'),
+        [desc, 0x6500, 0]), D3D_OK);
+    const buffer = h.box.memory.readU32(0x6500);
+    const strip = D3DPT.TRIANGLESTRIP;
+
+    assert.equal(h.device(device, 'BeginScene'), D3D_OK);
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['DrawIndexedPrimitive', [strip, FVF.XYZ, 0, 0, 0, 0, 0]],
+        ['DrawIndexedPrimitiveStrided', [strip, FVF.XYZ, strided, 0, 0, 0, 0]],
+        ['DrawPrimitive', [strip, FVF.XYZ, 0, 0, 0]],
+        ['DrawPrimitiveStrided', [strip, FVF.XYZ, strided, 0, 0]],
+        ['DrawPrimitiveVB', [strip, buffer, 0, 0, 0]],
+        ['DrawIndexedPrimitiveVB', [strip, buffer, 0, 4, 0, 0, 0]],
+    ]))
+    {
+        assert.equal(h.device(device, name, args), D3D_OK, name);
+    }
+    assert.equal(h.device(device, 'EndScene'), D3D_OK);
+
+    assert.equal(h.release(buffer), 0);
+    assert.equal(h.release(device), 0);
+    h.release(d3d);
+    h.release(target);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('GetInfo succeeds with nothing to say, and says nothing into the structure', ()=>{
+    // The retail runtime keeps no statistics; S_FALSE is its answer, as
+    // Direct3D 8's device gives it (Wine's d3d8 device.c 9796-9797).
+    const h = seamed();
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const device = h.createDevice(d3d, target).device;
+    const info = 0x7000;
+    h.box.bytes.fill(0xab, info, info + 16);
+    for (const id of [1, 2, 3])
+    {
+        assert.equal(h.device(device, 'GetInfo', [id, info, 16]), 1, `D3DDEVINFOID ${id}`);
+    }
+    assert.ok(h.box.bytes.subarray(info, info + 16).every(byte=>byte === 0xab));
+
+    assert.equal(h.release(device), 0);
+    h.release(d3d);
+    h.release(target);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
 test('a vertex buffer is a guest allocation with a description of its own', ()=>{
     const h = seamed();
     const ddraw = h.create7();
@@ -478,6 +701,69 @@ test('a vertex buffer is a guest allocation with a description of its own', ()=>
 
     assert.equal(h.release(buffer), 0);
     h.release(d3d);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('ProcessVertices and ProcessVerticesStrided write transformed vertices into the buffer', ()=>{
+    // Wine's ddraw7 test_process_vertices, its first viewport and vertices.
+    const h = seamed();
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const device = h.createDevice(d3d, target).device;
+    const floats = new DataView(h.box.bytes.buffer);
+    /** @param {number} fvf @param {number} count */
+    const vertexBuffer = (fvf, count)=>{
+        const desc = 0x6400;
+        h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwSize, D3DVERTEXBUFFERDESC.SIZE);
+        h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwCaps, 0);
+        h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwFVF, fvf);
+        h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwNumVertices, count);
+        assert.equal(h.box.call(d3d, slot(IDIRECT3D7_SLOTS, 'CreateVertexBuffer'),
+            [desc, 0x6500, 0]), D3D_OK);
+        const buffer = h.box.memory.readU32(0x6500);
+        assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3D_OK);
+        const data = h.box.memory.readU32(0x6600);
+        assert.equal(h.buffer(buffer, 'Unlock'), D3D_OK);
+        return { buffer, data };
+    };
+    const quad = [[0, 0, 0], [1, 1, 1], [-1, -1, 0.5], [0.5, -0.5, 0.25]];
+    const src = vertexBuffer(FVF.XYZ, 4);
+    quad.flat().forEach((value, k)=>floats.setFloat32(src.data + k * 4, value, true));
+    const dest = vertexBuffer(FVF.XYZRHW, 4);
+
+    const viewport = 0x6800;
+    [0, 0, 8, 8].forEach((value, k)=>h.box.memory.writeU32(viewport + k * 4, value));
+    floats.setFloat32(viewport + D3DVIEWPORT7.dvMinZ, 0, true);
+    floats.setFloat32(viewport + D3DVIEWPORT7.dvMaxZ, 1, true);
+    assert.equal(h.device(device, 'SetViewport', [viewport]), D3D_OK);
+
+    const D3DVOP_TRANSFORM = 1;
+    assert.equal(h.buffer(dest.buffer, 'ProcessVertices',
+        [D3DVOP_TRANSFORM, 0, 4, src.buffer, 0, device, 0]), D3D_OK);
+    /** @param {number} k */
+    const written = k=>[0, 1, 2, 3].map(i=>floats.getFloat32(dest.data + k * 16 + i * 4, true));
+    assert.deepEqual(written(1), [8, 0, 1, 1]);
+    assert.deepEqual(written(2), [0, 8, 0.5, 1]);
+    assert.equal(h.buffer(dest.buffer, 'ProcessVertices',
+        [D3DVOP_TRANSFORM, 0, 4, 0, 0, device, 0]), DDERR_INVALIDPARAMS >>> 0, 'no source');
+
+    // The strided form: a position stream at its own stride, starting at vertex zero.
+    const strided = 0x6900;
+    h.box.bytes.fill(0, strided, strided + 96);
+    h.box.memory.writeU32(strided, src.data + 12);
+    h.box.memory.writeU32(strided + 4, 12);
+    assert.equal(h.buffer(dest.buffer, 'ProcessVerticesStrided',
+        [D3DVOP_TRANSFORM, 0, 3, strided, FVF.XYZ, device, 0]), D3D_OK);
+    assert.deepEqual(written(0), [8, 0, 1, 1], 'what was the second vertex is now the first');
+    assert.deepEqual(written(1), [0, 8, 0.5, 1]);
+
+    h.release(src.buffer);
+    h.release(dest.buffer);
+    assert.equal(h.release(device), 0);
+    h.release(d3d);
+    h.release(target);
     h.release(ddraw);
     h.assertAllReleased();
 });

@@ -75,6 +75,31 @@ test('_ftol truncates towards zero rather than rounding', ()=>{
     assert.equal(table._ftol2, table._ftol, 'the same function under both names');
 });
 
+test('_ftol answers an __int64, the high half in EDX, under all three names', ()=>{
+    const memory = fakeMemory();
+    const fpu = fakeFpu();
+    /** @type {Record<string, number>[]} */
+    const registers = [];
+    const table = /** @type {Record<string, any>} */ (createMathFunctions({
+        writeMemory: memory.writeMemory, fpu, setRegisters: values=>registers.push(values),
+    }));
+    /** @param {string} name @param {number} value */
+    const convert = (name, value)=>{
+        fpu.load([value]);
+        const eax = table[name].handler([]) >>> 0;
+        return [eax, registers.at(-1)?.edx];
+    };
+    assert.deepEqual(convert('_ftol', 0x100000007 + 0.5), [7, 1]);
+    assert.deepEqual(convert('_ftol2', -1.5), [0xffffffff, 0xffffffff], 'sign-extended');
+    assert.deepEqual(convert('_ftol2_sse', -0x100000000), [0, 0xffffffff]);
+    // Past the range of an __int64, and NaN, x87's FISTP stores the integer
+    // indefinite rather than any part of the value.
+    assert.deepEqual(convert('_ftol', 1e20), [0, 0x80000000]);
+    assert.deepEqual(convert('_ftol', -1e20), [0, 0x80000000]);
+    assert.deepEqual(convert('_ftol', NaN), [0, 0x80000000]);
+    assert.deepEqual(convert('_ftol', -(2 ** 63)), [0, 0x80000000], 'the one in range');
+});
+
 test('_ftol consumes its argument', ()=>{
     const { fpu, table } = build();
     fpu.load([1.5, 9]);

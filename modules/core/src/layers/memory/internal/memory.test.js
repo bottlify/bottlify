@@ -106,6 +106,32 @@ test('a layout that overlaps is refused when it is registered', ()=>{
     assert.deepEqual(regions.list().map(r=>r.name), ['code', 'data', 'stack']);
 });
 
+test('a region given back is gone from every answer, and its span can be registered again', ()=>{
+    // A thread's stack outlives nothing but its thread: once it is given
+    // back, a read there is a read of nothing, and the next stack goes there.
+    const raw = fakeMemory();
+    const regions = mapWithCode();
+    const accessors = createAccessors({ raw, regions });
+    regions.register({
+        name: 'stack-1', base: 0x3000, size: 0x1000,
+        kind: RegionKind.STACK, access: Access.READ_WRITE,
+    });
+    accessors.writeU32(0x3000, 5);
+    assert.equal(accessors.readU32(0x3000), 5, 'remembered by the accessors and the map');
+
+    regions.unregister('stack-1');
+    assert.equal(regions.find(0x3000), undefined, 'not answered from a cache');
+    assert.throws(()=>accessors.readU32(0x3000), /Unmapped/);
+    assert.deepEqual(regions.list().map(r=>r.name), ['code', 'data']);
+    assert.throws(()=>regions.unregister('stack-1'), /No region named/);
+
+    regions.register({
+        name: 'stack-2', base: 0x3000, size: 0x800,
+        kind: RegionKind.STACK, access: Access.READ_WRITE,
+    });
+    assert.equal(regions.find(0x3000)?.name, 'stack-2');
+});
+
 test('access is checked against the region that holds it', ()=>{
     const regions = mapWithCode();
 

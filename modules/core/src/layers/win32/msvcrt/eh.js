@@ -692,8 +692,8 @@ export function createCxxExceptions(host){
                 },
             },
 
-            /** bool __uncaught_exception(void) */
-            '?__uncaught_exception@@YA_NXZ': {
+            /** bool __uncaught_exception(void) -- a C name in msvcrt.dll. */
+            __uncaught_exception: {
                 convention: 'cdecl',
                 argBytes: 0,
                 handler: ()=>((inFlight.get(host.currentThread()) ?? 0) > 0 ? 1 : 0),
@@ -723,8 +723,13 @@ export function createCxxExceptions(host){
                 },
             },
 
-            /** _se_translator_function _set_se_translator(_se_translator_function) */
-            _set_se_translator: {
+            /**
+             * _se_translator_function _set_se_translator(_se_translator_function)
+             *
+             * msvcrt.dll exports this one under its C++ name only; the C name
+             * is a later runtime's, and an import by it never binds here.
+             */
+            '?_set_se_translator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z': {
                 convention: 'cdecl',
                 argBytes: 4,
                 /** @param {number[]} args */

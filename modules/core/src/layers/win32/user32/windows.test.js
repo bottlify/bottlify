@@ -144,6 +144,8 @@ function fakeHandles(){
                 throw new Error('Invalid handle');
             }
         },
+        /** @param {number} handle */
+        typeOf: handle=>entries.get(handle)?.type ?? null,
     };
 }
 
@@ -552,7 +554,8 @@ test('placing a window as the system would moves it and tells the program', ()=>
     const WS_CAPTION = 0x00c00000;
     const { fns, memory, hwnd, queue, service } = withWindow({ style: WS_CAPTION });
     fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
-    assert.equal(memory.u32(RECT_BUFFER + RECT.bottom), 200 - 19 - 2, 'framed before placing');
+    assert.equal(memory.u32(RECT_BUFFER + RECT.bottom), 200 - 19 - 2 * 3,
+        'framed before placing: a caption and a dialog frame');
 
     assert.equal(service.place(hwnd, 0, 0, 1024, 768), true);
 
@@ -606,6 +609,32 @@ test('placing a window as the system would moves it and tells the program', ()=>
     assert.equal(queue.peek({ hwnd: null, first: 0, last: 0, remove: true }), null);
 });
 
+test('the service measures a client area where it is on the screen, as ClientToScreen does', ()=>{
+    // Read from outside this layer by whoever places a picture in a window it
+    // did not draw -- a film in the window a program named its owner -- so
+    // the origin is the screen's, a child's inside its parent's frame.
+    const WS_CAPTION = 0x00c00000;
+    const { fns, memory, hwnd, service } = withWindow({ style: WS_CAPTION });
+    const child = createWindow(fns, memory,
+        { style: WS_CHILD, parent: hwnd, x: 7, y: 9, width: 50, height: 40 });
+    for (const window of [hwnd, child])
+    {
+        memory.putU32s(TEXT_BUFFER, [0, 0]);
+        fns.ClientToScreen.handler([window, TEXT_BUFFER]);
+        fns.GetClientRect.handler([window, RECT_BUFFER]);
+        assert.deepEqual(service.clientRect(window), {
+            left: memory.u32(TEXT_BUFFER),
+            top: memory.u32(TEXT_BUFFER + 4),
+            right: memory.u32(TEXT_BUFFER) + memory.u32(RECT_BUFFER + RECT.right),
+            bottom: memory.u32(TEXT_BUFFER + 4) + memory.u32(RECT_BUFFER + RECT.bottom),
+        });
+    }
+    const outer = /** @type {any} */ (service.clientRect(hwnd));
+    assert.deepEqual([service.clientRect(child)?.left, service.clientRect(child)?.top],
+        [outer.left + 7, outer.top + 9], 'the child is placed inside its parent\'s client area');
+    assert.equal(service.clientRect(0x9999), null);
+});
+
 test('MoveWindow changes both rectangles', ()=>{
     const { fns, memory, hwnd } = withWindow();
 
@@ -639,6 +668,89 @@ test('ShowWindow answers with the visibility it found, not the one it set', ()=>
     assert.equal(fns.ShowWindow.handler([hwnd, SW_HIDE]), 1);
     assert.equal(fns.ShowWindow.handler([hwnd, SW_SHOW]), 0);
     assert.equal(fns.ShowWindow.handler([0x9999, SW_SHOW]), 0, 'no window, nothing to report');
+});
+
+test('a top-level window\'s menu bar comes out of its client area, as AdjustWindowRect adds it',
+    ()=>{
+        // user32's window tests: the client rectangle mapped to the screen
+        // and grown by AdjustWindowRectEx -- with a menu when the window is
+        // not a child and GetMenu names one -- is the window rectangle.
+        const WS_OVERLAPPEDWINDOW = 0x00cf0000;
+        const WS_POPUP = 0x80000000;
+        const HTMENU = 5;
+        const WM_NCHITTEST = 0x0084;
+        const { fns, memory, dispatched } = withWindow();
+        const menu = fns.CreateMenu.handler();
+        memory.putU32s(RECT_BUFFER, [0, 0, 640, 480]);
+        fns.AdjustWindowRect.handler([RECT_BUFFER, WS_OVERLAPPEDWINDOW, 1]);
+        const [left, top, right, bottom] = [0, 4, 8, 12]
+            .map(at=>memory.u32(RECT_BUFFER + at) | 0);
+        const hwnd = createWindow(fns, memory, { style: WS_OVERLAPPEDWINDOW | WS_VISIBLE, menu,
+            x: 0, y: 0, width: right - left, height: bottom - top });
+        assert.equal(fns.GetMenu.handler([hwnd]), menu);
+        /** @returns {number[]} */
+        const client = ()=>{
+            fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
+            return [memory.u32(RECT_BUFFER + RECT.right), memory.u32(RECT_BUFFER + RECT.bottom)];
+        };
+        assert.deepEqual(client(), [640, 480], 'the client area asked for');
+        const frame = -left;
+        const inMenu = ((frame + 19 + 5) << 16 | 100) >>> 0;
+        assert.equal(fns.DefWindowProcA.handler([hwnd, WM_NCHITTEST, 0, inMenu]), HTMENU,
+            'the bar is the menu\'s part of the frame');
+
+        dispatched.length = 0;
+        assert.equal(fns.SetMenu.handler([hwnd, 0]), 1);
+        assert.deepEqual(client(), [640, 499], 'a window whose menu goes gets the bar back');
+        assert.deepEqual(dispatched.filter(m=>m.message === WM_SIZE).map(m=>m.lParam),
+            [(499 << 16 | 640) >>> 0], 'and is told its new size');
+
+        const owned = createWindow(fns, memory, { style: WS_POPUP, parent: hwnd, menu });
+        assert.equal(fns.GetMenu.handler([owned]), menu,
+            'an owned window is not a child, and its hMenu is a menu');
+    });
+
+test('DestroyWindow destroys the menu of a window that is not a child', ()=>{
+    // user32's window tests: a popup made with a menu, destroyed, leaves
+    // IsMenu failing with ERROR_INVALID_MENU_HANDLE -- WS_CHILD | WS_POPUP
+    // included, whose hMenu is a menu as a popup's is. A child's hMenu is
+    // its id, and nothing of it is destroyed.
+    const WS_POPUP = 0x80000000;
+    const ERROR_INVALID_MENU_HANDLE = 1401;
+    const { fns, memory, errors } = setup();
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const desktop = fns.GetDesktopWindow.handler();
+    for (const style of [WS_POPUP, WS_CHILD | WS_POPUP])
+    {
+        const menu = fns.CreateMenu.handler();
+        const hwnd = createWindow(fns, memory, { style, parent: desktop, menu });
+        assert.equal(fns.GetMenu.handler([hwnd]), menu, `0x${style.toString(16)}`);
+        assert.equal(fns.DestroyWindow.handler([hwnd]), 1);
+        errors.length = 0;
+        assert.equal(fns.IsMenu.handler([menu]), 0, 'destroyed with the window');
+        assert.deepEqual(errors, [ERROR_INVALID_MENU_HANDLE]);
+    }
+    const kept = fns.CreateMenu.handler();
+    const parent = createWindow(fns, memory, { style: WS_POPUP });
+    const child = createWindow(fns, memory, { style: WS_CHILD, parent, menu: kept });
+    fns.DestroyWindow.handler([child]);
+    assert.equal(fns.IsMenu.handler([kept]), 1, 'a child\'s hMenu is an id, not its menu');
+});
+
+test('SW_SHOWNA tells a visible window it is shown, where SW_SHOW tells it nothing', ()=>{
+    // user32's message tests: WmSHOWNATopVisible is WM_SHOWWINDOW(1) for a
+    // top-level window that was already visible, with no activation.
+    const SW_SHOWNA = 8;
+    const { fns, hwnd, dispatched } = withWindow();
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    dispatched.length = 0;
+
+    assert.equal(fns.ShowWindow.handler([hwnd, SW_SHOW]), 1);
+    assert.deepEqual(dispatched, [], 'nothing changed, so nothing is said');
+    assert.equal(fns.ShowWindow.handler([hwnd, SW_SHOWNA]), 1, 'it was visible');
+    assert.deepEqual(dispatched.map(({ message, wParam, lParam })=>[message, wParam, lParam]),
+        [[WM_SHOWWINDOW, 1, 0]]);
 });
 
 test('WS_VISIBLE at creation shows in the style and in ShowWindow', ()=>{
@@ -699,6 +811,24 @@ test('window text is set, read back, and truncated to the buffer offered', ()=>{
         'there is no room even for a terminator, so nothing is written');
 });
 
+test('window text in the upper half of the ANSI page reads back as the bytes it was set as', ()=>{
+    // A window keeps its text as the ANSI page reads it, where 0x80 is the
+    // euro sign, 0x99 the trade mark and 0x97 an em dash rather than control
+    // characters; GetWindowTextA writes it back in that page, so a caption a
+    // program set is the caption it reads.
+    const { fns, memory, hwnd } = withWindow({
+        reply: (/** @type {any} */ message)=>fns.DefWindowProcA.handler(
+            [message.hwnd, message.message, message.wParam, message.lParam]),
+    });
+    const set = [0x80, 0x20, 0x99, 0x97, 0xe9, 0x8d];
+    memory.bytes.set([...set, 0], TITLE);
+
+    assert.equal(fns.SetWindowTextA.handler([hwnd, TITLE]), 1);
+    assert.equal(fns.GetWindowTextA.handler([hwnd, TEXT_BUFFER, 64]), set.length);
+    assert.deepEqual([...memory.bytes.subarray(TEXT_BUFFER, TEXT_BUFFER + set.length + 1)],
+        [...set, 0]);
+});
+
 test('SetWindowLongA answers with the value it replaced', ()=>{
     const { fns, hwnd } = withWindow();
 
@@ -748,63 +878,137 @@ test('a class that asked for no extra bytes has none', ()=>{
     assert.equal(fns.GetWindowLongA.handler([hwnd, 0]), 0);
 });
 
-test('a window that takes the activation is told, and the one it replaced is told it lost it', ()=>{
+test('the first window shown makes the application active before the call returns', ()=>{
+    // user32's message tests: WmCreatePopupSeq (CreateWindow with WS_VISIBLE)
+    // and WmShowOverlappedSeq (ShowWindow on a hidden window) both follow
+    // WM_SHOWWINDOW(1) with WM_ACTIVATEAPP(1), WM_NCACTIVATE(1),
+    // WM_ACTIVATE(WA_ACTIVE) and WM_SETFOCUS, all sent. WM_ACTIVATEAPP goes
+    // to every top-level window of the application, a hidden one too; a
+    // window made hidden is activated by nothing until it is shown.
+    const WM_ACTIVATEAPP = 0x001c;
     const WM_ACTIVATE = 0x0006;
+    const WM_SETFOCUS = 0x0007;
+    const { memory, fns, dispatched, queue } = setup({ heap: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hidden = createWindow(fns, memory);
+    assert.deepEqual(dispatched.map(entry=>entry.message), [WM_NCCREATE, WM_CREATE]);
+    assert.equal(fns.GetActiveWindow.handler(), 0, 'a window made hidden is not activated');
+    dispatched.length = 0;
+
+    const shown = createWindow(fns, memory, { style: WS_VISIBLE });
+    assert.deepEqual(dispatched.map(({ hwnd, message, wParam })=>[hwnd, message, wParam]), [
+        [shown, WM_NCCREATE, 0], [shown, WM_CREATE, 0], [shown, WM_SIZE, 0], [shown, WM_MOVE, 0],
+        [shown, WM_SHOWWINDOW, 1], [shown, WM_ACTIVATEAPP, 1], [hidden, WM_ACTIVATEAPP, 1],
+        [shown, WM_NCACTIVATE, 1], [shown, WM_ACTIVATE, 1], [shown, WM_SETFOCUS, 0],
+    ]);
+    assert.deepEqual(dispatched.slice(5).map(entry=>entry.lParam), [0, 0, 0, 0, 0],
+        'no thread of this program had the activation, and no window');
+    assert.equal(queue.depth(), 0, 'nothing of it was posted');
+    assert.equal(fns.GetActiveWindow.handler(), shown);
+    assert.equal(fns.GetFocus.handler(), shown);
+
+    // With the active window gone nothing of the application is active, and
+    // the next window shown makes it the active application again.
+    fns.DestroyWindow.handler([shown]);
+    dispatched.length = 0;
+    fns.ShowWindow.handler([hidden, SW_SHOW]);
+    assert.deepEqual(dispatched.map(({ hwnd, message, wParam })=>[hwnd, message, wParam]), [
+        [hidden, WM_SHOWWINDOW, 1], [hidden, WM_ACTIVATEAPP, 1], [hidden, WM_NCACTIVATE, 1],
+        [hidden, WM_ACTIVATE, 1], [hidden, WM_SETFOCUS, 0], [hidden, WM_SIZE, 0],
+    ], 'with no window active, the application is activated again');
+});
+
+test('a window that takes the activation is told, and the one it replaced is told it lost it', ()=>{
+    // user32's message tests, SetActiveWindowSeq2: the window losing the
+    // activation hears WM_NCACTIVATE(0) and WM_ACTIVATE(WA_INACTIVE), the one
+    // gaining it WM_NCACTIVATE(1) and WM_ACTIVATE(WA_ACTIVE), and then the
+    // focus moves -- WM_KILLFOCUS, WM_SETFOCUS -- all sent. A second window
+    // of the same application is no news to the application: no
+    // WM_ACTIVATEAPP. A program that shows a second window, or makes another
+    // render window for a mode change, activates its mouse and clips its
+    // cursor only in the window it has been told is active.
+    const WM_ACTIVATE = 0x0006;
+    const WM_SETFOCUS = 0x0007;
+    const WM_KILLFOCUS = 0x0008;
     const WA_ACTIVE = 1;
     const WA_INACTIVE = 0;
-    // The application is told it is foreground once, when its first window
-    // appears. Which of its own windows holds that activation afterwards is a
-    // window-level fact, and a program that shows a second window -- or destroys
-    // its render window and makes another for a mode change -- activates its
-    // mouse, captures and clips only in the window it believes active, so that
-    // window has to be told it is. The first activation is left alone (the
-    // input layer sends that one, with WM_ACTIVATEAPP, in order); this is the
-    // switch to a later window.
     const context = setup();
     putClass(context.memory);
     context.fns.RegisterClassA.handler([CLASS_STRUCT]);
     const first = createWindow(context.fns, context.memory, { style: WS_VISIBLE });
+    context.dispatched.length = 0;
     const second = createWindow(context.fns, context.memory, { style: WS_VISIBLE });
 
-    /** @type {any[]} */
-    const told = [];
-    // Only what was actually posted: a visible window's paint is made up on
-    // every look and never leaves by looking, so draining to "nothing" would
-    // never stop -- the pending count is the queue's own, and reaches zero.
-    while (context.queue.depth() > 0)
-    {
-        const message = context.queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
-        if (!message)
-        {
-            break;
-        }
-        told.push(message);
-    }
+    assert.deepEqual(context.dispatched.map(({ hwnd, message, wParam, lParam })=>
+        [hwnd, message, wParam, lParam >>> 0]), [
+        [first, WM_NCACTIVATE, 0, 0], [first, WM_ACTIVATE, WA_INACTIVE, second],
+        [second, WM_NCACTIVATE, 1, 0], [second, WM_ACTIVATE, WA_ACTIVE, first],
+        [first, WM_KILLFOCUS, second, 0], [second, WM_SETFOCUS, first, 0],
+    ]);
+    assert.equal(context.queue.depth(), 0, 'sent before the call returns, none of it posted');
+});
 
-    const gained = told.find(entry=>entry.hwnd === second && entry.message === WM_ACTIVATE);
-    const yielded = told.find(entry=>entry.hwnd === first && entry.message === WM_ACTIVATE);
-    assert.ok(gained, 'the new window is told it became the active one');
-    assert.equal(gained.wParam, WA_ACTIVE);
-    assert.equal(gained.lParam >>> 0, first, 'and names the window it took the activation from');
-    assert.ok(yielded, 'the window that gave it up is told it no longer has it');
-    assert.equal(yielded.wParam, WA_INACTIVE);
-    assert.equal(told.indexOf(yielded) < told.indexOf(gained), true,
-        'the one that loses hears it before the one that gains');
-    const activations = told.filter(entry=>entry.message === WM_ACTIVATE
-        && entry.hwnd === second && entry.wParam === WA_ACTIVE).length;
-    assert.equal(activations, 1,
-        'exactly once: the switch does not re-send the first activation');
+test('activation leaving the application for the desktop tells it WM_ACTIVATEAPP(0), and '
+    + 'coming back WM_ACTIVATEAPP(1)', ()=>{
+    // user32's message tests (SetForegroundWindowSeq): SetForegroundWindow
+    // of the desktop away from the application's foreground window sends
+    // that window WM_NCACTIVATE(0), WM_ACTIVATE(WA_INACTIVE),
+    // WM_ACTIVATEAPP(0) and WM_KILLFOCUS. WM_ACTIVATEAPP is documented as
+    // sent to the application whose window is being activated and to the
+    // one whose window is being deactivated -- here, to each of its
+    // top-level windows, as when it first became active.
+    const WM_ACTIVATEAPP = 0x001c;
+    const WM_ACTIVATE = 0x0006;
+    const WM_SETFOCUS = 0x0007;
+    const WM_KILLFOCUS = 0x0008;
+    const context = setup();
+    const { fns, memory, dispatched } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+    const hidden = createWindow(fns, memory);
+    fns.SetForegroundWindow.handler([hwnd]);
+    const told = ()=>dispatched.filter(entry=>entry.hwnd === hwnd || entry.hwnd === hidden)
+        .map(({ hwnd: to, message, wParam })=>[to, message,
+            message === WM_KILLFOCUS || message === WM_SETFOCUS ? 0 : wParam]);
+    dispatched.length = 0;
 
-    // WM_NCACTIVATE tells the frame before WM_ACTIVATE tells the window, for
-    // both the one losing activation and the one gaining it.
-    const yieldedNc = told.find(entry=>entry.hwnd === first && entry.message === WM_NCACTIVATE);
-    const gainedNc = told.find(entry=>entry.hwnd === second && entry.message === WM_NCACTIVATE);
-    assert.ok(yieldedNc);
-    assert.equal(yieldedNc.wParam, 0);
-    assert.ok(gainedNc);
-    assert.equal(gainedNc.wParam, 1);
-    assert.equal(told.indexOf(yieldedNc) < told.indexOf(yielded), true);
-    assert.equal(told.indexOf(gainedNc) < told.indexOf(gained), true);
+    fns.SetForegroundWindow.handler([fns.GetDesktopWindow.handler()]);
+    assert.deepEqual(told(), [[hwnd, WM_NCACTIVATE, 0], [hwnd, WM_ACTIVATE, 0],
+        [hwnd, WM_ACTIVATEAPP, 0], [hidden, WM_ACTIVATEAPP, 0], [hwnd, WM_KILLFOCUS, 0]]);
+
+    dispatched.length = 0;
+    fns.SetForegroundWindow.handler([hwnd]);
+    assert.deepEqual(told(), [[hwnd, WM_ACTIVATEAPP, 1], [hidden, WM_ACTIVATEAPP, 1],
+        [hwnd, WM_NCACTIVATE, 1], [hwnd, WM_ACTIVATE, 1], [hwnd, WM_SETFOCUS, 0]]);
+});
+
+test('with the desktop in the foreground the application has no active window, focus or '
+    + 'foreground window, until it takes them back', ()=>{
+    // user32's window tests (test_SetFocus, test_SetForegroundWindow): after
+    // SetForegroundWindow of the desktop, a window of the application shown
+    // with SW_SHOWNA leaves GetFocus, GetActiveWindow and GetForegroundWindow
+    // all answering NULL.
+    const SW_SHOWNA = 8;
+    const context = setup();
+    const { fns, memory } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+    fns.SetForegroundWindow.handler([hwnd]);
+    const state = ()=>[fns.GetActiveWindow.handler(), fns.GetForegroundWindow.handler(),
+        fns.GetFocus.handler()];
+    assert.deepEqual(state(), [hwnd, hwnd, hwnd]);
+
+    fns.SetForegroundWindow.handler([fns.GetDesktopWindow.handler()]);
+    assert.deepEqual(state(), [0, 0, 0]);
+    const other = createWindow(fns, memory);
+    fns.ShowWindow.handler([other, SW_SHOWNA]);
+    assert.deepEqual(state(), [0, 0, 0], 'a window shown without activating changes none');
+
+    fns.SetForegroundWindow.handler([hwnd]);
+    assert.deepEqual(state(), [hwnd, hwnd, hwnd]);
 });
 
 test('SetFocus into another window sends the activation set, then the focus', ()=>{
@@ -822,6 +1026,162 @@ test('SetFocus into another window sends the activation set, then the focus', ()
         [second, WM_NCACTIVATE, 0], [second, 0x0006, 0], [first, WM_NCACTIVATE, 1],
         [first, 0x0006, 1], [second, 0x0008, first], [first, 0x0007, second],
     ], 'sent before the call returns: NCACTIVATE, ACTIVATE, then KILLFOCUS and SETFOCUS');
+});
+
+test('a window whose procedure says the pointer passes through passes it beneath', ()=>{
+    // user32's window tests (WindowFromPoint): the window under the point is
+    // asked WM_NCHITTEST, and one that answers HTTRANSPARENT has the click go
+    // to the window beneath it, which WindowFromPoint answers as well. As
+    // documented for WM_NCHITTEST, the answer is where the pointer is: a
+    // client area the procedure calls a caption takes the frame's form of
+    // the message, the screen point in lParam.
+    const WM_NCHITTEST = 0x0084;
+    const WM_NCLBUTTONDOWN = 0x00a1;
+    const HTTRANSPARENT = 0xffffffff;
+    const HTCLIENT = 1;
+    const HTCAPTION = 2;
+    const POINT = TEXT_BUFFER;
+    let transparent = 0;
+    let caption = 0;
+    const context = setup({ reply: message=>{
+        if (message.message !== WM_NCHITTEST)
+        {
+            return 0;
+        }
+        return message.hwnd === transparent ? HTTRANSPARENT
+            : message.hwnd === caption ? HTCAPTION : HTCLIENT;
+    } });
+    const { fns, memory, queue, dispatched } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const parent = createWindow(fns, memory, { style: WS_VISIBLE });
+    /** A child over the same square as the one made before it, beneath it. */
+    const square = ()=>createWindow(fns, memory,
+        { style: WS_CHILD | WS_VISIBLE, parent, x: 10, y: 10, width: 100, height: 100 });
+    const over = square();
+    const under = square();
+    transparent = over;
+    memory.putU32s(POINT, [5, 5]);
+    fns.ClientToScreen.handler([over, POINT]);
+    const [x, y] = [memory.u32(POINT), memory.u32(POINT + 4)];
+    /** Clicks there as the input layer does, and takes the press. */
+    const press = ()=>{
+        queue.post({ hwnd: 0, message: WM_LBUTTONDOWN, wParam: 1, lParam: 0, x, y });
+        dispatched.length = 0;
+        assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+        return [MSG.hwnd, MSG.message, MSG.wParam, MSG.lParam]
+            .map(at=>memory.u32(MSG_BUFFER + at));
+    };
+
+    assert.deepEqual(press(), [under, WM_LBUTTONDOWN, 1, (5 << 16 | 5) >>> 0]);
+    const asked = dispatched.find(entry=>entry.hwnd === over && entry.message === WM_NCHITTEST);
+    assert.equal(asked?.lParam >>> 0, (y << 16 | x) >>> 0, 'asked, with the screen point');
+    assert.equal(fns.WindowFromPoint.handler([x, y]), under);
+
+    caption = under;
+    assert.deepEqual(press(), [under, WM_NCLBUTTONDOWN, HTCAPTION, (y << 16 | x) >>> 0]);
+});
+
+test('a range of messages asked for takes a click in the form the program\'s procedure '
+    + 'gives it, not the one it arrived in', ()=>{
+    // PeekMessage and GetMessage retrieve only the messages in the range
+    // asked for, and a mouse message's form is settled as it is retrieved:
+    // user32's window tests (test_mouse_input) take the second click of a
+    // pair over a frame as a client message once the window has the
+    // capture. A click a procedure calls a caption is not taken by a range
+    // of client messages and is by the frame's; a peek that leaves it sees
+    // that form too; and the other way round.
+    const WM_NCHITTEST = 0x0084;
+    const WM_NCLBUTTONDOWN = 0x00a1;
+    const WM_NCMOUSEFIRST = 0x00a0;
+    const WM_NCMOUSELAST = 0x00ad;
+    const WM_MOUSEFIRST = 0x0200;
+    const WM_MOUSELAST = 0x020e;
+    const WS_CAPTION = 0x00c00000;
+    const HTCLIENT = 1;
+    const HTCAPTION = 2;
+    let hit = HTCAPTION;
+    const context = setup({ reply: message=>(message.message === WM_NCHITTEST ? hit : 0) });
+    const { fns, memory, queue } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    /** @param {number} first @param {number} last @param {number} how */
+    const peek = (first, last, how)=>(fns.PeekMessageA.handler([MSG_BUFFER, 0, first, last,
+        how]) === 0 ? null : [MSG.message, MSG.wParam].map(at=>memory.u32(MSG_BUFFER + at)));
+
+    const plain = createWindow(fns, memory, { style: WS_VISIBLE });
+    memory.putU32s(TEXT_BUFFER, [5, 5]);
+    fns.ClientToScreen.handler([plain, TEXT_BUFFER]);
+    queue.post({ hwnd: 0, message: WM_LBUTTONDOWN, wParam: 1, lParam: 0,
+        x: memory.u32(TEXT_BUFFER), y: memory.u32(TEXT_BUFFER + 4) });
+    assert.equal(peek(WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE), null, 'not a client message');
+    assert.deepEqual(peek(WM_NCMOUSEFIRST, WM_NCMOUSELAST, PM_NOREMOVE),
+        [WM_NCLBUTTONDOWN, HTCAPTION]);
+    assert.deepEqual(peek(WM_NCMOUSEFIRST, WM_NCMOUSELAST, PM_REMOVE),
+        [WM_NCLBUTTONDOWN, HTCAPTION]);
+    fns.DestroyWindow.handler([plain]);
+
+    hit = HTCLIENT;
+    const framed = createWindow(fns, memory, { style: WS_CAPTION | WS_VISIBLE });
+    fns.GetWindowRect.handler([framed, TEXT_BUFFER]);
+    queue.post({ hwnd: 0, message: WM_LBUTTONDOWN, wParam: 1, lParam: 0,
+        x: memory.u32(TEXT_BUFFER) + 40, y: memory.u32(TEXT_BUFFER + 4) + 8 });
+    assert.equal(peek(WM_NCMOUSEFIRST, WM_NCMOUSELAST, PM_REMOVE), null, 'not a frame message');
+    assert.equal(peek(WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE)?.[0], WM_LBUTTONDOWN);
+});
+
+test('WM_SETCURSOR is sent to the window under the pointer as each mouse message is taken', ()=>{
+    // user32's message tests (WmMove_mouse): WM_SETCURSOR, its lParam the
+    // hit and the mouse message, is sent before each WM_MOUSEMOVE the pointer
+    // makes; documented as sent to the window the cursor moves in when the
+    // mouse is not captured. Over the frame the hit is the frame's, and the
+    // message the client one. A mouse message a program posted itself is no
+    // move of the cursor, and a look that leaves the message sends nothing.
+    const WM_SETCURSOR = 0x0020;
+    const WM_MOUSEMOVE = 0x0200;
+    const WS_CAPTION = 0x00c00000;
+    const HTCLIENT = 1;
+    const HTCAPTION = 2;
+    const WM_NCHITTEST = 0x0084;
+    // The window's procedure leaves the hit test to the default one, as a
+    // program's does; the tests pin the messages around it, not it.
+    /** @type {any} */
+    let table = null;
+    const context = setup({ reply: message=>(message.message === WM_NCHITTEST
+        ? table.DefWindowProcA.handler([message.hwnd, message.message, message.wParam,
+            message.lParam]) : 0) });
+    table = context.fns;
+    putClass(context.memory);
+    context.fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(context.fns, context.memory, { style: WS_CAPTION | WS_VISIBLE });
+    /** Takes what is queued, and answers what was sent on the way. */
+    const take = (/** @type {number} */ how = PM_REMOVE)=>{
+        context.dispatched.length = 0;
+        context.fns.PeekMessageA.handler([MSG_BUFFER, 0, WM_MOUSEMOVE, WM_MOUSEMOVE + 0x0d, how]);
+        return context.dispatched.filter(({ message })=>message !== WM_NCHITTEST)
+            .map(({ hwnd: to, message, wParam, lParam })=>[to, message, wParam, lParam >>> 0]);
+    };
+    const move = (/** @type {number} */ x, /** @type {number} */ y)=>context.queue.post(
+        { hwnd: 0, message: WM_MOUSEMOVE, wParam: 0, lParam: 0, x, y });
+
+    move(60, 80);
+    assert.deepEqual(take(PM_NOREMOVE), [], 'a look sends nothing');
+    assert.deepEqual(take(), [[hwnd, WM_SETCURSOR, hwnd, (WM_MOUSEMOVE << 16 | HTCLIENT) >>> 0]]);
+    assert.equal(context.memory.u32(MSG_BUFFER + MSG.message), WM_MOUSEMOVE, 'then the move');
+
+    move(60, 30);
+    context.dispatched.length = 0;
+    context.fns.PeekMessageA.handler([MSG_BUFFER, 0, 0x00a0, 0x00a0, PM_REMOVE]);
+    const told = context.dispatched.filter(({ message })=>message !== WM_NCHITTEST);
+    assert.deepEqual(told.map(({ message, lParam })=>[message, lParam >>> 0]),
+        [[WM_SETCURSOR, (WM_MOUSEMOVE << 16 | HTCAPTION) >>> 0]], 'over the caption');
+
+    context.queue.post({ hwnd, message: WM_MOUSEMOVE, wParam: 0, lParam: 0 });
+    assert.deepEqual(take(), [], 'posted by the program');
+
+    context.fns.SetCapture.handler([hwnd]);
+    move(61, 80);
+    assert.deepEqual(take(), [], 'captured');
 });
 
 test('a press activates its window as the program takes it, unless the window says not to', ()=>{
@@ -1013,6 +1373,125 @@ test('MsgWaitForMultipleObjects with no handles is a sleep the queue can cut sho
     assert.equal(await expired, WAIT_TIMEOUT, 'and the deadline is kept on the guest clock');
 });
 
+test('MsgWaitForMultipleObjects wakes for input that arrived since the queue was last looked at',
+    ()=>{
+        // user32's message tests, step by step: a posted message ends a
+        // zero-time wait for QS_POSTMESSAGE until a PeekMessage has seen it,
+        // taken or not, and a new post ends it again; MWMO_INPUTAVAILABLE ends
+        // it for a message already seen.
+        const { fns, hwnd } = withWindow();
+        const post = ()=>fns.PostMessageA.handler([hwnd, WM_USER, 0, 0]);
+        /** @param {number} [inputAvailable] */
+        const wait = (inputAvailable = 0)=>fns.MsgWaitForMultipleObjects.handler(
+            [0, 0, 0, 0, QS_POSTMESSAGE, inputAvailable]);
+        /** @param {number} remove */
+        const peek = remove=>fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, remove]);
+
+        assert.equal(wait(), WAIT_TIMEOUT);
+        post();
+        assert.equal(wait(), WAIT_OBJECT_0);
+        assert.equal(wait(), WAIT_OBJECT_0, 'asking is not a look');
+        assert.equal(peek(PM_REMOVE), 1);
+        assert.equal(wait(), WAIT_TIMEOUT);
+        post();
+        assert.equal(wait(), WAIT_OBJECT_0);
+        assert.equal(peek(PM_NOREMOVE), 1);
+        assert.equal(wait(), WAIT_TIMEOUT, 'a message seen and left is no longer new');
+        post();
+        assert.equal(wait(), WAIT_OBJECT_0, 'a new one is');
+        assert.equal(peek(PM_REMOVE), 1);
+        assert.equal(peek(PM_REMOVE), 1);
+
+        post();
+        assert.equal(peek(PM_NOREMOVE), 1);
+        assert.equal(wait(1), WAIT_OBJECT_0, 'MWMO_INPUTAVAILABLE: seen or not, it is there');
+        assert.equal(fns.MsgWaitForMultipleObjects.handler([0, 0, 0, 0, QS_KEY]), WAIT_TIMEOUT,
+            'and only the kinds the wake mask names wake it');
+    });
+
+test('MsgWaitForMultipleObjects on an event ends when a message arrives while it waits',
+    async()=>{
+        // As documented: the wait ends when an object is signalled or input
+        // arrives. The event is polled on every turn rather than handed to
+        // kernel32's wait, which would hold the thread past the message.
+        const HANDLES = 0x11800;
+        let ready = false;
+        /** @type {number[][]} */
+        const asked = [];
+        const { fns, handles, memory, queue, tick } = setup({ waitForObjects: args=>{
+            asked.push(args);
+            if (args[3] !== 0)
+            {
+                return /** @type {any} */ (PARKED);
+            }
+            return ready ? WAIT_OBJECT_0 : WAIT_TIMEOUT;
+        } });
+        memory.putU32s(HANDLES, [handles.open('event', {})]);
+        /** @returns {Promise<number>} */
+        const waiting = ()=>/** @type {any} */ (fns.MsgWaitForMultipleObjects.handler(
+            [1, HANDLES, 0, INFINITE, QS_ALLINPUT]));
+
+        const first = waiting();
+        assert.equal(typeof first.then, 'function');
+        await tick();
+        queue.post({ hwnd: 0, message: 0x0401, wParam: 0, lParam: 0 });
+        await tick();
+        assert.equal(await first, WAIT_OBJECT_0 + 1, 'the message, past the one handle');
+        queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
+
+        const second = waiting();
+        await tick();
+        ready = true;
+        await tick();
+        assert.equal(await second, WAIT_OBJECT_0, 'and the event, when it is the one');
+        assert.ok(asked.every(args=>args[3] === 0), 'the handles were only ever polled');
+
+        ready = false;
+        assert.equal(fns.MsgWaitForMultipleObjects.handler(
+            [1, HANDLES, 0, INFINITE, QS_ALLINPUT, 0, 1]), PARKED,
+        'an alertable wait is kernel32\'s, whose wait an APC can end');
+
+        memory.putU32s(HANDLES, [handles.open('process', {})]);
+        ready = false;
+        assert.equal(fns.MsgWaitForMultipleObjects.handler([1, HANDLES, 0, INFINITE, QS_ALLINPUT]),
+            PARKED, 'a process is kernel32\'s to wait on');
+        assert.equal(asked.at(-1)?.[3], INFINITE);
+    });
+
+test('with fWaitAll the handles and the input together end the wait, and neither alone',
+    async()=>{
+        // As documented for fWaitAll: complete only when every object is
+        // signalled and an input event has been received -- and the objects
+        // are not taken before then.
+        const HANDLES = 0x11800;
+        let ready = false;
+        /** @type {number[][]} */
+        const asked = [];
+        const { fns, handles, memory, queue, tick } = setup({ waitForObjects: args=>{
+            asked.push(args);
+            return ready ? WAIT_OBJECT_0 : WAIT_TIMEOUT;
+        } });
+        memory.putU32s(HANDLES, [handles.open('event', {}), handles.open('event', {})]);
+
+        ready = true;
+        assert.equal(fns.MsgWaitForMultipleObjects.handler([2, HANDLES, 1, 0, QS_ALLINPUT]),
+            WAIT_TIMEOUT, 'the handles alone');
+        assert.deepEqual(asked, [], 'and they were not taken without the input');
+
+        ready = false;
+        queue.post({ hwnd: 0, message: 0x0401, wParam: 0, lParam: 0 });
+        assert.equal(fns.MsgWaitForMultipleObjects.handler([2, HANDLES, 1, 0, QS_ALLINPUT]),
+            WAIT_TIMEOUT, 'the input alone');
+        assert.deepEqual(asked, [[2, HANDLES, 1, 0]], 'the set was asked for all at once');
+
+        const both = /** @type {Promise<number>} */ (/** @type {any} */ (
+            fns.MsgWaitForMultipleObjects.handler([2, HANDLES, 1, INFINITE, QS_ALLINPUT])));
+        await tick();
+        ready = true;
+        await tick();
+        assert.equal(await both, WAIT_OBJECT_0, 'both: the set, answered for all of it');
+    });
+
 /**
  * Retrieves and validates until the queue is empty, which runs a paint pass to
  * its end -- and is where the desktop is shown, if it was marked painted.
@@ -1072,7 +1551,8 @@ test('a window with an area to paint is handed WM_PAINT when nothing else is que
     // the window in the code that follows it. Posting either one leaves the
     // text rasterised for whatever default the program started with.
     assert.deepEqual(dispatched.slice(announced).map(entry=>entry.message),
-        [WM_SHOWWINDOW, WM_SIZE], 'shown: the show message, then the size');
+        [WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_SIZE],
+        'shown: the show message, the activation, then the size');
     assert.equal(dispatched[announced].wParam, 1, 'TRUE: the window is being shown');
     // Showing a window is the first thing that paints it.
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
@@ -1136,12 +1616,13 @@ test('ShowWindow answers only after the procedures it sent to have run', async()
     const result = fns.ShowWindow.handler([hwnd, SW_SHOW]);
     assert.equal(typeof result.then, 'function', 'the show message is still running');
     assert.deepEqual(dispatched.map(entry=>entry.message), [WM_SHOWWINDOW],
-        'and the size waits behind it');
+        'and the activation and the size wait behind it');
 
     answer(0);
     assert.equal(await result, 0, 'SW_SHOW on a hidden window answers the state it found');
-    assert.deepEqual(dispatched.map(entry=>entry.message), [WM_SHOWWINDOW, WM_SIZE],
-        'the size went once the show message was answered');
+    assert.deepEqual(dispatched.map(entry=>entry.message),
+        [WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_SIZE],
+        'the activation and the size went once the show message was answered');
 });
 
 test('WaitMessage yields until there is something to retrieve, and takes nothing', async()=>{
@@ -1336,6 +1817,49 @@ test('DefWindowProcA does not end the program when a window ends', ()=>{
     assert.equal(queue.quitPending(), false);
 });
 
+test('DefWindowProcA(WM_SETCURSOR) asks the parent first, then sets the cursor of the '
+    + 'window under it', ()=>{
+    // As documented for WM_SETCURSOR: the parent decides first, and the
+    // default sets the class cursor over the client area and the arrow
+    // elsewhere. The cursor is the class's of the window wParam names, so a
+    // parent that passes a child's message on sets the child's.
+    const WM_SETCURSOR = 0x0020;
+    const WM_MOUSEMOVE = 0x0200;
+    const HTCLIENT = 1;
+    const HTCAPTION = 2;
+    const IDC_ARROW = 32512;
+    const GCL_HCURSOR = -12;
+    let parentAnswer = 0;
+    const { fns, memory, dispatched, hwnd: parent } = withWindow({
+        reply: message=>(message.message === WM_SETCURSOR ? parentAnswer : 0),
+    });
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent });
+    const overClient = (WM_MOUSEMOVE << 16 | HTCLIENT) >>> 0;
+    dispatched.length = 0;
+
+    assert.equal(fns.DefWindowProcA.handler([child, WM_SETCURSOR, child, overClient]), 1);
+    assert.deepEqual(dispatched.map(({ hwnd, message, wParam, lParam })=>
+        ({ hwnd, message, wParam, lParam })),
+    [{ hwnd: parent, message: WM_SETCURSOR, wParam: child, lParam: overClient }],
+    'the parent was asked with the same arguments');
+    assert.equal(fns.GetCursor.handler(), 0x22, 'the class cursor is set');
+
+    parentAnswer = 1;
+    fns.SetCursor.handler([0x99]);
+    assert.equal(fns.DefWindowProcA.handler([child, WM_SETCURSOR, child, overClient]), 1);
+    assert.equal(fns.GetCursor.handler(), 0x99, 'a parent that answers TRUE has set it');
+
+    fns.DefWindowProcA.handler([parent, WM_SETCURSOR, parent,
+        (WM_MOUSEMOVE << 16 | HTCAPTION) >>> 0]);
+    assert.equal(fns.GetCursor.handler(), IDC_ARROW, 'the frame shows the arrow');
+
+    fns.SetClassLongA.handler([parent, GCL_HCURSOR, 0]);
+    fns.SetCursor.handler([0x99]);
+    assert.equal(fns.DefWindowProcA.handler([parent, WM_SETCURSOR, parent, overClient]), 0,
+        'a class with no cursor leaves the client area to its procedure');
+    assert.equal(fns.GetCursor.handler(), 0x99);
+});
+
 test('DefWindowProcA does nothing at all with a message it has no opinion on', ()=>{
     const { fns, queue, hwnd } = withWindow();
 
@@ -1447,8 +1971,14 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
     // call, as the real CreateWindowEx sends them once WM_CREATE is answered:
     // a program that never calls ShowWindow measures the screen it lays itself
     // out and rasterises its text for from what it is told here.
-    assert.deepEqual(dispatched.map(entry=>entry.message), [WM_CREATE, WM_SIZE, WM_MOVE]);
-    const [message] = dispatched;
+    // And, the application's first window shown, that the application is
+    // the active one: WM_ACTIVATEAPP, WM_NCACTIVATE, WM_ACTIVATE, WM_SETFOCUS.
+    assert.deepEqual(dispatched.map(entry=>entry.message),
+        [WM_NCCREATE, WM_CREATE, WM_SIZE, WM_MOVE, WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006,
+            0x0007]);
+    assert.equal(dispatched[0].lParam, dispatched[1].lParam,
+        'WM_NCCREATE carries the same structure');
+    const message = dispatched[1];
     assert.equal(message.message, WM_CREATE);
     assert.equal(message.wndProc, WNDPROC);
     assert.equal(message.hwnd, hwnd);
@@ -1470,7 +2000,7 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
     assert.equal(memory.u32(at + CREATESTRUCT.lpszClass), CLASS_NAME);
     assert.equal(memory.u32(at + CREATESTRUCT.dwExStyle), 0x200);
 
-    const size = dispatched[1];
+    const size = dispatched[2];
     assert.equal(size.hwnd, hwnd);
     assert.equal(size.wParam, 0, 'SIZE_RESTORED');
     fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
@@ -1480,22 +2010,71 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
         - memory.u32(RECT_BUFFER + RECT.top);
     assert.equal(size.lParam >>> 16, clientHeight, 'the client height, not the frame');
     assert.equal(size.lParam & 0xffff, clientWidth, 'and the client width');
-    const place = dispatched[2];
+    const place = dispatched[3];
     assert.equal(place.hwnd, hwnd);
     assert.equal(place.lParam >>> 16, 20, 'the y it was created at');
     assert.equal(place.lParam & 0xffff, 10, 'and the x');
+    assert.deepEqual([dispatched[4].wParam, dispatched[4].lParam], [1, 0], 'shown');
 });
 
-test('a window created hidden hears only WM_CREATE', ()=>{
-    // WM_NCCREATE is the one to leave out: its default answer is TRUE and its
-    // structure arrives again a moment later. A hidden window is told nothing
-    // about a size or a place it does not have on screen yet.
+test('a window created hidden hears only that it is being created', ()=>{
+    // A hidden window is told nothing about a size or a place it does not
+    // have on screen yet, nor that it is shown.
     const { memory, fns, dispatched } = setup({ heap: true });
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     createWindow(fns, memory);
 
-    assert.deepEqual(dispatched.map(m=>m.message), [WM_CREATE], 'hidden: the create only');
+    assert.deepEqual(dispatched.map(m=>m.message), [WM_NCCREATE, WM_CREATE],
+        'hidden: the two creates only');
+});
+
+test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s message '
+    + 'tests pin', ()=>{
+    // WmCreateOverlappedSeq and WmCreatePopupSeq, less what this layer does
+    // not send (WM_GETMINMAXINFO, WM_NCCALCSIZE, the WM_WINDOWPOS pair, the
+    // painting, HCBT_ACTIVATE and HCBT_SETFOCUS): HCBT_CREATEWND, WM_NCCREATE,
+    // WM_CREATE, and for a window created visible WM_SIZE (SIZE_RESTORED),
+    // WM_MOVE, WM_SHOWWINDOW(1) and the activation -- WM_ACTIVATEAPP to each
+    // of the application's top-level windows, the hidden one too.
+    /** @type {string[]} */
+    const log = [];
+    const { memory, fns } = setup({
+        heap: true,
+        reply: message=>{
+            log.push(`0x${message.message.toString(16)}:${message.wParam}`);
+            return message.message === WM_NCCREATE ? 1 : 0;
+        },
+        hookReply: (entry, args)=>{
+            log.push(`hook:${args[0]}`);
+            return 0;
+        },
+    });
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, 0, 0]);
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+
+    createWindow(fns, memory, { style: 0x80000000 });
+    assert.deepEqual(log, [`hook:${HCBT_CREATEWND}`, '0x81:0', '0x1:0'], 'hidden');
+
+    log.length = 0;
+    createWindow(fns, memory, { style: 0x80000000 | WS_VISIBLE });
+    assert.deepEqual(log, [`hook:${HCBT_CREATEWND}`, '0x81:0', '0x1:0', '0x5:0', '0x3:0',
+        '0x18:1', '0x1c:1', '0x1c:1', '0x86:1', '0x6:1', '0x7:0'], 'visible');
+});
+
+test('WM_NCCREATE answered FALSE refuses the window, which hears WM_NCDESTROY alone', ()=>{
+    // As documented for WM_NCCREATE: FALSE and CreateWindowEx answers NULL.
+    const { memory, fns, dispatched } = setup({
+        heap: true, reply: message=>(message.message === WM_NCCREATE ? 0 : 1),
+    });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+
+    const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+    assert.equal(hwnd, 0);
+    assert.deepEqual(dispatched.map(m=>m.message), [WM_NCCREATE, WM_NCDESTROY]);
+    assert.equal(fns.IsWindow.handler([dispatched[0].hwnd]), 0, 'and nothing is left behind');
 });
 
 test('the CREATESTRUCT is freed once the procedure has seen it', ()=>{
@@ -1533,7 +2112,8 @@ test('a procedure that answers late leaves the caller a promise to park on', asy
     const result = createWindow(fns, memory);
     assert.equal(typeof result.then, 'function', 'sending is running guest code, which waits');
 
-    answer(0);
+    // TRUE to WM_NCCREATE, and anything but -1 to WM_CREATE.
+    answer(1);
     assert.notEqual(await result, 0, 'and the handle arrives when the procedure is done');
 });
 
@@ -1753,8 +2333,9 @@ test('a CBT hook is told of a window before its procedure is, and can refuse it'
     // procedure is then handed.
     assert.equal(memory.u32(args[2]), dispatched[0].lParam);
     assert.equal(memory.u32(dispatched[0].lParam + CREATESTRUCT.lpszClass), CLASS_NAME);
-    assert.equal(dispatched[0].message, WM_CREATE);
-    assert.equal(dispatched[0].thread, THREAD);
+    assert.deepEqual(dispatched.map(m=>m.message), [WM_NCCREATE, WM_CREATE]);
+    assert.equal(dispatched[1].lParam, dispatched[0].lParam);
+    assert.equal(dispatched[1].thread, THREAD);
 });
 
 test('a CBT hook answering non-zero refuses the window before WM_CREATE', ()=>{
@@ -1768,7 +2349,7 @@ test('a CBT hook answering non-zero refuses the window before WM_CREATE', ()=>{
     assert.deepEqual(dispatched, [], 'the procedure never hears of a window the hook refused');
 });
 
-test('a hook that answers late leaves the caller a promise, and WM_CREATE follows it', async()=>{
+test('a hook that answers late leaves a promise, and the creation follows it', async()=>{
     /** @type {(value: number) => void} */
     let answer = ()=>{};
     const pending = new Promise(resolve=>{
@@ -1784,7 +2365,8 @@ test('a hook that answers late leaves the caller a promise, and WM_CREATE follow
     assert.deepEqual(dispatched, [], 'not yet');
     answer(0);
     assert.notEqual(await result, 0);
-    assert.equal(/** @type {any} */ (dispatched[0]).message, WM_CREATE);
+    assert.deepEqual(/** @type {any[]} */ (dispatched).map(m=>m.message),
+        [WM_NCCREATE, WM_CREATE]);
 });
 
 test('the newest hook is called first and reaches the older through CallNextHookEx', ()=>{
@@ -1898,3 +2480,323 @@ test('PostThreadMessageA refuses a thread that does not exist, and says why', ()
     assert.equal(queue.depth(), 0, 'and queues nothing for nobody to find');
     assert.deepEqual(errors, [ERROR_INVALID_THREAD_ID]);
 });
+
+// --- raw input ---
+
+const WM_INPUT = 0x00ff;
+const RID_INPUT = 0x10000003;
+const RID_HEADER = 0x10000005;
+const RIDEV_REMOVE = 0x0001;
+const RIDEV_INPUTSINK = 0x0100;
+const RIM_INPUT = 0;
+const RIM_INPUTSINK = 1;
+const RAWINPUTDEVICE_SIZE = 12;
+const RAWINPUTHEADER_SIZE = 16;
+const ERROR_INVALID_PARAMETER = 87;
+const ERROR_INVALID_HANDLE = 6;
+const ERROR_INSUFFICIENT_BUFFER = 122;
+const DEVICES = 0x11400;
+const COUNT = 0x11500;
+const RAW = 0x11600;
+
+/**
+ * @param {ReturnType<typeof fakeMemory>} memory
+ * @param {[number, number, number, number][]} devices  page, usage, flags, target
+ */
+function putDevices(memory, devices){
+    devices.forEach(([page, usage, flags, target], index)=>{
+        memory.putU32s(DEVICES + index * RAWINPUTDEVICE_SIZE,
+            [(usage << 16 | page) >>> 0, flags, target]);
+    });
+    return devices.length;
+}
+
+/** @param {ReturnType<typeof fakeMemory>} memory @param {number} at */
+const u16 = (memory, at)=>memory.u32(at) & 0xffff;
+
+test('RegisterRawInputDevices checks its devices, and the registered list is ordered', ()=>{
+    // user32's input tests: no devices or a cbSize of 0 is ERROR_INVALID_PARAMETER;
+    // the registered list is counted with a null buffer, refused for a count of
+    // 0, too small with ERROR_INSUFFICIENT_BUFFER and the count needed, and
+    // comes back ordered by usage; RIDEV_INPUTSINK needs a window and
+    // RIDEV_REMOVE must not name one.
+    const HID_USAGE_GENERIC_JOYSTICK = 0x04;
+    const HID_USAGE_GENERIC_GAMEPAD = 0x05;
+    const { fns, memory, hwnd, errors } = withWindow({ style: WS_VISIBLE });
+    const count = putDevices(memory, [[1, HID_USAGE_GENERIC_GAMEPAD, 0, 0],
+        [1, HID_USAGE_GENERIC_JOYSTICK, 0, 0]]);
+    const registered = (/** @type {number} */ buffer, /** @type {number} */ size)=>
+        fns.GetRegisteredRawInputDevices.handler([buffer, COUNT, size]);
+
+    assert.equal(fns.RegisterRawInputDevices.handler([0, 0, 0]), 0);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, count, 0]), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER]);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, count, RAWINPUTDEVICE_SIZE]), 1);
+
+    errors.length = 0;
+    assert.equal(fns.GetRegisteredRawInputDevices.handler([0, 0, 0]), 0xffffffff);
+    assert.equal(registered(0, 0), 0xffffffff);
+    memory.putU32s(COUNT, [0]);
+    assert.equal(registered(0, RAWINPUTDEVICE_SIZE), 0);
+    assert.equal(memory.u32(COUNT), 2, 'counted');
+    memory.putU32s(COUNT, [0]);
+    assert.equal(registered(DEVICES, RAWINPUTDEVICE_SIZE), 0xffffffff);
+    assert.equal(memory.u32(COUNT), 0);
+    memory.putU32s(COUNT, [1]);
+    assert.equal(registered(DEVICES, RAWINPUTDEVICE_SIZE), 0xffffffff);
+    assert.equal(memory.u32(COUNT), 2, 'told how many it needs');
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER,
+        ERROR_INVALID_PARAMETER, ERROR_INSUFFICIENT_BUFFER]);
+    memory.fill(DEVICES, 6);
+    memory.putU32s(COUNT, [2]);
+    assert.equal(registered(DEVICES, RAWINPUTDEVICE_SIZE), 2);
+    assert.deepEqual([0, 12].map(at=>memory.u32(DEVICES + at)),
+        [(HID_USAGE_GENERIC_JOYSTICK << 16 | 1) >>> 0, (HID_USAGE_GENERIC_GAMEPAD << 16 | 1) >>> 0],
+        'ordered by usage, not by registration');
+
+    errors.length = 0;
+    putDevices(memory, [[1, 4, RIDEV_INPUTSINK, 0], [1, 5, RIDEV_INPUTSINK, 0]]);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, 2, RAWINPUTDEVICE_SIZE]), 0);
+    putDevices(memory, [[1, 4, RIDEV_INPUTSINK, hwnd], [1, 5, RIDEV_INPUTSINK, hwnd]]);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, 2, RAWINPUTDEVICE_SIZE]), 1);
+    putDevices(memory, [[1, 4, RIDEV_REMOVE, hwnd], [1, 5, RIDEV_REMOVE, hwnd]]);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, 2, RAWINPUTDEVICE_SIZE]), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER]);
+    putDevices(memory, [[1, 4, RIDEV_REMOVE, 0], [1, 5, RIDEV_REMOVE, 0]]);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, 2, RAWINPUTDEVICE_SIZE]), 1);
+    memory.putU32s(COUNT, [0]);
+    assert.equal(registered(0, RAWINPUTDEVICE_SIZE), 0);
+    assert.equal(memory.u32(COUNT), 0, 'both removed');
+});
+
+test('GetRawInputData refuses a handle that names no input', ()=>{
+    const { fns, memory, errors } = setup();
+    memory.putU32s(COUNT, [0]);
+    assert.equal(fns.GetRawInputData.handler([0, RID_INPUT, 0, COUNT, RAWINPUTHEADER_SIZE]),
+        0xffffffff);
+    assert.deepEqual(errors, [ERROR_INVALID_HANDLE]);
+});
+
+test('a registered mouse is posted WM_INPUT, and GetRawInputData reads the report', ()=>{
+    // As documented for WM_INPUT and GetRawInputData: wParam says whether the
+    // window was in the foreground, lParam is the handle, a null buffer asks
+    // the size, RID_HEADER reads the RAWINPUTHEADER alone, and a RAWMOUSE
+    // carries relative motion, button transitions and the wheel.
+    const RI_MOUSE_LEFT_BUTTON_DOWN = 0x0001;
+    const RI_MOUSE_WHEEL = 0x0400;
+    const RAWINPUT_MOUSE_SIZE = 40;
+    const { fns, memory, hwnd, queue, service, errors } = withWindow({ style: WS_VISIBLE });
+    fns.SetFocus.handler([hwnd]);
+    service.rawInput({ device: 'mouse', dx: 5, dy: -3 });
+    assert.equal(queue.depth(), 0, 'nothing is posted for a device nobody registered');
+
+    putDevices(memory, [[1, 2, 0, hwnd]]);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, 1, RAWINPUTDEVICE_SIZE]), 1);
+    service.rawInput({ device: 'mouse', dx: 5, dy: -3 });
+    assert.equal(fns.GetQueueStatus.handler([0x0400]) >>> 16, 0x0400, 'QS_RAWINPUT');
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.deepEqual([MSG.hwnd, MSG.message, MSG.wParam].map(at=>memory.u32(MSG_BUFFER + at)),
+        [hwnd, WM_INPUT, RIM_INPUT]);
+    const handle = memory.u32(MSG_BUFFER + MSG.lParam);
+    assert.notEqual(handle, 0);
+
+    memory.putU32s(COUNT, [0]);
+    assert.equal(fns.GetRawInputData.handler([handle, RID_INPUT, 0, COUNT, RAWINPUTHEADER_SIZE]),
+        0, 'a null buffer asks the size');
+    assert.equal(memory.u32(COUNT), RAWINPUT_MOUSE_SIZE);
+    memory.fill(RAW, 10);
+    assert.equal(fns.GetRawInputData.handler([handle, RID_INPUT, RAW, COUNT, RAWINPUTHEADER_SIZE]),
+        RAWINPUT_MOUSE_SIZE);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RAW + at)),
+        [0, RAWINPUT_MOUSE_SIZE, 0, 0], 'RIM_TYPEMOUSE, its size, no device, RIM_INPUT');
+    assert.deepEqual([16, 20, 24, 28, 32, 36].map(at=>memory.u32(RAW + at)),
+        [0, 0, 0, 5, 0xfffffffd, 0], 'relative motion, no buttons');
+
+    memory.putU32s(COUNT, [RAWINPUTHEADER_SIZE]);
+    memory.fill(RAW, 10);
+    assert.equal(fns.GetRawInputData.handler([handle, RID_HEADER, RAW, COUNT,
+        RAWINPUTHEADER_SIZE]), RAWINPUTHEADER_SIZE);
+    assert.equal(memory.u32(RAW + 16), UNTOUCHED, 'the header alone');
+    assert.equal(fns.GetRawInputData.handler([handle, RID_INPUT, RAW, COUNT,
+        RAWINPUTHEADER_SIZE]), 0xffffffff, 'a buffer too small for the report');
+    assert.equal(fns.GetRawInputData.handler([handle, RID_INPUT, RAW, COUNT, 12]), 0xffffffff);
+    assert.deepEqual(errors, [ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER]);
+
+    service.rawInput({ device: 'mouse', button: 'left', down: true });
+    service.rawInput({ device: 'mouse', wheel: -120 });
+    memory.putU32s(COUNT, [RAWINPUT_MOUSE_SIZE]);
+    /** @returns {number[]} usButtonFlags and usButtonData of the next report */
+    const nextButtons = ()=>{
+        fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+        fns.GetRawInputData.handler([memory.u32(MSG_BUFFER + MSG.lParam), RID_INPUT, RAW,
+            COUNT, RAWINPUTHEADER_SIZE]);
+        return [u16(memory, RAW + 20), u16(memory, RAW + 22)];
+    };
+    assert.deepEqual(nextButtons(), [RI_MOUSE_LEFT_BUTTON_DOWN, 0]);
+    assert.deepEqual(nextButtons(), [RI_MOUSE_WHEEL, 0xff88], 'the wheel\'s signed delta');
+});
+
+test('a registered keyboard follows the focus, and only a sink hears it in the background', ()=>{
+    // RAWINPUTDEVICE documents a null hwndTarget as the keyboard focus, and
+    // RIDEV_INPUTSINK as input received while the window is not in the
+    // foreground, with wParam RIM_INPUTSINK; a RAWKEYBOARD carries the make
+    // code, RI_KEY_BREAK and RI_KEY_E0, the virtual key and the message.
+    const RI_KEY_BREAK = 1;
+    const RI_KEY_E0 = 2;
+    const WM_KEYUP = 0x0101;
+    const RAWINPUT_KEYBOARD_SIZE = 32;
+    const { fns, memory, hwnd, queue, service } = withWindow({ style: WS_VISIBLE });
+    const other = createWindow(fns, memory, { style: WS_VISIBLE });
+    /** Moves the focus, dropping what activation posted, so only raw input is queued. */
+    const focusOn = (/** @type {number} */ target)=>{
+        fns.SetFocus.handler([target]);
+        queue.purge(hwnd);
+        queue.purge(other);
+    };
+    focusOn(hwnd);
+    putDevices(memory, [[1, 6, 0, 0]]);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, 1, RAWINPUTDEVICE_SIZE]), 1);
+
+    /** @returns {number[]} the window, wParam and the RAWKEYBOARD's fields */
+    const next = ()=>{
+        assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+        assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_INPUT);
+        memory.putU32s(COUNT, [RAWINPUT_KEYBOARD_SIZE]);
+        assert.equal(fns.GetRawInputData.handler([memory.u32(MSG_BUFFER + MSG.lParam),
+            RID_INPUT, RAW, COUNT, RAWINPUTHEADER_SIZE]), RAWINPUT_KEYBOARD_SIZE);
+        assert.equal(memory.u32(RAW), 1, 'RIM_TYPEKEYBOARD');
+        return [memory.u32(MSG_BUFFER + MSG.hwnd), memory.u32(MSG_BUFFER + MSG.wParam),
+            u16(memory, RAW + 16), u16(memory, RAW + 18), u16(memory, RAW + 22),
+            memory.u32(RAW + 24)];
+    };
+    service.rawInput({ device: 'key', scan: 0x1e, vk: 0x41, down: true });
+    assert.deepEqual(next(), [hwnd, RIM_INPUT, 0x1e, 0, 0x41, WM_KEYDOWN]);
+    focusOn(other);
+    service.rawInput({ device: 'key', scan: 0x1d, extended: true, vk: 0x11, down: false });
+    assert.deepEqual(next(), [other, RIM_INPUT, 0x1d, RI_KEY_BREAK | RI_KEY_E0, 0x11, WM_KEYUP]);
+
+    putDevices(memory, [[1, 6, 0, hwnd]]);
+    fns.RegisterRawInputDevices.handler([DEVICES, 1, RAWINPUTDEVICE_SIZE]);
+    service.rawInput({ device: 'key', scan: 0x1e, vk: 0x41, down: true });
+    assert.equal(queue.depth(), 0, 'a window in the background is not told');
+    putDevices(memory, [[1, 6, RIDEV_INPUTSINK, hwnd]]);
+    fns.RegisterRawInputDevices.handler([DEVICES, 1, RAWINPUTDEVICE_SIZE]);
+    service.rawInput({ device: 'key', scan: 0x1e, vk: 0x41, down: true });
+    assert.deepEqual(next().slice(0, 2), [hwnd, RIM_INPUTSINK], 'unless it is a sink');
+});
+
+test('the service says the application is deactivated from WM_ACTIVATEAPP(0) until '
+    + 'WM_ACTIVATEAPP(1)', ()=>{
+    // What a layer outside this one asks when its own state follows the
+    // application's activation: DirectDraw's exclusive mode is lost when the
+    // application is told it is no longer the active one (ddraw's
+    // test_coop_level_mode_set and test_lost_device), not when the program
+    // activates another window of its own.
+    const context = setup();
+    const { fns, memory, service } = context;
+    assert.equal(service.deactivated(), false, 'nothing has told it otherwise yet');
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+    const other = createWindow(fns, memory, { style: WS_VISIBLE });
+    fns.SetForegroundWindow.handler([hwnd]);
+    assert.equal(service.deactivated(), false);
+    fns.SetForegroundWindow.handler([other]);
+    assert.equal(service.deactivated(), false, 'another of its own windows keeps it active');
+
+    fns.SetForegroundWindow.handler([fns.GetDesktopWindow.handler()]);
+    assert.equal(service.deactivated(), true, 'the desktop took the activation');
+    fns.SetForegroundWindow.handler([hwnd]);
+    assert.equal(service.deactivated(), false, 'and it came back');
+});
+
+test('the service counts every time the application was deactivated', ()=>{
+    // A layer that reads the state only when a program next calls it has to
+    // learn of a deactivation that came and went in between: DirectDraw's
+    // video memory is lost by one, and a program that stops drawing while it
+    // is in the background calls nothing until it is back.
+    const context = setup();
+    const { fns, memory, service } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+    fns.SetForegroundWindow.handler([hwnd]);
+    assert.equal(service.deactivations(), 0);
+    const desktop = fns.GetDesktopWindow.handler();
+    fns.SetForegroundWindow.handler([desktop]);
+    fns.SetForegroundWindow.handler([desktop]);
+    assert.equal(service.deactivations(), 1, 'once for each time it went, not each call');
+    fns.SetForegroundWindow.handler([hwnd]);
+    assert.equal(service.deactivated(), false);
+    assert.equal(service.deactivations(), 1, 'and the count stays once it is back');
+    fns.SetForegroundWindow.handler([desktop]);
+    fns.SetForegroundWindow.handler([hwnd]);
+    assert.equal(service.deactivations(), 2);
+});
+
+test('SetWindowTextW hands an ANSI window its text in the ANSI page, lent for the call', ()=>{
+    const context = setup({
+        heap: true,
+        reply: (/** @type {any} */ message)=>context.fns.DefWindowProcA.handler(
+            [message.hwnd, message.message, message.wParam, message.lParam]),
+    });
+    const { fns, memory, released, dispatched } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    const WIDE = 0x10600;
+    // e acute is in Windows-1252, a Cyrillic letter is not and becomes '?'.
+    memory.writeMemory(WIDE, new Uint8Array(Buffer.from('Café Ж\0', 'utf16le')));
+    released.length = 0;
+
+    assert.equal(fns.SetWindowTextW.argBytes, 8);
+    assert.equal(fns.SetWindowTextW.handler([hwnd, WIDE]), 1);
+    const sent = dispatched.at(-1);
+    assert.equal(sent.message, 0x000c, 'WM_SETTEXT reached the procedure');
+    assert.deepEqual(released, [sent.lParam], 'the ANSI copy is given back after the message');
+    assert.equal(fns.GetWindowTextA.handler([hwnd, TEXT_BUFFER, 64]), 6);
+    assert.deepEqual([...memory.readMemory(TEXT_BUFFER, 7)], [0x43, 0x61, 0x66, 0xe9, 0x20,
+        0x3f, 0]);
+    assert.equal(fns.SetWindowTextW.handler([0x9999, WIDE]), 0, 'no such window');
+});
+
+test('SetWindowTextW fails where there is no heap to put the ANSI text in', ()=>{
+    const { fns, memory, hwnd } = withWindow();
+    memory.writeMemory(0x10600, new Uint8Array(Buffer.from('Title\0', 'utf16le')));
+    assert.equal(fns.SetWindowTextW.handler([hwnd, 0x10600]), 0);
+});
+
+test('EnumWindows hands over every top-level window, topmost first, until told to stop',
+    async()=>{
+        const ENUMPROC = 0x405000;
+        const { fns, memory, called } = setup({ hookReply: ()=>1 });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const first = createWindow(fns, memory);
+        const child = createWindow(fns, memory, { parent: first, style: WS_CHILD });
+        const second = createWindow(fns, memory);
+        const third = createWindow(fns, memory);
+        fns.SetForegroundWindow?.handler([first]);
+        fns.SetWindowPos.handler([first, 0, 0, 0, 0, 0, 0x3]); // HWND_TOP, no move or size
+
+        assert.equal(fns.EnumWindows.argBytes, 8);
+        assert.equal(await fns.EnumWindows.handler([ENUMPROC, 0x77]), 1);
+        const listed = called.filter(one=>one.entry === ENUMPROC).map(one=>one.args[0]);
+        assert.deepEqual(listed, [first, third, second],
+            'the one brought to the top, then the rest newest first, never a child');
+        assert.ok(!listed.includes(child));
+        assert.ok(called.every(one=>one.entry !== ENUMPROC
+            || (one.args[1] === 0x77 && one.thread === THREAD)));
+
+        const stopping = setup({ hookReply: ()=>0 });
+        putClass(stopping.memory);
+        stopping.fns.RegisterClassA.handler([CLASS_STRUCT]);
+        createWindow(stopping.fns, stopping.memory);
+        createWindow(stopping.fns, stopping.memory);
+        assert.equal(await stopping.fns.EnumWindows.handler([ENUMPROC, 0]), 0,
+            'FALSE from the callback is the answer too');
+        assert.equal(stopping.called.filter(one=>one.entry === ENUMPROC).length, 1);
+
+        assert.equal(stopping.fns.EnumWindows.handler([0, 0]), 0);
+        assert.equal(stopping.errors.at(-1), 87, 'ERROR_INVALID_PARAMETER for no callback');
+    });

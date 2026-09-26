@@ -59,6 +59,10 @@ const WM_LBUTTONUP = 0x0202;
 const WM_NCLBUTTONDOWN = 0x00a1;
 const WM_NCHITTEST = 0x0084;
 const WM_CTLCOLORSTATIC = 0x0138;
+/** SetBkMode's two modes, and the stock brush of the classic 3D face's grey. */
+const TRANSPARENT = 1;
+const OPAQUE = 2;
+const LTGRAY_BRUSH = 1;
 const BM_GETCHECK = 0x00f0;
 const BM_SETCHECK = 0x00f1;
 const BN_CLICKED = 0;
@@ -658,6 +662,64 @@ test('Enter fires the default button and Escape is IDCANCEL', async()=>{
     assert.equal(context.commands().at(-1)?.[0], 101);
 });
 
+test('the default push button follows the dialog manager\'s focus, and DM_SETDEFID', async()=>{
+    // user32's dialog tests (WM_NEXTDLGCTL): the push button the dialog
+    // manager moves the focus to is styled BS_DEFPUSHBUTTON and the default
+    // one BS_PUSHBUTTON, DM_GETDEFID staying what it was -- the template's
+    // default push button until DM_SETDEFID names another -- and a control
+    // that is no push button taking the focus gives the default its style
+    // back. DM_SETDEFID moves the style from the old default to the new.
+    // Enter presses the push button with the focus only while it is the
+    // default; otherwise the default id.
+    const BS_TYPEMASK = 0x0f;
+    const IDOK = 1;
+    const page = { ...WIZARD_PAGE, controls: [
+        { id: 10, className: 'Edit', title: '', x: 4, y: 4, cx: 60, cy: 12,
+            style: WS_CHILD | WS_VISIBLE | WS_TABSTOP },
+        { id: IDOK, className: 'Button', title: 'OK', x: 4, y: 40, cx: 40, cy: 14,
+            style: WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON },
+        { id: IDCANCEL, className: 'Button', title: 'Cancel', x: 50, y: 40, cx: 40, cy: 14,
+            style: WS_CHILD | WS_VISIBLE | WS_TABSTOP },
+    ] };
+    const context = setup({ reply: message=>(message.message === WM_INITDIALOG ? 1 : 0) });
+    const dialog = await openDialog(context, page);
+    const [edit, ok, cancel] = [10, IDOK, IDCANCEL]
+        .map(id=>context.fns.GetDlgItem.handler([dialog, id]));
+    /** The two buttons' types, OK's then Cancel's. */
+    const kinds = ()=>[ok, cancel]
+        .map(hwnd=>context.fns.GetWindowLongA.handler([hwnd, -16]) & BS_TYPEMASK);
+    const defaultId = ()=>context.fns.SendMessageA.handler([dialog, DM_GETDEFID, 0, 0]);
+    assert.equal(context.fns.GetFocus.handler([]), edit);
+    assert.equal(defaultId(), (0x534b << 16 | IDOK) >>> 0, 'the template\'s default push button');
+
+    context.key(WM_KEYDOWN, VK_TAB);
+    context.key(WM_KEYDOWN, VK_TAB);
+    await context.pump(dialog);
+    assert.equal(context.fns.GetFocus.handler([]), cancel);
+    assert.deepEqual(kinds(), [0, BS_DEFPUSHBUTTON], 'the focus took the default style');
+    assert.equal(defaultId() & 0xffff, IDOK, 'but not the default id');
+    context.key(WM_KEYDOWN, VK_RETURN);
+    await context.pump(dialog);
+    assert.deepEqual(context.commands().at(-1), [IDCANCEL, BN_CLICKED, cancel]);
+
+    context.key(WM_KEYDOWN, VK_TAB);
+    await context.pump(dialog);
+    assert.equal(context.fns.GetFocus.handler([]), edit);
+    assert.deepEqual(kinds(), [BS_DEFPUSHBUTTON, 0], 'the default has its style back');
+
+    context.fns.SendMessageA.handler([dialog, DM_SETDEFID, IDCANCEL, 0]);
+    assert.deepEqual(kinds(), [0, BS_DEFPUSHBUTTON]);
+    context.key(WM_KEYDOWN, VK_TAB);
+    await context.pump(dialog);
+    assert.equal(context.fns.GetFocus.handler([]), ok);
+    context.fns.SendMessageA.handler([dialog, DM_SETDEFID, IDCANCEL, 0]);
+    context.fns.SendMessageA.handler([ok, 0x00f4, 0, 1]);
+    context.key(WM_KEYDOWN, VK_RETURN);
+    await context.pump(dialog);
+    assert.deepEqual(context.commands().at(-1), [IDCANCEL, BN_CLICKED, cancel],
+        'a push button with the focus that is not the default is not what Enter presses');
+});
+
 test('an auto check box toggles on a click and on Space, and answers BM_GETCHECK', async()=>{
     const context = setup();
     const dialog = await openDialog(context);
@@ -753,6 +815,287 @@ test('an edit takes typing at its caret, selects, and tells its parent EN_CHANGE
     assert.equal(context.memory.readCString(OUT, 16), 'replaced!', 'read-only takes nothing');
 });
 
+/**
+ * A dialog that records the owner-draw messages its procedure is handed, the
+ * DRAWITEMSTRUCT read while it is still there.
+ */
+async function ownerDrawDialog(){
+    const WM_DRAWITEM = 0x002b;
+    /** @type {any[]} */
+    const seen = [];
+    /** @type {any} */
+    let context = null;
+    context = setup({
+        reply: message=>{
+            if (message.message === WM_DRAWITEM)
+            {
+                const at = message.lParam;
+                const [type, id, item, action, state, hwnd, hdc, left, top, right, bottom]
+                    = Array.from({ length: 11 }, (_, index)=>context.memory.u32(at + index * 4));
+                seen.push({ message: 'draw', wParam: message.wParam, type, id, item, action,
+                    state, hwnd, hdc, rect: [left, top, right, bottom] });
+            }
+            else if (message.message >= 0x0133 && message.message <= 0x0138)
+            {
+                seen.push({ message: `ctlcolor 0x${message.message.toString(16)}` });
+            }
+            else if (message.message === WM_COMMAND)
+            {
+                seen.push({ message: 'command', code: message.wParam >>> 16 });
+            }
+            return 0;
+        },
+    });
+    const dialog = await openDialog(context);
+    seen.length = 0;
+    return { context, dialog, seen };
+}
+
+test('an owner-drawn button is drawn by its parent, told what changed', async()=>{
+    // user32's message tests: a BS_OWNERDRAW button asks WM_CTLCOLORBTN and
+    // then hands WM_DRAWITEM to its parent -- ODA_DRAWENTIRE when it paints,
+    // ODA_FOCUS with ODS_FOCUS when it takes the focus, ODA_SELECT with
+    // ODS_SELECTED when BM_SETSTATE pushes it.
+    const BS_OWNERDRAW = 0x000b;
+    const BS_NOTIFY = 0x4000;
+    const BM_SETSTATE = 0x00f3;
+    const ODT_BUTTON = 4;
+    const ODA_DRAWENTIRE = 1;
+    const ODA_SELECT = 2;
+    const ODA_FOCUS = 4;
+    const ODS_SELECTED = 1;
+    const ODS_FOCUS = 0x10;
+    const BN_SETFOCUS = 6;
+    const { context, dialog, seen } = await ownerDrawDialog();
+    context.memory.putString(TEXT, 'Button');
+    const button = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_NOTIFY, 150, 110, 50, 14, dialog, 0xe,
+        HINSTANCE, 0]);
+    await context.pump(dialog);
+    assert.deepEqual(seen.map(one=>one.message), ['ctlcolor 0x135', 'draw']);
+    const [, painted] = seen;
+    assert.deepEqual([painted.wParam, painted.type, painted.id, painted.item, painted.action,
+        painted.state, painted.hwnd], [0xe, ODT_BUTTON, 0xe, 0, ODA_DRAWENTIRE, 0, button]);
+    assert.notEqual(painted.hdc, 0, 'a context to draw in');
+    assert.deepEqual(painted.rect, [0, 0, 50, 14], 'the client area');
+
+    seen.length = 0;
+    await context.fns.SetFocus.handler([button]);
+    assert.deepEqual(seen.map(one=>[one.message, one.action, one.state, one.code]), [
+        ['ctlcolor 0x135', undefined, undefined, undefined],
+        ['draw', ODA_FOCUS, ODS_FOCUS, undefined],
+        ['command', undefined, undefined, BN_SETFOCUS],
+    ]);
+
+    seen.length = 0;
+    await context.fns.SendMessageA.handler([button, BM_SETSTATE, 1, 0]);
+    assert.deepEqual(seen.map(one=>[one.message, one.action, one.state]), [
+        ['ctlcolor 0x135', undefined, undefined],
+        ['draw', ODA_SELECT, ODS_SELECTED | ODS_FOCUS],
+    ]);
+});
+
+test('an owner-drawn static is drawn by its parent', async()=>{
+    // As documented for SS_OWNERDRAW: the parent draws it on WM_DRAWITEM,
+    // having been asked WM_CTLCOLORSTATIC first.
+    const SS_OWNERDRAW = 0x000d;
+    const ODT_STATIC = 5;
+    const ODA_DRAWENTIRE = 1;
+    const { context, dialog, seen } = await ownerDrawDialog();
+    context.memory.putString(TEXT, 'Static');
+    const shown = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | SS_OWNERDRAW, 150, 110, 40, 20, dialog, 7, HINSTANCE, 0]);
+    await context.pump(dialog);
+    assert.deepEqual(seen.map(one=>one.message), ['ctlcolor 0x138', 'draw']);
+    assert.deepEqual([seen[1].wParam, seen[1].type, seen[1].id, seen[1].action, seen[1].state,
+        seen[1].hwnd], [7, ODT_STATIC, 7, ODA_DRAWENTIRE, 0, shown]);
+    assert.deepEqual(seen[1].rect, [0, 0, 40, 20]);
+});
+
+test('statics and check boxes write their text in the colour WM_CTLCOLORSTATIC set',
+    async()=>{
+        // As documented for WM_CTLCOLORSTATIC: the parent sets the text
+        // colour on the device context it is handed and answers the brush,
+        // and the control draws its text in it. A push button keeps the
+        // system colours, as documented for WM_CTLCOLORBTN.
+        const RED = 0x000000ff;
+        /** @type {any} */
+        let gdi = null;
+        const context = setup({
+            reply: message=>{
+                if (message.message === WM_CTLCOLORSTATIC || message.message === 0x0135)
+                {
+                    gdi.table.SetTextColor.handler([message.wParam, RED]);
+                    gdi.table.SetBkMode.handler([message.wParam, TRANSPARENT]);
+                    return gdi.table.GetStockObject.handler([LTGRAY_BRUSH]);
+                }
+                return 0;
+            },
+        });
+        gdi = context.gdi;
+        const dialog = await openDialog(context);
+        /** @param {number} id @returns {Set<number>} the pixels in the control */
+        const colours = id=>{
+            context.fns.GetWindowRect.handler([context.fns.GetDlgItem.handler([dialog, id]), OUT]);
+            const [left, top, right, bottom] = [0, 4, 8, 12]
+                .map(at=>context.memory.u32(OUT + at));
+            const seen = new Set();
+            for (let y = top; y < bottom; y++)
+            {
+                for (let x = left; x < right; x++)
+                {
+                    seen.add(context.desktop.read(x, y));
+                }
+            }
+            return seen;
+        };
+        const red = 0x00ff0000;
+        assert.ok(colours(100).has(red), 'the static\'s text is red');
+        assert.ok(!colours(100).has(0), 'and none of it is left black');
+        assert.ok(colours(101).has(red), 'so is the check box\'s');
+        assert.ok(!colours(3).has(red), 'a push button keeps its own');
+    });
+
+test('a static\'s text is drawn over the context\'s background colour unless it is transparent',
+    async()=>{
+        // As documented for WM_CTLCOLORSTATIC: the parent may set the
+        // background colour and mode of the context it is handed as well as
+        // the text colour; the default procedure sets the system's -- window
+        // text on the 3D face -- so a dialog's static is drawn in the
+        // dialog's colours unless the dialog procedure answers otherwise.
+        const GREEN = 0x0000ff00;
+        const WHITE = 0x00ffffff;
+        /** @type {any} */
+        let gdi = null;
+        let answer = true;
+        let mode = OPAQUE;
+        const context = setup({
+            reply: message=>{
+                if (message.message === WM_CTLCOLORSTATIC && answer)
+                {
+                    gdi.table.SetBkColor.handler([message.wParam, GREEN]);
+                    gdi.table.SetBkMode.handler([message.wParam, mode]);
+                    return gdi.table.GetStockObject.handler([LTGRAY_BRUSH]);
+                }
+                return 0;
+            },
+        });
+        gdi = context.gdi;
+        const dialog = await openDialog(context);
+        const hwnd = context.fns.GetDlgItem.handler([dialog, 100]);
+        /** @returns {Set<number>} the pixels in the static */
+        const colours = ()=>{
+            context.fns.GetWindowRect.handler([hwnd, OUT]);
+            const [left, top, right, bottom] = [0, 4, 8, 12]
+                .map(at=>context.memory.u32(OUT + at));
+            const seen = new Set();
+            for (let y = top; y < bottom; y++)
+            {
+                for (let x = left; x < right; x++)
+                {
+                    seen.add(context.desktop.read(x, y));
+                }
+            }
+            return seen;
+        };
+        /** Paints the static again and answers its pixels. */
+        const repaint = async()=>{
+            context.fns.InvalidateRect.handler([hwnd, 0, 1]);
+            await context.pump(dialog);
+            return colours();
+        };
+        assert.ok(colours().has(GREEN), 'opaque: the text sits on the green background');
+        mode = TRANSPARENT;
+        assert.ok(!(await repaint()).has(GREEN), 'transparent: on the brush alone');
+        answer = false;
+        const plain = await repaint();
+        assert.ok(!plain.has(GREEN) && !plain.has(WHITE),
+            'left to the default: the 3D face, not the context\'s own white');
+        assert.ok(plain.has(0), 'and the window text colour');
+    });
+
+test('an edit copies, cuts, pastes and clears through the clipboard, and undoes a change',
+    async()=>{
+        // user32's edit tests: WM_PASTE inserts the clipboard's CF_TEXT, and a
+        // single-line edit keeps only its first line. The rest as documented
+        // for the edit control's clipboard messages and EM_CANUNDO.
+        const WM_CUT = 0x0300;
+        const WM_COPY = 0x0301;
+        const WM_PASTE = 0x0302;
+        const WM_CLEAR = 0x0303;
+        const WM_UNDO = 0x0304;
+        const EM_CANUNDO = 0x00c6;
+        const EM_EMPTYUNDOBUFFER = 0x00cd;
+        const EM_SETREADONLY = 0x00cf;
+        const CF_TEXT = 1;
+        const context = setup();
+        const dialog = await openDialog(context);
+        const { fns, memory } = context;
+        memory.putString(TEXT, 'Edit');
+        const edit = fns.CreateWindowExA.handler([WS_EX_CLIENTEDGE, TEXT, 0,
+            WS_CHILD | WS_VISIBLE, 8, 110, 100, 20, dialog, 300, HINSTANCE, 0]);
+        /** @param {number} message @param {number} [wParam] @param {number} [lParam] */
+        const send = (message, wParam = 0, lParam = 0)=>
+            fns.SendMessageA.handler([edit, message, wParam, lParam]);
+        const text = ()=>{
+            fns.GetWindowTextA.handler([edit, OUT, 64]);
+            return memory.readCString(OUT, 64);
+        };
+        const clipboard = ()=>{
+            fns.OpenClipboard.handler([0]);
+            const handle = fns.GetClipboardData.handler([CF_TEXT]);
+            fns.CloseClipboard.handler([]);
+            return handle === 0 ? null : memory.readCString(handle, 64);
+        };
+        /** @param {string} value */
+        const putClipboard = value=>{
+            const at = memory.putString(TEXT + 0x100, value);
+            fns.OpenClipboard.handler([0]);
+            fns.EmptyClipboard.handler([]);
+            fns.SetClipboardData.handler([CF_TEXT, at]);
+            fns.CloseClipboard.handler([]);
+        };
+        memory.putString(TEXT, 'hello world');
+        fns.SetWindowTextA.handler([edit, TEXT]);
+        assert.equal(send(EM_CANUNDO), 0, 'nothing to undo after WM_SETTEXT');
+
+        send(EM_SETSEL, 0, 5);
+        send(WM_COPY);
+        assert.equal(clipboard(), 'hello', 'the selection is on the clipboard');
+        assert.equal(text(), 'hello world', 'and still in the edit');
+
+        send(EM_SETSEL, 6, 11);
+        send(WM_PASTE);
+        assert.equal(text(), 'hello hello');
+        assert.equal(send(EM_CANUNDO), 1);
+        send(WM_UNDO);
+        assert.equal(text(), 'hello world', 'the paste undone');
+
+        send(EM_SETSEL, 0, 6);
+        send(WM_CUT);
+        assert.equal(text(), 'world');
+        assert.equal(clipboard(), 'hello ');
+        send(EM_SETSEL, 0, 2);
+        send(WM_CLEAR);
+        assert.equal(text(), 'rld');
+        send(EM_EMPTYUNDOBUFFER);
+        assert.equal(send(EM_CANUNDO), 0);
+
+        putClipboard('first line\r\nsecond line');
+        send(EM_SETSEL, 0, -1);
+        send(WM_PASTE);
+        assert.equal(text(), 'first line', 'a single-line edit keeps the first line');
+
+        send(EM_SETREADONLY, 1);
+        send(EM_SETSEL, 0, 5);
+        send(WM_CUT);
+        send(WM_CLEAR);
+        send(WM_PASTE);
+        assert.equal(text(), 'first line', 'read-only: nothing taken out or put in');
+        send(WM_COPY);
+        assert.equal(clipboard(), 'first', 'but copying still works');
+    });
+
 test('typing inside a modal loop reaches the edit with the focus, translated', async()=>{
     // DialogBox pumps for the program, so it translates for the program too:
     // a key press left alone by the dialog manager becomes the character an
@@ -799,8 +1142,10 @@ test('an edit places its caret and selection where the drawn text ends', async()
     const context = setup({ engine: true });
     const dialog = await openDialog(context);
     context.memory.putString(TEXT, 'Edit');
+    // Clear of the page's own controls, which are stacked above a control
+    // made after them and would take the clicks below.
     const edit = context.fns.CreateWindowExA.handler([WS_EX_CLIENTEDGE, TEXT, 0,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 8, 60, 120, 20, dialog, 300, HINSTANCE, 0]);
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 8, 110, 100, 20, dialog, 300, HINSTANCE, 0]);
     assert.notEqual(edit, 0);
     await context.fns.SetFocus.handler([edit]);
     for (const character of 'il')
@@ -902,6 +1247,50 @@ test('a list box keeps its items and a click selects one with LBN_SELCHANGE', as
         [[400, LBN_SELCHANGE, list]]);
 });
 
+test('an owner-drawn list without strings keeps what LB_ADDSTRING is given as item data', async()=>{
+    // As documented for LB_ADDSTRING and LB_GETTEXT: in an owner-drawn list
+    // box without LBS_HASSTRINGS, lParam is the item's data, not a string,
+    // and LB_GETTEXT hands back that value; LB_FINDSTRING looks for it; the
+    // same for a combo box's CB_ADDSTRING and CB_GETLBTEXT without
+    // CBS_HASSTRINGS. With LBS_HASSTRINGS lParam is a string again.
+    const LBS_OWNERDRAWFIXED = 0x0010;
+    const LBS_HASSTRINGS = 0x0040;
+    const LB_GETITEMDATA = 0x0199;
+    const LB_FINDSTRING = 0x018f;
+    const CBS_OWNERDRAWFIXED = 0x0010;
+    const CB_GETLBTEXTLEN = 0x0149;
+    const DATA = 0xdeadbeef;
+    const context = setup();
+    const dialog = await openDialog(context);
+    /** @param {string} className @param {number} style @param {number} id */
+    const make = (className, style, id)=>{
+        context.memory.putString(TEXT, className);
+        return context.fns.CreateWindowExA.handler([0, TEXT, 0, WS_CHILD | style,
+            8, 60, 100, 60, dialog, id, HINSTANCE, 0]);
+    };
+    const list = make('ListBox', LBS_OWNERDRAWFIXED, 400);
+    assert.equal(context.fns.SendMessageA.handler([list, LB_ADDSTRING, 0, 0x1234]), 0);
+    assert.equal(context.fns.SendMessageA.handler([list, LB_ADDSTRING, 0, DATA]), 1);
+    assert.equal(context.fns.SendMessageA.handler([list, LB_GETITEMDATA, 1, 0]), DATA);
+    assert.equal(context.fns.SendMessageA.handler([list, LB_GETTEXTLEN, 1, 0]), 4);
+    context.memory.writeMemory(OUT, new Uint8Array(4));
+    assert.equal(context.fns.SendMessageA.handler([list, LB_GETTEXT, 1, OUT]), 4);
+    assert.equal(context.memory.u32(OUT), DATA, 'the item data, in the text\'s place');
+    assert.equal(context.fns.SendMessageA.handler([list, LB_FINDSTRING, -1 >>> 0, DATA]), 1);
+
+    const combo = make('ComboBox', 0x0003 | CBS_OWNERDRAWFIXED, 500);
+    assert.equal(context.fns.SendMessageA.handler([combo, CB_ADDSTRING, 0, DATA]), 0);
+    assert.equal(context.fns.SendMessageA.handler([combo, CB_GETLBTEXTLEN, 0, 0]), 4);
+    context.memory.writeMemory(OUT, new Uint8Array(4));
+    assert.equal(context.fns.SendMessageA.handler([combo, CB_GETLBTEXT, 0, OUT]), 4);
+    assert.equal(context.memory.u32(OUT), DATA);
+
+    const named = make('ListBox', LBS_OWNERDRAWFIXED | LBS_HASSTRINGS, 401);
+    context.memory.putString(TEXT, 'Alpha');
+    context.fns.SendMessageA.handler([named, LB_ADDSTRING, 0, TEXT]);
+    assert.equal(context.fns.SendMessageA.handler([named, LB_GETTEXTLEN, 0, 0]), 5);
+});
+
 test('a combo box shows its selection and the arrow keys change it with CBN_SELCHANGE',
     async()=>{
         const context = setup();
@@ -996,8 +1385,10 @@ test('a scroll bar keeps its range and position, and a click on an arrow asks it
         const context = setup();
         const dialog = await openDialog(context);
         context.memory.putString(TEXT, 'ScrollBar');
+        // Short of the Next button, which is stacked above a control made
+        // after it and would take the click on the lower arrow.
         const bar = context.fns.CreateWindowExA.handler([0, TEXT, 0,
-            WS_CHILD | WS_VISIBLE | SBS_VERT, 180, 4, 16, 100, dialog, 600, HINSTANCE, 0]);
+            WS_CHILD | WS_VISIBLE | SBS_VERT, 180, 4, 16, 70, dialog, 600, HINSTANCE, 0]);
         context.fns.SendMessageA.handler([bar, SBM_SETRANGE, 0, 50]);
         assert.equal(context.fns.SendMessageA.handler([bar, SBM_SETPOS, 70, 1]), 0,
             'the previous position');
@@ -1139,7 +1530,7 @@ test('a program\'s own class is told to erase with its background brush and to p
         await context.pump();
         const seen = context.dispatched.map(one=>one.message);
         assert.ok(seen.includes(WM_CREATE) && seen.includes(WM_PAINT), 'created and painted');
-        assert.equal(context.desktop.read(60, 50), 0x00ffffff, 'COLOR_WINDOW inside the client');
+        assert.equal(context.desktop.read(60, 53), 0x00ffffff, 'COLOR_WINDOW inside the client');
         assert.equal(context.desktop.read(60, 38), 0x00000080, 'the active caption above it');
         assert.equal(context.desktop.read(20, 30), 0x00ffffff, 'the frame\'s highlight corner');
         assert.equal(context.desktop.read(10, 10), 0x00808080, 'the desktop around it');
@@ -1177,10 +1568,10 @@ test('an unread message for a hidden window paints nothing and the desktop stays
         'the template\'s size in pixels');
     context.fns.GetWindowRect.handler([dialog, OUT]);
     assert.deepEqual([context.memory.u32(OUT + 8) - context.memory.u32(OUT),
-        context.memory.u32(OUT + 12) - context.memory.u32(OUT + 4)], [202, 141],
-    'plus the one-pixel edge each side and the caption');
+        context.memory.u32(OUT + 12) - context.memory.u32(OUT + 4)], [206, 145],
+    'plus the three-pixel dialog frame each side and the caption');
     const presentedBefore = context.presents();
-    context.fns.MoveWindow.handler([dialog, 30, 10, 202, 141, 1]);
+    context.fns.MoveWindow.handler([dialog, 30, 10, 206, 145, 1]);
     await context.pump(dialog);
     assert.ok(context.presents() > presentedBefore, 'moving repainted and showed the desktop');
     assert.equal(context.desktop.read(8, 8), 0x00808080, 'the desktop shows where it was');

@@ -86,7 +86,10 @@ test('every field the descriptor reads is a field the key folds', ()=>{
         alphaTest: true,
         alphaFunc: 8,
         fogMode: 3,
+        fogSource: 1,
         specularEnable: true,
+        normalizeNormals: true,
+        rangeFog: true,
     };
 
     const original = pipelineKey(base);
@@ -97,12 +100,39 @@ test('every field the descriptor reads is a field the key folds', ()=>{
     }
 });
 
+test('a layout over several streams is one vertex buffer per stream, in stream order', ()=>{
+    // Direct3D binds up to sixteen streams and a declaration reads each
+    // member from its own; WebGPU's vertex buffers are the same idea, one slot
+    // per stream the layout reads, stream zero first.
+    const descriptor = pipelineDescriptor(/** @type {any} */ (baseState()), {
+        stride: 16,
+        attributes: [
+            { name: 'position', shaderLocation: 0, offset: 0, format: 'float32x3' },
+            { name: 'diffuse', shaderLocation: 1, offset: 4, format: 'unorm8x4', stream: 3 },
+            { name: 'specular', shaderLocation: 2, offset: 0, format: 'unorm8x4', stream: 1 },
+        ],
+        streams: [{ stream: 1, stride: 0 }, { stream: 3, stride: 8 }],
+        preTransformed: false,
+        texCoordSets: 0,
+        blendWeights: 0,
+    });
+    assert.deepEqual(descriptor.vertexBuffers, [
+        { arrayStride: 16, stepMode: 'vertex',
+            attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] },
+        { arrayStride: 0, stepMode: 'vertex',
+            attributes: [{ shaderLocation: 2, offset: 0, format: 'unorm8x4' }] },
+        { arrayStride: 8, stepMode: 'vertex',
+            attributes: [{ shaderLocation: 1, offset: 4, format: 'unorm8x4' }] },
+    ]);
+    assert.deepEqual(descriptor.vertexLayout, descriptor.vertexBuffers[0]);
+});
+
 test('the same state gives the same key, every time', ()=>{
     assert.equal(pipelineKey(baseState()), pipelineKey(baseState()));
     // Exact, because a key is compared by value and a diagnostic prints it.
     assert.equal(
         pipelineKey(baseState()),
-        '322|0|0|bgra8unorm|depth24plus|1|triangle-list|1|1|4|3|0|5|6|1|15|0|5|0|0[]|0|-',
+        '322|0|0|bgra8unorm|depth24plus|1|triangle-list|1|1|4|3|0|5|6|1|15|0|5|0/0|0[]|0|-',
     );
 });
 
@@ -120,6 +150,10 @@ test('a stage list is folded stage by stage, and its length is part of the key',
     assert.notEqual(one, sameFirst, 'a second stage is not the same as one stage');
     assert.notEqual(sameFirst, differentSecond, 'stage one\'s operation is folded');
     assert.notEqual(sameFirst, differentCoords, 'stage one\'s coordinate index is folded');
+    assert.notEqual(pipelineKey({ ...base, stages: [stage({ colorKey: 0xff })] }), one,
+        'a colour key is folded');
+    assert.notEqual(pipelineKey({ ...base, stages: [stage({ colorKey: 0xff })] }),
+        pipelineKey({ ...base, stages: [stage({ colorKey: 0xfe })] }), 'and which key it is');
 });
 
 test('every part of the lighting state that shapes the shader is folded', ()=>{

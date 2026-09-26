@@ -50,6 +50,7 @@
  * @property {(desc: any)=>any} createRenderPipeline
  * @property {(desc: any)=>Promise<any>} createRenderPipelineAsync
  * @property {(desc?: any)=>GpuCommandEncoderLike} createCommandEncoder
+ * @property {(desc: any)=>any} createQuerySet
  */
 
 /**
@@ -68,6 +69,8 @@
  * @property {(source: any, sourceOffset: number, destination: any, destinationOffset: number,
  *            size: number)=>void} copyBufferToBuffer
  * @property {(source: any, destination: any, size: any)=>void} copyTextureToTexture
+ * @property {(querySet: any, firstQuery: number, queryCount: number, destination: any,
+ *            destinationOffset: number)=>void} resolveQuerySet
  * @property {(desc?: any)=>any} finish
  */
 
@@ -83,6 +86,7 @@
  * @property {number} [mipLevelCount]  One unless the surface carries a chain.
  * @property {number} [layers]         Array layers; six for a cube map.
  * @property {number} [mipLevel]       The level of `texture` this is a view of; zero unless said.
+ * @property {number} [layer]          The array layer -- a cube's face -- this is a view of.
  * @property {string} label
  */
 

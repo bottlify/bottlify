@@ -424,9 +424,7 @@ export function createTokenFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const length = 8 + 4 * host.readMemory(sid >>> 0, 2)[1];
-                const wanted = host.readMemory(sid >>> 0, length);
-                const member = [USER_SID, ...GROUP_SIDS].map(sidBytes).some(held=>
-                    held.length === wanted.length && held.every((byte, at)=>byte === wanted[at]));
+                const member = isTokenMember(host.readMemory(sid >>> 0, length));
                 host.writeMemory(out >>> 0, new Uint8Array([member ? 1 : 0, 0, 0, 0]));
                 return 1;
             },
@@ -436,3 +434,13 @@ export function createTokenFunctions(host){
 
 /** BUILTIN\Administrators, laid out: what a program compares the groups against. */
 export const ADMINISTRATORS_SID = sidBytes(GROUP_SIDS[2]);
+
+/**
+ * Whether the one account's token holds a SID, laid out: the user's own or
+ * one of its groups. The answer CheckTokenMembership gives, for the libraries
+ * that ask it on a program's behalf.
+ *
+ * @param {Uint8Array} wanted
+ */
+export const isTokenMember = wanted=>[USER_SID, ...GROUP_SIDS].map(sidBytes).some(held=>
+    held.length === wanted.length && held.every((byte, at)=>byte === wanted[at]));

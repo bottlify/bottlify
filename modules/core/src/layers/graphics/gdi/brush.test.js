@@ -21,7 +21,6 @@ import {
     createPattern,
     solidPattern,
 } from './brush.js';
-import { clearSurface, createSurface } from './surface.js';
 
 const ORIGIN = { x: 0, y: 0 };
 const RED_COLOR = 0x000000ff;
@@ -97,15 +96,16 @@ test('the background mode decides what a hatch leaves between its lines', ()=>{
 });
 
 test('a pattern brush tiles its bitmap and wraps at negative coordinates', ()=>{
-    const tile = createSurface({ width: 2, height: 2 });
-    clearSurface(tile, 0);
-    tile.write(0, 0, 0x00111111);
-    tile.write(1, 0, 0x00222222);
-    tile.write(0, 1, 0x00333333);
-    tile.write(1, 1, 0x00444444);
-
+    // The copy the bookkeeping half takes: rows top-down, WORD-padded.
+    const pixels = new Uint8Array(new Uint32Array([
+        0x00111111, 0x00222222,
+        0x00333333, 0x00444444,
+    ]).buffer);
     const pattern = createPattern({
-        attributes: { style: BS_PATTERN, color: RED_COLOR, surface: tile },
+        attributes: {
+            style: BS_PATTERN, color: RED_COLOR,
+            pattern: { width: 2, height: 2, bitCount: 32, pixels },
+        },
         bkMode: OPAQUE,
         bkColor: WHITE,
         origin: ORIGIN,
@@ -113,6 +113,41 @@ test('a pattern brush tiles its bitmap and wraps at negative coordinates', ()=>{
     assert.equal(pattern(0, 0), 0x00111111);
     assert.equal(pattern(3, 2), 0x00222222);
     assert.equal(pattern(-1, -1), 0x00444444, 'a modulo that goes negative wraps the wrong way');
+});
+
+test('a monochrome pattern is drawn in the context\'s colours, and as bits into a mask', ()=>{
+    // A 0 bit is the text colour and a 1 bit the background colour, opaque
+    // whatever the background mode.
+    const pixels = new Uint8Array([0b01000000, 0]);
+    /** @param {boolean} mono */
+    const monochrome = mono=>createPattern({
+        attributes: { style: BS_PATTERN, pattern: { width: 2, height: 1, bitCount: 1, pixels } },
+        bkMode: TRANSPARENT,
+        bkColor: WHITE,
+        textColor: RED_COLOR,
+        mono,
+        origin: ORIGIN,
+    });
+    assert.deepEqual([monochrome(false)(0, 0), monochrome(false)(1, 0)], [RED_PIXEL, WHITE]);
+    assert.deepEqual([monochrome(true)(0, 0), monochrome(true)(1, 0)], [0, WHITE]);
+});
+
+test('a pattern copied from a DIB section keeps the section\'s colours', ()=>{
+    // One bit a pixel here is a colour table of two, not monochrome.
+    const pattern = createPattern({
+        attributes: {
+            style: BS_PATTERN,
+            pattern: {
+                width: 2, height: 1, bitCount: 1, pixels: new Uint8Array([0b01000000, 0]),
+                dib: true, palette: [0x00123456, 0x00abcdef],
+            },
+        },
+        bkMode: OPAQUE,
+        bkColor: WHITE,
+        textColor: RED_COLOR,
+        origin: ORIGIN,
+    });
+    assert.deepEqual([pattern(0, 0), pattern(1, 0)], [0x00123456, 0x00abcdef]);
 });
 
 test('a pattern brush with no bitmap behind it falls back to its colour', ()=>{

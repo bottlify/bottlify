@@ -368,6 +368,31 @@ test('the queue says when its next timer comes due', ()=>{
     assert.equal(queue.nextTimerDue(), null);
 });
 
+test('a message asked for later is made and posted once its time has come', ()=>{
+    const { clock, queue } = timed();
+    let made = 0;
+    const make = ()=>{
+        made++;
+        return { hwnd: 0x40, message: WM_USER, wParam: clock.at, lParam: 0 };
+    };
+    queue.postLater('hover', 400, ()=>null);
+    queue.postLater('hover', 50, make);
+    assert.equal(queue.nextTimerDue(), 50, 'a second request replaces the first');
+    clock.at = 49;
+    assert.equal(queue.peek(ALL), null, 'not yet');
+    assert.equal(made, 0, 'and not made before its time');
+    clock.at = 60;
+    assert.equal(queue.news() & QS_POSTMESSAGE, QS_POSTMESSAGE, 'a wait wakes for it');
+    assert.deepEqual(queue.peek(ALL)?.wParam, 60, 'made when it came due, not when asked for');
+    assert.equal(queue.nextTimerDue(), null);
+
+    queue.postLater('hover', 10, make);
+    assert.equal(queue.cancelLater('hover'), true);
+    clock.at = 100;
+    assert.equal(queue.peek(ALL), null, 'a cancelled one is never made');
+    assert.equal(made, 1);
+});
+
 test('the queue says what a program pumps, not only how much', ()=>{
     // A count says how busy a loop is; which messages says what it is doing,
     // and a loop that spends a third of every frame waiting is waiting for one

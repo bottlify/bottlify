@@ -24,6 +24,7 @@
 import { PEB, TEB } from '../kernel32/teb.js';
 import { STATUS } from './status.js';
 import { PROCESSOR } from '../kernel32/processor.js';
+import { verifyVersion, windowsVersion } from '../kernel32/versions.js';
 
 /** RTL_OSVERSIONINFOW, and the extended form that also carries the service pack. */
 const OSVERSIONINFOW_SIZE = 276;
@@ -41,8 +42,8 @@ const OSVERSIONINFO = Object.freeze({
     PRODUCT_TYPE: 0x11a,
 });
 
-/** Not a server, and nothing here models the distinction any further. */
-const VER_NT_WORKSTATION = 1;
+/** szCSDVersion's room, in characters. */
+const CSD_VERSION_CHARACTERS = 128;
 
 /** SYSTEM_BASIC_INFORMATION as a 32-bit program declares it. */
 const SYSTEM_BASIC = Object.freeze({
@@ -104,6 +105,10 @@ const NORMAL_BASE_PRIORITY = 8;
  * @property {() => number} teb  The running thread's block, which is the only
  *           route to the process block a program would take itself.
  * @property {{ base: number, size: number }} arena  The memory the process has.
+ * @property {import('../kernel32/versions.js').WindowsVersion} [version]
+ *           The machine's Windows, for the two fields the process block does
+ *           not hold: the suite and the product type, which Windows keeps in
+ *           the page the kernel shares with every process. Absent, the default.
  */
 
 /**
@@ -115,6 +120,8 @@ const NORMAL_BASE_PRIORITY = 8;
  * @param {QueryHost} host
  */
 export function createQueryFunctions(host){
+    const machine = host.version ?? windowsVersion();
+
     /** @param {number} at */
     const readU32 = at=>{
         const bytes = host.readMemory(at, 4);
@@ -135,6 +142,27 @@ export function createQueryFunctions(host){
     const peb = ()=>{
         const teb = host.teb() >>> 0;
         return teb === 0 ? 0 : readU32(teb + TEB.PEB);
+    };
+
+    /**
+     * The version a process block holds, as the comparison reads one; the
+     * suite and product type are the machine's, which the block does not hold.
+     *
+     * @param {number} block
+     * @returns {import('../kernel32/versions.js').ComparedVersion}
+     */
+    const versionIn = block=>{
+        const buildAndPack = readU32(block + PEB.OS_BUILD_NUMBER);
+        return {
+            major: readU32(block + PEB.OS_MAJOR_VERSION),
+            minor: readU32(block + PEB.OS_MINOR_VERSION),
+            build: buildAndPack & 0xffff,
+            platformId: readU32(block + PEB.OS_PLATFORM_ID),
+            servicePackMajor: buildAndPack >>> 24,
+            servicePackMinor: buildAndPack >>> 16 & 0xff,
+            suiteMask: machine.suiteMask,
+            productType: machine.productType,
+        };
     };
 
     return {
@@ -168,22 +196,71 @@ export function createQueryFunctions(host){
                 // caller's own size field survives untouched.
                 const struct = new Uint8Array(declared);
                 const view = new DataView(struct.buffer);
-                view.setUint32(OSVERSIONINFO.MAJOR,
-                    readU32(block + PEB.OS_MAJOR_VERSION), true);
-                view.setUint32(OSVERSIONINFO.MINOR,
-                    readU32(block + PEB.OS_MINOR_VERSION), true);
-                view.setUint32(OSVERSIONINFO.BUILD,
-                    readU32(block + PEB.OS_BUILD_NUMBER), true);
-                view.setUint32(OSVERSIONINFO.PLATFORM,
-                    readU32(block + PEB.OS_PLATFORM_ID), true);
-                // szCSDVersion stays zeroed: no service pack is installed, and an
-                // empty string is what says so.
+                const version = versionIn(block);
+                view.setUint32(OSVERSIONINFO.MAJOR, version.major, true);
+                view.setUint32(OSVERSIONINFO.MINOR, version.minor, true);
+                view.setUint32(OSVERSIONINFO.BUILD, version.build, true);
+                view.setUint32(OSVERSIONINFO.PLATFORM, version.platformId, true);
+                // The rest of szCSDVersion stays zeroed rather than whatever
+                // the caller left there.
+                const csdLength = Math.min(readU32(block + PEB.CSD_VERSION) & 0xffff,
+                    (CSD_VERSION_CHARACTERS - 1) * 2);
+                const csdText = readU32(block + PEB.CSD_VERSION + 4);
+                if (csdLength > 0 && csdText !== 0)
+                {
+                    struct.set(host.readMemory(csdText, csdLength), OSVERSIONINFO.CSD_VERSION);
+                }
                 if (declared === OSVERSIONINFOEXW_SIZE)
                 {
-                    view.setUint8(OSVERSIONINFO.PRODUCT_TYPE, VER_NT_WORKSTATION);
+                    view.setUint16(OSVERSIONINFO.SERVICE_PACK_MAJOR, version.servicePackMajor,
+                        true);
+                    view.setUint16(OSVERSIONINFO.SERVICE_PACK_MINOR, version.servicePackMinor,
+                        true);
+                    view.setUint16(OSVERSIONINFO.SUITE_MASK, version.suiteMask, true);
+                    view.setUint8(OSVERSIONINFO.PRODUCT_TYPE, version.productType);
                 }
                 host.writeMemory(at + 4, struct.subarray(4));
                 return STATUS.SUCCESS;
+            },
+        },
+
+        /**
+         * NTSTATUS RtlVerifyVersionInfo(PRTL_OSVERSIONINFOEXW VersionInfo,
+         *                               ULONG TypeMask, ULONGLONG ConditionMask)
+         *
+         * VerifyVersionInfo's comparison against the version RtlGetVersion
+         * answers: the machine's own, where kernel32's compares against what
+         * the program is told. The request's size field is not read, as
+         * VerifyVersionInfo does not read it.
+         */
+        RtlVerifyVersionInfo: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([pointer, typeMask, maskLow, maskHigh])=>{
+                const block = peb();
+                if (block === 0)
+                {
+                    return STATUS.UNSUCCESSFUL;
+                }
+                const at = pointer >>> 0;
+                const extended = host.readMemory(at + OSVERSIONINFO.SERVICE_PACK_MAJOR, 8)
+                    .slice();
+                const fields = new DataView(extended.buffer);
+                const answer = verifyVersion(versionIn(block), {
+                    major: readU32(at + OSVERSIONINFO.MAJOR),
+                    minor: readU32(at + OSVERSIONINFO.MINOR),
+                    build: readU32(at + OSVERSIONINFO.BUILD),
+                    platformId: readU32(at + OSVERSIONINFO.PLATFORM),
+                    servicePackMajor: fields.getUint16(0, true),
+                    servicePackMinor: fields.getUint16(2, true),
+                    suiteMask: fields.getUint16(4, true),
+                    productType: fields.getUint8(6),
+                }, typeMask, BigInt(maskLow >>> 0) | BigInt(maskHigh >>> 0) << 32n);
+                if (answer === 'met')
+                {
+                    return STATUS.SUCCESS;
+                }
+                return answer === 'invalid' ? STATUS.INVALID_PARAMETER : STATUS.REVISION_MISMATCH;
             },
         },
 

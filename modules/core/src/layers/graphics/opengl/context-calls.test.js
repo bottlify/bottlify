@@ -149,6 +149,19 @@ test('texture parameters refuse what is not a parameter or not a value of it', (
     assert.deepEqual(context.glGetTexParameteriv(GL.TEXTURE_2D, GL.TEXTURE_RESIDENT), [1]);
 });
 
+test('texture 0 is one object for every unit, not one per unit', ()=>{
+    // GL 1.2.1, appendix F (ARB_multitexture): the texture object name space,
+    // the initial objects included, is shared among all texture units.
+    const { context } = drawing();
+    context.glActiveTextureARB(GL.TEXTURE0 + 1);
+    context.glBindTexture(GL.TEXTURE_2D, 0);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 8, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE, null);
+    context.glActiveTextureARB(GL.TEXTURE0);
+    context.glBindTexture(GL.TEXTURE_2D, 0);
+    assert.deepEqual(context.glGetTexLevelParameteriv(GL.TEXTURE_2D, 0, GL.TEXTURE_WIDTH), [8],
+        'the image given through unit 1 is unit 0\'s texture 0 too');
+});
+
 test('a level reads its shape back, and an empty level reads zero', ()=>{
     const { context } = drawing();
     const [name] = context.glGenTextures(1);

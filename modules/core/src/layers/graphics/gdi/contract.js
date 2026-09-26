@@ -53,6 +53,18 @@
  * @property {number} offset         Where row zero starts inside `bytes`.
  * @property {(x: number, y: number) => number} read     Raw 32-bit pixel.
  * @property {(x: number, y: number, pixel: number) => void} write
+ * @property {(pixel: number) => number} [nearest]
+ *           What a write of `pixel` reads back as: the entry an indexed
+ *           surface would store, the colour sixteen bits keep. A 32-bit
+ *           surface keeps the pixel whole, its unused byte included.
+ * @property {boolean} [mono]
+ *           A monochrome device-dependent bitmap, which a blit converts to and
+ *           from other kinds by the device context's colours rather than by
+ *           nearest colour: its 0 bits become the destination's text colour
+ *           and its 1 bits the background colour, and a source pixel equal to
+ *           the source's background colour becomes 1 in it and every other
+ *           pixel 0. A one-bit DIB is not one of these: its bits index a
+ *           colour table like any indexed DIB's.
  */
 
 /**

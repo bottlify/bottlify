@@ -19,12 +19,16 @@ import { audioModule } from './module.js';
 import { DSBPLAY_LOOPING } from './dsound/buffers.js';
 import { createRing } from './output/ring.js';
 import {
-    slotHeaderOffset, slotPcmOffset, SLOT_HEADER_INT32, SLOT_BYTES, WRITTEN,
+    slotHeaderOffset, slotPcmOffset, SLOT_HEADER_INT32, SLOT_BYTES, WRITTEN, RATE as SLOT_RATE,
     createSeam, resampleInto,
 } from './output/mix.js';
 import {
     WAVEFORMATEX, DSBUFFERDESC, DS_OK, IID_IDirectSoundNotify,
 } from './dsound/seam.js';
+
+/** DSBCAPS_CTRLFREQUENCY, CTRLPAN and CTRLVOLUME together. */
+const DSBCAPS_CTRLDEFAULT = 0x000000e0;
+const DSBCAPS_CTRLPOSITIONNOTIFY = 0x00000100;
 
 const FORMAT_AT = 0x100;
 const DESC_AT = 0x200;
@@ -149,6 +153,9 @@ async function playing({ silent = false, drained = true, shared = false, memory 
     f.view.setUint32(FORMAT_AT + WAVEFORMATEX.nSamplesPerSec, RATE, true);
     f.view.setUint16(FORMAT_AT + WAVEFORMATEX.wBitsPerSample, BITS, true);
     f.view.setUint32(DESC_AT + DSBUFFERDESC.dwSize, DSBUFFERDESC.SIZE, true);
+    // The controls a program of this era asks for, and the positions it waits on.
+    f.view.setUint32(DESC_AT + DSBUFFERDESC.dwFlags,
+        DSBCAPS_CTRLDEFAULT | DSBCAPS_CTRLPOSITIONNOTIFY, true);
     f.view.setUint32(DESC_AT + DSBUFFERDESC.dwBufferBytes, BUFFER_BYTES, true);
     f.view.setUint32(DESC_AT + DSBUFFERDESC.lpwfxFormat, FORMAT_AT, true);
 
@@ -262,6 +269,89 @@ test('a silenced buffer is mixed at its own gain, not at full', async()=>{
     f.api.output().ring.read(block);
     assert.ok(block.every(sample=>sample === 0),
         'DSBVOLUME_MIN is silence, and the volume is decibels rather than a fraction');
+});
+
+test('a buffer panned hard left is heard on the left alone', async()=>{
+    const f = await playing();
+    f.call(f.buffer, 'SetPan', [-10000]);
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.advance(50);
+    f.api.pump();
+
+    const block = new Float32Array(64 * 2);
+    const frames = f.api.output().ring.read(block);
+    assert.ok(frames > 0);
+    for (let frame = 0; frame < frames; frame++)
+    {
+        assert.ok(block[frame * 2] > 0, 'the left side plays');
+        assert.equal(block[frame * 2 + 1], 0, 'DSBPAN_LEFT leaves the right silent');
+    }
+});
+
+test('with shared memory, a buffer\'s pan reaches its slot', async()=>{
+    const f = await playing({ shared: true });
+    f.call(f.buffer, 'SetPan', [10000]);
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.advance(50);
+    f.api.pump();
+
+    const table = f.api.output().table;
+    const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+    const pcm = new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES);
+    const block = new Float32Array(2 * 2);
+    resampleInto({ block, blockFrames: 2, header, pcm, outputRate: 48000, seam: createSeam() });
+    assert.equal(block[0], 0, 'DSBPAN_RIGHT leaves the left silent');
+    assert.ok(block[1] > 0);
+});
+
+test('a buffer retuned while it plays is heard at the rate its cursor moves', async()=>{
+    // The cursor drains bytes at the new frequency from the moment it is set; a
+    // track still reading them at the first one plays them at the wrong pitch
+    // and makes twice (or half) the sound the guest's clock allows for.
+    const f = await playing();
+    const mixer = f.api.output();
+    /** @type {any[]} */
+    const opened = [];
+    const open = mixer.open.bind(mixer);
+    mixer.open = (/** @type {any} */ format)=>{
+        const track = open(format);
+        opened.push(track);
+        return track;
+    };
+    const scratch = new Float32Array(mixer.capacityFrames * 2);
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.advance(50);
+    f.api.pump();
+    mixer.ring.read(scratch);
+    assert.equal(opened.length, 1);
+    assert.equal(opened[0].format.sampleRate, RATE);
+
+    f.call(f.buffer, 'SetFrequency', [RATE * 2]);
+    let frames = 0;
+    for (let turn = 0; turn < 10; turn++)
+    {
+        f.advance(20);
+        f.api.pump();
+        frames += mixer.ring.read(scratch);
+    }
+    assert.equal(opened.length, 1, 'the same track, retuned');
+    assert.equal(opened[0].format.sampleRate, RATE * 2);
+    // Two hundred milliseconds of guest time is 9600 frames at 48 kHz.
+    assert.ok(Math.abs(frames - 9600) < 9600 / 10,
+        `the output keeps pace with the guest's clock: ${frames} frames in 200 ms`);
+});
+
+test('with shared memory, a retuned buffer\'s slot reads at its new rate', async()=>{
+    const f = await playing({ shared: true });
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.advance(50);
+    f.api.pump();
+    f.call(f.buffer, 'SetFrequency', [44100]);
+    f.advance(20);
+    f.api.pump();
+
+    const header = new Int32Array(f.api.output().table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+    assert.equal(Atomics.load(header, SLOT_RATE), 44100);
 });
 
 test('the mixer asks for sound itself, so whoever pumps it need not know how', async()=>{
@@ -414,6 +504,23 @@ test('with shared memory, a released DirectSound buffer frees its slot: 40 over 
         'no fallback after releasing every buffer before the next one opened');
 });
 
+test('with nothing listening, a released buffer still leaves the walk', async()=>{
+    // A build with no sound device reads nothing out, but it still walks every
+    // buffer before each mix for its notifications; one that never let go of a
+    // released buffer walked everything the program had ever made.
+    const f = await playing({ drained: false });
+    for (let i = 0; i < 40; i++)
+    {
+        assert.equal(f.call(f.root, 'CreateSoundBuffer', [DESC_AT, OUT_AT + 4, 0]), DS_OK);
+        const pointer = f.view.getUint32(OUT_AT + 4, true);
+        f.call(pointer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+        f.objectAt(pointer).api.release();
+        f.api.pump();
+    }
+    assert.equal(f.api.buffers().length, 1, 'only the buffer the program still holds');
+    assert.equal(f.api.feeding().refusedFills, 40, 'and still nothing was read out');
+});
+
 /** Somewhere to put a DSBPOSITIONNOTIFY the guest would have filled in. */
 const NOTIFY_AT = 0x400;
 
@@ -476,6 +583,16 @@ test('the MPEG provider is a library beside DirectSound, with an entry point', a
         registered: false, provider: 0, opens: 0, failedOpens: 0, open: 0, samplesOut: 0,
         waits: 0, lastError: '', recent: [], streams: [],
     });
+});
+
+test('DirectSound\'s ordinals are offered beside its table', async()=>{
+    // The assembling caller synthesises every library with the numbers its
+    // layer declares, and a program that imports by number needs Windows'.
+    const f = await playing();
+    const ordinals = f.api.ordinals()['DSOUND.dll'];
+    assert.equal(ordinals[1], 'DirectSoundCreate');
+    assert.equal(ordinals[2], 'DirectSoundEnumerateA');
+    assert.equal(ordinals[11], 'DirectSoundCreate8');
 });
 
 test('the MPEG provider can be left out, for a run to compare against', async()=>{

@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parsePe } from './pe.js';
-import { findResource, listResources, loadString, RT_STRING } from './resources.js';
+import { findResource, listResources, loadString, RT_STRING, UI_LANGUAGE } from './resources.js';
 
 /**
  * Where the resource section is mapped, and where its bytes are in the file.
@@ -300,9 +300,10 @@ test('an image with no resource directory carries nothing', ()=>{
     assert.deepEqual(listResources(bytes, without), []);
 });
 
-test('a specific language is honoured, and no language takes the first', ()=>{
-    // A title shipping one locale still tags its resources with it, so a caller
-    // asking for none has to be given what is there rather than nothing.
+test('a specific language is honoured, and only that one', ()=>{
+    // Wine's kernel32 resource tests, test_find_resource: FindResourceEx for a
+    // language the resource is not in is ERROR_RESOURCE_LANG_NOT_FOUND, even
+    // when the language is English.
     const { bytes, image } = buildImage(buildResources([
         {
             type: 10,
@@ -318,8 +319,65 @@ test('a specific language is honoured, and no language takes the first', ()=>{
 
     assert.equal(findResource(bytes, image, 10, 1, 0x409)?.language, 0x409);
     assert.equal(findResource(bytes, image, 10, 1, 0x407)?.language, 0x407);
-    assert.equal(findResource(bytes, image, 10, 1)?.language, 0x407, 'the first one on offer');
     assert.equal(findResource(bytes, image, 10, 1, 0x419), null, 'and one absent is absent');
+    const german = buildImage(buildResources([
+        { type: 4, names: [{ name: 1, langs: [{ lang: 0x407, data: bytesOf('de') }] }] },
+    ]));
+    assert.equal(findResource(german.bytes, german.image, 4, 1, 0x409), null);
+});
+
+/**
+ * An RCDATA resource 1 in each of the languages given, in the ascending order
+ * a resource compiler lays them out in.
+ *
+ * @param {number[]} languages
+ */
+const inLanguages = languages=>buildImage(buildResources([{
+    type: 10,
+    names: [{ name: 1, langs: [...languages].sort((a, b)=>a - b)
+        .map(lang=>({ lang, data: [lang & 0xff, lang >> 8] })) }],
+}]));
+
+test('a lookup naming no language takes the user interface\'s, not the first there is', ()=>{
+    // Fifteen languages side by side, as a multilingual installer carries its
+    // dialogs, and Traditional Chinese (0x404) sorts before US English.
+    const { bytes, image } = inLanguages([0x404, 0x405, 0x407, 0x409, 0x40c, 0x411, 0x804]);
+    assert.equal(UI_LANGUAGE, 0x409);
+    assert.equal(findResource(bytes, image, 10, 1)?.language, 0x409);
+    // Wine's kernel32 resource tests: LANG_NEUTRAL with SUBLANG_NEUTRAL is the
+    // same search, and a resource in one language alone is still found by it.
+    const only = inLanguages([0x407]);
+    assert.equal(findResource(only.bytes, only.image, 10, 1)?.language, 0x407);
+});
+
+test('with the user interface\'s language absent the neutral search goes on in order', ()=>{
+    // Its primary language with no sublanguage, then LANG_NEUTRAL with
+    // SUBLANG_NEUTRAL and with SUBLANG_DEFAULT, then English, and only
+    // then the first entry.
+    const GERMAN = 0x407;
+    /** @param {number[]} languages */
+    const chosen = languages=>{
+        const { bytes, image } = inLanguages(languages);
+        return findResource(bytes, image, 10, 1, null, GERMAN)?.language;
+    };
+    assert.equal(chosen([0x000, 0x007, 0x404, 0x407, 0x409]), 0x407, 'the language itself');
+    assert.equal(chosen([0x000, 0x007, 0x404, 0x409, 0x807]), 0x007, 'its primary, neutral');
+    assert.equal(chosen([0x000, 0x400, 0x404, 0x409, 0x807]), 0x000, 'LANG_NEUTRAL');
+    assert.equal(chosen([0x400, 0x404, 0x409, 0x807]), 0x400, 'the user default');
+    assert.equal(chosen([0x404, 0x409, 0x807]), 0x409, 'English');
+    assert.equal(chosen([0x404, 0x807]), 0x404, 'and at last the first');
+});
+
+test('a string is read in the user interface\'s language when none is named', ()=>{
+    const { bytes, image } = buildImage(buildResources([{
+        type: RT_STRING,
+        names: [{ name: 1, langs: [
+            { lang: 0x404, data: bundle(['\u4e2d']) },
+            { lang: 0x409, data: bundle(['English']) },
+        ] }],
+    }]));
+    assert.equal(loadString(bytes, image, 0), 'English');
+    assert.equal(loadString(bytes, image, 0, 0x404), '\u4e2d');
 });
 
 test('a listing says what an image actually carries', ()=>{

@@ -27,11 +27,12 @@ import { D3DCLEAR, D3DPT, D3DTA, D3DTOP, D3DTSS } from '../d3d8/constants.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { UNIFORM_AT } from '../d3d8/render.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import {
-    DDPF_ALPHAPIXELS, DDPF_RGB, DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN, DDSCAPS_SYSTEMMEMORY,
-    DDSCAPS_TEXTURE, DDSCAPS_ZBUFFER, DDSCL_NORMAL, DDSD_CAPS, DDSD_HEIGHT, DDSD_PIXELFORMAT,
-    DDSD_WIDTH, DDSD_ZBUFFERBITDEPTH,
+    DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_RGB, DDSCAPS_3DDEVICE, DDSCAPS_COMPLEX, DDSCAPS_MIPMAP,
+    DDSCAPS_OFFSCREENPLAIN, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_ZBUFFER, DDSCL_NORMAL,
+    DDSD_CAPS, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DDSD_ZBUFFERBITDEPTH,
 } from '../ddraw/constants.js';
 
 const HWND = 0x00010044;
@@ -48,7 +49,7 @@ const ARGB32 = Object.freeze({
  * A DirectDraw object under a cooperative level, the way a program has one
  * before it asks for Direct3D.
  *
- * @param {{ allocate?: (bytes: number) => number }} [options]
+ * @param {{ allocate?: (bytes: number) => number, free?: (address: number) => void }} [options]
  */
 function ddrawObject(options = {}){
     const root = createDirectDraw({ version: 7, screenWidth: 16, screenHeight: 16, ...options });
@@ -349,6 +350,74 @@ test('stage zero modulates by default and the stage states stop at D3D7\'s last'
     releaseAll(f);
 });
 
+test('ComputeSphereVisibility names the planes a sphere crosses and the ones it lies beyond', ()=>{
+    // Wine's ddraw7 test_compute_sphere_visibility, its table and its answers.
+    const f = fixture();
+    const { device } = f;
+    const proj1 = [1.810660, 0, 0, 0, 0, 2.414213, 0, 0, 0, 0, 1.020408, 1, 0, 0, -0.102041, 0];
+    const proj2 = [10, 0, 0, 0, 0, 10, 0, 0, 0, 0, 10, 0, 0, 0, 0, 1];
+    const view1 = [1, 0, 0, 0, 0, 0.768221, -0.640185, 0, -0, 0.640185, 0.768221, 0,
+        -14.852037, 9.857489, 11.600972, 1];
+    const CLIPPLANEENABLE = 152;
+    /** @type {[number[], number[], number[][], number[], number, number[]][]} */
+    const cases = [
+        [view1, proj1, [[11.461533, -4.761727, -1.171646]], [38.252632], 0, [0x3f]],
+        [view1, proj1, [[-3.515620, -1.560661, -12.464638], [14.290396, -2.981143, -24.311312],
+            [1.461626, -6.093709, -13.901010]], [4.354097, 12.500704, 17.251318], 0,
+        [0x103d, 0x3f, 0x3f]],
+        [IDENTITY, proj2, [[0, 0, 0.05]], [0.04], 0, [0]],
+        [IDENTITY, IDENTITY, [[0, 0, 0.5]], [0.5], 0, [0]],
+        [IDENTITY, IDENTITY, [[0, 0, 0]], [0], 0, [0]],
+        [IDENTITY, IDENTITY, [[-1, -1, 0.5]], [0.25], 0, [0x9]],
+        [IDENTITY, IDENTITY, [[-20, 0, 0.5]], [3], 0, [0x103d]],
+        [IDENTITY, IDENTITY, [[20, 0, 0.5]], [3], 0, [0x203e]],
+        [IDENTITY, IDENTITY, [[0, -20, 0.5]], [3], 0, [0x803b]],
+        [IDENTITY, IDENTITY, [[0, 20, 0.5]], [3], 0, [0x4037]],
+        [IDENTITY, IDENTITY, [[0, 0, -20]], [3], 0, [0x1001f]],
+        [IDENTITY, IDENTITY, [[0, 0, 20]], [3], 0, [0x2002f]],
+        [IDENTITY, IDENTITY, [[0, 0, 0]], [5], 1, [0x7f]],
+        [IDENTITY, IDENTITY, [[-0.5, 0, 0]], [5], 1, [0x7f]],
+        [IDENTITY, IDENTITY, [[-0.5, 0, 0]], [1], 1, [0x51]],
+        [IDENTITY, IDENTITY, [[-2.5, 0, 0]], [1], 1, [0x41051]],
+    ];
+    assert.equal(device.SetClipPlane(0, [1, 0, 0, 0.5]), D3D_OK);
+    assert.equal(device.SetTransform(D3DTRANSFORMSTATE.WORLD, IDENTITY), D3D_OK);
+    cases.forEach(([view, projection, centers, radii, planes, expected], index)=>{
+        assert.equal(device.SetTransform(D3DTRANSFORMSTATE.VIEW, view), D3D_OK);
+        assert.equal(device.SetTransform(D3DTRANSFORMSTATE.PROJECTION, projection), D3D_OK);
+        assert.equal(device.SetRenderState(CLIPPLANEENABLE, planes), D3D_OK);
+        /** @type {{ results?: number[] }} */
+        const out = {};
+        assert.equal(device.ComputeSphereVisibility(centers, radii, out), D3D_OK);
+        assert.deepEqual(out.results, expected, `case ${index}`);
+    });
+
+    releaseAll(f);
+});
+
+test('ValidateDevice refuses a stage the combiner does not draw', ()=>{
+    const f = fixture();
+    const { device } = f;
+    /** @type {{ passes?: number }} */
+    const out = {};
+    assert.equal(device.ValidateDevice(out), D3D_OK);
+    assert.equal(out.passes, 1);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLORARG1, 5), D3D_OK, 'D3DTA_TEMP');
+    /** @type {{ passes?: number }} */
+    const refused = {};
+    assert.equal(device.ValidateDevice(refused), 0x8876081a, 'D3DERR_UNSUPPORTEDCOLORARG');
+    assert.equal(refused.passes, undefined);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.TEXTURE), D3D_OK);
+
+    // Read in this version's numbering: D3DTFP_LINEAR is drawn, D3DTFG_FLATCUBIC is not.
+    assert.equal(device.SetTextureStageState(0, D3DTSS.MIPFILTER, 3), D3D_OK);
+    assert.equal(device.ValidateDevice(out), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.MAGFILTER, 3), D3D_OK);
+    assert.equal(device.ValidateDevice(refused), 0x88760822, 'D3DERR_UNSUPPORTEDTEXTUREFILTER');
+
+    releaseAll(f);
+});
+
 test('binding a texture owns it, in this version', ()=>{
     const f = fixture();
     const { device, root } = f;
@@ -425,6 +494,27 @@ test('a state block holds what was set between begin and end, and can be refresh
     assert.equal(device.CreateStateBlock(9, out), DDERR_INVALIDPARAMS);
 
     releaseAll(f);
+});
+
+test('a vertex buffer gives its guest memory back with its last reference', ()=>{
+    /** @type {number[]} */
+    const freed = [];
+    const root = ddrawObject({
+        allocate: ()=>0x200000,
+        free: (/** @type {number} */ address)=>{
+            freed.push(address);
+        },
+    });
+    const d3d = createDirect3D7(root);
+    const made = d3d.createVertexBuffer({ caps: 0, fvf: FVF_TL, numVertices: 4 });
+    assert.equal(made.hr, D3D_OK);
+    assert.equal(made.buffer.base, 0x200000);
+    made.buffer.addRef();
+    made.buffer.release();
+    assert.deepEqual(freed, [], 'not while a reference is held');
+    assert.equal(made.buffer.release(), 0);
+    assert.deepEqual(freed, [0x200000]);
+    assert.equal(root.release('IDirectDraw7'), 0);
 });
 
 test('a vertex buffer is a guest allocation with one lock at a time', ()=>{
@@ -526,8 +616,12 @@ test('the material, clip status and clip planes read back as copies', ()=>{
 
 // --- recorded: what the GPU was asked to do ---
 
-/** A device over the recording GPU, with guest memory the test owns. */
-function recorded(){
+/**
+ * A device over the recording GPU, with guest memory the test owns.
+ *
+ * @param {{ writable?: boolean }} [options]  Whether the device may write guest memory.
+ */
+function recorded(options = {}){
     const gpu = createFakeDevice();
     const backend = createBackend({
         device: gpu.device,
@@ -551,6 +645,10 @@ function recorded(){
     const d3d = createDirect3D7(root, {
         backend,
         readMemory: (address, length)=>ram.slice(address, address + length),
+        ...(options.writable
+            ? { writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
+                ram.set(bytes, address) }
+            : {}),
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
         presenter: {
             claim: buffer=>claimed.push(buffer),
@@ -617,6 +715,35 @@ test('recorded: a draw and a present are one encoder, one submit, one frame', as
     assert.ok(f.root.destroyed);
 });
 
+test('recorded: a depth fill of the device\'s depth buffer clears the depth it draws against',
+    async()=>{
+        // The depth a device draws against lives on the GPU, so a DirectDraw
+        // depth fill of that surface reaches it there, not only in memory.
+        const f = recorded();
+        const { device, gpu, root, target } = f;
+        const depth = surface(root, { caps: DDSCAPS_ZBUFFER, zBufferBitDepth: 16 });
+        assert.equal(target.addAttachedSurface(depth), D3D_OK);
+        const other = surface(root, { caps: DDSCAPS_ZBUFFER, zBufferBitDepth: 16 });
+
+        other.depthFilled(null, 0x1234);
+        assert.equal(device.diagnostics().clears, 0, 'a depth buffer the device does not use');
+        depth.depthFilled(null, 0x8000);
+        assert.equal(device.diagnostics().clears, 1);
+        device.present(target.buffer);
+        await device.idle();
+        const pass = gpu.of('beginRenderPass')[0].descriptor;
+        assert.equal(pass.depthStencilAttachment.depthLoadOp, 'clear');
+        assert.equal(pass.depthStencilAttachment.depthClearValue, 0x8000 / 0xffff);
+
+        assert.equal(target.deleteAttachedSurface(depth), D3D_OK);
+        assert.equal(depth.release(), 0);
+        assert.equal(other.release(), 0);
+        assert.equal(device.release(), 0);
+        assert.equal(target.release(), 0);
+        assert.equal(root.release('IDirectDraw7'), 0);
+        assert.ok(root.destroyed);
+    });
+
 test('recorded: a texture goes up once, and again only after the program wrote it', async()=>{
     const f = recorded();
     const { device, gpu, root, ram, target } = f;
@@ -664,6 +791,146 @@ test('recorded: a texture goes up once, and again only after the program wrote i
     assert.ok(root.destroyed);
 });
 
+test('recorded: COLORKEYENABLE discards the texels of the texture\'s source colour key', async()=>{
+    // Wine's ddraw7 test_ck_default: a texture filled with its own
+    // DDCKEY_SRCBLT colour draws that colour with the state off, its
+    // default, and draws nothing -- the clear shows through -- with it on.
+    // Only the colour bits are compared, so the unused top byte of an X8R8G8B8
+    // key does not decide it.
+    const f = recorded();
+    const { device, gpu, root, ram, target } = f;
+    const texture = surface(root, {
+        caps: DDSCAPS_TEXTURE | DDSCAPS_OFFSCREENPLAIN, width: 2, height: 2, pixelFormat: ARGB32,
+    });
+    ram.set(new Uint8Array(16).fill(0).map((_, at)=>(at % 4 === 0 || at % 4 === 3 ? 255 : 0)),
+        texture.buffer);
+    assert.equal(texture.setColorKey(DDCKEY_SRCBLT, { low: 0x770000ff, high: 0x770000ff }), D3D_OK);
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.SELECTARG1), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.TEXTURE), D3D_OK);
+    const quad = vertices([[0, 0, 0, 0], [8, 0, 1, 0], [0, 8, 0, 1], [8, 8, 1, 1]], true);
+    const draw = async()=>{
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL_TEX, quad, 4), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        device.present(target.buffer);
+        await device.idle();
+        const modules = gpu.of('createShaderModule');
+        return modules[modules.length - 1].descriptor.code;
+    };
+
+    const plain = await draw();
+    assert.doesNotMatch(plain, /discard/, 'off by default, the key is ordinary colour');
+    assert.equal(device.SetRenderState(D3DRENDERSTATE.COLORKEYENABLE, 1), D3D_OK);
+    const keyed = await draw();
+    assert.ok(keyed.includes('textureLoad(texture0,'), keyed);
+    assert.ok(keyed.includes('vec3f(0.0, 0.0, 1.0)'), 'the key, blue, as the texel expands');
+    assert.match(keyed, /if \(colourKeyed\)\s*\{\s*discard;/);
+    // A key set on the surface afterwards is the one the next draw keys by.
+    assert.equal(texture.setColorKey(DDCKEY_SRCBLT, { low: 0x00ff0000, high: 0x00ff0000 }),
+        D3D_OK);
+    assert.ok((await draw()).includes('vec3f(1.0, 0.0, 0.0)'));
+
+    assert.equal(device.SetTexture(0, null), D3D_OK);
+    assert.equal(texture.release(), 0);
+    assert.equal(device.release(), 0);
+    assert.equal(target.release(), 0);
+    assert.equal(root.release('IDirectDraw7'), 0);
+});
+
+test('recorded: every level of a DirectDraw mip chain goes up, each when it was written', async()=>{
+    const f = recorded();
+    const { device, gpu, root, ram, target } = f;
+    const made = root.createSurface({
+        flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | DDSD_MIPMAPCOUNT,
+        caps: DDSCAPS_TEXTURE | DDSCAPS_COMPLEX | DDSCAPS_MIPMAP,
+        width: 4, height: 4, mipMapCount: 3, pixelFormat: ARGB32,
+    });
+    assert.equal(made.hr, D3D_OK);
+    const texture = /** @type {any} */ (made.surface);
+    const levels = [texture, texture.mipNext, texture.mipNext.mipNext];
+    levels.forEach((level, index)=>{
+        ram.fill(index + 1, level.buffer, level.buffer + level.pitch * level.height);
+    });
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.SELECTARG1), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.TEXTURE), D3D_OK);
+    const quad = vertices([[0, 0, 0, 0], [8, 0, 1, 0], [0, 8, 0, 1], [8, 8, 1, 1]], true);
+    const draw = async()=>{
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL_TEX, quad, 4), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        device.present(target.buffer);
+        await device.idle();
+    };
+    const written = ()=>gpu.of('writeTexture').map((/** @type {any} */ call)=>
+        [call.destination.mipLevel ?? 0, call.bytes[0], call.bytes.length]);
+
+    await draw();
+    const chain = gpu.of('createTexture').find((/** @type {any} */ call)=>
+        call.descriptor.size.width === 4 && call.descriptor.size.height === 4);
+    assert.equal(chain?.descriptor.mipLevelCount, 3);
+    assert.deepEqual(written(), [[0, 1, 64], [1, 2, 16], [2, 3, 4]], 'each level, its own bytes');
+
+    ram.fill(9, levels[1].buffer, levels[1].buffer + 16);
+    assert.equal(levels[1].lock(null).hr, D3D_OK);
+    assert.equal(levels[1].unlock(null), D3D_OK);
+    await draw();
+    assert.deepEqual(written().slice(3), [[1, 9, 16]], 'a level written goes up alone');
+
+    assert.equal(device.SetTexture(0, null), D3D_OK);
+    assert.equal(texture.release(), 0);
+    assert.equal(device.release(), 0);
+    assert.equal(target.release(), 0);
+    assert.equal(root.release('IDirectDraw7'), 0);
+    assert.ok(root.destroyed);
+});
+
+test('recorded: Direct3D 7 filters are its own numbering, D3DTFP_NONE the mip default', async()=>{
+    // d3dtypes.h: D3DTFP_NONE is 1, D3DTFP_POINT 2 and D3DTFP_LINEAR 3, and
+    // D3DTFG_ANISOTROPIC 5, where Direct3D 8 numbers them 0, 1, 2 and 3.
+    const f = recorded();
+    const { device, gpu, root, target } = f;
+    /** @type {{ value?: number }} */
+    const out = {};
+    assert.equal(device.GetTextureStageState(0, D3DTSS.MIPFILTER, out), D3D_OK);
+    assert.equal(out.value, 1, 'D3DTFP_NONE');
+    const texture = surface(root, {
+        caps: DDSCAPS_TEXTURE | DDSCAPS_OFFSCREENPLAIN, width: 2, height: 2, pixelFormat: ARGB32,
+    });
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    const quad = vertices([[0, 0, 0, 0], [8, 0, 1, 0], [0, 8, 0, 1], [8, 8, 1, 1]], true);
+    /** @param {number} mip @param {number} mag */
+    const flagsFor = async(mip, mag)=>{
+        assert.equal(device.SetTextureStageState(0, D3DTSS.MIPFILTER, mip), D3D_OK);
+        assert.equal(device.SetTextureStageState(0, D3DTSS.MAGFILTER, mag), D3D_OK);
+        assert.equal(device.GetTextureStageState(0, D3DTSS.MIPFILTER, out), D3D_OK);
+        assert.equal(out.value, mip, 'read back as it was set');
+        assert.equal(device.GetTextureStageState(0, D3DTSS.MAGFILTER, out), D3D_OK);
+        assert.equal(out.value, mag);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL_TEX, quad, 4), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        device.present(target.buffer);
+        await device.idle();
+        const writes = gpu.of('writeBuffer').filter((/** @type {any} */ call)=>
+            call.buffer.descriptor.label.startsWith('uniforms'));
+        const last = writes[writes.length - 1].bytes;
+        const flags = new DataView(last.buffer, last.byteOffset, last.byteLength)
+            .getUint32(UNIFORM_AT.stage0 * 4, true);
+        return { mipMode: (flags >> 6) & 3, magPoint: (flags >> 4) & 1 };
+    };
+    assert.deepEqual(await flagsFor(1, 1), { mipMode: 0, magPoint: 1 }, 'none, point');
+    assert.deepEqual(await flagsFor(2, 2), { mipMode: 1, magPoint: 0 }, 'point, linear');
+    assert.deepEqual(await flagsFor(3, 5), { mipMode: 2, magPoint: 0 }, 'linear, anisotropic');
+
+    assert.equal(device.SetTexture(0, null), D3D_OK);
+    assert.equal(texture.release(), 0);
+    assert.equal(device.release(), 0);
+    assert.equal(target.release(), 0);
+    assert.equal(root.release('IDirectDraw7'), 0);
+});
+
 test('recorded: indices by pointer and vertices in a buffer draw as one indexed call', async()=>{
     const f = recorded();
     const { d3d, device, gpu, ram, root, target } = f;
@@ -700,6 +967,70 @@ test('recorded: indices by pointer and vertices in a buffer draw as one indexed 
     assert.equal(buffer.release(), 0);
     assert.equal(device.release(), 0);
     assert.equal(target.release(), 0);
+    assert.equal(root.release('IDirectDraw7'), 0);
+    assert.ok(root.destroyed);
+});
+
+test('recorded: a render target\'s pixels are read back into its guest bytes when asked for,'
+    + ' and taken up again when the program wrote them', async()=>{
+    // ddraw7.c get_surface_color (453-470) locks the target after drawing;
+    // the lock's bytes are the GPU's picture only once they are read back.
+    const f = recorded({ writable: true });
+    const { device, gpu, ram, root, target } = f;
+    const depth = surface(root, { caps: DDSCAPS_ZBUFFER, zBufferBitDepth: 16 });
+    assert.equal(target.addAttachedSurface(depth), D3D_OK);
+    const texture = surface(root, { caps: DDSCAPS_TEXTURE, pixelFormat: ARGB32 });
+
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, FVF_TL,
+        vertices([[0, 0], [8, 0], [0, 8]], false), 3), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    device.present(target.buffer);
+    await device.idle();
+    assert.equal(texture.pixelsCurrent(), null, 'a texture\'s bytes are its pixels already');
+    assert.equal(depth.pixelsCurrent(), null, 'and a depth buffer is not read back');
+
+    // What the GPU holds for the target: the fake keeps texels, so they are
+    // put there as a draw would have left them.
+    const drawn = gpu.of('beginRenderPass')[0].descriptor.colorAttachments[0].view.texture;
+    for (let at = 0; at < drawn.bytes.length; at += 4)
+    {
+        drawn.bytes.set([0x30, 0x20, 0x10, 0xff], at);
+    }
+    const pending = target.pixelsCurrent();
+    assert.ok(pending, 'a target is read back');
+    await pending;
+    const copies = gpu.of('copyTextureToBuffer');
+    assert.equal(copies.length, 1);
+    assert.equal(copies[0].source.texture, drawn, 'out of the texture the draw went into');
+    assert.deepEqual([...ram.subarray(target.buffer, target.buffer + 8)],
+        [0x30, 0x20, 0x10, 0xff, 0x30, 0x20, 0x10, 0xff]);
+    assert.deepEqual([...ram.subarray(target.buffer + 8 * 8 * 4 - 4, target.buffer + 8 * 8 * 4)],
+        [0x30, 0x20, 0x10, 0xff], 'every pixel of it, at the surface\'s own pitch');
+
+    // A write lock's bytes go up to the target, in the frame's order, before
+    // it is drawn to again.
+    const uploads = ()=>gpu.of('copyBufferToTexture')
+        .filter(call=>call.destination.texture === drawn);
+    assert.equal(target.lock(null, 0).hr, D3D_OK);
+    ram.set([1, 2, 3, 4], target.buffer);
+    assert.equal(target.unlock(null), D3D_OK);
+    assert.equal(uploads().length, 0, 'not before the target is used');
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, FVF_TL,
+        vertices([[0, 0], [8, 0], [0, 8]], false), 3), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    device.present(target.buffer);
+    await device.idle();
+    assert.equal(uploads().length, 1);
+    assert.deepEqual([...drawn.bytes.subarray(0, 8)], [1, 2, 3, 0xff, 0x30, 0x20, 0x10, 0xff],
+        'the program\'s pixel, X8 as opaque, beside what the read-back brought in');
+
+    assert.equal(device.release(), 0);
+    assert.equal(target.pixelsCurrent(), null, 'a released device holds no copy');
+    assert.equal(texture.release(), 0);
+    assert.equal(target.release(), 0);
+    assert.equal(depth.release(), 0);
     assert.equal(root.release('IDirectDraw7'), 0);
     assert.ok(root.destroyed);
 });

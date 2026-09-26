@@ -19,6 +19,7 @@
  *
  *     node tools/cdp_test/frames.mjs <bundle-id> [--seconds 60] [--settle 20]
  *                                    [--video] [--no-trace] [--command-line STRING]
+ *                                    [--windows NAME]
  */
 
 import { existsSync } from 'node:fs';
@@ -28,7 +29,9 @@ import { fileURLToPath } from 'node:url';
 import { launchWithGpu, shutdown } from './browser.mjs';
 import { CdpEndpoint } from './cdp.mjs';
 import { serveStatic } from './server.mjs';
+import { frameSpread } from './frame-window.mjs';
 import { openBundle } from '../btl.mjs';
+import { windowsVersion } from '../../modules/core/src/layers/win32/kernel32/versions.js';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const REPO_ROOT = resolve(TOOL_ROOT, '..', '..');
@@ -49,6 +52,8 @@ function parse(argv){
         commandLine: argv.includes('--command-line')
             ? argv[argv.indexOf('--command-line') + 1]
             : null,
+        // The Windows the title runs under, over the one its manifest names.
+        windows: argv.includes('--windows') ? argv[argv.indexOf('--windows') + 1] : null,
         /** How long to watch once the title is up. */
         seconds: number('--seconds', 60),
         // How long to let it start first. Measuring through loading measures
@@ -89,16 +94,6 @@ function parse(argv){
 
 /** @param {number} value */
 const asMs = value=>`${value.toFixed(2)}ms`;
-
-/** @param {number[]} values @param {number} share */
-function quantile(values, share){
-    if (values.length === 0)
-    {
-        return 0;
-    }
-    const sorted = [...values].sort((one, two)=>one - two);
-    return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * share))];
-}
 
 /**
  * Folds a sampling heap profile into the functions that allocated most, by
@@ -154,7 +149,7 @@ function describe(before, after, windowMs){
 
     say(`watched ${seconds.toFixed(1)}s and saw ${frames} frames`);
     say(`  ${(frames / seconds).toFixed(1)} frames per second`
-        + `, ${asMs(frames > 0 ? windowMs / frames : 0)} per frame`);
+        + (frames > 0 ? `, ${asMs(windowMs / frames)} per frame` : ''));
     say(`  ${(instructions / seconds / 1e6).toFixed(1)}M guest instructions per second`);
     if (after.jit && after.jit.compiledSteps >= 0)
     {
@@ -179,12 +174,8 @@ function describe(before, after, windowMs){
     }
     say('');
 
-    /** @type {number[]} */
-    const spread = after.recentFrames.map((/** @type {any} */ frame)=>frame.ms);
     say('one frame, as the engine measured it:');
-    say(`  median ${asMs(quantile(spread, 0.5))}`
-        + `   ninety-fifth ${asMs(quantile(spread, 0.95))}`
-        + `   worst ${asMs(quantile(spread, 1))}`);
+    frameSpread(before, after).lines.forEach(say);
     // The share is what says which side to change. Mostly the guest means the
     // answer is the emulator; mostly ours means it is our own code.
     say(`  ours ${(after.hostShare * 100).toFixed(1)}% of a frame,`
@@ -432,6 +423,10 @@ if (!existsSync(join(directory, 'bundle.btl')))
 }
 
 const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'));
+// The Windows the bottle runs under, refused here by name, as createApp would
+// refuse it, before a browser starts.
+const windows = options.windows ?? manifest.windows ?? undefined;
+windowsVersion(windows);
 const opened = await openBundle(join(directory, 'bundle.btl'));
 const executable = await opened.read(manifest.entry);
 await opened.close();
@@ -498,6 +493,7 @@ try
         // `--command-line` overrides them.
         commandLine: options.commandLine
             ?? (manifest.commandLine ? `"${imagePath}" ${manifest.commandLine}` : undefined),
+        windows,
         maxTurns: Number.MAX_SAFE_INTEGER,
         video: options.video,
         quantum: options.quantum || undefined,

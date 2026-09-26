@@ -38,21 +38,46 @@ import {
     D3DERR_INBEGINSTATEBLOCK, D3DERR_INVALIDPRIMITIVETYPE, D3DERR_INVALIDSTATEBLOCK,
     D3DERR_INVALIDVERTEXFORMAT, D3DERR_NOTINBEGINSTATEBLOCK, D3DERR_SCENE_IN_SCENE,
     D3DERR_SCENE_NOT_IN_SCENE, D3DERR_VERTEXBUFFERLOCKED, D3DFMT, D3DLIGHTTYPE,
-    D3DRENDERSTATE_D3D7_ONLY, D3DRENDERSTATE_MAX, D3DSBT, D3DTSS_MAX, D3DVBCAPS_OPTIMIZED, D3D_OK,
-    DDERR_INVALIDPARAMS,
-    DDERR_NOTFOUND, DDLOCK_DISCARDCONTENTS, DDLOCK_NOOVERWRITE, DDLOCK_READONLY, transformStateOf,
+    D3DRENDERSTATE_D3D7_ONLY, D3DRENDERSTATE_MAX, D3DSBT, D3DTRANSFORMSTATE, D3DTSS_MAX,
+    D3DVBCAPS_OPTIMIZED, D3D_OK, DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DDLOCK_DISCARDCONTENTS,
+    DDLOCK_NOOVERWRITE, DDLOCK_READONLY, transformStateOf,
 } from './constants.js';
 import { DEVICE_DESCRIPTIONS } from './caps.js';
-import { D3DLOCK, D3DFMT_INDEX, D3DTSS } from '../d3d8/constants.js';
+import { D3DCLEAR, D3DLOCK, D3DFMT_INDEX, D3DTSS } from '../d3d8/constants.js';
 import { createDefaultRenderStates } from '../d3d8/renderstates.js';
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
-import { IDENTITY, STAGE_COUNT, createRenderer, vertexCountOf } from '../d3d8/render.js';
+import {
+    IDENTITY, STAGE_COUNT, createRenderer, multiplyMatrices, vertexCountOf,
+} from '../d3d8/render.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { validateDeviceTarget } from '../ddraw/caps.js';
+import { validateStages } from '../d3d8/validity.js';
+import { writePixels } from '../d3d9/resources.js';
 import {
-    DDPF_ALPHAPIXELS, DDPF_PALETTEINDEXED_ANY, DDPF_ZBUFFER, DDSCAPS_ZBUFFER,
+    DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_PALETTEINDEXED_ANY, DDPF_ZBUFFER, DDSCAPS_ZBUFFER,
 } from '../ddraw/constants.js';
+
+/**
+ * Direct3D 7 numbers two of its filters apart from Direct3D 8, whose
+ * numbering the stage states are kept in so the renderer reads them as they
+ * are: D3DTFP counts from one where D3DTEXF counts from zero, and D3DTFG puts
+ * the two cubic filters before anisotropic (d3dtypes.h). Each mapping is one
+ * to one over the dword, so a value no header names reads back as it was set.
+ *
+ * @type {Readonly<Record<number, { stored: (value: number) => number,
+ *   read: (value: number) => number }>>}
+ */
+const FILTER_NUMBERING = Object.freeze({
+    [D3DTSS.MAGFILTER]: {
+        stored: value=>[value, value, value, 4, 5, 3][value] ?? value,
+        read: value=>[value, value, value, 5, 3, 4][value] ?? value,
+    },
+    [D3DTSS.MIPFILTER]: {
+        stored: value=>(value - 1) >>> 0,
+        read: value=>(value + 1) >>> 0,
+    },
+});
 
 /**
  * @typedef {import('../d3d8/device.js').Light} Light
@@ -65,6 +90,9 @@ import {
  *     What a device that draws needs; absent, the device is the pure model.
  * @property {any} [backend]
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
+ *     How a render target's pixels read back off the GPU reach its guest
+ *     bytes; without it a lock of a target hands out bytes nobody drew.
  * @property {(descriptor: any) => any} [createSampler]
  * @property {{ claim: (buffer: number, show: () => void) => void,
  *              release: (buffer: number) => void }} [presenter]
@@ -75,6 +103,10 @@ import {
 
 /** How many indices the scratch record can carry; a bigger draw grows it. */
 const INDEX_SCRATCH = 0x10000;
+
+/** D3DRENDERSTATE_CLIPPLANEENABLE, and the user planes a D3DSTATUS word has bits for. */
+const D3DRENDERSTATE_CLIPPLANEENABLE = 152;
+const USER_CLIP_PLANES = 6;
 
 /**
  * The D3DFMT a DirectDraw pixel format means, as the renderer names formats.
@@ -295,6 +327,7 @@ export function createDirect3D7(ddraw, services = {}){
                 count--;
                 if (count === 0)
                 {
+                    ddraw.freeStorage(base);
                     ddraw.release('IDirectDraw7');
                 }
                 return Math.max(count, 0);
@@ -427,6 +460,8 @@ export function createDirect3D7(ddraw, services = {}){
             const format = d3dFormatOf(surface.pixelFormat);
             const adapter = {
                 buffer,
+                // Where a read-back is written and a write taken up from.
+                base: buffer,
                 /** @param {{ desc?: any }} out */
                 GetDesc(out){
                     out.desc = {
@@ -463,21 +498,44 @@ export function createDirect3D7(ddraw, services = {}){
             {
                 return null;
             }
+            // A DirectDraw mip chain is a surface per level, each with pixels
+            // and a uniqueness value of its own.
+            /** @type {any[]} */
+            const levels = [];
+            for (let level = surface; level && levels.length < Math.max(1, surface.mipMapCount);
+                level = level.mipNext)
+            {
+                levels.push(level);
+            }
+            const views = levels.map(level=>({ base: level.buffer, release: ()=>0 }));
             const adapter = {
-                seen: -1,
+                levels,
+                seen: levels.map(()=>-1),
                 /** @param {number} level @param {{ surface?: any }} out */
                 GetSurfaceLevel(level, out){
-                    void level;
-                    out.surface = { base: surface.buffer, release: ()=>0 };
+                    if (!views[level])
+                    {
+                        return DDERR_INVALIDPARAMS;
+                    }
+                    views[level].base = levels[level].buffer;
+                    out.surface = views[level];
                     return D3D_OK;
                 },
                 /** Replaced by the renderer with the one that marks the copy stale. */
                 UnlockRect(){
                     return D3D_OK;
                 },
+                /**
+                 * The source colour key COLORKEYENABLE draws against, as the
+                 * surface holds it now, or null for none.
+                 */
+                colorKey(){
+                    const { key } = surface.getColorKey(DDCKEY_SRCBLT);
+                    return key ? key.low >>> 0 : null;
+                },
             };
             renderer.trackTexture(adapter,
-                { width: surface.width, height: surface.height, format });
+                { width: surface.width, height: surface.height, format, levels: levels.length });
             textureAdapters.set(surface, adapter);
             return adapter;
         };
@@ -503,12 +561,14 @@ export function createDirect3D7(ddraw, services = {}){
             {
                 return null;
             }
-            const now = surface.uniquenessValue();
-            if (now !== adapter.seen)
-            {
-                adapter.seen = now;
-                adapter.UnlockRect(0);
-            }
+            adapter.levels.forEach((/** @type {any} */ level, /** @type {number} */ index)=>{
+                const now = level.uniquenessValue();
+                if (now !== adapter.seen[index])
+                {
+                    adapter.seen[index] = now;
+                    adapter.UnlockRect(index);
+                }
+            });
             return adapter;
         };
 
@@ -598,15 +658,19 @@ export function createDirect3D7(ddraw, services = {}){
 
         /**
          * What every draw is refused for before its arguments are looked at.
+         * A draw of nothing -- no vertices, or no indices -- is not refused
+         * for having no primitives: it draws nothing and succeeds, whatever
+         * its arrays are (Wine's ddraw7.c test_draw_primitive).
          *
          * @param {number} type @param {number} fvf @param {number} primitiveCount
+         * @param {number} elements  The vertices or indices the draw names.
          */
-        const drawPreconditions = (type, fvf, primitiveCount)=>{
+        const drawPreconditions = (type, fvf, primitiveCount, elements)=>{
             if (!inScene)
             {
                 return D3DERR_SCENE_NOT_IN_SCENE;
             }
-            if (vertexCountOf(type, primitiveCount) === 0)
+            if (elements !== 0 && vertexCountOf(type, primitiveCount) === 0)
             {
                 return primitiveCount > 0 ? D3DERR_INVALIDPRIMITIVETYPE : DDERR_INVALIDPARAMS;
             }
@@ -660,6 +724,64 @@ export function createDirect3D7(ddraw, services = {}){
             }
         };
 
+        /**
+         * The depth this device draws against is the GPU's copy, so a
+         * DirectDraw depth fill of the buffer attached to its target is a
+         * depth clear there, over the rectangle filled and nothing else.
+         */
+        const stopWatchingDepth = ddraw.watchDepthFills?.(
+            (/** @type {any} */ surface, /** @type {any} */ rect, /** @type {number} */ value)=>{
+                if (!renderer || attachedDepth(renderTarget) !== surface)
+                {
+                    return;
+                }
+                const range = surface.pixelFormat.greenMask >>> 0 || 0xffff;
+                const kept = viewport;
+                viewport = fullTarget({ width: renderTarget.width, height: renderTarget.height });
+                renderer.clear(model, rect
+                    ? [{ x1: rect.left, y1: rect.top, x2: rect.right, y2: rect.bottom }]
+                    : [], D3DCLEAR.ZBUFFER, 0, ((value & range) >>> 0) / range, 0);
+                viewport = kept;
+            }) ?? (()=>{});
+
+        /**
+         * The colour target drawn at the address a surface shows, if this
+         * device draws there: after a flip that is another surface's target.
+         *
+         * @param {any} surface
+         */
+        const drawnAt = surface=>((surface.caps & DDSCAPS_ZBUFFER) === 0
+            ? targetAdapters.get(surface.buffer) ?? null
+            : null);
+        const write = services.writeMemory;
+        /**
+         * A surface this device renders into has its picture on the GPU and
+         * stale bytes in guest memory. Before a program reads those bytes --
+         * a lock, a device context, a blit out of it -- they are read back,
+         * and the caller waits; once it has written them, they go up to the
+         * target at its next use. A depth buffer has no way back.
+         */
+        const stopWatchingPixels = ddraw.watchPixels?.({
+            readBack: (/** @type {any} */ surface)=>{
+                const adapter = drawnAt(surface);
+                if (!adapter || !renderer || !write)
+                {
+                    return null;
+                }
+                return renderer.readSurface(adapter).then(
+                    (/** @type {{ data: Uint8Array }} */ pixels)=>{
+                        writePixels(adapter, pixels.data, write);
+                    });
+            },
+            written: (/** @type {any} */ surface)=>{
+                const adapter = drawnAt(surface);
+                if (adapter && renderer)
+                {
+                    renderer.markDirty(adapter);
+                }
+            },
+        }) ?? (()=>{});
+
         const device = {
             description,
             get refCount(){
@@ -687,6 +809,8 @@ export function createDirect3D7(ddraw, services = {}){
                     surface.release();
                 }
                 textures.clear();
+                stopWatchingDepth();
+                stopWatchingPixels();
                 renderTarget.release();
                 ddraw.release('IDirectDraw7');
                 return 0;
@@ -1007,8 +1131,9 @@ export function createDirect3D7(ddraw, services = {}){
                 {
                     return DDERR_INVALIDPARAMS;
                 }
-                states.set(type, value >>> 0);
-                record('stageStates', (stage << 8) | type, value >>> 0);
+                const stored = FILTER_NUMBERING[type]?.stored(value >>> 0) ?? value >>> 0;
+                states.set(type, stored);
+                record('stageStates', (stage << 8) | type, stored);
                 return D3D_OK;
             },
 
@@ -1023,14 +1148,23 @@ export function createDirect3D7(ddraw, services = {}){
                 {
                     return DDERR_INVALIDPARAMS;
                 }
-                out.value = states.get(type);
+                const stored = /** @type {number} */ (states.get(type));
+                out.value = FILTER_NUMBERING[type]?.read(stored) ?? stored;
                 return D3D_OK;
             },
 
-            /** @param {{ passes?: number }} out */
+            /**
+             * One pass when the combiner draws the cascade.
+             *
+             * @param {{ passes?: number }} out  Written only on success.
+             */
             ValidateDevice(out){
-                out.passes = 1;
-                return D3D_OK;
+                const hr = validateStages(stageStatesFor, STAGE_COUNT);
+                if (hr === D3D_OK)
+                {
+                    out.passes = 1;
+                }
+                return hr;
             },
 
             PreLoad(){
@@ -1056,6 +1190,92 @@ export function createDirect3D7(ddraw, services = {}){
                     return DDERR_INVALIDPARAMS;
                 }
                 clipPlanes.set(index, [...plane]);
+                return D3D_OK;
+            },
+
+            /**
+             * What ProcessVertices reads of this device.
+             *
+             * @returns {import('./process.js').ProcessingState}
+             */
+            processingState(){
+                return {
+                    transform: type=>transforms.get(type) ?? IDENTITY,
+                    viewport: viewport.rect,
+                    renderState: state=>renderStates.get(state) ?? 0,
+                    lights: [...lights.values()].filter(entry=>entry.enabled)
+                        .map(entry=>entry.light),
+                    material,
+                };
+            },
+
+            /**
+             * Where each sphere lies against the six sides of the view volume
+             * and the user clip planes enabled, as D3DSTATUS bits: a plane the
+             * sphere crosses or lies beyond sets its union bit (D3DCLIP_*), and
+             * one it lies wholly beyond its intersection bit too, twelve places
+             * up. The volume's sides come out of world, view and projection
+             * together, a user plane out of the world transform alone.
+             *
+             * @param {readonly number[][]} centers @param {readonly number[]} radii
+             * @param {{ results?: number[] }} out
+             */
+            ComputeSphereVisibility(centers, radii, out){
+                const world = transforms.get(transformStateOf(D3DTRANSFORMSTATE.WORLD) ?? 0)
+                    ?? IDENTITY;
+                const all = multiplyMatrices(multiplyMatrices(world,
+                    transforms.get(D3DTRANSFORMSTATE.VIEW) ?? IDENTITY),
+                transforms.get(D3DTRANSFORMSTATE.PROJECTION) ?? IDENTITY);
+                /** @param {ArrayLike<number>} m @param {number} c */
+                const column = (m, c)=>[m[c], m[4 + c], m[8 + c], m[12 + c]];
+                /** @param {number[]} a @param {number[]} b @param {number} sign */
+                const combine = (a, b, sign)=>a.map((value, k)=>value + sign * b[k]);
+                const [x, y, z, w] = [0, 1, 2, 3].map(c=>column(all, c));
+                // Left, right, top, bottom, front, back: D3DCLIP_LEFT up to _BACK.
+                /** @type {(number[] | null)[]} */
+                const planes = [
+                    combine(w, x, 1), combine(w, x, -1), combine(w, y, -1), combine(w, y, 1),
+                    z, combine(w, z, -1),
+                ];
+                const enabled = renderStates.get(D3DRENDERSTATE_CLIPPLANEENABLE) ?? 0;
+                for (let index = 0; index < USER_CLIP_PLANES; index++)
+                {
+                    if ((enabled & (1 << index)) !== 0)
+                    {
+                        // A plane in world space tests a point in model space
+                        // as the world matrix times the plane.
+                        const p = clipPlanes.get(index) ?? [0, 0, 0, 0];
+                        planes.push([0, 1, 2, 3].map(row=>world[row * 4] * p[0]
+                            + world[row * 4 + 1] * p[1] + world[row * 4 + 2] * p[2]
+                            + world[row * 4 + 3] * p[3]));
+                    }
+                    else
+                    {
+                        planes.push(null);
+                    }
+                }
+                out.results = centers.map((center, sphere)=>{
+                    const radius = radii[sphere];
+                    let result = 0;
+                    planes.forEach((plane, bit)=>{
+                        if (!plane)
+                        {
+                            return;
+                        }
+                        const length = Math.hypot(plane[0], plane[1], plane[2]) || 1;
+                        const distance = (plane[0] * center[0] + plane[1] * center[1]
+                            + plane[2] * center[2] + plane[3]) / length;
+                        if (distance < -radius)
+                        {
+                            result |= (1 << bit) | (1 << (bit + 12));
+                        }
+                        else if (distance < radius)
+                        {
+                            result |= 1 << bit;
+                        }
+                    });
+                    return result >>> 0;
+                });
                 return D3D_OK;
             },
 
@@ -1189,8 +1409,8 @@ export function createDirect3D7(ddraw, services = {}){
              */
             DrawPrimitive(type, fvf, vertices, vertexCount){
                 const primitiveCount = primitiveCountOf(type, vertexCount);
-                const hr = drawPreconditions(type, fvf, primitiveCount);
-                if (hr !== D3D_OK)
+                const hr = drawPreconditions(type, fvf, primitiveCount, vertexCount);
+                if (hr !== D3D_OK || vertexCount === 0)
                 {
                     return hr;
                 }
@@ -1214,8 +1434,8 @@ export function createDirect3D7(ddraw, services = {}){
              */
             DrawIndexedPrimitive(type, fvf, vertices, vertexCount, indices, indexCount){
                 const primitiveCount = primitiveCountOf(type, indexCount);
-                const hr = drawPreconditions(type, fvf, primitiveCount);
-                if (hr !== D3D_OK)
+                const hr = drawPreconditions(type, fvf, primitiveCount, indexCount);
+                if (hr !== D3D_OK || indexCount === 0)
                 {
                     return hr;
                 }
@@ -1239,9 +1459,10 @@ export function createDirect3D7(ddraw, services = {}){
              */
             DrawPrimitiveVB(type, buffer, startVertex, vertexCount){
                 const primitiveCount = primitiveCountOf(type, vertexCount);
-                const hr = buffer ? drawPreconditions(type, buffer.fvf, primitiveCount)
+                const hr = buffer
+                    ? drawPreconditions(type, buffer.fvf, primitiveCount, vertexCount)
                     : DDERR_INVALIDPARAMS;
-                if (hr !== D3D_OK)
+                if (hr !== D3D_OK || vertexCount === 0)
                 {
                     return hr;
                 }
@@ -1273,9 +1494,10 @@ export function createDirect3D7(ddraw, services = {}){
             )
             {
                 const primitiveCount = primitiveCountOf(type, indexCount);
-                const hr = buffer ? drawPreconditions(type, buffer.fvf, primitiveCount)
+                const hr = buffer
+                    ? drawPreconditions(type, buffer.fvf, primitiveCount, indexCount)
                     : DDERR_INVALIDPARAMS;
-                if (hr !== D3D_OK)
+                if (hr !== D3D_OK || indexCount === 0)
                 {
                     return hr;
                 }

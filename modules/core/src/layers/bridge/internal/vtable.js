@@ -95,6 +95,18 @@ export function createVtables({ memory, register, heap }){
      * @type {Map<number, { object: any, interfaceId: string }>}
      */
     const owners = new Map();
+    /**
+     * Interfaces whose object's count reached zero while it could still be
+     * reached: something besides the program keeps it, as a DirectSound
+     * device keeps its primary buffer, and a program may call it again
+     * through the same pointer. An object model says so with an optional
+     * `reachable(interfaceId)`, which answers yes while its count is above
+     * zero too. Asked again after every release, whoever's, and forgotten once
+     * the answer is no.
+     *
+     * @type {Map<any, Set<string>>}
+     */
+    const heldAtZero = new Map();
     let interfaces = 0;
     let methods = 0;
     let refused = 0;
@@ -244,6 +256,11 @@ export function createVtables({ memory, register, heap }){
      * counts references per interface generation can end one while another
      * is still held.
      *
+     * The object is told, through an optional `forgotten(pointer,
+     * interfaceId)`, so that a map it keeps from pointers back to objects
+     * drops the entry now: the words may hold another object's interface by
+     * the next call that hands the pointer in.
+     *
      * @param {any} object
      * @param {string} interfaceId
      */
@@ -258,6 +275,59 @@ export function createVtables({ memory, register, heap }){
         owners.delete(block);
         heap.free?.(block);
         interfaces--;
+        heldAtZero.get(object)?.delete(interfaceId);
+        object.forgotten?.(block, interfaceId);
+    }
+
+    /**
+     * The last reference to an interface went. Forgotten, unless its object
+     * says it can still be reached; and every interface kept that way before
+     * is asked again, because whatever kept it may be what was released.
+     *
+     * An object model that knows the object itself is over says so with
+     * `destroyed`, and then every interface it was published as goes the
+     * same way: a pointer from an earlier QueryInterface would otherwise
+     * keep finding the released object, and its words would never go back.
+     * Without that word a zero ends only the interface it came through,
+     * which is true of every way of counting -- DirectDraw counts each
+     * generation apart, and one reaching zero leaves the others held.
+     *
+     * @param {any} object @param {string} interfaceId
+     */
+    function releasedToZero(object, interfaceId){
+        const ended = object.destroyed === true
+            ? [...published.get(object)?.keys() ?? []]
+            : [interfaceId];
+        for (const id of ended)
+        {
+            if (object.reachable?.(id))
+            {
+                const ids = heldAtZero.get(object) ?? new Set();
+                ids.add(id);
+                heldAtZero.set(object, ids);
+            }
+            else
+            {
+                forget(object, id);
+            }
+        }
+    }
+
+    function sweepHeld(){
+        for (const [object, ids] of heldAtZero)
+        {
+            for (const id of ids)
+            {
+                if (!object.reachable(id))
+                {
+                    forget(object, id);
+                }
+            }
+            if (ids.size === 0)
+            {
+                heldAtZero.delete(object);
+            }
+        }
     }
 
     /**
@@ -287,7 +357,11 @@ export function createVtables({ memory, register, heap }){
                 const left = object.release(interfaceId);
                 if (left === 0)
                 {
-                    forget(object, interfaceId);
+                    releasedToZero(object, interfaceId);
+                }
+                if (heldAtZero.size > 0)
+                {
+                    sweepHeld();
                 }
                 return left;
             }
@@ -385,6 +459,25 @@ export function createVtables({ memory, register, heap }){
         publish(object, interfaceId){
             const record = object.interfaceFor(interfaceId);
             return record ? publish(object, interfaceId, record.methods) : 0;
+        },
+
+        /**
+         * Gives back an interface the program cannot release: one whose table
+         * has no IUnknown, which ends when the object that handed it out
+         * ends. Forgotten as a release to zero forgets it -- the pointer then
+         * finds nothing, its words go back and its object is told.
+         *
+         * @param {any} object
+         * @param {string} interfaceId
+         * @returns {boolean} whether it was published
+         */
+        unpublish(object, interfaceId){
+            if (published.get(object)?.get(interfaceId) === undefined)
+            {
+                return false;
+            }
+            forget(object, interfaceId);
+            return true;
         },
 
         diagnostics: ()=>({

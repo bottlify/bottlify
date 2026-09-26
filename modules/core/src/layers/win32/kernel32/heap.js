@@ -65,8 +65,20 @@ const PAGE_SIZE = 4096;
  */
 const ALLOCATION_GRANULARITY = 64 * 1024;
 
+/** HeapCreate's option that leaves a heap unserialised. */
+const HEAP_NO_SERIALIZE = 0x00000001;
+
+/** The HEAP_INFORMATION_CLASS values, and the one compatibility value there is. */
+const HEAP_COMPATIBILITY_INFORMATION = 0;
+const HEAP_ENABLE_TERMINATION_ON_CORRUPTION = 1;
+const LOW_FRAGMENTATION_HEAP = 2;
+
 /** Codes this surface reports. */
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_INVALID_HANDLE = 6;
+const ERROR_GEN_FAILURE = 31;
+const ERROR_INSUFFICIENT_BUFFER = 122;
+const ERROR_NOACCESS = 998;
 /** What VirtualAlloc reports for an address outside anything it reserved. */
 const ERROR_INVALID_ADDRESS = 487;
 const ERROR_NO_MORE_ITEMS = 259;
@@ -505,6 +517,20 @@ export function createHeapAllocator({ base, size }){
             return true;
         },
 
+        /** @returns {{ base: number, size: number }[]} every free span */
+        freeSpans(){
+            /** @type {{ base: number, size: number }[]} */
+            const spans = [];
+            for (const span of byBase.values())
+            {
+                if (span)
+                {
+                    spans.push({ base: span.base, size: span.size });
+                }
+            }
+            return spans;
+        },
+
         /** @param {any} owner @returns {number[]} */
         owned(owner){
             return [...live.values()]
@@ -547,7 +573,7 @@ export function createHeapAllocator({ base, size }){
  * @property {(code: number) => void} setLastError
  * @property {(address: number) => { base: number, size: number } | null} [regionAt]
  *           The memory layer's region map, when the assembling caller wired one.
- *           Without it VirtualQuery reports every address as free.
+ *           Without it VirtualQuery knows only the arena.
  * @property {(address: number) => { base: number, size: number } | null} [nextRegionAfter]
  *           The mapped region with the lowest base above an address, when the
  *           assembling caller wired one. VirtualQuery uses it to coalesce a
@@ -590,6 +616,10 @@ export function createHeapFunctions(host){
 
     const processHeap = newHandle();
     const heaps = new Set([processHeap]);
+    /** Heaps made with HEAP_NO_SERIALIZE, which cannot take the low-fragmentation heap. */
+    const unserialized = new Set();
+    /** Heaps the program turned the low-fragmentation heap on for. */
+    const lowFragmentation = new Set();
 
     /**
      * An allocation the arena could not serve, said with what was asked and
@@ -601,6 +631,12 @@ export function createHeapFunctions(host){
         const state = allocator.diagnostics();
         host.divergence?.(api, `${size} bytes refused: ${state.largestFree} largest free`
             + ` of ${state.free} free, ${state.used} used in ${state.blocks} blocks`);
+    };
+
+    /** @param {number} address */
+    const readDword = address=>{
+        const bytes = host.readMemory(address, 4);
+        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
 
     /** @param {number} address @param {number} value */
@@ -655,6 +691,56 @@ export function createHeapFunctions(host){
      * @type {Map<number, { from: number, to: number }[]>}
      */
     const decommitted = new Map();
+
+    /**
+     * The pages of each reservation that are committed, as ordered ranges
+     * that never touch. Page-level commit changes nothing about what the
+     * guest can read here, but VirtualQuery reports it: an allocator asks
+     * which pages of its reservation it has committed before it commits more.
+     *
+     * @type {Map<number, { from: number, to: number }[]>}
+     */
+    const committed = new Map();
+
+    /**
+     * Marks [from, to) of a reservation committed or not.
+     *
+     * @param {number} reservation @param {number} from @param {number} to
+     * @param {boolean} on
+     */
+    const markCommitted = (reservation, from, to, on)=>{
+        /** @type {{ from: number, to: number }[]} */
+        const kept = [];
+        let start = from;
+        let end = to;
+        for (const range of committed.get(reservation) ?? [])
+        {
+            if (range.to < from || range.from > to)
+            {
+                kept.push(range);
+                continue;
+            }
+            if (on)
+            {
+                start = Math.min(start, range.from);
+                end = Math.max(end, range.to);
+                continue;
+            }
+            if (range.from < from)
+            {
+                kept.push({ from: range.from, to: from });
+            }
+            if (range.to > to)
+            {
+                kept.push({ from: to, to: range.to });
+            }
+        }
+        if (on)
+        {
+            kept.push({ from: start, to: end });
+        }
+        committed.set(reservation, kept.sort((a, b)=>a.from - b.from));
+    };
 
     /**
      * Notes [from, to) of a reservation as given back.
@@ -724,6 +810,62 @@ export function createHeapFunctions(host){
     };
 
     /**
+     * What VirtualQuery says about a page of the arena, as its seven fields in
+     * order: base, allocation base, allocation protection, size, state,
+     * protection, type.
+     *
+     * @param {number} page @param {number} arenaEnd
+     * @returns {[number, number, number, number, number, number, number]}
+     */
+    const arenaAnswer = (page, arenaEnd)=>{
+        const block = allocator.blockContaining(page);
+        if (block && block.owner === VIRTUAL)
+        {
+            const end = block.address + block.capacity;
+            const ranges = committed.get(block.address) ?? [];
+            const inside = ranges.find(range=>page >= range.from && page < range.to);
+            if (inside)
+            {
+                return [page, block.address, PAGE_EXECUTE_READWRITE,
+                    Math.min(inside.to, end) - page, MEM_COMMIT, PAGE_EXECUTE_READWRITE,
+                    MEM_PRIVATE];
+            }
+            const next = ranges.find(range=>range.from > page);
+            return [page, block.address, PAGE_EXECUTE_READWRITE,
+                (next ? Math.min(next.from, end) : end) - page, MEM_RESERVE, 0, MEM_PRIVATE];
+        }
+        /** @type {{ base: number, size: number }[]} */
+        const spans = allocator.freeSpans();
+        const free = spans.find(span=>
+            span.base <= page && span.base + span.size >= page + PAGE_SIZE);
+        if (free)
+        {
+            const end = ((free.base + free.size) & ~(PAGE_SIZE - 1)) >>> 0;
+            return [page, 0, 0, end - page, MEM_FREE, PAGE_NOACCESS, 0];
+        }
+        // The heap's own blocks, up to the next page that is a reservation's
+        // or wholly free.
+        let end = arenaEnd;
+        for (const reservation of allocator.owned(VIRTUAL))
+        {
+            if (reservation > page && reservation < end)
+            {
+                end = reservation;
+            }
+        }
+        for (const span of spans)
+        {
+            const first = roundUp(span.base, PAGE_SIZE);
+            if (first > page && first + PAGE_SIZE <= span.base + span.size && first < end)
+            {
+                end = first;
+            }
+        }
+        return [page, host.arena.base, PAGE_EXECUTE_READWRITE, end - page, MEM_COMMIT,
+            PAGE_EXECUTE_READWRITE, MEM_PRIVATE];
+    };
+
+    /**
      * The block at `address`, but only if it belongs to `heap`. Windows leaves
      * a cross-heap free undefined; refusing it turns a bug that would otherwise
      * surface as unrelated corruption into a FALSE the caller can see.
@@ -784,10 +926,103 @@ export function createHeapFunctions(host){
         /** HANDLE HeapCreate(DWORD flOptions, SIZE_T dwInitialSize, SIZE_T dwMaximumSize) */
         HeapCreate: {
             argBytes: 12,
-            handler: ()=>{
+            /** @param {number[]} [args] */
+            handler: ([options] = [0])=>{
                 const heap = newHandle();
                 heaps.add(heap);
+                if ((options & HEAP_NO_SERIALIZE) !== 0)
+                {
+                    unserialized.add(heap);
+                }
                 return heap;
+            },
+        },
+
+        /**
+         * BOOL HeapSetInformation(HANDLE, HEAP_INFORMATION_CLASS, PVOID, SIZE_T)
+         *
+         * The low-fragmentation heap is a promise about how the heap lays out
+         * small blocks, which this allocator keeps whatever it is told; what
+         * is kept is the answer, since a program turns it on and later asks.
+         * It cannot be turned off again, and a heap without serialisation
+         * cannot have it. Ending the process on corruption is asked of no heap
+         * in particular and accepted.
+         */
+        HeapSetInformation: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, kind, information, length])=>{
+                const heap = handle >>> 0;
+                if (kind === HEAP_ENABLE_TERMINATION_ON_CORRUPTION)
+                {
+                    return 1;
+                }
+                if (kind !== HEAP_COMPATIBILITY_INFORMATION || (length >>> 0) < 4
+                    || information === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if (!heaps.has(heap))
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                const value = readDword(information >>> 0);
+                if (lowFragmentation.has(heap))
+                {
+                    if (value === LOW_FRAGMENTATION_HEAP)
+                    {
+                        return 1;
+                    }
+                    host.setLastError(ERROR_GEN_FAILURE);
+                    return 0;
+                }
+                if (value === 0)
+                {
+                    return 1;
+                }
+                if (value !== LOW_FRAGMENTATION_HEAP || unserialized.has(heap))
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                lowFragmentation.add(heap);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL HeapQueryInformation(HANDLE, HEAP_INFORMATION_CLASS, PVOID,
+         *                           SIZE_T, PSIZE_T ReturnLength)
+         */
+        HeapQueryInformation: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, kind, information, length, returned])=>{
+                const heap = handle >>> 0;
+                if (!heaps.has(heap))
+                {
+                    host.setLastError(ERROR_NOACCESS);
+                    return 0;
+                }
+                if (kind !== HEAP_COMPATIBILITY_INFORMATION)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if (returned !== 0)
+                {
+                    writeDword(returned >>> 0, 4);
+                }
+                if ((length >>> 0) < 4 || information === 0)
+                {
+                    host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+                    return 0;
+                }
+                writeDword(information >>> 0,
+                    lowFragmentation.has(heap) ? LOW_FRAGMENTATION_HEAP : 0);
+                return 1;
             },
         },
 
@@ -809,6 +1044,8 @@ export function createHeapFunctions(host){
                     allocator.free(address);
                 }
                 heaps.delete(heap);
+                unserialized.delete(heap);
+                lowFragmentation.delete(heap);
                 return 1;
             },
         },
@@ -940,6 +1177,12 @@ export function createHeapFunctions(host){
                         return 0;
                     }
                     decommitted.delete(start);
+                    committed.set(start, []);
+                    if ((kind & MEM_COMMIT) !== 0)
+                    {
+                        markCommitted(start, (requested & ~(PAGE_SIZE - 1)) >>> 0,
+                            start + span, true);
+                    }
                     zeroHandedOver(start, span);
                     return start;
                 }
@@ -1003,6 +1246,7 @@ export function createHeapFunctions(host){
                     // commits up to its high-water mark each time it grows
                     // does exactly that.
                     takeBack(existing.address, page, page + needed);
+                    markCommitted(existing.address, page, page + needed, true);
                     return page;
                 }
 
@@ -1046,6 +1290,11 @@ export function createHeapFunctions(host){
                 // Arena that was never handed out is zero already; only what
                 // something else finished with costs a write.
                 decommitted.delete(address);
+                committed.set(address, []);
+                if ((kind & MEM_COMMIT) !== 0)
+                {
+                    markCommitted(address, address, address + rounded, true);
+                }
                 zeroHandedOver(address, span);
                 return address;
             },
@@ -1093,6 +1342,7 @@ export function createHeapFunctions(host){
                     }
                     allocator.free(address);
                     decommitted.delete(address);
+                    committed.delete(address);
                     return 1;
                 }
                 // Decommit keeps the reservation. Page-level commit state is not
@@ -1112,6 +1362,7 @@ export function createHeapFunctions(host){
                     return 0;
                 }
                 giveBack(block.address, Math.max(page, block.address), to);
+                markCommitted(block.address, Math.max(page, block.address), to, false);
                 return 1;
             },
         },
@@ -1420,15 +1671,21 @@ export function createHeapFunctions(host){
          * SIZE_T VirtualQuery(LPCVOID lpAddress, PMEMORY_BASIC_INFORMATION lpBuffer,
          *                     SIZE_T dwLength)
          *
-         * Answered from the memory layer's own region map when the assembling
-         * caller supplied one, so that what is reported mapped is what actually
-         * is. An address outside any region is free space, and the whole free
-         * run is reported as one answer -- from the query address's own page
-         * down to the next mapped region's base (or the top of user address
-         * space with nothing above) -- because a guest that walks its address
-         * space with `address += RegionSize` (a crash reporter, a heap
-         * manager) would otherwise step one page at a time across every free
-         * gigabyte.
+         * The arena is answered from the allocator, which knows what is in it:
+         * a VirtualAlloc reservation as its own allocation, committed and
+         * reserved page by page; free arena as free; and the heap's blocks as
+         * committed memory. Anything else is answered from the memory layer's
+         * region map when the assembling caller supplied one.
+         *
+         * Every answer covers the whole run of pages that share the state of
+         * the one asked about, because a guest that walks its address space
+         * with `address += RegionSize` (a crash reporter, a heap manager)
+         * would otherwise step one page at a time across every gigabyte.
+         *
+         * Free is said only where VirtualAlloc can reserve, which is inside the
+         * arena: an address nothing maps outside it is reported reserved, by
+         * someone else, since a program that finds free space goes on to
+         * reserve it there.
          */
         VirtualQuery: {
             argBytes: 12,
@@ -1448,33 +1705,45 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const region = host.regionAt ? host.regionAt(at) : null;
-                const data = new Uint8Array(MEMORY_BASIC_INFORMATION.SIZE);
-                const view = new DataView(data.buffer);
-                view.setUint32(MEMORY_BASIC_INFORMATION.BaseAddress, at, true);
-                if (region)
+                const page = (at & ~(PAGE_SIZE - 1)) >>> 0;
+                const arenaEnd = host.arena.base + host.arena.size;
+                const inArena = page >= host.arena.base && page < arenaEnd;
+                const region = inArena ? null : host.regionAt ? host.regionAt(at) : null;
+                /** @type {[number, number, number, number, number, number, number]} */
+                let answer;
+                if (inArena)
                 {
-                    view.setUint32(MEMORY_BASIC_INFORMATION.AllocationBase,
-                        region.base, true);
-                    view.setUint32(MEMORY_BASIC_INFORMATION.AllocationProtect,
-                        PAGE_EXECUTE_READWRITE, true);
-                    view.setUint32(MEMORY_BASIC_INFORMATION.RegionSize,
-                        region.base + region.size - at, true);
-                    view.setUint32(MEMORY_BASIC_INFORMATION.State, MEM_COMMIT, true);
-                    view.setUint32(MEMORY_BASIC_INFORMATION.Protect,
-                        PAGE_EXECUTE_READWRITE, true);
-                    view.setUint32(MEMORY_BASIC_INFORMATION.Type, MEM_PRIVATE, true);
+                    answer = arenaAnswer(page, arenaEnd);
+                }
+                else if (region)
+                {
+                    answer = [at, region.base, PAGE_EXECUTE_READWRITE,
+                        region.base + region.size - at, MEM_COMMIT, PAGE_EXECUTE_READWRITE,
+                        MEM_PRIVATE];
                 }
                 else
                 {
-                    const base = (at & ~(PAGE_SIZE - 1)) >>> 0;
                     const next = host.nextRegionAfter ? host.nextRegionAfter(at) : null;
-                    const limit = next ? next.base : USER_ADDRESS_SPACE_TOP;
-                    view.setUint32(MEMORY_BASIC_INFORMATION.BaseAddress, base, true);
-                    view.setUint32(MEMORY_BASIC_INFORMATION.RegionSize, limit - base, true);
-                    view.setUint32(MEMORY_BASIC_INFORMATION.State, MEM_FREE, true);
-                    view.setUint32(MEMORY_BASIC_INFORMATION.Protect, PAGE_NOACCESS, true);
+                    let limit = next ? next.base : USER_ADDRESS_SPACE_TOP;
+                    if (host.arena.base > at && host.arena.base < limit)
+                    {
+                        limit = host.arena.base;
+                    }
+                    answer = [page, page, PAGE_NOACCESS, limit - page, MEM_RESERVE, 0,
+                        MEM_PRIVATE];
                 }
+                const data = new Uint8Array(MEMORY_BASIC_INFORMATION.SIZE);
+                const view = new DataView(data.buffer);
+                const [base, allocationBase, allocationProtect, size, state, protect, type]
+                    = answer;
+                view.setUint32(MEMORY_BASIC_INFORMATION.BaseAddress, base, true);
+                view.setUint32(MEMORY_BASIC_INFORMATION.AllocationBase, allocationBase, true);
+                view.setUint32(MEMORY_BASIC_INFORMATION.AllocationProtect, allocationProtect,
+                    true);
+                view.setUint32(MEMORY_BASIC_INFORMATION.RegionSize, size, true);
+                view.setUint32(MEMORY_BASIC_INFORMATION.State, state, true);
+                view.setUint32(MEMORY_BASIC_INFORMATION.Protect, protect, true);
+                view.setUint32(MEMORY_BASIC_INFORMATION.Type, type, true);
                 host.writeMemory(buffer >>> 0, data);
                 return MEMORY_BASIC_INFORMATION.SIZE;
             },

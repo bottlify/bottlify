@@ -116,6 +116,34 @@ test('the two halves of the viewport travel together', ()=>{
     assert.deepEqual(pass.viewport.scale, [2 / 64, -2 / 32]);
 });
 
+test('a viewport past the target keeps its mapping, and its scissor stays on the target', ()=>{
+    // A viewport may reach past the attachment -- WebGPU allows it, and so do
+    // the APIs above -- but a scissor may not: one past the attachment
+    // invalidates the encoder, and a negative origin is refused outright, so
+    // either would lose the whole frame instead of the part off the target.
+    const { gpu, backend } = harness();
+
+    const frame = backend.beginFrame();
+    const pass = frame.beginPass({ target: target(backend, 256) });
+    pass.setViewport({ x: 0, y: 0, width: 512, height: 384 });
+    pass.setViewport({ x: -64, y: -32, width: 256, height: 256 });
+    pass.setViewport({ x: 300, y: 0, width: 64, height: 64 });
+    pass.setScissor({ x: -8, y: 200, width: 64, height: 100 });
+    frame.end();
+
+    assert.deepEqual(gpu.of('setViewport').map(call=>call.rect).slice(1), [
+        [0, 0, 512, 384, 0, 1],
+        [-64, -32, 256, 256, 0, 1],
+        [300, 0, 64, 64, 0, 1],
+    ], 'the viewport itself is passed as the program set it');
+    assert.deepEqual(gpu.of('setScissorRect').map(call=>call.rect).slice(1), [
+        [0, 0, 256, 256],
+        [0, 0, 192, 224],
+        [256, 0, 0, 64],
+        [0, 200, 56, 56],
+    ]);
+});
+
 test('the binding cache survives a pass boundary and a frame boundary', ()=>{
     // A group names a layout, a view, a sampler and the uniform ring: nothing
     // that changes per draw, so the one made in the first pass is the one
@@ -516,6 +544,122 @@ test('a pass takes a stencil reference as dynamic state', ()=>{
     frame.end();
     assert.deepEqual(gpu.of('setStencilReference').map((/** @type {any} */ c)=>c.reference),
         [0x80]);
+});
+
+test('a pass of several colour targets attaches each at its location', ()=>{
+    const { gpu, backend } = harness();
+    const a = target(backend, 64);
+    const b = target(backend, 64);
+    const frame = backend.beginFrame();
+    const pass = frame.beginPass({
+        targets: [a, null, b],
+        clearValues: [{ r: 1, g: 0, b: 0, a: 1 }, null, null],
+    });
+    pass.setScissor({ x: 0, y: 0, width: 512, height: 512 });
+    frame.end();
+    const [begun] = gpu.of('beginRenderPass');
+    const attachments = begun.descriptor.colorAttachments;
+    assert.equal(attachments.length, 3);
+    assert.deepEqual([attachments[0].view, attachments[0].loadOp, attachments[0].clearValue],
+        [a.view, 'clear', { r: 1, g: 0, b: 0, a: 1 }], 'a value clears its own target');
+    assert.equal(attachments[1], null, 'a location with nothing bound stays empty');
+    assert.deepEqual([attachments[2].view, attachments[2].loadOp], [b.view, 'load']);
+    assert.equal(pass.target, a, 'the first target sizes the pass');
+    assert.deepEqual(gpu.of('setScissorRect').map(call=>call.rect).at(-1), [0, 0, 64, 64],
+        'the scissor is clamped to the targets');
+});
+
+test('the colour targets of one pass are one size, and a pass has some target', ()=>{
+    const { backend } = harness();
+    const frame = backend.beginFrame();
+    assert.throws(()=>frame.beginPass({ targets: [target(backend, 64), target(backend, 32)] }),
+        /one size/);
+    assert.throws(()=>frame.beginPass({ targets: [] }), /no target/);
+    frame.end();
+});
+
+test('a pass may draw depth alone, sized by its depth target', ()=>{
+    const { gpu, backend } = harness();
+    const depth = backend.createSurface({ width: 32, height: 16, format: 'depth32float',
+        label: 'shadow' });
+    const frame = backend.beginFrame();
+    frame.beginPass({
+        targets: [],
+        depthTarget: depth,
+        depthStencilAttachment: { view: depth.view, depthLoadOp: 'clear', depthStoreOp: 'store',
+            depthClearValue: 1 },
+    });
+    frame.end();
+    const [begun] = gpu.of('beginRenderPass');
+    assert.deepEqual(begun.descriptor.colorAttachments, []);
+    assert.equal(begun.descriptor.depthStencilAttachment.view, depth.view);
+    assert.deepEqual(gpu.of('setViewport')[0].rect, [0, 0, 32, 16, 0, 1]);
+});
+
+test('a pass takes a blend constant as dynamic state', ()=>{
+    const { gpu, backend } = harness();
+    const frame = backend.beginFrame();
+    const pass = frame.beginPass({ target: target(backend) });
+    pass.setBlendConstant({ r: 0.5, g: 0.25, b: 0, a: 1 });
+    frame.end();
+    assert.deepEqual(gpu.of('setBlendConstant').map((/** @type {any} */ c)=>c.color),
+        [{ r: 0.5, g: 0.25, b: 0, a: 1 }]);
+});
+
+test('occlusion queries count through the frame\'s query set, read once the frame ends',
+    async()=>{
+        const { gpu, backend } = harness({ fake: { occlusionSamples: (/** @type {number} */ index)=>
+            (index + 1) * 10 } });
+        const frame = backend.beginFrame();
+        const first = frame.beginPass({ target: target(backend), occlusion: true });
+        const zero = first.beginOcclusionQuery();
+        first.draw(3, 1, 0, 0);
+        first.endOcclusionQuery();
+        // A second pass counts on in the same set.
+        const second = frame.beginPass({ target: target(backend, 64), occlusion: true });
+        const one = second.beginOcclusionQuery();
+        second.endOcclusionQuery();
+        const read = frame.occlusionResults();
+        frame.end();
+        assert.deepEqual([zero, one], [0, 1]);
+        const [made] = gpu.of('createQuerySet');
+        assert.equal(made.descriptor.type, 'occlusion');
+        assert.equal(gpu.count('createQuerySet'), 1, 'one set for the frame');
+        for (const pass of gpu.of('beginRenderPass'))
+        {
+            assert.equal(pass.descriptor.occlusionQuerySet, made.createQuerySet);
+        }
+        const [resolved] = gpu.of('resolveQuerySet');
+        assert.deepEqual([resolved.firstQuery, resolved.queryCount], [0, 2]);
+        assert.deepEqual(await read(), [10, 20]);
+        assert.ok(gpu.of('destroyQuerySet').length === 1, 'the set goes with the frame');
+    });
+
+test('a pass not opened for occlusion cannot count, and a frame that counts nothing makes no set',
+    async()=>{
+        const { gpu, backend } = harness();
+        const frame = backend.beginFrame();
+        const pass = frame.beginPass({ target: target(backend) });
+        assert.throws(()=>pass.beginOcclusionQuery(), /occlusion/);
+        const read = frame.occlusionResults();
+        frame.end();
+        assert.deepEqual(await read(), []);
+        assert.equal(gpu.count('createQuerySet'), 0);
+        assert.equal(gpu.count('resolveQuerySet'), 0);
+    });
+
+test('a snapshot reads texels of any width, from any layer', async()=>{
+    const { gpu, backend } = harness();
+    const wide = backend.createSurface({ width: 20, height: 3, format: 'rgba16float',
+        layers: 2, label: 'wide' });
+    const frame = backend.beginFrame();
+    const read = frame.snapshot({ ...wide, layer: 1, bytesPerTexel: 8 });
+    frame.end();
+    const [copy] = gpu.of('copyTextureToBuffer');
+    assert.deepEqual(copy.source.origin, { x: 0, y: 0, z: 1 });
+    assert.equal(copy.destination.bytesPerRow, 256, 'twenty eight-byte texels, a row of 256');
+    const image = await read();
+    assert.equal(image.data.length, 20 * 3 * 8);
 });
 
 test('a texture copy closes the pass it interrupts and records on the frame encoder', ()=>{

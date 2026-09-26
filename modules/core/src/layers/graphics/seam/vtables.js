@@ -275,7 +275,7 @@ export const IDIRECT3DDEVICE8_SLOTS = /** @type {[string, number][]} */ ([
  * front of its own list. A derived interface names its base's methods again
  * because that is what the guest compiled against.
  */
-const RESOURCE8_SLOTS = /** @type {[string, number][]} */ ([
+export const IDIRECT3DRESOURCE8_SLOTS = /** @type {[string, number][]} */ ([
     ['GetDevice', 1],
     ['SetPrivateData', 4],
     ['GetPrivateData', 3],
@@ -284,6 +284,14 @@ const RESOURCE8_SLOTS = /** @type {[string, number][]} */ ([
     ['GetPriority', 0],
     ['PreLoad', 0],
     ['GetType', 0],
+]);
+
+/** IDirect3DBaseTexture8: a resource, then the three every texture kind shares. */
+export const IDIRECT3DBASETEXTURE8_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDIRECT3DRESOURCE8_SLOTS,
+    ['SetLOD', 1],
+    ['GetLOD', 0],
+    ['GetLevelCount', 0],
 ]);
 
 /** IDirect3DSurface8. Not a resource: it has its own short list. */
@@ -300,10 +308,7 @@ export const IDIRECT3DSURFACE8_SLOTS = /** @type {[string, number][]} */ ([
 
 /** IDirect3DTexture8: a resource, then the base-texture three, then its own. */
 export const IDIRECT3DTEXTURE8_SLOTS = /** @type {[string, number][]} */ ([
-    ...RESOURCE8_SLOTS,
-    ['SetLOD', 1],
-    ['GetLOD', 0],
-    ['GetLevelCount', 0],
+    ...IDIRECT3DBASETEXTURE8_SLOTS,
     ['GetLevelDesc', 2],
     ['GetSurfaceLevel', 2],
     ['LockRect', 4],
@@ -311,9 +316,56 @@ export const IDIRECT3DTEXTURE8_SLOTS = /** @type {[string, number][]} */ ([
     ['AddDirtyRect', 1],
 ]);
 
+/**
+ * IDirect3DCubeTexture8: the base texture, then its own five, each naming the
+ * face before the level.
+ */
+export const IDIRECT3DCUBETEXTURE8_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDIRECT3DBASETEXTURE8_SLOTS,
+    ['GetLevelDesc', 2],
+    ['GetCubeMapSurface', 3],
+    ['LockRect', 5],
+    ['UnlockRect', 2],
+    ['AddDirtyRect', 2],
+]);
+
+/** IDirect3DVolumeTexture8: the base texture, then its own five over boxes. */
+export const IDIRECT3DVOLUMETEXTURE8_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDIRECT3DBASETEXTURE8_SLOTS,
+    ['GetLevelDesc', 2],
+    ['GetVolumeLevel', 2],
+    ['LockBox', 4],
+    ['UnlockBox', 1],
+    ['AddDirtyBox', 1],
+]);
+
+/**
+ * IDirect3DSwapChain8, which after IUnknown has two methods: Present with the
+ * device's four arguments, and GetBackBuffer.
+ */
+export const IDIRECT3DSWAPCHAIN8_SLOTS = /** @type {[string, number][]} */ ([
+    ['Present', 4],
+    ['GetBackBuffer', 3],
+]);
+
+/**
+ * IDirect3DVolume8, a level of a volume texture. Not a resource: it has no
+ * priority, no preload and no type, as a surface has none.
+ */
+export const IDIRECT3DVOLUME8_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetDevice', 1],
+    ['SetPrivateData', 4],
+    ['GetPrivateData', 3],
+    ['FreePrivateData', 1],
+    ['GetContainer', 2],
+    ['GetDesc', 1],
+    ['LockBox', 3],
+    ['UnlockBox', 0],
+]);
+
 /** IDirect3DVertexBuffer8. */
 export const IDIRECT3DVERTEXBUFFER8_SLOTS = /** @type {[string, number][]} */ ([
-    ...RESOURCE8_SLOTS,
+    ...IDIRECT3DRESOURCE8_SLOTS,
     ['Lock', 4],
     ['Unlock', 0],
     ['GetDesc', 1],

@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import {
     createProcessBlocks, TEB, PEB, PARAMS, LDR_DATA, LDR_ENTRY, END_OF_EXCEPTION_LIST,
 } from './teb.js';
+import { WINDOWS_VERSIONS } from './versions.js';
 
 /** Guest memory as a flat array, with a bump allocator over it. */
 function guest(){
@@ -96,6 +97,41 @@ test('the process block points at its parameters, and they say they are normalis
     assert.equal(memory.view.getUint32(peb + PEB.PROCESS_PARAMETERS, true), params);
     assert.notEqual(memory.view.getUint32(params + PARAMS.FLAGS, true) & 0x80000000, 0);
     assert.equal(memory.view.getUint32(peb + PEB.IMAGE_BASE_ADDRESS, true), 0x00400000);
+});
+
+test('the process block holds the version and its service pack where a program reads them', ()=>{
+    // A program that reads the block directly finds what GetVersionEx says:
+    // the build is a WORD, and the WORD after it is the service pack, major
+    // in the high byte -- a DWORD build would write a zero service pack over it.
+    const memory = guest();
+    const { peb } = build(memory, { version: WINDOWS_VERSIONS.win7 });
+
+    assert.equal(memory.view.getUint32(peb + PEB.OS_MAJOR_VERSION, true), 6);
+    assert.equal(memory.view.getUint32(peb + PEB.OS_MINOR_VERSION, true), 1);
+    assert.equal(memory.view.getUint16(peb + PEB.OS_BUILD_NUMBER, true), 7601);
+    assert.equal(memory.view.getUint16(peb + PEB.OS_CSD_VERSION, true), 0x0100);
+    assert.equal(memory.view.getUint32(peb + PEB.OS_PLATFORM_ID, true), 2);
+
+    const length = memory.view.getUint16(peb + PEB.CSD_VERSION, true);
+    const buffer = memory.view.getUint32(peb + PEB.CSD_VERSION + 4, true);
+    assert.equal(length, 'Service Pack 1'.length * 2);
+    assert.equal(memory.view.getUint16(peb + PEB.CSD_VERSION + 2, true), length + 2);
+    const text = String.fromCharCode(...Array.from({ length: length / 2 },
+        (_, index)=>memory.view.getUint16(buffer + index * 2, true)));
+    assert.equal(text, 'Service Pack 1');
+});
+
+test('a Windows with no service pack has an empty one, not a missing one', ()=>{
+    const memory = guest();
+    const { peb } = build(memory, { version: WINDOWS_VERSIONS.win10 });
+
+    assert.equal(memory.view.getUint32(peb + PEB.OS_MAJOR_VERSION, true), 10);
+    assert.equal(memory.view.getUint16(peb + PEB.OS_BUILD_NUMBER, true), 19045);
+    assert.equal(memory.view.getUint16(peb + PEB.OS_CSD_VERSION, true), 0);
+    assert.equal(memory.view.getUint16(peb + PEB.CSD_VERSION, true), 0);
+    const buffer = memory.view.getUint32(peb + PEB.CSD_VERSION + 4, true);
+    assert.notEqual(buffer, 0, 'a reader copying the string finds a terminator');
+    assert.equal(memory.view.getUint16(buffer, true), 0);
 });
 
 test('a counted string names its length in bytes and its room including the terminator', ()=>{
@@ -234,6 +270,41 @@ test('the modules given at build time are all three lists, in order, walkable fr
         .map(node=>node - LDR_ENTRY.IN_INITIALIZATION_ORDER_LINKS);
     assert.deepEqual(memoryOrder, loadOrder);
     assert.deepEqual(initOrder, loadOrder);
+});
+
+test('removeModule unlinks a library from all three lists, both ways round', ()=>{
+    const memory = guest();
+    const blocks = build(memory, { modules: [
+        { name: 'kernel32.dll', base: 0x77000000, size: 0x1000 },
+        { name: 'probe.dll', base: 0x10000000, size: 0x1000 },
+        { name: 'other.dll', base: 0x10100000, size: 0x1000 },
+    ] });
+    const ldr = memory.view.getUint32(blocks.peb + PEB.LDR, true);
+
+    blocks.removeModule(0x10000000);
+    blocks.removeModule(0x10100000);
+    blocks.addModule({ name: 'late.dll', base: 0x10200000, size: 0x1000 });
+
+    for (const [list, link] of [
+        [LDR_DATA.IN_LOAD_ORDER_MODULE_LIST, LDR_ENTRY.IN_LOAD_ORDER_LINKS],
+        [LDR_DATA.IN_MEMORY_ORDER_MODULE_LIST, LDR_ENTRY.IN_MEMORY_ORDER_LINKS],
+        [LDR_DATA.IN_INITIALIZATION_ORDER_MODULE_LIST, LDR_ENTRY.IN_INITIALIZATION_ORDER_LINKS],
+    ])
+    {
+        const head = ldr + list;
+        const nodes = walkList(memory, head);
+        assert.deepEqual(nodes.map(node=>readUnicodeString(memory,
+            node - link + LDR_ENTRY.BASE_DLL_NAME)), ['kernel32.dll', 'late.dll']);
+        // Backwards too: every Blink is the node before it.
+        let at = memory.view.getUint32(head + 4, true);
+        for (const node of [...nodes].reverse())
+        {
+            assert.equal(at, node);
+            at = memory.view.getUint32(at + 4, true);
+        }
+        assert.equal(at, head);
+    }
+    blocks.removeModule(0x12345678);
 });
 
 test('addModule joins a library LoadLibrary mapped after the process started', ()=>{

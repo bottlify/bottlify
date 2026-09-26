@@ -176,7 +176,7 @@ const S3TC_FORMATS = new Set([
  * @typedef {Object} TextureUnit
  * @property {Map<number, number>} enabled   target -> 0 or 1
  * @property {Map<number, number>} bindings  target -> texture name
- * @property {Map<number, import('./objects.js').TextureObject>} defaults
+ * @property {Map<number, import('./objects.js').TextureObject>} defaults  one map, every unit's
  * @property {import('./texture.js').TextureEnvironment} env
  * @property {number[]} genEnabled  per coordinate
  * @property {number[]} genModes
@@ -185,12 +185,17 @@ const S3TC_FORMATS = new Set([
  * @property {import('./matrix.js').MatrixStack} stack
  */
 
-/** @returns {TextureUnit} */
-function createUnit(){
+/**
+ * @param {Map<number, import('./objects.js').TextureObject>} defaults  the
+ *        context's texture 0 per target: the initial objects belong to the
+ *        name space, which every unit shares, not to a unit
+ * @returns {TextureUnit}
+ */
+function createUnit(defaults){
     return {
         enabled: new Map(TARGETS.map(target=>[target, 0])),
         bindings: new Map(TARGETS.map(target=>[target, 0])),
-        defaults: new Map(TARGETS.map(target=>[target, createTextureObject(0, target)])),
+        defaults,
         env: createTextureEnvironment(),
         genEnabled: [0, 0, 0, 0],
         genModes: [GL.EYE_LINEAR, GL.EYE_LINEAR, GL.EYE_LINEAR, GL.EYE_LINEAR],
@@ -207,8 +212,10 @@ function createUnit(){
 export function installTextureCalls(context, kernel){
     const { enter, setError, record, setState, diverge } = kernel;
 
+    /** @type {Map<number, import('./objects.js').TextureObject>} */
+    const defaults = new Map(TARGETS.map(target=>[target, createTextureObject(0, target)]));
     /** @type {TextureUnit[]} */
-    const units = Array.from({ length: TEXTURE_UNITS }, createUnit);
+    const units = Array.from({ length: TEXTURE_UNITS }, ()=>createUnit(defaults));
     let active = 0;
     /** @type {number[][]} the current texture coordinates, per unit */
     const texCoords = Array.from({ length: TEXTURE_UNITS }, ()=>[0, 0, 0, 1]);

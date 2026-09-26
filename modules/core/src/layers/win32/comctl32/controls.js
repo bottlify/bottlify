@@ -21,16 +21,18 @@
 
 import { PROGRESS_CLASS, PROGRESS_ATOM, createProgressProcedure } from './progress.js';
 import { TREEVIEW_CLASS, TREEVIEW_ATOM, createTreeViewProcedure } from './treeview.js';
+import { TAB_CLASS, TAB_ATOM, createTabProcedure } from './tab.js';
 
 /**
  * The classes, in the order a program is likeliest to meet them.
  *
  * @param {import('../user32/controls.js').ControlHost} host
  * @param {any} toolkit  The drawing helpers the system classes share.
+ * @param {import('./tab.js').TabImages} [images]  The image lists a tab draws from.
  * @returns {{ name: string, procedure: any, atom: number,
  *     windowExtra?: number, background?: number }[]}
  */
-export function createCommonControls(host, toolkit){
+export function createCommonControls(host, toolkit, images){
     return [
         {
             name: PROGRESS_CLASS,
@@ -41,6 +43,11 @@ export function createCommonControls(host, toolkit){
             name: TREEVIEW_CLASS,
             atom: TREEVIEW_ATOM,
             procedure: createTreeViewProcedure(host, toolkit),
+        },
+        {
+            name: TAB_CLASS,
+            atom: TAB_ATOM,
+            procedure: createTabProcedure(host, toolkit, images),
         },
     ];
 }

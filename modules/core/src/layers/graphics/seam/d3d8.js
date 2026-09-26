@@ -16,13 +16,11 @@
  * answers E_NOTIMPL, which is a reply a program handles.
  *
  * A slot that answers a failure code rather than doing the thing asked of it is
- * making the same point more loudly: the shaders, the cube and volume textures,
- * the additional swap chain, the palettes, the cursor and the transformed-vertex
- * path are all refused, each because the renderer behind this cannot honour
- * what succeeding would promise. Every one of them says so where it stands. A
- * refusal is a reply a program acts on -- usually by taking the path this build
- * does draw -- where a success it cannot see through leaves it drawing nothing
- * and looking somewhere else for the reason.
+ * making the same point more loudly: a shader of a version the caps do not
+ * claim is refused, because the renderer behind this cannot honour what
+ * succeeding would promise. A refusal is a reply a program acts on -- usually
+ * by taking the path this build does draw -- where a success it cannot see
+ * through leaves it drawing nothing and looking somewhere else for the reason.
  *
  * Out-parameters are where this is easy to get wrong in a way nothing reports.
  * A method that hands back an interface writes a pointer *and* takes a
@@ -31,21 +29,35 @@
  * because both are facts about the ABI rather than about Direct3D.
  */
 
-import { describe, IDIRECT3D8_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS,
-    IDIRECT3DTEXTURE8_SLOTS, IDIRECT3DVERTEXBUFFER8_SLOTS,
-    IDIRECT3DINDEXBUFFER8_SLOTS } from './vtables.js';
-import { IID_IDirect3D8, IID_IDirect3DDevice8, IID_IDirect3DSurface8,
-    IID_IDirect3DTexture8, IID_IDirect3DVertexBuffer8,
-    IID_IDirect3DIndexBuffer8 } from './iids.js';
+import { describe, IDIRECT3D8_SLOTS, IDIRECT3DBASETEXTURE8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS,
+    IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSWAPCHAIN8_SLOTS,
+    IDIRECT3DRESOURCE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
+    IDIRECT3DVERTEXBUFFER8_SLOTS, IDIRECT3DINDEXBUFFER8_SLOTS, IDIRECT3DVOLUME8_SLOTS,
+    IDIRECT3DVOLUMETEXTURE8_SLOTS } from './vtables.js';
+import { IID_IDirect3D8, IID_IDirect3DBaseTexture8, IID_IDirect3DCubeTexture8,
+    IID_IDirect3DDevice8,
+    IID_IDirect3DIndexBuffer8, IID_IDirect3DResource8, IID_IDirect3DSurface8,
+    IID_IDirect3DTexture8, IID_IDirect3DVertexBuffer8, IID_IDirect3DVolume8,
+    IID_IDirect3DVolumeTexture8, IID_IDirect3DSwapChain8 } from './iids.js';
+import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js';
+import { queryAs, readGuid } from './guid.js';
 import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
-    D3DSURFACE_DESC8, D3DLOCKED_RECT, D3DLIGHT7, RECT, POINT, createFields } from './structs.js';
-import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE } from '../d3d8/constants.js';
+    D3DSURFACE_DESC8, D3DLOCKED_RECT, D3DLIGHT7, RECT, POINT, createFields,
+    D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8 } from './structs.js';
+import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
     D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
 import { vertexCountOf } from '../d3d8/render.js';
+import { PALETTE_BYTES } from '../d3d9/device.js';
 import { createCursorTeller } from './cursor.js';
+import { ADAPTER_GUID, describeAdapter } from './adapter.js';
+import { createRaster, rasterStatus } from './raster.js';
+import { TEXTURE_OP_CAPS } from '../d3d8/validity.js';
+import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
+import { declarationLength } from '../d3d8/declaration.js';
+import { END_TOKEN } from '../d3d9/shader.js';
 import {
     createShadow, getSurfaceLevelCode, lockCode, materialFloats, materialOf, setIndicesCode,
     setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
@@ -59,7 +71,16 @@ import {
  * blob is unreviewable: nobody can tell a claim we can honour from one we
  * cannot, and every one of these is a claim a program acts on.
  */
-const D3DCAPS2_FULLSCREENGAMMA = 0x00020000;
+const D3DCAPS_READ_SCANLINE = 0x00020000;
+const D3DVS_VERSION_MARK = 0xfffe0000;
+const D3DPS_VERSION_MARK = 0xffff0000;
+
+/** Past this many tokens a shader function with no end token is not one. */
+const MAX_SHADER_DWORDS = 1 << 16;
+
+/** A pixel shader's constant registers, c0 to c7. */
+const PIXEL_SHADER_CONSTANTS = 8;
+
 // A colour cursor at any resolution: the device keeps the bitmap a program
 // hands it and the host shows it over the frame. A device that claims neither
 // sends a program down its own drawing path for the cursor, which a program
@@ -67,6 +88,7 @@ const D3DCAPS2_FULLSCREENGAMMA = 0x00020000;
 const D3DCURSORCAPS_COLOR = 0x00000001;
 const D3DCURSORCAPS_LOWRES = 0x00000002;
 const D3DCAPS2_CANRENDERWINDOWED = 0x00080000;
+const D3DCAPS2_FULLSCREENGAMMA = 0x00020000;
 
 const D3DPRESENT_INTERVAL_ONE = 0x00000001;
 const D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
@@ -91,10 +113,9 @@ const D3DPRASTERCAPS_DITHER = 0x00000001;
 const D3DPRASTERCAPS_ZTEST = 0x00000010;
 const D3DPRASTERCAPS_FOGVERTEX = 0x00000080;
 const D3DPRASTERCAPS_FOGTABLE = 0x00000100;
-const D3DPRASTERCAPS_MIPMAPLODBIAS = 0x00002000;
-const D3DPRASTERCAPS_ZBIAS = 0x00004000;
-const D3DPRASTERCAPS_ANISOTROPY = 0x00020000;
-const D3DPRASTERCAPS_ZFOG = 0x00100000;
+const D3DPRASTERCAPS_FOGRANGE = 0x00010000;
+const D3DPRASTERCAPS_WFOG = 0x00100000;
+const D3DPRASTERCAPS_ZFOG = 0x00200000;
 
 /** NEVER, LESS, EQUAL, LESSEQUAL, GREATER, NOTEQUAL, GREATEREQUAL, ALWAYS. */
 const ALL_COMPARE_CAPS = 0x000000ff;
@@ -114,20 +135,26 @@ const D3DPSHADECAPS_FOGGOURAUD = 0x00080000;
 const D3DPTEXTURECAPS_PERSPECTIVE = 0x00000001;
 const D3DPTEXTURECAPS_ALPHA = 0x00000004;
 const D3DPTEXTURECAPS_PROJECTED = 0x00000400;
-const D3DPTEXTURECAPS_CUBEMAP = 0x00000800;
 const D3DPTEXTURECAPS_MIPMAP = 0x00004000;
+const D3DPTEXTURECAPS_CUBEMAP = 0x00000800;
 const D3DPTEXTURECAPS_MIPCUBEMAP = 0x00010000;
-const D3DPTEXTURECAPS_ALPHAPALETTE = 0x00000080;
+const D3DPTEXTURECAPS_VOLUMEMAP = 0x00002000;
+const D3DPTEXTURECAPS_MIPVOLUMEMAP = 0x00008000;
 
-/** Point, linear and anisotropic, for minification, magnification and mip. */
-const ALL_FILTER_CAPS = 0x07070700 | 0x00000700;
+/**
+ * Point and linear, for minification, magnification and mip. An anisotropic
+ * filter is sampled linearly and D3DTSS_MAXANISOTROPY is not read, so neither
+ * it nor a maximum above one is claimed.
+ */
+const FILTER_CAPS = 0x03030300;
 
 const D3DPTADDRESSCAPS_WRAP = 0x00000001;
 const D3DPTADDRESSCAPS_MIRROR = 0x00000002;
 const D3DPTADDRESSCAPS_CLAMP = 0x00000004;
-const D3DPTADDRESSCAPS_BORDER = 0x00000008;
 const D3DPTADDRESSCAPS_INDEPENDENTUV = 0x00000010;
-const D3DPTADDRESSCAPS_MIRRORONCE = 0x00000020;
+/** Border and mirror-once are folded into clamp and mirror by the sampler, so neither is promised. */
+const ADDRESS_CAPS = D3DPTADDRESSCAPS_WRAP | D3DPTADDRESSCAPS_MIRROR | D3DPTADDRESSCAPS_CLAMP
+    | D3DPTADDRESSCAPS_INDEPENDENTUV;
 
 const D3DLINECAPS_TEXTURE = 0x00000001;
 const D3DLINECAPS_ZTEST = 0x00000002;
@@ -135,11 +162,6 @@ const D3DLINECAPS_BLEND = 0x00000004;
 const D3DLINECAPS_ALPHACMP = 0x00000008;
 const D3DLINECAPS_FOG = 0x00000010;
 
-/** Keep, zero, replace, incr/decr saturating and wrapping, invert. */
-const ALL_STENCIL_CAPS = 0x000001ff;
-
-/** Every texture-stage operation d3d8caps.h defines, which is bits 1..25. */
-const ALL_TEXTURE_OP_CAPS = 0x03ffffff;
 
 const D3DFVFCAPS_PSIZE = 0x00100000;
 
@@ -154,41 +176,6 @@ const D3DERR_INVALIDCALL = 0x8876086c | 0;
 
 /** D3DENUM_NO_WHQL_LEVEL: skip the certification lookup, which took seconds on real Windows. */
 const D3DENUM_NO_WHQL_LEVEL = 0x00000002;
-
-/**
- * WebGPU's word for a vendor against the PCI id a program's card database is
- * keyed by. Only vendors with a WebGPU spelling appear; anything else is
- * reported as zero, an unknown card.
- *
- * @type {Readonly<Record<string, number>>}
- */
-const PCI_VENDOR_IDS = Object.freeze({
-    nvidia: 0x10de,
-    amd: 0x1002,
-    intel: 0x8086,
-    apple: 0x106b,
-    qualcomm: 0x5143,
-    arm: 0x13b5,
-    microsoft: 0x1414,
-});
-
-/**
- * The identifier's GUID: one per adapter and driver on Windows, and one for
- * this engine here -- a program keeps it to recognise the same hardware next
- * run, and the same engine is the same hardware for that purpose.
- */
-const ADAPTER_GUID = Uint8Array.from([
-    0x7a, 0x1b, 0x6c, 0x0d, 0x3e, 0x9f, 0x40, 0x11,
-    0x8a, 0x2b, 0x5c, 0x6d, 0x7e, 0x8f, 0x90, 0xa1,
-]);
-
-/**
- * @typedef {Object} AdapterIdentity
- *     The hardware behind the device, as WebGPU describes it.
- * @property {string} [vendor]        WebGPU's vendor word, e.g. "nvidia".
- * @property {string} [architecture]  WebGPU's architecture word, e.g. "ampere".
- * @property {string} [description]   A human-readable name, when the browser gives one.
- */
 
 /** What a device answers for something it could do on other hardware and cannot here. */
 const D3DERR_NOTAVAILABLE = 0x8876086a | 0;
@@ -238,19 +225,24 @@ const S_FALSE = 1;
  *          ) => void} [deps.resolution]
  *        Told the resolution a device is created at, to report as the screen --
  *        and which window it presents into, so a fullscreen one can be placed.
- * @param {() => AdapterIdentity | null} [deps.identity]
+ * @param {() => import('./adapter.js').AdapterIdentity | null} [deps.identity]
  *        The hardware behind the device, as the assembling caller knows it.
  * @param {(window: number) => { width: number, height: number } | null} [deps.windowClientSize]
  *        The client area of a window, which is the size a back buffer asked
  *        for as zero by zero takes. Without it the configured display is the
  *        nearest size this layer knows.
+ * @param {() => number} [deps.now]  The clock the display's raster runs on, in milliseconds.
  */
 export function createDirect3D8Seam(
     { publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution, identity,
-        windowClientSize },
+        windowClientSize, now = ()=>performance.now() },
 )
 {
     const fields = createFields(memory);
+    const raster = createRaster({
+        now, refresh: ()=>REFRESH_HZ, height: ()=>screen().height,
+    });
+    const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA });
 
     /**
      * Each device's block of state the guest sets without crossing, and the
@@ -279,6 +271,7 @@ export function createDirect3D8Seam(
      * @param {any} resource @param {Iterable<number>} pointers
      */
     const retire = (resource, pointers)=>{
+        privateData.released(resource);
         const shadow = resourceShadows.get(resource);
         if (!shadow)
         {
@@ -365,9 +358,14 @@ export function createDirect3D8Seam(
      * @param {string} id
      * @param {number} out  Where to write the pointer.
      * @param {number} [failure]  What this method answers when it cannot allocate.
+     * @param {any} [owner]  The device that made it, for GetDevice.
      * @returns {number} D3D_OK, or `failure`.
      */
-    const handBack = (object, interfaces, id, out, failure = E_OUTOFMEMORY)=>{
+    const handBack = (object, interfaces, id, out, failure = E_OUTOFMEMORY, owner = null)=>{
+        if (owner)
+        {
+            owners.set(object, owner);
+        }
         const pointer = publisher.publish(object, interfaces, id);
         fields.writeU32(out, pointer);
         return pointer === 0 ? failure : D3D_OK;
@@ -381,18 +379,157 @@ export function createDirect3D8Seam(
      * pointer left there is one it goes on to call.
      *
      * @param {number} out
+     * @param {number} [hr]  The refusal; D3DERR_NOTAVAILABLE unless the create said otherwise.
      */
-    const clearAndRefuse = out=>{
+    const clearAndRefuse = (out, hr = D3DERR_NOTAVAILABLE)=>{
         if ((out >>> 0) !== 0)
         {
             fields.writeU32(out >>> 0, 0);
         }
-        return D3DERR_NOTAVAILABLE;
+        return hr;
     };
+
+    /**
+     * A level's description is the description of its surface, which is also
+     * the only way to reach one. The reference that reaching it took is given
+     * straight back: the call hands out no interface, so a program owes
+     * nothing for it.
+     *
+     * @param {(held: { surface?: any }) => number} reach
+     * @param {number} out
+     */
+    const writeLevelDesc = (reach, out)=>{
+        /** @type {{ surface?: any }} */
+        const held = {};
+        const hr = reach(held);
+        if (hr !== D3D_OK || !held.surface)
+        {
+            return hr;
+        }
+        /** @type {{ desc?: any }} */
+        const described = {};
+        held.surface.GetDesc(described);
+        held.surface.release();
+        if ((out >>> 0) !== 0 && described.desc)
+        {
+            fields.writeStruct(out >>> 0, D3DSURFACE_DESC8, described.desc);
+        }
+        return D3D_OK;
+    };
+
+    /**
+     * The window each additional swap chain presents into. The display shows
+     * the device's window; a chain presenting anywhere else has its frame
+     * drawn and not shown.
+     *
+     * @type {WeakMap<object, number>}
+     */
+    const chainWindows = new WeakMap();
+
+    // IDirect3DSwapChain8: a present, whose rectangles and dirty region are
+    // not honoured and whose window decides whether the display shows the
+    // picture, and the back buffers.
+    const swapChainInterfaces = [describe(IID_IDirect3DSwapChain8, IDIRECT3DSWAPCHAIN8_SLOTS, {
+        /** @param {any} chain @param {number[]} args */
+        Present: (chain, [, , override])=>chain.Present(
+            ((override >>> 0) || chainWindows.get(chain) || deviceWindow) === deviceWindow),
+        /** @param {any} chain @param {number[]} args */
+        GetBackBuffer: (chain, [index, type, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ surface?: any }} */
+            const held = {};
+            const hr = chain.GetBackBuffer(index >>> 0, type >>> 0, held);
+            if (hr !== D3D_OK || !held.surface)
+            {
+                return hr;
+            }
+            return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8, out >>> 0,
+                E_OUTOFMEMORY, owners.get(chain));
+        },
+    })];
+
+    /**
+     * The device each resource was made by, for GetDevice. A texture's levels
+     * are found through the texture. Weak, so this keeps nothing alive.
+     *
+     * @type {WeakMap<object, any>}
+     */
+    const owners = new WeakMap();
+    /** @param {any} resource @returns {any} */
+    const ownerOf = resource=>owners.get(resource)
+        ?? (resource.container ? owners.get(resource.container) : undefined) ?? null;
+
+    /**
+     * The device a resource was made by: the same pointer the program already
+     * holds, with the reference the call owes.
+     *
+     * @param {any} resource @param {number[]} args
+     */
+    const getDevice = (resource, [out])=>{
+        const device = ownerOf(resource);
+        if ((out >>> 0) === 0 || !device)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        device.addRef();
+        fields.writeU32(out >>> 0,
+            publisher.publish(device, deviceInterfaces, IID_IDirect3DDevice8));
+        return D3D_OK;
+    };
+
+    /**
+     * What IDirect3DResource8 answers for every resource: GetType returns the
+     * kind rather than an HRESULT, and the two priority calls a DWORD.
+     *
+     * @param {number} type  D3DRTYPE
+     */
+    const resourceMethods = type=>({
+        ...privateData.methods,
+        GetDevice: getDevice,
+        /** @param {any} resource @param {number[]} args */
+        SetPriority: (resource, [priority])=>resource.SetPriority(priority >>> 0),
+        /** @param {any} resource */
+        GetPriority: resource=>resource.GetPriority(),
+        // Declared void: a resource here is uploaded when it changes.
+        PreLoad: ()=>0,
+        GetType: ()=>type,
+    });
 
     // Resources carry no behaviour of their own here beyond what the API
     // objects already do, so their descriptors are built once.
     const surfaceInterfaces = [describe(IID_IDirect3DSurface8, IDIRECT3DSURFACE8_SLOTS, {
+        ...privateData.methods,
+        GetDevice: getDevice,
+
+        /**
+         * QueryInterface on what holds the surface: the texture a level
+         * belongs to, and the device for a surface of its own -- a back
+         * buffer included, this version having no swap chain object (Wine's
+         * d3d8 test_surface_get_container and test_refcount).
+         *
+         * @param {any} surface @param {number[]} args
+         */
+        GetContainer: (surface, [riid, out])=>{
+            if ((riid >>> 0) === 0 || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const id = readGuid(memory, riid);
+            if (surface.container)
+            {
+                return queryAs(publisher, fields, surface.container,
+                    textureKind(surface.container).interfaces, id, out);
+            }
+            const device = ownerOf(surface);
+            if (!device)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            return queryAs(publisher, fields, device, deviceInterfaces, id, out);
+        },
         /** @param {any} surface @param {number[]} args */
         GetDesc: (surface, [out])=>{
             /** @type {{ desc?: any }} */
@@ -426,9 +563,15 @@ export function createDirect3D8Seam(
         },
         /** @param {any} surface */
         UnlockRect: surface=>surface.UnlockRect(),
-    })];
+    }, {}, retire)];
 
-    const textureInterfaces = [describe(IID_IDirect3DTexture8, IDIRECT3DTEXTURE8_SLOTS, {
+    const textureMethods = {
+        ...resourceMethods(D3DRTYPE.TEXTURE),
+        // Both answer a level rather than an HRESULT.
+        /** @param {any} texture @param {number[]} args */
+        SetLOD: (texture, [lod])=>texture.SetLOD(lod >>> 0),
+        /** @param {any} texture */
+        GetLOD: texture=>texture.GetLOD(),
         // The count is a property of the object rather than a method on it, and
         // this answers a number rather than an HRESULT.
         /** @param {any} texture */
@@ -451,29 +594,9 @@ export function createDirect3D8Seam(
             return answer;
         },
 
-        // A level's description is the description of its surface, which is
-        // also the only way to reach one. The reference that reaching it took
-        // is given straight back: this call hands out no interface, so a
-        // program owes nothing for it.
         /** @param {any} texture @param {number[]} args */
-        GetLevelDesc: (texture, [level, out])=>{
-            /** @type {{ surface?: any }} */
-            const held = {};
-            const hr = texture.GetSurfaceLevel(level >>> 0, held);
-            if (hr !== D3D_OK || !held.surface)
-            {
-                return hr;
-            }
-            /** @type {{ desc?: any }} */
-            const described = {};
-            held.surface.GetDesc(described);
-            held.surface.release();
-            if ((out >>> 0) !== 0 && described.desc)
-            {
-                fields.writeStruct(out >>> 0, D3DSURFACE_DESC8, described.desc);
-            }
-            return D3D_OK;
-        },
+        GetLevelDesc: (texture, [level, out])=>writeLevelDesc(
+            held=>texture.GetSurfaceLevel(level >>> 0, held), out),
 
         // Locking a level through the texture and through the level's own
         // surface are one lock, which is what makes taking both an error.
@@ -495,10 +618,202 @@ export function createDirect3D8Seam(
         /** @param {any} texture @param {number[]} args */
         UnlockRect: (texture, [level])=>texture.UnlockRect(level >>> 0),
 
-        // Noted and nothing else: an unlock already marks the whole level for
-        // upload, so there is no smaller area for this to narrow it to.
-        AddDirtyRect: ()=>D3D_OK,
-    }, textureGuests, retire)];
+        /** @param {any} texture @param {number[]} args */
+        AddDirtyRect: (texture, [rect])=>texture.AddDirtyRect(readRect(rect)),
+    };
+    // The two interfaces a texture derives from are answered too, over the
+    // same methods: their slots are the front of the texture's own.
+    const textureInterfaces = [
+        describe(IID_IDirect3DTexture8, IDIRECT3DTEXTURE8_SLOTS, textureMethods,
+            textureGuests, retire),
+        describe(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS, textureMethods),
+        describe(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, textureMethods),
+    ];
+
+    // A cube map: the base texture's methods, then each of its own naming a
+    // face before the level.
+    const cubeTextureMethods = {
+        ...resourceMethods(D3DRTYPE.CUBETEXTURE),
+        SetLOD: textureMethods.SetLOD,
+        GetLOD: textureMethods.GetLOD,
+        GetLevelCount: textureMethods.GetLevelCount,
+        /** @param {any} texture @param {number[]} args */
+        GetLevelDesc: (texture, [level, out])=>writeLevelDesc(
+            held=>texture.GetCubeMapSurface(0, level >>> 0, held), out),
+        /** @param {any} texture @param {number[]} args */
+        GetCubeMapSurface: (texture, [face, level, out])=>{
+            /** @type {{ surface?: any }} */
+            const held = {};
+            const hr = texture.GetCubeMapSurface(face >>> 0, level >>> 0, held);
+            if (hr !== D3D_OK || !held.surface || (out >>> 0) === 0)
+            {
+                return hr;
+            }
+            return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8, out >>> 0);
+        },
+        /** @param {any} texture @param {number[]} args */
+        LockRect: (texture, [face, level, out, rect, flags])=>{
+            /** @type {any} */
+            const locked = {};
+            const hr = texture.LockCubeRect(face >>> 0, level >>> 0, locked, readRect(rect),
+                flags >>> 0);
+            if (hr === D3D_OK && (out >>> 0) !== 0)
+            {
+                fields.writeStruct(out >>> 0, D3DLOCKED_RECT, {
+                    Pitch: locked.Pitch ?? 0,
+                    pBits: locked.pBits ?? 0,
+                });
+            }
+            return hr;
+        },
+        /** @param {any} texture @param {number[]} args */
+        UnlockRect: (texture, [face, level])=>texture.UnlockCubeRect(face >>> 0, level >>> 0),
+        /** @param {any} texture @param {number[]} args */
+        AddDirtyRect: (texture, [face, rect])=>texture.AddDirtyRect(readRect(rect), face >>> 0),
+    };
+    const cubeTextureInterfaces = [
+        describe(IID_IDirect3DCubeTexture8, IDIRECT3DCUBETEXTURE8_SLOTS, cubeTextureMethods,
+            {}, retire),
+        describe(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS, cubeTextureMethods),
+        describe(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, cubeTextureMethods),
+    ];
+
+    /**
+     * A box as the guest passed it, or null for none -- the whole volume.
+     *
+     * @param {number} pointer
+     */
+    const readBox = pointer=>{
+        if ((pointer >>> 0) === 0)
+        {
+            return null;
+        }
+        const box = fields.readStruct(pointer >>> 0, D3DBOX);
+        return {
+            left: box.Left, top: box.Top, right: box.Right, bottom: box.Bottom,
+            front: box.Front, back: box.Back,
+        };
+    };
+    /**
+     * A lock of a volume: the two pitches and the address on success, and on
+     * a refusal a null address -- the pointer a program would otherwise write
+     * through (Wine's d3d8 test_volume_locking).
+     *
+     * @param {number} out @param {(locked: any) => number} lock
+     */
+    const lockBox = (out, lock)=>{
+        /** @type {any} */
+        const locked = {};
+        const hr = lock(locked);
+        if ((out >>> 0) === 0)
+        {
+            return hr;
+        }
+        if (hr === D3D_OK)
+        {
+            fields.writeStruct(out >>> 0, D3DLOCKED_BOX, locked);
+        }
+        else
+        {
+            fields.writeU32((out >>> 0) + D3DLOCKED_BOX.pBits, 0);
+        }
+        return hr;
+    };
+    /** @param {any} volume @param {number} out */
+    const writeVolumeDesc = (volume, out)=>{
+        /** @type {{ desc?: any }} */
+        const described = {};
+        volume.GetDesc(described);
+        if ((out >>> 0) !== 0 && described.desc)
+        {
+            fields.writeStruct(out >>> 0, D3DVOLUME_DESC8, described.desc);
+        }
+        return D3D_OK;
+    };
+
+    // A volume texture's level: not a resource, so it answers for itself and
+    // for IUnknown alone, and names its texture as its container.
+    /** @type {import('./com.js').InterfaceDescriptor[]} */
+    const volumeInterfaces = [describe(IID_IDirect3DVolume8, IDIRECT3DVOLUME8_SLOTS, {
+        ...privateData.methods,
+        GetDevice: getDevice,
+        /** @param {any} volume @param {number[]} args @returns {number} */
+        GetContainer: (volume, [riid, out])=>{
+            if ((riid >>> 0) === 0 || (out >>> 0) === 0 || !volume.container)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            return queryAs(publisher, fields, volume.container, volumeTextureInterfaces,
+                readGuid(memory, riid), out);
+        },
+        /** @param {any} volume @param {number[]} args */
+        GetDesc: (volume, [out])=>writeVolumeDesc(volume, out),
+        /** @param {any} volume @param {number[]} args */
+        LockBox: (volume, [out, box, flags])=>lockBox(out,
+            locked=>volume.LockBox(locked, readBox(box), flags >>> 0)),
+        /** @param {any} volume */
+        UnlockBox: volume=>volume.UnlockBox(),
+    }, {}, privateData.released)];
+
+    const volumeTextureMethods = {
+        ...resourceMethods(D3DRTYPE.VOLUMETEXTURE),
+        SetLOD: textureMethods.SetLOD,
+        GetLOD: textureMethods.GetLOD,
+        GetLevelCount: textureMethods.GetLevelCount,
+        /** @param {any} texture @param {number[]} args */
+        GetLevelDesc: (texture, [level, out])=>{
+            /** @type {{ volume?: any }} */
+            const held = {};
+            const hr = texture.GetVolumeLevel(level >>> 0, held);
+            if (hr !== D3D_OK || !held.volume)
+            {
+                return hr;
+            }
+            held.volume.release();
+            return writeVolumeDesc(held.volume, out);
+        },
+        /** @param {any} texture @param {number[]} args @returns {number} */
+        GetVolumeLevel: (texture, [level, out])=>{
+            /** @type {{ volume?: any }} */
+            const held = {};
+            const hr = texture.GetVolumeLevel(level >>> 0, held);
+            if (hr !== D3D_OK || !held.volume || (out >>> 0) === 0)
+            {
+                return hr;
+            }
+            return handBack(held.volume, volumeInterfaces, IID_IDirect3DVolume8, out >>> 0);
+        },
+        /** @param {any} texture @param {number[]} args */
+        LockBox: (texture, [level, out, box, flags])=>lockBox(out,
+            locked=>texture.LockBox(level >>> 0, locked, readBox(box), flags >>> 0)),
+        /** @param {any} texture @param {number[]} args */
+        UnlockBox: (texture, [level])=>texture.UnlockBox(level >>> 0),
+        /** @param {any} texture @param {number[]} args */
+        AddDirtyBox: (texture, [box])=>texture.AddDirtyBox(readBox(box)),
+    };
+    /** @type {import('./com.js').InterfaceDescriptor[]} */
+    const volumeTextureInterfaces = [
+        describe(IID_IDirect3DVolumeTexture8, IDIRECT3DVOLUMETEXTURE8_SLOTS,
+            volumeTextureMethods, {}, retire),
+        describe(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS, volumeTextureMethods),
+        describe(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, volumeTextureMethods),
+    ];
+
+    /**
+     * Whichever interfaces a texture is published with, by its kind.
+     *
+     * @param {any} texture
+     * @returns {{ interfaces: import('./com.js').InterfaceDescriptor[], id: string }}
+     */
+    const textureKind = texture=>{
+        if (texture.cube)
+        {
+            return { interfaces: cubeTextureInterfaces, id: IID_IDirect3DCubeTexture8 };
+        }
+        return texture.volume
+            ? { interfaces: volumeTextureInterfaces, id: IID_IDirect3DVolumeTexture8 }
+            : { interfaces: textureInterfaces, id: IID_IDirect3DTexture8 };
+    };
 
     /**
      * A buffer hands back an address in the guest's own memory, so locking is
@@ -548,13 +863,36 @@ export function createDirect3D8Seam(
         }
         : {};
 
+    /**
+     * The one method the two buffers' layouts differ in: an index buffer's
+     * description has no FVF.
+     *
+     * @param {Record<string, number>} layout
+     */
+    const describeBuffer = layout=>(/** @type {any} */ buffer, /** @type {number[]} */ [out])=>{
+        /** @type {{ desc?: any }} */
+        const held = {};
+        const hr = buffer.GetDesc(held);
+        if (hr === D3D_OK && (out >>> 0) !== 0 && held.desc)
+        {
+            fields.writeStruct(out >>> 0, layout, held.desc);
+        }
+        return (out >>> 0) === 0 ? D3DERR_INVALIDCALL : hr;
+    };
+
     const vertexBufferInterfaces = [
-        describe(IID_IDirect3DVertexBuffer8, IDIRECT3DVERTEXBUFFER8_SLOTS, bufferMethods,
-            bufferGuests, retire),
+        describe(IID_IDirect3DVertexBuffer8, IDIRECT3DVERTEXBUFFER8_SLOTS, {
+            ...resourceMethods(D3DRTYPE.VERTEXBUFFER),
+            ...bufferMethods,
+            GetDesc: describeBuffer(D3DVERTEXBUFFER_DESC9),
+        }, bufferGuests, retire),
     ];
     const indexBufferInterfaces = [
-        describe(IID_IDirect3DIndexBuffer8, IDIRECT3DINDEXBUFFER8_SLOTS, bufferMethods,
-            bufferGuests, retire),
+        describe(IID_IDirect3DIndexBuffer8, IDIRECT3DINDEXBUFFER8_SLOTS, {
+            ...resourceMethods(D3DRTYPE.INDEXBUFFER),
+            ...bufferMethods,
+            GetDesc: describeBuffer(D3DINDEXBUFFER_DESC9),
+        }, bufferGuests, retire),
     ];
 
     /**
@@ -607,6 +945,75 @@ export function createDirect3D8Seam(
         {
             fields.writeF32(address + index * 4, values[index]);
         }
+    };
+
+    /** @param {number} pointer @param {number} count @returns {Uint32Array} */
+    const readDwords = (pointer, count)=>{
+        const dwords = new Uint32Array(count);
+        new Uint8Array(dwords.buffer).set(memory.readMemory(pointer >>> 0, count * 4));
+        return dwords;
+    };
+
+    /**
+     * A shader function's tokens, read to its end token. The stream carries
+     * no length; a comment's own length is honoured, since one may hold
+     * anything.
+     *
+     * @param {number} pointer
+     * @returns {Uint32Array | null}
+     */
+    const readFunction = pointer=>{
+        /** @type {number[]} */
+        const tokens = [];
+        let skip = 0;
+        while (tokens.length < MAX_SHADER_DWORDS)
+        {
+            const token = fields.readU32(pointer + tokens.length * 4);
+            tokens.push(token);
+            if (skip > 0)
+            {
+                skip--;
+            }
+            else if (tokens.length > 1 && (token & 0xffff) === 0xfffe)
+            {
+                skip = (token >>> 16) & 0x7fff;
+            }
+            else if (token === END_TOKEN)
+            {
+                return Uint32Array.from(tokens);
+            }
+        }
+        return null;
+    };
+
+    /**
+     * A reader of a shader's declaration or function by handle: the size
+     * pointer is required, the buffer optional, and a buffer too small is
+     * refused with the size left as the caller wrote it.
+     *
+     * @param {'GetVertexShaderDeclaration' | 'GetVertexShaderFunction'
+     *     | 'GetPixelShaderFunction'} name
+     */
+    const tokensOf = name=>(/** @type {any} */ device, /** @type {number[]} */ args)=>{
+        const [handle, data, size] = args;
+        if ((size >>> 0) === 0)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        /** @type {{ bytes?: number, tokens?: Uint32Array }} */
+        const held = {};
+        const hr = device[name](handle >>> 0, held,
+            (data >>> 0) === 0 ? null : fields.readU32(size >>> 0));
+        if (hr === D3D_OK)
+        {
+            fields.writeU32(size >>> 0, held.bytes ?? 0);
+            if (held.tokens)
+            {
+                memory.writeMemory(data >>> 0,
+                    new Uint8Array(Uint32Array.from(held.tokens).buffer));
+            }
+        }
+        return hr;
     };
 
     /** @param {number} pointer */
@@ -829,7 +1236,7 @@ export function createDirect3D8Seam(
             {
                 attachTexture(device, held.texture);
                 return handBack(held.texture, textureInterfaces, IID_IDirect3DTexture8,
-                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
+                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
             return hr;
         },
@@ -842,7 +1249,7 @@ export function createDirect3D8Seam(
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
-                    out >>> 0);
+                    out >>> 0, E_OUTOFMEMORY, device);
             }
             return hr;
         },
@@ -857,7 +1264,7 @@ export function createDirect3D8Seam(
             {
                 attach(device, held.buffer);
                 return handBack(held.buffer, vertexBufferInterfaces,
-                    IID_IDirect3DVertexBuffer8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
+                    IID_IDirect3DVertexBuffer8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
             return hr;
         },
@@ -872,7 +1279,7 @@ export function createDirect3D8Seam(
             {
                 attach(device, held.buffer);
                 return handBack(held.buffer, indexBufferInterfaces,
-                    IID_IDirect3DIndexBuffer8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
+                    IID_IDirect3DIndexBuffer8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
             return hr;
         },
@@ -885,7 +1292,7 @@ export function createDirect3D8Seam(
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
-                    out >>> 0);
+                    out >>> 0, E_OUTOFMEMORY, device);
             }
             return hr;
         },
@@ -974,7 +1381,7 @@ export function createDirect3D8Seam(
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
-                    out >>> 0);
+                    out >>> 0, E_OUTOFMEMORY, device);
             }
             return hr;
         },
@@ -987,7 +1394,7 @@ export function createDirect3D8Seam(
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
-                    out >>> 0);
+                    out >>> 0, E_OUTOFMEMORY, device);
             }
             if ((out >>> 0) !== 0)
             {
@@ -1066,25 +1473,22 @@ export function createDirect3D8Seam(
             return hr;
         },
 
-        // Nothing here scans a frame out, so there is no beam to be behind and
-        // no blanking interval to be inside: both fields read as the start of a
-        // frame, which is what DirectDraw's scan line reports for the same
-        // reason. A program polling this to pace itself sees a display that
-        // never moves, and one that reads it once sees a legal answer.
+        // The raster the clock gives, the one DirectDraw reports: a program
+        // polling this for the blank sees it come round once a refresh.
         /** @param {any} device @param {number[]} args */
         GetRasterStatus: (device, [out])=>{
             if ((out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
-            fields.writeStruct(out >>> 0, D3DRASTER_STATUS, { InVBlank: 0, ScanLine: 0 });
+            fields.writeStruct(out >>> 0, D3DRASTER_STATUS, rasterStatus(raster));
             return D3D_OK;
         },
 
         // --- the desktop, none of which this build owns ---
 
         // Both gamma calls are declared void, so what they leave in EAX is not
-        // read; the ramp is state a program reads back rather than a picture.
+        // read.
         /** @param {any} device @param {number[]} args */
         SetGammaRamp: (device, [, ramp])=>{
             if ((ramp >>> 0) !== 0)
@@ -1140,17 +1544,33 @@ export function createDirect3D8Seam(
             return was ? 1 : 0;
         },
 
-        // One swap chain exists and it is the device's own. There is no second
-        // one to publish -- not even an interface for it -- and NOTAVAILABLE is
-        // what a device that cannot do something answers.
         /** @param {any} device @param {number[]} args */
-        CreateAdditionalSwapChain: (device, [, out])=>clearAndRefuse(out),
+        CreateAdditionalSwapChain: (device, [parameters, out])=>{
+            if ((parameters >>> 0) === 0 || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            // A chain naming no window presents into the device's, measured
+            // for a size asked for as zero; only the count is written back.
+            const wanted = readPresentParameters(parameters >>> 0, deviceWindow);
+            const window = (wanted.hDeviceWindow >>> 0) || deviceWindow;
+            /** @type {{ swapChain?: any }} */
+            const held = {};
+            const hr = device.CreateAdditionalSwapChain(wanted, held);
+            if (hr !== D3D_OK || !held.swapChain)
+            {
+                return clearAndRefuse(out, hr);
+            }
+            writePresentParameters(parameters >>> 0, wanted);
+            chainWindows.set(held.swapChain, window);
+            return handBack(held.swapChain, swapChainInterfaces, IID_IDirect3DSwapChain8,
+                out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
+        },
 
-        // The presented frame lives on the backend's device and is never read
-        // back into guest memory, so there is nothing to copy into the caller's
-        // surface. Answering with an untouched surface would hand a program
-        // whatever that memory happened to hold and call it a screenshot.
-        GetFrontBuffer: ()=>D3DERR_INVALIDCALL,
+        // The caller waits while the picture comes back from the GPU.
+        /** @param {any} device @param {number[]} args */
+        GetFrontBuffer: (device, [destination])=>
+            device.GetFrontBuffer(publisher.objectAt(destination)),
 
         // --- resources ---
 
@@ -1167,7 +1587,7 @@ export function createDirect3D8Seam(
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
-                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
+                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
             return hr;
         },
@@ -1181,22 +1601,48 @@ export function createDirect3D8Seam(
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
-                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
+                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
             return hr;
         },
 
-        // A cube map and a volume texture are refused rather than made. The
-        // renderer samples neither, and there is no vtable for either interface
-        // here -- a texture handed back through a table transcribed from memory
-        // would be worse than one that was never made, because the program
-        // would call into it. The refusal is what sends a program to the
-        // two-dimensional path it also has.
         /** @param {any} device @param {number[]} args */
-        CreateCubeTexture: (device, [, , , , , out])=>clearAndRefuse(out),
+        CreateCubeTexture: (device, [edgeLength, levels, usage, format, pool, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ texture?: any }} */
+            const held = {};
+            const hr = device.CreateCubeTexture(edgeLength >>> 0, levels >>> 0, usage >>> 0,
+                format >>> 0, pool >>> 0, held);
+            if (hr === D3D_OK && held.texture)
+            {
+                attachTexture(device, held.texture);
+                return handBack(held.texture, cubeTextureInterfaces, IID_IDirect3DCubeTexture8,
+                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
+            }
+            return clearAndRefuse(out, hr);
+        },
 
         /** @param {any} device @param {number[]} args */
-        CreateVolumeTexture: (device, [, , , , , , , out])=>clearAndRefuse(out),
+        CreateVolumeTexture: (device, [width, height, depth, levels, usage, format, pool, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ texture?: any }} */
+            const held = {};
+            const hr = device.CreateVolumeTexture(width >>> 0, height >>> 0, depth >>> 0,
+                levels >>> 0, usage >>> 0, format >>> 0, pool >>> 0, held);
+            if (hr === D3D_OK && held.texture)
+            {
+                attachTexture(device, held.texture);
+                return handBack(held.texture, volumeTextureInterfaces,
+                    IID_IDirect3DVolumeTexture8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
+            }
+            return clearAndRefuse(out, hr);
+        },
 
         /** @param {any} device @param {number[]} args */
         CopyRects: (device, [source, rects, count, destination, points])=>{
@@ -1370,7 +1816,8 @@ export function createDirect3D8Seam(
                 // answers a null pointer rather than leaving the caller's
                 // variable holding the texture it last read.
                 fields.writeU32(out >>> 0, held.texture
-                    ? publisher.publish(held.texture, textureInterfaces, IID_IDirect3DTexture8)
+                    ? publisher.publish(held.texture, textureKind(held.texture).interfaces,
+                        textureKind(held.texture).id)
                     : 0);
             }
             return hr;
@@ -1509,36 +1956,119 @@ export function createDirect3D8Seam(
             return hr;
         },
 
-        // No format here is palettised, so a palette could never reach a texel.
-        // All four calls refuse for that one reason.
-        SetPaletteEntries: ()=>D3DERR_INVALIDCALL,
-        GetPaletteEntries: ()=>D3DERR_INVALIDCALL,
-        SetCurrentTexturePalette: ()=>D3DERR_INVALIDCALL,
-        GetCurrentTexturePalette: ()=>D3DERR_INVALIDCALL,
+        // A palette is state a program sets and reads back; no texel here is
+        // ever looked up through one.
+        /** @param {any} device @param {number[]} args */
+        SetPaletteEntries: (device, [number, entries])=>((entries >>> 0) === 0
+            ? D3DERR_INVALIDCALL
+            : device.SetPaletteEntries(number >>> 0,
+                memory.readMemory(entries >>> 0, PALETTE_BYTES))),
+        /** @param {any} device @param {number[]} args */
+        GetPaletteEntries: (device, [number, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ entries?: Uint8Array }} */
+            const held = {};
+            const hr = device.GetPaletteEntries(number >>> 0, held);
+            if (hr === D3D_OK && held.entries)
+            {
+                memory.writeMemory(out >>> 0, held.entries);
+            }
+            return hr;
+        },
+        /** @param {any} device @param {number[]} args */
+        SetCurrentTexturePalette: (device, [number])=>
+            device.SetCurrentTexturePalette(number >>> 0),
+        /** @param {any} device @param {number[]} args */
+        GetCurrentTexturePalette: (device, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ number?: number }} */
+            const held = {};
+            const hr = device.GetCurrentTexturePalette(held);
+            if (hr === D3D_OK)
+            {
+                fields.writeU32(out >>> 0, held.number ?? 0);
+            }
+            return hr;
+        },
 
-        // Transforming happens inside a draw, on the backend's device. There is
-        // no path that transforms vertices and writes them back into a buffer
-        // the program can read, and a call that answered success while leaving
-        // the destination untouched would draw whatever that buffer held.
-        ProcessVertices: ()=>D3DERR_INVALIDCALL,
+        /** @param {any} device @param {number[]} args */
+        ProcessVertices: (device, [start, index, count, destination, flags])=>{
+            // The guest's own writes into the source and destination are in
+            // guest memory already; a lock it holds in the guest is settled
+            // first, so the renderer sees one lock.
+            const buffer = publisher.objectAt(destination);
+            resourceShadows.get(buffer)?.settleBuffer(buffer);
+            return device.ProcessVertices(start >>> 0, index >>> 0, count >>> 0, buffer,
+                flags >>> 0);
+        },
 
-        // CreateVertexShader and CreatePixelShader are absent on purpose, and
-        // this is the one absence here that is a decision rather than a gap.
-        // The renderer draws the fixed-function pipeline and counts a draw with
-        // either shader bound as one it declined; a create that succeeded would
-        // send a program down the programmable path, where every draw would be
-        // silently dropped, and it would never look back. Refusing sends it
-        // down the fixed-function path it also has, which draws.
-        //
-        // The declaration and function readers, and the shader constants, are
-        // absent for the same reason: they are only reachable through a handle
-        // that cannot exist.
-        //
-        // Setting is a different matter, because this one dword carries two
-        // meanings: a vertex format goes through it, and that is how every
-        // fixed-function draw declares its vertices.
+        /**
+         * The declaration is read to its end token, and the function, when
+         * there is one, to its own. The usage asks for software vertex
+         * processing, which the one stage there is serves either way.
+         *
+         * @param {any} device @param {number[]} args
+         */
+        CreateVertexShader: (device, [declaration, code, out])=>{
+            if ((declaration >>> 0) === 0 || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const length = declarationLength(
+                index=>fields.readU32((declaration >>> 0) + index * 4));
+            const tokens = (code >>> 0) === 0 ? null : readFunction(code >>> 0);
+            if (length < 0 || ((code >>> 0) !== 0 && !tokens))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ handle?: number }} */
+            const held = {};
+            const hr = device.CreateVertexShader(readDwords(declaration >>> 0, length), tokens,
+                held);
+            if (hr === D3D_OK)
+            {
+                fields.writeU32(out >>> 0, held.handle ?? 0);
+            }
+            return hr;
+        },
+
+        // One dword, two meanings: a vertex format goes through it as well
+        // as a handle, and that is how every fixed-function draw declares its
+        // vertices.
         /** @param {any} device @param {number[]} args */
         SetVertexShader: (device, [handle])=>device.SetVertexShader(handle >>> 0),
+
+        GetVertexShaderDeclaration: tokensOf('GetVertexShaderDeclaration'),
+        GetVertexShaderFunction: tokensOf('GetVertexShaderFunction'),
+
+        /** @param {any} device @param {number[]} args */
+        SetVertexShaderConstant: (device, [register, data, count])=>((data >>> 0) === 0
+            ? D3DERR_INVALIDCALL
+            // No more is read than the file holds; a count past it is refused.
+            : device.SetVertexShaderConstant(register >>> 0, readFloats(data >>> 0,
+                Math.min(count >>> 0, device.caps.maxVertexShaderConst ?? 0) * 4), count >>> 0)),
+
+        /** @param {any} device @param {number[]} args */
+        GetVertexShaderConstant: (device, [register, data, count])=>{
+            if ((data >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ values?: Float32Array }} */
+            const held = {};
+            const hr = device.GetVertexShaderConstant(register >>> 0, count >>> 0, held);
+            if (hr === D3D_OK && held.values)
+            {
+                writeFloats(data >>> 0, held.values);
+            }
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         GetVertexShader: (device, [out])=>{
@@ -1560,7 +2090,48 @@ export function createDirect3D8Seam(
         DeleteVertexShader: (device, [handle])=>device.DeleteVertexShader(handle >>> 0),
 
         /** @param {any} device @param {number[]} args */
+        CreatePixelShader: (device, [code, out])=>{
+            const tokens = (code >>> 0) === 0 ? null : readFunction(code >>> 0);
+            if (!tokens || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ handle?: number }} */
+            const held = {};
+            const hr = device.CreatePixelShader(tokens, held);
+            if (hr === D3D_OK)
+            {
+                fields.writeU32(out >>> 0, held.handle ?? 0);
+            }
+            return hr;
+        },
+
+        /** @param {any} device @param {number[]} args */
         SetPixelShader: (device, [handle])=>device.SetPixelShader(handle >>> 0),
+
+        GetPixelShaderFunction: tokensOf('GetPixelShaderFunction'),
+
+        /** @param {any} device @param {number[]} args */
+        SetPixelShaderConstant: (device, [register, data, count])=>((data >>> 0) === 0
+            ? D3DERR_INVALIDCALL
+            : device.SetPixelShaderConstant(register >>> 0, readFloats(data >>> 0,
+                Math.min(count >>> 0, PIXEL_SHADER_CONSTANTS) * 4), count >>> 0)),
+
+        /** @param {any} device @param {number[]} args */
+        GetPixelShaderConstant: (device, [register, data, count])=>{
+            if ((data >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ values?: Float32Array }} */
+            const held = {};
+            const hr = device.GetPixelShaderConstant(register >>> 0, count >>> 0, held);
+            if (hr === D3D_OK && held.values)
+            {
+                writeFloats(data >>> 0, held.values);
+            }
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         GetPixelShader: (device, [out])=>{
@@ -1691,20 +2262,14 @@ export function createDirect3D8Seam(
 
     /**
      * D3DADAPTER_IDENTIFIER8, from what the assembling caller knows of the
-     * hardware. The vendor is the one number a program acts on -- its card
-     * database is keyed by PCI vendor id -- so WebGPU's word for the vendor is
-     * turned into that id, and a vendor not in the table is reported as zero,
-     * which every program reads as a card it does not know rather than as a
-     * refusal.
+     * hardware: the vendor, name and GUID every generation reports. A vendor
+     * with no PCI id is reported as zero, which every program reads as a card
+     * it does not know rather than as a refusal.
      *
      * @param {number} address @param {number} flags D3DENUM_*
      */
     const writeAdapterIdentifier = (address, flags)=>{
-        const known = identity?.() ?? null;
-        const vendor = (known?.vendor ?? '').toLowerCase();
-        const description = known?.description
-            || [known?.vendor, known?.architecture].filter(Boolean).join(' ')
-            || 'WebGPU adapter';
+        const { vendorId, description } = describeAdapter(identity?.() ?? null);
         const block = new Uint8Array(D3DADAPTER_IDENTIFIER8.FIELDS);
         /** @param {string} text @param {number} at */
         const ascii = (text, at)=>{
@@ -1719,7 +2284,7 @@ export function createDirect3D8Seam(
         // A version of 1.0.0.0: the product word of the LARGE_INTEGER is its
         // high dword, and a program that prints it prints something sane.
         view.setUint32(D3DADAPTER_IDENTIFIER8.DriverVersion + 4, 0x00010000, true);
-        view.setUint32(D3DADAPTER_IDENTIFIER8.VendorId, PCI_VENDOR_IDS[vendor] ?? 0, true);
+        view.setUint32(D3DADAPTER_IDENTIFIER8.VendorId, vendorId, true);
         block.set(ADAPTER_GUID, D3DADAPTER_IDENTIFIER8.DeviceIdentifier);
         // Certified unless the caller said not to ask: the flag exists because
         // asking took seconds on real Windows, and a program that passes it
@@ -1770,23 +2335,24 @@ export function createDirect3D8Seam(
      * maximum of zero, and what that looks like from outside is a machine that
      * is running perfectly and getting nowhere.
      *
-     * The values describe what the renderer behind this actually does: fixed
-     * function only, no shaders, two texture stages combined per pass, and
-     * filtering and addressing a GPU of any generation has.
+     * The values describe what the renderer behind this actually does: the
+     * fixed-function stages, vertex shaders to 1.1 and pixel shaders to 1.4
+     * translated to the GPU's own, and filtering and addressing a GPU of any
+     * generation has.
      *
      * @param {number} address @param {any} caps
      */
     const writeCaps = (address, caps)=>{
         // Zeroed first: the structure is long, a caller allocates all of it,
         // and every field this does not set has to read as "not supported"
-        // rather than as whatever was on the stack. Two of those zeroes are
-        // load-bearing -- the shader versions say this device runs neither,
-        // which is the claim the shader entry points make good on.
+        // rather than as whatever was on the stack.
         memory.writeMemory(address, new Uint8Array(D3DCAPS8.SIZE));
         fields.writeStruct(address, D3DCAPS8, {
             DeviceType: D3DDEVTYPE.HAL,
-            // D3DCAPS_READ_SCANLINE is not claimed: there is no scanline.
-            Caps2: D3DCAPS2_CANRENDERWINDOWED | D3DCAPS2_FULLSCREENGAMMA,
+            Caps: D3DCAPS_READ_SCANLINE,
+            // A full-screen device's ramp is claimed where the display shows it.
+            Caps2: D3DCAPS2_CANRENDERWINDOWED
+                | (caps.fullscreenGamma === true ? D3DCAPS2_FULLSCREENGAMMA : 0),
             PresentationIntervals: D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE,
             CursorCaps: D3DCURSORCAPS_COLOR | D3DCURSORCAPS_LOWRES,
             DevCaps: D3DDEVCAPS_HWTRANSFORMANDLIGHT | D3DDEVCAPS_HWRASTERIZATION
@@ -1796,10 +2362,11 @@ export function createDirect3D8Seam(
             PrimitiveMiscCaps: D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW
                 | D3DPMISCCAPS_CULLCCW | D3DPMISCCAPS_MASKZ
                 | D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP,
+            // No depth bias, level bias or anisotropy: the renderer reads
+            // none of D3DRS_ZBIAS, D3DTSS_MIPMAPLODBIAS and MAXANISOTROPY.
             RasterCaps: D3DPRASTERCAPS_DITHER | D3DPRASTERCAPS_ZTEST
-                | D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGTABLE
-                | D3DPRASTERCAPS_MIPMAPLODBIAS | D3DPRASTERCAPS_ZBIAS
-                | D3DPRASTERCAPS_ANISOTROPY | D3DPRASTERCAPS_ZFOG,
+                | D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGTABLE | D3DPRASTERCAPS_FOGRANGE
+                | D3DPRASTERCAPS_WFOG | D3DPRASTERCAPS_ZFOG,
             // Every comparison a depth test can ask for; the backend maps them
             // one to one onto its own.
             ZCmpCaps: ALL_COMPARE_CAPS,
@@ -1808,15 +2375,16 @@ export function createDirect3D8Seam(
             AlphaCmpCaps: ALL_COMPARE_CAPS,
             ShadeCaps: D3DPSHADECAPS_COLORGOURAUDRGB | D3DPSHADECAPS_SPECULARGOURAUDRGB
                 | D3DPSHADECAPS_ALPHAGOURAUDBLEND | D3DPSHADECAPS_FOGGOURAUD,
+            // No palette alpha: no palettised format is ever made.
             TextureCaps: D3DPTEXTURECAPS_PERSPECTIVE | D3DPTEXTURECAPS_ALPHA
-                | D3DPTEXTURECAPS_PROJECTED | D3DPTEXTURECAPS_CUBEMAP
-                | D3DPTEXTURECAPS_MIPMAP | D3DPTEXTURECAPS_MIPCUBEMAP
-                | D3DPTEXTURECAPS_ALPHAPALETTE,
-            TextureFilterCaps: ALL_FILTER_CAPS,
-            CubeTextureFilterCaps: ALL_FILTER_CAPS,
-            TextureAddressCaps: D3DPTADDRESSCAPS_WRAP | D3DPTADDRESSCAPS_MIRROR
-                | D3DPTADDRESSCAPS_CLAMP | D3DPTADDRESSCAPS_BORDER
-                | D3DPTADDRESSCAPS_INDEPENDENTUV | D3DPTADDRESSCAPS_MIRRORONCE,
+                | D3DPTEXTURECAPS_PROJECTED | D3DPTEXTURECAPS_MIPMAP
+                | D3DPTEXTURECAPS_CUBEMAP | D3DPTEXTURECAPS_MIPCUBEMAP
+                | D3DPTEXTURECAPS_VOLUMEMAP | D3DPTEXTURECAPS_MIPVOLUMEMAP,
+            TextureFilterCaps: FILTER_CAPS,
+            CubeTextureFilterCaps: FILTER_CAPS,
+            VolumeTextureFilterCaps: FILTER_CAPS,
+            TextureAddressCaps: ADDRESS_CAPS,
+            VolumeTextureAddressCaps: ADDRESS_CAPS,
             LineCaps: D3DLINECAPS_TEXTURE | D3DLINECAPS_ZTEST | D3DLINECAPS_BLEND
                 | D3DLINECAPS_ALPHACMP | D3DLINECAPS_FOG,
             MaxTextureWidth: caps.maxTextureWidth ?? 4096,
@@ -1824,23 +2392,33 @@ export function createDirect3D8Seam(
             MaxVolumeExtent: caps.maxVolumeExtent ?? 256,
             MaxTextureRepeat: caps.maxTextureRepeat ?? 8192,
             MaxTextureAspectRatio: caps.maxTextureAspectRatio ?? 4096,
-            MaxAnisotropy: caps.maxAnisotropy ?? 16,
-            StencilCaps: ALL_STENCIL_CAPS,
+            MaxAnisotropy: caps.maxAnisotropy ?? 1,
+            // The pipeline has no stencil test, so no stencil operation is
+            // promised.
+            StencilCaps: 0,
             FVFCaps: D3DFVFCAPS_PSIZE | 8,
-            TextureOpCaps: ALL_TEXTURE_OP_CAPS,
+            TextureOpCaps: TEXTURE_OP_CAPS,
             MaxTextureBlendStages: caps.maxTextureBlendStages ?? 8,
             MaxSimultaneousTextures: caps.maxSimultaneousTextures ?? 8,
             VertexProcessingCaps: D3DVTXPCAPS_TEXGEN | D3DVTXPCAPS_MATERIALSOURCE7
                 | D3DVTXPCAPS_DIRECTIONALLIGHTS | D3DVTXPCAPS_POSITIONALLIGHTS
                 | D3DVTXPCAPS_LOCALVIEWER,
             MaxActiveLights: caps.maxActiveLights ?? 8,
-            MaxUserClipPlanes: caps.maxUserClipPlanes ?? 6,
-            MaxVertexBlendMatrices: caps.maxVertexBlendMatrices ?? 4,
+            // Nothing clips against a program's planes or blends by vertex
+            // weights, which is what Direct3D 9 answers for the same reason.
+            MaxUserClipPlanes: caps.maxUserClipPlanes ?? 0,
+            MaxVertexBlendMatrices: caps.maxVertexBlendMatrices ?? 0,
             MaxVertexBlendMatrixIndex: caps.maxVertexBlendMatrixIndex ?? 0,
             MaxPrimitiveCount: caps.maxPrimitiveCount ?? 0xffff,
             MaxVertexIndex: caps.maxVertexIndex ?? 0xffff,
             MaxStreams: caps.maxStreams ?? 16,
             MaxStreamStride: caps.maxStreamStride ?? 256,
+            VertexShaderVersion: (D3DVS_VERSION_MARK | ((caps.vertexShaderVersion?.major ?? 0) << 8)
+                | (caps.vertexShaderVersion?.minor ?? 0)) >>> 0,
+            MaxVertexShaderConst: caps.vertexShaderVersion?.major
+                ? caps.maxVertexShaderConst ?? 0 : 0,
+            PixelShaderVersion: (D3DPS_VERSION_MARK | ((caps.pixelShaderVersion?.major ?? 0) << 8)
+                | (caps.pixelShaderVersion?.minor ?? 0)) >>> 0,
         });
         // The floats, which the same writer cannot place without being told.
         // MaxVertexW is the largest homogeneous W a vertex may carry; a zero
@@ -1853,12 +2431,21 @@ export function createDirect3D8Seam(
             GuardBandRight: 1e9,
             GuardBandBottom: 1e9,
             ExtentsAdjust: 0,
+            // A 1.x shader's registers hold [-1, 1]: its constants read so.
+            MaxPixelShaderValue: caps.pixelShaderVersion?.major ? 1 : 0,
         }, ['MaxPointSize', 'MaxVertexW', 'GuardBandLeft', 'GuardBandTop',
-            'GuardBandRight', 'GuardBandBottom', 'ExtentsAdjust']);
+            'GuardBandRight', 'GuardBandBottom', 'ExtentsAdjust', 'MaxPixelShaderValue']);
     };
 
     const rootMethods = {
+        // Accepted and ignored: no software rasteriser is ever plugged in.
+        RegisterSoftwareDevice: ()=>D3D_OK,
         GetAdapterCount: ()=>1,
+
+        // An HMONITOR rather than an HRESULT: the display user32 names for
+        // every window, and none for an adapter that does not exist.
+        /** @param {any} root @param {number[]} args */
+        GetAdapterMonitor: (root, [adapter])=>((adapter >>> 0) === 0 ? PRIMARY_MONITOR : 0),
 
         /**
          * Who made the adapter, as a program's card database wants to know.

@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLocaleFunctions } from './locale.js';
+import { UI_LANGUAGE } from '../../loader/internal/resources.js';
 
 const CP_ACP = 0;
 const CP_UTF8 = 65001;
@@ -136,6 +137,49 @@ test('a zero destination measures and writes nothing at all', ()=>{
     assert.equal(host.bytes[0x200], 0xee, 'the destination was not touched');
 });
 
+test('a negative destination size is an invalid parameter, and nothing is written', ()=>{
+    // -1 and -1000 alike: the destination length is a count, not the "up to
+    // the terminator" a negative source length means.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.plantAnsi(0x100, 'foobar');
+    host.plantWide(0x300, 'foobar');
+
+    for (const size of [-1, -1000])
+    {
+        host.bytes.fill(0xee, 0x200, 0x220);
+        host.errors.length = 0;
+        assert.equal(fns.MultiByteToWideChar.handler([CP_ACP, 0, 0x100, -1, 0x200, size]), 0);
+        assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER]);
+        assert.equal(host.bytes[0x200], 0xee, 'the destination was not touched');
+
+        host.errors.length = 0;
+        assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0, 0x300, -1, 0x200, size, 0, 0]), 0);
+        assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER]);
+        assert.equal(host.bytes[0x200], 0xee);
+    }
+});
+
+test('MB_ERR_INVALID_CHARS refuses a malformed UTF-8 sequence instead of replacing it', ()=>{
+    const MB_ERR_INVALID_CHARS = 0x8;
+    const ERROR_NO_UNICODE_TRANSLATION = 1113;
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.bytes.set([0x41, 0xff, 0x42, 0], 0x100);
+
+    assert.equal(fns.MultiByteToWideChar.handler(
+        [CP_UTF8, MB_ERR_INVALID_CHARS, 0x100, -1, 0x200, 16]), 0);
+    assert.deepEqual(host.errors, [ERROR_NO_UNICODE_TRANSLATION]);
+    assert.equal(fns.MultiByteToWideChar.handler(
+        [CP_UTF8, MB_ERR_INVALID_CHARS, 0x100, -1, 0, 0]), 0, 'measuring refuses it too');
+
+    assert.equal(fns.MultiByteToWideChar.handler([CP_UTF8, 0, 0x100, -1, 0x200, 16]), 4,
+        'without the flag the byte is replaced and the call succeeds');
+    host.bytes.set([0xc3, 0xa9, 0], 0x100);
+    assert.equal(fns.MultiByteToWideChar.handler(
+        [CP_UTF8, MB_ERR_INVALID_CHARS, 0x100, -1, 0x200, 16]), 2, 'a well-formed one converts');
+});
+
 test('a NULL source is an invalid parameter, not a read of address zero', ()=>{
     const host = fakeHost();
     const fns = createLocaleFunctions(host);
@@ -244,6 +288,24 @@ test('the Latin-1 half of the ANSI page survives a round trip', ()=>{
     assert.equal(new DataView(host.bytes.buffer).getUint32(used, true), 0);
 });
 
+test('the five positions Windows-1252 leaves undefined round-trip as their own code points', ()=>{
+    // Microsoft's table for the page (bestfit1252.txt) maps 0x81, 0x8D, 0x8F,
+    // 0x90 and 0x9D to U+0081, U+008D, U+008F, U+0090 and U+009D and back, so
+    // text read from those bytes is written back as the same bytes rather than
+    // as the default character.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const undefinedBytes = [0x81, 0x8d, 0x8f, 0x90, 0x9d];
+    host.bytes.set(undefinedBytes, 0x100);
+
+    fns.MultiByteToWideChar.handler([CP_ACP, 0, 0x100, 5, 0x200, 5]);
+    assert.equal(host.readWide(0x200, 5), '\u0081\u008d\u008f\u0090\u009d');
+    const used = 0x400;
+    fns.WideCharToMultiByte.handler([CP_ACP, 0, 0x200, 5, 0x300, 8, 0, used]);
+    assert.deepEqual([...host.bytes.subarray(0x300, 0x305)], undefinedBytes);
+    assert.equal(new DataView(host.bytes.buffer).getUint32(used, true), 0);
+});
+
 test('a conversion that loses nothing says so', ()=>{
     const host = fakeHost();
     const fns = createLocaleFunctions(host);
@@ -313,6 +375,11 @@ test('the UI language is the language everything else here is in', ()=>{
     assert.equal(fns.GetSystemDefaultUILanguage.handler(),
         fns.GetSystemDefaultLangID.handler());
     assert.equal(fns.GetSystemDefaultUILanguage.argBytes, 0);
+    assert.equal(fns.GetUserDefaultUILanguage.handler(), fns.GetUserDefaultLangID.handler(),
+        'the user\'s UI language too');
+    assert.equal(fns.GetUserDefaultUILanguage.argBytes, 0);
+    assert.equal(fns.GetUserDefaultUILanguage.handler(), UI_LANGUAGE,
+        'the language a resource lookup naming none prefers');
 });
 
 test('a number is grouped and given the locale decimals when no picture is passed', ()=>{
@@ -358,4 +425,88 @@ test('the thread locale is the one locale, and the default placeholders resolve 
     assert.equal(fns.ConvertDefaultLocale.handler([0x0800]), 0x0409, 'LOCALE_SYSTEM_DEFAULT');
     assert.equal(fns.ConvertDefaultLocale.handler([0x0407]), 0x0407, 'a real locale is itself');
     assert.equal(fns.ConvertDefaultLocale.argBytes, 4);
+});
+
+const LOCALE_RETURN_NUMBER = 0x20000000;
+const LOCALE_RETURN_GENITIVE_NAMES = 0x10000000;
+const ERROR_INVALID_FLAGS = 1004;
+
+test('LOCALE_RETURN_NUMBER answers the value itself, counted in the form\'s characters', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    const ILANGUAGE = 0x0001;
+    const IDEFAULTANSICODEPAGE = 0x1004;
+
+    assert.equal(fns.GetLocaleInfoA.handler([0x409, ILANGUAGE | LOCALE_RETURN_NUMBER, 0x100, 4]),
+        4, 'four bytes in the narrow form');
+    assert.equal(view.getUint32(0x100, true), 0x0409, 'the language, not the text "0409"');
+    assert.equal(fns.GetLocaleInfoW.handler([0x409, ILANGUAGE | LOCALE_RETURN_NUMBER, 0x200, 2]),
+        2, 'two characters in the wide form');
+    assert.equal(view.getUint32(0x200, true), 0x0409);
+    assert.equal(fns.GetLocaleInfoA.handler(
+        [0x400, IDEFAULTANSICODEPAGE | LOCALE_RETURN_NUMBER, 0x300, 4]), 4);
+    assert.equal(view.getUint32(0x300, true), 1252, 'a decimal value is decimal');
+
+    assert.equal(fns.GetLocaleInfoA.handler([0x409, ILANGUAGE | LOCALE_RETURN_NUMBER, 0, 0]), 4,
+        'a count of zero measures');
+    assert.equal(
+        fns.GetLocaleInfoA.handler([0x409, ILANGUAGE | LOCALE_RETURN_NUMBER, 0x100, 2]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+});
+
+test('a type the locale lacks, or a flag the call cannot take, is ERROR_INVALID_FLAGS', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const SDECIMAL = 0x000E;
+    const SMONTHNAME1 = 0x0038;
+
+    assert.equal(fns.GetLocaleInfoA.handler([0x409, SDECIMAL | LOCALE_RETURN_NUMBER, 0x100, 4]), 0,
+        'a string has no number to return');
+    assert.equal(host.errors.at(-1), ERROR_INVALID_FLAGS);
+    assert.equal(fns.GetLocaleInfoA.handler([0x409, 0x7ffe, 0x100, 64]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_FLAGS);
+
+    host.bytes[0x100] = 0x61;
+    assert.equal(fns.GetLocaleInfoA.handler(
+        [0x409, SMONTHNAME1 | LOCALE_RETURN_GENITIVE_NAMES, 0x100, 64]), 0,
+    'the narrow form has no genitive names');
+    assert.equal(host.errors.at(-1), ERROR_INVALID_FLAGS);
+    assert.equal(host.bytes[0x100], 0x61, 'and writes nothing');
+    assert.equal(fns.GetLocaleInfoW.handler([0x409, LOCALE_RETURN_GENITIVE_NAMES, 0x100, 64]), 0,
+        'the flag alone names no type');
+    assert.equal(host.errors.at(-1), ERROR_INVALID_FLAGS);
+
+    assert.equal(fns.GetLocaleInfoW.handler(
+        [0x409, SMONTHNAME1 | LOCALE_RETURN_GENITIVE_NAMES, 0x100, 64]), 8,
+    'an English month is its own genitive');
+    assert.equal(host.readWide(0x100, 7), 'January');
+
+    host.errors.length = 0;
+    assert.equal(fns.GetLocaleInfoA.handler([0x419, SDECIMAL, 0x100, 64]), 0);
+    assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER],
+        'a locale we do not carry is still that');
+});
+
+test('the abbreviated names, the digit grouping and the currency are answered', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    /** @param {number} type */
+    const ask = type=>{
+        const length = fns.GetLocaleInfoA.handler([0x409, type, 0x100, 64]);
+        assert.ok(length > 0, `LCTYPE 0x${type.toString(16)} is answered`);
+        return String.fromCharCode(...host.bytes.slice(0x100, 0x100 + length - 1));
+    };
+
+    assert.equal(ask(0x0031), 'Mon', 'SABBREVDAYNAME1');
+    assert.equal(ask(0x0037), 'Sun', 'SABBREVDAYNAME7');
+    assert.equal(ask(0x0044), 'Jan', 'SABBREVMONTHNAME1');
+    assert.equal(ask(0x004F), 'Dec', 'SABBREVMONTHNAME12');
+    assert.equal(ask(0x0010), '3;0', 'SGROUPING');
+    assert.equal(ask(0x0011), '2', 'IDIGITS');
+    assert.equal(ask(0x0012), '1', 'ILZERO');
+    assert.equal(ask(0x0005), '1', 'ICOUNTRY');
+    assert.equal(ask(0x0014), '$', 'SCURRENCY');
+    assert.equal(ask(0x0001), '0409', 'ILANGUAGE stays four hex digits as text');
+    assert.equal(ask(0x000B), '437', 'IDEFAULTCODEPAGE');
 });

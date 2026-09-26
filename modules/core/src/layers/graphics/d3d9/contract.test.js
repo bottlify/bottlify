@@ -81,8 +81,11 @@ test('the adapter answers format questions from the table its creates consult', 
     assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1), D3D_OK,
         'a compressed format is legal whatever compressedTextures says -- it only chooses'
             + ' how the surface travels to the GPU');
-    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.VOLUMETEXTURE, D3DFMT.A8R8G8B8),
-        D3DERR_NOTAVAILABLE, 'volumes are never made');
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.VOLUMETEXTURE, D3DFMT.A8R8G8B8), D3D_OK);
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.VOLUMETEXTURE, D3DFMT.DXT1),
+        D3DERR_NOTAVAILABLE, 'a volume is never made in blocks');
+    assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.RENDERTARGET, D3DRTYPE.VOLUMETEXTURE,
+        D3DFMT.A8R8G8B8), D3DERR_NOTAVAILABLE, 'nor drawn into');
     assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, 999), D3DERR_NOTAVAILABLE);
 
     /** @type {{ qualityLevels?: number }} */
@@ -202,7 +205,10 @@ test('a declaration the program made reports no format, even when it describes o
     assert.equal(device.release(), 0);
 });
 
-test('a draw through a declaration with no format succeeds and is reported once', ()=>{
+test('a draw through a declaration the fixed stage cannot read succeeds, reported once', ()=>{
+    // A colour of four bytes read R, G, B, A: the fixed-function stage reads
+    // D3DCOLOR alone. A declaration it can read -- a tangent beside the
+    // position, a member in another stream -- is drawn, and not reported.
     /** @type {string[]} */
     const reports = [];
     const { device } = make({ services: { divergence: (/** @type {string} */ _api,
@@ -211,7 +217,7 @@ test('a draw through a declaration with no format succeeds and is reported once'
     const made = {};
     device.CreateVertexDeclaration([
         element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
-        element(D3DDECLUSAGE.TANGENT, D3DDECLTYPE.FLOAT3, 12),
+        element(D3DDECLUSAGE.COLOR, D3DDECLTYPE.UBYTE4N, 12),
     ], made);
     device.SetVertexDeclaration(made.declaration);
     /** @type {{ buffer?: any }} */
@@ -501,7 +507,10 @@ test('a render target must be one, only index zero exists, and a depth stencil m
     /** @type {{ surface?: any }} */
     const depth = {};
     assert.equal(device.GetDepthStencilSurface(depth), D3DERR_NOTFOUND);
-    assert.equal(device.GetBackBuffer(0, 0, 1, depth), D3DERR_INVALIDCALL, 'not a mono buffer');
+    // Wine's d3d9 test_swapchain: the type is not looked at, and a stereo
+    // buffer asked for is the mono one.
+    assert.equal(device.GetBackBuffer(0, 0, 1, depth), D3D_OK, 'D3DBACKBUFFER_TYPE_LEFT');
+    depth.surface.release();
     assert.equal(device.GetBackBuffer(0, 1, 0, depth), D3DERR_INVALIDCALL, 'past the count');
 
     level.surface.release();
@@ -541,19 +550,21 @@ test('event and occlusion queries are offered, the timings are not, and a null p
         assert.equal(device.CreateQuery(D3DQUERYTYPE.TIMESTAMP, refused), D3DERR_NOTAVAILABLE);
         assert.equal(refused.query, undefined);
 
-        // An occlusion query answers every pixel of the target, which never
-        // culls what should be drawn, and the device says so once.
+        // A device that draws nothing counts nothing: an occlusion query
+        // never ended answers without writing, and once ended, zero.
         /** @type {{ query?: any }} */
         const occlusion = {};
         assert.equal(device.CreateQuery(D3DQUERYTYPE.OCCLUSION, occlusion), D3D_OK);
-        assert.equal(occlusion.query.Issue(D3DISSUE.BEGIN), D3D_OK);
-        assert.equal(occlusion.query.GetData({}, 4), 1, 'S_FALSE until the end is issued');
-        assert.equal(occlusion.query.Issue(D3DISSUE.END), D3D_OK);
         /** @type {{ value?: number }} */
         const pixels = {};
         assert.equal(occlusion.query.GetData(pixels, 4), D3D_OK);
-        assert.equal(pixels.value, 64 * 48);
-        assert.equal(reports.filter(line=>line.includes('occlusion')).length, 1);
+        assert.equal(pixels.value, undefined);
+        assert.equal(occlusion.query.Issue(D3DISSUE.BEGIN), D3D_OK);
+        assert.equal(occlusion.query.GetData({}, 4), 1, 'S_FALSE until the end is issued');
+        assert.equal(occlusion.query.Issue(D3DISSUE.END), D3D_OK);
+        assert.equal(occlusion.query.GetData(pixels, 4), D3D_OK);
+        assert.equal(pixels.value, 0);
+        assert.equal(reports.filter(line=>line.includes('occlusion')).length, 0);
         assert.equal(occlusion.query.release(), 0);
 
         /** @type {{ query?: any }} */
@@ -772,6 +783,100 @@ test('UpdateTexture copies the levels, and the pools and formats have to match t
     assert.equal(device.release(), 0);
 });
 
+test('UpdateTexture carries only the source\'s dirty region, scaled to each level', ()=>{
+    // Wine's d3d9 add_dirty_rect_test: an update takes the region, a lock
+    // or AddDirtyRect adds to it, and the destination's own is ignored.
+    const { device, memory } = makeWithMemory();
+    /** @type {{ texture?: any }} */
+    const source = {};
+    device.CreateTexture(8, 8, 2, 0, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, source);
+    /** @type {{ texture?: any }} */
+    const destination = {};
+    device.CreateTexture(8, 8, 2, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, destination);
+    /** @param {any} texture @param {number} level */
+    const baseOf = (texture, level)=>{
+        /** @type {{ surface?: any }} */
+        const held = {};
+        texture.GetSurfaceLevel(level, held);
+        held.surface.release();
+        return held.surface.base;
+    };
+    assert.equal(device.UpdateTexture(source.texture, destination.texture), D3D_OK);
+    memory.fill(7, baseOf(source.texture, 0), baseOf(source.texture, 0) + 8 * 8 * 4);
+    memory.fill(7, baseOf(source.texture, 1), baseOf(source.texture, 1) + 4 * 4 * 4);
+    assert.equal(device.UpdateTexture(source.texture, destination.texture), D3D_OK);
+    assert.equal(memory[baseOf(destination.texture, 0)], 0, 'written with no lock: not carried');
+
+    assert.equal(destination.texture.AddDirtyRect({ left: 0, top: 0, right: 8, bottom: 8 }),
+        D3D_OK);
+    assert.equal(device.UpdateTexture(source.texture, destination.texture), D3D_OK);
+    assert.equal(memory[baseOf(destination.texture, 0)], 0, 'nor for the destination\'s asking');
+
+    assert.equal(source.texture.AddDirtyRect({ left: 4, top: 4, right: 6, bottom: 6 }), D3D_OK);
+    assert.equal(device.UpdateTexture(source.texture, destination.texture), D3D_OK);
+    const top = baseOf(destination.texture, 0);
+    assert.equal(memory[top + (4 * 8 + 4) * 4], 7, 'inside the rectangle');
+    assert.equal(memory[top + (5 * 8 + 5) * 4], 7);
+    assert.equal(memory[top + (3 * 8 + 4) * 4], 0, 'outside it');
+    assert.equal(memory[top + (4 * 8 + 6) * 4], 0);
+    const next = baseOf(destination.texture, 1);
+    assert.equal(memory[next + (2 * 4 + 2) * 4], 7, 'and its half at the next level');
+    assert.equal(memory[next], 0);
+    source.texture.release();
+    destination.texture.release();
+    assert.equal(device.release(), 0);
+});
+
+test('UpdateTexture carries a cube map face by face, each by its own dirty region', ()=>{
+    const { device, memory } = makeWithMemory();
+    /** @param {number} pool */
+    const cube = pool=>{
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateCubeTexture(4, 1, 0, D3DFMT.A8R8G8B8, pool, out), D3D_OK);
+        return out.texture;
+    };
+    const source = cube(D3DPOOL.SYSTEMMEM);
+    const destination = cube(D3DPOOL.DEFAULT);
+    /** @param {any} texture @param {number} face */
+    const baseOf = (texture, face)=>{
+        /** @type {{ surface?: any }} */
+        const held = {};
+        assert.equal(texture.GetCubeMapSurface(face, 0, held), D3D_OK);
+        held.surface.release();
+        return held.surface.base;
+    };
+    for (let face = 0; face < 6; face++)
+    {
+        memory.fill(face + 1, baseOf(source, face), baseOf(source, face) + 64);
+    }
+    assert.equal(device.UpdateTexture(source, destination), D3D_OK);
+    assert.deepEqual(Array.from({ length: 6 }, (_, face)=>memory[baseOf(destination, face)]),
+        [1, 2, 3, 4, 5, 6], 'every face, at first');
+
+    for (let face = 0; face < 6; face++)
+    {
+        memory.fill(9, baseOf(source, face), baseOf(source, face) + 64);
+    }
+    /** @type {any} */
+    const locked = {};
+    assert.equal(source.LockCubeRect(3, 0, locked, null, 0), D3D_OK);
+    assert.equal(source.UnlockCubeRect(3, 0), D3D_OK);
+    assert.equal(device.UpdateTexture(source, destination), D3D_OK);
+    assert.deepEqual(Array.from({ length: 6 }, (_, face)=>memory[baseOf(destination, face)]),
+        [1, 2, 3, 9, 5, 6], 'the face that was locked, and no other');
+
+    /** @type {{ texture?: any }} */
+    const flat = {};
+    device.CreateTexture(4, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, flat);
+    assert.equal(device.UpdateTexture(source, flat.texture), D3DERR_INVALIDCALL,
+        'a cube is not carried into a texture of one face');
+    flat.texture.release();
+    source.release();
+    destination.release();
+    assert.equal(device.release(), 0);
+});
+
 test('ColorFill writes the colour in the format\'s own layout, over the rectangle only', ()=>{
     const { device, memory } = makeWithMemory();
     /** @type {{ surface?: any }} */
@@ -909,10 +1014,17 @@ test('an index buffer describes itself with its index width', ()=>{
 
 test('a palette is kept and read back, and the current one remembered', ()=>{
     const { device } = make();
-    const entries = Uint8Array.from({ length: 1024 }, (_, index)=>index & 0xff);
+    // Opaque entries: this device claims no D3DPTEXTURECAPS_ALPHAPALETTE, and
+    // without it an entry whose peFlags is not 0xff is refused (Wine's d3d9
+    // test_set_palette).
+    const entries = Uint8Array.from({ length: 1024 },
+        (_, index)=>(index % 4 === 3 ? 0xff : index & 0xff));
     assert.equal(device.SetPaletteEntries(3, entries), D3D_OK);
     assert.equal(device.SetPaletteEntries(4, new Uint8Array(12)), D3DERR_INVALIDCALL,
         'a palette is 256 entries');
+    assert.equal(device.SetPaletteEntries(4,
+        Uint8Array.from({ length: 1024 }, (_, index)=>index & 0xff)), D3DERR_INVALIDCALL,
+    'an entry with alpha');
     /** @type {{ entries?: Uint8Array }} */
     const out = {};
     assert.equal(device.GetPaletteEntries(3, out), D3D_OK);
@@ -925,3 +1037,91 @@ test('a palette is kept and read back, and the current one remembered', ()=>{
     assert.equal(current.number, 3);
     assert.equal(device.release(), 0);
 });
+
+test('a texture that makes its own levels shows the program one, in the pools that allow it',
+    ()=>{
+        // Wine's d3d9 test_mipmap_gen and test_cube_texture_mipmap_gen.
+        const { d3d, device } = make();
+        const AUTOGEN = D3DUSAGE.AUTOGENMIPMAP;
+        const D3DOK_NOAUTOGEN = 0x0876086f;
+        assert.equal(d3d.CheckDeviceFormat(AUTOGEN, D3DRTYPE.TEXTURE, D3DFMT.X8R8G8B8), D3D_OK);
+        assert.equal(d3d.CheckDeviceFormat(AUTOGEN, D3DRTYPE.CUBETEXTURE, D3DFMT.X8R8G8B8),
+            D3D_OK);
+        assert.equal(d3d.CheckDeviceFormat(AUTOGEN, D3DRTYPE.TEXTURE, D3DFMT.DXT5),
+            D3DOK_NOAUTOGEN, 'a format no level is drawn into is made without them');
+        assert.equal(d3d.CheckDeviceFormat(AUTOGEN | D3DUSAGE.DYNAMIC, D3DRTYPE.TEXTURE,
+            D3DFMT.X8R8G8B8), D3DERR_NOTAVAILABLE);
+        assert.equal(d3d.CheckDeviceFormat(AUTOGEN, D3DRTYPE.VOLUMETEXTURE, D3DFMT.X8R8G8B8),
+            D3DERR_NOTAVAILABLE);
+
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(64, 64, 0, D3DUSAGE.RENDERTARGET | AUTOGEN,
+            D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT, out), D3D_OK);
+        out.texture.release();
+        assert.equal(device.CreateTexture(64, 64, 0, AUTOGEN, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED,
+            out), D3D_OK);
+        const texture = out.texture;
+        assert.equal(texture.GetAutoGenFilterType(), 2, 'D3DTEXF_LINEAR');
+        assert.equal(texture.SetAutoGenFilterType(0), D3DERR_INVALIDCALL, 'D3DTEXF_NONE');
+        assert.equal(texture.SetAutoGenFilterType(3), D3D_OK);
+        assert.equal(texture.GetAutoGenFilterType(), 3, 'D3DTEXF_ANISOTROPIC');
+        assert.equal(texture.levels, 1);
+        /** @type {any} */
+        const held = {};
+        assert.equal(texture.GetSurfaceLevel(0, held), D3D_OK);
+        /** @type {{ desc?: any }} */
+        const described = {};
+        held.surface.GetDesc(described);
+        assert.equal(described.desc.Usage, AUTOGEN);
+        held.surface.release();
+        for (let level = 1; level < 6; level++)
+        {
+            assert.equal(texture.GetSurfaceLevel(level, {}), D3DERR_INVALIDCALL);
+            assert.equal(texture.LockRect(level, {}, null, 0), D3DERR_INVALIDCALL);
+        }
+        texture.release();
+
+        for (const levels of [2, 6])
+        {
+            assert.equal(device.CreateTexture(64, 64, levels, AUTOGEN, D3DFMT.X8R8G8B8,
+                D3DPOOL.MANAGED, out), D3DERR_INVALIDCALL, `${levels} levels`);
+        }
+        assert.equal(device.CreateTexture(64, 64, 1, AUTOGEN, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED,
+            out), D3D_OK);
+        out.texture.release();
+        assert.equal(device.CreateTexture(64, 64, 0, AUTOGEN, D3DFMT.X8R8G8B8,
+            D3DPOOL.SYSTEMMEM, out), D3DERR_INVALIDCALL);
+        assert.equal(device.CreateTexture(64, 64, 0, AUTOGEN, D3DFMT.DXT5, D3DPOOL.DEFAULT, out),
+            D3D_OK, 'made, without generated levels');
+        assert.equal(out.texture.levels, 1);
+        out.texture.release();
+        assert.equal(device.CreateCubeTexture(64, 0, AUTOGEN, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED,
+            out), D3D_OK);
+        assert.equal(out.texture.levels, 1);
+        out.texture.release();
+        assert.equal(device.CreateVolumeTexture(64, 64, 64, 0, AUTOGEN, D3DFMT.X8R8G8B8,
+            D3DPOOL.DEFAULT, out), D3DERR_INVALIDCALL);
+        assert.equal(device.release(), 0);
+    });
+
+test('UpdateTexture into a texture that makes its own levels carries the source\'s top level',
+    ()=>{
+        const { device } = make();
+        /** @type {{ texture?: any }} */
+        const source = {};
+        assert.equal(device.CreateTexture(16, 16, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM,
+            source), D3D_OK);
+        /** @type {{ texture?: any }} */
+        const destination = {};
+        assert.equal(device.CreateTexture(16, 16, 0, D3DUSAGE.AUTOGENMIPMAP, D3DFMT.A8R8G8B8,
+            D3DPOOL.DEFAULT, destination), D3D_OK);
+        /** @type {{ moves?: any[] }} */
+        const out = {};
+        assert.equal(device.UpdateTexture(source.texture, destination.texture, out), D3D_OK);
+        assert.equal(out.moves?.length, 1);
+        assert.deepEqual([out.moves?.[0].rowBytes, out.moves?.[0].rows], [64, 16]);
+        source.texture.release();
+        destination.texture.release();
+        assert.equal(device.release(), 0);
+    });

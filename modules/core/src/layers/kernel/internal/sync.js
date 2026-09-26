@@ -197,6 +197,14 @@ export function createSyncObjects({ scheduler }){
         // because whoever takes it leaves the queue as it goes.
         for (const thread of [...object.waiters])
         {
+            // A suspended waiter is not waiting while it is suspended: what it
+            // took it could not use, and whoever else waits would starve for
+            // as long as it stays suspended. It stays queued, and `retry`
+            // looks again when it is resumed.
+            if (thread.suspendCount > 0)
+            {
+                continue;
+            }
             const set = thread.waitSet;
             const all = set?.all === true;
             if (all && !set.objects.every(
@@ -204,31 +212,41 @@ export function createSyncObjects({ scheduler }){
             {
                 continue;
             }
-            leaveQueues(thread, object);
-            if (all)
-            {
-                let result = WaitResult.OBJECT_0;
-                for (const one of set.objects)
-                {
-                    if (api.wait(one, thread) === WaitResult.ABANDONED)
-                    {
-                        result = WaitResult.ABANDONED;
-                    }
-                }
-                thread.waitResult = result;
-            }
-            else
-            {
-                // The base is what acquiring said -- OBJECT_0, or ABANDONED for
-                // a mutex whose owner died -- and the index is added to it,
-                // which is what makes both of them bases rather than values.
-                const index = set ? set.objects.indexOf(object) : 0;
-                thread.waitResult = (acquire(object, thread) + index) >>> 0;
-            }
-            scheduler.wake(thread);
+            hand(thread, object);
             return thread;
         }
         return null;
+    };
+
+    /**
+     * Ends a queued thread's wait with the object that satisfied it.
+     *
+     * @param {any} thread @param {any} object
+     */
+    const hand = (thread, object)=>{
+        const set = thread.waitSet;
+        leaveQueues(thread, object);
+        if (set?.all === true)
+        {
+            let result = WaitResult.OBJECT_0;
+            for (const one of set.objects)
+            {
+                if (api.wait(one, thread) === WaitResult.ABANDONED)
+                {
+                    result = WaitResult.ABANDONED;
+                }
+            }
+            thread.waitResult = result;
+        }
+        else
+        {
+            // The base is what acquiring said -- OBJECT_0, or ABANDONED for
+            // a mutex whose owner died -- and the index is added to it,
+            // which is what makes both of them bases rather than values.
+            const index = set ? set.objects.indexOf(object) : 0;
+            thread.waitResult = (acquire(object, thread) + index) >>> 0;
+        }
+        scheduler.wake(thread);
     };
 
     /** @param {any[]} objects_ */
@@ -378,6 +396,51 @@ export function createSyncObjects({ scheduler }){
          * @param {any} thread
          */
         stopWaiting,
+
+        /**
+         * Looks again at the wait a thread is queued in, for a thread that
+         * could not be handed anything while it was suspended: an object
+         * signalled in that time, and still signalled, ends the wait now, as
+         * it would have had the thread been there to take it.
+         *
+         * @param {any} thread
+         * @returns {boolean} whether the wait ended
+         */
+        retry(thread){
+            if (thread.state !== 'blocked' || thread.suspendCount > 0)
+            {
+                return false;
+            }
+            // Only the queues it still stands in: a thread whose last wait was
+            // answered keeps the list of what it was queued on, and a later
+            // block of another kind must not be ended by an object from it.
+            const queued = (thread.queuedOn ?? []).filter(
+                (/** @type {any} */ one)=>one.waiters.includes(thread));
+            if (queued.length === 0)
+            {
+                return false;
+            }
+            const set = thread.waitSet;
+            /** @param {any} one */
+            const takeable = one=>isSignalled(one) || owns(one, thread);
+            if (set?.all === true)
+            {
+                if (!set.objects.every(takeable))
+                {
+                    return false;
+                }
+                hand(thread, set.objects[0]);
+                return true;
+            }
+            // The first in the caller's order, which is the index it is told.
+            const object = (set ? set.objects : queued).find(takeable);
+            if (!object)
+            {
+                return false;
+            }
+            hand(thread, object);
+            return true;
+        },
 
         /**
          * Waits for one object.

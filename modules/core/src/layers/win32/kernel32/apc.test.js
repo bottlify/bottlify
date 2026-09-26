@@ -189,15 +189,33 @@ test('SignalObjectAndWait signals by the object\'s kind, then waits', ()=>{
         'a thread cannot be signalled');
 });
 
-test('MsgWaitForMultipleObjectsEx reads wait-all and alertable out of its flags', ()=>{
-    const m = machine();
+test('MsgWaitForMultipleObjectsEx reads wait-all, input-available and alertable from its flags',
+    ()=>{
+        // The message wait takes the two it acts on itself after its own five
+        // arguments: MWMO_INPUTAVAILABLE, then MWMO_ALERTABLE.
+        const MWMO_WAITALL = 0x1;
+        const MWMO_ALERTABLE = 0x2;
+        const MWMO_INPUTAVAILABLE = 0x4;
+        const m = machine();
 
-    m.apcs.user32.MsgWaitForMultipleObjectsEx.handler([2, 0x3000, 50, 0xff, 0x3]);
+        m.apcs.user32.MsgWaitForMultipleObjectsEx.handler(
+            [2, 0x3000, 50, 0xff, MWMO_WAITALL | MWMO_ALERTABLE]);
+        m.apcs.user32.MsgWaitForMultipleObjectsEx.handler(
+            [1, 0x3000, 0, 0xff, MWMO_INPUTAVAILABLE]);
 
-    assert.deepEqual(m.calls, [{
-        name: 'MsgWaitForMultipleObjects', args: [2, 0x3000, 1, 50, 0xff], alertable: true,
-    }]);
-});
+        assert.deepEqual(m.calls, [
+            {
+                name: 'MsgWaitForMultipleObjects',
+                args: [2, 0x3000, 1, 50, 0xff, 0, MWMO_ALERTABLE],
+                alertable: true,
+            },
+            {
+                name: 'MsgWaitForMultipleObjects',
+                args: [1, 0x3000, 0, 0, 0xff, MWMO_INPUTAVAILABLE, 0],
+                alertable: false,
+            },
+        ]);
+    });
 
 test('every entry pops its own stdcall bytes', ()=>{
     const { apcs } = machine();

@@ -28,7 +28,10 @@ const KEPT_FORMATS = /** @type {Record<string, number>} */ ({
 
 /**
  * @param {{ compilationMessages?: Record<string, any[]>,
- *           refusePipeline?: (descriptor: any) => string | null | undefined }} [options]
+ *           refusePipeline?: (descriptor: any) => string | null | undefined,
+ *           occlusionSamples?: (index: number) => number }} [options]
+ *        `occlusionSamples` is what the occlusion query at each slot of a query
+ *        set resolves to, standing in for the rasteriser; zero when absent.
  */
 export function createFakeDevice(options = {}){
     /** @type {any[]} */
@@ -41,7 +44,9 @@ export function createFakeDevice(options = {}){
 
     /** @param {any} descriptor */
     const createTexture = descriptor=>{
-        const texture = object('texture', { descriptor });
+        // What a GPUTexture says of itself, read by whoever decides how to use one.
+        const texture = object('texture', { descriptor, usage: descriptor.usage ?? 0,
+            format: descriptor.format, sampleCount: descriptor.sampleCount ?? 1 });
         const kept = KEPT_FORMATS[descriptor.format];
         if (kept)
         {
@@ -113,8 +118,9 @@ export function createFakeDevice(options = {}){
         const pass = object('pass', { descriptor });
         for (const attachment of descriptor.colorAttachments ?? [])
         {
-            const texture = attachment.view?.texture;
-            if (attachment.loadOp === 'clear' && texture?.bytes)
+            // A location left empty is a null, as WebGPU takes it.
+            const texture = attachment?.view?.texture;
+            if (attachment?.loadOp === 'clear' && texture?.bytes)
             {
                 const value = attachment.clearValue ?? { r: 0, g: 0, b: 0, a: 1 };
                 /** @param {number} channel */
@@ -136,6 +142,10 @@ export function createFakeDevice(options = {}){
         pass.setScissorRect = (/** @type {number[]} */ ...rect)=>record('setScissorRect', { rect });
         pass.setStencilReference = (/** @type {number} */ reference)=>
             record('setStencilReference', { reference });
+        pass.setBlendConstant = (/** @type {any} */ color)=>record('setBlendConstant', { color });
+        pass.beginOcclusionQuery = (/** @type {number} */ index)=>
+            record('beginOcclusionQuery', { index });
+        pass.endOcclusionQuery = ()=>record('endOcclusionQuery', {});
         pass.setPipeline = (/** @type {any} */ pipeline)=>record('setPipeline', { pipeline });
         // A dynamic binding resolves to the byte range the shader would read:
         // the offsets arrive in binding order, and the resource names the
@@ -209,6 +219,23 @@ export function createFakeDevice(options = {}){
             deferred.push(()=>moveTexels(source, destination, size));
             calls.push({ op: 'copyTextureToBuffer', encoder, source, destination, size });
         };
+        /**
+         * @param {any} querySet @param {number} firstQuery @param {number} queryCount
+         * @param {any} destination @param {number} at
+         */
+        encoder.resolveQuerySet = (querySet, firstQuery, queryCount, destination, at)=>{
+            const destinationOffset = at;
+            deferred.push(()=>{
+                const view = new DataView(destination.bytes.buffer);
+                for (let index = 0; index < queryCount; index++)
+                {
+                    view.setBigUint64(destinationOffset + index * 8,
+                        BigInt(options.occlusionSamples?.(firstQuery + index) ?? 0), true);
+                }
+            });
+            calls.push({ op: 'resolveQuerySet', encoder, querySet, firstQuery, queryCount,
+                destination, destinationOffset });
+        };
         /** @param {any} source @param {any} destination @param {any} size */
         encoder.copyTextureToTexture = (source, destination, size)=>{
             deferred.push(()=>moveTexels(source, destination, size));
@@ -269,6 +296,15 @@ export function createFakeDevice(options = {}){
         createShaderModule,
         createBuffer,
         createBindGroupLayout: recorder('createBindGroupLayout'),
+        /** @param {any} descriptor */
+        createQuerySet: descriptor=>{
+            const querySet = object('createQuerySet', { descriptor });
+            querySet.destroy = ()=>{
+                calls.push({ op: 'destroyQuerySet', querySet });
+            };
+            calls.push({ op: 'createQuerySet', createQuerySet: querySet, descriptor });
+            return querySet;
+        },
         createPipelineLayout: recorder('createPipelineLayout'),
         /** @param {any} descriptor */
         createBindGroup: descriptor=>{
@@ -353,6 +389,11 @@ export function createFakeDevice(options = {}){
      * first frame of the run and never again.
      */
     const screenTexture = object('canvasTexture');
+    screenTexture.createView = (/** @type {any} */ viewDescriptor)=>{
+        const view = object('view', { texture: screenTexture, viewDescriptor });
+        calls.push({ op: 'createView', texture: screenTexture, view });
+        return view;
+    };
     const canvas = { width: 0, height: 0, getContext: ()=>screen };
     const screen = {
         canvas,

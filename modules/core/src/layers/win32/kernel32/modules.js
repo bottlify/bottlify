@@ -29,6 +29,9 @@ const SEPARATOR = String.fromCharCode(92);
 /** ERROR_MOD_NOT_FOUND, ERROR_PROC_NOT_FOUND. */
 const ERROR_MOD_NOT_FOUND = 126;
 const ERROR_PROC_NOT_FOUND = 127;
+const ERROR_INVALID_PARAMETER = 87;
+/** What FreeLibrary says of a data-file handle that names no mapping. */
+const ERROR_BAD_EXE_FORMAT = 193;
 
 /**
  * A pointer whose high word is zero is an ordinal, not a string. It is the rule
@@ -65,6 +68,10 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  * @property {(name: string) => number | null} addressOf
  * @property {(ordinal: number) => number | null} addressOfOrdinal
  * @property {string} [path]  Where it was loaded from, when it came from a file.
+ * @property {() => number | Promise<number>} [release]
+ *           Gives back one reference a LoadLibrary took; the last one unloads
+ *           the module, its DllMain told first. A module without one -- the
+ *           program, and every library it imports -- is never unloaded.
  */
 
 /**
@@ -77,9 +84,13 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  * @property {(code: number) => void} setLastError
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {() => string} imagePath  The path the running program was loaded from.
- * @property {(name: string) => number | Promise<number>} [load]
+ * @property {(name: string, flags?: number) => number | Promise<number>} [load]
  *           Brings a library in if it is not here yet, answering with its base
  *           or zero. Answers synchronously whenever it can -- see LoadLibraryA.
+ *           `flags` are LoadLibraryEx's, which say how it is to be loaded.
+ * @property {(handle: number) => ModuleRecord | null} [dataFile]
+ *           A library LoadLibraryEx mapped as data, by the handle it gave out:
+ *           no module, so not among the ones `byBase` knows.
  * @property {(asked: { module: string, name: string, found: number }) => void} [resolved]
  *           Told what a program looked up at runtime and what it was given. A
  *           name we answer zero to is one the program then decides about, and
@@ -136,13 +147,14 @@ export function createModuleFunctions(host){
      * answer about whether waiting is needed stops matching the waiting.
      *
      * @param {string} name
+     * @param {number} [flags]  LoadLibraryEx's.
      * @returns {number | Promise<number>}
      */
-    const load = name=>{
+    const load = (name, flags = 0)=>{
         // Through the loader even for a module already here: only it knows
         // whether this is the load that has to run the module's entry point.
         const known = host.find(name);
-        const answer = host.load ? host.load(name) : known?.base ?? 0;
+        const answer = host.load ? host.load(name, flags) : known?.base ?? 0;
         if (typeof answer === 'number')
         {
             const base = answer || known?.base || 0;
@@ -200,15 +212,36 @@ export function createModuleFunctions(host){
             handler: ([name])=>load(host.readCString(name >>> 0, MAX_NAME)),
         },
 
-        /** HMODULE LoadLibraryExA(LPCSTR, HANDLE, DWORD dwFlags) */
+        /**
+         * HMODULE LoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
+         * HMODULE LoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
+         *
+         * The flags say how the library is loaded -- as data for its resources,
+         * or mapped without its imports resolved or its entry point run -- and
+         * the loader acts on them. hFile is reserved and must be NULL.
+         */
         LoadLibraryExA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([name])=>{
-                // The flags select how a library is mapped -- as data, with or
-                // without running its entry point. Ours have no entry point and
-                // one mapping, so every flag describes what already happened.
-                return load(host.readCString(name >>> 0, MAX_NAME));
+            handler: ([name, file, flags])=>{
+                if ((file >>> 0) !== 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return load(host.readCString(name >>> 0, MAX_NAME), flags >>> 0);
+            },
+        },
+        LoadLibraryExW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([name, file, flags])=>{
+                if ((file >>> 0) !== 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return load(host.readWideString(name >>> 0, MAX_NAME), flags >>> 0);
             },
         },
 
@@ -217,9 +250,16 @@ export function createModuleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                // Nothing is unmapped: an address handed out earlier must keep
-                // working, and a system module has no lifetime of its own.
-                return host.byBase(handle >>> 0) ? 1 : 0;
+                const module = host.byBase(handle >>> 0) ?? host.dataFile?.(handle >>> 0) ?? null;
+                if (!module)
+                {
+                    // A handle with the low bits set is a data file's, and one
+                    // that names no mapping is not an image at all.
+                    host.setLastError(
+                        (handle & 3) !== 0 ? ERROR_BAD_EXE_FORMAT : ERROR_MOD_NOT_FOUND);
+                    return 0;
+                }
+                return module.release ? module.release() : 1;
             },
         },
 

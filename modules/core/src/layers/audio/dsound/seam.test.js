@@ -7,18 +7,32 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
+import { synthesiseModule } from '../../loader/internal/synth.js';
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
 import {
     createDirectSound, createPublisher, describe,
     DS_OK, WAVEFORMATEX, DSBUFFERDESC, DSBCAPS, DSCAPS, DSCAPS_FLAGS, DSBPOSITIONNOTIFY,
     IID_IDirectSound, IID_IDirectSound8, IID_IDirectSoundBuffer,
     IID_IDirectSoundBuffer8, IID_IDirectSoundNotify, IID_IDirectSound3DBuffer,
-    IDIRECTSOUND_SLOTS, IDIRECTSOUNDBUFFER_SLOTS, IDIRECTSOUNDBUFFER8_SLOTS,
+    IDIRECTSOUND_SLOTS, IDIRECTSOUND8_SLOTS, IDIRECTSOUNDBUFFER_SLOTS,
+    IDIRECTSOUNDBUFFER8_SLOTS,
 } from './seam.js';
 import { DSBSTATUS_PLAYING, DSBPLAY_LOOPING, DSBLOCK_ENTIREBUFFER } from './buffers.js';
 
 const DSERR_INVALIDPARAM = 0x80070057 | 0;
+const DSERR_CONTROLUNAVAIL = 0x8878001e | 0;
+const DSERR_INVALIDCALL = 0x88780032 | 0;
+const DSERR_NODRIVER = 0x88780078 | 0;
+const DS_UNCERTIFIED = 1;
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
+const DSBCAPS_LOCHARDWARE = 0x00000004;
+const DSBCAPS_LOCSOFTWARE = 0x00000008;
+const DSBCAPS_CTRLFREQUENCY = 0x00000020;
+const DSBCAPS_CTRLPAN = 0x00000040;
+const DSBCAPS_CTRLVOLUME = 0x00000080;
+const DSBCAPS_CTRLPOSITIONNOTIFY = 0x00000100;
+const DSBCAPS_CTRLFX = 0x00000200;
+const DSBCAPS_GETCURRENTPOSITION2 = 0x00010000;
 
 /** Flat guest memory, one megabyte, addressed from zero. */
 function guestMemory(){
@@ -198,6 +212,7 @@ function createBuffer(f, spec = {}){
 test('every declared slot counts `this` in its argument size', ()=>{
     for (const [name, slots] of [
         ['IDirectSound', IDIRECTSOUND_SLOTS],
+        ['IDirectSound8', IDIRECTSOUND8_SLOTS],
         ['IDirectSoundBuffer', IDIRECTSOUNDBUFFER_SLOTS],
     ])
     {
@@ -246,17 +261,47 @@ test('every slot is present, including the ones nothing implements', ()=>{
     assert.equal(method.invoke, undefined);
 });
 
-test('one object has one identity however many times it is published', ()=>{
+test('one object has one identity however many times it is asked for', ()=>{
+    const f = createRoot();
+    assert.equal(f.bridge.query(f.root, IID_IDirectSound), f.root,
+        'a second pointer is a second object to a program comparing them');
+});
+
+test('each DirectSoundCreate makes an object of its own, counting its own references', ()=>{
+    // Wine's dsound tests release every object they create and expect zero
+    // back, and two objects' primary buffers are independent.
     const f = createRoot();
     const again = 0x1004;
     f.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, again, 0]);
-    assert.equal(f.memory.u32(again), f.root,
-        'a second pointer is a second object to a program comparing them');
+    assert.notEqual(f.memory.u32(again), f.root);
+
+    const device = f.bridge.recordAt(f.root).object;
+    assert.equal(device.addRef(), 2);
+    assert.equal(device.release(), 1);
+    assert.equal(device.release(), 0);
+    assert.equal(device.release(), 0, 'and never below');
+});
+
+test('DirectSoundCreate\'s object is IDirectSound alone; DirectSoundCreate8\'s is both', ()=>{
+    // Wine's dsound IDirectSound_test: QueryInterface for IID_IDirectSound8 on
+    // what DirectSoundCreate returned is E_NOINTERFACE; its dsound8 counterpart
+    // answers both on what DirectSoundCreate8 returned.
+    const f = createRoot();
+    const device = f.bridge.recordAt(f.root).object;
+    assert.ok(device.interfaceFor(IID_IDirectSound));
+    assert.equal(device.interfaceFor(IID_IDirectSound8), null);
+    assert.equal(f.bridge.query(f.root, IID_IDirectSound8), 0);
+
+    const out = 0x1008;
+    f.dsound.libraries['DSOUND.dll'].DirectSoundCreate8.handler([0, out, 0]);
+    const eight = f.memory.u32(out);
+    assert.notEqual(f.bridge.query(eight, IID_IDirectSound), 0);
+    assert.equal(f.bridge.query(eight, IID_IDirectSound8), eight);
 });
 
 test('an object answers QueryInterface for what it has and refuses what it has not', ()=>{
     const f = createRoot();
-    const buffer = createBuffer(f);
+    const buffer = createBuffer(f, { flags: DSBCAPS_CTRLPOSITIONNOTIFY });
     const adapter = f.bridge.recordAt(buffer).object;
     assert.ok(adapter.interfaceFor(IID_IDirectSoundBuffer));
     assert.ok(adapter.interfaceFor(IID_IDirectSoundBuffer8));
@@ -266,11 +311,41 @@ test('an object answers QueryInterface for what it has and refuses what it has n
         'a short vtable is worse than E_NOINTERFACE');
 });
 
-test('the root answers to both IDirectSound and IDirectSound8', ()=>{
-    const f = createRoot();
-    const adapter = f.bridge.recordAt(f.root).object;
+test('IDirectSound8 is IDirectSound with one slot more', ()=>{
+    const f = fixture();
+    const out = 0x1000;
+    f.dsound.libraries['DSOUND.dll'].DirectSoundCreate8.handler([0, out, 0]);
+    const adapter = f.bridge.recordAt(f.memory.u32(out)).object;
     assert.equal(adapter.interfaceFor(IID_IDirectSound8).methods.length,
-        adapter.interfaceFor(IID_IDirectSound).methods.length);
+        adapter.interfaceFor(IID_IDirectSound).methods.length + 1,
+        'IDirectSound8 is IDirectSound with VerifyCertification appended');
+});
+
+test('IDirectSound8 has its twelfth slot, VerifyCertification, and answers it', ()=>{
+    // dsound.h declares it after Initialize. A table that ends one short has a
+    // program that calls it jump through whatever word follows the table.
+    assert.deepEqual(IDIRECTSOUND8_SLOTS.map(([name])=>name),
+        [...IDIRECTSOUND_SLOTS.map(([name])=>name), 'VerifyCertification']);
+
+    const f = fixture();
+    const out = 0x1000;
+    assert.equal(
+        f.dsound.libraries['DSOUND.dll'].DirectSoundCreate8.handler([0, out, 0]), DS_OK);
+    const root = f.memory.u32(out);
+    assert.equal(f.bridge.recordAt(root).id, IID_IDirectSound8,
+        'DirectSoundCreate8 hands out the table IDirectSound8 is called through');
+    const methods = f.bridge.methodsOf(root);
+    assert.equal(methods.length, 12);
+    assert.equal(methods[11].name, 'VerifyCertification');
+    assert.equal(methods[11].argBytes, 8);
+
+    // The answer agrees with GetCaps, which does not report DSCAPS_CERTIFIED;
+    // Wine's dsound8 test accepts DS_OK here.
+    const certified = 0x1100;
+    f.memory.setU32(certified, 0xdeadbeef);
+    assert.equal(f.bridge.call(root, 'VerifyCertification', [certified]), DS_OK);
+    assert.equal(f.memory.u32(certified), DS_UNCERTIFIED);
+    assert.equal(f.bridge.call(root, 'VerifyCertification', [0]), DSERR_INVALIDPARAM);
 });
 
 test('CreateSoundBuffer refuses a descriptor with no size or no format', ()=>{
@@ -295,6 +370,159 @@ test('a primary buffer needs neither a size nor a format', ()=>{
     assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]), DS_OK);
     assert.notEqual(f.memory.u32(out), 0);
     assert.equal(f.dsound.buffers()[0].primary, true);
+});
+
+test('through DirectSound 8, a 3D buffer is mono and has no pan', ()=>{
+    // Wine's ds3d8 test_secondary8: a stereo DSBCAPS_CTRL3D buffer, and a mono
+    // one with CTRLPAN as well, are DSERR_INVALIDPARAM; a mono one is made.
+    const f = fixture();
+    const out = 0x1000;
+    f.dsound.libraries['DSOUND.dll'].DirectSoundCreate8.handler([0, out, 0]);
+    const eight = { ...f, root: f.memory.u32(out) };
+    const at = 0x1800;
+    /** @param {any} on @param {any} spec */
+    const create = (on, spec)=>{
+        f.memory.setU32(at, 0xdeadbeef);
+        const result = f.bridge.call(on.root, 'CreateSoundBuffer',
+            [describeBuffer(f.memory, spec), at, 0]);
+        return { result, pointer: f.memory.u32(at) };
+    };
+    const DSBCAPS_CTRL3D = 0x00000010;
+    const stereo3d = create(eight, { flags: DSBCAPS_CTRL3D, channels: 2 });
+    assert.deepEqual(stereo3d, { result: DSERR_INVALIDPARAM, pointer: 0 });
+    const panned3d = create(eight, { flags: DSBCAPS_CTRL3D | DSBCAPS_CTRLPAN, channels: 1 });
+    assert.deepEqual(panned3d, { result: DSERR_INVALIDPARAM, pointer: 0 });
+    assert.equal(create(eight, { flags: DSBCAPS_CTRL3D, channels: 1 }).result, DS_OK);
+
+    // Wine's ds3d test_secondary makes both through DirectSoundCreate's object:
+    // the rule is DirectSound 8's.
+    const older = createRoot(f);
+    const both = create(older, { flags: DSBCAPS_CTRL3D | DSBCAPS_CTRLPAN, channels: 2 });
+    assert.equal(both.result, DS_OK);
+});
+
+test('a primary buffer described with a format is refused', ()=>{
+    // Wine's dsound test_primary: DSBCAPS_PRIMARYBUFFER with a non-null
+    // lpwfxFormat is DSERR_INVALIDPARAM and a null pointer back -- its format
+    // is set afterwards, through SetFormat.
+    const f = createRoot();
+    const out = 0x1800;
+    f.memory.setU32(out, 0xdeadbeef);
+    const descriptor = describeBuffer(f.memory,
+        { flags: DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME });
+    f.memory.setU32(descriptor + DSBUFFERDESC.lpwfxFormat, 0x2000);
+    assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]),
+        DSERR_INVALIDPARAM);
+    assert.equal(f.memory.u32(out), 0);
+    assert.equal(f.dsound.buffers().length, 0, 'nothing was made');
+
+    // And not handed the one that exists either.
+    createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER, descriptor: 0x2200 });
+    assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]),
+        DSERR_INVALIDPARAM);
+    assert.equal(f.memory.u32(out), 0);
+});
+
+test('a device has one primary buffer, handed out again with its count raised', ()=>{
+    // Wine's dsound test_primary and test_hw_buffers: a second primary is the
+    // first, whatever the second description says, and releasing it leaves
+    // one reference; the primary is no IDirectSoundBuffer8 and cannot be
+    // duplicated.
+    const f = createRoot();
+    const primary = createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME });
+    const second = createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER | DSBCAPS_LOCSOFTWARE });
+    assert.equal(second, primary);
+    const buffer = f.bridge.recordAt(primary).object;
+    assert.equal(buffer.release(), 1);
+    assert.equal(f.dsound.buffers().filter(b=>b.primary).length, 1);
+
+    const caps = 0x1a00;
+    f.memory.setU32(caps + DSBCAPS.dwSize, DSBCAPS.SIZE);
+    f.bridge.call(primary, 'GetCaps', [caps]);
+    assert.equal(f.memory.u32(caps + DSBCAPS.dwFlags),
+        DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME, 'the first description stands');
+
+    assert.equal(buffer.interfaceFor(IID_IDirectSoundBuffer8), null);
+    assert.equal(f.bridge.query(primary, IID_IDirectSoundBuffer8), 0);
+    assert.equal(f.bridge.call(f.root, 'DuplicateSoundBuffer', [primary, 0x1e00, 0]),
+        DSERR_INVALIDCALL);
+
+    // Released to nothing and never below; asked for again, it is the same
+    // buffer with the format it was given.
+    assert.equal(buffer.release(), 0);
+    assert.equal(buffer.release(), 0);
+    assert.equal(buffer.addRef(), 1);
+    assert.equal(buffer.release(), 0);
+    createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER });
+    assert.equal(f.dsound.buffers().filter(b=>b.primary).length, 1);
+    assert.equal(f.dsound.buffers().find(b=>b.primary).references, 1);
+});
+
+test('a primary buffer is dropped once nothing can reach it, and not before', ()=>{
+    // Its device holds it: a count of zero is not the end of it while the
+    // device lives. Once both are gone it leaves the walk, or every object a
+    // program creates leaves a buffer behind for the rest of the session.
+    const f = createRoot();
+    const device = f.bridge.recordAt(f.root).object;
+    const primary = f.bridge.recordAt(createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER })).object;
+    const primaries = ()=>f.dsound.buffers().filter(b=>b.primary).length;
+
+    assert.equal(primary.release(), 0);
+    f.dsound.pruneReleased();
+    assert.equal(primaries(), 1, 'its device still has it');
+    assert.equal(device.release(), 0);
+    f.dsound.pruneReleased();
+    assert.equal(primaries(), 0);
+
+    // The other order: the program still holds the primary when the device goes.
+    const other = 0x1004;
+    f.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, other, 0]);
+    const second = { ...f, root: f.memory.u32(other) };
+    const held = f.bridge.recordAt(createBuffer(second, { flags: DSBCAPS_PRIMARYBUFFER })).object;
+    assert.equal(f.bridge.recordAt(second.root).object.release(), 0);
+    f.dsound.pruneReleased();
+    assert.equal(primaries(), 1, 'the program still holds it');
+    assert.equal(held.release(), 0);
+    f.dsound.pruneReleased();
+    assert.equal(primaries(), 0);
+});
+
+test('two DirectSound objects have primary buffers of their own', ()=>{
+    // Wine's dsound test_primary_independent.
+    const f = createRoot();
+    const first = createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER });
+    const other = 0x1004;
+    f.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, other, 0]);
+    const second = createBuffer({ ...f, root: f.memory.u32(other) },
+        { flags: DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME });
+    assert.notEqual(second, first);
+    assert.equal(f.bridge.call(second, 'GetVolume', [0x1c00]), DS_OK);
+    assert.equal(f.bridge.call(first, 'GetVolume', [0x1c00]), DSERR_CONTROLUNAVAIL);
+});
+
+test('CreateSoundBuffer reads a description of either size and refuses any other', ()=>{
+    // Wine's dsound test_primary: a dwSize one short of DSBUFFERDESC is
+    // DSERR_INVALIDPARAM with a null pointer back. The DirectX 3 layout,
+    // DSBUFFERDESC1, is the same without guid3DAlgorithm and is read the same.
+    const f = createRoot();
+    const out = 0x1800;
+    const descriptor = describeBuffer(f.memory, { bytes: 4096 });
+    for (const size of [0, DSBUFFERDESC.SIZE - 1, DSBUFFERDESC.SIZE_DX8 - 1,
+        DSBUFFERDESC.SIZE_DX8 + 1])
+    {
+        f.memory.setU32(out, 0xdeadbeef);
+        f.memory.setU32(descriptor + DSBUFFERDESC.dwSize, size);
+        assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]),
+            DSERR_INVALIDPARAM, `dwSize ${size}`);
+        assert.equal(f.memory.u32(out), 0, `dwSize ${size} writes a null back`);
+    }
+    assert.equal(f.dsound.buffers().length, 0);
+    for (const size of [DSBUFFERDESC.SIZE, DSBUFFERDESC.SIZE_DX8])
+    {
+        f.memory.setU32(descriptor + DSBUFFERDESC.dwSize, size);
+        assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]), DS_OK,
+            `dwSize ${size}`);
+    }
 });
 
 test('CreateSoundBuffer refuses null pointers rather than dereferencing them', ()=>{
@@ -401,7 +629,81 @@ test('GetCaps fills DSBCAPS and refuses a header that does not declare its size'
     f.memory.setU32(caps + DSBCAPS.dwSize, DSBCAPS.SIZE);
     assert.equal(f.bridge.call(buffer, 'GetCaps', [caps]), DS_OK);
     assert.equal(f.memory.u32(caps + DSBCAPS.dwBufferBytes), 4096);
-    assert.equal(f.memory.u32(caps + DSBCAPS.dwFlags), 0);
+    assert.equal(f.memory.u32(caps + DSBCAPS.dwFlags), DSBCAPS_LOCSOFTWARE,
+        'asked for nothing, it is mixed in software and says so');
+});
+
+test('GetCaps reports the flags a buffer was created with, and where it is mixed', ()=>{
+    const f = createRoot();
+    const caps = 0x1a00;
+    f.memory.setU32(caps + DSBCAPS.dwSize, DSBCAPS.SIZE);
+    /** @param {number} buffer */
+    const flagsOf = buffer=>{
+        assert.equal(f.bridge.call(buffer, 'GetCaps', [caps]), DS_OK);
+        return f.memory.u32(caps + DSBCAPS.dwFlags);
+    };
+
+    // A program branches on these -- Wine's ds3d test calls SetVolume only when
+    // CTRLVOLUME comes back -- so an answer of nothing says it may not.
+    const controls = DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLPAN | DSBCAPS_CTRLFREQUENCY
+        | DSBCAPS_CTRLPOSITIONNOTIFY | DSBCAPS_GETCURRENTPOSITION2;
+    const plain = createBuffer(f, { flags: controls });
+    assert.equal(flagsOf(plain), controls | DSBCAPS_LOCSOFTWARE);
+
+    const soft = createBuffer(f, { flags: controls | DSBCAPS_LOCSOFTWARE });
+    assert.equal(flagsOf(soft), controls | DSBCAPS_LOCSOFTWARE);
+
+    // Accepted in hardware, so reported in hardware (Wine's dsound test of
+    // hardware buffers checks exactly this bit), and never in both places.
+    const hard = createBuffer(f, { flags: DSBCAPS_LOCHARDWARE | DSBCAPS_CTRLVOLUME });
+    assert.equal(flagsOf(hard), DSBCAPS_LOCHARDWARE | DSBCAPS_CTRLVOLUME);
+
+    const out = 0x1e00;
+    assert.equal(f.bridge.call(f.root, 'DuplicateSoundBuffer', [plain, out, 0]), DS_OK);
+    assert.equal(flagsOf(f.memory.u32(out)), controls | DSBCAPS_LOCSOFTWARE,
+        'a duplicate has the capabilities of its original');
+
+    const primary = createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME });
+    assert.equal(flagsOf(primary) & (DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME),
+        DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME);
+});
+
+test('SetFX is refused as a control the buffer was not created with', ()=>{
+    // Wine's dsound8 test_effects: SetFX on a buffer without DSBCAPS_CTRLFX.
+    const f = createRoot();
+    const effects = 0x1c00;
+    const results = 0x1c40;
+    const plain = f.bridge.query(createBuffer(f), IID_IDirectSoundBuffer8);
+    assert.equal(f.bridge.call(plain, 'SetFX', [1, effects, results]), DSERR_CONTROLUNAVAIL);
+
+    // With the control, the arguments are checked as the same test checks them,
+    // and a buffer that is playing refuses a change to its effects.
+    const fx = f.bridge.query(createBuffer(f, { flags: DSBCAPS_CTRLFX }), IID_IDirectSoundBuffer8);
+    assert.equal(f.bridge.call(fx, 'SetFX', [1, 0, 0]), DSERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(fx, 'SetFX', [0, effects, 0]), DSERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(fx, 'SetFX', [0, 0, results]), DSERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(fx, 'SetFX', [0, 0, 0]), DS_OK,
+        'clearing the effects of a buffer that has none is done');
+    f.bridge.call(fx, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    assert.equal(f.bridge.call(fx, 'SetFX', [0, 0, 0]), DSERR_INVALIDCALL);
+});
+
+test('a size that splits a frame is rounded up to the next whole one', ()=>{
+    // Wine's dsound test_block_align, which Windows passes: a second of 11025 Hz
+    // 16-bit stereo plus one byte comes back as that second plus one frame.
+    const f = createRoot();
+    const buffer = createBuffer(f, { bytes: 44101, rate: 11025, channels: 2, bits: 16 });
+    const caps = 0x1a00;
+    f.memory.setU32(caps + DSBCAPS.dwSize, DSBCAPS.SIZE);
+    assert.equal(f.bridge.call(buffer, 'GetCaps', [caps]), DS_OK);
+    assert.equal(f.memory.u32(caps + DSBCAPS.dwBufferBytes), 44104);
+
+    // A lap that ends on a frame boundary, or the second one reads its samples
+    // one byte out of step, which is noise.
+    const [sound] = f.dsound.buffers();
+    assert.equal(sound.bytes % sound.format.blockAlign, 0);
+    f.bridge.call(buffer, 'Lock', [0, 0, 0x1900, 0x1904, 0x1908, 0x190c, DSBLOCK_ENTIREBUFFER]);
+    assert.equal(f.memory.u32(0x1904), 44104, 'the whole buffer is the rounded size');
 });
 
 test('GetFormat writes a WAVEFORMATEX derived from the format, not echoed back', ()=>{
@@ -435,7 +737,9 @@ test('GetFormat with no structure answers only the size it would need', ()=>{
 
 test('volume, pan and frequency round-trip through guest memory', ()=>{
     const f = createRoot();
-    const buffer = createBuffer(f, { rate: 22050 });
+    const buffer = createBuffer(f, {
+        rate: 22050, flags: DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLPAN | DSBCAPS_CTRLFREQUENCY,
+    });
     const out = 0x1c00;
 
     f.bridge.call(buffer, 'SetVolume', [-2500 | 0]);
@@ -451,6 +755,50 @@ test('volume, pan and frequency round-trip through guest memory', ()=>{
     assert.equal(f.memory.u32(out), 11025);
 });
 
+test('a control the buffer was not created with is refused, and changes nothing', ()=>{
+    // Wine's ds3d test_buffer: GetVolume without DSBCAPS_CTRLVOLUME and GetPan
+    // without CTRLPAN answer DSERR_CONTROLUNAVAIL; a frequency without
+    // CTRLFREQUENCY likewise.
+    const f = createRoot();
+    const out = 0x1c00;
+    const controls = /** @type {[number, string, string, number][]} */ ([
+        [DSBCAPS_CTRLVOLUME, 'SetVolume', 'GetVolume', -1200],
+        [DSBCAPS_CTRLPAN, 'SetPan', 'GetPan', 2500],
+        [DSBCAPS_CTRLFREQUENCY, 'SetFrequency', 'GetFrequency', 11025],
+    ]);
+    for (const [flag, set, get, value] of controls)
+    {
+        // Every control but this one: each is its own.
+        const others = controls.reduce((all, [bit])=>all | bit, 0) & ~flag;
+        const without = createBuffer(f, { flags: others | DSBCAPS_GETCURRENTPOSITION2 });
+        assert.equal(f.bridge.call(without, set, [value]), DSERR_CONTROLUNAVAIL, set);
+        assert.equal(f.bridge.call(without, get, [out]), DSERR_CONTROLUNAVAIL, get);
+
+        const withIt = createBuffer(f, { flags: flag });
+        assert.equal(f.bridge.call(withIt, set, [value]), DS_OK, set);
+        assert.equal(f.bridge.call(withIt, get, [out]), DS_OK, get);
+        assert.equal(f.memory.u32(out) | 0, value);
+    }
+    const [plain] = f.dsound.buffers();
+    assert.equal(plain.gain, 1, 'a refused SetVolume is not heard');
+});
+
+test('the primary buffer has volume and pan if asked for, and never a frequency', ()=>{
+    // Wine's ds3d test_buffer on the primary: GetFrequency answers
+    // DSERR_CONTROLUNAVAIL whatever it was created with, GetVolume and GetPan
+    // succeed on one created with CTRLVOLUME and CTRLPAN; a null is still a
+    // null first.
+    const f = createRoot();
+    const primary = createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME
+        | DSBCAPS_CTRLPAN | DSBCAPS_CTRLFREQUENCY });
+    const out = 0x1c00;
+    assert.equal(f.bridge.call(primary, 'GetVolume', [out]), DS_OK);
+    assert.equal(f.bridge.call(primary, 'SetPan', [-500]), DS_OK);
+    assert.equal(f.bridge.call(primary, 'GetFrequency', [0]), DSERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(primary, 'GetFrequency', [out]), DSERR_CONTROLUNAVAIL);
+    assert.equal(f.bridge.call(primary, 'SetFrequency', [22050]), DSERR_CONTROLUNAVAIL);
+});
+
 test('the getters refuse a null rather than writing to address zero', ()=>{
     const f = createRoot();
     const buffer = createBuffer(f);
@@ -460,9 +808,26 @@ test('the getters refuse a null rather than writing to address zero', ()=>{
     }
 });
 
+test('IDirectSoundNotify is there only on a buffer created to notify', ()=>{
+    // Wine's dsound test_notifications: without DSBCAPS_CTRLPOSITIONNOTIFY the
+    // interface is E_NOINTERFACE, with it DS_OK -- a program that asks is
+    // finding out which kind of buffer it holds.
+    const f = createRoot();
+    const plain = createBuffer(f, { flags: DSBCAPS_GETCURRENTPOSITION2 });
+    assert.equal(f.bridge.recordAt(plain).object.interfaceFor(IID_IDirectSoundNotify), null);
+    assert.equal(notifyOn(f, plain), 0);
+
+    const notifying = createBuffer(f, { flags: DSBCAPS_CTRLPOSITIONNOTIFY });
+    assert.notEqual(notifyOn(f, notifying), 0);
+
+    const out = 0x1e00;
+    assert.equal(f.bridge.call(f.root, 'DuplicateSoundBuffer', [plain, out, 0]), DS_OK);
+    assert.equal(notifyOn(f, f.memory.u32(out)), 0, 'a duplicate has what its original has');
+});
+
 test('SetNotificationPositions reads an array of DSBPOSITIONNOTIFY', ()=>{
     const f = createRoot();
-    const buffer = createBuffer(f, { bytes: 88200 });
+    const buffer = createBuffer(f, { bytes: 88200, flags: DSBCAPS_CTRLPOSITIONNOTIFY });
     const array = 0x1d00;
     f.memory.setU32(array + DSBPOSITIONNOTIFY.dwOffset, 44100);
     f.memory.setU32(array + DSBPOSITIONNOTIFY.hEventNotify, 0x77);
@@ -476,7 +841,7 @@ test('SetNotificationPositions reads an array of DSBPOSITIONNOTIFY', ()=>{
 
 test('SetNotificationPositions with a count and no array is refused', ()=>{
     const f = createRoot();
-    const buffer = createBuffer(f);
+    const buffer = createBuffer(f, { flags: DSBCAPS_CTRLPOSITIONNOTIFY });
     assert.equal(f.bridge.call(notifyOn(f, buffer), 'SetNotificationPositions', [3, 0]),
         DSERR_INVALIDPARAM);
     assert.equal(f.bridge.call(notifyOn(f, buffer), 'SetNotificationPositions', [0, 0]), DS_OK,
@@ -485,7 +850,7 @@ test('SetNotificationPositions with a count and no array is refused', ()=>{
 
 test('a notification the cursor passed is signalled when the buffer is next read', ()=>{
     const f = createRoot();
-    const buffer = createBuffer(f, { bytes: 88200 });
+    const buffer = createBuffer(f, { bytes: 88200, flags: DSBCAPS_CTRLPOSITIONNOTIFY });
     const array = 0x1d00;
     f.memory.setU32(array + DSBPOSITIONNOTIFY.dwOffset, 22000);
     f.memory.setU32(array + DSBPOSITIONNOTIFY.hEventNotify, 0x77);
@@ -497,6 +862,40 @@ test('a notification the cursor passed is signalled when the buffer is next read
     f.bridge.call(buffer, 'GetCurrentPosition', [0x1900, 0x1904]);
     assert.deepEqual(f.signalled, [0x77],
         'a program that polls instead of waiting must still see its notifications');
+});
+
+test('Stop signals DSBPN_OFFSETSTOP in the call, and only the stopped buffer\'s', ()=>{
+    // Wine's dsound test_duplicate/test_notify: Play, Stop, GetStatus reads 0,
+    // and the event is already set -- the duplicate's own, not the original's.
+    const f = createRoot();
+    const original = createBuffer(f, { bytes: 4410, flags: DSBCAPS_CTRLPOSITIONNOTIFY });
+    const array = 0x1d00;
+    f.memory.setU32(array + DSBPOSITIONNOTIFY.dwOffset, 0xffffffff);
+    f.memory.setU32(array + DSBPOSITIONNOTIFY.hEventNotify, 0x70);
+    f.bridge.call(notifyOn(f, original), 'SetNotificationPositions', [1, array]);
+
+    const out = 0x1e00;
+    assert.equal(f.bridge.call(f.root, 'DuplicateSoundBuffer', [original, out, 0]), DS_OK);
+    const copy = f.memory.u32(out);
+    f.memory.setU32(array + DSBPOSITIONNOTIFY.hEventNotify, 0x71);
+    f.bridge.call(notifyOn(f, copy), 'SetNotificationPositions', [1, array]);
+
+    const status = 0x1f00;
+    f.bridge.call(copy, 'SetCurrentPosition', [0]);
+    f.bridge.call(copy, 'Play', [0, 0, 0]);
+    f.bridge.call(copy, 'GetStatus', [status]);
+    assert.equal(f.memory.u32(status), DSBSTATUS_PLAYING);
+    f.bridge.call(copy, 'Stop');
+    f.bridge.call(copy, 'GetStatus', [status]);
+    assert.equal(f.memory.u32(status), 0);
+    assert.deepEqual(f.signalled, [0x71]);
+
+    f.bridge.call(original, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.time.advance(300);
+    f.bridge.call(original, 'GetCurrentPosition', [0x1900, 0x1904]);
+    assert.deepEqual(f.signalled, [0x71], 'a loop going round is not a stop');
+    f.bridge.call(original, 'Stop');
+    assert.deepEqual(f.signalled, [0x71, 0x70]);
 });
 
 test('DuplicateSoundBuffer shares the samples and not the cursor', ()=>{
@@ -600,6 +999,41 @@ test('the library exports the entry points a program links against', ()=>{
     for (const [name, entry] of Object.entries(table))
     {
         assert.equal(entry.argBytes % 4, 0, `${name} is not a whole number of slots`);
+    }
+});
+
+test('the library\'s entry points keep the ordinals Windows gives them', ()=>{
+    // dsound.spec: a program that imports by number binds to these, and a
+    // table numbered in its own declaration order gives it another function
+    // with another argument count -- DirectSoundCreate8 where it compiled
+    // against DirectSoundEnumerateA.
+    const f = fixture();
+    /** @type {Record<string, unknown>} */
+    const table = f.dsound.libraries['DSOUND.dll'];
+    const pinned = f.dsound.ordinals['DSOUND.dll'];
+    assert.deepEqual(pinned, {
+        1: 'DirectSoundCreate', 2: 'DirectSoundEnumerateA', 3: 'DirectSoundEnumerateW',
+        6: 'DirectSoundCaptureCreate', 9: 'GetDeviceID', 11: 'DirectSoundCreate8',
+        12: 'DirectSoundCaptureCreate8',
+    });
+    for (const name of Object.values(pinned))
+    {
+        assert.ok(table[name], `${name} is an export, not a number bound to nothing`);
+    }
+
+    // Through the synthesiser, declared the way the assembling caller declares
+    // them, and read back from the image's own export directory.
+    const declared = new Map(Object.entries(pinned).map(([n, name])=>[name, Number(n)]));
+    const module = synthesiseModule({
+        name: 'DSOUND.dll',
+        base: 0x10000000,
+        exports: Object.keys(table).map((name, at)=>({
+            name, ordinal: declared.get(name), target: 0x20000000 + at * 16,
+        })),
+    });
+    for (const [ordinal, name] of Object.entries(pinned))
+    {
+        assert.equal(module.ordinalOf(name), Number(ordinal), name);
     }
 });
 
@@ -715,6 +1149,113 @@ const slotOf = (slots, name)=>{
     assert.ok(index >= 0, `${name} is a slot`);
     return 3 + index;
 };
+
+test('the primary buffer answers through its pointer after its last release', ()=>{
+    // Wine's dsound test_primary: Release to zero, AddRef answers one, two
+    // Releases answer zero, and QueryInterface still answers -- E_NOINTERFACE
+    // for IDirectSoundNotify, not E_POINTER -- because the device keeps it.
+    const g = guestMachine();
+    g.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, 0x1000, 0]);
+    const device = g.memory.u32(0x1000);
+    const descriptor = describeBuffer(g.memory, { flags: DSBCAPS_PRIMARYBUFFER });
+    assert.equal(g.call(device, slotOf(IDIRECTSOUND_SLOTS, 'CreateSoundBuffer'),
+        [descriptor, 0x1100, 0]), DS_OK);
+    const primary = g.memory.u32(0x1100);
+    const [ADDREF, RELEASE] = [1, 2];
+    assert.equal(g.call(primary, RELEASE), 0);
+    assert.equal(g.call(primary, ADDREF), 1);
+    assert.equal(g.call(primary, RELEASE), 0);
+    assert.equal(g.call(primary, RELEASE), 0);
+    const iid = 0x1200;
+    g.memory.writeMemory(iid, new Uint8Array([
+        0x83, 0x07, 0x21, 0xb0, 0xcd, 0x89, 0xd0, 0x11,
+        0xaf, 0x08, 0x00, 0xa0, 0xc9, 0x25, 0xcd, 0x16,
+    ]));
+    assert.equal(g.call(primary, 0, [iid, 0x1300]) >>> 0, 0x80004002, 'E_NOINTERFACE');
+
+    // Asked for again, it is the same buffer behind the same pointer.
+    assert.equal(g.call(device, slotOf(IDIRECTSOUND_SLOTS, 'CreateSoundBuffer'),
+        [descriptor, 0x1100, 0]), DS_OK);
+    assert.equal(g.memory.u32(0x1100), primary);
+    assert.equal(g.call(primary, RELEASE), 0);
+
+    // Once its device is gone as well, the pointer is let go.
+    assert.equal(g.call(device, RELEASE), 0);
+    assert.equal(g.call(primary, ADDREF) >>> 0, 0x80004003, 'E_POINTER');
+});
+
+/** IID_IUnknown, as a program lays it out for QueryInterface. */
+const IUNKNOWN_BYTES = new Uint8Array([
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+]);
+
+test('a buffer whose last reference goes is gone through every interface it was asked for', ()=>{
+    // Released first through the pointer CreateSoundBuffer answered, then
+    // through the IUnknown asked for later: neither may reach it after.
+    const g = guestMachine();
+    g.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, 0x1000, 0]);
+    const device = g.memory.u32(0x1000);
+    assert.equal(g.call(device, slotOf(IDIRECTSOUND_SLOTS, 'CreateSoundBuffer'),
+        [describeBuffer(g.memory, { bytes: 4096 }), 0x1100, 0]), DS_OK);
+    const buffer = g.memory.u32(0x1100);
+    g.memory.writeMemory(0x1200, IUNKNOWN_BYTES);
+    assert.equal(g.call(buffer, 0, [0x1200, 0x1300]), DS_OK);
+    const unknown = g.memory.u32(0x1300);
+    const [ADDREF, RELEASE] = [1, 2];
+
+    assert.equal(g.call(buffer, RELEASE), 1);
+    assert.equal(g.call(unknown, RELEASE), 0);
+    assert.equal(g.call(buffer, ADDREF) >>> 0, 0x80004003, 'E_POINTER');
+    assert.equal(g.call(unknown, ADDREF) >>> 0, 0x80004003);
+});
+
+test('the primary buffer keeps every pointer it was asked for while its device lives', ()=>{
+    const g = guestMachine();
+    g.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, 0x1000, 0]);
+    const device = g.memory.u32(0x1000);
+    assert.equal(g.call(device, slotOf(IDIRECTSOUND_SLOTS, 'CreateSoundBuffer'),
+        [describeBuffer(g.memory, { flags: DSBCAPS_PRIMARYBUFFER }), 0x1100, 0]), DS_OK);
+    const primary = g.memory.u32(0x1100);
+    g.memory.writeMemory(0x1200, IUNKNOWN_BYTES);
+    assert.equal(g.call(primary, 0, [0x1200, 0x1300]), DS_OK);
+    const unknown = g.memory.u32(0x1300);
+    const [ADDREF, RELEASE] = [1, 2];
+
+    assert.equal(g.call(primary, RELEASE), 1);
+    assert.equal(g.call(unknown, RELEASE), 0);
+    assert.equal(g.call(unknown, ADDREF), 1, 'the device keeps it');
+    assert.equal(g.call(unknown, RELEASE), 0);
+
+    assert.equal(g.call(device, RELEASE), 0);
+    assert.equal(g.call(primary, ADDREF) >>> 0, 0x80004003, 'and then neither pointer is kept');
+    assert.equal(g.call(unknown, ADDREF) >>> 0, 0x80004003);
+});
+
+test('a pointer the bridge let go of names no buffer any more, and a kept one still does', ()=>{
+    // DuplicateSoundBuffer and SetNotificationPositions take pointers back:
+    // one whose words went back to the heap must not find the released
+    // buffer, while a primary buffer its device keeps is still that buffer.
+    const g = guestMachine();
+    g.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, 0x1000, 0]);
+    const device = g.memory.u32(0x1000);
+    assert.equal(g.call(device, slotOf(IDIRECTSOUND_SLOTS, 'CreateSoundBuffer'),
+        [describeBuffer(g.memory, { bytes: 4096 }), 0x1100, 0]), DS_OK);
+    const buffer = g.memory.u32(0x1100);
+    assert.equal(g.call(device, slotOf(IDIRECTSOUND_SLOTS, 'CreateSoundBuffer'),
+        [describeBuffer(g.memory, { flags: DSBCAPS_PRIMARYBUFFER }), 0x1100, 0]), DS_OK);
+    const primary = g.memory.u32(0x1100);
+    const { publisher } = g.dsound;
+    const RELEASE = 2;
+
+    assert.equal(g.call(buffer, RELEASE), 0);
+    assert.equal(publisher.objectAt(buffer), null);
+    assert.equal(g.call(primary, RELEASE), 0);
+    assert.notEqual(publisher.objectAt(primary), null, 'the device keeps its primary');
+    assert.equal(g.call(device, RELEASE), 0);
+    assert.equal(publisher.objectAt(primary), null);
+    assert.equal(publisher.objectAt(device), null);
+});
 
 test('a method reaches the arguments the guest pushed, at the offsets it pushed them', ()=>{
     const g = guestMachine();
@@ -852,6 +1393,54 @@ test('enumerating devices describes the primary driver first, with no guid', asy
     assert.equal(textAt(f.memory, primary.args[1]), 'Primary Sound Driver');
     assert.equal(primary.args[3], 0xabcd, 'and the context it was given comes back to it');
     assert.notEqual(device.args[0], 0, 'a device of its own carries a guid');
+});
+
+test('GetDeviceID answers the device a default names, and a device as itself', async()=>{
+    // dsound.h's DSDEVID_Default{Playback,Capture,VoicePlayback,VoiceCapture}
+    // are aliases for whichever device is the default; this machine has one
+    // playback device, the one DirectSoundEnumerate describes after the
+    // primary driver, and no capture device at all.
+    const f = withGuest([1, 1]);
+    await f.dsound.libraries['DSOUND.dll'].DirectSoundEnumerateA.handler([0x9000, 0]);
+    const enumerated = [...f.memory.bytes.subarray(f.calls[1].args[0], f.calls[1].args[0] + 16)];
+    const getDeviceID = f.dsound.libraries['DSOUND.dll'].GetDeviceID;
+    assert.equal(getDeviceID.argBytes, 8);
+
+    const source = 0x3000;
+    const dest = 0x3100;
+    /** @param {number[]} bytes */
+    const ask = bytes=>{
+        f.memory.writeMemory(source, new Uint8Array(bytes));
+        f.memory.bytes.fill(0xcc, dest, dest + 16);
+        return getDeviceID.handler([source, dest]);
+    };
+    const answered = ()=>[...f.memory.bytes.subarray(dest, dest + 16)];
+    /** @param {number} which  DEF0000n: Playback, Capture, VoicePlayback, VoiceCapture */
+    const alias = which=>[which, 0x00, 0xf0, 0xde, 0x6d, 0x9c, 0xed, 0x47,
+        0xaa, 0xf1, 0x4d, 0xda, 0x8f, 0x2b, 0x5c, 0x03];
+    for (const which of [0, 2])
+    {
+        assert.equal(ask(alias(which)), DS_OK, `DSDEVID playback default ${which}`);
+        assert.deepEqual(answered(), enumerated);
+    }
+    // As Wine's dsound test expects DirectSoundCreate to answer for a capture
+    // default: the default names a device that is not there.
+    for (const which of [1, 3])
+    {
+        assert.equal(ask(alias(which)), DSERR_NODRIVER, `DSDEVID capture default ${which}`);
+        assert.ok(answered().every(byte=>byte === 0xcc), 'and nothing is written');
+    }
+    assert.equal(ask(enumerated), DS_OK, 'a device is its own id');
+    assert.deepEqual(answered(), enumerated);
+
+    // Anything else is no device: GUID_NULL, a default with one byte off.
+    for (const other of [new Array(16).fill(0), alias(4)])
+    {
+        assert.equal(ask(other), DSERR_INVALIDPARAM);
+        assert.ok(answered().every(byte=>byte === 0xcc), 'and nothing is written');
+    }
+    assert.equal(getDeviceID.handler([0, dest]), DSERR_INVALIDPARAM);
+    assert.equal(getDeviceID.handler([source, 0]), DSERR_INVALIDPARAM);
 });
 
 test('a program that has seen enough is not handed the rest', async()=>{

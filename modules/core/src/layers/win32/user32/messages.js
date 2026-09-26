@@ -73,6 +73,10 @@ export const QS_TIMER = 0x0010;
 export const QS_PAINT = 0x0020;
 export const QS_HOTKEY = 0x0080;
 export const QS_ALLPOSTMESSAGE = 0x0100;
+export const QS_RAWINPUT = 0x0400;
+
+/** Raw input's one message, a class of its own. */
+const WM_INPUT = 0x00ff;
 
 /** The ends of the two input ranges, and the one message of its own class. */
 const WM_KEYFIRST = 0x0100;
@@ -132,6 +136,10 @@ const classOf = message=>{
     {
         return QS_HOTKEY;
     }
+    if (message === WM_INPUT)
+    {
+        return QS_RAWINPUT;
+    }
     if (message >= WM_KEYFIRST && message <= WM_KEYLAST)
     {
         return QS_KEY;
@@ -185,6 +193,11 @@ export function createMessageQueue(options = {}){
      * itself as news in every one of them.
      */
     let reportedSynthetic = 0;
+    /**
+     * When the queue was last looked at, on the guest clock: a timer that
+     * came due after it is news to a wait, one already due then is not.
+     */
+    let lookedAt = -Infinity;
     /**
      * The message most recently taken off the queue, for GetMessageTime and
      * GetMessagePos: both answer about it, whichever window it was for.
@@ -310,6 +323,16 @@ export function createMessageQueue(options = {}){
     let dirtyWindow = null;
 
     /**
+     * The entries the input layer posted -- the ones that name the pointer's
+     * position -- as against a program's own posts of the same messages: the
+     * system answers the mouse's own messages in ways it does not answer a
+     * program's.
+     *
+     * @type {WeakSet<object>}
+     */
+    const input = new WeakSet();
+
+    /**
      * Where a message posted from outside goes, when the window half has
      * said: the input layer names the pointer's position and no window, and
      * which window is under the pointer is the window half's to know.
@@ -317,6 +340,61 @@ export function createMessageQueue(options = {}){
      * @type {((message: PostedMessage) => PostedMessage | null) | null}
      */
     let router = null;
+
+    /**
+     * Messages the window half asked to have posted once a moment has come,
+     * by a key a second request replaces the first under. The message is made
+     * at that moment, not when asked for: a hover reports where the pointer
+     * is when it comes due, and a request whose reason has gone makes none.
+     *
+     * @type {Map<string, { due: number, make: () => PostedMessage | null }>}
+     */
+    const later = new Map();
+
+    /** Posts every message asked for later whose moment has come. */
+    const releaseLater = ()=>{
+        if (later.size === 0)
+        {
+            return;
+        }
+        const at = now();
+        for (const [key, entry] of later)
+        {
+            if (entry.due > at)
+            {
+                continue;
+            }
+            later.delete(key);
+            const message = entry.make();
+            if (message)
+            {
+                postMessage(message);
+            }
+        }
+    };
+
+    /**
+     * When the soonest timer or message asked for later comes due, or null:
+     * both are what a thread waiting on an empty queue can be woken by.
+     */
+    const soonestDue = ()=>{
+        let soonest = null;
+        for (const timer of livingTimers())
+        {
+            if (soonest === null || timer.due < soonest)
+            {
+                soonest = timer.due;
+            }
+        }
+        for (const entry of later.values())
+        {
+            if (soonest === null || entry.due < soonest)
+            {
+                soonest = entry.due;
+            }
+        }
+        return soonest;
+    };
 
     /** @param {MessageFilter} filter */
     const takePaint = filter=>{
@@ -452,6 +530,35 @@ export function createMessageQueue(options = {}){
         return null;
     };
 
+    /** Every class waiting to be retrieved now, the synthesised ones included. */
+    const waiting = ()=>{
+        releaseLater();
+        let inQueue = 0;
+        for (const entry of pending)
+        {
+            inQueue |= classOf(entry.message);
+        }
+        if (quitCode !== null)
+        {
+            inQueue |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
+        }
+        const filter = { hwnd: ANY_WINDOW, first: 0, last: 0, remove: false };
+        if (dirtyWindow && dirtyWindow(filter) !== 0)
+        {
+            inQueue |= QS_PAINT;
+        }
+        const at = now();
+        for (const [key, timer] of timers)
+        {
+            if (timer.due <= at && deliverable(key, timer))
+            {
+                inQueue |= QS_TIMER;
+                break;
+            }
+        }
+        return inQueue;
+    };
+
     /**
      * The one path in: the input layer posts through here like everything
      * else, because a keystroke and a program's own post are the same
@@ -503,11 +610,15 @@ export function createMessageQueue(options = {}){
                 held.time = (message.time ?? 0) >>> 0;
                 held.x = (message.x ?? 0) | 0;
                 held.y = (message.y ?? 0) | 0;
+                if (message.x !== undefined)
+                {
+                    input.add(held);
+                }
                 posted++;
                 return;
             }
         }
-        pending.push({
+        const entry = {
             hwnd: message.hwnd >>> 0,
             message: message.message >>> 0,
             wParam: message.wParam >>> 0,
@@ -515,7 +626,12 @@ export function createMessageQueue(options = {}){
             time: (message.time ?? 0) >>> 0,
             x: (message.x ?? 0) | 0,
             y: (message.y ?? 0) | 0,
-        });
+        };
+        if (message.x !== undefined)
+        {
+            input.add(entry);
+        }
+        pending.push(entry);
         posted++;
     };
 
@@ -567,6 +683,25 @@ export function createMessageQueue(options = {}){
 
         /** @param {PostedMessage} incoming */
         post: postMessage,
+
+        /**
+         * Whether a message taken from the queue came from the input layer
+         * rather than from a program's post.
+         *
+         * @param {object} entry
+         */
+        fromInput: entry=>input.has(entry),
+
+        /**
+         * The messages posted and not yet taken, oldest first: what a
+         * retrieval looks through before its filter, to settle where a
+         * mouse message goes. A copy, so settling one does not move the
+         * walk under itself.
+         */
+        queued: ()=>[...pending],
+
+        /** Whether a retrieval's filter takes a message. */
+        accepts,
 
         /**
          * Registers a hot key, or replaces the registration this `hwnd` and
@@ -631,24 +766,16 @@ export function createMessageQueue(options = {}){
          * When the soonest timer comes due, in guest time, or null for none.
          *
          * A thread waiting on an empty queue is waiting for exactly two things:
-         * something posted from outside, and a timer of its own. The first
-         * nobody can predict; the second is written down right here, and
-         * without it whoever drives the machine has to keep looking to find out
-         * -- on a timeout a browser clamps, several thousand times a run.
+         * something posted from outside, and a timer of its own -- or a
+         * message the window half asked for later, which comes due the same
+         * way. The first nobody can predict; the second is written down right
+         * here, and without it whoever drives the machine has to keep looking
+         * to find out -- on a timeout a browser clamps, several thousand times
+         * a run.
          *
          * @returns {number | null}
          */
-        nextTimerDue(){
-            let soonest = null;
-            for (const timer of livingTimers())
-            {
-                if (soonest === null || timer.due < soonest)
-                {
-                    soonest = timer.due;
-                }
-            }
-            return soonest;
-        },
+        nextTimerDue: soonestDue,
 
         /** @param {number} code  The value the program exits with. */
         postQuit(code){
@@ -669,37 +796,49 @@ export function createMessageQueue(options = {}){
          * @returns {{ inQueue: number, changed: number }}
          */
         status(){
-            let inQueue = 0;
-            for (const entry of pending)
-            {
-                inQueue |= classOf(entry.message);
-            }
-            if (quitCode !== null)
-            {
-                inQueue |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
-            }
-            const filter = { hwnd: ANY_WINDOW, first: 0, last: 0, remove: false };
-            if (dirtyWindow && dirtyWindow(filter) !== 0)
-            {
-                inQueue |= QS_PAINT;
-            }
-            const at = now();
-            for (const [key, timer] of timers)
-            {
-                if (timer.due <= at && deliverable(key, timer))
-                {
-                    inQueue |= QS_TIMER;
-                    break;
-                }
-            }
+            const inQueue = waiting();
             const synthetic = inQueue & (QS_PAINT | QS_TIMER);
             // Only what is still there: the low word is defined as what arrived
             // *and has not been taken yet*, so a keystroke posted and retrieved
             // between two looks is no longer news.
             const news = (changed | (synthetic & ~reportedSynthetic)) & inQueue;
             changed = 0;
+            lookedAt = now();
             reportedSynthetic = synthetic;
             return { inQueue, changed: news };
+        },
+
+        /**
+         * The classes waiting now, as GetQueueStatus's high word reports
+         * them, without the look that clears the news.
+         */
+        waiting,
+
+        /**
+         * The classes that arrived since the queue was last looked at: what
+         * MsgWaitForMultipleObjects wakes for. Asking is not a look -- a
+         * wait that ends on news leaves it for the pump that follows -- and a
+         * message a look has already seen is no longer news, whether or not
+         * it was taken.
+         */
+        news(){
+            releaseLater();
+            let arrived = changed;
+            const at = now();
+            for (const [key, timer] of timers)
+            {
+                if (timer.due > lookedAt && timer.due <= at && deliverable(key, timer))
+                {
+                    arrived |= QS_TIMER;
+                    break;
+                }
+            }
+            return arrived;
+        },
+
+        /** A window has an area to paint where it had none: news of a paint. */
+        dirtied(){
+            changed |= QS_PAINT;
         },
 
         /**
@@ -764,20 +903,28 @@ export function createMessageQueue(options = {}){
         },
 
         /**
-         * When the earliest timer is due, or null. Whoever is idling the
-         * process reads this so that a thread waiting for a message wakes at
-         * the right moment rather than at whatever else happens to happen.
+         * When the earliest timer, or message asked for later, is due, or
+         * null. Whoever is idling the process reads this so that a thread
+         * waiting for a message wakes at the right moment rather than at
+         * whatever else happens to happen.
          */
-        nextDue(){
-            let earliest = null;
-            for (const timer of livingTimers())
-            {
-                if (earliest === null || timer.due < earliest)
-                {
-                    earliest = timer.due;
-                }
-            }
-            return earliest;
+        nextDue: soonestDue,
+
+        /**
+         * Posts what `make` answers once `delay` milliseconds of guest time
+         * have passed, replacing whatever was asked for under `key`. It is
+         * posted when the queue is next looked at or waited on from then.
+         *
+         * @param {string} key @param {number} delay
+         * @param {() => PostedMessage | null} make
+         */
+        postLater(key, delay, make){
+            later.set(key, { due: now() + delay, make });
+        },
+
+        /** Forgets what was asked for under `key`. @param {string} key */
+        cancelLater(key){
+            return later.delete(key);
         },
 
         /**
@@ -791,7 +938,9 @@ export function createMessageQueue(options = {}){
             // A look at the queue is a look however it is spelt: GetMessage and
             // PeekMessage clear the news GetQueueStatus reports just as
             // GetQueueStatus itself does.
+            releaseLater();
             changed = 0;
+            lookedAt = now();
             const index = pending.findIndex(entry=>accepts(entry, filter));
             if (index >= 0)
             {

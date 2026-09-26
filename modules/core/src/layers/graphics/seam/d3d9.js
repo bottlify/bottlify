@@ -29,47 +29,62 @@
 
 import { IDIRECT3D9_SLOTS, describe } from './vtables.js';
 import {
-    D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS9, POINT, RECT, createFields,
+    D3DBOX, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_BOX, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS9,
+    POINT, RECT, createFields,
 } from './structs.js';
 import {
-    IDIRECT3DCUBETEXTURE9_SLOTS, IDIRECT3DDEVICE9_SLOTS, IDIRECT3DINDEXBUFFER9_SLOTS,
-    IDIRECT3DQUERY9_SLOTS, IDIRECT3DSHADER9_SLOTS, IDIRECT3DSTATEBLOCK9_SLOTS,
+    IDIRECT3DBASETEXTURE9_SLOTS, IDIRECT3DCUBETEXTURE9_SLOTS, IDIRECT3DDEVICE9_SLOTS,
+    IDIRECT3DINDEXBUFFER9_SLOTS, IDIRECT3DQUERY9_SLOTS, IDIRECT3DRESOURCE9_SLOTS,
+    IDIRECT3DSHADER9_SLOTS, IDIRECT3DSTATEBLOCK9_SLOTS,
     IDIRECT3DSURFACE9_SLOTS, IDIRECT3DSWAPCHAIN9_SLOTS, IDIRECT3DTEXTURE9_SLOTS,
-    IDIRECT3DVERTEXBUFFER9_SLOTS, IDIRECT3DVERTEXDECLARATION9_SLOTS, IID_IDirect3D9,
-    IID_IDirect3DCubeTexture9, IID_IDirect3DDevice9, IID_IDirect3DIndexBuffer9,
+    IDIRECT3DVERTEXBUFFER9_SLOTS, IDIRECT3DVERTEXDECLARATION9_SLOTS, IDIRECT3DVOLUME9_SLOTS,
+    IDIRECT3DVOLUMETEXTURE9_SLOTS, IID_IDirect3D9, IID_IDirect3DVolume9,
+    IID_IDirect3DVolumeTexture9, IDIRECT3D9EX_SLOTS, IDIRECT3DDEVICE9EX_SLOTS,
+    IDIRECT3DSWAPCHAIN9EX_SLOTS, IID_IDirect3D9Ex, IID_IDirect3DDevice9Ex,
+    IID_IDirect3DSwapChain9Ex,
+    IID_IDirect3DBaseTexture9, IID_IDirect3DCubeTexture9, IID_IDirect3DDevice9,
+    IID_IDirect3DIndexBuffer9, IID_IDirect3DResource9,
     IID_IDirect3DPixelShader9, IID_IDirect3DQuery9, IID_IDirect3DStateBlock9,
     IID_IDirect3DSurface9, IID_IDirect3DSwapChain9, IID_IDirect3DTexture9,
     IID_IDirect3DVertexBuffer9, IID_IDirect3DVertexDeclaration9, IID_IDirect3DVertexShader9,
 } from '../d3d9/interfaces.js';
 import {
     D3DADAPTER_IDENTIFIER9, D3DCAPS9, D3DCAPS9_FLOATS, D3DCLIPSTATUS9, D3DDECL_END_STREAM,
+    D3DDISPLAYMODEEX, D3DDISPLAYMODEFILTER,
     D3DINDEXBUFFER_DESC9, D3DSURFACE_DESC9, D3DVERTEXBUFFER_DESC9, D3DVERTEXELEMENT9,
-    D3DVIEWPORT9,
+    D3DVIEWPORT9, D3DVOLUME_DESC9,
 } from '../d3d9/structs.js';
 import {
     ADAPTER_STRING_LENGTH, D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES,
 } from '../d3d8/structs.js';
-import { D3DFMT_INDEX, D3DFMT, D3DRTYPE } from '../d3d8/constants.js';
+import { D3DFMT_INDEX, D3DFMT, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
 import { vertexCountOf } from '../d3d8/render.js';
 import { createCursorTeller } from './cursor.js';
+import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { capabilityWords } from '../d3d9/caps.js';
 import { D3DCREATE, D3DDEVTYPE, PALETTE_BYTES } from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
+import { createRaster, rasterStatus } from './raster.js';
+import { queryAs, readGuid } from './guid.js';
+import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c | 0;
 const D3DERR_NOTAVAILABLE = 0x8876086a | 0;
+const D3DSCANLINEORDERING_PROGRESSIVE = 1;
+const D3DSCANLINEORDERING_INTERLACED = 2;
+const D3DDISPLAYROTATION_IDENTITY = 1;
+/** The adapter's LUID, low part; the high part is zero. */
+const ADAPTER_LUID = 0x00000001;
 const D3DERR_OUTOFVIDEOMEMORY = 0x8876017c | 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
 /** D3DENUM_NO_WHQL_LEVEL: skip the certification lookup, which took seconds on real Windows. */
 const D3DENUM_NO_WHQL_LEVEL = 0x00000002;
 /** D3DPRESENTFLAG_LOCKABLE_BACKBUFFER. */
 const LOCKABLE_BACKBUFFER = 0x00000001;
-/** D3DTEXF_LINEAR, what an automatic mip filter reads back as. */
-const D3DTEXF_LINEAR = 2;
 
 /**
  * The adapter formats a display mode is listed in: 32-bit and 16-bit.
@@ -78,42 +93,8 @@ const D3DTEXF_LINEAR = 2;
  */
 const ADAPTER_FORMATS = new Set([D3DFMT.X8R8G8B8, D3DFMT.R5G6B5]);
 
-/**
- * WebGPU's word for a vendor against the PCI id a program's card database is
- * keyed by. Only vendors with a WebGPU spelling appear; anything else is
- * reported as zero, an unknown card.
- *
- * @type {Readonly<Record<string, number>>}
- */
-const PCI_VENDOR_IDS = Object.freeze({
-    nvidia: 0x10de,
-    amd: 0x1002,
-    intel: 0x8086,
-    apple: 0x106b,
-    qualcomm: 0x5143,
-    arm: 0x13b5,
-    microsoft: 0x1414,
-});
-
-/**
- * The identifier's GUID: one per adapter and driver on Windows, and one for
- * this engine here -- a program keeps it to recognise the same hardware next
- * run, and the same engine is the same hardware for that purpose.
- */
-const ADAPTER_GUID = Uint8Array.from([
-    0x7a, 0x1b, 0x6c, 0x0d, 0x3e, 0x9f, 0x40, 0x11,
-    0x8a, 0x2b, 0x5c, 0x6d, 0x7e, 0x8f, 0x90, 0xa1,
-]);
-
 /** The most dwords a shader read from guest memory may run to before it is given up on. */
 const MAX_SHADER_DWORDS = 1 << 16;
-
-/**
- * @typedef {Object} AdapterIdentity
- * @property {string} [vendor]
- * @property {string} [architecture]
- * @property {string} [description]
- */
 
 /**
  * @param {Object} deps
@@ -130,18 +111,25 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     screen -- and which window it presents into, so a fullscreen one can be
  *     placed. `announce` asks that the window be told its size even if it
  *     did not change.
- * @param {() => AdapterIdentity | null} [deps.identity]
+ * @param {() => import('./adapter.js').AdapterIdentity | null} [deps.identity]
  * @param {(window: number) => { width: number, height: number } | null} [deps.windowClientSize]
  *     The client area of a window, which is the size a back buffer asked for
  *     as zero by zero takes. Without it the configured display is the nearest
  *     size this layer knows.
+ * @param {import('../d3d9/resources.js').SurfaceGdi} [deps.gdi]
+ *     Device contexts over a surface's pixels, for GetDC; absent, none is handed out.
+ * @param {() => number} [deps.now]  The clock the display's raster runs on, in milliseconds.
  */
 export function createDirect3D9Seam(
     { publisher, memory, screen, divergence, cursor, resolution, identity,
-        windowClientSize },
+        windowClientSize, gdi, now = ()=>performance.now() },
 )
 {
     const fields = createFields(memory);
+    const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA });
+    const raster = createRaster({
+        now, refresh: ()=>REFRESH_HZ, height: ()=>screen().height,
+    });
 
     /**
      * The device each resource was made by, for GetDevice. Weak, so this map
@@ -175,19 +163,16 @@ export function createDirect3D9Seam(
     };
 
     /**
-     * A create this build cannot do: the caller's pointer is cleared as well
-     * as the result reported, because a program tests the one as often as the
-     * other.
+     * The window each additional swap chain presents into. The display shows
+     * the device's window; a chain presenting anywhere else has its frame
+     * drawn and not shown.
      *
-     * @param {number} out
+     * @type {WeakMap<object, number>}
      */
-    const clearAndRefuse = out=>{
-        if ((out >>> 0) !== 0)
-        {
-            fields.writeU32(out >>> 0, 0);
-        }
-        return D3DERR_NOTAVAILABLE;
-    };
+    const chainWindows = new WeakMap();
+    /** @param {any} chain @param {number} override  The window a present named, or 0. */
+    const shownIn = (chain, override)=>
+        ((override >>> 0) || chainWindows.get(chain) || deviceWindow) === deviceWindow;
 
     /**
      * The method that hands a resource its device: the same pointer the
@@ -208,16 +193,19 @@ export function createDirect3D9Seam(
     };
 
     /**
-     * What every resource interface answers in its first eight slots. Private
-     * data is not kept, so those three slots stay E_NOTIMPL; priorities are
-     * accepted and read back as zero, since nothing here manages residency.
+     * What every resource interface answers in its first eight slots. A
+     * priority is the resource's own, and only a managed one keeps it; a
+     * surface has none to keep and reads back zero whatever it was told.
      *
      * @param {number} type  D3DRTYPE, or a function of the object for a texture.
      */
     const resourceMethods = (/** @type {number | ((object: any) => number)} */ type)=>({
+        ...privateData.methods,
         GetDevice: getDevice,
-        SetPriority: ()=>0,
-        GetPriority: ()=>0,
+        /** @param {any} resource @param {number[]} args */
+        SetPriority: (resource, [priority])=>resource.SetPriority?.(priority >>> 0) ?? 0,
+        /** @param {any} resource */
+        GetPriority: resource=>resource.GetPriority?.() ?? 0,
         PreLoad: ()=>0,
         /** @param {any} object */
         GetType: object=>(typeof type === 'function' ? type(object) : type),
@@ -456,6 +444,7 @@ export function createDirect3D9Seam(
         return null;
     };
 
+    /** @type {import('./com.js').InterfaceDescriptor[]} */
     const surfaceInterfaces = [describe(IID_IDirect3DSurface9, IDIRECT3DSURFACE9_SLOTS, {
         ...resourceMethods(D3DRTYPE.SURFACE),
         /** @param {any} surface @param {number[]} args */
@@ -492,11 +481,62 @@ export function createDirect3D9Seam(
         },
         /** @param {any} surface */
         UnlockRect: surface=>surface.UnlockRect(),
-        // No device context is drawn through here: GDI reaches a surface
-        // through DirectDraw, and a Direct3D 9 surface is not one.
-        GetDC: ()=>D3DERR_INVALIDCALL,
-        ReleaseDC: ()=>D3DERR_INVALIDCALL,
-    })];
+        /** @param {any} surface @param {number[]} args */
+        GetDC: (surface, [out])=>{
+            if ((out >>> 0) === 0 || !gdi)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ dc?: number }} */
+            const held = {};
+            /** @param {number} hr */
+            const answer = hr=>{
+                if (hr === D3D_OK)
+                {
+                    fields.writeU32(out >>> 0, held.dc ?? 0);
+                }
+                return hr;
+            };
+            const hr = surface.GetDC(gdi, held);
+            return hr instanceof Promise ? hr.then(answer) : answer(hr);
+        },
+        /** @param {any} surface @param {number[]} args */
+        ReleaseDC: (surface, [dc])=>(gdi ? surface.ReleaseDC(dc >>> 0, gdi) : D3DERR_INVALIDCALL),
+
+        /**
+         * QueryInterface on what holds the surface: the texture a level
+         * belongs to, the swap chain a back buffer belongs to, and the device
+         * for a surface of its own (Wine's d3d9 test_surface_get_container and
+         * test_refcount).
+         *
+         * @param {any} surface @param {number[]} args
+         * @returns {number}
+         */
+        GetContainer: (surface, [riid, out])=>{
+            if ((riid >>> 0) === 0 || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const id = readGuid(memory, riid);
+            const container = surface.container ?? null;
+            if (container?.GetBackBuffer)
+            {
+                return queryAs(publisher, fields, container,
+                    chainInterfacesOf(owners.get(surface)), id, out);
+            }
+            if (container)
+            {
+                return queryAs(publisher, fields, container, textureInterfacesFor(container), id,
+                    out);
+            }
+            const device = owners.get(surface);
+            if (!device)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            return queryAs(publisher, fields, device, deviceInterfacesOf(device), id, out);
+        },
+    }, {}, privateData.released)];
 
     /**
      * The six every texture kind shares, over the resource eight.
@@ -504,13 +544,23 @@ export function createDirect3D9Seam(
      * @param {any} texture
      */
     const baseTextureMethods = {
-        SetLOD: ()=>0,
-        GetLOD: ()=>0,
+        /** @param {any} texture @param {number[]} args */
+        SetLOD: (texture, [lod])=>texture.SetLOD(lod >>> 0),
+        /** @param {any} texture */
+        GetLOD: texture=>texture.GetLOD(),
         /** @param {any} texture */
         GetLevelCount: texture=>texture.levels ?? 1,
-        SetAutoGenFilterType: ()=>D3D_OK,
-        GetAutoGenFilterType: ()=>D3DTEXF_LINEAR,
-        GenerateMipSubLevels: ()=>0,
+        /** @param {any} texture @param {number[]} args */
+        SetAutoGenFilterType: (texture, [filter])=>texture.SetAutoGenFilterType(filter >>> 0),
+        // Answers the filter rather than an HRESULT, and GenerateMipSubLevels
+        // nothing at all.
+        /** @param {any} texture */
+        GetAutoGenFilterType: texture=>texture.GetAutoGenFilterType(),
+        /** @param {any} texture */
+        GenerateMipSubLevels: texture=>{
+            texture.GenerateMipSubLevels();
+            return 0;
+        },
     };
 
     /**
@@ -523,7 +573,10 @@ export function createDirect3D9Seam(
     const writeLevelDesc = (texture, level, out)=>{
         /** @type {{ surface?: any }} */
         const held = {};
-        const hr = texture.GetSurfaceLevel(level, held);
+        // Every face of a cube's level has one description: the first's.
+        const hr = texture.cube
+            ? texture.GetCubeMapSurface(0, level, held)
+            : texture.GetSurfaceLevel(level, held);
         if (hr !== D3D_OK || !held.surface)
         {
             return hr;
@@ -540,7 +593,7 @@ export function createDirect3D9Seam(
         return D3D_OK;
     };
 
-    const textureInterfaces = [describe(IID_IDirect3DTexture9, IDIRECT3DTEXTURE9_SLOTS, {
+    const textureMethods = {
         ...resourceMethods(D3DRTYPE.TEXTURE),
         ...baseTextureMethods,
         /** @param {any} texture @param {number[]} args */
@@ -573,16 +626,179 @@ export function createDirect3D9Seam(
         },
         /** @param {any} texture @param {number[]} args */
         UnlockRect: (texture, [level])=>texture.UnlockRect(level >>> 0),
-        // An unlock already marks the whole level for upload.
-        AddDirtyRect: ()=>D3D_OK,
-    })];
+        /** @param {any} texture @param {number[]} args */
+        AddDirtyRect: (texture, [rect])=>texture.AddDirtyRect(readRect(rect)),
+    };
+    // A cube map's own methods name a face before the level.
+    const cubeTextureMethods = {
+        ...resourceMethods(D3DRTYPE.CUBETEXTURE),
+        ...baseTextureMethods,
+        GetLevelDesc: textureMethods.GetLevelDesc,
+        /** @param {any} texture @param {number[]} args */
+        GetCubeMapSurface: (texture, [face, level, out])=>{
+            /** @type {{ surface?: any }} */
+            const held = {};
+            const hr = texture.GetCubeMapSurface(face >>> 0, level >>> 0, held);
+            if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
+            {
+                return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface9,
+                    out >>> 0, E_OUTOFMEMORY, owners.get(texture));
+            }
+            return hr;
+        },
+        /** @param {any} texture @param {number[]} args */
+        LockRect: (texture, [face, level, out, rect, flags])=>{
+            /** @type {any} */
+            const locked = {};
+            const hr = texture.LockCubeRect(face >>> 0, level >>> 0, locked, readRect(rect),
+                flags >>> 0);
+            if (hr === D3D_OK && (out >>> 0) !== 0)
+            {
+                fields.writeStruct(out >>> 0, D3DLOCKED_RECT, {
+                    Pitch: locked.Pitch ?? 0,
+                    pBits: locked.pBits ?? 0,
+                });
+            }
+            return hr;
+        },
+        /** @param {any} texture @param {number[]} args */
+        UnlockRect: (texture, [face, level])=>texture.UnlockCubeRect(face >>> 0, level >>> 0),
+        /** @param {any} texture @param {number[]} args */
+        AddDirtyRect: (texture, [face, rect])=>texture.AddDirtyRect(readRect(rect), face >>> 0),
+    };
 
-    const cubeTextureInterfaces = [
-        describe(IID_IDirect3DCubeTexture9, IDIRECT3DCUBETEXTURE9_SLOTS, {
-            ...resourceMethods(D3DRTYPE.CUBETEXTURE),
-            ...baseTextureMethods,
-        }),
+    /**
+     * A texture kind's own interface, and the two it derives from over the
+     * same methods: their slots are the front of its own.
+     *
+     * @param {string} id @param {[string, number][]} slots @param {any} methods
+     */
+    const textureFamily = (id, slots, methods)=>[
+        describe(id, slots, methods, {}, privateData.released),
+        describe(IID_IDirect3DBaseTexture9, IDIRECT3DBASETEXTURE9_SLOTS, methods),
+        describe(IID_IDirect3DResource9, IDIRECT3DRESOURCE9_SLOTS, methods),
     ];
+    const textureInterfaces = textureFamily(IID_IDirect3DTexture9, IDIRECT3DTEXTURE9_SLOTS,
+        textureMethods);
+    const cubeTextureInterfaces = textureFamily(IID_IDirect3DCubeTexture9,
+        IDIRECT3DCUBETEXTURE9_SLOTS, cubeTextureMethods);
+
+    /**
+     * A box as the guest passed it, or null for none -- the whole volume.
+     *
+     * @param {number} pointer
+     */
+    const readBox = pointer=>{
+        if ((pointer >>> 0) === 0)
+        {
+            return null;
+        }
+        const box = fields.readStruct(pointer >>> 0, D3DBOX);
+        return {
+            left: box.Left, top: box.Top, right: box.Right, bottom: box.Bottom,
+            front: box.Front, back: box.Back,
+        };
+    };
+    /**
+     * A lock of a volume: the two pitches and the address on success, and on
+     * a refusal a null address -- the pointer a program would otherwise write
+     * through (Wine's d3d9 test_volume_locking).
+     *
+     * @param {number} out @param {(locked: any) => number} lock
+     */
+    const lockBox = (out, lock)=>{
+        /** @type {any} */
+        const locked = {};
+        const hr = lock(locked);
+        if ((out >>> 0) === 0)
+        {
+            return hr;
+        }
+        if (hr === D3D_OK)
+        {
+            fields.writeStruct(out >>> 0, D3DLOCKED_BOX, locked);
+        }
+        else
+        {
+            fields.writeU32((out >>> 0) + D3DLOCKED_BOX.pBits, 0);
+        }
+        return hr;
+    };
+    /** @param {any} volume @param {number} out */
+    const writeVolumeDesc = (volume, out)=>{
+        /** @type {{ desc?: any }} */
+        const described = {};
+        volume.GetDesc(described);
+        if ((out >>> 0) !== 0 && described.desc)
+        {
+            fields.writeStruct(out >>> 0, D3DVOLUME_DESC9, described.desc);
+        }
+        return D3D_OK;
+    };
+
+    // A volume texture's level is not a resource (Wine's d3d9
+    // test_volume_resource): it answers for itself and IUnknown alone, and
+    // names its texture as its container (test_volume_get_container).
+    /** @type {import('./com.js').InterfaceDescriptor[]} */
+    const volumeInterfaces = [describe(IID_IDirect3DVolume9, IDIRECT3DVOLUME9_SLOTS, {
+        ...privateData.methods,
+        /** @param {any} volume @param {number[]} args */
+        GetDevice: (volume, args)=>getDevice(volume.container, args),
+        /** @param {any} volume @param {number[]} args @returns {number} */
+        GetContainer: (volume, [riid, out])=>{
+            if ((riid >>> 0) === 0 || (out >>> 0) === 0 || !volume.container)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            return queryAs(publisher, fields, volume.container, volumeTextureInterfaces,
+                readGuid(memory, riid), out);
+        },
+        /** @param {any} volume @param {number[]} args */
+        GetDesc: (volume, [out])=>writeVolumeDesc(volume, out),
+        /** @param {any} volume @param {number[]} args */
+        LockBox: (volume, [out, box, flags])=>lockBox(out,
+            locked=>volume.LockBox(locked, readBox(box), flags >>> 0)),
+        /** @param {any} volume */
+        UnlockBox: volume=>volume.UnlockBox(),
+    }, {}, privateData.released)];
+
+    const volumeTextureMethods = {
+        ...resourceMethods(D3DRTYPE.VOLUMETEXTURE),
+        ...baseTextureMethods,
+        /** @param {any} texture @param {number[]} args */
+        GetLevelDesc: (texture, [level, out])=>{
+            /** @type {{ volume?: any }} */
+            const held = {};
+            const hr = texture.GetVolumeLevel(level >>> 0, held);
+            if (hr !== D3D_OK || !held.volume)
+            {
+                return hr;
+            }
+            held.volume.release();
+            return writeVolumeDesc(held.volume, out);
+        },
+        /** @param {any} texture @param {number[]} args @returns {number} */
+        GetVolumeLevel: (texture, [level, out])=>{
+            /** @type {{ volume?: any }} */
+            const held = {};
+            const hr = texture.GetVolumeLevel(level >>> 0, held);
+            if (hr !== D3D_OK || !held.volume || (out >>> 0) === 0)
+            {
+                return hr;
+            }
+            return handBack(held.volume, volumeInterfaces, IID_IDirect3DVolume9, out >>> 0);
+        },
+        /** @param {any} texture @param {number[]} args */
+        LockBox: (texture, [level, out, box, flags])=>lockBox(out,
+            locked=>texture.LockBox(level >>> 0, locked, readBox(box), flags >>> 0)),
+        /** @param {any} texture @param {number[]} args */
+        UnlockBox: (texture, [level])=>texture.UnlockBox(level >>> 0),
+        /** @param {any} texture @param {number[]} args */
+        AddDirtyBox: (texture, [box])=>texture.AddDirtyBox(readBox(box)),
+    };
+    /** @type {import('./com.js').InterfaceDescriptor[]} */
+    const volumeTextureInterfaces = textureFamily(IID_IDirect3DVolumeTexture9,
+        IDIRECT3DVOLUMETEXTURE9_SLOTS, volumeTextureMethods);
 
     /**
      * A buffer hands back an address in the guest's own memory, so locking is
@@ -622,7 +838,7 @@ export function createDirect3D9Seam(
                 }
                 return hr;
             },
-        }),
+        }, {}, privateData.released),
     ];
     const indexBufferInterfaces = [
         describe(IID_IDirect3DIndexBuffer9, IDIRECT3DINDEXBUFFER9_SLOTS, {
@@ -639,7 +855,7 @@ export function createDirect3D9Seam(
                 }
                 return hr;
             },
-        }),
+        }, {}, privateData.released),
     ];
 
     const declarationInterfaces = [
@@ -720,16 +936,23 @@ export function createDirect3D9Seam(
         GetDataSize: query=>query.GetDataSize(),
         /** @param {any} query @param {number[]} args */
         Issue: (query, [flags])=>query.Issue(flags >>> 0),
+        // A count is written in as many of its four bytes as the caller has
+        // room for, and the caller of a flush waits while it comes back.
         /** @param {any} query @param {number[]} args */
-        GetData: (query, [data, size])=>{
+        GetData: (query, [data, size, flags])=>{
             /** @type {{ value?: number }} */
             const held = {};
-            const hr = query.GetData((data >>> 0) === 0 ? null : held, size >>> 0);
-            if (hr === D3D_OK && (data >>> 0) !== 0 && held.value !== undefined)
-            {
-                fields.writeU32(data >>> 0, held.value);
-            }
-            return hr;
+            /** @param {number} hr */
+            const write = hr=>{
+                if (hr === D3D_OK && (data >>> 0) !== 0 && held.value !== undefined)
+                {
+                    const bytes = new Uint8Array(new Uint32Array([held.value >>> 0]).buffer);
+                    memory.writeMemory(data >>> 0, bytes.subarray(0, Math.min(4, size >>> 0)));
+                }
+                return hr;
+            };
+            const hr = query.GetData((data >>> 0) === 0 ? null : held, size >>> 0, flags >>> 0);
+            return hr instanceof Promise ? hr.then(write) : write(hr);
         },
     })];
 
@@ -748,21 +971,29 @@ export function createDirect3D9Seam(
 
     /** @param {number} address */
     const writeRasterStatus = address=>{
-        // Nothing scans a frame out, so there is no beam to be behind and no
-        // blanking interval to be inside: both read as the start of a frame.
-        fields.writeStruct(address, D3DRASTER_STATUS, { InVBlank: 0, ScanLine: 0 });
+        fields.writeStruct(address, D3DRASTER_STATUS, rasterStatus(raster));
     };
 
-    const swapChainInterfaces = [describe(IID_IDirect3DSwapChain9, IDIRECT3DSWAPCHAIN9_SLOTS, {
-        /** @param {any} chain */
-        Present: chain=>chain.Present(),
-        GetFrontBufferData: ()=>D3DERR_INVALIDCALL,
+    const swapChainMethods = {
+        // The rectangles and the dirty region are not honoured; the window,
+        // the chain's own or the override, decides whether the display
+        // shows the picture.
+        /** @param {any} chain @param {number[]} args */
+        Present: (chain, [, , window])=>chain.Present(shownIn(chain, window)),
+        // The caller waits while the picture comes back from the GPU.
+        /** @param {any} chain @param {number[]} args */
+        GetFrontBufferData: (chain, [destination])=>
+            chain.GetFrontBufferData(publisher.objectAt(destination)),
         /** @param {any} chain @param {number[]} args */
         GetBackBuffer: (chain, [index, type, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             /** @type {{ surface?: any }} */
             const held = {};
             const hr = chain.GetBackBuffer(index >>> 0, type >>> 0, held);
-            if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
+            if (hr === D3D_OK && held.surface)
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface9,
                     out >>> 0, E_OUTOFMEMORY, owners.get(chain));
@@ -803,11 +1034,81 @@ export function createDirect3D9Seam(
             }
             return hr;
         },
-    })];
+    };
+
+    /** @type {import('./com.js').InterfaceDescriptor[]} */
+    const swapChainInterfaces = [
+        describe(IID_IDirect3DSwapChain9, IDIRECT3DSWAPCHAIN9_SLOTS, swapChainMethods),
+    ];
+
+    /**
+     * D3DDISPLAYMODEEX, into a structure whose Size the caller set: anything
+     * else is refused (Wine's d3d9ex.c test_get_adapter_displaymode_ex). The
+     * display's scan lines are progressive and it is not rotated.
+     *
+     * @param {number} address @param {number} rotation  Where the rotation goes, or 0.
+     */
+    const writeDisplayModeEx = (address, rotation)=>{
+        if ((address >>> 0) === 0 || fields.readU32(address >>> 0) !== D3DDISPLAYMODEEX.SIZE)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        const display = screen();
+        fields.writeStruct(address >>> 0, D3DDISPLAYMODEEX, {
+            Width: display.width,
+            Height: display.height,
+            RefreshRate: REFRESH_HZ,
+            Format: D3DFMT.X8R8G8B8,
+            ScanLineOrdering: D3DSCANLINEORDERING_PROGRESSIVE,
+        });
+        if ((rotation >>> 0) !== 0)
+        {
+            fields.writeU32(rotation >>> 0, D3DDISPLAYROTATION_IDENTITY);
+        }
+        return D3D_OK;
+    };
+
+    /**
+     * A chain of a device made through IDirect3D9Ex, which answers
+     * IDirect3DSwapChain9Ex as well (Wine's d3d9ex.c test_qi_ex_to_base).
+     *
+     * @type {import('./com.js').InterfaceDescriptor[]}
+     */
+    const exSwapChainInterfaces = [
+        describe(IID_IDirect3DSwapChain9Ex,
+            [...IDIRECT3DSWAPCHAIN9_SLOTS, ...IDIRECT3DSWAPCHAIN9EX_SLOTS], {
+                ...swapChainMethods,
+                /** @param {any} chain @param {number[]} args */
+                GetLastPresentCount: (chain, [out])=>{
+                    if ((out >>> 0) === 0)
+                    {
+                        return D3DERR_INVALIDCALL;
+                    }
+                    fields.writeU32(out >>> 0, chain.presentCount ?? 0);
+                    return D3D_OK;
+                },
+                // The statistics are the display's refreshes, which nothing
+                // here sees: a FLIPEX chain is refused them as any other is.
+                GetPresentStats: ()=>D3DERR_INVALIDCALL,
+                /** @param {any} chain @param {number[]} args */
+                GetDisplayModeEx: (chain, [mode, rotation])=>writeDisplayModeEx(mode, rotation),
+            }),
+        ...swapChainInterfaces,
+    ];
+
+    /**
+     * The interfaces a device's chain answers.
+     *
+     * @param {any} device
+     */
+    const chainInterfacesOf = device=>(device?.extended
+        ? exSwapChainInterfaces
+        : swapChainInterfaces);
 
     /**
      * A create that ends in a shared-handle pointer, which the plain interface
-     * requires to be null: sharing is the extended interface's.
+     * requires to be null. Sharing is the extended interface's, and nothing
+     * here shares a resource between devices, so it is refused there too.
      *
      * @param {number} shared
      */
@@ -952,9 +1253,31 @@ export function createDirect3D9Seam(
             return was ? 1 : 0;
         },
 
-        // One swap chain exists and it is the device's own.
         /** @param {any} device @param {number[]} args */
-        CreateAdditionalSwapChain: (device, [, out])=>clearAndRefuse(out),
+        CreateAdditionalSwapChain: (device, [parameters, out])=>{
+            if ((parameters >>> 0) === 0 || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            // A chain naming no window presents into the device's, measured
+            // for a size asked for as zero, and says so when asked for its
+            // parameters; what is written back leaves the window as it was.
+            const wanted = readPresentParameters(parameters >>> 0, deviceWindow);
+            const window = (wanted.hDeviceWindow >>> 0) || deviceWindow;
+            /** @type {{ swapChain?: any }} */
+            const held = {};
+            const hr = device.CreateAdditionalSwapChain({ ...wanted, hDeviceWindow: window },
+                held);
+            if (hr !== D3D_OK || !held.swapChain)
+            {
+                fields.writeU32(out >>> 0, 0);
+                return hr;
+            }
+            writePresentParameters(parameters >>> 0, wanted);
+            chainWindows.set(held.swapChain, window);
+            return handBack(held.swapChain, chainInterfacesOf(device), IID_IDirect3DSwapChain9,
+                out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
+        },
 
         /** @param {any} device @param {number[]} args */
         GetSwapChain: (device, [index, out])=>{
@@ -967,9 +1290,10 @@ export function createDirect3D9Seam(
             const hr = device.GetSwapChain(index >>> 0, held);
             if (hr === D3D_OK && held.swapChain)
             {
-                return handBack(held.swapChain, swapChainInterfaces, IID_IDirect3DSwapChain9,
+                return handBack(held.swapChain, chainInterfacesOf(device), IID_IDirect3DSwapChain9,
                     out >>> 0, E_OUTOFMEMORY, device);
             }
+            fields.writeU32(out >>> 0, 0);
             return hr;
         },
         /** @param {any} device */
@@ -1048,8 +1372,9 @@ export function createDirect3D9Seam(
         /** @param {any} device @param {number[]} args */
         SetDialogBoxMode: (device, [enable])=>device.SetDialogBoxMode((enable >>> 0) !== 0),
 
-        // Both gamma calls are declared void; the ramp is state a program
-        // reads back rather than a picture.
+        // Both gamma calls are declared void. The swap chain and the
+        // calibration flag are not read: a device's one ramp is its implicit
+        // chain's, and nothing here calibrates.
         /** @param {any} device @param {number[]} args */
         SetGammaRamp: (device, [, , ramp])=>{
             if ((ramp >>> 0) !== 0)
@@ -1091,14 +1416,42 @@ export function createDirect3D9Seam(
             return hr;
         },
 
-        // A volume texture is refused rather than made: the renderer samples
-        // none, and there is no interface for one here. A cube texture is
-        // refused for the same reason -- the capability block claims no cube
-        // maps, and a program that read it never asks.
         /** @param {any} device @param {number[]} args */
-        CreateVolumeTexture: (device, [, , , , , , , out])=>clearAndRefuse(out),
+        CreateVolumeTexture: (device, args)=>{
+            const [width, height, depth, levels, usage, format, pool, out, shared] = args;
+            if (sharedHandleRefused(shared) || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ texture?: any }} */
+            const held = {};
+            const hr = device.CreateVolumeTexture(width >>> 0, height >>> 0, depth >>> 0,
+                levels >>> 0, usage >>> 0, format >>> 0, pool >>> 0, held);
+            if (hr === D3D_OK && held.texture)
+            {
+                return handBack(held.texture, volumeTextureInterfaces,
+                    IID_IDirect3DVolumeTexture9, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
+            }
+            fields.writeU32(out >>> 0, 0);
+            return hr;
+        },
         /** @param {any} device @param {number[]} args */
-        CreateCubeTexture: (device, [, , , , , out])=>clearAndRefuse(out),
+        CreateCubeTexture: (device, [edgeLength, levels, usage, format, pool, out, shared])=>{
+            if (sharedHandleRefused(shared) || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ texture?: any }} */
+            const held = {};
+            const hr = device.CreateCubeTexture(edgeLength >>> 0, levels >>> 0, usage >>> 0,
+                format >>> 0, pool >>> 0, held);
+            if (hr === D3D_OK && held.texture)
+            {
+                return handBack(held.texture, cubeTextureInterfaces, IID_IDirect3DCubeTexture9,
+                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
+            }
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         CreateVertexBuffer: (device, [length, usage, fvf, pool, out, shared])=>{
@@ -1209,7 +1562,9 @@ export function createDirect3D9Seam(
             publisher.objectAt(target), publisher.objectAt(destination)),
 
         /** @param {any} device */
-        GetFrontBufferData: (/** @type {any} */ device)=>device.GetFrontBufferData(),
+        /** @param {any} device @param {number[]} args */
+        GetFrontBufferData: (device, [chain, destination])=>
+            device.GetFrontBufferData(chain >>> 0, publisher.objectAt(destination)),
 
         /** @param {any} device @param {number[]} args */
         StretchRect: (device, [source, sourceRect, destination, destinationRect, filter])=>
@@ -1502,7 +1857,7 @@ export function createDirect3D9Seam(
                 // variable holding the texture it last read.
                 fields.writeU32(out >>> 0, held.texture
                     ? publisher.publish(held.texture, textureInterfacesFor(held.texture),
-                        held.texture.cube ? IID_IDirect3DCubeTexture9 : IID_IDirect3DTexture9)
+                        textureInterfacesFor(held.texture)[0].id)
                     : 0);
             }
             return hr;
@@ -1668,8 +2023,10 @@ export function createDirect3D9Seam(
                 readArray(vertices, (numVertices >>> 0) * (stride >>> 0)),
                 stride >>> 0),
 
-        /** @param {any} device */
-        ProcessVertices: (/** @type {any} */ device)=>device.ProcessVertices(),
+        /** @param {any} device @param {number[]} args */
+        ProcessVertices: (device, [start, index, count, destination, declaration, flags])=>
+            device.ProcessVertices(start >>> 0, index >>> 0, count >>> 0,
+                publisher.objectAt(destination), publisher.objectAt(declaration), flags >>> 0),
 
         // --- declarations ---
 
@@ -1924,13 +2281,158 @@ export function createDirect3D9Seam(
     };
 
     /** @param {any} texture */
-    const textureInterfacesFor = texture=>(texture.cube
-        ? cubeTextureInterfaces
-        : textureInterfaces);
+    const textureInterfacesFor = texture=>{
+        if (texture.cube)
+        {
+            return cubeTextureInterfaces;
+        }
+        return texture.volume ? volumeTextureInterfaces : textureInterfaces;
+    };
 
     const deviceInterfaces = [
         describe(IID_IDirect3DDevice9, IDIRECT3DDEVICE9_SLOTS, deviceMethods),
     ];
+
+    /**
+     * An Ex create: the plain one's surface with a usage beside, and the
+     * shared handle the plain interface refuses refused here as well, since
+     * nothing here shares a resource across devices.
+     *
+     * @param {string} method
+     * @param {(args: number[]) => { out: number, shared: number,
+     *     call: (device: any, held: { surface?: any }) => number }} read
+     */
+    const exSurfaceCreate = (method, read)=>
+        (/** @type {any} */ device, /** @type {number[]} */ args)=>{
+            const { out, shared, call } = read(args);
+            if (sharedHandleRefused(shared) || (out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ surface?: any }} */
+            const held = {};
+            const hr = call(device, held);
+            if (hr === D3D_OK && held.surface)
+            {
+                return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface9,
+                    out >>> 0, method === 'CreateOffscreenPlainSurfaceEx'
+                        ? E_OUTOFMEMORY
+                        : D3DERR_OUTOFVIDEOMEMORY, device);
+            }
+            return hr;
+        };
+
+    /**
+     * IDirect3DDevice9Ex's own slots. SetConvolutionMonoKernel and
+     * ComposeRects, which build a one-bit surface out of another's
+     * rectangles, are absent.
+     */
+    const exDeviceMethods = {
+        // The flags ask not to wait for the display, which nothing here
+        // does, or not to show the frame, which is not honoured.
+        /** @param {any} device */
+        PresentEx: (/** @type {any} */ device)=>deviceMethods.Present(device),
+        /** @param {any} device @param {number[]} args */
+        GetGPUThreadPriority: (device, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ priority?: number }} */
+            const held = {};
+            const hr = device.GetGPUThreadPriority(held);
+            fields.writeU32(out >>> 0, (held.priority ?? 0) >>> 0);
+            return hr;
+        },
+        /** @param {any} device @param {number[]} args */
+        SetGPUThreadPriority: (device, [priority])=>device.SetGPUThreadPriority(priority | 0),
+        /** @param {any} device @param {number[]} args */
+        WaitForVBlank: (device, [chain])=>device.WaitForVBlank(chain >>> 0),
+        /** @param {any} device @param {number[]} args */
+        CheckResourceResidency: (device, [, count])=>device.CheckResourceResidency(count >>> 0),
+        /** @param {any} device @param {number[]} args */
+        SetMaximumFrameLatency: (device, [latency])=>device.SetMaximumFrameLatency(latency >>> 0),
+        /** @param {any} device @param {number[]} args */
+        GetMaximumFrameLatency: (device, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ latency?: number }} */
+            const held = {};
+            const hr = device.GetMaximumFrameLatency(held);
+            fields.writeU32(out >>> 0, held.latency ?? 0);
+            return hr;
+        },
+        /** @param {any} device @param {number[]} args */
+        CheckDeviceState: (device, [window])=>device.CheckDeviceState(window >>> 0),
+        CreateRenderTargetEx: exSurfaceCreate('CreateRenderTargetEx',
+            ([width, height, format, , , lockable, out, shared, usage])=>({
+                out, shared,
+                call: (device, held)=>device.CreateRenderTargetEx(width >>> 0, height >>> 0,
+                    format >>> 0, lockable !== 0, usage >>> 0, held),
+            })),
+        CreateOffscreenPlainSurfaceEx: exSurfaceCreate('CreateOffscreenPlainSurfaceEx',
+            ([width, height, format, pool, out, shared, usage])=>({
+                out, shared,
+                call: (device, held)=>device.CreateOffscreenPlainSurfaceEx(width >>> 0,
+                    height >>> 0, format >>> 0, pool >>> 0, usage >>> 0, held),
+            })),
+        CreateDepthStencilSurfaceEx: exSurfaceCreate('CreateDepthStencilSurfaceEx',
+            ([width, height, format, , , , out, shared, usage])=>({
+                out, shared,
+                call: (device, held)=>device.CreateDepthStencilSurfaceEx(width >>> 0,
+                    height >>> 0, format >>> 0, usage >>> 0, held),
+            })),
+        /** @param {any} device @param {number[]} args */
+        ResetEx: (device, [parameters, mode])=>((parameters >>> 0) === 0
+            || !modeFits(parameters >>> 0, mode >>> 0)
+            ? D3DERR_INVALIDCALL
+            : deviceMethods.Reset(device, [parameters])),
+        /** @param {any} device @param {number[]} args */
+        GetDisplayModeEx: (device, [chain, mode, rotation])=>((chain >>> 0) !== 0
+            ? D3DERR_INVALIDCALL
+            : writeDisplayModeEx(mode, rotation)),
+    };
+
+    /**
+     * A device made through IDirect3D9Ex, which answers IDirect3DDevice9Ex as
+     * well; one made through the plain interface does not (Wine's d3d9ex.c
+     * test_qi_base_to_ex and test_qi_ex_to_base).
+     *
+     * @type {import('./com.js').InterfaceDescriptor[]}
+     */
+    const exDeviceInterfaces = [
+        describe(IID_IDirect3DDevice9Ex, [...IDIRECT3DDEVICE9_SLOTS, ...IDIRECT3DDEVICE9EX_SLOTS],
+            { ...deviceMethods, ...exDeviceMethods }),
+        ...deviceInterfaces,
+    ];
+
+    /** @param {any} device */
+    const deviceInterfacesOf = device=>(device?.extended ? exDeviceInterfaces : deviceInterfaces);
+
+    /**
+     * Whether the display mode an Ex create or reset names fits its
+     * parameters: none for a window, and for fullscreen one of the back
+     * buffer's own size, which may not be zero (Wine's d3d9ex.c test_reset_ex).
+     *
+     * @param {number} parameters @param {number} mode
+     */
+    const modeFits = (parameters, mode)=>{
+        const raw = fields.readStruct(parameters, D3DPRESENT_PARAMETERS9);
+        if (raw.Windowed !== 0)
+        {
+            return mode === 0;
+        }
+        if (mode === 0)
+        {
+            return false;
+        }
+        const asked = fields.readStruct(mode, D3DDISPLAYMODEEX);
+        return asked.Width !== 0 && asked.Height !== 0
+            && asked.Width === (raw.BackBufferWidth >>> 0)
+            && asked.Height === (raw.BackBufferHeight >>> 0);
+    };
 
     /**
      * @param {number} address
@@ -2017,18 +2519,12 @@ export function createDirect3D9Seam(
 
     /**
      * D3DADAPTER_IDENTIFIER9, from what the assembling caller knows of the
-     * hardware. The vendor is the one number a program acts on -- its card
-     * database is keyed by PCI vendor id -- so WebGPU's word for the vendor is
-     * turned into that id, and a vendor not in the table is reported as zero.
+     * hardware: the vendor, name and GUID every generation reports.
      *
      * @param {number} address @param {number} flags D3DENUM_*
      */
     const writeAdapterIdentifier = (address, flags)=>{
-        const known = identity?.() ?? null;
-        const vendor = (known?.vendor ?? '').toLowerCase();
-        const description = known?.description
-            || [known?.vendor, known?.architecture].filter(Boolean).join(' ')
-            || 'WebGPU adapter';
+        const { vendorId, description } = describeAdapter(identity?.() ?? null);
         const block = new Uint8Array(D3DADAPTER_IDENTIFIER9.FIELDS);
         /** @param {string} text @param {number} at @param {number} room */
         const ascii = (text, at, room)=>{
@@ -2042,7 +2538,7 @@ export function createDirect3D9Seam(
         ascii('\\\\.\\DISPLAY1', D3DADAPTER_IDENTIFIER9.DeviceName, 32);
         const view = new DataView(block.buffer);
         view.setUint32(D3DADAPTER_IDENTIFIER9.DriverVersion + 4, 0x00010000, true);
-        view.setUint32(D3DADAPTER_IDENTIFIER9.VendorId, PCI_VENDOR_IDS[vendor] ?? 0, true);
+        view.setUint32(D3DADAPTER_IDENTIFIER9.VendorId, vendorId, true);
         block.set(ADAPTER_GUID, D3DADAPTER_IDENTIFIER9.DeviceIdentifier);
         view.setUint32(D3DADAPTER_IDENTIFIER9.WHQLLevel,
             (flags & D3DENUM_NO_WHQL_LEVEL) !== 0 ? 0 : 1, true);
@@ -2173,62 +2669,147 @@ export function createDirect3D9Seam(
             return D3D_OK;
         },
 
-        // No monitor handle exists on this side; a null one is what a program
-        // checks for and falls back from.
-        GetAdapterMonitor: ()=>0,
+        // The display user32 names for every window; no second adapter has one.
+        /** @param {any} root @param {number[]} args */
+        GetAdapterMonitor: (root, [adapter])=>((adapter >>> 0) === 0 ? PRIMARY_MONITOR : 0),
 
-        /**
-         * The device, made the way a program makes one. The adapter must be
-         * the one there is, the type one this version names, and the
-         * behaviour must name exactly one kind of vertex processing.
-         *
-         * @param {any} root @param {number[]} args
-         */
-        CreateDevice: (root, [adapter, deviceType, focus, behaviourFlags, parameters, out])=>{
-            if ((out >>> 0) === 0)
+        /** @param {any} root @param {number[]} args */
+        CreateDevice: (root, args)=>createDevice(root, args, IID_IDirect3DDevice9),
+    };
+
+    /**
+     * The device, made the way a program makes one. The adapter must be the
+     * one there is, the type one this version names, and the behaviour must
+     * name exactly one kind of vertex processing. A device made through
+     * IDirect3D9Ex is Direct3D 9Ex's, whichever create made it.
+     *
+     * @param {any} root @param {number[]} args
+     * @param {string} id  The interface the pointer handed back is.
+     */
+    const createDevice = (root, args, id)=>{
+        const [adapter, deviceType, focus, behaviourFlags, parameters, out] = args;
+        if ((out >>> 0) === 0)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        const processing = (behaviourFlags >>> 0) & VERTEX_PROCESSING;
+        if ((adapter >>> 0) !== 0 || !DEVICE_TYPES.has(deviceType >>> 0)
+            || (parameters >>> 0) === 0
+            || processing === 0 || (processing & (processing - 1)) !== 0)
+        {
+            fields.writeU32(out >>> 0, 0);
+            return D3DERR_INVALIDCALL;
+        }
+        const wanted = readPresentParameters(parameters >>> 0, focus >>> 0);
+        /** @type {{ device?: any }} */
+        const held = {};
+        const hr = root.CreateDevice(wanted, held, behaviourFlags >>> 0, {
+            AdapterOrdinal: adapter >>> 0,
+            DeviceType: deviceType >>> 0,
+            hFocusWindow: focus >>> 0,
+        }, exRoots.has(root));
+        if (hr !== D3D_OK || !held.device)
+        {
+            fields.writeU32(out >>> 0, 0);
+            return hr;
+        }
+        writePresentParameters(parameters >>> 0, wanted);
+        lastParameters = wanted;
+        // The window is now this resolution; the reported screen is too.
+        // Fullscreen, the device's window follows the mode, as the real
+        // device moves it; windowed, the window is the program's own. The
+        // window is kept for a later Reset, whose present parameters need
+        // not repeat it.
+        deviceWindow = (wanted.hDeviceWindow >>> 0) || (focus >>> 0);
+        resolution?.(wanted.backBufferWidth >>> 0, wanted.backBufferHeight >>> 0, {
+            window: deviceWindow,
+            fullscreen: !wanted.windowed,
+        });
+        const result = handBack(held.device, deviceInterfacesOf(held.device), id,
+            out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
+        if (result === D3D_OK)
+        {
+            lastDevice = held.device;
+        }
+        return result;
+    };
+
+    /** The roots Direct3DCreate9Ex made. @type {WeakSet<object>} */
+    const exRoots = new WeakSet();
+
+    /**
+     * The modes an Ex enumeration lists: the display's sizes in the format
+     * the filter names, the adapter's own format without one. Every mode is
+     * progressive, so a filter asking for interlaced lines lists none.
+     *
+     * @param {number} filter
+     */
+    const filteredModes = filter=>{
+        if ((filter >>> 0) === 0)
+        {
+            return adapterModes(D3DFMT.X8R8G8B8);
+        }
+        const asked = fields.readStruct(filter >>> 0, D3DDISPLAYMODEFILTER);
+        return asked.ScanLineOrdering === D3DSCANLINEORDERING_INTERLACED
+            ? []
+            : adapterModes(asked.Format >>> 0);
+    };
+
+    /** IDirect3D9Ex's own slots. */
+    const rootExMethods = {
+        /** @param {any} root @param {number[]} args */
+        GetAdapterModeCountEx: (root, [adapter, filter])=>((adapter >>> 0) !== 0
+            ? 0
+            : filteredModes(filter).length),
+        /** @param {any} root @param {number[]} args */
+        EnumAdapterModesEx: (root, [adapter, filter, mode, out])=>{
+            const listed = (adapter >>> 0) === 0 ? filteredModes(filter)[mode >>> 0] : undefined;
+            if (!listed || (out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
-            const processing = (behaviourFlags >>> 0) & VERTEX_PROCESSING;
-            if ((adapter >>> 0) !== 0 || !DEVICE_TYPES.has(deviceType >>> 0)
-                || (parameters >>> 0) === 0
-                || processing === 0 || (processing & (processing - 1)) !== 0)
+            fields.writeStruct(out >>> 0, D3DDISPLAYMODEEX, {
+                Size: D3DDISPLAYMODEEX.SIZE,
+                Width: listed.width,
+                Height: listed.height,
+                RefreshRate: listed.refresh,
+                Format: (filter >>> 0) === 0
+                    ? D3DFMT.X8R8G8B8
+                    : fields.readU32((filter >>> 0) + D3DDISPLAYMODEFILTER.Format),
+                ScanLineOrdering: D3DSCANLINEORDERING_PROGRESSIVE,
+            });
+            return D3D_OK;
+        },
+        /** @param {any} root @param {number[]} args */
+        GetAdapterDisplayModeEx: (root, [adapter, mode, rotation])=>((adapter >>> 0) !== 0
+            ? D3DERR_INVALIDCALL
+            : writeDisplayModeEx(mode, rotation)),
+        /** @param {any} root @param {number[]} args */
+        CreateDeviceEx: (root, args)=>{
+            const [adapter, deviceType, focus, behaviourFlags, parameters, mode, out] = args;
+            if ((parameters >>> 0) !== 0 && !modeFits(parameters >>> 0, mode >>> 0))
             {
-                fields.writeU32(out >>> 0, 0);
+                if ((out >>> 0) !== 0)
+                {
+                    fields.writeU32(out >>> 0, 0);
+                }
                 return D3DERR_INVALIDCALL;
             }
-            const wanted = readPresentParameters(parameters >>> 0, focus >>> 0);
-            /** @type {{ device?: any }} */
-            const held = {};
-            const hr = root.CreateDevice(wanted, held, behaviourFlags >>> 0, {
-                AdapterOrdinal: adapter >>> 0,
-                DeviceType: deviceType >>> 0,
-                hFocusWindow: focus >>> 0,
-            });
-            if (hr !== D3D_OK || !held.device)
+            return createDevice(root,
+                [adapter, deviceType, focus, behaviourFlags, parameters, out],
+                IID_IDirect3DDevice9Ex);
+        },
+        // The one adapter's locally unique identifier: any value that is its
+        // own, and stays so.
+        /** @param {any} root @param {number[]} args */
+        GetAdapterLUID: (root, [adapter, out])=>{
+            if ((adapter >>> 0) !== 0 || (out >>> 0) === 0)
             {
-                fields.writeU32(out >>> 0, 0);
-                return hr;
+                return D3DERR_INVALIDCALL;
             }
-            writePresentParameters(parameters >>> 0, wanted);
-            lastParameters = wanted;
-            // The window is now this resolution; the reported screen is too.
-            // Fullscreen, the device's window follows the mode, as the real
-            // device moves it; windowed, the window is the program's own. The
-            // window is kept for a later Reset, whose present parameters need
-            // not repeat it.
-            deviceWindow = (wanted.hDeviceWindow >>> 0) || (focus >>> 0);
-            resolution?.(wanted.backBufferWidth >>> 0, wanted.backBufferHeight >>> 0, {
-                window: deviceWindow,
-                fullscreen: !wanted.windowed,
-            });
-            const result = handBack(held.device, deviceInterfaces, IID_IDirect3DDevice9,
-                out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
-            if (result === D3D_OK)
-            {
-                lastDevice = held.device;
-            }
-            return result;
+            fields.writeU32(out >>> 0, ADAPTER_LUID);
+            fields.writeU32((out >>> 0) + 4, 0);
+            return D3D_OK;
         },
     };
 
@@ -2236,6 +2817,18 @@ export function createDirect3D9Seam(
     const tellCursor = cursor ? createCursorTeller(cursor, memory.readMemory) : ()=>{};
 
     const rootInterfaces = [describe(IID_IDirect3D9, IDIRECT3D9_SLOTS, rootMethods)];
+
+    /**
+     * The object Direct3DCreate9Ex hands back, which answers IDirect3D9 as
+     * well; the plain one does not answer IDirect3D9Ex.
+     *
+     * @type {import('./com.js').InterfaceDescriptor[]}
+     */
+    const rootExInterfaces = [
+        describe(IID_IDirect3D9Ex, [...IDIRECT3D9_SLOTS, ...IDIRECT3D9EX_SLOTS],
+            { ...rootMethods, ...rootExMethods }),
+        ...rootInterfaces,
+    ];
 
     /** @type {any} */
     let lastDevice = null;
@@ -2257,6 +2850,28 @@ export function createDirect3D9Seam(
          */
         publishRoot: (/** @type {any} */ root)=>publisher.publish(root, rootInterfaces, IID_IDirect3D9),
 
+        /**
+         * What Direct3DCreate9Ex does with the object graphics.create('d3d9')
+         * returned: an IDirect3D9Ex, through the pointer it was handed.
+         *
+         * @param {any} root  Null when this build has no Direct3D 9.
+         * @param {number} out
+         * @returns {number} HRESULT
+         */
+        publishRootEx: (/** @type {any} */ root, /** @type {number} */ out)=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            if (!root)
+            {
+                fields.writeU32(out >>> 0, 0);
+                return D3DERR_NOTAVAILABLE;
+            }
+            exRoots.add(root);
+            return handBack(root, rootExInterfaces, IID_IDirect3D9Ex, out >>> 0);
+        },
+
         /** What the device this program is drawing through has counted. */
         diagnostics: ()=>lastDevice?.diagnostics?.() ?? null,
 
@@ -2267,7 +2882,8 @@ export function createDirect3D9Seam(
             indexBuffer: indexBufferInterfaces, declaration: declarationInterfaces,
             vertexShader: vertexShaderInterfaces, pixelShader: pixelShaderInterfaces,
             stateBlock: stateBlockInterfaces, query: queryInterfaces,
-            swapChain: swapChainInterfaces,
+            swapChain: swapChainInterfaces, rootEx: rootExInterfaces,
+            deviceEx: exDeviceInterfaces, swapChainEx: exSwapChainInterfaces,
         },
     };
 }

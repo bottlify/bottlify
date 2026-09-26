@@ -132,10 +132,14 @@ pass on the wall clock without moving virtual time, so a device paced by that cl
 Capped at a quarter second so a genuine stall (a fetch, a hidden tab) isn't handed to the program
 as time it spent. *2026-09-08, `33f251d6`.*
 
-**A22 — `WM_CREATE` is sent when a window is made; `WM_NCCREATE` deliberately is not.** A window
-procedure does its real setup in `WM_CREATE`; without it a window looks real and does nothing.
-`WM_NCCREATE` would mean running guest code twice from one host call, with the second starting
-while the first unwinds — left out until a program is seen to need it. *2026-09-08, `33f251d6`.*
+**A22 — `WM_NCCREATE` and then `WM_CREATE` are sent when a window is made.** A window procedure
+does its real setup in `WM_CREATE`; without it a window looks real and does nothing. `WM_NCCREATE`
+was at first left out, because it meant running guest code twice from one host call with the
+second starting while the first unwound; creation has since come to chain the CBT hook,
+`WM_CREATE`, `WM_SIZE` and `WM_MOVE` each after the previous one's answer, so that no longer held,
+and a procedure that keeps `lpCreateParams` from `WM_NCCREATE` -- a common way to bind a window to
+its object -- never got it. It is sent first now, and `FALSE` from it refuses the window, as user32's
+message tests pin. *2026-09-08, `33f251d6`; revised 2026-09-26, `54c1d1f`.*
 
 **A23 — `DefWindowProc` does nothing with `WM_DESTROY`**, rather than posting a quit. Windows
 programs destroy windows constantly (dialogs, tooltips, splash screens) and pass `WM_DESTROY` to
@@ -175,6 +179,70 @@ fast path can't do — an unknown state, a shader handle, a held lock, a full ri
 the method's own trap. Measured on one title's menu; the block takes a dedicated memory page so
 writing it never evicts compiled guest code sitting next to the routines that write it. *2026-09-10,
 `109d90f6`.*
+
+**A29 — Video memory is a constant 256 MiB that creating a surface or texture never reduces.**
+`GetAvailableTextureMem` (Direct3D 8 and 9) and `GetAvailableVidMem` (DirectDraw) answer the same
+number however much has been created, and WMI's `Win32_VideoController.AdapterRAM` gives the
+same figure, where Wine's tests (`d3d9/tests/device.c`, `ddraw/tests/ddraw7.c` and its older
+siblings) see it fall as render targets are made. A program
+asks to size a cache, and what it does with a falling answer is evict and reload; here nothing is
+ever evicted, because a texture's storage is the guest's own memory and its GPU copy lives as long
+as it does, so a shrinking figure would make a program work around a pressure that does not exist.
+The figure sits well below a signed 32-bit boundary so a caller treating it as signed cannot go
+negative. Revisit if a program is found that checks the figure falls, or that refuses to run when
+it doesn't. *Recorded 2026-09-26; the choice predates this repository's history (`7a469c3`).*
+
+**A30 — `Present` never waits for the display, whatever presentation interval was asked for.**
+The caps advertise `D3DPRESENT_INTERVAL_ONE` and `IMMEDIATE`, and the interval a program asks for
+is parsed and handed back, but no path reads it: two presents in a row both return at once, where
+the documented contract is at most one per refresh period. The pacer
+(`webgpu/internal/pacer.js`) takes the newest frame at each display tick instead, so a frame
+presented too soon is superseded rather than shown, and the guest thread is never held for a frame.
+A guest thread parked for a refresh period costs more than any number of frames drawn. What this
+gives up: a program that
+relies on `Present` to throttle its loop runs that loop faster than the display, and burns guest
+time on frames nobody sees. *Recorded 2026-09-26; the choice predates this repository's history
+(`7a469c3`).*
+
+**A31 — The Windows a machine reports is a bottle's setting, one of four, and XP SP3 by default.**
+Some programs refuse a Windows older than they were written for and some one newer, so no single
+answer serves every title: `createApp`'s `windows` option (and a bottle manifest's `windows` field)
+picks one of `win2000`, `winxp`, `win7` and `win10`, each at the last service pack its release
+had, and every place a program reads the version from answers that one (`docs/core/win32.md`'s
+"The version a program is told"):
+
+| choice | version | service pack | suite | profile layout |
+|--------|---------|--------------|-------|----------------|
+| `win2000` | 5.0.2195 | 4 | none | `Documents and Settings` |
+| `winxp` | 5.1.2600 | 3 | `VER_SUITE_SINGLEUSERTS` | `Documents and Settings` |
+| `win7` | 6.1.7601 | 1 | `VER_SUITE_SINGLEUSERTS` | `Users`, `ProgramData` |
+| `win10` | 10.0.19045 | none | `VER_SUITE_SINGLEUSERTS` | `Users`, `ProgramData` |
+
+All four are workstations (`VER_NT_WORKSTATION`) on `VER_PLATFORM_WIN32_NT`, a Professional
+edition rather than a Home one (no `VER_SUITE_PERSONAL`), and 32-bit: `IsWow64Process` stays
+FALSE and there is no `Program Files (x86)`. The Windows directory is `C:\WINDOWS` for all four,
+2000 included, whose own setup chose `C:\WINNT`: a program asks `GetWindowsDirectory` rather than
+assuming either, and one directory keeps the system volume and every path under it the same.
+The temporary directory (`GetTempPath`, `TEMP`, `TMP`) is `C:\WINDOWS\TEMP` for all four as well,
+where Windows keeps one per user under the profile: XP's is the short
+`C:\DOCUME~1\User\LOCALS~1\Temp`, and this volume has no 8.3 names, so the long path would put its
+spaces into every command line an installer builds from it unquoted. Revisit once the volume
+answers short names.
+`win10` answers `GetVersion`, `GetVersionEx` and `VerifyVersionInfo` with the newest Windows the
+program declares, 6.2 when it declares nothing newer, as Windows 8.1 and later do; the process
+block, `RtlGetVersion`, the registry and a system library's file version keep the truth. A system
+library's file version is `major.minor.build.0`: the service pack's own revision number is not
+modelled. A hive restored from a run under another setting has its version values and shell
+folders written over at start (a bottle's setting can change between runs), where every other
+value a program wrote is kept.
+
+XP SP3 is the default because the installers a title of the era carries accept it and the engine
+already is it: the DirectX June 2010 redistributable's setup refuses anything below XP SP2, and
+kernel32 already exports SP2's additions, such as `EncodePointer` and `IsWow64Process` -- a
+machine exporting SP2's interface while claiming no service pack contradicts itself. It is also
+old enough that a program written for 2000 or 98 still recognises it, where a version check
+written before 7 existed may not recognise 7 or 10. *2026-09-26, the commit adding
+`kernel32/versions.js`.*
 
 ## B. From measured optimisation work
 
@@ -392,3 +460,11 @@ the engine ships the June 2010 DirectX End-User Runtime as a read-only system vo
 loader runs the real `d3dx9_24…43.dll` from it whenever a program doesn't bring its own; the
 engine's own `d3dx9_25`/`26`/`27` stub tables (`layers/win32/d3dx9/`) still answer a program that
 ships neither — the fallback now, not the primary path. *2026-09-07, `42e8e9bc`.*
+Reconsidered: the engine no longer carries the DirectX End-User Runtime. It was Microsoft's binary
+fetched into every build to stand in for a setup the engine answered as already run, so a title's
+installer never ran the `DXSETUP` it brought, and whatever that setup could not do here stayed
+hidden behind a runtime nobody installed. The setup a title brings now runs as the child it is
+and puts the `d3dx`/`d3dcompiler` libraries in `system32`, where the loader already looks; the
+engine's `d3dx9_*` stub tables answer a program whose installer never ran. The Visual C++ and
+.NET redistributables are still answered as already run, since the engine carries the C runtime
+itself. *2026-09-26.*

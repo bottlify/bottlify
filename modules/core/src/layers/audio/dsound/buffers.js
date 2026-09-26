@@ -55,6 +55,12 @@ export const DSBSTATUS_LOOPING = 0x0004;
 /** DSBPLAY_LOOPING, the only play flag that changes what the cursor does. */
 export const DSBPLAY_LOOPING = 0x0001;
 
+/**
+ * The offset a notification names to be told when playback stops, rather than
+ * when the cursor reaches a place: dsound.h's -1, read as the dword it is.
+ */
+export const DSBPN_OFFSETSTOP = 0xffffffff;
+
 /** Lock flags. */
 export const DSBLOCK_FROMWRITECURSOR = 0x0001;
 export const DSBLOCK_ENTIREBUFFER = 0x0002;
@@ -101,9 +107,14 @@ export function normaliseFormat(format){
  * @param {() => number} options.now   The guest's clock, in milliseconds.
  * @param {boolean} [options.primary]  A primary buffer is the mix target and
  *                                     never holds a program's own samples.
+ * @param {number} [options.capabilities]  The DSBCAPS flags it was created with.
+ * @param {() => boolean} [options.kept]  Whether something besides the program's
+ *                                     own references keeps it.
  */
-export function createSoundBuffer(
-    { bytes, address, format: initialFormat, now, primary = false })
+export function createSoundBuffer({
+    bytes, address, format: initialFormat, now, primary = false, capabilities = 0,
+    kept = ()=>false,
+})
 {
     // Not a constant: a program sets the format of the primary buffer to say
     // what the mix should run at, and everything below is in bytes derived from
@@ -123,6 +134,14 @@ export function createSoundBuffer(
     let notifications = [];
     /** Where the play cursor stood the last time notifications were tested. */
     let lastNotified = 0;
+    /** Playback stopped, by Stop or at the end, since notifications were tested. */
+    let stopOwed = false;
+    /**
+     * A one-shot ran to its end since notifications were tested. Its cursor
+     * reads zero again, as a wrapped one does, and what it passed on the way
+     * is the rest of the buffer -- not the whole of it again from the start.
+     */
+    let ranOut = false;
     /**
      * How far the bytes have been read out for mixing: the write cursor, not
      * the play cursor. The span between the two is what a real device has
@@ -263,6 +282,8 @@ export function createSoundBuffer(
             anchorByte = 0;
             anchorMs = now();
             reachedEnd = true;
+            stopOwed = true;
+            ranOut = true;
         }
     };
 
@@ -383,11 +404,20 @@ export function createSoundBuffer(
         get primary(){
             return primary;
         },
+        get capabilities(){
+            return capabilities;
+        },
 
         addRef: ()=>++references,
-        release: ()=>Math.max(0, --references),
+        release: ()=>(references = Math.max(0, references - 1)),
         get references(){
             return references;
+        },
+        /** Whether it can still be reached: a count of zero is not the end of it while kept. */
+        reachable: ()=>references > 0 || kept(),
+        /** Whether the program's last reference has gone, whatever keeps it besides. */
+        get destroyed(){
+            return references === 0;
         },
 
         /**
@@ -432,6 +462,9 @@ export function createSoundBuffer(
             // back there hands over the whole sound a second time.
             anchorByte = playCursor();
             anchorMs = now();
+            // Only a buffer that was playing stops; one that already ran to
+            // its end said so when it got there.
+            stopOwed ||= playing;
             playing = false;
         },
 
@@ -441,6 +474,7 @@ export function createSoundBuffer(
             anchorByte = alignDown((position >>> 0) % bytes);
             anchorMs = now();
             lastNotified = anchorByte;
+            ranOut = false;
             // Moved with the cursor, or the next read hands over everything
             // between where playback used to be and where it has been put --
             // which is most of the buffer, played at once.
@@ -489,10 +523,28 @@ export function createSoundBuffer(
             return pan;
         },
 
+        /**
+         * That pan as a multiplier for each side, left then right.
+         *
+         * Hundredths of a decibel like volume, taken off the side the sound is
+         * panned away from while the other stays whole -- not a crossfade
+         * between the two. The bound is silence on the far side, as the floor
+         * of volume is.
+         *
+         * @returns {[number, number]}
+         */
+        get balance(){
+            const keep = (/** @type {number} */ cut)=>(cut >= DSBPAN_RIGHT ? 0 : 10 ** (-cut / 2000));
+            return [keep(Math.max(0, pan)), keep(Math.max(0, -pan))];
+        },
+
         /** @param {{ offset: number, event: number }[]} positions */
         setNotifications(positions){
             notifications = positions.map(entry=>({ ...entry }));
             lastNotified = playCursor();
+            // A stop from before these were set is not theirs to report.
+            stopOwed = false;
+            ranOut = false;
         },
         get notifications(){
             return notifications;
@@ -500,27 +552,45 @@ export function createSoundBuffer(
 
         /**
          * Which notification events the cursor has passed since this was last
-         * asked, in the order it passed them.
+         * asked, in the order it passed them, and then those waiting for
+         * playback to stop if it has.
          *
          * Crossing is tested rather than compared, because the cursor wraps: a
          * position behind the current one may have been passed a moment ago or
          * not for another whole buffer, and only the direction of travel says
-         * which.
+         * which. DSBPN_OFFSETSTOP is no position and never crossed; tested as
+         * one, it is past everything and fires on every lap.
+         *
+         * A position is passed once the frame there has been played: the span
+         * runs from where the cursor stood, inclusive, to where it stands now,
+         * exclusive. So the position playback starts at is the first one it
+         * passes, and a one-shot's last frame is passed as it ends.
          *
          * @returns {number[]}
          */
         drainNotifications(){
             const play = playCursor();
             const from = lastNotified;
+            const wrapped = ranOut || play < from;
             lastNotified = play;
-            if (notifications.length === 0 || from === play)
+            ranOut = false;
+            const stopped = stopOwed;
+            stopOwed = false;
+            if (notifications.length === 0)
             {
                 return [];
             }
-            const passed = (/** @type {number} */ offset)=>(from < play
-                ? offset > from && offset <= play
-                : offset > from || offset <= play);
-            return notifications.filter(entry=>passed(entry.offset)).map(entry=>entry.event);
+            const passed = (/** @type {number} */ offset)=>offset !== DSBPN_OFFSETSTOP
+                && (wrapped ? offset >= from || offset < play : offset >= from && offset < play);
+            /** @param {{ offset: number }} entry */
+            const travelled = entry=>((entry.offset >>> 0) - from + bytes) % bytes;
+            return notifications
+                .filter(entry=>passed(entry.offset >>> 0))
+                .sort((a, b)=>travelled(a) - travelled(b))
+                .concat(stopped
+                    ? notifications.filter(entry=>(entry.offset >>> 0) === DSBPN_OFFSETSTOP)
+                    : [])
+                .map(entry=>entry.event);
         },
 
         /**

@@ -29,6 +29,8 @@
  *   to open it.
  */
 
+import { planesToBgra } from './cursors.js';
+
 /** The resource directories a cursor and an icon are named in. */
 export const RT_GROUP_CURSOR = 12;
 export const RT_GROUP_ICON = 14;
@@ -46,9 +48,9 @@ const MAX_RESOURCE_NAME = 256;
  * A standard one is named by a small integer on a null instance and exists
  * everywhere, so its number is its handle. One out of a module's own image
  * exists when the module carries the resource -- and then a program is owed a
- * handle it can put in a window class or pass to SetCursor, whether or not
- * anything here ever draws it. The bits are not decoded: no path consumes
- * them, and a program that gets null back concludes its own image is short
+ * handle it can put in a window class or pass to SetCursor. The bits are
+ * decoded when SetCursor first shows it, not here: most loaded cursors are
+ * never set. A program that gets null back concludes its own image is short
  * of a resource it was built with.
  *
  * @param {{ handles: { open: (type: string, object: any) => number },
@@ -89,6 +91,8 @@ const MF_OWNERDRAW = 0x0100;
 const MF_SEPARATOR = 0x0800;
 /** The check mark of the default menu font, in pixels each way. */
 const CHECK_MARK_SIZE = 13;
+/** What a call handed a handle that names no menu leaves for GetLastError. */
+const ERROR_INVALID_MENU_HANDLE = 1401;
 
 /**
  * The system menu every window has by default: the commands the frame's own
@@ -360,11 +364,30 @@ const parseMenuTemplate = bytes=>{
 
 
 /**
+ * The clipboard as a control reaches it -- an edit's WM_COPY and WM_PASTE --
+ * rather than through the exports a program calls.
+ *
+ * @typedef {Object} ClipboardService
+ * @property {() => string | null} text
+ *           The text a paste takes: the program's own, else the host's, and
+ *           nothing while a program holds the clipboard open.
+ * @property {(text: string) => boolean} copy
+ *           Makes text the clipboard's CF_TEXT, as a control that opens,
+ *           empties, sets and closes it does; false while a program holds it
+ *           open.
+ */
+
+/**
  * @param {Object} options
  * @param {any} options.host
  * @param {(hwnd: number) => any | null} options.live
+ * @param {(service: ClipboardService) => void} [options.clipboardService]
+ *        Handed the clipboard for the controls' own use.
+ * @param {(record: any, previous: number) => number | Promise<number>} [options.menuChanged]
+ *        Told a window's menu changed, which moves its client area when a bar
+ *        comes or goes; answers what SetMenu answers once the window is told.
  */
-export function createObjectFunctions({ host, live }){
+export function createObjectFunctions({ host, live, clipboardService, menuChanged }){
     /** @type {Map<number, any>} */
     const menus = new Map();
     /** @type {Map<number, any>} */
@@ -508,6 +531,42 @@ export function createObjectFunctions({ host, live }){
         const narrow = clipboard.formats.get(CF_TEXT) || clipboard.formats.get(CF_OEMTEXT);
         return narrow ? readTerminated(narrow, 1) : null;
     };
+
+    /**
+     * What a control put on the clipboard is memory of ours, given back when
+     * the clipboard is next emptied, as Windows frees what it held.
+     *
+     * @type {Set<number>}
+     */
+    const controlCopies = new Set();
+    const releaseControlCopies = ()=>{
+        for (const handle of controlCopies)
+        {
+            host.release?.(handle);
+        }
+        controlCopies.clear();
+    };
+
+    clipboardService?.({
+        text: ()=>(clipboard.open ? null : clipboardText() ?? hostText()?.text ?? null),
+        copy: text=>{
+            if (clipboard.open)
+            {
+                return false;
+            }
+            releaseControlCopies();
+            clipboard.formats.clear();
+            clipboard.emptiedAt = host.pasteboard?.version ?? 0;
+            if (host.allocate)
+            {
+                const handle = layDown(CF_TEXT, text);
+                clipboard.formats.set(CF_TEXT, handle);
+                controlCopies.add(handle);
+            }
+            host.clipboard?.(text);
+            return true;
+        },
+    });
 
     /** @param {number} address @param {string} text @param {number} limit */
     const writeString = (address, text, limit)=>{
@@ -809,6 +868,26 @@ export function createObjectFunctions({ host, live }){
                 menus.delete(menu.handle);
                 host.handles.close(menu.handle);
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL IsMenu(HMENU hMenu)
+         *
+         * Whether the handle names a menu that has not been destroyed; a
+         * handle that does not is refused with the reason, as Windows refuses
+         * it.
+         */
+        IsMenu: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                if (menuOf(handle))
+                {
+                    return 1;
+                }
+                host.setLastError?.(ERROR_INVALID_MENU_HANDLE);
+                return 0;
             },
         },
 
@@ -1223,8 +1302,9 @@ export function createObjectFunctions({ host, live }){
                 {
                     return 0;
                 }
+                const previous = record.menu;
                 record.menu = menu >>> 0;
-                return 1;
+                return menuChanged?.(record, previous) ?? 1;
             },
         },
 
@@ -1410,6 +1490,7 @@ export function createObjectFunctions({ host, live }){
                 {
                     return 0;
                 }
+                releaseControlCopies();
                 clipboard.formats.clear();
                 clipboard.changed = true;
                 clipboard.emptiedAt = host.pasteboard?.version ?? 0;
@@ -1485,22 +1566,30 @@ export function createObjectFunctions({ host, live }){
          * HCURSOR CreateCursor(HINSTANCE hInst, int xHotSpot, int yHotSpot,
          *   int nWidth, int nHeight, const VOID *pvANDPlane, const VOID *pvXORPlane)
          *
-         * The bits are not read. Nothing draws a cursor, and copying two masks
-         * to hold them would be storing pixels that no path consumes; what a
-         * program needs back is a handle it can pass to SetCursor and destroy.
+         * The two planes are read now, as the call documents copying them:
+         * the picture is what SetCursor hands the page.
          */
         CreateCursor: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([, x, y, width, height])=>{
-                if ((width | 0) <= 0 || (height | 0) <= 0)
+            handler: ([, x, y, width, height, and, xor])=>{
+                const MAX_SIDE = 256;
+                const across = width | 0;
+                const down = height | 0;
+                if (across <= 0 || down <= 0 || across > MAX_SIDE || down > MAX_SIDE)
                 {
                     return 0;
                 }
+                const size = ((across + 15) >>> 4) * 2 * down;
+                // A plane not given is a bitmap made without bits: all zero.
+                /** @param {number} plane */
+                const read = plane=>((plane >>> 0) === 0
+                    ? new Uint8Array(size) : host.readMemory(plane >>> 0, size));
+                const hotSpot = { x: x | 0, y: y | 0 };
                 return host.handles.open('cursor', {
-                    hotSpot: { x: x | 0, y: y | 0 },
-                    width: width | 0,
-                    height: height | 0,
+                    hotSpot, width: across, height: down,
+                    picture: { width: across, height: down, hotSpot,
+                        bgra: planesToBgra(across, down, read(and), read(xor)) },
                 });
             },
         },

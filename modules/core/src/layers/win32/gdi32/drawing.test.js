@@ -274,22 +274,22 @@ test('a memory context is bound to the bitmap selected into it, and rebound on a
     /** @type {any[]} */
     const asked = [];
     graphics.services.surfaceFor = (/** @type {any} */ dc, /** @type {any} */ bitmap)=>{
-        asked.push({ kind: dc.kind, bits: bitmap.bits });
+        asked.push({ kind: dc.kind, width: bitmap.width });
         return { width: bitmap.width, height: bitmap.height };
     };
     const { fns, hdc } = setup(graphics.services);
     const memoryDc = fns.CreateCompatibleDC.handler([hdc]);
-    const first = fns.CreateBitmap.handler([8, 8, 1, 32, 0x1000]);
-    const second = fns.CreateBitmap.handler([8, 8, 1, 32, 0x2000]);
+    const first = fns.CreateBitmap.handler([8, 8, 1, 32, 0]);
+    const second = fns.CreateBitmap.handler([9, 8, 1, 32, 0]);
 
     fns.SelectObject.handler([memoryDc, first]);
     assert.equal(fns.LineTo.handler([memoryDc, 1, 1]), 1);
     assert.equal(fns.LineTo.handler([memoryDc, 2, 2]), 1);
-    assert.deepEqual(asked, [{ kind: 'memory', bits: 0x1000 }], 'bound once while nothing changes');
+    assert.deepEqual(asked, [{ kind: 'memory', width: 8 }], 'bound once while nothing changes');
 
     fns.SelectObject.handler([memoryDc, second]);
     assert.equal(fns.LineTo.handler([memoryDc, 3, 3]), 1);
-    assert.deepEqual(asked.at(-1), { kind: 'memory', bits: 0x2000 });
+    assert.deepEqual(asked.at(-1), { kind: 'memory', width: 9 });
     assert.equal(graphics.calls.filter(call=>call[0] === 'bind').length, 2,
         'once per bitmap');
 });
@@ -352,8 +352,11 @@ test('the blits that need no source, and the ones that scale, reach the service'
     assert.deepEqual(graphics.calls.filter(call=>call[0] === 'stretchDIBits'),
         [['stretchDIBits', hdc, 2, 4, 16, 8, 4]]);
     assert.equal(fns.StretchDIBits.handler(
-        [hdc, 0, 0, 4, 4, 0, 0, 2, 2, BITS, INFO, DIB_PAL_COLORS, SRCCOPY]), 0,
-    'a palette-relative table is not decoded, and says so with zero lines');
+        [hdc, 0, 0, 4, 4, 0, 0, 2, 2, BITS, INFO, DIB_PAL_COLORS, SRCCOPY]), 2,
+    'a palette-relative table is read through the palette');
+    assert.equal(fns.StretchDIBits.handler(
+        [hdc, 0, 0, 4, 4, 0, 0, 2, 2, BITS, INFO, DIB_PAL_COLORS + 2, SRCCOPY]), 0,
+    'and past DIB_PAL_INDICES there is no usage');
     assert.equal(fns.PatBlt.argBytes, 24);
     assert.equal(fns.StretchDIBits.argBytes, 52);
 });
@@ -477,6 +480,170 @@ test('GetObjectA sizes a buffer before it fills one', ()=>{
     assert.equal(fns.GetObjectA.handler([0x1234, 16, OUT]), 0, 'a stale handle is not an object');
 });
 
+/**
+ * A BITMAPINFOHEADER at STRUCT, with its colour table after it.
+ *
+ * @param {ReturnType<typeof fakeMemory>} memory
+ * @param {{ width: number, height: number, bitCount: number, colors?: number[],
+ *     pels?: number[] }} shape
+ */
+function putInfo(memory, { width, height, bitCount, colors = [], pels = [0, 0] }){
+    memory.putU32s(STRUCT, [40, width, height, 0, 0, 0, pels[0], pels[1], colors.length, 0]);
+    memory.bytes.set([1, 0, bitCount, 0], STRUCT + 12);
+    memory.putU32s(STRUCT + 40, colors);
+}
+
+test('GetObject gives a bitmap the stride its rows have, and a DIB section its pointer', ()=>{
+    // Wine's bitmap tests: a device-dependent bitmap's rows pad to a WORD and
+    // it has no bits a program can address (bmBits NULL), a DIB section's pad
+    // to a DWORD and bmBits is the pointer CreateDIBSection handed out.
+    const { memory, fns, hdc } = setup();
+    /** @param {number} handle */
+    const bitmapOf = handle=>{
+        memory.bytes.fill(0xee, OUT, OUT + 24);
+        assert.equal(fns.GetObjectA.handler([handle, 24, OUT]), 24);
+        return {
+            type: memory.u32(OUT), width: memory.u32(OUT + 4), height: memory.u32(OUT + 8),
+            widthBytes: memory.u32(OUT + 12), planes: memory.u16(OUT + 16),
+            bitsPixel: memory.u16(OUT + 18), bits: memory.u32(OUT + 20),
+        };
+    };
+
+    assert.deepEqual(bitmapOf(fns.CreateBitmap.handler([15, 15, 1, 1, 0])),
+        { type: 0, width: 15, height: 15, widthBytes: 2, planes: 1, bitsPixel: 1, bits: 0 });
+    assert.deepEqual(bitmapOf(fns.CreateCompatibleBitmap.handler([hdc, 3, 2])),
+        { type: 0, width: 3, height: 2, widthBytes: 12, planes: 1, bitsPixel: 32, bits: 0 });
+    memory.putU32s(STRUCT + 0x100, [0, 0]);
+    assert.equal(bitmapOf(fns.CreateBitmap.handler([2, 2, 1, 4, STRUCT + 0x100])).bits, 0,
+        'bmBits must be NULL for device-dependent bitmaps, whatever lpBits was');
+
+    putInfo(memory, { width: 10, height: -4, bitCount: 24 });
+    const section = fns.CreateDIBSection.handler([hdc, STRUCT, 0, OUT + 0x80, 0, 0]);
+    const pointer = memory.u32(OUT + 0x80);
+    assert.deepEqual(bitmapOf(section), { type: 0, width: 10, height: 4, widthBytes: 32,
+        planes: 1, bitsPixel: 24, bits: pointer });
+});
+
+test('GetObject fills a DIBSECTION for a DIB section when there is room for one', ()=>{
+    const { memory, fns, hdc } = setup();
+    putInfo(memory, { width: 16, height: 8, bitCount: 1, colors: [0x00ff0000, 0x000000ff],
+        pels: [2835, 1417] });
+    const section = fns.CreateDIBSection.handler([hdc, STRUCT, 0, OUT + 0x80, 0, 0]);
+    const pointer = memory.u32(OUT + 0x80);
+
+    assert.equal(fns.GetObjectA.handler([section, 0, 0]), 24,
+        'the size asked with a null buffer is a BITMAP\'s');
+    assert.equal(fns.GetObjectA.handler([section, 80, OUT]), 24, 'short of 84 it is a BITMAP');
+    memory.bytes.fill(0xaa, OUT, OUT + 84);
+    assert.equal(fns.GetObjectA.handler([section, 84 * 2, OUT]), 84);
+    assert.equal(memory.u32(OUT + 20), pointer, 'dsBm.bmBits');
+    assert.equal(memory.u32(OUT + 12), 4, 'dsBm.bmWidthBytes: a DWORD-padded row');
+    const header = OUT + 24;
+    assert.deepEqual([0, 4, 8].map(at=>memory.u32(header + at)), [40, 16, 8],
+        'biSize, biWidth and biHeight');
+    assert.deepEqual([memory.u16(header + 12), memory.u16(header + 14)], [1, 1]);
+    assert.deepEqual([16, 20, 24, 28, 32].map(at=>memory.u32(header + at)),
+        [0, 4 * 8, 2835, 1417, 2], 'BI_RGB, the image size, the pels, the table counted in full');
+    assert.deepEqual([64, 68, 72, 76, 80].map(at=>memory.u32(OUT + at)), [0, 0, 0, 0, 0],
+        'no masks for BI_RGB, no file mapping, no offset');
+
+    // A top-down section reports its height without the sign.
+    putInfo(memory, { width: 2, height: -3, bitCount: 32 });
+    const topDown = fns.CreateDIBSection.handler([hdc, STRUCT, 0, OUT + 0x80, 0, 0]);
+    assert.equal(fns.GetObjectA.handler([topDown, 84, OUT]), 84);
+    assert.equal(memory.u32(OUT + 24 + 8), 3);
+    assert.equal(memory.u32(OUT + 24 + 32), 0, 'no colour table above eight bits');
+});
+
+test('CreateCompatibleBitmap on a DC with a DIB section selected makes a DIB section', ()=>{
+    // The CreateCompatibleBitmap documentation: with a DIB section selected,
+    // the bitmap it makes is a DIB section -- here in the selected one's
+    // format, its depth, masks and colours, over rows of its own.
+    const { memory, fns, hdc } = setup();
+    const dc = fns.CreateCompatibleDC.handler([hdc]);
+    const colors = [...Array(256).keys()].map(index=>index * 0x010203 & 0xffffff);
+    putInfo(memory, { width: 4, height: -4, bitCount: 8, colors });
+    const section = fns.CreateDIBSection.handler([hdc, STRUCT, 0, OUT + 0x80, 0, 0]);
+    const first = memory.u32(OUT + 0x80);
+    const previous = fns.SelectObject.handler([dc, section]);
+
+    const made = fns.CreateCompatibleBitmap.handler([dc, 5, 3]);
+    memory.bytes.fill(0xaa, OUT, OUT + 84);
+    assert.equal(fns.GetObjectA.handler([made, 84, OUT]), 84, 'a DIBSECTION, so a section');
+    assert.ok(memory.u32(OUT + 20) !== 0 && memory.u32(OUT + 20) !== first, 'rows of its own');
+    assert.deepEqual([4, 8, 12].map(at=>memory.u32(OUT + at)), [5, 3, 8]);
+    assert.equal(memory.u16(OUT + 18), 8, 'the section\'s depth, not the screen\'s');
+    const other = fns.CreateCompatibleDC.handler([hdc]);
+    fns.SelectObject.handler([other, made]);
+    memory.bytes.fill(0, OUT, OUT + 1024);
+    assert.equal(fns.GetDIBColorTable.handler([other, 0, 256, OUT]), 256);
+    assert.deepEqual([...Array(256).keys()].map(index=>memory.u32(OUT + index * 4)), colors);
+    fns.SelectObject.handler([other, previous]);
+
+    putInfo(memory, { width: 2, height: 2, bitCount: 16, colors: [0xf800, 0x07e0, 0x001f] });
+    memory.putU32s(STRUCT + 16, [3]);
+    memory.putU32s(STRUCT + 32, [0]);
+    fns.SelectObject.handler([dc, fns.CreateDIBSection.handler([hdc, STRUCT, 0, OUT + 0x80,
+        0, 0])]);
+    const masked = fns.CreateCompatibleBitmap.handler([dc, 2, 2]);
+    assert.equal(fns.GetObjectA.handler([masked, 84, OUT]), 84);
+    assert.equal(memory.u16(OUT + 18), 16);
+    assert.equal(memory.u32(OUT + 24 + 16), 3, 'BI_BITFIELDS');
+    assert.deepEqual([64, 68, 72].map(at=>memory.u32(OUT + at)), [0xf800, 0x07e0, 0x001f]);
+
+    fns.SelectObject.handler([dc, fns.CreateCompatibleBitmap.handler([hdc, 2, 2])]);
+    assert.equal(fns.GetObjectA.handler([fns.CreateCompatibleBitmap.handler([dc, 2, 2]), 84,
+        OUT]), 24, 'with a device-dependent bitmap selected, a device-dependent bitmap');
+});
+
+test('GetObject hands a font back as the LOGFONT it was made from, in either spelling', ()=>{
+    const { memory, fns } = setup();
+    memory.bytes.set([...'Arial'].map(c=>c.charCodeAt(0)).concat(0), STRUCT);
+    const font = fns.CreateFontA.handler([-12, 5, 0, 0, 700, 1, 0, 0, 0xcc, 3, 2, 4, 0x22,
+        STRUCT]);
+
+    assert.equal(fns.GetObjectA.handler([font, 0, 0]), 60, 'sizeof(LOGFONTA)');
+    assert.equal(fns.GetObjectA.handler([font, 59, OUT]), 0);
+    memory.bytes.fill(0xee, OUT, OUT + 92);
+    assert.equal(fns.GetObjectA.handler([font, 60, OUT]), 60);
+    assert.deepEqual([0, 4, 16].map(at=>memory.u32(OUT + at) | 0), [-12, 5, 700]);
+    assert.deepEqual([...memory.bytes.subarray(OUT + 20, OUT + 28)],
+        [1, 0, 0, 0xcc, 3, 2, 4, 0x22]);
+    assert.equal(new TextDecoder('latin1').decode(memory.bytes.subarray(OUT + 28, OUT + 34)),
+        'Arial\0');
+    assert.equal(memory.bytes[OUT + 60], 0xee, 'nothing past the structure');
+
+    assert.equal(fns.GetObjectW.handler([font, 0, 0]), 92, 'sizeof(LOGFONTW)');
+    assert.equal(fns.GetObjectW.handler([font, 92, OUT]), 92);
+    assert.deepEqual([...memory.bytes.subarray(OUT + 28, OUT + 40)],
+        [0x41, 0, 0x72, 0, 0x69, 0, 0x61, 0, 0x6c, 0, 0, 0], 'the face name in UTF-16');
+
+    const DEFAULT_GUI_FONT = 17;
+    assert.equal(fns.GetObjectA.handler([fns.GetStockObject.handler([DEFAULT_GUI_FONT]), 60,
+        OUT]), 60, 'a stock font is a font too');
+});
+
+test('GetObject on a palette is the WORD count of its entries', ()=>{
+    const { memory, fns } = setup();
+    memory.putU32s(STRUCT, [0x300 | (3 << 16), 0x00112233, 0x00445566, 0x00778899]);
+    const palette = fns.CreatePalette.handler([STRUCT]);
+
+    assert.equal(fns.GetObjectA.handler([palette, 0, 0]), 2);
+    assert.equal(fns.GetObjectA.handler([palette, 1, OUT]), 0);
+    memory.bytes.fill(0xee, OUT, OUT + 4);
+    assert.equal(fns.GetObjectW.handler([palette, 4, OUT]), 2);
+    assert.deepEqual([...memory.bytes.subarray(OUT, OUT + 4)], [3, 0, 0xee, 0xee]);
+});
+
+test('GetObjectW answers what GetObjectA does for everything but a font', ()=>{
+    const { memory, fns } = setup();
+    assert.equal(fns.GetObjectW.argBytes, 12);
+    const pen = fns.CreatePen.handler([0, 3, 0x00ff8040]);
+    assert.equal(fns.GetObjectW.handler([pen, 16, OUT]), 16);
+    assert.equal(memory.u32(OUT + 12), 0x00ff8040);
+    assert.equal(fns.GetObjectW.handler([0x1234, 16, OUT]), 0);
+});
+
 // --- palettes, which exist and change nothing ---
 
 test('a palette is real, selectable, and realizes no entries', ()=>{
@@ -500,6 +667,31 @@ test('a palette is real, selectable, and realizes no entries', ()=>{
     assert.equal(fns.RealizePalette.handler([hdc]), 0);
     assert.equal(fns.GetDIBColorTable.handler([hdc, 0, 256, OUT]), 0);
 });
+
+test('a halftone palette is 256 colours, the default palette\'s first and last eight at its ends',
+    ()=>{
+        // Wine's test_halftone_palette: 256 entries, the first eight those of
+        // the stock default palette and the last eight its last eight, flags
+        // clear. What lies between is not pinned.
+        const { fns, memory, hdc } = setup();
+        const palette = fns.CreateHalftonePalette.handler([hdc]);
+        assert.equal(fns.GetPaletteEntries.handler([palette, 0, 0, 0]), 256);
+        memory.bytes.fill(0xee, OUT, OUT + 1024);
+        assert.equal(fns.GetPaletteEntries.handler([palette, 0, 256, OUT]), 256);
+        const DEFAULTS = OUT + 0x400;
+        assert.equal(fns.GetPaletteEntries.handler([fns.GetStockObject.handler([15]), 0, 20,
+            DEFAULTS]), 20);
+        for (let index = 0; index < 8; index++)
+        {
+            assert.equal(memory.u32(OUT + index * 4), memory.u32(DEFAULTS + index * 4),
+                `${index}`);
+            assert.equal(memory.u32(OUT + (248 + index) * 4),
+                memory.u32(DEFAULTS + (12 + index) * 4), `${248 + index}`);
+        }
+        const distinct = new Set([...Array(256).keys()].map(index=>memory.u32(OUT + index * 4)));
+        assert.ok(distinct.size > 200, 'colours spread over the cube, not one repeated');
+        assert.ok([...distinct].every(entry=>(entry >>> 24) === 0), 'no flags');
+    });
 
 test('UnrealizeObject succeeds for any live object and fails for one that is not', ()=>{
     // The realization it undoes changes nothing here, so all that is left to get
@@ -665,6 +857,40 @@ test('palette entries are kept, and only as far as the palette goes', ()=>{
         'and a handle that is not a palette is not one');
 });
 
+test('the stock default palette holds the twenty colours Windows records for it', ()=>{
+    // Wine's metafile tests replay a Windows-recorded CreatePalette of the
+    // stock palette: these twenty PALETTEENTRYs, red first. Its palette tests
+    // read twenty back, and find SetPaletteEntries refused on it.
+    const { memory, fns, hdc } = setup();
+    const stock = fns.GetStockObject.handler([15]);
+    assert.equal(fns.GetPaletteEntries.argBytes, 16);
+    assert.equal(fns.GetPaletteEntries.handler([stock, 0, 0, 0]), 20,
+        'a null buffer asks the size');
+    assert.equal(fns.GetPaletteEntries.handler([stock, 0, 20, OUT]), 20);
+    const colours = [...Array(20).keys()].map(index=>memory.u32(OUT + index * 4));
+    assert.deepEqual(colours, [
+        0x000000, 0x000080, 0x008000, 0x008080, 0x800000, 0x800080, 0x808000, 0xc0c0c0,
+        0xc0dcc0, 0xf0caa6, 0xf0fbff, 0xa4a0a0,
+        0x808080, 0x0000ff, 0x00ff00, 0x00ffff, 0xff0000, 0xff00ff, 0xffff00, 0xffffff,
+    ].map(bgr=>bgr >>> 0));
+    assert.equal(fns.GetPaletteEntries.handler([stock, 18, 5, OUT]), 2, 'only as far as it goes');
+
+    memory.putU32s(STRUCT, [0x00123456]);
+    assert.equal(fns.SetPaletteEntries.handler([stock, 0, 1, STRUCT]), 0);
+    fns.GetPaletteEntries.handler([stock, 0, 1, OUT]);
+    assert.equal(memory.u32(OUT), 0, 'and it is not changed');
+
+    // A DIB_PAL_COLORS table is indices into it from the moment a DC exists.
+    memory.putU32s(STRUCT, [40, 1, 1, 1 | 8 << 16, 0, 0, 0, 0, 1, 0]);
+    memory.bytes[STRUCT + 40] = 13;
+    memory.bytes[STRUCT + 41] = 0;
+    const section = fns.CreateDIBSection.handler([hdc, STRUCT, 1, 0, 0, 0]);
+    const reader = fns.CreateCompatibleDC.handler([hdc]);
+    fns.SelectObject.handler([reader, section]);
+    assert.equal(fns.GetDIBColorTable.handler([reader, 0, 1, OUT]), 1);
+    assert.equal(memory.u32(OUT), 0x00ff0000, 'entry 13 is red');
+});
+
 test('the system palette has no entries to report', ()=>{
     // A system palette exists on a device of eight bits or fewer, and this one
     // is 32. Reporting entries would have a program match colours against a
@@ -738,22 +964,61 @@ test('the drawing entry points reach the service, and fail without one', ()=>{
 });
 
 test('GetDIBits describes a bitmap before it copies one', ()=>{
-    // A null buffer asks for the shape, which is bookkeeping and answerable
-    // without any pixels at all -- and is how a caller sizes the buffer it will
-    // ask with next.
+    // A null buffer and a biBitCount of zero ask for the bitmap's own shape,
+    // which is bookkeeping and answerable without any pixels at all -- and is
+    // how a caller sizes the buffer it will ask with next. Wine's
+    // test_GetDIBits_BI_BITFIELDS: a sixteen- or thirty-two-bit bitmap is
+    // described as BI_BITFIELDS, its masks not yet written, and the answer is 1.
     const { memory, fns, hdc } = setup();
     const bitmap = fns.CreateCompatibleBitmap.handler([hdc, 64, 48]);
 
-    memory.putU32s(STRUCT, new Array(10).fill(0));
-    assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 48, 0, STRUCT, 0]), 48);
+    memory.putU32s(STRUCT, [40, ...new Array(12).fill(0)]);
+    assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 48, 0, STRUCT, 0]), 1);
     assert.equal(memory.u32(STRUCT), 40, 'biSize');
     assert.equal(memory.u32(STRUCT + 4), 64, 'biWidth');
     assert.equal(memory.u32(STRUCT + 8), 48, 'biHeight');
     assert.equal(memory.u16(STRUCT + 12), 1, 'biPlanes');
+    assert.equal(memory.u16(STRUCT + 14), 32, 'biBitCount');
+    assert.equal(memory.u32(STRUCT + 16), 3, 'biCompression: BI_BITFIELDS');
+    assert.equal(memory.u32(STRUCT + 20), 64 * 4 * 48, 'biSizeImage');
+    assert.deepEqual([40, 44, 48].map(at=>memory.u32(STRUCT + at)), [0, 0, 0]);
 
-    // Without the bitmap selected into the context there is no surface to read,
-    // and rows from somewhere else would be worse than none.
+    // The rows themselves are pixels, and without a drawing service there are
+    // none to copy.
     assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 48, OUT, STRUCT, 0]), 0);
+});
+
+test('GetDIBits keeps the format asked for, sizes the image in it, and names its masks', ()=>{
+    // Wine's test_GetDIBits_selected_DDB fills biSizeImage this way before
+    // allocating; test_GetDIBits_BI_BITFIELDS reads the masks back.
+    const { memory, fns, hdc } = setup();
+    const bitmap = fns.CreateCompatibleBitmap.handler([hdc, 10, 4]);
+
+    memory.putU32s(STRUCT, [40, 10, 4, 1 | (24 << 16), 0, 0xdeadbeef, 0, 0, 37, 0]);
+    assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 4, 0, STRUCT, 0]), 1);
+    assert.equal(memory.u16(STRUCT + 14), 24, 'the depth asked for, not the bitmap\'s');
+    assert.equal(memory.u32(STRUCT + 16), 0, 'nor its compression');
+    assert.equal(memory.u32(STRUCT + 20), 32 * 4, 'thirty bytes a row, padded to a DWORD');
+    assert.equal(memory.u32(STRUCT + 32), 0, 'biClrUsed');
+
+    memory.putU32s(STRUCT, [40, 10, -4, 1 | (16 << 16), 3, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 0, OUT, STRUCT, 0]), 1,
+        'no lines asks the same question a null buffer does');
+    assert.equal(memory.u32(STRUCT + 20), 20 * 4, 'a negative height is still four rows');
+    assert.deepEqual([40, 44, 48].map(at=>memory.u32(STRUCT + at)), [0xf800, 0x07e0, 0x001f],
+        'sixteen bits read out of a device-dependent bitmap are 5-6-5');
+    memory.putU32s(STRUCT + 12, [1 | (32 << 16), 3]);
+    fns.GetDIBits.handler([hdc, bitmap, 0, 4, 0, STRUCT, 0]);
+    assert.deepEqual([40, 44, 48].map(at=>memory.u32(STRUCT + at)),
+        [0x00ff0000, 0x0000ff00, 0x000000ff]);
+
+    // Wine's test_dib_formats: seven bits is no format, and neither is a
+    // usage past DIB_PAL_COLORS.
+    memory.putU32s(STRUCT, [40, 10, 4, 1 | (7 << 16), 0, 0, 0, 0, 0, 0]);
+    assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 4, 0, STRUCT, 0]), 0);
+    assert.equal(memory.u16(STRUCT + 14), 7, 'and a refused header is left as it was');
+    memory.putU32s(STRUCT, [40, 10, 4, 1 | (24 << 16), 0, 0, 0, 0, 0, 0]);
+    assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 4, 0, STRUCT, 2]), 0);
 });
 
 test('TextOutW reads code units and draws through the same engine as the narrow twin', ()=>{
@@ -776,4 +1041,92 @@ test('TextOutW reads code units and draws through the same engine as the narrow 
     const bare = setup();
     assert.equal(bare.fns.TextOutW.handler([bare.hdc, 0, 0, STRUCT, 1]), 0,
         'and it fails the same way without a drawing service');
+});
+
+/**
+ * Writes a ramp into guest memory as SetDeviceGammaRamp reads it: red, green
+ * and blue, 256 words each.
+ *
+ * @param {ReturnType<typeof fakeMemory>} memory
+ * @param {(channel: number, index: number) => number} entry
+ */
+function putRamp(memory, entry){
+    const bytes = new Uint8Array(3 * 256 * 2);
+    const view = new DataView(bytes.buffer);
+    for (let channel = 0; channel < 3; channel++)
+    {
+        for (let index = 0; index < 256; index++)
+        {
+            view.setUint16((channel * 256 + index) * 2, entry(channel, index) & 0xffff, true);
+        }
+    }
+    memory.writeMemory(RAMP, bytes);
+}
+
+test('SetDeviceGammaRamp refuses a ramp that strays too far from the identity', ()=>{
+    // Wine's gdi32 dc.c test_gamma, one channel changed at a time with the
+    // others the identity: a channel of zeros, a flat line of the low byte
+    // alone, and one jumping to full at the second entry are refused; a steep
+    // line, one that wraps round midway and a staircase are taken. A refused
+    // ramp leaves the one before it in effect.
+    const { memory, fns, hdc } = setup();
+    const identity = (/** @type {number} */ channel, /** @type {number} */ index)=>index * 256;
+    /** @param {(index: number) => number} red */
+    const tryRed = red=>{
+        putRamp(memory, (channel, index)=>(channel === 0 ? red(index) : identity(channel, index)));
+        return fns.SetDeviceGammaRamp.handler([hdc, RAMP]);
+    };
+    assert.equal(tryRed(()=>0), 0, 'zeroes');
+    assert.equal(tryRed(index=>index), 0, 'low');
+    assert.equal(tryRed(index=>index * 256), 1, 'steep');
+    assert.equal(tryRed(index=>(index === 0 ? 0 : index === 1 ? 0x7fff : 0xffff)), 0, 'bright');
+    assert.equal(fns.GetDeviceGammaRamp.handler([hdc, RAMP]), 1);
+    assert.equal(memory.u16(RAMP + 2 * 2), 2 * 256, 'the steep ramp is still the one in effect');
+    assert.equal(tryRed(index=>512 * index), 1, 'wraps midway, exactly half the range out');
+    assert.equal(tryRed(index=>256 * (index & ~1)), 1, 'stairs');
+    assert.equal(fns.GetDeviceGammaRamp.handler([hdc, RAMP]), 1);
+    assert.equal(memory.u16(RAMP + 3 * 2), 2 * 256, 'the staircase reads back as set');
+    assert.equal(fns.SetDeviceGammaRamp.handler([hdc, 0]), 0, 'a null ramp is a failure');
+});
+
+test('the display\'s ramp is the graphics layer\'s: set there, read back from there', ()=>{
+    /** @type {any[]} */
+    const set = [];
+    /** @type {{ red: Uint16Array, green: Uint16Array, blue: Uint16Array } | null} */
+    let inEffect = null;
+    let applies = true;
+    const graphics = {
+        ...fakeDrawing().services,
+        /** @param {any} ramp */
+        setGammaRamp: ramp=>set.push(ramp),
+        gammaRamp: ()=>inEffect,
+        appliesGamma: ()=>applies,
+    };
+    const { memory, fns, hdc } = setup(graphics);
+
+    putRamp(memory, (channel, index)=>(channel === 2 ? 0xffff - index * 256 : index * 256));
+    assert.equal(fns.SetDeviceGammaRamp.handler([hdc, RAMP]), 0,
+        'an inverted channel is refused before it reaches anything');
+    assert.equal(set.length, 0);
+    putRamp(memory, (channel, index)=>Math.min(0xffff, index * 256 + channel * 64));
+    assert.equal(fns.SetDeviceGammaRamp.handler([hdc, RAMP]), 1);
+    assert.equal(set.length, 1);
+    assert.deepEqual([set[0].red.length, set[0].green.length, set[0].blue.length],
+        [256, 256, 256]);
+    assert.deepEqual([set[0].red[1], set[0].green[1], set[0].blue[1]], [256, 320, 384]);
+
+    assert.equal(fns.GetDeviceGammaRamp.handler([hdc, RAMP]), 1);
+    assert.equal(memory.u16(RAMP + 2), 257, 'nothing in effect reads back as the identity');
+    const shown = Uint16Array.from({ length: 256 }, (_, index)=>(255 - index) * 257);
+    inEffect = { red: shown, green: shown, blue: shown };
+    assert.equal(fns.GetDeviceGammaRamp.handler([hdc, RAMP]), 1);
+    assert.equal(memory.u16(RAMP), 0xffff, 'whatever ramp the display shows, whoever set it');
+    assert.equal(memory.u16(RAMP + (512 + 255) * 2), 0);
+
+    const COLORMGMTCAPS = 121;
+    const CM_GAMMA_RAMP = 2;
+    assert.equal(fns.GetDeviceCaps.handler([hdc, COLORMGMTCAPS]), CM_GAMMA_RAMP);
+    applies = false;
+    assert.equal(fns.GetDeviceCaps.handler([hdc, COLORMGMTCAPS]), 0,
+        'claimed only where a ramp reaches the picture');
 });

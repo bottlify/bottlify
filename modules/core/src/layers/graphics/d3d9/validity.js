@@ -19,7 +19,7 @@
  */
 
 import {
-    D3DERR_INVALIDCALL, D3DPOOL, D3DSWAPEFFECT, D3DUSAGE, D3D_OK,
+    D3DERR_INVALIDCALL, D3DPOOL, D3DSWAPEFFECT, D3DUSAGE, D3D_OK, FORMAT_INFO,
 } from './constants.js';
 
 /** What the pool/usage table distinguishes about a format, and nothing more. */
@@ -183,6 +183,59 @@ export function surfaceCreateResult(surfaceType, row, support){
 }
 
 /**
+ * How many levels a volume of this extent has when all are asked for: down
+ * to a single texel on its longest axis.
+ *
+ * @param {number} width @param {number} height @param {number} depth
+ */
+export function volumeLevelCount(width, height, depth){
+    let levels = 1;
+    for (let extent = Math.max(width, height, depth); extent > 1; extent >>>= 1)
+    {
+        levels++;
+    }
+    return levels;
+}
+
+/**
+ * Whether a volume texture of these arguments is made, in either version
+ * (Wine's d3d8 and d3d9 test_volume_locking and test_lockbox_invalid, d3d9
+ * test_mipmap_gen): never a render target, a depth buffer, write-only or
+ * mipmapped by the device, and dynamic only in the default or system-memory
+ * pool. A depth format and a format in blocks are refused too: nothing here
+ * uploads either as a volume.
+ *
+ * @param {{ width: number, height: number, depth: number, levels: number, usage: number,
+ *           format: number, pool: number, maxExtent: number }} request
+ *        `levels` zero for the whole chain.
+ * @returns {number} D3D_OK or D3DERR_INVALIDCALL
+ */
+export function volumeCreateResult(request){
+    const info = FORMAT_INFO[request.format];
+    if (!info || info.depth || info.blockBytes !== undefined)
+    {
+        return D3DERR_INVALIDCALL;
+    }
+    if ((request.usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL
+        | D3DUSAGE.WRITEONLY | D3DUSAGE.AUTOGENMIPMAP)) !== 0)
+    {
+        return D3DERR_INVALIDCALL;
+    }
+    if ((request.usage & D3DUSAGE.DYNAMIC) !== 0
+        && request.pool !== D3DPOOL.DEFAULT && request.pool !== D3DPOOL.SYSTEMMEM)
+    {
+        return D3DERR_INVALIDCALL;
+    }
+    const extents = [request.width, request.height, request.depth];
+    if (!extents.every(extent=>extent > 0 && extent <= request.maxExtent)
+        || request.levels > volumeLevelCount(request.width, request.height, request.depth))
+    {
+        return D3DERR_INVALIDCALL;
+    }
+    return D3D_OK;
+}
+
+/**
  * Whether a created surface answers a lock. A depth stencil never does, however
  * it was asked for; a render target does exactly when it was created lockable.
  *
@@ -219,6 +272,20 @@ export const SWAP_EFFECT_MAX_BACK_BUFFERS = Object.freeze({
 });
 
 /**
+ * The same for a device made through IDirect3D9Ex, which allows thirty and
+ * D3DSWAPEFFECT_FLIPEX; OVERLAY needs hardware no device here claims (Wine's
+ * d3d9ex.c test_swapchain_parameters).
+ *
+ * @type {Readonly<Record<number, number>>}
+ */
+const EX_SWAP_EFFECT_MAX_BACK_BUFFERS = Object.freeze({
+    [D3DSWAPEFFECT.DISCARD]: 30,
+    [D3DSWAPEFFECT.FLIP]: 30,
+    [D3DSWAPEFFECT.COPY]: 1,
+    [D3DSWAPEFFECT.FLIPEX]: 30,
+});
+
+/**
  * @typedef {Object} PresentParameters
  * @property {number} swapEffect
  * @property {number} [backBufferCount]  Zero means one, which is what a device reports back.
@@ -233,10 +300,12 @@ export const SWAP_EFFECT_MAX_BACK_BUFFERS = Object.freeze({
 
 /**
  * @param {PresentParameters} parameters
+ * @param {boolean} [extended]  For a device made through IDirect3D9Ex.
  * @returns {number} D3D_OK or D3DERR_INVALIDCALL
  */
-export function validatePresentParameters(parameters){
-    const limit = SWAP_EFFECT_MAX_BACK_BUFFERS[parameters.swapEffect];
+export function validatePresentParameters(parameters, extended = false){
+    const limit = (extended ? EX_SWAP_EFFECT_MAX_BACK_BUFFERS
+        : SWAP_EFFECT_MAX_BACK_BUFFERS)[parameters.swapEffect];
     if (limit === undefined)
     {
         return D3DERR_INVALIDCALL;

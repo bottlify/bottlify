@@ -339,15 +339,40 @@ export function createCriticalSections(host){
         wake(address){
             wakes++;
             const queue = queueAt(address);
-            const next = queue.waiters.shift();
-            if (next)
+            // A suspended waiter is not waiting while it is suspended, so the
+            // section goes to the first that can run. With none, the release
+            // is owed, as a wake that came before its waiter is.
+            const at = queue.waiters.findIndex(thread=>!(thread.suspendCount > 0));
+            if (at >= 0)
             {
+                const [next] = queue.waiters.splice(at, 1);
                 handOver(address, next);
                 host.wake(next, 0);
                 return 0;
             }
             queue.owed++;
             return 0;
+        },
+
+        /**
+         * A thread has been resumed: if it is queued behind a section whose
+         * release was owed while nobody could take it, the section is its own.
+         *
+         * @param {any} thread
+         */
+        resumed(thread){
+            for (const [address, queue] of queues)
+            {
+                const at = queue.waiters.indexOf(thread);
+                if (at >= 0 && queue.owed > 0)
+                {
+                    queue.owed--;
+                    queue.waiters.splice(at, 1);
+                    handOver(address, thread);
+                    host.wake(thread, 0);
+                    return;
+                }
+            }
         },
 
         /**

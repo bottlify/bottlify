@@ -96,51 +96,6 @@ async function writeChecksums(){
 }
 
 /**
- * Copies the DirectX runtime, when this machine has it, into
- * dist/vendor/directx/ and records each DLL.
- *
- * Unlike the emulator it is optional: a build with no runtime simply has no
- * system volume, and a `d3dx9_*` a title links against answers from the
- * engine's own table, exactly as before the runtime route existed. That is why
- * absence is silent here rather than the hard stop an absent `v86.wasm` is --
- * the DLLs are someone else's binary, fetched on demand and never committed,
- * so a clean checkout has none.
- *
- * @returns {Promise<{ artifacts: Record<string, string>, source: string | null }>}
- */
-async function copyDirectxRuntime(){
-    const from = join(PREBUILT, 'directx');
-    /** @type {Record<string, string>} */
-    const artifacts = {};
-    let source = null;
-    try
-    {
-        const names = (await readdir(from)).filter(name=>/\.dll$/i.test(name)).sort();
-        if (names.length === 0)
-        {
-            return { artifacts, source };
-        }
-        const lock = JSON.parse(
-            await readFile(join(ROOT, 'directx-runtime-lock.json'), 'utf8'));
-        source = lock.repo && lock.tag ? `${lock.repo}@${lock.tag}` : lock.microsoftUrl ?? null;
-        await mkdir(join(VENDOR_OUT, 'directx'), { recursive: true });
-        for (const name of names)
-        {
-            await copyFile(join(from, name), join(VENDOR_OUT, 'directx', name));
-            artifacts[`./directx/${name}`] =
-                await sha256File(join(VENDOR_OUT, 'directx', name));
-        }
-    }
-    catch (e){
-        if (/** @type {NodeJS.ErrnoException} */ (e).code !== 'ENOENT')
-        {
-            throw e;
-        }
-    }
-    return { artifacts, source };
-}
-
-/**
  * Copies the prebuilt emulator artifacts into dist/vendor/ and records what
  * they are. A package missing them installs cleanly and then cannot boot, so
  * an absent artifact stops the build rather than shipping that.
@@ -187,20 +142,6 @@ async function copyVendor(){
     {
         console.log(`dist: ${artifact.name} absent (${artifact.fetch}); the package will `
             + 'not carry the emulator');
-    }
-
-    // The DirectX runtime is the one optional vendor artifact: present, every
-    // DLL is recorded and travels with the package; absent, the manifest simply
-    // has no directx entries.
-    const directx = await copyDirectxRuntime();
-    for (const [path, digest] of Object.entries(directx.artifacts))
-    {
-        const name = path.slice('./'.length);
-        artifacts[name] = digest;
-        if (directx.source)
-        {
-            sources[name] = directx.source;
-        }
     }
 
     await writeFile(

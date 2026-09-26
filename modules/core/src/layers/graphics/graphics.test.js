@@ -16,8 +16,9 @@ import { graphicsModule } from './module.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
 import { FVF } from './webgpu/internal/vertexformat.js';
-import { D3DFMT, D3DPOOL, D3DRTYPE, D3D_OK } from './d3d9/constants.js';
+import { D3DERR_DEVICELOST, D3DFMT, D3DPOOL, D3DRTYPE, D3D_OK } from './d3d9/constants.js';
 import { D3DPT, D3DTA, D3DTOP, D3DTSS } from './d3d8/constants.js';
+import { IID_IDirectDraw } from './seam/iids.js';
 
 /** A host that hands over only what the module declares it requires. */
 function hostWith(/** @type {any} */ memory){
@@ -280,6 +281,35 @@ test('a per-call compressedTextures override cannot turn BC on for a device with
         await graphicsModule.dispose();
     });
 
+test('Direct3D 10 is handed block compression as 8 and 9 are, the guest clock and depth clip'
+    + ' control', async()=>{
+    // A timestamp query a program compares with its own timers reads the
+    // guest's clock, as the raster does; block compression is asked for by
+    // the configuration and granted by the adapter; unclipped depth needs a
+    // device made with depth-clip-control.
+    for (const features of [['texture-compression-bc', 'depth-clip-control'], []])
+    {
+        const gpu = createFakeDevice();
+        /** @type {any} */ (gpu.device).features = new Set(features);
+        const api = await graphicsModule.create({
+            device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
+            compressedTextures: true,
+            guestNow: ()=>1234,
+        }, hostWith(fakeMemory()));
+        const options = api.create('d3d10');
+        const granted = features.length > 0;
+        assert.equal(options.compressedTextures, granted, 'block compression');
+        assert.equal(options.depthClipControl, granted, 'depth clip control');
+        assert.equal(options.now(), 1234, 'the guest\'s milliseconds');
+        await graphicsModule.dispose();
+    }
+    const api = await graphicsModule.create({}, hostWith(fakeMemory()));
+    const headless = api.create('d3d10');
+    assert.equal(headless.compressedTextures, false);
+    assert.equal(headless.depthClipControl, false);
+    await graphicsModule.dispose();
+});
+
 test('an API is made by name, and an unknown one says so', async()=>{
     const api = await graphicsModule.create({}, hostWith(fakeMemory()));
 
@@ -288,6 +318,29 @@ test('an API is made by name, and an unknown one says so', async()=>{
     assert.throws(()=>api.create('directdraw'), /no such API/,
         'a near-miss name is an error, not a silent null');
 
+    await graphicsModule.dispose();
+});
+
+test('a DirectDraw surface\'s pixels are guest memory the configuration hands out', async()=>{
+    // A lock hands the program an address it writes through, and the presenter
+    // reads the primary back from the same address; neither works on bytes the
+    // guest cannot reach.
+    /** @type {number[]} */
+    const freed = [];
+    const api = await graphicsModule.create({
+        allocate: ()=>0x123000,
+        free: (/** @type {number} */ address)=>{
+            freed.push(address);
+        },
+    }, hostWith(fakeMemory()));
+    const ddraw = api.create('ddraw');
+    ddraw.setCooperativeLevel(0, 8);
+    const created = ddraw.createSurface({ flags: 7, caps: 0x40, width: 4, height: 4 });
+    const locked = created.surface.lock();
+    assert.equal(locked.surfacePointer, 0x123000);
+    created.surface.unlock(null);
+    created.surface.release();
+    assert.deepEqual(freed, [0x123000], 'and gives them back');
     await graphicsModule.dispose();
 });
 
@@ -347,6 +400,111 @@ test('a frame is not delivered faster than the cap the caller set', async()=>{
     assert.ok(armed.length > 0 || clock >= 1000 / 60,
         'it was held rather than delivered inside the cap');
 
+    await graphicsModule.dispose();
+});
+
+test('the display\'s raster runs on the guest\'s clock when the caller hands one over', async()=>{
+    // A program that spins on the vertical blank or the scan line and times
+    // the spin with its own timers is comparing two readings of one clock --
+    // the guest's -- so the raster has to be on it too; on the host's, the
+    // two drift apart whenever the machine runs slower or faster than real
+    // time.
+    const ram = new Uint8Array(0x1000);
+    /** @type {any[]} */
+    const published = [];
+    let guest = 0;
+    const api = await graphicsModule.create({
+        guestNow: ()=>guest,
+        publishInterface: (/** @type {any} */ object)=>{
+            published.push(object);
+            return 0x100 + published.length * 4;
+        },
+    }, hostWith({
+        readBytes: (/** @type {number} */ at, /** @type {number} */ n)=>ram.slice(at, at + n),
+        writeBytes: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>ram.set(bytes, at),
+    }));
+    assert.equal(api.libraries()['DDRAW.dll'].DirectDrawCreate.handler([0, 0x800, 0]), 0);
+    const adapter = published[0];
+    const scanLine = adapter.interfaceFor(IID_IDirectDraw).methods
+        .find((/** @type {any} */ method)=>method.name === 'GetScanLine');
+    /** @param {number} at @returns {number} the line the raster is on, at that guest time */
+    const lineAt = at=>{
+        guest = at;
+        assert.equal(scanLine.invoke(adapter, [0x900]), 0);
+        return new DataView(ram.buffer).getUint32(0x900, true);
+    };
+    assert.equal(lineAt(0), 0, 'the top of the frame at guest time zero');
+    const later = lineAt(1000 / 120);
+    assert.ok(later > 100, `half a frame of guest time later the beam is lower (${later})`);
+    assert.equal(lineAt(0), 0, 'and it is the guest\'s clock it follows, not the host\'s');
+    await graphicsModule.dispose();
+});
+
+test('a lost GPU loses every Direct3D 8 and 9 device made on it', async()=>{
+    // WebGPU says its device is gone by settling device.lost; the devices a
+    // program made on it then answer D3DERR_DEVICELOST from
+    // TestCooperativeLevel and Present, as they do on a lost display, rather
+    // than go on succeeding while nothing reaches the screen. A device made
+    // after the loss starts lost.
+    const gpu = createFakeDevice();
+    const gpuDevice = /** @type {any} */ (gpu.device);
+    gpuDevice.features = new Set();
+    gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor });
+    /** @type {(info: any) => void} */
+    let lose = ()=>{};
+    gpuDevice.lost = new Promise(resolve=>{
+        lose = resolve;
+    });
+    const api = await graphicsModule.create({
+        device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
+    }, hostWith(ramMemory()));
+    const parameters = {
+        swapEffect: 1, backBufferCount: 1, backBufferWidth: 4, backBufferHeight: 4,
+        backBufferFormat: D3DFMT.X8R8G8B8,
+    };
+    /** @param {string} name */
+    const deviceOf = name=>{
+        /** @type {{ device?: any }} */
+        const out = {};
+        assert.equal(api.create(name).CreateDevice(parameters, out), D3D_OK);
+        return out.device;
+    };
+    const nine = deviceOf('d3d9');
+    const eight = deviceOf('d3d8');
+    assert.equal(nine.TestCooperativeLevel(), D3D_OK);
+    assert.equal(eight.TestCooperativeLevel(), D3D_OK);
+
+    lose({ reason: 'unknown', message: 'the GPU process went away' });
+    await gpuDevice.lost;
+    await Promise.resolve();
+    assert.equal(nine.TestCooperativeLevel(), D3DERR_DEVICELOST);
+    assert.equal(nine.Present(), D3DERR_DEVICELOST);
+    assert.equal(eight.TestCooperativeLevel(), D3DERR_DEVICELOST);
+    assert.equal(deviceOf('d3d9').TestCooperativeLevel(), D3DERR_DEVICELOST,
+        'and one made after it is born lost');
+    await graphicsModule.dispose();
+});
+
+test('a GPU device the host destroys does not lose the program\'s devices', async()=>{
+    // WebGPU settles device.lost with reason "destroyed" when destroy() was
+    // called, which is the host ending the run rather than the GPU failing.
+    const gpu = createFakeDevice();
+    const gpuDevice = /** @type {any} */ (gpu.device);
+    gpuDevice.features = new Set();
+    gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor });
+    gpuDevice.lost = Promise.resolve({ reason: 'destroyed', message: '' });
+    const api = await graphicsModule.create({
+        device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
+    }, hostWith(ramMemory()));
+    await gpuDevice.lost;
+    await Promise.resolve();
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(api.create('d3d9').CreateDevice({
+        swapEffect: 1, backBufferCount: 1, backBufferWidth: 4, backBufferHeight: 4,
+        backBufferFormat: D3DFMT.X8R8G8B8,
+    }, out), D3D_OK);
+    assert.equal(out.device.TestCooperativeLevel(), D3D_OK);
     await graphicsModule.dispose();
 });
 
@@ -579,6 +737,53 @@ test('dispose releases this machine\'s backend and leaves the run\'s presenter u
         assert.ok(presenter.diagnostics().presents >= 1, 'its counters are untouched');
     });
 
+test('a child\'s machine that goes leaves its parent drawing from its own memory', async()=>{
+    // A child started beside its parent is a second machine on the run's
+    // presenter, and it goes while the parent stands. What the parent
+    // presents afterwards is read from the parent's address space and shown
+    // through the parent's backend; the child's went with the child.
+    const gpu = createFakeDevice();
+    const presenter = createPresenter({
+        device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+        now: ()=>0,
+    });
+    const device = {
+        device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+        presentTo: (/** @type {any} */ frame)=>presenter.show(frame),
+    };
+    /** @param {Uint8Array} ram */
+    const memoryOf = ram=>({
+        readBytes: (/** @type {number} */ at, /** @type {number} */ n)=>ram.slice(at, at + n),
+        writeBytes: ()=>{},
+        window: (/** @type {number} */ at, /** @type {number} */ n)=>ram.subarray(at, at + n),
+    });
+    const parentRam = new Uint8Array(0x100);
+    parentRam.set([0x56, 0x34, 0x12, 0xff]);
+    const childRam = new Uint8Array(0x100);
+    childRam.set([0x11, 0x22, 0x33, 0xff]);
+    const pixel = { buffer: 0, width: 1, height: 1, pitch: 4, bitCount: 32, palette: null };
+    const settled = ()=>new Promise(resolve=>setImmediate(resolve));
+
+    const parent = await graphicsModule.create({ presenter, device },
+        hostWith(memoryOf(parentRam)));
+    const child = await graphicsModule.create({ presenter, device },
+        hostWith(memoryOf(childRam)));
+    child.present(pixel);
+    await settled();
+    assert.deepEqual([...gpu.of('writeTexture').at(-1).bytes], [0x11, 0x22, 0x33, 0xff],
+        'the child showed its own frame');
+
+    // The child's lifetime ends; the most recently created instance is its.
+    await graphicsModule.dispose();
+    parent.present(pixel);
+    await settled();
+
+    assert.deepEqual([...gpu.of('writeTexture').at(-1).bytes], [0x56, 0x34, 0x12, 0xff],
+        'the parent\'s frame came from the parent\'s memory');
+    assert.deepEqual(presenter.diagnostics().failures, []);
+    assert.equal(presenter.diagnostics().shown, 2);
+});
+
 test('a second instance in one realm does not take the first one\'s backend', async()=>{
     // A process replacement runs `create()` again in the same realm, and the
     // plan for two machines in one worker needs two live at once. The backend
@@ -632,3 +837,54 @@ test('diagnostics answers for the live instance', async()=>{
         'the live instance is the one whose request is reported');
     await graphicsModule.dispose();
 });
+
+test('the display\'s gamma ramp is the run\'s: a device\'s goes with the machine, GDI\'s stays',
+    async()=>{
+        const gpu = createFakeDevice();
+        const gpuDevice = /** @type {any} */ (gpu.device);
+        gpuDevice.features = new Set();
+        gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler',
+            descriptor });
+        const presenter = createPresenter({
+            device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+            now: ()=>0,
+        });
+        const device = {
+            device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+            presentTo: (/** @type {any} */ frame)=>presenter.show(frame),
+        };
+        const api = await graphicsModule.create({ presenter, device }, hostWith(ramMemory()));
+        /** @param {(index: number) => number} entry */
+        const rampOf = entry=>{
+            const channel = Uint16Array.from({ length: 256 }, (_, index)=>entry(index));
+            return { red: channel, green: channel.slice(), blue: channel.slice() };
+        };
+        const dim = rampOf(index=>(index >> 1) * 257);
+        const inverted = rampOf(index=>(255 - index) * 257);
+
+        const gdi = api.gdiDrawing();
+        assert.equal(gdi.displayGamma(), null, 'none set: the caller answers the identity');
+        gdi.setDisplayGamma(dim);
+        assert.deepEqual([...(presenter.gammaRamp()?.green ?? [])], [...dim.green]);
+
+        const d3d9 = api.create('d3d9');
+        assert.equal(d3d9.caps.fullscreenGamma, true, 'the presenter draws through a ramp');
+        /** @type {{ device?: any }} */
+        const out = {};
+        assert.equal(d3d9.CreateDevice({
+            swapEffect: 1, backBufferCount: 1, backBufferWidth: 4, backBufferHeight: 4,
+            backBufferFormat: D3DFMT.X8R8G8B8, windowed: false,
+        }, out), D3D_OK);
+        out.device.SetGammaRamp(inverted);
+        assert.deepEqual([...(gdi.displayGamma()?.red ?? [])], [...inverted.red],
+            'the device\'s ramp is the display\'s while it is full-screen');
+
+        await graphicsModule.dispose();
+        assert.deepEqual([...(presenter.gammaRamp()?.red ?? [])], [...dim.red],
+            'the machine\'s device went with it, and the display keeps its own ramp');
+
+        const headless = await graphicsModule.create({}, hostWith(fakeMemory()));
+        assert.equal(headless.create('d3d9').caps.fullscreenGamma, false,
+            'without a canvas no ramp is shown, and none is claimed');
+        await graphicsModule.dispose();
+    });

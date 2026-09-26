@@ -18,10 +18,12 @@
 
 import { ANY_WINDOW, WM_PAINT, WM_QUIT, WM_TIMER } from './messages.js';
 import { characterOf } from './keys.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 import { createPaintFunctions } from './paint.js';
-import { SYS_COLORS, createSystemFunctions } from './system.js';
+import { HOVER_SIZE, HOVER_TIME, SYS_COLORS, createSystemFunctions } from './system.js';
 import { createObjectFunctions } from './objects.js';
 import { createDialogFunctions } from './dialogs.js';
+import { createRawInput } from './rawinput.js';
 import {
     WS_CHILD, WS_DISABLED, contains, createGeometry, intersect, isEmpty,
 } from './frame.js';
@@ -65,6 +67,8 @@ const WM_SYSCHAR = 0x0106;
 
 /** The rest of what DefWindowProc and the frame answer. */
 const WM_ACTIVATE = 0x0006;
+/** To every top-level window of a program that becomes, or stops being, the active one. */
+const WM_ACTIVATEAPP = 0x001c;
 const WM_MOUSEACTIVATE = 0x0021;
 /** WM_ACTIVATE's wParam: who is being told, and why. */
 const WA_INACTIVE = 0;
@@ -80,6 +84,8 @@ const WM_NCPAINT = 0x0085;
  */
 const WM_NCACTIVATE = 0x0086;
 const WM_NCMOUSEMOVE = 0x00a0;
+/** WM_NCXBUTTONDBLCLK, the last of the frame's mouse messages. */
+const WM_NCMOUSELAST = 0x00ad;
 const WM_NCLBUTTONDOWN = 0x00a1;
 const WM_RBUTTONDOWN = 0x0204;
 const WM_MBUTTONDOWN = 0x0207;
@@ -89,6 +95,7 @@ const WM_KEYLAST = 0x0108;
 const WM_CAPTURECHANGED = 0x0215;
 /** Hit-test answers for the frame. */
 const HTCAPTION = 2;
+const HTMENU = 5;
 const HTBORDER = 18;
 const HTCLOSE = 20;
 const HTVSCROLL = 7;
@@ -107,6 +114,7 @@ const SC_CLOSE = 0xf060;
 const COLOR_BACKGROUND = 1;
 const COLOR_ACTIVECAPTION = 2;
 const COLOR_INACTIVECAPTION = 3;
+const COLOR_MENU = 4;
 const COLOR_CAPTIONTEXT = 9;
 const COLOR_INACTIVECAPTIONTEXT = 19;
 /** A system colour plus one, as a class background names it. */
@@ -123,13 +131,25 @@ const CLOSE_GAP = 2;
  */
 const SYSTEM_CLASSES = Object.freeze([
     { name: 'Button', atom: 0x0080, windowExtra: 0, background: 0 },
-    { name: 'Edit', atom: 0x0081, windowExtra: 0, background: 0 },
+    { name: 'Edit', atom: 0x0081, windowExtra: 0, background: 0, cursor: 32513 },
     { name: 'Static', atom: 0x0082, windowExtra: 0, background: 0 },
     { name: 'ListBox', atom: 0x0083, windowExtra: 0, background: 0 },
     { name: 'ScrollBar', atom: 0x0084, windowExtra: 0, background: 0 },
     { name: 'ComboBox', atom: 0x0085, windowExtra: 0, background: 0 },
     { name: '#32770', atom: 0x8002, windowExtra: DLGWINDOWEXTRA, background: COLOR_3DFACE + 1 },
 ]);
+
+/**
+ * The standard arrow, as LoadCursor(NULL, IDC_ARROW) names it: the cursor of
+ * every system class but the edit's, which is the I-beam above.
+ */
+const IDC_ARROW = 32512;
+
+/** The hit-test codes of a sizing border, which a child keeps from its parent. */
+const HTSIZEFIRST = 10;
+const HTSIZELAST = 17;
+
+const WM_SETCURSOR = 0x0020;
 
 /**
  * Where a host procedure's address is when there is no bridge to hand one
@@ -227,9 +247,11 @@ const WS_VISIBLE = 0x10000000;
 const SW_HIDE = 0;
 const SW_SHOW = 5;
 const SW_MINIMIZE = 6;
+const SW_SHOWNA = 8;
 /** The show commands that leave the window minimised. */
 const MINIMISING = new Set([2, SW_MINIMIZE, 7]);
 const WS_MINIMIZE = 0x20000000;
+const WS_POPUP = 0x80000000;
 /** The ShowWindow commands that leave activation where it is. */
 const SHOW_WITHOUT_ACTIVATING = new Set([SW_HIDE, 4, 6, 7, 8]);
 
@@ -244,6 +266,9 @@ const CW_USEDEFAULT = 0x80000000;
 const DEFAULT_ORIGIN = 0;
 const DEFAULT_WIDTH = 640;
 const DEFAULT_HEIGHT = 480;
+
+/** The desktop's style: shown, and clipping what is drawn on it to itself. */
+const DESKTOP_STYLE = 0x96000000;
 
 /** GetWindowLong / SetWindowLong indices: negative ones name a field. */
 const GWL_WNDPROC = -4;
@@ -263,11 +288,37 @@ const WAIT_TIMEOUT = 0x102;
 const WAIT_FAILED = 0xffffffff;
 const INFINITE = 0xffffffff;
 
+/**
+ * The kernel objects whose signal a poll reads the same for every thread:
+ * a mutex is owned by one, a thread and a process are not polled at all.
+ */
+const POLLED_KINDS = new Set(['event', 'semaphore', 'timer']);
+
 /** PeekMessage takes this where a window goes to mean "thread messages only". */
 const HWND_THREAD_MESSAGES = 0xffffffff;
 
 /** What PostThreadMessage reports for an identifier that names no thread. */
 const ERROR_INVALID_THREAD_ID = 1444;
+const ERROR_INVALID_PARAMETER = 87;
+const ERROR_INVALID_WINDOW_HANDLE = 1400;
+
+/** TrackMouseEvent's request, its flags, and the messages its tracking posts. */
+const TRACKMOUSEEVENT_SIZE = 16;
+const TME_HOVER = 0x00000001;
+const TME_LEAVE = 0x00000002;
+const TME_NONCLIENT = 0x00000010;
+const TME_QUERY = 0x40000000;
+const TME_CANCEL = 0x80000000;
+const HOVER_DEFAULT = 0xffffffff;
+const WM_NCMOUSEHOVER = 0x02a0;
+const WM_MOUSEHOVER = 0x02a1;
+const WM_NCMOUSELEAVE = 0x02a2;
+const WM_MOUSELEAVE = 0x02a3;
+/** The queue's key for the hover asked for later: there is one tracking. */
+const HOVER_KEY = 'TrackMouseEvent';
+/** The MK_ bits of a mouse message's wParam, by the virtual key each reads. */
+const MOUSE_KEYS = Object.freeze([[0x01, 0x0001], [0x02, 0x0002], [0x10, 0x0004],
+    [0x11, 0x0008], [0x04, 0x0010], [0x05, 0x0020], [0x06, 0x0040]]);
 
 /** Class atoms come from the range Windows reserves for dynamic atoms. */
 const FIRST_ATOM = 0xc000;
@@ -299,17 +350,34 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           says nothing about what a click would reach.
  * @property {(hwnd: number) => { left: number, top: number, right: number,
  *     bottom: number } | null} clientRect
- *           One window's client rectangle, or null for a handle that names
- *           none: the measurement GetClientRect answers with, for the callers
- *           outside this layer that must answer a size a program asked for as
- *           zero -- a back buffer's, which means exactly this rectangle.
+ *           One window's client rectangle on the screen, or null for a handle
+ *           that names none: GetClientRect's size at ClientToScreen's origin,
+ *           for the callers outside this layer that must answer a size a
+ *           program asked for as zero -- a back buffer's, which means exactly
+ *           this rectangle -- or place a picture inside a window.
  * @property {(hwnd: number, x: number, y: number, width: number, height: number,
  *     how?: { announce?: boolean }) => boolean} place
  * @property {() => number} active
  *           The active top-level window -- what GetForegroundWindow answers --
  *           or zero while there is none.
+ * @property {() => boolean} deactivated
+ *           Whether the application was last told WM_ACTIVATEAPP(0): from
+ *           then until WM_ACTIVATEAPP(1) it is not the active application,
+ *           whichever of its windows the program activates meanwhile.
+ * @property {() => number} deactivations
+ *           How many times the application has been told WM_ACTIVATEAPP(0),
+ *           for a caller that looks only now and then and must still learn
+ *           of a deactivation that came and went in between.
  * @property {() => void} refresh
  *           Repaints the desktop and every window shown on it.
+ * @property {(event: import('./rawinput.js').RawInputEvent) => void} rawInput
+ *           One event of the mouse or the keyboard as the device reported it,
+ *           posted as WM_INPUT to whoever registered for that device.
+ * @property {(hwnd: number, options: { thread: unknown,
+ *     first?: import('./dialogs.js').ModalHook }) => number | Promise<number>} modalLoop
+ *           Runs a dialog another library made as DialogBox runs one, on the
+ *           thread named, each message offered to `first` before the dialog
+ *           manager: what a property sheet's own loop is on Windows.
  */
 
 /**
@@ -349,7 +417,12 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           The region an address sits in, from the memory layer's map: the
  *           `va_list` window wvsprintfA reads stops at its end.
  * @property {{ open: (type: string, object: any) => number,
- *              close: (handle: number) => any }} handles
+ *              close: (handle: number) => any,
+ *              typeOf?: (handle: number) => string | null,
+ *              resolve?: (handle: number, type: string) => any }} handles
+ *           typeOf names the kind of object a handle is, which decides how a
+ *           wait that also watches the queue can hold it; resolve hands back
+ *           the object, and throws for a handle of another kind.
  * @property {ReturnType<typeof import('./messages.js').createMessageQueue>} queue
  *           Where messages come from, including the ones the input layer posts.
  * @property {{ hwnd: number, message: number, at: number }[]} [dispatching]
@@ -454,12 +527,16 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           mouse's would, and a key named by virtual key or scan code takes
  *           the same path a real key press does. Absent in a build with no
  *           input, and then the call injects nothing.
- * @property {(picture: { shown: boolean }) => void} [reportCursor]
+ * @property {(picture: { shown: boolean, width?: number, height?: number,
+ *           hotSpot?: { x: number, y: number }, bgra?: Uint8Array }) => void} [reportCursor]
  *           The page's cursor, as user32's own state changed it: shown while
  *           ShowCursor's count is not below zero and SetCursor has not named the
- *           null cursor. Handed up only on a change, through the same event the
- *           Direct3D device methods use. Absent in a build with nothing showing
- *           a cursor, and then the derived picture is kept to ourselves.
+ *           null cursor, with the bitmap -- four bytes a pixel, top row first --
+ *           and the hot spot of a cursor the program made or loaded, and none
+ *           for a standard cursor, which the page shows as its own. Handed up
+ *           only on a change, through the same event the Direct3D device
+ *           methods use. Absent in a build with nothing showing a cursor, and
+ *           then the derived picture is kept to ourselves.
  * @property {(notice: { id: number, text: string, caption: string, type: number,
  *           buttons: { id: number, label: string }[], defaultButton: number,
  *           icon: string | null }) => number | Promise<number> | void} [messageBox]
@@ -630,6 +707,80 @@ export function createWindowFunctions(host){
         : then(value));
 
     /**
+     * Runs `use` with a wide string turned into the ANSI page, in guest
+     * memory the process heap lends for as long as the call takes; a null
+     * pointer is handed on as null. Without a heap there is nowhere to put
+     * the text, and the call fails.
+     *
+     * @param {number} wide
+     * @param {(ansi: number) => number | Promise<number>} use
+     */
+    const asAnsi = (wide, use)=>{
+        if ((wide >>> 0) === 0)
+        {
+            return use(0);
+        }
+        if (!host.allocate)
+        {
+            return 0;
+        }
+        let text = '';
+        for (let at = wide >>> 0; text.length < 0x8000; at += 256)
+        {
+            const piece = host.readMemory(at, 256);
+            let end = -1;
+            for (let i = 0; i + 1 < piece.length; i += 2)
+            {
+                const unit = piece[i] | piece[i + 1] << 8;
+                if (unit === 0)
+                {
+                    end = i;
+                    break;
+                }
+                text += String.fromCharCode(unit);
+            }
+            if (end >= 0 || piece.length < 256)
+            {
+                break;
+            }
+        }
+        const bytes = new Uint8Array(text.length + 1);
+        bytes.set(encodeAnsi(text));
+        const ansi = host.allocate(bytes.length);
+        if (ansi === 0)
+        {
+            return 0;
+        }
+        host.writeMemory(ansi, bytes);
+        return andThen(use(ansi), result=>{
+            host.release?.(ansi);
+            return result;
+        });
+    };
+
+    /**
+     * Whether every handle a wait names is one a poll can answer for whichever
+     * thread asks, which is what a wait held across turns asks it from.
+     *
+     * @param {number} array  The guest's array of handles. @param {number} total
+     */
+    const pollable = (array, total)=>{
+        const typeOf = host.handles.typeOf;
+        if (!typeOf || array === 0)
+        {
+            return false;
+        }
+        for (let at = 0; at < total; at++)
+        {
+            if (!POLLED_KINDS.has(typeOf(readU32(host, array + at * 4)) ?? ''))
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    /**
      * The window a FindWindow of either spelling answers with, or zero.
      *
      * Windows compares both names without regard to case, and searches in
@@ -674,8 +825,41 @@ export function createWindowFunctions(host){
         return 0;
     };
 
+    /**
+     * The desktop: the window every top-level window sits on, as
+     * GetDesktopWindow names it. Made when a program first asks for it, and
+     * kept out of the table the other windows are walked in: it is behind
+     * all of them, never painted over them or found before them.
+     *
+     * @type {any}
+     */
+    let desktop = null;
+    const desktopWindow = ()=>{
+        if (!desktop)
+        {
+            desktop = {
+                hwnd: 0, className: '#32769', title: '', style: DESKTOP_STYLE, exStyle: 0,
+                parent: 0, instance: 0, id: 0, wndProc: 0, menu: 0, x: 0, y: 0,
+                width: 0, height: 0, userData: 0, extra: new DataView(new ArrayBuffer(0)),
+                destroyed: false, updateRect: null, erase: false, ncDirty: false,
+            };
+            desktop.hwnd = host.handles.open('window', desktop);
+        }
+        return desktop;
+    };
+
     /** @param {number} hwnd @returns {any | null} */
     const live = hwnd=>{
+        if (desktop !== null && (hwnd >>> 0) === desktop.hwnd)
+        {
+            // The screen, whatever mode it was last switched to, and nothing
+            // a program placed it at instead.
+            desktop.x = 0;
+            desktop.y = 0;
+            desktop.width = host.screen?.width ?? DEFAULT_WIDTH;
+            desktop.height = host.screen?.height ?? DEFAULT_HEIGHT;
+            return desktop;
+        }
         const record = windows.get(hwnd >>> 0);
         return record && !record.destroyed ? record : null;
     };
@@ -689,6 +873,26 @@ export function createWindowFunctions(host){
         while (isChild(at) && windows.get(at.parent))
         {
             at = windows.get(at.parent);
+        }
+        return at;
+    };
+
+    /**
+     * The top-level window at the end of a window's owner chain: the one whose
+     * popups GetLastActivePopup answers about. An owner is kept where a
+     * child keeps its parent, and a chain a program looped with SetParent
+     * ends where it comes round.
+     *
+     * @param {any} record
+     */
+    const rootOwnerOf = record=>{
+        let at = topLevelOf(record);
+        const seen = new Set([at]);
+        for (let owner = live(at.parent); owner && !seen.has(topLevelOf(owner));
+            owner = live(at.parent))
+        {
+            at = topLevelOf(owner);
+            seen.add(at);
         }
         return at;
     };
@@ -750,6 +954,47 @@ export function createWindowFunctions(host){
         }
     };
 
+    /**
+     * Moves a child within its siblings' stacking -- which for children is
+     * the order the records are kept in, topmost first -- as SetWindowPos's
+     * hWndInsertAfter says: HWND_BOTTOM below them all, a sibling's handle
+     * just below that sibling, and the top for anything else.
+     *
+     * @param {any} record @param {number} after
+     */
+    const restack = (record, after)=>{
+        const HWND_BOTTOM = 1;
+        const others = childrenOf({ hwnd: record.parent }).filter(each=>each !== record);
+        const sibling = others.findIndex(each=>each.hwnd === (after >>> 0));
+        const at = (after >>> 0) === HWND_BOTTOM ? others.length : sibling + 1;
+        const order = [...others.slice(0, at), record, ...others.slice(at)];
+        const moved = new Set(order);
+        /** @type {any[]} */
+        const kept = [];
+        let placed = false;
+        for (const each of windows.values())
+        {
+            if (!moved.has(each))
+            {
+                kept.push(each);
+            }
+            else if (!placed)
+            {
+                kept.push(...order);
+                placed = true;
+            }
+        }
+        windows.clear();
+        for (const each of kept)
+        {
+            windows.set(each.hwnd, each);
+        }
+        if (shown(record))
+        {
+            appear(record);
+        }
+    };
+
     /** @param {any} record  Whether it and every ancestor is shown. */
     const shown = record=>{
         for (let at = record; at; at = isChild(at) ? windows.get(at.parent) : null)
@@ -777,6 +1022,9 @@ export function createWindowFunctions(host){
      * sliding in, the camera settling -- so the picture never stops arriving.
      */
     let active = 0;
+    /** What WM_ACTIVATEAPP last told the application: false once it went. */
+    let applicationActive = true;
+    let deactivations = 0;
     const activeWindow = ()=>{
         if (active !== 0 && live(active))
         {
@@ -794,66 +1042,80 @@ export function createWindowFunctions(host){
     };
     /**
      * Makes a top-level window the active one, telling the window that loses
-     * activation and the one that gains it.
+     * activation and the one that gains it, and moving the focus into it.
      *
-     * Told by sending when the caller is a guest call -- `sent` -- so the
-     * window procedures have heard it before the call returns, as Windows
-     * sends the set: SetFocus, SetActiveWindow, ShowWindow, a click taken
-     * from the queue. Posted otherwise, when nothing of the guest's is
-     * running to send from: a window made visible as it is created.
+     * Everything is sent, before the call that caused it returns -- SetFocus,
+     * ShowWindow, CreateWindowEx with WS_VISIBLE, a click taken from the
+     * queue -- in the order user32's message tests pin: WM_NCACTIVATE(0) and
+     * WM_ACTIVATE(WA_INACTIVE) to the window losing it, WM_NCACTIVATE(1) and
+     * WM_ACTIVATE to the one gaining it, then WM_KILLFOCUS and WM_SETFOCUS as
+     * the focus follows (SetActiveWindowSeq2). When nothing of the program was
+     * active the program itself becomes the active application, and each of
+     * its top-level windows hears WM_ACTIVATEAPP(1) first (WmCreatePopupSeq).
      *
      * @param {number} hwnd
-     * @param {{ thread?: unknown, sent?: boolean, how?: number }} [options]
+     * @param {{ thread?: unknown, how?: number }} [options]
      *        `how` is WM_ACTIVATE's wParam for the window gaining it:
      *        WA_CLICKACTIVE when a click did it.
      * @returns {number | Promise<number>} once every procedure told has answered
      */
-    const activate = (hwnd, { thread, sent = false, how = WA_ACTIVE } = {})=>{
+    const activate = (hwnd, { thread, how = WA_ACTIVE } = {})=>{
         const record = live(hwnd);
         const previous = active;
         active = record ? topLevelOf(record).hwnd : 0;
+        if (record)
+        {
+            rootOwnerOf(record).lastActivePopup = active;
+        }
         // The keyboard follows activation: a focus outside the window that
-        // became active is moved to it, as Windows moves it.
+        // became active is moved to it, as DefWindowProc's WM_ACTIVATE moves
+        // it. A caller that placed the focus itself -- SetFocus -- tells it.
         const current = focusWindow();
-        if (active !== 0 && (current === 0 || topLevelOf(windows.get(current)).hwnd !== active))
+        const moved = active !== 0
+            && (current === 0 || topLevelOf(live(current)).hwnd !== active);
+        if (moved)
         {
             focus = active;
         }
-        // Which of the program's own windows holds the activation is a
-        // window-level fact, and a window is told it holds it -- and the one it
-        // took it from is told it no longer does -- every time it changes, not
-        // only the first time. The application is told it is foreground once,
-        // when its first window appears; that first WM_ACTIVATE travels with it,
-        // in the order Windows sends the set. What has no other source is the
-        // switch to a later window: a program that shows one window and then
-        // another -- a title that recreates its render window for a mode change
-        // is the ordinary case -- activates its mouse, captures and clips only in
-        // the window it believes active, and without this message that window is
-        // never told it is.
-        if (previous === 0 || active === previous)
+        if (active === previous)
         {
             return 0;
         }
-        // WM_NCACTIVATE comes first, to the window losing activation and
-        // then, when there is one, to the window gaining it: the frame redraws
-        // itself before either window's own procedure hears WM_ACTIVATE.
         const gained = active;
         /** @type {[number, number, number, number][]} */
-        const told = [
-            [previous, WM_NCACTIVATE, 0, 0],
-            [previous, WM_ACTIVATE, WA_INACTIVE, gained],
-            ...(gained !== 0 ? /** @type {[number, number, number, number][]} */ ([
-                [gained, WM_NCACTIVATE, 1, 0],
-                [gained, WM_ACTIVATE, how, previous],
-            ]) : []),
-        ];
-        if (!sent)
+        const told = [];
+        if (previous !== 0)
         {
-            for (const [target, message, wParam, lParam] of told)
+            told.push([previous, WM_NCACTIVATE, 0, 0],
+                [previous, WM_ACTIVATE, WA_INACTIVE, gained]);
+        }
+        // The program is the active application or stops being it when the
+        // activation comes from, or goes to, nothing or the desktop -- the
+        // one window here that is not the program's. lParam names the thread
+        // on the other side: another program's, which here is none.
+        /** @param {number} which */
+        const programs = which=>which !== 0 && which !== desktop?.hwnd;
+        if (programs(previous) !== programs(gained))
+        {
+            applicationActive = programs(gained);
+            deactivations += applicationActive ? 0 : 1;
+            for (const top of [...windows.values()]
+                .filter(each=>!each.destroyed && !isChild(each)).reverse())
             {
-                host.queue.post({ hwnd: target, message, wParam, lParam });
+                told.push([top.hwnd, WM_ACTIVATEAPP, programs(gained) ? 1 : 0, 0]);
             }
-            return 0;
+        }
+        if (gained !== 0)
+        {
+            told.push([gained, WM_NCACTIVATE, 1, 0], [gained, WM_ACTIVATE, how, previous]);
+        }
+        if (moved)
+        {
+            if (current !== 0)
+            {
+                told.push([current, WM_KILLFOCUS, gained, 0]);
+            }
+            told.push([gained, WM_SETFOCUS, current, 0]);
         }
         /** @param {number} index @returns {number | Promise<number>} */
         const tell = index=>{
@@ -898,7 +1160,7 @@ export function createWindowFunctions(host){
         focus = target;
         // Activation is told first, then the focus: a window gaining both
         // hears WM_ACTIVATE before WM_SETFOCUS.
-        const activated = target !== 0 ? activate(target, { thread, sent: true }) : 0;
+        const activated = target !== 0 ? activate(target, { thread }) : 0;
         return andThen(activated, ()=>
             andThen(previous !== 0 ? send(previous, WM_KILLFOCUS, target, 0, thread) : 0,
                 ()=>andThen(target !== 0 ? send(target, WM_SETFOCUS, previous, 0, thread) : 0,
@@ -944,13 +1206,16 @@ export function createWindowFunctions(host){
         return atom;
     };
 
-    /** @param {number} address  Where a NUL-terminated string goes. @param {string} text */
+    /**
+     * A window's text back into the program's memory, NUL-terminated, in the
+     * ANSI page it was read in: a caption holds the euro sign where the
+     * program wrote 0x80, and 0x80 is what it reads back.
+     *
+     * @param {number} address @param {string} text
+     */
     const writeString = (address, text)=>{
         const bytes = new Uint8Array(text.length + 1);
-        for (let index = 0; index < text.length; index++)
-        {
-            bytes[index] = text.charCodeAt(index) & 0xff;
-        }
+        bytes.set(encodeAnsi(text));
         host.writeMemory(address, bytes);
     };
 
@@ -983,7 +1248,7 @@ export function createWindowFunctions(host){
      */
     const destroyWindow = (hwnd, thread, told = 'all')=>{
         const record = live(hwnd);
-        if (!record)
+        if (!record || record === desktop)
         {
             return 0;
         }
@@ -1029,6 +1294,17 @@ export function createWindowFunctions(host){
                     if (captured === record.hwnd)
                     {
                         captured = 0;
+                    }
+                    if (tracking?.hwnd === record.hwnd)
+                    {
+                        stopTracking();
+                    }
+                    // Its menu goes with it, as DestroyWindow is documented
+                    // to destroy it; one a program took back with SetMenu is
+                    // its own again.
+                    if ((record.menu ?? 0) !== 0)
+                    {
+                        table.DestroyMenu.handler([record.menu]);
                     }
                     if (covered)
                     {
@@ -1252,16 +1528,23 @@ export function createWindowFunctions(host){
         }
         record.hwnd = host.handles.open('window', record);
         windows.set(record.hwnd, record);
-        if ((record.style & WS_VISIBLE) !== 0 && !isChild(record))
-        {
-            activate(record.hwnd);
-        }
         if ((record.style & WS_VISIBLE) !== 0)
         {
             appear(record);
         }
         return record;
     };
+
+    /**
+     * A top-level window created visible is activated once it has been told
+     * it is shown, as CreateWindowEx activates it (WmCreatePopupSeq); a child,
+     * or a window refused on the way, is not.
+     *
+     * @param {any} record @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const activateCreated = (record, thread)=>((record.style & WS_VISIBLE) !== 0
+        && !isChild(record) && live(record.hwnd) ? activate(record.hwnd, { thread }) : 0);
 
     /**
      * CreateWindowExA, and CreateWindowA once its missing argument is filled in.
@@ -1282,12 +1565,16 @@ export function createWindowFunctions(host){
             title: (windowName >>> 0) === 0 ? '' : host.readCString(windowName, MAX_WINDOW_TEXT),
             style: style >>> 0,
             exStyle: exStyle >>> 0,
-            parent: parent >>> 0,
+            // A window made on the desktop is a top-level window, which is
+            // what a parent of zero already says.
+            parent: desktop !== null && (parent >>> 0) === desktop.hwnd ? 0 : parent >>> 0,
             instance: instance >>> 0,
-            // For a child window hMenu is its control id; for a top-level one it
-            // is a menu handle, which the menu bookkeeping hangs on to.
-            id: parent === 0 ? 0 : menu >>> 0,
-            menu: parent === 0 ? menu >>> 0 : 0,
+            // For a child window hMenu is its control id; for any other --
+            // an owned popup included, and WS_CHILD | WS_POPUP, which is a
+            // popup -- it is a menu handle, which the menu bookkeeping hangs
+            // on to, the frame makes room for and DestroyWindow destroys.
+            id: (style & (WS_CHILD | WS_POPUP)) === WS_CHILD ? menu >>> 0 : 0,
+            menu: (style & (WS_CHILD | WS_POPUP)) === WS_CHILD ? 0 : menu >>> 0,
             wndProc: cls.wndProc,
             x: coordinate(x, DEFAULT_ORIGIN),
             y: coordinate(y, DEFAULT_ORIGIN),
@@ -1323,33 +1610,38 @@ export function createWindowFunctions(host){
     const announce = (record, args)=>{
         const [exStyle, className, windowName, style, x, y, width, height,
             parent, menu, instance, params] = args;
+        // Named once, before anything is awaited: a call made after the hook
+        // has answered is answering a call the bridge has already let go of.
+        const thread = host.callerThread?.();
+        /** The window, activated first when it was created visible. */
+        const activated = ()=>andThen(activateCreated(record, thread), ()=>record.hwnd);
         if (record.wndProc === 0)
         {
-            return record.hwnd;
+            return activated();
         }
         // A procedure on this side reads nothing out of a CREATESTRUCT.
         if (procedures.has(record.wndProc))
         {
             return andThen(callProcedure(record.wndProc, {
                 hwnd: record.hwnd, message: WM_CREATE, wParam: 0, lParam: 0,
-            }, host.callerThread?.()), created=>{
+            }, thread), created=>{
                 if ((created | 0) === -1)
                 {
                     return andThen(destroyWindow(record.hwnd, undefined, 'ncdestroy'), ()=>0);
                 }
-                return record.hwnd;
+                return activated();
             });
         }
         if (!host.allocate)
         {
-            return record.hwnd;
+            return activated();
         }
         // The CREATESTRUCT, and behind it the two words a CBT hook is handed
         // that point at it.
         const create = host.allocate(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.SIZE);
         if (create === 0)
         {
-            return record.hwnd;
+            return activated();
         }
         const bytes = new Uint8Array(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.SIZE);
         const view = new DataView(bytes.buffer);
@@ -1375,9 +1667,6 @@ export function createWindowFunctions(host){
         void x;
         void y;
 
-        // Named once, before anything is awaited: a call made after the hook
-        // has answered is answering a call the bridge has already let go of.
-        const thread = host.callerThread?.();
         /** @param {number} message */
         const tell = message=>callProcedure(record.wndProc, {
             hwnd: record.hwnd, message, wParam: 0, lParam: create,
@@ -1390,43 +1679,45 @@ export function createWindowFunctions(host){
 
         // The CBT hook first, before the window's own procedure has run: a
         // framework attaches its object to the window here and subclasses the
-        // procedure, so the WM_CREATE that follows reaches the framework and
-        // not the class. A hook that answers non-zero refuses the window.
-        //
-        // Only WM_CREATE after it, and deliberately: WM_NCCREATE is the
-        // message a procedure is least likely to need -- its default answer is
-        // TRUE and the structure it carries arrives again a moment later with
-        // WM_CREATE -- so it is the one to leave out until a program is seen
-        // to want it.
+        // procedure, so the messages that follow reach the framework and not
+        // the class. A hook that answers non-zero refuses the window.
         const cbt = callHook(WH_CBT, null,
             [HCBT_CREATEWND, record.hwnd, create + CREATESTRUCTA.SIZE], thread);
+        /** @returns {number | Promise<number>} */
+        const refuse = ()=>andThen(destroyWindow(record.hwnd, thread, 'ncdestroy'), ()=>done(0));
         return andThen(cbt, refused=>{
             if ((refused | 0) !== 0)
             {
                 return andThen(destroyWindow(record.hwnd, thread, 'none'), ()=>done(0));
             }
-            return andThen(tell(WM_CREATE), created=>{
-                if ((created | 0) === -1)
-                {
-                    return andThen(destroyWindow(record.hwnd, thread, 'ncdestroy'), ()=>done(0));
-                }
-                // A window created visible hears its own size and place inside
-                // this call, as the real CreateWindowEx sends them once
-                // WM_CREATE has been answered: a program that never calls
-                // ShowWindow measures the screen it lays itself out and
-                // rasterises its text for from the size it is told here.
-                if ((style & WS_VISIBLE) === 0)
-                {
-                    return done(record.hwnd);
-                }
-                const client = geometry.clientRect(record);
-                return andThen(send(record.hwnd, WM_SIZE, SIZE_RESTORED,
-                    ((((client.bottom - client.top) & 0xffff) << 16)
-                        | ((client.right - client.left) & 0xffff)) >>> 0, thread),
-                ()=>andThen(send(record.hwnd, WM_MOVE, 0,
-                    (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
-                ()=>done(record.hwnd)));
-            });
+            // WM_NCCREATE before WM_CREATE, with the same structure: a
+            // procedure that keeps lpCreateParams takes it from the first.
+            return andThen(tell(WM_NCCREATE), accepted=>((accepted | 0) === 0 ? refuse()
+                : andThen(tell(WM_CREATE), created=>{
+                    if ((created | 0) === -1)
+                    {
+                        return refuse();
+                    }
+                    // A window created visible hears its own size, its place
+                    // and that it is shown inside this call, as the real
+                    // CreateWindowEx sends them once WM_CREATE has been
+                    // answered: a program that never calls ShowWindow
+                    // measures the screen it lays itself out and rasterises
+                    // its text for from the size it is told here. Then it
+                    // is activated.
+                    if ((style & WS_VISIBLE) === 0)
+                    {
+                        return done(record.hwnd);
+                    }
+                    const client = geometry.clientRect(record);
+                    return andThen(send(record.hwnd, WM_SIZE, SIZE_RESTORED,
+                        ((((client.bottom - client.top) & 0xffff) << 16)
+                            | ((client.right - client.left) & 0xffff)) >>> 0, thread),
+                    ()=>andThen(send(record.hwnd, WM_MOVE, 0,
+                        (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
+                    ()=>andThen(send(record.hwnd, WM_SHOWWINDOW, 1, 0, thread),
+                        ()=>andThen(activateCreated(record, thread), ()=>done(record.hwnd)))));
+                })));
         });
     };
 
@@ -1488,6 +1779,7 @@ export function createWindowFunctions(host){
         {
             return;
         }
+        host.queue.dirtied?.();
         const origin = geometry.clientRect(record);
         const dirty = {
             left: origin.left + record.updateRect.left,
@@ -1666,6 +1958,13 @@ export function createWindowFunctions(host){
                     bottom: y + 1 }, ink);
             }
         }
+        if (frame.menu > 0)
+        {
+            // The bar's room, in the menu colour: nothing lays its items out.
+            draw.fill(hdc, { left: frame.edge, top: frame.edge + frame.caption,
+                right: width - frame.edge, bottom: frame.edge + frame.caption + frame.menu },
+            sysColor(COLOR_MENU));
+        }
         if (frame.right > frame.edge)
         {
             const bar = scrollBarRect(record, true);
@@ -1740,6 +2039,12 @@ export function createWindowFunctions(host){
             const box = closeBox(record);
             return contains(box, local.x, local.y) ? HTCLOSE : HTCAPTION;
         }
+        const barTop = frame.edge + frame.caption;
+        if (frame.menu > 0 && local.y >= barTop && local.y < barTop + frame.menu
+            && local.x >= frame.edge && local.x < record.width - frame.edge)
+        {
+            return HTMENU;
+        }
         if (frame.right > frame.edge && contains(scrollBarRect(record, true), local.x, local.y))
         {
             return HTVSCROLL;
@@ -1752,9 +2057,47 @@ export function createWindowFunctions(host){
     };
 
     /**
-     * The window under a screen point: the topmost shown one whose rectangle
-     * holds it, then down through its children, skipping a window that says
-     * the point passes through it or is disabled.
+     * Every window under a screen point that could take the pointer, in the
+     * order they are offered it: from the top, a window's children at the
+     * point before the window itself, deepest first. A hidden window is
+     * never among them, nor, unless asked for, a disabled one.
+     *
+     * @param {number} x @param {number} y @param {boolean} [disabledToo]
+     * @returns {any[]}
+     */
+    const windowsAt = (x, y, disabledToo = false)=>{
+        /** @type {any[]} */
+        const found = [];
+        /** @param {any[]} candidates  Topmost first. */
+        const visit = candidates=>{
+            for (const record of candidates)
+            {
+                if ((record.style & WS_VISIBLE) === 0
+                    || !contains(geometry.windowRect(record), x, y)
+                    || (!disabledToo && (record.style & WS_DISABLED) !== 0))
+                {
+                    continue;
+                }
+                if (hitTest(record, x, y) === HTCLIENT)
+                {
+                    visit(childrenOf(record));
+                }
+                found.push(record);
+            }
+        };
+        // Top-level windows are kept bottom-up and children top-down: the
+        // stacking GetWindow walks, and the one that decides who is hit.
+        visit([...windows.values()].filter(record=>!record.destroyed
+            && !isChild(record)).reverse());
+        return found;
+    };
+
+    /**
+     * The window under a screen point: the first of `windowsAt` that does
+     * not say the point passes through it. Only the procedures on this side
+     * are asked, as this answers without running the program -- routing
+     * the input layer's messages as they arrive -- and `askedFromPoint`
+     * asks the program's own.
      *
      * @param {number} x @param {number} y
      * @param {{ disabled?: boolean, transparent?: boolean }} [skip]
@@ -1763,55 +2106,26 @@ export function createWindowFunctions(host){
      * @returns {{ record: any, hit: number } | null}
      */
     const windowFromPoint = (x, y, skip = { disabled: true, transparent: true })=>{
-        /**
-         * @param {any[]} candidates
-         * @returns {{ record: any, hit: number } | null}
-         */
-        const deepest = candidates=>{
-            for (let index = candidates.length - 1; index >= 0; index--)
+        for (const record of windowsAt(x, y, !skip.disabled))
+        {
+            if (!(skip.transparent && transparentAt(record)))
             {
-                const record = candidates[index];
-                if ((record.style & WS_VISIBLE) === 0
-                    || !contains(geometry.windowRect(record), x, y))
-                {
-                    continue;
-                }
-                if (skip.disabled && (record.style & WS_DISABLED) !== 0)
-                {
-                    continue;
-                }
-                const hit = hitTest(record, x, y);
-                if (hit === HTCLIENT)
-                {
-                    const inner = deepest(childrenOf(record));
-                    if (inner)
-                    {
-                        return inner;
-                    }
-                }
-                if (skip.transparent && transparentAt(record))
-                {
-                    continue;
-                }
-                return { record, hit };
+                return { record, hit: hitTest(record, x, y) };
             }
-            return null;
-        };
-        return deepest([...windows.values()].filter(record=>!record.destroyed
-            && !isChild(record)));
+        }
+        return null;
     };
 
     /**
-     * Whether a window lets the pointer through: what it answers WM_NCHITTEST
-     * with, asked of the ones whose procedure is on this side. A program's
-     * own procedure is not run for every hit test; a static of the
-     * program's own class stops the pointer as a window does.
+     * Whether a window lets the pointer through, asked of a procedure on
+     * this side that answers without the program: what it answers
+     * WM_NCHITTEST with. One that would run the program is not asked.
      *
      * @param {any} record
      */
     const transparentAt = record=>{
         const procedure = procedures.get(record.wndProc);
-        if (!procedure)
+        if (!procedure || reachesProgram(record))
         {
             return false;
         }
@@ -1819,6 +2133,238 @@ export function createWindowFunctions(host){
             hwnd: record.hwnd, message: WM_NCHITTEST, wParam: 0, lParam: 0,
         });
         return typeof answer === 'number' && (answer | 0) === HTTRANSPARENT;
+    };
+
+    /**
+     * Whether a message to a window can run the program's code: its
+     * procedure is the program's own, or the dialog class's, which hands
+     * every message to the program's dialog procedure first.
+     *
+     * @param {any} record
+     */
+    const reachesProgram = record=>record.wndProc !== 0
+        && (!procedures.has(record.wndProc)
+            || procedures.get(record.wndProc) === controlProcedures['#32770']);
+
+    /**
+     * The window under a screen point as the program would find it, asked
+     * from its own thread: each window in turn is sent WM_NCHITTEST -- a
+     * program's own procedure run -- and the first that does not answer
+     * HTTRANSPARENT is the one, with the hit it answered.
+     *
+     * @param {number} x @param {number} y @param {unknown} thread
+     * @returns {{ record: any, hit: number } | null
+     *     | Promise<{ record: any, hit: number } | null>}
+     */
+    const askedFromPoint = (x, y, thread)=>{
+        const candidates = windowsAt(x, y);
+        /** @param {number} index @returns {any} */
+        const next = index=>{
+            const record = candidates[index];
+            if (!record)
+            {
+                return null;
+            }
+            if (!reachesProgram(record))
+            {
+                return transparentAt(record) ? next(index + 1)
+                    : { record, hit: hitTest(record, x, y) };
+            }
+            return andThen(send(record.hwnd, WM_NCHITTEST, 0,
+                ((y & 0xffff) << 16 | x & 0xffff) >>> 0, thread), answer=>((answer | 0)
+                === HTTRANSPARENT ? next(index + 1) : { record, hit: answer | 0 }));
+        };
+        return next(0);
+    };
+
+    /** The buttons and keys held, as a client mouse message's wParam reports them. */
+    const mouseKeys = ()=>{
+        let keys = 0;
+        for (const [vk, bit] of MOUSE_KEYS)
+        {
+            keys |= ((host.keyState?.(vk) ?? 0) & 0x8000) !== 0 ? bit : 0;
+        }
+        return keys;
+    };
+
+    /**
+     * What TrackMouseEvent was asked to report: of which window, its hover or
+     * its leaving or both, of its client area or, with TME_NONCLIENT, its
+     * frame, and where the pointer was when the hover time last started.
+     *
+     * @type {{ hwnd: number, flags: number, hoverTime: number, x: number,
+     *     y: number } | null}
+     */
+    let tracking = null;
+
+    /**
+     * Whether the point is over this window's client area, or its frame: a
+     * child over it is not, since the pointer is then over the child.
+     *
+     * @param {number} x @param {number} y @param {number} hwnd @param {boolean} frame
+     */
+    const pointerIn = (x, y, hwnd, frame)=>{
+        const found = windowFromPoint(x, y);
+        return found !== null && found.record.hwnd === hwnd && (found.hit !== HTCLIENT) === frame;
+    };
+
+    const stopTracking = ()=>{
+        tracking = null;
+        host.queue.cancelLater(HOVER_KEY);
+    };
+
+    /** @param {number} hwnd @param {number} flags */
+    const postLeave = (hwnd, flags)=>host.queue.post({ hwnd,
+        message: (flags & TME_NONCLIENT) !== 0 ? WM_NCMOUSELEAVE : WM_MOUSELEAVE,
+        wParam: 0, lParam: 0 });
+
+    /**
+     * The hover, made when its time has come: where the pointer is then, in
+     * client coordinates with the buttons and keys held, or on the frame with
+     * the hit and the screen point. Posting it ends the hover tracking.
+     *
+     * @returns {import('./messages.js').PostedMessage | null}
+     */
+    const hoverMessage = ()=>{
+        const track = tracking;
+        const record = track ? live(track.hwnd) : null;
+        if (!track || !record || (track.flags & TME_HOVER) === 0)
+        {
+            return null;
+        }
+        track.flags &= ~TME_HOVER;
+        if ((track.flags & TME_LEAVE) === 0)
+        {
+            tracking = null;
+        }
+        const at = host.cursor?.() ?? { x: 0, y: 0 };
+        if ((track.flags & TME_NONCLIENT) !== 0)
+        {
+            return { hwnd: record.hwnd, message: WM_NCMOUSEHOVER,
+                wParam: hitTest(record, at.x, at.y) >>> 0,
+                lParam: ((at.y & 0xffff) << 16 | at.x & 0xffff) >>> 0 };
+        }
+        const origin = geometry.clientOrigin(record);
+        return { hwnd: record.hwnd, message: WM_MOUSEHOVER, wParam: mouseKeys(),
+            lParam: (((at.y - origin.y) & 0xffff) << 16 | (at.x - origin.x) & 0xffff) >>> 0 };
+    };
+
+    /** @param {number} x @param {number} y */
+    const armHover = (x, y)=>{
+        if (tracking)
+        {
+            tracking.x = x;
+            tracking.y = y;
+            host.queue.postLater(HOVER_KEY, tracking.hoverTime, hoverMessage);
+        }
+    };
+
+    /**
+     * The tracking, told where the pointer has gone: out of the area tracked
+     * ends it with the leave if one was asked for, and out of the hover
+     * rectangle starts the hover time again from there.
+     *
+     * @param {number} x @param {number} y
+     */
+    const followPointer = (x, y)=>{
+        const track = tracking;
+        if (!track)
+        {
+            return;
+        }
+        if (!pointerIn(x, y, track.hwnd, (track.flags & TME_NONCLIENT) !== 0))
+        {
+            stopTracking();
+            if ((track.flags & TME_LEAVE) !== 0 && live(track.hwnd))
+            {
+                postLeave(track.hwnd, track.flags);
+            }
+            return;
+        }
+        if ((track.flags & TME_HOVER) !== 0 && (Math.abs(x - track.x) > HOVER_SIZE / 2
+            || Math.abs(y - track.y) > HOVER_SIZE / 2))
+        {
+            armHover(x, y);
+        }
+    };
+
+    /**
+     * TrackMouseEvent's request, read from guest memory: a query filled in,
+     * a cancellation of what it names, or tracking of the window the pointer
+     * is over -- and for one it is not over, a leave posted at once.
+     *
+     * @param {number} request
+     */
+    const trackMouseEvent = request=>{
+        const at = request >>> 0;
+        if (at === 0 || readU32(host, at) !== TRACKMOUSEEVENT_SIZE)
+        {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const flags = readU32(host, at + 4);
+        if ((flags & TME_QUERY) !== 0)
+        {
+            const track = tracking && live(tracking.hwnd) ? tracking : null;
+            writeU32s(host, at + 4, track ? [track.flags, track.hwnd, track.hoverTime] : [0, 0, 0]);
+            return 1;
+        }
+        const record = live(readU32(host, at + 8));
+        if (!record || record === desktop)
+        {
+            host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+            return 0;
+        }
+        const asked = flags & (TME_HOVER | TME_LEAVE);
+        const area = flags & TME_NONCLIENT;
+        if ((flags & TME_CANCEL) !== 0)
+        {
+            if (tracking && tracking.hwnd === record.hwnd
+                && (tracking.flags & TME_NONCLIENT) === area)
+            {
+                tracking.flags &= ~asked;
+                if ((tracking.flags & TME_HOVER) === 0)
+                {
+                    host.queue.cancelLater(HOVER_KEY);
+                }
+                if ((tracking.flags & (TME_HOVER | TME_LEAVE)) === 0)
+                {
+                    stopTracking();
+                }
+            }
+            return 1;
+        }
+        const pointer = host.cursor?.() ?? { x: 0, y: 0 };
+        // Whatever was tracked is brought up to where the pointer is first,
+        // so a window it has left hears so before another is tracked.
+        followPointer(pointer.x, pointer.y);
+        if (!pointerIn(pointer.x, pointer.y, record.hwnd, area !== 0))
+        {
+            if ((flags & TME_LEAVE) !== 0)
+            {
+                postLeave(record.hwnd, area);
+            }
+            return 1;
+        }
+        if (asked === 0)
+        {
+            return 1;
+        }
+        if (!tracking || tracking.hwnd !== record.hwnd
+            || (tracking.flags & TME_NONCLIENT) !== area)
+        {
+            stopTracking();
+            tracking = { hwnd: record.hwnd, flags: area, hoverTime: HOVER_TIME,
+                x: pointer.x, y: pointer.y };
+        }
+        tracking.flags |= asked;
+        if ((flags & TME_HOVER) !== 0)
+        {
+            const time = readU32(host, at + 12);
+            tracking.hoverTime = time === 0 || time === HOVER_DEFAULT ? HOVER_TIME : time;
+            armHover(pointer.x, pointer.y);
+        }
+        return 1;
     };
 
     /**
@@ -1850,6 +2396,7 @@ export function createWindowFunctions(host){
         }
         const x = message.x | 0;
         const y = message.y | 0;
+        followPointer(x, y);
         if (kind === WM_MOUSEWHEEL)
         {
             const target = focusWindow() || activeWindow();
@@ -1912,27 +2459,156 @@ export function createWindowFunctions(host){
                 return !eaten;
             }
             raise(top);
-            return andThen(activate(top.hwnd, { thread, sent: true, how: WA_CLICKACTIVE }),
+            return andThen(activate(top.hwnd, { thread, how: WA_CLICKACTIVE }),
                 ()=>!eaten);
         });
     };
 
     /**
-     * The next message a retrieval takes, a press having activated its
-     * window first; a press its window ate is passed over for the one after.
+     * WM_SETCURSOR, sent as a message of the mouse's own is taken, to the
+     * window the pointer is over -- its hit, and the client form of the mouse
+     * message, in lParam -- as Windows sends it whenever the cursor moves in
+     * a window with the mouse not captured. Sent from the thread taking the
+     * message, like WM_MOUSEACTIVATE; the wheel moves no cursor, and a
+     * message a program posted itself is no move of it.
      *
-     * @param {() => any} take @param {unknown} thread
+     * @param {any} entry @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const askCursor = (entry, thread)=>{
+        const kind = entry.message >>> 0;
+        const client = kind >= WM_MOUSEMOVE && kind <= WM_MOUSELAST && kind !== WM_MOUSEWHEEL;
+        const frame = kind >= WM_NCMOUSEMOVE && kind <= WM_NCMOUSELAST;
+        const record = client || frame ? live(entry.hwnd) : null;
+        if (!record || captured !== 0 || !host.queue.fromInput(entry))
+        {
+            return 0;
+        }
+        const hit = client ? HTCLIENT : entry.wParam & 0xffff;
+        const mouse = client ? kind : kind - WM_NCMOUSEMOVE + WM_MOUSEMOVE;
+        return send(record.hwnd, WM_SETCURSOR, record.hwnd, ((mouse & 0xffff) << 16 | hit) >>> 0,
+            thread);
+    };
+
+    /**
+     * The mouse's own message, sent where the program's procedures say the
+     * pointer is: it was routed as it arrived by what this side can answer
+     * alone, and a window whose messages run the program's code -- its own
+     * procedure, or a dialog's -- is asked WM_NCHITTEST as the message is
+     * taken: one that answers HTTRANSPARENT passes it to the window beneath,
+     * and the hit answered decides whether it is the client or the frame
+     * form of the message.
+     *
+     * @param {any} entry @param {unknown} thread
+     * @returns {any} the entry, placed
+     */
+    const rehit = (entry, thread)=>{
+        if (!askable(entry))
+        {
+            return entry;
+        }
+        const kind = entry.message >>> 0;
+        const client = kind >= WM_MOUSEMOVE && kind <= WM_MOUSELAST;
+        const x = entry.x | 0;
+        const y = entry.y | 0;
+        return andThen(askedFromPoint(x, y, thread), found=>{
+            if (!found)
+            {
+                return entry;
+            }
+            const clientKind = client ? kind : kind - WM_NCMOUSEMOVE + WM_MOUSEMOVE;
+            // An XBUTTON's number rides in the high word of either form.
+            const high = entry.wParam & 0xffff0000;
+            entry.hwnd = found.record.hwnd;
+            if (found.hit === HTCLIENT)
+            {
+                const origin = geometry.clientOrigin(found.record);
+                entry.message = clientKind;
+                entry.wParam = (high | (client ? entry.wParam & 0xffff : mouseKeys())) >>> 0;
+                entry.lParam = (((y - origin.y) & 0xffff) << 16 | (x - origin.x) & 0xffff) >>> 0;
+            }
+            else
+            {
+                entry.message = clientKind + WM_NCMOUSEMOVE - WM_MOUSEMOVE;
+                entry.wParam = (high | found.hit & 0xffff) >>> 0;
+                entry.lParam = ((y & 0xffff) << 16 | x & 0xffff) >>> 0;
+            }
+            return entry;
+        });
+    };
+
+    /**
+     * Whether `rehit` asks the program's procedures where a message goes: a
+     * mouse message from the input layer, for a window whose messages run
+     * the program's code, while nothing holds the capture.
+     *
+     * @param {any} entry
+     */
+    const askable = entry=>{
+        const kind = entry.message >>> 0;
+        const client = kind >= WM_MOUSEMOVE && kind <= WM_MOUSELAST && kind !== WM_MOUSEWHEEL;
+        const frame = kind >= WM_NCMOUSEMOVE && kind <= WM_NCMOUSELAST;
+        const target = client || frame ? live(entry.hwnd) : null;
+        return target !== null && reachesProgram(target) && captured === 0
+            && host.queue.fromInput(entry);
+    };
+
+    /**
+     * Places the mouse messages a retrieval could take before its filter
+     * looks at them, oldest first, up to the first the filter takes: the
+     * range and the window a program asks for are those of the message as
+     * its procedures place it, not as it arrived. Only a message the range
+     * could take in either form is asked about.
+     *
+     * @param {import('./messages.js').MessageFilter} filter @param {unknown} thread
+     * @returns {null | Promise<null>}
+     */
+    const placeWaiting = (filter, thread)=>{
+        const asked = new Set();
+        /** @param {number} kind */
+        const inRange = kind=>(filter.first === 0 && filter.last === 0)
+            || (kind >= filter.first && kind <= filter.last);
+        /** @returns {any} */
+        const walk = ()=>{
+            for (const entry of host.queue.queued())
+            {
+                const kind = entry.message >>> 0;
+                const client = kind >= WM_MOUSEMOVE ? kind : kind - WM_NCMOUSEMOVE + WM_MOUSEMOVE;
+                if (!asked.has(entry) && askable(entry)
+                    && (inRange(client) || inRange(client + WM_NCMOUSEMOVE - WM_MOUSEMOVE)))
+                {
+                    asked.add(entry);
+                    return andThen(rehit(entry, thread), walk);
+                }
+                if (host.queue.accepts(entry, filter))
+                {
+                    return null;
+                }
+            }
+            return null;
+        };
+        return walk();
+    };
+
+    /**
+     * The next message a retrieval takes, placed where the program's
+     * procedures say the pointer is, a press having activated its window
+     * first and the window under the pointer asked for its cursor; a press
+     * its window ate is passed over for the one after.
+     *
+     * @param {import('./messages.js').MessageFilter} filter @param {unknown} thread
      * @returns {any}
      */
-    const takeThrough = (take, thread)=>{
-        const entry = take();
+    const takeThrough = (filter, thread)=>andThen(placeWaiting(filter, thread), ()=>{
+        const entry = host.queue.peek(filter);
         if (!entry)
         {
             return null;
         }
-        return andThen(mouseActivate(entry, thread),
-            (/** @type {boolean} */ keep)=>(keep ? entry : takeThrough(take, thread)));
-    };
+        return andThen(mouseActivate(entry, thread), (/** @type {boolean} */ keep)=>(keep
+            ? andThen(askCursor(entry, thread), ()=>entry)
+            : takeThrough(filter, thread)));
+    });
 
     /**
      * The default window procedure, as every window procedure falls back on
@@ -2011,6 +2687,19 @@ export function createWindowFunctions(host){
                     return send(record.hwnd, WM_CLOSE, 0, 0, thread);
                 }
                 return 0;
+            case WM_SETCURSOR: {
+                // The parent decides first -- a dialog chooses for its
+                // controls -- except on a sizing border, which is the
+                // window's own. What a parent passes on names the window
+                // under the cursor in wParam, and that window's class cursor
+                // is the one set.
+                const hit = (message.lParam << 16) >> 16;
+                const parent = isChild(record) && (hit < HTSIZEFIRST || hit > HTSIZELAST)
+                    ? live(record.parent) : null;
+                return andThen(parent ? send(parent.hwnd, WM_SETCURSOR, message.wParam,
+                    message.lParam, thread) : 0, handled=>((handled >>> 0) !== 0
+                    ? 1 : setCursorOver(windows.get(message.wParam >>> 0) ?? record, hit)));
+            }
             case WM_MOUSEACTIVATE:
                 // A child asks its parent first, as the default procedure
                 // does: a dialog decides for the controls in it.
@@ -2045,13 +2734,18 @@ export function createWindowFunctions(host){
             }
             case WM_GETTEXTLENGTH:
                 return record.title.length;
+            // The system's colours are set in the context as well as the
+            // brush answered: the window text, on the 3D face or on the
+            // window colour for an edit or a list box.
             case WM_CTLCOLORSTATIC:
             case WM_CTLCOLORBTN:
             case WM_CTLCOLORDLG:
             case WM_CTLCOLORSCROLLBAR:
+                controls.helpers.defaultControlColors(message.message, message.wParam >>> 0);
                 return draw ? draw.solidBrush(sysColor(COLOR_3DFACE)) : 0;
             case WM_CTLCOLOREDIT:
             case WM_CTLCOLORLISTBOX:
+                controls.helpers.defaultControlColors(message.message, message.wParam >>> 0);
                 return 0;
             case WM_VSCROLL:
             case WM_HSCROLL:
@@ -2062,6 +2756,27 @@ export function createWindowFunctions(host){
             default:
                 return 0;
         }
+    };
+
+    /**
+     * The cursor the default procedure sets for a hit test on a window: its
+     * class cursor over the client area, answering FALSE for a class that has
+     * none, and the arrow anywhere else, answering what SetCursor answers.
+     *
+     * @param {any} record @param {number} hit
+     */
+    const setCursorOver = (record, hit)=>{
+        if (hit !== HTCLIENT)
+        {
+            return table.SetCursor.handler([IDC_ARROW]);
+        }
+        const cursor = (classNamed(record.className)?.cursor ?? 0) >>> 0;
+        if (cursor === 0)
+        {
+            return 0;
+        }
+        table.SetCursor.handler([cursor]);
+        return 1;
     };
 
     /**
@@ -2161,11 +2876,23 @@ export function createWindowFunctions(host){
         }
     };
 
+    /**
+     * The clipboard the object half keeps, once it has been built beside the
+     * controls that copy to it and paste from it.
+     *
+     * @type {import('./objects.js').ClipboardService | null}
+     */
+    let clipboardAccess = null;
+
     // The host the system classes and the common controls share: what a
     // procedure needs of the window manager around it, in one object, so a
     // control in comctl32 paints and tells its parent exactly as one here does.
     /** @type {import('./controls.js').ControlHost} */
     const controlHost = {
+        clipboard: {
+            text: ()=>clipboardAccess?.text() ?? null,
+            copy: text=>clipboardAccess?.copy(text) ?? false,
+        },
         readCString: host.readCString,
         writeMemory: host.writeMemory,
         readMemory: host.readMemory,
@@ -2232,7 +2959,7 @@ export function createWindowFunctions(host){
             windowExtra: definition.windowExtra ?? 0,
             instance: 0,
             icon: 0,
-            cursor: 0,
+            cursor: IDC_ARROW,
             background: definition.background ?? 0,
             menuName: 0,
             className: 0,
@@ -2255,7 +2982,7 @@ export function createWindowFunctions(host){
             windowExtra: definition.windowExtra,
             instance: 0,
             icon: 0,
-            cursor: 0,
+            cursor: definition.cursor ?? IDC_ARROW,
             background: definition.background,
             menuName: 0,
             className: 0,
@@ -2290,9 +3017,31 @@ export function createWindowFunctions(host){
         return 0;
     });
 
+    const rawInput = createRawInput({
+        host,
+        isWindow: hwnd=>live(hwnd) !== null,
+        focus: ()=>focusWindow() || activeWindow(),
+        foreground: hwnd=>{
+            const record = live(hwnd);
+            return record !== null && topLevelOf(record).hwnd === activeWindow();
+        },
+    });
+
     host.windowService?.({
         /** The window GetForegroundWindow answers with, or zero. */
         active: ()=>activeWindow(),
+        deactivated: ()=>!applicationActive,
+        deactivations: ()=>deactivations,
+
+        modalLoop: (hwnd, { thread, first })=>(runModal
+            ? runModal(hwnd >>> 0, thread, first) : 0),
+
+        /**
+         * One event of the mouse or the keyboard as the device reported it,
+         * for WM_INPUT: what a program that registered for raw input reads,
+         * beside the messages it has always had.
+         */
+        rawInput: rawInput.deliver,
 
         /**
          * The desktop and every window shown on it paint again: what the
@@ -2312,10 +3061,10 @@ export function createWindowFunctions(host){
         },
 
         /**
-         * One window's client rectangle, or null for a handle that names no
-         * window. Read by whoever has to answer a size a program asked for as
-         * zero -- a back buffer's, which means exactly this rectangle -- and
-         * the same measurement GetClientRect answers with.
+         * One window's client rectangle on the screen, or null for a handle
+         * that names no window. Read by whoever has to answer a size a
+         * program asked for as zero -- a back buffer's, which means exactly
+         * this rectangle -- or place a picture inside the window.
          *
          * @param {number} hwnd
          */
@@ -2407,13 +3156,14 @@ export function createWindowFunctions(host){
         // message is *sent* -- the procedure runs before this call returns --
         // and only when this call changes the visibility, because SW_SHOW on
         // an already-visible window says nothing happened and nothing did.
+        // SW_SHOWNA is the exception, told whatever it found (WmSHOWNATopVisible).
         //
         // Sent, and then chained onto whatever follows it: a procedure the
         // bridge has to run answers with a promise, so returning this call's
         // own result before it has answered hands the host call back to the
         // guest while the guest's procedure is still pending -- and the guest
         // reuses its own stack under it.
-        const greeting = wasVisible === hide
+        const greeting = wasVisible === hide || cmdShow === SW_SHOWNA
             ? send(record.hwnd, WM_SHOWWINDOW, hide ? 0 : 1, 0, host.callerThread?.())
             : 0;
         record.style = hide
@@ -2435,7 +3185,7 @@ export function createWindowFunctions(host){
         if (!hide && !SHOW_WITHOUT_ACTIVATING.has(cmdShow) && !isChild(record))
         {
             told = andThen(greeting, ()=>activate(record.hwnd,
-                { thread: host.callerThread?.(), sent: true }));
+                { thread: host.callerThread?.() }));
             raise(record);
         }
         if (!wasVisible && !hide)
@@ -2446,8 +3196,10 @@ export function createWindowFunctions(host){
             // and rasterises every glyph of its text for. Without it a program
             // keeps whatever default it started with, and its text stays
             // scaled for that instead of for its window.
+            // After the activation, not beside it: two guest calls started
+            // from one host call would run over each other's stack.
             const client = geometry.clientRect(record);
-            told = andThen(greeting, ()=>send(record.hwnd, WM_SIZE, SIZE_RESTORED,
+            told = andThen(told, ()=>send(record.hwnd, WM_SIZE, SIZE_RESTORED,
                 ((((client.bottom - client.top) & 0xffff) << 16)
                     | ((client.right - client.left) & 0xffff)) >>> 0,
                 host.callerThread?.()));
@@ -2461,6 +3213,14 @@ export function createWindowFunctions(host){
         return andThen(told, ()=>wasVisible ? 1 : 0);
     };
 
+    /**
+     * The dialog manager's modal loop, once the dialog functions below have
+     * made it.
+     *
+     * @type {((hwnd: number, thread: unknown, first?: import('./dialogs.js').ModalHook)
+     *     => Promise<number>) | null}
+     */
+    let runModal = null;
     // Named, because a message for a window with no procedure of its own is
     // handed to the default procedure in this table by `deliver` above.
     const table = {
@@ -2472,33 +3232,80 @@ export function createWindowFunctions(host){
             host: Object.assign(Object.create(host), {
                 focus: focusWindow, setFocus, active: activeWindow, activate,
                 capture: ()=>captured, setCapture, releaseCapture,
-                send, callProcedure, geometry, windowFromPoint, isChild, repaint, appear, uncover,
-                shown, raise, sysColorBrush: (/** @type {number} */ index)=>(draw
+                send, callProcedure, geometry, windowFromPoint, askedFromPoint, isChild, repaint,
+                appear, uncover,
+                shown, raise, restack, desktop: desktopWindow,
+                isDesktop: (/** @type {any} */ record)=>record !== null && record === desktop,
+                sysColorBrush: (/** @type {number} */ index)=>(draw
                     ? draw.solidBrush(sysColor(index)) : 0),
+                /**
+                 * The window of a top-level window's owner chain that was
+                 * active last, or the window itself: for one that is owned or
+                 * is a child, and for a chain none of whose popups has been.
+                 *
+                 * @param {any} record
+                 */
+                lastActivePopup: record=>{
+                    if (isChild(record) || live(record.parent))
+                    {
+                        return record.hwnd;
+                    }
+                    return live(record.lastActivePopup ?? 0)?.hwnd ?? record.hwnd;
+                },
             }),
             live, windows, classes,
         }),
-        ...createObjectFunctions({ host, live }),
+        ...createObjectFunctions({ host, live,
+            clipboardService: service=>{
+                clipboardAccess = service;
+            },
+            // A menu bar that comes or goes moves the client area, and the
+            // window hears its new size as it would from the frame change.
+            menuChanged: (record, previous)=>{
+                const now = record.menu;
+                record.menu = previous;
+                const before = geometry.clientSize(record);
+                record.menu = now;
+                const after = geometry.clientSize(record);
+                if (shown(record))
+                {
+                    appear(record);
+                }
+                if (after.width === before.width && after.height === before.height)
+                {
+                    return 1;
+                }
+                return andThen(send(record.hwnd, WM_SIZE, SIZE_RESTORED,
+                    ((after.height & 0xffff) << 16 | after.width & 0xffff) >>> 0,
+                    host.callerThread?.()), ()=>1);
+            },
+        }),
         ...createDialogFunctions({
             host: Object.assign(Object.create(host), {
                 focus: focusWindow, setFocus, send, callProcedure, geometry, children: childrenOf,
-                defDlgProc: controls.helpers.defDlgProc, keyDown: (/** @type {number} */ key)=>
+                defDlgProc: controls.helpers.dialogProc, markDefault: controls.helpers.markDefault,
+                keyDown: (/** @type {number} */ key)=>
                     ((host.keyState?.(key) ?? 0) & 0x8000) !== 0,
                 show: (/** @type {number} */ hwnd)=>{
                     const record = live(hwnd);
-                    if (record)
-                    {
-                        showWindow(record, SW_SHOW);
-                    }
+                    return record ? showWindow(record, SW_SHOW) : 0;
                 },
                 translate,
+                take: (/** @type {unknown} */ thread)=>takeThrough(
+                    { hwnd: ANY_WINDOW, first: 0, last: 0, remove: true }, thread),
             }),
             live, windows, makeWindow, destroyWindow, deliver, announce,
             // A class the program registered, by the name a template spells it.
             classNamed: name=>(classes.has(name) || [...classes.values()].some(
                 cls=>cls.name.toLowerCase() === name.toLowerCase())
                 ? classNamed(name) : null),
+            classKnown: name=>classNamed(/^#\d+$/.test(name)
+                ? atoms.get(Number(name.slice(1))) ?? name : name) !== null,
+            modalLoop: run=>{
+                runModal = run;
+            },
         }),
+        ...rawInput.table,
 
         /** ATOM RegisterClassA(const WNDCLASSA *lpWndClass) */
         RegisterClassA: {
@@ -2623,8 +3430,8 @@ export function createWindowFunctions(host){
          *   DWORD dwStyle, int X, int Y, int nWidth, int nHeight, HWND hWndParent,
          *   HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam)
          *
-         * lpParam is what WM_NCCREATE and WM_CREATE carry, and both of those are
-         * calls into the window procedure, so it goes nowhere yet.
+         * lpParam reaches the window procedure as the CREATESTRUCT's
+         * lpCreateParams, with WM_NCCREATE and again with WM_CREATE.
          */
         CreateWindowExA: {
             argBytes: 48,
@@ -2760,6 +3567,28 @@ export function createWindowFunctions(host){
                 return andThen(send(record.hwnd, WM_SETTEXT, 0, string >>> 0,
                     host.callerThread?.()), ()=>1);
             },
+        },
+
+        /**
+         * BOOL SetWindowTextW(HWND hWnd, LPCWSTR lpString)
+         *
+         * Every window here is an ANSI one, so the text reaches it as a
+         * wide caller's message reaches an ANSI window on Windows: converted
+         * to the ANSI page, in guest memory for as long as WM_SETTEXT takes.
+         */
+        SetWindowTextW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, string])=>asAnsi(string,
+                text=>table.SetWindowTextA.handler([hwnd, text])),
+        },
+
+        /** BOOL SetDlgItemTextW(HWND hDlg, int nIDDlgItem, LPCWSTR lpString) */
+        SetDlgItemTextW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([dialog, id, string])=>asAnsi(string,
+                text=>table.SetDlgItemTextA.handler([dialog, id, text])),
         },
 
         /** int GetWindowTextA(HWND hWnd, LPSTR lpString, int nMaxCount) */
@@ -3021,15 +3850,13 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([out, hwnd, filterMin, filterMax, removeFlag])=>{
                 const remove = (removeFlag & PM_REMOVE) !== 0;
-                const look = ()=>host.queue.peek({
-                    hwnd: windowFilter(hwnd),
-                    first: filterMin >>> 0,
-                    last: filterMax >>> 0,
-                    remove,
-                });
+                const filter = { hwnd: windowFilter(hwnd), first: filterMin >>> 0,
+                    last: filterMax >>> 0, remove };
+                const thread = host.callerThread?.();
                 // Only a message taken activates: a look leaves the press,
                 // and the activation, for the call that takes it.
-                const entry = remove ? takeThrough(look, host.callerThread?.()) : look();
+                const entry = remove ? takeThrough(filter, thread)
+                    : andThen(placeWaiting(filter, thread), ()=>host.queue.peek(filter));
                 return andThen(entry, (/** @type {any} */ taken)=>{
                     if (!taken)
                     {
@@ -3042,33 +3869,58 @@ export function createWindowFunctions(host){
         },
 
         /**
+         * BOOL TrackMouseEvent(LPTRACKMOUSEEVENT lpEventTrack)
+         *
+         * One window's hover or leaving, or both, reported by message:
+         * WM_MOUSEHOVER once the pointer has rested in a small square for the
+         * hover time, WM_MOUSELEAVE once it leaves the client area -- the NC
+         * pair for the frame with TME_NONCLIENT. Each message ends what it
+         * reports; a TME_QUERY answers what is still being tracked.
+         */
+        TrackMouseEvent: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([request])=>trackMouseEvent(request),
+        },
+
+        /**
          * DWORD MsgWaitForMultipleObjects(DWORD nCount, const HANDLE *pHandles,
          *   BOOL fWaitAll, DWORD dwMilliseconds, DWORD dwWakeMask)
          *
-         * A wait on handles that also ends when a message arrives, answered
-         * with the count of handles when it is the message that ended it.
-         * The handles are kernel32's business and are deferred to it; the
-         * queue is looked at here, and the two are asked in that order because
-         * a handle and a message both ready is answered with the handle.
+         * A wait on handles that also ends when input of the kinds the wake
+         * mask names arrives, answered with the count of handles when it is
+         * the input that ended it. Input is what arrived since the queue was
+         * last looked at: a message a PeekMessage has already seen does not
+         * end the wait, whether or not it was taken. With fWaitAll, the
+         * handles and the input together end it, and the handles are taken
+         * only then.
          *
-         * The wake mask is not applied: a message of any kind ends the wait.
-         * The one program-visible difference is a wait that ends a message
-         * early, and a loop written round this call goes on to pump the queue
-         * and wait again.
+         * The handles are kernel32's business and are asked of it; the queue
+         * is looked at here, and the two are asked in that order because a
+         * handle and input both ready is answered with the handle. A wait
+         * that has to be held is a poll of both on every turn the host
+         * gives, as a wait on the queue alone always was -- but only for
+         * handles a poll can answer for any thread: an event, a semaphore, a
+         * waitable timer. A thread, a process or a mutex, whose answer
+         * depends on who is waiting or whose wait hands the machine to
+         * another process, is kernel32's to hold, and a message arriving
+         * while it holds one does not end the wait.
          *
-         * A wait on nothing but the queue -- a count of zero -- is a sleep
-         * the queue can cut short. A program uses that to pump messages while
-         * waiting out an interval, and it must not stop the thread for good.
+         * A sixth and a seventh element, which no program's call carries, are
+         * MsgWaitForMultipleObjectsEx's flags: MWMO_INPUTAVAILABLE, input
+         * already waiting ending the wait too, seen or not; and
+         * MWMO_ALERTABLE, which leaves a wait on handles to kernel32, whose
+         * wait an APC can end.
          */
         MsgWaitForMultipleObjects: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([count, handles, waitAll, timeout])=>{
+            handler: ([count, handles, waitAll, timeout, wakeMask, inputAvailable, alertable])=>{
                 const total = count >>> 0;
                 const wait = timeout >>> 0;
-                const queued = ()=>host.queue.peek({
-                    hwnd: ANY_WINDOW, first: 0, last: 0, remove: false,
-                }) !== null;
+                const mask = wakeMask >>> 0;
+                const input = ()=>((inputAvailable ? host.queue.waiting() : host.queue.news())
+                    & mask) !== 0;
                 /** @param {number} milliseconds */
                 const askHandles = milliseconds=>{
                     if (total === 0)
@@ -3079,41 +3931,53 @@ export function createWindowFunctions(host){
                         ? host.waitForObjects([total, handles, waitAll, milliseconds])
                         : WAIT_FAILED;
                 };
+                /** @returns {any} what the wait answers now, or null while it goes on */
+                const settle = ()=>{
+                    if (waitAll !== 0 && total > 0)
+                    {
+                        if (!input())
+                        {
+                            return null;
+                        }
+                        const all = askHandles(0);
+                        return all === WAIT_TIMEOUT ? null : all;
+                    }
+                    const polled = askHandles(0);
+                    if (polled !== WAIT_TIMEOUT)
+                    {
+                        return polled;
+                    }
+                    return input() ? WAIT_OBJECT_0 + total : null;
+                };
 
-                // Handles first, then the queue: a poll answers both at once.
-                const polled = askHandles(0);
-                if (polled !== WAIT_TIMEOUT)
+                const settled = settle();
+                if (settled !== null)
                 {
-                    return polled;
-                }
-                if (queued())
-                {
-                    return WAIT_OBJECT_0 + total;
+                    return settled;
                 }
                 if (wait === 0)
                 {
                     return WAIT_TIMEOUT;
                 }
-                // A real wait with handles in it is kernel32's to hold, and a
-                // handle that can only be signalled by a process that is to
-                // take this one's place holds it for good. What is given up
-                // is a message arriving while it is held; nobody posts one to
-                // a thread that is stopped.
-                if (total > 0)
+                if (total > 0 && (alertable || !pollable(handles >>> 0, total)))
                 {
                     return askHandles(wait);
                 }
                 const deadline = wait === INFINITE ? null : (host.now?.() ?? 0) + wait;
                 return (async()=>{
-                    while (!queued())
+                    for (;;)
                     {
                         if (deadline !== null && (host.now?.() ?? 0) >= deadline)
                         {
                             return WAIT_TIMEOUT;
                         }
                         await host.idle();
+                        const answer = settle();
+                        if (answer !== null)
+                        {
+                            return answer;
+                        }
                     }
-                    return WAIT_OBJECT_0;
                 })();
             },
         },
@@ -3130,15 +3994,10 @@ export function createWindowFunctions(host){
                     // as `while (GetMessage(...))` spins forever on it.
                     return -1;
                 }
-                const take = ()=>host.queue.peek({
-                    hwnd: filter,
-                    first: filterMin >>> 0,
-                    last: filterMax >>> 0,
-                    remove: true,
-                });
-
+                const wanted = { hwnd: filter, first: filterMin >>> 0, last: filterMax >>> 0,
+                    remove: true };
                 const thread = host.callerThread?.();
-                const next = ()=>takeThrough(take, thread);
+                const next = ()=>takeThrough(wanted, thread);
                 /** @param {any} entry */
                 const answer = entry=>{
                     writeMessage(host, out, entry);
@@ -3232,6 +4091,42 @@ export function createWindowFunctions(host){
                         if ((await call(callback >>> 0, [hwnd, lParam >>> 0], thread) | 0) === 0)
                         {
                             break;
+                        }
+                    }
+                    return 1;
+                })();
+            },
+        },
+
+        /**
+         * BOOL EnumWindows(WNDENUMPROC lpEnumFunc, LPARAM lParam)
+         *
+         * Every top-level window, hidden ones too, topmost first -- the
+         * order they are kept in, reversed -- each handed to the callback
+         * until one answers FALSE, which the call then answers too. The list
+         * is taken first, as EnumChildWindows takes its own.
+         */
+        EnumWindows: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([callback, lParam])=>{
+                const call = host.call;
+                if (!call || (callback >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const thread = host.callerThread?.();
+                const listed = [...windows.values()]
+                    .filter(record=>!record.destroyed && !isChild(record))
+                    .reverse()
+                    .map(record=>record.hwnd);
+                return (async()=>{
+                    for (const hwnd of listed)
+                    {
+                        if ((await call(callback >>> 0, [hwnd, lParam >>> 0], thread) | 0) === 0)
+                        {
+                            return 0;
                         }
                     }
                     return 1;

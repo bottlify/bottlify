@@ -25,6 +25,8 @@
  *   size. That is what `readSurfaceDesc` returning null encodes.
  */
 
+import { DDSD_CKDESTBLT, DDSD_CKSRCBLT } from './constants.js';
+
 /**
  * DDPIXELFORMAT. Five of its eight fields are unions; the alias names are
  * listed at the offset they share.
@@ -108,6 +110,26 @@ export const DDSURFACEDESC2 = Object.freeze({
     dwTextureStage: 0x78,
     SIZE: 0x7c,
 });
+
+/**
+ * DDDEVICEIDENTIFIER2, which IDirectDraw7 fills. IDirectDraw4's
+ * DDDEVICEIDENTIFIER is the same structure without its last field, so its
+ * size is where the WHQL level would start. The strings are fixed arrays of
+ * MAX_DDDEVICEID_STRING bytes, not pointers.
+ */
+export const DDDEVICEIDENTIFIER2 = Object.freeze({
+    szDriver: 0x000,
+    szDescription: 0x200,
+    liDriverVersion: 0x400,
+    dwVendorId: 0x408,
+    dwDeviceId: 0x40c,
+    dwSubSysId: 0x410,
+    dwRevision: 0x414,
+    guidDeviceIdentifier: 0x418,
+    dwWHQLLevel: 0x428,
+    SIZE: 0x42c,
+});
+export const MAX_DDDEVICEID_STRING = 512;
 
 /**
  * @typedef {Object} DrawMemory
@@ -200,6 +222,9 @@ export function writePixelFormat(memory, address, format){
  * @property {number} caps
  * @property {number} caps2        Zero for the older layout, which has no such field.
  * @property {PixelFormatFields} pixelFormat
+ * @property {{ low: number, high: number }} [srcColorKey]   Read and written under DDSD_CKSRCBLT.
+ * @property {{ low: number, high: number }} [destColorKey]  Read and written under DDSD_CKDESTBLT.
+ * @property {number} [surfacePointer]  lpSurface: memory the program hands over, or a lock's.
  */
 
 /**
@@ -222,8 +247,13 @@ export function readSurfaceDesc(memory, address, layout){
     }
     /** @param {number} offset */
     const field = offset=>readU32(memory, address + offset);
+    const flags = field(layout.dwFlags);
+    /** @param {number} flag @param {number} offset */
+    const keyAt = (flag, offset)=>((flags & flag) !== 0
+        ? { low: field(offset), high: field(offset + 4) }
+        : undefined);
     return {
-        flags: field(layout.dwFlags),
+        flags,
         width: field(layout.dwWidth),
         height: field(layout.dwHeight),
         pitch: field(layout.lPitch),
@@ -233,6 +263,9 @@ export function readSurfaceDesc(memory, address, layout){
         caps: field(layout.dwCaps),
         caps2: 'dwCaps2' in layout ? field(layout.dwCaps2) : 0,
         pixelFormat: readPixelFormat(memory, address + layout.ddpfPixelFormat),
+        srcColorKey: keyAt(DDSD_CKSRCBLT, layout.ddckCKSrcBlt),
+        destColorKey: keyAt(DDSD_CKDESTBLT, layout.ddckCKDestBlt),
+        surfacePointer: field(layout.lpSurface),
     };
 }
 
@@ -248,7 +281,7 @@ export function readSurfaceDesc(memory, address, layout){
  * @param {DrawMemory} memory
  * @param {number} address
  * @param {typeof DDSURFACEDESC | typeof DDSURFACEDESC2} layout
- * @param {SurfaceDescFields & { surfacePointer?: number }} desc
+ * @param {SurfaceDescFields} desc
  */
 export function writeSurfaceDesc(memory, address, layout, desc){
     writeU32(memory, address + layout.dwSize, layout.SIZE);
@@ -265,6 +298,14 @@ export function writeSurfaceDesc(memory, address, layout, desc){
         writeU32(memory, address + layout.dwCaps2, desc.caps2);
     }
     writePixelFormat(memory, address + layout.ddpfPixelFormat, desc.pixelFormat);
+    for (const [key, offset] of /** @type {const} */ ([
+        [desc.srcColorKey, layout.ddckCKSrcBlt],
+        [desc.destColorKey, layout.ddckCKDestBlt],
+    ]))
+    {
+        writeU32(memory, address + offset, key?.low ?? 0);
+        writeU32(memory, address + offset + 4, key?.high ?? 0);
+    }
 }
 
 /**

@@ -305,18 +305,32 @@ export const loaderModule = {
              */
             synthesise({ name, base, exports, entryPoint }){
                 const module = synthesiseModule({ name, base, exports, entryPoint });
+                const codeSize = module.dataRva || module.size;
 
                 memory.register({
                     name,
                     base,
-                    size: module.size,
+                    size: codeSize,
                     kind: memory.RegionKind.IMAGE,
                     // Written once, at assembly, and executable from then on:
                     // the exports are jumps and the guest runs them.
                     access: memory.Access.READ_WRITE_EXECUTE,
                 });
-                memory.writeBytes(base, module.bytes);
+                memory.writeBytes(base, module.bytes.subarray(0, codeSize));
                 memory.protect(name, memory.Access.READ_EXECUTE);
+                if (module.dataRva !== 0)
+                {
+                    // The variables are written by the program and by the
+                    // library's own functions alike, as a real `.data` is.
+                    memory.register({
+                        name: `${name} .data`,
+                        base: base + module.dataRva,
+                        size: module.size - module.dataRva,
+                        kind: memory.RegionKind.IMAGE,
+                        access: memory.Access.READ_WRITE,
+                    });
+                    memory.writeBytes(base + module.dataRva, module.bytes.subarray(module.dataRva));
+                }
 
                 const entryAddress = module.entryPointRva === 0 ? 0 : base + module.entryPointRva;
                 const record = { base, entryPoint: entryAddress, unresolved: [], name };

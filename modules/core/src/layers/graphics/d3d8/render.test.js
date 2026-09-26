@@ -34,8 +34,10 @@ import {
 import { createDirect3D8 } from './device.js';
 import {
     IDENTITY, LIGHT_FLOATS, UNIFORM_AT, UNIFORM_FLOATS, colorToFloats, expandTexels, eyePosition,
-    HARDWARE_SAMPLER, listIndices, multiplyMatrices, packLight, pipelineStateOf, samplerFlagsOf,
-    screenExtent, transformPosition, uniformBlock, fogModeOf,
+    normalMatrixOf,
+    HARDWARE_SAMPLER, filledIndices, listIndices, multiplyMatrices, packLight, pipelineStateOf,
+    samplerFlagsOf,
+    screenExtent, transformPosition, uniformBlock, fogModeOf, fogOf, isAffine,
     vertexCountOf,
 } from './render.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -43,8 +45,11 @@ import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { viewportState } from '../webgpu/internal/viewport.js';
 import {
-    clear as referenceClear, createReferenceSurface, fillRect, toBase64,
+    clear as referenceClear, createReferenceSurface, fillRect, fogFactor,
+    fogged as referenceFogged, toBase64,
 } from '../webgpu/internal/reference.js';
+import { generateFixedFunction } from '../webgpu/internal/fixedfunction.js';
+import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
 
 /**
  * The sampler state of stage zero as the last uniform block on the queue carries it.
@@ -632,11 +637,16 @@ test('a texture in a luminance format is created rather than refused', ()=>{
 });
 
 test('byte-exact: strips and fans expand to the lists they draw, winding kept', ()=>{
+    // Each triangle starts at the vertex a flat-shaded one takes its colours
+    // from: a fan's first after the hub, which EXT_provoking_vertex (issue 7)
+    // records as DirectX 9's, and a strip triangle's own first -- Wine's
+    // test_shademode has the second triangle of a strip coloured by vertex 1.
     assert.deepEqual([...listIndices(D3DPT.TRIANGLEFAN, [0, 1, 2, 3, 4])],
-        [0, 1, 2, 0, 2, 3, 0, 3, 4]);
-    // The odd triangle is flipped so the strip faces one way throughout.
+        [1, 2, 0, 2, 3, 0, 3, 4, 0]);
+    // The odd triangle is turned so the strip faces one way throughout, and
+    // rotated so it still starts at its first vertex.
     assert.deepEqual([...listIndices(D3DPT.TRIANGLESTRIP, [0, 1, 2, 3])],
-        [0, 1, 2, 2, 1, 3]);
+        [0, 1, 2, 1, 3, 2]);
     assert.deepEqual([...listIndices(D3DPT.LINESTRIP, [5, 6, 7])], [5, 6, 6, 7]);
     assert.ok(listIndices(D3DPT.TRIANGLEFAN, [0, 1, 70000]) instanceof Uint32Array,
         'an index past sixteen bits widens the list');
@@ -644,6 +654,20 @@ test('byte-exact: strips and fans expand to the lists they draw, winding kept', 
     assert.equal(vertexCountOf(D3DPT.TRIANGLELIST, 2), 6);
     assert.equal(vertexCountOf(7, 2), 0, 'not a primitive type');
     assert.equal(vertexCountOf(D3DPT.POINTLIST, 0), 0);
+});
+
+test('byte-exact: triangles under a fill mode become their edges or their vertices', ()=>{
+    // D3DFILL_WIREFRAME draws each triangle's three edges and D3DFILL_POINT
+    // its three vertices (Microsoft's D3DFILLMODE), whatever type of
+    // triangles they are.
+    assert.deepEqual([...filledIndices(D3DPT.TRIANGLELIST, [0, 1, 2, 3, 4, 5], 2)],
+        [0, 1, 1, 2, 2, 0, 3, 4, 4, 5, 5, 3]);
+    assert.deepEqual([...filledIndices(D3DPT.TRIANGLESTRIP, [0, 1, 2, 3], 2)],
+        [0, 1, 1, 2, 2, 0, 1, 3, 3, 2, 2, 1]);
+    assert.deepEqual([...filledIndices(D3DPT.TRIANGLEFAN, [0, 1, 2, 3], 1)],
+        [1, 2, 0, 2, 3, 0]);
+    assert.deepEqual([...filledIndices(D3DPT.TRIANGLELIST, [7, 8, 9, 10], 1)], [7, 8, 9],
+        'an incomplete triangle draws nothing');
 });
 
 // --- recorded commands: what the GPU was asked to do ---
@@ -810,6 +834,41 @@ test('recorded: a DISCARD lock renames, and the earlier draw reads the old gener
     assert.equal(written[1].bytes[0], 2);
     assert.equal(written[0].size, 60, 'only the locked range travels after a DISCARD');
     assert.equal(written[1].size, 60);
+    out.buffer.release();
+});
+
+test('recorded: NOOVERWRITE with DISCARD is NOOVERWRITE, and the buffer is not renamed', async()=>{
+    // Wine's d3d8 and d3d9 test_map_synchronisation have
+    // D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD lock unsynchronised, as
+    // NOOVERWRITE alone does: the program promises not to touch what a draw
+    // reads, and the contents outside the locked range are kept. Taken as a
+    // DISCARD the buffer was renamed and everything outside the range lost.
+    const h = harness();
+    const { device, gpu } = h;
+    /** @type {{ buffer?: any }} */
+    const out = {};
+    assert.equal(device.CreateVertexBuffer(1024, 0, FVF_QUAD, D3DPOOL.DEFAULT, out), D3D_OK);
+    /** @param {number} at @param {number} value @param {number} flags */
+    const fill = (at, value, flags)=>{
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(out.buffer.Lock(at, 60, locked, flags), D3D_OK);
+        h.write(/** @type {number} */ (locked.pBits), new Uint8Array(60).fill(value));
+        assert.equal(out.buffer.Unlock(), D3D_OK);
+    };
+
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.SetStreamSource(0, out.buffer, 20), D3D_OK);
+    fill(0, 1, D3DLOCK.DISCARD);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    fill(60, 2, D3DLOCK.DISCARD | D3DLOCK.NOOVERWRITE);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 3, 1), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const bound = gpu.of('setVertexBuffer').map((/** @type {any} */ call)=>call.buffer);
+    assert.equal(bound[0], bound[1], 'one generation serves both draws');
     out.buffer.release();
 });
 
@@ -1132,6 +1191,8 @@ test('the sampler state packs as the shader unpacks it', ()=>{
     assert.equal(samplerFlagsOf(states), 1 | (2 << 2) | (1 << 4) | (0 << 5) | (2 << 6) | (3 << 8));
     assert.equal((samplerFlagsOf(states, false) >> 6) & 3, 0, 'mips off: no mip mode');
     assert.equal(samplerFlagsOf(new Map()), 1 << 4 | 1 << 5, 'the defaults: wrap, point, no mips');
+    assert.equal(samplerFlagsOf(new Map([[D3DTSS.ADDRESSW, D3DTADDRESS.CLAMP]])) >>> 16, 2,
+        'a volume\'s third address mode above the rest');
 });
 
 test('recorded: a texture is uploaded after it is unlocked, and only then', async()=>{
@@ -1168,6 +1229,52 @@ test('recorded: a texture is uploaded after it is unlocked, and only then', asyn
     assert.equal(gpu.count('writeTexture'), 2, 'the unlock made it dirty again');
     assert.deepEqual([...gpu.of('writeTexture')[1].bytes], [1, 1, 1, 255]);
 });
+
+test('recorded: a managed texture keeps its GPU copy through a lock that promised no change',
+    async()=>{
+        // Wine's d3d8 add_dirty_rect_test: a managed texture's read-only and
+        // NO_DIRTY_UPDATE locks are not uploaded, and AddDirtyRect uploads
+        // what they wrote; a default-pool texture's lock always is.
+        const h = harness();
+        const { device, gpu } = h;
+        const texture = textureFrom(h, 1, 1, D3DFMT.X8R8G8B8, Uint8Array.from([9, 8, 7, 0]));
+        assert.equal(device.SetTexture(0, texture), D3D_OK);
+        selectTexture(device);
+        assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+        const draw = async()=>{
+            assert.equal(device.BeginScene(), D3D_OK);
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28),
+                D3D_OK);
+            assert.equal(device.EndScene(), D3D_OK);
+            await h.present();
+            return gpu.count('writeTexture');
+        };
+        /** @param {any} target @param {number} flags @param {number} value */
+        const write = (target, flags, value)=>{
+            /** @type {{ pBits?: number }} */
+            const locked = {};
+            assert.equal(target.LockRect(0, locked, null, flags), D3D_OK);
+            h.write(/** @type {number} */ (locked.pBits), Uint8Array.from([value, value, value, 0]));
+            assert.equal(target.UnlockRect(0), D3D_OK);
+        };
+        assert.equal(await draw(), 1);
+        write(texture, D3DLOCK.READONLY, 1);
+        write(texture, 0x8000, 2);
+        assert.equal(await draw(), 1, 'neither lock went up');
+        assert.equal(texture.AddDirtyRect(null), D3D_OK);
+        assert.equal(await draw(), 2, 'AddDirtyRect sends what they wrote');
+        assert.deepEqual([...gpu.of('writeTexture')[1].bytes], [2, 2, 2, 255]);
+
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(1, 1, 1, 0x200, D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT, out),
+            D3D_OK);
+        assert.equal(device.SetTexture(0, out.texture), D3D_OK);
+        write(out.texture, 0, 3);
+        assert.equal(await draw(), 3);
+        write(out.texture, 0x8000, 4);
+        assert.equal(await draw(), 4, 'a dynamic texture\'s lock is its texture');
+    });
 
 test('recorded: a chain of levels goes up level by level, into a texture with that many',
     async()=>{
@@ -1263,6 +1370,241 @@ test('mips can be switched off for a run, and every sample comes from the top le
         'the top level alone, whatever the program asked');
 });
 
+test('recorded: a managed texture\'s level of detail is the finest level a sample reaches',
+    async()=>{
+        // Wine's d3d9 maxmip_test: the finer of MAXMIPLEVEL and the texture's
+        // own LOD limits the sample, and a LOD set between two draws of one
+        // state is the second draw's.
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(4, 4, 3, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, out),
+            D3D_OK);
+        const texture = out.texture;
+        assert.equal(device.SetTexture(0, texture), D3D_OK);
+        selectTexture(device);
+        assert.equal(device.SetTextureStageState(0, D3DTSS.MIPFILTER, D3DTEXF.POINT), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+        const draw = async()=>{
+            assert.equal(device.BeginScene(), D3D_OK);
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28),
+                D3D_OK);
+            assert.equal(device.EndScene(), D3D_OK);
+            await h.present();
+            return (stageFlagsWritten(gpu) >> 8) & 0xff;
+        };
+        assert.equal(await draw(), 0);
+        assert.equal(texture.SetLOD(1), 0);
+        assert.equal(await draw(), 1, 'the texture\'s level');
+        assert.equal(device.SetTextureStageState(0, D3DTSS.MAXMIPLEVEL, 2), D3D_OK);
+        assert.equal(await draw(), 2, 'the stage\'s, when it is the coarser');
+    });
+
+test('recorded: a cube map is six layers of one texture, each face going up into its own',
+    async()=>{
+        // A cube stage reads a direction -- three components of the set the
+        // vertex carries -- through a cube view, bound where the layout says
+        // a cube is; a face written again is that face sent again.
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateCubeTexture(4, 2, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, out),
+            D3D_OK);
+        const cube = out.texture;
+        /** @param {number} face @param {number} level @param {number} value */
+        const fill = (face, level, value)=>{
+            /** @type {{ pBits?: number }} */
+            const locked = {};
+            assert.equal(cube.LockCubeRect(face, level, locked, null, 0), D3D_OK);
+            const extent = 4 >> level;
+            h.write(/** @type {number} */ (locked.pBits),
+                new Uint8Array(extent * extent * 4).fill(value));
+            assert.equal(cube.UnlockCubeRect(face, level), D3D_OK);
+        };
+        for (let face = 0; face < 6; face++)
+        {
+            fill(face, 0, 10 + face);
+            fill(face, 1, 20 + face);
+        }
+        assert.equal(device.SetTexture(0, cube), D3D_OK);
+        selectTexture(device);
+        const threeComponents = 1 << 16;
+        const draw = async()=>{
+            assert.equal(device.BeginScene(), D3D_OK);
+            assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD | threeComponents), D3D_OK);
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(96), 32),
+                D3D_OK);
+            assert.equal(device.EndScene(), D3D_OK);
+            await h.present();
+        };
+        await draw();
+
+        const made = gpu.of('createTexture').find(
+            (/** @type {any} */ call)=>call.descriptor.label === 'cube');
+        assert.ok(made, 'the cube was made as one texture');
+        assert.equal(made.descriptor.size.depthOrArrayLayers, 6);
+        assert.equal(made.descriptor.mipLevelCount, 2);
+        assert.ok(gpu.of('createView').some((/** @type {any} */ call)=>call.texture === made.texture
+            && call.view.viewDescriptor?.dimension === 'cube'), 'sampled through a cube view');
+        /** @param {any} call */
+        const shape = call=>[call.destination.origin?.z ?? 0, call.destination.mipLevel,
+            call.size.width, call.bytes[0]];
+        const uploads = ()=>gpu.of('writeTexture')
+            .filter((/** @type {any} */ call)=>call.destination.texture === made.texture)
+            .map(shape);
+        assert.deepEqual(uploads(), Array.from({ length: 6 },
+            (_, face)=>[[face, 0, 4, 10 + face], [face, 1, 2, 20 + face]]).flat());
+
+        const layouts = gpu.of('createBindGroupLayout').map(
+            (/** @type {any} */ call)=>call.createBindGroupLayout?.descriptor ?? call.descriptor);
+        assert.ok(layouts.some((/** @type {any} */ layout)=>layout.entries.some(
+            (/** @type {any} */ entry)=>entry.texture?.viewDimension === 'cube')),
+        'the stage\'s binding takes a cube view');
+        const code = gpu.of('createShaderModule')
+            .map((/** @type {any} */ call)=>call.descriptor.code).join('\n');
+        assert.match(code, /var texture0: texture_cube<f32>;/);
+        assert.match(code, /texCoord0: vec4f/, 'the set carries its third component');
+
+        fill(3, 1, 99);
+        await draw();
+        assert.deepEqual(uploads().slice(12), [[3, 1, 2, 99]]);
+    });
+
+test('recorded: a volume texture is one texture of three dimensions, each level all its slices',
+    async()=>{
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateVolumeTexture(4, 4, 2, 2, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED,
+            out), D3D_OK);
+        const volume = out.texture;
+        /** @param {number} level @param {number} value @param {number} [flags] */
+        const fill = (level, value, flags = 0)=>{
+            /** @type {{ pBits?: number, SlicePitch?: number }} */
+            const locked = {};
+            assert.equal(volume.LockBox(level, locked, null, flags), D3D_OK);
+            const slices = level === 0 ? 2 : 1;
+            h.write(/** @type {number} */ (locked.pBits),
+                new Uint8Array(slices * /** @type {number} */ (locked.SlicePitch)).fill(value));
+            assert.equal(volume.UnlockBox(level), D3D_OK);
+        };
+        fill(0, 10);
+        fill(1, 20);
+        assert.equal(device.SetTexture(0, volume), D3D_OK);
+        selectTexture(device);
+        assert.equal(device.SetTextureStageState(0, D3DTSS.ADDRESSW, D3DTADDRESS.CLAMP), D3D_OK);
+        const threeComponents = 1 << 16;
+        const draw = async()=>{
+            assert.equal(device.BeginScene(), D3D_OK);
+            assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD | threeComponents), D3D_OK);
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(96), 32),
+                D3D_OK);
+            assert.equal(device.EndScene(), D3D_OK);
+            await h.present();
+        };
+        await draw();
+
+        const made = gpu.of('createTexture').find(
+            (/** @type {any} */ call)=>call.descriptor.label === 'volume');
+        assert.ok(made, 'the volume was made as one texture');
+        assert.equal(made.descriptor.dimension, '3d');
+        assert.equal(made.descriptor.size.depthOrArrayLayers, 2);
+        assert.equal(made.descriptor.mipLevelCount, 2);
+        assert.ok(gpu.of('createView').some((/** @type {any} */ call)=>call.texture === made.texture
+            && call.view.viewDescriptor?.dimension === '3d'), 'sampled through a 3D view');
+        /** @param {any} call */
+        const shape = call=>[call.destination.mipLevel, call.size.width, call.size.height,
+            call.size.depthOrArrayLayers, call.bytes.length, call.bytes[0]];
+        const uploads = ()=>gpu.of('writeTexture')
+            .filter((/** @type {any} */ call)=>call.destination.texture === made.texture)
+            .map(shape);
+        assert.deepEqual(uploads(), [[0, 4, 4, 2, 128, 10], [1, 2, 2, 1, 16, 20]]);
+        const layouts = gpu.of('createBindGroupLayout').map(
+            (/** @type {any} */ call)=>call.descriptor);
+        assert.ok(layouts.some((/** @type {any} */ layout)=>layout.entries.some(
+            (/** @type {any} */ entry)=>entry.texture?.viewDimension === '3d')));
+        const code = gpu.of('createShaderModule')
+            .map((/** @type {any} */ call)=>call.descriptor.code).join('\n');
+        assert.match(code, /var texture0: texture_3d<f32>;/);
+        assert.equal((stageFlagsWritten(gpu) >>> 16) & 3, 2, 'the third axis clamps');
+
+        // A managed volume keeps its copy through a read-only lock; a level
+        // written again is that level sent again.
+        fill(1, 30, D3DLOCK.READONLY);
+        await draw();
+        assert.equal(uploads().length, 2);
+        fill(1, 40);
+        await draw();
+        assert.deepEqual(uploads().slice(2), [[1, 2, 2, 1, 16, 40]]);
+    });
+
+test('recorded: a default-pool volume goes up after UpdateTexture writes it', async()=>{
+    const h = harness();
+    const { device, gpu } = h;
+    /** @param {number} pool */
+    const volume = pool=>{
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateVolumeTexture(2, 2, 2, 1, 0, D3DFMT.X8R8G8B8, pool, out),
+            D3D_OK);
+        return out.texture;
+    };
+    const source = volume(D3DPOOL.SYSTEMMEM);
+    const destination = volume(D3DPOOL.DEFAULT);
+    assert.equal(device.SetTexture(0, destination), D3D_OK);
+    selectTexture(device);
+    const draw = async()=>{
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD | (1 << 16)), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(96), 32),
+            D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+    };
+    await draw();
+    const made = gpu.of('createTexture').find(
+        (/** @type {any} */ call)=>call.descriptor.label === 'volume');
+    const uploads = ()=>gpu.of('writeTexture')
+        .filter((/** @type {any} */ call)=>call.destination.texture === made.texture).length;
+    assert.equal(uploads(), 1);
+    await draw();
+    assert.equal(uploads(), 1, 'nothing written, nothing sent');
+    /** @type {{ moves?: any[] }} */
+    const moved = {};
+    assert.equal(device.UpdateTexture(source, destination, moved), D3D_OK);
+    assert.equal(moved.moves?.length, 2, 'a move per slice');
+    await draw();
+    assert.equal(uploads(), 2);
+});
+
+test('recorded: with ZENABLE off no depth is written, whatever ZWRITEENABLE says', async()=>{
+    // Direct3D ties the write to the test: ZENABLE=FALSE with ZWRITEENABLE=TRUE
+    // leaves the depth buffer as it was. WebGPU writes under an 'always'
+    // compare, so the write has to be switched off with the test.
+    /** @param {number} zenable */
+    const drawWith = async zenable=>{
+        const h = harness();
+        const { device, gpu } = h;
+        assert.equal(device.SetRenderState(D3DRS.ZENABLE, zenable), D3D_OK);
+        assert.equal(device.SetRenderState(D3DRS.ZWRITEENABLE, 1), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        return gpu.of('createRenderPipeline')[0].descriptor.depthStencil;
+    };
+
+    const off = await drawWith(0);
+    assert.equal(off.depthCompare, 'always');
+    assert.equal(off.depthWriteEnabled, false);
+    const on = await drawWith(1);
+    assert.equal(on.depthWriteEnabled, true, 'and with the test on, the write is ZWRITEENABLE');
+});
+
 test('recorded: a whole clear is a clearing pass, a partial clear a scissored quad', async()=>{
     const h = harness();
     const { device, gpu } = h;
@@ -1344,7 +1686,7 @@ test('recorded: an indexed strip is expanded to a list from the bytes the progra
     const scratch = gpu.of('writeBuffer').find((/** @type {any} */ call)=>
         call.buffer === bound[0].buffer);
     assert.deepEqual([...new Uint16Array(scratch.bytes.buffer, scratch.bytes.byteOffset, 6)],
-        [3, 2, 1, 1, 2, 0], 'the strip the program wrote, as a list');
+        [3, 2, 1, 2, 0, 1], 'the strip the program wrote, as a list');
     const pipelines = gpu.of('createRenderPipeline').map((/** @type {any} */ call)=>
         call.descriptor.primitive.topology);
     assert.deepEqual(pipelines, ['triangle-list'], 'one pipeline serves both');
@@ -1375,34 +1717,33 @@ test('recorded: a fan drawn from user memory is expanded, and unbinds stream zer
     out.buffer.release();
 });
 
-test('recorded: a bound shader is counted and not drawn as fixed function', async()=>{
-    const h = harness();
-    const { device, gpu } = h;
-    /** @type {{ handle?: number }} */
-    const shader = {};
-    assert.equal(device.CreateVertexShader([0], null, shader), D3D_OK);
-    /** @type {{ handle?: number }} */
-    const pixel = {};
-    assert.equal(device.CreatePixelShader([0], pixel), D3D_OK);
+test('recorded: a bound pixel shader is drawn through its translation, not as fixed function',
+    async()=>{
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ handle?: number }} */
+        const pixel = {};
+        // ps_1_1: mov r0, v0.
+        assert.equal(device.CreatePixelShader([0xffff0101, 0x00000001, 0x800f0000, 0x90e40000,
+            0x0000ffff], pixel), D3D_OK);
 
-    assert.equal(device.BeginScene(), D3D_OK);
-    assert.equal(device.SetVertexShader(shader.handle ?? 0), D3D_OK);
-    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK,
-        'the program is told the draw succeeded');
-    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
-    assert.equal(device.SetPixelShader(pixel.handle ?? 0), D3D_OK);
-    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK);
-    assert.equal(device.SetPixelShader(0), D3D_OK);
-    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK);
-    assert.equal(device.EndScene(), D3D_OK);
-    await h.present();
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+        assert.equal(device.SetPixelShader(pixel.handle ?? 0), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20),
+            D3D_OK);
+        assert.equal(device.SetPixelShader(0), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20),
+            D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
 
-    assert.equal(gpu.count('draw'), 1, 'only the fixed-function draw reached the pass');
-    const skipped = h.device.diagnostics().skipped;
-    assert.equal(skipped.vertexShader, 1, 'a vertex shader draw would be wrong geometry');
-    assert.equal(skipped.pixelShader, 1, 'a pixel shader draw would be the wrong formula');
-    assert.deepEqual(h.device.diagnostics().failures, []);
-});
+        assert.equal(gpu.count('draw'), 2);
+        const diagnostics = h.device.diagnostics();
+        assert.equal(diagnostics.programmable, 1, 'the first through the shader');
+        assert.equal(diagnostics.skipped.pixelShader, 0);
+        assert.deepEqual(diagnostics.failures, []);
+    });
 
 test('recorded: a stream whose stride is not the format\'s is counted, not misread', async()=>{
     const h = harness();
@@ -1623,6 +1964,34 @@ test('the camera is the point the view matrix sends to the origin', ()=>{
     assert.deepEqual(eyePosition(new Array(16).fill(0)), [0, 0, 0]);
 });
 
+test('a normal goes through the inverse transpose of the world matrix', ()=>{
+    // Wine's d3d9 lighting_test lights a quad whose normal faces the default
+    // directional light under four world matrices: identity, a singular one
+    // and a rotation with translation all light it fully, and a non-affine
+    // one -- a w of -z -- leaves it black. The inverse transpose of the whole
+    // 4x4 does exactly that; the world matrix itself turns the singular
+    // case's normal aside, and its upper 3x3 alone lights the non-affine one.
+    // With no inverse, the adjugate stands in: the direction is what counts.
+    const through = (/** @type {number[]} */ world, /** @type {number[]} */ normal)=>{
+        const n = normalMatrixOf(world);
+        return [0, 1, 2].map(column=>
+            normal[0] * n[column] + normal[1] * n[4 + column] + normal[2] * n[8 + column]);
+    };
+    /** @param {number[]} normal  lit by the default light, travelling along +z */
+    const lit = normal=>Math.min(1, Math.max(0, -normal[2]));
+    assert.equal(lit(through([...IDENTITY], [0, 0, -1])), 1);
+    assert.equal(lit(through([1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0.5, 1], [0, 0, -1])), 1,
+        'singular');
+    assert.equal(lit(through([0, 0, 1, 0, 0, 1, 0, 0, -1, 0, 0, 0, 10, 10, 10, 1],
+        [-1, 0, 0])), 1, 'rotated and translated');
+    assert.equal(lit(through([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -1, 10, 10, 10, 0], [0, 0, -1])),
+        0, 'non-affine');
+    // A mirror flips the normal with it, as an inverse does and an adjugate
+    // would not.
+    assert.deepEqual(through([-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], [1, 0, 0]),
+        [-1, 0, 0]);
+});
+
 test('a light is packed into the rows the shader declares', ()=>{
     // Every row is read by offset. A field one row out is read as a different
     // one, and every one of them is a plausible number.
@@ -1648,6 +2017,70 @@ test('a light is packed into the rows the shader declares', ()=>{
     packLight(degenerate, 0, light8({ Direction: { x: 0, y: 0, z: 0 } }));
     assert.deepEqual([...degenerate.subarray(16, 20)], [0, 0, 0, 0]);
 });
+
+test('recorded: each lit draw carries the normal matrix of its own world', async()=>{
+    // The world moves between draws of one prepared state, and a normal moves
+    // with it: the block of each draw carries the inverse transpose of that
+    // draw's world, not the first one's.
+    const h = harness();
+    const { device } = h;
+    assert.equal(device.SetRenderState(D3DRS.LIGHTING, 1), D3D_OK);
+    assert.equal(device.SetLight(0, light8()), D3D_OK);
+    assert.equal(device.LightEnable(0, true), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF.XYZ | FVF.NORMAL | FVF.DIFFUSE), D3D_OK);
+    const vertices = new Uint8Array(28 * 3);
+    [[0, 0, 0], [1, 0, 0], [0, 1, 0]].forEach((at, index)=>
+        vertices.set(litVertexBytes(at), index * 28));
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, vertices, 28), D3D_OK);
+    const scaled = Float32Array.from(IDENTITY);
+    scaled[0] = 2;
+    assert.equal(device.SetTransform(D3DTS.WORLD, scaled), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, vertices, 28), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    const draws = h.device.diagnostics().lastFrame
+        .filter((/** @type {any} */ command)=>command.kind === 'draw');
+    const at = UNIFORM_AT.normalMatrix;
+    assert.deepEqual([...draws[0].uniforms.subarray(at, at + 16)], [...IDENTITY]);
+    assert.equal(draws[1].uniforms[at], 0.5, 'x scaled by two carries a normal by a half');
+});
+
+test('recorded: a coordinate generated from the normal carries it as a normal into camera space',
+    async()=>{
+        // D3DTSS_TCI_CAMERASPACENORMAL: the normal through the inverse
+        // transpose of world then view, as a lit normal goes through the
+        // world's -- a view doubling x carries a normal by a half there, where
+        // world-view itself would double it. Each draw carries its own.
+        const h = harness();
+        const { device } = h;
+        /** @type {{ texture?: any }} */
+        const made = {};
+        assert.equal(device.CreateTexture(1, 1, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, made),
+            D3D_OK);
+        assert.equal(device.SetTexture(0, made.texture), D3D_OK);
+        assert.equal(device.SetTextureStageState(0, D3DTSS.TEXCOORDINDEX, 0x10000), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF.XYZ | FVF.NORMAL | FVF.DIFFUSE), D3D_OK);
+        const vertices = new Uint8Array(28 * 3);
+        [[0, 0, 0], [1, 0, 0], [0, 1, 0]].forEach((at, index)=>
+            vertices.set(litVertexBytes(at), index * 28));
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, vertices, 28), D3D_OK);
+        const scaled = Float32Array.from(IDENTITY);
+        scaled[0] = 2;
+        assert.equal(device.SetTransform(D3DTS.VIEW, scaled), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, vertices, 28), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        const draws = h.device.diagnostics().lastFrame
+            .filter((/** @type {any} */ command)=>command.kind === 'draw');
+        const at = UNIFORM_AT.cameraNormalMatrix;
+        assert.deepEqual([...draws[0].uniforms.subarray(at, at + 16)], [...IDENTITY]);
+        assert.equal(draws[1].uniforms[at], 0.5);
+        assert.equal(draws[1].uniforms[UNIFORM_AT.worldView], 2, 'world-view itself doubles');
+        assert.equal(device.SetTexture(0, null), D3D_OK);
+        made.texture.release();
+    });
 
 test('recorded: a lit draw carries its lights, its material and the scene ambient', async()=>{
     // The defect this pins is that all of this reached the device and stopped
@@ -1759,6 +2192,113 @@ test('a state with no lighting in its shape is unlit, and still reads the specul
     });
     assert.equal(state.lighting, null, 'nothing asked for lighting, so there is none');
     assert.equal(state.specularEnable, true, 'but the specular state is read from the device');
+});
+
+test('recorded: a flat-shaded strip is drawn as a list, each triangle from its first vertex',
+    async()=>{
+        // Wine's d3d8 and d3d9 test_shademode: under D3DSHADE_FLAT the second
+        // triangle of a strip takes the colour of vertex 1. WebGPU's own strip
+        // starts its odd triangles at the vertex after -- it reorders them to
+        // keep the winding -- so a flat-shaded strip is rewritten as a list
+        // whose triangles start where Direct3D's do; Gouraud keeps the strip.
+        const drawStrip = async(/** @type {number} */ shade)=>{
+            const h = harness();
+            const { device } = h;
+            assert.equal(device.SetRenderState(D3DRS.LIGHTING, 0), D3D_OK);
+            assert.equal(device.SetRenderState(D3DRS.SHADEMODE, shade), D3D_OK);
+            assert.equal(device.BeginScene(), D3D_OK);
+            assert.equal(device.SetVertexShader(FVF.XYZ | FVF.DIFFUSE), D3D_OK);
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLESTRIP, 2, new Uint8Array(16 * 4),
+                16), D3D_OK);
+            assert.equal(device.EndScene(), D3D_OK);
+            await h.present();
+            const draw = h.device.diagnostics().lastFrame
+                .find((/** @type {any} */ c)=>c.kind === 'draw');
+            return { h, draw };
+        };
+        const flat = await drawStrip(1);
+        assert.equal(flat.draw.state.flatShading, true);
+        assert.equal(flat.draw.state.topology, 'triangle-list');
+        const scratch = flat.h.gpu.of('writeBuffer').filter((/** @type {any} */ call)=>
+            call.buffer.descriptor.label.startsWith('scratch-indices'));
+        assert.ok(scratch.length > 0);
+        const written = scratch[scratch.length - 1].bytes;
+        assert.deepEqual([...new Uint16Array(written.buffer, written.byteOffset, 6)],
+            [0, 1, 2, 1, 3, 2]);
+        const code = generateFixedFunction(flat.draw.state, decodeFvf(FVF.XYZ | FVF.DIFFUSE)).code;
+        assert.ok(code.includes('@location(0) @interpolate(flat) diffuse: vec4f,'));
+
+        const gouraud = await drawStrip(2);
+        assert.equal(gouraud.draw.state.flatShading, false);
+        assert.equal(gouraud.draw.state.topology, 'triangle-strip');
+    });
+
+test('recorded: FILLMODE WIREFRAME and POINT draw triangles as lines and points', async()=>{
+    // WebGPU has no fill mode, so the topology carries it: the triangles'
+    // edges as a line list, their vertices as a point list, rewritten from
+    // the program's own vertices or indices; lines and points are left as
+    // they are.
+    const drawWith = async(/** @type {number} */ fill, /** @type {boolean} */ indexed)=>{
+        const h = harness();
+        const { device } = h;
+        assert.equal(device.SetRenderState(D3DRS.LIGHTING, 0), D3D_OK);
+        assert.equal(device.SetRenderState(D3DRS.FILLMODE, fill), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF.XYZ | FVF.DIFFUSE), D3D_OK);
+        const vertices = new Uint8Array(16 * 4);
+        assert.equal(indexed
+            ? device.DrawIndexedPrimitiveUP(D3DPT.TRIANGLELIST, 0, 4, 2,
+                new Uint8Array(Uint16Array.from([0, 1, 2, 2, 1, 3]).buffer),
+                D3DFMT_INDEX.INDEX16, vertices, 16)
+            : device.DrawPrimitiveUP(D3DPT.TRIANGLESTRIP, 2, vertices, 16), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.LINELIST, 1, vertices, 16), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        const draws = h.device.diagnostics().lastFrame
+            .filter((/** @type {any} */ c)=>c.kind === 'draw');
+        const scratch = h.gpu.of('writeBuffer').filter((/** @type {any} */ call)=>
+            call.buffer.descriptor.label.startsWith('scratch-indices'));
+        const written = scratch.length > 0 ? scratch[scratch.length - 1].bytes : null;
+        return { draws, written };
+    };
+    const wire = await drawWith(2, false);
+    assert.equal(wire.draws[0].state.topology, 'line-list');
+    assert.equal(wire.draws[0].count, 12);
+    assert.deepEqual([...new Uint16Array(/** @type {Uint8Array} */ (wire.written).buffer,
+        /** @type {Uint8Array} */ (wire.written).byteOffset, 12)],
+    [0, 1, 1, 2, 2, 0, 1, 3, 3, 2, 2, 1]);
+    assert.equal(wire.draws[1].state.topology, 'line-list', 'a line list is left a line list');
+    assert.equal(wire.draws[1].count, 2);
+
+    const points = await drawWith(1, true);
+    assert.equal(points.draws[0].state.topology, 'point-list');
+    assert.deepEqual([...new Uint16Array(/** @type {Uint8Array} */ (points.written).buffer,
+        /** @type {Uint8Array} */ (points.written).byteOffset, 6)], [0, 1, 2, 2, 1, 3]);
+
+    const solid = await drawWith(3, true);
+    assert.equal(solid.draws[0].state.topology, 'triangle-list');
+    assert.equal(solid.draws[0].count, 6, 'solid is the triangles as given');
+});
+
+test('a state renormalises its normals only when NORMALIZENORMALS asks', ()=>{
+    const model = /** @type {any} */ ({
+        renderStates: new Map([[D3DRS.LIGHTING, 1]]),
+        stageStates: ()=>new Map(),
+        textures: new Map(),
+        transforms: new Map(),
+        lights: new Map(),
+        material: material8(),
+    });
+    const shape = {
+        fvf: FVF.XYZ | FVF.NORMAL,
+        topology: 'triangle-list',
+        targetFormat: 'bgra8unorm',
+        depthFormat: undefined,
+        stages: [],
+    };
+    assert.equal(pipelineStateOf(model, shape).normalizeNormals, false, 'off by default');
+    model.renderStates.set(D3DRS.NORMALIZENORMALS, 1);
+    assert.equal(pipelineStateOf(model, shape).normalizeNormals, true);
 });
 
 test('the run counts what lighting it was actually asked for', async()=>{
@@ -2133,12 +2673,15 @@ test('byte-exact: a two-coordinate texture transform moves the sample by its thi
 test('the block lays a texture transform out as two rows per sampled stage', ()=>{
     // The shader reads array<vec4f, 32> at float 76 -- byte 304, sixteen-aligned
     // after the three sampler words, a matrix per stage for all eight --
-    // then the world-view matrix at byte 816 and the lights from byte 880. A
-    // row at the wrong index is read as another stage's, or as a light.
+    // then the world-view matrix at byte 816, the normal matrix at byte 880,
+    // the camera-space normal matrix at byte 944 and the lights from byte
+    // 1008. A row at the wrong index is read as another stage's, or as a light.
     assert.equal(UNIFORM_AT.textureTransforms, 76);
     assert.equal(UNIFORM_AT.worldView, 204);
-    assert.equal(UNIFORM_AT.lights, 220);
-    assert.equal(UNIFORM_FLOATS, 220);
+    assert.equal(UNIFORM_AT.normalMatrix, 220);
+    assert.equal(UNIFORM_AT.cameraNormalMatrix, 236);
+    assert.equal(UNIFORM_AT.lights, 252);
+    assert.equal(UNIFORM_FLOATS, 252);
     const columns = Array.from({ length: 16 }, (_, at)=>at + 2);
     const block = uniformBlock({
         worldViewProjection: IDENTITY,
@@ -2437,12 +2980,21 @@ test('recorded: the world transform reaches each draw of one prepared state', as
     assert.equal(draws[0].uniforms[at.worldViewProjection + 12], 0);
     assert.equal(draws[1].uniforms[at.worldViewProjection + 12], 7,
         'and its product with the view and the projection');
-    // Everything past the two world fields is what the preparation carries, and
-    // a draw that rewrote any of it would be a draw served from a stale block.
+    // And its product with the view alone, which vertex fog takes its depth
+    // from and a generated coordinate its camera space: a draw that read the
+    // preparation's fogged and textured by where the first draw's model was.
+    assert.equal(draws[0].uniforms[at.worldView + 12], 0);
+    assert.equal(draws[1].uniforms[at.worldView + 12], 7);
+    // Everything else past the world fields is what the preparation carries,
+    // and a draw that rewrote any of it would be a draw served from a stale
+    // block.
     assert.deepEqual(
-        [...draws[0].uniforms.subarray(at.viewportOffset)],
-        [...draws[1].uniforms.subarray(at.viewportOffset)],
+        [...draws[0].uniforms.subarray(at.viewportOffset, at.worldView)],
+        [...draws[1].uniforms.subarray(at.viewportOffset, at.worldView)],
         'and nothing else');
+    assert.deepEqual(
+        [...draws[0].uniforms.subarray(at.worldView + 16)],
+        [...draws[1].uniforms.subarray(at.worldView + 16)]);
 });
 
 test('recorded: every state group the device publishes ends the reuse', async()=>{
@@ -2528,18 +3080,19 @@ test('recorded: a state set to the value it already holds is not a change', asyn
 
 test('recorded: a vertex shader bound and unbound between two draws leaves their state reusable',
     async()=>{
-        // Recorded commands. The excursion through a shader is declined and
-        // changes nothing the two quad draws do, so the state they share is
-        // still the state that was built: a cache keyed on the values serves
-        // the second from the first, and the shader never leaks into it.
+        // Recorded commands. The excursion through a declaration is declined
+        // and changes nothing the two quad draws do, so the state they share
+        // is still the state that was built: a cache keyed on the values
+        // serves the second from the first, and the handle never leaks into it.
         const h = harness();
         /** @type {{ handle?: number }} */
         const made = {};
         assert.equal(h.device.CreateVertexShader([0xffffffff], null, made), D3D_OK);
         const { draws, prepared } = await twoDraws(h, ()=>{
             assert.equal(h.device.SetVertexShader(made.handle ?? 0), D3D_OK);
-            // Declined, because this build has no translation for a shader bound
-            // through a handle -- which is what makes it an excursion.
+            // Declined: the declaration loads no position, so the
+            // fixed-function stage has nothing to read -- which is what makes
+            // it an excursion.
             assert.equal(h.device.DrawPrimitiveUP(
                 D3DPT.TRIANGLELIST, 2, quad([0, 0, 4, 4], 0), 20), D3D_OK);
             assert.equal(h.device.SetVertexShader(FVF_QUAD), D3D_OK);
@@ -2839,4 +3392,197 @@ test('fog: the table mode is the one that runs when it is set, else the vertex m
     });
     assert.equal(fogModeOf(disabled), D3DFOG.NONE);
     assert.equal(fogModeOf(both, false), D3DFOG.NONE);
+
+    // Where the factor comes from follows the same rule, and fog enabled with
+    // neither mode set is the specular alpha rather than no fog at all.
+    assert.deepEqual(fogOf(both), { source: FOG_SOURCE.TABLE, mode: D3DFOG.LINEAR });
+    assert.deepEqual(fogOf(vertexOnly), { source: FOG_SOURCE.VERTEX, mode: D3DFOG.EXP });
+    assert.deepEqual(fogOf(modelOf({ [D3DRS.FOGENABLE]: 1 })),
+        { source: FOG_SOURCE.SPECULAR, mode: D3DFOG.NONE });
+    assert.deepEqual(fogOf(disabled), { source: FOG_SOURCE.NONE, mode: D3DFOG.NONE });
+});
+
+test('fog: range fog is vertex fog over the distance from the eye, and table fog ignores it',
+    async()=>{
+        // Wine's d3d9 fog_test, "Test RANGEFOG vs FOGTABLEMODE": a quad at
+        // z = 0.5 with corners at x, y = +/-1 under identity matrices, linear
+        // fog from 0.75 to 0.75001. With D3DRS_RANGEFOGENABLE vertex fog takes
+        // each corner's distance from the eye, 1.5, and the quad is all fog
+        // colour; table fog does not use range fog, takes z = 0.5, and the
+        // quad keeps its colour.
+        const draw = async(/** @type {number} */ table)=>{
+            const h = harness({ width: 640, height: 480 });
+            const { device } = h;
+            device.SetRenderState(D3DRS.LIGHTING, 0);
+            device.SetRenderState(D3DRS.FOGENABLE, 1);
+            device.SetRenderState(D3DRS.RANGEFOGENABLE, 1);
+            device.SetRenderState(D3DRS.FOGSTART, floatToDword(0.75));
+            device.SetRenderState(D3DRS.FOGEND, floatToDword(0.75001));
+            device.SetRenderState(D3DRS.FOGTABLEMODE, table);
+            device.SetRenderState(D3DRS.FOGVERTEXMODE, D3DFOG.LINEAR);
+            assert.equal(device.BeginScene(), D3D_OK);
+            assert.equal(device.SetVertexShader(FVF.XYZ | FVF.DIFFUSE), D3D_OK);
+            const bytes = new DataView(new ArrayBuffer(16 * 4));
+            [[-1, -1], [-1, 1], [1, -1], [1, 1]].forEach(([x, y], index)=>{
+                bytes.setFloat32(index * 16, x, true);
+                bytes.setFloat32(index * 16 + 4, y, true);
+                bytes.setFloat32(index * 16 + 8, 0.5, true);
+            });
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLESTRIP, 2,
+                new Uint8Array(bytes.buffer), 16), D3D_OK);
+            assert.equal(device.EndScene(), D3D_OK);
+            await h.present();
+            return h.device.diagnostics().lastFrame
+                .find((/** @type {any} */ c)=>c.kind === 'draw');
+        };
+        const ranged = await draw(D3DFOG.NONE);
+        assert.equal(ranged.state.fogSource, FOG_SOURCE.VERTEX);
+        assert.equal(ranged.state.rangeFog, true);
+        const worldView = ranged.uniforms.subarray(UNIFORM_AT.worldView,
+            UNIFORM_AT.worldView + 16);
+        const range = { start: 0.75, end: 0.75001, density: 1 };
+        for (const corner of [[-1, -1, 0.5], [1, 1, 0.5]])
+        {
+            const eye = transformPosition(worldView, corner);
+            assert.equal(fogFactor(D3DFOG.LINEAR, Math.hypot(eye[0], eye[1], eye[2]), range), 0,
+                'the corner is all fog');
+        }
+        assert.ok(generateFixedFunction(ranged.state, decodeFvf(ranged.state.fvf)).code
+            .includes('fogFactorOf(length((uniforms.worldView'));
+
+        const table = await draw(D3DFOG.LINEAR);
+        assert.equal(table.state.fogSource, FOG_SOURCE.TABLE);
+        assert.equal(table.state.rangeFog, false, 'range fog is vertex fog alone');
+        assert.equal(fogFactor(D3DFOG.LINEAR, 0.5, range), 1, 'z = 0.5 keeps the colour');
+    });
+
+test('fog: table fog is taken over z under an affine projection, over w otherwise', ()=>{
+    // Microsoft's "Pixel Fog": a projection whose fourth column is
+    // (0, 0, 0, 1) is affine and fogs by z; Wine's test_fog has _44 = 1.01
+    // fog by w. The block's fog row carries which, beside the range.
+    assert.equal(isAffine(IDENTITY), true);
+    const perspective = [...IDENTITY];
+    perspective[15] = 1.01;
+    assert.equal(isAffine(perspective), false);
+    const projective = [...IDENTITY];
+    projective[11] = 1;
+    projective[15] = 0;
+    assert.equal(isAffine(projective), false);
+
+    const block = (/** @type {boolean} */ affineProjection)=>uniformBlock({
+        worldViewProjection: IDENTITY,
+        viewport: viewportState({ x: 0, y: 0, width: 4, height: 4 }),
+        textureFactor: 0,
+        fogColor: 0,
+        alphaRef: 0,
+        fogFactors: [2, 10, 0.5],
+        affineProjection,
+    });
+    assert.deepEqual([...block(true).subarray(UNIFORM_AT.fogFactors, UNIFORM_AT.fogFactors + 4)],
+        [2, 10, 0.5, 1]);
+    assert.equal(block(false)[UNIFORM_AT.fogFactors + 3], 0);
+});
+
+test('recorded: the fog interpolation scene fogs as Windows does in every mode', async()=>{
+    // Wine's d3d8 and d3d9 test_fog_interpolation: a quad from x = -1 to 1
+    // whose z runs from 0 on the left to 1 on the right under identity
+    // matrices, the stage colour blue, the fog green at density 5, and a
+    // specular alpha from 1 on the left to 0 on the right. Windows reads
+    // blue at the left edge in every case, 0x00fd02 at the right, and in the
+    // middle the interpolated specular alpha or vertex factor (0x007f80) or,
+    // for table fog, the curve at z = 0.5 (0x00ea15) -- not the mean of the
+    // ends. What is checked is what the renderer hands the shader -- the
+    // source, the curve, the depth the block says to take, the camera-space
+    // depth of each vertex -- carried through the reference's fog formula,
+    // and that the shader takes the factor from the same place.
+    const cases = [
+        [D3DFOG.NONE, D3DFOG.NONE, 1, 0x007f80],
+        [D3DFOG.NONE, D3DFOG.NONE, 2, 0x007f80],
+        [D3DFOG.EXP, D3DFOG.NONE, 1, 0x007f80],
+        [D3DFOG.EXP, D3DFOG.NONE, 2, 0x007f80],
+        [D3DFOG.NONE, D3DFOG.EXP, 1, 0x00ea15],
+        [D3DFOG.NONE, D3DFOG.EXP, 2, 0x00ea15],
+        [D3DFOG.EXP, D3DFOG.EXP, 1, 0x00ea15],
+        [D3DFOG.EXP, D3DFOG.EXP, 2, 0x00ea15],
+    ];
+    const fvf = FVF.XYZ | FVF.DIFFUSE | FVF.SPECULAR;
+    const stride = 20;
+    const corners = [[-1, -1, 0, 0xff000000], [-1, 1, 0, 0xff000000],
+        [1, -1, 1, 0x00000000], [1, 1, 1, 0x00000000]];
+    const bytes = new DataView(new ArrayBuffer(stride * 4));
+    corners.forEach(([x, y, z, specular], index)=>{
+        bytes.setFloat32(index * stride, x, true);
+        bytes.setFloat32(index * stride + 4, y, true);
+        bytes.setFloat32(index * stride + 8, z, true);
+        bytes.setUint32(index * stride + 12, 0xffff0000, true);
+        bytes.setUint32(index * stride + 16, specular, true);
+    });
+    const blue = { r: 0, g: 0, b: 255, a: 255 };
+    const green = { r: 0, g: 255, b: 0, a: 255 };
+    /** @param {number} rgb */
+    const colourOf = rgb=>({ r: (rgb >> 16) & 0xff, g: (rgb >> 8) & 0xff, b: rgb & 0xff });
+
+    for (const [vertexMode, tableMode, shade, middle] of cases)
+    {
+        const h = harness({ width: 640, height: 480 });
+        const { device } = h;
+        device.SetRenderState(D3DRS.LIGHTING, 0);
+        device.SetRenderState(D3DRS.ZENABLE, 0);
+        device.SetRenderState(D3DRS.FOGENABLE, 1);
+        device.SetRenderState(D3DRS.FOGCOLOR, 0x0000ff00);
+        device.SetRenderState(D3DRS.FOGDENSITY, floatToDword(5));
+        device.SetRenderState(D3DRS.TEXTUREFACTOR, 0x000000ff);
+        device.SetRenderState(D3DRS.SHADEMODE, shade);
+        device.SetRenderState(D3DRS.FOGVERTEXMODE, vertexMode);
+        device.SetRenderState(D3DRS.FOGTABLEMODE, tableMode);
+        device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.SELECTARG1);
+        device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.TFACTOR);
+        device.SetTransform(D3DTS.PROJECTION, IDENTITY);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(fvf), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLESTRIP, 2,
+            new Uint8Array(bytes.buffer), stride), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        const draw = h.device.diagnostics().lastFrame
+            .find((/** @type {any} */ c)=>c.kind === 'draw');
+        const state = draw.state;
+        const fog = draw.uniforms.subarray(UNIFORM_AT.fogFactors, UNIFORM_AT.fogFactors + 4);
+        const range = { start: fog[0], end: fog[1], density: fog[2] };
+        const code = generateFixedFunction(state, decodeFvf(state.fvf)).code;
+        const worldView = draw.uniforms.subarray(UNIFORM_AT.worldView, UNIFORM_AT.worldView + 16);
+        const cameraZ = (/** @type {number[]} */ at)=>transformPosition(worldView, at)[2];
+
+        /** @param {number} t  from the left edge to the right, as the pixel centre lies */
+        const factorAt = t=>{
+            if (state.fogSource === FOG_SOURCE.TABLE)
+            {
+                assert.ok(code.includes('fogFactorOf(select(1.0 / input.position.w,'
+                    + ' input.position.z, uniforms.fogFactors.w != 0.0))'));
+                // The pixel's z is the interpolated z; its w is one here.
+                return fogFactor(state.fogMode, fog[3] !== 0 ? t : 1, range);
+            }
+            if (state.fogSource === FOG_SOURCE.VERTEX)
+            {
+                assert.ok(code.includes('out.fogAmount = fogFactorOf(abs((uniforms.worldView'));
+                const left = fogFactor(state.fogMode, Math.abs(cameraZ([-1, 0, 0])), range);
+                const right = fogFactor(state.fogMode, Math.abs(cameraZ([1, 0, 1])), range);
+                return left + (right - left) * t;
+            }
+            assert.equal(state.fogSource, FOG_SOURCE.SPECULAR);
+            assert.ok(code.includes('out.fogAmount = vertex.specular.a;'));
+            return 1 - t;
+        };
+        const label = `vertex ${vertexMode}, table ${tableMode}, shade ${shade}`;
+        for (const [x, expected] of [[0, 0x0000ff], [320, middle], [639, 0x00fd02]])
+        {
+            const got = referenceFogged(blue, green, factorAt(x / 640));
+            const want = colourOf(expected);
+            for (const channel of /** @type {const} */ (['r', 'g', 'b']))
+            {
+                assert.ok(Math.abs(got[channel] - want[channel]) <= 2,
+                    `${label}: x=${x} ${channel} ${got[channel]} against ${want[channel]}`);
+            }
+        }
+    }
 });

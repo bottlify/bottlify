@@ -33,7 +33,7 @@
  * thing.
  */
 
-import { D3DLIGHT, D3DTA, D3DTOP, argumentsRead } from './fixedfunction.js';
+import { D3DFOG, D3DLIGHT, D3DTA, D3DTOP, argumentsRead } from './fixedfunction.js';
 
 /** Bytes per pixel, everywhere in this engine. */
 const BPP = 4;
@@ -330,6 +330,55 @@ export function fillRect(target, rect, options){
 
 /** @param {ReferenceSurface} surface @returns {string} */
 export const toBase64 = surface=>Buffer.from(surface.bytes).toString('base64');
+
+// --- fog, which is a curve over a depth and then a mix ---
+
+/**
+ * How much of a colour survives fog at a depth, 1 for all of it: the three
+ * curves of D3DFOGMODE, held to [0, 1]. Which depth -- a pixel's z or w, a
+ * vertex's camera-space z -- is the caller's, as it is the shader's caller's.
+ *
+ * @param {number} mode  D3DFOG
+ * @param {number} depth
+ * @param {{ start: number, end: number, density: number }} range
+ * @returns {number}
+ */
+export function fogFactor(mode, depth, range){
+    const held = (/** @type {number} */ value)=>Math.min(1, Math.max(0, value));
+    switch (mode)
+    {
+        case D3DFOG.LINEAR:
+            return range.end <= range.start
+                ? (depth >= range.end ? 0 : 1)
+                : held((range.end - depth) / (range.end - range.start));
+        case D3DFOG.EXP:
+            return held(Math.exp(-range.density * depth));
+        case D3DFOG.EXP2:
+            return held(Math.exp(-((range.density * depth) ** 2)));
+        default:
+            throw new Error(`Unsupported fog mode ${mode}`);
+    }
+}
+
+/**
+ * A colour fogged by a factor: the factor of the colour and the rest of the
+ * fog colour, each channel rounded to the nearest level. Alpha is not fogged.
+ *
+ * @param {Colour} colour  0..255 each
+ * @param {Colour} fog     0..255 each
+ * @param {number} factor  0..1
+ * @returns {Colour}
+ */
+export function fogged(colour, fog, factor){
+    const channel = (/** @type {number} */ c, /** @type {number} */ f)=>
+        Math.round(c * factor + f * (1 - factor));
+    return {
+        r: channel(colour.r, fog.r),
+        g: channel(colour.g, fog.g),
+        b: channel(colour.b, fog.b),
+        a: colour.a,
+    };
+}
 
 // --- the lighting equation, in the floats it is actually computed in ---
 

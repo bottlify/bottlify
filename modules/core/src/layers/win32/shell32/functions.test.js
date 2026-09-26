@@ -7,6 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createShellFunctions } from './functions.js';
+import { filesystemModule } from '../../filesystem/module.js';
+import { createVolume } from '../kernel32/vfs.js';
 
 /** @param {number} [allocator]  The IMalloc pointer ole32 would hand out, if any. */
 function machine(allocator){
@@ -385,7 +387,12 @@ test('the extended launch is refused the same way, in the record the caller read
 test('a shell file operation is refused as not implemented and marked aborted', ()=>{
     const m = machine();
     assert.equal(m.shell.SHFileOperationA.handler([0x100]), 120);
-    assert.deepEqual([...m.memory.slice(0x114, 0x118)], [1, 0, 0, 0], 'fAnyOperationsAborted');
+    // shellapi.h packs the structure to one byte on Win32: fFlags is a WORD
+    // at 16, so the BOOL follows at 18 and hNameMappings at 22.
+    assert.deepEqual([...m.memory.slice(0x112, 0x116)], [1, 0, 0, 0], 'fAnyOperationsAborted');
+    assert.deepEqual([...m.memory.slice(0x110, 0x112)], [0xaa, 0xaa], 'fFlags is not touched');
+    assert.deepEqual([...m.memory.slice(0x116, 0x11a)], [0xaa, 0xaa, 0xaa, 0xaa],
+        'hNameMappings is not touched');
     assert.equal(m.shell.SHChangeNotify.handler([0x8000000, 0, 0, 0]), 0);
     assert.equal(m.shell.SHGetFileInfoA.handler([0x100, 0, 0x120, 352, 0x100]), 0);
     assert.deepEqual([m.shell.SHFileOperationA, m.shell.SHChangeNotify, m.shell.SHGetFileInfoA]
@@ -402,4 +409,127 @@ test('DragFinish pops the drop it is handed', ()=>{
     const fns = createShellFunctions({ writeMemory: ()=>{} });
     assert.equal(fns.DragFinish.argBytes, 4);
     assert.equal(fns.DragFinish.handler(), 0);
+});
+
+/**
+ * A shell over a real volume, with guest memory for a SHFILEOPSTRUCT and the
+ * lists it points at.
+ */
+async function machineWithVolume(){
+    const fs = await filesystemModule.create({});
+    const volume = /** @type {any} */ (createVolume(fs));
+    volume.mkdir('C:\\work');
+    volume.setCurrentDirectory('C:\\work');
+    for (const name of ['a.txt', 'b.txt'])
+    {
+        const node = volume.open(name, { write: true, create: true, truncate: true });
+        volume.write(node, 0, Uint8Array.of(0x41));
+        volume.close(node);
+    }
+    const memory = new Uint8Array(0x4000);
+    const view = new DataView(memory.buffer);
+    let next = 0x1000;
+    const shell = /** @type {any} */ (createShellFunctions({
+        readMemory: (address, length)=>memory.slice(address, address + length),
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        readCString: (address, limit)=>{
+            let text = '';
+            for (let at = address; at < address + limit && memory[at] !== 0; at++)
+            {
+                text += String.fromCharCode(memory[at]);
+            }
+            return text;
+        },
+        resolve: path=>fs.resolve(path).path,
+        volume: { ...volume, drives: ()=>['C'] },
+    }));
+    /** A list of names, each terminated, and one more terminator. @param {string[]} names @param {boolean} wide */
+    const list = (names, wide)=>{
+        const at = next;
+        for (const unit of [...names.join('\0'), '\0', '\0'])
+        {
+            if (wide)
+            {
+                view.setUint16(next, unit.charCodeAt(0), true);
+                next += 2;
+            }
+            else
+            {
+                memory[next++] = unit.charCodeAt(0);
+            }
+        }
+        next = next + 15 & ~15;
+        return at;
+    };
+    /**
+     * SHFILEOPSTRUCT at 0x100, packed to one byte as shellapi.h declares it.
+     *
+     * @param {number} func @param {number} from @param {number} to @param {number} flags
+     */
+    const record = (func, from, to, flags)=>{
+        memory.fill(0xaa, 0x100, 0x120);
+        view.setUint32(0x100, 0, true);
+        view.setUint32(0x104, func, true);
+        view.setUint32(0x108, from, true);
+        view.setUint32(0x10c, to, true);
+        view.setUint16(0x110, flags, true);
+        return 0x100;
+    };
+    return { fs, volume, shell, memory, view, list, record };
+}
+
+test('SHFileOperation copies, moves, renames and deletes on the volume', async()=>{
+    // shlfileop.c: FO_DELETE answers ERROR_SUCCESS with fAnyOperationsAborted
+    // FALSE and the files gone; the same record read through either spelling.
+    const m = await machineWithVolume();
+    const FO_MOVE = 1;
+    const FO_COPY = 2;
+    const FO_DELETE = 3;
+    const FO_RENAME = 4;
+    const FOF_NO_UI = 0x0614;
+
+    const copy = m.record(FO_COPY, m.list(['a.txt', 'b.txt'], false),
+        m.list(['copies'], false), FOF_NO_UI);
+    assert.equal(await m.shell.SHFileOperationA.handler([copy]), 0);
+    assert.equal(m.view.getUint32(0x112, true), 0, 'fAnyOperationsAborted, at 18');
+    assert.equal(m.view.getUint32(0x116, true), 0xaaaaaaaa, 'hNameMappings is not asked for');
+    assert.ok(m.volume.stat('copies\\a.txt') && m.volume.stat('copies\\b.txt'));
+
+    const move = m.record(FO_MOVE, m.list(['copies\\a.txt'], true), m.list(['moved.txt'], true),
+        FOF_NO_UI);
+    assert.equal(await m.shell.SHFileOperationW.handler([move]), 0);
+    assert.ok(!m.volume.stat('copies\\a.txt') && m.volume.stat('moved.txt'));
+
+    const rename = m.record(FO_RENAME, m.list(['moved.txt'], false), m.list(['renamed.txt'], false),
+        FOF_NO_UI);
+    assert.equal(await m.shell.SHFileOperationA.handler([rename]), 0);
+    assert.ok(m.volume.stat('renamed.txt'));
+
+    const remove = m.record(FO_DELETE, m.list(['copies', 'renamed.txt'], true), 0, FOF_NO_UI);
+    assert.equal(await m.shell.SHFileOperationW.handler([remove]), 0);
+    assert.ok(!m.volume.stat('copies') && !m.volume.stat('renamed.txt'));
+    assert.ok(m.volume.stat('a.txt'), 'the sources of the copy are where they were');
+
+    const missing = m.record(FO_DELETE, m.list(['nonexistent.txt'], false), 0, FOF_NO_UI);
+    assert.equal(await m.shell.SHFileOperationA.handler([missing]), 2, 'ERROR_FILE_NOT_FOUND');
+    assert.equal(m.view.getUint32(0x112, true), 0, 'a failure is not an abort');
+    const none = m.record(FO_DELETE, 0, 0, FOF_NO_UI);
+    assert.equal(await m.shell.SHFileOperationA.handler([none]), 87, 'ERROR_INVALID_PARAMETER');
+    assert.equal(m.view.getUint32(0x112, true), 0xaaaaaaaa, 'and the record left alone');
+    assert.deepEqual([m.shell.SHFileOperationA.argBytes, m.shell.SHFileOperationW.argBytes],
+        [4, 4]);
+});
+
+test('SHCreateDirectoryEx makes the whole path, and says when it was there', async()=>{
+    const m = await machineWithVolume();
+    const narrow = m.list(['C:\\work\\one\\two'], false);
+    assert.equal(m.shell.SHCreateDirectoryExA.handler([0, narrow, 0]), 0);
+    assert.ok(m.volume.stat('C:\\work\\one\\two')?.isDirectory);
+    assert.equal(m.shell.SHCreateDirectoryExA.handler([0, narrow, 0]), 183,
+        'ERROR_ALREADY_EXISTS');
+    const wide = m.list(['C:\\work\\\u00e9t\u00e9\\three'], true);
+    assert.equal(m.shell.SHCreateDirectoryExW.handler([0, wide, 0]), 0);
+    assert.ok(m.volume.stat('C:\\work\\\u00e9t\u00e9\\three')?.isDirectory);
+    assert.deepEqual([m.shell.SHCreateDirectoryExA.argBytes, m.shell.SHCreateDirectoryExW.argBytes],
+        [12, 12]);
 });

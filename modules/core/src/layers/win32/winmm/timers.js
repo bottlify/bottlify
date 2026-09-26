@@ -39,8 +39,8 @@ const CMP_LOWEST = [0x3d, LOWEST_RECORD & 0xff, LOWEST_RECORD >>> 8 & 0xff,
     LOWEST_RECORD >>> 16 & 0xff, LOWEST_RECORD >>> 24 & 0xff];
 /** MMSYSERR_INVALPARAM: no such timer. */
 const MMSYSERR_INVALPARAM = 11;
-/** `timeSetEvent`'s resolution is clamped to this range of milliseconds. */
-const MAX_PERIOD = 1000000;
+/** The longest delay `timeSetEvent` takes, in milliseconds; the shortest is one. */
+export const MAX_PERIOD = 1000000;
 
 /**
  * The loop, as x86. `stub` is where the trap lives and `at` is where these

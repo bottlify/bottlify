@@ -18,7 +18,7 @@
  * Nothing in this file is reached by the product; it is a fixture.
  */
 
-import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
+import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE, parseDxbc } from './dxbc.js';
 import { OPCODE, OPERAND, SELECTION } from './sm4.js';
 
 const COMPONENT_INDEX = { x: 0, y: 1, z: 2, w: 3 };
@@ -117,9 +117,11 @@ function encodeOperand(operand, destination){
         const count = /** @type {number[]} */ (operand.immediate).length;
         token |= count === 1 ? 1 : 2;
     }
-    else if (operand.type === OPERAND.NULL || operand.type === OPERAND.SAMPLER)
+    else if (operand.type === OPERAND.NULL || operand.type === OPERAND.SAMPLER
+        || operand.type === OPERAND.LABEL)
     {
-        // Neither names a component: a sampler is one thing and null is nothing.
+        // None names a component: a sampler or a label is one thing and null
+        // is nothing.
         token |= 0;
     }
     else if (operand.type === OPERAND.OUTPUT_DEPTH)
@@ -287,6 +289,11 @@ export const imul = (high, low, a, b)=>op(OPCODE.IMUL, [high, low, a, b], { dest
  */
 export const udiv = (quotient, remainder, a, b)=>
     op(OPCODE.UDIV, [quotient, remainder, a, b], { destinations: 2 });
+/**
+ * @param {AsmOperand} high @param {AsmOperand} low
+ * @param {AsmOperand} a @param {AsmOperand} b
+ */
+export const umul = (high, low, a, b)=>op(OPCODE.UMUL, [high, low, a, b], { destinations: 2 });
 
 /** @param {AsmOperand} dest @param {AsmOperand} coordinate @param {AsmOperand} texture @param {AsmOperand} sampler */
 export const sample = (dest, coordinate, texture, sampler)=>
@@ -303,11 +310,32 @@ export const sampleL = (dest, coordinate, texture, sampler, level)=>
  */
 export const sampleCLz = (dest, coordinate, texture, sampler, reference)=>
     op(OPCODE.SAMPLE_C_LZ, [dest, coordinate, texture, sampler, reference]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} coordinate @param {AsmOperand} texture
+ * @param {AsmOperand} sampler @param {AsmOperand} ddx @param {AsmOperand} ddy
+ */
+export const sampleD = (dest, coordinate, texture, sampler, ddx, ddy)=>
+    op(OPCODE.SAMPLE_D, [dest, coordinate, texture, sampler, ddx, ddy]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} coordinate @param {AsmOperand} texture
+ * @param {AsmOperand} sampler
+ */
+export const gather4 = (dest, coordinate, texture, sampler)=>
+    op(OPCODE.GATHER4, [dest, coordinate, texture, sampler]);
 /** @param {AsmOperand} dest @param {AsmOperand} address @param {AsmOperand} texture */
 export const ld = (dest, address, texture)=>op(OPCODE.LD, [dest, address, texture]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} address @param {AsmOperand} texture
+ * @param {AsmOperand} sampleIndex
+ */
+export const ldMs = (dest, address, texture, sampleIndex)=>
+    op(OPCODE.LD_MS, [dest, address, texture, sampleIndex]);
 /** @param {AsmOperand} dest @param {AsmOperand} level @param {AsmOperand} texture @param {boolean} [asUint] */
 export const resinfo = (dest, level, texture, asUint = false)=>
     op(OPCODE.RESINFO, [dest, level, texture], { control: asUint ? 2 : 0 });
+/** @param {AsmOperand} dest @param {AsmOperand} level @param {AsmOperand} texture */
+export const resinfoRcp = (dest, level, texture)=>
+    op(OPCODE.RESINFO, [dest, level, texture], { control: 1 });
 
 /** @param {AsmOperand} condition */
 export const ifNz = condition=>op(OPCODE.IF, [condition], { nonZero: true, destinations: 0 });
@@ -325,6 +353,21 @@ export const breakcNz = condition=>
 export const discardNz = condition=>
     op(OPCODE.DISCARD, [condition], { nonZero: true, destinations: 0 });
 export const ret = ()=>op(OPCODE.RET, []);
+/** @param {number} index @returns {AsmOperand} */
+const labelOperand = index=>({ type: OPERAND.LABEL, indices: [index] });
+/** @param {number} index  Where subroutine `index` begins. */
+export const label = index=>op(OPCODE.LABEL, [labelOperand(index)], { destinations: 0 });
+/** @param {number} index */
+export const call = index=>op(OPCODE.CALL, [labelOperand(index)], { destinations: 0 });
+/** @param {AsmOperand} condition @param {number} index */
+export const callcNz = (condition, index)=>op(OPCODE.CALLC, [condition, labelOperand(index)],
+    { nonZero: true, destinations: 0 });
+/** @param {AsmOperand} selector */
+export const switchOn = selector=>op(OPCODE.SWITCH, [selector], { destinations: 0 });
+/** @param {number} value */
+export const caseOf = value=>op(OPCODE.CASE, [lu(value)], { destinations: 0 });
+export const defaultCase = ()=>op(OPCODE.DEFAULT, []);
+export const endswitch = ()=>op(OPCODE.ENDSWITCH, []);
 /** @param {AsmOperand} condition */
 export const retcNz = condition=>op(OPCODE.RETC, [condition], { nonZero: true, destinations: 0 });
 
@@ -570,3 +613,237 @@ export function colouredPixelShader(){
         ],
     });
 }
+
+// --- what a compiler records beside the program ---
+
+/**
+ * @typedef {Object} FixtureBinding
+ * @property {string} name
+ * @property {number} type
+ * @property {number} [returnType]
+ * @property {number} [dimension]
+ * @property {number} [samples]
+ * @property {number} bindPoint
+ * @property {number} [bindCount]
+ * @property {number} [flags]
+ */
+
+/**
+ * @typedef {Object} FixtureType
+ * @property {number} class
+ * @property {number} type
+ * @property {number} [rows]
+ * @property {number} [columns]
+ * @property {number} [elements]
+ * @property {{ name: string, offset: number, type: FixtureType }[]} [members]
+ */
+
+/**
+ * @typedef {Object} FixtureVariable
+ * @property {string} name
+ * @property {number} offset
+ * @property {number} size
+ * @property {number} [flags]
+ * @property {number[]} [defaultValue]  Dwords.
+ * @property {FixtureType} type
+ */
+
+/**
+ * @typedef {Object} FixtureBuffer
+ * @property {string} name
+ * @property {number | FixtureVariable[]} variables  A count alone lays out no entries.
+ * @property {number} size
+ * @property {number} [flags]
+ * @property {number} [type]
+ */
+
+/**
+ * A resource-definition chunk laid out as a compiler lays it out: seven
+ * dwords of header (constant buffer count and offset, binding count and
+ * offset, target, flags, creator offset), the bindings at 32 bytes, the
+ * constant buffers at 24, their variables at 24, the types at 16 and the
+ * structures' members at 12, default values, then the strings. A type used
+ * twice is laid out once, as a compiler shares one. `model5` adds the header
+ * a Shader Model 5 compiler writes, tagged RD11, and lengthens variables to
+ * 40 bytes and types to 36, the added fields zero.
+ *
+ * @param {{ buffers?: FixtureBuffer[], bindings?: FixtureBinding[], target: number,
+ *           flags: number, creator?: string, model5?: boolean }} spec
+ * @returns {Uint8Array}
+ */
+export function resourceDefinitions(spec){
+    const buffers = spec.buffers ?? [];
+    const bindings = spec.bindings ?? [];
+    const sizes = spec.model5 ? { variable: 40, type: 36 } : { variable: 24, type: 16 };
+    /** @param {FixtureBuffer} buffer */
+    const listOf = buffer=>(Array.isArray(buffer.variables) ? buffer.variables : []);
+    const bindingsAt = spec.model5 ? 60 : 28;
+    const buffersAt = bindingsAt + bindings.length * 32;
+    let at = buffersAt + buffers.length * 24;
+    const variablesAt = buffers.map(buffer=>{
+        const here = listOf(buffer).length ? at : 0;
+        at += listOf(buffer).length * sizes.variable;
+        return here;
+    });
+    /** @type {FixtureType[]} */
+    const types = [];
+    /** @param {FixtureType} type */
+    const visit = type=>{
+        if (!types.includes(type))
+        {
+            types.push(type);
+            (type.members ?? []).forEach(member=>visit(member.type));
+        }
+    };
+    buffers.forEach(buffer=>listOf(buffer).forEach(variable=>visit(variable.type)));
+    const typesAt = at;
+    at += types.length * sizes.type;
+    const membersAt = types.map(type=>{
+        const count = (type.members ?? []).length;
+        const here = count ? at : 0;
+        at += count * 12;
+        return here;
+    });
+    /** @type {Map<FixtureVariable, number>} */
+    const defaults = new Map();
+    for (const variable of buffers.flatMap(listOf))
+    {
+        if (variable.defaultValue)
+        {
+            defaults.set(variable, at);
+            at += variable.defaultValue.length * 4;
+        }
+    }
+
+    let stringsAt = at;
+    /** @type {Map<string, number>} */
+    const strings = new Map();
+    /** @param {string} text */
+    const stringAt = text=>{
+        if (!strings.has(text))
+        {
+            strings.set(text, stringsAt);
+            stringsAt += text.length + 1;
+        }
+        return /** @type {number} */ (strings.get(text));
+    };
+    /** @param {FixtureType} type */
+    const typeAt = type=>typesAt + types.indexOf(type) * sizes.type;
+    /** @type {number[]} */
+    const bytes = [];
+    /** @param {number[]} words */
+    const put = words=>{
+        for (const word of words)
+        {
+            bytes.push(word & 0xff, word >>> 8 & 0xff, word >>> 16 & 0xff, word >>> 24 & 0xff);
+        }
+    };
+    /** @param {number} count */
+    const zeros = count=>put(new Array(count / 4).fill(0));
+
+    const creator = spec.creator === undefined ? 0 : stringAt(spec.creator);
+    put([buffers.length, buffers.length ? buffersAt : 0, bindings.length, bindingsAt, spec.target,
+        spec.flags, creator]);
+    if (spec.model5)
+    {
+        put([0x31314452, 60, 24, 32, sizes.variable, sizes.type, 12, 0]);
+    }
+    for (const entry of bindings)
+    {
+        put([stringAt(entry.name), entry.type, entry.returnType ?? 0, entry.dimension ?? 0,
+            entry.samples ?? 0, entry.bindPoint, entry.bindCount ?? 1, entry.flags ?? 0]);
+    }
+    buffers.forEach((buffer, index)=>{
+        put([stringAt(buffer.name), listOf(buffer).length || Number(buffer.variables),
+            variablesAt[index], buffer.size, buffer.flags ?? 0, buffer.type ?? 0]);
+    });
+    for (const variable of buffers.flatMap(listOf))
+    {
+        put([stringAt(variable.name), variable.offset, variable.size, variable.flags ?? 0,
+            typeAt(variable.type), defaults.get(variable) ?? 0]);
+        zeros(sizes.variable - 24);
+    }
+    types.forEach((type, index)=>{
+        put([type.class | (type.type << 16), (type.rows ?? 1) | ((type.columns ?? 1) << 16),
+            (type.elements ?? 0) | ((type.members ?? []).length << 16), membersAt[index]]);
+        zeros(sizes.type - 16);
+    });
+    for (const member of types.flatMap(type=>type.members ?? []))
+    {
+        put([stringAt(member.name), typeAt(member.type), member.offset]);
+    }
+    for (const words of defaults.keys())
+    {
+        put(/** @type {number[]} */ (words.defaultValue));
+    }
+    for (const text of strings.keys())
+    {
+        bytes.push(...[...text].map(char=>char.charCodeAt(0)), 0);
+    }
+    while (bytes.length % 4 !== 0)
+    {
+        bytes.push(0xab);
+    }
+    return Uint8Array.from(bytes);
+}
+
+/**
+ * A compiled program's own chunks with the tools' chunks put back around
+ * them.
+ *
+ * @param {Uint8Array} program  A container from the assembler.
+ * @param {{ name: string, bytes: Uint8Array }[]} before
+ * @param {{ name: string, bytes: Uint8Array }[]} [after]
+ */
+export function withChunks(program, before, after = []){
+    const parsed = parseDxbc(program);
+    if (!parsed)
+    {
+        throw new Error('not a container');
+    }
+    const own = ['ISGN', 'OSGN', 'SHDR'].map(name=>({
+        name, bytes: /** @type {Uint8Array} */ (parsed.chunks.get(name)),
+    }));
+    return container([...before, ...own, ...after]);
+}
+
+/** D3D10_SHADER_VARIABLE_CLASS and D3D10_SHADER_VARIABLE_TYPE, as far as the tests go. */
+export const SVC = Object.freeze({ SCALAR: 0, STRUCT: 5 });
+export const SVT = Object.freeze({ VOID: 0, BOOL: 1, INT: 2, FLOAT: 3 });
+
+/**
+ * The constant buffers of the ps_4_0 program in Wine's d3dcompiler
+ * test_reflection_constant_buffer: a structure in $Globals, and in c1 a
+ * float, an array of two, an int and a structure of two floats, whose members
+ * share one type as that compiler laid them out.
+ *
+ * @returns {FixtureBuffer[]}
+ */
+function wineConstantBuffers(){
+    const float = { class: SVC.SCALAR, type: SVT.FLOAT };
+    const flag = { class: SVC.SCALAR, type: SVT.BOOL };
+    return [
+        { name: '$Globals', size: 16, variables: [
+            { name: 'g_Test', offset: 0, size: 4, flags: 2, type: { class: SVC.STRUCT,
+                type: SVT.VOID, members: [{ name: 'm_on', offset: 0, type: flag }] } },
+        ] },
+        { name: 'c1', size: 64, variables: [
+            { name: 'a', offset: 0, size: 4, type: { class: SVC.SCALAR, type: SVT.FLOAT } },
+            { name: 'b', offset: 16, size: 20,
+                type: { class: SVC.SCALAR, type: SVT.FLOAT, elements: 2 } },
+            { name: 'i', offset: 36, size: 4, type: { class: SVC.SCALAR, type: SVT.INT } },
+            { name: 't', offset: 48, size: 8, flags: 2, type: { class: SVC.STRUCT,
+                type: SVT.VOID, columns: 2, members: [
+                    { name: 'a', offset: 0, type: float }, { name: 'b', offset: 4, type: float },
+                ] } },
+        ] },
+    ];
+}
+
+/** That program's pixel shader with those buffers recorded beside it. */
+export const constantBufferShader = ()=>withChunks(solidPixelShader([0, 0, 0, 1]), [{
+    name: 'RDEF',
+    bytes: resourceDefinitions({
+        target: 0xffff0400, flags: 0x100, buffers: wineConstantBuffers(),
+    }),
+}]);

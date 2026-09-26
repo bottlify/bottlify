@@ -30,7 +30,8 @@
  *   pointed at a buffer that will be reused.
  */
 
-import { VERSION_BUILD, VERSION_MAJOR, VERSION_MINOR } from '../kernel32/process.js';
+import { windowsVersion } from '../kernel32/versions.js';
+import { createGlobals } from './globals.js';
 
 /** What `_controlfp` reports when nothing has changed it: the MSVC default. */
 const DEFAULT_CONTROL_WORD = 0x0009001f;
@@ -121,11 +122,24 @@ export function splitCommandLine(line){
  * @property {(code: number) => any} exitProcess
  *           Ends the process. Returns whatever the caller must return to stop
  *           the calling thread, since `exit` does not come back.
- * @property {(code: number) => void} [exit]
- *           Records the exit without stopping anything, for a call that has
- *           already left the bridge: `exit` after the handlers it ran in the
- *           guest. The process ends before the thread runs another instruction,
- *           because the run loop reads the code before it hands out a slice.
+ * @property {(code: number) => Promise<number> | null | void} [exit]
+ *           Ends the process without parking, for a call that has already
+ *           left the bridge: `exit` after the handlers it ran in the guest.
+ *           What ExitProcess tells the libraries is told here too, and the
+ *           answer is the promise of that when there is any. The process ends
+ *           before the thread runs another instruction, because the run loop
+ *           reads the code before it hands out a slice.
+ * @property {import('./globals.js').Globals} [globals]
+ *           The runtime's variables, shared with the functions that set them:
+ *           errno is set by whichever call fails. Absent, these are private.
+ * @property {() => string} [errnoName]
+ *           Which of them is the calling thread's errno. Absent, one for all.
+ * @property {() => void} [closeStreams]
+ *           Closes every stream still open, for `_cexit`. Absent, there are
+ *           no streams to close.
+ * @property {import('../kernel32/versions.js').WindowsVersion} [version]
+ *           The Windows GetVersion answers for this process. Absent, the
+ *           default one.
  */
 
 /**
@@ -134,6 +148,7 @@ export function splitCommandLine(line){
  */
 export function createStartupFunctions(host){
     let controlWord = DEFAULT_CONTROL_WORD;
+    const version = host.version ?? windowsVersion();
 
     /**
      * A C string in guest memory that outlives this call.
@@ -226,34 +241,37 @@ export function createStartupFunctions(host){
         return bytes;
     };
 
-    /** An int in guest memory that a `__p__*` accessor can hand out. */
-    /** @type {Map<string, number>} */
-    const cells = new Map();
+    const globals = host.globals ?? createGlobals(host);
 
     /**
-     * What `_onexit` registered, in the order it was registered. Run backwards
-     * by `exit`, which is the contract `atexit` is built on: a handler may rely
-     * on what an earlier one set up still being there.
+     * What `_onexit` and `atexit` registered, in the order it was registered.
+     * Run backwards by `exit` and `_cexit`, which is the contract `atexit` is
+     * built on: a handler may rely on what an earlier one set up still being
+     * there.
      *
      * @type {number[]}
      */
     const onExit = [];
 
-    /** @param {string} name @param {number} initial */
-    const cell = (name, initial)=>{
-        const held = cells.get(name);
-        if (held !== undefined)
-        {
-            return held;
-        }
-        const address = host.allocate(4);
-        if (address !== 0)
-        {
-            writeU32(address, initial);
-        }
-        cells.set(name, address);
-        return address;
+    /**
+     * Runs the register, last first, and empties it: a handler runs once
+     * however many of the exits reach it. A handler is guest code, so this
+     * answers with a promise that settles when the last one has returned.
+     */
+    const runOnExit = ()=>{
+        const asked = host.currentThread?.();
+        const handlers = onExit.splice(0).reverse();
+        return handlers.reduce(
+            (waiting, entry)=>waiting.then(()=>host.callGuest(entry, [], asked)),
+            Promise.resolve(0));
     };
+
+    /**
+     * An int in guest memory that a `__p__*` accessor can hand out.
+     *
+     * @param {string} name @param {number} initial
+     */
+    const cell = (name, initial)=>globals.address(name, initial);
 
     /**
      * unsigned int _controlfp(unsigned int newControl, unsigned int mask)
@@ -430,15 +448,13 @@ export function createStartupFunctions(host){
          * The runtime's error cells, reached the same way: a library that
          * resolves them by name at load time (a packed one restoring its
          * import table) must get an address, or the call it later makes
-         * through the table goes nowhere. One cell for the process rather
-         * than one per thread: what is read after a failing call is the
-         * failing call's own, on the thread that made it, and nothing here
-         * sets it from another.
+         * through the table goes nowhere. errno is a cell per thread, the one
+         * the calling thread's own failing calls set.
          */
         _errno: {
             convention: 'cdecl',
             argBytes: 0,
-            handler: ()=>cell('errno', 0),
+            handler: ()=>cell(host.errnoName?.() ?? 'errno', 0),
         },
 
         __doserrno: {
@@ -521,12 +537,13 @@ export function createStartupFunctions(host){
          * The runtime's copy of the system version, which a start-up and a
          * program's own version check read without calling GetVersion: the
          * build, major and minor in one word, and each part alone. The same
-         * figures GetVersion answers, since a program may compare the two.
+         * figures GetVersion answers for the Windows the process is told it
+         * runs on, since a program may compare the two.
          */
-        _osver: { data: ()=>dword(VERSION_BUILD) },
-        _winver: { data: ()=>dword(VERSION_MAJOR << 8 | VERSION_MINOR) },
-        _winmajor: { data: ()=>dword(VERSION_MAJOR) },
-        _winminor: { data: ()=>dword(VERSION_MINOR) },
+        _osver: { data: ()=>dword(version.build) },
+        _winver: { data: ()=>dword(version.major << 8 | version.minor) },
+        _winmajor: { data: ()=>dword(version.major) },
+        _winminor: { data: ()=>dword(version.minor) },
 
         /**
          * double _HUGE
@@ -571,6 +588,17 @@ export function createStartupFunctions(host){
             handler: ([fn])=>{
                 onExit.push(fn >>> 0);
                 return fn >>> 0;
+            },
+        },
+
+        /** int atexit(void (*func)(void)) -- zero once registered. */
+        atexit: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([fn])=>{
+                onExit.push(fn >>> 0);
+                return 0;
             },
         },
 
@@ -625,12 +653,8 @@ export function createStartupFunctions(host){
                 {
                     return host.exitProcess(code >>> 0);
                 }
-                const asked = host.currentThread?.();
-                const handlers = onExit.splice(0).reverse();
-                return handlers.reduce(
-                    (waiting, entry)=>waiting.then(()=>host.callGuest(entry, [], asked)),
-                    Promise.resolve(0)).then(()=>{
-                    host.exit?.(code >>> 0);
+                return runOnExit().then(async()=>{
+                    await host.exit?.(code >>> 0);
                     return 0;
                 });
             },
@@ -649,8 +673,24 @@ export function createStartupFunctions(host){
          * Run the runtime's own teardown and return, which is not the same as
          * ending the process: a program calls these when it means to keep going
          * afterwards, and ending here would take away the rest of its shutdown.
+         *
+         * `_cexit` is `exit` without the ending: what `atexit` and `_onexit`
+         * registered runs, last first, and then every open stream is closed,
+         * as it is documented to be -- flushing one is nothing here, every
+         * stream writing straight through to the volume. `_c_exit` is `_exit`
+         * without the ending, so it runs and closes nothing.
          */
-        _cexit: { convention: 'cdecl', argBytes: 0, handler: ()=>0 },
+        _cexit: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>{
+                const close = ()=>{
+                    host.closeStreams?.();
+                    return 0;
+                };
+                return onExit.length === 0 ? close() : runOnExit().then(close);
+            },
+        },
         _c_exit: { convention: 'cdecl', argBytes: 0, handler: ()=>0 },
 
         /**

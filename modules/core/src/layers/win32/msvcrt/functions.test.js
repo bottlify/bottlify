@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMsvcrtFunctions } from './functions.js';
-import { fakeMemory } from './harness.test.js';
+import { doubleSlots, fakeMemory, fakeVolume } from './harness.test.js';
 
 /**
  * A stand-in for guest memory, with the same contract as the real one.
@@ -327,6 +327,20 @@ test('atoi saturates rather than wrapping, and atol is the same function', ()=>{
     assert.equal(fns.atol.argBytes, fns.atoi.argBytes);
 });
 
+test('_isnan is nonzero for any NaN and zero for every other double, infinities too', ()=>{
+    // "_isnan ... return a non-zero value if the argument x is a NaN;
+    // otherwise they return 0." A double is two slots, and no FPU is needed.
+    const { fns } = setup();
+    assert.notEqual(fns._isnan.handler(doubleSlots(NaN)), 0);
+    assert.notEqual(fns._isnan.handler([0, 0xfff80000]), 0, 'the x87 indefinite');
+    assert.notEqual(fns._isnan.handler([1, 0x7ff00000]), 0, 'a signalling NaN');
+    for (const value of [0, -0, 1.5, -2e300, Infinity, -Infinity, Number.MIN_VALUE])
+    {
+        assert.equal(fns._isnan.handler(doubleSlots(value)), 0, String(value));
+    }
+    assert.equal(fns._isnan.argBytes, 8);
+});
+
 test('itoa writes the digits and returns the buffer', ()=>{
     const { fns, put, at } = setup();
 
@@ -344,14 +358,14 @@ test('itoa writes the digits and returns the buffer', ()=>{
 });
 
 test('puts writes the string with a newline', ()=>{
-    const { fns, host, put } = setup();
+    const { fns, host, put } = onConsole();
 
     assert.equal(fns.puts.handler([put(0x100, 'hello')]), 0);
     assert.deepEqual(host.output.map(entry=>entry.text), ['hello\n']);
 });
 
 test('printf formats its variadic tail and returns the character count', ()=>{
-    const { fns, host, put } = setup();
+    const { fns, host, put } = onConsole();
     const format = put(0x100, '%s scored %d%%');
     const name = put(0x200, 'player');
 
@@ -360,7 +374,7 @@ test('printf formats its variadic tail and returns the character count', ()=>{
 });
 
 test('printf survives a format that no argument satisfies', ()=>{
-    const { fns, host, put } = setup();
+    const { fns, host, put } = onConsole();
 
     fns.printf.handler([put(0x100, '%d %s')]);
     assert.deepEqual(host.output.map(entry=>entry.text), ['0 (null)']);
@@ -392,6 +406,93 @@ test('_vsnprintf formats from a list in memory and truncates the way _snprintf d
     assert.equal(fns._vsnprintf.argBytes, 16);
 });
 
+test('sprintf reads %S and %ls as the wide strings they are', ()=>{
+    // Wine's msvcrt test_sprintf: "%S" and "%ls" of L"wide" are "wide".
+    const { fns, host, put, at } = setup();
+    const view = new DataView(host.bytes.buffer);
+    [...'wide\0'].forEach((c, index)=>view.setUint16(0x100 + index * 2, c.charCodeAt(0), true));
+    assert.equal(fns.sprintf.handler([0x200, put(0x140, '%S/%ls'), 0x100, 0x100]), 9);
+    assert.equal(at(0x200), 'wide/wide');
+    const list = 0x180;
+    view.setUint32(list, 0x100, true);
+    assert.equal(fns._vsnprintf.handler([0x200, 16, put(0x140, '<%S>'), list]), 6);
+    assert.equal(at(0x200), '<wide>');
+});
+
+test('_vsnwprintf formats wide text from a list, terminated only when there is room', ()=>{
+    // Wine's msvcrt test_vsnwprintf, and test_snprintf's lengths for the
+    // narrow twin: text shorter than the count is terminated, text exactly
+    // the count is not, and longer text is -1 with the count written.
+    const { fns, host, put } = setup();
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} address @param {string} text */
+    const wide = (address, text)=>{
+        [...text, '\0'].forEach((c, at)=>view.setUint16(address + at * 2, c.charCodeAt(0), true));
+        return address;
+    };
+    /** @param {number} address @param {number} count */
+    const units = (address, count)=>String.fromCharCode(
+        ...Array.from({ length: count }, (_, at)=>view.getUint16(address + at * 2, true)));
+    /** @param {number} list @param {number[]} values */
+    const slots = (list, values)=>{
+        values.forEach((value, at)=>view.setUint32(list + at * 4, value, true));
+        return list;
+    };
+    const list = slots(0x180, [wide(0x100, 'one'), wide(0x110, 'two'), wide(0x120, 'three')]);
+    const format = wide(0x140, '%ws%ws%ws');
+
+    host.bytes.fill(0xee, 0x200, 0x300);
+    assert.equal(fns._vsnwprintf.handler([0x200, 32, format, list]), 11);
+    assert.equal(units(0x200, 12), 'onetwothree\0');
+    assert.equal(fns._vsnwprintf.handler([0x200, 0, format, list]), -1);
+    assert.equal(fns._vsnwprintf.handler([0, 0, format, list]), 11, 'the count it would need');
+
+    const none = slots(0x1a0, []);
+    for (const [text, expected] of /** @type {[string, number][]} */ ([
+        ['short', 5], ['justfit', 7], ['justfits', 8], ['muchlonger', -1],
+    ]))
+    {
+        host.bytes.fill(0xee, 0x200, 0x300);
+        assert.equal(fns._vsnwprintf.handler([0x200, 8, wide(0x240, text), none]), expected, text);
+        const valid = expected < 0 ? 8 : Math.min(expected + 1, 8);
+        assert.equal(units(0x200, valid), `${text}\0`.slice(0, valid), text);
+        assert.equal(view.getUint16(0x200 + 16, true), 0xeeee, `${text}: nothing past the count`);
+    }
+    assert.equal(fns._vsnwprintf.handler([0x200, 8, wide(0x240, '%s|%S'),
+        slots(0x1a0, [wide(0x100, 'w'), put(0x120, 'n')])]), 3, '%s wide, %S narrow');
+    assert.equal(units(0x200, 3), 'w|n');
+    assert.equal(fns._vsnwprintf.argBytes, 16);
+});
+
+test('_snprintf and _vsnprintf terminate only when the text is shorter than the count', ()=>{
+    // Wine's ntdll test__snprintf, whose _snprintf is this one: "hello world"
+    // into 11 leaves the X after it, "test" into 4 leaves the byte after it
+    // alone, and into 12 the text is terminated. "The _snprintf family of
+    // functions only appends a terminating NULL character if the formatted
+    // string length is strictly less than count characters."
+    const { fns, host, put, at } = setup();
+    const text = put(0x100, 'hello world');
+    put(0x200, 'XXXXXXXXXXXX');
+    assert.equal(fns._snprintf.handler([0x200, 11, text]), 11);
+    assert.equal(at(0x200), 'hello worldX');
+    put(0x200, 'XXXXXXXXXXXX');
+    assert.equal(fns._snprintf.handler([0x200, 12, text]), 11);
+    assert.equal(at(0x200), 'hello world');
+    assert.equal(fns._snprintf.handler([0x200, 10, text]), -1);
+
+    const test4 = put(0x140, 'test');
+    for (const call of [
+        ()=>fns._snprintf.handler([0x300, 4, test4]),
+        ()=>fns._vsnprintf.handler([0x300, 4, test4, 0x180]),
+    ])
+    {
+        host.bytes.fill(0x7c, 0x300, 0x320);
+        assert.equal(call(), 4);
+        assert.equal(at(0x300).slice(0, 4), 'test');
+        assert.equal(host.bytes[0x304], 0x7c, 'nothing past the count');
+    }
+});
+
 test('_vsnprintf stops the va_list window at the end of its region', ()=>{
     // The stop that faulted a whole run: a thread formats from just below the
     // top of its stack, every argument it reads is there, and the fixed
@@ -419,7 +520,7 @@ test('_vsnprintf stops the va_list window at the end of its region', ()=>{
 });
 
 test('every function is cdecl and declares the stack its arguments occupy', ()=>{
-    const { fns } = setup();
+    const { fns } = onConsole();
 
     for (const [name, fn] of Object.entries(fns))
     {
@@ -581,4 +682,207 @@ test('rand starts where this runtime starts, without any srand at all', ()=>{
     // An unseeded program is seeded with one, which is what the C standard says
     // and what msvcrt does.
     assert.equal(fns.rand.handler(), 41);
+});
+
+/**
+ * The whole table over a host that has a heap, a start-up and a volume, so
+ * the functions that need those seams are exported.
+ *
+ * @param {any} files
+ * @param {() => any} [currentThread]
+ * @param {Record<string, any>} [more]  Further seams, the runtime's `_iob` among them.
+ */
+function wholeRuntime(files, currentThread, more = {}){
+    const host = fakeHost(0x4000);
+    let next = 0x2000;
+    const fns = /** @type {Record<string, any>} */ (createMsvcrtFunctions({
+        ...host,
+        ...more,
+        currentThread,
+        allocate: bytes=>{
+            const at = next;
+            next += bytes + 7 & ~7;
+            return at;
+        },
+        free: ()=>true,
+        commandLine: ()=>'"C:\\game.exe"',
+        exitProcess: ()=>0,
+        files,
+    }));
+    /** @param {number} address @param {string} text */
+    const put = (address, text)=>{
+        host.writeMemory(address, new Uint8Array([...text].map(c=>c.charCodeAt(0)).concat(0)));
+        return address;
+    };
+    /** @param {number} address */
+    const u32 = address=>new DataView(host.bytes.buffer).getUint32(address, true);
+    return { host, fns, put, u32 };
+}
+
+/** The whole runtime, its standard streams placed and stdout on the console. */
+function onConsole(){
+    return wholeRuntime(fakeVolume({}, { directories: ['C:\\'] }), undefined,
+        { iob: ()=>0x3800 });
+}
+
+test('errno is one variable: a failing call sets what _errno points at', ()=>{
+    // Before the program has asked for the address and after: the start-up
+    // hands out the cell the failing functions write.
+    const { fns, put, u32 } = wholeRuntime({
+        stat: ()=>null,
+        currentDirectory: ()=>'C:\\game',
+        setCurrentDirectory: ()=>true,
+    });
+    const ENOENT = 2;
+    const ERANGE = 34;
+
+    assert.equal(fns._chdir.handler([put(0x100, 'C:\\nowhere')]), -1);
+    const cell = fns._errno.handler([]);
+    assert.equal(u32(cell), ENOENT, 'set before anyone asked where errno is');
+
+    assert.equal(fns.strtol.handler([put(0x100, '99999999999'), 0, 10]), 0x7fffffff);
+    assert.equal(u32(cell), ERANGE, 'and written through the cell after');
+});
+
+test('each thread has its own errno: another thread\'s failure does not overwrite it', ()=>{
+    // The scheduler may switch threads between a failing call and the line
+    // that reads errno after it; the runtime keeps the variable per thread.
+    const main = { name: 'main' };
+    const worker = { name: 'worker' };
+    let current = main;
+    const { fns, put, u32 } = wholeRuntime({
+        stat: ()=>null, currentDirectory: ()=>'C:\\', setCurrentDirectory: ()=>true,
+    }, ()=>current);
+
+    assert.equal(fns._chdir.handler([put(0x100, 'C:\\nowhere')]), -1);
+    current = worker;
+    assert.equal(fns.strtol.handler([put(0x100, '99999999999'), 0, 10]), 0x7fffffff);
+    const workerErrno = fns._errno.handler([]);
+    current = main;
+    const mainErrno = fns._errno.handler([]);
+
+    assert.notEqual(mainErrno, workerErrno);
+    assert.equal(u32(mainErrno), 2, 'ENOENT, from the main thread\'s own call');
+    assert.equal(u32(workerErrno), 34, 'ERANGE, from the worker\'s');
+    assert.equal(fns._errno.handler([]), mainErrno, 'the same cell every time');
+});
+
+test('_snprintf and _vsnprintf with no buffer and a count of zero answer the length needed', ()=>{
+    // Wine's ntdll test__snprintf: _snprintf(NULL, 0, "hello world") is 11.
+    // With no buffer and a count to fill it is -1 and EINVAL, the answer the
+    // documentation gives and the test allows.
+    const { fns, put, u32 } = wholeRuntime(fakeVolume({}));
+    const text = put(0x100, 'hello world');
+    assert.equal(fns._snprintf.handler([0, 0, text]), 11);
+    assert.equal(fns._vsnprintf.handler([0, 0, text, 0x180]), 11);
+    assert.equal(u32(fns._errno.handler([])), 0);
+    assert.equal(fns._snprintf.handler([0, 1, text]), -1);
+    assert.equal(u32(fns._errno.handler([])), 22);
+    assert.equal(fns._vsnprintf.handler([0, 12, text, 0x180]), -1);
+});
+
+test('printf, puts and vprintf write through stdout, so freopen moves them with it', ()=>{
+    // printf is fprintf on stdout and puts is fputs on it: a program that
+    // moved stdout to a file with freopen finds their output there.
+    const IOB = 0x3800;
+    const files = fakeVolume({}, { directories: ['C:\\'] });
+    const { host, fns, put } = wholeRuntime(files, undefined, { iob: ()=>IOB });
+    const stdout = IOB + 32;
+    const format = put(0x100, '%s=%d\n');
+    const name = put(0x140, 'x');
+    const list = 0x180;
+    new DataView(host.bytes.buffer).setUint32(list, name, true);
+    new DataView(host.bytes.buffer).setUint32(list + 4, 3, true);
+    const say = ()=>[
+        fns.printf.handler([format, name, 1]),
+        fns.puts.handler([put(0x1c0, 'hi')]),
+        fns.vprintf.handler([format, list]),
+    ];
+
+    assert.deepEqual(say(), [4, 0, 4]);
+    assert.deepEqual(host.output.map(entry=>[entry.handle, entry.text]),
+        [[2, 'x=1\n'], [2, 'hi\n'], [2, 'x=3\n']], 'the console, while stdout is on it');
+
+    host.output.length = 0;
+    assert.equal(fns.freopen.handler([put(0x200, 'C:\\log.txt'), put(0x220, 'w'), stdout]),
+        stdout);
+    assert.deepEqual(say(), [4, 0, 4]);
+    assert.deepEqual(host.output, []);
+    assert.equal(String.fromCharCode(...files.files['C:\\log.txt']), 'x=1\r\nhi\r\nx=3\r\n');
+});
+
+test('_cexit closes every open stream after the handlers, a temporary file with it', async()=>{
+    // "_cexit ... flushes all I/O buffers and closes all open streams before
+    // returning" -- a standard stream freopen moved to a file included.
+    const IOB = 0x3800;
+    const files = fakeVolume({}, { directories: ['C:\\'] });
+    const { host, fns, put } = wholeRuntime(files, undefined, { iob: ()=>IOB });
+    assert.notEqual(fns.fopen.handler([put(0x100, 'C:\\scratch.tmp'), put(0x120, 'w+D')]), 0);
+    const kept = fns.fopen.handler([put(0x140, 'C:\\kept.txt'), put(0x160, 'w')]);
+    fns.freopen.handler([put(0x180, 'C:\\log.txt'), put(0x1a0, 'w'), IOB + 64]);
+
+    assert.equal(await fns._cexit.handler([]), 0);
+    assert.equal(files.files['C:\\scratch.tmp'], undefined);
+    assert.deepEqual([...files.closed].sort(),
+        ['C:\\kept.txt', 'C:\\log.txt', 'C:\\scratch.tmp']);
+    assert.equal(fns.fputc.handler([0x41, kept]), -1, 'the stream is gone');
+    assert.equal(fns.fputc.handler([0x42, IOB + 64]), 0x42, 'stderr is the console again');
+    assert.deepEqual(host.output.map(entry=>[entry.handle, entry.text]), [[3, 'B']]);
+});
+
+test('the runtime closes its files when the process ends, removing a temporary one', ()=>{
+    /** @type {(() => void)[]} */
+    const atEnd = [];
+    const files = fakeVolume({}, { directories: ['C:\\'] });
+    const { fns, put } = wholeRuntime(files, undefined, {
+        iob: ()=>0x3800, atProcessEnd: (/** @type {() => void} */ task)=>atEnd.push(task),
+    });
+    assert.notEqual(fns.fopen.handler([put(0x100, 'C:\\scratch.tmp'), put(0x120, 'wD')]), 0);
+    const O_CREAT_RDWR_TEMPORARY = 0x0142;
+    assert.ok(fns._open.handler([put(0x140, 'C:\\low.tmp'), O_CREAT_RDWR_TEMPORARY, 0]) > 2);
+
+    assert.equal(atEnd.length, 1, 'told once, when the runtime was made');
+    atEnd.forEach(task=>task());
+    assert.deepEqual(Object.keys(files.files), []);
+});
+
+test('sprintf_s and vsprintf_s write what fits with its terminator, and refuse the rest', ()=>{
+    // "If the buffer is too small for the formatted text, including the
+    // terminating null, then the buffer is set to an empty string"; a null
+    // buffer or format is -1 and EINVAL, as a size of zero is for vsprintf_s.
+    const { host, fns, put, u32 } = wholeRuntime({
+        stat: ()=>null, currentDirectory: ()=>'C:\\', setCurrentDirectory: ()=>true,
+    });
+    const errno = fns._errno.handler([]);
+    const format = put(0x100, '%s=%d');
+    const name = put(0x120, 'x');
+    host.writeMemory(0x140, new Uint8Array([name & 0xff, name >>> 8 & 0xff, 0, 0, 42, 0, 0, 0]));
+    const text = (/** @type {number} */ address)=>host.readCString(address, 64);
+    const ERANGE = 34;
+    const EINVAL = 22;
+
+    assert.equal(fns.sprintf_s.handler([0x200, 5, format, name, 42]), 4, 'exactly room');
+    assert.equal(text(0x200), 'x=42');
+    assert.equal(fns.vsprintf_s.handler([0x300, 16, format, 0x140]), 4);
+    assert.equal(text(0x300), 'x=42');
+
+    host.bytes.fill(0x7f, 0x400, 0x408);
+    assert.equal(fns.sprintf_s.handler([0x400, 4, format, name, 42]), -1,
+        'no room for the terminator');
+    assert.deepEqual([...host.bytes.subarray(0x400, 0x402)], [0, 0x7f]);
+    assert.equal(u32(errno), ERANGE);
+    host.bytes[0x400] = 0x7f;
+    assert.equal(fns.vsprintf_s.handler([0x400, 2, format, 0x140]), -1);
+    assert.equal(host.bytes[0x400], 0);
+
+    assert.equal(fns.sprintf_s.handler([0, 16, format]), -1);
+    assert.equal(u32(errno), EINVAL);
+    host.writeMemory(errno, new Uint8Array(4));
+    assert.equal(fns.vsprintf_s.handler([0x400, 16, 0, 0x140]), -1);
+    assert.equal(u32(errno), EINVAL);
+    host.writeMemory(errno, new Uint8Array(4));
+    assert.equal(fns.vsprintf_s.handler([0x400, 0, format, 0x140]), -1);
+    assert.equal(u32(errno), EINVAL);
+    assert.deepEqual([fns.sprintf_s.convention, fns.vsprintf_s.argBytes], ['cdecl', 16]);
+    assert.ok(fns.sprintf_s.argBytes >= 12 + 4 * 4, 'sprintf_s reads a tail');
 });

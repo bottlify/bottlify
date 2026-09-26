@@ -44,14 +44,23 @@
 
 import {
     CLASS_E_NOAGGREGATION,
+    DDCKEY_COLORSPACE,
+    DDCKEY_DESTBLT,
+    DDCKEY_SRCBLT,
     DDERR_CANNOTATTACHSURFACE,
     DDERR_CANNOTDETACHSURFACE,
     DDERR_DCALREADYCREATED,
     DDERR_CLIPPERISUSINGHWND,
+    DDERR_EXCLUSIVEMODEALREADYSET,
+    DDERR_WRONGMODE,
+    DDERR_INVALIDCAPS,
     DDERR_INVALIDMODE,
+    DDERR_INVALIDOBJECT,
     DDERR_INVALIDPARAMS,
+    DDERR_INVALIDSURFACETYPE,
     DDERR_NOCLIPPERATTACHED,
     DDERR_NOCOLORKEY,
+    DDERR_NOCOLORKEYHW,
     DDERR_NOCOOPERATIVELEVELSET,
     DDERR_NODC,
     DDERR_NOEXCLUSIVEMODE,
@@ -59,6 +68,7 @@ import {
     DDERR_NOTFLIPPABLE,
     DDERR_NOTFOUND,
     DDERR_NOTLOCKED,
+    DDERR_NOTONMIPMAPSUBLEVEL,
     DDERR_SURFACEALREADYATTACHED,
     DDERR_SURFACEBUSY,
     DDERR_SURFACELOST,
@@ -70,22 +80,33 @@ import {
     DDPF_PALETTEINDEXED8,
     DDPF_RGB,
     DDPF_ZBUFFER,
+    DDSCAPS2_D3DTEXTUREMANAGE,
+    DDSCAPS2_MIPMAPSUBLEVEL,
+    DDSCAPS2_TEXTUREMANAGE,
     DDSCAPS_FLIP,
     DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY,
+    DDSCAPS_TEXTURE,
     DDSCAPS_VISIBLE,
     DDSCAPS_ZBUFFER,
     DDSCL_EXCLUSIVE,
     DDSD_BACKBUFFERCOUNT,
+    DDSD_CAPS,
     DDSD_HEIGHT,
+    DDSD_LPSURFACE,
+    DDSD_MIPMAPCOUNT,
+    DDSD_PITCH,
+    DDSD_PIXELFORMAT,
     DDSD_WIDTH,
     DDSD_ZBUFFERBITDEPTH,
+    DDLOCK_READONLY,
     DD_OK,
     E_NOINTERFACE,
 } from './constants.js';
 import {
     acceptsMalformedLockRect,
     backBufferCaps,
+    mipLevelCount,
     validateSurfaceCaps,
     validateSurfaceSize,
 } from './caps.js';
@@ -134,9 +155,18 @@ const LEGACY_D3D = Object.freeze(new Set(['IDirect3D', 'IDirect3D2', 'IDirect3D3
  * @property {number} [width]
  * @property {number} [height]
  * @property {number} [backBufferCount]
+ * @property {number} [mipMapCount]      dwMipMapCount, when DDSD_MIPMAPCOUNT names it.
  * @property {number} [zBufferBitDepth]  dwZBufferBitDepth, in the older layout.
  * @property {import("./structs.js").PixelFormatFields} [pixelFormat]
+ * @property {ColorKey} [srcColorKey]   ddckCKSrcBlt, when DDSD_CKSRCBLT names it.
+ * @property {ColorKey} [destColorKey]  ddckCKDestBlt, when DDSD_CKDESTBLT names it.
+ * @property {number} [pitch]           lPitch, when DDSD_PITCH names it.
+ * @property {number} [surfacePointer]  lpSurface, when DDSD_LPSURFACE names it.
  */
+
+/** The fields SetSurfaceDesc may name; lpSurface has to be among them. */
+const SETTABLE_FIELDS = DDSD_LPSURFACE | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH | DDSD_PIXELFORMAT
+    | DDSD_CAPS;
 
 /**
  * The pixel format of a depth buffer asked for by bit depth alone, which is
@@ -199,6 +229,7 @@ export function depthFormatForDepth(bitDepth){
  * @typedef {Object} Surface
  * @property {number} refCount
  * @property {boolean} destroyed
+ * @property {any} directDraw  The DirectDraw object that made it.
  * @property {() => number} addRef
  * @property {() => number} release
  * @property {number} caps
@@ -208,6 +239,9 @@ export function depthFormatForDepth(bitDepth){
  * @property {number} pitch
  * @property {import("./structs.js").PixelFormatFields} pixelFormat
  * @property {number} backBufferCount
+ * @property {number} mipMapCount     Levels from this one down; zero off a mip chain.
+ * @property {Surface | null} mipNext The next smaller level.
+ * @property {(next: Surface | null) => void} setMipNext
  * @property {number} buffer          The pixels this surface currently shows.
  * @property {boolean} implicit       Created as part of a complex surface.
  * @property {Palette | null} palette
@@ -216,6 +250,7 @@ export function depthFormatForDepth(bitDepth){
  * @property {boolean} locked
  * @property {number | null} dc
  * @property {() => void} present
+ * @property {(rect: Rect | null, value: number) => void} depthFilled
  * @property {(which: number, key: ColorKey | null) => number} setColorKey
  * @property {(which: number) => { hr: number, key: ColorKey | null }} getColorKey
  * @property {() => number} uniquenessValue
@@ -233,16 +268,40 @@ export function depthFormatForDepth(bitDepth){
  * @property {() => { hr: number, palette: Palette | null }} getPalette
  * @property {(next: Clipper | null) => number} setClipper
  * @property {() => { hr: number, clipper: Clipper | null }} getClipper
- * @property {(rect?: Rect | null) => LockResult} lock
+ * @property {(rect?: Rect | null, flags?: number) => LockResult} lock
  * @property {(rect?: Rect | null) => number} unlock
  * @property {() => { hr: number, dc: number | null }} getDC
  * @property {(handle: number) => number} releaseDC
  * @property {(other: Surface) => number} addAttachedSurface
- * @property {(other: Surface) => number} deleteAttachedSurface
- * @property {(wanted: number) => { hr: number, surface: Surface | null }} getAttachedSurface
+ * @property {(other: Surface | null) => number} deleteAttachedSurface
+ * @property {(wanted: number, wanted2?: number) => { hr: number, surface: Surface | null }}
+ *           getAttachedSurface
  * @property {() => Surface[]} enumAttachedSurfaces
  * @property {(target?: Surface | null, flags?: number) => number} flip
+ * @property {(request: SurfaceRequest, flags: number) => number} setSurfaceDesc
+ * @property {Uint16Array | null} gammaRamp  What SetGammaRamp set; null is the identity.
+ * @property {() => Uint16Array} getGammaRamp
+ * @property {(ramp: ArrayLike<number>) => number} setGammaRamp
+ * @property {() => { hr: number, priority: number }} getPriority
+ * @property {(value: number) => number} setPriority
+ * @property {() => Promise<void> | null} pixelsCurrent
+ *
+ * @typedef {Object} PixelWatcher
+ * @property {(surface: Surface) => Promise<void> | null} readBack
+ *           Settles once the surface's guest bytes hold what the watcher's copy
+ *           holds; null for a surface it keeps no copy of.
+ * @property {(surface: Surface) => void} written
+ *           The guest bytes are newer than the watcher's copy now.
  */
+
+/** Entries per channel of a DDGAMMARAMP, and its three channels end to end. */
+const GAMMA_ENTRIES = 256;
+const GAMMA_WORDS = GAMMA_ENTRIES * 3;
+
+/** @returns {Uint16Array} red, green and blue, each passing its input straight through */
+function identityRamp(){
+    return Uint16Array.from({ length: GAMMA_WORDS }, (_, index)=>(index % GAMMA_ENTRIES) * 257);
+}
 
 /**
  * The pixel format a display depth means, which is what a primary surface --
@@ -310,6 +369,17 @@ function rectIsValid(rect, width, height){
 }
 
 /**
+ * Whether two display modes are one: the same size and depth. The refresh
+ * rate is left out, zero standing for whatever rate the display runs at.
+ *
+ * @param {{ width: number, height: number, bitCount: number }} a
+ * @param {{ width: number, height: number, bitCount: number }} b
+ */
+function sameMode(a, b){
+    return a.width === b.width && a.height === b.height && a.bitCount === b.bitCount;
+}
+
+/**
  * @param {Rect} a
  * @param {Rect} b
  * @returns {boolean}
@@ -328,12 +398,23 @@ function sameRect(a, b){
  *           Where a surface's pixels live. Injected so the model is testable
  *           with no backend; the default hands out distinct, page-aligned
  *           addresses and never reads or writes them.
+ * @property {(address: number) => void} [free]
+ *           Gives a surface's pixels back when its last reference goes.
  * @property {(attributes: DcAttributes) => number} [createDc]
  *           A device context handle for GetDC, over the surface's own pixels.
  *           This layer records that one was handed out and nothing more --
  *           what a DC *is* belongs to gdi, which is told where the pixels are.
  * @property {(handle: number) => void} [releaseDc]
  *           The other end of `createDc`.
+ * @property {import('../webgpu/internal/presenter.js').DisplayGamma} [gamma]
+ *           The display's gamma ramp, which is the primary surface's: set when
+ *           a program sets one through the primary's gamma control, taken back
+ *           when the primary goes. Absent, a ramp is kept and read back only.
+ * @property {{ deactivated: () => boolean, deactivations: () => number }} [application]
+ *           Whether the application is not the active one now, and how many
+ *           times it has stopped being. An exclusive owner loses its video
+ *           memory each time, and cannot restore it until the application is
+ *           active again. Absent, the application is always active.
  * @property {(surface: Surface, window: number, exclusive: boolean) => void} [onPresent]
  *           Called whenever what the primary surface shows may have changed: a
  *           flip, an unlock or a released DC on it, a blit into it -- with the
@@ -380,6 +461,8 @@ export function createDirectDraw(options = {}){
         return address;
     });
 
+    const free = options.free ?? (()=>{});
+
     let nextDc = 0x1000;
     const createDc = options.createDc ?? (()=>{
         nextDc += 4;
@@ -387,6 +470,21 @@ export function createDirectDraw(options = {}){
     });
     const releaseDc = options.releaseDc ?? (()=>{});
     const onPresent = options.onPresent ?? (()=>{});
+    /**
+     * Who draws against a depth buffer somewhere else -- a Direct3D device,
+     * on the GPU -- and so must hear of a fill of its memory.
+     *
+     * @type {Set<(surface: Surface, rect: Rect | null, value: number) => void>}
+     */
+    const depthFillWatchers = new Set();
+    /**
+     * Who keeps a surface's pixels somewhere other than its guest bytes -- a
+     * Direct3D device, on the GPU -- and so is asked for them before they are
+     * read and told when the program wrote them.
+     *
+     * @type {Set<PixelWatcher>}
+     */
+    const pixelWatchers = new Set();
 
     /**
      * The display mode, which is what a primary surface takes its size and
@@ -423,6 +521,61 @@ export function createDirectDraw(options = {}){
 
     /** @returns {boolean} */
     const exclusive = ()=>(cooperativeLevel & DDSCL_EXCLUSIVE) !== 0;
+
+    /**
+     * Whether a surface's memory is the display's, which the display takes
+     * back: anything not in system memory. A managed texture is the
+     * runtime's to keep and reports itself in system memory besides.
+     *
+     * @param {{ caps: number, caps2: number }} surface
+     */
+    const canBeLost = surface=>(surface.caps & DDSCAPS_SYSTEMMEMORY) === 0
+        && (surface.caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) === 0;
+    const loseVideoMemory = ()=>{
+        for (const surface of surfaces)
+        {
+            if (canBeLost(surface))
+            {
+                surface.markLost();
+            }
+        }
+    };
+    /** The deactivations counted when this object last looked. */
+    let deactivationsSeen = options.application?.deactivations() ?? 0;
+    /**
+     * Brings the surfaces up to what the application's activation has done
+     * since they were last looked at: every deactivation while this object
+     * held the screen took its video memory. Asked on every call that can
+     * find a surface lost, because nothing tells this layer when it happens.
+     */
+    const noticeDeactivation = ()=>{
+        const count = options.application?.deactivations() ?? 0;
+        if (count !== deactivationsSeen)
+        {
+            deactivationsSeen = count;
+            if (exclusive())
+            {
+                loseVideoMemory();
+            }
+        }
+    };
+    /** Whether the screen is out of this object's hands: exclusive, and in the background. */
+    const screenWithheld = ()=>exclusive() && options.application?.deactivated() === true;
+    /**
+     * Makes `next` the display mode. A change of size or depth takes the
+     * display's memory back from every surface, whichever cooperative level
+     * the object is at; setting the mode already in effect takes nothing.
+     *
+     * @param {{ width: number, height: number, bitCount: number, refreshRate: number }} next
+     */
+    const changeDisplayMode = next=>{
+        const changed = !sameMode(next, displayMode);
+        displayMode = next;
+        if (changed)
+        {
+            loseVideoMemory();
+        }
+    };
 
     function destroyIfUnreferenced(){
         if (destroyed)
@@ -475,6 +628,24 @@ export function createDirectDraw(options = {}){
         if (legacyD3dGeneration === null)
         {
             legacyD3dGeneration = published.get(through)?.generation ?? through;
+        }
+        return legacyD3dGeneration;
+    }
+
+    /**
+     * The generation the older Direct3D interfaces count against when the
+     * caller cannot say which interface a query came through -- the bridge
+     * answers a QueryInterface from the table alone. Bound as a query binds
+     * it, once: to the newest generation before the seventh that is held,
+     * which is the one a program queries from, or else to the seed.
+     *
+     * @returns {string}
+     */
+    function legacyD3dGenerationHeld(){
+        if (legacyD3dGeneration === null)
+        {
+            legacyD3dGeneration = ['IDirectDraw4', 'IDirectDraw2', 'IDirectDraw']
+                .find(generation=>(counts.get(generation) ?? 0) > 0) ?? seed;
         }
         return legacyD3dGeneration;
     }
@@ -701,14 +872,21 @@ export function createDirectDraw(options = {}){
     /**
      * @param {{ caps: number, caps2: number, width: number, height: number,
      *   backBufferCount: number, pixelFormat: import("./structs.js").PixelFormatFields,
-     *   owner: string | null, implicit: boolean }} spec
+     *   owner: string | null, implicit: boolean, mipMapCount?: number,
+     *   mode?: { width: number, height: number, bitCount: number } }} spec
+     *   `mode` is the display mode a primary and its buffers are the screen in.
      * @returns {Surface}
      */
     function makeSurface(spec){
         let caps = spec.caps >>> 0;
-        const bpp = bytesPerPixel(spec.pixelFormat);
-        const pitch = spec.width * (bpp > 0 ? bpp : 1);
-        let buffer = allocate(pitch * spec.height);
+        // The geometry is the creation's until SetSurfaceDesc hands the
+        // surface memory of the program's own, of a size it names.
+        let width = spec.width;
+        let height = spec.height;
+        let pixelFormat = spec.pixelFormat;
+        let bpp = bytesPerPixel(pixelFormat);
+        let pitch = width * (bpp > 0 ? bpp : 1);
+        let buffer = allocate(pitch * height);
 
         /** @type {Surface | null} */
         let flipNext = null;
@@ -718,11 +896,16 @@ export function createDirectDraw(options = {}){
         let flipImplicit = false;
         /** @type {Surface | null} */
         let depth = null;
+        /** @type {Surface | null} */
+        let mipNext = null;
+        // A level below the top is the texture's storage and nothing more:
+        // its palette and colour keys are the top level's.
+        const sublevel = (spec.caps2 & DDSCAPS2_MIPMAPSUBLEVEL) !== 0;
         /** @type {Palette | null} */
         let palette = null;
         /** @type {Clipper | null} */
         let clipper = null;
-        /** @type {Rect[]} */
+        /** @type {{ area: Rect, readOnly: boolean }[]} */
         const locks = [];
         /** @type {number | null} */
         let dc = null;
@@ -730,6 +913,30 @@ export function createDirectDraw(options = {}){
         /** Colour keys by the DDCKEY flag that names them. @type {Map<number, ColorKey>} */
         const colorKeys = new Map();
         let uniqueness = 1;
+        /** @type {Uint16Array | null} */
+        let gammaRamp = null;
+        let priority = 0;
+        /**
+         * Whether this surface can hold a priority: only a texture the
+         * runtime manages has one, and only at its top level.
+         */
+        const priorityRefusal = ()=>{
+            if ((caps & DDSCAPS_TEXTURE) === 0)
+            {
+                return DDERR_INVALIDOBJECT;
+            }
+            return (spec.caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) === 0
+                || sublevel
+                ? DDERR_INVALIDPARAMS
+                : DD_OK;
+        };
+        /** Whoever keeps a copy of these pixels hears that the guest's bytes changed. */
+        const tellWritten = ()=>{
+            for (const watcher of pixelWatchers)
+            {
+                watcher.written(surface);
+            }
+        };
 
         const life = counted(()=>{
             surfaces.delete(surface);
@@ -750,10 +957,22 @@ export function createDirectDraw(options = {}){
                 depth.release();
                 depth = null;
             }
+            if (mipNext)
+            {
+                mipNext.release();
+                mipNext = null;
+            }
             if (spec.owner)
             {
                 release(spec.owner);
             }
+            if (gammaRamp && (caps & DDSCAPS_PRIMARYSURFACE) !== 0)
+            {
+                options.gamma?.set(surface, null);
+            }
+            // Whatever the surface holds now: a flip moves buffers between a
+            // chain's members, and each member gives back the one it ends with.
+            free(buffer);
         });
 
         const surface = {
@@ -762,6 +981,10 @@ export function createDirectDraw(options = {}){
             },
             get destroyed(){
                 return life.dead;
+            },
+            /** The DirectDraw object that made it, which an attached surface has too. */
+            get directDraw(){
+                return directDraw;
             },
             addRef: ()=>life.addRef(),
             release: ()=>life.release(),
@@ -772,12 +995,30 @@ export function createDirectDraw(options = {}){
             get caps2(){
                 return spec.caps2;
             },
-            width: spec.width,
-            height: spec.height,
-            pitch,
-            pixelFormat: spec.pixelFormat,
+            get width(){
+                return width;
+            },
+            get height(){
+                return height;
+            },
+            get pitch(){
+                return pitch;
+            },
+            get pixelFormat(){
+                return pixelFormat;
+            },
             get backBufferCount(){
                 return spec.backBufferCount;
+            },
+            get mipMapCount(){
+                return spec.mipMapCount ?? 0;
+            },
+            get mipNext(){
+                return mipNext;
+            },
+            /** @param {Surface | null} next */
+            setMipNext(next){
+                mipNext = next;
             },
             get buffer(){
                 return buffer;
@@ -802,18 +1043,29 @@ export function createDirectDraw(options = {}){
             },
 
             /**
-             * @param {number} which  A DDCKEY flag.
+             * A key is one colour. Without DDCKEY_COLORSPACE the high value
+             * is not read at all; with it, a range is refused rather than
+             * narrowed, because no device of the era keyed on one.
+             *
+             * @param {number} which  A DDCKEY flag, with DDCKEY_COLORSPACE or without.
              * @param {ColorKey | null} key  Null removes the key.
              */
             setColorKey(which, key){
+                if (sublevel)
+                {
+                    return DDERR_NOTONMIPMAPSUBLEVEL;
+                }
+                const kind = which & ~DDCKEY_COLORSPACE;
                 if (key === null)
                 {
-                    colorKeys.delete(which);
+                    colorKeys.delete(kind);
+                    return DD_OK;
                 }
-                else
+                if ((which & DDCKEY_COLORSPACE) !== 0 && key.low >>> 0 !== key.high >>> 0)
                 {
-                    colorKeys.set(which, { low: key.low >>> 0, high: key.high >>> 0 });
+                    return DDERR_NOCOLORKEYHW;
                 }
+                colorKeys.set(kind, { low: key.low >>> 0, high: key.low >>> 0 });
                 return DD_OK;
             },
 
@@ -830,6 +1082,21 @@ export function createDirectDraw(options = {}){
             /** Called by whatever wrote into the surface behind the program's back. */
             changeUniquenessValue(){
                 uniqueness++;
+                tellWritten();
+            },
+
+            /**
+             * Brings the guest's bytes up to date with a copy kept elsewhere
+             * -- a render target the GPU draws into -- before they are read
+             * or partly overwritten. Null when nobody keeps one: the bytes
+             * are the pixels already.
+             *
+             * @returns {Promise<void> | null}
+             */
+            pixelsCurrent(){
+                const pending = [...pixelWatchers].map(watcher=>watcher.readBack(surface))
+                    .filter(answer=>answer !== null);
+                return pending.length === 0 ? null : Promise.all(pending).then(()=>undefined);
             },
 
             /**
@@ -841,6 +1108,19 @@ export function createDirectDraw(options = {}){
                 if ((caps & DDSCAPS_PRIMARYSURFACE) !== 0 && (caps & DDSCAPS_VISIBLE) !== 0)
                 {
                     onPresent(surface, cooperativeWindow, exclusive());
+                }
+            },
+
+            /**
+             * A depth fill wrote this surface's depth bits.
+             *
+             * @param {Rect | null} rect  Null for all of it.
+             * @param {number} value      The fill, in the surface's own depth bits.
+             */
+            depthFilled(rect, value){
+                for (const watcher of depthFillWatchers)
+                {
+                    watcher(surface, rect, value);
                 }
             },
 
@@ -872,16 +1152,49 @@ export function createDirectDraw(options = {}){
             },
 
             isLost(){
+                noticeDeactivation();
                 return lost ? DDERR_SURFACELOST : DD_OK;
             },
 
+            /**
+             * Gives a lost surface its memory back -- not its contents, which
+             * the program redraws -- with the surfaces created with it: a
+             * flip chain's buffers and a texture's levels come back with the
+             * surface they were made for, one attached later does not. Not
+             * while the screen is another application's.
+             */
             restore(){
+                noticeDeactivation();
+                if (!canBeLost(surface))
+                {
+                    return DD_OK;
+                }
+                if (screenWithheld())
+                {
+                    return DDERR_WRONGMODE;
+                }
+                if (spec.mode && !sameMode(spec.mode, displayMode))
+                {
+                    return DDERR_WRONGMODE;
+                }
                 lost = false;
+                if (mipNext?.implicit)
+                {
+                    mipNext.restore();
+                }
+                if (flipNext && flipImplicit)
+                {
+                    flipNext.restore();
+                }
                 return DD_OK;
             },
 
             /** @param {Palette | null} next */
             setPalette(next){
+                if (sublevel)
+                {
+                    return DDERR_NOTONMIPMAPSUBLEVEL;
+                }
                 if (palette)
                 {
                     if (caps & DDSCAPS_PRIMARYSURFACE)
@@ -930,14 +1243,16 @@ export function createDirectDraw(options = {}){
 
             /**
              * @param {Rect | null} [rect]
+             * @param {number} [flags]  DDLOCK; a read-only lock writes nothing when released.
              * @returns {{ hr: number, surfacePointer: number | null, pitch: number }}
              */
-            lock(rect = null){
+            lock(rect = null, flags = 0){
                 // Every failure below leaves the surface pointer null. A caller
                 // that ignores the return code and follows the pointer anyway
                 // then faults instead of writing into a surface it does not own.
                 const fail = /** @param {number} hr */ hr=>(
                     { hr, surfacePointer: null, pitch });
+                noticeDeactivation();
                 if (lost)
                 {
                     return fail(DDERR_SURFACELOST);
@@ -948,17 +1263,17 @@ export function createDirectDraw(options = {}){
                 {
                     return fail(DDERR_SURFACEBUSY);
                 }
-                const area = wholeSurface(rect, spec.width, spec.height);
-                if (locks.some(held=>sameRect(held, area)))
+                const area = wholeSurface(rect, width, height);
+                if (locks.some(held=>sameRect(held.area, area)))
                 {
                     return fail(DDERR_SURFACEBUSY);
                 }
-                if (!rectIsValid(area, spec.width, spec.height)
+                if (!rectIsValid(area, width, height)
                     && !acceptsMalformedLockRect(caps, spec.caps2))
                 {
                     return fail(DDERR_INVALIDPARAMS);
                 }
-                locks.push(area);
+                locks.push({ area, readOnly: (flags & DDLOCK_READONLY) !== 0 });
                 // The pointer names the rectangle's own top-left corner, and the
                 // pitch does not change with it: a partial lock is a window onto
                 // the same rows, not a buffer of its own.
@@ -980,13 +1295,17 @@ export function createDirectDraw(options = {}){
                 // Lock/Unlock calls unwind in the order they were made.
                 const index = rect === null
                     ? locks.length - 1
-                    : locks.findIndex(held=>sameRect(held, rect));
+                    : locks.findIndex(held=>sameRect(held.area, rect));
                 if (index < 0)
                 {
                     return DDERR_NOTLOCKED;
                 }
-                locks.splice(index, 1);
+                const [released] = locks.splice(index, 1);
                 uniqueness++;
+                if (!released.readOnly)
+                {
+                    tellWritten();
+                }
                 surface.present();
                 return DD_OK;
             },
@@ -1000,13 +1319,14 @@ export function createDirectDraw(options = {}){
                     // no second DC to hand back and none is invented.
                     return { hr: DDERR_DCALREADYCREATED, dc: null };
                 }
+                noticeDeactivation();
                 if (lost)
                 {
                     return { hr: DDERR_SURFACELOST, dc: null };
                 }
                 dc = createDc({
-                    width: spec.width,
-                    height: spec.height,
+                    width: width,
+                    height: height,
                     pitch,
                     bitCount: bpp * 8,
                     bits: buffer,
@@ -1015,7 +1335,7 @@ export function createDirectDraw(options = {}){
                     // surface with none of its own draws in the primary's, the
                     // colours its pixels are shown in once blitted there.
                     palette: bpp === 1 ? (palette ?? primaryPalette())?.pixels ?? null : null,
-                    format: spec.pixelFormat.greenMask === 0x07e0 ? '565' : '555',
+                    format: pixelFormat.greenMask === 0x07e0 ? '565' : '555',
                 });
                 return { hr: DD_OK, dc };
             },
@@ -1030,6 +1350,7 @@ export function createDirectDraw(options = {}){
                 releaseDc(dc);
                 dc = null;
                 uniqueness++;
+                tellWritten();
                 surface.present();
                 return DD_OK;
             },
@@ -1061,7 +1382,7 @@ export function createDirectDraw(options = {}){
                 {
                     return DDERR_CANNOTATTACHSURFACE;
                 }
-                if (other.width !== spec.width || other.height !== spec.height)
+                if (other.width !== width || other.height !== height)
                 {
                     return DDERR_CANNOTATTACHSURFACE;
                 }
@@ -1074,13 +1395,36 @@ export function createDirectDraw(options = {}){
                 return DD_OK;
             },
 
-            /** @param {Surface} other */
+            /**
+             * Null detaches every surface this one attached. What the runtime
+             * attached stays, as it does when named one at a time.
+             *
+             * @param {Surface | null} other
+             */
             deleteAttachedSurface(other){
+                if (other === null)
+                {
+                    if (depth)
+                    {
+                        surface.deleteAttachedSurface(depth);
+                    }
+                    // Each detach splices the next one up behind this surface.
+                    let next = flipNext;
+                    while (next !== null && surface.deleteAttachedSurface(next) === DD_OK)
+                    {
+                        next = flipNext;
+                    }
+                    return DD_OK;
+                }
                 if (depth === other)
                 {
                     depth = null;
                     other.release();
                     return DD_OK;
+                }
+                if (mipNext === other)
+                {
+                    return DDERR_CANNOTDETACHSURFACE;
                 }
                 if (flipNext !== other)
                 {
@@ -1112,36 +1456,41 @@ export function createDirectDraw(options = {}){
             },
 
             /**
-             * @param {number} wanted  The DDSCAPS the caller is looking for.
+             * The first attached surface whose caps hold every bit asked for.
+             * The last buffer of a flip chain counts the front as attached,
+             * which is how a walk down the chain comes round again.
+             *
+             * @param {number} wanted   The DDSCAPS the caller is looking for.
+             * @param {number} [wanted2]  DDSCAPS2, from the wider structure.
              * @returns {{ hr: number, surface: Surface | null }}
              */
-            getAttachedSurface(wanted){
-                if (wanted & DDSCAPS_ZBUFFER)
+            getAttachedSurface(wanted, wanted2 = 0){
+                noticeDeactivation();
+                if (lost)
                 {
-                    if (!depth)
-                    {
-                        return { hr: DDERR_NOTFOUND, surface: null };
-                    }
-                    depth.addRef();
-                    return { hr: DD_OK, surface: depth };
+                    return { hr: DDERR_SURFACELOST, surface: null };
                 }
-                if (wanted & DDSCAPS_FLIP)
+                const next = flipNext ?? (flipPrev ? chainHead() : null);
+                const found = [mipNext, next, depth].find(candidate=>candidate !== null
+                    && candidate !== surface
+                    && (candidate.caps & wanted) === wanted >>> 0
+                    && (candidate.caps2 & wanted2) === wanted2 >>> 0);
+                if (!found)
                 {
-                    const next = flipNext ?? (flipPrev ? chainHead() : null);
-                    if (!next || next === surface)
-                    {
-                        return { hr: DDERR_NOTFOUND, surface: null };
-                    }
-                    next.addRef();
-                    return { hr: DD_OK, surface: next };
+                    return { hr: DDERR_NOTFOUND, surface: null };
                 }
-                return { hr: DDERR_NOTFOUND, surface: null };
+                found.addRef();
+                return { hr: DD_OK, surface: found };
             },
 
             /** @returns {Surface[]} */
             enumAttachedSurfaces(){
                 /** @type {Surface[]} */
                 const found = [];
+                if (mipNext)
+                {
+                    found.push(mipNext);
+                }
                 if (flipNext)
                 {
                     found.push(flipNext);
@@ -1175,6 +1524,7 @@ export function createDirectDraw(options = {}){
                 {
                     return DDERR_NOEXCLUSIVEMODE;
                 }
+                noticeDeactivation();
                 if (lost)
                 {
                     return DDERR_SURFACELOST;
@@ -1196,6 +1546,112 @@ export function createDirectDraw(options = {}){
                 members[members.length - 1].setBuffer(first);
                 surface.present();
                 return DD_OK;
+            },
+
+            /**
+             * Puts the surface over memory the program owns, with a new size,
+             * pitch or format if it names one. Only a system-memory surface
+             * the runtime does not manage can be moved -- video memory and
+             * the screen are not the program's to point elsewhere -- and that
+             * is decided before the descriptor is read. The memory has to be
+             * named every time: the call hands memory over, it does not
+             * resize. The pitch is the program's word, checked only for being
+             * a positive whole number of dwords. Everything else the surface
+             * has -- keys, palette, attachments -- is kept.
+             *
+             * @param {SurfaceRequest} request
+             * @param {number} flags  The call's own, which are reserved.
+             */
+            setSurfaceDesc(request, flags){
+                if (flags !== 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                if ((caps & DDSCAPS_SYSTEMMEMORY) === 0 || (caps & DDSCAPS_PRIMARYSURFACE) !== 0
+                    || (spec.caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) !== 0)
+                {
+                    return DDERR_INVALIDSURFACETYPE;
+                }
+                const named = request.flags >>> 0;
+                const has = (/** @type {number} */ flag)=>(named & flag) !== 0;
+                if ((named & ~SETTABLE_FIELDS) !== 0 || !has(DDSD_LPSURFACE)
+                    || (request.surfacePointer ?? 0) >>> 0 === 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                if (has(DDSD_CAPS) && request.caps !== 0)
+                {
+                    return DDERR_INVALIDCAPS;
+                }
+                const newPitch = (request.pitch ?? 0) | 0;
+                if ((has(DDSD_HEIGHT) && !((request.height ?? 0) > 0))
+                    || has(DDSD_WIDTH) !== has(DDSD_PITCH)
+                    || (has(DDSD_WIDTH) && (!((request.width ?? 0) > 0) || newPitch <= 0
+                        || (newPitch & 3) !== 0)))
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                buffer = /** @type {number} */ (request.surfacePointer) >>> 0;
+                if (has(DDSD_WIDTH))
+                {
+                    width = /** @type {number} */ (request.width);
+                    pitch = newPitch;
+                }
+                if (has(DDSD_HEIGHT))
+                {
+                    height = /** @type {number} */ (request.height);
+                }
+                if (has(DDSD_PIXELFORMAT) && request.pixelFormat)
+                {
+                    pixelFormat = request.pixelFormat;
+                    bpp = bytesPerPixel(pixelFormat);
+                }
+                uniqueness++;
+                return DD_OK;
+            },
+
+            /**
+             * The ramp a gamma control on this surface holds. Only the
+             * primary's reaches the screen, and there it is the display's;
+             * another surface's is kept and read back.
+             */
+            get gammaRamp(){
+                return gammaRamp;
+            },
+            getGammaRamp(){
+                return gammaRamp ? gammaRamp.slice() : identityRamp();
+            },
+            /** @param {ArrayLike<number>} ramp  Red, green and blue, 256 words each. */
+            setGammaRamp(ramp){
+                gammaRamp = Uint16Array.from({ length: GAMMA_WORDS }, (_, index)=>ramp[index] ?? 0);
+                if ((caps & DDSCAPS_PRIMARYSURFACE) !== 0)
+                {
+                    const channel = GAMMA_WORDS / 3;
+                    options.gamma?.set(surface, {
+                        red: gammaRamp.subarray(0, channel),
+                        green: gammaRamp.subarray(channel, channel * 2),
+                        blue: gammaRamp.subarray(channel * 2),
+                    });
+                }
+                return DD_OK;
+            },
+
+            /**
+             * The priority the texture manager evicts by. Kept and read back;
+             * nothing is evicted here, so it orders nothing.
+             */
+            getPriority(){
+                const hr = priorityRefusal();
+                return { hr, priority: hr === DD_OK ? priority : 0 };
+            },
+            /** @param {number} value */
+            setPriority(value){
+                const hr = priorityRefusal();
+                if (hr === DD_OK)
+                {
+                    priority = value >>> 0;
+                }
+                return hr;
             },
         };
 
@@ -1276,6 +1732,7 @@ export function createDirectDraw(options = {}){
             caps2,
             backBufferCount,
             hasBackBufferCount: (request.flags & DDSD_BACKBUFFERCOUNT) !== 0,
+            hasMipMapCount: (request.flags & DDSD_MIPMAPCOUNT) !== 0,
             exclusive: exclusive(),
             version,
         });
@@ -1295,6 +1752,16 @@ export function createDirectDraw(options = {}){
         {
             return { hr: sizeHr, surface: null };
         }
+        const keys = /** @type {[number, ColorKey | undefined][]} */ ([
+            [DDCKEY_SRCBLT, request.srcColorKey],
+            [DDCKEY_DESTBLT, request.destColorKey],
+        ]).filter(([, key])=>key !== undefined);
+        // A descriptor's key is a colour space: one value is a key, a range
+        // is the same refusal SetColorKey gives one under DDCKEY_COLORSPACE.
+        if (keys.some(([, key])=>key && key.low >>> 0 !== key.high >>> 0))
+        {
+            return { hr: DDERR_NOCOLORKEYHW, surface: null };
+        }
 
         // A primary surface is the size and format of the display mode,
         // whatever the caller wrote in the width, height and format fields.
@@ -1308,12 +1775,29 @@ export function createDirectDraw(options = {}){
         const pixelFormat = depthRequest
             ? depthFormatForDepth(request.zBufferBitDepth ?? 16)
             : (primary || !request.pixelFormat ? modeFormat : request.pixelFormat);
+        const levels = mipLevelCount({
+            caps: validity.caps,
+            width,
+            height,
+            mipMapCount: (request.flags & DDSD_MIPMAPCOUNT) !== 0 ? request.mipMapCount ?? 0 : null,
+            version,
+        });
+        if (levels === null)
+        {
+            return { hr: DDERR_INVALIDPARAMS, surface: null };
+        }
         const owner = OWNING_GENERATIONS.has(generation) ? generation : null;
         if (owner)
         {
             addRef(owner);
         }
 
+        // A primary is the screen in the mode it was made in, and its
+        // buffers with it: in another mode it cannot be restored.
+        const primaryMode = (validity.caps & DDSCAPS_PRIMARYSURFACE) !== 0
+            ? { mode: { width: displayMode.width, height: displayMode.height,
+                bitCount: displayMode.bitCount } }
+            : {};
         const front = makeSurface({
             caps: validity.caps,
             caps2,
@@ -1323,7 +1807,28 @@ export function createDirectDraw(options = {}){
             pixelFormat,
             owner,
             implicit: false,
+            mipMapCount: levels,
+            ...primaryMode,
         });
+
+        // Each level holds the one below it, so the chain goes with its top.
+        let above = front;
+        for (let index = 1; index < levels; index++)
+        {
+            const level = makeSurface({
+                caps: validity.caps,
+                caps2: caps2 | DDSCAPS2_MIPMAPSUBLEVEL,
+                width: Math.max(1, width >>> index),
+                height: Math.max(1, height >>> index),
+                backBufferCount: 0,
+                pixelFormat,
+                owner: null,
+                implicit: true,
+                mipMapCount: levels - index,
+            });
+            above.setMipNext(level);
+            above = level;
+        }
 
         if (validity.flipChain)
         {
@@ -1341,6 +1846,7 @@ export function createDirectDraw(options = {}){
                     pixelFormat,
                     owner: null,
                     implicit: true,
+                    ...primaryMode,
                 });
                 previous.setFlipNext(back, true);
                 back.setFlipPrev(previous);
@@ -1348,10 +1854,14 @@ export function createDirectDraw(options = {}){
             }
         }
 
+        for (const [which, key] of keys)
+        {
+            front.setColorKey(which, key ?? null);
+        }
         return { hr: DD_OK, surface: front };
     }
 
-    return {
+    const directDraw = {
         get destroyed(){
             return destroyed;
         },
@@ -1363,6 +1873,28 @@ export function createDirectDraw(options = {}){
         },
         get surfaceCount(){
             return surfaces.size;
+        },
+
+        /**
+         * @param {(surface: Surface, rect: Rect | null, value: number) => void} watcher
+         * @returns {() => void} what stops it
+         */
+        watchDepthFills(watcher){
+            depthFillWatchers.add(watcher);
+            return ()=>{
+                depthFillWatchers.delete(watcher);
+            };
+        },
+
+        /**
+         * @param {PixelWatcher} watcher
+         * @returns {() => void} what stops it
+         */
+        watchPixels(watcher){
+            pixelWatchers.add(watcher);
+            return ()=>{
+                pixelWatchers.delete(watcher);
+            };
         },
 
         /** @param {string} [generation] */
@@ -1378,6 +1910,7 @@ export function createDirectDraw(options = {}){
             return release(generation);
         },
         queryInterface,
+        legacyD3dGeneration: legacyD3dGenerationHeld,
 
         /**
          * @param {number} window
@@ -1388,17 +1921,36 @@ export function createDirectDraw(options = {}){
             // Giving it back does not: the surfaces stay valid until somebody
             // claims the screen again, which is the order a program observes.
             const takingExclusive = (flags & DDSCL_EXCLUSIVE) !== 0 && !exclusive();
+            // A deactivation while the screen was held is settled before the
+            // level changes, and one before it was taken is not this level's.
+            noticeDeactivation();
             cooperativeLevel = flags >>> 0;
             cooperativeWindow = window;
             levelSet = true;
             if (takingExclusive)
             {
-                for (const surface of surfaces)
-                {
-                    surface.markLost();
-                }
+                loseVideoMemory();
             }
             return DD_OK;
+        },
+
+        /**
+         * Whether the screen is this object's to draw on. Exclusive mode is
+         * the screen held, lost while the application is not the active one
+         * and held again once it is back; normal mode holds nothing to lose,
+         * and hears only that another object holds the screen. A display
+         * mode changed under a normal-mode object (DDERR_WRONGMODE) is not
+         * answered: nothing here changes it behind a program's back.
+         *
+         * @param {{ heldElsewhere?: boolean }} [display]
+         */
+        testCooperativeLevel({ heldElsewhere = false } = {}){
+            noticeDeactivation();
+            if (exclusive())
+            {
+                return screenWithheld() ? DDERR_NOEXCLUSIVEMODE : DD_OK;
+            }
+            return heldElsewhere ? DDERR_EXCLUSIVEMODEALREADYSET : DD_OK;
         },
 
         createSurface,
@@ -1425,12 +1977,12 @@ export function createDirectDraw(options = {}){
             {
                 return DDERR_INVALIDMODE;
             }
-            displayMode = { width, height, bitCount, refreshRate };
+            changeDisplayMode({ width, height, bitCount, refreshRate });
             return DD_OK;
         },
 
         restoreDisplayMode(){
-            displayMode = { ...nativeMode };
+            changeDisplayMode({ ...nativeMode });
             return DD_OK;
         },
 
@@ -1475,11 +2027,21 @@ export function createDirectDraw(options = {}){
         },
 
         restoreAllSurfaces(){
+            noticeDeactivation();
+            if (screenWithheld())
+            {
+                return DDERR_WRONGMODE;
+            }
+            // Every surface that can come back does; the first that cannot
+            // is what the program is told, so it does not take a lost
+            // primary for a restored one.
+            let answer = DD_OK;
             for (const surface of surfaces)
             {
-                surface.restore();
+                const hr = surface.restore();
+                answer = answer === DD_OK ? hr : answer;
             }
-            return DD_OK;
+            return answer;
         },
 
         /**
@@ -1491,6 +2053,11 @@ export function createDirectDraw(options = {}){
          */
         allocateStorage(bytes){
             return allocate(bytes);
+        },
+
+        /** @param {number} address  What allocateStorage handed out. */
+        freeStorage(address){
+            free(address);
         },
 
         /** @returns {Surface[]} every surface alive, in creation order */
@@ -1522,4 +2089,5 @@ export function createDirectDraw(options = {}){
             return null;
         },
     };
+    return directDraw;
 }

@@ -5,6 +5,7 @@
  */
 
 import { enterCode, leaveCode, tryEnterCode } from './critical.js';
+import { createSlimSync } from './slimsync.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -68,6 +69,11 @@ const CURRENT_THREAD = 0xfffffffe;
 /** More than this in one wait is a caller that has lost track of its handles. */
 const MAXIMUM_WAIT_OBJECTS = 64;
 
+/** A thread already carries MAXIMUM_SUSPEND_COUNT suspensions. */
+const ERROR_SIGNAL_REFUSED = 156;
+/** A thread that has ended cannot be suspended. */
+const ERROR_ACCESS_DENIED = 5;
+
 /**
  * @typedef {Object} SyncHost
  * @property {any} kernel                        The kernel layer's API.
@@ -85,6 +91,7 @@ const MAXIMUM_WAIT_OBJECTS = 64;
  * @property {(milliseconds: number) => void} [advanceClock]
  *   Credits the guest clock for time a wait was supposed to spend. See the
  *   timeout note on WaitForMultipleObjects.
+ * @property {(code: number) => void} [setLastError]
  */
 
 /**
@@ -199,6 +206,9 @@ export function createSyncFunctions(host){
                 return target.owner === null || target.owner === thread;
             case 'semaphore':
                 return target.count > 0;
+            // Signalled by having ended, and for ever after.
+            case 'thread':
+                return (target.exitCode ?? null) !== null;
             default:
                 return false;
         }
@@ -487,13 +497,18 @@ export function createSyncFunctions(host){
                 {
                     return WAIT_FAILED;
                 }
+                if (kernel.ThreadState && thread.state === kernel.ThreadState.TERMINATED)
+                {
+                    host.setLastError?.(ERROR_ACCESS_DENIED);
+                    return WAIT_FAILED;
+                }
                 // The count before, which is what tells a caller whether it was
                 // the one that stopped the thread or merely the second to ask.
-                const previous = thread.suspendCount ?? 0;
-                thread.suspendCount = previous + 1;
-                if (previous === 0)
+                const previous = kernel.suspendThread(thread);
+                if (previous === null)
                 {
-                    kernel.block(thread, 'suspended');
+                    host.setLastError?.(ERROR_SIGNAL_REFUSED);
+                    return WAIT_FAILED;
                 }
                 return thread === host.currentThread() ? host.park(thread) : previous >>> 0;
             },
@@ -521,15 +536,11 @@ export function createSyncFunctions(host){
                 {
                     return WAIT_FAILED;
                 }
-                const previous = thread.suspendCount ?? 0;
-                if (previous === 0)
+                const previous = kernel.resumeThread(thread);
+                if (previous === 1)
                 {
-                    return 0;
-                }
-                thread.suspendCount = previous - 1;
-                if (thread.suspendCount === 0)
-                {
-                    kernel.wake(thread);
+                    // A section released while it was suspended may be its now.
+                    host.critical.resumed(thread);
                 }
                 return previous >>> 0;
             },
@@ -551,5 +562,9 @@ export function createSyncFunctions(host){
                 return thread === host.currentThread() ? host.park(thread) : 1;
             },
         },
+
+        // SRW locks and condition variables; a sleep on one takes a critical
+        // section back through the same guest code EnterCriticalSection is.
+        ...createSlimSync(host, builder=>placed(builder).enter),
     };
 }

@@ -30,8 +30,10 @@ const OPTIONAL_HEADER_SIZE = 0xe0;
 const SUBSYSTEM_CONSOLE = 3;
 
 const SECTION_CNT_CODE = 0x00000020;
+const SECTION_CNT_INITIALIZED_DATA = 0x00000040;
 const SECTION_MEM_EXECUTE = 0x20000000;
 const SECTION_MEM_READ = 0x40000000;
+const SECTION_MEM_WRITE = 0x80000000;
 
 /**
  * Section and file alignment are both a page, which makes every raw offset equal
@@ -61,9 +63,10 @@ const encoder = new TextEncoder();
  *   A variable rather than a function: the export's address is these bytes.
  *   A runtime exports its command line and its flags this way, and a program
  *   reads through the address it imported -- a jump there would be read as a
- *   pointer. Up to a slot's worth sits in the export's own slot; anything
- *   larger -- an array of records, as the runtime's standard streams are --
- *   gets room of its own after the export directory.
+ *   pointer. Variables live in a `.data` section of their own, on pages
+ *   apart from the code: a program and the runtime both write them -- a
+ *   stream's flags, the file mode -- where the code beside them stays
+ *   read-only.
  */
 
 /**
@@ -72,6 +75,9 @@ const encoder = new TextEncoder();
  * @property {number} size                 SizeOfImage; equals bytes.length.
  * @property {number} exportDirectoryRva
  * @property {number} entryPointRva      Zero when the module has nothing to initialise.
+ * @property {number} dataRva
+ *   Where the writable `.data` section starts, through to `size`; zero when
+ *   the module exports no variable and is one read-only section.
  * @property {(name: string) => number | null} addressOf  Guest address of the trampoline.
  * @property {(name: string) => number | null} ordinalOf
  */
@@ -121,28 +127,36 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
     // The directory's size spans everything it owns, which is what tells a loader
     // whether an exported address is code or a forwarder.
     const exportDirectorySize = cursor - exportDirectoryRva;
+    const sectionSize = cursor - SECTION_RVA;
 
-    // Variables too big for a slot, after the directory -- outside its range,
-    // so none is taken for a forwarder string -- each aligned like a slot.
+    // The variables, on the pages after the code -- outside the directory's
+    // range, so none is taken for a forwarder string -- each aligned like a
+    // slot.
+    const hasData = exports.some(entry=>entry.data);
+    const dataRva = hasData ? SECTION_RVA + align(sectionSize, PAGE) : 0;
     /** @type {Map<number, number>} */
     const dataRvas = new Map();
+    let dataCursor = dataRva;
     exports.forEach((entry, index)=>{
-        if (entry.data && entry.data.length > TRAMPOLINE_STRIDE)
+        if (entry.data)
         {
-            cursor = align(cursor, TRAMPOLINE_STRIDE);
-            dataRvas.set(index, cursor);
-            cursor += entry.data.length;
+            dataCursor = align(dataCursor, TRAMPOLINE_STRIDE);
+            dataRvas.set(index, dataCursor);
+            dataCursor += entry.data.length;
         }
     });
-    const sectionSize = cursor - SECTION_RVA;
-    const size = SECTION_RVA + align(sectionSize, PAGE);
+    const dataSize = hasData ? dataCursor - dataRva : 0;
+    const size = hasData
+        ? dataRva + align(dataSize, PAGE)
+        : SECTION_RVA + align(sectionSize, PAGE);
 
     const bytes = new Uint8Array(size);
     const view = new DataView(bytes.buffer);
     const entryPointRva = entryIndex < 0 ? 0 : trampolinesRva + entryIndex * TRAMPOLINE_STRIDE;
 
     writeHeaders(bytes, view, {
-        base, size, sectionSize, exportDirectoryRva, exportDirectorySize, entryPointRva,
+        base, size, sectionSize, dataRva, dataSize,
+        exportDirectoryRva, exportDirectorySize, entryPointRva,
     });
 
     exports.forEach((entry, index)=>{
@@ -196,6 +210,7 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
         size,
         exportDirectoryRva,
         entryPointRva,
+        dataRva,
         addressOf: exported=>table.get(exported)?.address ?? null,
         ordinalOf: exported=>table.get(exported)?.ordinal ?? null,
     };
@@ -261,6 +276,8 @@ function assignOrdinals(exports){
  * @param {number} layout.base
  * @param {number} layout.size
  * @param {number} layout.sectionSize
+ * @param {number} layout.dataRva   Zero for no `.data` section.
+ * @param {number} layout.dataSize
  * @param {number} layout.exportDirectoryRva
  * @param {number} layout.exportDirectorySize
  * @param {number} layout.entryPointRva
@@ -274,13 +291,14 @@ function writeHeaders(bytes, view, layout){
 
     const coff = PE_OFFSET + 4;
     view.setUint16(coff, MACHINE_I386, true);
-    view.setUint16(coff + 2, 1, true); // one section
+    view.setUint16(coff + 2, layout.dataRva === 0 ? 1 : 2, true); // NumberOfSections
     view.setUint16(coff + 16, OPTIONAL_HEADER_SIZE, true);
     view.setUint16(coff + 18, COFF_EXECUTABLE_IMAGE | COFF_32BIT_MACHINE | COFF_DLL, true);
 
     const optional = coff + 20;
     view.setUint16(optional, PE32_MAGIC, true);
     view.setUint32(optional + 4, rawSize, true); // SizeOfCode
+    view.setUint32(optional + 8, align(layout.dataSize, PAGE), true); // SizeOfInitializedData
     view.setUint32(optional + 16, layout.entryPointRva, true); // AddressOfEntryPoint
     view.setUint32(optional + 20, SECTION_RVA, true); // BaseOfCode
     view.setUint32(optional + 28, layout.base, true); // ImageBase
@@ -302,6 +320,18 @@ function writeHeaders(bytes, view, layout){
     view.setUint32(section + 16, rawSize, true); // SizeOfRawData
     view.setUint32(section + 20, SECTION_RVA, true); // PointerToRawData
     view.setUint32(section + 36, SECTION_CNT_CODE | SECTION_MEM_EXECUTE | SECTION_MEM_READ, true);
+
+    if (layout.dataRva !== 0)
+    {
+        const data = section + 40;
+        bytes.set(encoder.encode('.data'), data);
+        view.setUint32(data + 8, layout.dataSize, true); // VirtualSize
+        view.setUint32(data + 12, layout.dataRva, true);
+        view.setUint32(data + 16, align(layout.dataSize, PAGE), true); // SizeOfRawData
+        view.setUint32(data + 20, layout.dataRva, true); // PointerToRawData
+        view.setUint32(data + 36,
+            (SECTION_CNT_INITIALIZED_DATA | SECTION_MEM_READ | SECTION_MEM_WRITE) >>> 0, true);
+    }
 }
 
 /**

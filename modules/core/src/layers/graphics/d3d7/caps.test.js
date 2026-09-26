@@ -8,7 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DEVICE_DESCRIPTIONS } from './caps.js';
 import {
-    D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DPRASTERCAPS_ZTEST, D3DTOP,
+    D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DPRASTERCAPS_FOGRANGE,
+    D3DPRASTERCAPS_ZTEST, D3DPTFILTERCAPS_MIPFLINEAR, D3DPTFILTERCAPS_MIPFPOINT, D3DTOP,
     DEVICE_IDS, textureOpCaps,
 } from './constants.js';
 
@@ -29,11 +30,16 @@ test('the three devices differ only in where the work is said to happen', ()=>{
 });
 
 test('a capability claimed is one the renderer draws', ()=>{
-    // No fog, no stencil, no lighting, no bump mapping: nothing draws them yet.
+    // No stencil, no lighting, no bump mapping: nothing draws them yet.
     const caps = DEVICE_DESCRIPTIONS[2].caps;
     assert.equal(caps.stencilCaps, 0);
     assert.equal(caps.vertexProcessingCaps, 0);
-    assert.equal(caps.triCaps.rasterCaps, D3DPRASTERCAPS_ZTEST, 'the depth test, and only that');
+    assert.equal(caps.triCaps.rasterCaps, D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_FOGRANGE,
+        'the depth test and range fog');
+    assert.equal(caps.lineCaps.rasterCaps, caps.triCaps.rasterCaps);
+    const mipFilters = D3DPTFILTERCAPS_MIPFPOINT | D3DPTFILTERCAPS_MIPFLINEAR;
+    assert.equal(caps.triCaps.textureFilterCaps & mipFilters, mipFilters,
+        'a DirectDraw mip chain is sampled level by level');
     // Bump environment mapping is operation 22; nothing here draws it.
     assert.equal(caps.textureOpCaps & textureOpCaps([22]), 0);
     assert.notEqual(caps.textureOpCaps & textureOpCaps([D3DTOP.MODULATE]), 0);

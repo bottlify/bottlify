@@ -86,6 +86,66 @@ test('wcstombs narrows, and answers the count without a destination', ()=>{
     assert.equal(memory.text(destination), 'abc');
 });
 
+test('wcstombs terminates only when the null character comes within the count', ()=>{
+    // "the multibyte character string at mbstr is null-terminated only if
+    // wcstombs encounters a wide-character NULL character during
+    // conversion": a string as long as the count, or longer, is not.
+    const { memory, table } = build();
+    const destination = memory.allocate(16);
+    for (const [text, count, answer] of /** @type {[string, number, number][]} */ ([
+        ['abc', 3, 3], ['abcdef', 3, 3], ['ab', 3, 2],
+    ]))
+    {
+        memory.writeMemory(destination, new Uint8Array(8).fill(0x7c));
+        assert.equal(table.wcstombs.handler([destination, memory.putWide(text), count]), answer);
+        assert.deepEqual([...memory.bytes.subarray(destination, destination + 4)],
+            [...`${text.slice(0, count)}${text.length < count ? '\0' : ''}`.padEnd(4, '|')]
+                .map(character=>character.charCodeAt(0)), `${text} into ${count}`);
+    }
+});
+
+test('wcstombs refuses a character the C locale has no byte for with -1 and EILSEQ', ()=>{
+    // "If wcstombs encounters a wide character it can't convert to a
+    // multibyte character, it returns -1 cast to type size_t and sets errno
+    // to EILSEQ" -- as wctomb does for the same character.
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (
+        createWideFunctions({ ...memory, errno: code=>errno.push(code) }));
+    const destination = memory.allocate(16);
+    const text = memory.putWide('ab☺');
+    assert.equal(table.wcstombs.handler([destination, text, 8]), -1);
+    assert.equal(table.wcstombs.handler([0, text, 0]), -1, 'nor can it say how many bytes');
+    assert.equal(table.wcstombs.handler([destination, text, 2]), 2, 'the count ends before it');
+    assert.equal(table.wcstombs.handler([destination, memory.putWide('caf\xe9'), 8]), 4);
+    assert.equal(memory.text(destination), 'caf\xe9');
+    const EILSEQ = 42;
+    assert.deepEqual(errno, [EILSEQ, EILSEQ]);
+});
+
+test('wctomb writes a character to U+00FF as its byte, and refuses one past it with EILSEQ', ()=>{
+    // "If the conversion isn't possible in the current locale, wctomb returns
+    // -1 and errno is set to EILSEQ." The C locale has a byte for each of the
+    // first 256 characters and none past them: Wine's msvcrt
+    // test__wcstombs_s_l finds L"\xfffd" EILSEQ there.
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (
+        createWideFunctions({ ...memory, errno: code=>errno.push(code) }));
+    const out = memory.allocate(4);
+    assert.equal(table.wctomb.handler([out, 0xe9]), 1);
+    assert.equal(memory.bytes[out], 0xe9);
+    assert.equal(table.wctomb.handler([out, 0x263a]), -1);
+    assert.equal(table.wctomb.handler([out, 0x100]), -1, 'not its low byte');
+    assert.equal(memory.bytes[out], 0xe9, 'nothing written');
+    assert.equal(table.wctomb.handler([out, 0]), 1, 'the null character is one byte');
+    assert.equal(table.wctomb.handler([0, 0x263a]), 0, 'no encoding here keeps a state');
+    const EILSEQ = 42;
+    assert.deepEqual(errno, [EILSEQ, EILSEQ]);
+});
+
 test('mbtowc reports one byte consumed, and zero at the terminator', ()=>{
     const { memory, table } = build();
     const unit = memory.allocate(4);

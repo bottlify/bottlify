@@ -63,7 +63,7 @@ replaced by what it is built from. The worker rebuilds the object it needs.
 | `v86` | `{ moduleUrl: string, wasmBytes: ArrayBuffer }` | The emulator module and binary. Both are subpath exports of the package (`@bottlify/core/libv86.mjs`, `@bottlify/core/v86.wasm`). |
 | `zstd` | `{ wasmUrl?: string, wasmBytes?: ArrayBuffer }` | The bundle decoder's wasm build (`vendor/zstd.wasm` beside the module by default). Optional: absent, the JavaScript decoder decodes, or the emulator's while it is loaded (`docs/core/cpu.md`, "zstd"). |
 | `media` | `{ wasmBytes?: ArrayBuffer }` | The video decoder (`@bottlify/core/video-decoder.wasm`). Absent, the media layer comes up and reports that nothing can be played. |
-| `system` | `{ files: { path: string, bytes: Uint8Array }[] }` | The engine's own read-only volume, mounted under `C:\WINDOWS\system32\`. Each `path` is a bare DLL name and each `bytes` its contents — the DirectX End-User Runtime the engine plays DXSETUP's role for. Absent (or empty), the volume has no system layer and a `d3dx9_*` name is answered by the engine's own table. |
+| `system` | `{ files: { path: string, bytes: Uint8Array }[] }` | The engine's own read-only volume, mounted under `C:\WINDOWS\system32\`. Each `path` is a bare file name and each `bytes` its contents, present as though the machine had always had them. The engine carries none of its own. Absent (or empty), the volume has no system layer. |
 | `bundle` | `{ url, store?, id?, prefix?, prefetch?, indexSha256?, retry? }` | A `.btl` mounted as the volume's read-only source, fetched by HTTP byte range from `url` (a `206` is the only accepted answer). `store: 'local'` (default) caches blocks in OPFS; `null` keeps nothing. `id` names the cache. `prefix` is where the bundle appears in the volume. `prefetch` (default on) fills the cache when idle. `indexSha256` is checked against the bundle's index. `retry: { attempts, baseDelayMs, maxDelayMs }` defaults to 6 / 250 / 10000. A zstd-compressed block is decoded synchronously by the engine's decoder: the emulator's wasm one under `emulator`/`hybrid` (it is loaded and several times faster), this project's own (`src/zstd.js`) under `cork`, which has no emulator. |
 | `storage` | `'opfs' \| 'local' \| { files: { path, bytes }[] } \| null` | Where the session — files the program wrote plus the registry — is loaded from and saved to. `'opfs'` persists in the origin's private file system. `'local'` means `localStorage`, which a worker does not have (see section 9). An object seeds the volume and saves nothing. |
 | `id` | `string` | Names the session and the bundle cache when neither option does. |
@@ -80,6 +80,8 @@ replaced by what it is built from. The worker rebuilds the object it needs.
 | `collectOnExit` | `boolean` | Whether `run()` carries the volume's files back with the exit, for `session.export()`. |
 | `pacing` | `'page' \| 'event'` | How the run loop waits in a worker. See section 6. |
 | `network` | `{ module, url, room, token? }` | The relay Winsock reaches the world through, named by what the worker builds it from: the URL of a module exporting `connectRelay` (the networking package's client, served by the page's own origin), the relay's `wss://` address and the room to join. A transport is a WebSocket and callbacks, neither of which crosses a port, so the worker opens it -- and the engine never imports the networking package; the module is loaded by the URL the page hands over, as a bundle's own hooks are. Closed with the run. Absent, Winsock runs over loopback alone. |
+| `win32` | `{ trustedRoots?: (Uint8Array \| string)[] }` | The root store `WinVerifyTrust` judges Authenticode chains against, each root as DER bytes or base64. Absent, it holds Microsoft's "Microsoft Root Authority" alone (THIRD-PARTY-NOTICES.md says whose it is and where it was taken from); an empty list trusts nothing. Crosses to the engine as it is. `win32.network`, a transport object, does not cross: the worker builds one from `network`. `src/trust.itest.js` runs a program verifying a cabinet signed by a chain of its own: trusted with that chain's root given here, `CERT_E_CHAINING` without it. |
+| `windows` | `'win2000' \| 'winxp' \| 'win7' \| 'win10'` | The Windows the machine is, a bottle's setting: 2000 SP4, XP SP3, 7 SP1 or 10 (build 19045). Default `'winxp'`. Every place a program reads the version or the profile folders from agrees on it (`win32.md`'s "The version a program is told"); under `win10` a program whose manifest and PE header declare nothing newer is told 6.2, as the real one tells it. Any other value rejects `createApp` before anything is built, naming the four. A bundle's `manifest.json` may carry it as `windows`; a caller that reads a manifest passes it here, and an installer runs a setup under the value the bottle will run under. |
 | `imagePath`, `commandLine` | `string` | What the program believes it was loaded from and started with; this `commandLine` is the whole thing, `kernel32.GetCommandLineA`'s own answer, image path included. Default `C:\app.exe`, quoted. A bundle's `manifest.json` may carry its own `commandLine` (only the arguments, e.g. `+set s_realTimeDecoding 0`); a caller that reads a manifest builds `createApp`'s option as `"${imagePath}" ${manifest.commandLine}`, the quoted image path first. |
 | `refuseReplacement` | `boolean` | Stop rather than replace the process with a child it asks for. |
 | `exitNotice` | `boolean` | Default `true`: when the run ends with the program's own exit code 0 -- the last process, not a child its parent goes on after -- the engine emits a `message-box` of its own (`id: 0`, `exit: { code: 0 }`, one OK button, the information icon) saying the game has finished and its process has stopped, for the page to draw as it draws the program's boxes. Nothing waits on its answer. A nonzero code is the page's error report instead. |
@@ -113,8 +115,10 @@ message the device repeats is counted and written again every 256th time with it
 Only before the program's journal exists does it go to the worker's console. A device that is lost
 (`GPUDevice.lost`, for any reason but its own destruction at the end of the run) is written the
 same way, once, with the reason and the browser's message: nothing drawn after it reaches the
-screen, and the device is not reacquired -- a lost device ends the picture for that run, and the
-guest's own device-lost states are not driven by it.
+screen, and the device is not reacquired -- a lost device ends the picture for that run. The
+graphics layer tells the guest: every Direct3D 8 and 9 device made on it answers
+`D3DERR_DEVICELOST` from then on, and a `Reset` does not bring it back
+([`graphics.md`](./graphics.md)).
 
 ### `host: 'thread'`
 
@@ -222,8 +226,9 @@ Events an engine emits and the page may subscribe to include `frame`, `output`, 
 such import called — the **first** call only, once per import per run, with its `count`; every
 later call is counted for diagnostics and written to the journal but never announced again, so a
 program calling a missing import in a loop cannot flood the page's queue; both events carry
-`origin`, `'system'` or `'program'` — and a call to an
-undecorated name of a system library ends the run as a `guest-fault` naming it), `divergence`, `message-box` (the program's `MessageBox`, drawn by the page, not inside the program's desktop; or, with `id: 0` and `exit`, the engine's own box when the game has finished -- see `exitNotice`), `clipboard` (`{ text }`, what a program copied, for the page to put on the browser clipboard), `library-loaded`, `library-missing`,
+`origin`, `'system'` or `'program'` — and a call to an undecorated name of a system library, or to
+a C++ name that does not carry its argument bytes, ends the run as a `guest-fault` naming it),
+`divergence`, `message-box` (the program's `MessageBox`, drawn by the page, not inside the program's desktop; or, with `id: 0` and `exit`, the engine's own box when the game has finished -- see `exitNotice`), `clipboard` (`{ text }`, what a program copied, for the page to put on the browser clipboard), `library-loaded`, `library-unloaded` (`{ name, base }`, a library the program freed for the last time), `library-missing`,
 `libraries`, `bundle`, `bundle-retry`, `bundle-prefetch`, `bundle-unavailable`, `session`,
 `process-create`, `process-replace`, `process-child` (`{ image, commandLine }`, a parent waiting on a child it started: the child is about to run beside it), `process-started`, `process-resumed` (`{ image, code }`, that child exited with `code` and its parent goes on), `process-patched`, `hooks-bound`
 (`{ image, bound, refused, pending }`, once per image the sidecar is bound against -- the
@@ -324,17 +329,13 @@ translator (`@bottlify/cork`), which the cpu layer loads by URL too. The outputs
 | `dist/cork/index.js`, `dist/cork/translator.worker.js` | `modules/cork/src/index.js` and its translation worker | loaded by URL for `engine: 'cork'` or `'hybrid'` |
 | `dist/vendor/libv86.mjs`, `v86.wasm` | copied from `vendor/prebuilt/` | `@bottlify/core/libv86.mjs`, `@bottlify/core/v86.wasm` |
 | `dist/vendor/video-decoder.wasm` | copied from `vendor/prebuilt/` | `@bottlify/core/video-decoder.wasm` |
-| `dist/vendor/directx/*.dll` | copied from `vendor/prebuilt/directx/`, when fetched | the DirectX runtime, handed to `createApp` as `system.files` |
 | `dist/vendor/manifest.json` | written | checksums and source release of each vendor artifact |
 | `dist/checksums.json` | written | SHA-256 of every file under `dist/` |
 
 The build is minified, without source maps, targets `es2022`, and stops if a vendor artifact is
 missing from `vendor/prebuilt/` (`npm run fetch:v86`, `npm run fetch:video-decoder` put them
-there, verified against `vendor-lock.json` and `video-decoder-lock.json`). The DirectX runtime is
-the one optional artifact: `npm run fetch:directx-runtime` fills `vendor/prebuilt/directx/` and
-the build then copies it into `dist/vendor/directx/`, verified against
-`directx-runtime-lock.json`; absent, the build still succeeds and the package simply has no system
-volume. `import.meta.env.BOTTLIFY_VENDOR` is defined as `./vendor/` and
+there, verified against `vendor-lock.json` and `video-decoder-lock.json`).
+`import.meta.env.BOTTLIFY_VENDOR` is defined as `./vendor/` and
 `import.meta.env.BOTTLIFY_CORK` as `./cork/index.js`, so the built module finds its emulator and its
 translator beside itself.
 
@@ -417,4 +418,6 @@ the first one's history and poll are gone with it.
 - **One program per worker at a time.** A second `start` is refused. A child process the program
   asks for runs inside the same engine: on a machine of its own beside the parent's while the
   parent waits on it, after which the parent goes on; in the parent's place once the parent has
-  exited. Two machines exist at once only in the first case, and only one of them runs.
+  exited. Two machines exist at once only in the first case, and only one of them runs. Either way
+  the child starts from the parent's files and its registry as it stands, and a child run beside
+  hands back that registry with its own changes.

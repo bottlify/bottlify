@@ -33,6 +33,7 @@ export const WAIT_IO_COMPLETION = 0xc0;
 /** MsgWaitForMultipleObjectsEx's flags. */
 const MWMO_WAITALL = 0x1;
 const MWMO_ALERTABLE = 0x2;
+const MWMO_INPUTAVAILABLE = 0x4;
 
 /** The pseudo-handle GetCurrentThread answers. */
 const CURRENT_THREAD = 0xfffffffe;
@@ -285,6 +286,10 @@ export function createApcs(host){
             /**
              * DWORD MsgWaitForMultipleObjectsEx(DWORD nCount, const HANDLE *pHandles,
              *   DWORD dwMilliseconds, DWORD dwWakeMask, DWORD dwFlags)
+             *
+             * The message wait is handed, after its own five arguments, the two
+             * flags it acts on itself: whether input already seen counts
+             * (MWMO_INPUTAVAILABLE), and whether the wait is alertable.
              */
             MsgWaitForMultipleObjectsEx: {
                 argBytes: 20,
@@ -293,7 +298,7 @@ export function createApcs(host){
                     waitWith((flags & MWMO_ALERTABLE) !== 0,
                         ()=>host.call('MsgWaitForMultipleObjects')(
                             [count, handles, (flags & MWMO_WAITALL) !== 0 ? 1 : 0, milliseconds,
-                                mask])),
+                                mask, flags & MWMO_INPUTAVAILABLE, flags & MWMO_ALERTABLE])),
             },
         },
     };

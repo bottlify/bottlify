@@ -407,43 +407,60 @@ test('the launcher every spelling shares finds one image and opens the handles',
 });
 
 test('the redistributables the engine stands in for are recognised by what they are', ()=>{
-    for (const name of ['DXSETUP.exe', 'dxsetup.exe', 'dxwebsetup.exe',
-        'vcredist_x86.exe', 'vc_redist.x86.exe', 'dotnetfx35.exe', 'ndp48-x86-x64.exe',
-        'C:\\Install\\DirectX\\DXSETUP.EXE', 'C:\\Install\\DirectX\\anything.exe'])
+    for (const name of ['vcredist_x86.exe', 'vc_redist.x86.exe', 'dotnetfx35.exe',
+        'ndp48-x86-x64.exe', 'C:\\Install\\vcredist\\vcredist_x86.EXE', 'oalinst.exe'])
     {
         assert.equal(isRedistributableInstaller(name), true, name);
     }
-    for (const name of ['speedDemo.exe', 'War3.exe', 'launcher.exe',
-        'C:\\App\\directxess.exe', 'C:\\App\\DirectX\\readme.txt'])
+    // The DirectX End-User Runtime is not among them: the engine carries no
+    // copy of the libraries it installs, so its setup is a program like any other.
+    for (const name of ['speedDemo.exe', 'War3.exe', 'launcher.exe', 'DXSETUP.exe',
+        'dxwebsetup.exe', 'directx_Jun2010_redist.exe', 'C:\\Install\\DirectX\\DXSETUP.EXE',
+        'C:\\Install\\DirectX\\anything.exe'])
     {
         assert.equal(isRedistributableInstaller(name), false, name);
     }
 });
 
-test('a DXSETUP child is answered as a process that already ran and exited 0', ()=>{
-    // An installer starts the DirectX redistributable and waits for it. The
-    // engine carries the runtime itself, so the child is over before it begins
-    // -- and it must not be what this process hands over to.
-    const host = fakeHost({ files: ['C:\\App\\DXSETUP.exe'] });
+test('a redistributable child is answered as a process that already ran and exited 0', ()=>{
+    // An installer starts the Visual C++ redistributable and waits for it. The
+    // engine carries the C runtime itself, so the child is over before it
+    // begins -- and it must not be what this process hands over to.
+    const host = fakeHost({ files: ['C:\\App\\vcredist_x86.exe'] });
     const fns = createSpawnFunctions(host);
 
     assert.equal(fns.CreateProcessA.handler(
-        [putAnsi(host, 0x100, 'DXSETUP.exe'), 0, 0, 0, 0, 0, 0, 0, 0, 0]), 1);
+        [putAnsi(host, 0x100, 'vcredist_x86.exe'), 0, 0, 0, 0, 0, 0, 0, 0, 0]), 1);
     const made = host.kernel.processes.all()[0];
     assert.equal(made.completed, true);
     assert.equal(made.exitCode, 0, 'it exited cleanly');
     assert.equal(host.kernel.processes.pending(), null, 'nothing to replace this process with');
     assert.notEqual(made.handle, 0, 'and the caller still gets a process to wait on');
     assert.deepEqual(host.requests.map((/** @type {any} */ r)=>r.imagePath),
-        ['C:\\App\\DXSETUP.exe'], 'reported like any other child');
+        ['C:\\App\\vcredist_x86.exe'], 'reported like any other child');
 
     // WinExec is the other spelling an SFX stub uses for the same child.
-    const viaExec = fakeHost({ files: ['C:\\App\\DXSETUP.exe'] });
+    const viaExec = fakeHost({ files: ['C:\\App\\vcredist_x86.exe'] });
     const execFns = createSpawnFunctions(viaExec);
     assert.equal(execFns.WinExec.handler(
-        [putAnsi(viaExec, 0x100, 'DXSETUP.exe /Q'), 0]), WINEXEC_SUCCESS);
+        [putAnsi(viaExec, 0x100, 'vcredist_x86.exe /Q'), 0]), WINEXEC_SUCCESS);
     assert.equal(viaExec.kernel.processes.pending(), null);
     assert.equal(viaExec.kernel.processes.all()[0].exitCode, 0);
+});
+
+test('DXSETUP runs as the child it is, and installs the runtime itself', ()=>{
+    // The libraries a title links against beyond Direct3D itself (d3dx9 and
+    // the rest) are the DirectX setup's to put in system32, as on a machine
+    // that never had them; the engine carries none of its own.
+    const host = fakeHost({ files: ['C:\\Install\\DirectX\\DXSETUP.exe'] });
+    const fns = createSpawnFunctions(host);
+
+    assert.equal(fns.CreateProcessA.handler(
+        [putAnsi(host, 0x100, 'C:\\Install\\DirectX\\DXSETUP.exe'), 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+    1);
+    const made = host.kernel.processes.all()[0];
+    assert.equal(made.completed, false);
+    assert.equal(host.kernel.processes.pending()?.imagePath, 'C:\\Install\\DirectX\\DXSETUP.exe');
 });
 
 test('an ordinary child is still held pending for the replacement', ()=>{

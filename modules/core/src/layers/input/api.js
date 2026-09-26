@@ -15,7 +15,9 @@
  * - `post(event)`   one event in a DirectInput device's own codes.
  * - `attach(canvas)` listens to a viewport and produces those events; `detach`
  *                   stops, `poll` reads what has no events of its own.
- * - `libraries()`   DINPUT.dll and DINPUT8.dll, for the loader.
+ * - `libraries()`   DINPUT.dll, DINPUT8.dll and the two XInput libraries, for
+ *                   the loader; `ordinals()` the numbers they export by where
+ *                   Windows pins them.
  * - `keyState(vk)`, `cursor()`, `pad()`  what is held right now.
  *
  * @typedef {import("../../system/contract.js").ModuleConfig} Config

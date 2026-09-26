@@ -30,6 +30,30 @@
  * picture.
  */
 
+/**
+ * Where the fog factor of a draw comes from, which is decided by which of the
+ * two fog modes is set and not by the curve either of them names.
+ *
+ * - SPECULAR: the vertex's specular alpha, interpolated. D3DRS_FOGENABLE with
+ *   both modes NONE, and vertex fog on a pre-transformed vertex, which has no
+ *   eye space for the vertex pipeline to take a depth in.
+ * - VERTEX: D3DRS_FOGVERTEXMODE's curve, evaluated per vertex over the
+ *   magnitude of its camera-space z and interpolated.
+ * - TABLE: D3DRS_FOGTABLEMODE's curve, evaluated per pixel over the pixel's
+ *   depth: its z when the projection is affine, its w otherwise.
+ */
+export const FOG_SOURCE = Object.freeze({ NONE: 0, SPECULAR: 1, VERTEX: 2, TABLE: 3 });
+
+/**
+ * A state's fog source. A state that names a curve and no source is vertex
+ * fog.
+ *
+ * @param {{ fogMode: number, fogSource?: number }} state
+ * @returns {number} FOG_SOURCE
+ */
+export const fogSourceOf = state=>state.fogSource
+    ?? (state.fogMode === 0 ? FOG_SOURCE.NONE : FOG_SOURCE.VERTEX);
+
 /** D3DCMP → WebGPU's compare function. One is the identity of the other. */
 const COMPARE = Object.freeze({
     1: 'never',
@@ -119,6 +143,12 @@ function lookUp(table, value, what){
  *     For a stage generating its coordinate: which component the transformed
  *     coordinate is divided by at the sample -- 3 or 4 under
  *     D3DTTFF_PROJECTED with that count, 0 or absent for no divide.
+ * @property {number} [colorKey]
+ *     Direct3D 7 colour keying in force on this stage's texture: the key as
+ *     its texel expands, 0xRRGGBB. A texel of that colour is not drawn.
+ * @property {'cube' | '3d'} [dimension]
+ *     The texture the stage samples, when it is not two-dimensional: its
+ *     coordinate is then three components and its binding another kind.
  */
 
 /**
@@ -161,10 +191,22 @@ function lookUp(table, value, what){
  * @property {number} colorWrite         D3DCOLORWRITEENABLE bits.
  * @property {boolean} alphaTest
  * @property {number} alphaFunc
- * @property {number} fogMode            D3DFOG; NONE is 0.
+ * @property {number} fogMode            D3DFOG, the curve; NONE is 0.
+ * @property {number} [fogSource]
+ *     FOG_SOURCE, where the factor comes from; absent is vertex fog for a
+ *     curve and no fog without one (`fogSourceOf`).
  * @property {StageKey[]} stages         Empty means no cascade at all.
  * @property {boolean} [specularEnable]  D3DRS_SPECULARENABLE.
  * @property {LightingState | null} [lighting]  Absent or null means unlit.
+ * @property {boolean} [normalizeNormals]
+ *     D3DRS_NORMALIZENORMALS: whether a normal is renormalised after its
+ *     transform, for lighting and for a coordinate generated from it.
+ * @property {boolean} [flatShading]
+ *     D3DSHADE_FLAT: the two vertex colours are the provoking vertex's over
+ *     the whole primitive.
+ * @property {boolean} [rangeFog]
+ *     D3DRS_RANGEFOGENABLE under vertex fog: the distance from the eye rather
+ *     than the depth.
  * @property {import('./vertexformat.js').VertexLayout} [vertexLayout]
  *     The vertex layout when the vertex format cannot spell it -- a declaration
  *     read by the fixed-function stage -- with `vertexLayoutKey` naming it.
@@ -189,6 +231,8 @@ export function pipelineKey(state){
             stage.colorOp, stage.colorArg1, stage.colorArg2,
             stage.alphaOp, stage.alphaArg1, stage.alphaArg2,
             stage.texCoordIndex, stage.projected ?? 0,
+            ...(stage.colorKey === undefined ? [] : [`k${stage.colorKey}`]),
+            ...(stage.dimension === undefined ? [] : [stage.dimension]),
         ].join(','))
         .join(';');
 
@@ -211,7 +255,7 @@ export function pipelineKey(state){
         state.colorWrite,
         state.alphaTest ? 1 : 0,
         state.alphaFunc,
-        state.fogMode,
+        `${fogSourceOf(state)}/${state.fogMode}`,
         // The separator is what keeps two stage lists apart; the count in front
         // is for reading a key in a diagnostic, not for correctness. Said
         // plainly because the first version of this comment claimed the count
@@ -221,8 +265,12 @@ export function pipelineKey(state){
         state.specularEnable ? 1 : 0,
         lightingKey(state.lighting),
         // Only a layout the format cannot spell adds a part, so every key of a
-        // formatted draw reads as it always has.
+        // formatted draw reads as it always has; the same for the states below,
+        // each named so that no two optional parts can be read as each other.
         ...(state.vertexLayoutKey === undefined ? [] : [state.vertexLayoutKey]),
+        ...(state.normalizeNormals ? ['normalize'] : []),
+        ...(state.flatShading ? ['flat'] : []),
+        ...(state.rangeFog ? ['range'] : []),
     ].join('|');
 }
 
@@ -262,6 +310,35 @@ export function colorWriteMask(bits){
 }
 
 /**
+ * The vertex buffers a layout reads: stream zero's first, then one per
+ * further stream in the order the layout lists them, each with the
+ * attributes read from it.
+ *
+ * @param {number} stride  Stream zero's.
+ * @param {readonly { shaderLocation: number, offset: number, format: string,
+ *     stream?: number }[]} attributes
+ * @param {readonly { stream: number, stride: number, instanced?: boolean }[]} [streams]
+ *        A stream `instanced` steps once an instance.
+ * @returns {{ arrayStride: number, stepMode: string,
+ *     attributes: { shaderLocation: number, offset: number, format: string }[] }[]}
+ */
+export function vertexBuffersOf(stride, attributes, streams = []){
+    /** @type {readonly { stream: number, stride: number, instanced?: boolean }[]} */
+    const buffers = [{ stream: 0, stride }, ...streams];
+    return buffers.map(buffer=>({
+        arrayStride: buffer.stride,
+        stepMode: buffer.instanced ? 'instance' : 'vertex',
+        attributes: attributes
+            .filter(attribute=>(attribute.stream ?? 0) === buffer.stream)
+            .map(attribute=>({
+                shaderLocation: attribute.shaderLocation,
+                offset: attribute.offset,
+                format: attribute.format,
+            })),
+    }));
+}
+
+/**
  * The descriptor for the state, less the shader modules and layout, which the
  * caller supplies because it owns compilation and binding.
  *
@@ -298,6 +375,9 @@ export function pipelineDescriptor(state, layout){
         }
         : undefined;
 
+    const vertexBuffers = layout === null
+        ? undefined
+        : vertexBuffersOf(layout.stride, layout.attributes, layout.streams);
     return {
         primitive: {
             topology: state.topology === undefined ? 'triangle-list' : state.topology,
@@ -306,17 +386,8 @@ export function pipelineDescriptor(state, layout){
         },
         depthStencil: depth,
         multisample: { count: state.sampleCount === undefined ? 1 : state.sampleCount },
-        vertexLayout: layout === null
-            ? undefined
-            : {
-                arrayStride: layout.stride,
-                stepMode: 'vertex',
-                attributes: layout.attributes.map(attribute=>({
-                    shaderLocation: attribute.shaderLocation,
-                    offset: attribute.offset,
-                    format: attribute.format,
-                })),
-            },
+        vertexLayout: vertexBuffers?.[0],
+        vertexBuffers,
         target: {
             format: state.targetFormat,
             blend,

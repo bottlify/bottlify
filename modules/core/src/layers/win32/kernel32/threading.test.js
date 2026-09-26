@@ -12,6 +12,7 @@ import { createNamedObjects } from './named-objects.js';
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_INVALID_PARAMETER = 87;
 const ERROR_ALREADY_EXISTS = 183;
 
 /**
@@ -387,6 +388,49 @@ test('CreateThread fills in the thread id when asked, and not when not', ()=>{
     assert.equal(kernel.state.threadIds.length, 1, 'a null pointer is not written through');
 });
 
+test('CreateThread hands the kernel the stack size as a commit, or as a reserve when flagged', ()=>{
+    const STACK_SIZE_PARAM_IS_A_RESERVATION = 0x00010000;
+    const { kernel, fns } = setup();
+
+    fns.CreateThread.handler([0, 0x800000, 0x401000, 0, 0, 0]);
+    assert.equal(kernel.state.created[0].stackSize, 0x800000);
+    assert.equal(kernel.state.created[0].stackReserve, undefined);
+
+    fns.CreateThread.handler([0, 0x40000, 0x401000, 0, STACK_SIZE_PARAM_IS_A_RESERVATION, 0]);
+    assert.equal(kernel.state.created[1].stackReserve, 0x40000);
+    assert.equal(kernel.state.created[1].stackSize, undefined);
+});
+
+test('CREATE_SUSPENDED makes the thread with one suspension, and no turn until resumed', ()=>{
+    // Wine's thread test: a thread created suspended does not run, and the
+    // first ResumeThread answers a previous count of one.
+    const CREATE_SUSPENDED = 0x4;
+    const { kernel, fns } = setup();
+    /** @type {any[]} */
+    const suspended = [];
+    Object.assign(kernel, {
+        suspendThread: (/** @type {any} */ thread)=>{
+            suspended.push(thread);
+            return 0;
+        },
+    });
+
+    fns.CreateThread.handler([0, 0, 0x401000, 0, 0, 0]);
+    assert.deepEqual(suspended, [], 'a thread created without it is left to run');
+    fns.CreateThread.handler([0, 0, 0x401000, 0, CREATE_SUSPENDED, 0]);
+    assert.deepEqual(suspended, [kernel.state.created[1]]);
+});
+
+test('a thread the kernel has no room for is a failed CreateThread, not a stopped machine', ()=>{
+    const ERROR_NOT_ENOUGH_MEMORY = 8;
+    const { kernel, fns, errors } = setup();
+    kernel.createThread = ()=>null;
+
+    assert.equal(fns.CreateThread.handler([0, 0, 0x401000, 0, 0, 0x405000]), 0);
+    assert.deepEqual(errors, [ERROR_NOT_ENOUGH_MEMORY]);
+    assert.deepEqual(kernel.state.threadIds, [], 'no id is written for a thread never made');
+});
+
 test('waiting on a child process is where the parent hands over', ()=>{
     // Nothing in this process can signal a child: it runs once the parent has
     // nothing else to do. So the thread blocks outside every wait queue, and is
@@ -542,10 +586,50 @@ test('a named semaphore is found by a second create, and by OpenSemaphore', ()=>
 });
 
 test('an unnamed CreateSemaphore still validates its counts', ()=>{
-    const { fns } = setup();
+    const { fns, errors } = setup();
     assert.equal(fns.CreateSemaphoreA.handler([0, 0, 0, 0]), 0, 'a maximum of zero is refused');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER, 'and says why');
+    errors.length = 0;
     assert.equal(fns.CreateSemaphoreA.handler([0, 5, 4, 0]), 0, 'initial above maximum is refused');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    errors.length = 0;
+    assert.equal(fns.CreateSemaphoreW.handler([0, -1, 4, 0]), 0, 'a negative initial is refused');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
     assert.notEqual(fns.CreateSemaphoreA.handler([0, 1, 4, 0]), 0);
+});
+
+test('the Ex creators take their options as flags, and make the same objects', ()=>{
+    const CREATE_EVENT_MANUAL_RESET = 0x1;
+    const CREATE_EVENT_INITIAL_SET = 0x2;
+    const CREATE_MUTEX_INITIAL_OWNER = 0x1;
+    const ALL_ACCESS = 0x1f0003;
+    const NAME = 0x2000;
+    const { kernel, fns, errors, current } = setup({ [NAME]: 'Ready' });
+
+    const event = fns.CreateEventExW.handler(
+        [0, NAME, CREATE_EVENT_MANUAL_RESET | CREATE_EVENT_INITIAL_SET, ALL_ACCESS]);
+    const made = kernel.handles.resolve(event, 'event');
+    assert.equal(made.manualReset, true);
+    assert.equal(made.signalled, true);
+    assert.equal(kernel.handles.resolve(fns.CreateEventA.handler([0, 0, 0, NAME]), 'event'), made,
+        'the name is the one CreateEvent uses');
+    assert.equal(errors.at(-1), ERROR_ALREADY_EXISTS);
+    assert.equal(kernel.handles.resolve(fns.CreateEventExA.handler([0, 0, 0, ALL_ACCESS]),
+        'event').manualReset, false, 'no flags is an auto-reset event, not signalled');
+
+    const mutex = kernel.handles.resolve(
+        fns.CreateMutexExA.handler([0, 0, CREATE_MUTEX_INITIAL_OWNER, ALL_ACCESS]), 'mutex');
+    assert.deepEqual(kernel.state.waits.at(-1).object, mutex);
+    assert.equal(kernel.state.waits.at(-1).thread, current, 'taken by the caller');
+
+    const semaphore = fns.CreateSemaphoreExW.handler([0, 1, 4, 0, 0, ALL_ACCESS]);
+    assert.equal(kernel.handles.resolve(semaphore, 'semaphore').maximum, 4);
+    assert.equal(fns.CreateSemaphoreExA.handler([0, 5, 4, 0, 0, ALL_ACCESS]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+
+    assert.deepEqual([fns.CreateEventExA, fns.CreateEventExW, fns.CreateMutexExA,
+        fns.CreateMutexExW, fns.CreateSemaphoreExA, fns.CreateSemaphoreExW]
+        .map(fn=>fn.argBytes), [16, 16, 16, 16, 24, 24]);
 });
 
 test('OpenSemaphoreA reports no such thing for a name nothing created', ()=>{
@@ -874,4 +958,104 @@ test('a timer set without a routine queues nothing', ()=>{
     fns.SetWaitableTimer.handler([timer, 0x10, 0, 0, 0, 0]);
 
     assert.equal(kernel.handles.resolve(timer, 'timer').fired, null);
+});
+
+test('SwitchToThread answers zero at once when no other thread is ready', ()=>{
+    const { fns, kernel, parked, current } = setup();
+    /** @type {any} */ (kernel).threads = ()=>[current, { state: 'blocked' },
+        { state: 'ready', awaitingHost: true }];
+    assert.equal(fns.SwitchToThread.handler(), 0);
+    assert.deepEqual(parked, []);
+    assert.deepEqual(kernel.state.blocked, []);
+    assert.equal(fns.SwitchToThread.argBytes, 0);
+});
+
+test('SwitchToThread stands aside for a ready thread and answers nonzero when it runs again',
+    ()=>{
+        const { fns, kernel, parked, current } = setup();
+        kernel.state.now = 500;
+        current.priority = 0;
+        /** @type {any} */ (kernel).threads = ()=>[current, { state: 'ready', priority: 0 }];
+        assert.equal(fns.SwitchToThread.handler(), PARKED);
+        assert.deepEqual(parked, [current]);
+        assert.deepEqual(kernel.state.blocked, [{ thread: current, reason: 'SwitchToThread',
+            timed: { deadline: 500, result: 1 } }], 'behind one of its own priority, no longer');
+
+        /** @type {any} */ (kernel).threads = ()=>[current, { state: 'ready', priority: -2 }];
+        current.priority = 2;
+        fns.SwitchToThread.handler();
+        assert.deepEqual(kernel.state.blocked[1].timed, { deadline: 501, result: 1 },
+            'a lower priority gets a moment of guest time, as the scheduler would pick the '
+            + 'caller again at once');
+    });
+
+/**
+ * An OVERLAPPED in guest memory at 0x20, and a count at 0x40.
+ *
+ * @param {ReturnType<typeof setup>} parts
+ * @param {number} internal @param {number} internalHigh @param {number} [event]
+ */
+function overlapped({ host }, internal, internalHigh, event = 0){
+    const bytes = new Uint8Array(0x100);
+    const view = new DataView(bytes.buffer);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.writeMemory = (address, data)=>bytes.set(data, address);
+    view.setUint32(0x20, internal, true);
+    view.setUint32(0x24, internalHigh, true);
+    view.setUint32(0x30, event, true);
+    view.setUint32(0x40, 0x5555, true);
+    return { count: ()=>view.getUint32(0x40, true), view };
+}
+
+test('GetOverlappedResult reads the count and the status the I/O left in the OVERLAPPED', ()=>{
+    // Wine's kernel32 file tests, test_overlapped.
+    const STATUS_INVALID_HANDLE = 0xc0000008;
+    const parts = setup();
+    const done = overlapped(parts, 0, 0xabcd);
+    assert.equal(parts.fns.GetOverlappedResult.handler([0, 0x20, 0x40, 0]), 1);
+    assert.equal(done.count(), 0xabcd);
+    assert.equal(parts.fns.GetOverlappedResult.argBytes, 16);
+
+    const failed = overlapped(parts, STATUS_INVALID_HANDLE, 0xabcd);
+    assert.equal(parts.fns.GetOverlappedResult.handler([0, 0x20, 0x40, 0]), 0);
+    assert.equal(parts.errors.at(-1), 6, 'ERROR_INVALID_HANDLE, from the status');
+    assert.equal(failed.count(), 0xabcd, 'the count is written all the same');
+});
+
+test('an operation still pending is incomplete without bWait, and waited for with it', ()=>{
+    const STATUS_PENDING = 0x103;
+    const ERROR_IO_INCOMPLETE = 996;
+    const parts = setup();
+    const { fns, kernel, parked, current } = parts;
+    const event = fns.CreateEventA.handler([0, 1, 1, 0]);
+    const pending = overlapped(parts, STATUS_PENDING, 0xabcd, event);
+    assert.equal(fns.GetOverlappedResult.handler([0, 0x20, 0x40, 0]), 0);
+    assert.equal(parts.errors.at(-1), ERROR_IO_INCOMPLETE);
+    assert.equal(pending.count(), 0x5555, 'and the count is left alone');
+
+    /** @type {any[]} */
+    const sets = [];
+    /** @type {any} */ (kernel).waitAny = (/** @type {any[]} */ objects)=>{
+        sets.push(objects);
+        const index = objects.findIndex(object=>object.signalled);
+        return index < 0 ? null : { index, result: index };
+    };
+    assert.equal(fns.GetOverlappedResult.handler([0, 0x20, 0x40, 1]), 1,
+        'a signalled event ends the wait at once, the status still pending');
+    assert.equal(pending.count(), 0xabcd);
+    const object = kernel.handles.resolve(event, 'event');
+    assert.equal(sets[0][1], object, 'the event awaited is the one the OVERLAPPED names');
+    assert.equal(sets[0][0].signalled, false, 'behind one nothing sets');
+
+    kernel.resetEvent(object);
+    pending.view.setUint32(0x30, event | 1, true);
+    assert.equal(fns.GetOverlappedResult.handler([0, 0x20, 0x40, 1]), PARKED,
+        'the low bit of hEvent is a flag, not part of the handle');
+    assert.deepEqual(parked, [current]);
+    assert.equal(sets[1][1], object);
+
+    pending.view.setUint32(0x30, 0, true);
+    assert.equal(fns.GetOverlappedResult.handler([0x9999, 0x20, 0x40, 1]), 0,
+        'with no event the file is waited on, and it must be a handle');
+    assert.equal(parts.errors.at(-1), 6);
 });

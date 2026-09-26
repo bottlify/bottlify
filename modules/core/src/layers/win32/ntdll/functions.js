@@ -77,6 +77,9 @@ const KERNEL32_ALIASES = Object.freeze({
     // Not a rename: kernel32 forwards this one to ntdll on a real machine, and
     // the walk it drives is the same walk a processor fault goes through here.
     RtlUnwind: 'RtlUnwind',
+    // Forwarded the same way (kernel32.spec), so a mask built through either
+    // name is the one both comparisons read.
+    VerSetConditionMask: 'VerSetConditionMask',
 });
 
 /**
@@ -96,6 +99,9 @@ const KERNEL32_ALIASES = Object.freeze({
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *           Without it the 64-bit helpers stay unexported: their answer does not
  *           fit in the one register the dispatcher writes.
+ * @property {import('../kernel32/versions.js').WindowsVersion} [windows]
+ *           The machine's Windows, for what RtlGetVersion cannot read from the
+ *           process block. Absent, the default.
  */
 
 /**
@@ -152,6 +158,7 @@ export function createNtdllFunctions(host){
             writeMemory: host.writeMemory,
             teb: host.teb,
             arena: host.arena,
+            version: host.windows,
         }),
 
         ...(host.setRegisters

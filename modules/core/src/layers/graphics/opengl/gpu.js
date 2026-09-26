@@ -1061,8 +1061,9 @@ export function createGpuRenderer(services){
         const scissor = clampRect({
             x: box.x0, y: box.y0, width: box.x1 - box.x0, height: box.y1 - box.y0,
         }, target);
+        const [near, far] = scene.depthRange;
         return {
-            viewport: { ...viewport, minDepth: scene.depthRange[0], maxDepth: scene.depthRange[1] },
+            viewport: { ...viewport, minDepth: Math.min(near, far), maxDepth: Math.max(near, far) },
             scissor,
         };
     };
@@ -1121,7 +1122,9 @@ export function createGpuRenderer(services){
             depth: {
                 test: operations.depthTest !== undefined,
                 func: operations.depthFunc ?? GL.LESS,
-                write: operations.depthWrite,
+                // The depth buffer is not updated while the test is disabled,
+                // whatever the mask; WebGPU would write under 'always'.
+                write: operations.depthTest !== undefined && operations.depthWrite,
             },
             stencil: scene.stencil,
             stencilBack: scene.stencilBack,
@@ -1257,6 +1260,16 @@ export function createGpuRenderer(services){
     };
 
     /**
+     * GL lets the near value be the greater, and maps depth backwards; a
+     * WebGPU viewport's range only runs forwards. So the viewport takes the
+     * range in order, and the vertex stage turns the depth round in it.
+     *
+     * @param {import('./pipeline.js').Scene} scene
+     * @returns {number} 1, or -1 for a range run backwards
+     */
+    const depthDirectionOf = scene=>(scene.depthRange[0] > scene.depthRange[1] ? -1 : 1);
+
+    /**
      * @param {import('./pipeline.js').Scene['alphaTest']} a
      * @param {import('./pipeline.js').Scene['alphaTest']} b
      */
@@ -1281,6 +1294,7 @@ export function createGpuRenderer(services){
      *           current: import('./pipeline.js').Scene['current'],
      *           fog: import('./pipeline.js').Scene['fog'],
      *           alphaTest: import('./pipeline.js').Scene['alphaTest'],
+     *           depthDirection: number,
      *           modelview: ArrayLike<number>,
      *           block: Float32Array }>}
      */
@@ -1338,7 +1352,8 @@ export function createGpuRenderer(services){
         if (cached && sameMatrix(cached.mvp, mvp) && sameMatrix(cached.modelview, scene.modelview)
             && sameUnits(cached.units, scene.units)
             && sameCurrent(cached.current, scene.current) && sameFog(cached.fog, scene.fog)
-            && sameAlphaTest(cached.alphaTest, scene.alphaTest))
+            && sameAlphaTest(cached.alphaTest, scene.alphaTest)
+            && cached.depthDirection === depthDirectionOf(scene))
         {
             stats.uniformsReused++;
             return cached.block;
@@ -1408,9 +1423,11 @@ export function createGpuRenderer(services){
             block[fogAt + 3] = current.fogCoord;
         }
         block[UNIFORM.misc] = scene.alphaTest ? scene.alphaTest.reference : 0;
+        const depthDirection = depthDirectionOf(scene);
+        block[UNIFORM.misc + 1] = depthDirection;
         fixedUniformsCache.set(context, {
             mvp, modelview: scene.modelview, units: scene.units, current: scene.current,
-            fog: scene.fog, alphaTest: scene.alphaTest, block,
+            fog: scene.fog, alphaTest: scene.alphaTest, depthDirection, block,
         });
         return block;
     };

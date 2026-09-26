@@ -36,24 +36,31 @@
  *   draw uploads what the shader reads and not the whole file.
  * - **Fog is a varying**, at the location `varyingLocation` gives the oFog
  *   register: the fixed-function vertex stage of a hybrid computes the amount
- *   from its own clip w and carries the fog colour beside it, and a pixel
- *   shader the caller fogged reads it and mixes its own colour towards that
- *   colour by that amount. Direct3D applies its fog stage to a shader-drawn
+ *   -- vertex fog from the camera-space depth, or the specular alpha -- and
+ *   carries the fog colour beside it, and a pixel shader the caller fogged
+ *   reads it and mixes its own colour towards that colour by that amount.
+ *   Table fog is the pixel's, so for it the vertex stage carries the curve's
+ *   range instead (`FOG_RANGE_LOCATION`) and the pixel shader evaluates the
+ *   curve over its own depth. Direct3D applies its fog stage to a shader-drawn
  *   surface below model 3 exactly as to a fixed-function one.
  * - **Samplers are texture and sampler pairs** at group 2, two bindings per
- *   sampler register, in the order `samplers` lists them.
+ *   sampler register, in the order `samplers` lists them. A 1.x pixel shader
+ *   declares none: each stage it samples is of the dimension the caller says
+ *   the texture bound there has.
+ * - **A 1.x pixel shader's bump matrices are constants** past the ones it
+ *   reads (`bumpRegister`): two registers a stage, D3DTSS_BUMPENVMAT00, 01,
+ *   10 and 11, then D3DTSS_BUMPENVLSCALE and LOFFSET.
  *
- * Four things are not translated and say so: the texture-addressing
- * instructions of the 1.x pixel shaders, which are a different machine with
- * six-way modes of their own; predicated execution; subroutines, whose body
- * would need the entry point's registers; and texture reads from a vertex
- * shader. A shader using any of them is reported as untranslatable rather
- * than translated wrong.
+ * Three things are not translated and say so: predicated execution;
+ * subroutines, whose body would need the entry point's registers; and texture
+ * reads from a vertex shader. A shader using any of them is reported as
+ * untranslatable rather than translated wrong.
  */
 
 import { OPCODE, REGISTER, SHADER_KIND } from './shader.js';
 import { D3DDECLUSAGE } from './declaration.js';
 import { fogFunctionDeclaration } from '../webgpu/internal/fixedfunction.js';
+import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
 
 /** D3DSPSM, the source modifiers. */
 const MODIFIER = Object.freeze({
@@ -63,6 +70,19 @@ const MODIFIER = Object.freeze({
 
 /** D3DSPDM_SATURATE, in the destination's result modifier. */
 const SATURATE = 0x1;
+
+/**
+ * The factor a destination's shift scales its result by: _x2, _x4 and _x8
+ * as one to three, _d8, _d4 and _d2 as the signed nibble's -3 to -1.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+const SHIFT = Object.freeze({ 1: '2.0', 2: '4.0', 3: '8.0', 13: '0.125', 14: '0.25', 15: '0.5' });
+
+/** The texture WGSL declares for a sampler of each dimension. */
+const TEXTURE_TYPE = Object.freeze({
+    '2d': 'texture_2d<f32>', cube: 'texture_cube<f32>', '3d': 'texture_3d<f32>',
+});
 
 /**
  * D3DSHADER_COMPARISON, in the control bits of ifc, breakc and setp.
@@ -101,8 +121,26 @@ export const HYBRID_CONSTANTS = Object.freeze({
     /** The fixed-function fog's start, end and density, and the fog colour beside it. */
     FOG: 41,
     FOG_COLOR: 42,
-    COUNT: 43,
+    /** Four rows: the inverse transpose of world then view, which the normal goes through. */
+    CAMERA_NORMAL: 43,
+    COUNT: 47,
 });
+
+/**
+ * Where a hybrid's vertex stage puts table fog's start, end and density, and
+ * whether the projection is affine: constant over the draw, so flat. The
+ * point-size location, which no pixel shader below model 3 can read.
+ */
+export const FOG_RANGE_LOCATION = 11;
+
+/**
+ * The interpolation a varying at a location is declared with: flat for the
+ * two colours under D3DSHADE_FLAT, which both stages must agree on.
+ *
+ * @param {number} location @param {boolean | undefined} flat
+ */
+export const colourInterpolation = (location, flat)=>
+    (flat && location <= 1 ? ' @interpolate(flat)' : '');
 
 /**
  * Where a varying of a given usage travels between the two stages: colours
@@ -154,6 +192,12 @@ export function varyingLocation(usage, index){
  *     reads: what the vertex stage paired with it has to write.
  * @property {{ index: number, type: string }[]} samplers
  * @property {number} constants   How many float registers the shader reaches.
+ * @property {number} [viewportRegister]
+ *     A vertex shader's: the float register past the ones it reads, where the
+ *     viewport's scale is carried for the half-pixel move of its position.
+ * @property {number} [bumpRegister]
+ *     A 1.x pixel shader's that bumps: the first of the two registers a stage
+ *     its bump matrix and luminance travel in, past the ones it reads.
  * @property {string | null} error
  */
 
@@ -172,18 +216,20 @@ function swizzleOf(operand){
 
 /**
  * The statement that writes a value into a destination through its mask,
- * saturating first when asked. A mask of all four is a plain assignment;
- * anything less rebuilds the vector from the old and new components, since
- * WGSL has no assignment through a swizzle.
+ * scaled by its shift and then saturated when asked. A mask of all four is a
+ * plain assignment; anything less rebuilds the vector from the old and new
+ * components, since WGSL has no assignment through a swizzle.
  *
  * @param {string} target   The WGSL variable.
  * @param {import('./shader.js').Operand} dest
  * @param {string} value    A vec4f expression.
  */
 function writeMasked(target, dest, value){
+    const scale = SHIFT[dest.shift];
+    const shifted = scale ? `(${value} * ${scale})` : value;
     const saturated = (dest.resultModifier & SATURATE) !== 0
-        ? `clamp(${value}, vec4f(0.0), vec4f(1.0))`
-        : value;
+        ? `clamp(${shifted}, vec4f(0.0), vec4f(1.0))`
+        : shifted;
     if (dest.writeMask === 0xf)
     {
         return `${target} = ${saturated};`;
@@ -197,6 +243,24 @@ function writeMasked(target, dest, value){
             : `${target}.${letter}`);
     }
     return `{ let _t = ${saturated}; ${target} = vec4f(${parts.join(', ')}); }`;
+}
+
+/**
+ * Whether an expression is one pair of parentheses around the rest.
+ *
+ * @param {string} expression
+ */
+function enclosed(expression){
+    let depth = 0;
+    for (let at = 0; at < expression.length; at++)
+    {
+        depth += expression[at] === '(' ? 1 : expression[at] === ')' ? -1 : 0;
+        if (depth === 0)
+        {
+            return at > 0 && at === expression.length - 1;
+        }
+    }
+    return false;
 }
 
 /**
@@ -268,7 +332,8 @@ function moduleHeader(options){
  *
  * @param {import('./shader.js').ParsedShader} parsed
  * @param {{ inputs?: Map<number, InputShape>, alsoWrite?: readonly number[],
- *     fog?: number }} [options]
+ *     fog?: number, fogSource?: number, flatColours?: boolean,
+ *     stageDimensions?: readonly string[], projectedBy?: readonly string[] }} [options]
  *        For a vertex shader, the shape of each v# the declaration supplies,
  *        by register. Absent means every declared input arrives as four
  *        floats; present, a declared register it does not name reads as the
@@ -282,12 +347,26 @@ function moduleHeader(options){
  *        y,z,w -- and mixes the shader's own colour towards that colour,
  *        which is where Direct3D applies it. Only a draw whose vertex stage
  *        is the fixed one can promise the varying, so only it is fogged.
+ *        `fogSource` FOG_SOURCE.TABLE evaluates the curve per pixel instead,
+ *        over the range the vertex stage carries at `FOG_RANGE_LOCATION`.
+ *        `flatColours` declares the two colour varyings flat, for
+ *        D3DSHADE_FLAT; the stage paired with this one must say the same.
+ *        For a 1.x pixel shader, `stageDimensions` is the dimension ('2d',
+ *        'cube', '3d') of the texture bound at each stage, which is what its
+ *        reads sample, and `projectedBy` the component each stage's
+ *        coordinates are divided by under D3DTTFF_PROJECTED ('' for none),
+ *        which a 1.0 to 1.3 shader's reads honour.
  * @returns {TranslatedShader}
  */
 export function translateShader(parsed, options = {}){
     const kind = parsed.version.kind;
     const vertex = kind === SHADER_KIND.VERTEX;
     const major = parsed.version.major;
+    const minor = parsed.version.minor;
+    const legacy = !vertex && major < 2;
+    // ps_1_4 reads its coordinate sets as inputs and has temporaries for the
+    // rest; 1.0 to 1.3 fill each texture register from its own stage.
+    const phased = legacy && minor >= 4;
     const supplied = options.inputs ?? null;
     /** @type {ShaderInput[]} */
     const inputs = [];
@@ -346,6 +425,9 @@ export function translateShader(parsed, options = {}){
     const vertexOutputs = new Set();
     /** @type {Set<number>} the v# a vertex shader reads */
     const vertexInputs = new Set();
+    /** @type {number[]} the stages of the texm3x rows taken so far */
+    const pendingRows = [];
+    let bumps = false;
 
     /**
      * The WGSL name of a register, declaring what needs declaring as a side
@@ -379,7 +461,11 @@ export function translateShader(parsed, options = {}){
                     return `k${index}`;
                 }
                 constants = relative ? Infinity : Math.max(constants, index + 1);
-                return `c[${index}${relative}]`;
+                // A 1.x pixel shader's constants are held to the range of
+                // its registers, [-1, 1], however they were set.
+                return legacy
+                    ? `clamp(c[${index}${relative}], vec4f(-1.0), vec4f(1.0))`
+                    : `c[${index}${relative}]`;
             case REGISTER.CONSTINT:
                 if (definedInts.has(index) && !relative)
                 {
@@ -401,7 +487,7 @@ export function translateShader(parsed, options = {}){
                     used.add('a0');
                     return 'a0';
                 }
-                if (major < 2)
+                if (major < 2 && !phased)
                 {
                     // Once `tex` has filled it, a 1.x texture register is a
                     // temporary like any other: the arithmetic that follows
@@ -532,6 +618,104 @@ export function translateShader(parsed, options = {}){
     const src = (instruction, at)=>source(instruction.sources[at]);
 
     /**
+     * An expression's components, parenthesised unless it is a name or
+     * already in parentheses of its own.
+     *
+     * @param {string} expression @param {string} components
+     */
+    const swizzled = (expression, components)=>(/^[\w.[\]]+$/.test(expression)
+        || enclosed(expression)
+        ? `${expression}.${components}`
+        : `(${expression}).${components}`);
+
+    /**
+     * A 1.x read of the texture bound at a stage, of the dimension the caller
+     * says it has, at the leading components of `at` that dimension takes.
+     *
+     * @param {number} stage @param {string} at  A vec4f expression.
+     */
+    const stageSample = (stage, at)=>{
+        const dimension = options.stageDimensions?.[stage] ?? '2d';
+        if (!samplers.some(one=>one.index === stage))
+        {
+            samplers.push({
+                index: stage,
+                type: TEXTURE_TYPE[/** @type {keyof typeof TEXTURE_TYPE} */ (dimension)]
+                    ?? TEXTURE_TYPE['2d'],
+            });
+        }
+        return `textureSample(tex${stage}, samp${stage},`
+            + ` ${swizzled(at, dimension === '2d' ? 'xy' : 'xyz')})`;
+    };
+
+    /**
+     * A 1.0 to 1.3 stage's coordinate set, divided as D3DTTFF_PROJECTED asks.
+     *
+     * @param {number} stage
+     */
+    const stageCoordinates = stage=>{
+        pixelCoordinates.add(stage);
+        const by = options.projectedBy?.[stage] ?? '';
+        return by ? `(in.t${stage} / in.t${stage}.${by})` : `in.t${stage}`;
+    };
+
+    /**
+     * Fills a 1.0 to 1.3 texture register, which is read as a temporary from
+     * then on.
+     *
+     * @param {number} stage @param {string} value
+     */
+    const fill = (stage, value)=>{
+        used.add(`t${stage}`);
+        emit(`t${stage} = ${value};`);
+    };
+
+    /**
+     * One row of a texm3x or texdp3 matrix: the stage's coordinates against
+     * the source's colour.
+     *
+     * @param {number} stage @param {string} read
+     */
+    const rowOf = (stage, read)=>{
+        pixelCoordinates.add(stage);
+        return `dot(in.t${stage}.xyz, ${swizzled(read, 'xyz')})`;
+    };
+
+    /**
+     * The register of a stage's bump matrix (0) or luminance (1).
+     *
+     * @param {number} stage @param {number} which
+     */
+    const bumpRegisterOf = (stage, which)=>{
+        bumps = true;
+        return `c[_bump + ${stage * 2 + which}]`;
+    };
+
+    /**
+     * What a stage's bump matrix moves a coordinate by, for the source's red
+     * and green: u by 00 and 10, v by 01 and 11.
+     *
+     * @param {number} stage @param {string} read
+     */
+    const bumpOffset = (stage, read)=>{
+        const matrix = bumpRegisterOf(stage, 0);
+        return `vec2f(dot(${swizzled(read, 'xy')}, ${matrix}.xz),`
+            + ` dot(${swizzled(read, 'xy')}, ${matrix}.yw))`;
+    };
+
+    /**
+     * Writes the depth a quotient spells: one where the divisor is zero, and
+     * held to [0, 1] (Wine's d3d9 visual.c texdepth_test).
+     *
+     * @param {string} dividend @param {string} divisor
+     */
+    const depth = (dividend, divisor)=>{
+        pixelOutputs.add(-1);
+        emit(`oDepth = vec4f(select(clamp(${dividend} / ${divisor}, 0.0, 1.0), 1.0,`
+            + ` ${divisor} == 0.0));`);
+    };
+
+    /**
      * The row dot products the matrix instructions unroll into: `rows` of
      * them, each against the constant register `columns` after the first.
      *
@@ -653,7 +837,9 @@ export function translateShader(parsed, options = {}){
                 const dest = /** @type {import('./shader.js').Operand} */ (instruction.dest);
                 const floats = new Float32Array(
                     Uint32Array.from(instruction.literals ?? []).buffer);
-                defined.set(dest.index, `vec4f(${[...floats].map(literal).join(', ')})`);
+                defined.set(dest.index, `vec4f(${[...floats]
+                    .map(value=>(legacy ? Math.min(1, Math.max(-1, value)) : value))
+                    .map(literal).join(', ')})`);
                 break;
             }
             case OPCODE.DEFI: {
@@ -788,8 +974,12 @@ export function translateShader(parsed, options = {}){
                     + ` ${src(instruction, 0)} >= vec4f(0.0))`);
                 break;
             case OPCODE.CND:
-                write(instruction, `select(${src(instruction, 2)}, ${src(instruction, 1)},`
-                    + ` ${src(instruction, 0)} > vec4f(0.5))`);
+                // Co-issued in 1.0 to 1.3, the comparison is not made and
+                // the second source is taken (Wine's d3d8 visual.c cnd_test).
+                write(instruction, legacy && !phased && instruction.coissue
+                    ? src(instruction, 1)
+                    : `select(${src(instruction, 2)}, ${src(instruction, 1)},`
+                        + ` ${src(instruction, 0)} > vec4f(0.5))`);
                 break;
             case OPCODE.DSX:
                 write(instruction, `dpdx(${src(instruction, 0)})`);
@@ -798,28 +988,33 @@ export function translateShader(parsed, options = {}){
                 write(instruction, `dpdy(${src(instruction, 0)})`);
                 break;
             case OPCODE.TEXKILL: {
-                // The register named is read, not written; in a 1.x shader it
-                // is the coordinate set itself.
+                // The register named is read, not written; in a 1.0 to 1.3
+                // shader it is the coordinate set itself, not what a read
+                // filled the register with.
                 const dest = /** @type {import('./shader.js').Operand} */ (instruction.dest);
-                const read = dest.type === REGISTER.ADDR && major < 2
-                    ? registerName(dest, true)
+                if (dest.type === REGISTER.ADDR && legacy && !phased)
+                {
+                    pixelCoordinates.add(dest.index);
+                }
+                const read = dest.type === REGISTER.ADDR && legacy && !phased
+                    ? `in.t${dest.index}`
                     : registerName(dest, false);
                 emit(`if (any(${read}.xyz < vec3f(0.0))) { discard; }`);
                 break;
             }
             case OPCODE.TEX:
-                if (major < 2)
+                if (phased)
+                {
+                    // ps_1_4: `texld rN, src` samples stage N at the source.
+                    const dest = /** @type {import('./shader.js').Operand} */ (instruction.dest);
+                    write(instruction, stageSample(dest.index, src(instruction, 0)));
+                    break;
+                }
+                if (legacy)
                 {
                     // ps_1_x: `tex tN` samples texture N with coordinate set N.
                     const dest = /** @type {import('./shader.js').Operand} */ (instruction.dest);
-                    if (!samplers.some(one=>one.index === dest.index))
-                    {
-                        samplers.push({ index: dest.index, type: 'texture_2d<f32>' });
-                    }
-                    pixelCoordinates.add(dest.index);
-                    used.add(`t${dest.index}`);
-                    emit(`t${dest.index} = textureSample(tex${dest.index}, samp${dest.index},`
-                        + ` in.t${dest.index}.xy);`);
+                    fill(dest.index, stageSample(dest.index, stageCoordinates(dest.index)));
                     break;
                 }
                 write(instruction, sample(instruction, 'sample'));
@@ -832,9 +1027,16 @@ export function translateShader(parsed, options = {}){
                 break;
             case OPCODE.TEXCOORD: {
                 const dest = /** @type {import('./shader.js').Operand} */ (instruction.dest);
+                if (phased)
+                {
+                    // ps_1_4's texcrd: the coordinates, as its source reads them.
+                    write(instruction, src(instruction, 0));
+                    break;
+                }
+                // The coordinates as a colour: held to [0, 1], with a w of one.
                 pixelCoordinates.add(dest.index);
-                used.add(`t${dest.index}`);
-                emit(`t${dest.index} = in.t${dest.index};`);
+                fill(dest.index,
+                    `vec4f(clamp(in.t${dest.index}.xyz, vec3f(0.0), vec3f(1.0)), 1.0)`);
                 break;
             }
             case OPCODE.IF:
@@ -915,25 +1117,118 @@ export function translateShader(parsed, options = {}){
             case OPCODE.BREAKP:
                 fail('predicated execution is not translated');
                 break;
+            case OPCODE.PHASE:
+                break;
             case OPCODE.TEXBEM:
-            case OPCODE.TEXBEML:
+            case OPCODE.TEXBEML: {
+                const stage = /** @type {import('./shader.js').Operand} */ (instruction.dest).index;
+                const bumped = src(instruction, 0);
+                const at = stageCoordinates(stage);
+                fill(stage, stageSample(stage, `vec4f(${swizzled(at, 'xy')}`
+                    + ` + ${bumpOffset(stage, bumped)}, ${swizzled(at, 'zw')})`));
+                if (instruction.opcode === OPCODE.TEXBEML)
+                {
+                    const luminance = bumpRegisterOf(stage, 1);
+                    emit(`t${stage} = vec4f(t${stage}.rgb * clamp(${swizzled(bumped, 'z')}`
+                        + ` * ${luminance}.x + ${luminance}.y, 0.0, 1.0), t${stage}.a);`);
+                }
+                break;
+            }
+            case OPCODE.BEM: {
+                // bem rN.xy: the first source moved by the second through
+                // stage N's bump matrix.
+                const stage = /** @type {import('./shader.js').Operand} */ (instruction.dest).index;
+                write(instruction, `vec4f(${swizzled(src(instruction, 0), 'xy')}`
+                    + ` + ${bumpOffset(stage, src(instruction, 1))}, 0.0, 0.0)`);
+                break;
+            }
             case OPCODE.TEXREG2AR:
             case OPCODE.TEXREG2GB:
-            case OPCODE.TEXM3x2PAD:
-            case OPCODE.TEXM3x2TEX:
-            case OPCODE.TEXM3x3PAD:
-            case OPCODE.TEXM3x3TEX:
-            case OPCODE.TEXM3x3SPEC:
-            case OPCODE.TEXM3x3VSPEC:
-            case OPCODE.TEXREG2RGB:
-            case OPCODE.TEXDP3TEX:
-            case OPCODE.TEXM3x2DEPTH:
-            case OPCODE.TEXDP3:
-            case OPCODE.TEXM3x3:
-            case OPCODE.TEXDEPTH:
-            case OPCODE.BEM:
-                fail(`the 1.x texture instruction ${instruction.name} is not translated`);
+            case OPCODE.TEXREG2RGB: {
+                const stage = /** @type {import('./shader.js').Operand} */ (instruction.dest).index;
+                const read = src(instruction, 0);
+                const at = instruction.opcode === OPCODE.TEXREG2AR
+                    ? `vec4f(${swizzled(read, 'wx')}, 0.0, 0.0)`
+                    : instruction.opcode === OPCODE.TEXREG2GB
+                        ? `vec4f(${swizzled(read, 'yz')}, 0.0, 0.0)`
+                        : `vec4f(${swizzled(read, 'xyz')}, 0.0)`;
+                fill(stage, stageSample(stage, at));
                 break;
+            }
+            case OPCODE.TEXDP3TEX:
+            case OPCODE.TEXDP3: {
+                const stage = /** @type {import('./shader.js').Operand} */ (instruction.dest).index;
+                const product = rowOf(stage, src(instruction, 0));
+                fill(stage, instruction.opcode === OPCODE.TEXDP3
+                    ? `vec4f(${product})`
+                    : stageSample(stage, `vec4f(${product}, 0.0, 0.0, 0.0)`));
+                break;
+            }
+            case OPCODE.TEXM3x2PAD:
+            case OPCODE.TEXM3x3PAD: {
+                const stage = /** @type {import('./shader.js').Operand} */ (instruction.dest).index;
+                const name = `_row${stage}`;
+                emit(`let ${name} = ${rowOf(stage, src(instruction, 0))};`);
+                pendingRows.push(stage);
+                break;
+            }
+            case OPCODE.TEXM3x2TEX:
+            case OPCODE.TEXM3x2DEPTH:
+            case OPCODE.TEXM3x3TEX:
+            case OPCODE.TEXM3x3:
+            case OPCODE.TEXM3x3SPEC:
+            case OPCODE.TEXM3x3VSPEC: {
+                const stage = /** @type {import('./shader.js').Operand} */ (instruction.dest).index;
+                const wide = instruction.opcode !== OPCODE.TEXM3x2TEX
+                    && instruction.opcode !== OPCODE.TEXM3x2DEPTH;
+                if (pendingRows.length !== (wide ? 2 : 1))
+                {
+                    fail(`${instruction.name} follows ${pendingRows.length} rows`);
+                    break;
+                }
+                const last = rowOf(stage, src(instruction, 0));
+                const product = [...pendingRows.map(row=>`_row${row}`), last];
+                const stages = [...pendingRows, stage];
+                pendingRows.length = 0;
+                if (instruction.opcode === OPCODE.TEXM3x2DEPTH)
+                {
+                    // The depth the pair of rows spells, z over w.
+                    depth(product[0], product[1]);
+                    break;
+                }
+                const vector = `vec3f(${product.join(', ')}${wide ? '' : ', 0.0'})`;
+                if (instruction.opcode === OPCODE.TEXM3x3)
+                {
+                    fill(stage, `vec4f(${vector}, 1.0)`);
+                    break;
+                }
+                if (instruction.opcode === OPCODE.TEXM3x3TEX
+                    || instruction.opcode === OPCODE.TEXM3x2TEX)
+                {
+                    fill(stage, stageSample(stage, `vec4f(${vector}, 0.0)`));
+                    break;
+                }
+                // The eye vector: a constant for spec, the three sets' w for
+                // vspec; what is sampled is it reflected about the normal.
+                const eye = instruction.opcode === OPCODE.TEXM3x3SPEC
+                    ? swizzled(src(instruction, 1), 'xyz')
+                    : `vec3f(${stages.map(one=>{
+                        pixelCoordinates.add(one);
+                        return `in.t${one}.w`;
+                    }).join(', ')})`;
+                emit(`{ let _n = ${vector}; let _e = ${eye};`
+                    + ` t${stage} = ${stageSample(stage,
+                        'vec4f(2.0 * dot(_n, _e) / dot(_n, _n) * _n - _e, 0.0)')}; }`);
+                used.add(`t${stage}`);
+                break;
+            }
+            case OPCODE.TEXDEPTH: {
+                // texdepth r5: r5.r over r5.g.
+                const read = registerName(
+                    /** @type {import('./shader.js').Operand} */ (instruction.dest), false);
+                depth(`${read}.x`, `${read}.y`);
+                break;
+            }
             default:
                 fail(`${instruction.name} is not translated`);
         }
@@ -987,6 +1282,10 @@ export function translateShader(parsed, options = {}){
     const reads = [];
     /** @type {string[]} */
     const prologue = [];
+    /** @type {string[]} module-scope declarations the fog stage adds */
+    const fogCurve = [];
+    /** @type {number | undefined} */
+    let viewportRegister;
     let entry;
     if (vertex)
     {
@@ -1014,10 +1313,14 @@ export function translateShader(parsed, options = {}){
                 fail(`v${register} is read without a declaration`);
             }
         }
-        outputFields.push('    @builtin(position) oPos: vec4f,');
+        // Invariant, so the same shader compiled into two pipelines -- one
+        // mesh drawn in two passes under two pixel shaders -- gives both the
+        // same position.
+        outputFields.push('    @builtin(position) @invariant oPos: vec4f,');
         /** @param {number} location @param {string} name */
         const emits = (location, name)=>{
-            outputFields.push(`    @location(${location}) ${name}: vec4f,`);
+            outputFields.push(`    @location(${location})`
+                + `${colourInterpolation(location, options.flatColours)} ${name}: vec4f,`);
             outputs.push(location);
         };
         if (major >= 3)
@@ -1043,6 +1346,9 @@ export function translateShader(parsed, options = {}){
                 {
                     emits(varyingLocation(D3DDECLUSAGE.COLOR, output - 100),
                         `oD${output - 100}`);
+                    // Below model 3 a colour output leaves the shader held to
+                    // [0, 1]; a model 3 output is whatever the shader wrote.
+                    body.push(`    out.oD${output - 100} = saturate(out.oD${output - 100});`);
                 }
                 else if (output === 1)
                 {
@@ -1062,6 +1368,12 @@ export function translateShader(parsed, options = {}){
                 body.push(`    out.oX${location} = vec4f(0.0);`);
             }
         }
+        // Direct3D puts a pixel's centre on its integer coordinate and WebGPU
+        // half a pixel further on, so the position the shader wrote moves by
+        // half a pixel: half the viewport's scale in clip space, times w.
+        viewportRegister = constants === Infinity ? 256 : constants;
+        body.push(`    out.oPos = vec4f(out.oPos.xy + out.oPos.w * c[${viewportRegister}].xy`
+            + ' * 0.5, out.oPos.zw);');
         entry = 'vs_main';
     }
     else
@@ -1080,7 +1392,8 @@ export function translateShader(parsed, options = {}){
             const location = declaration
                 ? varyingLocation(declaration.usage, declaration.usageIndex)
                 : varyingLocation(D3DDECLUSAGE.COLOR, input);
-            inputFields.push(`    @location(${location}) v${input}: vec4f,`);
+            inputFields.push(`    @location(${location})`
+                + `${colourInterpolation(location, options.flatColours)} v${input}: vec4f,`);
             reads.push(location);
         }
         for (const output of [...pixelOutputs].sort((a, b)=>a - b))
@@ -1100,26 +1413,48 @@ export function translateShader(parsed, options = {}){
         // factor the vertex stage carried in the oFog varying -- its amount in
         // x and the fog colour in y,z,w. The mix goes in after the body and
         // before the outputs are written: fog on the shaded colour.
-        if (options.fog && pixelOutputs.has(0))
+        const table = options.fogSource === FOG_SOURCE.TABLE;
+        if ((options.fog || options.fogSource === FOG_SOURCE.SPECULAR) && pixelOutputs.has(0))
         {
             inputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.FOG, 0)}) fog: vec4f,`);
             reads.push(varyingLocation(D3DDECLUSAGE.FOG, 0));
+            // Table fog over the pixel's z under an affine projection, its w
+            // otherwise; the curve reads its range from a module variable,
+            // since a function cannot see the entry point's input.
+            const amount = table
+                ? 'fogFactorOf(select(1.0 / in.vPos.w, in.vPos.z, fogRange.w != 0.0))'
+                : 'in.fog.x';
             const fogLines = [
-                '    oC0 = vec4f(mix(in.fog.yzw, oC0.rgb,'
-                    + ' clamp(in.fog.x, 0.0, 1.0)), oC0.a);',
+                ...(table ? ['    fogRange = in.fogRange;'] : []),
+                `    oC0 = vec4f(mix(in.fog.yzw, oC0.rgb, clamp(${amount}, 0.0, 1.0)), oC0.a);`,
             ];
+            if (table)
+            {
+                inputFields.push(`    @location(${FOG_RANGE_LOCATION}) @interpolate(flat)`
+                    + ' fogRange: vec4f,');
+                reads.push(FOG_RANGE_LOCATION);
+                fogCurve.push('var<private> fogRange: vec4f;',
+                    fogFunctionDeclaration(options.fog ?? 0, 'fogRange').trimEnd());
+            }
             const at = body.indexOf('    out.oC0 = oC0;');
             body.splice(at < 0 ? body.length : at, 0, ...fogLines);
         }
         entry = 'ps_main';
     }
 
-    const reach = constants === Infinity ? Infinity : constants;
+    // The bump registers follow the ones the shader reads, eight stages of
+    // two, named through a module constant so the body did not need to know
+    // where they would start.
+    const bumpRegister = bumps ? constants : undefined;
+    const reach = viewportRegister !== undefined ? viewportRegister + 1
+        : bumpRegister !== undefined ? bumpRegister + 16
+            : constants === Infinity ? 224 : constants;
     const wgsl = [
         ...moduleHeader({
-            vertex, constants: reach === Infinity ? (vertex ? 256 : 224) : reach, samplers,
-            inputFields, outputFields,
+            vertex, constants: reach, samplers, inputFields, outputFields,
         }),
+        ...fogCurve,
+        ...(bumpRegister === undefined ? [] : [`const _bump = ${bumpRegister};`]),
         vertex ? '@vertex' : '@fragment',
         `fn ${entry}(in: ${vertex ? 'VsIn' : 'PsIn'}) -> ${vertex ? 'VsOut' : 'PsOut'} {`,
         `    var out: ${vertex ? 'VsOut' : 'PsOut'};`,
@@ -1132,8 +1467,9 @@ export function translateShader(parsed, options = {}){
     ].join('\n');
 
     return {
-        wgsl, entry, inputs, outputs, reads, samplers,
-        constants: reach === Infinity ? (vertex ? 256 : 224) : reach,
+        wgsl, entry, inputs, outputs, reads, samplers, constants: reach,
+        ...(viewportRegister === undefined ? {} : { viewportRegister }),
+        ...(bumpRegister === undefined ? {} : { bumpRegister }),
         error,
     };
 }
@@ -1166,18 +1502,31 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  *        then view in `c[WORLD_VIEW..]`) and puts it through the stage's
  *        transform (`c[TRANSFORMS..]`), whatever the declaration carries
  *        under that set.
- * @param {number} [fog]  D3DFOG mode; zero for none. Set, the stage computes
- *        the fixed function's fog factor from the vertex's clip w and writes
- *        it, with the fog colour, in the oFog varying a fogged pixel shader
- *        reads -- which is the stage Direct3D applies after a pixel shader
- *        below model 3.
+ * @param {number} [fog]  D3DFOG mode, the curve; zero for none.
+ * @param {number} [fogSource]  FOG_SOURCE; by default vertex fog for a curve
+ *        and none without one. Fogged, the stage writes the oFog varying a
+ *        fogged pixel shader reads -- the fixed function's factor and the fog
+ *        colour -- which is the stage Direct3D applies after a pixel shader
+ *        below model 3: the curve over the camera-space depth for vertex fog,
+ *        the specular alpha for a pre-transformed vertex or with no mode set,
+ *        and for table fog the colour alone, with the curve's range beside it
+ *        for the pixel shader to evaluate per pixel.
+ * @param {{ flatColours?: boolean, normalizeNormals?: boolean, rangeFog?: boolean }} [options]
+ *        `flatColours`: the two colour varyings flat, for D3DSHADE_FLAT, as
+ *        the pixel shader must read them. `normalizeNormals`:
+ *        D3DRS_NORMALIZENORMALS, whether the camera-space normal a
+ *        coordinate is generated from is renormalised. `rangeFog`:
+ *        D3DRS_RANGEFOGENABLE, vertex fog over the distance from the eye.
  * @returns {TranslatedShader}
  */
-export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [], fog = 0){
+export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [], fog = 0,
+    fogSource = fog === 0 ? FOG_SOURCE.NONE : FOG_SOURCE.VERTEX, options = {})
+{
+    const flatColours = options.flatColours === true;
     /** @type {string[]} */
     const inputFields = [];
     /** @type {string[]} */
-    const outputFields = ['    @builtin(position) oPos: vec4f,'];
+    const outputFields = ['    @builtin(position) @invariant oPos: vec4f,'];
     /** @type {number[]} */
     const outputs = [];
     /** @type {string[]} */
@@ -1187,6 +1536,7 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     let position = null;
     let vertex = null;
     let normal = 'vec3f(0.0, 0.0, 1.0)';
+    let specularAlpha = '1.0';
     for (const element of elements)
     {
         const shape = shapes.get(element.register) ?? FOUR_FLOATS;
@@ -1219,8 +1569,13 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         }
         else if (element.usage === D3DDECLUSAGE.COLOR || element.usage === D3DDECLUSAGE.TEXCOORD)
         {
+            if (element.usage === D3DDECLUSAGE.COLOR && element.usageIndex === 1)
+            {
+                specularAlpha = `${value}.w`;
+            }
             const location = varyingLocation(element.usage, element.usageIndex);
-            outputFields.push(`    @location(${location}) o${location}: vec4f,`);
+            outputFields.push(`    @location(${location})`
+                + `${colourInterpolation(location, flatColours)} o${location}: vec4f,`);
             outputs.push(location);
             body.push(`    out.o${location} = ${value};`);
         }
@@ -1228,10 +1583,15 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     if (generated.some(mode=>mode !== 0) && vertex)
     {
         const wv = HYBRID_CONSTANTS.WORLD_VIEW;
+        const cn = HYBRID_CONSTANTS.CAMERA_NORMAL;
+        const turned = `(mat4x4f(c[${cn}], c[${cn + 1}], c[${cn + 2}], c[${cn + 3}])`
+            + ` * vec4f(${normal}, 0.0)).xyz`;
         body.push(
             `    let worldView = mat4x4f(c[${wv}], c[${wv + 1}], c[${wv + 2}], c[${wv + 3}]);`,
             `    let cameraPosition = (worldView * vec4f(${vertex}, 1.0)).xyz;`,
-            `    let cameraNormal = normalize((worldView * vec4f(${normal}, 0.0)).xyz);`);
+            options.normalizeNormals
+                ? `    let cameraNormal = normalize(${turned});`
+                : `    let cameraNormal = ${turned};`);
     }
     for (const [set, mode] of generated.entries())
     {
@@ -1257,43 +1617,65 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             + ` dot(c[${row + 2}], vec4f(${coordinate}, 1.0)),`
             + ` dot(c[${row + 3}], vec4f(${coordinate}, 1.0)));`);
     }
-    // The fog the fixed-function stage adds after the pixel shader: the amount
-    // from the vertex's own clip w -- the eye-space depth a perspective
-    // projection carries into it -- and the colour beside it, so a fogged
-    // pixel shader needs nothing but the varying to apply it.
-    if (fog !== 0)
+    // The fog the fixed-function stage adds after the pixel shader, with the
+    // colour beside it so a fogged pixel shader needs nothing but varyings to
+    // apply it. Vertex fog is the curve over the magnitude of the vertex's
+    // camera-space z -- not its clip w, which an orthographic projection
+    // holds at one -- and a pre-transformed vertex has no camera space, so
+    // its fog is its specular alpha, as it is with no mode set at all.
+    const vertexFog = fogSource === FOG_SOURCE.VERTEX && vertex !== null;
+    if (fogSource !== FOG_SOURCE.NONE)
     {
         const location = varyingLocation(D3DDECLUSAGE.FOG, 0);
         outputFields.push(`    @location(${location}) o${location}: vec4f,`);
         outputs.push(location);
-        body.push(`    out.o${location} = vec4f(fogFactorOf(out.oPos.w),`
-            + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
+        const wv = HYBRID_CONSTANTS.WORLD_VIEW;
+        const camera = `(mat4x4f(c[${wv}], c[${wv + 1}], c[${wv + 2}], c[${wv + 3}])`
+            + ` * vec4f(${vertex}, 1.0))`;
+        const amount = fogSource === FOG_SOURCE.TABLE ? '0.0'
+            : vertexFog
+                ? `fogFactorOf(${options.rangeFog ? `length(${camera}.xyz)` : `abs(${camera}.z)`})`
+                : specularAlpha;
+        body.push(`    out.o${location} = vec4f(${amount}, c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
+    }
+    if (fogSource === FOG_SOURCE.TABLE)
+    {
+        outputFields.push(`    @location(${FOG_RANGE_LOCATION}) @interpolate(flat)`
+            + ` o${FOG_RANGE_LOCATION}: vec4f,`);
+        outputs.push(FOG_RANGE_LOCATION);
+        body.push(`    out.o${FOG_RANGE_LOCATION} = c[${HYBRID_CONSTANTS.FOG}];`);
     }
     for (const location of alsoWrite)
     {
         if (!outputs.includes(location))
         {
-            outputFields.push(`    @location(${location}) o${location}: vec4f,`);
+            outputFields.push(`    @location(${location})`
+                + `${colourInterpolation(location, flatColours)} o${location}: vec4f,`);
             outputs.push(location);
             const colour = location === varyingLocation(D3DDECLUSAGE.COLOR, 0)
                 || location === varyingLocation(D3DDECLUSAGE.COLOR, 1);
             body.push(`    out.o${location} = vec4f(${colour ? '1.0' : '0.0'});`);
         }
     }
-    body.unshift(`    out.oPos = ${position ?? 'vec4f(0.0, 0.0, 0.0, 1.0)'};`);
+    // Half a pixel on to WebGPU's pixel centres, as every Direct3D position.
+    body.unshift(`    out.oPos = ${position ?? 'vec4f(0.0, 0.0, 0.0, 1.0)'};`,
+        `    out.oPos = vec4f(out.oPos.xy + out.oPos.w * c[${HYBRID_CONSTANTS.VIEWPORT}].zw`
+            + ' * 0.5, out.oPos.zw);');
     const wgsl = [
         ...moduleHeader({
             vertex: true, constants: HYBRID_CONSTANTS.COUNT, samplers: [], inputFields,
             outputFields,
         }),
         // The fog curve over the fixed function's own range row.
-        fogFunctionDeclaration(fog, `c[${HYBRID_CONSTANTS.FOG}]`).trimEnd(),
+        fogFunctionDeclaration(vertexFog ? fog : 0, `c[${HYBRID_CONSTANTS.FOG}]`).trimEnd(),
         // The viewport's inverse offset and scale, as the fixed-function stage
-        // applies them to a vertex given in target pixels.
+        // applies them to a vertex given in target pixels, and its RHW back as
+        // the clip w the rasteriser interpolates by (one for none to give).
         'fn viewportPosition(vertex: vec4f) -> vec4f {',
         `    let screen = (vertex.xy + c[${HYBRID_CONSTANTS.VIEWPORT}].xy)`
             + ` * c[${HYBRID_CONSTANTS.VIEWPORT}].zw;`,
-        '    return vec4f(screen.x - 1.0, screen.y + 1.0, vertex.z, 1.0);',
+        '    let clipW = select(1.0, 1.0 / vertex.w, vertex.w > 0.0);',
+        '    return vec4f(screen.x - 1.0, screen.y + 1.0, vertex.z, 1.0) * clipW;',
         '}',
         '@vertex',
         'fn vs_main(in: VsIn) -> VsOut {',

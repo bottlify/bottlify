@@ -34,8 +34,12 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
  * @property {{ name: string, argBytes: number,
  *              invoke?: (target: any, args: number[]) => number,
  *              guest?: (builder: { trap: number }) => number }[]} methods
- *           In vtable order, after IUnknown's three. `target` is the API object,
+ *           In vtable order, after IUnknown's three unless `bare`. `target` is the API object,
  *           not the adapter: an implementation never sees this file.
+ * @property {boolean} [bare]
+ *           The interface does not derive from IUnknown, so its table starts
+ *           with its own first method. Nothing can Release such a pointer: it
+ *           lives as long as whatever handed it out says it does.
  * @property {(target: any, pointers: Iterable<number>) => void} [released]
  *           Told when the program lets go of the object's last reference,
  *           while its pointers still name it: state the guest set by pointer
@@ -63,7 +67,7 @@ function methodsFor(descriptor){
     if (!methods)
     {
         methods = [
-            ...IUNKNOWN_METHODS,
+            ...(descriptor.bare ? [] : IUNKNOWN_METHODS),
             ...descriptor.methods.map((/** @type {any} */ method)=>({
                 name: method.name,
                 argBytes: method.argBytes,
@@ -83,9 +87,13 @@ function methodsFor(descriptor){
  * @param {any} api        The drawing API's own object.
  * @param {InterfaceDescriptor[]} interfaces
  * @param {(adapter: any) => void} onGone  Called when the last reference goes.
+ * @param {(adapter: any, id: string) => void} onReferenced
+ *        Called when a reference is taken through an interface.
+ * @param {(adapter: any, pointer: number) => void} onForgotten
+ *        Called when the bridge forgets one of the object's pointers.
  * @returns {any} something the bridge's publisher will accept
  */
-function adapt(api, interfaces, onGone){
+function adapt(api, interfaces, onGone, onReferenced, onForgotten){
     const declared = new Map(interfaces.map(entry=>[entry.id, entry]));
 
     /**
@@ -95,9 +103,17 @@ function adapt(api, interfaces, onGone){
      * one past what the program owes, and the object dies while it is held.
      */
     const settle = ()=>api.settleGuestRefs?.();
+    /** Whether the latest release ended the object, which the bridge asks next. */
+    let gone = false;
 
     const adapter = {
         api,
+        // Every interface pointer goes with the object at the bridge then,
+        // and not while the object says it outlives the count that went, as
+        // a DirectDraw object does while another generation is held.
+        get destroyed(){
+            return gone;
+        },
         // Where a method that runs in the guest finds the object's memory:
         // the object's own answer, or nothing for an object that keeps none.
         guestState: ()=>(typeof api.guestState === 'function' ? api.guestState() : 0),
@@ -108,6 +124,17 @@ function adapt(api, interfaces, onGone){
          * @type {Set<number>}
          */
         pointers: new Set(),
+        /**
+         * The interfaces it was published as, which is what the bridge is
+         * told to give back for an object with no Release.
+         *
+         * @type {Set<string>}
+         */
+        ids: new Set(),
+        /** @param {number} pointer */
+        forgotten(pointer){
+            onForgotten(adapter, pointer >>> 0);
+        },
         /** @param {string} id */
         interfaceFor(id){
             // IUnknown is every object's, and answers with one record whichever
@@ -130,6 +157,10 @@ function adapt(api, interfaces, onGone){
         /** @param {string} [id] */
         addRef(id){
             settle();
+            if (id !== undefined)
+            {
+                onReferenced(adapter, id);
+            }
             return api.addRef?.(id) ?? 1;
         },
 
@@ -156,7 +187,8 @@ function adapt(api, interfaces, onGone){
             }
             settle();
             const left = api.release(id);
-            if (left === 0 && api.destroyed !== false)
+            gone = left === 0 && api.destroyed !== false;
+            if (gone)
             {
                 for (const descriptor of declared.values())
                 {
@@ -176,11 +208,15 @@ function adapt(api, interfaces, onGone){
  * @param {Object} deps
  * @param {(object: any, interfaceId: string) => number} deps.publishInterface
  *        The bridge's, which lays the vtable out in guest memory.
+ * @param {(object: any, interfaceId: string) => boolean} [deps.unpublishInterface]
+ *        The bridge's, which gives an interface back; without it an object
+ *        given back leaves only this file's way back to it.
  * @returns {{ publish: (api: any, interfaces: InterfaceDescriptor[], id: string) => number,
+ *             unpublish: (api: any) => void,
  *             objectAt: (pointer: number) => any,
  *             adapterFor: (api: any) => any, count: () => number }}
  */
-export function createPublisher({ publishInterface }){
+export function createPublisher({ publishInterface, unpublishInterface }){
     /** Keyed by the API object, so one object is one identity. */
     const adapters = new WeakMap();
 
@@ -192,10 +228,31 @@ export function createPublisher({ publishInterface }){
         let adapter = adapters.get(api);
         if (!adapter)
         {
-            adapter = adapt(api, interfaces, forget);
+            adapter = adapt(api, interfaces, forget, remember, forgetPointer);
             adapters.set(api, adapter);
         }
         return adapter;
+    };
+
+    /**
+     * A pointer QueryInterface laid out, recorded when the reference it
+     * carries is taken. The bridge answers a query from the object's own
+     * interfaces without coming through `publish`, and a program then hands
+     * that pointer back -- an IDirect3DTexture2 exists only as a query's
+     * answer, and SetTexture takes one -- so without this the way back from
+     * it knew nothing. Asking the bridge again is its memoised answer, the
+     * pointer the program holds.
+     *
+     * @param {any} adapter @param {string} id
+     */
+    const remember = (adapter, id)=>{
+        const pointer = publishInterface(adapter, id);
+        if (pointer !== 0 && !adapter.pointers.has(pointer >>> 0))
+        {
+            byPointer.set(pointer >>> 0, adapter.api);
+            adapter.pointers.add(pointer >>> 0);
+            adapter.ids.add(id);
+        }
     };
 
     /** @param {any} adapter */
@@ -205,6 +262,19 @@ export function createPublisher({ publishInterface }){
             byPointer.delete(pointer);
         }
         adapter.pointers.clear();
+    };
+
+    /**
+     * One pointer the bridge let go of: its words may be another object's
+     * interface by the next call that hands them in.
+     *
+     * @param {any} adapter @param {number} pointer
+     */
+    const forgetPointer = (adapter, pointer)=>{
+        if (adapter.pointers.delete(pointer))
+        {
+            byPointer.delete(pointer);
+        }
     };
 
     /**
@@ -242,8 +312,30 @@ export function createPublisher({ publishInterface }){
             {
                 byPointer.set(pointer >>> 0, api);
                 adapter.pointers.add(pointer >>> 0);
+                adapter.ids.add(id);
             }
             return pointer;
+        },
+
+        /**
+         * Gives back every interface an object was published as, for an
+         * object the program has no Release for: a table without IUnknown,
+         * which ends when whatever handed it out ends.
+         *
+         * @param {any} api
+         */
+        unpublish(api){
+            const adapter = adapters.get(api);
+            if (!adapter)
+            {
+                return;
+            }
+            for (const id of adapter.ids)
+            {
+                unpublishInterface?.(adapter, id);
+            }
+            adapter.ids.clear();
+            forget(adapter);
         },
 
         /**

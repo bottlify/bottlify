@@ -9,22 +9,23 @@
  *
  * The device in `device.js` decides what is legal; this decides what the GPU
  * is told. Between the two is a record: every clear and draw is written down
- * with the whole state it depends on, and a present replays the record onto
- * one backend frame once every pipeline it needs has been built. The replay is
+ * with the whole state it depends on, and a present -- or a flush, which shows
+ * nothing -- replays the record onto one backend frame once every pipeline it
+ * needs has been built. The replay is
  * where the backend's rules are honoured -- one encoder, one submit, a pass per
  * change of target -- and the record is what a test reads back to know what was
  * drawn.
  *
  * Every resource keeps a host copy of its bytes. That is what a map hands out
  * and an unmap reads back, what a copy between resources moves, and what an
- * upload sends. It is also the honest limit of this cut: a resource the GPU
- * wrote -- a render target -- has no host copy worth reading, and a copy out of
- * one says so rather than copying stale bytes quietly.
+ * upload sends. A resource the GPU wrote -- a render target, or one the GPU
+ * copied or filtered into -- has no host copy worth reading, so a copy out of
+ * one is recorded for the GPU to make in its turn, and one into a staging
+ * resource is read back after the frame that holds it is submitted.
  *
  * What this cut does not do is stated where it is decided, each as a divergence
- * that names the call: several render targets at once, a blend factor or a
- * stencil reference that is not the default, wireframe fill, geometry shaders,
- * stream output, predication, and multisampling.
+ * that names the call: wireframe fill, geometry shaders, stream output,
+ * predication, and multisampling.
  */
 
 import {
@@ -32,13 +33,17 @@ import {
     D3D10_DEPTH_WRITE_MASK, D3D10_FILL_MODE, D3D10_FILTER, D3D10_FILTER_ANISOTROPIC_BIT,
     D3D10_FILTER_COMPARISON_BIT, D3D10_INPUT_CLASSIFICATION, D3D10_PRIMITIVE_TOPOLOGY,
     D3D10_RESOURCE_DIMENSION, D3D10_STENCIL_OP, D3D10_TEXTURE_ADDRESS, D3D10_USAGE,
-    D3D10_APPEND_ALIGNED_ELEMENT,
+    D3D10_APPEND_ALIGNED_ELEMENT, DXGI_FORMAT, FORMAT_INFO, formatPitch,
 } from './constants.js';
+import { convertTexels, convertedTexelBytes } from './blocks.js';
 import {
-    INDEX_FORMAT, TEXEL_BYTES, TEXTURE_FORMAT, VERTEX_FORMAT, VERTEX_FORMAT_BYTES,
+    INDEX_FORMAT, TEXEL_BYTES, VERTEX_FORMAT, VERTEX_FORMAT_BYTES, copyCompatible,
+    isDepthFormat, textureStorage, viewFormatOf,
 } from './gpuformats.js';
 import { levelExtent } from './validity.js';
-import { BINDING, linkProgram, translateShader } from './wgsl.js';
+import {
+    BINDING, BUFFER_VIEW_FORMATS, STAGE, linkProgram, translateShader,
+} from './wgsl.js';
 import { LockFlags } from '../webgpu/internal/buffers.js';
 
 /**
@@ -48,6 +53,10 @@ import { LockFlags } from '../webgpu/internal/buffers.js';
  * @property {(descriptor: object) => any} createSampler
  * @property {(descriptor: object) => any} createTexture
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {boolean} [compressedTextures]  Whether the GPU samples BC blocks as they are;
+ *                                          without it they are decoded on the processor.
+ * @property {boolean} [depthClipControl]  Whether the GPU device was made with
+ *     depth-clip-control, which leaving depth unclipped needs.
  */
 
 /** @type {Readonly<Record<number, string>>} */
@@ -130,6 +139,16 @@ const ADDRESS = Object.freeze({
     [D3D10_TEXTURE_ADDRESS.BORDER]: 'clamp-to-edge',
     [D3D10_TEXTURE_ADDRESS.MIRROR_ONCE]: 'clamp-to-edge',
 });
+
+/**
+ * Formats WebGPU blends. An integer target is never blended (Direct3D skips
+ * blending for one too), and a 32-bit float one only with a device feature
+ * this build does not ask for, which CheckFormatSupport says by not claiming
+ * it blendable.
+ *
+ * @param {string} format
+ */
+const blendable = format=>!/int$/.test(format) && !/32float$/.test(format);
 
 /** The state a null rasterizer, depth-stencil or blend state stands for. */
 const DEFAULT_RASTERIZER = Object.freeze({
@@ -237,6 +256,8 @@ const DEFAULT_BLEND = Object.freeze({
  * @property {number} vertexCount
  * @property {number} startVertex
  * @property {number} instanceCount
+ * @property {number} startInstance
+ * @property {number} stencilRef
  * @property {number | null} indexCount   Null for a non-indexed draw.
  * @property {number} startIndex
  * @property {number} baseVertex
@@ -254,6 +275,29 @@ const DEFAULT_BLEND = Object.freeze({
  * @property {number[]} color
  */
 
+/** The formats a level is drawn into and filtered from when the GPU makes mips. */
+const FILTERED_TARGET = /^(rgba8unorm|bgra8unorm|rgba16float|rg16float|r16float|rgb10a2unorm|rg8unorm|r8unorm)/;
+
+/**
+ * A triangle over the whole target, sampling the level above at the middle of
+ * each target texel.
+ */
+const MIP_SHADER = [
+    '@group(0) @binding(0) var source: texture_2d<f32>;',
+    '@group(0) @binding(1) var linear: sampler;',
+    'struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> };',
+    '@vertex fn vertexMain(@builtin(vertex_index) index: u32) -> Out {',
+    '    let uv = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));',
+    '    var out: Out;',
+    '    out.position = vec4<f32>(uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);',
+    '    out.uv = uv;',
+    '    return out;',
+    '}',
+    '@fragment fn fragmentMain(in: Out) -> @location(0) vec4<f32> {',
+    '    return textureSampleLevel(source, linear, in.uv, 0.0);',
+    '}',
+].join('\n');
+
 /**
  * @param {number} a
  * @param {number} b
@@ -269,6 +313,7 @@ export function createRenderer(services){
     const divergence = services.divergence ?? null;
     const BufferUsage = backend ? backend.BufferUsage : null;
     const TextureUsage = backend ? backend.TextureUsage : null;
+    const compressed = services.compressedTextures ?? false;
 
     /** Said once per distinct detail, so a loop of draws does not flood. */
     const reported = new Set();
@@ -286,6 +331,8 @@ export function createRenderer(services){
     const backings = new WeakMap();
     /** @type {WeakMap<object, any>} view -> GPU texture view */
     const views = new WeakMap();
+    /** @type {WeakMap<object, any>} buffer view -> the uniform describing it */
+    const bufferViews = new WeakMap();
     /** @type {WeakMap<object, any>} sampler state -> GPU sampler */
     const samplers = new WeakMap();
     /** @type {WeakMap<object, any>} shader -> translation */
@@ -297,8 +344,37 @@ export function createRenderer(services){
     /** @type {any} */
     let placeholders = null;
 
+    /**
+     * Occlusion counters: what an occlusion query of the device counts into.
+     * A draw recorded while any is open is counted on the GPU, into every one
+     * open; a counter is settled once it has ended and every submission that
+     * holds its draws has delivered its counts.
+     *
+     * @typedef {{ samples: number, outstanding: number, ended: boolean,
+     *             settled: boolean, failed: boolean }} OcclusionCounter
+     */
+    /** @type {Set<OcclusionCounter>} */
+    const occluding = new Set();
+    /** @type {Set<OcclusionCounter>} the counters the recording's draws count into */
+    let recordingCounters = new Set();
+    /** @param {OcclusionCounter} counter */
+    const settle = counter=>{
+        counter.settled = counter.ended && counter.outstanding === 0;
+    };
+
     /** @type {any[]} commands recorded since the last present */
     let recording = [];
+    /**
+     * Commands ever recorded, and how many of those have been handed to the
+     * GPU: what a query ended after some of them waits on.
+     */
+    let recordedCount = 0;
+    let handedOver = 0;
+    /** @param {any} command */
+    const record = command=>{
+        recording.push(command);
+        recordedCount++;
+    };
     /** @type {Promise<void>} */
     let chain = Promise.resolve();
     /** @type {any[]} */
@@ -332,25 +408,30 @@ export function createRenderer(services){
     /**
      * @typedef {Object} LevelGeometry
      * @property {number} offset      Into the slice, in bytes.
-     * @property {number} rowPitch
+     * @property {number} rowPitch    Bytes per row of blocks.
      * @property {number} depthPitch
-     * @property {number} width
+     * @property {number} width       Texels.
      * @property {number} height
      * @property {number} depth
+     * @property {number} rows        Rows of blocks.
      */
 
     /**
      * @typedef {Object} ResourceLayout
-     * @property {string | null} format  The GPU spelling, or null for a buffer.
-     * @property {number} texelBytes
+     * @property {string | null} format  The GPU texture's format, or null for a buffer.
+     * @property {import('./gpuformats.js').TextureStorage | null} storage
+     * @property {number} texelBytes     Bytes per block: per texel, but for a compressed format.
+     * @property {number} blockEdge      Texels along a block's side.
      * @property {LevelGeometry[]} levels
      * @property {number} sliceBytes     One array slice, every level of it.
      * @property {number} slices
      */
 
     /**
-     * How a resource's bytes are laid out on the host: every level of a slice
-     * back to back, then the next slice, as the subresource numbering counts.
+     * How a resource's bytes are laid out on the host: in the program's own
+     * format, rows of blocks, every level of a slice back to back and then the
+     * next slice, as the subresource numbering counts. That is the layout a
+     * map hands out, whatever the GPU keeps.
      *
      * @param {any} resource
      * @returns {ResourceLayout}
@@ -361,17 +442,19 @@ export function createRenderer(services){
         {
             return {
                 format: null,
+                storage: null,
                 texelBytes: 1,
+                blockEdge: 1,
                 levels: [{
                     offset: 0, rowPitch: desc.ByteWidth, depthPitch: desc.ByteWidth,
-                    width: desc.ByteWidth, height: 1, depth: 1,
+                    width: desc.ByteWidth, height: 1, depth: 1, rows: 1,
                 }],
                 sliceBytes: desc.ByteWidth,
                 slices: 1,
             };
         }
-        const format = TEXTURE_FORMAT[desc.Format] ?? null;
-        const texelBytes = format ? TEXEL_BYTES[format] : 4;
+        const storage = textureStorage(desc.Format, desc.BindFlags, { compressed });
+        const info = FORMAT_INFO[desc.Format];
         const levels = [];
         let offset = 0;
         for (let level = 0; level < desc.MipLevels; level++)
@@ -383,14 +466,16 @@ export function createRenderer(services){
             const depth = resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
                 ? levelExtent(desc.Depth, level)
                 : 1;
-            const rowPitch = width * texelBytes;
-            const depthPitch = rowPitch * height;
-            levels.push({ offset, rowPitch, depthPitch, width, height, depth });
+            const { rowPitch, rows } = formatPitch(desc.Format, width, height);
+            const depthPitch = rowPitch * rows;
+            levels.push({ offset, rowPitch, depthPitch, width, height, depth, rows });
             offset += depthPitch * depth;
         }
         return {
-            format,
-            texelBytes,
+            format: storage ? storage.format : null,
+            storage,
+            texelBytes: info ? info.bytesPerPixel : 4,
+            blockEdge: info ? info.blockEdge : 1,
             levels,
             sliceBytes: offset,
             slices: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
@@ -398,6 +483,8 @@ export function createRenderer(services){
                 : desc.ArraySize,
         };
     };
+
+    let nextBacking = 1;
 
     /** @param {any} resource */
     const backingOf = resource=>{
@@ -410,7 +497,7 @@ export function createRenderer(services){
         const layout = layoutOf(resource);
         const bytes = new Uint8Array(layout.sliceBytes * layout.slices);
         backing = {
-            layout, bytes, gpu: null, texture: null, surface: null,
+            id: nextBacking++, layout, bytes, gpu: null, texture: null, surface: null,
             sampleCount: desc.SampleDesc ? desc.SampleDesc.Count : 1,
         };
         if (!backend)
@@ -426,7 +513,10 @@ export function createRenderer(services){
                     label: `d3d10:buffer#${desc.ByteWidth}`,
                     size: desc.ByteWidth,
                     usage: BufferUsage.VERTEX | BufferUsage.INDEX | BufferUsage.UNIFORM
-                        | BufferUsage.COPY_DST | BufferUsage.COPY_SRC,
+                        | BufferUsage.COPY_DST | BufferUsage.COPY_SRC
+                        | ((desc.BindFlags & D3D10_BIND.SHADER_RESOURCE) !== 0
+                            ? BufferUsage.STORAGE
+                            : 0),
                 });
             }
         }
@@ -450,19 +540,22 @@ export function createRenderer(services){
                     ? desc.Depth
                     : desc.ArraySize,
             };
+            const viewFormats = layout.storage ? layout.storage.viewFormats : [];
             backing.texture = createTexture({
                 label: `d3d10:texture${resource.dimension - 1}d:${layout.format}`,
                 size,
                 mipLevelCount: desc.MipLevels,
                 sampleCount: desc.SampleDesc.Count,
+                // A one-dimensional texture is one row of a two-dimensional
+                // one: WebGPU's own has neither mip levels nor array layers.
                 dimension: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
                     ? '3d'
-                    : resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE1D ? '1d' : '2d',
+                    : '2d',
                 format: layout.format,
+                ...(viewFormats.length > 0 ? { viewFormats } : {}),
                 usage,
             });
-            // The surface the backend attaches passes to: the whole of level
-            // zero, which is what a swap chain's buffer is.
+            // The surface a swap chain shows: the whole of level zero.
             backing.surface = {
                 texture: backing.texture,
                 view: backing.texture.createView({ label: 'd3d10:target' }),
@@ -495,7 +588,8 @@ export function createRenderer(services){
     /**
      * @param {any} resource
      * @param {number} subresource
-     * @returns {{ bytes: Uint8Array, rowPitch: number, depthPitch: number, level: any }}
+     * @returns {{ bytes: Uint8Array, rowPitch: number, depthPitch: number,
+     *             level: LevelGeometry }}
      */
     const subresourceBytes = (resource, subresource)=>{
         const backing = backingOf(resource);
@@ -511,13 +605,75 @@ export function createRenderer(services){
     };
 
     /**
-     * Sends a subresource's host bytes to the GPU.
+     * A box in texels as the host layout counts it: whole blocks, a row in
+     * bytes, and clipped to the level it lies in.
+     *
+     * @param {ResourceLayout} layout
+     * @param {LevelGeometry} geometry
+     * @param {Box} box
+     */
+    const blocksOf = (layout, geometry, box)=>{
+        const edge = layout.blockEdge;
+        const left = Math.floor(box.left / edge);
+        const top = Math.floor(box.top / edge);
+        const columns = Math.ceil(Math.min(box.right, geometry.width) / edge) - left;
+        return {
+            left: left * layout.texelBytes,
+            top,
+            front: box.front,
+            rowBytes: Math.max(0, columns) * layout.texelBytes,
+            rows: Math.max(0, Math.ceil(Math.min(box.bottom, geometry.height) / edge) - top),
+            depth: Math.max(0, Math.min(box.back, geometry.depth) - box.front),
+        };
+    };
+
+    /**
+     * A subresource's host bytes as the GPU texture holds them: as they are,
+     * or converted where the texture keeps another format.
+     *
+     * @param {ResourceLayout} layout
+     * @param {LevelGeometry} geometry
+     * @param {Uint8Array} bytes
+     * @returns {{ data: Uint8Array, bytesPerRow: number } | null}
+     */
+    const texelsForGpu = (layout, geometry, bytes)=>{
+        const conversion = layout.storage ? layout.storage.conversion : null;
+        if (!conversion)
+        {
+            return { data: bytes, bytesPerRow: geometry.rowPitch };
+        }
+        const slices = [];
+        for (let z = 0; z < geometry.depth; z++)
+        {
+            const converted = convertTexels(conversion,
+                bytes.subarray(z * geometry.depthPitch, (z + 1) * geometry.depthPitch),
+                geometry.width, geometry.height);
+            if (!converted)
+            {
+                return null;
+            }
+            slices.push(converted);
+        }
+        const texel = convertedTexelBytes(conversion);
+        const data = new Uint8Array(slices.reduce((total, slice)=>total + slice.length, 0));
+        slices.reduce((at, slice)=>{
+            data.set(slice, at);
+            return at + slice.length;
+        }, 0);
+        return { data, bytesPerRow: geometry.width * texel };
+    };
+
+    /**
+     * Sends a subresource's host bytes to the GPU: all of them, or the box a
+     * program wrote -- the rest of a level the GPU drew into is newer on the
+     * GPU than on the host, and must not be overwritten with it.
      *
      * @param {any} resource
      * @param {number} subresource
      * @param {number} [flags]  A LockFlags value for a buffer.
+     * @param {Box | null} [box]
      */
-    const upload = (resource, subresource, flags = LockFlags.NONE)=>{
+    const upload = (resource, subresource, flags = LockFlags.NONE, box = null)=>{
         const backing = backingOf(resource);
         if (backing.gpu)
         {
@@ -530,28 +686,101 @@ export function createRenderer(services){
         {
             return;
         }
+        if (backing.layout.storage.depth)
+        {
+            // WebGPU copies into no depth format with a stencil, and a depth
+            // texture is written by drawing: bytes a program hands one stay on
+            // the host.
+            diverge('bytes a program gives a depth texture are kept but not uploaded: the'
+                + ' GPU copy of a depth texture is written only by drawing and clearing');
+            return;
+        }
         const { level, slice } = subresourceOf(resource, subresource);
         const geometry = backing.layout.levels[level];
         const held = subresourceBytes(resource, subresource);
-        backend.uploadTexture({
-            texture: backing.texture,
-            format: backing.layout.format,
-            width: geometry.width,
-            height: geometry.height,
-            depthOrArrayLayers: geometry.depth,
-            mipLevel: level,
-            origin: { x: 0, y: 0, z: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
-                ? 0
-                : slice },
-            bytesPerRow: geometry.rowPitch,
-            data: held.bytes,
-            staging: false,
-        });
+        const layout = backing.layout;
+        const is3D = resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D;
+        let texels;
+        let area = { x: 0, y: 0, z: 0, width: geometry.width, height: geometry.height,
+            depth: geometry.depth };
+        if (box && !layout.storage.conversion)
+        {
+            const region = blocksOf(layout, geometry, box);
+            const edge = layout.blockEdge;
+            const x = Math.floor(box.left / edge) * edge;
+            const y = Math.floor(box.top / edge) * edge;
+            area = {
+                x, y, z: region.front,
+                width: Math.min(box.right, geometry.width) - x,
+                height: Math.min(box.bottom, geometry.height) - y,
+                depth: region.depth,
+            };
+            const data = new Uint8Array(region.rowBytes * region.rows * region.depth);
+            for (let z = 0; z < region.depth; z++)
+            {
+                for (let row = 0; row < region.rows; row++)
+                {
+                    const from = (region.front + z) * held.depthPitch
+                        + (region.top + row) * held.rowPitch + region.left;
+                    data.set(held.bytes.subarray(from, from + region.rowBytes),
+                        (z * region.rows + row) * region.rowBytes);
+                }
+            }
+            texels = { data, bytesPerRow: region.rowBytes };
+        }
+        else
+        {
+            texels = texelsForGpu(layout, geometry, held.bytes);
+        }
+        if (!texels || area.width <= 0 || area.height <= 0 || area.depth <= 0)
+        {
+            return;
+        }
+        const compressedBlocks = layout.blockEdge > 1 && !layout.storage.conversion;
+        try
+        {
+            backend.uploadTexture({
+                texture: backing.texture,
+                format: layout.format,
+                width: area.width,
+                height: area.height,
+                depthOrArrayLayers: area.depth,
+                mipLevel: level,
+                origin: { x: area.x, y: area.y, z: is3D ? area.z : slice },
+                bytesPerRow: texels.bytesPerRow,
+                data: texels.data,
+                // Blocks go through a staging buffer, the path they arrive by.
+                staging: compressedBlocks,
+            });
+        }
+        catch (e){
+            diverge(`a ${backing.layout.format} texture is not uploaded:`
+                + ` ${e && /** @type {any} */ (e).message || e}`);
+        }
     };
 
-    /** @param {any} resource */
+    /**
+     * Whether the GPU's copy of a resource may be newer than the host's: one
+     * a draw can write, and one the GPU copied or filtered into.
+     *
+     * @param {any} resource
+     */
     const gpuWritten = resource=>(resource.desc.BindFlags
-        & (D3D10_BIND.RENDER_TARGET | D3D10_BIND.DEPTH_STENCIL)) !== 0;
+        & (D3D10_BIND.RENDER_TARGET | D3D10_BIND.DEPTH_STENCIL)) !== 0
+        || backingOf(resource).gpuDirty === true;
+
+    /**
+     * Whether a level of this texture can be read back as it is: texels the
+     * GPU keeps in the program's own layout, one sample each. A depth format
+     * or one converted on the way to the GPU cannot be.
+     *
+     * @param {any} backing
+     */
+    const readable = backing=>{
+        const storage = backing.layout.storage;
+        return !!storage && !storage.conversion && !storage.depth
+            && TEXEL_BYTES[storage.format] > 0 && backing.sampleCount === 1;
+    };
 
     /**
      * @param {any} view
@@ -580,15 +809,19 @@ export function createRenderer(services){
         const shape = view.dimensionName ?? '';
         const isCube = shape === 'TEXTURECUBE';
         const array = shape.endsWith('ARRAY') || isCube;
-        const format = TEXTURE_FORMAT[desc.Format] ?? backing.layout.format;
-        gpu = backing.texture.createView({
-            label: `d3d10:view:${format}`,
-            format,
+        const chosen = viewFormatOf(backing.layout.storage, desc.Format, { compressed });
+        if (chosen.reinterpreted)
+        {
+            diverge(`a view of a typeless texture as format ${desc.Format} reads it as`
+                + ` ${chosen.format}: WebGPU does not reinterpret one type as another`);
+        }
+        const created = backing.texture.createView({
+            label: `d3d10:view:${chosen.format ?? chosen.aspect}`,
+            ...(chosen.format ? { format: chosen.format } : {}),
+            ...(chosen.aspect ? { aspect: chosen.aspect } : {}),
             dimension: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
                 ? '3d'
-                : resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE1D
-                    ? '1d'
-                    : isCube ? 'cube' : array ? '2d-array' : '2d',
+                : isCube ? 'cube' : array ? '2d-array' : '2d',
             baseMipLevel: desc.MostDetailedMip ?? desc.MipSlice ?? 0,
             mipLevelCount: desc.MipLevels ?? 1,
             baseArrayLayer: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
@@ -598,9 +831,14 @@ export function createRenderer(services){
                 ? 1
                 : desc.ArraySize ?? 1,
         });
+        gpu = { view: created, sampleType: sampleTypeOf(chosen.format, chosen.aspect) };
         views.set(view, gpu);
         return gpu;
     };
+
+    /** @param {any} state a sampler state object */
+    const isComparisonSampler = state=>(stateDesc(state).Filter
+        & D3D10_FILTER_COMPARISON_BIT) !== 0;
 
     /** @param {any} state a sampler state object */
     const samplerOf = state=>{
@@ -642,7 +880,11 @@ export function createRenderer(services){
         return gpu;
     };
 
-    /** What an unbound slot reads as: zeros, black, and a point sampler. */
+    /**
+     * What an unbound slot reads as: zeros, black, and a point sampler -- a
+     * texture of the type and shape the shader declared, because WebGPU binds
+     * nothing else there.
+     */
     const placeholdersOf = ()=>{
         if (placeholders)
         {
@@ -653,18 +895,150 @@ export function createRenderer(services){
             size: 16,
             usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST,
         });
-        const texture = createTexture({
-            label: 'd3d10:unbound-texture',
-            size: { width: 1, height: 1, depthOrArrayLayers: 1 },
-            format: 'rgba8unorm',
-            usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST,
+        // An unbound buffer view: its zeroed uniform above says no elements.
+        const storage = backend.createDynamicBuffer({
+            label: 'd3d10:unbound-buffer-view',
+            size: 16,
+            usage: BufferUsage.STORAGE | BufferUsage.COPY_DST,
         });
+        /** @type {Map<string, any>} */
+        const textures = new Map();
+        /** @type {Record<string, string>} */
+        const formats = {
+            float: 'rgba8unorm', 'unfilterable-float': 'rgba8unorm', depth: 'depth32float',
+            uint: 'rgba8uint', sint: 'rgba8sint',
+        };
         placeholders = {
             buffer,
-            view: texture.createView({ label: 'd3d10:unbound-texture' }),
+            storage,
+            /** @param {{ sampleType: string, viewDimension: string }} kind */
+            view(kind){
+                const key = `${kind.sampleType}:${kind.viewDimension}`;
+                let view = textures.get(key);
+                if (!view)
+                {
+                    const cube = kind.viewDimension.startsWith('cube');
+                    const texture = createTexture({
+                        label: `d3d10:unbound-texture:${key}`,
+                        size: { width: 1, height: 1, depthOrArrayLayers: cube ? 6 : 1 },
+                        dimension: kind.viewDimension === '1d' || kind.viewDimension === '3d'
+                            ? kind.viewDimension
+                            : '2d',
+                        format: formats[kind.sampleType] ?? 'rgba8unorm',
+                        usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST,
+                    });
+                    view = texture.createView({
+                        label: `d3d10:unbound-texture:${key}`, dimension: kind.viewDimension,
+                    });
+                    textures.set(key, view);
+                }
+                return view;
+            },
             sampler: createSampler({ label: 'd3d10:unbound-sampler' }),
+            comparison: createSampler({ label: 'd3d10:unbound-comparison', compare: 'never' }),
         };
         return placeholders;
+    };
+
+    /**
+     * A buffer bound through a shader resource view: its bytes as storage at
+     * the view's texture binding, and at its view binding a uniform of the
+     * view's format, first element, element count and element size, which the
+     * shader decodes the element with.
+     *
+     * @param {any} stage
+     * @param {import('./wgsl.js').BindGroupLayoutEntry} entry
+     * @param {any} fallback
+     */
+    const bufferViewBinding = (stage, entry, fallback)=>{
+        const isView = entry.binding >= BINDING.BUFFER_VIEW;
+        const slot = entry.binding - (isView ? BINDING.BUFFER_VIEW : BINDING.TEXTURE);
+        const view = stage.shaderResources[slot] ?? null;
+        /** @type {{ resource?: any }} */
+        const held = {};
+        view?.GetResource(held);
+        held.resource?.release();
+        const backing = view?.dimensionName === 'BUFFER' && held.resource
+            ? backingOf(held.resource)
+            : null;
+        /** @type {{ desc?: any }} */
+        const described = {};
+        view?.GetDesc(described);
+        const format = described.desc?.Format ?? 0;
+        const decodable = backing?.gpu && BUFFER_VIEW_FORMATS.has(format);
+        if (!isView && view && !decodable)
+        {
+            diverge(backing?.gpu
+                ? `a buffer view of format ${format} is read as zeros: no decoding is kept for it`
+                : 'a texture view bound where the shader reads a buffer is read as zeros');
+        }
+        if (!decodable)
+        {
+            return {
+                binding: entry.binding,
+                resource: { buffer: (isView ? fallback.buffer : fallback.storage).gpu,
+                    offset: 0, size: 16 },
+            };
+        }
+        if (!isView)
+        {
+            backing.gpu.markRead();
+            return {
+                binding: entry.binding,
+                resource: { buffer: backing.gpu.gpu, offset: 0,
+                    size: Math.ceil(held.resource.desc.ByteWidth / 4) * 4 },
+            };
+        }
+        let uniform = bufferViews.get(view);
+        if (!uniform)
+        {
+            uniform = backend.createDynamicBuffer({
+                label: 'd3d10:buffer-view',
+                size: 16,
+                usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST,
+            });
+            const lock = uniform.lock(0, 16, LockFlags.NONE);
+            const words = new DataView(lock.data.buffer, lock.data.byteOffset, 16);
+            words.setUint32(0, format, true);
+            words.setUint32(4, described.desc.ElementOffset ?? 0, true);
+            words.setUint32(8, described.desc.ElementWidth ?? 0, true);
+            words.setUint32(12, FORMAT_INFO[format].bytesPerPixel, true);
+            uniform.unlock(lock);
+            bufferViews.set(view, uniform);
+        }
+        return { binding: entry.binding, resource: { buffer: uniform.gpu, offset: 0, size: 16 } };
+    };
+
+    /**
+     * The sample type a view of this format binds as.
+     *
+     * @param {string | undefined} format
+     * @param {string | undefined} aspect
+     * @returns {string}
+     */
+    const sampleTypeOf = (format, aspect)=>{
+        if (aspect === 'depth-only' || (format && isDepthFormat(format)))
+        {
+            return 'depth';
+        }
+        if (aspect === 'stencil-only' || /uint$/.test(format ?? ''))
+        {
+            return 'uint';
+        }
+        if (/sint$/.test(format ?? ''))
+        {
+            return 'sint';
+        }
+        return /32float/.test(format ?? '') ? 'unfilterable-float' : 'float';
+    };
+
+    /** @type {Record<string, string[]>} what each layout sample type accepts */
+    const ACCEPTS = {
+        float: ['float'],
+        'unfilterable-float': ['float', 'unfilterable-float', 'depth'],
+        depth: ['depth'],
+        uint: ['uint'],
+        sint: ['sint'],
     };
 
     // --- shaders and pipelines ---
@@ -732,8 +1106,16 @@ export function createRenderer(services){
             {
                 const perInstance = element.InputSlotClass
                     === D3D10_INPUT_CLASSIFICATION.PER_INSTANCE_DATA;
+                const stepRate = perInstance ? element.InstanceDataStepRate ?? 1 : 1;
+                if (stepRate > 1)
+                {
+                    diverge('per-instance data stepping once every several instances steps'
+                        + ' every instance: WebGPU steps an instance buffer by one');
+                }
                 buffer = {
-                    arrayStride: strides[slot] ?? 0,
+                    // A rate of zero feeds every instance the same element,
+                    // which a stride of zero is.
+                    arrayStride: stepRate === 0 ? 0 : strides[slot] ?? 0,
                     stepMode: perInstance ? 'instance' : 'vertex',
                     attributes: [],
                 };
@@ -765,7 +1147,9 @@ export function createRenderer(services){
     const pipelineKey = state=>[
         idOf(state.vertexShader), idOf(state.pixelShader), idOf(state.inputLayout),
         idOf(state.blendState), idOf(state.depthStencilState), idOf(state.rasterizerState),
-        state.topology, state.targetFormat, state.depthFormat ?? '-', state.sampleMask >>> 0,
+        state.topology, state.targetFormats.join(','), state.targetWriteMasks.join(','),
+        state.depthFormat ?? '-',
+        state.sampleMask >>> 0,
         state.sampleCount, state.strides.join(','), state.indexFormat ?? '-',
     ].join('|');
 
@@ -796,16 +1180,46 @@ export function createRenderer(services){
     };
 
     /**
+     * Every target's blend, from a blend state of either version: a 10.0 one
+     * shares its factors among targets, a 10.1 one may not.
+     *
+     * @param {any} state
+     * @returns {{ alphaToCoverage: boolean, targets: any[] }}
+     */
+    const blendTargetsOf = state=>{
+        if (!state)
+        {
+            return {
+                alphaToCoverage: false,
+                targets: DEFAULT_BLEND.BlendEnable.map((_, index)=>({
+                    ...DEFAULT_BLEND, BlendEnable: false,
+                    RenderTargetWriteMask: DEFAULT_BLEND.RenderTargetWriteMask[index],
+                })),
+            };
+        }
+        /** @type {{ desc?: any }} */
+        const held = {};
+        state.GetDesc1(held);
+        return {
+            alphaToCoverage: held.desc.AlphaToCoverageEnable, targets: held.desc.RenderTarget,
+        };
+    };
+
+    /**
      * @param {any} state the draw's captured state
      * @returns {Promise<any>}
      */
     const buildPipeline = async state=>{
         const vs = translationOf(state.vertexShader);
         const ps = translationOf(state.pixelShader);
-        const program = linkProgram(vs, ps);
+        /** @type {(string | null)[]} */
+        const formats = state.targetFormats;
+        const bound = formats.flatMap((format, index)=>(format ? [index] : []));
+        const program = linkProgram(vs, ps, { targets: bound });
         if (program.unsupported.length > 0)
         {
-            throw new Error(`the shaders cannot be translated: ${program.unsupported.join('; ')}`);
+            throw Object.assign(new Error('the shaders cannot be translated:'
+                + ` ${program.unsupported.join('; ')}`), { untranslatable: true });
         }
         const layout = vertexLayouts(state.inputLayout, program, state.strides);
         if (typeof layout === 'string')
@@ -818,25 +1232,69 @@ export function createRenderer(services){
         const depthStencil = state.depthStencilState
             ? stateDesc(state.depthStencilState)
             : DEFAULT_DEPTH_STENCIL;
-        const blend = state.blendState ? stateDesc(state.blendState) : DEFAULT_BLEND;
+        const blend = blendTargetsOf(state.blendState);
         if (rasterizer.FillMode === D3D10_FILL_MODE.WIREFRAME)
         {
             diverge('wireframe fill is drawn solid: the backend has no line rasterisation'
                 + ' of a triangle');
         }
-        if (!rasterizer.DepthClipEnable)
+        // With clipping off Direct3D 10 clamps depth to the viewport's range,
+        // which WebGPU does whether or not it clips.
+        const unclipped = !rasterizer.DepthClipEnable && services.depthClipControl === true;
+        if (!rasterizer.DepthClipEnable && !unclipped)
         {
-            diverge('depth clipping stays on: turning it off needs a device feature this'
-                + ' build does not ask for');
+            diverge('depth clipping stays on: turning it off needs a GPU device made with'
+                + ' depth-clip-control, which this one was not');
         }
-        for (const factor of [blend.SrcBlend, blend.DestBlend, blend.SrcBlendAlpha,
-            blend.DestBlendAlpha])
-        {
-            if (blend.BlendEnable[0] && !BLEND_FACTOR[factor])
+        /**
+         * @param {string | null} format
+         * @param {number} index
+         * @returns {object | null}
+         */
+        const colourTarget = (format, index)=>{
+            if (!format)
             {
-                throw new Error(`blend factor ${factor} has no counterpart`);
+                return null;
             }
-        }
+            const target = blend.targets[index];
+            for (const factor of [target.SrcBlend, target.DestBlend, target.SrcBlendAlpha,
+                target.DestBlendAlpha])
+            {
+                if (target.BlendEnable && !BLEND_FACTOR[factor])
+                {
+                    throw new Error(`blend factor ${factor} has no counterpart`);
+                }
+            }
+            if (target.BlendEnable && !blendable(format) && !/int$/.test(format))
+            {
+                diverge(`a ${format} target is drawn unblended: WebGPU blends one only with a`
+                    + ' device feature');
+            }
+            return {
+                format,
+                // A target the shader does not write keeps what it holds.
+                writeMask: program.targets.includes(index)
+                    ? target.RenderTargetWriteMask & state.targetWriteMasks[index]
+                    : 0,
+                ...(target.BlendEnable && blendable(format)
+                    ? {
+                        blend: {
+                            color: {
+                                srcFactor: BLEND_FACTOR[target.SrcBlend],
+                                dstFactor: BLEND_FACTOR[target.DestBlend],
+                                operation: BLEND_OP[target.BlendOp],
+                            },
+                            alpha: {
+                                srcFactor: BLEND_FACTOR[target.SrcBlendAlpha],
+                                dstFactor: BLEND_FACTOR[target.DestBlendAlpha],
+                                operation: BLEND_OP[target.BlendOpAlpha],
+                            },
+                        },
+                    }
+                    : {}),
+            };
+        };
+        const colourTargets = formats.map(colourTarget);
 
         const [vertexModule, fragmentModule] = await Promise.all([
             backend.createShaderModule({ code: program.vertex, label: `d3d10:vs#${idOf(vs)}` }),
@@ -863,31 +1321,13 @@ export function createRenderer(services){
             fragment: {
                 module: fragmentModule,
                 entryPoint: 'fragmentMain',
-                targets: [{
-                    format: state.targetFormat,
-                    writeMask: blend.RenderTargetWriteMask[0],
-                    ...(blend.BlendEnable[0]
-                        ? {
-                            blend: {
-                                color: {
-                                    srcFactor: BLEND_FACTOR[blend.SrcBlend],
-                                    dstFactor: BLEND_FACTOR[blend.DestBlend],
-                                    operation: BLEND_OP[blend.BlendOp],
-                                },
-                                alpha: {
-                                    srcFactor: BLEND_FACTOR[blend.SrcBlendAlpha],
-                                    dstFactor: BLEND_FACTOR[blend.DestBlendAlpha],
-                                    operation: BLEND_OP[blend.BlendOpAlpha],
-                                },
-                            },
-                        }
-                        : {}),
-                }],
+                targets: colourTargets,
             },
             primitive: {
                 topology: state.topology,
                 cullMode: CULL[rasterizer.CullMode],
                 frontFace: rasterizer.FrontCounterClockwise ? 'ccw' : 'cw',
+                ...(unclipped ? { unclippedDepth: true } : {}),
                 ...(state.topology.endsWith('strip') && state.indexFormat
                     ? { stripIndexFormat: state.indexFormat }
                     : {}),
@@ -916,10 +1356,13 @@ export function createRenderer(services){
             multisample: {
                 count: state.sampleCount,
                 mask: state.sampleMask >>> 0,
-                alphaToCoverageEnabled: !!blend.AlphaToCoverageEnable,
+                alphaToCoverageEnabled: !!blend.alphaToCoverage,
             },
         });
-        return { gpu, program, groupLayouts, slots: layout.slots };
+        return {
+            gpu, program, groupLayouts, slots: layout.slots,
+            steps: layout.buffers.map((/** @type {any} */ buffer)=>buffer.stepMode),
+        };
     };
 
     /** @param {any} state */
@@ -936,21 +1379,83 @@ export function createRenderer(services){
 
     // --- recording ---
 
+    /** @type {WeakMap<object, any>} render target or depth stencil view -> target */
+    const targets = new WeakMap();
+
     /**
-     * @param {any} view a render target view
-     * @returns {any | null} the backing of the texture it looks at
+     * What a pass draws into through a render target or depth stencil view:
+     * the one level and slice the view names, as a surface of its own. Two
+     * views of one subresource share its key, which is what a clear through
+     * one and a draw through the other agree on.
+     *
+     * @param {any} view a render target or depth stencil view
+     * @returns {any | null}
      */
     const targetOf = view=>{
         if (!view)
         {
             return null;
         }
+        let target = targets.get(view);
+        if (target)
+        {
+            return target;
+        }
         /** @type {{ resource?: any }} */
         const held = {};
         view.GetResource(held);
         held.resource.release();
         const backing = backingOf(held.resource);
-        return backing.texture ? backing : null;
+        if (!backing.texture)
+        {
+            return null;
+        }
+        /** @type {{ desc?: any }} */
+        const described = {};
+        view.GetDesc(described);
+        const desc = described.desc;
+        const mip = desc.MipSlice ?? 0;
+        const layer = desc.FirstArraySlice ?? 0;
+        if (held.resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D)
+        {
+            diverge('a view into a slice of a 3D texture draws into its first slice');
+        }
+        const chosen = viewFormatOf(backing.layout.storage, desc.Format, { compressed });
+        const format = chosen.format ?? backing.layout.format;
+        const width = levelExtent(held.resource.desc.Width, mip);
+        const height = held.resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE1D
+            ? 1
+            : levelExtent(held.resource.desc.Height, mip);
+        target = {
+            key: `${backing.id}:${mip}:${held.resource.dimension
+                === D3D10_RESOURCE_DIMENSION.TEXTURE3D ? 0 : layer}`,
+            backing,
+            texture: backing.texture,
+            format,
+            sampleCount: backing.sampleCount,
+            // What a draw writes, when the format keeps less than the texture does.
+            writeMask: desc.Format === DXGI_FORMAT.A8_UNORM ? 0x8 : 0xf,
+            surface: {
+                texture: backing.texture,
+                view: backing.texture.createView({
+                    label: `d3d10:target:${format}`,
+                    format,
+                    dimension: '2d',
+                    baseMipLevel: mip,
+                    mipLevelCount: 1,
+                    baseArrayLayer: held.resource.dimension
+                        === D3D10_RESOURCE_DIMENSION.TEXTURE3D ? 0 : layer,
+                    arrayLayerCount: 1,
+                }),
+                width,
+                height,
+                format,
+                mipLevel: mip,
+                label: `d3d10:${format}`,
+            },
+        };
+        targets.set(view, target);
+        return target;
     };
 
     /**
@@ -963,6 +1468,10 @@ export function createRenderer(services){
     const bindingsFor = (stage, entries)=>{
         const fallback = placeholdersOf();
         return entries.map(entry=>{
+            if (entry.buffer && entry.binding >= BINDING.TEXTURE)
+            {
+                return bufferViewBinding(stage, entry, fallback);
+            }
             if (entry.buffer)
             {
                 const buffer = stage.constantBuffers[entry.binding] ?? null;
@@ -983,14 +1492,228 @@ export function createRenderer(services){
                     diverge('a shader resource view over a buffer, or over a texture this'
                         + ' device could not back, is read as an empty texture');
                 }
-                return { binding: entry.binding, resource: gpu ?? fallback.view };
+                if (gpu && !(ACCEPTS[entry.texture.sampleType] ?? []).includes(gpu.sampleType))
+                {
+                    diverge(`a ${gpu.sampleType} texture bound where the shader reads a`
+                        + ` ${entry.texture.sampleType} one is read as an empty texture`);
+                    return { binding: entry.binding, resource: fallback.view(entry.texture) };
+                }
+                return {
+                    binding: entry.binding,
+                    resource: gpu ? gpu.view : fallback.view(entry.texture),
+                };
             }
             const sampler = stage.samplers[entry.binding - BINDING.SAMPLER];
+            const comparison = entry.sampler?.type === 'comparison';
+            if (sampler && comparison !== isComparisonSampler(sampler))
+            {
+                diverge('a sampler bound where the shader declares the other kind, comparison'
+                    + ' or not, is replaced by a point sampler of the declared kind');
+            }
             return {
                 binding: entry.binding,
-                resource: sampler ? samplerOf(sampler) : fallback.sampler,
+                resource: sampler && comparison === isComparisonSampler(sampler)
+                    ? samplerOf(sampler)
+                    : comparison ? fallback.comparison : fallback.sampler,
             };
         });
+    };
+
+    /**
+     * A copy made by the GPU, recorded in its turn: see copySubresourceRegion.
+     *
+     * @param {any} destination
+     * @param {number} destinationSubresource
+     * @param {{ x: number, y: number, z: number }} at
+     * @param {any} source
+     * @param {number} sourceSubresource
+     * @param {Box | null} box
+     * @returns {boolean} whether the GPU makes it
+     */
+    const gpuCopy = (destination, destinationSubresource, at, source, sourceSubresource, box)=>{
+        const from = backingOf(source);
+        const to = backingOf(destination);
+        if (!from.texture || from.layout.storage.depth || from.sampleCount !== 1)
+        {
+            return false;
+        }
+        const is3D = source.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D;
+        const src = subresourceOf(source, sourceSubresource);
+        const dst = subresourceOf(destination, destinationSubresource);
+        const fromLevel = from.layout.levels[src.level];
+        const toLevel = to.layout.levels[dst.level];
+        const region = box ?? {
+            left: 0, top: 0, front: 0,
+            right: fromLevel.width, bottom: fromLevel.height, back: fromLevel.depth,
+        };
+        const size = {
+            width: Math.min(region.right, fromLevel.width) - region.left,
+            height: Math.min(region.bottom, fromLevel.height) - region.top,
+            depthOrArrayLayers: Math.min(region.back, fromLevel.depth) - region.front,
+        };
+        size.width = Math.min(size.width, toLevel.width - at.x);
+        size.height = Math.min(size.height, toLevel.height - at.y);
+        size.depthOrArrayLayers = Math.min(size.depthOrArrayLayers, toLevel.depth - at.z);
+        if (size.width <= 0 || size.height <= 0 || size.depthOrArrayLayers <= 0)
+        {
+            return true;
+        }
+        if (to.texture)
+        {
+            if (!copyCompatible(from.layout.format, to.layout.format)
+                || to.layout.storage.depth || to.sampleCount !== 1)
+            {
+                return false;
+            }
+            record({
+                kind: 'copyTexture',
+                sourceId: from.id,
+                destinationId: to.id,
+                source: {
+                    texture: from.texture, mipLevel: src.level,
+                    origin: { x: region.left, y: region.top, z: is3D ? region.front : src.slice },
+                },
+                destination: {
+                    texture: to.texture, mipLevel: dst.level,
+                    origin: { x: at.x, y: at.y, z: is3D ? at.z : dst.slice },
+                },
+                size,
+            });
+            to.gpuDirty = true;
+            return true;
+        }
+        // A staging resource: the level comes back whole, and the box is
+        // placed where the program asked.
+        if (destination.desc.Usage !== D3D10_USAGE.STAGING || !readable(from) || is3D)
+        {
+            return false;
+        }
+        const texel = TEXEL_BYTES[from.layout.storage.format];
+        /** @type {(value?: any) => void} */
+        let resolve = ()=>{};
+        const promise = new Promise(done=>{
+            resolve = done;
+        });
+        const waiting = { promise, sequence: recordedCount + 1 };
+        let delivered = false;
+        record({
+            kind: 'readback',
+            sourceId: from.id,
+            surface: {
+                texture: from.texture, mipLevel: src.level, layer: src.slice,
+                width: fromLevel.width, height: fromLevel.height, bytesPerTexel: texel,
+            },
+            /** @param {{ width: number, height: number, data: Uint8Array } | null} image */
+            deliver(image){
+                if (delivered)
+                {
+                    return;
+                }
+                delivered = true;
+                if (image)
+                {
+                    const into = subresourceBytes(destination, destinationSubresource);
+                    for (let row = 0; row < size.height; row++)
+                    {
+                        const start = ((region.top + row) * image.width + region.left) * texel;
+                        into.bytes.set(image.data.subarray(start, start + size.width * texel),
+                            (at.y + row) * into.rowPitch + at.x * texel);
+                    }
+                }
+                else
+                {
+                    diverge('a read back that did not arrive leaves the staging resource as it'
+                        + ' was');
+                }
+                if (to.readback === waiting)
+                {
+                    to.readback = null;
+                }
+                resolve();
+            },
+        });
+        to.readback = waiting;
+        return true;
+    };
+
+    /** @type {Map<string, Promise<any>>} format -> the pipeline that draws a level from above */
+    const mipPipelines = new Map();
+
+    /** @param {string} format */
+    const mipPipelineFor = format=>{
+        let built = mipPipelines.get(format);
+        if (!built)
+        {
+            built = (async()=>{
+                const module = await backend.createShaderModule({
+                    code: MIP_SHADER, label: 'd3d10:mips',
+                });
+                const layout = layoutFor([
+                    { binding: 0, visibility: STAGE.FRAGMENT,
+                        texture: { sampleType: 'float', viewDimension: '2d' } },
+                    { binding: 1, visibility: STAGE.FRAGMENT, sampler: { type: 'filtering' } },
+                ], 'd3d10:mips');
+                const gpu = backend.createRenderPipeline({
+                    label: `d3d10:mips:${format}`,
+                    layout: backend.createPipelineLayout({
+                        label: 'd3d10:mips', bindGroupLayouts: [layout],
+                    }),
+                    vertex: { module, entryPoint: 'vertexMain', buffers: [] },
+                    fragment: { module, entryPoint: 'fragmentMain', targets: [{ format }] },
+                    primitive: { topology: 'triangle-list' },
+                });
+                return { gpu, layout };
+            })();
+            mipPipelines.set(format, built);
+        }
+        return built;
+    };
+
+    /** @type {any} */
+    let mipSampler = null;
+
+    /**
+     * Every level below the top drawn from the one above by the GPU, one
+     * slice at a time: a linear sample at the middle of each two-by-two
+     * block is its average.
+     *
+     * @param {any} resource
+     * @param {any} backing
+     */
+    const recordMips = (resource, backing)=>{
+        mipSampler = mipSampler ?? createSampler({
+            label: 'd3d10:mips', magFilter: 'linear', minFilter: 'linear',
+        });
+        const format = backing.layout.format;
+        const steps = [];
+        for (let slice = 0; slice < backing.layout.slices; slice++)
+        {
+            for (let level = 1; level < backing.layout.levels.length; level++)
+            {
+                /** @param {number} mip @param {string} label */
+                const view = (mip, label)=>backing.texture.createView({
+                    label, format, dimension: '2d', baseMipLevel: mip, mipLevelCount: 1,
+                    baseArrayLayer: slice, arrayLayerCount: 1,
+                });
+                const geometry = backing.layout.levels[level];
+                steps.push({
+                    surface: {
+                        texture: backing.texture,
+                        view: view(level, 'd3d10:mips:target'),
+                        width: geometry.width,
+                        height: geometry.height,
+                        format,
+                        label: `d3d10:mips:${level}`,
+                    },
+                    entries: [
+                        { binding: 0, resource: view(level - 1, 'd3d10:mips:source') },
+                        { binding: 1, resource: mipSampler },
+                    ],
+                });
+            }
+        }
+        record({ kind: 'mips', id: backing.id, pipeline: mipPipelineFor(format), steps });
+        backing.gpuDirty = true;
     };
 
     return {
@@ -1014,12 +1737,12 @@ export function createRenderer(services){
                     continue;
                 }
                 const held = subresourceBytes(resource, index);
-                const pitch = source.SysMemPitch || held.rowPitch;
-                const slicePitch = source.SysMemSlicePitch || held.depthPitch;
                 const geometry = held.level;
+                const pitch = source.SysMemPitch || held.rowPitch;
+                const slicePitch = source.SysMemSlicePitch || pitch * geometry.rows;
                 for (let z = 0; z < geometry.depth; z++)
                 {
-                    for (let row = 0; row < geometry.height; row++)
+                    for (let row = 0; row < geometry.rows; row++)
                     {
                         const from = z * slicePitch + row * pitch;
                         held.bytes.set(
@@ -1063,30 +1786,32 @@ export function createRenderer(services){
         updateSubresource(resource, subresource, box, data, rowPitch, depthPitch){
             const held = subresourceBytes(resource, subresource);
             const geometry = held.level;
-            const texel = backingOf(resource).layout.texelBytes;
-            const region = box ?? {
+            const region = blocksOf(backingOf(resource).layout, geometry, box ?? {
                 left: 0, top: 0, front: 0,
                 right: geometry.width, bottom: geometry.height, back: geometry.depth,
-            };
-            const width = Math.max(0, Math.min(region.right, geometry.width) - region.left);
-            const rows = Math.max(0, Math.min(region.bottom, geometry.height) - region.top);
-            const depth = Math.max(0, Math.min(region.back, geometry.depth) - region.front);
-            const pitch = rowPitch || width * texel;
-            const slicePitch = depthPitch || pitch * rows;
-            for (let z = 0; z < depth; z++)
+            });
+            const pitch = rowPitch || region.rowBytes;
+            const slicePitch = depthPitch || pitch * region.rows;
+            for (let z = 0; z < region.depth; z++)
             {
-                for (let row = 0; row < rows; row++)
+                for (let row = 0; row < region.rows; row++)
                 {
                     const from = z * slicePitch + row * pitch;
                     const to = (region.front + z) * held.depthPitch
-                        + (region.top + row) * held.rowPitch + region.left * texel;
-                    held.bytes.set(data.subarray(from, from + width * texel), to);
+                        + (region.top + row) * held.rowPitch + region.left;
+                    held.bytes.set(data.subarray(from, from + region.rowBytes), to);
                 }
             }
-            upload(resource, subresource);
+            upload(resource, subresource, LockFlags.NONE, box);
         },
 
         /**
+         * A copy out of what the GPU may have written is made by the GPU, in
+         * its turn among the draws: into a texture it keeps, as a texture
+         * copy; into a staging resource, as a read back once the frame that
+         * holds it has been submitted, which a map of that resource waits
+         * for. Anything else moves the host bytes the program wrote.
+         *
          * @param {any} destination
          * @param {number} destinationSubresource
          * @param {{ x: number, y: number, z: number }} at
@@ -1097,32 +1822,47 @@ export function createRenderer(services){
         copySubresourceRegion(destination, destinationSubresource, at, source, sourceSubresource,
             box)
         {
-            if (gpuWritten(source))
+            if (backend && gpuWritten(source))
             {
-                diverge('a copy out of a render target reads the bytes the program last wrote,'
-                    + ' not what the GPU drew');
+                if (gpuCopy(destination, destinationSubresource, at, source, sourceSubresource,
+                    box))
+                {
+                    return;
+                }
+                diverge('a copy out of a render target the GPU cannot copy or read back moves'
+                    + ' the bytes the program last wrote, not what the GPU drew');
             }
             const from = subresourceBytes(source, sourceSubresource);
             const to = subresourceBytes(destination, destinationSubresource);
-            const texel = backingOf(source).layout.texelBytes;
-            const region = box ?? {
+            const layout = backingOf(source).layout;
+            const region = blocksOf(layout, from.level, box ?? {
                 left: 0, top: 0, front: 0,
                 right: from.level.width, bottom: from.level.height, back: from.level.depth,
-            };
-            const width = Math.min(region.right - region.left, to.level.width - at.x);
-            const rows = Math.min(region.bottom - region.top, to.level.height - at.y);
-            const depth = Math.min(region.back - region.front, to.level.depth - at.z);
+            });
+            const place = blocksOf(layout, to.level, {
+                left: at.x, top: at.y, front: at.z,
+                right: to.level.width, bottom: to.level.height, back: to.level.depth,
+            });
+            const rowBytes = Math.min(region.rowBytes, place.rowBytes);
+            const rows = Math.min(region.rows, place.rows);
+            const depth = Math.min(region.depth, place.depth);
             for (let z = 0; z < depth; z++)
             {
                 for (let row = 0; row < rows; row++)
                 {
                     const start = (region.front + z) * from.depthPitch
-                        + (region.top + row) * from.rowPitch + region.left * texel;
-                    to.bytes.set(from.bytes.subarray(start, start + width * texel),
-                        (at.z + z) * to.depthPitch + (at.y + row) * to.rowPitch + at.x * texel);
+                        + (region.top + row) * from.rowPitch + region.left;
+                    to.bytes.set(from.bytes.subarray(start, start + rowBytes),
+                        (place.front + z) * to.depthPitch + (place.top + row) * to.rowPitch
+                            + place.left);
                 }
             }
-            upload(destination, destinationSubresource);
+            upload(destination, destinationSubresource, LockFlags.NONE, {
+                left: at.x, top: at.y, front: at.z,
+                right: at.x + (box ? box.right - box.left : from.level.width),
+                bottom: at.y + (box ? box.bottom - box.top : from.level.height),
+                back: at.z + (box ? box.back - box.front : from.level.depth),
+            });
         },
 
         /**
@@ -1130,15 +1870,20 @@ export function createRenderer(services){
          * @param {any} source
          */
         copyResource(destination, source){
-            if (gpuWritten(source))
+            const count = (source.desc.MipLevels ?? 1) * backingOf(source).layout.slices;
+            if (backend && gpuWritten(source) && source.dimension
+                !== D3D10_RESOURCE_DIMENSION.BUFFER)
             {
-                diverge('a copy out of a render target reads the bytes the program last wrote,'
-                    + ' not what the GPU drew');
+                for (let index = 0; index < count; index++)
+                {
+                    this.copySubresourceRegion(destination, index, { x: 0, y: 0, z: 0 },
+                        source, index, null);
+                }
+                return;
             }
             const from = backingOf(source);
             const to = backingOf(destination);
             to.bytes.set(from.bytes.subarray(0, Math.min(from.bytes.length, to.bytes.length)));
-            const count = (destination.desc.MipLevels ?? 1) * to.layout.slices;
             for (let index = 0; index < count; index++)
             {
                 upload(destination, index);
@@ -1155,7 +1900,15 @@ export function createRenderer(services){
         generateMips(resource){
             const backing = backingOf(resource);
             const format = backing.layout.format ?? '';
-            if (backing.layout.texelBytes !== 4
+            if (backend && backing.texture && gpuWritten(resource)
+                && resource.dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE1D
+                && resource.dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE3D
+                && FILTERED_TARGET.test(format) && backing.sampleCount === 1)
+            {
+                recordMips(resource, backing);
+                return true;
+            }
+            if (backing.layout.texelBytes !== 4 || backing.layout.storage?.conversion
                 || !(format.startsWith('rgba8') || format.startsWith('bgra8')))
             {
                 diverge(`GenerateMips on a ${backing.layout.format} texture is not generated:`
@@ -1213,7 +1966,7 @@ export function createRenderer(services){
                 return;
             }
             counters.clears++;
-            recording.push({ kind: 'clear', target, color: [...color] });
+            record({ kind: 'clear', target, color: [...color] });
         },
 
         /**
@@ -1234,30 +1987,46 @@ export function createRenderer(services){
                 return;
             }
             counters.clears++;
-            recording.push({ kind: 'clearDepth', target, flags, depth, stencil });
+            record({ kind: 'clearDepth', target, flags, depth, stencil });
         },
 
         /**
          * @param {PipelineSnapshot} pipeline
          * @param {{ vertexCount: number, startVertex: number, instanceCount?: number,
-         *           indexCount?: number, startIndex?: number, baseVertex?: number }} draw
+         *           indexCount?: number, startIndex?: number, baseVertex?: number,
+         *           startInstance?: number }} draw
          */
         draw(pipeline, draw){
             if (!backend)
             {
                 return;
             }
-            const target = targetOf(pipeline.renderTargets[0]);
-            if (!target)
+            // Every bound render target, by slot, and the depth target: the
+            // first of them sizes the pass, and a draw with a depth target and
+            // no colour one draws depth alone.
+            const depth = targetOf(pipeline.depthStencilView);
+            const bound = pipeline.renderTargets.map(view=>targetOf(view));
+            const sizing = bound.find(entry=>entry) ?? depth;
+            if (!sizing)
             {
                 counters.skipped.noTarget++;
                 return;
             }
-            if (pipeline.renderTargets.slice(1).some(view=>view))
+            const colour = bound.map(entry=>(entry
+                && (entry.surface.width !== sizing.surface.width
+                    || entry.surface.height !== sizing.surface.height)
+                ? null
+                : entry));
+            if (colour.some((entry, index)=>entry !== bound[index]))
             {
-                diverge('only the first render target is drawn into: several at once are not'
-                    + ' bound');
+                diverge('a render target of another size than the first is not drawn into:'
+                    + ' the targets of a pass are one size');
             }
+            while (colour.length > 0 && !colour[colour.length - 1])
+            {
+                colour.pop();
+            }
+            const target = colour.find(entry=>entry) ?? null;
             const viewport = pipeline.viewports[0];
             if (!viewport || !(viewport.Width > 0) || !(viewport.Height > 0))
             {
@@ -1279,7 +2048,6 @@ export function createRenderer(services){
                 diverge(`primitive topology ${pipeline.topology} cannot be drawn`);
                 return;
             }
-            const depth = targetOf(pipeline.depthStencilView);
             const indexFormat = INDEX_FORMAT[pipeline.indexFormat] ?? null;
             const state = {
                 vertexShader: pipeline.stages.vs.shader,
@@ -1289,10 +2057,11 @@ export function createRenderer(services){
                 depthStencilState: pipeline.depthStencilState,
                 rasterizerState: pipeline.rasterizerState,
                 topology,
-                targetFormat: target.layout.format,
-                depthFormat: depth ? depth.layout.format : null,
+                targetFormats: colour.map(entry=>(entry ? entry.format : null)),
+                targetWriteMasks: colour.map(entry=>(entry ? entry.writeMask : 0)),
+                depthFormat: depth ? depth.format : null,
                 sampleMask: pipeline.sampleMask,
-                sampleCount: target.sampleCount,
+                sampleCount: sizing.sampleCount,
                 strides: pipeline.vertexStrides.slice(),
                 indexFormat: draw.indexCount === undefined ? null : indexFormat,
             };
@@ -1300,16 +2069,6 @@ export function createRenderer(services){
             {
                 diverge('a draw with no input layout is skipped');
                 return;
-            }
-            if (pipeline.blendFactor.some((/** @type {number} */ value)=>value !== 1))
-            {
-                diverge('a blend factor other than white is not applied: the backend'
-                    + ' exposes no blend constant');
-            }
-            if (pipeline.stencilRef !== 0)
-            {
-                diverge('a stencil reference other than zero is not applied: the backend'
-                    + ' exposes no stencil reference');
             }
             const rasterizer = pipeline.rasterizerState
                 ? stateDesc(pipeline.rasterizerState)
@@ -1337,10 +2096,19 @@ export function createRenderer(services){
                 indexBacking.gpu.markRead();
             }
             counters.draws++;
-            recording.push({
+            for (const counter of occluding)
+            {
+                if (!recordingCounters.has(counter))
+                {
+                    recordingCounters.add(counter);
+                    counter.outstanding++;
+                }
+            }
+            record({
                 kind: 'draw',
                 pipeline: pipelineFor(state),
                 target,
+                targets: colour,
                 depth,
                 groups: [
                     bindingsFor(pipeline.stages.vs, program.groups[0]),
@@ -1368,6 +2136,10 @@ export function createRenderer(services){
                 vertexCount: draw.vertexCount,
                 startVertex: draw.startVertex,
                 instanceCount: draw.instanceCount ?? 1,
+                startInstance: draw.startInstance ?? 0,
+                stencilRef: pipeline.stencilRef,
+                blendFactor: [...pipeline.blendFactor],
+                occlusion: occluding.size > 0 ? [...occluding] : null,
                 indexCount: draw.indexCount ?? null,
                 startIndex: draw.startIndex ?? 0,
                 baseVertex: draw.baseVertex ?? 0,
@@ -1386,17 +2158,76 @@ export function createRenderer(services){
                 counters.frames++;
                 return chain;
             }
-            const recorded = recording;
-            recording = [];
-            backend.markPresent();
-            const surface = backingOf(backBuffer).surface;
             counters.frames++;
-            chain = chain.then(()=>replay(recorded, surface)).catch(failure=>{
-                counters.failures.push(String(failure && failure.message || failure));
-                diverge(`a frame could not be replayed: ${failure && failure.message || failure}`);
-            });
-            return chain;
+            return submit(backingOf(backBuffer).surface);
         },
+
+        /**
+         * A counter the draws recorded from now on count their samples into,
+         * or null without a GPU to count them.
+         *
+         * @returns {OcclusionCounter | null}
+         */
+        beginOcclusion(){
+            if (!backend)
+            {
+                return null;
+            }
+            /** @type {OcclusionCounter} */
+            const counter = {
+                samples: 0, outstanding: 0, ended: false, settled: false, failed: false,
+            };
+            occluding.add(counter);
+            return counter;
+        },
+
+        /** @param {OcclusionCounter} counter */
+        endOcclusion(counter){
+            occluding.delete(counter);
+            counter.ended = true;
+            settle(counter);
+        },
+
+        /**
+         * Hands what has been recorded to the GPU without showing anything:
+         * the next present starts from what is left, which is nothing.
+         *
+         * @returns {Promise<void>} settled when it has been submitted
+         */
+        flush(){
+            if (!backend || recording.length === 0)
+            {
+                handedOver = recordedCount;
+                return chain;
+            }
+            return submit(null);
+        },
+
+        /**
+         * The read back a map of this resource has to wait for, sent to the
+         * GPU if it has not been: null when there is none.
+         *
+         * @param {any} resource
+         * @returns {Promise<void> | null}
+         */
+        pendingReadback(resource){
+            const waiting = backings.get(resource)?.readback ?? null;
+            if (!waiting)
+            {
+                return null;
+            }
+            if (waiting.sequence > handedOver)
+            {
+                this.flush();
+            }
+            return waiting.promise;
+        },
+
+        /** @returns {number} commands recorded so far */
+        recorded: ()=>recordedCount,
+
+        /** @returns {number} commands handed to the GPU so far */
+        submitted: ()=>handedOver,
 
         idle: ()=>chain,
 
@@ -1415,49 +2246,108 @@ export function createRenderer(services){
     };
 
     /**
+     * The recording so far, onto one backend frame in its turn.
+     *
+     * @param {any} surface  What the frame shows, or null for a flush.
+     * @returns {Promise<void>}
+     */
+    function submit(surface){
+        const recorded = recording;
+        recording = [];
+        handedOver = recordedCount;
+        const counting = recordingCounters;
+        recordingCounters = new Set();
+        backend.markPresent();
+        chain = chain.then(()=>replay(recorded, surface)).catch(failure=>{
+            counters.failures.push(String(failure && failure.message || failure));
+            diverge(`a frame could not be replayed: ${failure && failure.message || failure}`);
+            for (const counter of counting)
+            {
+                counter.failed = true;
+            }
+        }).then(()=>{
+            for (const counter of counting)
+            {
+                counter.outstanding--;
+                settle(counter);
+            }
+            // A read back that never arrived leaves the host bytes as they
+            // were, rather than a map waiting for ever.
+            for (const command of recorded)
+            {
+                if (command.kind === 'readback')
+                {
+                    command.deliver(null);
+                }
+            }
+        });
+        return chain;
+    }
+
+    /**
      * @param {any[]} recorded
      * @param {any} surface
      */
     async function replay(recorded, surface){
         const pipelinesNeeded = await Promise.allSettled(
-            recorded.filter(command=>command.kind === 'draw').map(command=>command.pipeline));
+            recorded.map(command=>command.pipeline ?? null));
         const frame = backend.beginFrame();
+        /** @type {{ read: () => Promise<any>, command: any }[]} */
+        const readers = [];
+        const counting = recorded.some(command=>command.occlusion);
+        /** @type {{ slot: number, counters: OcclusionCounter[] }[]} */
+        const counted = [];
+        /** @type {(() => Promise<number[]>) | null} */
+        let readCounts = null;
         /** @type {any} */
         let pass = null;
-        /** @type {any} */
-        let passTarget = null;
+        /** @type {string | null} */
+        let passTargets = null;
         /** @type {any} */
         let passDepth = null;
-        let built = 0;
+        let passStencil = 0;
+        let passBlend = '';
 
         const closePass = ()=>{
             pass = null;
-            passTarget = null;
+            passTargets = null;
             passDepth = null;
         };
 
         /**
-         * @param {any} target
+         * A pass over these colour targets, by slot, and this depth target;
+         * the one open already when it is the same. A clear still waiting on
+         * any of them is made by the pass's load.
+         *
+         * @param {any[]} targetList
          * @param {any} depth
          */
-        const passFor = (target, depth)=>{
-            if (pass && passTarget === target && passDepth === depth)
+        const passFor = (targetList, depth)=>{
+            const key = targetList.map(entry=>(entry ? entry.key : '-')).join('|');
+            if (pass && passTargets === key && passDepth === depth)
             {
                 return pass;
             }
-            const clear = pendingClears.get(target.texture) ?? null;
-            const depthClear = depth ? pendingClears.get(depth.texture) ?? null : null;
-            pendingClears.delete(target.texture);
+            const clearValues = targetList.map(entry=>{
+                const clear = entry ? pendingClears.get(entry.key) ?? null : null;
+                if (!clear || !clear.color)
+                {
+                    return null;
+                }
+                pendingClears.delete(entry.key);
+                return { r: clear.color[0], g: clear.color[1], b: clear.color[2],
+                    a: clear.color[3] };
+            });
+            const depthClear = depth ? pendingClears.get(depth.key) ?? null : null;
             if (depth)
             {
-                pendingClears.delete(depth.texture);
+                pendingClears.delete(depth.key);
             }
             pass = frame.beginPass({
-                target: target.surface,
-                clear: !!clear,
-                clearValue: clear
-                    ? { r: clear.color[0], g: clear.color[1], b: clear.color[2], a: clear.color[3] }
-                    : undefined,
+                targets: targetList.map(entry=>(entry ? entry.surface : null)),
+                clearValues,
+                ...(depth ? { depthTarget: depth.surface } : {}),
+                occlusion: counting,
                 ...(depth
                     ? {
                         depthStencilAttachment: {
@@ -1467,7 +2357,7 @@ export function createRenderer(services){
                                 : 'load',
                             depthStoreOp: 'store',
                             depthClearValue: depthClear ? depthClear.depth : 1,
-                            ...(depth.layout.format.endsWith('stencil8')
+                            ...(depth.format.endsWith('stencil8')
                                 ? {
                                     stencilLoadOp: depthClear
                                         && (depthClear.flags & D3D10_CLEAR.STENCIL)
@@ -1481,28 +2371,84 @@ export function createRenderer(services){
                     }
                     : {}),
             });
-            passTarget = target;
+            passTargets = key;
             passDepth = depth;
+            // What a new pass compares against, and blends by, until a draw
+            // says otherwise.
+            passStencil = 0;
+            passBlend = '0,0,0,0';
             return pass;
+        };
+
+        /**
+         * A clear still waiting for a pass on a texture a copy is about to
+         * read or write happens first, in a pass of its own.
+         *
+         * @param {number} id  The backing's.
+         */
+        const settleClears = id=>{
+            for (const [key, clear] of [...pendingClears])
+            {
+                if (clear.color && key.startsWith(`${id}:`))
+                {
+                    closePass();
+                    passFor([clear.target], null);
+                }
+            }
+            closePass();
         };
 
         try
         {
-            for (const command of recorded)
+            for (const [position, command] of recorded.entries())
             {
                 if (command.kind === 'clear')
                 {
                     closePass();
-                    pendingClears.set(command.target.texture, { color: command.color });
+                    pendingClears.set(command.target.key,
+                        { color: command.color, target: command.target });
+                    continue;
+                }
+                if (command.kind === 'copyTexture')
+                {
+                    settleClears(command.sourceId);
+                    settleClears(command.destinationId);
+                    frame.copyTexture(command.source, command.destination, command.size);
+                    continue;
+                }
+                if (command.kind === 'readback')
+                {
+                    settleClears(command.sourceId);
+                    readers.push({ read: frame.snapshot(command.surface), command });
+                    continue;
+                }
+                if (command.kind === 'mips')
+                {
+                    settleClears(command.id);
+                    const built = pipelinesNeeded[position];
+                    if (built.status === 'rejected')
+                    {
+                        diverge(`mips were not generated: ${built.reason && built.reason.message
+                            || built.reason}`);
+                        continue;
+                    }
+                    for (const step of command.steps)
+                    {
+                        const mipPass = frame.beginPass({ target: step.surface });
+                        mipPass.setPipeline(built.value.gpu);
+                        mipPass.setBindings(0, built.value.layout, step.entries, 'd3d10:mips');
+                        mipPass.draw(3, 1, 0, 0);
+                    }
+                    closePass();
                     continue;
                 }
                 if (command.kind === 'clearDepth')
                 {
                     closePass();
-                    const previous = pendingClears.get(command.target.texture);
+                    const previous = pendingClears.get(command.target.key);
                     // Two clears of one half each add up; a later clear of a
                     // half replaces the earlier value of that half.
-                    pendingClears.set(command.target.texture, {
+                    pendingClears.set(command.target.key, {
                         flags: (previous ? previous.flags : 0) | command.flags,
                         depth: (command.flags & D3D10_CLEAR.DEPTH)
                             ? command.depth
@@ -1513,16 +2459,18 @@ export function createRenderer(services){
                     });
                     continue;
                 }
-                const settled = pipelinesNeeded[built++];
+                const settled = pipelinesNeeded[position];
                 if (settled.status === 'rejected')
                 {
-                    counters.skipped.pipeline++;
+                    counters.skipped[settled.reason?.untranslatable
+                        ? 'untranslatable'
+                        : 'pipeline']++;
                     diverge(`a draw was skipped: ${settled.reason && settled.reason.message
                         || settled.reason}`);
                     continue;
                 }
                 const pipeline = settled.value;
-                const current = passFor(command.target, command.depth);
+                const current = passFor(command.targets, command.depth);
                 current.setPipeline(pipeline.gpu);
                 current.setViewport(command.viewport);
                 if (command.scissor)
@@ -1534,11 +2482,29 @@ export function createRenderer(services){
                         current.setBindings(index, layout, command.groups[index],
                             `d3d10:${index === 0 ? 'vs' : 'ps'}`);
                     });
+                if (passStencil !== command.stencilRef)
+                {
+                    current.setStencilReference(command.stencilRef);
+                    passStencil = command.stencilRef;
+                }
+                const blendFactor = command.blendFactor.join(',');
+                if (passBlend !== blendFactor)
+                {
+                    const [r, g, b, a] = command.blendFactor;
+                    current.setBlendConstant({ r, g, b, a });
+                    passBlend = blendFactor;
+                }
                 pipeline.slots.forEach((/** @type {number} */ slot, /** @type {number} */ index)=>{
                     const buffer = command.vertexBuffers[slot];
                     if (buffer)
                     {
-                        current.setVertexBuffer(index, buffer.gpu, buffer.offset);
+                        // SV_InstanceID counts from zero whatever the first
+                        // instance, where WebGPU's instance index counts from
+                        // it: the per-instance streams start there instead.
+                        const skipped = pipeline.steps[index] === 'instance'
+                            ? command.startInstance * buffer.stride
+                            : 0;
+                        current.setVertexBuffer(index, buffer.gpu, buffer.offset + skipped);
                     }
                 });
                 if (command.indexCount !== null)
@@ -1550,6 +2516,10 @@ export function createRenderer(services){
                     }
                     current.setIndexBuffer(command.indexBuffer.gpu, command.indexBuffer.format,
                         command.indexBuffer.offset);
+                }
+                const slot = command.occlusion ? current.beginOcclusionQuery() : null;
+                if (command.indexCount !== null)
+                {
                     current.drawIndexed(command.indexCount, command.instanceCount,
                         command.startIndex, command.baseVertex, 0);
                 }
@@ -1558,24 +2528,45 @@ export function createRenderer(services){
                     current.draw(command.vertexCount, command.instanceCount,
                         command.startVertex, 0);
                 }
+                if (slot !== null)
+                {
+                    current.endOcclusionQuery();
+                    counted.push({ slot, counters: command.occlusion });
+                }
+                else if (command.occlusion)
+                {
+                    // Every slot of the frame's set is spent: this draw's
+                    // samples go uncounted, and its queries cannot answer.
+                    for (const counter of command.occlusion)
+                    {
+                        counter.failed = true;
+                    }
+                }
             }
             // A clear that met no draw still has to happen before the frame
             // is shown: a program that only clears expects to see the colour.
-            for (const [texture, clear] of [...pendingClears])
+            for (const [key, clear] of [...pendingClears])
             {
                 if (!clear.color)
                 {
                     continue;
                 }
                 const target = recorded.find(command=>command.kind === 'clear'
-                    && command.target.texture === texture);
+                    && command.target.key === key);
                 if (target)
                 {
                     closePass();
-                    passFor(target.target, null);
+                    passFor([target.target], null);
                 }
             }
-            frame.present(surface);
+            if (surface)
+            {
+                frame.present(surface);
+            }
+            if (counting)
+            {
+                readCounts = frame.occlusionResults();
+            }
         }
         finally
         {
@@ -1583,9 +2574,24 @@ export function createRenderer(services){
             // above must not leave the frame open for every present after.
             frame.end();
         }
+        for (const reader of readers)
+        {
+            reader.command.deliver(await reader.read());
+        }
+        if (readCounts)
+        {
+            const values = await readCounts();
+            for (const { slot, counters: into } of counted)
+            {
+                for (const counter of into)
+                {
+                    counter.samples += values[slot] ?? 0;
+                }
+            }
+        }
         // The record a test reads, without the promise a draw carried.
         lastFrame = recorded.map(command=>{
-            if (command.kind !== 'draw')
+            if (!command.pipeline)
             {
                 return command;
             }

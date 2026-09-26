@@ -8,7 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createQueryFunctions } from './query.js';
 import { STATUS } from './status.js';
-import { PEB, TEB } from '../kernel32/teb.js';
+import { PEB, TEB, createProcessBlocks } from '../kernel32/teb.js';
+import { VER, WINDOWS_VERSIONS, setCondition } from '../kernel32/versions.js';
 
 const TEB_AT = 0x1000;
 const PEB_AT = 0x2000;
@@ -33,7 +34,8 @@ function fakeHost({ blocks = true, arenaSize = 64 * 1024 * 1024 } = {}){
         view.setUint32(TEB_AT + TEB.PROCESS_ID, 0x1234, true);
         view.setUint32(PEB_AT + PEB.OS_MAJOR_VERSION, 5, true);
         view.setUint32(PEB_AT + PEB.OS_MINOR_VERSION, 1, true);
-        view.setUint32(PEB_AT + PEB.OS_BUILD_NUMBER, 2600, true);
+        view.setUint16(PEB_AT + PEB.OS_BUILD_NUMBER, 2600, true);
+        view.setUint16(PEB_AT + PEB.OS_CSD_VERSION, 0x0300, true);
         view.setUint32(PEB_AT + PEB.OS_PLATFORM_ID, 2, true);
     }
     return {
@@ -63,6 +65,52 @@ test('RtlGetVersion reports what the process block holds', ()=>{
     assert.equal(host.view.getUint32(BUFFER + 16, true), 2, 'VER_PLATFORM_WIN32_NT');
     assert.equal(host.view.getUint32(BUFFER, true), OSVERSIONINFOW_SIZE,
         'and the size the caller declared is left alone');
+});
+
+test('RtlGetVersion answers each Windows the process block was built for', ()=>{
+    // The block as the loader writes it, read back through the call: the
+    // service pack comes from the block's own WORD and string, and the suite
+    // and product type, which live in the kernel's shared page on Windows,
+    // from the version the host names.
+    for (const version of Object.values(WINDOWS_VERSIONS))
+    {
+        const bytes = new Uint8Array(0x10000);
+        const view = new DataView(bytes.buffer);
+        let next = 0x4000;
+        const blocks = createProcessBlocks({
+            allocate: size=>{
+                const at = next;
+                next += size + 15 & ~15;
+                return at;
+            },
+            writeMemory: (at, data)=>bytes.set(data, at),
+            processId: 0x1234,
+            version,
+            imageBase: 0x400000,
+        });
+        const { teb } = blocks.createThreadBlock({ id: 1, stackBase: 0x3000, stackLimit: 0x2000 });
+        const fns = createQueryFunctions({
+            readMemory: (address, length)=>bytes.subarray(address, address + length),
+            writeMemory: (address, data)=>bytes.set(data, address),
+            teb: ()=>teb,
+            arena: { base: 0x400000, size: 0x100000 },
+            version,
+        });
+        bytes.fill(0xcd, BUFFER, BUFFER + OSVERSIONINFOEXW_SIZE);
+        view.setUint32(BUFFER, OSVERSIONINFOEXW_SIZE, true);
+
+        assert.equal(fns.RtlGetVersion.handler([BUFFER]), STATUS.SUCCESS);
+        assert.deepEqual([4, 8, 12, 16].map(at=>view.getUint32(BUFFER + at, true)),
+            [version.major, version.minor, version.build, 2], version.name);
+        const csd = String.fromCharCode(...Array.from({ length: version.csdVersion.length },
+            (_, index)=>view.getUint16(BUFFER + 20 + index * 2, true)));
+        assert.equal(csd, version.csdVersion, version.name);
+        assert.equal(view.getUint16(BUFFER + 20 + version.csdVersion.length * 2, true), 0);
+        assert.equal(view.getUint16(BUFFER + 0x114, true), version.servicePackMajor);
+        assert.equal(view.getUint16(BUFFER + 0x116, true), version.servicePackMinor);
+        assert.equal(view.getUint16(BUFFER + 0x118, true), version.suiteMask, version.name);
+        assert.equal(bytes[BUFFER + 0x11a], version.productType);
+    }
 });
 
 test('a structure size nobody recognises is refused rather than partly filled', ()=>{
@@ -168,4 +216,50 @@ test('argument sizes match what the guest compiled against', ()=>{
     assert.equal(fns.RtlGetVersion.argBytes, 4);
     assert.equal(fns.NtQuerySystemInformation.argBytes, 16);
     assert.equal(fns.NtQueryInformationProcess.argBytes, 20);
+});
+
+test('RtlVerifyVersionInfo compares against the version the process block holds', ()=>{
+    // The truth, as RtlGetVersion answers it: Windows 10 tells a program with
+    // no manifest 6.2 through kernel32, and ntdll still says 10.0.
+    const version = WINDOWS_VERSIONS.win10;
+    const bytes = new Uint8Array(0x10000);
+    const view = new DataView(bytes.buffer);
+    let next = 0x4000;
+    const blocks = createProcessBlocks({
+        allocate: size=>{
+            const at = next;
+            next += size + 15 & ~15;
+            return at;
+        },
+        writeMemory: (at, data)=>bytes.set(data, at),
+        processId: 0x1234,
+        version,
+        imageBase: 0x400000,
+    });
+    const { teb } = blocks.createThreadBlock({ id: 1, stackBase: 0x3000, stackLimit: 0x2000 });
+    const fns = createQueryFunctions({
+        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        writeMemory: (address, data)=>bytes.set(data, address),
+        teb: ()=>teb,
+        arena: { base: 0x400000, size: 0x100000 },
+        version,
+    });
+    const types = VER.MAJORVERSION | VER.MINORVERSION | VER.SERVICEPACKMAJOR;
+    const atLeast = [VER.MAJORVERSION, VER.MINORVERSION, VER.SERVICEPACKMAJOR]
+        .reduce((mask, type)=>setCondition(mask, type, 3), 0n);
+    /** @param {number} major @param {number} minor @param {number} [typeMask] */
+    const ask = (major, minor, typeMask = types)=>{
+        bytes.fill(0, BUFFER, BUFFER + OSVERSIONINFOEXW_SIZE);
+        view.setUint32(BUFFER, OSVERSIONINFOEXW_SIZE, true);
+        view.setUint32(BUFFER + 4, major, true);
+        view.setUint32(BUFFER + 8, minor, true);
+        return fns.RtlVerifyVersionInfo.handler([BUFFER, typeMask,
+            Number(atLeast & 0xffffffffn), Number(atLeast >> 32n)]) >>> 0;
+    };
+
+    assert.equal(ask(10, 0), STATUS.SUCCESS, 'Windows 10 is at least 10.0');
+    assert.equal(ask(6, 3), STATUS.SUCCESS);
+    assert.equal(ask(10, 1), STATUS.REVISION_MISMATCH);
+    assert.equal(ask(10, 0, 0), STATUS.INVALID_PARAMETER, 'a request that names nothing');
+    assert.equal(fns.RtlVerifyVersionInfo.argBytes, 16);
 });

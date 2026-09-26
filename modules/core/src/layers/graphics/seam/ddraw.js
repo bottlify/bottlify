@@ -46,41 +46,73 @@ import {
     IDIRECTDRAWSURFACE2_SLOTS, IDIRECTDRAWSURFACE_SLOTS, IDIRECTDRAWPALETTE_SLOTS,
     IDIRECTDRAWCLIPPER_SLOTS,
 } from './vtables.js';
+import { IDIRECTDRAWGAMMACONTROL_SLOTS } from './vtables-ddraw.js';
 import {
     IID_IDirectDraw, IID_IDirectDraw2, IID_IDirectDraw4, IID_IDirectDraw7,
     IID_IDirectDrawSurface, IID_IDirectDrawSurface2, IID_IDirectDrawSurface3,
     IID_IDirectDrawSurface4, IID_IDirectDrawSurface7, IID_IDirectDrawPalette,
-    IID_IDirectDrawClipper,
+    IID_IDirectDrawClipper, IID_IDirectDrawGammaControl, IID_IDirect3D, IID_IDirect3D2,
+    IID_IDirect3D3,
 } from './iids.js';
 import {
     DDBLTFX, DDCAPS, DDCAPS_SIZES, DDCOLORKEY, DDSCAPS2, RECT, createFields,
 } from './structs.js';
 import {
-    DDSURFACEDESC, DDSURFACEDESC2, bytesPerPixel, readSurfaceDesc, writePixelFormat,
-    writeSurfaceDesc,
+    DDDEVICEIDENTIFIER2, DDSURFACEDESC, DDSURFACEDESC2, MAX_DDDEVICEID_STRING, bytesPerPixel,
+    readSurfaceDesc, writePixelFormat, writeSurfaceDesc,
 } from '../ddraw/structs.js';
 import {
-    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_KEYDESTOVERRIDE,
-    DDBLT_KEYSRCOVERRIDE, DDCAPS2_CANRENDERWINDOWED, DDCAPS2_CERTIFIED,
-    DDCAPS2_WIDESURFACES, DDCAPS_BLT, DDCAPS_BLTCOLORFILL, DDCAPS_BLTSTRETCH,
-    DDCAPS_CANBLTSYSMEM, DDCAPS_COLORKEY, DDCAPS_GDI, DDCAPS_PALETTE, DDCKEYCAPS_DESTBLT,
-    DDCKEYCAPS_SRCBLT, DDCKEY_DESTBLT, DDCKEY_SRCBLT, DDERR_ALREADYINITIALIZED,
-    DDERR_INVALIDPARAMS, DDERR_SURFACEBUSY, DDERR_SURFACELOST, DDERR_UNSUPPORTED, DDPCAPS_1BIT,
-    DDPCAPS_2BIT, DDPCAPS_4BIT, DDPCAPS_8BIT, DDPCAPS_ALLOW256, DDPCAPS_PRIMARYSURFACE,
-    DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT, DDSD_PITCH, DDSD_PIXELFORMAT, DDSD_REFRESHRATE,
-    DDSD_WIDTH, DD_OK,
+    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_DEPTHFILL, DDBLT_KEYDESTOVERRIDE,
+    DDBLT_KEYSRCOVERRIDE, DDPF_ZBUFFER, DDCAPS2_CANRENDERWINDOWED, DDCAPS2_CERTIFIED,
+    DDCAPS2_PRIMARYGAMMA,
+    DDCAPS2_WIDESURFACES, DDCAPS_BLT, DDCAPS_BLTCOLORFILL, DDCAPS_BLTSTRETCH, DDCAPS_CANBLTSYSMEM,
+    DDCAPS_COLORKEY, DDCAPS_GDI, DDCAPS_PALETTE, DDCKEYCAPS_DESTBLT, DDCKEYCAPS_SRCBLT,
+    DDCKEY_DESTBLT, DDCKEY_SRCBLT, DDERR_ALREADYINITIALIZED, DDERR_INVALIDPARAMS,
+    DDERR_NOTAOVERLAYSURFACE, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_SURFACEBUSY,
+    DDERR_SURFACELOST, DDERR_UNSUPPORTED, DDPCAPS_1BIT, DDPCAPS_2BIT, DDPCAPS_4BIT,
+    DDPCAPS_8BIT, DDPCAPS_ALLOW256,
+    DDPCAPS_PRIMARYSURFACE, DDPF_RGB, DDSCAPS_3DDEVICE, DDSCAPS_BACKBUFFER, DDSCAPS_COMPLEX,
+    DDSCAPS_FLIP, DDSCAPS_FRONTBUFFER, DDSCAPS_LOCALVIDMEM, DDSCAPS_MIPMAP, DDSCAPS_OFFSCREENPLAIN,
+    DDSCAPS_PRIMARYSURFACE, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_VIDEOMEMORY,
+    DDSCAPS_ZBUFFER, DDSCL_EXCLUSIVE, DDSD_BACKBUFFERCOUNT,
+    DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PITCH,
+    DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK, DDGDI_GETHOSTIDENTIFIER,
 } from '../ddraw/constants.js';
 import { pixelFormatForDepth } from '../ddraw/objects.js';
 import { blt, bltFast } from '../ddraw/blit.js';
+import { ADAPTER_GUID, describeAdapter } from './adapter.js';
+import { createRaster } from './raster.js';
+import { DDRAW_PRIVATE_DATA, createPrivateData } from './privatedata.js';
+import { REFRESH_HZ } from '../../win32/user32/display.js';
+
+/** WaitForVerticalBlank: which edge of the blank to return at. */
+const DDWAITVB_BLOCKBEGIN = 0x00000001;
+const DDWAITVB_BLOCKBEGINEVENT = 0x00000002;
+const DDWAITVB_BLOCKEND = 0x00000004;
 
 /** The Direct3D 7 interface, whose count is IDirectDraw7's. */
 const IID_IDirect3D7 = '{F5049E77-4861-11D2-A407-00A0C90629A8}';
 
+/** The older Direct3D interfaces, which share the count of one earlier generation. */
+const LEGACY_D3D_IIDS = Object.freeze(new Set([IID_IDirect3D, IID_IDirect3D2, IID_IDirect3D3]));
+
+/** DDGAMMARAMP: red, green and blue, 256 words each. */
+const DDGAMMARAMP_BYTES = 3 * 256 * 2;
+
 /** What the caps report as video memory: a round number nothing here measures. */
 const VIDEO_MEMORY = 256 << 20;
 
+/** The surfaces CreateSurface builds and the places it puts them. */
+const SURFACE_CAPS = (DDSCAPS_BACKBUFFER | DDSCAPS_COMPLEX | DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER
+    | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_PRIMARYSURFACE | DDSCAPS_SYSTEMMEMORY | DDSCAPS_TEXTURE
+    | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY | DDSCAPS_ZBUFFER | DDSCAPS_MIPMAP
+    | DDSCAPS_LOCALVIDMEM) >>> 0;
+
 /** What an enumeration callback answers to go on, and to stop. */
 const DDENUMRET_CANCEL = 0;
+
+/** DirectDrawEnumerateEx flags: which devices besides the primary to name. */
+const DDENUM_KNOWN = 0x00000007;
 
 /** EnumSurfaces flags: which surfaces the caller wants named. */
 const DDENUMSURFACES_ALL = 0x00000001;
@@ -207,13 +239,46 @@ export function versionOf(id){
  * @param {import('./com.js').InterfaceDescriptor[]} [deps.extraInterfaces]
  *        Interfaces other seams put on the DirectDraw object -- IDirect3D7 is
  *        reached by QueryInterface from it, not made by an entry point.
+ * @param {import('./com.js').InterfaceDescriptor[]} [deps.extraSurfaceInterfaces]
+ *        And on every surface: the texture interfaces of the Direct3D before
+ *        the seventh, which a surface answers a QueryInterface for.
+ * @param {() => number} [deps.now]  The clock the raster runs on, in milliseconds.
+ * @param {(ms: number, run: () => void) => void} [deps.schedule]
+ *        How a wait for the vertical blank is woken.
+ * @param {() => import('./adapter.js').AdapterIdentity | null} [deps.identity]
+ *        The hardware behind the display, as the assembling caller knows it.
+ * @param {import('../webgpu/internal/presenter.js').DisplayGamma} [deps.gamma]
+ *        Where a primary surface's gamma ramp reaches the picture.
+ * @param {() => boolean} [deps.deactivated]
+ *        Whether the application has been told it is not the active one.
+ *        Absent, it always is.
+ * @param {() => number} [deps.deactivations]
+ *        How many times it has been told so: an exclusive owner loses its
+ *        video memory each time.
  */
 export function createDirectDrawSeam(
     { publisher, memory, screen, gdi, present, callGuest, currentThread, scratch,
-        extraInterfaces = [] },
+        extraInterfaces = [], extraSurfaceInterfaces = [], now = ()=>performance.now(),
+        schedule = (ms, run)=>{
+            setTimeout(run, ms);
+        }, identity, gamma, deactivated, deactivations },
 )
 {
     const fields = createFields(memory);
+    /**
+     * The objects that took exclusive mode, for another one's
+     * TestCooperativeLevel: the screen is one, whichever object holds it.
+     *
+     * @type {Set<any>}
+     */
+    const exclusiveHolders = new Set();
+
+    const privateData = createPrivateData({ memory, publisher, rules: DDRAW_PRIVATE_DATA });
+
+    /** The raster of a DirectDraw object's display mode. @param {any} root */
+    const rasterOf = root=>createRaster({
+        now, refresh: ()=>REFRESH_HZ, height: ()=>root.displayMode.height,
+    });
 
     /** @type {number} the descriptor block, taken on the first enumeration */
     let descriptorBlock = 0;
@@ -226,10 +291,6 @@ export function createDirectDrawSeam(
     };
     /** Whether an enumeration can reach the program at all. */
     const canEnumerate = ()=>callGuest !== undefined && descriptorScratch() !== 0;
-
-    /** Which ddraw object made a surface: what GetDDInterface hands back. */
-    /** @type {WeakMap<object, any>} */
-    const owners = new WeakMap();
 
     /** One facade per model, so one object is one identity. */
     /** @type {WeakMap<object, any>} */
@@ -254,7 +315,8 @@ export function createDirectDrawSeam(
         }
         // Either an identifier or a generation name arrives here: the bridge
         // sends identifiers, and the sibling APIs name the generation they
-        // share a count with. IDirect3D7 is IDirectDraw7's count.
+        // share a count with. IDirect3D7 is IDirectDraw7's count; the older
+        // Direct3D interfaces share the one the model binds them to.
         const generationOf = (/** @type {string | undefined} */ id)=>{
             if (id === undefined)
             {
@@ -263,6 +325,10 @@ export function createDirectDrawSeam(
             if (id === IID_IDirect3D7)
             {
                 return GENERATIONS[7].name;
+            }
+            if (LEGACY_D3D_IIDS.has(id))
+            {
+                return root.legacyD3dGeneration();
             }
             const version = versionOf(id);
             if (version !== null)
@@ -278,6 +344,14 @@ export function createDirectDrawSeam(
         facades.set(root, facade);
         return facade;
     };
+
+    /**
+     * The DirectDraw object that made a surface, as it was published -- a
+     * back buffer or a mip level included, which no CreateSurface handed out.
+     *
+     * @param {any} surface
+     */
+    const ownerOf = surface=>(surface?.directDraw ? facadeOf(surface.directDraw) : null);
 
     /**
      * A RECT at an address. Typed loosely on purpose: the field reader answers
@@ -469,14 +543,31 @@ export function createDirectDrawSeam(
 
     // --- surface ---
 
-    /** @param {any} surface @returns {import('../ddraw/blit.js').BlitSurface} */
-    const blitView = surface=>({
-        buffer: surface.buffer,
-        pitch: surface.pitch,
-        width: surface.width,
-        height: surface.height,
-        bytesPerPixel: surface.bytesPerPixel,
-    });
+    /**
+     * A key is compared on the colour a pixel shows: an RGB format's unused
+     * bits take no part in it, and are copied with the rest of the pixel.
+     *
+     * @param {any} surface @returns {import('../ddraw/blit.js').BlitSurface}
+     */
+    const blitView = surface=>{
+        const format = surface.pixelFormat;
+        const colour = (format.flags & DDPF_RGB) !== 0
+            ? (format.redMask | format.greenMask | format.blueMask) >>> 0
+            : 0;
+        return {
+            buffer: surface.buffer,
+            pitch: surface.pitch,
+            width: surface.width,
+            height: surface.height,
+            bytesPerPixel: surface.bytesPerPixel,
+            depth: (surface.caps & DDSCAPS_ZBUFFER) !== 0,
+            // DDPIXELFORMAT keeps dwZBitMask where an RGB format keeps green.
+            ...((format.flags & DDPF_ZBUFFER) !== 0 && format.greenMask !== 0
+                ? { depthMask: format.greenMask >>> 0 }
+                : {}),
+            ...(colour !== 0 ? { keyMask: colour } : {}),
+        };
+    };
 
     /**
      * The colour keys a blit uses. A key named on the surface is the default;
@@ -519,6 +610,21 @@ export function createDirectDrawSeam(
         return DD_OK;
     };
 
+    /**
+     * Runs a call once every surface it reads has its pixels in guest memory:
+     * a render target the GPU draws into has them there only once they are
+     * read back, and the caller is parked until then. At once, and as a plain
+     * answer, when nobody keeps a copy elsewhere.
+     *
+     * @param {any[]} surfaces @param {() => number} run
+     * @returns {number | Promise<number>}
+     */
+    const whenCurrent = (surfaces, run)=>{
+        const pending = surfaces.map(surface=>surface.pixelsCurrent())
+            .filter(answer=>answer !== null);
+        return pending.length === 0 ? run() : Promise.all(pending).then(run);
+    };
+
     /** @param {any} surface @returns {import('../ddraw/objects.js').Rect[] | undefined} */
     const clipListOf = surface=>{
         const clipper = surface.clipper;
@@ -534,19 +640,27 @@ export function createDirectDrawSeam(
      * @param {any} surface
      * @param {number} [surfacePointer]
      */
-    const descriptorOf = (surface, surfacePointer)=>({
-        flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH | DDSD_PIXELFORMAT
-            | (surface.backBufferCount > 0 ? DDSD_BACKBUFFERCOUNT : 0),
-        width: surface.width,
-        height: surface.height,
-        pitch: surface.pitch,
-        backBufferCount: surface.backBufferCount,
-        mipMapCount: 0,
-        caps: surface.caps,
-        caps2: surface.caps2,
-        pixelFormat: surface.pixelFormat,
-        surfacePointer,
-    });
+    const descriptorOf = (surface, surfacePointer)=>{
+        const srcColorKey = surface.getColorKey(DDCKEY_SRCBLT).key ?? undefined;
+        const destColorKey = surface.getColorKey(DDCKEY_DESTBLT).key ?? undefined;
+        return {
+            flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH | DDSD_PIXELFORMAT
+                | (surface.backBufferCount > 0 ? DDSD_BACKBUFFERCOUNT : 0)
+                | (surface.mipMapCount > 0 ? DDSD_MIPMAPCOUNT : 0)
+                | (srcColorKey ? DDSD_CKSRCBLT : 0) | (destColorKey ? DDSD_CKDESTBLT : 0),
+            srcColorKey,
+            destColorKey,
+            width: surface.width,
+            height: surface.height,
+            pitch: surface.pitch,
+            backBufferCount: surface.backBufferCount,
+            mipMapCount: surface.mipMapCount,
+            caps: surface.caps,
+            caps2: surface.caps2,
+            pixelFormat: surface.pixelFormat,
+            surfacePointer,
+        };
+    };
 
     /**
      * The methods of one surface generation.
@@ -561,6 +675,7 @@ export function createDirectDrawSeam(
         const readCaps = pointer=>fields.readU32((pointer >>> 0) + (wide ? DDSCAPS2.dwCaps : 0));
 
         return {
+            ...privateData.methods,
             /** @param {any} surface @param {number[]} args */
             AddAttachedSurface: (surface, [other])=>{
                 const attached = publisher.objectAt(other);
@@ -575,17 +690,19 @@ export function createDirectDrawSeam(
                 {
                     return hr;
                 }
-                const outcome = blt({
+                // dwFillDepth shares dwFillColor's place in the structure.
+                const fill = (fx >>> 0) === 0
+                    ? 0
+                    : fields.readU32((fx >>> 0) + DDBLTFX.dwFillColor);
+                const rect = readRect(destRect);
+                const request = {
                     memory,
-                    dest: blitView(surface),
-                    destRect: readRect(destRect),
-                    src: from ? blitView(from) : undefined,
+                    destRect: rect,
                     srcRect: readRect(sourceRect),
                     flags: flags >>> 0,
                     fx: {
-                        fillColor: (fx >>> 0) === 0
-                            ? 0
-                            : fields.readU32((fx >>> 0) + DDBLTFX.dwFillColor),
+                        fillColor: fill,
+                        fillDepth: fill,
                         srcColorKey: from
                             ? keyFor(from, DDCKEY_SRCBLT,
                                 (flags & DDBLT_KEYSRCOVERRIDE) !== 0, fx, DDBLTFX.ddckSrcColorkey)
@@ -594,13 +711,24 @@ export function createDirectDrawSeam(
                             (flags & DDBLT_KEYDESTOVERRIDE) !== 0, fx, DDBLTFX.ddckDestColorkey),
                     },
                     clipList: clipListOf(surface),
+                };
+                return whenCurrent(from ? [surface, from] : [surface], ()=>{
+                    const outcome = blt({
+                        ...request,
+                        dest: blitView(surface),
+                        src: from ? blitView(from) : undefined,
+                    });
+                    if (outcome === DD_OK)
+                    {
+                        surface.changeUniquenessValue();
+                        surface.present();
+                        if ((flags & DDBLT_DEPTHFILL) !== 0)
+                        {
+                            surface.depthFilled(rect, fill);
+                        }
+                    }
+                    return outcome;
                 });
-                if (outcome === DD_OK)
-                {
-                    surface.changeUniquenessValue();
-                    surface.present();
-                }
-                return outcome;
             },
 
             /** @param {any} surface @param {number[]} args */
@@ -615,12 +743,10 @@ export function createDirectDrawSeam(
                 {
                     return hr;
                 }
-                const outcome = bltFast({
+                const request = {
                     memory,
-                    dest: blitView(surface),
                     x: x | 0,
                     y: y | 0,
-                    src: blitView(from),
                     srcRect: readRect(sourceRect),
                     flags: flags >>> 0,
                     srcColorKey: (flags & DDBLTFAST_SRCCOLORKEY) !== 0
@@ -629,17 +755,26 @@ export function createDirectDrawSeam(
                     destColorKey: (flags & DDBLTFAST_DESTCOLORKEY) !== 0
                         ? surface.getColorKey(DDCKEY_DESTBLT).key ?? undefined
                         : undefined,
+                };
+                return whenCurrent([surface, from], ()=>{
+                    const outcome = bltFast({
+                        ...request, dest: blitView(surface), src: blitView(from),
+                    });
+                    if (outcome === DD_OK)
+                    {
+                        surface.changeUniquenessValue();
+                        surface.present();
+                    }
+                    return outcome;
                 });
-                if (outcome === DD_OK)
-                {
-                    surface.changeUniquenessValue();
-                    surface.present();
-                }
-                return outcome;
             },
 
             /** @param {any} surface @param {number[]} args */
             DeleteAttachedSurface: (surface, [, other])=>{
+                if ((other >>> 0) === 0)
+                {
+                    return surface.deleteAttachedSurface(null);
+                }
                 const attached = publisher.objectAt(other);
                 return attached ? surface.deleteAttachedSurface(attached) : DDERR_INVALIDPARAMS;
             },
@@ -674,7 +809,8 @@ export function createDirectDrawSeam(
                 {
                     return DDERR_INVALIDPARAMS;
                 }
-                const found = surface.getAttachedSurface(readCaps(caps));
+                const found = surface.getAttachedSurface(readCaps(caps),
+                    wide ? fields.readU32((caps >>> 0) + DDSCAPS2.dwCaps2) : 0);
                 if (found.hr === DD_OK)
                 {
                     handBack(found.surface, surfaceInterfaces, generation.id, out >>> 0);
@@ -735,11 +871,14 @@ export function createDirectDrawSeam(
                     return DDERR_INVALIDPARAMS;
                 }
                 const got = surface.getDC();
-                if (got.hr === DD_OK)
+                if (got.hr !== DD_OK)
                 {
-                    fields.writeU32(out >>> 0, got.dc);
+                    return got.hr;
                 }
-                return got.hr;
+                return whenCurrent([surface], ()=>{
+                    fields.writeU32(out >>> 0, got.dc);
+                    return DD_OK;
+                });
             },
 
             GetFlipStatus: ()=>DD_OK,
@@ -787,12 +926,19 @@ export function createDirectDrawSeam(
              *
              * @param {any} surface @param {number[]} args
              */
-            Lock: (surface, [rect, desc])=>{
+            Lock: (surface, [rect, desc, flags])=>{
                 if ((desc >>> 0) === 0 || fields.readU32(desc >>> 0) !== layout.SIZE)
                 {
                     return DDERR_INVALIDPARAMS;
                 }
-                const locked = surface.lock(readRect(rect));
+                const locked = surface.lock(readRect(rect), flags >>> 0);
+                if (locked.hr === DDERR_SURFACELOST)
+                {
+                    // Refused before anything is written: the descriptor the
+                    // program passed comes back as it went (Wine's ddraw7
+                    // test_coop_level_d3d_state).
+                    return locked.hr;
+                }
                 if (locked.hr !== DD_OK)
                 {
                     fields.writeU32((desc >>> 0) + layout.lpSurface, 0);
@@ -800,7 +946,7 @@ export function createDirectDrawSeam(
                 }
                 writeSurfaceDesc(memory, desc >>> 0, layout,
                     descriptorOf(surface, locked.surfacePointer));
-                return DD_OK;
+                return whenCurrent([surface], ()=>DD_OK);
             },
 
             /** @param {any} surface @param {number[]} args */
@@ -831,7 +977,7 @@ export function createDirectDrawSeam(
                 {
                     return DDERR_INVALIDPARAMS;
                 }
-                const root = owners.get(surface);
+                const root = ownerOf(surface);
                 if (!root)
                 {
                     return DDERR_INVALIDPARAMS;
@@ -848,6 +994,49 @@ export function createDirectDrawSeam(
 
             PageLock: ()=>DD_OK,
             PageUnlock: ()=>DD_OK,
+
+            // No surface is an overlay -- creating one is refused for want of
+            // the hardware -- so every call that works on one is answered as
+            // it is for any other surface, and the call that lists the
+            // overlays over a surface lists none.
+            UpdateOverlay: ()=>DDERR_NOTAOVERLAYSURFACE,
+            GetOverlayPosition: ()=>DDERR_NOTAOVERLAYSURFACE,
+            SetOverlayPosition: ()=>DDERR_NOTAOVERLAYSURFACE,
+            UpdateOverlayZOrder: ()=>DDERR_NOTAOVERLAYSURFACE,
+            UpdateOverlayDisplay: ()=>DDERR_NOTAOVERLAYSURFACE,
+            /** @param {any} surface @param {number[]} args */
+            EnumOverlayZOrders: (surface, [, , callback])=>((callback >>> 0) === 0
+                ? DDERR_INVALIDPARAMS
+                : DD_OK),
+
+            /** @param {any} surface @param {number[]} args */
+            SetPriority: (surface, [value])=>surface.setPriority(value >>> 0),
+
+            /**
+             * A refusal leaves the caller's variable as it was.
+             *
+             * @param {any} surface @param {number[]} args
+             */
+            GetPriority: (surface, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                const got = surface.getPriority();
+                if (got.hr === DD_OK)
+                {
+                    fields.writeU32(out >>> 0, got.priority);
+                }
+                return got.hr;
+            },
+
+            /** @param {any} surface @param {number[]} args */
+            SetSurfaceDesc: (surface, [desc, flags])=>{
+                const request = (desc >>> 0) === 0
+                    ? null
+                    : readSurfaceDesc(memory, desc >>> 0, layout);
+                return request ? surface.setSurfaceDesc(request, flags >>> 0) : DDERR_INVALIDPARAMS;
+            },
 
             /** @param {any} surface @param {number[]} args */
             GetUniquenessValue: (surface, [out])=>{
@@ -867,9 +1056,43 @@ export function createDirectDrawSeam(
         };
     };
 
+    /**
+     * The gamma control a surface answers for: a DDGAMMARAMP, three channels
+     * of 256 little-endian words, read and written whole. Both flags are
+     * taken as the runtime takes them -- the calibration flag asks for a
+     * calibrator there is none of -- so only a missing ramp is refused.
+     */
+    const gammaInterface = describe(IID_IDirectDrawGammaControl, IDIRECTDRAWGAMMACONTROL_SLOTS, {
+        /** @param {any} surface @param {number[]} args */
+        GetGammaRamp: (surface, [, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const ramp = surface.getGammaRamp();
+            memory.writeMemory(out >>> 0, new Uint8Array(ramp.buffer, ramp.byteOffset,
+                ramp.byteLength));
+            return DD_OK;
+        },
+        /** @param {any} surface @param {number[]} args */
+        SetGammaRamp: (surface, [, ramp])=>{
+            if ((ramp >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const bytes = memory.readMemory(ramp >>> 0, DDGAMMARAMP_BYTES);
+            return surface.setGammaRamp(new Uint16Array(bytes.slice().buffer));
+        },
+    });
+
     /** Every surface generation, so a QueryInterface across them succeeds. */
-    const surfaceInterfaces = SURFACE_GENERATIONS.map(generation=>
-        describe(generation.id, generation.slots, surfaceMethods(generation)));
+    const surfaceInterfaces = [
+        ...SURFACE_GENERATIONS.map(generation=>
+            describe(generation.id, generation.slots, surfaceMethods(generation), {},
+                privateData.released)),
+        gammaInterface,
+        ...extraSurfaceInterfaces,
+    ];
 
     /**
      * Names each surface to the callback in turn, stopping when it says so.
@@ -927,13 +1150,57 @@ export function createDirectDrawSeam(
             dwSize: size,
             dwCaps: DDCAPS_BLT | DDCAPS_BLTSTRETCH | DDCAPS_BLTCOLORFILL | DDCAPS_COLORKEY
                 | DDCAPS_GDI | DDCAPS_PALETTE | DDCAPS_CANBLTSYSMEM,
-            dwCaps2: DDCAPS2_CERTIFIED | DDCAPS2_WIDESURFACES | DDCAPS2_CANRENDERWINDOWED,
+            // A primary's gamma ramp is claimed where the display applies it.
+            dwCaps2: DDCAPS2_CERTIFIED | DDCAPS2_WIDESURFACES | DDCAPS2_CANRENDERWINDOWED
+                | (gamma?.applies() ? DDCAPS2_PRIMARYGAMMA : 0),
             dwCKeyCaps: DDCKEYCAPS_SRCBLT | DDCKEYCAPS_DESTBLT,
             dwPalCaps: DDPCAPS_8BIT | DDPCAPS_PRIMARYSURFACE | DDPCAPS_ALLOW256,
             dwVidMemTotal: VIDEO_MEMORY,
             dwVidMemFree: VIDEO_MEMORY,
+            ddsOldCaps: SURFACE_CAPS,
         });
+        if (size >= DDCAPS.SIZE)
+        {
+            fields.writeU32(at + DDCAPS.ddsCaps, SURFACE_CAPS);
+        }
         return DD_OK;
+    };
+
+    /**
+     * DDDEVICEIDENTIFIER, or its second form with the WHQL level after it,
+     * from what the assembling caller knows of the hardware -- the answer
+     * Direct3D's adapter identifier gives, so a program asking both finds one
+     * card. The driver is named as a DLL because that is what the field holds
+     * on Windows and what a program parsing it looks for. Only the structure's
+     * own bytes are written: rounded up to its alignment it would run four
+     * bytes into whatever the caller keeps after it.
+     *
+     * @param {number} address @param {boolean} withWhql
+     */
+    const writeDeviceIdentifier = (address, withWhql)=>{
+        const { vendorId, description } = describeAdapter(identity?.() ?? null);
+        const block = new Uint8Array(withWhql
+            ? DDDEVICEIDENTIFIER2.SIZE
+            : DDDEVICEIDENTIFIER2.dwWHQLLevel);
+        /** @param {string} text @param {number} at */
+        const ascii = (text, at)=>{
+            for (let index = 0; index < Math.min(text.length, MAX_DDDEVICEID_STRING - 1); index++)
+            {
+                block[at + index] = text.charCodeAt(index) & 0x7f;
+            }
+        };
+        ascii('webgpu.dll', DDDEVICEIDENTIFIER2.szDriver);
+        ascii(description, DDDEVICEIDENTIFIER2.szDescription);
+        const view = new DataView(block.buffer);
+        // Version 1.0.0.0: the product word is the LARGE_INTEGER's high dword.
+        view.setUint32(DDDEVICEIDENTIFIER2.liDriverVersion + 4, 0x00010000, true);
+        view.setUint32(DDDEVICEIDENTIFIER2.dwVendorId, vendorId, true);
+        block.set(ADAPTER_GUID, DDDEVICEIDENTIFIER2.guidDeviceIdentifier);
+        if (withWhql)
+        {
+            view.setUint32(DDDEVICEIDENTIFIER2.dwWHQLLevel, 1, true);
+        }
+        memory.writeMemory(address, block);
     };
 
     /**
@@ -995,7 +1262,6 @@ export function createDirectDrawSeam(
             {
                 return made.hr;
             }
-            owners.set(made.surface, root);
             handBack(made.surface, surfaceInterfaces, generation.surface, out >>> 0);
             return DD_OK;
         },
@@ -1093,7 +1359,20 @@ export function createDirectDrawSeam(
                 callback >>> 0, context >>> 0);
         },
 
-        FlipToGDISurface: ()=>DD_OK,
+        /**
+         * The primary is what GDI draws on, so flipping to it needs one, and
+         * one that flips.
+         *
+         * @param {any} root
+         */
+        FlipToGDISurface: root=>{
+            const primary = root.primarySurface();
+            if (!primary)
+            {
+                return DDERR_NOTFOUND;
+            }
+            return (primary.caps & DDSCAPS_FLIP) !== 0 ? DD_OK : DDERR_NOTFLIPPABLE;
+        },
 
         /** @param {any} root @param {number[]} args */
         GetCaps: (root, [hal, hel])=>{
@@ -1150,10 +1429,15 @@ export function createDirectDrawSeam(
 
         /** @param {any} root @param {number[]} args */
         GetGDISurface: (root, [out])=>{
-            const primary = root.primarySurface();
-            if (!primary || (out >>> 0) === 0)
+            if ((out >>> 0) === 0)
             {
                 return DDERR_INVALIDPARAMS;
+            }
+            const primary = root.primarySurface();
+            if (!primary)
+            {
+                fields.writeU32(out >>> 0, 0);
+                return DDERR_NOTFOUND;
             }
             primary.addRef();
             handBack(primary, surfaceInterfaces, generation.surface, out >>> 0);
@@ -1166,17 +1450,19 @@ export function createDirectDrawSeam(
             {
                 return DDERR_INVALIDPARAMS;
             }
-            fields.writeU32(out >>> 0, 60);
+            fields.writeU32(out >>> 0, REFRESH_HZ);
             return DD_OK;
         },
 
+        // The scan line counts on through the blank, past the last visible
+        // line, the way the documentation's example numbers it.
         /** @param {any} root @param {number[]} args */
         GetScanLine: (root, [out])=>{
             if ((out >>> 0) === 0)
             {
                 return DDERR_INVALIDPARAMS;
             }
-            fields.writeU32(out >>> 0, 0);
+            fields.writeU32(out >>> 0, rasterOf(root).position().line);
             return DD_OK;
         },
 
@@ -1186,7 +1472,7 @@ export function createDirectDrawSeam(
             {
                 return DDERR_INVALIDPARAMS;
             }
-            fields.writeU32(out >>> 0, 0);
+            fields.writeU32(out >>> 0, rasterOf(root).position().inBlank ? 1 : 0);
             return DD_OK;
         },
 
@@ -1196,8 +1482,18 @@ export function createDirectDrawSeam(
         RestoreDisplayMode: (/** @type {any} */ root)=>root.restoreDisplayMode(),
 
         /** @param {any} root @param {number[]} args */
-        SetCooperativeLevel: (root, [window, flags])=>
-            root.setCooperativeLevel(window >>> 0, flags >>> 0),
+        SetCooperativeLevel: (root, [window, flags])=>{
+            const hr = root.setCooperativeLevel(window >>> 0, flags >>> 0);
+            if ((root.cooperativeLevel & DDSCL_EXCLUSIVE) !== 0)
+            {
+                exclusiveHolders.add(root);
+            }
+            else
+            {
+                exclusiveHolders.delete(root);
+            }
+            return hr;
+        },
 
         // The first generation takes width, height and depth; every later one
         // adds a refresh rate and flags after them.
@@ -1205,7 +1501,25 @@ export function createDirectDrawSeam(
         SetDisplayMode: (root, [width, height, depth, refresh])=>root.setDisplayMode(
             width >>> 0, height >>> 0, depth >>> 0, version === 1 ? 0 : (refresh >>> 0)),
 
-        WaitForVerticalBlank: ()=>DD_OK,
+        /**
+         * Parks the caller until the blank begins, or ends. The event form is
+         * the one the documentation says is not supported.
+         *
+         * @param {any} root @param {number[]} args
+         */
+        WaitForVerticalBlank: (root, [flags])=>{
+            const edge = (flags >>> 0) === DDWAITVB_BLOCKBEGIN ? 'begin'
+                : (flags >>> 0) === DDWAITVB_BLOCKEND ? 'end' : null;
+            if (edge === null)
+            {
+                return (flags >>> 0) === DDWAITVB_BLOCKBEGINEVENT
+                    ? DDERR_UNSUPPORTED
+                    : DDERR_INVALIDPARAMS;
+            }
+            return new Promise(resolve=>{
+                schedule(rasterOf(root).untilBlank(edge), ()=>resolve(DD_OK));
+            });
+        },
 
         /** @param {any} root @param {number[]} args */
         GetAvailableVidMem: (root, [, total, free])=>{
@@ -1238,8 +1552,67 @@ export function createDirectDrawSeam(
         /** @param {any} root */
         RestoreAllSurfaces: (/** @type {any} */ root)=>root.restoreAllSurfaces(),
 
-        TestCooperativeLevel: ()=>DD_OK,
+        /** @param {any} root */
+        TestCooperativeLevel: root=>{
+            for (const holder of exclusiveHolders)
+            {
+                if (holder.destroyed || (holder.cooperativeLevel & DDSCL_EXCLUSIVE) === 0)
+                {
+                    exclusiveHolders.delete(holder);
+                }
+            }
+            return root.testCooperativeLevel({
+                heldElsewhere: [...exclusiveHolders].some(holder=>holder !== root),
+            });
+        },
+
+        /**
+         * The host flag asks after the adapter a 3D-only card is attached to,
+         * and the one adapter here is its own host.
+         *
+         * @param {any} root @param {number[]} args
+         */
+        GetDeviceIdentifier: (root, [out, flags])=>{
+            if ((out >>> 0) === 0 || (flags & ~DDGDI_GETHOSTIDENTIFIER) !== 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            writeDeviceIdentifier(out >>> 0, version === 7);
+            return DD_OK;
+        },
     });
+
+    /**
+     * Names the one DirectDraw device there is to a program's callback: the
+     * primary display driver, which a program then creates by passing a null
+     * GUID. The Ex form's callback takes a monitor handle as well, and the
+     * primary device's is null -- it is the whole desktop, not one monitor.
+     * Without a way into the guest nothing is named, and the program sees a
+     * machine with no devices to choose between.
+     *
+     * @param {number} callback @param {number} context @param {boolean} withMonitor
+     * @returns {number | Promise<number>}
+     */
+    const enumerateDevices = (callback, context, withMonitor)=>{
+        if (!canEnumerate())
+        {
+            return DD_OK;
+        }
+        const call = /** @type {NonNullable<typeof callGuest>} */ (callGuest);
+        const at = descriptorScratch();
+        const name = at + 0x40;
+        for (const [where, text] of /** @type {const} */ ([
+            [at, 'Primary Display Driver'], [name, 'display'],
+        ]))
+        {
+            memory.writeMemory(where, Uint8Array.from([...text, '\0'], c=>c.charCodeAt(0)));
+        }
+        return call({
+            entry: callback,
+            args: [0, at, name, context, ...(withMonitor ? [0] : [])],
+            thread: currentThread?.(),
+        }).then(()=>DD_OK);
+    };
 
     /** Every generation, so a QueryInterface across them succeeds. */
     const ddrawInterfaces = [
@@ -1280,6 +1653,17 @@ export function createDirectDrawSeam(
                 options.createDc = attributes=>gdi.createSurfaceDc(attributes);
                 options.releaseDc = handle=>gdi.deleteSurfaceDc(handle);
             }
+            if (gamma)
+            {
+                options.gamma = gamma;
+            }
+            if (deactivated)
+            {
+                options.application = {
+                    deactivated,
+                    deactivations: deactivations ?? (()=>0),
+                };
+            }
             const display = screen();
             options.screenWidth = display.width;
             options.screenHeight = display.height;
@@ -1296,6 +1680,28 @@ export function createDirectDrawSeam(
          */
         publishRoot: (root, version)=>
             publisher.publish(facadeOf(root), ddrawInterfaces, GENERATIONS[version].id),
+
+        /**
+         * DirectDrawEnumerate, in the four forms DDRAW.dll exports. The wide
+         * ones were never implemented by the runtime and answer that they are
+         * not, having called nothing; a null callback is refused first.
+         */
+        enumerate: {
+            /** @param {number} callback @param {number} context */
+            ansi: (callback, context)=>((callback >>> 0) === 0
+                ? DDERR_INVALIDPARAMS
+                : enumerateDevices(callback >>> 0, context >>> 0, false)),
+            /** @param {number} callback @param {number} context @param {number} flags */
+            ansiEx: (callback, context, flags)=>((callback >>> 0) === 0
+                || (flags & ~DDENUM_KNOWN) !== 0
+                ? DDERR_INVALIDPARAMS
+                : enumerateDevices(callback >>> 0, context >>> 0, true)),
+            /** @param {number} callback */
+            wide: callback=>((callback >>> 0) === 0 ? DDERR_INVALIDPARAMS : DDERR_UNSUPPORTED),
+            wideEx: ()=>DDERR_UNSUPPORTED,
+        },
+
+        ownerOf,
 
         /** For tests, which have no guest to call through. */
         interfaces: {

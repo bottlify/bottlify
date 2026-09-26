@@ -10,8 +10,9 @@
  * Four calls that look like a pipeline and are not. FindResource locates an
  * entry, SizeofResource says how long it is, LoadResource is documented as
  * loading it and LockResource as pinning it — but the bytes were mapped with
- * the image and were never anywhere else, so the last two are arithmetic. Both
- * still exist because a program calls all four in order and checks each result.
+ * the image and were never anywhere else, so LoadResource is arithmetic and
+ * LockResource the identity. Both still exist because a program calls all four
+ * in order and checks each result.
  *
  * The reader itself lives in the loader, where the PE format is understood, and
  * arrives through the host. This layer may not reach into that one, and the
@@ -218,26 +219,31 @@ export function createResourceFunctions(host){
          * HGLOBAL LoadResource(HMODULE hModule, HRSRC hResInfo)
          *
          * Nothing is loaded. The bytes came into memory with the image and have
-         * not moved, so this hands back the same token and LockResource turns it
-         * into the address they are already at.
+         * not moved, so the HGLOBAL is their address -- on Win32 it always is,
+         * and a program that reads through it without locking works there.
          */
         LoadResource: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, resource])=>{
+                if ((resource >>> 0) === 0)
+                {
+                    return 0;
+                }
                 const entry = found.get(resource >>> 0);
-                return entry ? resource >>> 0 : fail(ERROR_RESOURCE_DATA_NOT_FOUND);
+                return entry ? (entry.base + entry.rva) >>> 0 : fail(ERROR_RESOURCE_DATA_NOT_FOUND);
             },
         },
 
-        /** LPVOID LockResource(HGLOBAL hResData) */
+        /**
+         * LPVOID LockResource(HGLOBAL hResData)
+         *
+         * The handle already is the pointer, so it comes back as it went in.
+         */
         LockResource: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([resource])=>{
-                const entry = found.get(resource >>> 0);
-                return entry ? (entry.base + entry.rva) >>> 0 : 0;
-            },
+            handler: ([handle])=>handle >>> 0,
         },
 
         /**

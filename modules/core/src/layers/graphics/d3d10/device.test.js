@@ -1190,12 +1190,18 @@ test('viewports and scissor rectangles are lists, and an empty one is legal', ()
     assert.equal(rects.count, 1);
     assert.deepEqual(rects.rects[0], { left: 1, top: 2, right: 3, bottom: 4 });
 
-    // More than the pipeline has room for is truncated, not refused: these
-    // setters have no way to report anything.
-    device.RSSetViewports(new Array(D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS + 4).fill(
-        { TopLeftX: 0, TopLeftY: 0, Width: 1, Height: 1, MinDepth: 0, MaxDepth: 1 }));
+    // More viewports than the pipeline has room for is a call Windows ignores
+    // whole, as Wine's d3d10core tests show: what was set before stays.
+    device.RSSetViewports(new Array(D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS + 1).fill(
+        { TopLeftX: 1, TopLeftY: 0, Width: 1, Height: 1, MinDepth: 0, MaxDepth: 1 }));
     device.RSGetViewports(viewports);
-    assert.equal(viewports.count, D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS);
+    assert.equal(viewports.count, 2);
+    assert.equal(viewports.viewports[0].TopLeftX, 0);
+    device.RSSetViewports(new Array(D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS).fill(
+        { TopLeftX: 1, TopLeftY: 0, Width: 1, Height: 1, MinDepth: 0, MaxDepth: 1 }));
+    device.RSGetViewports(viewports);
+    assert.equal(viewports.count, D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS,
+        'exactly as many is taken');
 
     device.RSSetViewports([]);
     device.RSGetViewports(viewports);
@@ -1532,6 +1538,251 @@ test('a query is made for every kind, and only two kinds are predicates', ()=>{
     assertFullyReleased(device);
 });
 
+/**
+ * @param {any} device
+ * @param {number} kind
+ */
+function createQuery(device, kind){
+    /** @type {{ query?: any }} */
+    const out = {};
+    assert.equal(device.CreateQuery({ Query: kind, MiscFlags: 0 }, out), S_OK);
+    return out.query;
+}
+
+/**
+ * The answer a query gives into a buffer of its own size.
+ *
+ * @param {any} query
+ * @returns {{ hr: number, view: DataView | null }}
+ */
+function queryData(query){
+    /** @type {{ data?: Uint8Array | null }} */
+    const out = {};
+    const hr = query.GetData(true, query.GetDataSize(), 0, out);
+    return {
+        hr,
+        view: out.data ? new DataView(out.data.buffer, out.data.byteOffset, out.data.length)
+            : null,
+    };
+}
+
+/**
+ * A 640x480 target, its view bound with a full viewport, and a four-vertex
+ * strip ready to draw: the context Wine's query tests draw in.
+ *
+ * @param {any} device
+ * @param {{ pixelShader?: boolean }} [options]
+ */
+function bindQuad(device, options = {}){
+    const texture = createTexture2D(device, { Width: 640, Height: 480 });
+    /** @type {{ view?: any }} */
+    const view = {};
+    assert.equal(device.CreateRenderTargetView(texture, null, view), S_OK);
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    assert.equal(device.CreateVertexShader(passThroughVertexShader(), vs), S_OK);
+    device.VSSetShader(vs.shader);
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    if (options.pixelShader)
+    {
+        assert.equal(device.CreatePixelShader(solidPixelShader([1, 0, 0, 1]), ps), S_OK);
+        device.PSSetShader(ps.shader);
+    }
+    device.IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY.TRIANGLESTRIP);
+    device.OMSetRenderTargets([view.view], null);
+    device.RSSetViewports([{
+        TopLeftX: 0, TopLeftY: 0, Width: 640, Height: 480, MinDepth: 0, MaxDepth: 1,
+    }]);
+    return [texture, view.view, vs.shader, ps.shader ?? null];
+}
+
+test('each kind of query answers a structure of its own size', ()=>{
+    // After Wine's d3d10core test_occlusion_query, test_pipeline_statistics_query,
+    // test_timestamp_query and test_so_statistics_query, and the header's structures.
+    const device = createDevice();
+    const sizes = {
+        [D3D10_QUERY.EVENT]: 4,
+        [D3D10_QUERY.OCCLUSION]: 8,
+        [D3D10_QUERY.TIMESTAMP]: 8,
+        [D3D10_QUERY.TIMESTAMP_DISJOINT]: 16,
+        [D3D10_QUERY.PIPELINE_STATISTICS]: 64,
+        [D3D10_QUERY.OCCLUSION_PREDICATE]: 4,
+        [D3D10_QUERY.SO_STATISTICS]: 16,
+        [D3D10_QUERY.SO_OVERFLOW_PREDICATE]: 4,
+    };
+    for (const [kind, size] of Object.entries(sizes))
+    {
+        const query = createQuery(device, Number(kind));
+        assert.equal(query.GetDataSize(), size, `query ${kind}`);
+        query.release();
+    }
+    assertFullyReleased(device);
+});
+
+test('a query never ended, or begun again, has no answer and says so', ()=>{
+    const device = createDevice();
+    const query = createQuery(device, D3D10_QUERY.OCCLUSION);
+    /** @type {{ data?: Uint8Array | null }} */
+    const out = {};
+    assert.equal(query.GetData(false, 0, 0, out), DXGI_ERROR_INVALID_CALL);
+    assert.equal(query.GetData(true, 8, 0, out), DXGI_ERROR_INVALID_CALL);
+    // An end with no beginning is nothing; a beginning makes it build.
+    query.End();
+    query.Begin();
+    query.Begin();
+    assert.equal(query.GetData(false, 0, 0, out), DXGI_ERROR_INVALID_CALL);
+    query.End();
+    assert.equal(query.GetData(false, 0, 0, out), S_OK);
+    query.release();
+
+    const event = createQuery(device, D3D10_QUERY.EVENT);
+    assert.equal(event.GetData(true, 4, 0, out), DXGI_ERROR_INVALID_CALL);
+    event.Begin();
+    assert.equal(event.GetData(true, 4, 0, out), DXGI_ERROR_INVALID_CALL,
+        'an event has no beginning, and Begin does not issue it');
+    event.End();
+    const answer = queryData(event);
+    assert.equal(answer.hr, S_OK);
+    assert.equal(answer.view?.getUint32(0, true), 1, 'TRUE: the work before it is done');
+    event.release();
+    assertFullyReleased(device);
+});
+
+test('an answer is refused into a buffer of any size but its own', ()=>{
+    const device = createDevice();
+    const query = createQuery(device, D3D10_QUERY.OCCLUSION);
+    query.Begin();
+    query.End();
+    /** @type {{ data?: Uint8Array | null }} */
+    const out = {};
+    for (const size of [4, 2, 7, 9])
+    {
+        assert.equal(query.GetData(true, size, 0, out), E_INVALIDARG, `${size} bytes`);
+        assert.equal(out.data, null, 'nothing is written');
+    }
+    assert.equal(query.GetData(true, 0, 0, out), S_OK, 'no room asks only whether it is ready');
+    assert.equal(out.data, null);
+    assert.equal(query.GetData(false, 4, 0, out), E_INVALIDARG, 'a size with nowhere to put it');
+    assert.equal(query.GetData(false, 8, 0, out), E_INVALIDARG);
+    query.release();
+    assertFullyReleased(device);
+});
+
+test('an occlusion query counts the samples its draws cover, and none for no draw', ()=>{
+    const device = createDevice();
+    const bound = bindQuad(device, { pixelShader: true });
+    const query = createQuery(device, D3D10_QUERY.OCCLUSION);
+    const predicate = createQuery(device, D3D10_QUERY.OCCLUSION_PREDICATE);
+    query.Begin();
+    predicate.Begin();
+    device.Draw(4, 0);
+    query.End();
+    predicate.End();
+    assert.equal(queryData(query).view?.getBigUint64(0, true), 640n * 480n);
+    assert.equal(queryData(predicate).view?.getUint32(0, true), 1);
+
+    query.Begin();
+    query.End();
+    query.End();
+    assert.equal(queryData(query).view?.getBigUint64(0, true), 0n);
+    predicate.Begin();
+    predicate.End();
+    assert.equal(queryData(predicate).view?.getUint32(0, true), 0);
+    query.release();
+    predicate.release();
+    bound.forEach(object=>object?.release());
+    assertFullyReleased(device);
+});
+
+test('pipeline statistics count what the input assembler and the shaders were given', ()=>{
+    const device = createDevice();
+    const bound = bindQuad(device);
+    const query = createQuery(device, D3D10_QUERY.PIPELINE_STATISTICS);
+    query.Begin();
+    device.Draw(4, 0);
+    query.End();
+    let view = /** @type {DataView} */ (queryData(query).view);
+    const counters = ()=>[0, 8, 16, 24, 32, 40, 48, 56]
+        .map(at=>Number(view.getBigUint64(at, true)));
+    assert.deepEqual(counters(), [4, 2, 4, 0, 0, 2, 2, 0],
+        'IA vertices and primitives, VS, GS, clipper in and out, and no pixel shader');
+
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader(solidPixelShader([1, 0, 0, 1]), ps), S_OK);
+    device.PSSetShader(ps.shader);
+    query.Begin();
+    device.DrawInstanced(4, 3, 0, 0);
+    query.End();
+    view = /** @type {DataView} */ (queryData(query).view);
+    assert.deepEqual(counters().slice(0, 3), [12, 6, 12], 'three instances');
+    assert.ok(counters()[7] >= 3 * 640 * 480, 'a pixel shader runs over what is covered');
+    query.release();
+    ps.shader.release();
+    bound.forEach(object=>object?.release());
+    assertFullyReleased(device);
+});
+
+test('a timestamp ends where it is issued, and its disjoint query says to discard it', ()=>{
+    let clock = 5;
+    /** @type {{ device?: any }} */
+    const out = {};
+    /** @type {string[]} */
+    const divergences = [];
+    assert.equal(D3D10CreateDevice(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0,
+        D3D10_SDK_VERSION, out, {
+            now: ()=>clock,
+            divergence: (api, detail)=>divergences.push(detail),
+        }), S_OK);
+    const device = out.device;
+    const disjoint = createQuery(device, D3D10_QUERY.TIMESTAMP_DISJOINT);
+    const stamp = createQuery(device, D3D10_QUERY.TIMESTAMP);
+    disjoint.Begin();
+    assert.equal(queryData(disjoint).hr, DXGI_ERROR_INVALID_CALL);
+    assert.equal(queryData(stamp).hr, DXGI_ERROR_INVALID_CALL);
+    stamp.End();
+    clock = 7;
+    const first = queryData(stamp);
+    assert.equal(first.hr, S_OK);
+    assert.equal(first.view?.getBigUint64(0, true), 5_000_000n, 'nanoseconds at its end');
+    stamp.End();
+    assert.equal(queryData(stamp).view?.getBigUint64(0, true), 7_000_000n);
+    disjoint.End();
+    const answer = queryData(disjoint);
+    assert.equal(answer.hr, S_OK);
+    assert.equal(answer.view?.getBigUint64(0, true), 1_000_000_000n, 'Frequency');
+    assert.equal(answer.view?.getUint32(8, true), 1, 'Disjoint: this clock is not the GPU\'s');
+    // The clock is the one the device was handed -- the guest's, in an
+    // assembled build -- so the report names neither.
+    assert.ok(divergences.some(line=>line.includes('the clock the device was given, not the'
+        + ' GPU\'s')), divergences.join('; '));
+    stamp.release();
+    disjoint.release();
+    assertFullyReleased(device);
+});
+
+test('stream-output queries count nothing written and no overflow', ()=>{
+    const device = createDevice();
+    const bound = bindQuad(device);
+    const statistics = createQuery(device, D3D10_QUERY.SO_STATISTICS);
+    const overflow = createQuery(device, D3D10_QUERY.SO_OVERFLOW_PREDICATE);
+    statistics.Begin();
+    overflow.Begin();
+    device.Draw(4, 0);
+    statistics.End();
+    overflow.End();
+    const data = queryData(statistics);
+    assert.equal(data.hr, S_OK);
+    assert.equal(data.view?.getBigUint64(0, true), 0n);
+    assert.equal(data.view?.getBigUint64(8, true), 0n);
+    assert.equal(queryData(overflow).view?.getUint32(0, true), 0);
+    statistics.release();
+    overflow.release();
+    bound.forEach(object=>object?.release());
+    assertFullyReleased(device);
+});
+
 // --- private data ---
 
 test('private data is kept per object and an interface entry holds a reference', ()=>{
@@ -1614,6 +1865,170 @@ test('a format reports what it can be used for, and an unknown one fails', ()=>{
     assert.ok(/** @type {number} */ (out.support) & 0x4, 'an index buffer');
     assert.equal(device.CheckFormatSupport(DXGI_FORMAT.D24_UNORM_S8_UINT, out), S_OK);
     assert.ok(/** @type {number} */ (out.support) & 0x10000, 'a depth stencil');
+    assertFullyReleased(device);
+});
+
+test('the compressed, packed and typeless formats report what this device does with them', ()=>{
+    // After Wine's d3d10core test_format_support and its display format list.
+    const device = createDevice();
+    /** @param {number} format */
+    const support = format=>{
+        /** @type {{ support?: number }} */
+        const out = {};
+        assert.equal(device.CheckFormatSupport(format, out), S_OK, `format ${format}`);
+        return /** @type {number} */ (out.support);
+    };
+    for (const format of [DXGI_FORMAT.BC1_UNORM, DXGI_FORMAT.BC3_UNORM_SRGB,
+        DXGI_FORMAT.BC4_SNORM, DXGI_FORMAT.BC5_UNORM])
+    {
+        const bits = support(format);
+        assert.ok(bits & 0x20, 'a 2D texture');
+        assert.ok(bits & 0x200, 'sampled');
+        assert.ok(!(bits & 0x4000), 'never a render target');
+        assert.ok(!(bits & 0x1), 'never a buffer');
+    }
+    assert.ok(support(DXGI_FORMAT.R11G11B10_FLOAT) & 0x4000, 'R11G11B10 is a render target');
+    assert.ok(!(support(DXGI_FORMAT.R9G9B9E5_SHAREDEXP) & 0x4000), 'a shared exponent is not');
+    assert.ok(support(DXGI_FORMAT.R9G9B9E5_SHAREDEXP) & 0x200);
+    assert.ok(!(support(DXGI_FORMAT.R32G32B32A32_FLOAT) & 0x200),
+        'a 32-bit float is loaded, not filtered');
+    assert.ok(support(DXGI_FORMAT.R16_FLOAT) & 0x2, 'a one-channel vertex element');
+    assert.ok(support(DXGI_FORMAT.R8G8_UINT) & 0x2);
+    for (const format of [DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UNORM_SRGB,
+        DXGI_FORMAT.B8G8R8A8_UNORM, DXGI_FORMAT.B8G8R8A8_UNORM_SRGB])
+    {
+        assert.ok(support(format) & 0x80000, `format ${format} can be displayed`);
+    }
+    for (const format of [DXGI_FORMAT.R1_UNORM, DXGI_FORMAT.B5G6R5_UNORM,
+        DXGI_FORMAT.B5G5R5A1_UNORM])
+    {
+        /** @type {{ support?: number }} */
+        const out = {};
+        assert.equal(device.CheckFormatSupport(format, out), E_FAIL, `format ${format}`);
+    }
+    assertFullyReleased(device);
+});
+
+test('a texture is made in every format a shader can read, and drawn into only in those'
+    + ' a shader can write', ()=>{
+    // After the format table of Wine's d3d10core test_create_texture2d.
+    const device = createDevice();
+    /** @param {number} format @param {number} bindFlags */
+    const result = (format, bindFlags)=>{
+        /** @type {{ resource?: any }} */
+        const out = {};
+        const hr = device.CreateTexture2D({
+            ...TEXTURE_2D, Width: 16, Height: 16, Format: format, BindFlags: bindFlags,
+        }, null, out);
+        out.resource?.release();
+        return hr;
+    };
+    const { SHADER_RESOURCE, RENDER_TARGET, DEPTH_STENCIL } = D3D10_BIND;
+    for (const format of [
+        DXGI_FORMAT.BC1_TYPELESS, DXGI_FORMAT.BC1_UNORM, DXGI_FORMAT.BC1_UNORM_SRGB,
+        DXGI_FORMAT.BC2_TYPELESS, DXGI_FORMAT.BC2_UNORM, DXGI_FORMAT.BC2_UNORM_SRGB,
+        DXGI_FORMAT.BC3_TYPELESS, DXGI_FORMAT.BC3_UNORM, DXGI_FORMAT.BC3_UNORM_SRGB,
+        DXGI_FORMAT.BC4_TYPELESS, DXGI_FORMAT.BC4_UNORM, DXGI_FORMAT.BC4_SNORM,
+        DXGI_FORMAT.BC5_TYPELESS, DXGI_FORMAT.BC5_UNORM, DXGI_FORMAT.BC5_SNORM,
+    ])
+    {
+        assert.equal(result(format, SHADER_RESOURCE), S_OK, `format ${format} is sampled`);
+        assert.equal(result(format, RENDER_TARGET), E_INVALIDARG, `format ${format} is not drawn`);
+    }
+    assert.equal(result(DXGI_FORMAT.R9G9B9E5_SHAREDEXP, SHADER_RESOURCE), S_OK);
+    assert.equal(result(DXGI_FORMAT.R9G9B9E5_SHAREDEXP, RENDER_TARGET), E_INVALIDARG);
+    assert.equal(result(DXGI_FORMAT.R9G9B9E5_SHAREDEXP, DEPTH_STENCIL), E_INVALIDARG);
+    assert.equal(result(DXGI_FORMAT.R11G11B10_FLOAT, RENDER_TARGET), S_OK);
+    assert.equal(result(DXGI_FORMAT.R32G8X24_TYPELESS, DEPTH_STENCIL), S_OK);
+    assert.equal(result(DXGI_FORMAT.R32G8X24_TYPELESS, RENDER_TARGET), E_INVALIDARG);
+    assert.equal(result(DXGI_FORMAT.R16_TYPELESS, RENDER_TARGET), S_OK);
+    assert.equal(result(DXGI_FORMAT.R16_TYPELESS, DEPTH_STENCIL | SHADER_RESOURCE), S_OK);
+    assert.equal(result(DXGI_FORMAT.R24_UNORM_X8_TYPELESS, RENDER_TARGET), E_INVALIDARG);
+    assert.equal(result(DXGI_FORMAT.R8G8B8A8_UNORM, DEPTH_STENCIL), E_INVALIDARG);
+    assert.equal(result(DXGI_FORMAT.R10G10B10A2_UINT, RENDER_TARGET), S_OK);
+    assert.equal(result(DXGI_FORMAT.B5G6R5_UNORM, SHADER_RESOURCE), E_INVALIDARG,
+        'not a format of this version of the API');
+    assertFullyReleased(device);
+});
+
+test('a block-compressed texture maps a row of blocks at a time', ()=>{
+    const device = createDevice();
+    /** @type {{ resource?: any }} */
+    const out = {};
+    assert.equal(device.CreateTexture2D({
+        ...TEXTURE_2D, Width: 8, Height: 8, MipLevels: 0, Format: DXGI_FORMAT.BC3_UNORM,
+        Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+        CPUAccessFlags: D3D10_CPU_ACCESS.READ | D3D10_CPU_ACCESS.WRITE,
+    }, null, out), S_OK);
+    /** @type {{ data?: Uint8Array | null, rowPitch?: number, depthPitch?: number }} */
+    const mapped = {};
+    assert.equal(out.resource.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
+    assert.equal(mapped.rowPitch, 32, 'two blocks of sixteen bytes');
+    assert.equal(mapped.data?.length, 64, 'two rows of blocks');
+    out.resource.Unmap(0);
+    assert.equal(out.resource.Map(3, D3D10_MAP.READ, 0, mapped), S_OK);
+    assert.equal(mapped.rowPitch, 16, 'a 1x1 level is still one whole block');
+    assert.equal(mapped.data?.length, 16);
+    out.resource.Unmap(3);
+    out.resource.release();
+    assertFullyReleased(device);
+});
+
+test('a copy moves bits within a format family and never between families', ()=>{
+    // After Wine's d3d10core test_format_compatibility and
+    // test_compressed_format_compatibility.
+    const device = createDevice();
+    /**
+     * @param {number} format @param {number} width @param {number} height
+     * @param {Uint8Array} bytes
+     */
+    const texture = (format, width, height, bytes)=>{
+        /** @type {{ resource?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture2D({
+            ...TEXTURE_2D, Width: width, Height: height, Format: format,
+            Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+            CPUAccessFlags: D3D10_CPU_ACCESS.READ | D3D10_CPU_ACCESS.WRITE,
+        }, [{ pSysMem: bytes }], out), S_OK);
+        return out.resource;
+    };
+    /** @param {any} resource */
+    const contents = resource=>{
+        /** @type {{ data?: Uint8Array | null }} */
+        const mapped = {};
+        assert.equal(resource.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
+        const bytes = [.../** @type {Uint8Array} */ (mapped.data)];
+        resource.Unmap(0);
+        return bytes;
+    };
+    const texels = Uint8Array.from({ length: 64 }, (_, at)=>at + 1);
+    const zeros = new Uint8Array(64);
+
+    const typeless = texture(DXGI_FORMAT.R8G8B8A8_TYPELESS, 4, 4, texels);
+    const unorm = texture(DXGI_FORMAT.R8G8B8A8_UNORM, 4, 4, zeros);
+    device.CopyResource(unorm, typeless);
+    assert.deepEqual(contents(unorm), [...texels], 'a typeless resource and its member');
+
+    const bgra = texture(DXGI_FORMAT.B8G8R8A8_UNORM, 4, 4, zeros);
+    device.CopyResource(bgra, unorm);
+    assert.deepEqual(contents(bgra), [...zeros], 'RGBA and BGRA are two families');
+
+    // A 16x16 BC1 texture is 64 bytes, as the 4x4 texture is: the extents differ.
+    const blocks = texture(DXGI_FORMAT.BC1_UNORM, 8, 8, texels.subarray(0, 32));
+    const other = texture(DXGI_FORMAT.R16G16B16A16_UINT, 2, 2, zeros.subarray(0, 32));
+    device.CopySubresourceRegion(other, 0, 0, 0, 0, blocks, 0, null);
+    assert.deepEqual(contents(other), [...zeros.subarray(0, 32)], 'blocks are not texels');
+
+    // Within a family, a region lands at its offset, counted in blocks.
+    const target = texture(DXGI_FORMAT.BC1_TYPELESS, 8, 8, zeros.subarray(0, 32));
+    device.CopySubresourceRegion(target, 0, 4, 4, 0, blocks, 0,
+        { left: 0, top: 0, front: 0, right: 4, bottom: 4, back: 1 });
+    assert.deepEqual(contents(target), [...zeros.subarray(0, 24), ...texels.subarray(0, 8)],
+        'the first block of the source, as the last block of the target');
+    for (const resource of [typeless, unorm, bgra, blocks, other, target])
+    {
+        resource.release();
+    }
     assertFullyReleased(device);
 });
 

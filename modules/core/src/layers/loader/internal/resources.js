@@ -39,6 +39,30 @@ export const RT_STRING = 6;
 /** How many strings share one bundle. */
 const STRINGS_PER_BUNDLE = 16;
 
+/**
+ * The language this machine's user interface is in: what a lookup naming no
+ * language prefers, and what GetUserDefaultUILanguage answers.
+ */
+export const UI_LANGUAGE = 0x0409;
+
+/** MAKELANGID(LANG_ENGLISH, SUBLANG_DEFAULT). */
+const ENGLISH = 0x0409;
+
+/** A LANGID's primary language is its low ten bits; the sublanguage is above them. */
+const PRIMARY_MASK = 0x3ff;
+
+/**
+ * The languages a lookup naming none tries, in order, before settling for the
+ * first there is: the user interface's language, its primary language with
+ * SUBLANG_NEUTRAL, LANG_NEUTRAL with SUBLANG_NEUTRAL and then with
+ * SUBLANG_DEFAULT, and English. A program that carries its dialogs in many
+ * languages gets its user's rather than whichever sorts first.
+ *
+ * @param {number} ui
+ * @returns {number[]}
+ */
+const neutralPreference = ui=>[...new Set([ui, ui & PRIMARY_MASK, 0x0000, 0x0400, ENGLISH])];
+
 /** Only the types worth naming in a listing; anything else is reported by number. */
 const TYPE_NAMES = new Map([
     [1, 'CURSOR'], [2, 'BITMAP'], [3, 'ICON'], [4, 'MENU'], [5, 'DIALOG'],
@@ -71,19 +95,21 @@ const TYPE_NAMES = new Map([
 /**
  * Finds one resource by type, name and language.
  *
- * `null` for the language means "whatever this image has", which is what a
- * program with one language always wants and what every caller here asks for:
- * a title that ships one locale still tags its resources with it, so demanding
- * a specific language would find nothing.
+ * `null` for the language is LANG_NEUTRAL: the search `neutralPreference`
+ * orders, ending with whatever the image has, since a title that ships one
+ * locale still tags its resources with it and must be given them. A language
+ * named is that language alone (Wine's kernel32 resource tests,
+ * test_find_resource).
  *
  * @param {Uint8Array} bytes  The raw file (not the mapped image).
  * @param {import('./pe.js').PeImage} image
  * @param {number | string} type
  * @param {number | string} name
  * @param {number | string | null} [language]
+ * @param {number} [uiLanguage]  The user interface's language, for a neutral search.
  * @returns {FoundResource | null}
  */
-export function findResource(bytes, image, type, name, language = null){
+export function findResource(bytes, image, type, name, language = null, uiLanguage = UI_LANGUAGE){
     const tree = openTree(bytes, image);
     if (!tree)
     {
@@ -113,7 +139,9 @@ export function findResource(bytes, image, type, name, language = null){
         return tree.leaf(byName.offset, language ?? 0);
     }
 
-    const byLanguage = tree.lookup(byName.offset, language);
+    const byLanguage = language !== null ? tree.lookup(byName.offset, language)
+        : neutralPreference(uiLanguage).map(each=>tree.lookup(byName.offset, each))
+            .find(found=>found !== null) ?? tree.lookup(byName.offset, null);
     if (byLanguage === null || byLanguage.directory)
     {
         return null;

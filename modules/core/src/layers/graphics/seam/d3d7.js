@@ -29,20 +29,38 @@ import {
 } from './iids.js';
 import {
     D3DCLIPSTATUS, D3DDEVICEDESC7, D3DLIGHT7, D3DPRIMCAPS, D3DRECT, D3DVERTEXBUFFERDESC,
-    D3DVIEWPORT7, createFields,
+    D3DVIEWPORT7, RECT, createFields,
 } from './structs.js';
 import { readGuid } from './ddraw.js';
 import { writePixelFormat } from '../ddraw/structs.js';
 import { depthFormatForDepth, pixelFormatForDepth } from '../ddraw/objects.js';
 import { DDERR_INVALIDPARAMS, D3D_OK } from '../d3d7/constants.js';
 import { createDirect3D7 } from '../d3d7/device.js';
+import { loadTexture } from '../d3d7/load.js';
+import { processVertices } from '../d3d7/process.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 
 /** What an enumeration callback answers to stop. */
 const DDENUMRET_CANCEL = 0;
 
+/** Succeeded, and answered nothing -- which is what GetInfo does outside a debug runtime. */
+const S_FALSE = 1;
+
 /** The texture formats EnumTextureFormats names: the ones the renderer uploads. */
 const TEXTURE_DEPTHS = Object.freeze([32, 16]);
+
+/** The most vertices one draw may name (d3dtypes.h). */
+const D3DMAXNUMVERTICES = 0xffff;
+
+/**
+ * Which entry of a D3DDRAWPRIMITIVESTRIDEDDATA holds an attribute, and where
+ * in that entry's element it starts; the coordinate sets follow at four on.
+ *
+ * @type {Readonly<Record<string, [number, number]>>}
+ */
+const STRIDED_STREAMS = Object.freeze({
+    position: [0, 0], blendWeight: [0, 12], normal: [1, 0], diffuse: [2, 0], specular: [3, 0],
+});
 
 /**
  * A GUID as its sixteen bytes, the way a program reads one out of a structure:
@@ -214,6 +232,74 @@ export function createDirect3D7Seam(
         ? null
         : memory.readMemory(pointer >>> 0, length));
 
+    /**
+     * One stream of a D3DDRAWPRIMITIVESTRIDEDDATA: a pointer and a stride for
+     * the position, the normal, the two colours and eight coordinate sets, in
+     * that order. Blend weights ride in the position's stream after its three
+     * floats; a point size has no stream in this version.
+     *
+     * @param {number} data @param {string} name  An attribute of decodeFvf's.
+     * @returns {{ base: number, stride: number } | null}
+     */
+    const stridedStream = (data, name)=>{
+        const [entry, offset] = STRIDED_STREAMS[name]
+            ?? (name.startsWith('texCoord') ? [4 + Number(name.slice('texCoord'.length)), 0]
+                : [-1, 0]);
+        if (entry < 0)
+        {
+            return null;
+        }
+        const at = (data >>> 0) + entry * 8;
+        return { base: (fields.readU32(at) + offset) >>> 0, stride: fields.readU32(at + 4) };
+    };
+
+    /**
+     * The vertices of a strided draw packed as the format lays them out, so
+     * the draw goes down the path a draw by pointer takes. Each stream is read
+     * once over the span its vertices cover, unless its stride makes that
+     * span a waste. Null for no structure, a format with no position, or more
+     * vertices than one draw may have -- all of which the draw refuses.
+     *
+     * @param {number} data @param {number} fvf @param {number} count
+     * @returns {Uint8Array | null}
+     */
+    const gatherStrided = (data, fvf, count)=>{
+        if ((data >>> 0) === 0 || count > D3DMAXNUMVERTICES)
+        {
+            return null;
+        }
+        let layout;
+        try
+        {
+            layout = decodeFvf(fvf >>> 0);
+        }
+        catch (e){
+            void e;
+            return null;
+        }
+        const packed = new Uint8Array(layout.stride * count);
+        layout.attributes.forEach((attribute, index)=>{
+            const size = (layout.attributes[index + 1]?.offset ?? layout.stride) - attribute.offset;
+            const stream = stridedStream(data, attribute.name);
+            if (!stream || count === 0)
+            {
+                return;
+            }
+            const spanBytes = (count - 1) * stream.stride + size;
+            const span = spanBytes <= count * size * 4
+                ? memory.readMemory(stream.base, spanBytes)
+                : null;
+            for (let k = 0; k < count; k++)
+            {
+                const bytes = span
+                    ? span.subarray(k * stream.stride, k * stream.stride + size)
+                    : memory.readMemory((stream.base + k * stream.stride) >>> 0, size);
+                packed.set(bytes, k * layout.stride + attribute.offset);
+            }
+        });
+        return packed;
+    };
+
     /** @param {number} fvf @returns {number} the stride of a format, or zero for a bad one */
     const strideOf = fvf=>{
         try
@@ -297,7 +383,37 @@ export function createDirect3D7Seam(
 
     // --- vertex buffer ---
 
-    const bufferInterfaces = [describe(IID_IDirect3DVertexBuffer7, IDIRECT3DVERTEXBUFFER7_SLOTS, {
+    /**
+     * Runs ProcessVertices into a buffer, which is written as a lock would
+     * write it, so a device drawing the buffer takes the new vertices.
+     *
+     * @param {any} buffer
+     * @param {number} op @param {number} destIndex @param {number} count
+     * @param {number} device @param {number} flags
+     * @param {import('../d3d7/process.js').VertexSource} source
+     */
+    const processInto = (buffer, op, destIndex, count, device, flags, source)=>{
+        const owner = publisher.objectAt(device);
+        if (!owner)
+        {
+            return DDERR_INVALIDPARAMS;
+        }
+        const locking = !buffer.locked;
+        if (locking)
+        {
+            buffer.Lock(0, {});
+        }
+        const hr = processVertices({ memory, vertexOp: op >>> 0, dest: buffer,
+            destIndex: destIndex >>> 0, count: count >>> 0, source,
+            state: owner.processingState(), flags: flags >>> 0 });
+        if (locking)
+        {
+            buffer.Unlock();
+        }
+        return hr;
+    };
+
+    const bufferMethods = {
         /** @param {any} buffer @param {number[]} args */
         Lock: (buffer, [flags, out, sizeOut])=>{
             if ((out >>> 0) === 0)
@@ -338,7 +454,58 @@ export function createDirect3D7Seam(
         },
         /** @param {any} buffer */
         Optimize: (/** @type {any} */ buffer)=>buffer.Optimize(),
-    })];
+        /** @param {any} buffer @param {number[]} args */
+        ProcessVertices: (buffer, [op, destIndex, count, source, sourceIndex, device, flags])=>{
+            const from = publisher.objectAt(source);
+            if (!from || (sourceIndex >>> 0) + (count >>> 0) > from.numVertices)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const layout = decodeFvf(from.fvf);
+            return processInto(buffer, op, destIndex, count, device, flags, {
+                fvf: from.fvf,
+                addressOf: (name, k)=>{
+                    const attribute = layout.attributes.find(entry=>entry.name === name);
+                    return attribute
+                        ? from.base + ((sourceIndex >>> 0) + k) * layout.stride + attribute.offset
+                        : null;
+                },
+            });
+        },
+        /**
+         * The source is a D3DDRAWPRIMITIVESTRIDEDDATA, each stream read from
+         * its first vertex.
+         *
+         * @param {any} buffer @param {number[]} args
+         */
+        ProcessVerticesStrided: (buffer, [op, destIndex, count, data, fvf, device, flags])=>{
+            if ((data >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            let layout;
+            try
+            {
+                layout = decodeFvf(fvf >>> 0);
+            }
+            catch (e){
+                void e;
+                return DDERR_INVALIDPARAMS;
+            }
+            return processInto(buffer, op, destIndex, count, device, flags, {
+                fvf: fvf >>> 0,
+                addressOf: (name, k)=>{
+                    const stream = layout.attributes.some(entry=>entry.name === name)
+                        ? stridedStream(data, name)
+                        : null;
+                    return stream ? stream.base + k * stream.stride : null;
+                },
+            });
+        },
+    };
+    const bufferInterfaces = [
+        describe(IID_IDirect3DVertexBuffer7, IDIRECT3DVERTEXBUFFER7_SLOTS, bufferMethods),
+    ];
 
     // --- device ---
 
@@ -618,6 +785,16 @@ export function createDirect3D7Seam(
         },
 
         /** @param {any} device @param {number[]} args */
+        DrawPrimitiveStrided: (device, [type, fvf, data, count])=>device.DrawPrimitive(
+            type >>> 0, fvf >>> 0, gatherStrided(data, fvf, count >>> 0), count >>> 0),
+
+        /** @param {any} device @param {number[]} args */
+        DrawIndexedPrimitiveStrided: (device, [type, fvf, data, count, indices, indexCount])=>
+            device.DrawIndexedPrimitive(type >>> 0, fvf >>> 0,
+                gatherStrided(data, fvf, count >>> 0), count >>> 0,
+                readArray(indices, (indexCount >>> 0) * 2), indexCount >>> 0),
+
+        /** @param {any} device @param {number[]} args */
         DrawPrimitiveVB: (device, [type, buffer, start, count])=>device.DrawPrimitiveVB(
             type >>> 0, publisher.objectAt(buffer), start >>> 0, count >>> 0),
 
@@ -713,6 +890,53 @@ export function createDirect3D7Seam(
             }
             return hr;
         },
+
+        /**
+         * The flags name cube faces, and no surface here is a cube map.
+         *
+         * @param {any} device @param {number[]} args
+         */
+        Load: (device, [dest, point, src, rect])=>loadTexture({
+            memory,
+            dest: publisher.objectAt(dest),
+            destPoint: (point >>> 0) === 0
+                ? null
+                : { x: fields.readU32(point >>> 0) | 0, y: fields.readU32((point >>> 0) + 4) | 0 },
+            src: publisher.objectAt(src),
+            srcRect: (rect >>> 0) === 0
+                ? null
+                : {
+                    left: fields.readU32((rect >>> 0) + RECT.left) | 0,
+                    top: fields.readU32((rect >>> 0) + RECT.top) | 0,
+                    right: fields.readU32((rect >>> 0) + RECT.right) | 0,
+                    bottom: fields.readU32((rect >>> 0) + RECT.bottom) | 0,
+                },
+        }),
+
+        /** @param {any} device @param {number[]} args */
+        ComputeSphereVisibility: (device, [centers, radii, count, , results])=>{
+            if ((centers >>> 0) === 0 || (radii >>> 0) === 0 || (results >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const points = readFloats(centers, (count >>> 0) * 3);
+            /** @type {{ results?: number[] }} */
+            const held = {};
+            const hr = device.ComputeSphereVisibility(
+                Array.from({ length: count >>> 0 }, (_, k)=>[...points.subarray(k * 3, k * 3 + 3)]),
+                [...readFloats(radii, count >>> 0)], held);
+            if (hr === D3D_OK)
+            {
+                (held.results ?? []).forEach((status, k)=>
+                    fields.writeU32((results >>> 0) + k * 4, status));
+            }
+            return hr;
+        },
+
+        // The retail answer: the call succeeded and there is nothing to report,
+        // which is what a program checks before reading the structure it
+        // passed. Nothing is written into it.
+        GetInfo: ()=>S_FALSE,
 
         /** @param {any} device @param {number[]} args */
         SetClipPlane: (device, [index, pointer])=>((pointer >>> 0) === 0
@@ -875,5 +1099,16 @@ export function createDirect3D7Seam(
 
         /** For tests, which have no guest to call through. */
         interfaces: { device: deviceInterfaces, buffer: bufferInterfaces },
+
+        /**
+         * What the Direct3D of DirectX 3, 5 and 6 shares with this one: the
+         * object per DirectDraw object, and the translations of the calls
+         * whose arguments did not change -- its devices wrap these devices,
+         * and its vertex buffer is this one under an older table.
+         */
+        shared: {
+            d3dFor, deviceMethods, bufferMethods, d3dMethods, gatherStrided, readArray, readFloats,
+            strideOf, writeString, textureDepths: TEXTURE_DEPTHS,
+        },
     };
 }

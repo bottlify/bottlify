@@ -10,7 +10,9 @@ import {
     D3D10_BIND, D3D10_DRIVER_TYPE, D3D10_SDK_VERSION, DXGI_ERROR_INVALID_CALL,
     DXGI_ERROR_NOT_FOUND, DXGI_FORMAT, DXGI_SWAP_EFFECT, DXGI_USAGE, E_NOINTERFACE, IID, S_OK,
 } from './constants.js';
-import { CreateDXGIFactory, createFactory, defaultSwapChainDesc } from './dxgi.js';
+import {
+    CreateDXGIFactory, CreateDXGIFactory1, createFactory, defaultSwapChainDesc,
+} from './dxgi.js';
 import { D3D10CreateDevice } from './device.js';
 
 /** @param {object} [options] */
@@ -57,6 +59,32 @@ test('the factory entry point answers for its own version and no later one', ()=
         assert.equal(CreateDXGIFactory(iid, out), E_NOINTERFACE, iid);
         assert.equal(out.object, null, `${iid} left no object behind`);
     }
+});
+
+test('the second entry point makes a factory that is IDXGIFactory1 as well', ()=>{
+    // After Wine's dxgi test_create_factory.
+    for (const iid of [IID.IUnknown, IID.IDXGIObject, IID.IDXGIFactory, IID.IDXGIFactory1])
+    {
+        /** @type {{ object?: any }} */
+        const out = {};
+        assert.equal(CreateDXGIFactory1(iid, out), S_OK, iid);
+        assert.ok(out.object.supports(IID.IDXGIFactory1));
+        assert.equal(out.object.IsCurrent(), true);
+        /** @type {{ adapter?: any }} */
+        const adapter = {};
+        assert.equal(out.object.EnumAdapters1(0, adapter), S_OK);
+        assert.ok(adapter.adapter.supports(IID.IDXGIAdapter1));
+        adapter.adapter.release();
+        assertFullyReleased(out.object, 'the factory');
+    }
+    /** @type {{ object?: any }} */
+    const refused = { object: 'untouched' };
+    assert.equal(CreateDXGIFactory1(IID.IDXGIDevice, refused), E_NOINTERFACE);
+    assert.equal(refused.object, null);
+    /** @type {{ object?: any }} */
+    const first = {};
+    assert.equal(CreateDXGIFactory(IID.IDXGIFactory, first), S_OK);
+    assert.ok(!first.object.supports(IID.IDXGIFactory1), 'the first version stays the first');
 });
 
 test('a factory has no parent, and says so rather than answering with nothing', ()=>{
@@ -207,7 +235,7 @@ test('a swap chain reports the description it was made from', ()=>{
     /** @type {{ desc?: any }} */
     const out = {};
     assert.equal(created.swapChain.GetDesc(out), S_OK);
-    assert.deepEqual(out.desc, requested);
+    assert.deepEqual(out.desc, { ...requested, windowed: true });
     // The description handed back is a copy: writing through it must not reach
     // the swap chain's own.
     out.desc.bufferCount = 99;

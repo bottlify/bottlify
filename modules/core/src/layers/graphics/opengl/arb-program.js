@@ -745,16 +745,14 @@ function parse(tokens, text){
             }
             case 'color':
             {
+                // A dot not followed by a colour type is the operand's own
+                // swizzle, which the caller reads.
                 /** @type {'primary' | 'secondary'} */
                 let colour = 'primary';
-                if (acceptSymbol('.'))
+                if (peekDotIdentifier(['primary', 'secondary']))
                 {
-                    const type = expectIdentifier();
-                    if (type.value !== 'primary' && type.value !== 'secondary')
-                    {
-                        fail('a colour binding is .primary or .secondary', type.position);
-                    }
-                    colour = type.value;
+                    at++;
+                    colour = /** @type {'primary' | 'secondary'} */ (next().value);
                 }
                 return trackAttrib(
                     { kind: 'vertex',
@@ -830,16 +828,11 @@ function parse(tokens, text){
             case 'color':
             {
                 /** @type {'primary' | 'secondary'} */
-                /** @type {'primary' | 'secondary'} */
                 let colour = 'primary';
-                if (acceptSymbol('.'))
+                if (peekDotIdentifier(['primary', 'secondary']))
                 {
-                    const type = expectIdentifier();
-                    if (type.value !== 'primary' && type.value !== 'secondary')
-                    {
-                        fail('a colour binding is .primary or .secondary', type.position);
-                    }
-                    colour = type.value;
+                    at++;
+                    colour = /** @type {'primary' | 'secondary'} */ (next().value);
                 }
                 binding = {
                     kind: 'fragment',
@@ -908,10 +901,7 @@ function parse(tokens, text){
                         at++;
                         colour = /** @type {'primary' | 'secondary'} */ (next().value);
                     }
-                    else if (peekSymbol('.'))
-                    {
-                        fail('a colour result takes .front/.back and .primary/.secondary');
-                    }
+                    // Any other dot is the destination's write mask.
                     return { kind: 'result', name: 'color', face, colour, index: 0 };
                 }
                 case 'texcoord':

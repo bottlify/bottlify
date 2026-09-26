@@ -189,12 +189,23 @@ test('fixed function reads a declaration by its offsets and refuses what it cann
     assert.deepEqual(layout, {
         id: 7,
         attributes: [
-            { name: 'texCoord0', offset: 0, format: 'float32x2', bytes: 8 },
-            { name: 'position', offset: 16, format: 'float32x3', bytes: 12 },
+            { name: 'texCoord0', offset: 0, format: 'float32x2', bytes: 8, stream: 0 },
+            { name: 'position', offset: 16, format: 'float32x3', bytes: 12, stream: 0 },
         ],
         preTransformed: false,
         texCoordSets: 1,
+        streams: [],
     }, 'the tangent is ignored and the rest read where they lie');
+    // A member in another stream is read from that stream (Wine's d3d9
+    // test_color_vertex draws the colours from streams 1 and 2).
+    const split = fixedFunctionLayoutOf({ id: 8, elements: [
+        element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
+        element(D3DDECLUSAGE.COLOR, D3DDECLTYPE.D3DCOLOR, 0, { stream: 2 }),
+        element(D3DDECLUSAGE.COLOR, D3DDECLTYPE.D3DCOLOR, 4, { stream: 1, index: 1 }),
+    ] });
+    assert.deepEqual(split?.attributes.map(attribute=>[attribute.name, attribute.stream]),
+        [['position', 0], ['diffuse', 2], ['specular', 1]]);
+    assert.deepEqual(split?.streams, [1, 2]);
     assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [position,
         element(D3DDECLUSAGE.BLENDWEIGHT, D3DDECLTYPE.FLOAT1, 28)] }), null, 'blend weights');
     assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [position,

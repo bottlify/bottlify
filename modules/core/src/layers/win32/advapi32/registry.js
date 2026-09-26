@@ -15,9 +15,17 @@
  *
  * A session's registry outlives the session, so the whole tree converts to a
  * plain JSON-able object and back.
+ *
+ * HKEY_CLASSES_ROOT is not a tree of its own. It is a view of two others: the
+ * machine's classes under HKLM\Software\Classes and the user's under
+ * HKCU\Software\Classes, the user's lying over the machine's. A class an
+ * installer registers under one name is found under the other, and a program
+ * that registers a COM server under HKLM\Software\Classes has it activated by
+ * code that only ever reads the classes root.
  */
 
 import { PROCESSOR, PROCESSOR_IDENTIFIER } from '../kernel32/processor.js';
+import { windowsVersion } from '../kernel32/versions.js';
 
 /** The predefined roots. A guest names these by constant; it never opens them. */
 export const HKEY_CLASSES_ROOT = 0x80000000;
@@ -36,12 +44,16 @@ export const REG_MULTI_SZ = 7;
 /** Types whose data is text, and is therefore expected to end in a terminator. */
 const STRING_TYPES = new Set([REG_SZ, REG_EXPAND_SZ, REG_MULTI_SZ]);
 
+/** The roots that are trees of their own; the classes root is a view of two of them. */
 const ROOT_NAMES = new Map([
-    [HKEY_CLASSES_ROOT, 'HKEY_CLASSES_ROOT'],
     [HKEY_CURRENT_USER, 'HKEY_CURRENT_USER'],
     [HKEY_LOCAL_MACHINE, 'HKEY_LOCAL_MACHINE'],
     [HKEY_USERS, 'HKEY_USERS'],
 ]);
+
+/** Where each side of the classes root lives. */
+const MACHINE_CLASSES = 'SOFTWARE\\Classes';
+const USER_CLASSES = 'Software\\Classes';
 
 /**
  * @typedef {Object} RegistryValue
@@ -51,11 +63,26 @@ const ROOT_NAMES = new Map([
  */
 
 /**
- * @typedef {Object} RegistryKey
+ * A key as the hive stores it.
+ *
+ * @typedef {Object} RegistryNode
  * @property {string} name
- * @property {Map<string, RegistryKey>} keys      Keyed by folded name.
+ * @property {Map<string, RegistryNode>} keys      Keyed by folded name.
  * @property {Map<string, RegistryValue>} values  Keyed by folded name.
  */
+
+/**
+ * A key reached through HKEY_CLASSES_ROOT: a path under the classes, looked up
+ * on both sides whenever it is used, so a key one side gains or loses after it
+ * was opened is seen through a handle already held.
+ *
+ * @typedef {Object} ClassesKey
+ * @property {'classes'} view
+ * @property {string} name
+ * @property {string[]} path
+ */
+
+/** @typedef {RegistryNode | ClassesKey} RegistryKey */
 
 /**
  * @typedef {Object} StoredValue
@@ -79,7 +106,7 @@ const ROOT_NAMES = new Map([
  */
 const fold = name=>name.toLowerCase();
 
-/** @param {string} name @returns {RegistryKey} */
+/** @param {string} name @returns {RegistryNode} */
 function makeKey(name){
     return { name, keys: new Map(), values: new Map() };
 }
@@ -124,7 +151,7 @@ function terminate(type, data){
     return padded;
 }
 
-/** @param {RegistryKey} key @returns {StoredKey} */
+/** @param {RegistryNode} key @returns {StoredKey} */
 function keyToJSON(key){
     return {
         name: key.name,
@@ -137,7 +164,7 @@ function keyToJSON(key){
     };
 }
 
-/** @param {any} stored @returns {RegistryKey} */
+/** @param {any} stored @returns {RegistryNode} */
 function keyFromJSON(stored){
     const key = makeKey(stored?.name ?? '');
     for (const value of stored?.values ?? [])
@@ -162,36 +189,145 @@ function keyFromJSON(stored){
  * @property {string} path
  * @property {Record<string, string | number | Uint8Array>} [values]
  *     Text is REG_SZ, a number REG_DWORD, bytes REG_BINARY.
+ * @property {readonly string[]} [owned]
+ *     Values that describe the machine rather than anything a program chose:
+ *     written from `values` whenever the machine's keys are put in place, and
+ *     removed when `values` has none, so a hive kept from a run under another
+ *     Windows describes this one.
  */
+
+/** @typedef {import('../kernel32/versions.js').WindowsVersion} WindowsVersion */
 
 /**
  * Where the shell keeps its folders, by the names the registry lists them
  * under. One table, because a program reads the same folder two ways -- the
  * registry value and the shell's own call -- and compares what it got.
  *
- * @type {Readonly<Record<string, string>>}
+ * Windows Vista moved them: the profile from `Documents and Settings` to
+ * `Users`, a roaming and a local `AppData` in it, and what every user shares
+ * to `ProgramData` and `Users\Public`.
+ *
+ * @param {WindowsVersion} [windows]
+ * @returns {Readonly<Record<string, string>>}
  */
-export const SHELL_FOLDERS = Object.freeze({
-    Desktop: 'C:\\Documents and Settings\\User\\Desktop',
-    Programs: 'C:\\Documents and Settings\\User\\Start Menu\\Programs',
-    'Start Menu': 'C:\\Documents and Settings\\User\\Start Menu',
-    Startup: 'C:\\Documents and Settings\\User\\Start Menu\\Programs\\Startup',
-    Personal: 'C:\\Documents and Settings\\User\\My Documents',
-    AppData: 'C:\\Documents and Settings\\User\\Application Data',
-    'Local AppData': 'C:\\Documents and Settings\\User\\Local Settings\\Application Data',
-    Fonts: 'C:\\WINDOWS\\Fonts',
-    Profile: 'C:\\Documents and Settings\\User',
-    'Common Desktop': 'C:\\Documents and Settings\\All Users\\Desktop',
-    'Common Programs': 'C:\\Documents and Settings\\All Users\\Start Menu\\Programs',
-    'Common Start Menu': 'C:\\Documents and Settings\\All Users\\Start Menu',
-    'Common Startup': 'C:\\Documents and Settings\\All Users\\Start Menu\\Programs\\Startup',
-    'Common Documents': 'C:\\Documents and Settings\\All Users\\Documents',
-    'Common AppData': 'C:\\Documents and Settings\\All Users\\Application Data',
-    Windows: 'C:\\WINDOWS',
-    System: 'C:\\WINDOWS\\system32',
-    ProgramFiles: 'C:\\Program Files',
-    CommonFiles: 'C:\\Program Files\\Common Files',
+export function shellFolders(windows = windowsVersion()){
+    const { user, allUsers, public: shared } = windows.profiles;
+    const machine = {
+        Fonts: 'C:\\WINDOWS\\Fonts',
+        Windows: 'C:\\WINDOWS',
+        System: 'C:\\WINDOWS\\system32',
+        ProgramFiles: 'C:\\Program Files',
+        CommonFiles: 'C:\\Program Files\\Common Files',
+    };
+    if (shared === null)
+    {
+        return Object.freeze({
+            Desktop: `${user}\\Desktop`,
+            Programs: `${user}\\Start Menu\\Programs`,
+            'Start Menu': `${user}\\Start Menu`,
+            Startup: `${user}\\Start Menu\\Programs\\Startup`,
+            Personal: `${user}\\My Documents`,
+            AppData: `${user}\\Application Data`,
+            'Local AppData': `${user}\\Local Settings\\Application Data`,
+            Profile: user,
+            'Common Desktop': `${allUsers}\\Desktop`,
+            'Common Programs': `${allUsers}\\Start Menu\\Programs`,
+            'Common Start Menu': `${allUsers}\\Start Menu`,
+            'Common Startup': `${allUsers}\\Start Menu\\Programs\\Startup`,
+            'Common Documents': `${allUsers}\\Documents`,
+            'Common AppData': `${allUsers}\\Application Data`,
+            ...machine,
+        });
+    }
+    const roaming = `${user}\\AppData\\Roaming`;
+    const menu = `${roaming}\\Microsoft\\Windows\\Start Menu`;
+    const commonMenu = `${allUsers}\\Microsoft\\Windows\\Start Menu`;
+    return Object.freeze({
+        Desktop: `${user}\\Desktop`,
+        Programs: `${menu}\\Programs`,
+        'Start Menu': menu,
+        Startup: `${menu}\\Programs\\Startup`,
+        Personal: `${user}\\Documents`,
+        AppData: roaming,
+        'Local AppData': `${user}\\AppData\\Local`,
+        Profile: user,
+        'Common Desktop': `${shared}\\Desktop`,
+        'Common Programs': `${commonMenu}\\Programs`,
+        'Common Start Menu': commonMenu,
+        'Common Startup': `${commonMenu}\\Programs\\Startup`,
+        'Common Documents': `${shared}\\Documents`,
+        'Common AppData': allUsers,
+        ...machine,
+    });
+}
+
+/**
+ * The directories a Windows's profile folders need on the volume, each parent
+ * before its children: every shell folder under the user's, the shared and the
+ * public profile, and the directories that hold them.
+ *
+ * @param {WindowsVersion} [windows]
+ * @returns {string[]}
+ */
+export function profileDirectories(windows = windowsVersion()){
+    const { user, allUsers, public: shared } = windows.profiles;
+    const roots = [user, allUsers, shared].filter(root=>root !== null);
+    /** @type {Set<string>} */
+    const directories = new Set();
+    for (const folder of Object.values(shellFolders(windows)))
+    {
+        if (!roots.some(root=>folder === root || folder.startsWith(`${root}\\`)))
+        {
+            continue;
+        }
+        const parts = folder.split('\\');
+        for (let depth = 2; depth <= parts.length; depth++)
+        {
+            directories.add(parts.slice(0, depth).join('\\'));
+        }
+    }
+    return [...directories];
+}
+
+/** What NT 4, 2000 and XP keep in CurrentBuild; Vista put the build number there. */
+const OBSOLETE_BUILD = '1.511.1 () (Obsolete data - do not use)';
+
+/** Every value of the Windows NT version key that describes the version. */
+const VERSION_VALUES = Object.freeze(['CurrentVersion', 'CurrentBuildNumber', 'CurrentBuild',
+    'CSDVersion', 'ProductName', 'CurrentMajorVersionNumber', 'CurrentMinorVersionNumber',
+    'DisplayVersion', 'ReleaseId', 'UBR']);
+
+/**
+ * The Windows NT version key's description of a Windows. Windows 10 leaves
+ * CurrentVersion at 6.3, where programs that parse it expect to find a
+ * number they know, and says 10.0 in two DWORDs of its own, beside the name of
+ * its release and the revision of its last update; a Windows with no service
+ * pack has no CSDVersion.
+ *
+ * @param {WindowsVersion} windows
+ * @returns {Record<string, string | number>}
+ */
+const versionValues = windows=>({
+    CurrentVersion: windows.major >= 10 ? '6.3' : `${windows.major}.${windows.minor}`,
+    CurrentBuildNumber: String(windows.build),
+    CurrentBuild: windows.major >= 6 ? String(windows.build) : OBSOLETE_BUILD,
+    ...windows.csdVersion === '' ? {} : { CSDVersion: windows.csdVersion },
+    ProductName: windows.productName,
+    ...windows.major >= 10
+        ? { CurrentMajorVersionNumber: windows.major, CurrentMinorVersionNumber: windows.minor }
+        : {},
+    ...windows.release === null ? {} : {
+        DisplayVersion: windows.release.displayVersion,
+        ReleaseId: windows.release.releaseId,
+        UBR: windows.release.ubr,
+    },
 });
+
+/**
+ * The DirectX this machine has, as its own setup library reads it back: 9.0c,
+ * the newest of the interfaces the drawing layer answers for.
+ */
+export const DIRECTX_VERSION = '4.09.00.0904';
 
 /**
  * @param {Readonly<Record<string, string>>} table @param {string[]} names
@@ -199,78 +335,88 @@ export const SHELL_FOLDERS = Object.freeze({
  */
 const pick = (table, names)=>Object.fromEntries(names.map(name=>[name, table[name]]));
 
+/** Where the kernel describes the processor. */
+const PROCESSOR_KEY = 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0';
+
 /**
  * The keys and values every Windows installation carries before any program
  * has run, as far as a program of the era asks for them: where programs go,
  * where the shared-library counts live, where an installer registers what it
- * put there and where the shell keeps its folders. An installer opens these
- * without creating them and takes a missing one for a broken machine.
+ * put there, where the shell keeps its folders and which Windows this is. An
+ * installer opens these without creating them and takes a missing one for a
+ * broken machine.
  *
  * Every string is stored as REG_SZ; a path is what this machine's volume
  * actually holds, so what a program reads here it can then open.
  *
- * @type {readonly MachineKey[]}
+ * @param {WindowsVersion} windows
+ * @returns {readonly MachineKey[]}
  */
-/** Where the kernel describes the processor. */
-const PROCESSOR_KEY = 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0';
-
-const MACHINE_KEYS = Object.freeze(/** @type {MachineKey[]} */ ([
-    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Classes' },
-    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion', values: {
-        ProgramFilesDir: SHELL_FOLDERS.ProgramFiles,
-        ProgramFilesPath: SHELL_FOLDERS.ProgramFiles,
-        CommonFilesDir: SHELL_FOLDERS.CommonFiles,
-        SystemRoot: SHELL_FOLDERS.Windows,
-        MediaPath: 'C:\\WINDOWS\\Media',
-    } },
-    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs' },
-    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Setup' },
-    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall' },
-    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths' },
-    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run' },
-    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce' },
-    { root: HKEY_LOCAL_MACHINE,
-        path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders',
-        values: pick(SHELL_FOLDERS, ['Common Desktop', 'Common Programs', 'Common Start Menu',
-            'Common Startup', 'Common Documents']) },
-    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion', values: {
-        CurrentVersion: '5.1',
-        CurrentBuildNumber: '2600',
-        ProductName: 'Microsoft Windows XP',
-        SystemRoot: 'C:\\WINDOWS',
-        PathName: 'C:\\WINDOWS',
-    } },
-    { root: HKEY_LOCAL_MACHINE, path: 'SYSTEM\\CurrentControlSet\\Control\\Session Manager' },
-    // What the kernel wrote about the processor it found: the identifier is
-    // the emulated CPUID's family, model and stepping, and the speed the
-    // emulated counter's rate (`createHive`'s `processorMhz`). A program reads
-    // the speed from here before it measures anything, and one that finds no
-    // key reports a 0 MHz machine.
-    { root: HKEY_LOCAL_MACHINE, path: PROCESSOR_KEY,
-        values: {
-            Identifier: PROCESSOR_IDENTIFIER,
-            VendorIdentifier: PROCESSOR.vendor,
-            '~MHz': PROCESSOR.mhz,
+const machineKeys = windows=>{
+    const folders = shellFolders(windows);
+    const userFolders = pick(folders, ['Desktop', 'Programs', 'Start Menu', 'Startup',
+        'Personal', 'AppData', 'Local AppData', 'Fonts']);
+    const commonFolders = pick(folders, ['Common Desktop', 'Common Programs',
+        'Common Start Menu', 'Common Startup', 'Common Documents']);
+    const windowsKey = 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion';
+    return Object.freeze(/** @type {MachineKey[]} */ ([
+        { root: HKEY_LOCAL_MACHINE, path: MACHINE_CLASSES },
+        { root: HKEY_LOCAL_MACHINE, path: windowsKey, values: {
+            ProgramFilesDir: folders.ProgramFiles,
+            ProgramFilesPath: folders.ProgramFiles,
+            CommonFilesDir: folders.CommonFiles,
+            SystemRoot: folders.Windows,
+            MediaPath: 'C:\\WINDOWS\\Media',
         } },
-    // The DirectX this machine has, in the two forms its own setup library
-    // reads back: the version string, and the binary pair an older setup
-    // library consults first. 9.0c, the newest of the interfaces the drawing
-    // layer answers for, and every earlier one is inside it, so an installer
-    // asking for 8.1 is satisfied. An installer that finds no version here
-    // offers to install one, and the redistributable it carries cannot run.
-    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\DirectX', values: {
-        Version: '4.09.00.0904',
-        InstalledVersion: Uint8Array.of(0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x09, 0x04),
-        InstalledCount: 1,
-        RC: 0,
-    } },
-    { root: HKEY_CURRENT_USER, path: 'Software\\Microsoft\\Windows\\CurrentVersion\\Run' },
-    { root: HKEY_CURRENT_USER,
-        path: 'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders',
-        values: pick(SHELL_FOLDERS, ['Desktop', 'Programs', 'Start Menu', 'Startup', 'Personal',
-            'AppData', 'Local AppData', 'Fonts']) },
-    { root: HKEY_CURRENT_USER, path: 'Control Panel\\Desktop' },
-]));
+        { root: HKEY_LOCAL_MACHINE, path: `${windowsKey}\\SharedDLLs` },
+        { root: HKEY_LOCAL_MACHINE, path: `${windowsKey}\\Setup` },
+        { root: HKEY_LOCAL_MACHINE, path: `${windowsKey}\\Uninstall` },
+        { root: HKEY_LOCAL_MACHINE, path: `${windowsKey}\\App Paths` },
+        { root: HKEY_LOCAL_MACHINE, path: `${windowsKey}\\Run` },
+        { root: HKEY_LOCAL_MACHINE, path: `${windowsKey}\\RunOnce` },
+        { root: HKEY_LOCAL_MACHINE,
+            path: `${windowsKey}\\Explorer\\Shell Folders`,
+            values: commonFolders, owned: Object.keys(commonFolders) },
+        { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion',
+            values: {
+                ...versionValues(windows),
+                SystemRoot: 'C:\\WINDOWS',
+                PathName: 'C:\\WINDOWS',
+            },
+            owned: VERSION_VALUES },
+        { root: HKEY_LOCAL_MACHINE, path: 'SYSTEM\\CurrentControlSet\\Control\\Session Manager' },
+        // What the kernel wrote about the processor it found: the identifier is
+        // the emulated CPUID's family, model and stepping, and the speed the
+        // emulated counter's rate (`createHive`'s `processorMhz`). A program reads
+        // the speed from here before it measures anything, and one that finds no
+        // key reports a 0 MHz machine.
+        { root: HKEY_LOCAL_MACHINE, path: PROCESSOR_KEY,
+            values: {
+                Identifier: PROCESSOR_IDENTIFIER,
+                VendorIdentifier: PROCESSOR.vendor,
+                '~MHz': PROCESSOR.mhz,
+            } },
+        // The DirectX this machine has, in the two forms its own setup library
+        // reads back: the version string, and the binary pair an older setup
+        // library consults first. 9.0c, the newest of the interfaces the drawing
+        // layer answers for, and every earlier one is inside it, so an installer
+        // asking for 8.1 is satisfied. An installer that finds no version here
+        // treats the machine as having none and installs the whole runtime over
+        // the interfaces the drawing layer answers for.
+        { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\DirectX', values: {
+            Version: DIRECTX_VERSION,
+            InstalledVersion: Uint8Array.of(0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x09, 0x04),
+            InstalledCount: 1,
+            RC: 0,
+        } },
+        { root: HKEY_CURRENT_USER, path: 'Software\\Microsoft\\Windows\\CurrentVersion\\Run' },
+        { root: HKEY_CURRENT_USER,
+            path: 'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders',
+            values: userFolders, owned: Object.keys(userFolders) },
+        { root: HKEY_CURRENT_USER, path: 'Control Panel\\Desktop' },
+        { root: HKEY_CURRENT_USER, path: USER_CLASSES },
+    ]));
+};
 
 /** @param {string} text @returns {Uint8Array} eight-bit text with its terminator */
 const sz = text=>{
@@ -290,21 +436,78 @@ const dword = value=>{
 };
 
 /**
- * Builds a hive: the four predefined roots with the machine's own keys under
- * them (see MACHINE_KEYS), and nothing a program has put there yet.
+ * The node a path leads to from a node, or null where it stops.
+ *
+ * @param {RegistryNode | null | undefined} node @param {string[]} parts
+ * @returns {RegistryNode | null}
+ */
+function walk(node, parts){
+    let at = node ?? null;
+    for (const part of parts)
+    {
+        at = at?.keys.get(fold(part)) ?? null;
+    }
+    return at;
+}
+
+/**
+ * Copies into a node what a saved tree has and the node does not, leaving
+ * what the node already holds as it is.
+ *
+ * @param {RegistryNode} into @param {RegistryNode} from
+ */
+function mergeMissing(into, from){
+    for (const [name, value] of from.values)
+    {
+        if (!into.values.has(name))
+        {
+            into.values.set(name, value);
+        }
+    }
+    for (const [name, child] of from.keys)
+    {
+        const present = into.keys.get(name);
+        if (present)
+        {
+            mergeMissing(present, child);
+        }
+        else
+        {
+            into.keys.set(name, child);
+        }
+    }
+}
+
+/** @param {RegistryKey} key @returns {key is ClassesKey} */
+const isClasses = key=>'view' in key;
+
+/** @param {string[]} path @returns {ClassesKey} */
+const classesKey = path=>({
+    view: 'classes',
+    name: path.length > 0 ? path[path.length - 1] : 'HKEY_CLASSES_ROOT',
+    path,
+});
+
+/**
+ * Builds a hive: the predefined roots with the machine's own keys under
+ * them (see machineKeys), and nothing a program has put there yet.
  *
  * Enumeration order is insertion order throughout, which is what makes an
  * index-based enumeration answer the same thing twice. Overwriting a value
  * leaves it where it was; only deleting and re-adding moves it to the end.
+ *
+ * @param {{ processorMhz?: number, windows?: WindowsVersion }} [options]
+ *        `processorMhz` is the speed the processor key reports: the rate the
+ *        engine's rdtsc advances at, which is the engine's to say. `windows` is
+ *        the Windows the machine's keys describe; absent, the default.
  */
-/**
- * @param {{ processorMhz?: number }} [options]
- *        The speed the processor key reports: the rate the engine's rdtsc
- *        advances at, which is the engine's to say.
- */
-export function createHive({ processorMhz = PROCESSOR.mhz } = {}){
-    /** @type {Map<number, RegistryKey>} */
+export function createHive({ processorMhz = PROCESSOR.mhz, windows = windowsVersion() } = {}){
+    const furnishings = machineKeys(windows);
+    /** @type {Map<number, RegistryNode>} */
     const roots = new Map();
+
+    /** The classes root itself: the same object every time it is asked for. */
+    const CLASSES_ROOT = classesKey([]);
 
     /**
      * Whoever keeps the hive between runs. Told once per burst of changes and
@@ -335,17 +538,18 @@ export function createHive({ processorMhz = PROCESSOR.mhz } = {}){
      * Puts the machine's own keys in place, adding what is missing and
      * leaving what is there: a hive restored from an earlier run keeps every
      * value a program wrote, and a key the program deleted comes back, as
-     * it would on a machine whose registry was repaired.
+     * it would on a machine whose registry was repaired. The values that
+     * describe the machine itself are the exception, and are written over.
      */
     const furnish = ()=>{
-        for (const entry of MACHINE_KEYS)
+        for (const entry of furnishings)
         {
             // HARDWARE is written by the kernel at every boot, not kept: a hive
             // restored from a run on another engine reports this one's speed.
             const volatile = entry.path.startsWith('HARDWARE\\');
             const values = entry.path === PROCESSOR_KEY
                 ? { ...entry.values, '~MHz': processorMhz } : entry.values ?? {};
-            let node = /** @type {RegistryKey} */ (roots.get(entry.root));
+            let node = /** @type {RegistryNode} */ (roots.get(entry.root));
             for (const part of segments(entry.path))
             {
                 let next = node.keys.get(fold(part));
@@ -356,9 +560,16 @@ export function createHive({ processorMhz = PROCESSOR.mhz } = {}){
                 }
                 node = next;
             }
+            for (const name of entry.owned ?? [])
+            {
+                if (!Object.hasOwn(values, name))
+                {
+                    node.values.delete(fold(name));
+                }
+            }
             for (const [name, value] of Object.entries(values))
             {
-                if (volatile || !node.values.has(fold(name)))
+                if (volatile || !node.values.has(fold(name)) || entry.owned?.includes(name))
                 {
                     node.values.set(fold(name), typeof value === 'number'
                         ? { name, type: REG_DWORD, data: dword(value) }
@@ -384,8 +595,8 @@ export function createHive({ processorMhz = PROCESSOR.mhz } = {}){
      * Walks to the parent of the last path segment, which is where both
      * creation and deletion have to act.
      *
-     * @param {RegistryKey} key @param {string | null | undefined} path
-     * @returns {{ parent: RegistryKey, name: string } | null}
+     * @param {RegistryNode} key @param {string | null | undefined} path
+     * @returns {{ parent: RegistryNode, name: string } | null}
      */
     const parentOf = (key, path)=>{
         const parts = segments(path);
@@ -406,13 +617,110 @@ export function createHive({ processorMhz = PROCESSOR.mhz } = {}){
         return { parent: node, name: parts[parts.length - 1] };
     };
 
+    /**
+     * The two keys a classes path stands for, either of which may be absent.
+     *
+     * @param {ClassesKey} key
+     */
+    const sidesOf = key=>({
+        user: walk(roots.get(HKEY_CURRENT_USER), [...segments(USER_CLASSES), ...key.path]),
+        machine: walk(roots.get(HKEY_LOCAL_MACHINE),
+            [...segments(MACHINE_CLASSES), ...key.path]),
+    });
+
+    /**
+     * Where a write through the classes root lands: the user's key when the
+     * user has one, the machine's otherwise.
+     *
+     * @param {RegistryKey} key @returns {RegistryNode | null}
+     */
+    const writable = key=>{
+        if (!isClasses(key))
+        {
+            return key;
+        }
+        const { user, machine } = sidesOf(key);
+        return user ?? machine;
+    };
+
+    /**
+     * @param {RegistryNode} key @param {string | null} [path]
+     * @returns {{ key: RegistryNode, created: boolean }}
+     */
+    const createNode = (key, path)=>{
+        let node = key;
+        let created = false;
+        for (const part of segments(path))
+        {
+            let next = node.keys.get(fold(part));
+            if (!next)
+            {
+                next = makeKey(part);
+                node.keys.set(fold(part), next);
+                created = true;
+            }
+            node = next;
+        }
+        if (created)
+        {
+            changed();
+        }
+        return { key: node, created };
+    };
+
+    /**
+     * @param {RegistryNode} key @param {string | null} [path]
+     * @returns {'deleted' | 'missing' | 'has-subkeys'}
+     */
+    const removeNode = (key, path)=>{
+        const target = parentOf(key, path);
+        if (!target)
+        {
+            return 'missing';
+        }
+        const doomed = target.parent.keys.get(fold(target.name));
+        if (!doomed)
+        {
+            return 'missing';
+        }
+        if (doomed.keys.size > 0)
+        {
+            return 'has-subkeys';
+        }
+        target.parent.keys.delete(fold(target.name));
+        changed();
+        return 'deleted';
+    };
+
+    /**
+     * What a list keyed by folded name holds on both sides of a classes key,
+     * the user's first and the machine's only where the user has none.
+     *
+     * @template T
+     * @param {ClassesKey} key
+     * @param {(node: RegistryNode) => Map<string, T>} listOf
+     * @returns {T[]}
+     */
+    const merged = (key, listOf)=>{
+        const { user, machine } = sidesOf(key);
+        const seen = new Map(user ? listOf(user) : []);
+        for (const [name, entry] of machine ? listOf(machine) : [])
+        {
+            if (!seen.has(name))
+            {
+                seen.set(name, entry);
+            }
+        }
+        return [...seen.values()];
+    };
+
     return {
         /**
          * @param {number} id
          * @returns {RegistryKey | null}
          */
         root(id){
-            return roots.get(id >>> 0) ?? null;
+            return (id >>> 0) === HKEY_CLASSES_ROOT ? CLASSES_ROOT : roots.get(id >>> 0) ?? null;
         },
 
         /**
@@ -423,72 +731,76 @@ export function createHive({ processorMhz = PROCESSOR.mhz } = {}){
          * @returns {RegistryKey | null}
          */
         open(key, path){
-            let node = key;
-            for (const part of segments(path))
+            const parts = segments(path);
+            if (parts.length === 0)
             {
-                const next = node.keys.get(fold(part));
-                if (!next)
-                {
-                    return null;
-                }
-                node = next;
+                return key;
             }
-            return node;
+            if (isClasses(key))
+            {
+                const found = classesKey([...key.path, ...parts]);
+                const { user, machine } = sidesOf(found);
+                return user || machine ? found : null;
+            }
+            return walk(key, parts);
         },
 
         /**
-         * Creates a subkey path, intermediate keys included.
+         * Creates a subkey path, intermediate keys included. A key made
+         * through the classes root that neither side has is the machine's,
+         * which is where Windows stores it.
          *
          * @param {RegistryKey} key @param {string | null} [path]
          * @returns {{ key: RegistryKey, created: boolean }}
          */
         create(key, path){
-            let node = key;
-            let created = false;
-            for (const part of segments(path))
+            if (!isClasses(key))
             {
-                let next = node.keys.get(fold(part));
-                if (!next)
-                {
-                    next = makeKey(part);
-                    node.keys.set(fold(part), next);
-                    created = true;
-                }
-                node = next;
+                return createNode(key, path);
             }
-            if (created)
+            const parts = segments(path);
+            if (parts.length === 0)
             {
-                changed();
+                return { key, created: false };
             }
-            return { key: node, created };
+            const made = classesKey([...key.path, ...parts]);
+            const { user, machine } = sidesOf(made);
+            if (user || machine)
+            {
+                return { key: made, created: false };
+            }
+            const classes = createNode(/** @type {RegistryNode} */ (
+                roots.get(HKEY_LOCAL_MACHINE)), MACHINE_CLASSES).key;
+            createNode(classes, made.path.join('\\'));
+            return { key: made, created: true };
         },
 
         /**
          * Deletes a subkey. One that has subkeys of its own is refused rather
          * than removed recursively -- NT's rule, and the reason a delete can
-         * fail on a key that plainly exists.
+         * fail on a key that plainly exists. Through the classes root the
+         * user's key goes first, and the machine's is what a second delete
+         * finds.
          *
          * @param {RegistryKey} key @param {string | null} [path]
          * @returns {'deleted' | 'missing' | 'has-subkeys'}
          */
         remove(key, path){
-            const target = parentOf(key, path);
-            if (!target)
+            if (!isClasses(key))
+            {
+                return removeNode(key, path);
+            }
+            const parts = segments(path);
+            if (parts.length === 0)
             {
                 return 'missing';
             }
-            const doomed = target.parent.keys.get(fold(target.name));
-            if (!doomed)
-            {
-                return 'missing';
-            }
-            if (doomed.keys.size > 0)
-            {
-                return 'has-subkeys';
-            }
-            target.parent.keys.delete(fold(target.name));
-            changed();
-            return 'deleted';
+            const doomed = classesKey([...key.path, ...parts]);
+            const { user, machine } = sidesOf(doomed);
+            const base = user
+                ? walk(roots.get(HKEY_CURRENT_USER), segments(USER_CLASSES))
+                : machine ? walk(roots.get(HKEY_LOCAL_MACHINE), segments(MACHINE_CLASSES)) : null;
+            return base ? removeNode(base, doomed.path.join('\\')) : 'missing';
         },
 
         /**
@@ -496,7 +808,8 @@ export function createHive({ processorMhz = PROCESSOR.mhz } = {}){
          * @returns {string[]} subkey names, in enumeration order
          */
         subkeys(key){
-            return [...key.keys.values()].map(child=>child.name);
+            return (isClasses(key) ? merged(key, node=>node.keys) : [...key.keys.values()])
+                .map(child=>child.name);
         },
 
         /**
@@ -504,7 +817,7 @@ export function createHive({ processorMhz = PROCESSOR.mhz } = {}){
          * @returns {RegistryValue[]} in enumeration order
          */
         values(key){
-            return [...key.values.values()];
+            return isClasses(key) ? merged(key, node=>node.values) : [...key.values.values()];
         },
 
         /**
@@ -514,6 +827,11 @@ export function createHive({ processorMhz = PROCESSOR.mhz } = {}){
          * @returns {RegistryValue | null}
          */
         getValue(key, name){
+            if (isClasses(key))
+            {
+                const { user, machine } = sidesOf(key);
+                return user?.values.get(fold(name)) ?? machine?.values.get(fold(name)) ?? null;
+            }
             return key.values.get(fold(name)) ?? null;
         },
 
@@ -524,14 +842,19 @@ export function createHive({ processorMhz = PROCESSOR.mhz } = {}){
          */
         setValue(key, name, type, data){
             const value = { name, type: type >>> 0, data: terminate(type >>> 0, data) };
-            key.values.set(fold(name), value);
-            changed();
+            const node = writable(key);
+            // A classes key both sides have since deleted takes the value nowhere.
+            if (node)
+            {
+                node.values.set(fold(name), value);
+                changed();
+            }
             return value;
         },
 
         /** @param {RegistryKey} key @param {string} name @returns {boolean} */
         deleteValue(key, name){
-            const deleted = key.values.delete(fold(name));
+            const deleted = writable(key)?.values.delete(fold(name)) ?? false;
             if (deleted)
             {
                 changed();
@@ -559,7 +882,8 @@ export function createHive({ processorMhz = PROCESSOR.mhz } = {}){
         /**
          * The whole hive as a plain object. Roots are a list rather than an
          * object so that nothing depends on how a JSON implementation orders
-         * numeric keys.
+         * numeric keys. The classes root is not among them: what it shows is
+         * already under the two roots it is a view of.
          *
          * @returns {{ roots: { id: number, key: StoredKey }[] }}
          */
@@ -572,22 +896,36 @@ export function createHive({ processorMhz = PROCESSOR.mhz } = {}){
         /**
          * Replaces the contents with a saved tree. Roots the save does not
          * mention come back empty rather than missing, so a hive is always
-         * usable after a restore.
+         * usable after a restore. A save that kept the classes root as a tree
+         * of its own has it folded into the machine's classes, keeping what
+         * the machine side already says: the classes a program registered
+         * there are still found.
          *
          * @param {any} stored
          */
         fromJSON(stored){
             reset();
+            /** @type {RegistryNode[]} */
+            const classes = [];
             for (const entry of stored?.roots ?? [])
             {
                 const id = entry?.id >>> 0;
-                if (!ROOT_NAMES.has(id))
+                if (id === HKEY_CLASSES_ROOT)
                 {
-                    continue;
+                    classes.push(keyFromJSON(entry.key));
                 }
-                roots.set(id, keyFromJSON(entry.key));
+                else if (ROOT_NAMES.has(id))
+                {
+                    roots.set(id, keyFromJSON(entry.key));
+                }
             }
             furnish();
+            const machine = /** @type {RegistryNode} */ (
+                walk(roots.get(HKEY_LOCAL_MACHINE), segments(MACHINE_CLASSES)));
+            for (const tree of classes)
+            {
+                mergeMissing(machine, tree);
+            }
         },
     };
 }

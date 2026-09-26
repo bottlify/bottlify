@@ -17,15 +17,15 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from './constants.js';
-import { D3DPT, D3DRS, D3DTS, D3DTSS } from '../d3d8/constants.js';
+import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK, floatToDword } from './constants.js';
+import { D3DFMT_INDEX, D3DPT, D3DRS, D3DTS, D3DTSS } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from './declaration.js';
 import { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, versionToken } from './shader.js';
 import { HYBRID_CONSTANTS, varyingLocation } from './wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
-import { multiplyMatrices } from '../d3d8/render.js';
+import { UNIFORM_FLOATS, multiplyMatrices, normalMatrixOf } from '../d3d8/render.js';
 
 const RAM_BASE = 0x40000000;
 const RAM_SIZE = 4 << 20;
@@ -233,7 +233,8 @@ test('a shader pair draws: layout from the declaration, modules, constants, text
         assert.ok(vertexModule.code.includes('@location(0) v0: vec3<f32>,'));
         assert.ok(vertexModule.code.includes('@location(1) v1: vec4<f32>,'));
         assert.ok(vertexModule.code.includes('let v1 = in.v1.zyxw;'));
-        assert.ok(vertexModule.code.includes('c: array<vec4f, 6>;'), 'up to c5');
+        assert.ok(vertexModule.code.includes('c: array<vec4f, 7>;'),
+            'up to c5, and the viewport register past it');
         assert.ok(pixelModule.code.includes('textureSample(tex0, samp0, in.t0.xy)'));
         assert.ok(pixelModule.code.includes('c: array<vec4f, 3>;'), 'up to c2');
 
@@ -256,10 +257,12 @@ test('a shader pair draws: layout from the declaration, modules, constants, text
         assert.equal(pipeline.layout.descriptor.bindGroupLayouts.length, 3);
 
         // The constants each stage was bound to, byte for byte: the vertex
-        // floats to c5 and no further, all sixteen integers, the booleans.
+        // floats to c5 and then the viewport's scale for the half-pixel move
+        // of the position, all sixteen integers, the booleans.
         const groups = h.groupsOfDraw();
+        const viewport = h.device.viewportState.scale;
         assert.deepEqual([...new Float32Array(h.boundBytes(groups.get(0), 0).buffer)],
-            [...matrix, 0, 0, 0, 0, 0.5, 0.5, 0.5, 1]);
+            [...matrix, 0, 0, 0, 0, 0.5, 0.5, 0.5, 1, ...viewport, 0, 0].map(Math.fround));
         const ints = new Int32Array(h.boundBytes(groups.get(0), 1).buffer);
         assert.deepEqual([...ints.subarray(4, 8)], [3, 4, 5, 6]);
         assert.equal(ints.length, 64);
@@ -296,6 +299,156 @@ test('a shader pair draws: layout from the declaration, modules, constants, text
         h.vb.release();
         assert.equal(h.device.release(), 0);
     });
+
+test('a ps_1_1 reads each stage as bound, projects as the stage asks, and bumps by its matrix',
+    async()=>{
+        // Wine's d3d9 visual.c texbem_test: tex t0, texbem t1, t0, mov r0, t1,
+        // with stage 1's matrix and D3DTTFF_COUNT4 | D3DTTFF_PROJECTED.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+        assert.equal(h.device.CreatePixelShader([
+            versionToken(SHADER_KIND.PIXEL, 1, 1),
+            0x00000042, 0xb00f0000,
+            0x00000043, 0xb00f0001, 0xb0e40000,
+            0x00000001, 0x800f0000, 0xb0e40001,
+            END_TOKEN,
+        ], ps), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        /** @type {{ texture?: any }} */
+        const cube = {};
+        assert.equal(h.device.CreateCubeTexture(2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, cube),
+            D3D_OK);
+        h.device.SetTexture(0, h.texture);
+        h.device.SetTexture(1, cube.texture);
+        const matrix = [0, 0.5, -0.5, 0];
+        [D3DTSS.BUMPENVMAT00, D3DTSS.BUMPENVMAT01, D3DTSS.BUMPENVMAT10, D3DTSS.BUMPENVMAT11]
+            .forEach((state, at)=>
+                h.device.SetTextureStageState(1, state, floatToDword(matrix[at])));
+        h.device.SetTextureStageState(1, D3DTSS.BUMPENVLSCALE, floatToDword(2));
+        h.device.SetTextureStageState(1, D3DTSS.TEXTURETRANSFORMFLAGS, 4 | 0x100);
+
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        assert.equal(h.device.diagnostics().programmable, 1);
+        const pixelModule = h.gpu.of('createShaderModule').map(call=>call.descriptor)
+            .find(module=>module.label.startsWith('ps:'));
+        assert.ok(pixelModule.code.includes('var tex1: texture_cube<f32>;'),
+            'stage one samples the cube bound there');
+        assert.ok(pixelModule.code.includes('(in.t1 / in.t1.w)'), 'and divides by w');
+        assert.ok(pixelModule.code.includes('const _bump = 0;'));
+
+        // The bump registers, two a stage from the first past the constants
+        // the shader reads, carry stage one's matrix and luminance.
+        const groups = h.groupsOfDraw();
+        const floats = new Float32Array(h.boundBytes(groups.get(1), 0).buffer);
+        assert.equal(floats.length, 16 * 4);
+        assert.deepEqual([...floats.subarray(8, 16)], [0, 0.5, -0.5, 0, 2, 0, 0, 0]);
+        const sampled = groups.get(2).descriptor.entries;
+        assert.equal(sampled[2].resource.viewDescriptor.dimension, 'cube');
+
+        h.device.SetTexture(0, null);
+        h.device.SetTexture(1, null);
+        h.device.SetVertexShader(null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        vs.shader.release();
+        ps.shader.release();
+        cube.texture.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
+test('a sampler declared a cube binds the cube map\'s cube view, and nothing of another kind',
+    async()=>{
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        const cubeSampler = (3 << 27) >>> 0;
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+        assert.equal(h.device.CreatePixelShader([
+            PIXEL_SHADER[0], op(OPCODE.DCL, 2), cubeSampler, dst(REGISTER.SAMPLER, 0),
+            ...PIXEL_SHADER.slice(4),
+        ], ps), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        /** @type {{ texture?: any }} */
+        const cube = {};
+        assert.equal(h.device.CreateCubeTexture(2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, cube),
+            D3D_OK);
+        h.device.SetTexture(0, cube.texture);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+
+        const layouts = h.gpu.of('createBindGroupLayout').map(call=>call.descriptor);
+        assert.ok(layouts.some(layout=>layout.entries.some(
+            (/** @type {any} */ entry)=>entry.texture?.viewDimension === 'cube')));
+        const bound = ()=>h.groupsOfDraw().get(2).descriptor.entries[0].resource;
+        assert.equal(bound().viewDescriptor.dimension, 'cube');
+        assert.equal(bound().texture.descriptor.size.depthOrArrayLayers, 6);
+
+        // A two-dimensional texture cannot be bound where a cube is declared:
+        // the sampler reads a blank cube, and the program is told.
+        h.device.SetTexture(0, h.texture);
+        await h.draw();
+        assert.equal(bound().texture.descriptor.label, 'placeholder:cube');
+        assert.equal(h.reports.length, 1);
+        assert.match(h.reports[0], /declared cube and a 2d texture is bound/);
+
+        h.device.SetTexture(0, null);
+        h.device.SetVertexShader(null);
+        h.device.SetPixelShader(null);
+        vs.shader.release();
+        ps.shader.release();
+        cube.texture.release();
+    });
+
+test('a sampler declared a volume binds the volume texture\'s 3D view', async()=>{
+    const h = harness();
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    const volumeSampler = (4 << 27) >>> 0;
+    assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+    assert.equal(h.device.CreatePixelShader([
+        PIXEL_SHADER[0], op(OPCODE.DCL, 2), volumeSampler, dst(REGISTER.SAMPLER, 0),
+        ...PIXEL_SHADER.slice(4),
+    ], ps), D3D_OK);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetPixelShader(ps.shader);
+    /** @type {{ texture?: any }} */
+    const volume = {};
+    assert.equal(h.device.CreateVolumeTexture(2, 2, 2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED,
+        volume), D3D_OK);
+    h.device.SetTexture(0, volume.texture);
+    await h.draw();
+    assert.deepEqual(h.reports, []);
+    const pixel = h.gpu.of('createShaderModule').map(call=>call.descriptor)
+        .find(module=>module.label.startsWith('ps:'));
+    assert.match(pixel.code, /texture_3d<f32>/);
+    const bound = h.groupsOfDraw().get(2).descriptor.entries[0].resource;
+    assert.equal(bound.viewDescriptor.dimension, '3d');
+    assert.equal(bound.texture.descriptor.size.depthOrArrayLayers, 2);
+    const sampler = h.groupsOfDraw().get(2).descriptor.entries[1].resource.descriptor;
+    assert.equal(sampler.addressModeW, 'repeat', 'the third axis addressed as the program set');
+
+    h.device.SetTexture(0, null);
+    h.device.SetVertexShader(null);
+    h.device.SetPixelShader(null);
+    vs.shader.release();
+    ps.shader.release();
+    volume.texture.release();
+});
 
 test('a programmable draw is not blind to the dump: shaders, declaration and samplers', async()=>{
     // render.js's `--dump-draws` table used to skip every draw with
@@ -462,7 +615,7 @@ test('a vertex shader over the fixed-function pixel stage gets a fragment stage 
         // render state's texture factor and alpha reference in it.
         const groups = h.groupsOfDraw();
         const block = new Float32Array(h.boundBytes(groups.get(1), 0).buffer);
-        assert.equal(block.length, 220);
+        assert.equal(block.length, UNIFORM_FLOATS);
         assert.deepEqual([...block.subarray(36, 40)].map(v=>Math.round(v * 255)),
             [0x20, 0x40, 0x60, 0xff]);
         assert.equal(Math.round(block[72] * 255), 0x80);
@@ -603,6 +756,38 @@ test('a pixel shader over a declaration that carries only a position is given wh
         assert.equal(h.device.release(), 0);
     });
 
+test('a pixel shader over fixed-function vertices generating from the normal carries it as one',
+    async()=>{
+        // D3DTSS_TCI_CAMERASPACENORMAL: the made vertex stage's constants
+        // carry the inverse transpose of world then view, which a view that
+        // doubles x makes a half there.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTexture(0, h.texture);
+        h.device.SetTextureStageState(0, D3DTSS.TEXCOORDINDEX, 0x10000);
+        const view = [2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 5, 1];
+        h.device.SetTransform(D3DTS.VIEW, view);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        const floats = new Float32Array(h.boundBytes(h.groupsOfDraw().get(0), 0).buffer);
+        const at = HYBRID_CONSTANTS.CAMERA_NORMAL * 4;
+        assert.deepEqual([...floats.subarray(at, at + 16)],
+            [...normalMatrixOf(view)].map(Math.fround));
+        assert.equal(floats[at], 0.5);
+        h.device.SetTexture(0, null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        ps.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
 test('a pixel shader over fixed-function vertices reads a coordinate the stages generate',
     async()=>{
         // Stage 0 set to D3DTSS_TCI_CAMERASPACEPOSITION with a three-coordinate
@@ -650,6 +835,19 @@ test('a pixel shader over fixed-function vertices reads a coordinate the stages 
         assert.deepEqual([...floats.subarray(HYBRID_CONSTANTS.TRANSFORMS * 4,
             HYBRID_CONSTANTS.TRANSFORMS * 4 + 16)],
         [0.5, 0, 0, 0.25, 0, -0.5, 0, 0.75, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+        // D3DRS_NORMALIZENORMALS reaches the made stage's camera-space
+        // normal, as it reaches the fixed-function stage's: off by default,
+        // and set, a stage of its own.
+        // The normal goes into camera space by the inverse transpose of
+        // world then view, which the constants carry once a stage takes one.
+        assert.ok(vertexModule.code.includes('let cameraNormal = (mat4x4f(c[43]'));
+        h.device.SetRenderState(D3DRS.NORMALIZENORMALS, 1);
+        h.device.SetTextureStageState(0, D3DTSS.TEXCOORDINDEX, 0x10000);
+        await h.draw();
+        assert.ok(h.gpu.of('createShaderModule').map(call=>call.descriptor)
+            .some(module=>module.label.startsWith('vs:')
+                && module.code.includes('let cameraNormal = normalize((mat4x4f(c[43]')));
 
         h.device.SetTexture(0, null);
         h.device.SetPixelShader(null);
@@ -728,6 +926,135 @@ test('a declaration the GPU cannot deliver is declined with the reason', async()
     h.vb.release();
     assert.equal(h.device.release(), 0);
 });
+
+test('a shader pair reads a member of another stream from that stream\'s buffer', async()=>{
+    // A declaration may put each member in a stream of its own; the shader
+    // reads the colour from stream 1, bound at its own stride, as a second
+    // vertex buffer after stream zero's.
+    const h = harness();
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    h.device.CreateVertexShader(VERTEX_SHADER, vs);
+    h.device.CreatePixelShader(PIXEL_SHADER, ps);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetPixelShader(ps.shader);
+    /** @type {{ declaration?: any }} */
+    const split = {};
+    assert.equal(h.device.CreateVertexDeclaration([
+        { Stream: 0, Offset: 0, Type: D3DDECLTYPE.FLOAT3, Method: 0,
+            Usage: D3DDECLUSAGE.POSITION, UsageIndex: 0 },
+        { Stream: 1, Offset: 0, Type: D3DDECLTYPE.D3DCOLOR, Method: 0,
+            Usage: D3DDECLUSAGE.COLOR, UsageIndex: 0 },
+    ], split), D3D_OK);
+    h.device.SetVertexDeclaration(split.declaration);
+    /** @type {{ buffer?: any }} */
+    const colours = {};
+    assert.equal(h.device.CreateVertexBuffer(12, 0, 0, D3DPOOL.MANAGED, colours), D3D_OK);
+    assert.equal(h.device.SetStreamSource(1, colours.buffer, 0, 4), D3D_OK);
+    await h.draw();
+    assert.deepEqual(h.reports, []);
+    assert.equal(h.device.diagnostics().skipped.program, 0);
+    const [pipeline] = h.gpu.of('createRenderPipeline').map(call=>call.descriptor);
+    assert.deepEqual(pipeline.vertex.buffers.map((/** @type {any} */ buffer)=>
+        [buffer.arrayStride, buffer.attributes.map((/** @type {any} */ a)=>a.format)]),
+    [[STRIDE, ['float32x3']], [4, ['unorm8x4']]]);
+    assert.equal(h.gpu.of('setVertexBuffer').filter(call=>call.slot === 1).length, 1);
+
+    h.device.SetVertexShader(null);
+    h.device.SetPixelShader(null);
+    h.device.SetVertexDeclaration(null);
+    h.device.SetStreamSource(0, null, 0, 0);
+    h.device.SetStreamSource(1, null, 0, 0);
+    vs.shader.release();
+    ps.shader.release();
+    split.declaration.release();
+    colours.buffer.release();
+    h.texture.release();
+    h.declaration.release();
+    h.vb.release();
+    assert.equal(h.device.release(), 0);
+});
+
+test('an indexed draw is instanced by stream zero\'s count, a stream stepping by instance',
+    async()=>{
+        // D3D9 instancing: stream zero carries D3DSTREAMSOURCE_INDEXEDDATA and
+        // the count, a further stream D3DSTREAMSOURCE_INSTANCEDATA | 1, and an
+        // indexed draw draws the geometry once an instance with the further
+        // stream read once an instance (Wine's d3d9 stream_test).
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        h.device.CreateVertexShader(VERTEX_SHADER, vs);
+        h.device.CreatePixelShader(PIXEL_SHADER, ps);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        /** @type {{ declaration?: any }} */
+        const split = {};
+        assert.equal(h.device.CreateVertexDeclaration([
+            { Stream: 0, Offset: 0, Type: D3DDECLTYPE.FLOAT3, Method: 0,
+                Usage: D3DDECLUSAGE.POSITION, UsageIndex: 0 },
+            { Stream: 1, Offset: 0, Type: D3DDECLTYPE.D3DCOLOR, Method: 0,
+                Usage: D3DDECLUSAGE.COLOR, UsageIndex: 0 },
+        ], split), D3D_OK);
+        h.device.SetVertexDeclaration(split.declaration);
+        /** @type {{ buffer?: any }} */
+        const colours = {};
+        assert.equal(h.device.CreateVertexBuffer(16, 0, 0, D3DPOOL.MANAGED, colours), D3D_OK);
+        assert.equal(h.device.SetStreamSource(1, colours.buffer, 4, 4), D3D_OK);
+        /** @type {{ buffer?: any }} */
+        const indices = {};
+        assert.equal(h.device.CreateIndexBuffer(6, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.MANAGED,
+            indices), D3D_OK);
+        assert.equal(h.device.SetIndices(indices.buffer), D3D_OK);
+        assert.equal(h.device.SetStreamSourceFreq(0, (0x40000000 | 3) >>> 0), D3D_OK);
+        assert.equal(h.device.SetStreamSourceFreq(1, (0x80000000 | 1) >>> 0), D3D_OK);
+        const draw = async()=>{
+            assert.equal(h.device.BeginScene(), D3D_OK);
+            assert.equal(h.device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, 0, 0, 3, 0, 1),
+                D3D_OK);
+            assert.equal(h.device.EndScene(), D3D_OK);
+            assert.equal(h.device.Present(), D3D_OK);
+            await h.device.idle();
+        };
+        await draw();
+        assert.deepEqual(h.reports, []);
+        const [pipeline] = h.gpu.of('createRenderPipeline').map(call=>call.descriptor);
+        assert.deepEqual(pipeline.vertex.buffers.map((/** @type {any} */ buffer)=>
+            [buffer.arrayStride, buffer.stepMode]), [[STRIDE, 'vertex'], [4, 'instance']]);
+        assert.deepEqual(h.gpu.of('drawIndexed').map(call=>call.args[1]), [3], 'three instances');
+        assert.deepEqual(h.gpu.of('setVertexBuffer').filter(call=>call.slot === 1)
+            .map(call=>call.offset), [4], 'the instance stream at its own offset');
+
+        // A stream stepping every second instance is not what a vertex
+        // buffer can do: the draw is not drawn, and that is said.
+        assert.equal(h.device.SetStreamSourceFreq(1, (0x80000000 | 2) >>> 0), D3D_OK);
+        await draw();
+        assert.equal(h.gpu.of('drawIndexed').length, 1);
+        assert.equal(h.device.diagnostics().skipped.instancing, 1);
+        assert.equal(h.reports.length, 1);
+
+        h.device.SetStreamSourceFreq(0, 1);
+        h.device.SetStreamSourceFreq(1, 1);
+        h.device.SetVertexShader(null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        h.device.SetStreamSource(1, null, 0, 0);
+        h.device.SetIndices(null);
+        vs.shader.release();
+        ps.shader.release();
+        split.declaration.release();
+        colours.buffer.release();
+        indices.buffer.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
 
 test('draws that change only their constants share a preparation and read their own', async()=>{
     // The shape of a shader-drawn frame: constants set before every draw and

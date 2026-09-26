@@ -44,6 +44,59 @@ import {
     DXGI_MODE_SCANLINE_ORDER, DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, E_NOINTERFACE, IID, S_OK,
 } from './constants.js';
 import { backBufferUsage, highestAccessibleBuffer, swapChainDescResult } from './validity.js';
+import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
+
+/** DXGI_ERROR_NOT_CURRENTLY_AVAILABLE: what the browser has no way to give. */
+const DXGI_ERROR_NOT_CURRENTLY_AVAILABLE = 0x887a0022;
+
+/**
+ * The formats an output lists modes in: the ones a swap chain's buffer is
+ * shown from.
+ *
+ * @type {ReadonlySet<number>}
+ */
+const DISPLAY_FORMATS = new Set([
+    DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UNORM_SRGB, DXGI_FORMAT.B8G8R8A8_UNORM,
+    DXGI_FORMAT.B8G8R8A8_UNORM_SRGB,
+]);
+
+/**
+ * @typedef {Object} ModeFields
+ * @property {number} width
+ * @property {number} height
+ * @property {number} refreshNumerator
+ * @property {number} refreshDenominator
+ * @property {number} format
+ * @property {number} scanlineOrdering
+ * @property {number} scaling
+ */
+
+/**
+ * The modes an output of this size lists in one format: the sizes every
+ * other path of this build lists, at the one rate a browser presents at,
+ * progressive, ordered by width, then height.
+ *
+ * @param {{ width: number, height: number }} size
+ * @param {number} format
+ * @returns {ModeFields[]}
+ */
+export function outputModes(size, format){
+    if (!DISPLAY_FORMATS.has(format))
+    {
+        return [];
+    }
+    return displayModes({ width: size.width, height: size.height, bitsPerPixel: 32 })
+        .filter(mode=>mode.refresh === REFRESH_HZ)
+        .map(mode=>({
+            width: mode.width,
+            height: mode.height,
+            refreshNumerator: REFRESH_HZ,
+            refreshDenominator: 1,
+            format,
+            scanlineOrdering: DXGI_MODE_SCANLINE_ORDER.PROGRESSIVE,
+            scaling: DXGI_MODE_SCALING.UNSPECIFIED,
+        }));
+}
 
 /**
  * @typedef {Object} OutputConfig
@@ -99,9 +152,31 @@ export function CreateDXGIFactory(iid, out, options = {}){
 }
 
 /**
+ * DXGI 1.1's entry point: the same factory, answering as IDXGIFactory1 too.
+ * Only a factory made here does; one made by the first entry point, or
+ * implicitly for a device, stays a first-version factory.
+ *
+ * @param {string} iid
+ * @param {{ object?: any }} out
  * @param {FactoryOptions} [options]
+ * @returns {number}
  */
-export function createFactory(options = {}){
+export function CreateDXGIFactory1(iid, out, options = {}){
+    if (iid !== IID.IUnknown && iid !== IID.IDXGIObject && iid !== IID.IDXGIFactory
+        && iid !== IID.IDXGIFactory1)
+    {
+        out.object = null;
+        return E_NOINTERFACE;
+    }
+    out.object = createFactory(options, true);
+    return S_OK;
+}
+
+/**
+ * @param {FactoryOptions} [options]
+ * @param {boolean} [secondVersion]  Whether it answers as IDXGIFactory1.
+ */
+export function createFactory(options = {}, secondVersion = false){
     const configs = options.adapters ?? DEFAULT_ADAPTERS;
     const windowClientSize = options.windowClientSize ?? (()=>({ width: 640, height: 480 }));
 
@@ -148,11 +223,34 @@ export function createFactory(options = {}){
             return S_OK;
         },
 
+        /**
+         * @param {number} index
+         * @param {{ adapter?: any }} out
+         * @returns {number}
+         */
+        EnumAdapters1(index, out){
+            return factory.EnumAdapters(index, out);
+        },
+
+        /**
+         * Whether the adapters enumerated are still the system's: nothing
+         * here is ever plugged in or out.
+         *
+         * @returns {boolean}
+         */
+        IsCurrent(){
+            return true;
+        },
+
         /** @returns {number} how many adapters this factory reports */
         adapterCount(){
             return adapters.length;
         },
-    }, { interfaces: [IID.IDXGIObject, IID.IDXGIFactory], parent: null });
+    }, {
+        interfaces: [IID.IDXGIObject, IID.IDXGIFactory,
+            ...(secondVersion ? [IID.IDXGIFactory1] : [])],
+        parent: null,
+    });
 
     adapters = configs.map(config=>createAdapter(config, factory));
     return factory;
@@ -218,7 +316,75 @@ function createAdapter(config, factory){
  * @param {any} adapter
  */
 function createOutput(config, adapter){
+    const desktop = config.desktopCoordinates ?? { left: 0, top: 0, right: 0, bottom: 0 };
+    const size = {
+        width: desktop.right - desktop.left || 640,
+        height: desktop.bottom - desktop.top || 480,
+    };
     return attachCom({
+        /**
+         * @param {number} format
+         * @returns {ModeFields[]} every mode listed in that format
+         */
+        GetDisplayModeList(format){
+            return outputModes(size, format);
+        },
+
+        /**
+         * The listed mode nearest the one asked for: the size nearest it, and
+         * among those the rate nearest it. Any field left zero matches
+         * anything, but a size is both halves or neither, and a format is
+         * needed unless a device says which.
+         *
+         * @param {ModeFields} wanted
+         * @param {boolean} hasDevice
+         * @param {{ mode?: ModeFields }} out
+         * @returns {number}
+         */
+        FindClosestMatchingMode(wanted, hasDevice, out){
+            if ((wanted.width === 0) !== (wanted.height === 0))
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            if (wanted.format === DXGI_FORMAT.UNKNOWN && !hasDevice)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            const format = wanted.format === DXGI_FORMAT.UNKNOWN
+                ? DXGI_FORMAT.R8G8B8A8_UNORM
+                : wanted.format;
+            const modes = outputModes(size, format);
+            if (modes.length === 0)
+            {
+                return DXGI_ERROR_NOT_FOUND;
+            }
+            const target = wanted.width === 0 ? size : wanted;
+            const rate = wanted.refreshDenominator === 0
+                ? REFRESH_HZ
+                : wanted.refreshNumerator / wanted.refreshDenominator;
+            /** @param {ModeFields} mode */
+            const distance = mode=>Math.abs(mode.width - target.width)
+                + Math.abs(mode.height - target.height);
+            let best = modes[0];
+            for (const mode of modes)
+            {
+                const nearer = distance(mode) - distance(best)
+                    || Math.abs(mode.refreshNumerator / mode.refreshDenominator - rate)
+                        - Math.abs(best.refreshNumerator / best.refreshDenominator - rate);
+                if (nearer < 0)
+                {
+                    best = mode;
+                }
+            }
+            out.mode = { ...best };
+            return S_OK;
+        },
+
+        /** @returns {{ width: number, height: number }} the desktop this output shows */
+        size(){
+            return { ...size };
+        },
+
         /** @param {{ desc?: any }} out */
         GetDesc(out){
             if (!out)
@@ -277,7 +443,10 @@ function copySwapChainDesc(desc){
  * @param {(window: number) => { width: number, height: number }} windowClientSize
  */
 function createSwapChain(requested, device, factory, windowClientSize){
-    let desc = copySwapChainDesc(requested);
+    // Nothing here takes the display for itself, so a swap chain asked for
+    // fullscreen is made windowed and says so, as one made while fullscreen
+    // is unavailable is.
+    let desc = { ...copySwapChainDesc(requested), windowed: true };
     /** @type {Map<number, any>} */
     let buffers = new Map();
     let outstanding = 0;
@@ -411,6 +580,28 @@ function createSwapChain(requested, device, factory, windowClientSize){
             buffers = new Map();
             currentBuffer = 0;
             return S_OK;
+        },
+
+        /**
+         * Going fullscreen is refused the way DXGI refuses it when the display
+         * cannot be had just now; going windowed is where the swap chain
+         * already is.
+         *
+         * @param {boolean} fullscreen
+         * @returns {number}
+         */
+        SetFullscreenState(fullscreen){
+            return fullscreen ? DXGI_ERROR_NOT_CURRENTLY_AVAILABLE : S_OK;
+        },
+
+        /**
+         * The output the window is on: the device's adapter's first.
+         *
+         * @param {{ output?: any }} out
+         * @returns {number}
+         */
+        GetContainingOutput(out){
+            return device.adapter().EnumOutputs(0, out);
         },
 
         /**

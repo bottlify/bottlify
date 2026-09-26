@@ -31,15 +31,54 @@ export const IID_IDirect3DBaseTexture9 = '{580CA87E-1D3C-4D54-991D-B7D3E3C298CE}
 export const IID_IDirect3DTexture9 = '{85C31227-3DE5-4F00-9B3A-F11AC38C18B5}';
 export const IID_IDirect3DCubeTexture9 = '{FFF32F81-D953-473A-9223-93D652ABA93F}';
 export const IID_IDirect3DVolumeTexture9 = '{2518526C-E789-4111-A7B9-47EF328D13E6}';
+export const IID_IDirect3DVolume9 = '{24F416E6-1F67-4AA7-B88E-D33F6F3128A1}';
 export const IID_IDirect3DVertexBuffer9 = '{B64BB1B5-FD70-4DF6-BF91-19D0A12455E3}';
 export const IID_IDirect3DIndexBuffer9 = '{7C9DD65E-D3F7-4529-ACEE-785830ACDE35}';
 export const IID_IDirect3DSurface9 = '{0CFBAF3A-9FF6-429A-99B3-A2796AF8B89B}';
 export const IID_IDirect3DSwapChain9 = '{794950F2-ADFC-458A-905E-10A10B0B503B}';
 export const IID_IDirect3DVertexDeclaration9 = '{DD13C59C-36FA-4098-A8FB-C7ED39DC8546}';
-export const IID_IDirect3DVertexShader9 = '{EFC5557E-6265-4613-B5D9-CB9D9BB93F7C}';
+export const IID_IDirect3DVertexShader9 = '{EFC5557E-6265-4613-8A94-43857889EB36}';
 export const IID_IDirect3DPixelShader9 = '{6D3BDBDC-5B02-4415-B852-CE5E8BCCB289}';
 export const IID_IDirect3DStateBlock9 = '{B07C4FE5-310D-4BA8-A23C-4F0F206F218B}';
 export const IID_IDirect3DQuery9 = '{D9771460-A695-4F26-BBD3-27B840B541CC}';
+export const IID_IDirect3D9Ex = '{02177241-69FC-400C-8FF1-93A44DF6861D}';
+export const IID_IDirect3DDevice9Ex = '{B18B10CE-2649-405A-870F-95F777D4313A}';
+export const IID_IDirect3DSwapChain9Ex = '{91886CAF-1C3D-4D2E-A0AB-3E4C7D8D3303}';
+
+/** IDirect3D9Ex's own slots, after IDirect3D9's fourteen. */
+export const IDIRECT3D9EX_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetAdapterModeCountEx', 2],
+    ['EnumAdapterModesEx', 4],
+    ['GetAdapterDisplayModeEx', 3],
+    ['CreateDeviceEx', 7],
+    ['GetAdapterLUID', 2],
+]);
+
+/** IDirect3DDevice9Ex's own slots, after IDirect3DDevice9's. */
+export const IDIRECT3DDEVICE9EX_SLOTS = /** @type {[string, number][]} */ ([
+    ['SetConvolutionMonoKernel', 4],
+    ['ComposeRects', 8],
+    ['PresentEx', 5],
+    ['GetGPUThreadPriority', 1],
+    ['SetGPUThreadPriority', 1],
+    ['WaitForVBlank', 1],
+    ['CheckResourceResidency', 2],
+    ['SetMaximumFrameLatency', 1],
+    ['GetMaximumFrameLatency', 1],
+    ['CheckDeviceState', 1],
+    ['CreateRenderTargetEx', 9],
+    ['CreateOffscreenPlainSurfaceEx', 7],
+    ['CreateDepthStencilSurfaceEx', 9],
+    ['ResetEx', 2],
+    ['GetDisplayModeEx', 3],
+]);
+
+/** IDirect3DSwapChain9Ex's own slots, after IDirect3DSwapChain9's. */
+export const IDIRECT3DSWAPCHAIN9EX_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetLastPresentCount', 1],
+    ['GetPresentStats', 1],
+    ['GetDisplayModeEx', 2],
+]);
 
 /**
  * IDirect3DDevice9, after IUnknown's three: one hundred and sixteen slots.
@@ -175,7 +214,7 @@ export const IDIRECT3DDEVICE9_SLOTS = /** @type {[string, number][]} */ ([
  * IDirect3DResource9's own slots, repeated at the front of every resource
  * interface because that is what the guest compiled against.
  */
-const RESOURCE9_SLOTS = /** @type {[string, number][]} */ ([
+export const IDIRECT3DRESOURCE9_SLOTS = /** @type {[string, number][]} */ ([
     ['GetDevice', 1],
     ['SetPrivateData', 4],
     ['GetPrivateData', 3],
@@ -187,8 +226,8 @@ const RESOURCE9_SLOTS = /** @type {[string, number][]} */ ([
 ]);
 
 /** IDirect3DBaseTexture9: a resource, then the six every texture kind shares. */
-const BASETEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
-    ...RESOURCE9_SLOTS,
+export const IDIRECT3DBASETEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDIRECT3DRESOURCE9_SLOTS,
     ['SetLOD', 1],
     ['GetLOD', 0],
     ['GetLevelCount', 0],
@@ -199,7 +238,7 @@ const BASETEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
 
 /** IDirect3DSurface9: a resource in this version, unlike 8's, then a device context pair. */
 export const IDIRECT3DSURFACE9_SLOTS = /** @type {[string, number][]} */ ([
-    ...RESOURCE9_SLOTS,
+    ...IDIRECT3DRESOURCE9_SLOTS,
     ['GetContainer', 2],
     ['GetDesc', 1],
     ['LockRect', 3],
@@ -209,7 +248,7 @@ export const IDIRECT3DSURFACE9_SLOTS = /** @type {[string, number][]} */ ([
 ]);
 
 export const IDIRECT3DTEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
-    ...BASETEXTURE9_SLOTS,
+    ...IDIRECT3DBASETEXTURE9_SLOTS,
     ['GetLevelDesc', 2],
     ['GetSurfaceLevel', 2],
     ['LockRect', 4],
@@ -218,7 +257,7 @@ export const IDIRECT3DTEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
 ]);
 
 export const IDIRECT3DCUBETEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
-    ...BASETEXTURE9_SLOTS,
+    ...IDIRECT3DBASETEXTURE9_SLOTS,
     ['GetLevelDesc', 2],
     ['GetCubeMapSurface', 3],
     ['LockRect', 5],
@@ -226,8 +265,29 @@ export const IDIRECT3DCUBETEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
     ['AddDirtyRect', 2],
 ]);
 
+export const IDIRECT3DVOLUMETEXTURE9_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDIRECT3DBASETEXTURE9_SLOTS,
+    ['GetLevelDesc', 2],
+    ['GetVolumeLevel', 2],
+    ['LockBox', 4],
+    ['UnlockBox', 1],
+    ['AddDirtyBox', 1],
+]);
+
+/** A volume texture's level, which unlike a surface is not a resource. */
+export const IDIRECT3DVOLUME9_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetDevice', 1],
+    ['SetPrivateData', 4],
+    ['GetPrivateData', 3],
+    ['FreePrivateData', 1],
+    ['GetContainer', 2],
+    ['GetDesc', 1],
+    ['LockBox', 3],
+    ['UnlockBox', 0],
+]);
+
 export const IDIRECT3DVERTEXBUFFER9_SLOTS = /** @type {[string, number][]} */ ([
-    ...RESOURCE9_SLOTS,
+    ...IDIRECT3DRESOURCE9_SLOTS,
     ['Lock', 4],
     ['Unlock', 0],
     ['GetDesc', 1],

@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { UI_LANGUAGE } from '../../loader/internal/resources.js';
+
 /**
  * Code pages and the string conversions built on them.
  *
@@ -35,6 +37,11 @@ const OEM_CODE_PAGE = CP_OEM_437;
 /** Error codes this file can produce. */
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
+const ERROR_INVALID_FLAGS = 1004;
+const ERROR_NO_UNICODE_TRANSLATION = 1113;
+
+/** MultiByteToWideChar's flag that turns a malformed sequence into a failure. */
+const MB_ERR_INVALID_CHARS = 0x8;
 
 /** sizeof(CPINFO): MaxCharSize, DefaultChar[2], LeadByte[12]. */
 const CPINFO_SIZE = 18;
@@ -106,6 +113,16 @@ const LOCALE_SYSTEM_DEFAULT = 0x0800;
 
 /** Asks for the system value rather than one a user overrode. There is no user. */
 const LOCALE_NOUSEROVERRIDE = 0x80000000;
+/** Converts with the ANSI page rather than the locale's; they are the same page here. */
+const LOCALE_USE_CP_ACP = 0x40000000;
+const LOCALE_RETURN_NUMBER = 0x20000000;
+/** The month names as they stand after a day; English has no second form. */
+const LOCALE_RETURN_GENITIVE_NAMES = 0x10000000;
+const LOCALE_ALLOW_NEUTRAL_NAMES = 0x08000000;
+const LOCALE_FLAGS = LOCALE_NOUSEROVERRIDE | LOCALE_USE_CP_ACP | LOCALE_RETURN_NUMBER
+    | LOCALE_RETURN_GENITIVE_NAMES | LOCALE_ALLOW_NEUTRAL_NAMES;
+const LOCALE_SMONTHNAME1 = 0x0038;
+const LOCALE_SMONTHNAME13 = 0x100E;
 
 /** CompareString's answers. Note that none of them is zero: zero is failure. */
 const CSTR_LESS_THAN = 1;
@@ -172,52 +189,97 @@ const DAYS = [
  * Only the values a C runtime and a program's own formatting actually ask for.
  * An LCTYPE not here fails rather than returning an empty string: a caller
  * given "" for the decimal separator formats every number wrongly and never
- * finds out, where a failure sends it to its own default.
+ * finds out, where a failure sends it to its own default. The two empty
+ * strings below are the locale's real answers, not placeholders.
  */
 const LOCALE_STRINGS = Object.freeze({
-    0x00000001: '0409',                    // ILANGUAGE
     0x00000002: 'English (United States)', // SLANGUAGE
     0x00000003: 'ENU',                     // SABBREVLANGNAME
+    0x00000004: 'English',                 // SNATIVELANGNAME
     0x00000006: 'United States',           // SCOUNTRY
-    0x0000000B: '437',                     // IDEFAULTCODEPAGE
+    0x00000007: 'USA',                     // SABBREVCTRYNAME
+    0x00000008: 'United States',           // SNATIVECTRYNAME
     0x0000000C: ',',                       // SLIST
-    0x0000000D: '1',                       // IMEASURE, non-metric
     0x0000000E: '.',                       // SDECIMAL
     0x0000000F: ',',                       // STHOUSAND
+    0x00000010: '3;0',                     // SGROUPING
+    0x00000013: '0123456789',              // SNATIVEDIGITS
+    0x00000014: '$',                       // SCURRENCY
+    0x00000015: 'USD',                     // SINTLSYMBOL
+    0x00000016: '.',                       // SMONDECIMALSEP
+    0x00000017: ',',                       // SMONTHOUSANDSEP
+    0x00000018: '3;0',                     // SMONGROUPING
     0x0000001D: '/',                       // SDATE
     0x0000001E: ':',                       // STIME
     0x0000001F: SHORT_DATE,                // SSHORTDATE
     0x00000020: LONG_DATE,                 // SLONGDATE
     0x00000028: 'AM',                      // S1159
     0x00000029: 'PM',                      // S2359
-    0x0000002A: 'Monday',                  // SDAYNAME1
-    0x0000002B: 'Tuesday',
-    0x0000002C: 'Wednesday',
-    0x0000002D: 'Thursday',
-    0x0000002E: 'Friday',
-    0x0000002F: 'Saturday',
-    0x00000030: 'Sunday',                  // SDAYNAME7
-    0x00000038: 'January',                 // SMONTHNAME1
-    0x00000039: 'February',
-    0x0000003A: 'March',
-    0x0000003B: 'April',
-    0x0000003C: 'May',
-    0x0000003D: 'June',
-    0x0000003E: 'July',
-    0x0000003F: 'August',
-    0x00000040: 'September',
-    0x00000041: 'October',
-    0x00000042: 'November',
-    0x00000043: 'December',                // SMONTHNAME12
+    // SDAYNAME1..7 and SABBREVDAYNAME1..7 start the week on Monday.
+    ...Object.fromEntries([...DAYS.slice(1), DAYS[0]].flatMap((day, at)=>[
+        [0x2A + at, day], [0x31 + at, day.slice(0, 3)],
+    ])),
+    // SMONTHNAME1..12 and SABBREVMONTHNAME1..12; the thirteenth month of a
+    // twelve-month calendar is there and empty.
+    ...Object.fromEntries(MONTHS.flatMap((month, at)=>[
+        [0x38 + at, month], [0x44 + at, month.slice(0, 3)],
+    ])),
+    0x0000100E: '',                        // SMONTHNAME13
+    0x0000100F: '',                        // SABBREVMONTHNAME13
+    0x00000050: '',                        // SPOSITIVESIGN
+    0x00000051: '-',                       // SNEGATIVESIGN
     0x00000059: 'en',                      // SISO639LANGNAME
     0x0000005A: 'US',                      // SISO3166CTRYNAME
+    0x0000005C: 'en-US',                   // SNAME
     0x00001001: 'English',                 // SENGLANGUAGE
     0x00001002: 'United States',           // SENGCOUNTRY
     0x00001003: LONG_TIME,                 // STIMEFORMAT
-    0x00001004: '1252',                    // IDEFAULTANSICODEPAGE
-    0x00001009: '1',                       // ICALENDARTYPE, Gregorian
-    0x0000100C: '6',                       // IFIRSTDAYOFWEEK, Sunday first
+    0x00001007: 'US Dollar',               // SENGCURRNAME
+    0x00001008: 'US Dollar',               // SNATIVECURRNAME
 });
+
+/**
+ * The LCTYPEs whose value is a number: answered as its digits, or with
+ * LOCALE_RETURN_NUMBER as the DWORD itself.
+ */
+const LOCALE_NUMBERS = Object.freeze({
+    0x00000001: LCID_EN_US,                // ILANGUAGE
+    0x00000005: 1,                         // ICOUNTRY
+    0x00000009: LCID_EN_US,                // IDEFAULTLANGUAGE
+    0x0000000A: 1,                         // IDEFAULTCOUNTRY
+    0x0000000B: 437,                       // IDEFAULTCODEPAGE
+    0x0000000D: 1,                         // IMEASURE, non-metric
+    0x00000011: 2,                         // IDIGITS
+    0x00000012: 1,                         // ILZERO
+    0x00000019: 2,                         // ICURRDIGITS
+    0x0000001A: 2,                         // IINTLCURRDIGITS
+    0x0000001B: 0,                         // ICURRENCY, "$1.1"
+    0x0000001C: 0,                         // INEGCURR, "($1.1)"
+    0x00000021: 0,                         // IDATE, month first
+    0x00000022: 0,                         // ILDATE
+    0x00000023: 0,                         // ITIME, twelve hours
+    0x00000024: 1,                         // ICENTURY
+    0x00000025: 0,                         // ITLZERO
+    0x00000026: 0,                         // IDAYLZERO
+    0x00000027: 0,                         // IMONLZERO
+    0x00000052: 3,                         // IPOSSIGNPOSN
+    0x00000053: 0,                         // INEGSIGNPOSN
+    0x00000054: 1,                         // IPOSSYMPRECEDES
+    0x00000055: 0,                         // IPOSSEPBYSPACE
+    0x00000056: 1,                         // INEGSYMPRECEDES
+    0x00000057: 0,                         // INEGSEPBYSPACE
+    0x00001004: 1252,                      // IDEFAULTANSICODEPAGE
+    0x00001005: 0,                         // ITIMEMARKPOSN
+    0x00001009: 1,                         // ICALENDARTYPE, Gregorian
+    0x0000100A: 1,                         // IPAPERSIZE, letter
+    0x0000100C: 6,                         // IFIRSTDAYOFWEEK, Sunday first
+    0x0000100D: 0,                         // IFIRSTWEEKOFYEAR
+    0x00001010: 1,                         // INEGNUMBER
+    0x00001011: 10000,                     // IDEFAULTMACCODEPAGE
+});
+
+/** The two numbers written as hex, four digits: a language is read as one. */
+const HEX_NUMBERS = [0x0001, 0x0009];
 
 /** The byte a character outside the page becomes. */
 const DEFAULT_CHAR = 0x3f;
@@ -293,6 +355,13 @@ const encodeSingleByte = (text, page)=>{
             bytes[at] = 0x80 + found;
             continue;
         }
+        // A position the page leaves undefined decodes as its own code point,
+        // and goes back as its own byte.
+        if (code < 0x80 + high.length && high[code - 0x80] === 0)
+        {
+            bytes[at] = code;
+            continue;
+        }
         // A table that stops short of the top of the page leaves the rest of
         // it Latin-1, exactly as decoding reads it: an accented letter is a
         // byte of its own there, not the default character.
@@ -321,6 +390,21 @@ export const transcodeSingleByte = (bytes, from, to)=>
 /** The pages the OEM/ANSI conversions translate between, for their callers. */
 export const OEM_PAGE = CP_OEM_437;
 export const ANSI_PAGE = CP_WINDOWS_1252;
+
+/**
+ * Text in the ANSI page, as WideCharToMultiByte(CP_ACP) writes it: what a
+ * wide call's string becomes when it reaches something that reads ANSI.
+ *
+ * @param {string} text
+ */
+export const encodeAnsi = text=>encodeSingleByte(text, ANSI_PAGE).bytes;
+
+/**
+ * Bytes of the ANSI page as text, as MultiByteToWideChar(CP_ACP) reads them.
+ *
+ * @param {Uint8Array} bytes
+ */
+export const decodeAnsi = bytes=>decodeSingleByte(bytes, ANSI_PAGE);
 
 /**
  * Bytes of the ANSI page with their case changed, one byte to one byte.
@@ -617,15 +701,47 @@ export function createLocaleFunctions(host){
         }
         // The high bit asks for the unaltered system value rather than whatever
         // the user changed in the control panel. There is no user here, so both
-        // answers are the same one and the bit is simply cleared.
-        const wanted = type & ~LOCALE_NOUSEROVERRIDE;
+        // answers are the same one and the bit is simply ignored.
+        const wanted = type & ~LOCALE_FLAGS;
+        const number = /** @type {Record<number, number>} */ (LOCALE_NUMBERS)[wanted];
         const text = /** @type {Record<number, string>} */ (LOCALE_STRINGS)[wanted];
-        if (text === undefined)
+        const genitive = (type & LOCALE_RETURN_GENITIVE_NAMES) !== 0;
+        const asNumber = (type & LOCALE_RETURN_NUMBER) !== 0;
+        // What the type cannot be asked for is a bad flag rather than a bad
+        // parameter, and a caller that tells the two apart retries without
+        // the flag: a string has no number, and only the wide form carries
+        // the genitive month names.
+        const refused = (number === undefined && text === undefined)
+            || (asNumber && number === undefined)
+            || (genitive && (!isWide || wanted < LOCALE_SMONTHNAME1
+                || (wanted > LOCALE_SMONTHNAME1 + 11 && wanted !== LOCALE_SMONTHNAME13)));
+        if (refused)
         {
-            host.setLastError(ERROR_INVALID_PARAMETER);
+            host.setLastError(ERROR_INVALID_FLAGS);
             return 0;
         }
-        return writeAnswer(text, buffer, count, isWide);
+        if (asNumber)
+        {
+            const bytes = 4;
+            const needed = isWide ? bytes / 2 : bytes;
+            if (count === 0)
+            {
+                return needed;
+            }
+            if (buffer === 0 || needed > count)
+            {
+                host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+                return 0;
+            }
+            const value = new Uint8Array(bytes);
+            new DataView(value.buffer).setUint32(0, number, true);
+            host.writeMemory(buffer, value);
+            return needed;
+        }
+        const answer = text ?? (HEX_NUMBERS.includes(wanted)
+            ? number.toString(16).padStart(4, '0')
+            : String(number));
+        return writeAnswer(answer, buffer, count, isWide);
     };
 
     /**
@@ -766,9 +882,20 @@ export function createLocaleFunctions(host){
          *
          * The language the system's own resources are in, which here is the
          * only one there is: a program that picks its strings by this must
-         * land on the same table it picks its formats by.
+         * land on the same table it picks its formats by. It is the loader's,
+         * the one a resource lookup naming no language prefers.
          */
-        GetSystemDefaultUILanguage: { argBytes: 0, handler: ()=>LANGID_EN_US },
+        GetSystemDefaultUILanguage: { argBytes: 0, handler: ()=>UI_LANGUAGE },
+
+        /**
+         * LANGID GetUserDefaultUILanguage(VOID)
+         *
+         * The user's choice of the same, and there is one language to choose:
+         * a locale lookup by it answers what one by the user's LCID does, as
+         * Wine's kernel32 locale tests (test_GetLocaleInfoA,
+         * test_ConvertDefaultLocale) require of the pair.
+         */
+        GetUserDefaultUILanguage: { argBytes: 0, handler: ()=>UI_LANGUAGE },
 
         /**
          * BOOL IsValidCodePage(UINT CodePage)
@@ -981,22 +1108,40 @@ export function createLocaleFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([page, flags, source, sourceBytes, destination, destinationChars])=>{
-                void flags;
                 const resolved = resolvePage(page);
                 // A NULL source is refused before it is measured: measuring
                 // reads it, and a read of address zero is a fault where
-                // Windows answers with an error code.
+                // Windows answers with an error code. A negative destination
+                // size is refused with it, before anything is written: unlike
+                // the source's, it has no "up to the terminator" meaning.
                 const span = (source >>> 0) === 0
                     ? { length: 0 } : sourceSpan(source >>> 0, sourceBytes, 1);
-                if (span.length === 0)
+                if (span.length === 0 || (destinationChars | 0) < 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 const raw = host.readMemory(source >>> 0, span.length);
-                const text = resolved === CP_UTF8
-                    ? new TextDecoder().decode(raw)
-                    : decodeSingleByte(raw, resolved);
+                let text;
+                if (resolved === CP_UTF8)
+                {
+                    // With MB_ERR_INVALID_CHARS a malformed sequence fails the
+                    // call rather than becoming U+FFFD, measuring included.
+                    try
+                    {
+                        text = new TextDecoder('utf-8',
+                            { fatal: (flags & MB_ERR_INVALID_CHARS) !== 0 }).decode(raw);
+                    }
+                    catch (e){
+                        void e;
+                        host.setLastError(ERROR_NO_UNICODE_TRANSLATION);
+                        return 0;
+                    }
+                }
+                else
+                {
+                    text = decodeSingleByte(raw, resolved);
+                }
 
                 // Zero is the measuring call, and it must not write.
                 if ((destinationChars | 0) === 0)
@@ -1035,7 +1180,7 @@ export function createLocaleFunctions(host){
                 const resolved = resolvePage(page);
                 const span = (source >>> 0) === 0
                     ? { length: 0 } : sourceSpan(source >>> 0, sourceChars, 2);
-                if (span.length === 0)
+                if (span.length === 0 || (destinationBytes | 0) < 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;

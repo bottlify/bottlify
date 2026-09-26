@@ -77,6 +77,57 @@ export const BITMAPINFOHEADER = Object.freeze({
     SIZE: 40,
 });
 
+/** BITMAPCOREHEADER, the OS/2 header: bcSize, then four WORDs. */
+export const BITMAPCOREHEADER = Object.freeze({
+    bcSize: 0,
+    bcWidth: 4,
+    bcHeight: 6,
+    bcPlanes: 8,
+    bcBitCount: 10,
+    SIZE: 12,
+});
+
+/**
+ * BITMAP, as GetObject writes it. bmPlanes and bmBitsPixel are WORDs; bmBits
+ * is the DIB section's pointer and NULL for a device-dependent bitmap, whose
+ * bits the program has no address for.
+ */
+export const BITMAP = Object.freeze({
+    bmType: 0,
+    bmWidth: 4,
+    bmHeight: 8,
+    bmWidthBytes: 12,
+    bmPlanes: 16,
+    bmBitsPixel: 18,
+    bmBits: 20,
+    SIZE: 24,
+});
+
+/** DIBSECTION: a BITMAP, the header the section was made from, then its masks. */
+export const DIBSECTION = Object.freeze({
+    dsBm: 0,
+    dsBmih: 24,
+    dsBitfields: 64,
+    dshSection: 76,
+    dsOffset: 80,
+    SIZE: 84,
+});
+
+/**
+ * Bytes per row of a device-dependent bitmap, which pads to a WORD -- the
+ * layout CreateBitmap's lpBits and GetBitmapBits' buffer are in.
+ *
+ * @param {number} width @param {number} bitCount
+ */
+export const ddbStride = (width, bitCount)=>(((width * bitCount + 15) >>> 4) * 2);
+
+/**
+ * Bytes per row of a DIB, which pads to a DWORD.
+ *
+ * @param {number} width @param {number} bitCount
+ */
+export const dibStride = (width, bitCount)=>(((width * bitCount + 31) >>> 5) * 4);
+
 /**
  * TEXTMETRICA. Nine bytes sit past the eleven LONGs, and the structure is
  * padded from 53 to 56 so that an array of them stays LONG-aligned.
@@ -312,6 +363,40 @@ export function readLogFontW(memory, address){
 }
 
 /**
+ * A LOGFONT as the program's own structure holds it: LOGFONTA's face name in
+ * bytes, LOGFONTW's in UTF-16, NUL-padded to the end of the field either way.
+ *
+ * @param {LogFontFields} font
+ * @param {boolean} wide
+ * @returns {Uint8Array}
+ */
+export function logFontBytes(font, wide){
+    const bytes = new Uint8Array(wide ? LOGFONTW_SIZE : LOGFONTA.SIZE);
+    const view = new DataView(bytes.buffer);
+    [font.height, font.width, font.escapement, font.orientation, font.weight]
+        .forEach((value, index)=>view.setInt32(LOGFONTA.lfHeight + index * 4, value | 0, true));
+    [font.italic, font.underline, font.strikeOut, font.charSet, font.outPrecision,
+        font.clipPrecision, font.quality, font.pitchAndFamily]
+        .forEach((value, index)=>{
+            bytes[LOGFONTA.lfItalic + index] = value & 0xff;
+        });
+    // The last unit of the field stays the terminator whatever the name's length.
+    const name = font.faceName.slice(0, LF_FACESIZE - 1);
+    for (let at = 0; at < name.length; at++)
+    {
+        if (wide)
+        {
+            view.setUint16(LOGFONTA.lfFaceName + at * 2, name.charCodeAt(at), true);
+        }
+        else
+        {
+            bytes[LOGFONTA.lfFaceName + at] = name.charCodeAt(at) & 0xff;
+        }
+    }
+    return bytes;
+}
+
+/**
  * Everything of a LOGFONT but its face name, which is where the A and W
  * layouts part.
  *
@@ -347,14 +432,54 @@ function readLogFontFields(memory, address){
  * @property {number} compression
  * @property {number} sizeImage
  * @property {number} clrUsed
+ * @property {number} [xPelsPerMeter]
+ * @property {number} [yPelsPerMeter]
  */
 
 /**
+ * Whether a DIB header's first DWORD names a header there is: a
+ * BITMAPCOREHEADER's exact twelve, or forty or more, which is a
+ * BITMAPINFOHEADER and whatever a later version appends (Wine's
+ * test_bitmapinfoheadersize).
+ *
+ * @param {number} size
+ */
+export const isDibHeaderSize = size=>size === BITMAPCOREHEADER.SIZE
+    || size >= BITMAPINFOHEADER.SIZE;
+
+/**
+ * The bytes of one colour table entry behind a header: a BITMAPCOREINFO's
+ * are RGBTRIPLEs, every other's RGBQUADs.
+ *
+ * @param {BitmapInfoHeaderFields} header
+ */
+export const colorEntryBytes = header=>(header.size === BITMAPCOREHEADER.SIZE ? 3 : 4);
+
+/**
+ * A DIB's header, read as the BITMAPINFOHEADER fields whichever header it
+ * is. A BITMAPCOREHEADER's sides are unsigned WORDs, so it is bottom-up; it
+ * is always BI_RGB, and its table always full; `size` says it is one.
+ *
  * @param {StructMemory} memory
  * @param {number} address
  * @returns {BitmapInfoHeaderFields}
  */
 export function readBitmapInfoHeader(memory, address){
+    if (readU32(memory, address) === BITMAPCOREHEADER.SIZE)
+    {
+        return {
+            size: BITMAPCOREHEADER.SIZE,
+            width: readU16(memory, address + BITMAPCOREHEADER.bcWidth),
+            height: readU16(memory, address + BITMAPCOREHEADER.bcHeight),
+            planes: readU16(memory, address + BITMAPCOREHEADER.bcPlanes),
+            bitCount: readU16(memory, address + BITMAPCOREHEADER.bcBitCount),
+            compression: 0,
+            sizeImage: 0,
+            xPelsPerMeter: 0,
+            yPelsPerMeter: 0,
+            clrUsed: 0,
+        };
+    }
     return {
         size: readU32(memory, address + BITMAPINFOHEADER.biSize),
         width: readI32(memory, address + BITMAPINFOHEADER.biWidth),
@@ -363,6 +488,8 @@ export function readBitmapInfoHeader(memory, address){
         bitCount: readU16(memory, address + BITMAPINFOHEADER.biBitCount),
         compression: readU32(memory, address + BITMAPINFOHEADER.biCompression),
         sizeImage: readU32(memory, address + BITMAPINFOHEADER.biSizeImage),
+        xPelsPerMeter: readI32(memory, address + BITMAPINFOHEADER.biXPelsPerMeter),
+        yPelsPerMeter: readI32(memory, address + BITMAPINFOHEADER.biYPelsPerMeter),
         clrUsed: readU32(memory, address + BITMAPINFOHEADER.biClrUsed),
     };
 }

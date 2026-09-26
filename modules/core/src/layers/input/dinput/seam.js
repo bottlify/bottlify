@@ -30,18 +30,25 @@
  */
 
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
-import { readGuid, writeGuid } from '../../win32/ole32/guid.js';
+import { readGuid, parseGuid } from '../../win32/ole32/guid.js';
 import {
-    createInputDevice, KEYBOARD, MOUSE, KEYBOARD_KEYS, DIMOUSE_OFS,
+    createInputDevice, objectsOf, KEYBOARD, MOUSE, KEYBOARD_KEYS, DIMOUSE_OFS, MOUSE_BUTTONS,
 } from './devices.js';
 
 export const DI_OK = 0;
 /** DI_BUFFEROVERFLOW is S_FALSE: a success a program has to look at. */
 export const DI_BUFFEROVERFLOW = 1;
+/** DI_NOEFFECT is S_FALSE too: the call succeeded and changed nothing. */
+export const DI_NOEFFECT = 1;
 const DIERR_INVALIDPARAM = 0x80070057 | 0;
 const DIERR_NOTACQUIRED = 0x8007000c | 0;
+const DIERR_ACQUIRED = 0x800700aa | 0;
 const DIERR_UNSUPPORTED = 0x80004001 | 0;
 const DIERR_DEVICENOTREG = 0x80040154 | 0;
+const DIERR_NOTFOUND = 0x80070002 | 0;
+const DIERR_NOTBUFFERED = 0x80040207 | 0;
+const E_POINTER = 0x80004003 | 0;
+const E_HANDLE = 0x80070006 | 0;
 
 /** What a program's enumeration callback answers: another, or no more. */
 export const DIENUM_CONTINUE = 1;
@@ -61,9 +68,21 @@ const DI8DEVTYPE_MOUSE = 0x12;
 const DI8DEVTYPE_KEYBOARD = 0x13;
 const DIDEVTYPE_MOUSE = 2;
 const DIDEVTYPE_KEYBOARD = 3;
-const DI8DEVTYPEMOUSE_TRADITIONAL = 2;
+/** The same value in both generations' subtype tables, as PCENH is. */
+const DEVTYPEMOUSE_UNKNOWN = 1;
 const DI8DEVTYPEKEYBOARD_PCENH = 4;
+/**
+ * The buttons Windows counts on the system keyboard, as against the 256 bytes
+ * of its state -- the number device8.c's test_sys_keyboard expects.
+ */
+const KEYBOARD_BUTTONS = 128;
+const DIDC_ATTACHED = 0x00000001;
+const DIDC_EMULATED = 0x00000004;
 const DIEDFL_FORCEFEEDBACK = 0x00000100;
+const DISCL_EXCLUSIVE = 0x00000001;
+const DISCL_NONEXCLUSIVE = 0x00000002;
+const DISCL_FOREGROUND = 0x00000004;
+const DISCL_BACKGROUND = 0x00000008;
 
 /** The devices a program creates, named by the GUIDs it was compiled with. */
 export const GUID_SysKeyboard = '{6F1D2B61-D5A0-11CF-BFC7-444553540000}';
@@ -79,10 +98,10 @@ export const IID_IDirectInput7W = '{9A4CB685-236D-11D3-8E9D-00C04F6844AE}';
 export const IID_IDirectInput8A = '{BF798030-483A-4DA2-AA99-5D64ED369700}';
 export const IID_IDirectInput8W = '{BF798031-483A-4DA2-AA99-5D64ED369700}';
 
-export const IID_IDirectInputDeviceA = '{5944E680-AA8A-11CF-BFC7-444553540000}';
-export const IID_IDirectInputDeviceW = '{5944E681-AA8A-11CF-BFC7-444553540000}';
-export const IID_IDirectInputDevice2A = '{5944E682-AA8A-11CF-BFC7-444553540000}';
-export const IID_IDirectInputDevice2W = '{5944E683-AA8A-11CF-BFC7-444553540000}';
+export const IID_IDirectInputDeviceA = '{5944E680-C92E-11CF-BFC7-444553540000}';
+export const IID_IDirectInputDeviceW = '{5944E681-C92E-11CF-BFC7-444553540000}';
+export const IID_IDirectInputDevice2A = '{5944E682-C92E-11CF-BFC7-444553540000}';
+export const IID_IDirectInputDevice2W = '{5944E683-C92E-11CF-BFC7-444553540000}';
 export const IID_IDirectInputDevice7A = '{57D7C6BC-2356-11D3-8E9D-00C04F6844AE}';
 export const IID_IDirectInputDevice7W = '{57D7C6BD-2356-11D3-8E9D-00C04F6844AE}';
 export const IID_IDirectInputDevice8A = '{54D41080-DC15-4833-A41B-748F73A38179}';
@@ -111,6 +130,7 @@ export const DIPROPDWORD_DATA = 0x10;
 
 /** MAKEDIPROP packs a small integer into a pointer; these are the ones we read. */
 export const DIPROP_BUFFERSIZE = 1;
+const DIPROP_AXISMODE = 2;
 
 /** DIDEVCAPS, as far as a program reads it. */
 export const DIDEVCAPS = Object.freeze({
@@ -141,10 +161,121 @@ export const DIDEVICEINSTANCE = Object.freeze({
     NAME_CHARS: 260,
     SIZE_A: 580,
     SIZE_W: 1100,
+    // DIDEVICEINSTANCE_DX3: the same, ending where guidFFDriver begins.
+    SIZE_DX3_A: 560,
+    SIZE_DX3_W: 1080,
+});
+
+/**
+ * DIDEVICEOBJECTINSTANCE, what EnumObjects and GetObjectInfo describe one
+ * object in. The name is inline again; after it DirectX 5 appended
+ * force-feedback and HID fields, which a keyboard and a mouse leave zero.
+ */
+export const DIDEVICEOBJECTINSTANCE = Object.freeze({
+    dwSize: 0x00,
+    guidType: 0x04,
+    dwOfs: 0x14,
+    dwType: 0x18,
+    dwFlags: 0x1c,
+    tszName: 0x20,
+    NAME_CHARS: 260,
+    SIZE_A: 316,
+    SIZE_W: 576,
+    SIZE_DX3_A: 292,
+    SIZE_DX3_W: 552,
 });
 
 /** DIGDD_PEEK: read the buffer without consuming it. */
 const DIGDD_PEEK = 0x00000001;
+
+/** How GetObjectInfo's caller names the object. */
+const DIPH_BYOFFSET = 1;
+const DIPH_BYID = 2;
+const DIPH_BYUSAGE = 3;
+
+/**
+ * The attribute bits of an EnumObjects filter -- actuator, effect trigger,
+ * vendor-defined, alias, output. Each asks for objects that have it, and
+ * nothing on a system keyboard or mouse does.
+ */
+const DIDFT_ATTRIBUTES = 0x1f000000;
+
+/**
+ * What a device says it is, to EnumDevices, GetCapabilities and GetDeviceInfo
+ * alike: its family in the low byte, in the codes of the generation the
+ * interface belongs to, and its subtype above that. The system mouse's
+ * subtype is unknown, not traditional -- the answer Windows gives in Wine's
+ * device8.c and joystick8.c, where Wine's own differs.
+ *
+ * @param {'keyboard' | 'mouse'} kind @param {boolean} legacy
+ */
+function devTypeOf(kind, legacy){
+    return kind === KEYBOARD
+        ? (legacy ? DIDEVTYPE_KEYBOARD : DI8DEVTYPE_KEYBOARD) | DI8DEVTYPEKEYBOARD_PCENH << 8
+        : (legacy ? DIDEVTYPE_MOUSE : DI8DEVTYPE_MOUSE) | DEVTYPEMOUSE_UNKNOWN << 8;
+}
+
+/**
+ * A string as it sits in one of the inline name arrays, with its terminator.
+ *
+ * @param {string} text @param {boolean} wide
+ */
+function textBytes(text, wide){
+    const units = wide ? 2 : 1;
+    const bytes = new Uint8Array((text.length + 1) * units);
+    for (let index = 0; index < text.length; index++)
+    {
+        const code = text.charCodeAt(index);
+        bytes[index * units] = code & 0xff;
+        if (wide)
+        {
+            bytes[index * units + 1] = code >>> 8 & 0xff;
+        }
+    }
+    return bytes;
+}
+
+/**
+ * A whole DIDEVICEINSTANCE in the width asked for. Both GUIDs are the
+ * device's own, as Windows reports the system keyboard and mouse;
+ * guidFFDriver and the usage stay zero because nothing here rumbles.
+ *
+ * @param {string} guid @param {number} devType
+ * @param {string} instanceName @param {string} productName @param {boolean} wide
+ */
+function deviceInstanceBytes(guid, devType, instanceName, productName, wide){
+    const I = DIDEVICEINSTANCE;
+    const size = wide ? I.SIZE_W : I.SIZE_A;
+    const bytes = new Uint8Array(size);
+    const view = new DataView(bytes.buffer);
+    const id = parseGuid(guid) ?? new Uint8Array(16);
+    view.setUint32(I.dwSize, size, true);
+    bytes.set(id, I.guidInstance);
+    bytes.set(id, I.guidProduct);
+    view.setUint32(I.dwDevType, devType, true);
+    bytes.set(textBytes(instanceName, wide), I.tszInstanceName);
+    bytes.set(textBytes(productName, wide), I.tszInstanceName + I.NAME_CHARS * (wide ? 2 : 1));
+    return bytes;
+}
+
+/**
+ * A whole DIDEVICEOBJECTINSTANCE in the width asked for.
+ *
+ * @param {import('./devices.js').DeviceObject} object @param {boolean} wide
+ */
+function objectInstanceBytes(object, wide){
+    const O = DIDEVICEOBJECTINSTANCE;
+    const size = wide ? O.SIZE_W : O.SIZE_A;
+    const bytes = new Uint8Array(size);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(O.dwSize, size, true);
+    bytes.set(parseGuid(object.guidType) ?? new Uint8Array(16), O.guidType);
+    view.setUint32(O.dwOfs, object.offset, true);
+    view.setUint32(O.dwType, object.type, true);
+    view.setUint32(O.dwFlags, object.flags, true);
+    bytes.set(textBytes(object.name, wide), O.tszName);
+    return bytes;
+}
 
 /**
  * The data formats we recognise, by the size of the structure the caller says
@@ -332,6 +463,19 @@ export function createPublisher({ publishInterface }){
                 },
                 addRef: ()=>api.addRef?.() ?? 1,
                 release: ()=>api.release?.() ?? 0,
+                // A device keeps one count whichever generation it is reached
+                // through, so its last reference ends them all; an object that
+                // says nothing ends only the interface it was released through.
+                get destroyed(){
+                    return api.destroyed === true;
+                },
+                /** @param {number} pointer */
+                forgotten: pointer=>{
+                    if (byPointer.get(pointer) === api)
+                    {
+                        byPointer.delete(pointer);
+                    }
+                },
             };
             adapters.set(api, adapter);
         }
@@ -378,9 +522,13 @@ export function createPublisher({ publishInterface }){
  *        by when the thread the processor is on may no longer be this one --
  *        so the loop names it once, before that first await, rather than
  *        asking the bridge to guess a second time.
+ * @param {(hwnd: number) => 'top' | 'child' | null | undefined} [deps.windowKind]
+ *        What a handle names: a top-level window, a child one, nothing -- or
+ *        undefined when there are no windows to ask about, in which case any
+ *        handle is taken as a window. SetCooperativeLevel wants a top-level one.
  */
 export function createDirectInput(
-    { memory, now, publishInterface, signal, allocate, callGuest, callerThread },
+    { memory, now, publishInterface, signal, allocate, callGuest, callerThread, windowKind },
 )
 {
     const publisher = createPublisher({ publishInterface });
@@ -411,15 +559,80 @@ export function createDirectInput(
     /** @type {Map<string, any>} */
     const devices = new Map();
 
-    /** @type {Record<string, (target: any, args: number[]) => number>} */
+    /**
+     * Fills a structure the caller sized, in one of the two sizes its width
+     * allows -- the DirectX 3 one or the whole one -- and never past it. The
+     * caller's own dwSize stays as it wrote it.
+     *
+     * @param {number} address @param {Uint8Array} whole
+     * @param {number[]} sizes  The two sizes the caller may have declared.
+     * @returns {number} DI_OK, or why nothing was written.
+     */
+    const fillSized = (address, whole, sizes)=>{
+        if ((address >>> 0) === 0)
+        {
+            return E_POINTER;
+        }
+        const size = readU32(address);
+        if (!sizes.includes(size))
+        {
+            return DIERR_INVALIDPARAM;
+        }
+        memory.writeMemory((address >>> 0) + 4, whole.subarray(4, size));
+        return DI_OK;
+    };
+
+    /**
+     * The object GetObjectInfo's caller named, or the error that says why
+     * there is none. By id, the instance has to be the object's and the type
+     * bits have to include its type: a toggle button is not a push button.
+     *
+     * @param {any} device @param {number} which @param {number} how
+     * @returns {import('./devices.js').DeviceObject | number}
+     */
+    const objectNamed = (device, which, how)=>{
+        const objects = objectsOf(device.kind);
+        let found;
+        switch (how){
+            case DIPH_BYOFFSET:
+                found = objects.find(object=>object.offset === which);
+                break;
+            case DIPH_BYID:
+                found = objects.find(object=>(object.type >>> 8 & 0xffff) === (which >>> 8 & 0xffff)
+                    && (object.type & which & 0xff) !== 0);
+                break;
+            case DIPH_BYUSAGE:
+                // A HID usage names an object of a HID device, and the system
+                // keyboard and mouse are not reached as HID here.
+                return DIERR_UNSUPPORTED;
+            default:
+                return DIERR_INVALIDPARAM;
+        }
+        return found ?? DIERR_NOTFOUND;
+    };
+
+    /** @type {Record<string, (target: any, args: number[], descriptor?: any) => any>} */
     const deviceMethods = {
-        /** HRESULT Acquire(void) */
+        /**
+         * HRESULT Acquire(void)
+         *
+         * A second Acquire, or an Unacquire of a device nobody holds, changes
+         * nothing and answers DI_NOEFFECT -- S_FALSE, still a success.
+         */
         Acquire(device){
+            if (device.acquired)
+            {
+                return DI_NOEFFECT;
+            }
             device.acquire();
             return DI_OK;
         },
         /** HRESULT Unacquire(void) */
         Unacquire(device){
+            if (!device.acquired)
+            {
+                return DI_NOEFFECT;
+            }
             device.unacquire();
             return DI_OK;
         },
@@ -451,8 +664,48 @@ export function createDirectInput(
             return DI_OK;
         },
 
-        /** HRESULT SetCooperativeLevel(HWND, DWORD) */
-        SetCooperativeLevel(){
+        /**
+         * HRESULT SetCooperativeLevel(HWND, DWORD)
+         *
+         * Like the buffer size, a level is settled before the device is
+         * taken: a held device refuses a new one with DIERR_ACQUIRED. The
+         * one part of it anything here acts on is DISCL_EXCLUSIVE -- see
+         * `exclusive` below for what holding a device that way takes away.
+         *
+         * The rest is checked as Windows checks it (Wine's device8.c, for
+         * the system mouse and keyboard): exactly one of exclusive and
+         * nonexclusive and one of foreground and background, a top-level
+         * window unless the level is background and nonexclusive, and never
+         * background and exclusive at once for these two devices. A keyboard
+         * made by a version before 7 is not exclusive at all.
+         */
+        SetCooperativeLevel(device, [hwnd, flags]){
+            if (device.acquired)
+            {
+                return DIERR_ACQUIRED;
+            }
+            const exclusive = (flags & DISCL_EXCLUSIVE) !== 0;
+            const background = (flags & DISCL_BACKGROUND) !== 0;
+            if (exclusive === ((flags & DISCL_NONEXCLUSIVE) !== 0)
+                || background === ((flags & DISCL_FOREGROUND) !== 0))
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            const window = hwnd >>> 0;
+            const kind = window === 0 ? null : windowKind?.(window);
+            if (window === 0 ? exclusive || !background : kind === null || kind === 'child')
+            {
+                return E_HANDLE;
+            }
+            if (exclusive && device.kind === KEYBOARD && device.version < 0x0700)
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            if (exclusive && background)
+            {
+                return DIERR_UNSUPPORTED;
+            }
+            device.setExclusive(exclusive);
             return DI_OK;
         },
 
@@ -470,7 +723,15 @@ export function createDirectInput(
             }
             // A property GUID is either a real pointer or a small integer
             // packed into one by MAKEDIPROP, and only the latter reaches here.
-            if ((guid >>> 0) === DIPROP_BUFFERSIZE)
+            // The queue's size and the axis mode are settled while nobody
+            // reads the device; a held one keeps what it was acquired with.
+            const property = guid >>> 0;
+            if ((property === DIPROP_BUFFERSIZE || property === DIPROP_AXISMODE)
+                && device.acquired)
+            {
+                return DIERR_ACQUIRED;
+            }
+            if (property === DIPROP_BUFFERSIZE)
             {
                 device.setBufferSize(readU32((header >>> 0) + DIPROPDWORD_DATA));
                 return DI_OK;
@@ -559,7 +820,10 @@ export function createDirectInput(
             {
                 return DIERR_INVALIDPARAM;
             }
-            if (!device.acquired)
+            // Before DirectInput 8 the buffer stays readable once the device
+            // is let go of; from 8 it waits, kept, for the next Acquire
+            // (Wine's device8.c, test_sys_mouse).
+            if (!device.acquired && device.version >= 0x0800)
             {
                 return DIERR_NOTACQUIRED;
             }
@@ -568,6 +832,12 @@ export function createDirectInput(
                 && entrySize !== DIDEVICEOBJECTDATA.SIZE_DX8)
             {
                 return DIERR_INVALIDPARAM;
+            }
+            // A device that was never given a buffer has no events to hand
+            // out, which is not the same as having none waiting.
+            if (device.bufferSize === 0)
+            {
+                return DIERR_NOTBUFFERED;
             }
 
             const asked = readU32(count);
@@ -596,41 +866,152 @@ export function createDirectInput(
         },
 
         /** HRESULT GetCapabilities(LPDIDEVCAPS) */
-        GetCapabilities(device, [caps]){
+        GetCapabilities(device, [caps], descriptor){
             if ((caps >>> 0) === 0 || readU32(caps + DIDEVCAPS.dwSize) < DIDEVCAPS.SIZE)
             {
                 return DIERR_INVALIDPARAM;
             }
             const keyboard = device.kind === KEYBOARD;
-            writeU32(caps + DIDEVCAPS.dwFlags, 0x00000001 | 0x00000004); // ATTACHED | POLLEDDEVICE
-            writeU32(caps + DIDEVCAPS.dwDevType, keyboard ? 0x03 : 0x02); // KEYBOARD | MOUSE
+            writeU32(caps + DIDEVCAPS.dwFlags, DIDC_ATTACHED | DIDC_EMULATED);
+            writeU32(caps + DIDEVCAPS.dwDevType,
+                devTypeOf(device.kind, descriptor?.legacy === true));
             writeU32(caps + DIDEVCAPS.dwAxes, keyboard ? 0 : 3);
-            writeU32(caps + DIDEVCAPS.dwButtons, keyboard ? KEYBOARD_KEYS : 8);
+            writeU32(caps + DIDEVCAPS.dwButtons, keyboard ? KEYBOARD_BUTTONS : MOUSE_BUTTONS);
             writeU32(caps + DIDEVCAPS.dwPOVs, 0);
             return DI_OK;
         },
 
         /**
+         * HRESULT GetDeviceInfo(LPDIDEVICEINSTANCE)
+         *
+         * The same description EnumDevices hands a callback, in the width of
+         * the interface and with the type GetCapabilities gives.
+         *
+         * @param {any} device @param {number[]} args
+         * @param {{ wide?: boolean, legacy?: boolean }} [descriptor]
+         */
+        GetDeviceInfo(device, [info], descriptor){
+            const wide = descriptor?.wide === true;
+            const keyboard = device.kind === KEYBOARD;
+            const name = keyboard ? 'Keyboard' : 'Mouse';
+            const whole = deviceInstanceBytes(keyboard ? GUID_SysKeyboard : GUID_SysMouse,
+                devTypeOf(device.kind, descriptor?.legacy === true), name, name, wide);
+            return fillSized(info, whole, wide
+                ? [DIDEVICEINSTANCE.SIZE_DX3_W, DIDEVICEINSTANCE.SIZE_W]
+                : [DIDEVICEINSTANCE.SIZE_DX3_A, DIDEVICEINSTANCE.SIZE_A]);
+        },
+
+        /**
+         * HRESULT GetObjectInfo(LPDIDEVICEOBJECTINSTANCE, DWORD obj, DWORD how)
+         *
+         * @param {any} device @param {number[]} args
+         * @param {{ wide?: boolean }} [descriptor]
+         */
+        GetObjectInfo(device, [info, which, how], descriptor){
+            const wide = descriptor?.wide === true;
+            /** @type {number[]} */
+            const sizes = wide
+                ? [DIDEVICEOBJECTINSTANCE.SIZE_DX3_W, DIDEVICEOBJECTINSTANCE.SIZE_W]
+                : [DIDEVICEOBJECTINSTANCE.SIZE_DX3_A, DIDEVICEOBJECTINSTANCE.SIZE_A];
+            if ((info >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            if (!sizes.includes(readU32(info)))
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            const found = objectNamed(device, which >>> 0, how >>> 0);
+            return typeof found === 'number'
+                ? found
+                : fillSized(info, objectInstanceBytes(found, wide), sizes);
+        },
+
+        /**
+         * HRESULT EnumObjects(LPDIENUMDEVICEOBJECTSCALLBACK, LPVOID, DWORD flags)
+         *
+         * The callback is guest code, run once per object whose type the
+         * filter's low byte includes (all of them for DIDFT_ALL), with the
+         * caller parked meanwhile -- EnumDevices' shape. Only DIENUM_STOP ends
+         * it; any other answer is taken as going on. One structure is written
+         * over for each object: it is the callback's to read, not to keep.
+         *
+         * @param {any} device @param {number[]} args
+         * @param {{ wide?: boolean }} [descriptor]
+         * @returns {number | Promise<number>}
+         */
+        EnumObjects(device, [callback, context, flags], descriptor){
+            if ((callback >>> 0) === 0)
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            const run = callGuest;
+            if (!run || allocate === undefined)
+            {
+                return DI_OK;
+            }
+            const types = flags & 0xff;
+            const wanted = (flags & DIDFT_ATTRIBUTES) !== 0 ? [] : objectsOf(device.kind)
+                .filter(object=>types === 0 || (object.type & types) !== 0);
+            if (wanted.length === 0)
+            {
+                return DI_OK;
+            }
+            const wide = descriptor?.wide === true;
+            const address = arena(wide ? DIDEVICEOBJECTINSTANCE.SIZE_W
+                : DIDEVICEOBJECTINSTANCE.SIZE_A);
+            // Named before the first await, for the reason `enumerate` gives.
+            const thread = callerThread?.();
+            return (async()=>{
+                for (const object of wanted)
+                {
+                    memory.writeMemory(address, objectInstanceBytes(object, wide));
+                    const more = await run(callback >>> 0, [address, context >>> 0], thread);
+                    if ((more | 0) === DIENUM_STOP)
+                    {
+                        break;
+                    }
+                }
+                return DI_OK;
+            })();
+        },
+
+        /**
          * HRESULT Poll(void)
          *
-         * Nothing to poll: events arrive as they happen. DI_NOEFFECT would be
-         * honest and is also what a program checks for with `FAILED()`, which
-         * it is not -- so either answer works and this is the shorter one.
+         * Nothing to poll: events arrive as they happen, and the device does
+         * not claim DIDC_POLLEDDEVICE. Windows answers such a device with
+         * DI_NOEFFECT from DirectInput 7 on and DI_OK before it, and a device
+         * nobody holds with DIERR_NOTACQUIRED (Wine's joystick8.c).
          */
-        Poll(){
-            return DI_OK;
+        Poll(device){
+            if (!device.acquired)
+            {
+                return DIERR_NOTACQUIRED;
+            }
+            return device.version >= 0x0700 ? DI_NOEFFECT : DI_OK;
         },
     };
 
+    // The generation and the width travel with the interface, as they do on
+    // the roots: they are what GetCapabilities' device type and the string
+    // structures are answered in.
     const deviceInterfaces = ()=>[
-        describe(IID_IDirectInputDeviceA, IDIRECTINPUTDEVICE_SLOTS, deviceMethods),
-        describe(IID_IDirectInputDeviceW, IDIRECTINPUTDEVICE_SLOTS, deviceMethods),
-        describe(IID_IDirectInputDevice2A, IDIRECTINPUTDEVICE2_SLOTS, deviceMethods),
-        describe(IID_IDirectInputDevice2W, IDIRECTINPUTDEVICE2_SLOTS, deviceMethods),
-        describe(IID_IDirectInputDevice7A, IDIRECTINPUTDEVICE7_SLOTS, deviceMethods),
-        describe(IID_IDirectInputDevice7W, IDIRECTINPUTDEVICE7_SLOTS, deviceMethods),
+        describe(IID_IDirectInputDeviceA, IDIRECTINPUTDEVICE_SLOTS, deviceMethods,
+            { legacy: true }),
+        describe(IID_IDirectInputDeviceW, IDIRECTINPUTDEVICE_SLOTS, deviceMethods,
+            { legacy: true, wide: true }),
+        describe(IID_IDirectInputDevice2A, IDIRECTINPUTDEVICE2_SLOTS, deviceMethods,
+            { legacy: true }),
+        describe(IID_IDirectInputDevice2W, IDIRECTINPUTDEVICE2_SLOTS, deviceMethods,
+            { legacy: true, wide: true }),
+        describe(IID_IDirectInputDevice7A, IDIRECTINPUTDEVICE7_SLOTS, deviceMethods,
+            { legacy: true }),
+        describe(IID_IDirectInputDevice7W, IDIRECTINPUTDEVICE7_SLOTS, deviceMethods,
+            { legacy: true, wide: true }),
         describe(IID_IDirectInputDevice8A, IDIRECTINPUTDEVICE8_SLOTS, deviceMethods),
-        describe(IID_IDirectInputDevice8W, IDIRECTINPUTDEVICE8_SLOTS, deviceMethods),
+        describe(IID_IDirectInputDevice8W, IDIRECTINPUTDEVICE8_SLOTS, deviceMethods,
+            { wide: true }),
     ];
 
     /** @param {string} guid */
@@ -655,49 +1036,17 @@ export function createDirectInput(
     let enumerations = 0;
 
     /**
-     * A string where a diddeviceinstance's inline name array sits.
-     *
-     * @param {number} address @param {string} text @param {boolean} wide
-     */
-    const writeText = (address, text, wide)=>{
-        const units = wide ? 2 : 1;
-        const bytes = new Uint8Array((text.length + 1) * units);
-        for (let index = 0; index < text.length; index++)
-        {
-            const code = text.charCodeAt(index);
-            bytes[index * units] = code & 0xff;
-            if (wide)
-            {
-                bytes[index * units + 1] = code >>> 8 & 0xff;
-            }
-        }
-        memory.writeMemory(address, bytes);
-    };
-
-    /**
-     * One DIDEVICEINSTANCE, in the width the interface asked about.
-     *
-     * The two names are inline, so the block is the size the A or the W
-     * definition gives and every field after them is written at that form's
-     * own offset. Both GUIDs are the device's own, as Windows reports the
-     * one system keyboard and mouse; guidFFDriver and the usage number stay
-     * zero because nothing here rumbles.
+     * One DIDEVICEINSTANCE, in the width the interface asked about, in memory
+     * of its own for a callback to be handed.
      *
      * @param {string} guid @param {number} devType
      * @param {string} instanceName @param {string} productName
      * @param {boolean} wide
      */
     const writeInstance = (guid, devType, instanceName, productName, wide)=>{
-        const nameBytes = DIDEVICEINSTANCE.NAME_CHARS * (wide ? 2 : 1);
-        const size = wide ? DIDEVICEINSTANCE.SIZE_W : DIDEVICEINSTANCE.SIZE_A;
-        const address = arena(size);
-        memory.writeMemory(address, new Uint8Array(size));
-        writeU32(address + DIDEVICEINSTANCE.dwSize, size);
-        writeGuid(memory, address + DIDEVICEINSTANCE.guidInstance, guid);
-        writeGuid(memory, address + DIDEVICEINSTANCE.guidProduct, guid);
-        writeU32(address + DIDEVICEINSTANCE.dwDevType, devType);
-        writeText(address + DIDEVICEINSTANCE.tszInstanceName, instanceName, wide);
-        writeText(address + DIDEVICEINSTANCE.tszInstanceName + nameBytes, productName, wide);
+        const bytes = deviceInstanceBytes(guid, devType, instanceName, productName, wide);
+        const address = arena(bytes.length);
+        memory.writeMemory(address, bytes);
         return address;
     };
 
@@ -746,8 +1095,7 @@ export function createDirectInput(
                 guid: GUID_SysMouse,
                 name: 'Mouse',
                 product: 'Mouse',
-                devType: (legacy ? DIDEVTYPE_MOUSE : DI8DEVTYPE_MOUSE)
-                    | (DI8DEVTYPEMOUSE_TRADITIONAL << 8),
+                devType: devTypeOf(MOUSE, legacy),
             });
         }
         if (deviceClass === DI8DEVCLASS_ALL || deviceClass === DI8DEVCLASS_KEYBOARD)
@@ -756,8 +1104,7 @@ export function createDirectInput(
                 guid: GUID_SysKeyboard,
                 name: 'Keyboard',
                 product: 'Keyboard',
-                devType: (legacy ? DIDEVTYPE_KEYBOARD : DI8DEVTYPE_KEYBOARD)
-                    | (DI8DEVTYPEKEYBOARD_PCENH << 8),
+                devType: devTypeOf(KEYBOARD, legacy),
             });
         }
 
@@ -793,8 +1140,19 @@ export function createDirectInput(
 
     /** @type {Record<string, (target: any, args: number[], descriptor?: any) => any>} */
     const rootMethods = {
-        /** HRESULT CreateDevice(REFGUID, LPDIRECTINPUTDEVICE*, LPUNKNOWN) */
-        CreateDevice(root, [guid, out]){
+        /**
+         * HRESULT CreateDevice(REFGUID, LPDIRECTINPUTDEVICE*, LPUNKNOWN)
+         *
+         * What comes back is the device interface the root is declared with:
+         * IDirectInputDevice8 from IDirectInput8, IDirectInputDevice from
+         * every earlier root, each in the root's width. A program holding an
+         * IDirectInput8 calls Poll at slot 25 of what it is given without
+         * asking for anything, so the shorter table is a call past its end.
+         *
+         * @param {any} root @param {number[]} args
+         * @param {{ wide?: boolean, legacy?: boolean }} [descriptor]
+         */
+        CreateDevice(root, [guid, out], descriptor){
             if ((out >>> 0) === 0 || (guid >>> 0) === 0)
             {
                 return DIERR_INVALIDPARAM;
@@ -805,8 +1163,12 @@ export function createDirectInput(
                 writeU32(out, 0);
                 return DIERR_DEVICENOTREG;
             }
-            writeU32(out, publisher.publish(
-                device, deviceInterfaces(), IID_IDirectInputDeviceA));
+            const wide = descriptor?.wide === true;
+            const id = descriptor?.legacy === false
+                ? (wide ? IID_IDirectInputDevice8W : IID_IDirectInputDevice8A)
+                : (wide ? IID_IDirectInputDeviceW : IID_IDirectInputDeviceA);
+            device.setVersion(root.version);
+            writeU32(out, publisher.publish(device, deviceInterfaces(), id));
             return DI_OK;
         },
 
@@ -829,6 +1191,7 @@ export function createDirectInput(
                 return DIERR_DEVICENOTREG;
             }
             const wanted = guidAt(iid);
+            device.setVersion(root.version);
             const pointer = publisher.publish(device, deviceInterfaces(), wanted);
             if (pointer === 0)
             {
@@ -870,8 +1233,9 @@ export function createDirectInput(
         RunControlPanel(){
             return DI_OK;
         },
-        /** HRESULT Initialize(HINSTANCE, DWORD) */
-        Initialize(){
+        /** HRESULT Initialize(HINSTANCE, DWORD version) */
+        Initialize(root, [, version]){
+            root.version = version >>> 0;
             return DI_OK;
         },
         /** HRESULT FindDevice(REFGUID, LPCSTR, LPGUID) */
@@ -880,7 +1244,6 @@ export function createDirectInput(
         },
     };
 
-    const root = { addRef: ()=>1, release: ()=>0 };
     const rootInterfaces = [
         describe(IID_IDirectInputA, IDIRECTINPUT_SLOTS, rootMethods, { legacy: true }),
         describe(IID_IDirectInputW, IDIRECTINPUT_SLOTS, rootMethods,
@@ -895,19 +1258,38 @@ export function createDirectInput(
         describe(IID_IDirectInput8W, IDIRECTINPUT8_SLOTS, rootMethods, { wide: true }),
     ];
 
-    /** @param {number} out @param {string} id */
-    const createInto = (out, id)=>{
+    /**
+     * A new DirectInput object, as each creation call makes on Windows. It
+     * remembers the version the program asked for: the devices it makes
+     * answer as that version does.
+     *
+     * It counts its references as one object whichever interface each came
+     * through, and the devices it made take none a program can see: Wine's
+     * dinput tests release it to zero while a device is still held, and the
+     * device goes on answering, since it keeps what it needs of its own.
+     *
+     * @param {number} out @param {string} id @param {number} version
+     */
+    const createInto = (out, id, version)=>{
         if ((out >>> 0) === 0)
         {
             return DIERR_INVALIDPARAM;
         }
+        let references = 1;
+        const root = {
+            version: version >>> 0,
+            addRef: ()=>++references,
+            release: ()=>(references = Math.max(0, references - 1)),
+            get destroyed(){
+                return references === 0;
+            },
+        };
         const pointer = publisher.publish(root, rootInterfaces, id);
         writeU32(out, pointer);
         return pointer === 0 ? 0x80004002 | 0 : DI_OK;
     };
 
     return {
-        root,
         publisher,
 
         /**
@@ -938,6 +1320,20 @@ export function createDirectInput(
         /** @param {string} guid */
         device: guid=>devices.get(guid) ?? null,
 
+        /**
+         * Whether a program holds this device exclusively right now: acquired
+         * at a cooperative level with DISCL_EXCLUSIVE. While it does, the
+         * device's input reaches the program through DirectInput alone --
+         * Windows takes it as raw input with RIDEV_NOLEGACY, and the window's
+         * own mouse or key messages stop, so one click is not read twice.
+         *
+         * @param {'keyboard' | 'mouse'} kind
+         */
+        exclusive(kind){
+            const device = devices.get(kind === KEYBOARD ? GUID_SysKeyboard : GUID_SysMouse);
+            return device !== undefined && device.acquired && device.exclusive;
+        },
+
         libraries: {
             'DINPUT.dll': {
                 /**
@@ -947,12 +1343,12 @@ export function createDirectInput(
                 DirectInputCreateA: {
                     argBytes: 16,
                     /** @param {number[]} args */
-                    handler: ([, , out])=>createInto(out, IID_IDirectInputA),
+                    handler: ([, version, out])=>createInto(out, IID_IDirectInputA, version),
                 },
                 DirectInputCreateW: {
                     argBytes: 16,
                     /** @param {number[]} args */
-                    handler: ([, , out])=>createInto(out, IID_IDirectInputW),
+                    handler: ([, version, out])=>createInto(out, IID_IDirectInputW, version),
                 },
                 /**
                  * HRESULT DirectInputCreateEx(HINSTANCE, DWORD, REFIID,
@@ -965,8 +1361,8 @@ export function createDirectInput(
                 DirectInputCreateEx: {
                     argBytes: 20,
                     /** @param {number[]} args */
-                    handler: ([, , iid, out])=>createInto(
-                        out, guidAt(iid)),
+                    handler: ([, version, iid, out])=>createInto(
+                        out, guidAt(iid), version),
                 },
                 DllCanUnloadNow: { argBytes: 0, handler: ()=>DI_OK },
             },
@@ -978,8 +1374,8 @@ export function createDirectInput(
                 DirectInput8Create: {
                     argBytes: 20,
                     /** @param {number[]} args */
-                    handler: ([, , iid, out])=>createInto(
-                        out, guidAt(iid)),
+                    handler: ([, version, iid, out])=>createInto(
+                        out, guidAt(iid), version),
                 },
                 DllCanUnloadNow: { argBytes: 0, handler: ()=>DI_OK },
             },

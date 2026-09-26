@@ -152,6 +152,51 @@ test('waiters are handed the section in the order they queued', ()=>{
     assert.equal(m.get32(0x9000 + CS.OWNING_THREAD), 3, 'the last hand-off stands');
 });
 
+test('a release passes over a suspended waiter to one that can run', ()=>{
+    // A suspended thread is not waiting on the section while it is suspended:
+    // the release goes to the next waiter, as the semaphore behind a section
+    // would satisfy the next thread waiting on it.
+    const m = machine();
+    const suspended = { id: 2, name: 'a' };
+    const running = { id: 3, name: 'b' };
+    m.run(suspended);
+    m.sections.wait(0x9000);
+    m.run(running);
+    m.sections.wait(0x9000);
+    Object.assign(suspended, { suspendCount: 1 });
+
+    m.sections.wake(0x9000);
+
+    assert.deepEqual(m.woken.map(one=>one.thread), [running]);
+    assert.equal(m.get32(0x9000 + CS.OWNING_THREAD), 3);
+    assert.deepEqual(m.sections.waiting(), ['a: critical section 0x9000'],
+        'and the suspended one is still queued');
+});
+
+test('a release with only suspended waiters is kept for whoever can take it', ()=>{
+    // Nobody can run to take the section: the release is owed, a newcomer
+    // takes it as it would a wake that came early, and a waiter resumed while
+    // one is owed takes it on resuming.
+    const m = machine();
+    const suspended = { id: 2, name: 'a', suspendCount: 1 };
+    m.run(suspended);
+    m.sections.wait(0x9000);
+
+    m.sections.wake(0x9000);
+    assert.equal(m.woken.length, 0, 'nobody is handed it');
+    assert.equal(m.sections.diagnostics().owed, 1);
+
+    suspended.suspendCount = 0;
+    m.sections.resumed(suspended);
+    assert.deepEqual(m.woken.map(one=>one.thread), [suspended]);
+    assert.equal(m.get32(0x9000 + CS.OWNING_THREAD), 2);
+    assert.equal(m.sections.diagnostics().owed, 0);
+    assert.deepEqual(m.sections.waiting(), []);
+
+    m.sections.resumed({ id: 5, name: 'c' });
+    assert.equal(m.woken.length, 1, 'a thread queued nowhere is nothing to hand to');
+});
+
 test('the counters block is read by the host and written by the fast paths', ()=>{
     const m = machine();
     assert.deepEqual(m.sections.diagnostics().entered, 0, 'nothing placed yet reads as nothing');

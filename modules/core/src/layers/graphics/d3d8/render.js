@@ -36,16 +36,17 @@
  */
 
 import {
-    COLORWRITEENABLE_ALPHA, COORD_SET_MASK, D3DBLEND, D3DCLEAR, D3DCMP, D3DCULL, D3DFMT,
-    D3DFMT_INDEX, D3DFOG, D3DLOCK, D3DPT, D3DRS, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTS,
-    D3DTSS, D3DUSAGE, D3DZB, D3D_OK, FORMAT_INFO, argumentsRead, dwordToFloat, isCompressed,
-    surfaceBytes,
+    COLORWRITEENABLE_ALPHA, COORD_SET_MASK, D3DBLEND, D3DCLEAR, D3DCMP, D3DCULL, D3DFILL, D3DFMT,
+    D3DFMT_INDEX, D3DFOG, D3DLOCK, D3DPOOL, D3DPT, D3DRS, D3DSHADE, D3DTA, D3DTADDRESS, D3DTEXF,
+    D3DTOP, D3DTS, D3DTSS, D3DUSAGE, D3DZB, D3D_OK, FORMAT_INFO, argumentsRead, dwordToFloat,
+    isCompressed, surfaceBytes,
 } from './constants.js';
 import { FVF, POSITION_MASK, decodeFvf } from '../webgpu/internal/vertexformat.js';
-import { levelExtent } from '../d3d9/resources.js';
+import { D3DLOCK_NO_DIRTY_UPDATE, levelExtent } from '../d3d9/resources.js';
+import { D3DRS as D3DRS9 } from '../d3d9/constants.js';
 import { resourceId } from '../webgpu/internal/bindings.js';
 import {
-    constantBlocks, createProgramCache, shapeKey, vertexLayoutOf,
+    constantBlocks, createProgramCache, samplerDimension, shapeKey, vertexLayoutOf,
 } from '../webgpu/internal/programmable.js';
 import {
     HYBRID_CONSTANTS, fixedVertexStage, translateShader, varyingLocation,
@@ -53,9 +54,21 @@ import {
 import { D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import {
-    fixedFragmentStage, generates, generationOf,
+    fixedFragmentStage, generates, generationOf, readsNormal,
 } from '../webgpu/internal/fixedfunction.js';
-import { pipelineKey } from '../webgpu/internal/pipeline.js';
+import { FOG_SOURCE, fogSourceOf, pipelineKey } from '../webgpu/internal/pipeline.js';
+
+/**
+ * Direct3D 7's D3DRENDERSTATE_COLORKEYENABLE. Its number is free in Direct3D
+ * 8 and 9, which never set it, so only a Direct3D 7 device keys a draw.
+ */
+const D3DRENDERSTATE_COLORKEYENABLE = 41;
+
+/**
+ * The buffer a stream with nothing bound reads from: WebGPU's default
+ * largest stride, so any member read at a stride of zero lies inside it.
+ */
+const ZERO_STREAM_BYTES = 2048;
 
 /** A stage state's DWORD, as the D3D8 header lays it out. */
 const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
@@ -103,6 +116,20 @@ const PLANAR_ROWS = Object.freeze([0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7,
 
 /** What those elements hold when the transform moves nothing: the identity, by columns. */
 const PLANAR_IDENTITY = Object.freeze([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+/**
+ * The stages a 1.x pixel shader samples: four below 1.4, six in it.
+ */
+const LEGACY_STAGES = 6;
+
+/**
+ * The component D3DTTFF_PROJECTED divides a coordinate set by, for each
+ * D3DTTFF_COUNTn: the last of the count, or w with no count; one coordinate
+ * has nothing to divide by.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+const PROJECTED_BY = Object.freeze({ 0: 'w', 2: 'y', 3: 'z', 4: 'w' });
 
 /** D3DTTFF_COUNTn: how many coordinates go through the matrix; PROJECTED divides by the last. */
 const TTFF_COUNT_MASK = 0xff;
@@ -393,6 +420,12 @@ const LIST_OF = Object.freeze({
  * rewrite keeps that, because a cull mode that discards half the strip is not
  * something a test on a list would notice.
  *
+ * Each triangle also starts at the vertex Direct3D takes a flat-shaded
+ * triangle's colours from, since the list's first vertex is the one flat
+ * interpolation reads: a strip triangle's first, and a fan triangle's first
+ * after the hub (EXT_provoking_vertex, issue 7, records the latter as
+ * DirectX 9's). Rotating a triangle's vertices keeps its winding.
+ *
  * @param {number} type
  * @param {ArrayLike<number>} indices  The vertex indices in strip or fan order.
  * @returns {Uint16Array | Uint32Array}
@@ -418,18 +451,49 @@ export function listIndices(type, indices){
                 }
                 else
                 {
-                    out.push(indices[index + 1], indices[index], indices[index + 2]);
+                    out.push(indices[index], indices[index + 2], indices[index + 1]);
                 }
             }
             break;
         case D3DPT.TRIANGLEFAN:
             for (let index = 1; index + 1 < count; index++)
             {
-                out.push(indices[0], indices[index], indices[index + 1]);
+                out.push(indices[index], indices[index + 1], indices[0]);
             }
             break;
         default:
             throw new Error(`Primitive type ${type} is already a list`);
+    }
+    const wide = out.some(value=>value > 0xffff);
+    return wide ? Uint32Array.from(out) : Uint16Array.from(out);
+}
+
+/**
+ * Triangles under D3DRS_FILLMODE WIREFRAME or POINT, rewritten as the lines
+ * or points they draw: each triangle's three edges, or its three vertices.
+ * WebGPU has no fill mode, so the topology is what carries it.
+ *
+ * @param {number} type  D3DPT, a triangle type
+ * @param {ArrayLike<number>} indices  The vertex indices in the type's order.
+ * @param {number} fill  D3DFILL, WIREFRAME or POINT
+ * @returns {Uint16Array | Uint32Array}
+ */
+export function filledIndices(type, indices, fill){
+    const triangles = type === D3DPT.TRIANGLELIST ? indices : listIndices(type, indices);
+    const whole = triangles.length - triangles.length % 3;
+    /** @type {number[]} */
+    const out = [];
+    for (let at = 0; at < whole; at += 3)
+    {
+        const [a, b, c] = [triangles[at], triangles[at + 1], triangles[at + 2]];
+        if (fill === D3DFILL.WIREFRAME)
+        {
+            out.push(a, b, b, c, c, a);
+        }
+        else
+        {
+            out.push(a, b, c);
+        }
     }
     const wide = out.some(value=>value > 0xffff);
     return wide ? Uint32Array.from(out) : Uint16Array.from(out);
@@ -715,7 +779,13 @@ export const UNIFORM_AT = Object.freeze({
     textureTransforms: 76,
     // World then view: the camera space a generated coordinate is taken in.
     worldView: 204,
-    lights: 220,
+    // The inverse transpose of the world matrix, which a lit normal goes
+    // through; identity unless the draw is lit.
+    normalMatrix: 220,
+    // The inverse transpose of world then view, which a normal a coordinate
+    // is generated from goes through; identity unless a stage takes one.
+    cameraNormalMatrix: 236,
+    lights: 252,
 });
 
 /** How many stages the block carries sampler state for. */
@@ -804,10 +874,16 @@ function putDword(block, at, dword){
  * @property {ArrayLike<number>} [world]   Identity unless the draw is lit.
  * @property {Material} [material]
  * @property {number[]} [fogFactors] Fog start, end and density, as floats.
+ * @property {boolean} [affineProjection]
+ *     Whether the projection's fourth column is (0, 0, 0, 1), which makes
+ *     table fog take the pixel's z rather than its w.
  * @property {number[]} [stages]     Packed sampler state per stage; see `samplerFlagsOf`.
  * @property {(readonly number[])[]} [textureTransforms]
  *     Per stage, the sixteen elements in `PLANAR_ROWS` order; identity when absent.
  * @property {ArrayLike<number>} [worldView]  Identity unless a stage generates coordinates.
+ * @property {ArrayLike<number>} [normalMatrix]  See `normalMatrixOf`; identity unless lit.
+ * @property {ArrayLike<number>} [cameraNormalMatrix]
+ *     `normalMatrixOf` world then view; identity unless a stage generates from the normal.
  * @property {number} [ambient]      D3DCOLOR, the scene's own ambient light.
  * @property {readonly number[]} [eye]     Camera position in world space.
  * @property {readonly Light[]} [lights]
@@ -829,10 +905,11 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     block.set(values.viewport.scale, at.viewportScale);
     putDword(block, at.textureFactor, values.textureFactor);
     putDword(block, at.fogColor, values.fogColor);
-    // Start, end and density, which is everything the three fog curves need;
-    // which curve is in force shaped the shader and is not carried here.
+    // Start, end and density, which is everything the three fog curves need,
+    // and which depth table fog runs over; which curve is in force shaped the
+    // shader and is not carried here.
     const fog = values.fogFactors ?? [0, 1, 1];
-    put4(block, at.fogFactors, fog[0], fog[1], fog[2], 0);
+    put4(block, at.fogFactors, fog[0], fog[1], fog[2], values.affineProjection ? 1 : 0);
     const material = values.material ?? NO_MATERIAL;
     putColour(block, at.materialDiffuse, material.Diffuse);
     putColour(block, at.materialAmbient, material.Ambient);
@@ -857,6 +934,8 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
         block.set(transforms[index] ?? PLANAR_IDENTITY, at.textureTransforms + index * 16);
     }
     block.set(values.worldView ?? IDENTITY, at.worldView);
+    block.set(values.normalMatrix ?? IDENTITY, at.normalMatrix);
+    block.set(values.cameraNormalMatrix ?? IDENTITY, at.cameraNormalMatrix);
     for (let index = 0; index < lights.length; index++)
     {
         packLight(block, at.lights + index * LIGHT_FLOATS, lights[index]);
@@ -896,6 +975,57 @@ export function createUniformArena(floats = 1 << 16){
             return block;
         },
     };
+}
+
+/**
+ * What a normal is carried into world space by: the inverse transpose of the
+ * world matrix, laid out as a matrix is, so a normal times it is the normal
+ * the surface has after the world matrix moved it. The whole 4x4 is
+ * inverted, not its upper 3x3 -- the two differ only under a non-affine
+ * world, where Direct3D lights by the former (Wine's d3d9 lighting_test has
+ * such a world leave a lit quad black). A matrix with no inverse gives its
+ * adjugate transpose: the cofactors, which the inverse is a scaling of, and a
+ * normal's direction is what lighting reads.
+ *
+ * @param {ArrayLike<number>} m  row-major, as D3DMATRIX
+ * @param {Float32Array} [out]
+ * @returns {Float32Array}
+ */
+export function normalMatrixOf(m, out = new Float32Array(16)){
+    /** @param {number} row @param {number} column */
+    const minor = (row, column)=>{
+        /** @type {number[]} */
+        const cells = [];
+        for (let r = 0; r < 4; r++)
+        {
+            for (let c = 0; c < 4; c++)
+            {
+                if (r !== row && c !== column)
+                {
+                    cells.push(m[r * 4 + c]);
+                }
+            }
+        }
+        const [a, b, c, d, e, f, g, h, i] = cells;
+        return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    };
+    for (let row = 0; row < 4; row++)
+    {
+        for (let column = 0; column < 4; column++)
+        {
+            // Negative zero is the same matrix and a worse one to read.
+            out[row * 4 + column] = ((row + column) % 2 === 0 ? 1 : -1) * minor(row, column) || 0;
+        }
+    }
+    const determinant = m[0] * out[0] + m[1] * out[1] + m[2] * out[2] + m[3] * out[3];
+    if (determinant !== 0)
+    {
+        for (let at = 0; at < 16; at++)
+        {
+            out[at] /= determinant;
+        }
+    }
+    return out;
 }
 
 /**
@@ -944,7 +1074,15 @@ export function eyePosition(view){
  * @property {Map<number, number>} renderStates
  * @property {(stage: number)=>Map<number, number>} stageStates
  * @property {Map<number, any>} textures
- * @property {{ buffer: any, stride: number }} stream       Stream zero.
+ * @property {{ buffer: any, stride: number, offset?: number }} stream       Stream zero.
+ * @property {(index: number) => { buffer: any, stride: number, offset?: number }} [streamAt]
+ * @property {Map<number, number>} [streamFrequencies]
+ *           D3DSTREAMSOURCE frequencies by stream, Direct3D 9's; none steps by instance.
+ *     Any stream by its number, where the API has more than one: a
+ *     declaration may read members from streams past zero.
+ * @property {{ left: number, top: number, right: number, bottom: number }} [scissor]
+ *     The scissor rectangle, where the API has one; D3DRS_SCISSORTESTENABLE
+ *     says whether draws are cut to it.
  * @property {any} indices
  * @property {number} baseVertexIndex
  * @property {import('../webgpu/contract.js').ViewportState} viewport
@@ -1079,9 +1217,9 @@ export function uniformsOf(model, lighting, take, mips = true){
     const world = transformOf(model, D3DTS.WORLD);
     const view = transformOf(model, D3DTS.VIEW);
     const worldView = multiplyMatrices(world, view, WORLD_VIEW);
+    const projection = transformOf(model, D3DTS.PROJECTION);
     return uniformBlock({
-        worldViewProjection: multiplyMatrices(
-            worldView, transformOf(model, D3DTS.PROJECTION), WORLD_VIEW_PROJECTION),
+        worldViewProjection: multiplyMatrices(worldView, projection, WORLD_VIEW_PROJECTION),
         world,
         worldView,
         viewport: model.viewport,
@@ -1096,12 +1234,17 @@ export function uniformsOf(model, lighting, take, mips = true){
             dwordToFloat(rs('FOGEND')),
             dwordToFloat(rs('FOGDENSITY')),
         ],
+        affineProjection: isAffine(projection),
         alphaRef: rs('ALPHAREF'),
         stages: stageFlags(model, mips),
         textureTransforms: stageTransforms(model),
         material: model.material,
         ambient: rs('AMBIENT'),
         eye: eyePosition(view),
+        ...(lighting ? { normalMatrix: normalMatrixOf(world, NORMAL_MATRIX) } : {}),
+        ...(generatesFromNormal(model)
+            ? { cameraNormalMatrix: normalMatrixOf(worldView, CAMERA_NORMAL_MATRIX) }
+            : {}),
         // The shader declares an array exactly as long as the lighting state
         // said, so a block that carried lights it does not know about would be
         // read past its own end.
@@ -1133,12 +1276,23 @@ const stageTransforms = model=>{
     return transforms;
 };
 
+/**
+ * The level of detail a managed texture was set to: the most detailed level a
+ * sample reaches, alongside the stage's own MAXMIPLEVEL, whichever is less
+ * detailed (Wine's d3d9 maxmip_test).
+ *
+ * @param {any} texture
+ * @returns {number}
+ */
+const lodOf = texture=>texture?.GetLOD?.() ?? 0;
+
 /** @param {RenderModel} model @param {boolean} mips */
 const stageFlags = (model, mips)=>{
     const flags = [];
     for (let index = 0; index < SAMPLED_STAGES; index++)
     {
-        flags.push(samplerFlagsOf(model.stageStates(index), mips));
+        flags.push(samplerFlagsOf(model.stageStates(index), mips,
+            lodOf(model.textures.get(index))));
     }
     return flags;
 };
@@ -1146,6 +1300,32 @@ const stageFlags = (model, mips)=>{
 /** Scratch for the two products every draw forms; copied into the block at once. */
 const WORLD_VIEW = new Float32Array(16);
 const WORLD_VIEW_PROJECTION = new Float32Array(16);
+/** Scratch for a lit draw's normal matrix, likewise. */
+const NORMAL_MATRIX = new Float32Array(16);
+/** Scratch for the camera-space one of a draw generating from the normal. */
+const CAMERA_NORMAL_MATRIX = new Float32Array(16);
+
+/**
+ * Whether a stage the cascade runs generates its coordinates from the
+ * vertex normal.
+ *
+ * @param {RenderModel} model
+ */
+function generatesFromNormal(model){
+    for (let stage = 0; stage < STAGE_COUNT; stage++)
+    {
+        const states = model.stageStates(stage);
+        if ((states.get(D3DTSS.COLOROP) ?? 0) === D3DTOP.DISABLE)
+        {
+            return false;
+        }
+        if (readsNormal(states.get(D3DTSS.TEXCOORDINDEX) ?? 0))
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
 /** What a preparation's block field holds before its first draw writes one. */
 const EMPTY_BLOCK = new Float32Array(0);
@@ -1233,10 +1413,25 @@ export function stageCascade(model, layout){
                 },
             };
         }
-        stages.push(key);
+        const dimension = samples ? textureDimensionOf(texture) : '2d';
+        stages.push(dimension === '2d' ? key : { ...key, dimension });
         textures.push(samples ? texture : null);
     }
     return { stages, textures, truncated: null };
+}
+
+/**
+ * What a texture is sampled as: a cube map, a volume, or two-dimensional.
+ *
+ * @param {any} texture
+ * @returns {'2d' | 'cube' | '3d'}
+ */
+export function textureDimensionOf(texture){
+    if (texture?.cube === true)
+    {
+        return 'cube';
+    }
+    return texture?.volume === true ? '3d' : '2d';
 }
 
 /**
@@ -1249,13 +1444,55 @@ export function stageCascade(model, layout){
  * @returns {number} D3DFOG; NONE is 0.
  */
 export function fogModeOf(model, applied = true){
+    return fogOf(model, applied).mode;
+}
+
+/**
+ * Where a draw's fog factor comes from, and the curve it is computed by.
+ *
+ * D3DRS_FOGENABLE with both modes NONE is not "no fog": the factor is then
+ * the specular alpha, which is how a program that computes its own fog hands
+ * it over. Wine's d3d9 test_fog_interpolation draws that case fogged by the
+ * interpolated specular alpha, flat shading or not.
+ *
+ * @param {RenderModel} model
+ * @param {boolean} [applied]  False runs the draw as if fog were disabled.
+ * @returns {{ source: number, mode: number }} FOG_SOURCE and D3DFOG
+ */
+export function fogOf(model, applied = true){
     const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
     if (!applied || rs('FOGENABLE') === 0)
     {
-        return D3DFOG.NONE;
+        return { source: FOG_SOURCE.NONE, mode: D3DFOG.NONE };
     }
-    return rs('FOGTABLEMODE') || rs('FOGVERTEXMODE');
+    if (rs('FOGTABLEMODE') !== D3DFOG.NONE)
+    {
+        return { source: FOG_SOURCE.TABLE, mode: rs('FOGTABLEMODE') };
+    }
+    if (rs('FOGVERTEXMODE') !== D3DFOG.NONE)
+    {
+        return { source: FOG_SOURCE.VERTEX, mode: rs('FOGVERTEXMODE') };
+    }
+    return { source: FOG_SOURCE.SPECULAR, mode: D3DFOG.NONE };
 }
+
+/**
+ * Whether the vertex colours are flat over each primitive: D3DSHADE_FLAT.
+ * Gouraud is the default, and Phong, which no device implements, draws as it.
+ *
+ * @param {RenderModel} model
+ */
+export const isFlatShaded = model=>
+    (model.renderStates.get(D3DRS.SHADEMODE) ?? 0) === D3DSHADE.FLAT;
+
+/**
+ * Whether a projection is affine -- its fourth column (0, 0, 0, 1) -- which is
+ * Direct3D's test for taking table fog over the pixel's z rather than its w.
+ *
+ * @param {ArrayLike<number>} projection
+ */
+export const isAffine = projection=>projection[3] === 0 && projection[7] === 0
+    && projection[11] === 0 && projection[15] === 1;
 
 /**
  * The render state of a draw, as the pipeline cache keys it.
@@ -1292,7 +1529,11 @@ export function pipelineStateOf(model, shape){
         srcBlend = D3DBLEND.INVSRCALPHA;
         destBlend = D3DBLEND.SRCALPHA;
     }
-    const fogMode = fogModeOf(model, shape.fog !== false);
+    const fog = fogOf(model, shape.fog !== false);
+    // Direct3D ties the depth write to the test: with ZENABLE off nothing is
+    // written, whatever ZWRITEENABLE says. WebGPU writes under 'always', so
+    // the write goes off with the test here, where the API's rule is known.
+    const depthTest = shape.depthFormat !== undefined && rs('ZENABLE') !== D3DZB.FALSE;
 
     return {
         fvf: shape.fvf,
@@ -1301,8 +1542,8 @@ export function pipelineStateOf(model, shape){
         targetFormat: shape.targetFormat,
         depthFormat: shape.depthFormat,
         topology: shape.topology,
-        depthTest: shape.depthFormat !== undefined && rs('ZENABLE') !== D3DZB.FALSE,
-        depthWrite: shape.depthFormat !== undefined && rs('ZWRITEENABLE') !== 0,
+        depthTest,
+        depthWrite: depthTest && rs('ZWRITEENABLE') !== 0,
         depthFunc: rs('ZFUNC'),
         cullMode: rs('CULLMODE'),
         blend: rs('ALPHABLENDENABLE') !== 0,
@@ -1318,13 +1559,18 @@ export function pipelineStateOf(model, shape){
             & (shape.targetHasAlpha === false ? ~COLORWRITEENABLE_ALPHA : ~0),
         alphaTest: rs('ALPHATESTENABLE') !== 0,
         alphaFunc: rs('ALPHAFUNC'),
-        fogMode,
+        fogMode: fog.mode,
+        fogSource: fog.source,
         stages: shape.stages,
         // Specular is a fragment-stage decision as much as a lighting one: the
         // vertex's specular colour is added after the cascade whether lighting
         // computed it or the program supplied it.
         specularEnable: rs('SPECULARENABLE') !== 0,
         lighting: shape.lighting ?? null,
+        normalizeNormals: rs('NORMALIZENORMALS') !== 0,
+        flatShading: isFlatShaded(model),
+        // Range fog is vertex fog's alone: table fog is the pixel's depth.
+        rangeFog: fog.source === FOG_SOURCE.VERTEX && rs('RANGEFOGENABLE') !== 0,
         ...(shape.vertexLayout ? {
             vertexLayout: shape.vertexLayout,
             vertexLayoutKey: shape.vertexLayoutKey,
@@ -1349,27 +1595,66 @@ const ADDRESS = Object.freeze({
     [D3DTADDRESS.MIRRORONCE]: 'mirror-repeat',
 });
 
+/** GPUShaderStage.FRAGMENT. */
+const FRAGMENT_VISIBILITY = 2;
+
+/** D3DSTREAMSOURCE_INDEXEDDATA and _INSTANCEDATA, and the count beside them. */
+const STREAMSOURCE_INDEXEDDATA = 0x40000000;
+const STREAMSOURCE_INSTANCEDATA = 0x80000000;
+const STREAMSOURCE_COUNT = 0x3fffffff;
+
+/**
+ * One level from the level above: a triangle over the target, and each pixel
+ * the sampler's reading of the source at the pixel's centre, which for a
+ * level half the size is the shared corner of the four texels it covers.
+ */
+const MIP_SHADER = `@group(0) @binding(0) var source: texture_2d<f32>;
+@group(0) @binding(1) var sourceSampler: sampler;
+
+struct Corner {
+    @builtin(position) position: vec4f,
+    @location(0) uv: vec2f,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> Corner {
+    let corner = vec2f(f32((index << 1u) & 2u), f32(index & 2u));
+    var out: Corner;
+    out.position = vec4f(corner * 2.0 - 1.0, 0.0, 1.0);
+    out.uv = vec2f(corner.x, 1.0 - corner.y);
+    return out;
+}
+
+@fragment
+fn fs_main(in: Corner) -> @location(0) vec4f {
+    return textureSampleLevel(source, sourceSampler, in.uv, 0.0);
+}
+`;
+
 /**
  * @param {Map<number, number>} states  one stage's states
  * @param {boolean} [mips]  False pins every sample to the top level.
+ * @param {number} [lod]  The bound texture's own level of detail.
  * @returns {{ magFilter: string, minFilter: string, mipmapFilter: string,
- *             addressModeU: string, addressModeV: string,
+ *             addressModeU: string, addressModeV: string, addressModeW: string,
  *             lodMinClamp: number, lodMaxClamp: number }}
  */
-export function samplerDescriptorOf(states, mips = true){
+export function samplerDescriptorOf(states, mips = true, lod = 0){
     const get = (/** @type {number} */ state)=>states.get(state) ?? 0;
     const mipFilter = mips ? get(D3DTSS.MIPFILTER) : D3DTEXF.NONE;
+    const finest = Math.max(get(D3DTSS.MAXMIPLEVEL), lod);
     return {
         magFilter: FILTER[get(D3DTSS.MAGFILTER)] ?? 'nearest',
         minFilter: FILTER[get(D3DTSS.MINFILTER)] ?? 'nearest',
         mipmapFilter: FILTER[mipFilter] ?? 'nearest',
         addressModeU: ADDRESS[get(D3DTSS.ADDRESSU)] ?? 'repeat',
         addressModeV: ADDRESS[get(D3DTSS.ADDRESSV)] ?? 'repeat',
-        // D3DTEXF_NONE for the mip filter means the top level alone, however
-        // many the texture has; the finest level a program allows is the
-        // nearest it lets a sample come.
-        lodMinClamp: get(D3DTSS.MAXMIPLEVEL),
-        lodMaxClamp: mipFilter === D3DTEXF.NONE ? 0 : LOD_MAX,
+        addressModeW: ADDRESS[get(D3DTSS.ADDRESSW)] ?? 'repeat',
+        // D3DTEXF_NONE for the mip filter means one level alone, however many
+        // the texture has: the finest a program allows, which is the nearest
+        // it lets any sample come.
+        lodMinClamp: finest,
+        lodMaxClamp: mipFilter === D3DTEXF.NONE ? finest : LOD_MAX,
     };
 }
 
@@ -1391,9 +1676,10 @@ const ADDRESS_BITS = Object.freeze({
  *
  * Every draw samples through one hardware sampler -- linear, repeating,
  * whole mip chain -- and the state a program set per stage is carried in the
- * uniform block instead: address mode per axis (bits 0-3), point filtering
- * for magnification and minification (bits 4-5), the mip mode (bits 6-7:
- * none, point, linear) and the most detailed level allowed (bits 8-15).
+ * uniform block instead: address mode per axis (bits 0-3, and 16-17 for a
+ * volume's third), point filtering for magnification and minification (bits
+ * 4-5), the mip mode (bits 6-7: none, point, linear) and the most detailed
+ * level allowed (bits 8-15).
  * Measured reason: a device was seen to keep one sampler in force for every
  * draw of a run regardless of the group each draw bound, for stretches of
  * frames at a time, so a picture whose sampling depends on which sampler is
@@ -1401,9 +1687,10 @@ const ADDRESS_BITS = Object.freeze({
  *
  * @param {Map<number, number>} states  one stage's states
  * @param {boolean} [mips]  False pins every sample to the top level.
+ * @param {number} [lod]  The bound texture's own level of detail.
  * @returns {number}
  */
-export function samplerFlagsOf(states, mips = true){
+export function samplerFlagsOf(states, mips = true, lod = 0){
     const get = (/** @type {number} */ state)=>states.get(state) ?? 0;
     const mipFilter = mips ? get(D3DTSS.MIPFILTER) : D3DTEXF.NONE;
     const mipMode = mipFilter === D3DTEXF.LINEAR ? 2 : mipFilter === D3DTEXF.NONE ? 0 : 1;
@@ -1414,7 +1701,8 @@ export function samplerFlagsOf(states, mips = true){
         | (point(get(D3DTSS.MAGFILTER)) << 4)
         | (point(get(D3DTSS.MINFILTER)) << 5)
         | (mipMode << 6)
-        | ((Math.min(255, Math.max(0, get(D3DTSS.MAXMIPLEVEL))) & 0xff) << 8);
+        | ((Math.min(255, Math.max(0, get(D3DTSS.MAXMIPLEVEL), lod)) & 0xff) << 8)
+        | ((ADDRESS_BITS[get(D3DTSS.ADDRESSW)] ?? 0) << 16);
 }
 
 /** The one sampler every draw samples through; the state is in the shader. */
@@ -1429,18 +1717,21 @@ export const HARDWARE_SAMPLER = Object.freeze({
 });
 
 /**
+ * NOOVERWRITE wins when both are given: the lock is unsynchronised, and what
+ * lies outside the locked range is kept rather than discarded.
+ *
  * @param {number} flags D3DLOCK
  * @param {any} LockFlags the backend's
  * @returns {number}
  */
 const lockFlagsOf = (flags, LockFlags)=>{
-    if ((flags & D3DLOCK.DISCARD) !== 0)
-    {
-        return LockFlags.DISCARD;
-    }
     if ((flags & D3DLOCK.NOOVERWRITE) !== 0)
     {
         return LockFlags.NOOVERWRITE;
+    }
+    if ((flags & D3DLOCK.DISCARD) !== 0)
+    {
+        return LockFlags.DISCARD;
     }
     return LockFlags.NONE;
 };
@@ -1555,6 +1846,8 @@ export function createRenderer(options){
     const textures = new WeakMap();
     /** @type {WeakMap<object, number>} a level's surface -> which level it is */
     const surfaceLevels = new WeakMap();
+    /** @type {WeakMap<object, number>} a cube face's surface -> which face it is */
+    const surfaceFaces = new WeakMap();
     /** @type {Map<string, any>} */
     const samplers = new Map();
     /**
@@ -1586,13 +1879,63 @@ export function createRenderer(options){
      */
     const released = new Set();
     let nextTextureId = 0;
-    /** @type {any} */
-    let placeholder = null;
+    /**
+     * Textures that make their own levels and whose top level changed since
+     * they last made them: the levels are made again before the next draw
+     * that samples one.
+     *
+     * @type {Set<any>}
+     */
+    const staleMips = new Set();
+    /** @param {any} record */
+    const markMips = record=>{
+        if (record.autogen)
+        {
+            staleMips.add(record);
+        }
+    };
+    /** @type {Map<string, Promise<any>>} a level-making pipeline per GPU format */
+    const mipPipelines = new Map();
+
+    /**
+     * The occlusion count a BEGIN opened and replay has reached without its
+     * END: it goes on counting across passes and frames until then. Replays
+     * run one after another, so one is enough.
+     *
+     * @type {any}
+     */
+    let countingQuery = null;
+    /**
+     * The frame being replayed's occlusion queries: whose count each slot of
+     * its set goes to, and the counts it holds a part of. Null in a frame
+     * that counts nothing.
+     *
+     * @type {{ slots: any[], touched: Set<any> } | null}
+     */
+    let frameOcclusion = null;
+    /** @param {any} count  An occlusion count every counter of which is back. */
+    const settleOcclusion = count=>{
+        count.value = count.total;
+        count.resolve(count.total);
+    };
+    /** @returns {any} a count a BEGIN, or an END with no BEGIN, starts */
+    const occlusionCount = ()=>{
+        /** @type {any} */
+        const count = { total: 0, outstanding: 0, ended: false, value: null, recording: null };
+        count.settled = new Promise(resolve=>{
+            count.resolve = resolve;
+        });
+        return count;
+    };
+    /** @type {Map<string, any>} one blank texture per dimension a binding may want */
+    const placeholders = new Map();
 
     /** @type {any} the frame being recorded, or null between frames */
     let recording = null;
     /** @type {Promise<void>} */
     let chain = Promise.resolve();
+    /** @type {any} The GPU surface the last present handed over: the front buffer. */
+    let front = null;
     /** @type {any[]} the commands of the frame most recently replayed */
     let lastFrame = [];
     /** @type {string[]} one line per draw of the frame being recorded */
@@ -1620,9 +1963,21 @@ export function createRenderer(options){
              * declaration the fixed-function path cannot read as a format.
              */
             layout: 0,
+            /**
+             * A draw whose further stream is bound at an offset its vertex
+             * buffer cannot start at.
+             */
+            stream: 0,
+            /**
+             * An instanced draw with a stream stepping once every several
+             * instances, which a WebGPU vertex buffer cannot.
+             */
+            instancing: 0,
         },
         /** Draws that ran through a program rather than the fixed-function pipeline. */
         programmable: 0,
+        /** Times a texture that makes its own levels made them again. */
+        mipsGenerated: 0,
         /**
          * How often a draw's preparation was built and how often the previous
          * draw's was reused.
@@ -2075,7 +2430,7 @@ export function createRenderer(options){
             + ` fvf=0x${state.fvf.toString(16)} n=${drawn}`
             + (indices ? ` base=${model.baseVertexIndex}` : '')
             + ` lit=${state.lighting ? state.lighting.lights.length : '-'}`
-            + ` fog=${state.fogMode === D3DFOG.NONE ? '-' : fogSettingOf(model)}`
+            + ` fog=${fogSourceOf(state) === FOG_SOURCE.NONE ? '-' : fogSettingOf(model)}`
             + ` spec=${state.specularEnable ? 1 : 0}`
             + ` z=${state.depthTest ? state.depthFunc : '-'}/${state.depthWrite ? 1 : 0}`
             // The bias a program leans on to keep a layer in front of the
@@ -2151,7 +2506,8 @@ export function createRenderer(options){
             + ` decl=${program.declarationId}`
             // The fog stage below model 3 runs after the shader too, so a
             // program's draw is another place its numbers can be wrong.
-            + ` fog=${prepared.state.fogMode === D3DFOG.NONE ? '-' : fogSettingOf(model)}`
+            + ` fog=${fogSourceOf(prepared.state) === FOG_SOURCE.NONE
+                ? '-' : fogSettingOf(model)}`
             + ` target=${describeTarget(model)}`
             + ` view=${model.viewport.rect.x},${model.viewport.rect.y}`
             + `+${model.viewport.rect.width}x${model.viewport.rect.height}`
@@ -2606,10 +2962,18 @@ export function createRenderer(options){
      *
      * @param {import('../d3d9/declaration.js').FixedFunctionLayout} declared
      * @param {number} stride
+     * @param {RenderModel} model  whose further streams' strides it reads
      * @returns {import('../webgpu/internal/vertexformat.js').VertexLayout | null}
      */
-    const layoutOfDeclaration = (declared, stride)=>{
-        if (declared.attributes.some(attribute=>attribute.offset + attribute.bytes > stride))
+    const layoutOfDeclaration = (declared, stride, model)=>{
+        const streams = declared.streams.map(stream=>({ stream, stride: strideOf(model, stream) }));
+        /** @param {number} stream */
+        const own = stream=>(stream === 0 ? stride
+            : /** @type {{ stride: number }} */ (streams.find(one=>one.stream === stream)).stride);
+        // A stream of stride zero is read at its start for every vertex, and
+        // what it holds is only as long as its longest member.
+        if (declared.attributes.some(attribute=>own(attribute.stream) !== 0
+            && attribute.offset + attribute.bytes > own(attribute.stream)))
         {
             return null;
         }
@@ -2620,14 +2984,165 @@ export function createRenderer(options){
                 offset: attribute.offset,
                 format: attribute.format,
                 shaderLocation: index,
+                ...(attribute.stream === 0 ? {} : { stream: attribute.stream }),
             })),
             preTransformed: declared.preTransformed,
             texCoordSets: declared.texCoordSets,
             blendWeights: 0,
+            ...(streams.length === 0 ? {} : { streams: stepped({ streams }, model).streams }),
         };
     };
 
+    /**
+     * A layout whose further streams say which step once an instance rather
+     * than once a vertex: those whose frequency D3DSTREAMSOURCE_INSTANCEDATA
+     * marks. Stream zero always steps by vertex; a device that sets no
+     * frequency has every stream do so.
+     *
+     * @template {{ streams?: { stream: number, stride: number, instanced?: boolean }[] }} L
+     * @param {L} layout @param {RenderModel} model
+     * @returns {L}
+     */
+    const stepped = (layout, model)=>{
+        const frequencies = model.streamFrequencies;
+        if (!layout.streams || !frequencies || frequencies.size === 0)
+        {
+            return layout;
+        }
+        return {
+            ...layout,
+            streams: layout.streams.map(one=>(
+                ((frequencies.get(one.stream) ?? 1) & STREAMSOURCE_INSTANCEDATA) !== 0
+                    ? { ...one, instanced: true }
+                    : one)),
+        };
+    };
+
+    /**
+     * How many instances an indexed draw draws: the count stream zero's
+     * frequency carries, when D3DSTREAMSOURCE_INDEXEDDATA marks it or a
+     * further stream steps by instance (Wine's d3d9 stream_test reads it
+     * from stream zero either way); one otherwise. Zero when a stream steps
+     * once every several instances, which is not drawn.
+     *
+     * @param {RenderModel} model
+     */
+    const instancesOf = model=>{
+        const frequencies = model.streamFrequencies;
+        if (!frequencies || frequencies.size === 0)
+        {
+            return 1;
+        }
+        let instanced = false;
+        for (const [stream, frequency] of frequencies)
+        {
+            if (stream !== 0 && (frequency & STREAMSOURCE_INSTANCEDATA) !== 0)
+            {
+                if ((frequency & STREAMSOURCE_COUNT) !== 1)
+                {
+                    return 0;
+                }
+                instanced = true;
+            }
+        }
+        const zero = frequencies.get(0) ?? 1;
+        return instanced || (zero & STREAMSOURCE_INDEXEDDATA) !== 0
+            ? Math.max(1, zero & STREAMSOURCE_COUNT)
+            : 1;
+    };
+
+    /**
+     * The stride a further stream is read at: its binding's, or zero with
+     * nothing bound -- every vertex then reads the start of a buffer of
+     * zeros, which is what a member in an empty stream reads as (Wine's
+     * d3d9 test_color_vertex draws such a colour black).
+     *
+     * @param {RenderModel} model @param {number} stream
+     */
+    const strideOf = (model, stream)=>{
+        const source = model.streamAt?.(stream);
+        return source?.buffer ? source.stride : 0;
+    };
+
+    /** @type {any} a buffer of zeros for a stream with nothing bound */
+    let zeroStream = null;
+
+    /**
+     * How many vertices stream zero's offset was folded into the first
+     * vertex as, which a device with offsets does before a buffer draw.
+     *
+     * @param {RenderModel} model
+     */
+    const streamZeroBias = model=>(model.stream.stride > 0
+        ? Math.floor((model.stream.offset ?? 0) / model.stream.stride) : 0);
+
+    /**
+     * The further streams a layout reads and their strides, for a key: a
+     * stride is the pipeline's.
+     *
+     * @param {{ streams?: readonly { stream: number, stride: number,
+     *     instanced?: boolean }[] }} layout
+     */
+    const streamsKey = layout=>(layout.streams ?? [])
+        .map(one=>`|s${one.stream}:${one.stride}${one.instanced ? 'i' : ''}`).join('');
+
+    /**
+     * Binds a recorded draw's further streams, after stream zero's.
+     *
+     * @param {any} pass @param {any} command
+     */
+    const bindStreams = (pass, command)=>{
+        for (const bound of command.streams ?? [])
+        {
+            pass.setVertexBuffer(bound.slot, bound.gpu, bound.offset);
+        }
+    };
+
+    /**
+     * The vertex buffers a draw binds past stream zero's, slot by slot, or
+     * null when one of them cannot be bound as it lies: WebGPU starts a
+     * vertex buffer at a multiple of four bytes, and stream zero's offset is
+     * folded into the first vertex (`bias` of them), which a further stream
+     * has to take back from its own.
+     *
+     * @param {RenderModel} model
+     * @param {readonly { stream: number, stride: number, instanced?: boolean }[] | undefined}
+     *        streams
+     * @param {number} bias
+     * @returns {{ slot: number, gpu: any, offset: number }[] | null}
+     */
+    const streamBindings = (model, streams, bias)=>{
+        /** @type {{ slot: number, gpu: any, offset: number }[]} */
+        const bound = [];
+        for (const [index, { stream, instanced }] of (streams ?? []).entries())
+        {
+            const source = model.streamAt?.(stream);
+            if (!source?.buffer)
+            {
+                zeroStream ??= backend.createDynamicBuffer({
+                    size: ZERO_STREAM_BYTES,
+                    usage: BufferUsage.VERTEX | BufferUsage.COPY_DST,
+                    label: 'zero-stream',
+                });
+                bound.push({ slot: index + 1, gpu: zeroStream.gpu, offset: 0 });
+                continue;
+            }
+            // Stream zero's first vertex moves the streams that step with it;
+            // one stepping by instance starts at its first instance.
+            const offset = (source.offset ?? 0) - (instanced ? 0 : bias * source.stride);
+            if (offset < 0 || offset % 4 !== 0)
+            {
+                return null;
+            }
+            const buffer = bufferFor(source.buffer).gpu;
+            buffer.markRead();
+            bound.push({ slot: index + 1, gpu: buffer.gpu, offset });
+        }
+        return bound;
+    };
+
     let layoutReported = false;
+    let instancingReported = false;
     /** Says once that fixed-function draws were dropped for want of a format. */
     const reportLayout = ()=>{
         if (divergence && !layoutReported)
@@ -2635,8 +3150,8 @@ export function createRenderer(options){
             layoutReported = true;
             divergence('Direct3D 8',
                 'a fixed-function draw over a vertex declaration the fixed-function stage'
-                + ' cannot read (a second stream, blend weights, a colour that is not a'
-                + ' D3DCOLOR, or a member past the vertex) is not drawn');
+                + ' cannot read (blend weights, a colour that is not a D3DCOLOR, or a member'
+                + ' past the vertex) is not drawn');
         }
     };
 
@@ -2725,7 +3240,10 @@ export function createRenderer(options){
             // them all: even level zero of a chained texture goes through a
             // view of that level alone.
             const level = surfaceLevels.get(surface) ?? 0;
-            return level === 0 && record.levels === 1 ? record.gpu : levelSurfaceOf(record, level);
+            const face = surfaceFaces.get(surface) ?? 0;
+            return level === 0 && record.gpuLevels === 1 && record.faces === 1
+                ? record.gpu
+                : levelSurfaceOf(record, level, face);
         }
         // A hit is the per-draw case, twice per draw; the description is
         // for making the texture and for a flush, and neither is the common
@@ -2774,21 +3292,93 @@ export function createRenderer(options){
     };
 
     /**
-     * A level above the top as a target: the same backend texture through a
-     * view of that level alone.
+     * A volume texture's levels, taken into care as a texture's surfaces are:
+     * each unlock, through the texture or through the level, marks that
+     * level for upload unless a managed texture keeps its copy, AddDirtyBox
+     * marks them all, and a level handed out is known by what it is a level
+     * of, so a copy into it marks it too.
      *
-     * @param {any} record @param {number} level
+     * @param {any} texture @param {any} entry
+     * @param {(level: number) => void} soiled
+     * @param {(volume: any) => boolean} keepsCopy
      */
-    const levelSurfaceOf = (record, level)=>{
+    const trackVolumeLevels = (texture, entry, soiled, keepsCopy)=>{
+        const volumeLevel = texture.GetVolumeLevel;
+        const unlockBox = texture.UnlockBox;
+        const addDirtyBox = texture.AddDirtyBox;
+        texture.UnlockBox = (/** @type {number} */ level)=>{
+            /** @type {{ volume?: any }} */
+            const held = {};
+            const keeps = volumeLevel(level, held) === D3D_OK && keepsCopy(held.volume);
+            held.volume?.release();
+            const hr = unlockBox(level);
+            if (hr === D3D_OK && !keeps)
+            {
+                soiled(level);
+            }
+            return hr;
+        };
+        texture.AddDirtyBox = (/** @type {any} */ box)=>{
+            const hr = addDirtyBox(box);
+            if (hr === D3D_OK)
+            {
+                for (let level = 0; level < entry.levels; level++)
+                {
+                    soiled(level);
+                }
+            }
+            return hr;
+        };
+        const hooked = new WeakSet();
+        /** @param {number} level @param {{ volume?: any }} out */
+        texture.GetVolumeLevel = (level, out)=>{
+            const hr = volumeLevel(level, out);
+            const volume = hr === D3D_OK ? out.volume : null;
+            if (volume && !hooked.has(volume))
+            {
+                hooked.add(volume);
+                textures.set(volume, entry);
+                surfaceLevels.set(volume, level);
+                const unlockVolume = volume.UnlockBox;
+                volume.UnlockBox = ()=>{
+                    const keeps = keepsCopy(volume);
+                    const unlocked = unlockVolume();
+                    if (unlocked === D3D_OK && !keeps)
+                    {
+                        soiled(level);
+                    }
+                    return unlocked;
+                };
+            }
+            return hr;
+        };
+        /** @type {{ volume?: any }} */
+        const top = {};
+        if (texture.GetVolumeLevel(0, top) === D3D_OK)
+        {
+            top.volume.release();
+            entry.base = top.volume.base;
+        }
+    };
+
+    /**
+     * A level above the top, or a face of a cube, as a target: the same
+     * backend texture through a view of that level of that face alone.
+     *
+     * @param {any} record @param {number} level @param {number} [face]
+     */
+    const levelSurfaceOf = (record, level, face = 0)=>{
         const views = record.levelSurfaces ??= new Map();
-        let made = views.get(level);
+        const key = face * record.gpuLevels + level;
+        let made = views.get(key);
         if (!made)
         {
-            const label = `texture:${record.id}:${level}`;
+            const label = `texture:${record.id}:${face > 0 ? `${face}:` : ''}${level}`;
             made = {
                 texture: record.gpu.texture,
                 view: record.gpu.texture.createView({
                     label, dimension: '2d', baseMipLevel: level, mipLevelCount: 1,
+                    baseArrayLayer: face, arrayLayerCount: 1,
                 }),
                 width: levelExtent(record.width, level),
                 height: levelExtent(record.height, level),
@@ -2797,8 +3387,9 @@ export function createRenderer(options){
                 layers: 1,
                 label,
                 mipLevel: level,
+                layer: face,
             };
-            views.set(level, made);
+            views.set(key, made);
         }
         return made;
     };
@@ -2830,7 +3421,8 @@ export function createRenderer(options){
      *
      * @param {any} surface a backend surface
      * @param {{ format: string, mipLevel: number, width: number, height: number,
-     *           texels: Uint8Array }} upload
+     *           texels: Uint8Array, layer?: number, depth?: number }} upload
+     *        `layer` is a cube's face; `depth` a volume level's slices, one after another.
      * @param {boolean} ordered
      */
     const uploadTexels = (surface, upload, ordered)=>{
@@ -2846,6 +3438,8 @@ export function createRenderer(options){
             width: upload.width,
             height: upload.height,
             data: upload.texels,
+            ...(upload.layer ? { origin: { x: 0, y: 0, z: upload.layer } } : {}),
+            ...(upload.depth ? { depthOrArrayLayers: upload.depth } : {}),
         });
     };
 
@@ -2943,19 +3537,28 @@ export function createRenderer(options){
         return made;
     };
 
-    /** A 1x1 texture for a cascade stage that reads no texture but is declared to have one. */
-    const placeholderView = ()=>{
+    /**
+     * A 1x1 texture for a stage that reads no texture but is declared to have
+     * one, of the dimension it is declared with.
+     *
+     * @param {string} [dimension]  '2d', 'cube' or '3d'.
+     */
+    const placeholderView = (dimension = '2d')=>{
+        let placeholder = placeholders.get(dimension);
         if (!placeholder)
         {
             placeholder = backend.createSurface({
                 width: 1,
                 height: 1,
                 format: COLOR_FORMAT,
-                label: 'placeholder',
+                label: dimension === '2d' ? 'placeholder' : `placeholder:${dimension}`,
                 usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST
                     | (dumpDraws ? TextureUsage.COPY_SRC : 0),
+                ...(dimension === 'cube' ? { layers: 6, dimension: 'cube' } : {}),
+                ...(dimension === '3d' ? { depth: 1, dimension: '3d' } : {}),
             });
-            if (dumpDraws)
+            placeholders.set(dimension, placeholder);
+            if (dumpDraws && dimension === '2d')
             {
                 uploaded.set('placeholder', {
                     id: 'placeholder',
@@ -2968,6 +3571,31 @@ export function createRenderer(options){
             }
         }
         return placeholder.view;
+    };
+
+    /**
+     * One level of a volume texture, all its slices, into the GPU's. A volume
+     * is never in blocks and never drawn into, so it is widened like any
+     * texture and goes up out of the frame's order.
+     *
+     * @param {any} record @param {number} level @param {number} width @param {number} height
+     */
+    const uploadVolumeLevel = (record, level, width, height)=>{
+        /** @type {{ volume?: any }} */
+        const held = {};
+        if (record.texture.GetVolumeLevel(level, held) !== D3D_OK || !held.volume)
+        {
+            return;
+        }
+        held.volume.release();
+        const depth = levelExtent(record.depth, level);
+        const bytes = readMemory(held.volume.base, held.volume.slicePitch * depth);
+        uploadTexels(record.gpu, {
+            format: gpuFormatOf(record.format, record.width, record.height, false),
+            mipLevel: level, width, height, depth,
+            texels: expandTexels(record.format, bytes, width * height * depth),
+        }, false);
+        (record.written ??= new Set()).add(level);
     };
 
     /**
@@ -2988,8 +3616,10 @@ export function createRenderer(options){
                 width: record.width,
                 height: record.height,
                 format: gpuFormatOf(record.format, record.width, record.height, compressedTextures),
-                mipLevelCount: record.levels,
-                label: 'texture',
+                mipLevelCount: record.gpuLevels,
+                ...(record.faces === 6 ? { layers: 6, dimension: 'cube' } : {}),
+                ...(record.volume ? { depth: record.depth, dimension: '3d' } : {}),
+                label: record.faces === 6 ? 'cube' : record.volume ? 'volume' : 'texture',
                 // Copied out of as well as into: a dumping run reads a
                 // texture back to compare what the device holds against what
                 // was handed to it, and a program copies a texture level into
@@ -3011,16 +3641,25 @@ export function createRenderer(options){
             // further still -- follows the same choice.
             const keepsBlocks = isCompressed(record.format) && compressedTextures
                 && blockAligned(record.width, record.height);
-            for (const level of [...record.dirtyLevels].sort((left, right)=>left - right))
+            for (const subresource of [...record.dirtyLevels].sort((left, right)=>left - right))
             {
+                const level = subresource % record.levels;
+                const face = Math.floor(subresource / record.levels);
                 const width = levelExtent(record.width, level);
                 const height = levelExtent(record.height, level);
+                if (record.volume)
+                {
+                    uploadVolumeLevel(record, level, width, height);
+                    continue;
+                }
                 // The level's own storage, made if the program never touched
                 // it: a level it left unwritten is sampled as whatever lies
                 // there, which is what a real device does with such a level.
                 /** @type {{ surface?: any }} */
                 const held = {};
-                if (texture.GetSurfaceLevel(level, held) !== D3D_OK || !held.surface)
+                if ((record.faces === 6
+                    ? texture.GetCubeMapSurface(face, level, held)
+                    : texture.GetSurfaceLevel(level, held)) !== D3D_OK || !held.surface)
                 {
                     continue;
                 }
@@ -3039,17 +3678,21 @@ export function createRenderer(options){
                         ? decodeCompressed(bytes, S3TC_OF[record.format], width, height)
                         : expandTexels(record.format, bytes, width * height);
                 uploadTexels(record.gpu,
-                    { format: gpuFormat, mipLevel: level, width, height, texels },
+                    { format: gpuFormat, mipLevel: level, width, height, texels, layer: face },
                     record.ordered);
+                if (level === 0)
+                {
+                    markMips(record);
+                }
                 // Which levels the program has written, and what its smallest
                 // ones hold: a surface sampled far away comes out of those,
                 // and a level the program never wrote is sampled all the same.
                 (record.written ??= new Set()).add(level);
-                if (width * height <= 16 && !keepsBlocks)
+                if (width * height <= 16 && !keepsBlocks && face === 0)
                 {
                     (record.tails ??= {})[level] = [...texels];
                 }
-                if (level === 0 && dumpDraws && !keepsBlocks)
+                if (subresource === 0 && dumpDraws && !keepsBlocks)
                 {
                     record.census = censusOf(texels);
                     if (uploaded.has(record.id) || uploaded.size < TEXTURE_DUMP_LIMIT)
@@ -3101,7 +3744,9 @@ export function createRenderer(options){
         {
             const arena = arenas.pop() ?? createUniformArena();
             arena.reset();
-            recording = { commands: [], pipelines: [], pass: null, viewport: null, arena };
+            recording = {
+                commands: [], pipelines: [], pass: null, viewport: null, scissor: '', arena,
+            };
         }
         return recording;
     };
@@ -3177,10 +3822,16 @@ export function createRenderer(options){
     const beginPass = (model, clearing)=>{
         const frame = ensureFrame();
         const target = surfaceFor(model.renderTarget);
+        const drawnInto = textures.get(model.renderTarget);
+        if (drawnInto && (surfaceLevels.get(model.renderTarget) ?? 0) === 0)
+        {
+            markMips(drawnInto);
+        }
         const depth = depthFor(model, target);
         frame.commands.push({ kind: 'pass', target, depth, ...clearing });
         frame.pass = { target, depth };
         frame.viewport = null;
+        frame.scissor = '';
     };
 
     /** @param {RenderModel} model */
@@ -3215,8 +3866,47 @@ export function createRenderer(options){
         {
             frame.commands.push({ kind: 'viewport', rect: model.viewport.rect });
             frame.viewport = model.viewport;
+            frame.scissor = '';
         }
         return frame;
+    };
+
+    /**
+     * The scissor a draw runs under: under D3DRS_SCISSORTESTENABLE the
+     * scissor rectangle cut to the viewport, which is what the draw may
+     * touch; otherwise the viewport's own, which setting the viewport set.
+     * The recording remembers which is in force (the empty string for the
+     * viewport's), so a run of draws under one scissor sets it once.
+     *
+     * @param {RenderModel} model
+     * @param {any} frame  the recording, with the model's viewport applied
+     */
+    const ensureScissor = (model, frame)=>{
+        const scissor = model.scissor;
+        const on = scissor !== undefined
+            && (model.renderStates.get(D3DRS9.SCISSORTESTENABLE) ?? 0) !== 0;
+        const view = model.viewport.rect;
+        let key = '';
+        let rect = null;
+        if (on)
+        {
+            const x = Math.max(view.x, scissor.left);
+            const y = Math.max(view.y, scissor.top);
+            rect = {
+                x, y,
+                width: Math.max(0, Math.min(view.x + view.width, scissor.right) - x),
+                height: Math.max(0, Math.min(view.y + view.height, scissor.bottom) - y),
+            };
+            key = `${rect.x},${rect.y},${rect.width},${rect.height}`;
+        }
+        if (frame.scissor === key)
+        {
+            return;
+        }
+        frame.scissor = key;
+        frame.commands.push({ kind: 'scissor', rect: rect ?? {
+            x: view.x, y: view.y, width: view.width, height: view.height,
+        } });
     };
 
     const programs = createProgramCache({ backend });
@@ -3273,9 +3963,10 @@ export function createRenderer(options){
      * written, so the state has to be in the sampler it is given.
      *
      * @param {Map<number, number>} states
+     * @param {number} [lod]  The bound texture's own level of detail.
      */
-    const programSamplerFor = states=>{
-        const descriptor = samplerDescriptorOf(states, mipsApplied);
+    const programSamplerFor = (states, lod = 0)=>{
+        const descriptor = samplerDescriptorOf(states, mipsApplied, lod);
         const key = Object.values(descriptor).join('|');
         const existing = programSamplers.get(key);
         if (existing)
@@ -3325,44 +4016,68 @@ export function createRenderer(options){
         // state the device versions, so it is worked out once per change of
         // that state -- a program that sets its constants and binds a texture
         // before every draw, which is how a shader-drawn frame goes, changes
-        // none of it.
+        // none of it. A 1.x pixel shader's reads also take the dimension of
+        // what is bound, which a binding changes without a version.
         const version = model.stateVersionBesideTextures;
+        const legacy = legacyStages(model, program);
         let pieces = version !== undefined && programPieces !== null
             && programPieces.version === version
             && programPieces.vertexShader === program.vertexShader
             && programPieces.pixelShader === program.pixelShader
             && programPieces.declarationId === program.declarationId
             && programPieces.stride === stride && programPieces.topology === topology
+            && programPieces.legacy === legacy.key
             ? programPieces.made
             : null;
         if (pieces === null)
         {
-            pieces = programPiecesOf(model, stride, topology, program);
+            pieces = programPiecesOf(model, stride, topology, program, legacy);
             if (pieces === null)
             {
                 return null;
             }
             programPieces = version === undefined ? null : {
                 version, vertexShader: program.vertexShader, pixelShader: program.pixelShader,
-                declarationId: program.declarationId, stride, topology, made: pieces,
+                declarationId: program.declarationId, stride, topology, legacy: legacy.key,
+                made: pieces,
             };
         }
         const { pixel, vertex, samplerPlan, state, source } = pieces;
         const samplerBindings = samplerPlan.map((/** @type {any} */ planned)=>{
-            const texture = model.textures.get(planned.stage);
+            const bound = model.textures.get(planned.stage);
+            // A texture of another dimension than the shader declared cannot
+            // be bound to it: the sampler reads a blank one instead.
+            const texture = bound && textureDimensionOf(bound) === planned.dimension
+                ? bound
+                : null;
+            if (bound && !texture)
+            {
+                reportProgram(`dimension:${planned.stage}:${planned.dimension}`,
+                    `sampler s${planned.stage} is declared ${planned.dimension} and a`
+                    + ` ${textureDimensionOf(bound)} texture is bound there: it samples nothing`);
+            }
+            // A binding moves no state version, and a managed texture's own
+            // level of detail is part of how it is sampled.
+            const lod = lodOf(texture);
             return {
                 stage: planned.stage,
                 texture,
-                view: texture ? uploadIfDirty(texture).view : placeholderView(),
-                sampler: planned.sampler,
+                view: texture ? uploadIfDirty(texture).view : placeholderView(planned.dimension),
+                sampler: lod === planned.lod
+                    ? planned.sampler
+                    : programSamplerFor(model.stageStates(planned.stage), lod),
                 placeholder: !texture,
             };
         });
         const take = ensureFrame().arena.take;
         const vertexBlocks = program.vertex
-            ? constantBlocks(program.vertexConstants, vertex.constants, take)
+            ? shaderVertexBlocks(model, program, vertex, take)
             : hybridBlocks(model, take);
         const pixelBlocks = constantBlocks(program.pixelConstants, pixel.constants, take);
+        if (pixel.bumpRegister !== undefined)
+        {
+            bumpMatrices(model, pixelBlocks[0], pixel.bumpRegister);
+        }
         return {
             version: undefined,
             contentVersion: 0,
@@ -3394,9 +4109,63 @@ export function createRenderer(options){
      * made for; see `prepareProgram`.
      *
      * @type {{ version: number, vertexShader: any, pixelShader: any, declarationId: number,
-     *          stride: number, topology: string, made: any } | null}
+     *          stride: number, topology: string, legacy: string, made: any } | null}
      */
     let programPieces = null;
+
+    /**
+     * What a 1.x pixel shader's reads depend on beyond the shader: the
+     * dimension of the texture bound at each stage and, below 1.4, the
+     * component D3DTTFF_PROJECTED divides each stage's coordinates by. None
+     * for any other shader.
+     *
+     * @param {RenderModel} model @param {ProgramState} program
+     * @returns {{ key: string, stageDimensions?: string[], projectedBy?: string[] }}
+     */
+    const legacyStages = (model, program)=>{
+        const version = program.pixel?.version;
+        if (!version || version.major >= 2)
+        {
+            return { key: '' };
+        }
+        /** @type {string[]} */
+        const stageDimensions = [];
+        /** @type {string[]} */
+        const projectedBy = [];
+        for (let stage = 0; stage < LEGACY_STAGES; stage++)
+        {
+            stageDimensions.push(textureDimensionOf(model.textures.get(stage)));
+            const flags = version.minor >= 4
+                ? 0
+                : model.stageStates(stage).get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
+            projectedBy.push((flags & TTFF_PROJECTED) === 0
+                ? ''
+                : PROJECTED_BY[flags & 0xff] ?? '');
+        }
+        return {
+            key: `${stageDimensions.join(',')}|${projectedBy.join(',')}`,
+            stageDimensions, projectedBy,
+        };
+    };
+
+    /**
+     * Each stage's bump matrix and luminance, into the registers a 1.x pixel
+     * shader's translation reads them from.
+     *
+     * @param {RenderModel} model @param {Float32Array} floats @param {number} register
+     */
+    const bumpMatrices = (model, floats, register)=>{
+        for (let stage = 0; stage < STAGE_COUNT; stage++)
+        {
+            const states = model.stageStates(stage);
+            const read = (/** @type {number} */ state)=>dwordToFloat(states.get(state) ?? 0);
+            floats.set([
+                read(D3DTSS.BUMPENVMAT00), read(D3DTSS.BUMPENVMAT01),
+                read(D3DTSS.BUMPENVMAT10), read(D3DTSS.BUMPENVMAT11),
+                read(D3DTSS.BUMPENVLSCALE), read(D3DTSS.BUMPENVLOFFSET), 0, 0,
+            ], (register + stage * 2) * 4);
+        }
+    };
 
     /**
      * The translations, layout, pipeline state and samplers of a shader draw:
@@ -3407,8 +4176,9 @@ export function createRenderer(options){
      * @param {number} stride
      * @param {string} topology
      * @param {ProgramState} program
+     * @param {ReturnType<typeof legacyStages>} legacy
      */
-    const programPiecesOf = (model, stride, topology, program)=>{
+    const programPiecesOf = (model, stride, topology, program, legacy)=>{
         if (!program.declaration)
         {
             return null;
@@ -3421,11 +4191,25 @@ export function createRenderer(options){
         // varying the mix reads, so a draw through a vertex shader of the
         // program's own keeps the fog Direct3D would take from that shader,
         // which this translation does not compute.
-        const fog = program.vertex ? 0 : fogModeOf(model, fogApplied);
-        const pixel = translationOf(pixelShader, `ps|fog${fog}`,
+        const fog = program.vertex
+            ? { source: FOG_SOURCE.NONE, mode: D3DFOG.NONE }
+            : fogOf(model, fogApplied);
+        // Flat shading is declared on both sides of the two colour varyings,
+        // so every translation of the pair is made for it.
+        const flat = isFlatShaded(model);
+        const normalizeNormals = (model.renderStates.get(D3DRS.NORMALIZENORMALS) ?? 0) !== 0;
+        const rangeFog = fog.source === FOG_SOURCE.VERTEX
+            && (model.renderStates.get(D3DRS.RANGEFOGENABLE) ?? 0) !== 0;
+        const pixel = translationOf(pixelShader,
+            `ps|fog${fog.source}/${fog.mode}${flat ? '|flat' : ''}|${legacy.key}`,
             ()=>translateShader(
-                /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.pixel),
-                fog === 0 ? {} : { fog }));
+                /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.pixel), {
+                    ...(fog.source === FOG_SOURCE.NONE
+                        ? {} : { fog: fog.mode, fogSource: fog.source }),
+                    flatColours: flat,
+                    stageDimensions: legacy.stageDimensions,
+                    projectedBy: legacy.projectedBy,
+                }));
         if (pixel.error)
         {
             skip('program');
@@ -3458,7 +4242,8 @@ export function createRenderer(options){
                     register: index,
                 }));
         }
-        const laid = vertexLayoutOf(program.declaration, wanted, stride);
+        const laid = vertexLayoutOf(program.declaration, wanted, stride,
+            stream=>strideOf(model, stream));
         if (!laid.layout)
         {
             skip('program');
@@ -3466,7 +4251,7 @@ export function createRenderer(options){
                 `a draw through declaration ${program.declarationId} was not drawn: ${laid.error}`);
             return null;
         }
-        const layout = laid.layout;
+        const layout = stepped(laid.layout, model);
         const shapes = shapeKey(layout);
         // A varying the pixel stage reads and the vertex shader never writes
         // is zero, as the vertex stage's own output: a fragment input with
@@ -3492,14 +4277,16 @@ export function createRenderer(options){
                     && varyingLocation(D3DDECLUSAGE.TEXCOORD, set) === location));
         const vertex = program.vertex
             ? translationOf(/** @type {object} */ (program.vertexShader),
-                `vs:${shapes}|w${missing.join(',')}`,
+                `vs:${shapes}|w${missing.join(',')}${flat ? '|flat' : ''}`,
                 ()=>translateShader(
                     /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
-                    { inputs: layout.shapes, alsoWrite: missing }))
+                    { inputs: layout.shapes, alsoWrite: missing, flatColours: flat }))
             : hybridStageFor(
                 `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`
-                    + `|f${fog}`,
-                wanted, layout.shapes, missing, generated, fog);
+                    + `|f${fog.source}/${fog.mode}${flat ? '|flat' : ''}`
+                    + `${normalizeNormals ? '|normalize' : ''}${rangeFog ? '|range' : ''}`,
+                wanted, layout.shapes, missing, generated, fog,
+                { flatColours: flat, normalizeNormals, rangeFog });
         if (vertex.error)
         {
             skip('program');
@@ -3507,10 +4294,15 @@ export function createRenderer(options){
                 `vertex stage of shader ${program.vertexId} was not drawn: ${vertex.error}`);
             return null;
         }
-        const samplerPlan = pixel.samplers.map((/** @type {any} */ entry)=>({
-            stage: entry.index,
-            sampler: programSamplerFor(model.stageStates(entry.index)),
-        }));
+        const samplerPlan = pixel.samplers.map((/** @type {any} */ entry)=>{
+            const lod = lodOf(model.textures.get(entry.index));
+            return {
+                stage: entry.index,
+                dimension: samplerDimension(entry.type),
+                lod,
+                sampler: programSamplerFor(model.stageStates(entry.index), lod),
+            };
+        });
         const state = {
             ...pipelineStateOf(model, {
                 fvf: 0, topology, ...formatsOf(model), stages: [], lighting: null,
@@ -3526,7 +4318,7 @@ export function createRenderer(options){
             state,
             source: {
                 key: `${state.vertexShader}/${state.pixelShader}/${program.declarationId}`
-                    + `/${shapes}/${stride}`,
+                    + `/${shapes}/${stride}${streamsKey(layout)}`,
                 vertex, pixel, layout,
             },
         };
@@ -3559,7 +4351,8 @@ export function createRenderer(options){
         }
         const declaration = /** @type {readonly import('../webgpu/internal/programmable.js')
             .VertexElement[]} */ (program.declaration);
-        const laid = vertexLayoutOf(declaration, base.inputs, stride);
+        const laid = vertexLayoutOf(declaration, base.inputs, stride,
+            stream=>strideOf(model, stream));
         if (!laid.layout)
         {
             skip('program');
@@ -3567,13 +4360,14 @@ export function createRenderer(options){
                 `a draw through declaration ${program.declarationId} was not drawn: ${laid.error}`);
             return null;
         }
-        const layout = laid.layout;
+        const layout = stepped(laid.layout, model);
         const shapes = shapeKey(layout);
+        const flat = isFlatShaded(model);
         /** @type {import('../d3d9/wgsl.js').TranslatedShader} */
         const vertex = translationOf(/** @type {object} */ (program.vertexShader),
-            `vs:${shapes}`, ()=>translateShader(
+            `vs:${shapes}${flat ? '|flat' : ''}`, ()=>translateShader(
                 /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
-                { inputs: layout.shapes }));
+                { inputs: layout.shapes, flatColours: flat }));
         if (vertex.error)
         {
             skip('program');
@@ -3615,7 +4409,7 @@ export function createRenderer(options){
             };
         });
         const take = ensureFrame().arena.take;
-        const vertexBlocks = constantBlocks(program.vertexConstants, vertex.constants, take);
+        const vertexBlocks = shaderVertexBlocks(model, program, vertex, take);
         const pixelBlocks = [uniformsOf(model, null, take, mipsApplied), take(64), take(16)];
         counters.prepared.built++;
         return {
@@ -3637,7 +4431,7 @@ export function createRenderer(options){
             program: {
                 source: {
                     key: `${state.vertexShader}/ffp/${program.declarationId}/${shapes}/${stride}`
-                        + `/${pipelineKey(state)}`,
+                        + `${streamsKey(layout)}/${pipelineKey(state)}`,
                     vertex, pixel, layout,
                 },
                 declarationId: program.declarationId,
@@ -3654,15 +4448,18 @@ export function createRenderer(options){
      * @param {Map<number, import('../d3d9/wgsl.js').InputShape>} shapes
      * @param {number[]} alsoWrite
      * @param {number[]} generated
-     * @param {number} fog  D3DFOG; zero for none.
+     * @param {{ source: number, mode: number }} fog  See `fogOf`.
+     * @param {{ flatColours: boolean, normalizeNormals: boolean, rangeFog: boolean }} shading
+     *     See `fixedVertexStage`.
      */
-    const hybridStageFor = (key, wanted, shapes, alsoWrite, generated, fog)=>{
+    const hybridStageFor = (key, wanted, shapes, alsoWrite, generated, fog, shading)=>{
         const existing = hybridStages.get(key);
         if (existing)
         {
             return existing;
         }
-        const made = fixedVertexStage(wanted, shapes, alsoWrite, generated, fog);
+        const made = fixedVertexStage(wanted, shapes, alsoWrite, generated, fog.mode, fog.source,
+            shading);
         hybridStages.set(key, made);
         return made;
     };
@@ -3694,6 +4491,23 @@ export function createRenderer(options){
     };
 
     /**
+     * The constant blocks a vertex shader reads: its file, and the viewport's
+     * scale in the register past it, for the half-pixel move of its position.
+     *
+     * @param {RenderModel} model @param {ProgramState} program
+     * @param {import('../d3d9/wgsl.js').TranslatedShader} vertex
+     * @param {(floats: number) => Float32Array} take
+     */
+    const shaderVertexBlocks = (model, program, vertex, take)=>{
+        const blocks = constantBlocks(program.vertexConstants, vertex.constants, take);
+        if (vertex.viewportRegister !== undefined)
+        {
+            blocks[0].set(model.viewport.scale, vertex.viewportRegister * 4);
+        }
+        return blocks;
+    };
+
+    /**
      * The constants a hybrid's fixed vertex stage reads: the same
      * world-view-projection the fixed-function block carries, then the
      * viewport's offset and scale, world-view and the stage transforms for a
@@ -3711,6 +4525,11 @@ export function createRenderer(options){
         floats.set(model.viewport.offset, HYBRID_CONSTANTS.VIEWPORT * 4);
         floats.set(model.viewport.scale, HYBRID_CONSTANTS.VIEWPORT * 4 + 2);
         floats.set(worldView, HYBRID_CONSTANTS.WORLD_VIEW * 4);
+        if (generatesFromNormal(model))
+        {
+            floats.set(normalMatrixOf(worldView, CAMERA_NORMAL_MATRIX),
+                HYBRID_CONSTANTS.CAMERA_NORMAL * 4);
+        }
         for (const [index, rows] of stageTransforms(model).entries())
         {
             floats.set(rows, (HYBRID_CONSTANTS.TRANSFORMS + index * 4) * 4);
@@ -3723,13 +4542,159 @@ export function createRenderer(options){
             dwordToFloat(rs('FOGSTART')),
             dwordToFloat(rs('FOGEND')),
             dwordToFloat(rs('FOGDENSITY')),
-            0,
+            isAffine(transformOf(model, D3DTS.PROJECTION)) ? 1 : 0,
         ], HYBRID_CONSTANTS.FOG * 4);
         const fogColour = colorToFloats(rs('FOGCOLOR'));
         floats.set([fogColour.r, fogColour.g, fogColour.b, fogColour.a],
             HYBRID_CONSTANTS.FOG_COLOR * 4);
         return [floats, take(64), take(16)];
     };
+
+    /**
+     * The levels of each texture a draw samples that makes its own and whose
+     * top level changed, made again ahead of the draw.
+     *
+     * @param {any} frame @param {any} prepared
+     */
+    const regenerateSampled = (frame, prepared)=>{
+        for (const binding of prepared.stageBindings)
+        {
+            const record = binding.texture ? textures.get(binding.texture) : null;
+            if (!record || !staleMips.has(record) || !record.gpu)
+            {
+                continue;
+            }
+            staleMips.delete(record);
+            const format = record.gpu.format;
+            let pipeline = mipPipelines.get(format);
+            if (!pipeline)
+            {
+                pipeline = mipPipeline(format);
+                mipPipelines.set(format, pipeline);
+            }
+            frame.pipelines.push(pipeline);
+            frame.commands.push({
+                kind: 'mips',
+                record,
+                pipeline: frame.pipelines.length - 1,
+                // D3DTEXF_POINT picks a texel of the four; every other filter
+                // a program may name is made linearly.
+                linear: record.texture.GetAutoGenFilterType?.() !== D3DTEXF.POINT,
+            });
+            counters.mipsGenerated++;
+        }
+    };
+
+    /**
+     * The pipeline that draws one level from the level above: a triangle over
+     * the level, each pixel sampling the four texels above it at their shared
+     * corner.
+     *
+     * @param {string} format
+     */
+    const mipPipeline = async format=>{
+        const layout = backend.createBindGroupLayout({
+            label: 'mips',
+            entries: [
+                { binding: 0, visibility: FRAGMENT_VISIBILITY, texture: {} },
+                { binding: 1, visibility: FRAGMENT_VISIBILITY, sampler: {} },
+            ],
+        });
+        const module = await backend.createShaderModule({ label: 'mips', code: MIP_SHADER });
+        const gpu = await backend.createRenderPipelineAsync({
+            label: `mips:${format}`,
+            layout: backend.createPipelineLayout({ label: 'mips', bindGroupLayouts: [layout] }),
+            vertex: { module, entryPoint: 'vs_main' },
+            fragment: { module, entryPoint: 'fs_main', targets: [{ format }] },
+            primitive: { topology: 'triangle-list' },
+        });
+        return { gpu, layout };
+    };
+
+    /** @type {Map<string, any>} */
+    const mipSamplers = new Map();
+
+    /**
+     * A draw counts for the occlusion query open where it stands: a query of
+     * the frame's set around it alone, whose samples go to that query's count
+     * once the set comes back. A draw past the set's last query is not
+     * counted, and that is reported.
+     *
+     * @param {any} pass
+     * @returns {number | null} the slot the draw counts in
+     */
+    const beginCounting = pass=>{
+        if (!countingQuery || !frameOcclusion)
+        {
+            return null;
+        }
+        const slot = pass.beginOcclusionQuery();
+        if (slot === null && divergence && !occlusionOverflowReported)
+        {
+            occlusionOverflowReported = true;
+            divergence('Direct3D', 'a frame with more draws inside occlusion queries than'
+                + ' WebGPU counts in one frame: the draws past them are not counted');
+        }
+        return slot;
+    };
+    /** @param {any} pass @param {number | null} slot */
+    const endCounting = (pass, slot)=>{
+        const occlusion = frameOcclusion;
+        if (slot === null || !occlusion)
+        {
+            return;
+        }
+        pass.endOcclusionQuery();
+        occlusion.slots[slot] = countingQuery;
+        if (!occlusion.touched.has(countingQuery))
+        {
+            occlusion.touched.add(countingQuery);
+            countingQuery.outstanding++;
+        }
+    };
+    let occlusionOverflowReported = false;
+
+    /**
+     * Every level of a texture below the top, each from the one above it, in
+     * the frame where the draw that samples them stands.
+     *
+     * @param {any} frame @param {any} pipeline @param {any} command
+     */
+    function replayMips(frame, pipeline, command){
+        const record = command.record;
+        const filter = command.linear ? 'linear' : 'nearest';
+        let sampler = mipSamplers.get(filter);
+        if (!sampler)
+        {
+            if (!createSampler)
+            {
+                throw new Error('graphics/d3d8: levels are made through a sampler, and this'
+                    + ' renderer was given no way to make one');
+            }
+            sampler = createSampler({
+                label: `mips:${filter}`, magFilter: filter, minFilter: filter,
+                addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
+            });
+            mipSamplers.set(filter, sampler);
+        }
+        for (let face = 0; face < record.faces; face++)
+        {
+            for (let level = 1; level < record.gpuLevels; level++)
+            {
+                const pass = frame.beginPass({
+                    target: levelSurfaceOf(record, level, face),
+                    clear: false,
+                    label: `mips:${record.id}:${face}:${level}`,
+                });
+                pass.setPipeline(pipeline.gpu);
+                pass.setBindings(0, pipeline.layout, [
+                    { binding: 0, resource: levelSurfaceOf(record, level - 1, face).view },
+                    { binding: 1, resource: sampler },
+                ]);
+                pass.draw(3);
+            }
+        }
+    }
 
     /**
      * Records one draw against the pass the model's targets name.
@@ -3742,10 +4707,34 @@ export function createRenderer(options){
      * @param {RenderModel} model
      * @param {PreparedDraw} prepared
      * @param {any} geometry
+     * @param {{ scissored?: boolean, bias?: number }} [drawing]
+     *     `scissored` false for a draw that sets its own scissor -- a partial
+     *     clear, cut to its area already; `bias` the vertices stream zero's
+     *     offset was folded into the first vertex as.
      */
-    const record = (model, prepared, geometry)=>{
+    const record = (model, prepared, geometry, drawing = {})=>{
         if (maxDraws >= 0 && kept >= maxDraws)
         {
+            return;
+        }
+        const streams = streamBindings(model,
+            prepared.layout?.streams ?? prepared.program?.source?.layout?.streams,
+            drawing.bias ?? 0);
+        if (!streams)
+        {
+            skip('stream');
+            return;
+        }
+        const instances = geometry.indices ? instancesOf(model) : 1;
+        if (instances === 0)
+        {
+            skip('instancing');
+            if (divergence && !instancingReported)
+            {
+                instancingReported = true;
+                divergence('Direct3D 9', 'an instanced draw with a stream stepping once every'
+                    + ' several instances is not drawn: a vertex buffer steps every instance');
+            }
             return;
         }
         kept++;
@@ -3767,6 +4756,14 @@ export function createRenderer(options){
             }
         }
         const frame = ensureViewport(model);
+        if (drawing.scissored !== false)
+        {
+            ensureScissor(model, frame);
+        }
+        if (staleMips.size > 0)
+        {
+            regenerateSampled(frame, prepared);
+        }
         if (prepared.pipelineFrame !== frame)
         {
             prepared.pipelineIndex = frame.pipelines.length;
@@ -3783,6 +4780,8 @@ export function createRenderer(options){
             stageBindings: prepared.stageBindings,
             program: prepared.program,
             ...geometry,
+            ...(streams.length === 0 ? {} : { streams }),
+            ...(instances === 1 ? {} : { instances }),
         });
     };
 
@@ -3969,7 +4968,8 @@ export function createRenderer(options){
      * draw's own shape are not in it: see `preparationKeyOf`, which adds them.
      *
      * @param {RenderModel} model
-     * @param {{ fvf: number, fixedFunctionLayout?: { id: number } | null }} processing
+     * @param {{ fvf: number, fixedFunctionLayout?: { id: number, streams?: number[] } | null }}
+     *     processing
      * @returns {number}
      */
     const stateNumberOf = (model, processing)=>{
@@ -3986,8 +4986,13 @@ export function createRenderer(options){
         };
         put(slowStateOf(model));
         put(processing.fvf);
-        // A declaration read without a format is told apart by its own id.
+        // A declaration read without a format is told apart by its own id,
+        // and by the strides its further streams are bound at.
         put(processing.fixedFunctionLayout?.id ?? 0);
+        for (const stream of processing.fixedFunctionLayout?.streams ?? [])
+        {
+            put(strideOf(model, stream));
+        }
         put(model.renderStates.size);
         for (const [state, value] of model.renderStates)
         {
@@ -4068,7 +5073,8 @@ export function createRenderer(options){
      * bytes, which change without the device hearing of it.
      *
      * @param {RenderModel} model
-     * @param {{ fvf: number, fixedFunctionLayout?: { id: number } | null }} processing
+     * @param {{ fvf: number, fixedFunctionLayout?: { id: number, streams?: number[] } | null }}
+     *     processing
      * @param {number} stride
      * @param {string} topology
      * @returns {string}
@@ -4086,13 +5092,26 @@ export function createRenderer(options){
             const texture = model.textures.get(stage);
             const held = texture ? textures.get(texture) : null;
             key += held ? `|${held.id}:${held.soil}` : '|-';
+            // A managed texture's level of detail is sampled by, and set on
+            // the texture where no state counter sees it.
+            const lod = lodOf(texture);
+            if (lod !== 0)
+            {
+                key += `:l${lod}`;
+            }
+            // A Direct3D 7 texture's colour key is set on the surface and
+            // shapes the shader, and no state counter sees it change.
+            if (texture?.colorKey)
+            {
+                key += `:${texture.colorKey()}`;
+            }
         }
         return key;
     };
 
     /**
-     * This draw's uniform block: the prepared state's block with the two
-     * fields the world transform reaches written over it.
+     * This draw's uniform block: the prepared state's block with the fields
+     * the world transform reaches written over it.
      *
      * @param {RenderModel} model
      * @param {PreparedDraw} prepared
@@ -4103,11 +5122,23 @@ export function createRenderer(options){
         const block = ensureFrame().arena.take(template.length);
         block.set(template);
         const world = transformOf(model, D3DTS.WORLD);
-        block.set(multiplyMatrices(
-            multiplyMatrices(world, transformOf(model, D3DTS.VIEW), WORLD_VIEW),
-            transformOf(model, D3DTS.PROJECTION), WORLD_VIEW_PROJECTION),
-        UNIFORM_AT.worldViewProjection);
+        const worldView = multiplyMatrices(world, transformOf(model, D3DTS.VIEW), WORLD_VIEW);
+        block.set(multiplyMatrices(worldView, transformOf(model, D3DTS.PROJECTION),
+            WORLD_VIEW_PROJECTION), UNIFORM_AT.worldViewProjection);
         block.set(world, UNIFORM_AT.world);
+        // World then view too: vertex fog's depth and a generated coordinate's
+        // camera space move with the model as its position does, and a lit
+        // normal with the model's own transform.
+        block.set(worldView, UNIFORM_AT.worldView);
+        if (prepared.lighting)
+        {
+            block.set(normalMatrixOf(world, NORMAL_MATRIX), UNIFORM_AT.normalMatrix);
+        }
+        if (prepared.state.stages.some(stage=>readsNormal(stage.texCoordIndex)))
+        {
+            block.set(normalMatrixOf(worldView, CAMERA_NORMAL_MATRIX),
+                UNIFORM_AT.cameraNormalMatrix);
+        }
         return block;
     };
 
@@ -4129,6 +5160,40 @@ export function createRenderer(options){
         countLighting(model, prepared);
         prepared.uniforms = blockFor(model, prepared);
         return prepared;
+    };
+
+    /**
+     * Direct3D 7 colour keying: with D3DRENDERSTATE_COLORKEYENABLE on, a
+     * stage sampling a texture that has a source colour key is keyed by it
+     * (Wine's ddraw7 test_ck_default). The key is the texel it names,
+     * expanded as the upload expands the texture, so the shader compares like
+     * with like; a compressed or unexpandable format is left unkeyed.
+     *
+     * @param {RenderModel} model
+     * @param {{ stages: import('../webgpu/internal/pipeline.js').StageKey[],
+     *     textures: (any | null)[] }} cascade
+     */
+    const keyStages = (model, cascade)=>{
+        if ((model.renderStates.get(D3DRENDERSTATE_COLORKEYENABLE) ?? 0) === 0)
+        {
+            return;
+        }
+        cascade.textures.forEach((texture, index)=>{
+            const raw = texture?.colorKey?.() ?? null;
+            const held = texture ? textures.get(texture) : undefined;
+            const info = held ? FORMAT_INFO[held.format] : undefined;
+            if (raw === null || !held || !info || !TEXEL_EXPANSION[held.format])
+            {
+                return;
+            }
+            const bytes = new Uint8Array(new Uint32Array([raw >>> 0]).buffer)
+                .subarray(0, info.bytesPerPixel);
+            const texel = expandTexels(held.format, bytes, 1);
+            cascade.stages[index] = {
+                ...cascade.stages[index],
+                colorKey: (texel[2] << 16) | (texel[1] << 8) | texel[0],
+            };
+        });
     };
 
     /**
@@ -4198,7 +5263,7 @@ export function createRenderer(options){
             // counted -- the program was already told it succeeded -- and never
             // raised into the program's thread.
             const declared = processing.fixedFunctionLayout
-                ? layoutOfDeclaration(processing.fixedFunctionLayout, stride)
+                ? layoutOfDeclaration(processing.fixedFunctionLayout, stride, model)
                 : null;
             if (!declared)
             {
@@ -4208,8 +5273,9 @@ export function createRenderer(options){
             }
             layout = declared;
             vertexLayoutKey = `d${stride}:${declared.attributes
-                .map(attribute=>`${attribute.name}@${attribute.offset}:${attribute.format}`)
-                .join(',')}`;
+                .map(attribute=>`${attribute.name}@${attribute.stream ?? 0}.${attribute.offset}`
+                    + `:${attribute.format}`)
+                .join(',')}${streamsKey(declared)}`;
         }
         else
         {
@@ -4221,6 +5287,7 @@ export function createRenderer(options){
             }
         }
         const cascade = stageCascade(model, layout);
+        keyStages(model, cascade);
         reportCascade(cascade);
         if (skipTextures.size > 0 && cascade.textures.some(
             texture=>texture && skipTextures.has(textures.get(texture)?.id ?? '')))
@@ -4231,6 +5298,7 @@ export function createRenderer(options){
         const stageBindings = cascade.stages.map((stage, index)=>{
             const texture = cascade.textures[index];
             return {
+                texture,
                 view: texture ? uploadIfDirty(texture).view : placeholderView(),
                 sampler: samplerFor(model.stageStates(index)),
                 // Which of those two it was, recorded rather than inferred: a
@@ -4324,9 +5392,12 @@ export function createRenderer(options){
      * @param {number} type
      * @param {ArrayLike<number>} indices  in strip or fan order
      * @param {number} baseVertex
+     * @param {number} [fill]  D3DFILL; SOLID rewrites a strip or fan as a list.
      */
-    const expandedGeometry = (type, indices, baseVertex)=>{
-        const expanded = listIndices(type, indices);
+    const expandedGeometry = (type, indices, baseVertex, fill = D3DFILL.SOLID)=>{
+        const expanded = fill === D3DFILL.SOLID
+            ? listIndices(type, indices)
+            : filledIndices(type, indices, fill);
         return {
             indices: {
                 ...scratchIndices.write(expanded),
@@ -4337,6 +5408,42 @@ export function createRenderer(options){
             baseVertex,
         };
     };
+
+    /**
+     * Whether a draw from vertices in order is rewritten as a list: a fan
+     * always, and a strip under flat shading, whose odd triangles WebGPU
+     * would otherwise take their colours from the wrong vertex -- its strip
+     * reorders them to keep the winding, and the first vertex is the one flat
+     * interpolation reads.
+     *
+     * @param {RenderModel} model @param {number} type
+     */
+    const listed = (model, type)=>type === D3DPT.TRIANGLEFAN
+        || (type === D3DPT.TRIANGLESTRIP && isFlatShaded(model));
+
+    /**
+     * The fill mode a draw's triangles are drawn under; anything that is not
+     * a triangle is SOLID, as D3DRS_FILLMODE leaves it. WebGPU cannot cull a
+     * line or a point, so a culled wireframe also draws its back faces'
+     * edges, where Direct3D culls the triangle before it is turned to lines.
+     *
+     * @param {RenderModel} model @param {number} type
+     */
+    const fillOf = (model, type)=>{
+        if (type !== D3DPT.TRIANGLELIST && type !== D3DPT.TRIANGLESTRIP
+            && type !== D3DPT.TRIANGLEFAN)
+        {
+            return D3DFILL.SOLID;
+        }
+        const fill = model.renderStates.get(D3DRS.FILLMODE) ?? D3DFILL.SOLID;
+        return fill === D3DFILL.POINT || fill === D3DFILL.WIREFRAME ? fill : D3DFILL.SOLID;
+    };
+
+    /** @type {Readonly<Record<number, string>>} the topology a fill mode draws triangles as */
+    const FILLED = Object.freeze({
+        [D3DFILL.POINT]: 'point-list',
+        [D3DFILL.WIREFRAME]: 'line-list',
+    });
 
     /** The vertices zero to count, which is what a non-indexed fan is a fan of. */
     const ascending = (/** @type {number} */ count)=>
@@ -4390,22 +5497,33 @@ export function createRenderer(options){
          *
          * @param {any} texture
          * @param {{ width: number, height: number, format: number, levels?: number,
-         *           usage?: number }} desc
+         *           usage?: number, depth?: number, gpuLevels?: number }} desc
+         *        `depth` is a volume's; `gpuLevels` more than `levels` for a
+         *        texture whose lower levels the device makes.
          */
         trackTexture(texture, desc){
             const levels = desc.levels ?? 1;
+            // A cube map's six faces are six layers of one texture; a face's
+            // level is a subresource numbered face * levels + level.
+            const faces = texture.cube === true ? 6 : 1;
+            // The GPU's copy of a texture that makes its own levels holds the
+            // whole chain, of which the program sees the top.
+            const gpuLevels = desc.gpuLevels ?? levels;
             const entry = {
-                gpu: null, dirty: true, base: 0, levels, texture,
+                gpu: null, dirty: true, base: 0, levels, faces, texture, gpuLevels,
+                autogen: gpuLevels > levels,
+                volume: texture.volume === true,
                 // A render-target texture is written by the GPU as well as
                 // by the guest, so its uploads have to keep their place in
                 // the frame; see `uploadTexels`. A copy landing in a plain
                 // texture turns this on too.
-                ordered: ((desc.usage ?? 0) & D3DUSAGE.RENDERTARGET) !== 0,
+                // So is one whose levels the GPU makes from the top.
+                ordered: ((desc.usage ?? 0) & D3DUSAGE.RENDERTARGET) !== 0 || gpuLevels > levels,
                 // Every level, until each has been uploaded once: a program
                 // fills the chain it asked for, and a chain sampled with a
                 // level missing shows the gap at the distance that level
                 // covers.
-                dirtyLevels: new Set(Array.from({ length: levels }, (_, level)=>level)),
+                dirtyLevels: new Set(Array.from({ length: levels * faces }, (_, index)=>index)),
                 id: `t${nextTextureId++}`,
                 // A per-texture generation of its contents, so a preparation
                 // key can say which bytes it was built against without a
@@ -4443,49 +5561,137 @@ export function createRenderer(options){
                 entry.soil++;
                 contentVersion++;
             };
+            const surfaceLevel = texture.GetSurfaceLevel;
+            /**
+             * Whether an unlock leaves the GPU's copy as it is: a managed
+             * texture's does after a read-only lock or one that asked for no
+             * dirty update, until AddDirtyRect says otherwise (Wine's d3d8 and
+             * d3d9 add_dirty_rect_test). Any other pool's lock writes the
+             * texture it draws from.
+             *
+             * @param {any} surface  A level's surface, or a volume texture's level.
+             */
+            const keepsCopy = surface=>texture.pool === D3DPOOL.MANAGED
+                && ((surface?.lockFlags ?? 0) & (D3DLOCK.READONLY | D3DLOCK_NO_DIRTY_UPDATE)) !== 0;
+            if (texture.volume === true)
+            {
+                trackVolumeLevels(texture, entry, soiled, keepsCopy);
+                return;
+            }
             const unlockLevel = texture.UnlockRect;
             texture.UnlockRect = (/** @type {number} */ level)=>{
+                /** @type {{ surface?: any }} */
+                const held = {};
+                const keeps = texture.pool === D3DPOOL.MANAGED
+                    && surfaceLevel(level, held) === D3D_OK && keepsCopy(held.surface);
+                held.surface?.release();
                 const hr = unlockLevel(level);
-                if (hr === D3D_OK)
+                if (hr === D3D_OK && !keeps)
                 {
                     soiled(level);
                 }
                 return hr;
             };
+            const addDirtyRect = texture.AddDirtyRect;
+            if (typeof addDirtyRect === 'function')
+            {
+                texture.AddDirtyRect = (/** @type {any} */ rect, /** @type {number} */ face = 0)=>{
+                    const hr = addDirtyRect(rect, face);
+                    if (hr === D3D_OK)
+                    {
+                        for (let level = 0; level < levels; level++)
+                        {
+                            soiled(face * levels + level);
+                        }
+                    }
+                    return hr;
+                };
+            }
+            const cubeSurface = texture.GetCubeMapSurface;
+            const unlockCube = texture.UnlockCubeRect;
+            if (faces === 6)
+            {
+                texture.UnlockCubeRect = (/** @type {number} */ face, /** @type {number} */ level)=>{
+                    /** @type {{ surface?: any }} */
+                    const held = {};
+                    const keeps = texture.pool === D3DPOOL.MANAGED
+                        && cubeSurface(face, level, held) === D3D_OK && keepsCopy(held.surface);
+                    held.surface?.release();
+                    const hr = unlockCube(face, level);
+                    if (hr === D3D_OK && !keeps)
+                    {
+                        soiled(face * levels + level);
+                    }
+                    return hr;
+                };
+            }
             // Each level's storage is reachable through the level's own
             // surface too -- one object however many times it is asked for --
             // and a copy names that rather than the texture it belongs to. The
             // surfaces are made on demand, so each is taken into care as it is
             // first handed out.
             const hooked = new WeakSet();
-            const surfaceLevel = texture.GetSurfaceLevel;
-            /** @type {(level: number, out: { surface?: any }) => number} */
-            const takeLevel = (level, out)=>{
-                const hr = surfaceLevel(level, out);
-                const surface = hr === D3D_OK ? out.surface : null;
-                if (surface && !hooked.has(surface))
+            /** @param {any} surface @param {number} face @param {number} level */
+            const hook = (surface, face, level)=>{
+                if (!surface || hooked.has(surface))
                 {
-                    hooked.add(surface);
-                    textures.set(surface, entry);
-                    surfaceLevels.set(surface, level);
-                    const unlockSurface = surface.UnlockRect;
-                    surface.UnlockRect = ()=>{
-                        const unlocked = unlockSurface();
-                        if (unlocked === D3D_OK)
-                        {
-                            soiled(level);
-                        }
-                        return unlocked;
-                    };
+                    return;
                 }
+                hooked.add(surface);
+                textures.set(surface, entry);
+                surfaceLevels.set(surface, level);
+                surfaceFaces.set(surface, face);
+                const unlockSurface = surface.UnlockRect;
+                surface.UnlockRect = ()=>{
+                    const keeps = keepsCopy(surface);
+                    const unlocked = unlockSurface();
+                    if (unlocked === D3D_OK && !keeps)
+                    {
+                        soiled(face * levels + level);
+                    }
+                    return unlocked;
+                };
+            };
+            texture.GetSurfaceLevel = (/** @type {number} */ level, /** @type {any} */ out)=>{
+                const hr = surfaceLevel(level, out);
+                hook(hr === D3D_OK ? out.surface : null, 0, level);
                 return hr;
             };
-            texture.GetSurfaceLevel = takeLevel;
+            if (faces === 6)
+            {
+                /** @param {number} face @param {number} level @param {any} out */
+                texture.GetCubeMapSurface = (face, level, out)=>{
+                    const hr = cubeSurface(face, level, out);
+                    hook(hr === D3D_OK ? out.surface : null, face, level);
+                    return hr;
+                };
+            }
+            if (entry.autogen)
+            {
+                texture.GenerateMipSubLevels = ()=>markMips(entry);
+            }
+            // A level of detail changes how the texture is sampled, which the
+            // prepared state of the draw in hand holds: it is prepared again.
+            const setLod = texture.SetLOD;
+            if (typeof setLod === 'function')
+            {
+                texture.SetLOD = (/** @type {number} */ lod)=>{
+                    const was = setLod(lod);
+                    if (texture.GetLOD() !== was)
+                    {
+                        contentVersion++;
+                    }
+                    return was;
+                };
+            }
             /** @type {{ surface?: any }} */
             const top = {};
-            texture.GetSurfaceLevel(0, top);
-            top.surface.release();
-            entry.base = top.surface.base;
+            if ((faces === 6 ? texture.GetCubeMapSurface(0, 0, top)
+                : texture.GetSurfaceLevel(0, top)) === D3D_OK)
+            {
+                top.surface.release();
+                entry.base = top.surface.base;
+            }
         },
 
         /**
@@ -4503,7 +5709,8 @@ export function createRenderer(options){
             const tracked = textures.get(resource);
             if (tracked)
             {
-                tracked.dirtyLevels.add(surfaceLevels.get(resource) ?? 0);
+                tracked.dirtyLevels.add((surfaceFaces.get(resource) ?? 0) * tracked.levels
+                    + (surfaceLevels.get(resource) ?? 0));
                 tracked.dirty = true;
                 tracked.soil++;
                 contentVersion++;
@@ -4549,6 +5756,10 @@ export function createRenderer(options){
                 // The GPU has written this texture now; its uploads from
                 // here on keep their place in the frame.
                 tracked.ordered = true;
+                if ((surfaceLevels.get(destination) ?? 0) === 0)
+                {
+                    markMips(tracked);
+                }
             }
             ensureFrame().commands.push({
                 kind: 'copy',
@@ -4560,6 +5771,82 @@ export function createRenderer(options){
                 height: rect.bottom - rect.top,
             });
             return true;
+        },
+
+        /**
+         * What has been recorded so far goes to the GPU with nothing shown:
+         * the frame of a swap chain whose picture has nowhere to go is still
+         * drawn, into targets that later draws and reads find as it left them.
+         */
+        /**
+         * An occlusion query, as the device keeps it: the count its last
+         * BEGIN opened, and the one its last END closed.
+         *
+         * @returns {{ open: any, latest: any }}
+         */
+        createOcclusionQuery(){
+            return { open: null, latest: null };
+        },
+
+        /**
+         * Counts the samples of every draw from here to the query's END,
+         * in this frame's order; a BEGIN while it counts starts again.
+         *
+         * @param {{ open: any, latest: any }} query
+         */
+        beginOcclusion(query){
+            query.open = occlusionCount();
+            ensureFrame().commands.push({ kind: 'occlusion', count: query.open, begin: true });
+        },
+
+        /** @param {{ open: any, latest: any }} query */
+        endOcclusion(query){
+            const count = query.open ?? occlusionCount();
+            query.open = null;
+            query.latest = count;
+            const frame = ensureFrame();
+            count.recording = frame;
+            frame.commands.push({ kind: 'occlusion', count, begin: false });
+        },
+
+        /**
+         * Where a query's answer stands: counting still, never asked, done,
+         * or on its way. Flushing sends the frame its END was recorded in to
+         * the GPU, which is what has to happen before it can come back.
+         *
+         * @param {{ open: any, latest: any }} query
+         * @param {boolean} flush
+         * @returns {{ state: 'building' | 'none' } | { state: 'done', value: number }
+         *     | { state: 'pending', settled: Promise<number> }}
+         */
+        occlusionResult(query, flush){
+            if (query.open)
+            {
+                return { state: 'building' };
+            }
+            const count = query.latest;
+            if (!count)
+            {
+                return { state: 'none' };
+            }
+            if (count.value !== null)
+            {
+                return { state: 'done', value: count.value };
+            }
+            if (flush && recording && count.recording === recording)
+            {
+                this.submit();
+            }
+            return { state: 'pending', settled: count.settled };
+        },
+
+        submit(){
+            const recorded = ensureFrame();
+            recording = null;
+            recorded.dump = dump;
+            dump = [];
+            kept = 0;
+            chain = chain.then(()=>replay(recorded, null)).catch(failure);
         },
 
         /**
@@ -4713,11 +6000,12 @@ export function createRenderer(options){
                     indices: null,
                     count: 6,
                     first: 0,
-                });
+                }, { scissored: false });
             }
             frame.commands.push({ kind: 'scissor', rect: {
                 x: rect.x, y: rect.y, width: rect.width, height: rect.height,
             } });
+            frame.scissor = '';
         },
 
         /**
@@ -4729,8 +6017,10 @@ export function createRenderer(options){
         drawPrimitive(model, type, startVertex, primitiveCount){
             const stream = model.stream;
             const count = vertexCountOf(type, primitiveCount);
-            const fan = type === D3DPT.TRIANGLEFAN;
-            const prepared = prepare(model, stream.stride, fan ? LIST_OF[type] : TOPOLOGY[type]);
+            const fill = fillOf(model, type);
+            const rewrite = fill !== D3DFILL.SOLID || listed(model, type);
+            const prepared = prepare(model, stream.stride,
+                FILLED[fill] ?? (rewrite ? LIST_OF[type] : TOPOLOGY[type]));
             if (!prepared)
             {
                 return;
@@ -4741,10 +6031,10 @@ export function createRenderer(options){
             streamBuffer.markRead();
             record(model, prepared, {
                 vertices: { gpu: streamBuffer.gpu, offset: 0 },
-                ...(fan
-                    ? expandedGeometry(type, ascending(count), startVertex)
+                ...(rewrite
+                    ? expandedGeometry(type, ascending(count), startVertex, fill)
                     : { indices: null, count, first: startVertex }),
-            });
+            }, { bias: streamZeroBias(model) });
             if (dumpDraws && prepared.program)
             {
                 dumpProgram(model, prepared, count);
@@ -4773,7 +6063,10 @@ export function createRenderer(options){
                 return;
             }
             const count = vertexCountOf(type, primitiveCount);
-            const list = LIST_OF[type];
+            const fill = fillOf(model, type);
+            // A list drawn solid binds the program's own indices; anything
+            // else is rewritten from them.
+            const list = fill === D3DFILL.SOLID ? LIST_OF[type] : FILLED[fill];
             const prepared = prepare(model, stream.stride,
                 list === undefined ? TOPOLOGY[type] : list);
             if (!prepared)
@@ -4798,7 +6091,7 @@ export function createRenderer(options){
                     count,
                     first: 0,
                     baseVertex: model.baseVertexIndex,
-                });
+                }, { bias: streamZeroBias(model) });
                 if (dumpDraws && prepared.program)
                 {
                     dumpProgram(model, prepared, count);
@@ -4816,8 +6109,8 @@ export function createRenderer(options){
                 readMemory(model.indices.base + byteOffset, count * format.bytes), format.bytes);
             record(model, prepared, {
                 vertices,
-                ...expandedGeometry(type, order, model.baseVertexIndex),
-            });
+                ...expandedGeometry(type, order, model.baseVertexIndex, fill),
+            }, { bias: streamZeroBias(model) });
             if (dumpDraws && prepared.program)
             {
                 dumpProgram(model, prepared, count);
@@ -4837,16 +6130,17 @@ export function createRenderer(options){
          */
         drawPrimitiveUp(model, type, primitiveCount, vertexData, stride){
             const count = vertexCountOf(type, primitiveCount);
-            const list = LIST_OF[type];
-            const topology = type === D3DPT.TRIANGLEFAN ? list : TOPOLOGY[type];
+            const fill = fillOf(model, type);
+            const rewrite = fill !== D3DFILL.SOLID || listed(model, type);
+            const topology = FILLED[fill] ?? (rewrite ? LIST_OF[type] : TOPOLOGY[type]);
             const prepared = prepare(model, stride, topology);
             if (!prepared)
             {
                 return;
             }
             const vertices = scratchVertices.write(vertexData.subarray(0, count * stride));
-            const geometry = type === D3DPT.TRIANGLEFAN
-                ? expandedGeometry(type, ascending(count), 0)
+            const geometry = rewrite
+                ? expandedGeometry(type, ascending(count), 0, fill)
                 : { indices: null, count, first: 0 };
             record(model, prepared, { vertices, ...geometry });
             if (dumpDraws && prepared.program)
@@ -4881,7 +6175,8 @@ export function createRenderer(options){
                 return;
             }
             const count = vertexCountOf(type, primitiveCount);
-            const list = LIST_OF[type];
+            const fill = fillOf(model, type);
+            const list = fill === D3DFILL.SOLID ? LIST_OF[type] : FILLED[fill];
             const prepared = prepare(model, stride, list === undefined ? TOPOLOGY[type] : list);
             if (!prepared)
             {
@@ -4898,7 +6193,7 @@ export function createRenderer(options){
                         first: 0,
                         baseVertex: 0,
                     }
-                    : expandedGeometry(type, indices, 0)),
+                    : expandedGeometry(type, indices, 0, fill)),
             });
             if (dumpDraws && prepared.program)
             {
@@ -4924,6 +6219,7 @@ export function createRenderer(options){
             // Before the frame closes: a back buffer the program wrote by
             // hand owes its upload to this frame, not the next.
             const surface = surfaceFor(model.backBuffer);
+            front = surface;
             const recorded = ensureFrame();
             recording = null;
             // Before the replay chain, so a rename in the next frame's
@@ -5007,6 +6303,36 @@ export function createRenderer(options){
         idle: ()=>chain,
 
         /**
+         * The picture the last present showed, for GetFrontBuffer: the
+         * surface it handed over, read once its frame has reached the queue
+         * and before a later one has. The draws recorded since are replayed
+         * at the next present, so they are not in it -- unless a read-back of
+         * a target (`readSurface`) replayed them early. Four bytes a pixel,
+         * blue first; null when nothing was presented.
+         *
+         * @param {any} [surface]
+         *        A d3d8 surface to read in place of what the display shows: a
+         *        back buffer a swap chain presented and the display did not.
+         * @returns {Promise<{ width: number, height: number, data: Uint8Array } | null>}
+         */
+        readFront(surface){
+            const asked = surface ? surfaceFor(surface) : null;
+            const read = chain.then(()=>{
+                const shown = asked ?? front;
+                if (!shown)
+                {
+                    return null;
+                }
+                const frame = backend.beginFrame();
+                const reader = frame.snapshot(shown);
+                frame.end();
+                return reader();
+            });
+            chain = read.then(()=>undefined, failure);
+            return read;
+        },
+
+        /**
          * A surface the program can no longer reach: its GPU texture goes
          * now rather than when the collector finds the object. Only a
          * surface this renderer made a texture for on its own is affected;
@@ -5018,6 +6344,10 @@ export function createRenderer(options){
             const made = surfaces.get(surface);
             if (made)
             {
+                if (front === made)
+                {
+                    front = null;
+                }
                 surfaces.delete(surface);
                 dirtyTargets.delete(surface);
                 // Not now, and not after the frames already queued either:
@@ -5035,6 +6365,7 @@ export function createRenderer(options){
                 draws: counters.draws,
                 clears: counters.clears,
                 programmable: counters.programmable,
+                mipsGenerated: counters.mipsGenerated,
                 prepared: { ...counters.prepared },
                 programs: programs.stats(),
                 skipped: { ...counters.skipped },
@@ -5103,6 +6434,15 @@ export function createRenderer(options){
     async function replay(recorded, surface, snapshot = null){
         const pipelines = await Promise.allSettled(recorded.pipelines);
         const frame = backend.beginFrame();
+        // A frame counts when a query is open as it starts or opens in it,
+        // and then every pass of it can: a BEGIN may land in any of them.
+        const counts = countingQuery !== null
+            || recorded.commands.some((/** @type {any} */ command)=>command.kind === 'occlusion');
+        /** @type {{ slots: any[], touched: Set<any> } | null} */
+        const occlusion = counts ? { slots: [], touched: new Set() } : null;
+        frameOcclusion = occlusion;
+        /** @type {(() => Promise<number[]>) | null} */
+        let counted = null;
         /** @type {any[]} */
         const checks = [];
         /** @type {(() => Promise<Uint8Array[]>) | null} */
@@ -5112,6 +6452,10 @@ export function createRenderer(options){
         try
         {
             replayInto(frame, pipelines, recorded, surface);
+            if (occlusion && occlusion.touched.size > 0)
+            {
+                counted = frame.occlusionResults();
+            }
             if (snapshot)
             {
                 shot = frame.snapshot(snapshot);
@@ -5167,6 +6511,28 @@ export function createRenderer(options){
             frame.end();
         }
         lastFrame = recorded.commands;
+        if (counted && occlusion)
+        {
+            // Not waited for: the next frame replays while these come back,
+            // and a count is settled once every frame it counted in has.
+            const { slots, touched } = occlusion;
+            counted().then(samples=>{
+                samples.forEach((value, slot)=>{
+                    if (slots[slot])
+                    {
+                        slots[slot].total += value;
+                    }
+                });
+                for (const count of touched)
+                {
+                    count.outstanding--;
+                    if (count.ended && count.outstanding === 0)
+                    {
+                        settleOcclusion(count);
+                    }
+                }
+            }).catch(failure);
+        }
         const pixels = shot ? await shot() : undefined;
         if (read)
         {
@@ -5235,16 +6601,20 @@ export function createRenderer(options){
         });
         pass.setBindings(2, pipeline.bindGroupLayouts[2], sampled);
         pass.setVertexBuffer(0, command.vertices.gpu, command.vertices.offset);
+        bindStreams(pass, command);
+        const slot = beginCounting(pass);
         if (command.indices)
         {
             pass.setIndexBuffer(command.indices.gpu, command.indices.format,
                 command.indices.offset);
-            pass.drawIndexed(command.count, 1, command.first, command.baseVertex);
+            pass.drawIndexed(command.count, command.instances ?? 1, command.first,
+                command.baseVertex);
         }
         else
         {
             pass.draw(command.count, 1, command.first);
         }
+        endCounting(pass, slot);
         counters.draws++;
         counters.programmable++;
     }
@@ -5254,6 +6624,15 @@ export function createRenderer(options){
      * @param {any} recorded @param {any} surface
      */
     function replayInto(frame, pipelines, recorded, surface){
+        /**
+         * A pass for the frame's draws, one its draws can count in when the
+         * frame counts.
+         *
+         * @param {any} descriptor
+         */
+        const countingPass = descriptor=>frame.beginPass(frameOcclusion
+            ? { ...descriptor, occlusion: true }
+            : descriptor);
         /** @type {any} */
         let pass = null;
         /** @type {any} */
@@ -5270,7 +6649,7 @@ export function createRenderer(options){
             {
                 return;
             }
-            pass = frame.beginPass({
+            pass = countingPass({
                 target: opened.target,
                 clear: false,
                 depthStencilAttachment: opened.depth
@@ -5288,10 +6667,30 @@ export function createRenderer(options){
         };
         for (const command of recorded.commands)
         {
+            if (command.kind === 'occlusion')
+            {
+                if (command.begin)
+                {
+                    countingQuery = command.count;
+                }
+                else
+                {
+                    if (countingQuery === command.count)
+                    {
+                        countingQuery = null;
+                    }
+                    command.count.ended = true;
+                    if (command.count.outstanding === 0)
+                    {
+                        settleOcclusion(command.count);
+                    }
+                }
+                continue;
+            }
             if (command.kind === 'pass')
             {
                 opened = command;
-                pass = frame.beginPass({
+                pass = countingPass({
                     target: command.target,
                     clear: command.clearColor !== undefined,
                     clearValue: command.clearColor,
@@ -5311,7 +6710,23 @@ export function createRenderer(options){
                     height: command.height,
                     data: command.texels,
                     staging: true,
+                    ...(command.layer ? { origin: { x: 0, y: 0, z: command.layer } } : {}),
+                    ...(command.depth ? { depthOrArrayLayers: command.depth } : {}),
                 });
+                pass = null;
+                continue;
+            }
+            if (command.kind === 'mips')
+            {
+                const made = pipelines[command.pipeline];
+                if (made.status === 'rejected')
+                {
+                    failure(made.reason);
+                }
+                else
+                {
+                    replayMips(frame, made.value, command);
+                }
                 pass = null;
                 continue;
             }
@@ -5319,10 +6734,11 @@ export function createRenderer(options){
             {
                 frame.copyTexture(
                     { texture: command.source.texture, mipLevel: command.source.mipLevel ?? 0,
-                        origin: command.sourceOrigin },
+                        origin: { ...command.sourceOrigin, z: command.source.layer ?? 0 } },
                     { texture: command.destination.texture,
                         mipLevel: command.destination.mipLevel ?? 0,
-                        origin: command.destinationOrigin },
+                        origin: { ...command.destinationOrigin,
+                            z: command.destination.layer ?? 0 } },
                     { width: command.width, height: command.height, depthOrArrayLayers: 1 });
                 pass = null;
                 continue;
@@ -5330,7 +6746,10 @@ export function createRenderer(options){
             reopen();
             if (command.kind === 'viewport')
             {
+                // Setting the viewport sets the scissor to it, so a pass
+                // reopened after this must not bring back an older scissor.
                 viewport = command.rect;
+                scissor = null;
                 pass.setViewport(command.rect);
                 continue;
             }
@@ -5357,7 +6776,7 @@ export function createRenderer(options){
                 // What the target held before this draw: a draw that seems to
                 // paint what was already there painted nothing.
                 command.check.before = frame.snapshot(opened.target);
-                pass = frame.beginPass({
+                pass = countingPass({
                     target: opened.target,
                     clear: false,
                     depthStencilAttachment: opened.depth
@@ -5400,16 +6819,20 @@ export function createRenderer(options){
             });
             pass.setBindings(0, pipeline.bindGroupLayout, entries);
             pass.setVertexBuffer(0, command.vertices.gpu, command.vertices.offset);
+            bindStreams(pass, command);
+            const slot = beginCounting(pass);
             if (command.indices)
             {
                 pass.setIndexBuffer(command.indices.gpu, command.indices.format,
                     command.indices.offset);
-                pass.drawIndexed(command.count, 1, command.first, command.baseVertex);
+                pass.drawIndexed(command.count, command.instances ?? 1, command.first,
+                    command.baseVertex);
             }
             else
             {
                 pass.draw(command.count, 1, command.first);
             }
+            endCounting(pass, slot);
             counters.draws++;
             if (command.check?.probe && opened)
             {
@@ -5433,6 +6856,7 @@ export function createRenderer(options){
                 pass.setPipeline(pipeline.gpu);
                 pass.setBindings(0, pipeline.bindGroupLayout, entries);
                 pass.setVertexBuffer(0, command.vertices.gpu, command.vertices.offset);
+                bindStreams(pass, command);
                 if (command.indices)
                 {
                     pass.setIndexBuffer(command.indices.gpu, command.indices.format,
@@ -5590,6 +7014,7 @@ export function createRenderer(options){
                     pass.setBindings(0, drawPipeline.bindGroupLayout, drawEntries);
                     pass.setVertexBuffer(0, variant.vertices ?? command.vertices.gpu,
                         variant.vertices ? 0 : command.vertices.offset);
+                    bindStreams(pass, command);
                     if (command.indices)
                     {
                         if (variant.indices)
@@ -5659,7 +7084,7 @@ export function createRenderer(options){
                     pass.draw(6, 1, 0);
                     check.quadShot = frame.snapshot(scratch.target);
                 }
-                pass = frame.beginPass({
+                pass = countingPass({
                     target: opened.target,
                     clear: false,
                     depthStencilAttachment: opened.depth

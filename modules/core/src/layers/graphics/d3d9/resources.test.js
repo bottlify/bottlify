@@ -304,6 +304,148 @@ test('a lock keeps the flags it was given, so a backend can honour them', ()=>{
     assertFullyReleased(device);
 });
 
+/** A GDI that hands out numbered contexts and remembers what it was shown. */
+function fakeGdi(){
+    /** @type {any[]} */
+    const made = [];
+    /** @type {number[]} */
+    const deleted = [];
+    return {
+        made,
+        deleted,
+        /** @param {any} attributes */
+        createSurfaceDc: attributes=>{
+            made.push(attributes);
+            return 0x100 + made.length;
+        },
+        /** @param {number} handle */
+        deleteSurfaceDc: handle=>{
+            deleted.push(handle);
+        },
+    };
+}
+
+test('GetDC answers for the formats GDI draws into, and refuses the rest untouched', ()=>{
+    // Wine's d3d9 test_getdc: supported for A8R8G8B8, X8R8G8B8, R5G6B5,
+    // X1R5G5B5 and A1R5G5B5 among what is made here, and a failed call leaves
+    // the handle.
+    const device = createDevice();
+    const gdi = fakeGdi();
+    for (const [format, bitCount, layout] of /** @type {[number, number, string | null][]} */ ([
+        [D3DFMT.A8R8G8B8, 32, null], [D3DFMT.X8R8G8B8, 32, null], [D3DFMT.R5G6B5, 16, '565'],
+        [D3DFMT.X1R5G5B5, 16, '555'], [D3DFMT.A1R5G5B5, 16, '555'],
+        [D3DFMT.A2R10G10B10, 0, null], [D3DFMT.L8, 0, null], [D3DFMT.DXT1, 0, null],
+    ]))
+    {
+        /** @type {{ surface?: any }} */
+        const plain = {};
+        assert.equal(device.CreateOffscreenPlainSurface(64, 64, format, D3DPOOL.SYSTEMMEM, plain),
+            D3D_OK);
+        const surface = plain.surface;
+        /** @type {{ dc?: number }} */
+        const out = { dc: 0x1234 };
+        if (bitCount === 0)
+        {
+            assert.equal(surface.GetDC(gdi, out), D3DERR_INVALIDCALL, `format ${format}`);
+            assert.equal(out.dc, 0x1234);
+        }
+        else
+        {
+            assert.equal(surface.GetDC(gdi, out), D3D_OK, `format ${format}`);
+            const shown = gdi.made[gdi.made.length - 1];
+            assert.equal(out.dc, 0x100 + gdi.made.length);
+            assert.deepEqual([shown.width, shown.height, shown.bitCount, shown.bits, shown.pitch],
+                [64, 64, bitCount, surface.base, surfacePitch(format, 64)]);
+            if (layout)
+            {
+                assert.equal(shown.format, layout);
+            }
+            assert.equal(surface.ReleaseDC(out.dc, gdi), D3D_OK);
+            assert.equal(gdi.deleted[gdi.deleted.length - 1], out.dc);
+        }
+        surface.release();
+    }
+    assertFullyReleased(device);
+});
+
+test('a held context is the resource\'s one lock: no second, no lock, no other level\'s', ()=>{
+    // Wine's d3d9 test_getdc, over two surfaces of one cube texture.
+    const device = createDevice();
+    const gdi = fakeGdi();
+    /** @type {{ texture?: any }} */
+    const cube = {};
+    assert.equal(device.CreateCubeTexture(64, 3, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, cube),
+        D3D_OK);
+    /** @type {{ surface?: any }} */
+    const first = {};
+    /** @type {{ surface?: any }} */
+    const second = {};
+    assert.equal(cube.texture.GetCubeMapSurface(D3DCUBEMAP_FACE.POSITIVE_X, 0, first), D3D_OK);
+    assert.equal(cube.texture.GetCubeMapSurface(D3DCUBEMAP_FACE.NEGATIVE_Y, 2, second), D3D_OK);
+    const surface = first.surface;
+    const other = second.surface;
+    /** @type {{ dc?: number }} */
+    const held = {};
+    /** @type {{ dc?: number }} */
+    const again = { dc: 0x1234 };
+    const locked = { Pitch: 0, pBits: 0 };
+
+    assert.equal(surface.GetDC(gdi, held), D3D_OK);
+    assert.equal(surface.GetDC(gdi, again), D3DERR_INVALIDCALL);
+    assert.equal(again.dc, 0x1234);
+    assert.equal(other.GetDC(gdi, again), D3DERR_INVALIDCALL, 'nor another surface of it');
+    assert.equal(surface.LockRect(locked, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(other.LockRect(locked, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(other.UnlockRect(), D3D_OK, 'the texture is locked, so an unlock is owed');
+    assert.equal(other.ReleaseDC(held.dc, gdi), D3DERR_INVALIDCALL, 'not the holder');
+    assert.equal(surface.ReleaseDC(held.dc, gdi), D3D_OK);
+    assert.equal(surface.ReleaseDC(held.dc, gdi), D3DERR_INVALIDCALL, 'released once');
+    assert.equal(other.UnlockRect(), D3DERR_INVALIDCALL);
+
+    assert.equal(other.LockRect(locked, null, 0), D3D_OK);
+    assert.equal(surface.GetDC(gdi, again), D3DERR_INVALIDCALL, 'a lock anywhere in it');
+    assert.equal(surface.LockRect(locked, null, 0), D3D_OK, 'locks do not exclude each other');
+    assert.equal(surface.UnlockRect(), D3D_OK);
+    assert.equal(other.UnlockRect(), D3D_OK);
+    assert.equal(surface.GetDC(gdi, again), D3D_OK);
+    assert.equal(surface.ReleaseDC(again.dc, gdi), D3D_OK);
+
+    first.surface.release();
+    second.surface.release();
+    cube.texture.release();
+    assertFullyReleased(device);
+});
+
+test('releasing a context is an unlock after a write, so what GDI drew is taken up', ()=>{
+    const device = createDevice();
+    const gdi = fakeGdi();
+    /** @type {{ texture?: any }} */
+    const texture = {};
+    assert.equal(device.CreateTexture(8, 8, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, texture),
+        D3D_OK);
+    /** @type {{ surface?: any }} */
+    const level = {};
+    assert.equal(texture.texture.GetSurfaceLevel(0, level), D3D_OK);
+    const surface = level.surface;
+    let unlocks = 0;
+    const unlock = surface.UnlockRect;
+    // What a renderer tracking the level puts in place.
+    surface.UnlockRect = ()=>{
+        const hr = unlock();
+        unlocks += hr === D3D_OK ? 1 : 0;
+        return hr;
+    };
+    /** @type {{ dc?: number }} */
+    const held = {};
+    assert.equal(surface.GetDC(gdi, held), D3D_OK);
+    assert.equal(unlocks, 0);
+    assert.equal(surface.ReleaseDC(held.dc, gdi), D3D_OK);
+    assert.equal(unlocks, 1);
+    surface.release();
+    texture.texture.release();
+    assertFullyReleased(device);
+});
+
 test('a texture gives its storage back when the last reference goes', ()=>{
     // The arena a texture's pixels come out of is the one the program's own
     // allocator draws from, and GlobalMemoryStatus reports what is left of it.
@@ -532,3 +674,175 @@ test('writePixels hands a four-byte read-back to guest memory whole, not a view 
     assert.equal(handed.length, 1);
     assert.equal(handed[0], pixels);
 });
+
+test('a volume texture is made and locks by the pool and usage it was made with', ()=>{
+    // Wine's d3d8 and d3d9 test_volume_locking.
+    const device = createDevice();
+    const DYNAMIC = 0x200;
+    const rows = [
+        [D3DPOOL.DEFAULT, 0, D3D_OK, D3DERR_INVALIDCALL],
+        [D3DPOOL.DEFAULT, DYNAMIC, D3D_OK, D3D_OK],
+        [D3DPOOL.SYSTEMMEM, 0, D3D_OK, D3D_OK],
+        [D3DPOOL.SYSTEMMEM, DYNAMIC, D3D_OK, D3D_OK],
+        [D3DPOOL.MANAGED, 0, D3D_OK, D3D_OK],
+        [D3DPOOL.MANAGED, DYNAMIC, D3DERR_INVALIDCALL, 0],
+        [D3DPOOL.SCRATCH, 0, D3D_OK, D3D_OK],
+        [D3DPOOL.SCRATCH, DYNAMIC, D3DERR_INVALIDCALL, 0],
+    ];
+    for (const [pool, usage, created, locks] of rows)
+    {
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateVolumeTexture(4, 4, 4, 1, usage, D3DFMT.A8R8G8B8, pool, out),
+            created, `pool ${pool} usage ${usage}`);
+        if (created !== D3D_OK)
+        {
+            continue;
+        }
+        /** @type {any} */
+        const locked = {};
+        assert.equal(out.texture.LockBox(0, locked, null, 0), locks, `pool ${pool} usage ${usage}`);
+        if (locks === D3D_OK)
+        {
+            assert.equal(out.texture.UnlockBox(0), D3D_OK);
+        }
+        assert.equal(out.texture.release(), 0);
+    }
+    /** @type {{ texture?: any }} */
+    const out = {};
+    for (const [usage, format] of [[0x1, D3DFMT.A8R8G8B8], [0x2, D3DFMT.D24S8],
+        [0x8, D3DFMT.A8R8G8B8], [0, D3DFMT.D24S8], [0, D3DFMT.DXT1]])
+    {
+        assert.equal(device.CreateVolumeTexture(4, 4, 4, 1, usage, format, D3DPOOL.SCRATCH, out),
+            D3DERR_INVALIDCALL, `usage ${usage} format ${format}`);
+    }
+    assert.equal(device.CreateVolumeTexture(4, 4, 0, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out),
+        D3DERR_INVALIDCALL, 'no depth');
+    assert.equal(device.CreateVolumeTexture(512, 4, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED,
+        out), D3DERR_INVALIDCALL, 'past MaxVolumeExtent');
+    assert.equal(device.CreateVolumeTexture(4, 4, 4, 4, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out),
+        D3DERR_INVALIDCALL, 'more levels than a 4x4x4 volume has');
+    assertFullyReleased(device);
+});
+
+test('a volume checks every box it is locked with, and locks it at the box\'s corner', ()=>{
+    // Wine's d3d8 and d3d9 test_lockbox_invalid, over a 4x4x2 volume.
+    const device = createDevice();
+    /** @type {{ texture?: any }} */
+    const out = {};
+    assert.equal(device.CreateVolumeTexture(4, 4, 2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SCRATCH, out),
+        D3D_OK);
+    const texture = out.texture;
+    /** @type {any} */
+    const whole = {};
+    assert.equal(texture.LockBox(0, whole, null, 0), D3D_OK);
+    assert.equal(texture.UnlockBox(0), D3D_OK);
+    /** @param {number[]} edges left, top, right, bottom, front, back */
+    const box = ([left, top, right, bottom, front, back])=>
+        ({ left, top, right, bottom, front, back });
+    const rows = [
+        [[0, 0, 2, 2, 0, 1], D3D_OK], [[0, 0, 4, 4, 0, 1], D3D_OK],
+        [[0, 0, 0, 4, 0, 1], D3DERR_INVALIDCALL], [[0, 0, 4, 0, 0, 1], D3DERR_INVALIDCALL],
+        [[0, 0, 4, 4, 1, 1], D3DERR_INVALIDCALL], [[4, 0, 0, 4, 0, 1], D3DERR_INVALIDCALL],
+        [[0, 4, 4, 0, 0, 1], D3DERR_INVALIDCALL], [[0, 0, 4, 4, 1, 0], D3DERR_INVALIDCALL],
+        [[0, 0, 8, 4, 0, 1], D3DERR_INVALIDCALL], [[0, 0, 4, 8, 0, 1], D3DERR_INVALIDCALL],
+        [[0, 0, 4, 4, 0, 3], D3DERR_INVALIDCALL], [[8, 0, 16, 4, 0, 1], D3DERR_INVALIDCALL],
+        [[0, 8, 4, 16, 0, 1], D3DERR_INVALIDCALL], [[0, 0, 4, 4, 2, 4], D3DERR_INVALIDCALL],
+        [[1, 2, 3, 4, 1, 2], D3D_OK],
+    ];
+    for (const [edges, expected] of /** @type {[number[], number][]} */ (rows))
+    {
+        /** @type {any} */
+        const locked = {};
+        const asked = box(edges);
+        assert.equal(texture.LockBox(0, locked, asked, 0), expected, edges.join(','));
+        if (expected === D3D_OK)
+        {
+            assert.equal(locked.pBits - whole.pBits, asked.front * locked.SlicePitch
+                + asked.top * locked.RowPitch + asked.left * 4);
+            assert.equal(texture.UnlockBox(0), D3D_OK);
+        }
+    }
+    /** @type {any} */
+    const held = {};
+    assert.equal(texture.LockBox(0, held, box([0, 0, 2, 2, 0, 1]), 0), D3D_OK);
+    assert.equal(texture.LockBox(0, held, box([2, 2, 4, 4, 0, 1]), 0), D3DERR_INVALIDCALL,
+        'a second lock, of another box');
+    assert.equal(texture.UnlockBox(0), D3D_OK);
+    assert.equal(texture.UnlockBox(0), D3DERR_INVALIDCALL);
+    assert.equal(texture.LockBox(1, held, null, 0), D3DERR_INVALIDCALL, 'no such level');
+    assert.equal(texture.release(), 0);
+    assertFullyReleased(device);
+});
+
+test('UpdateTexture carries a volume texture\'s dirty box, level by level and slice by slice',
+    ()=>{
+        const device = createDevice();
+        /** @param {number} pool @param {number} [levels] @param {number} [size] */
+        const volume = (pool, levels = 2, size = 4)=>{
+            /** @type {{ texture?: any }} */
+            const out = {};
+            assert.equal(device.CreateVolumeTexture(size, size, size, levels, 0, D3DFMT.A8R8G8B8,
+                pool, out), D3D_OK);
+            return out.texture;
+        };
+        const source = volume(D3DPOOL.SYSTEMMEM);
+        const destination = volume(D3DPOOL.DEFAULT);
+        /** @param {any} texture @param {number} level */
+        const levelOf = (texture, level)=>{
+            /** @type {{ volume?: any }} */
+            const held = {};
+            assert.equal(texture.GetVolumeLevel(level, held), D3D_OK);
+            held.volume.release();
+            return held.volume;
+        };
+        /** @type {{ moves?: any[] }} */
+        const out = {};
+        assert.equal(device.UpdateTexture(source, destination, out), D3D_OK);
+        assert.equal(out.moves?.length, 4 + 2, 'all of it at first: a move per slice per level');
+        assert.equal(out.moves?.[0].from, levelOf(source, 0).base);
+        assert.equal(out.moves?.[0].to, levelOf(destination, 0).base);
+        assert.equal(device.UpdateTexture(source, destination, out), D3D_OK);
+        assert.deepEqual(out.moves, [], 'and nothing once carried');
+
+        /** @type {any} */
+        const locked = {};
+        const part = { left: 2, top: 1, right: 4, bottom: 3, front: 2, back: 3 };
+        assert.equal(source.LockBox(0, locked, part, 0), D3D_OK);
+        assert.equal(source.UnlockBox(0), D3D_OK);
+        assert.equal(device.UpdateTexture(source, destination, out), D3D_OK);
+        const [top, next] = /** @type {any[]} */ (out.moves);
+        assert.equal(out.moves?.length, 2);
+        assert.deepEqual([top.rowBytes, top.rows], [8, 2], 'the box, one slice of it');
+        assert.equal(top.from, levelOf(source, 0).base + 2 * 64 + 16 + 8);
+        assert.deepEqual([next.rowBytes, next.rows], [4, 2],
+            'and at the next level the texels it covers, taken outward');
+        assert.equal(next.to, levelOf(destination, 1).base + 16 + 4, 'slice 1, row 0, texel 1');
+
+        assert.equal(source.LockBox(0, locked, null, 0x10), D3D_OK);
+        assert.equal(source.UnlockBox(0), D3D_OK);
+        assert.equal(destination.AddDirtyBox(null), D3D_OK);
+        assert.equal(device.UpdateTexture(source, destination, out), D3D_OK);
+        assert.deepEqual(out.moves, [], 'a read-only lock, and the destination\'s box, carry none');
+        assert.equal(source.AddDirtyBox({ left: 0, top: 0, right: 4, bottom: 4, front: 0,
+            back: 5 }), D3DERR_INVALIDCALL);
+
+        // Wine's d3d9 test_update_texture_pool: system memory into the default
+        // pool and nothing else; a volume into a texture of one face never.
+        const managed = volume(D3DPOOL.MANAGED);
+        assert.equal(device.UpdateTexture(source, managed), D3DERR_INVALIDCALL);
+        assert.equal(device.UpdateTexture(managed, destination), D3DERR_INVALIDCALL);
+        const larger = volume(D3DPOOL.DEFAULT, 2, 8);
+        assert.equal(device.UpdateTexture(source, larger), D3DERR_INVALIDCALL,
+            'levels of two sizes');
+        /** @type {{ texture?: any }} */
+        const flat = {};
+        assert.equal(device.CreateTexture(4, 4, 2, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, flat),
+            D3D_OK);
+        assert.equal(device.UpdateTexture(source, flat.texture), D3DERR_INVALIDCALL);
+        for (const texture of [source, destination, managed, larger, flat.texture])
+        {
+            assert.equal(texture.release(), 0);
+        }
+        assertFullyReleased(device);
+    });

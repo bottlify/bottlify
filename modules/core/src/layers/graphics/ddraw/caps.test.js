@@ -10,6 +10,7 @@ import {
     DDERR_INVALIDCAPS,
     DDERR_INVALIDPARAMS,
     DDERR_NOEXCLUSIVEMODE,
+    DDERR_NOOVERLAYHW,
     DDERR_NOPALETTEATTACHED,
     DDPF_PALETTEINDEXED8,
     DDPF_RGB,
@@ -24,6 +25,7 @@ import {
     DDSCAPS_LOCALVIDMEM,
     DDSCAPS_MIPMAP,
     DDSCAPS_OFFSCREENPLAIN,
+    DDSCAPS_OVERLAY,
     DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY,
     DDSCAPS_TEXTURE,
@@ -175,6 +177,15 @@ test('write-only is a promise only a managed texture can keep', ()=>{
     assert.equal(ask({
         caps: DDSCAPS_TEXTURE | DDSCAPS_WRITEONLY, caps2: DDSCAPS2_TEXTUREMANAGE,
     }).hr, DD_OK);
+});
+
+test('an overlay is refused for want of overlay hardware, once the request is well formed', ()=>{
+    // The caps promise no DDCAPS_OVERLAY, so a surface that would be one is
+    // the documented refusal, not a surface that is never shown.
+    assert.equal(ask({ caps: DDSCAPS_OVERLAY }).hr, DDERR_NOOVERLAYHW);
+    assert.equal(ask({ caps: DDSCAPS_OVERLAY | DDSCAPS_SYSTEMMEMORY }).hr, DDERR_NOOVERLAYHW);
+    assert.equal(ask({ caps: DDSCAPS_OVERLAY | DDSCAPS_SYSTEMMEMORY | DDSCAPS_VIDEOMEMORY }).hr,
+        DDERR_INVALIDCAPS, 'a malformed request is malformed first');
 });
 
 test('every surface but the primary has to say how big it is', ()=>{

@@ -19,17 +19,22 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE, parseDxbc } from './dxbc.js';
 import { MODIFIER, RESOURCE_DIMENSION, RETURN_TYPE, SAMPLER_MODE } from './sm4.js';
-import { BINDING, STAGE, linkProgram, translateShader } from './wgsl.js';
 import {
-    add, addSat, and, assemble, breakcNz, cb, colouredPixelShader, colouredVertexShader,
+    BINDING, BUFFER_VIEW_FORMATS, HELPERS, STAGE, linkProgram, translateShader,
+} from './wgsl.js';
+import { DXGI_FORMAT } from './constants.js';
+import {
+    add, addSat, and, assemble, breakOut, breakcNz, call, callcNz, caseOf, cb,
+    colouredPixelShader, colouredVertexShader, defaultCase, endswitch, label, switchOn,
     dclConstantBuffer, dclIndexableTemp, dclInput, dclInputPs, dclInputPsSiv, dclInputSiv,
     dclOutput, dclOutputSiv, dclResource, dclSampler, dclTemps, discardNz, div, dp3, dp4,
-    elseBranch, endif, endloop, eq, exp, frc, ftoi, ftou, ge, iadd, ieq, ifNz, ifZ, ige, ilt, imad,
+    elseBranch, endif, endloop, eq, exp, frc, ftoi, ftou, gather4, ge, iadd, ieq, ifNz, ifZ, ige,
+    ilt, imad, ldMs, resinfoRcp, sampleD,
     imul,
     immediateConstantBuffer, indexedBy, ineg, ishl, ishr, itof, l, ld, log, loop, lt, lu, mad, max,
     min, modified, mov, movc, mul, ne, not, nullDest, o, oDepth, or, passThroughVertexShader,
     r, resinfo, ret, retcNz, roundNe, roundNi, rsq, s, sample, sampleCLz, sampleL, sincos,
-    solidPixelShader, sqrt, t, udiv, ult, umax, umin, ushr, utof, v, xor,
+    solidPixelShader, sqrt, t, udiv, ult, umax, umin, umul, ushr, utof, v, xor,
 } from './shader-fixtures.js';
 
 /**
@@ -84,7 +89,7 @@ test('mov copies bit patterns without a type', ()=>{
 
 test('a partial write mask stores through a let, one component at a time', ()=>{
     assert.equal(emitted([mov(r(0, 'xy'), r(0, 'yx'))]),
-        'let t0 = r0.yxxx;\nr0.x = t0.x;\nr0.y = t0.y;');
+        'let held0 = r0.yxxx;\nr0.x = held0.x;\nr0.y = held0.y;');
 });
 
 test('a saturated move clamps as floats', ()=>{
@@ -128,7 +133,7 @@ test('saturate wraps the float result in a clamp', ()=>{
 
 test('a dot product takes as many components as its width and splats the scalar', ()=>{
     assert.equal(emitted([dp3(r(0, 'x'), r(1), r(2))]),
-        `let t0 = ${U}(vec4<f32>(dot(${F}(r1.xyzw).xyz, ${F}(r2.xyzw).xyz)));\nr0.x = t0.x;`);
+        `let held0 = ${U}(vec4<f32>(dot(${F}(r1.xyzw).xyz, ${F}(r2.xyzw).xyz)));\nr0.x = held0.x;`);
     assert.equal(emitted([dp4(r(0), r(1), cb(0, 3))]),
         `r0 = ${U}(vec4<f32>(dot(${F}(r1.xyzw), ${F}(cb0[3u].xyzw))));`);
 });
@@ -145,7 +150,10 @@ test('the unary float functions map one to one', ()=>{
 
 test('sincos writes the sine and the cosine to its two destinations', ()=>{
     assert.equal(emitted([sincos(r(0), r(1), r(2))]),
-        `r0 = ${U}(sin(${F}(r2.xyzw)));\nr1 = ${U}(cos(${F}(r2.xyzw)));`);
+        `let held0 = ${U}(cos(${F}(r2.xyzw)));\nr0 = ${U}(sin(${F}(r2.xyzw)));\nr1 = held0;`);
+    assert.equal(emitted([sincos(r(2), r(1), r(2))]),
+        `let held0 = ${U}(cos(${F}(r2.xyzw)));\nr2 = ${U}(sin(${F}(r2.xyzw)));\nr1 = held0;`,
+        'the cosine is of the source as it was, not of the sine written over it');
     assert.equal(emitted([sincos(nullDest(), r(1), r(2))]),
         `r1 = ${U}(cos(${F}(r2.xyzw)));`, 'a null destination is not stored');
 });
@@ -207,16 +215,63 @@ test('bitwise operations and shifts stay unsigned, with the shift count masked',
         `r0 = ${U}((${I}(r1.xyzw) >> (r2.xyzw & vec4<u32>(31u))));`);
 });
 
-test('imul keeps the low half and refuses a shader that wants the high half', ()=>{
+test('imul and umul write the high half of the product beside the low one', ()=>{
     assert.equal(emitted([imul(nullDest(), r(0), r(1), r(2))]),
         `r0 = ${U}((${I}(r1.xyzw) * ${I}(r2.xyzw)));`);
-    const wantsHigh = translate([imul(r(3), r(0), r(1), r(2))]);
-    assert.deepEqual(wantsHigh.unsupported, ['imul with a high destination']);
+    const signed = translate([imul(r(3), r(0), r(1), r(2))]);
+    assert.equal(bodyOf(signed), [
+        `let held0 = ${U}((${I}(r1.xyzw) * ${I}(r2.xyzw)));`,
+        `r3 = imulhi(${U}(${I}(r1.xyzw)), ${U}(${I}(r2.xyzw)));`,
+        'r0 = held0;',
+    ].join('\n'));
+    assert.deepEqual(signed.unsupported, []);
+    assert.deepEqual(signed.helpers, ['umulhi', 'imulhi'], 'the helper and what it calls');
+    const unsigned = translate([umul(r(3), nullDest(), r(1), r(2))]);
+    assert.equal(bodyOf(unsigned), 'r3 = umulhi(r1.xyzw, r2.xyzw);');
+    assert.deepEqual(unsigned.helpers, ['umulhi']);
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const fragment = linkProgram(vs, signed).fragment;
+    assert.ok(fragment.indexOf('fn umulhi(') < fragment.indexOf('fn imulhi('),
+        'written into the module, callee first');
+    assert.ok(!linkProgram(vs, translate([mov(r(0), r(1))])).fragment.includes('fn umulhi'));
 });
 
-test('udiv writes the quotient and the remainder', ()=>{
-    assert.equal(emitted([udiv(r(0), r(1), r(2), r(3))]),
-        'r0 = (r2.xyzw / r3.xyzw);\nr1 = (r2.xyzw % r3.xyzw);');
+test('the high halves the helpers compute are the high halves of the products', ()=>{
+    // The helpers' WGSL, read one lane at a time: every operation in them is
+    // one JavaScript has on unsigned 32-bit values once >> is read as >>>.
+    const source = [...HELPERS.umulhi.text, ...HELPERS.imulhi.text].join('\n')
+        .replace(/fn (\w+)\(a: [^)]*\) -> [^{]*\{/g, 'function $1(a, b) {')
+        .replace(/vec4<u32>\(([^()]*)\)/g, '($1)')
+        .replace(/(0x[0-9a-f]+|\d+)u\b/g, '$1')
+        .replace(/>>/g, '>>>')
+        .replace(/let (\w+) = ([^;]*);/g, 'const $1 = ($2) >>> 0;')
+        .replace(/return ([^;]*);/g, 'return ($1) >>> 0;')
+        .replace(/select\(/g, 'pick(');
+    const helpers = new Function('pick', `${source}\nreturn { umulhi, imulhi };`)(
+        (/** @type {number} */ no, /** @type {number} */ yes, /** @type {boolean} */ when)=>
+            (when ? yes : no));
+    const samples = [0, 1, 2, 0xffff, 0x10000, 0x7fffffff, 0x80000000, 0x80000001, 0xffffffff,
+        0x12345678, 0xdeadbeef, 0xcafef00d, 3000000000, 65537];
+    for (const a of samples)
+    {
+        for (const b of samples)
+        {
+            const unsigned = Number((BigInt(a) * BigInt(b)) >> 32n);
+            assert.equal(helpers.umulhi(a, b), unsigned, `umulhi(${a}, ${b})`);
+            const product = BigInt(a | 0) * BigInt(b | 0);
+            const signed = Number(BigInt.asUintN(32, product >> 32n));
+            assert.equal(helpers.imulhi(a, b), signed, `imulhi(${a | 0}, ${b | 0})`);
+        }
+    }
+});
+
+test('udiv writes the quotient and the remainder, all ones for a zero divisor', ()=>{
+    const byZero = 'r3.xyzw == vec4<u32>(0u)';
+    assert.equal(emitted([udiv(r(0), r(1), r(2), r(3))]), [
+        `let held0 = select((r2.xyzw % r3.xyzw), vec4<u32>(0xffffffffu), ${byZero});`,
+        `r0 = select((r2.xyzw / r3.xyzw), vec4<u32>(0xffffffffu), ${byZero});`,
+        'r1 = held0;',
+    ].join('\n'));
 });
 
 // --- flow control ---
@@ -247,6 +302,78 @@ test('discard is a pixel shader instruction and is refused elsewhere', ()=>{
 
 test('a conditional return is a return inside an if', ()=>{
     assert.equal(emitted([retcNz(r(0, 'x'))]), 'if (r0.xxxx.x != 0u) {\nRET\n}');
+});
+
+test('a switch gathers the cases that share a body, and has a default whatever happens', ()=>{
+    assert.equal(emitted([
+        switchOn(r(0, 'x')),
+        caseOf(0), caseOf(1), mov(r(1), lu(1)), breakOut(),
+        caseOf(0xffffffff), mov(r(1), lu(2)), breakOut(),
+        defaultCase(), mov(r(1), lu(3)), breakOut(),
+        endswitch(),
+    ]), [
+        'switch (r0.xxxx.x) {',
+        'case 0u, 1u: {', 'r1 = vec4<u32>(1u);', 'break;', '}',
+        'case 4294967295u: {', 'r1 = vec4<u32>(2u);', 'break;', '}',
+        'default: {', 'r1 = vec4<u32>(3u);', 'break;', '}',
+        '}',
+    ].join('\n'));
+    assert.equal(emitted([
+        switchOn(r(0, 'y')), caseOf(3), defaultCase(), mov(r(1), lu(1)), breakOut(),
+        caseOf(4), endswitch(),
+    ]), [
+        'switch (r0.yyyy.x) {',
+        'case 3u, default: {', 'r1 = vec4<u32>(1u);', 'break;', '}',
+        'case 4u: {', '}',
+        '}',
+    ].join('\n'), 'a trailing case with nothing to do, and a default among the selectors');
+    assert.equal(emitted([switchOn(r(0, 'x')), caseOf(2), breakOut(), endswitch()]),
+        'switch (r0.xxxx.x) {\ncase 2u: {\nbreak;\n}\ndefault: {}\n}',
+        'WGSL wants a default and Shader Model 4 does not');
+});
+
+test('a subroutine is written where it is called, on the caller\'s registers', ()=>{
+    // The translator appends the program's last ret, which ends label 0 here.
+    assert.equal(emitted([call(0), mov(r(2), r(1)), ret(), label(0), mov(r(1), lu(7))]),
+        'r1 = vec4<u32>(7u);\nr2 = r1.xyzw;');
+    assert.equal(emitted([callcNz(r(0, 'z'), 0), ret(), label(0), mov(r(1), lu(7))]),
+        'if (r0.zzzz.x != 0u) {\nr1 = vec4<u32>(7u);\n}');
+    const nested = translate([call(0), ret(), label(0), call(1), ret(), label(1),
+        mov(r(3), lu(1))]);
+    assert.equal(bodyOf(nested), 'r3 = vec4<u32>(1u);', 'a call from a subroutine');
+    assert.deepEqual(nested.unsupported, []);
+});
+
+test('a subroutine that returns early runs once through a loop and breaks out of it', ()=>{
+    assert.equal(emitted([call(0), ret(), label(0), retcNz(r(0, 'x')), mov(r(1), lu(5))]), [
+        'var returned0 = false;',
+        'loop {',
+        'if (r0.xxxx.x != 0u) {', 'returned0 = true;', 'break;', '}',
+        'r1 = vec4<u32>(5u);',
+        'break;',
+        '}',
+    ].join('\n'));
+    // A return from inside the subroutine's own loop leaves that loop, and
+    // the flag takes it out of the one around the subroutine.
+    assert.equal(emitted([call(0), ret(), label(0), loop(), retcNz(r(0, 'x')), endloop(),
+        mov(r(1), lu(5))]), [
+        'var returned0 = false;',
+        'loop {',
+        'loop {',
+        'if (r0.xxxx.x != 0u) {', 'returned0 = true;', 'break;', '}',
+        '}',
+        'if (returned0) { break; }',
+        'r1 = vec4<u32>(5u);',
+        'break;',
+        '}',
+    ].join('\n'));
+});
+
+test('a call that recurs, or names no label, is refused', ()=>{
+    assert.deepEqual(translate([call(0), ret(), label(0), call(0)]).unsupported,
+        ['a recursive call']);
+    assert.deepEqual(translate([call(4)]).unsupported,
+        ['a call to label 4, which the program does not have']);
 });
 
 // --- constant buffers and indexable temps ---
@@ -308,6 +435,14 @@ test('an immediate constant buffer becomes a module constant', ()=>{
 
 const TEXTURE = [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT), dclSampler(0)];
 
+test('a value held for a partial store does not take a texture\'s name', ()=>{
+    // A `let t0` would hide texture t0 from the second sample.
+    const body = bodyOf(translate([sample(r(0, 'xy'), v(0), t(0), s(0)),
+        sample(r(1), v(0), t(0), s(0))], { declarations: TEXTURE }));
+    assert.match(body, /^let held0 = /);
+    assert.doesNotMatch(body, /let t\d/);
+});
+
 test('sample reads a float texture through its sampler and applies the swizzle', ()=>{
     const translated = translate([sample(r(0), v(0, 'xy'), t(0, 'wzyx'), s(0))],
         { declarations: TEXTURE });
@@ -366,24 +501,177 @@ test('a 3D texture samples with three coordinates and an array with a layer', ()
 });
 
 test('resinfo answers the size and level count, as floats or as integers', ()=>{
-    const floats = translate([resinfo(r(0), lu(0), t(0))], { declarations: TEXTURE });
-    assert.equal(bodyOf(floats),
-        `r0 = ${U}(vec4<f32>(vec4<u32>(textureDimensions(t0, vec4<u32>(0u).x).x, `
-        + 'textureDimensions(t0, vec4<u32>(0u).x).y, 0u, textureNumLevels(t0))));');
-    const integers = translate([resinfo(r(0), lu(0), t(0), true)], { declarations: TEXTURE });
-    assert.match(bodyOf(integers), /^r0 = vec4<u32>\(textureDimensions/);
+    const level = 'vec4<u32>(1u).x';
+    const inRange = `${level} < textureNumLevels(t0)`;
+    const floats = translate([resinfo(r(0), lu(1), t(0))], { declarations: TEXTURE });
+    assert.equal(bodyOf(floats), [
+        `let held0 = textureDimensions(t0, min(${level}, textureNumLevels(t0) - 1u));`,
+        `r0 = (${U}(vec4<f32>(f32(select(0u, held0.x, ${inRange})), `
+            + `f32(select(0u, held0.y, ${inRange})), f32(0u), f32(textureNumLevels(t0))))).xyzw;`,
+    ].join('\n'), 'a level past the last has no size');
+    const integers = translate([resinfo(r(0), lu(1), t(0, 'wzyx'), true)],
+        { declarations: TEXTURE });
+    assert.equal(bodyOf(integers).split('\n')[1],
+        `r0 = (vec4<u32>(select(0u, held0.x, ${inRange}), select(0u, held0.y, ${inRange}), 0u, `
+        + 'textureNumLevels(t0))).wzyx;', 'and the resource\'s swizzle picks among them');
+});
+
+test('resinfo answers every shape: depth, array size, and reciprocals when asked', ()=>{
+    /**
+     * @param {number} dimension
+     * @param {import('./shader-fixtures.js').AsmInstruction} instruction
+     */
+    const resinfoOf = (dimension, instruction)=>bodyOf(translate([instruction], {
+        declarations: [dclResource(0, dimension, RETURN_TYPE.FLOAT)],
+    })).split('\n')[1];
+    const inRange = 'vec4<u32>(0u).x < textureNumLevels(t0)';
+    assert.equal(resinfoOf(RESOURCE_DIMENSION.TEXTURE3D, resinfo(r(0), lu(0), t(0), true)),
+        `r0 = (vec4<u32>(select(0u, held0.x, ${inRange}), select(0u, held0.y, ${inRange}), `
+        + `select(0u, held0.z, ${inRange}), textureNumLevels(t0))).xyzw;`);
+    assert.equal(resinfoOf(RESOURCE_DIMENSION.TEXTURE2DARRAY, resinfo(r(0), lu(0), t(0), true)),
+        `r0 = (vec4<u32>(select(0u, held0.x, ${inRange}), select(0u, held0.y, ${inRange}), `
+        + 'textureNumLayers(t0), textureNumLevels(t0))).xyzw;');
+    assert.equal(resinfoOf(RESOURCE_DIMENSION.TEXTURE1DARRAY, resinfo(r(0), lu(0), t(0), true)),
+        `r0 = (vec4<u32>(select(0u, held0.x, ${inRange}), textureNumLayers(t0), 0u, `
+        + 'textureNumLevels(t0))).xyzw;');
+    const width = `select(0u, held0.x, ${inRange})`;
+    assert.equal(resinfoOf(RESOURCE_DIMENSION.TEXTURE1D, resinfoRcp(r(0), lu(0), t(0))),
+        `r0 = (${U}(vec4<f32>(select(0.0, 1.0 / f32(${width}), ${width} != 0u), f32(0u), `
+        + 'f32(0u), f32(textureNumLevels(t0))))).xyzw;');
+});
+
+test('a one-dimensional texture is read as a row of a two-dimensional one', ()=>{
+    const ONE_D = [dclResource(0, RESOURCE_DIMENSION.TEXTURE1D, RETURN_TYPE.FLOAT),
+        dclSampler(0)];
+    const sampled = translate([sample(r(0), v(0), t(0), s(0))], { declarations: ONE_D });
+    assert.equal(bodyOf(sampled),
+        `r0 = ${U}((textureSample(t0, s0, vec2<f32>(${F}(v0.xyzw).x, 0.5))).xyzw);`);
+    const graded = translate([sampleD(r(0), v(0), t(0), s(0), r(1), r(2))],
+        { declarations: ONE_D });
+    assert.match(bodyOf(graded), new RegExp(
+        `, vec2<f32>\\(bitcast<vec4<f32>>\\(r1\\.xyzw\\)\\.x, 0\\.0\\), `
+        + 'vec2<f32>\\(bitcast<vec4<f32>>\\(r2\\.xyzw\\)\\.x, 0\\.0\\)\\)'));
+    const loaded = translate([ld(r(0), r(1), t(0))], { declarations: ONE_D });
+    assert.equal(bodyOf(loaded), `r0 = ${U}((textureLoad(t0, vec2<i32>(${I}(r1.xyzw).x, 0), `
+        + `${I}(r1.xyzw).w)).xyzw);`);
+    const array = translate([sample(r(0), v(0), t(0), s(0))], {
+        declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE1DARRAY, RETURN_TYPE.FLOAT),
+            dclSampler(0)],
+    });
+    assert.match(bodyOf(array), /vec2<f32>\(bitcast<vec4<f32>>\(v0.xyzw\).x, 0.5\), i32\(/);
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    assert.match(linkProgram(vs, sampled).fragment, /var t0: texture_2d<f32>;/);
+    assert.deepEqual(linkProgram(vs, array).groups[1][0].texture,
+        { sampleType: 'float', viewDimension: '2d-array' });
+});
+
+test('ld_ms reads the one sample every texture here has, and zero for any other', ()=>{
+    const translated = translate([ldMs(r(0), r(1), t(0), r(2, 'x'))], {
+        declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2DMS, RETURN_TYPE.FLOAT)],
+    });
+    assert.equal(bodyOf(translated), `r0 = select(${U}((textureLoad(t0, ${I}(r1.xyzw).xy, 0))`
+        + '.xyzw), vec4<u32>(0u), r2.xxxx.x != 0u);');
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    assert.match(linkProgram(vs, translated).fragment, /var t0: texture_2d<f32>;/);
+    const plain = translate([ld(r(0), r(1), t(0))], {
+        declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2DMSARRAY, RETURN_TYPE.FLOAT)],
+    });
+    assert.equal(bodyOf(plain), `r0 = ${U}((textureLoad(t0, ${I}(r1.xyzw).xy, `
+        + `${I}(r1.xyzw).z, 0)).xyzw);`);
+});
+
+test('ld from a buffer view reads storage, checked against the view and decoded by it', ()=>{
+    const translated = translate([ld(r(0), r(1, 'x'), t(2, 'zyxw'))], {
+        declarations: [dclResource(2, RESOURCE_DIMENSION.BUFFER, RETURN_TYPE.FLOAT)],
+    });
+    assert.equal(bodyOf(translated), 'r0 = (loadt2(r1.xxxx.x)).zyxw;');
+    assert.deepEqual(translated.unsupported, []);
+    assert.deepEqual(translated.helpers, ['bufferElement']);
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const linked = linkProgram(vs, translated);
+    assert.match(linked.fragment, /@binding\(18\) var<storage, read> t2: array<u32>;/);
+    assert.match(linked.fragment, /@binding\(162\) var<uniform> t2view: vec4<u32>;/);
+    assert.match(linked.fragment, /if \(index >= t2view\.z\) \{ return vec4<u32>\(0u\); \}/,
+        'an element past the view reads zero');
+    assert.match(linked.fragment, /return bufferElement\(t2view\.x, words, \(byte % 4u\) \* 8u\);/);
+    assert.deepEqual(linked.groups[1], [
+        { binding: BINDING.TEXTURE + 2, visibility: STAGE.FRAGMENT,
+            buffer: { type: 'read-only-storage' } },
+        { binding: BINDING.BUFFER_VIEW + 2, visibility: STAGE.FRAGMENT,
+            buffer: { type: 'uniform' } },
+    ]);
+});
+
+test('a buffer element is decoded by the view\'s format', ()=>{
+    const text = HELPERS.bufferElement.text.join('\n');
+    const FORMAT = DXGI_FORMAT;
+    /** @param {number} format */
+    const clauseOf = format=>text.split('\n').find(line=>line.includes(` ${format}u:`)
+        || line.includes(` ${format}u,`)) ?? '';
+    assert.match(clauseOf(FORMAT.R32G32B32A32_FLOAT), /return w;/, 'four dwords as they are');
+    assert.match(clauseOf(FORMAT.R32_FLOAT), /vec4<u32>\(w\.x, 0u, 0u, 0x3f800000u\)/,
+        'a missing component is zero and a missing alpha one');
+    assert.match(clauseOf(FORMAT.R32_UINT), /vec4<u32>\(w\.x, 0u, 0u, 1u\)/);
+    assert.match(clauseOf(FORMAT.R8G8B8A8_UNORM), /unpack4x8unorm\(w\.x\)/);
+    assert.match(clauseOf(FORMAT.B8G8R8A8_UNORM), /unpack4x8unorm\(w\.x\)\.zyxw/);
+    assert.match(clauseOf(FORMAT.R16_UINT), /\(\(w\.x >> s\) & 0xffffu\)/,
+        'a narrow element from the bit it starts at');
+    for (const format of [FORMAT.R32G32B32A32_FLOAT, FORMAT.R32G32B32_UINT,
+        FORMAT.R16G16B16A16_FLOAT, FORMAT.R16G16_SNORM, FORMAT.R16_FLOAT, FORMAT.R8G8B8A8_SINT,
+        FORMAT.R8G8_UINT, FORMAT.R8_UNORM, FORMAT.R10G10B10A2_UNORM])
+    {
+        assert.ok(BUFFER_VIEW_FORMATS.has(format), `format ${format}`);
+    }
+    assert.ok(!BUFFER_VIEW_FORMATS.has(FORMAT.R11G11B10_FLOAT), 'one it does not decode');
+    assert.match(text, /default: \{ return vec4<u32>\(0u\); \}/);
+});
+
+test('gather4 gathers the first component of four texels', ()=>{
+    const translated = translate([gather4(r(0), v(0), t(0, 'yxzw'), s(0))], {
+        declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+            dclSampler(0)],
+    });
+    assert.equal(bodyOf(translated),
+        `r0 = ${U}((textureGather(0, t0, s0, ${F}(v0.xyzw).xy)).yxzw);`);
+    const integer = translate([gather4(r(0), v(0), t(0), s(0))], {
+        declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.UINT),
+            dclSampler(0)],
+    });
+    assert.deepEqual(integer.unsupported,
+        ['gather4 on an integer, one- or three-dimensional texture']);
 });
 
 test('an instruction with no translation is named, and nothing plausible is emitted', ()=>{
-    const translated = translate([{ opcode: 46, operands: [r(0), r(1), t(0), lu(0)] }],
+    const translated = translate([{ opcode: 108, operands: [r(0), r(1), t(0), s(0)] }],
         { declarations: TEXTURE });
-    assert.deepEqual(translated.unsupported, ['ld_ms']);
+    assert.deepEqual(translated.unsupported, ['lod']);
     const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
-    assert.ok(linkProgram(vs, translated).unsupported.includes('ld_ms'),
+    assert.ok(linkProgram(vs, translated).unsupported.includes('lod'),
         'and the pair carries the refusal');
 });
 
 // --- linking ---
+
+test('the fragment stage lets a derivative be taken in divergent flow, as Direct3D does', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([0, 0, 1, 1]))));
+    const linked = linkProgram(vs, ps);
+    assert.ok(linked.fragment.startsWith('diagnostic(off, derivative_uniformity);\n'),
+        'a directive, before any declaration');
+    assert.ok(!linked.vertex.includes('diagnostic'));
+});
+
+test('an output with no target bound is left out, and with none left nothing is returned', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([0, 0, 1, 1]))));
+    const kept = linkProgram(vs, ps, { targets: [0, 3] });
+    assert.match(kept.fragment, /@location\(0\) target0/);
+    const none = linkProgram(vs, ps, { targets: [] });
+    assert.deepEqual(none.targets, [0], 'what the shader writes is still reported');
+    assert.doesNotMatch(none.fragment, /FragmentOut/);
+    assert.match(none.fragment, /@fragment fn fragmentMain\(\) \{/);
+    assert.match(none.fragment, /\n {4}return;\n\}$/);
+});
 
 test('a pass-through vertex shader and a solid pixel shader link into two entry points', ()=>{
     const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
@@ -406,6 +694,7 @@ test('a pass-through vertex shader and a solid pixel shader link into two entry 
         '}',
     ].join('\n'));
     assert.equal(linked.fragment, [
+        'diagnostic(off, derivative_uniformity);',
         'struct FragmentOut {',
         '    @location(0) target0: vec4<f32>,',
         '};',

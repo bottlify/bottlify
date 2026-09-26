@@ -15,13 +15,14 @@
  * no proxy class exists to hand out.
  */
 
-import { GUID_SIZE, parseGuid } from '../ole32/guid.js';
+import { GUID_SIZE, formatGuid, parseGuid } from '../ole32/guid.js';
 
 /** HRESULTs, and the RPC statuses that are not HRESULTs. */
 const S_OK = 0;
 const S_FALSE = 1;
 const CLASS_E_CLASSNOTAVAILABLE = 0x80040111 | 0;
 const RPC_S_OK = 0;
+const RPC_S_OUT_OF_MEMORY = 14;
 const RPC_S_INVALID_STRING_UUID = 1705;
 
 /** A UUID's string form is 36 characters, without braces. */
@@ -32,6 +33,10 @@ const UUID_STRING_LENGTH = 36;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} [readCString]
  * @property {((api: string, detail: string) => void) | undefined} [divergence]
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {(bytes: number) => number} [allocate]
+ *           Where a string the library hands out lives, freed by RpcStringFree.
+ * @property {(address: number) => void} [free]
  */
 
 /**
@@ -132,6 +137,51 @@ export function createRpcFunctions(host){
                     return RPC_S_INVALID_STRING_UUID;
                 }
                 host.writeMemory(out >>> 0, bytes);
+                return RPC_S_OK;
+            },
+        },
+
+        /**
+         * RPC_STATUS UuidToStringA(const UUID *Uuid, RPC_CSTR *StringUuid)
+         *
+         * The braceless spelling UuidFromStringA reads, in lower case, in a
+         * string the library allocates; a NULL UUID is the nil one.
+         */
+        UuidToStringA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([uuid, out])=>{
+                const bytes = (uuid >>> 0) === 0 || !host.readMemory
+                    ? new Uint8Array(GUID_SIZE)
+                    : host.readMemory(uuid >>> 0, GUID_SIZE);
+                const spelled = formatGuid(bytes).slice(1, -1).toLowerCase();
+                const at = host.allocate?.(spelled.length + 1) ?? 0;
+                if (at === 0)
+                {
+                    return RPC_S_OUT_OF_MEMORY;
+                }
+                host.writeMemory(at, Uint8Array.from([...spelled, '\0'].map(c=>c.charCodeAt(0))));
+                writeU32(out >>> 0, at);
+                return RPC_S_OK;
+            },
+        },
+
+        /** RPC_STATUS RpcStringFreeA(RPC_CSTR *String) -- freed, and the pointer cleared. */
+        RpcStringFreeA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                if ((pointer >>> 0) === 0 || !host.readMemory)
+                {
+                    return RPC_S_OK;
+                }
+                const held = new DataView(host.readMemory(pointer >>> 0, 4).slice().buffer)
+                    .getUint32(0, true);
+                if (held !== 0)
+                {
+                    host.free?.(held);
+                }
+                writeU32(pointer >>> 0, 0);
                 return RPC_S_OK;
             },
         },

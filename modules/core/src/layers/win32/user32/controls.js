@@ -30,6 +30,7 @@
  */
 
 import { layoutText } from './paint.js';
+import { createTabWalk } from './tabwalk.js';
 
 /** Messages the controls answer. */
 export const WM_CREATE = 0x0001;
@@ -114,6 +115,22 @@ const BS_AUTO3STATE = 0x06;
 const BS_GROUPBOX = 0x07;
 const BS_AUTORADIOBUTTON = 0x09;
 const BS_OWNERDRAW = 0x0b;
+
+/**
+ * Owner drawing: WM_DRAWITEM and its DRAWITEMSTRUCT -- CtlType, CtlID, itemID,
+ * itemAction, itemState, hwndItem, hDC, rcItem and itemData, forty-eight
+ * bytes -- with the kinds of control, the reasons to draw and the states.
+ */
+const WM_DRAWITEM = 0x002b;
+const DRAWITEMSTRUCT_SIZE = 48;
+const ODT_BUTTON = 4;
+const ODT_STATIC = 5;
+const ODA_DRAWENTIRE = 0x1;
+const ODA_SELECT = 0x2;
+const ODA_FOCUS = 0x4;
+const ODS_SELECTED = 0x1;
+const ODS_DISABLED = 0x4;
+const ODS_FOCUS = 0x10;
 const BS_LEFTTEXT = 0x20;
 const BS_MULTILINE = 0x2000;
 /** Without this a button reports clicks and nothing else. */
@@ -174,6 +191,11 @@ const STN_DBLCLK = 1;
 const IMAGE_BITMAP = 0;
 const IMAGE_ICON = 1;
 
+/** The window styles a dialog's Tab order is read from. */
+const WS_TABSTOP = 0x00010000;
+const WS_DISABLED = 0x08000000;
+const WS_VISIBLE = 0x10000000;
+
 /** Edit styles and messages. */
 const ES_MULTILINE = 0x0004;
 const ES_PASSWORD = 0x0020;
@@ -182,6 +204,7 @@ const ES_READONLY = 0x0800;
 const ES_WANTRETURN = 0x1000;
 const EM_GETSEL = 0x00b0;
 const EM_SETSEL = 0x00b1;
+const WM_NEXTDLGCTL = 0x0028;
 const EM_GETRECT = 0x00b2;
 const EM_SCROLL = 0x00b5;
 const EM_LINESCROLL = 0x00b6;
@@ -195,6 +218,13 @@ const EM_REPLACESEL = 0x00c2;
 const EM_GETLINE = 0x00c4;
 const EM_LIMITTEXT = 0x00c5;
 const EM_CANUNDO = 0x00c6;
+const EM_UNDO = 0x00c7;
+/** The clipboard messages an edit answers, and the undo they share with it. */
+const WM_CUT = 0x0300;
+const WM_COPY = 0x0301;
+const WM_PASTE = 0x0302;
+const WM_CLEAR = 0x0303;
+const WM_UNDO = 0x0304;
 const EM_EMPTYUNDOBUFFER = 0x00cd;
 const EM_GETFIRSTVISIBLELINE = 0x00ce;
 const EM_SETREADONLY = 0x00cf;
@@ -220,6 +250,9 @@ const LBS_SORT = 0x0002;
 const LBS_MULTIPLESEL = 0x0008;
 const LBS_EXTENDEDSEL = 0x0800;
 const LBS_NOSEL = 0x4000;
+/** An owner-drawn list box, and one that still keeps the strings it is handed. */
+const LBS_OWNERDRAW = 0x0030;
+const LBS_HASSTRINGS = 0x0040;
 const LB_ADDSTRING = 0x0180;
 const LB_INSERTSTRING = 0x0181;
 const LB_DELETESTRING = 0x0182;
@@ -254,6 +287,8 @@ const CBS_TYPEMASK = 0x0003;
 const CBS_SIMPLE = 0x0001;
 const CBS_DROPDOWN = 0x0002;
 const CBS_SORT = 0x0100;
+const CBS_OWNERDRAW = 0x0030;
+const CBS_HASSTRINGS = 0x0200;
 const CB_GETEDITSEL = 0x0140;
 const CB_LIMITTEXT = 0x0141;
 const CB_SETEDITSEL = 0x0142;
@@ -428,6 +463,9 @@ const RADIO_DOT = [
  * @property {number} lParam
  */
 
+/** SetBkMode's mode in which text is drawn over the context's background colour. */
+const OPAQUE = 2;
+
 /**
  * The drawing the window manager does itself, as gdi32 offers it.
  *
@@ -437,8 +475,15 @@ const RADIO_DOT = [
  * @property {(hdc: number, rect: Rect, brush: number) => boolean} fillWith
  * @property {(hdc: number, rect: Rect, brush: number) => boolean} frame
  * @property {(hdc: number, rect: Rect) => boolean} invert
+ * @property {(hdc: number) => number} [textColor]  The colour a context draws text in.
+ * @property {(hdc: number) => number} [bkMode]
+ *           OPAQUE or TRANSPARENT, as SetBkMode left the context.
+ * @property {(hdc: number, color: number) => number} [setTextColor]
+ * @property {(hdc: number, color: number) => number} [setBkColor]
  * @property {(hdc: number, x: number, y: number, text: string,
- *     options?: { color?: number, clip?: Rect | null }) => boolean} text
+ *     options?: { color?: number, clip?: Rect | null, transparent?: boolean }) => boolean} text
+ *           `transparent: false` draws over the context's own background
+ *           colour, in its own mode; otherwise over what is there.
  * @property {(hdc: number, text: string) => { width: number, height: number,
  *     ascent: number }} measure
  * @property {(hdc: number, x: number, y: number, bitmap: number) => boolean} bitmap
@@ -488,6 +533,9 @@ const RADIO_DOT = [
  *           a structure cannot be sent.
  * @property {(address: number) => void} [release]
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {import('./objects.js').ClipboardService} [clipboard]
+ *           The clipboard an edit copies to and pastes from. Absent, the
+ *           clipboard messages do nothing.
  */
 
 /**
@@ -545,7 +593,9 @@ export const pointOf = lParam=>({
  *
  * @param {ControlHost} host
  * @returns {{ procedures: Record<string, ControlProcedure>,
- *     helpers: { defDlgProc: ControlProcedure,
+ *     helpers: { dialogProc: ControlProcedure,
+ *         markDefault: (dialog: any, focused: number) => void,
+ *         defaultControlColors: (message: number, hdc: number) => void,
  *         paintScrollBar: (hdc: number, rect: Rect, vertical: boolean,
  *             held: ScrollBarState) => void,
  *         scrollHit: (rect: Rect, vertical: boolean, held: ScrollBarState,
@@ -638,7 +688,7 @@ export function createControlProcedures(host){
      * @param {number} hdc @param {string} text @param {Rect} rect @param {number} format
      * @param {number} rgb
      */
-    const drawText = (hdc, text, rect, format, rgb)=>{
+    const drawText = (hdc, text, rect, format, rgb, opaque = false)=>{
         const draw = /** @type {Drawing} */ (host.draw);
         const metrics = draw.measure(hdc, 'M');
         /** @param {string} piece */
@@ -648,7 +698,8 @@ export function createControlProcedures(host){
         });
         for (const line of lines)
         {
-            draw.text(hdc, line.x, line.y, line.text, { color: rgb, clip: rect });
+            draw.text(hdc, line.x, line.y, line.text,
+                { color: rgb, clip: rect, transparent: !opaque });
             if (line.underline !== null)
             {
                 const at = line.x + widthOf(line.text.slice(0, line.underline));
@@ -763,6 +814,66 @@ export function createControlProcedures(host){
     /** @param {any} record */
     const disabled = record=>(record.style & 0x08000000) !== 0;
 
+    /**
+     * Hands a control's drawing to its parent: WM_DRAWITEM, the structure
+     * in guest memory for as long as the message is being answered. A build
+     * with no heap has nowhere to put it, and the control is left undrawn.
+     *
+     * @param {any} record @param {number} hdc @param {Rect} rect
+     * @param {{ type: number, action: number, state: number, item?: number, data?: number }} what
+     * @param {unknown} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const drawItem = (record, hdc, rect, what, thread)=>{
+        const at = record.parent && host.allocate ? host.allocate(DRAWITEMSTRUCT_SIZE) : 0;
+        if (at === 0)
+        {
+            return 0;
+        }
+        const fields = [what.type, record.id, what.item ?? 0, what.action, what.state,
+            record.hwnd, hdc, rect.left, rect.top, rect.right, rect.bottom, what.data ?? 0];
+        const bytes = new Uint8Array(DRAWITEMSTRUCT_SIZE);
+        const view = new DataView(bytes.buffer);
+        fields.forEach((value, index)=>view.setUint32(index * 4, value >>> 0, true));
+        host.writeMemory(at, bytes);
+        return after(host.send(record.parent, WM_DRAWITEM, record.id, at, thread), ()=>{
+            host.release?.(at);
+            return 0;
+        });
+    };
+
+    /**
+     * The colour a control painted on WM_CTLCOLORSTATIC writes its text in:
+     * whatever the parent left in the context it was handed -- the window
+     * text colour unless the parent set its own -- and grey while disabled.
+     *
+     * @param {any} record @param {number} hdc
+     */
+    const staticInk = (record, hdc)=>(disabled(record) ? color(COLOR_GRAYTEXT)
+        : host.draw?.textColor?.(hdc) ?? color(COLOR_WINDOWTEXT));
+
+    /**
+     * Whether that text is drawn over the context's background colour: the
+     * mode a context starts in, unless the parent made it transparent.
+     *
+     * @param {number} hdc
+     */
+    const staticOpaque = hdc=>host.draw?.bkMode?.(hdc) === OPAQUE;
+
+    /**
+     * The colours the default procedure gives the context a control asked
+     * WM_CTLCOLOR* about, as DefWindowProc sets them: the window text on the
+     * window colour for an edit or a list box, on the 3D face for the rest.
+     *
+     * @param {number} message @param {number} hdc
+     */
+    const defaultControlColors = (message, hdc)=>{
+        const face = message === WM_CTLCOLOREDIT || message === WM_CTLCOLORLISTBOX
+            ? COLOR_WINDOW : COLOR_3DFACE;
+        host.draw?.setTextColor?.(hdc, color(COLOR_WINDOWTEXT));
+        host.draw?.setBkColor?.(hdc, color(face));
+    };
+
     // --- Button -------------------------------------------------------------
 
     /** @param {any} record */
@@ -848,7 +959,7 @@ export function createControlProcedures(host){
         const ink = color(disabled(record) ? COLOR_GRAYTEXT : COLOR_BTNTEXT);
         const multi = (record.style & BS_MULTILINE) !== 0 ? DT_WORDBREAK : DT_SINGLELINE;
 
-        if (PUSH_KINDS.has(kind) || kind === BS_OWNERDRAW)
+        if (PUSH_KINDS.has(kind))
         {
             let box = rect;
             draw.fill(hdc, rect, color(COLOR_3DFACE));
@@ -880,7 +991,8 @@ export function createControlProcedures(host){
                 const label = { left: rect.left + 8, top: rect.top,
                     right: rect.left + 8 + metrics.width + 4, bottom: rect.top + metrics.height };
                 background(hdc, label, brush, COLOR_3DFACE);
-                drawText(hdc, text, { ...label, left: label.left + 2 }, DT_SINGLELINE, ink);
+                drawText(hdc, text, { ...label, left: label.left + 2 }, DT_SINGLELINE,
+                    staticInk(record, hdc), staticOpaque(hdc));
             }
             return;
         }
@@ -917,7 +1029,60 @@ export function createControlProcedures(host){
         const textRect = leftText
             ? { ...rect, right: box.left - CHECK_GAP }
             : { ...rect, left: box.right + CHECK_GAP };
-        drawText(hdc, text, textRect, DT_VCENTER | multi, ink);
+        drawText(hdc, text, textRect, DT_VCENTER | multi, staticInk(record, hdc),
+            staticOpaque(hdc));
+    };
+
+    /** @param {any} record  How an owner-drawn button's parent is told it stands. */
+    const buttonItemState = record=>{
+        const state = stateOf(record);
+        return (state.pushed ? ODS_SELECTED : 0) | (disabled(record) ? ODS_DISABLED : 0)
+            | (state.focused ? ODS_FOCUS : 0);
+    };
+
+    /**
+     * An owner-drawn button's change drawn at once, as the button draws it
+     * rather than waiting for a paint: its parent asked for the colour and
+     * then told what changed.
+     *
+     * @param {any} record @param {number} action @param {unknown} [thread]
+     */
+    const redrawOwnerButton = (record, action, thread)=>{
+        if ((record.style & WS_VISIBLE) === 0)
+        {
+            return 0;
+        }
+        const { hdc, rect } = host.contextOn(record);
+        if (hdc === 0)
+        {
+            host.endPaint(record, hdc);
+            return 0;
+        }
+        return after(controlColor(record, WM_CTLCOLORBTN, hdc, thread), ()=>after(
+            drawItem(record, hdc, rect,
+                { type: ODT_BUTTON, action, state: buttonItemState(record) }, thread),
+            ()=>{
+                host.endPaint(record, hdc);
+                return 0;
+            }));
+    };
+
+    /**
+     * A button pushed in or let out: repainted, or for an owner-drawn one
+     * drawn by its parent there and then.
+     *
+     * @param {any} record @param {boolean} pushed @param {unknown} [thread]
+     */
+    const setPushed = (record, pushed, thread)=>{
+        const state = stateOf(record);
+        const changed = (state.pushed === true) !== pushed;
+        state.pushed = pushed;
+        if (buttonKind(record) === BS_OWNERDRAW)
+        {
+            return changed ? redrawOwnerButton(record, ODA_SELECT, thread) : 0;
+        }
+        host.invalidate(record);
+        return 0;
     };
 
     /**
@@ -928,6 +1093,13 @@ export function createControlProcedures(host){
         const kind = buttonKind(record);
         switch (message.message){
             case WM_PAINT:
+                if (kind === BS_OWNERDRAW)
+                {
+                    return painting(record, (hdc, rect)=>after(
+                        controlColor(record, WM_CTLCOLORBTN, hdc, thread), ()=>drawItem(record,
+                            hdc, rect, { type: ODT_BUTTON, action: ODA_DRAWENTIRE,
+                                state: buttonItemState(record) }, thread)));
+                }
                 return painting(record, (hdc, rect)=>{
                     const asked = PUSH_KINDS.has(kind) ? WM_CTLCOLORBTN : WM_CTLCOLORSTATIC;
                     return after(controlColor(record, asked, hdc, thread), brush=>{
@@ -960,9 +1132,8 @@ export function createControlProcedures(host){
                     return 0;
                 }
                 host.setCapture(record.hwnd);
-                state.pushed = true;
-                host.invalidate(record);
-                return after(host.setFocus(record.hwnd, thread), ()=>0);
+                return after(setPushed(record, true, thread),
+                    ()=>after(host.setFocus(record.hwnd, thread), ()=>0));
             case WM_MOUSEMOVE: {
                 if (host.capture() !== record.hwnd)
                 {
@@ -970,12 +1141,7 @@ export function createControlProcedures(host){
                 }
                 const point = pointOf(message.lParam);
                 const inside = contains(clientRect(record), point.x, point.y);
-                if (inside !== (state.pushed === true))
-                {
-                    state.pushed = inside;
-                    host.invalidate(record);
-                }
-                return 0;
+                return inside !== (state.pushed === true) ? setPushed(record, inside, thread) : 0;
             }
             case WM_LBUTTONUP: {
                 if (host.capture() !== record.hwnd)
@@ -984,47 +1150,44 @@ export function createControlProcedures(host){
                 }
                 host.releaseCapture();
                 const wasPushed = state.pushed === true;
-                state.pushed = false;
-                host.invalidate(record);
                 const point = pointOf(message.lParam);
-                return wasPushed && contains(clientRect(record), point.x, point.y)
-                    ? clickButton(record, thread)
-                    : 0;
+                return after(setPushed(record, false, thread), ()=>
+                    (wasPushed && contains(clientRect(record), point.x, point.y)
+                        ? clickButton(record, thread)
+                        : 0));
             }
             case WM_KEYDOWN:
                 if (message.wParam === VK_SPACE && !disabled(record) && kind !== BS_GROUPBOX)
                 {
-                    state.pushed = true;
-                    host.invalidate(record);
+                    return after(setPushed(record, true, thread), ()=>0);
                 }
                 return 0;
             case WM_KEYUP:
                 if (message.wParam === VK_SPACE && state.pushed)
                 {
-                    state.pushed = false;
-                    host.invalidate(record);
-                    return clickButton(record, thread);
+                    return after(setPushed(record, false, thread),
+                        ()=>clickButton(record, thread));
                 }
                 return 0;
             // The focus notifications go out only with BS_NOTIFY, as
             // documented: a parent that looks at the id alone and not the
             // code would otherwise take a focus change for a click.
             case WM_SETFOCUS:
-                state.focused = true;
-                host.invalidate(record);
-                return (record.style & BS_NOTIFY) !== 0 ? notify(record, BN_SETFOCUS, thread) : 0;
-            case WM_KILLFOCUS:
-                state.focused = false;
-                state.pushed = false;
-                host.invalidate(record);
-                return (record.style & BS_NOTIFY) !== 0 ? notify(record, BN_KILLFOCUS, thread) : 0;
-            case WM_CAPTURECHANGED:
-                if (state.pushed)
+            case WM_KILLFOCUS: {
+                const gained = message.message === WM_SETFOCUS;
+                state.focused = gained;
+                if (!gained)
                 {
                     state.pushed = false;
-                    host.invalidate(record);
                 }
-                return 0;
+                const drawn = kind === BS_OWNERDRAW
+                    ? redrawOwnerButton(record, ODA_FOCUS, thread)
+                    : (host.invalidate(record), 0);
+                return after(drawn, ()=>((record.style & BS_NOTIFY) !== 0
+                    ? notify(record, gained ? BN_SETFOCUS : BN_KILLFOCUS, thread) : 0));
+            }
+            case WM_CAPTURECHANGED:
+                return state.pushed ? after(setPushed(record, false, thread), ()=>0) : 0;
             case BM_GETCHECK:
                 return state.check ?? BST_UNCHECKED;
             case BM_SETCHECK:
@@ -1045,9 +1208,7 @@ export function createControlProcedures(host){
                 return (state.check ?? BST_UNCHECKED)
                     | (state.pushed ? BST_PUSHED : 0) | (state.focused ? BST_FOCUS : 0);
             case BM_SETSTATE:
-                state.pushed = message.wParam !== 0;
-                host.invalidate(record);
-                return 0;
+                return after(setPushed(record, message.wParam !== 0, thread), ()=>0);
             case BM_SETSTYLE:
                 record.style = ((record.style & ~BS_TYPEMASK)
                     | (message.wParam & BS_TYPEMASK)) >>> 0;
@@ -1105,8 +1266,6 @@ export function createControlProcedures(host){
                 }
                 return true;
             }
-            case SS_OWNERDRAW:
-                return background(hdc, rect, brush, COLOR_3DFACE);
             default:
                 break;
         }
@@ -1122,8 +1281,7 @@ export function createControlProcedures(host){
             | (kind === SS_SIMPLE ? DT_SINGLELINE : 0)
             | ((record.style & SS_CENTERIMAGE) !== 0 ? DT_VCENTER | DT_SINGLELINE : 0)
             | ((record.style & SS_NOPREFIX) !== 0 ? DT_NOPREFIX : 0);
-        drawText(hdc, record.title, inside, format,
-            color(disabled(record) ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT));
+        drawText(hdc, record.title, inside, format, staticInk(record, hdc), staticOpaque(hdc));
         return true;
     };
 
@@ -1134,8 +1292,16 @@ export function createControlProcedures(host){
         const state = stateOf(record);
         switch (message.message){
             case WM_PAINT:
+                // An owner-drawn static is its parent's to draw, all of it:
+                // asked for a colour first, as every static asks.
                 return painting(record, (hdc, rect)=>after(
                     controlColor(record, WM_CTLCOLORSTATIC, hdc, thread), brush=>{
+                        if ((record.style & SS_TYPEMASK) === SS_OWNERDRAW)
+                        {
+                            return drawItem(record, hdc, rect, { type: ODT_STATIC,
+                                action: ODA_DRAWENTIRE,
+                                state: disabled(record) ? ODS_DISABLED : 0 }, thread);
+                        }
                         paintStatic(record, hdc, rect, brush);
                         return 0;
                     }));
@@ -1348,6 +1514,54 @@ export function createControlProcedures(host){
     };
 
     /**
+     * Keeps what an edit held before a change, for WM_UNDO to put back: one
+     * level, as the control keeps. A run of typing is one change, so the
+     * first character of a run is what remembers; anything else ends the
+     * run.
+     *
+     * @param {any} record @param {boolean} [typing]
+     */
+    const rememberUndo = (record, typing = false)=>{
+        const state = editState(record);
+        if (!typing || !state.typingRun)
+        {
+            state.undo = { text: record.title, selStart: state.selStart, selEnd: state.selEnd };
+        }
+        state.typingRun = typing;
+    };
+
+    /**
+     * Swaps what an edit holds with what it held before its last change, so
+     * that undoing twice is the change again.
+     *
+     * @param {any} record @param {unknown} [thread]
+     */
+    const undoEdit = (record, thread)=>{
+        const state = editState(record);
+        const before = state.undo;
+        if (!before)
+        {
+            return 0;
+        }
+        state.undo = { text: record.title, selStart: state.selStart, selEnd: state.selEnd };
+        state.typingRun = false;
+        record.title = before.text;
+        state.selStart = before.selStart;
+        state.selEnd = before.selEnd;
+        state.modified = true;
+        host.invalidate(record);
+        return after(notify(record, EN_UPDATE, thread),
+            ()=>after(notify(record, EN_CHANGE, thread), ()=>1));
+    };
+
+    /** @param {any} record @returns {string} the text an edit has selected */
+    const selectedText = record=>{
+        const state = editState(record);
+        return record.title.slice(Math.min(state.selStart, state.selEnd),
+            Math.max(state.selStart, state.selEnd));
+    };
+
+    /**
      * Moves the caret, extending the selection when Shift is held.
      *
      * @param {any} record @param {number} to
@@ -1355,6 +1569,7 @@ export function createControlProcedures(host){
     const moveCaret = (record, to)=>{
         const state = editState(record);
         const clamped = Math.max(0, Math.min(record.title.length, to));
+        state.typingRun = false;
         state.selEnd = clamped;
         if (!host.keyDown(VK_SHIFT))
         {
@@ -1381,6 +1596,7 @@ export function createControlProcedures(host){
         const state = editState(record);
         if (character === VK_BACK)
         {
+            rememberUndo(record);
             if (state.selStart === state.selEnd && state.selEnd > 0)
             {
                 state.selStart = state.selEnd - 1;
@@ -1389,14 +1605,18 @@ export function createControlProcedures(host){
         }
         if (character === VK_RETURN)
         {
-            return multiline(record) && (record.style & ES_WANTRETURN) !== 0
-                ? replaceSelection(record, '\r\n', thread, codes)
-                : 0;
+            if (!multiline(record) || (record.style & ES_WANTRETURN) === 0)
+            {
+                return 0;
+            }
+            rememberUndo(record, true);
+            return replaceSelection(record, '\r\n', thread, codes);
         }
         if (character < VK_SPACE || character === VK_TAB || character === VK_ESCAPE)
         {
             return 0;
         }
+        rememberUndo(record, true);
         return replaceSelection(record, String.fromCharCode(character), thread, codes);
     };
 
@@ -1409,6 +1629,7 @@ export function createControlProcedures(host){
      */
     const setSelection = (record, start, end)=>{
         const state = editState(record);
+        state.typingRun = false;
         if (start === -1)
         {
             state.selStart = state.selEnd;
@@ -1538,6 +1759,7 @@ export function createControlProcedures(host){
                 {
                     const at = charFromPoint(record, hdc, point.x, point.y);
                     state.selStart = state.selEnd = at;
+                    state.typingRun = false;
                 }
                 host.endPaint(record, hdc);
                 host.invalidate(record);
@@ -1583,6 +1805,7 @@ export function createControlProcedures(host){
                         {
                             return 0;
                         }
+                        rememberUndo(record);
                         if (state.selStart === state.selEnd)
                         {
                             state.selEnd = Math.min(record.title.length, state.selEnd + 1);
@@ -1618,6 +1841,8 @@ export function createControlProcedures(host){
                 state.selStart = state.selEnd = 0;
                 state.firstLine = 0;
                 state.modified = false;
+                state.undo = null;
+                state.typingRun = false;
                 host.invalidate(record);
                 return after(notify(record, EN_UPDATE, thread),
                     ()=>after(notify(record, EN_CHANGE, thread), ()=>1));
@@ -1640,9 +1865,61 @@ export function createControlProcedures(host){
                 return 0;
             case EM_REPLACESEL: {
                 const address = message.lParam >>> 0;
+                // wParam is fCanUndo: whether the replacement can be undone.
+                if (message.wParam !== 0)
+                {
+                    rememberUndo(record);
+                }
+                else
+                {
+                    state.typingRun = false;
+                }
                 return replaceSelection(record,
                     address === 0 ? '' : host.readCString(address, MAX_TEXT), thread);
             }
+            // The clipboard: a password is never copied out, and a read-only
+            // edit gives nothing up and takes nothing in, though it copies.
+            case WM_COPY:
+                if ((record.style & ES_PASSWORD) === 0 && selectedText(record).length > 0)
+                {
+                    host.clipboard?.copy(selectedText(record));
+                }
+                return 0;
+            case WM_CUT:
+            case WM_CLEAR: {
+                const selected = selectedText(record);
+                if (readOnly() || selected.length === 0
+                    || (message.message === WM_CUT && (record.style & ES_PASSWORD) !== 0))
+                {
+                    return 0;
+                }
+                if (message.message === WM_CUT)
+                {
+                    host.clipboard?.copy(selected);
+                }
+                rememberUndo(record);
+                return after(replaceSelection(record, '', thread), ()=>0);
+            }
+            case WM_PASTE: {
+                const pasted = readOnly() ? null : host.clipboard?.text() ?? null;
+                if (pasted === null)
+                {
+                    return 0;
+                }
+                rememberUndo(record);
+                // A single-line edit takes the first line and no more.
+                const text = multiline(record) ? pasted : pasted.split(/[\r\n]/)[0];
+                return after(replaceSelection(record, text, thread), ()=>0);
+            }
+            case WM_UNDO:
+            case EM_UNDO:
+                return undoEdit(record, thread);
+            case EM_CANUNDO:
+                return state.undo ? 1 : 0;
+            case EM_EMPTYUNDOBUFFER:
+                state.undo = null;
+                state.typingRun = false;
+                return 0;
             case EM_LIMITTEXT:
                 state.limit = (message.wParam >>> 0) === 0
                     ? DEFAULT_EDIT_LIMIT : message.wParam >>> 0;
@@ -1714,8 +1991,6 @@ export function createControlProcedures(host){
                 return 0;
             case EM_GETPASSWORDCHAR:
                 return (record.style & ES_PASSWORD) !== 0 ? state.passwordChar ?? 0x2a : 0;
-            case EM_CANUNDO:
-            case EM_EMPTYUNDOBUFFER:
             case EM_SETMARGINS:
             case EM_GETRECT:
                 return 0;
@@ -1857,6 +2132,47 @@ export function createControlProcedures(host){
     };
 
     /**
+     * Whether a list keeps strings: every list does but an owner-drawn one
+     * made without LBS_HASSTRINGS (CBS_HASSTRINGS for a combo box), whose
+     * items are the values handed to LB_ADDSTRING, which its owner draws.
+     *
+     * @param {any} record
+     */
+    const keepsStrings = record=>(record.className === 'ComboBox'
+        ? (record.style & CBS_OWNERDRAW) === 0 || (record.style & CBS_HASSTRINGS) !== 0
+        : (record.style & LBS_OWNERDRAW) === 0 || (record.style & LBS_HASSTRINGS) !== 0);
+
+    /**
+     * An item added to a list without strings: the value is its data, and
+     * it goes at the end or where it was asked for -- the owner, not the
+     * list, is what could compare two of them.
+     *
+     * @param {any} record @param {number} data @param {number} [at]
+     */
+    const addData = (record, data, at)=>{
+        const index = addItem(record, false, '', at);
+        listState(record).items[index].data = data >>> 0;
+        return index;
+    };
+
+    /**
+     * @param {any} record @param {number} index @param {number} data
+     * @returns {number} the first item after `index` holding the value, wrapping, or -1
+     */
+    const findData = (record, index, data)=>{
+        const items = listState(record).items;
+        for (let step = 1; step <= items.length; step++)
+        {
+            const at = (index + step) % items.length;
+            if (items[at].data === (data >>> 0))
+            {
+                return at;
+            }
+        }
+        return -1;
+    };
+
+    /**
      * The messages a list box and a combo box share, by the list box's
      * numbers; the combo box translates its own before calling this.
      *
@@ -1866,14 +2182,17 @@ export function createControlProcedures(host){
     const listMessage = (record, sorted, message)=>{
         const state = listState(record);
         const items = state.items;
+        const strings = keepsStrings(record);
         const text = ()=>((message.lParam >>> 0) === 0
             ? '' : host.readCString(message.lParam >>> 0, MAX_TEXT));
         switch (message.message){
             case LB_ADDSTRING:
-                return addItem(record, sorted, text());
-            case LB_INSERTSTRING:
-                return addItem(record, sorted, text(),
-                    (message.wParam | 0) === -1 ? items.length : message.wParam | 0);
+                return strings ? addItem(record, sorted, text()) : addData(record, message.lParam);
+            case LB_INSERTSTRING: {
+                const at = (message.wParam | 0) === -1 ? items.length : message.wParam | 0;
+                return strings ? addItem(record, sorted, text(), at)
+                    : addData(record, message.lParam, at);
+            }
             case LB_DELETESTRING: {
                 const at = message.wParam | 0;
                 if (at < 0 || at >= items.length)
@@ -1925,11 +2244,16 @@ export function createControlProcedures(host){
                 {
                     return LB_ERR;
                 }
+                if (!strings)
+                {
+                    writeU32(message.lParam, item.data);
+                    return 4;
+                }
                 return writeString(message.lParam, item.text);
             }
             case LB_GETTEXTLEN: {
                 const item = items[message.wParam | 0];
-                return item ? item.text.length : LB_ERR;
+                return item ? (strings ? item.text.length : 4) : LB_ERR;
             }
             case LB_GETITEMDATA: {
                 const item = items[message.wParam | 0];
@@ -1945,9 +2269,11 @@ export function createControlProcedures(host){
                 return 1;
             }
             case LB_FINDSTRING:
-                return findItem(record, message.wParam | 0, false, text());
             case LB_FINDSTRINGEXACT:
-                return findItem(record, message.wParam | 0, true, text());
+                return strings
+                    ? findItem(record, message.wParam | 0, message.message === LB_FINDSTRINGEXACT,
+                        text())
+                    : findData(record, message.wParam | 0, message.lParam);
             case LB_GETTOPINDEX:
                 return state.top;
             case LB_SETTOPINDEX:
@@ -2629,6 +2955,55 @@ export function createControlProcedures(host){
 
     // --- The dialog class ---------------------------------------------------
 
+    /** @param {any} record  Whether it is a push button: one Enter can press. */
+    const isPushButton = record=>record.className === 'Button'
+        && PUSH_KINDS.has(record.style & BS_TYPEMASK);
+
+    /** @param {any} button @param {number} kind  BS_PUSHBUTTON or BS_DEFPUSHBUTTON. */
+    const restyle = (button, kind)=>{
+        if ((button.style & BS_TYPEMASK) !== kind)
+        {
+            button.style = ((button.style & ~BS_TYPEMASK) | kind) >>> 0;
+            host.invalidate(button);
+        }
+    };
+
+    /**
+     * Styles the push button Enter presses as the default, as the dialog
+     * manager does each time it moves the focus: the one with the focus when
+     * the focus is on a push button, the dialog's default id's otherwise.
+     * The default id itself does not change.
+     *
+     * @param {any} dialog @param {number} focused
+     */
+    const markDefault = (dialog, focused)=>{
+        const buttons = host.children(dialog).filter(isPushButton);
+        const chosen = buttons.find(button=>button.hwnd === focused)
+            ?? buttons.find(button=>button.id === dialog.defaultId);
+        for (const button of buttons)
+        {
+            restyle(button, button === chosen ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON);
+        }
+    };
+
+    const tabWalk = createTabWalk({ children: host.children, recordOf: host.windowOf });
+
+    /**
+     * Gives a control of a dialog the focus as the dialog manager moves it:
+     * an edit's text selected on the way in, as tabbing into one selects
+     * it, and the push buttons restyled after.
+     *
+     * @param {any} dialog @param {any} control @param {unknown} [thread]
+     */
+    const giveFocus = (dialog, control, thread)=>after(
+        host.send(control.hwnd, WM_GETDLGCODE, 0, 0, thread), code=>after(
+            ((code >>> 0) & DLGC_HASSETSEL) !== 0
+                ? host.send(control.hwnd, EM_SETSEL, 0, -1 >>> 0, thread) : 0,
+            ()=>after(host.setFocus(control.hwnd, thread), ()=>{
+                markDefault(dialog, control.hwnd);
+                return 0;
+            })));
+
     /**
      * The messages whose answer is the dialog procedure's own return value
      * rather than DWLP_MSGRESULT.
@@ -2648,7 +3023,6 @@ export function createControlProcedures(host){
      * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
      */
     const defDlgProc = (record, message, thread)=>{
-        const state = stateOf(record);
         switch (message.message){
             case WM_ERASEBKGND: {
                 if (!host.draw)
@@ -2669,22 +3043,56 @@ export function createControlProcedures(host){
             case WM_CTLCOLORSCROLLBAR:
                 // The dialog's face for its statics and buttons; an edit and a
                 // list box keep the window colour, which is their own default.
+                defaultControlColors(message.message, message.wParam >>> 0);
                 return host.draw ? host.draw.solidBrush(color(COLOR_3DFACE)) : 0;
             case WM_CTLCOLOREDIT:
             case WM_CTLCOLORLISTBOX:
+                defaultControlColors(message.message, message.wParam >>> 0);
                 return 0;
+            // The default id is the template's default push button's until a
+            // program names another; the dialog manager keeps it on the
+            // dialog's record, where making the dialog sets it.
             case DM_GETDEFID:
-                return state.defaultId !== undefined
-                    ? ((DC_HASDEFID << 16) | state.defaultId & 0xffff) >>> 0
+                return record.defaultId !== undefined
+                    ? ((DC_HASDEFID << 16) | record.defaultId & 0xffff) >>> 0
                     : 0;
-            case DM_SETDEFID:
-                state.defaultId = message.wParam & 0xffff;
+            case DM_SETDEFID: {
+                // The style moves with it: off the old default, onto the new
+                // one if it is a push button.
+                const buttons = host.children(record).filter(isPushButton);
+                const old = buttons.find(button=>button.id === record.defaultId);
+                if (old)
+                {
+                    restyle(old, BS_PUSHBUTTON);
+                }
+                record.defaultId = message.wParam & 0xffff;
+                const chosen = buttons.find(button=>button.id === record.defaultId);
+                if (chosen)
+                {
+                    restyle(chosen, BS_DEFPUSHBUTTON);
+                }
                 return 1;
+            }
             case WM_SETFONT:
                 record.font = message.wParam >>> 0;
                 return 0;
             case WM_GETFONT:
                 return record.font ?? 0;
+            case WM_SETFOCUS: {
+                // The dialog passes the focus on, to its first control that
+                // stops the Tab key.
+                const first = host.children(record).find(child=>(child.style
+                    & (WS_TABSTOP | WS_VISIBLE | WS_DISABLED)) === (WS_TABSTOP | WS_VISIBLE));
+                return first ? giveFocus(record, first, thread) : 0;
+            }
+            case WM_NEXTDLGCTL: {
+                // The control named when lParam's low word says so, else the
+                // next or previous tab stop from the focus; the default id
+                // stays, and only the buttons' look follows the focus.
+                const target = (message.lParam & 0xffff) !== 0 ? host.live(message.wParam)
+                    : tabWalk.nextTabStop(record, host.focus(), message.wParam === 0);
+                return target ? giveFocus(record, target, thread) : 0;
+            }
             case WM_CLOSE:
                 // Closing a dialog is Cancel: what the person could have
                 // pressed, sent the way a button would have sent it.
@@ -2745,7 +3153,7 @@ export function createControlProcedures(host){
             ScrollBar: scrollBarProc,
             '#32770': dialogProc,
         },
-        helpers: { defDlgProc, paintScrollBar, scrollHit },
+        helpers: { dialogProc, markDefault, defaultControlColors, paintScrollBar, scrollHit },
         // The drawing and messaging the classes above share, handed out whole
         // so the common controls paint and tell their parent with the same
         // helpers: one look, and a change to it is one change.

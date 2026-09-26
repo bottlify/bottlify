@@ -179,6 +179,30 @@ test('a size that does not match the data is refused before it reaches the drive
         /needs 128 bytes/);
 });
 
+test('a volume\'s slices go up as one copy, the rows of every slice repacked', ()=>{
+    const { gpu, copies, upload } = uploader();
+    const texture = /** @type {any} */ ({ kind: 'texture' });
+    // Three slices of 3x2 texels, twelve bytes a row: each slice's rows
+    // padded to the alignment, one image after another.
+    const data = Uint8Array.from({ length: 3 * 2 * 12 }, (_, index)=>index);
+    assert.throws(()=>upload({ texture, format: 'rgba8unorm', width: 3, height: 2,
+        depthOrArrayLayers: 3, data: data.subarray(0, 48) }), /needs 72 bytes/);
+
+    upload({ texture, format: 'rgba8unorm', width: 3, height: 2, depthOrArrayLayers: 3, data,
+        staging: true });
+    assert.deepEqual(copies[0].size, { width: 3, height: 2, depthOrArrayLayers: 3 });
+    assert.equal(copies[0].source.rowsPerImage, 2);
+    const staged = gpu.of('writeBuffer')[0].bytes;
+    assert.equal(staged.length, 6 * COPY_BYTES_PER_ROW_ALIGNMENT);
+    assert.deepEqual([...staged.subarray(5 * COPY_BYTES_PER_ROW_ALIGNMENT,
+        5 * COPY_BYTES_PER_ROW_ALIGNMENT + 12)], [...data.subarray(60, 72)], 'the last row');
+
+    upload({ texture, format: 'rgba8unorm', width: 3, height: 2, depthOrArrayLayers: 3, data });
+    const direct = gpu.of('writeTexture')[0];
+    assert.equal(direct.size.depthOrArrayLayers, 3);
+    assert.equal(direct.layout.rowsPerImage, 2);
+});
+
 test('an unknown format without an explicit pitch is an error, not a guess', ()=>{
     const { gpu, upload } = uploader();
     const texture = gpu.device.createTexture({});

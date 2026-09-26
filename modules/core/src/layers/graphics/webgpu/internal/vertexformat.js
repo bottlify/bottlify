@@ -67,6 +67,7 @@ const floatFormat = count=>(count === 1 ? 'float32' : `float32x${count}`);
  * @property {number} offset      Bytes from the start of the vertex.
  * @property {string} format      A WebGPU vertex format.
  * @property {number} shaderLocation
+ * @property {number} [stream]    The stream it is read from; zero when absent.
  */
 
 /**
@@ -74,6 +75,10 @@ const floatFormat = count=>(count === 1 ? 'float32' : `float32x${count}`);
  * @property {number} stride           Bytes per vertex.
  * @property {VertexAttribute[]} attributes
  * @property {boolean} preTransformed  True for XYZRHW: already in screen space.
+ * @property {{ stream: number, stride: number }[]} [streams]
+ *     The streams past zero a declaration's members are read from, each a
+ *     vertex buffer of its own after stream zero's, at the stride it is bound
+ *     with; an attribute names its stream, zero when it does not.
  * @property {number} texCoordSets
  * @property {number} blendWeights
  */

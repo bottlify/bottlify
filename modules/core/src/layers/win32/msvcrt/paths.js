@@ -17,10 +17,50 @@
  *
  * The operating half returns zero for success and -1 for failure, the C
  * convention and the opposite of the Win32 one sitting beside it in this
- * runtime. Getting that backwards makes every operation appear to fail.
+ * runtime. Getting that backwards makes every operation appear to fail. A
+ * failure says why in errno, with the codes each function documents.
  */
 
+import { EACCES, EBADF, EEXIST, EINVAL, ENOENT, ENOTEMPTY, ERANGE } from './globals.js';
+
 const MAX_STRING = 1 << 20;
+
+/** `struct _finddata_t` as msvcrt.dll lays it out: 32-bit times, 260 bytes of name. */
+const FINDDATA = Object.freeze({
+    ATTRIB: 0, TIME_CREATE: 4, TIME_ACCESS: 8, TIME_WRITE: 12, SIZE: 16, WIDE_SIZE: false,
+    NAME: 20, WIDE_NAME: false, BYTES: 280,
+});
+
+/**
+ * `struct _finddatai64_t`: the same with a 64-bit size, which moves the name
+ * to 24, and the whole rounded up to the size's 8-byte alignment.
+ */
+const FINDDATAI64 = Object.freeze({
+    ATTRIB: 0, TIME_CREATE: 4, TIME_ACCESS: 8, TIME_WRITE: 12, SIZE: 16, WIDE_SIZE: true,
+    NAME: 24, WIDE_NAME: false, BYTES: 288,
+});
+
+/** `struct _wfinddata_t`: `_finddata_t` with 260 wide characters of name. */
+const WFINDDATA = Object.freeze({
+    ATTRIB: 0, TIME_CREATE: 4, TIME_ACCESS: 8, TIME_WRITE: 12, SIZE: 16, WIDE_SIZE: false,
+    NAME: 20, WIDE_NAME: true, BYTES: 540,
+});
+
+/** `struct _wfinddatai64_t`: `_finddatai64_t` with 260 wide characters of name. */
+const WFINDDATAI64 = Object.freeze({
+    ATTRIB: 0, TIME_CREATE: 4, TIME_ACCESS: 8, TIME_WRITE: 12, SIZE: 16, WIDE_SIZE: true,
+    NAME: 24, WIDE_NAME: true, BYTES: 544,
+});
+
+/**
+ * @typedef {typeof FINDDATA | typeof FINDDATAI64 | typeof WFINDDATA
+ *           | typeof WFINDDATAI64} FindLayout
+ */
+const MAX_NAME = 259;
+
+/** The attributes FindFirstFile reports, which `_findfirst` passes on. */
+const A_SUBDIR = 0x10;
+const A_ARCH = 0x20;
 
 /**
  * Splits a path into drive, directory, filename and extension.
@@ -90,8 +130,11 @@ export function fullPath(path, current){
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(bytes: number) => number} allocate
  * @property {() => string[]} [drives]  Letters the filesystem has mounted.
- * @property {any} files  The volume: stat, remove, rename, mkdir and the
+ * @property {any} files  The volume: stat, list, remove, rename, mkdir and the
  *           current directory.
+ * @property {(code: number) => void} [errno]  Where a failure says why.
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ *           For a wide pattern. Absent, the wide finds stay unexported.
  */
 
 /**
@@ -115,16 +158,189 @@ export function createPathFunctions(host){
         host.writeMemory(pointer, bytes);
     };
 
+    /** @param {number} code */
+    const fail = code=>{
+        host.errno?.(code);
+    };
+
+    /** @param {string} path */
+    const exists = path=>host.files.stat(path)?.exists === true;
+
     /**
      * @param {number} argBytes
-     * @param {(args: number[]) => boolean} act
+     * @param {(args: number[]) => number} act  Zero, or the errno it failed with.
      */
     const operation = (argBytes, act)=>({
         convention: 'cdecl',
         argBytes,
         /** @param {number[]} args */
-        handler: (/** @type {number[]} */ args)=>(act(args) ? 0 : -1),
+        handler: (/** @type {number[]} */ args)=>{
+            const code = act(args);
+            if (code === 0)
+            {
+                return 0;
+            }
+            fail(code);
+            return -1;
+        },
     });
+
+    /**
+     * The searches `_findfirst` opened, by the handle it answered with: what
+     * matched, and how far `_findnext` has walked.
+     *
+     * @type {Map<number, { entries: any[], next: number }>}
+     */
+    const searches = new Map();
+    let nextSearch = 1;
+
+    /**
+     * A wide string, read a character at a time up to its terminator.
+     *
+     * @param {number} pointer
+     */
+    const readWide = pointer=>{
+        let text = '';
+        for (let at = pointer >>> 0; text.length < MAX_STRING; at += 2)
+        {
+            const unit = host.readMemory?.(at, 2) ?? new Uint8Array(2);
+            const code = unit[0] | unit[1] << 8;
+            if (code === 0)
+            {
+                break;
+            }
+            text += String.fromCharCode(code);
+        }
+        return text;
+    };
+
+    /**
+     * Fills a whole `_finddata_t`, `_finddatai64_t` or `_wfinddatai64_t`.
+     * The volume keeps one time per file, the last write, and it stands for
+     * all three.
+     *
+     * @param {number} address @param {any} entry @param {FindLayout} layout
+     */
+    const writeFound = (address, entry, layout)=>{
+        const bytes = new Uint8Array(layout.BYTES);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(layout.ATTRIB, entry.isDirectory ? A_SUBDIR : A_ARCH, true);
+        const time = Math.floor((entry.modified ?? 0) / 1000) >>> 0;
+        view.setUint32(layout.TIME_CREATE, time, true);
+        view.setUint32(layout.TIME_ACCESS, time, true);
+        view.setUint32(layout.TIME_WRITE, time, true);
+        if (layout.WIDE_SIZE)
+        {
+            view.setBigUint64(layout.SIZE, BigInt(entry.size ?? 0), true);
+        }
+        else
+        {
+            view.setUint32(layout.SIZE, (entry.size ?? 0) >>> 0, true);
+        }
+        const name = String(entry.name).slice(0, MAX_NAME);
+        for (let at = 0; at < name.length; at++)
+        {
+            if (layout.WIDE_NAME)
+            {
+                view.setUint16(layout.NAME + at * 2, name.charCodeAt(at), true);
+            }
+            else
+            {
+                bytes[layout.NAME + at] = name.charCodeAt(at) & 0xff;
+            }
+        }
+        host.writeMemory(address >>> 0, bytes);
+    };
+
+    /**
+     * `_findfirst` for one layout of the record: a handle for `_findnext`
+     * with the first match written out, or -1 with ENOENT when nothing
+     * matches or the directory is not there -- the same answers
+     * FindFirstFile gives, over the same listing. A wide record's pattern is
+     * wide too.
+     *
+     * @param {FindLayout} layout
+     */
+    const findFirst = layout=>({
+        convention: 'cdecl',
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([spec, data])=>{
+            if ((spec >>> 0) === 0 || (data >>> 0) === 0)
+            {
+                fail(EINVAL);
+                return -1;
+            }
+            const { directory, pattern } = splitSearch(
+                layout.WIDE_NAME ? readWide(spec) : readString(spec));
+            const holder = host.files.stat(directory);
+            const entries = pattern !== '' && holder?.isDirectory
+                ? host.files.list(directory, pattern) ?? []
+                : [];
+            if (entries.length === 0)
+            {
+                fail(ENOENT);
+                return -1;
+            }
+            writeFound(data, entries[0], layout);
+            const handle = nextSearch++;
+            searches.set(handle, { entries, next: 1 });
+            return handle;
+        },
+    });
+
+    /**
+     * `_findnext` for one layout -- ENOENT at the end. The searches are one
+     * table, whichever record a program asked for them in.
+     *
+     * @param {FindLayout} layout
+     */
+    const findNext = layout=>({
+        convention: 'cdecl',
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([handle, data])=>{
+            const search = searches.get(handle | 0);
+            if (!search || search.next >= search.entries.length)
+            {
+                fail(ENOENT);
+                return -1;
+            }
+            writeFound(data, search.entries[search.next++], layout);
+            return 0;
+        },
+    });
+
+    /**
+     * A search specification as the directory to look in and the pattern its
+     * last component is. A root keeps its separator, so "C:\*.*" looks in
+     * "C:\" and not in wherever "C:" alone would mean.
+     *
+     * @param {string} spec
+     */
+    const splitSearch = spec=>{
+        const cut = Math.max(spec.lastIndexOf('\\'), spec.lastIndexOf('/'));
+        if (cut < 0)
+        {
+            const drive = /^[A-Za-z]:/.test(spec) ? spec.slice(0, 2) : '.';
+            return { directory: drive, pattern: drive === '.' ? spec : spec.slice(2) };
+        }
+        const parent = spec.slice(0, cut);
+        const rooted = parent === '' || parent.endsWith(':');
+        return {
+            directory: rooted ? spec.slice(0, cut + 1) : parent,
+            pattern: spec.slice(cut + 1),
+        };
+    };
+
+    /**
+     * Why a removal the volume refused failed: the name is not there, or it
+     * is and is not the volume's to remove.
+     *
+     * @param {string} path @param {number} refused
+     */
+    const removal = (path, refused)=>
+        (host.files.remove(path) === true ? 0 : (exists(path) ? refused : ENOENT));
 
     return {
         /**
@@ -202,7 +418,13 @@ export function createPathFunctions(host){
             },
         },
 
-        /** char *_getcwd(char *buffer, int size) */
+        /**
+         * char *_getcwd(char *buffer, int size)
+         *
+         * With no buffer the one allocated is at least `size` bytes, larger
+         * only if the path needs it: a caller asks for room to append a file
+         * name to the directory and does so in place.
+         */
         _getcwd: {
             convention: 'cdecl',
             argBytes: 8,
@@ -211,12 +433,13 @@ export function createPathFunctions(host){
                 const text = host.files.currentDirectory();
                 if ((buffer >>> 0) === 0)
                 {
-                    const allocated = host.allocate(text.length + 1);
+                    const allocated = host.allocate(Math.max(text.length + 1, size | 0));
                     writeString(allocated, text);
                     return allocated;
                 }
                 if (text.length + 1 > (size | 0))
                 {
+                    fail(ERANGE);
                     return 0;
                 }
                 writeString(buffer, text);
@@ -227,29 +450,52 @@ export function createPathFunctions(host){
         /** int _chdir(const char *path) */
         _chdir: operation(4, ([path])=>{
             const text = readString(path);
-            if (!host.files.stat(text)?.exists)
+            if (!exists(text))
             {
-                return false;
+                return ENOENT;
             }
             host.files.setCurrentDirectory(text);
-            return true;
+            return 0;
         }),
 
-        /** int _mkdir(const char *path) */
-        _mkdir: operation(4, ([path])=>host.files.mkdir(readString(path)) === true),
+        /** int _mkdir(const char *path) -- EEXIST for any name already taken. */
+        _mkdir: operation(4, ([path])=>{
+            const text = readString(path);
+            if (host.files.mkdir(text) === true)
+            {
+                return 0;
+            }
+            return exists(text) ? EEXIST : ENOENT;
+        }),
 
-        /** int _rmdir(const char *path) */
-        _rmdir: operation(4, ([path])=>host.files.remove(readString(path)) === true),
+        /**
+         * int _rmdir(const char *path)
+         *
+         * ENOTEMPTY covers every refusal of a name that is there: not a
+         * directory, not empty, or the one the process stands in.
+         */
+        _rmdir: operation(4, ([path])=>removal(readString(path), ENOTEMPTY)),
 
-        /** int _unlink(const char *path) */
-        _unlink: operation(4, ([path])=>host.files.remove(readString(path)) === true),
+        /** int _unlink(const char *path) -- EACCES for a directory or a read-only file. */
+        _unlink: operation(4, ([path])=>removal(readString(path), EACCES)),
 
         /** int remove(const char *path) */
-        remove: operation(4, ([path])=>host.files.remove(readString(path)) === true),
+        remove: operation(4, ([path])=>removal(readString(path), EACCES)),
 
-        /** int rename(const char *from, const char *to) */
-        rename: operation(8, ([from, to])=>
-            host.files.rename(readString(from), readString(to)) === true),
+        /**
+         * int rename(const char *from, const char *to)
+         *
+         * ENOENT when the old name is not there; any other refusal is EACCES,
+         * which is what the new name already existing is.
+         */
+        rename: operation(8, ([from, to])=>{
+            const source = readString(from);
+            if (host.files.rename(source, readString(to)) === true)
+            {
+                return 0;
+            }
+            return exists(source) ? EACCES : ENOENT;
+        }),
 
         /**
          * int _access(const char *path, int mode)
@@ -259,7 +505,7 @@ export function createPathFunctions(host){
          * whether the path exists -- and a write check against a read-only file
          * would need a permission bit the filesystem does not carry.
          */
-        _access: operation(8, ([path])=>host.files.stat(readString(path))?.exists === true),
+        _access: operation(8, ([path])=>(exists(readString(path)) ? 0 : ENOENT)),
 
         /**
          * unsigned long _getdrives(void)
@@ -276,5 +522,45 @@ export function createPathFunctions(host){
                 .reduce((mask, letter)=>
                     mask | 1 << (letter[0].toUpperCase().charCodeAt(0) - 0x41), 0) >>> 0,
         },
+
+        /** intptr_t _findfirst(const char *filespec, struct _finddata_t *fileinfo) */
+        _findfirst: findFirst(FINDDATA),
+
+        /** int _findnext(intptr_t handle, struct _finddata_t *fileinfo) */
+        _findnext: findNext(FINDDATA),
+
+        /**
+         * intptr_t _findfirsti64(const char *filespec, struct _finddatai64_t *fileinfo)
+         *
+         * `_findfirst` with sizes that go past 4 GiB.
+         */
+        _findfirsti64: findFirst(FINDDATAI64),
+
+        /** int _findnexti64(intptr_t handle, struct _finddatai64_t *fileinfo) */
+        _findnexti64: findNext(FINDDATAI64),
+
+        // A wide pattern is read from memory as it lies, which needs the
+        // bytes themselves rather than the narrow string reader.
+        ...(host.readMemory
+            ? {
+                /** intptr_t _wfindfirst(const wchar_t *filespec, struct _wfinddata_t *fileinfo) */
+                _wfindfirst: findFirst(WFINDDATA),
+
+                /** int _wfindnext(intptr_t handle, struct _wfinddata_t *fileinfo) */
+                _wfindnext: findNext(WFINDDATA),
+
+                /**
+                 * intptr_t _wfindfirsti64(const wchar_t *filespec,
+                 *                         struct _wfinddatai64_t *fileinfo)
+                 */
+                _wfindfirsti64: findFirst(WFINDDATAI64),
+
+                /** int _wfindnexti64(intptr_t handle, struct _wfinddatai64_t *fileinfo) */
+                _wfindnexti64: findNext(WFINDDATAI64),
+            }
+            : {}),
+
+        /** int _findclose(intptr_t handle) -- EBADF for a handle not open. */
+        _findclose: operation(4, ([handle])=>(searches.delete(handle | 0) ? 0 : EBADF)),
     };
 }

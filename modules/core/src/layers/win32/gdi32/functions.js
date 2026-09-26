@@ -21,15 +21,26 @@
  */
 
 import { createGdiObjects } from './objects.js';
-import { createDrawingFunctions } from './drawing.js';
+import { DEFAULT_PALETTE_COLORS, createDrawingFunctions } from './drawing.js';
+import { FACES, faceNamed } from './faces.js';
 import {
+    BITMAP,
     BITMAPINFOHEADER,
+    LF_FACESIZE,
+    LOGFONTA,
+    LOGFONTW_SIZE,
+    colorEntryBytes,
+    ddbStride,
+    dibStride,
+    isDibHeaderSize,
+    logFontBytes,
     readBitmapInfoHeader,
     readLogBrush,
     readLogFont,
     readLogFontW,
     readLogPalette,
     readLogPen,
+    readU32,
     paletteEntryToPixel,
     writePoint,
     writeSize,
@@ -69,7 +80,16 @@ const BS_SOLID = 0;
 const BS_NULL = 1;
 const BS_HATCHED = 2;
 const BS_PATTERN = 3;
-const BRUSH_STYLES = new Set([BS_SOLID, BS_NULL, BS_HATCHED, BS_PATTERN]);
+/**
+ * A packed DIB's brush: lbHatch the DIB -- an HGLOBAL, which is its address
+ * here, or the address itself -- and lbColor its usage. BS_PATTERN8X8 is
+ * BS_PATTERN under an older name.
+ */
+const BS_DIBPATTERN = 5;
+const BS_DIBPATTERNPT = 6;
+const BS_PATTERN8X8 = 7;
+const BRUSH_STYLES = new Set([BS_SOLID, BS_NULL, BS_HATCHED, BS_PATTERN, BS_DIBPATTERN,
+    BS_DIBPATTERNPT, BS_PATTERN8X8]);
 
 /** Pen styles, PS_SOLID through PS_INSIDEFRAME. */
 const PS_NULL = 5;
@@ -95,6 +115,14 @@ const MM_ANISOTROPIC = 8;
 
 /** The two modes in which the program, not the mode, decides the extents. */
 const SCALABLE_MAP_MODES = new Set([MM_ISOTROPIC, MM_ANISOTROPIC]);
+
+/**
+ * A right-to-left layout: the device is read from its right edge, x mapped
+ * to width - 1 - x after everything else, and the mode reads MM_ANISOTROPIC
+ * for as long as it holds (Wine's test_dc_layout).
+ */
+const LAYOUT_RTL = 0x01;
+const GDI_ERROR = 0xffffffff;
 
 /**
  * The fixed modes, by how many logical units make an inch: MM_LOMETRIC's
@@ -133,6 +161,10 @@ const LOGPIXELSX = 88;
 const LOGPIXELSY = 90;
 const SIZEPALETTE = 104;
 const COLORRES = 108;
+const COLORMGMTCAPS = 121;
+
+/** CM_GAMMA_RAMP: the device takes a gamma ramp that reaches the picture. */
+const CM_GAMMA_RAMP = 0x00000002;
 
 /** DT_RASDISPLAY: the device is a raster display, not a plotter or a printer. */
 const DT_RASDISPLAY = 1;
@@ -166,6 +198,10 @@ const ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
 /** Bit depths a bitmap can have. Anything else is not a format GDI knows. */
 const BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 
+/** The longest side CreateBitmap takes. */
+const MAX_BITMAP_SIDE = 0x7ffffff;
+const ERROR_INVALID_PARAMETER = 87;
+
 /**
  * Depths a device context over somebody else's surface can be made at.
  * A palettised primary is the common one for a program of this era, which is
@@ -177,8 +213,16 @@ const SURFACE_DC_DEPTHS = new Set([8, 16, 32]);
 const BI_RGB = 0;
 const BI_BITFIELDS = 3;
 
-/** iUsage: the colour table is palette indices, not colours. */
+/** BI_JPEG and BI_PNG: an image file for a printer, never a bitmap's rows. */
+const IMAGE_COMPRESSIONS = new Set([4, 5]);
+
+/**
+ * iUsage: the colour table is colours; it is palette indices; or there is no
+ * table, and each pixel is a palette index itself.
+ */
+const DIB_RGB_COLORS = 0;
 const DIB_PAL_COLORS = 1;
+const DIB_PAL_INDICES = 2;
 
 /** Entries an indexed DIB's colour table holds, by depth. */
 const colorTableSize = (/** @type {number} */ bitCount)=>1 << bitCount;
@@ -203,10 +247,36 @@ const WIDTH_RATIO = 0.5;
 const FW_NORMAL = 400;
 
 /**
+ * Character sets. DEFAULT_CHARSET is a request, never a font's own: a font
+ * asked for with it is realised in the ANSI set, which is Windows-1252 here,
+ * the code page the font engine draws a program's bytes in.
+ */
+const ANSI_CHARSET = 0;
+const DEFAULT_CHARSET = 1;
+const HEBREW_CHARSET = 177;
+const ARABIC_CHARSET = 178;
+/** SHIFTJIS, HANGUL, JOHAB, GB2312 and CHINESEBIG5: the double-byte sets. */
+const DBCS_CHARSETS = new Set([128, 129, 130, 134, 136]);
+
+/** GetFontLanguageInfo's answers. */
+const GCP_DBCS = 0x0001;
+const GCP_REORDER = 0x0002;
+const GCP_ERROR = 0x8000;
+
+/** FONTSIGNATURE: four DWORDs of Unicode subranges, two of code pages. */
+const FONTSIGNATURE_SIZE = 24;
+
+/**
  * TMPF_FIXED_PITCH, whose name is the opposite of its meaning: the bit is set
  * for a variable-pitch font and clear for a fixed-pitch one.
  */
 const TMPF_FIXED_PITCH = 0x01;
+/**
+ * TMPF_VECTOR: a font drawn from outlines at any size rather than from
+ * bitmaps at one, which every face here is. TMPF_TRUETYPE is not claimed
+ * with it, since no face has the tables a TrueType font would.
+ */
+const TMPF_VECTOR = 0x02;
 
 /** The character range a metric describes, and the two special characters in it. */
 const FIRST_CHAR = 0x20;
@@ -216,6 +286,23 @@ const BREAK_CHAR = 0x20;
 
 /** Nothing bounds a face name but the field it came out of. */
 const MAX_FACE_NAME = 64;
+
+/**
+ * ENUMLOGFONTEX: a LOGFONT, then the full name, the style and the script, in
+ * characters of the LOGFONT's own width.
+ */
+const LF_FULLFACESIZE = 64;
+/** NEWTEXTMETRICEX, the larger of the two structures an enumeration's second pointer names. */
+const NEWTEXTMETRICEXA_SIZE = 96;
+const NEWTEXTMETRICEXW_SIZE = 100;
+
+/**
+ * An enumerated face's FontType: none of RASTER_FONTTYPE, DEVICE_FONTTYPE and
+ * TRUETYPE_FONTTYPE, which is what a vector font is. Every face here is drawn
+ * at any size, and none has tables a program could read, as TEXTMETRIC's
+ * TMPF_VECTOR and GetTextCharsetInfo already say.
+ */
+const SCALABLE_FONTTYPE = 0;
 
 /**
  * @typedef {Object} GdiHost
@@ -234,6 +321,13 @@ const MAX_FACE_NAME = 64;
  * @property {import('./drawing.js').DrawingServices} [graphics]
  *           Where pixels go. Absent in a build that cannot draw, and every
  *           entry point that needs it then fails truthfully.
+ * @property {(entry: number, args: number[], thread?: any) => Promise<number>} [call]
+ *           Calls the program back, as an enumeration's callback is called.
+ *           Absent in a build that cannot, where nothing is enumerated.
+ * @property {() => any} [callerThread]
+ *           The thread whose call is being answered, which a callback runs on.
+ * @property {(code: number) => void} [setLastError]
+ *           The calling thread's last error, for the calls documented to set it.
  */
 
 /**
@@ -260,22 +354,30 @@ export function createGdiFunctions(host){
      * A palette-relative table (DIB_PAL_COLORS) holds indices into the
      * palette the device has selected, and those are resolved now: the
      * bitmap keeps colours, not a reference to a palette that may change.
+     * An index past the palette's end wraps round to its start (Wine's
+     * test_SetDIBits). DIB_PAL_INDICES has no table at all: a pixel is the
+     * palette index itself, which is the identity table here.
      *
      * @param {number} at @param {number} count @param {number} usage @param {any} dc
+     * @param {boolean} [live]  False for a table read once and dropped, which
+     *        the palette need not keep up to date.
+     * @param {number} [entryBytes]  How far apart a table of colours' entries
+     *        are: an RGBQUAD's four, or a BITMAPCOREINFO's RGBTRIPLE's three.
      * @returns {number[]}
      */
-    const readColorTable = (at, count, usage, dc)=>{
+    const readColorTable = (at, count, usage, dc, live = true, entryBytes = 4)=>{
         const colors = [];
-        if (usage === DIB_PAL_COLORS)
+        if (usage === DIB_PAL_COLORS || usage === DIB_PAL_INDICES)
         {
             const record = objects.get(dc?.palette ?? 0);
             const entries = record?.attributes.entries ?? [];
-            const raw = host.readMemory(at, count * 2);
+            const raw = usage === DIB_PAL_COLORS ? host.readMemory(at, count * 2) : null;
             /** @type {number[]} */
             const indices = [];
             for (let index = 0; index < count; index++)
             {
-                const entry = raw[index * 2] | (raw[index * 2 + 1] << 8);
+                const entry = (raw ? raw[index * 2] | (raw[index * 2 + 1] << 8) : index)
+                    % Math.max(1, entries.length);
                 indices.push(entry);
                 colors.push(paletteEntryToPixel(entries[entry] ?? 0));
             }
@@ -285,17 +387,17 @@ export function createGdiFunctions(host){
             // is now, not as it was when the bitmap was made. So the resolved
             // array is kept alive on the palette and refreshed in place -- the
             // same array the surface already holds a reference to.
-            if (record && record.type === 'palette')
+            if (live && record && record.type === 'palette')
             {
                 (record.attributes.dependents ??= []).push({ indices, table: colors });
             }
             return colors;
         }
-        const quads = host.readMemory(at, count * 4);
-        for (let index = 0; index < count; index++)
+        const entries = host.readMemory(at, count * entryBytes);
+        for (let offset = 0; offset < count * entryBytes; offset += entryBytes)
         {
-            colors.push((quads[index * 4] | quads[index * 4 + 1] << 8
-                | quads[index * 4 + 2] << 16) >>> 0);
+            colors.push((entries[offset] | entries[offset + 1] << 8
+                | entries[offset + 2] << 16) >>> 0);
         }
         return colors;
     };
@@ -352,7 +454,10 @@ export function createGdiFunctions(host){
             case DEFAULT_GUI_FONT:
                 return { type: 'font', attributes: logFont({ height: -11 }) };
             case DEFAULT_PALETTE:
-                return { type: 'palette', attributes: { version: 0x300, entries: [] } };
+                // PALETTEENTRYs, red in the low byte.
+                return { type: 'palette', attributes: { version: 0x300,
+                    entries: DEFAULT_PALETTE_COLORS.map(pixel=>((pixel & 0xff) << 16
+                        | (pixel & 0xff00) | (pixel >>> 16) & 0xff) >>> 0) } };
             default:
                 return null;
         }
@@ -437,7 +542,7 @@ export function createGdiFunctions(host){
              * @type {{ left: number, top: number, right: number, bottom: number } | null}
              */
             bounds: null,
-            /** The bitmap a memory DC brought with it, and takes away again. */
+            /** The bitmap a surface's DC brought with it, and takes away again. */
             defaultBitmap: 0,
             pen: stockObject(BLACK_PEN),
             brush: stockObject(WHITE_BRUSH),
@@ -450,6 +555,7 @@ export function createGdiFunctions(host){
             rop2: R2_COPYPEN,
             textAlign: 0,
             mapMode: MM_TEXT,
+            layout: 0,
             viewportOrg: { x: 0, y: 0 },
             windowOrg: { x: 0, y: 0 },
             viewportExt: { cx: 1, cy: 1 },
@@ -478,7 +584,7 @@ export function createGdiFunctions(host){
             forEachSelection(state, handle=>objects.release(handle));
         }
         dc.saved.length = 0;
-        // The one-pixel bitmap a memory DC starts with is the DC's own, not the
+        // The bitmap over somebody else's surface is the DC's own, not the
         // program's: nobody else can have a handle to delete it.
         objects.remove(dc.defaultBitmap);
         contexts.delete(dc.hdc);
@@ -498,6 +604,7 @@ export function createGdiFunctions(host){
         rop2: dc.rop2,
         textAlign: dc.textAlign,
         mapMode: dc.mapMode,
+        layout: dc.layout,
         viewportOrg: { ...dc.viewportOrg },
         windowOrg: { ...dc.windowOrg },
         viewportExt: { ...dc.viewportExt },
@@ -526,8 +633,9 @@ export function createGdiFunctions(host){
         {
             // Two DCs sharing one bitmap means two sets of drawing state writing
             // the same pixels, so Windows lets exactly one of them have it -- and
-            // a display DC already draws to the screen.
-            if (dc.kind !== 'memory' || record.selectCount > 0)
+            // a display DC already draws to the screen. The stock pixel every
+            // memory DC starts with is the one bitmap in all of them at once.
+            if (dc.kind !== 'memory' || (record.selectCount > 0 && !record.stock))
             {
                 return 0;
             }
@@ -560,6 +668,7 @@ export function createGdiFunctions(host){
         dc.bkMode = state.bkMode;
         dc.rop2 = state.rop2;
         dc.mapMode = state.mapMode;
+        dc.layout = state.layout;
         dc.viewportOrg = state.viewportOrg;
         dc.windowOrg = state.windowOrg;
         dc.viewportExt = state.viewportExt;
@@ -703,10 +812,17 @@ export function createGdiFunctions(host){
         const [from, to, fromExt, toExt] = toDevice
             ? [dc.windowOrg, dc.viewportOrg, dc.windowExt, dc.viewportExt]
             : [dc.viewportOrg, dc.windowOrg, dc.viewportExt, dc.windowExt];
-        return {
-            x: mapped(point.x, from.x, to.x, fromExt.cx, toExt.cx),
+        const edge = (dc.layout & LAYOUT_RTL) !== 0 ? surfaceOf(dc).width - 1 : null;
+        const x = edge !== null && !toDevice ? edge - point.x : point.x;
+        const result = {
+            x: mapped(x, from.x, to.x, fromExt.cx, toExt.cx),
             y: mapped(point.y, from.y, to.y, fromExt.cy, toExt.cy),
         };
+        if (edge !== null && toDevice)
+        {
+            result.x = edge - result.x;
+        }
+        return result;
     };
 
     /**
@@ -778,8 +894,8 @@ export function createGdiFunctions(host){
             // The family nibble travels through unchanged; the pitch bits do not,
             // because there is only one pitch here and it is not the one the
             // constant is named after.
-            pitchAndFamily: (font.pitchAndFamily & 0xf0) & ~TMPF_FIXED_PITCH,
-            charSet: font.charSet,
+            pitchAndFamily: ((font.pitchAndFamily & 0xf0) & ~TMPF_FIXED_PITCH) | TMPF_VECTOR,
+            charSet: font.charSet === DEFAULT_CHARSET ? ANSI_CHARSET : font.charSet,
             ...measured,
         };
     };
@@ -838,6 +954,8 @@ export function createGdiFunctions(host){
                 return depth === PALETTE_DEPTH ? 1 << depth : 0;
             case COLORRES:
                 return depth;
+            case COLORMGMTCAPS:
+                return host.graphics?.appliesGamma?.() ? CM_GAMMA_RAMP : 0;
             default:
                 // An index with no answer reads as zero rather than as a
                 // plausible number from a neighbouring capability.
@@ -855,9 +973,244 @@ export function createGdiFunctions(host){
      * @param {number} bitCount
      */
     const dibSize = (width, height, bitCount)=>
-        (((((width * bitCount) + 31) / 32) | 0) * 4) * Math.abs(height);
+        Math.floor(((width * bitCount) + 31) / 32) * 4 * Math.abs(height);
 
-    const drawing = createDrawingFunctions({ host, objects, dcOf, surfaceOf, currentMetrics });
+    /**
+     * A device-dependent bitmap's attributes, its bits among them: rows
+     * top-down and WORD-padded, the layout CreateBitmap's lpBits and
+     * GetBitmapBits' buffer are in, zeroed. Windows keeps these bits where
+     * the program has no address for them -- GetObject's bmBits is NULL --
+     * so they are memory of their own here too, not the guest's: a buffer
+     * the program passed in is copied and is the program's to reuse.
+     *
+     * Null when the bits cannot be had, which the caller reports as the
+     * failure it is.
+     *
+     * @param {number} width @param {number} height @param {number} bitCount
+     * @param {number} [planes]
+     */
+    const deviceBitmap = (width, height, bitCount, planes = 1)=>{
+        let pixels;
+        try
+        {
+            pixels = new Uint8Array(ddbStride(width, bitCount) * height);
+        }
+        catch {
+            return null;
+        }
+        return { width, height, planes, bitCount, bits: 0, section: 0, pixels };
+    };
+
+    /** @type {number} */
+    let stockBitmap = 0;
+    /**
+     * The 1-by-1 monochrome bitmap: what CreateBitmap and CreateCompatibleBitmap
+     * answer for a zero width or height, and what every memory DC has selected
+     * before the program selects anything -- one stock object, the same handle
+     * for all of them (Wine's test_CreateBitmap).
+     */
+    const defaultBitmap = ()=>{
+        stockBitmap ||= objects.defineStock('bitmap', deviceBitmap(1, 1, 1));
+        return stockBitmap;
+    };
+
+    /**
+     * A bitmap's bits as GetBitmapBits and SetBitmapBits exchange them, or
+     * null for a handle that is not a bitmap with bits.
+     *
+     * @param {number} handle
+     * @returns {{ size: number, read: () => Uint8Array,
+     *             write: (bytes: Uint8Array) => void } | null}
+     */
+    const bitsOf = handle=>{
+        const record = objects.get(handle);
+        const attributes = record?.type === 'bitmap' ? record.attributes : null;
+        if (!attributes)
+        {
+            return null;
+        }
+        const stride = ddbStride(attributes.width, attributes.bitCount);
+        const size = stride * attributes.height;
+        if (attributes.pixels)
+        {
+            const pixels = /** @type {Uint8Array} */ (attributes.pixels);
+            return { size, read: ()=>pixels, write: bytes=>pixels.set(bytes) };
+        }
+        if ((attributes.section >>> 0) === 0)
+        {
+            return null;
+        }
+        const pitch = dibStride(attributes.width, attributes.bitCount);
+        /** @param {number} y */
+        const rowAt = y=>attributes.section + pitch
+            * (attributes.topDown ? y : attributes.height - 1 - y);
+        return {
+            size,
+            read(){
+                const bytes = new Uint8Array(size);
+                for (let y = 0; y < attributes.height; y++)
+                {
+                    bytes.set(host.readMemory(rowAt(y), stride), y * stride);
+                }
+                return bytes;
+            },
+            write(bytes){
+                for (let y = 0; y * stride < bytes.length; y++)
+                {
+                    host.writeMemory(rowAt(y), bytes.subarray(y * stride, (y + 1) * stride));
+                }
+            },
+        };
+    };
+
+    /**
+     * A pattern brush over a bitmap, or zero for a handle that is not one.
+     *
+     * The brush keeps a copy of the bitmap's bits, taken now: Windows paints
+     * with the bitmap as it was when the brush was made, and goes on painting
+     * with it once the bitmap is deleted (Wine's brush tests). The copy is in
+     * the layout GetBitmapBits hands out, with what a DIB section's values
+     * mean carried alongside; LOGBRUSH still names the bitmap and no colour.
+     *
+     * @param {number} handle
+     */
+    const patternBrush = handle=>{
+        const bits = bitsOf(handle);
+        if (!bits)
+        {
+            return 0;
+        }
+        const shape = /** @type {import('./objects.js').GdiObject} */ (
+            objects.get(handle)).attributes;
+        return objects.create('brush', {
+            style: BS_PATTERN,
+            color: 0,
+            hatch: handle >>> 0,
+            pattern: {
+                width: shape.width,
+                height: shape.height,
+                bitCount: shape.bitCount,
+                pixels: bits.read().slice(),
+                dib: (shape.section >>> 0) !== 0,
+                palette: shape.palette ? [...shape.palette] : undefined,
+                format: shape.format,
+                compression: shape.compression,
+                bitfields: shape.bitfields,
+            },
+        });
+    };
+
+    /**
+     * A pattern brush over a packed DIB -- header, masks, colour table and
+     * rows in one block -- or zero for one that cannot be a pattern.
+     *
+     * The rows are copied now, as a bitmap's are. A DIB_RGB_COLORS table is
+     * copied too, but a palette-relative one is kept as its indices: Windows
+     * resolves them through the palette the DC has when the brush paints,
+     * and again through the next one (Wine's test_palette_brush). LOGBRUSH
+     * names the DIB it was made from and no colour.
+     *
+     * @param {number} packed @param {number} usage
+     */
+    const dibPatternBrush = (packed, usage)=>{
+        if (packed === 0 || usage > DIB_PAL_INDICES)
+        {
+            return 0;
+        }
+        const header = readBitmapInfoHeader(host, packed);
+        const { width, bitCount, compression } = header;
+        const height = Math.abs(header.height);
+        const masked = compression === BI_BITFIELDS && (bitCount === 16 || bitCount === 32);
+        if (!isDibHeaderSize(header.size) || !BIT_COUNTS.has(bitCount)
+            || (compression !== BI_RGB && !masked) || width <= 0 || height === 0)
+        {
+            return 0;
+        }
+        const indexed = bitCount <= 8;
+        const size = colorTableSize(bitCount);
+        const entries = !indexed ? header.clrUsed
+            : usage === DIB_PAL_INDICES ? 0
+                : Math.min(header.clrUsed || size, size);
+        const table = packed + header.size
+            + (masked && header.size === BITMAPINFOHEADER.SIZE ? 12 : 0);
+        const entryBytes = colorEntryBytes(header);
+        const bitsAt = table + entries * (usage === DIB_PAL_COLORS ? 2 : entryBytes);
+        const stride = ddbStride(width, bitCount);
+        const pitch = dibStride(width, bitCount);
+        const pixels = new Uint8Array(stride * height);
+        for (let y = 0; y < height; y++)
+        {
+            const row = header.height < 0 ? y : height - 1 - y;
+            pixels.set(host.readMemory(bitsAt + row * pitch, stride), y * stride);
+        }
+        /** @type {number[] | undefined} */
+        let indices;
+        if (indexed && usage === DIB_PAL_COLORS)
+        {
+            const raw = host.readMemory(table, entries * 2);
+            indices = Array.from({ length: entries }, (_, index)=>raw[index * 2]
+                | (raw[index * 2 + 1] << 8));
+        }
+        else if (indexed && usage === DIB_PAL_INDICES)
+        {
+            indices = Array.from({ length: size }, (_, index)=>index);
+        }
+        return objects.create('brush', {
+            style: BS_DIBPATTERN,
+            color: 0,
+            hatch: packed,
+            pattern: {
+                width,
+                height,
+                bitCount,
+                pixels,
+                dib: true,
+                palette: indexed && !indices
+                    ? [...readColorTable(table, entries, DIB_RGB_COLORS, null, false, entryBytes),
+                        ...new Array(size - entries).fill(0)]
+                    : undefined,
+                indices,
+                compression,
+                bitfields: masked
+                    ? [0, 4, 8].map(at=>readU32(host, packed + BITMAPINFOHEADER.SIZE + at))
+                    : [0, 0, 0],
+            },
+        });
+    };
+
+    /**
+     * Runs `action` over a memory context of this layer's own with `bitmap`
+     * in it, whether or not a program has the bitmap selected somewhere: a
+     * bitmap read back or drawn for the window manager is not a selection,
+     * and the rule that a bitmap is in one DC at a time is the program's.
+     *
+     * @template T
+     * @param {number} bitmap @param {(hdc: number) => T} action
+     * @returns {T}
+     */
+    const lend = (bitmap, action)=>{
+        const dc = createContext(0, 'memory');
+        objects.retain(bitmap);
+        dc.bitmap = bitmap >>> 0;
+        try
+        {
+            return action(dc.hdc);
+        }
+        finally
+        {
+            objects.release(dc.bitmap);
+            dc.bitmap = 0;
+            destroyContext(dc);
+        }
+    };
+
+    const drawing = createDrawingFunctions({
+        host, objects, dcOf, surfaceOf, currentMetrics, lend,
+        toDevice: (dc, point)=>transform(dc, point, true),
+        /** @param {number} at @param {number} count @param {number} usage @param {any} dc */
+        readColorTable: (at, count, usage, dc, entryBytes)=>
+            readColorTable(at, count, usage, dc, false, entryBytes),
+    });
 
     /**
      * Solid brushes by colour, for the window manager's own painting and for
@@ -877,6 +1230,103 @@ export function createGdiFunctions(host){
             solidBrushes.set(key, handle);
         }
         return handle;
+    };
+
+    /**
+     * A string into a fixed-size field of a structure being built, NUL-padded:
+     * bytes for the A spellings, UTF-16 for the W ones.
+     *
+     * @param {Uint8Array} bytes @param {number} at @param {string} text @param {boolean} wide
+     */
+    const putText = (bytes, at, text, wide)=>{
+        for (let index = 0; index < text.length; index++)
+        {
+            const code = text.charCodeAt(index);
+            if (wide)
+            {
+                bytes[at + index * 2] = code & 0xff;
+                bytes[at + index * 2 + 1] = code >>> 8;
+            }
+            else
+            {
+                bytes[at + index] = code & 0xff;
+            }
+        }
+    };
+
+    /**
+     * EnumFontFamiliesExA and W: each face the LOGFONT asks for, handed to the
+     * program's callback until it answers zero, and the last answer returned.
+     *
+     * No name lists every face once, substitutes aside; a name finds that face
+     * whatever its case, a substitute under the name asked for with the face it
+     * stands for as its full name (Wine's test_EnumFonts_subst). The engine
+     * draws one character set, so DEFAULT_CHARSET and ANSI_CHARSET find the
+     * faces and every other set none. Each is described as it would realise:
+     * the LOGFONT's height, width and weight are the TEXTMETRIC's, which is
+     * GetTextMetrics' own answer for it. Nothing enumerated answers 1, which
+     * is how a program learns a face is not installed.
+     *
+     * @param {number[]} args @param {boolean} wide
+     */
+    const enumerateFaces = ([hdc, logfont, proc, lParam], wide)=>{
+        if (!dcOf(hdc))
+        {
+            return 0;
+        }
+        const request = (logfont >>> 0) === 0 ? null
+            : (wide ? readLogFontW : readLogFont)(host, logfont >>> 0);
+        const charSet = request ? request.charSet : DEFAULT_CHARSET;
+        const named = request && request.faceName !== '' ? faceNamed(request.faceName) : null;
+        const faces = charSet !== DEFAULT_CHARSET && charSet !== ANSI_CHARSET ? []
+            : request && request.faceName !== '' ? (named ? [named] : [])
+                : FACES.filter(face=>!face.substitute);
+        const call = host.call;
+        if (!call || (proc >>> 0) === 0 || faces.length === 0)
+        {
+            return 1;
+        }
+        // Read before the first await: after it the processor is whoever's
+        // the scheduler chose.
+        const thread = host.callerThread?.();
+        const logSize = wide ? LOGFONTW_SIZE : LOGFONTA.SIZE;
+        const unit = wide ? 2 : 1;
+        const enumSize = logSize + (LF_FULLFACESIZE + 2 * LF_FACESIZE) * unit;
+        const metricSize = wide ? NEWTEXTMETRICEXW_SIZE : NEWTEXTMETRICEXA_SIZE;
+        const block = host.surfaces.allocate(enumSize + metricSize);
+        return (async()=>{
+            let answer = 1;
+            try
+            {
+                for (const face of faces)
+                {
+                    const font = logFont({ faceName: face.name, charSet: ANSI_CHARSET,
+                        pitchAndFamily: face.family | face.pitch });
+                    const metrics = metricsOf(font);
+                    const bytes = new Uint8Array(enumSize);
+                    bytes.set(logFontBytes({ ...font, height: metrics.height,
+                        width: metrics.aveCharWidth, weight: metrics.weight }, wide));
+                    putText(bytes, logSize, face.substitute ?? face.name, wide);
+                    putText(bytes, logSize + LF_FULLFACESIZE * unit, 'Regular', wide);
+                    putText(bytes, logSize + (LF_FULLFACESIZE + LF_FACESIZE) * unit, 'Western',
+                        wide);
+                    host.writeMemory(block, bytes);
+                    host.writeMemory(block + enumSize, new Uint8Array(metricSize));
+                    (wide ? writeTextMetricsW : writeTextMetrics)(host, block + enumSize, metrics);
+                    answer = (await call(proc >>> 0,
+                        [block, block + enumSize, SCALABLE_FONTTYPE, lParam >>> 0], thread)) | 0;
+                    if (answer === 0)
+                    {
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                host.surfaces.free(block);
+            }
+            return answer;
+        })();
     };
 
     const table = {
@@ -955,10 +1405,7 @@ export function createGdiFunctions(host){
                 // Documented exactly: a memory DC starts out one monochrome pixel
                 // wide and one pixel high, so that it always has a surface.
                 const dc = createContext(0, 'memory');
-                dc.defaultBitmap = objects.create('bitmap', {
-                    width: 1, height: 1, planes: 1, bitCount: 1, bits: 0, section: 0,
-                });
-                select(dc, dc.defaultBitmap);
+                select(dc, defaultBitmap());
                 return dc.hdc;
             },
         },
@@ -1142,7 +1589,13 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                return objects.create('brush', fields);
+                if (fields.style === BS_PATTERN || fields.style === BS_PATTERN8X8)
+                {
+                    return patternBrush(fields.hatch);
+                }
+                return fields.style === BS_DIBPATTERN || fields.style === BS_DIBPATTERNPT
+                    ? dibPatternBrush(fields.hatch, fields.color)
+                    : objects.create('brush', fields);
             },
         },
 
@@ -1156,16 +1609,25 @@ export function createGdiFunctions(host){
         CreatePatternBrush: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([bitmap])=>{
-                const record = objects.get(bitmap);
-                if (!record || record.type !== 'bitmap')
-                {
-                    return 0;
-                }
-                return objects.create('brush', {
-                    style: BS_PATTERN, color: 0, hatch: bitmap >>> 0,
-                });
-            },
+            handler: ([bitmap])=>patternBrush(bitmap),
+        },
+
+        /**
+         * HBRUSH CreateDIBPatternBrushPt(const void *lpPackedDIB, UINT iUsage)
+         * HBRUSH CreateDIBPatternBrush(HGLOBAL hglbDIBPacked, UINT fuColorSpec)
+         *
+         * A brush over a packed DIB, which the BS_DIBPATTERNPT and BS_DIBPATTERN
+         * forms of a LOGBRUSH describe; an HGLOBAL is the address it locks to.
+         */
+        CreateDIBPatternBrushPt: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([packed, usage])=>dibPatternBrush(packed >>> 0, usage >>> 0),
+        },
+        CreateDIBPatternBrush: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([packed, usage])=>dibPatternBrush(packed >>> 0, usage >>> 0),
         },
 
         /** HBRUSH CreateHatchBrush(int iHatch, COLORREF color) */
@@ -1254,46 +1716,169 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                // Documented exactly: a zero extent yields a one-pixel monochrome
-                // bitmap rather than a failure.
-                const empty = (cx | 0) <= 0 || (cy | 0) <= 0;
-                return objects.create('bitmap', {
-                    width: empty ? 1 : cx | 0,
-                    height: empty ? 1 : cy | 0,
-                    planes: 1,
-                    bitCount: empty ? 1 : surfaceOf(dc).bitCount,
-                    // The bits arrive with whoever draws into them; this half only
-                    // decides what shape they have to be.
-                    bits: 0,
-                    section: 0,
-                });
+                // Documented exactly: a zero extent yields the one-pixel
+                // monochrome bitmap rather than a failure.
+                if ((cx | 0) <= 0 || (cy | 0) <= 0)
+                {
+                    return defaultBitmap();
+                }
+                const selected = objects.get(dc.bitmap);
+                const shape = selected?.type === 'bitmap' ? selected.attributes : null;
+                if (shape && (shape.section >>> 0) !== 0)
+                {
+                    // Also documented: over a DIB section, the bitmap made is a
+                    // DIB section, in the selected one's format -- its depth,
+                    // masks and colours, copied -- with bottom-up rows of its own.
+                    const bytes = dibSize(cx | 0, cy | 0, shape.bitCount);
+                    const address = bytes > 0xffffffff ? 0 : host.surfaces.allocate(bytes);
+                    if (address === 0)
+                    {
+                        return 0;
+                    }
+                    return objects.create('bitmap', {
+                        width: cx | 0,
+                        height: cy | 0,
+                        planes: 1,
+                        bitCount: shape.bitCount,
+                        topDown: false,
+                        usage: 0,
+                        bits: address,
+                        section: address,
+                        palette: shape.palette ? [...shape.palette] : undefined,
+                        compression: shape.compression,
+                        bitfields: [...(shape.bitfields ?? [0, 0, 0])],
+                        pelsPerMeter: [0, 0],
+                    });
+                }
+                const attributes = deviceBitmap(cx | 0, cy | 0, surfaceOf(dc).bitCount);
+                return attributes ? objects.create('bitmap', attributes) : 0;
             },
         },
 
-        /** HBITMAP CreateBitmap(int nWidth, int nHeight, UINT nPlanes, UINT nBitCount, const VOID *lpBits) */
+        /**
+         * HBITMAP CreateBitmap(int nWidth, int nHeight, UINT nPlanes, UINT nBitCount,
+         *                      const VOID *lpBits)
+         *
+         * lpBits, when there are any, is the whole image in the bitmap's own
+         * layout, and it is copied: the buffer is the caller's, free to be
+         * reused or freed the moment this returns. A zero width or height is
+         * the one-pixel monochrome bitmap, whatever the rest says; a side
+         * past 0x7ffffff is ERROR_INVALID_PARAMETER (Wine's test_bitmap).
+         */
         CreateBitmap: {
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([width, height, planes, bitCount, bits])=>{
-                if ((width | 0) <= 0 || (height | 0) <= 0 || (planes >>> 0) === 0)
+                if ((width | 0) > MAX_BITMAP_SIDE || (height | 0) > MAX_BITMAP_SIDE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if ((width | 0) === 0 || (height | 0) === 0)
+                {
+                    return defaultBitmap();
+                }
+                if ((width | 0) < 0 || (height | 0) < 0 || (planes >>> 0) === 0)
                 {
                     return 0;
                 }
-                if (!BIT_COUNTS.has((planes >>> 0) * (bitCount >>> 0)))
+                // A depth between two a bitmap can have is rounded up to the
+                // next, as Windows rounds it: three bits is four, and only
+                // past 32 is there none.
+                const depth = [...BIT_COUNTS].find(known=>known >= (bitCount >>> 0));
+                if ((bitCount >>> 0) === 0 || depth === undefined
+                    || !BIT_COUNTS.has((planes >>> 0) * depth))
                 {
                     return 0;
                 }
-                return objects.create('bitmap', {
-                    width: width | 0,
-                    height: height | 0,
-                    planes: planes >>> 0,
-                    bitCount: bitCount >>> 0,
-                    // The initial bits belong to the caller, who is free to reuse
-                    // the buffer the moment this returns; nothing is read from it
-                    // until there is something to read it into.
-                    bits: bits >>> 0,
-                    section: 0,
-                });
+                const attributes = deviceBitmap(width | 0, height | 0, depth, planes >>> 0);
+                if (!attributes)
+                {
+                    return 0;
+                }
+                if ((bits >>> 0) !== 0)
+                {
+                    attributes.pixels.set(host.readMemory(bits >>> 0, attributes.pixels.length));
+                }
+                return objects.create('bitmap', attributes);
+            },
+        },
+
+        /**
+         * HBITMAP CreateBitmapIndirect(const BITMAP *pbm)
+         *
+         * CreateBitmap with its arguments in a BITMAP, whose bmType must be zero.
+         * bmWidthBytes is not read: the rows are as wide as the width and depth
+         * make them (Wine's test_CreateBitmap).
+         */
+        CreateBitmapIndirect: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([bitmap])=>{
+                if ((bitmap >>> 0) === 0 || readU32(host, bitmap + BITMAP.bmType) !== 0)
+                {
+                    return 0;
+                }
+                const layout = readU32(host, bitmap + BITMAP.bmPlanes);
+                return table.CreateBitmap.handler([
+                    readU32(host, bitmap + BITMAP.bmWidth),
+                    readU32(host, bitmap + BITMAP.bmHeight),
+                    layout & 0xffff,
+                    layout >>> 16,
+                    readU32(host, bitmap + BITMAP.bmBits),
+                ]);
+            },
+        },
+
+        /** HBITMAP CreateDiscardableBitmap(HDC hdc, int cx, int cy): CreateCompatibleBitmap. */
+        CreateDiscardableBitmap: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: args=>table.CreateCompatibleBitmap.handler(args),
+        },
+
+        /**
+         * LONG GetBitmapBits(HBITMAP hbit, LONG cb, LPVOID lpvBits)
+         * LONG SetBitmapBits(HBITMAP hbm, DWORD cb, const VOID *pvBits)
+         *
+         * A bitmap's bits in the device-dependent layout, rows top-down and
+         * each padded to a WORD, whatever the bitmap is: a DIB section's
+         * DWORD-padded rows, bottom-up or not, are converted on the way. A
+         * null buffer asks for the size, and GetBitmapBits reads a negative
+         * count as all of it, as Windows does. Each answers with how many
+         * bytes it moved.
+         */
+        GetBitmapBits: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, count, out])=>{
+                const bits = bitsOf(handle);
+                if (!bits)
+                {
+                    return 0;
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return bits.size;
+                }
+                const wanted = (count | 0) < 0 ? bits.size : Math.min(count | 0, bits.size);
+                host.writeMemory(out >>> 0, bits.read().subarray(0, wanted));
+                return wanted;
+            },
+        },
+
+        SetBitmapBits: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, count, source])=>{
+                const bits = bitsOf(handle);
+                if (!bits || (source >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const wanted = Math.min(count >>> 0, bits.size);
+                bits.write(host.readMemory(source >>> 0, wanted).slice());
+                return wanted;
             },
         },
 
@@ -1311,10 +1896,8 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([hdc, info, usage, bitsOut, section])=>{
                 const header = readBitmapInfoHeader(host, info);
-                if (header.size < 40)
+                if (!isDibHeaderSize(header.size))
                 {
-                    // Anything smaller is a BITMAPCOREHEADER, whose fields are at
-                    // different offsets and are not the ones read above.
                     return 0;
                 }
                 if (header.compression !== BI_RGB && header.compression !== BI_BITFIELDS)
@@ -1323,8 +1906,25 @@ export function createGdiFunctions(host){
                     // is no pointer to hand back.
                     return 0;
                 }
-                if (!BIT_COUNTS.has(header.bitCount) || header.width <= 0 || header.height === 0)
+                if (!BIT_COUNTS.has(header.bitCount) || header.width <= 0 || header.height === 0
+                    || (usage >>> 0) > DIB_PAL_COLORS)
                 {
+                    return 0;
+                }
+                // Windows refuses no planes, and several whose product with the
+                // depth passes sixteen, and ignores the rest (Wine's
+                // test_dib_formats).
+                if (header.planes === 0
+                    || (header.planes > 1 && header.planes * header.bitCount > 16))
+                {
+                    return 0;
+                }
+                if (header.compression === BI_BITFIELDS && ((header.bitCount !== 16
+                    && header.bitCount !== 32) || (usage >>> 0) === DIB_PAL_COLORS
+                    || [0, 4, 8].some(at=>readU32(host, info + BITMAPINFOHEADER.SIZE + at) === 0)))
+                {
+                    // Every mask has to name some bits, though not necessarily
+                    // the one run of them the documentation asks for.
                     return 0;
                 }
                 if ((section >>> 0) !== 0)
@@ -1334,8 +1934,14 @@ export function createGdiFunctions(host){
                     // back memory that is not the file.
                     return 0;
                 }
+                // An image whose bytes 32 bits cannot count is refused (Wine's
+                // test_dib_formats), and so is one the arena has no room for.
                 const bytes = dibSize(header.width, header.height, header.bitCount);
-                const address = host.surfaces.allocate(bytes);
+                const address = bytes > 0xffffffff ? 0 : host.surfaces.allocate(bytes);
+                if (address === 0)
+                {
+                    return 0;
+                }
                 if ((bitsOut >>> 0) !== 0)
                 {
                     writeU32s(host, bitsOut, [address]);
@@ -1349,7 +1955,7 @@ export function createGdiFunctions(host){
                     ? readColorTable(info + header.size,
                         Math.min(header.clrUsed || colorTableSize(header.bitCount),
                             colorTableSize(header.bitCount)),
-                        usage >>> 0, dcOf(hdc))
+                        usage >>> 0, dcOf(hdc), true, colorEntryBytes(header))
                     : undefined;
                 if (palette)
                 {
@@ -1368,6 +1974,15 @@ export function createGdiFunctions(host){
                     bits: address,
                     section: address,
                     palette,
+                    // What GetObject hands back of the header the section was
+                    // made from. BI_BITFIELDS' masks sit right after the
+                    // original forty bytes, which in a V4 or V5 header is
+                    // inside the header rather than after it.
+                    compression: header.compression,
+                    bitfields: header.compression === BI_BITFIELDS
+                        ? [0, 4, 8].map(at=>readU32(host, info + BITMAPINFOHEADER.SIZE + at))
+                        : [0, 0, 0],
+                    pelsPerMeter: [header.xPelsPerMeter ?? 0, header.yPelsPerMeter ?? 0],
                 });
             },
         },
@@ -1428,43 +2043,57 @@ export function createGdiFunctions(host){
          * HBITMAP CreateDIBitmap(HDC hdc, const BITMAPINFOHEADER *pbmih,
          *   DWORD flInit, const VOID *pjBits, const BITMAPINFO *pbmi, UINT iUsage)
          *
-         * The bitmap it produces is device-dependent by name and a DIB by
-         * construction, exactly as CreateDIBSection's is: one storage format
-         * downstream means one code path, and a program cannot observe the
-         * difference through any call this library offers.
-         *
-         * CBM_INIT copies the caller's rows in as they are, which is only
-         * correct because the two formats are the same one -- the header the
-         * bits were described by is the header the bitmap is created with.
+         * A device-dependent bitmap, as CreateCompatibleBitmap makes one: the
+         * header gives its size and nothing else, and its depth is the DC's
+         * -- one bit with no DC at all (Wine's test_createdibitmap, which also
+         * finds no check on the header but its compression). With CBM_INIT
+         * the bits are converted in as pbmi describes them, which need not be
+         * the format the header names; bits that cannot be converted make no
+         * bitmap rather than a black one.
          */
         CreateDIBitmap: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([, infoHeader, init, bits])=>{
+            handler: ([hdc, infoHeader, init, bits, info, usage])=>{
                 const CBM_INIT = 4;
-                const header = readBitmapInfoHeader(host, infoHeader);
-                if (header.size < BITMAPINFOHEADER.SIZE
-                    || (header.compression !== BI_RGB && header.compression !== BI_BITFIELDS)
-                    || !BIT_COUNTS.has(header.bitCount)
-                    || header.width <= 0 || header.height === 0)
+                if ((infoHeader >>> 0) === 0)
                 {
                     return 0;
                 }
-                const bytes = dibSize(header.width, header.height, header.bitCount);
-                const address = host.surfaces.allocate(bytes);
-                if ((init & CBM_INIT) !== 0 && (bits >>> 0) !== 0)
+                const header = readBitmapInfoHeader(host, infoHeader);
+                const dc = (hdc >>> 0) === 0 ? null : dcOf(hdc);
+                if (!isDibHeaderSize(header.size)
+                    || IMAGE_COMPRESSIONS.has(header.compression)
+                    || header.width < 0 || ((hdc >>> 0) !== 0 && !dc))
                 {
-                    host.writeMemory(address, host.readMemory(bits >>> 0, bytes));
+                    return 0;
                 }
-                return objects.create('bitmap', {
-                    width: header.width,
-                    height: Math.abs(header.height),
-                    planes: 1,
-                    bitCount: header.bitCount,
-                    topDown: header.height < 0,
-                    bits: address,
-                    section: address,
-                });
+                // No size is CreateCompatibleBitmap's answer to no size, and
+                // that pixel is shared: nothing is drawn into it.
+                if (header.width === 0 || header.height === 0)
+                {
+                    return defaultBitmap();
+                }
+                const attributes = deviceBitmap(header.width, Math.abs(header.height),
+                    dc ? surfaceOf(dc).bitCount : 1);
+                if (!attributes)
+                {
+                    return 0;
+                }
+                const bitmap = objects.create('bitmap', attributes);
+                if ((init & CBM_INIT) === 0 || (bits >>> 0) === 0 || (info >>> 0) === 0)
+                {
+                    return bitmap;
+                }
+                // SetDIBits of the whole DIB the bits are described by.
+                const lines = Math.abs(readBitmapInfoHeader(host, info >>> 0).height);
+                if (drawing.setDIBits(bitmap, 0, lines, bits >>> 0, info >>> 0, usage >>> 0, dc)
+                    > 0)
+                {
+                    return bitmap;
+                }
+                objects.remove(bitmap);
+                return 0;
             },
         },
 
@@ -1590,7 +2219,7 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const previous = dc.mapMode;
-                dc.mapMode = mode | 0;
+                dc.mapMode = (dc.layout & LAYOUT_RTL) !== 0 ? MM_ANISOTROPIC : mode | 0;
                 const extents = extentsOf(mode | 0);
                 if (extents)
                 {
@@ -1599,6 +2228,39 @@ export function createGdiFunctions(host){
                 }
                 return previous;
             },
+        },
+
+        /**
+         * DWORD SetLayout(HDC hdc, DWORD dwLayout)
+         * DWORD GetLayout(HDC hdc)
+         *
+         * The layout, and the one it replaced; GDI_ERROR for no DC. Turning
+         * right-to-left on makes the mode MM_ANISOTROPIC, extents kept, and
+         * turning it off leaves the mode as it then is. Of the drawing calls,
+         * SetDIBitsToDevice places through it; the rest draw in device units.
+         */
+        SetLayout: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, layout])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return GDI_ERROR;
+                }
+                const previous = dc.layout;
+                dc.layout = layout >>> 0;
+                if ((dc.layout & LAYOUT_RTL) !== 0)
+                {
+                    dc.mapMode = MM_ANISOTROPIC;
+                }
+                return previous;
+            },
+        },
+        GetLayout: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>dcOf(handle)?.layout ?? GDI_ERROR,
         },
 
         /** int GetMapMode(HDC hdc) */
@@ -1771,23 +2433,123 @@ export function createGdiFunctions(host){
         },
 
         /**
+         * int EnumFontFamiliesExA(HDC hdc, LPLOGFONTA lpLogfont, FONTENUMPROCA lpProc,
+         *                         LPARAM lParam, DWORD dwFlags)
+         * int EnumFontFamiliesExW(HDC hdc, LPLOGFONTW lpLogfont, FONTENUMPROCW lpProc,
+         *                         LPARAM lParam, DWORD dwFlags)
+         */
+        EnumFontFamiliesExA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>enumerateFaces(args, false),
+        },
+
+        EnumFontFamiliesExW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>enumerateFaces(args, true),
+        },
+
+        /**
          * The font table here is fixed: a font file cannot be added to it,
          * and a scalable font resource cannot be written for one. Zero is the
          * documented failure of each, which an installer notes and moves on
-         * from -- the file itself was already copied.
+         * from -- the file itself was already copied. Every spelling answers
+         * the same way, the private and in-memory ones included, and nothing
+         * can be removed that was never added.
          *
          * int AddFontResourceA(LPCSTR lpszFilename)
+         * int AddFontResourceW(LPCWSTR lpszFilename)
+         * int AddFontResourceExA(LPCSTR name, DWORD fl, PVOID res)
+         * int AddFontResourceExW(LPCWSTR name, DWORD fl, PVOID res)
+         * HANDLE AddFontMemResourceEx(PVOID pFileView, DWORD cjSize, PVOID pvResrved,
+         *                             DWORD *pNumFonts)
+         * BOOL RemoveFontResourceA(LPCSTR lpFileName)
+         * BOOL RemoveFontResourceW(LPCWSTR lpFileName)
+         * BOOL RemoveFontResourceExA(LPCSTR name, DWORD fl, PVOID pdv)
+         * BOOL RemoveFontResourceExW(LPCWSTR name, DWORD fl, PVOID pdv)
+         * BOOL RemoveFontMemResourceEx(HANDLE h)
          * BOOL CreateScalableFontResourceA(DWORD fdwHidden, LPCSTR lpszFontRes,
          *                                  LPCSTR lpszFontFile, LPCSTR lpszCurrentPath)
          */
-        AddFontResourceA: {
-            argBytes: 4,
-            handler: ()=>0,
-        },
+        AddFontResourceA: { argBytes: 4, handler: ()=>0 },
+        AddFontResourceW: { argBytes: 4, handler: ()=>0 },
+        AddFontResourceExA: { argBytes: 12, handler: ()=>0 },
+        AddFontResourceExW: { argBytes: 12, handler: ()=>0 },
+        AddFontMemResourceEx: { argBytes: 16, handler: ()=>0 },
+        RemoveFontResourceA: { argBytes: 4, handler: ()=>0 },
+        RemoveFontResourceW: { argBytes: 4, handler: ()=>0 },
+        RemoveFontResourceExA: { argBytes: 12, handler: ()=>0 },
+        RemoveFontResourceExW: { argBytes: 12, handler: ()=>0 },
+        RemoveFontMemResourceEx: { argBytes: 4, handler: ()=>0 },
 
         CreateScalableFontResourceA: {
             argBytes: 16,
             handler: ()=>0,
+        },
+
+        /**
+         * UINT GetTextCharset(HDC hdc)
+         * UINT GetTextCharsetInfo(HDC hdc, LPFONTSIGNATURE lpSig, DWORD dwFlags)
+         *
+         * The character set of the font the DC has selected, as its
+         * TEXTMETRIC reports it, and DEFAULT_CHARSET for a handle that is
+         * not a DC, which is the documented failure. A signature is asked
+         * for only of a TrueType font; these faces are not ones a program can
+         * read tables out of, and TEXTMETRIC says as much, so the signature
+         * is the zeros the documentation gives any other font.
+         */
+        GetTextCharset: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                return dc ? currentMetrics(dc).charSet : DEFAULT_CHARSET;
+            },
+        },
+
+        GetTextCharsetInfo: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, signature])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return DEFAULT_CHARSET;
+                }
+                if ((signature >>> 0) !== 0)
+                {
+                    host.writeMemory(signature >>> 0, new Uint8Array(FONTSIGNATURE_SIZE));
+                }
+                return currentMetrics(dc).charSet;
+            },
+        },
+
+        /**
+         * DWORD GetFontLanguageInfo(HDC hdc)
+         *
+         * Zero, a font "treated as a simple Latin font", unless its character
+         * set says otherwise: a double-byte set is GCP_DBCS, and Hebrew and
+         * Arabic are read in an order that GCP_REORDER announces. No kerning
+         * table or extra glyph tables are exposed here, so nothing claims
+         * them. GCP_ERROR for a handle that is not a DC.
+         */
+        GetFontLanguageInfo: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return GCP_ERROR;
+                }
+                const charSet = currentMetrics(dc).charSet;
+                if (DBCS_CHARSETS.has(charSet))
+                {
+                    return GCP_DBCS;
+                }
+                return charSet === HEBREW_CHARSET || charSet === ARABIC_CHARSET ? GCP_REORDER : 0;
+            },
         },
 
         ScaleViewportExtEx: {
@@ -1995,6 +2757,20 @@ export function createGdiFunctions(host){
         table: aliased,
 
         /**
+         * A bitmap's size, or null for a handle that is not a bitmap: what an
+         * image list divides a strip by to count the images in it.
+         *
+         * @param {number} handle
+         * @returns {{ width: number, height: number } | null}
+         */
+        bitmapSize(handle){
+            const record = objects.get(handle >>> 0);
+            return record && record.type === 'bitmap'
+                ? { width: record.attributes.width, height: record.attributes.height }
+                : null;
+        },
+
+        /**
          * The rectangle a region object holds, or null for a handle that is
          * not a region: what user32 reads when a program names an area to
          * repaint by a region rather than by a rectangle.
@@ -2118,6 +2894,30 @@ export function createGdiFunctions(host){
             textColor: hdc=>(dcOf(hdc)?.textColor ?? 0) >>> 0,
 
             /**
+             * Whether a context's text is drawn over its background colour,
+             * OPAQUE, or over what is there, TRANSPARENT: what a parent left
+             * with SetBkMode on WM_CTLCOLOR*. A new context's is OPAQUE.
+             *
+             * @param {number} hdc
+             */
+            bkMode: hdc=>dcOf(hdc)?.bkMode ?? OPAQUE,
+
+            /** The colour a context's text is drawn over. @param {number} hdc */
+            bkColor: hdc=>(dcOf(hdc)?.bkColor ?? WHITE) >>> 0,
+
+            /**
+             * The colours the default procedure gives a control's context,
+             * as SetTextColor and SetBkColor would: each answers the colour
+             * it replaced.
+             *
+             * @param {number} hdc @param {number} color
+             */
+            setTextColor: (hdc, color)=>table.SetTextColor.handler([hdc, color]),
+
+            /** @param {number} hdc @param {number} color */
+            setBkColor: (hdc, color)=>table.SetBkColor.handler([hdc, color]),
+
+            /**
              * Text at a point, over whatever is there, clipped to a rectangle
              * when one is given. The context's own colour and mode are put
              * back afterwards: this is the window manager drawing, not the
@@ -2219,22 +3019,13 @@ export function createGdiFunctions(host){
              */
             bitmap(hdc, x, y, bitmap){
                 const record = objects.get(bitmap);
-                if (!record || record.type !== 'bitmap' || !record.attributes.bits)
+                const shape = record?.type === 'bitmap' ? record.attributes : null;
+                if (!shape || (!shape.bits && !shape.pixels))
                 {
                     return false;
                 }
-                const source = createContext(0, 'memory');
-                source.defaultBitmap = objects.create('bitmap', {
-                    width: 1, height: 1, planes: 1, bitCount: 1, bits: 0, section: 0,
-                });
-                select(source, source.defaultBitmap);
-                const selected = select(source, bitmap >>> 0) !== 0;
-                const shape = record.attributes;
-                const drawn = selected && table.BitBlt.handler([hdc >>> 0, x | 0, y | 0,
-                    shape.width | 0, shape.height | 0, source.hdc, 0, 0, SRCCOPY]) === 1;
-                select(source, source.defaultBitmap);
-                destroyContext(source);
-                return drawn;
+                return lend(bitmap, source=>table.BitBlt.handler([hdc >>> 0, x | 0, y | 0,
+                    shape.width | 0, shape.height | 0, source, 0, 0, SRCCOPY]) === 1);
             },
         },
 

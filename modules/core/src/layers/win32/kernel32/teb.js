@@ -60,7 +60,9 @@ export const PEB = Object.freeze({
     OS_MAJOR_VERSION: 0xa4,
     OS_MINOR_VERSION: 0xa8,
     OS_BUILD_NUMBER: 0xac,
+    OS_CSD_VERSION: 0xae,
     OS_PLATFORM_ID: 0xb0,
+    CSD_VERSION: 0x1f0,
     SIZE: 0x230,
 });
 
@@ -164,7 +166,10 @@ export const TLS_SLOTS = 64;
  * @param {(bytes: number) => number} options.allocate  Guest memory, zeroed.
  * @param {(address: number, bytes: Uint8Array) => void} options.writeMemory
  * @param {number} options.processId
- * @param {{ major: number, minor: number, build: number }} options.version
+ * @param {{ major: number, minor: number, build: number, servicePackMajor?: number,
+ *     servicePackMinor?: number, csdVersion?: string }} options.version
+ *        The Windows the machine is: the numbers, and the service pack as a
+ *        pair and as text, which is how the block keeps it.
  * @param {number} options.imageBase
  * @param {string} [options.imagePath]
  * @param {string} [options.commandLine]
@@ -199,7 +204,11 @@ export function createProcessBlocks(options){
     write(peb + PEB.PROCESS_PARAMETERS, params);
     write(peb + PEB.OS_MAJOR_VERSION, version.major);
     write(peb + PEB.OS_MINOR_VERSION, version.minor);
-    write(peb + PEB.OS_BUILD_NUMBER, version.build);
+    // Two WORDs, written as the DWORD they make up: the build, then the
+    // service pack with its major number in the high byte.
+    write(peb + PEB.OS_BUILD_NUMBER, (version.build & 0xffff
+        | ((version.servicePackMajor ?? 0) & 0xff) << 24
+        | ((version.servicePackMinor ?? 0) & 0xff) << 16) >>> 0);
     write(peb + PEB.OS_PLATFORM_ID, 2); // VER_PLATFORM_WIN32_NT
     // Read directly by a runtime sizing its thread pool, without a call.
     write(peb + PEB.NUMBER_OF_PROCESSORS, PROCESSOR.count);
@@ -234,6 +243,20 @@ export function createProcessBlocks(options){
         strings += bytes.length + 2 & ~1;
     };
 
+    // The service pack's name, in the room between the block and its
+    // parameters rather than in the arena the parameters' strings share.
+    // Empty when there is none: a reader copies it without looking first.
+    const csdVersion = version.csdVersion ?? '';
+    const csdText = new Uint8Array(csdVersion.length * 2 + 2);
+    for (let index = 0; index < csdVersion.length; index++)
+    {
+        csdText[index * 2] = csdVersion.charCodeAt(index) & 0xff;
+        csdText[index * 2 + 1] = csdVersion.charCodeAt(index) >>> 8;
+    }
+    writeMemory(peb + PEB.SIZE, csdText);
+    write(peb + PEB.CSD_VERSION, (csdVersion.length * 2 | csdText.length << 16) >>> 0);
+    write(peb + PEB.CSD_VERSION + 4, peb + PEB.SIZE);
+
     write(params + PARAMS.MAXIMUM_LENGTH, PARAMS.SIZE + STRING_ARENA);
     write(params + PARAMS.LENGTH, PARAMS.SIZE);
     write(params + PARAMS.FLAGS, PARAMS_NORMALIZED);
@@ -265,23 +288,49 @@ export function createProcessBlocks(options){
         write(head, head);
         write(head + 4, head);
     }
-    let loadTail = loadHead;
-    let memoryTail = memoryHead;
-    let initTail = initHead;
+    /**
+     * Each list's nodes after its head, in order: what linking and unlinking
+     * are done from, since nothing here reads guest memory back.
+     *
+     * @type {Map<number, number[]>}
+     */
+    const lists = new Map([[loadHead, []], [memoryHead, []], [initHead, []]]);
+    /** Each module's entry, by its base. @type {Map<number, number>} */
+    const entries = new Map();
 
     /**
      * `InsertTailList`, done by hand: nothing here keeps a live pointer into
      * guest memory to call the real one on, only the address it would be at.
      *
-     * @param {number} head @param {number} tail @param {number} node
-     * @returns {number} the new tail
+     * @param {number} head @param {number} node
      */
-    const insertTail = (head, tail, node)=>{
+    const insertTail = (head, node)=>{
+        const nodes = /** @type {number[]} */ (lists.get(head));
+        const tail = nodes.at(-1) ?? head;
         write(node, head);
         write(node + 4, tail);
         write(tail, node);
         write(head + 4, node);
-        return node;
+        nodes.push(node);
+    };
+
+    /**
+     * `RemoveEntryList`: the neighbours are joined around the node.
+     *
+     * @param {number} head @param {number} node
+     */
+    const remove = (head, node)=>{
+        const nodes = /** @type {number[]} */ (lists.get(head));
+        const at = nodes.indexOf(node);
+        if (at < 0)
+        {
+            return;
+        }
+        const before = at > 0 ? nodes[at - 1] : head;
+        const after = at + 1 < nodes.length ? nodes[at + 1] : head;
+        write(before, after);
+        write(after + 4, before);
+        nodes.splice(at, 1);
     };
 
     /**
@@ -331,10 +380,29 @@ export function createProcessBlocks(options){
         writeEntryString(entry + LDR_ENTRY.FULL_DLL_NAME, fullNameBuffer, fullName);
         writeEntryString(entry + LDR_ENTRY.BASE_DLL_NAME, baseNameBuffer, baseName);
 
-        loadTail = insertTail(loadHead, loadTail, entry + LDR_ENTRY.IN_LOAD_ORDER_LINKS);
-        memoryTail = insertTail(memoryHead, memoryTail, entry + LDR_ENTRY.IN_MEMORY_ORDER_LINKS);
-        initTail = insertTail(initHead, initTail, entry + LDR_ENTRY.IN_INITIALIZATION_ORDER_LINKS);
+        insertTail(loadHead, entry + LDR_ENTRY.IN_LOAD_ORDER_LINKS);
+        insertTail(memoryHead, entry + LDR_ENTRY.IN_MEMORY_ORDER_LINKS);
+        insertTail(initHead, entry + LDR_ENTRY.IN_INITIALIZATION_ORDER_LINKS);
+        entries.set(module.base >>> 0, entry);
         return entry;
+    };
+
+    /**
+     * Takes a module FreeLibrary unloaded out of all three lists. Its entry
+     * stays where it was, unlinked, as the loader leaves it.
+     *
+     * @param {number} base
+     */
+    const removeModule = base=>{
+        const entry = entries.get(base >>> 0);
+        if (entry === undefined)
+        {
+            return;
+        }
+        remove(loadHead, entry + LDR_ENTRY.IN_LOAD_ORDER_LINKS);
+        remove(memoryHead, entry + LDR_ENTRY.IN_MEMORY_ORDER_LINKS);
+        remove(initHead, entry + LDR_ENTRY.IN_INITIALIZATION_ORDER_LINKS);
+        entries.delete(base >>> 0);
     };
 
     for (const module of options.modules ?? [])
@@ -347,6 +415,7 @@ export function createProcessBlocks(options){
         params,
         ldr,
         addModule,
+        removeModule,
 
         /**
          * A block for one thread, with its own thread-local array.

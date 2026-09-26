@@ -54,6 +54,7 @@ Source: `src/layers/audio/module.js`. The DirectSound seam imports `IUNKNOWN_MET
 | member | what it is |
 |---|---|
 | `libraries()` | `{ 'DSOUND.dll', 'Mp3dec.asi' }` (the second only when `mp3 !== false`), shaped like a `win32` library's tables. |
+| `ordinals()` | `{ 'DSOUND.dll': { 1, 2, 3, 6, 9, 11, 12 } }`, for a program that imports by number; the assembling caller merges it with `win32`'s and `media`'s and synthesises each library with those numbers. |
 | `output()` | The mixer: `open(format)`, `pump(frames?)`, `sampleRate`, `channels`, `capacityFrames`, `consumed()`, `diagnostics()`, plus `ring`/`memory` (engine backend) or `table`/`memory` (shared backend). Handed down to `win32` by the assembling caller because `win32` sits below this layer. |
 | `pump(frames?)` | Mixes ahead into the ring; called once a scheduler turn by whoever drives the machine, before the turn yields. |
 | `available()` | `config.drained`. |
@@ -67,14 +68,18 @@ Source: `src/layers/audio/module.js`. The DirectSound seam imports `IUNKNOWN_MET
 
 | library | entry points | what they are |
 |---|---|---|
-| `DSOUND.dll` | 7 | `DirectSoundCreate`, `DirectSoundCreate8`, `DirectSoundEnumerateA/W`, `DirectSoundCaptureCreate`, `DirectSoundCaptureCreate8` (both `DSERR_UNSUPPORTED`: there is no capture device), `DllCanUnloadNow`. |
+| `DSOUND.dll` | 8 | `DirectSoundCreate`, `DirectSoundCreate8`, `DirectSoundEnumerateA/W`, `GetDeviceID`, `DirectSoundCaptureCreate`, `DirectSoundCaptureCreate8` (both `DSERR_UNSUPPORTED`: there is no capture device), `DllCanUnloadNow`. Seven carry Windows' ordinals (`dsound.spec`): `DirectSoundCreate` 1, `DirectSoundEnumerateA` 2, `DirectSoundEnumerateW` 3, `DirectSoundCaptureCreate` 6, `GetDeviceID` 9, `DirectSoundCreate8` 11, `DirectSoundCaptureCreate8` 12; `DllCanUnloadNow` is numbered above them. |
 | `Mp3dec.asi` | 11 | `DllMain`, `PROVIDER_query_attribute`, `ASI_startup`, `ASI_shutdown`, `ASI_error`, `ASI_stream_open`, `ASI_stream_process`, `ASI_stream_seek`, `ASI_stream_close`, `ASI_stream_attribute`, `ASI_stream_set_preference`. Nothing is imported by name; the middleware finds these through the tables `DllMain` registers. |
 
-Interfaces published (`src/layers/audio/dsound/seam.js`): `IDirectSound` and `IDirectSound8`
-(8 slots after `IUnknown`), `IDirectSoundBuffer` (18) and `IDirectSoundBuffer8` (21),
-`IDirectSoundNotify` (1). `IDirectSound3DListener` and `IDirectSound3DBuffer` are deliberately
-not declared, so `QueryInterface` answers `E_NOINTERFACE` rather than handing back a table that
-ends after `IUnknown`.
+Interfaces published (`src/layers/audio/dsound/seam.js`): `IDirectSound` (8 slots after
+`IUnknown`) and `IDirectSound8` (9, `VerifyCertification` last), `IDirectSoundBuffer` (18) and
+`IDirectSoundBuffer8` (21), `IDirectSoundNotify` (1). Which of them an object answers
+`QueryInterface` for follows Windows: the object `DirectSoundCreate` returns is `IDirectSound`
+alone, the one `DirectSoundCreate8` returns is both; a secondary buffer is `IDirectSoundBuffer`
+and `IDirectSoundBuffer8`, the primary buffer only the first; `IDirectSoundNotify` is there only
+on a buffer created with `DSBCAPS_CTRLPOSITIONNOTIFY`. `IDirectSound3DListener` and
+`IDirectSound3DBuffer` are deliberately not declared, so `QueryInterface` answers `E_NOINTERFACE`
+rather than handing back a table that ends after `IUnknown`.
 
 ### `diagnostics()`
 
@@ -94,7 +99,8 @@ ends after `IUnknown`.
 
 `src/layers/audio/output/mixer.js` keeps one track per open source, behind one surface --
 `open(format)`, `pump()`, `consumed()`, `diagnostics()`, a track's `write(pcm)`, `played()`,
-`playedBytes()`, `pending()`, `reset()`, `close()`, `gain`, `paused` -- and two backends behind
+`playedBytes()`, `pending()`, `reset()`, `close()`, `retune(rate)`, `gain`, `balance`, `paused` --
+and two backends behind
 that surface, chosen by `createMixer({ shared })`. `shared` is an environment question, not a
 mixer one: shared memory is what a worklet needs to read the far end at all, so the assembling
 caller answers it (`src/app.js` with `typeof SharedArrayBuffer === 'function'`) rather than the
@@ -112,8 +118,11 @@ does not grow with the run. `pump()` first calls `fill` (the DirectSound feed), 
 longest pending block among unpaused tracks into `src/layers/audio/output/ring.js` -- the one place
 sound crosses out on this path, a ring of interleaved float32 frames with a five-slot `Int32Array`
 control block (`WRITTEN`, `READ`, `STARVED_BLOCKS`, `STARVED_FRAMES`, `BLOCKS`) -- adding each
-track scaled by its `gain`; a track short of the block is counted under `shortfall` and its own
-`short`. A track's `played()` is what it mixed less what still sits in the ring, held monotonic.
+track scaled by its `gain` and each side by its `balance` (`[left, right]` multipliers, `[1, 1]`
+until set); a track short of the block is counted under `shortfall` and its own `short`.
+`retune(rate)` reads what is written from then on as recorded at that rate; what is queued was
+converted already, so the change falls exactly where the bytes change. A track's `played()` is
+what it mixed less what still sits in the ring, held monotonic.
 This is the only backend a reader without shared memory can use at all -- the test-page harness,
 any page that is not cross-origin isolated -- because nothing but this thread can read an ordinary
 `ArrayBuffer`; `test/page/game/harness.js`'s `drainSound` reads this ring on the engine thread for
@@ -121,30 +130,33 @@ exactly that reason, and a measurement taken through it still carries this backe
 converting-and-mixing cost.
 
 **With shared memory** (`createSharedMixer`): the engine writes each track's own guest PCM,
-unconverted, into a per-track byte ring inside one `SharedArrayBuffer` "track table"
-(`SLOTS = 32` slots of `SLOT_BYTES = 65536` bytes each, one 64-byte header per slot ahead of it, a
-32-byte global header ahead of all of them -- `output/mix.js`'s `TABLE_BYTES`); `write` copies as
-many bytes as fit into the slot's ring and advances `WRITTEN`, and nothing here converts or mixes
-at all, so `pump()` only calls `fill` and touches no `Float32Array`. `output/worklet.js` --
-the audio thread -- resamples, scales by `GAIN` and sums every slot into each output block from
-that same table; `played()` is `MIXED_FRAMES`, the reader's own count of output frames it has
-produced from a slot; `playedBytes()` is `READ`, the reader's own count of guest bytes it has
-consumed, exact by construction (no ledger: a program waiting for one small buffer back is
-credited it once the reader has looked at those bytes at all, not when a ledger decides to retire
-an entry). A slot's header also carries `RATE`, `CHANNELS`, `BITS` (the format `open` was called
-with), `PAUSED`, `STATE` (`STATE_FREE`/`STATE_OPEN`/`STATE_CLOSING`) and `GENERATION` (bumped on
-open and on a backlog drop; the reader resets its resampler seam when it changes) and `DROP_TO`
-(see below); every field has exactly one writer per phase of the slot's life -- `STATE` is the one
-exception stated as a handoff rather than a single owner: the engine writes `OPEN`/`CLOSING`, the
-reader alone writes `FREE`, and a slot the engine has closed is never reused until the reader has
-made that move -- and every access is `Atomics.load`/`store`, with neither side ever waiting on the
-other. A track opened when every slot is already taken -- not "already open"; a track's slot is
-spent for as long as it is `STATE_OPEN`, which lasts until its buffer is both released and freed by
-the reader, so the real ceiling is every buffer *ever* played in the session, not every buffer open
-at once -- gets a silent fallback track instead: writes are accepted and immediately credited so the
-program is never held up, but nothing is heard, and `diagnostics().fallbackTracks` counts it. A
-buffer's DirectSound seam closes its track and drops the buffer from its own walk once the program
-has released it, so the slot returns to the pool the moment nothing can reach the buffer any more.
+unconverted, into a per-track byte ring inside one `SharedArrayBuffer` "track table" (`SLOTS = 32`
+slots of `SLOT_BYTES = 65536` bytes each, one 64-byte header per slot ahead of it, a 32-byte global
+header ahead of all of them -- `output/mix.js`'s `TABLE_BYTES`); `write` copies as many bytes as fit
+into the slot's ring and advances `WRITTEN`, and nothing here converts or mixes at all, so `pump()`
+only calls `fill` and touches no `Float32Array`. `output/worklet.js` -- the audio thread --
+resamples, scales by `GAIN` and each side by what `LEFT_CUT` and `RIGHT_CUT` take off it (stored as
+the loss, so a header written without them plays both sides whole), and sums every slot into each
+output block from that same table; `played()` is `MIXED_FRAMES`, the reader's own count of output
+frames it has produced from a slot; `playedBytes()` is `READ`, the reader's own count of guest bytes
+it has consumed, exact by construction (no ledger: a program waiting for one small buffer back is
+credited it once the reader has looked at those bytes at all, not when a ledger decides to retire an
+entry). A slot's header also carries `RATE`, `CHANNELS`, `BITS` (the format `open` was called with;
+`retune` rewrites `RATE`, which then applies to whatever is still unread in the slot too, and the
+track's 200 ms capacity with it), `PAUSED`, `STATE` (`STATE_FREE`/`STATE_OPEN`/`STATE_CLOSING`) and
+`GENERATION` (bumped on open and on a backlog drop; the reader resets its resampler seam when it
+changes) and `DROP_TO` (see below); every field has exactly one writer per phase of the slot's life
+-- `STATE` is the one exception stated as a handoff rather than a single owner: the engine writes
+`OPEN`/`CLOSING`, the reader alone writes `FREE`, and a slot the engine has closed is never reused
+until the reader has made that move -- and every access is `Atomics.load`/`store`, with neither side
+ever waiting on the other. A track opened when every slot is already taken -- not "already open"; a
+track's slot is spent for as long as it is `STATE_OPEN`, which lasts until its buffer is both
+released and freed by the reader, so the real ceiling is every buffer *ever* played in the session,
+not every buffer open at once -- gets a silent fallback track instead: writes are accepted and
+immediately credited so the program is never held up, but nothing is heard, and
+`diagnostics().fallbackTracks` counts it. A buffer's DirectSound seam closes its track and drops the
+buffer from its own walk once the program has released it, so the slot returns to the pool the
+moment nothing can reach the buffer any more.
 
 **The backlog policy** is the same 200 ms this layer always allowed, built on different machinery
 per backend: the engine backend's `track.pending() > mixer.capacityFrames` still calls `reset()`,
@@ -179,28 +191,66 @@ against the guest's clock at `frequency * blockAlign` bytes per second, the writ
 the play cursor by 30 ms while playing and trailing it by 15 ms when stopped so a locked range
 from the write cursor covers nearly the whole buffer. A lock that runs off the end comes back as
 two ranges. Volume and pan are hundredths of a decibel within the documented bounds; `gain` is the
-volume as a factor. `drainPlayed()` hands back the byte ranges the play cursor has passed since it
-was last asked -- what a person hears -- and `drainNotifications()` the events whose positions it
-crossed. Looping, `SetCurrentPosition`, `SetFrequency` (zero restores the format's rate) and
+volume as a factor and `balance` the pan as one per side, as `SetPan` documents it: the side the
+sound is panned away from loses the pan in hundredths of a decibel, the other stays whole, and
+`DSBPAN_LEFT`/`DSBPAN_RIGHT` silence the far side. `drainPlayed()` hands back the byte ranges the
+play cursor has passed since it was last asked -- what a person hears -- and
+`drainNotifications()` the events whose positions it passed, in the order it reached them: the span
+runs from where the cursor stood, inclusive, to where it stands, exclusive, so the position playback
+starts at is the first one passed, a one-shot that ran out has passed the rest of its buffer, and a
+position is never passed twice in one lap. `DSBPN_OFFSETSTOP` is no position: it is delivered once
+when playback stops, by `Stop` (inside the call) or at the end of a one-shot, and never while a loop
+goes round. Looping, `SetCurrentPosition`, `SetFrequency` (zero restores the format's rate) and
 `Restore` (always succeeds; nothing here loses a buffer) are modelled; a duplicate shares its
-original's samples with cursors of its own.
+original's samples and capabilities with cursors of its own.
 
 `src/layers/audio/dsound/seam.js` publishes the interfaces above with one method list per
 descriptor shared by every object (a list per buffer was a stub table per buffer, and the stub
-table is finite), and one adapter per object so identity survives. `DirectSoundCreate` hands out
-the one root object every time. `GetCaps` names every `PRIMARY*` and `SECONDARY*` mono/stereo/8/16
-flag plus `CONTINUOUSRATE` and `CERTIFIED`, and writes every hardware field as zero;
-`EMULDRIVER` is deliberately not set, because a middleware reading it concludes DirectSound is not
-really there. `SetFormat` succeeds on the primary and is refused on a secondary.
+table is finite), and one adapter per object so identity survives. Every `DirectSoundCreate` or
+`DirectSoundCreate8` makes an object of its own that counts its references (the bridge frees an
+interface pointer whose release answers zero), and each object has one primary buffer: asking again
+hands it back with its count raised and ignores the new description, and it cannot be duplicated
+(`DSERR_INVALIDCALL`). A description of the primary that names a format is refused with
+`DSERR_INVALIDPARAM` -- its format is the device's, set through `SetFormat`. The device keeps its
+primary: after the program's last `Release` the same pointer still answers (the publisher's adapter
+answers the bridge's `reachable()` for it while the device lives), and the seam's `pruneReleased`
+drops it only once the device and every reference to it are gone. Through `DirectSoundCreate8`'s
+object a `DSBCAPS_CTRL3D` buffer must be mono and cannot have `DSBCAPS_CTRLPAN`
+(`DSERR_INVALIDPARAM`); `DirectSoundCreate`'s object accepts both, as the older interface does. The
+device's `GetCaps` names every `PRIMARY*` and `SECONDARY*` mono/stereo/8/16 flag plus
+`CONTINUOUSRATE`, and writes every hardware field as zero; `EMULDRIVER` is deliberately not set,
+because a middleware reading it concludes DirectSound is not really there, and `CERTIFIED` is not
+set either, which `IDirectSound8::VerifyCertification` agrees with by answering `DS_UNCERTIFIED`.
+
+A buffer's description is read at either of its sizes, the twenty-byte `DSBUFFERDESC1` and the
+thirty-six-byte `DSBUFFERDESC` with `guid3DAlgorithm`, and any other `dwSize` is refused with
+`DSERR_INVALIDPARAM`. A secondary buffer's size is rounded up to a whole number of frames. A
+buffer's `GetCaps` reports the flags it was created with plus where it is mixed:
+`DSBCAPS_LOCSOFTWARE`, or `LOCHARDWARE` when that was asked for and accepted. A control is only
+there if the buffer was created with it: `Get`/`SetVolume`, `Get`/`SetPan` and `Get`/`SetFrequency`
+answer `DSERR_CONTROLUNAVAIL` without `DSBCAPS_CTRLVOLUME`, `CTRLPAN` or `CTRLFREQUENCY` (a null
+pointer is refused first), and the primary buffer never has a frequency.
+`IDirectSoundBuffer8::SetFX` answers `DSERR_CONTROLUNAVAIL` without `DSBCAPS_CTRLFX`; with it, the
+arguments are checked, a buffer playing or locked is refused with `DSERR_INVALIDCALL`, and clearing
+a chain is `DS_OK`. `SetFormat` succeeds on the primary and is refused on a secondary.
+
 `DirectSoundEnumerateA/W` call the guest's callback twice -- the primary driver with a null GUID,
 then one device -- and stop early if the callback returns FALSE; without `callGuest` they succeed
-having named nothing. The module's `feedBuffers` runs before every mix: it drains every buffer's
-notifications and signals them whether or not anything is listening (a program that waits on a
-position must be woken even in a silent build); closes and drops the track of any buffer the
-program has fully released (`references` at zero) before anything else, so a released buffer's
-slot is not held for the rest of the session; then, when `drained`, opens a mixer track per
-secondary buffer on first play and writes the drained byte ranges from guest memory into it,
-resetting a track whose backlog exceeds the ring's capacity and counting that under `behind`.
+having named nothing. `GetDeviceID` answers that device's GUID for `DSDEVID_DefaultPlayback` and
+`DefaultVoicePlayback` and for the GUID itself; `DefaultCapture` and `DefaultVoiceCapture` answer
+`DSERR_NODRIVER`, because there is no capture device; any other GUID, or a null pointer, is
+`DSERR_INVALIDPARAM`; nothing is written on a failure. The module's `feedBuffers` runs before every
+mix: it drains every buffer's notifications and signals them whether or not anything is listening (a
+program that waits on a position must be woken even in a silent build). Then, when `drained`, it
+closes and drops the track of any buffer the program has fully released (`references` at zero)
+before anything else, so a released buffer's slot is not held for the rest of the session, opens a
+mixer track per secondary buffer on first play and writes the drained byte ranges from guest memory
+into it, resetting a track whose backlog exceeds the ring's capacity and counting that under
+`behind`. Every fill hands the track the buffer's current `gain` and `balance`, and retunes it when
+the buffer's frequency has changed since, so a program's `SetFrequency` is heard as a change of
+pitch and the track consumes bytes at the rate the cursor drains them. Last, drained or not, it
+drops the released buffers -- and any primary nothing can reach -- from the seam's walk, so the walk
+it makes before every mix stays the size of what the program holds.
 
 ### The hosted MPEG provider
 
@@ -245,9 +295,12 @@ throws, and the open fails with a message `ASI_error` returns.
 - **`SetCooperativeLevel` is recorded and not enforced.** Windows refuses `SetFormat` on the
   primary below `DSSCL_PRIORITY`; this layer does not. The seam's own comment notes it has no
   reporter to say so through -- there is no `divergence` hook in this layer.
-- **`IDirectSoundBuffer8`'s `SetFX`, `AcquireResources`, `GetObjectInPath`, and
-  `IDirectSound8::VerifyCertification`** are declared and unimplemented (`E_NOTIMPL` from the
-  right slot).
+- **No effects.** `IDirectSoundBuffer8::SetFX` on a buffer created with `DSBCAPS_CTRLFX` answers
+  `E_NOTIMPL` for any chain it would have to host; `AcquireResources` and `GetObjectInPath` are
+  declared and unimplemented (`E_NOTIMPL` from the right slot).
+- **A retune on the shared backend reaches back a little.** The slot has one `RATE` and no marker
+  in its bytes, so a new frequency also applies to what the reader has not yet consumed, a turn's
+  worth at most; the engine backend applies it exactly from the next bytes.
 - **Resampling is linear.** Cheap and click-free at block boundaries by construction; not the last
   word on quality.
 - **One buffer's backlog past 200 ms is dropped**, not delayed: the program's current sound is the
@@ -280,13 +333,13 @@ All under `npm test` from `modules/core` (`node --test "src/**/*.test.js"`).
 
 | file | kind | what it pins |
 |---|---|---|
-| `src/layers/audio/module.test.js` | Wiring | A sound a program plays actually reaches the ring (or the slot, with shared memory) with its own bytes at its own gain; nothing is read out with no sink; a stall costs time rather than unread sound; a program waiting on a position is woken even with nothing listening; `mp3: false` withholds the provider; a shared-memory backlog past 200 ms also counts `behind`; a released DirectSound buffer frees its slot, 40 over a session, none falling back. |
-| `src/layers/audio/output/mixer.test.js` | Unit | The engine backend, unchanged: format conversion, resampling across seams, the ledger's exact byte credit, pausing, `played()` monotonic, shortfall counting. The shared backend: `write` puts the guest's own bytes into the slot and calls no conversion, in output frames agreeing with the engine backend's own unit; `pump()` allocates no `Float32Array`; `playedBytes()` credits a probe once `READ` passes it and restarts at zero after `reset()`; a backlog sets `DROP_TO` without letting a write overrun what the reader has not read; a closed slot is freed by the reader and reused; a machine attaching to an inherited table sweeps every slot the previous one left open. |
+| `src/layers/audio/module.test.js` | Wiring | A sound a program plays actually reaches the ring (or the slot, with shared memory) with its own bytes at its own gain and pan; a buffer retuned while it plays is heard at the rate its cursor moves, and its slot is told the new rate; DirectSound's ordinals are offered; nothing is read out with no sink; a stall costs time rather than unread sound; a program waiting on a position is woken even with nothing listening; `mp3: false` withholds the provider; a shared-memory backlog past 200 ms also counts `behind`; a released DirectSound buffer frees its slot, 40 over a session, none falling back; with nothing listening, released buffers still leave the walk. |
+| `src/layers/audio/output/mixer.test.js` | Unit | The engine backend: format conversion, resampling across seams, the ledger's exact byte credit, pausing, `played()` monotonic, shortfall counting, a balance per side on top of the gain, a retune taking effect from the next write. The shared backend: `write` puts the guest's own bytes into the slot and calls no conversion; a retune rewrites `RATE` and the capacity; in output frames agreeing with the engine backend's own unit; `pump()` allocates no `Float32Array`; `playedBytes()` credits a probe once `READ` passes it and restarts at zero after `reset()`; a backlog sets `DROP_TO` without letting a write overrun what the reader has not read; a closed slot is freed by the reader and reused; a machine attaching to an inherited table sweeps every slot the previous one left open. |
 | `src/layers/audio/output/mix.test.js` | Unit | `resampleInto` over a byte ring matches `convert()` sample for sample across three buffers; a `GENERATION` change resets the seam; a `DROP_TO` ahead of `READ` is honoured; gain and pause; `WRITTEN`/`READ` crossing 2^31 bytes does not stall the ring. |
-| `src/layers/audio/output/worklet.test.js` | Unit, over a loaded copy of the real `worklet.js` | The `WORKLET-SHARED` region is textually identical to `mix.js`'s, `export` aside; two tracks at different gains come out summed; a silent block counts `STARVED_BLOCKS`/`STARVED_FRAMES`; `MIXED_FRAMES` and `READ` advance by exactly what was mixed. |
+| `src/layers/audio/output/worklet.test.js` | Unit, over a loaded copy of the real `worklet.js` | The `WORKLET-SHARED` region is textually identical to `mix.js`'s, `export` aside; two tracks at different gains come out summed; a balance reaches the audio thread one side at a time; a silent block counts `STARVED_BLOCKS`/`STARVED_FRAMES`; `MIXED_FRAMES` and `READ` advance by exactly what was mixed. |
 | `src/layers/audio/output/ring.test.js` | Unit | Fill and room, short writes, silence on a short read, starvation counters, `clear`. |
-| `src/layers/audio/dsound/buffers.test.js` | Contract | Cursor motion against the clock, write lead and stopped margin, wrapped locks, volume/pan bounds, notifications, duplicates, `drainPlayed` ranges. |
-| `src/layers/audio/dsound/seam.test.js` | Contract, over a flat guest memory | Every slot's argument count, structure layouts (`WAVEFORMATEX`, `DSBUFFERDESC` in both sizes, `DSCAPS` at 96 bytes), caps flags, refusals, enumeration through a guest callback, identity through the publisher. |
+| `src/layers/audio/dsound/buffers.test.js` | Contract | Cursor motion against the clock, write lead and stopped margin, wrapped locks, volume/pan bounds and the pan law, notifications (the start position passed first, a one-shot's last frame as it ends, `DSBPN_OFFSETSTOP` on a stop and never on a lap), duplicates, `drainPlayed` ranges. |
+| `src/layers/audio/dsound/seam.test.js` | Contract, over a flat guest memory | Every slot's argument count, `IDirectSound8`'s twelfth slot, structure layouts (`WAVEFORMATEX`, `DSBUFFERDESC` in both sizes and no other, `DSCAPS` at 96 bytes), device and buffer caps flags, a size rounded to whole frames, controls refused without their flags, `SetFX`, which interfaces each object answers, one object per create with its own count and one primary that outlives its last release while its device lives and is pruned after, a primary described with a format refused, DirectSound 8's rules for 3D buffers, `Stop` setting `DSBPN_OFFSETSTOP`, refusals, enumeration through a guest callback, `GetDeviceID` resolving the playback defaults and the enumerated device to one GUID and refusing the capture defaults, identity through the publisher, the ordinals through the real synthesiser. |
 | `src/layers/audio/asi/provider.test.js` | Contract, with a substitute decoder | Table registration through `RIB`, chunked continuing fetch, lead decoding, immediate answers, seek forward and back, preferences, a frameless stream, a failing decoder, a platform with none. |
 | `src/layers/audio/asi/mp3.test.js` | Unit | Frame-header parsing for each MPEG version, ID3 skipping, frame scanning, `interleave16` over planar and interleaved `AudioData`. |
 

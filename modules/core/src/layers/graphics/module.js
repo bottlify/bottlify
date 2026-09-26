@@ -15,7 +15,8 @@ import { createPresenter, expandRow } from './webgpu/internal/presenter.js';
 import { createGdiDrawing } from './gdi/context.js';
 import { createFontEngine } from './gdi/fonts.js';
 import {
-    createSurface, dibPitch, intersectRect, isEmptyRect, surfaceForDibSection, viewOf,
+    createSurface, dibPitch, intersectRect, isEmptyRect, surfaceForDdb, surfaceForDibSection,
+    viewOf,
 } from './gdi/surface.js';
 import { textExtent } from './gdi/text.js';
 
@@ -154,6 +155,13 @@ export function uncoveredRegion(windows, owner, exclusive, screen){
  */
 let current = null;
 
+/**
+ * The owner GDI's device ramp is set under. One for every machine, because
+ * the ramp is the display's rather than a process's: the next process on the
+ * same canvas replaces it rather than stacking another on top.
+ */
+const DISPLAY_RAMP = 'display';
+
 export const graphicsModule = {
     name: 'graphics',
     version: '0.1.0',
@@ -179,7 +187,8 @@ export const graphicsModule = {
          * the run's: a given one is attached, never disposed here.
          *
          * @type {{ backend: any, factories: any, created: string[], seam: any,
-         *     presenter: any, presenterGiven: boolean, disposed: boolean }}
+         *     presenter: any, presenterGiven: boolean, shown: any, disposed: boolean,
+         *     gammaOwners: Set<any> }}
          */
         const state = {
             backend: null,
@@ -188,7 +197,32 @@ export const graphicsModule = {
             seam: null,
             presenter: null,
             presenterGiven: false,
+            shown: null,
             disposed: false,
+            gammaOwners: new Set(),
+        };
+
+        /**
+         * The display's gamma ramp, which is the run presenter's: whichever
+         * ramp was set last is shown through. The owners this machine set one
+         * for are kept, so that its devices' ramps go with it -- a presenter
+         * the caller handed in outlives the process.
+         *
+         * @type {import('./webgpu/internal/presenter.js').DisplayGamma}
+         */
+        const displayGamma = {
+            set(owner, ramp){
+                if (ramp)
+                {
+                    state.gammaOwners.add(owner);
+                }
+                else
+                {
+                    state.gammaOwners.delete(owner);
+                }
+                state.presenter?.setGammaRamp?.(owner, ramp);
+            },
+            applies: ()=>state.presenter?.appliesGamma?.() === true,
         };
 
         /**
@@ -211,6 +245,43 @@ export const graphicsModule = {
         /** A factory's own override still cannot ask for BC on a device that cannot sample it. */
         const gatedCompressedTextures = (/** @type {any} */ caps)=>
             (caps?.compressedTextures ?? compressedTextures) && hasBcFeature;
+
+        /**
+         * The GPU going away. WebGPU settles `device.lost` once, for good; the
+         * Direct3D 8 and 9 devices made on it are then lost the way a lost
+         * display loses them, and one made afterwards starts lost. Nothing
+         * here recovers: a Reset still answers D3DERR_DEVICELOST, because
+         * there is no second GPU device to rebuild on. A device the host
+         * destroyed is the run ending, not the GPU failing under the program.
+         */
+        const loss = { happened: false, /** @type {Set<() => void>} */ watchers: new Set() };
+        device?.device?.lost?.then?.((/** @type {{ reason?: string }} */ info)=>{
+            if (info?.reason === 'destroyed')
+            {
+                return;
+            }
+            loss.happened = true;
+            for (const watcher of [...loss.watchers])
+            {
+                watcher();
+            }
+            loss.watchers.clear();
+        });
+        /**
+         * @param {() => void} watcher
+         * @returns {() => void} how to stop watching
+         */
+        const onDeviceLost = watcher=>{
+            if (loss.happened)
+            {
+                watcher();
+                return ()=>{};
+            }
+            loss.watchers.add(watcher);
+            return ()=>{
+                loss.watchers.delete(watcher);
+            };
+        };
 
         /** Everything an API needs from outside itself, in one place. */
         const services = {
@@ -247,6 +318,11 @@ export const graphicsModule = {
             /** @returns {any} */
             ddraw: (/** @type {any} */ options)=>createDirectDraw({
                 ...services,
+                // A surface's pixels are an address the program writes through
+                // and the presenter reads back, so they come out of the guest's
+                // heap -- not the byte arrays the services hand the others.
+                allocate: config?.allocate,
+                free: config?.free,
                 screenWidth: services.screen.width,
                 screenHeight: services.screen.height,
                 ...options,
@@ -295,6 +371,9 @@ export const graphicsModule = {
                 probeTexture: device?.probeTexture,
                 fog: device?.fog,
                 mips: device?.mips,
+                onDeviceLost,
+                // Where a full-screen device's gamma ramp is shown.
+                gamma: displayGamma,
             }),
             // The same wiring, except that the backend is asked for only when
             // this build has a GPU: a Direct3D 9 object made in a headless
@@ -329,6 +408,8 @@ export const graphicsModule = {
                 probeTexture: device?.probeTexture,
                 fog: device?.fog,
                 mips: device?.mips,
+                onDeviceLost,
+                gamma: displayGamma,
             }),
             // OpenGL asks for a device only when there is one, so it is the
             // one API here that a headless build can run to a finished frame.
@@ -351,7 +432,7 @@ export const graphicsModule = {
                 // and spare the processor decoding every S3TC texture in the
                 // guest's own code.
                 compressedTextures,
-                presenter: ()=>state.presenter,
+                presenter: ()=>state.shown,
                 // The same per-draw account the Direct3D 8 device takes, on
                 // the device handle for the same reason: only the assembling
                 // caller decides it wants one.
@@ -374,7 +455,7 @@ export const graphicsModule = {
             // Direct3D 10's seam makes the device itself from what a program
             // passes; this hands it the GPU, reached only when one is made.
             /** @returns {import('./d3d10/device.js').DeviceOptions} */
-            d3d10: ()=>({
+            d3d10: (/** @type {any} */ caps)=>({
                 backend: device ? api.backend() : undefined,
                 createSampler: device
                     ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
@@ -383,6 +464,14 @@ export const graphicsModule = {
                     ? (/** @type {any} */ descriptor)=>device.device.createTexture(descriptor)
                     : undefined,
                 divergence: config?.divergence,
+                // The configuration-and-adapter answer the other APIs get.
+                compressedTextures: gatedCompressedTextures(caps),
+                // A timestamp query is read against the program's own timers,
+                // which run on the guest's clock, as the raster does.
+                now: config?.guestNow,
+                // Only a device made with the feature can leave depth
+                // unclipped, which is what DepthClipEnable = FALSE asks.
+                depthClipControl: device?.device?.features?.has('depth-clip-control') === true,
             }),
             /** @returns {any} */
             vulkan: (/** @type {any} */ options)=>createVulkan({
@@ -514,7 +603,9 @@ export const graphicsModule = {
         });
         // The backend is asked for on the first present rather than now, so a
         // build that never shows one of these surfaces never builds a GPU.
-        state.presenter.attach({
+        // Everything this machine presents or claims goes through what the
+        // attachment answers, so none of it outlives the machine.
+        state.shown = state.presenter.attach({
             backend: ()=>api.backend(),
             readMemory: services.readMemory,
         });
@@ -597,19 +688,19 @@ export const graphicsModule = {
             // place on it. The ceiling on this: such a primary is shown as
             // it is, and anything over it is not seen.
             const wholeScreen = { left: 0, top: 0, right: screen.width, bottom: screen.height };
-            const region = state.presenter.isClaimed(surface.buffer)
+            const region = state.shown.isClaimed(surface.buffer)
                 || surface.width !== screen.width || surface.height !== screen.height
                 ? null
                 : uncoveredRegion(win32.windows?.() ?? [], window, exclusive, wholeScreen);
             if (!region || (region.length === 1 && sameRect(region[0], wholeScreen)))
             {
-                state.presenter.present(surface);
+                state.shown.present(surface);
                 return;
             }
             const target = desktop();
             if (!target)
             {
-                state.presenter.present(surface);
+                state.shown.present(surface);
                 return;
             }
             const bytesPerPixel = surface.bitCount >>> 3;
@@ -637,7 +728,7 @@ export const graphicsModule = {
                     }
                 }
             }
-            state.presenter.present(target);
+            state.shown.present(target);
         };
 
         /**
@@ -678,6 +769,11 @@ export const graphicsModule = {
             exportAddress: config?.exportAddress,
             // Where a program's cursor goes, when the host shows one.
             cursor: config?.cursor,
+            // The clock the display's raster -- the vertical blank and the
+            // scan line -- runs on: the guest's, from the assembling caller
+            // that owns it, because a program that spins on the blank times
+            // the spin with its own timers. The host's without one.
+            now: config?.guestNow,
             // Told the resolution a device is created at, so the reported
             // screen becomes that resolution.
             resolution: config?.resolution,
@@ -689,6 +785,9 @@ export const graphicsModule = {
             // inspection -- which then gets tables that refuse rather than
             // tables that publish into nowhere.
             publishInterface: config?.publishInterface ?? (()=>0),
+            // And the way to give back an interface with no Release -- a
+            // reflection's constant buffer -- when what handed it out ends.
+            unpublishInterface: config?.unpublishInterface,
             screen: ()=>services.screen,
             // What makes GetDC on a surface mean anything: gdi32 hands back a
             // context whose bitmap addresses the surface's own bytes, so a
@@ -706,6 +805,12 @@ export const graphicsModule = {
             },
 
             present: presentPrimary,
+            // A DirectDraw primary's gamma ramp is the display's.
+            gamma: displayGamma,
+            // What exclusive mode is lost on. Asked on each TestCooperativeLevel
+            // rather than now: win32 answers about windows made later.
+            deactivated: ()=>win32.applicationDeactivated?.() === true,
+            deactivations: ()=>win32.applicationDeactivations?.() ?? 0,
 
             // What a Direct3D 7 device draws with. Reached when a program
             // first asks its DirectDraw object for Direct3D, not now, so a
@@ -718,10 +823,13 @@ export const graphicsModule = {
             render: ()=>({
                 backend: device ? api.backend() : undefined,
                 readMemory: services.readMemory,
+                // A lock, a device context or a blit of a render target brings
+                // what the GPU drew back into the guest's bytes first.
+                writeMemory: services.writeMemory,
                 createSampler: device
                     ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
                     : undefined,
-                presenter: state.presenter,
+                presenter: state.shown,
             }),
 
             // Enumeration is the one thing here that runs guest code: the
@@ -799,7 +907,10 @@ export const graphicsModule = {
              *     A window context names the screen rectangle it may
              *     draw in, in screen coordinates; absent, the whole screen.
              * @param {{ width: number, height: number, bitCount: number, bits?: number,
-             *     topDown?: boolean, palette?: number[], format?: string }} bitmap
+             *     topDown?: boolean, palette?: number[], format?: string,
+             *     pixels?: Uint8Array }} bitmap
+             *     A device-dependent bitmap carries its own `pixels`; a DIB
+             *     section's `bits` are a guest address.
              */
             surfaceFor: (dc, bitmap)=>{
                 if (dc.kind !== 'memory')
@@ -812,6 +923,10 @@ export const graphicsModule = {
                     return viewOf(screen.surface, dc.bounds ?? {
                         left: 0, top: 0, right: screen.width, bottom: screen.height,
                     });
+                }
+                if (bitmap.pixels)
+                {
+                    return surfaceForDdb(bitmap);
                 }
                 const bits = bitmap.bits ?? 0;
                 if (bits === 0)
@@ -836,9 +951,25 @@ export const graphicsModule = {
                 const screen = desktop();
                 if (screen)
                 {
-                    state.presenter.present({ ...screen, label: 'desktop' });
+                    state.shown.present({ ...screen, label: 'desktop' });
                 }
             },
+            /**
+             * The display's ramp, as SetDeviceGammaRamp sets it: three
+             * channels of 256 sixteen-bit entries; null takes it back. A
+             * full-screen device's or a DirectDraw primary's ramp set after
+             * it is shown instead, until that one is taken back.
+             *
+             * @param {import('./webgpu/internal/presenter.js').GammaRamp | null} ramp
+             */
+            setDisplayGamma: ramp=>displayGamma.set(DISPLAY_RAMP, ramp),
+            /**
+             * The ramp the display shows through, whoever set it, or null
+             * when none was: GetDeviceGammaRamp answers the identity then.
+             */
+            displayGamma: ()=>state.presenter?.gammaRamp?.() ?? null,
+            /** Whether a ramp set reaches the picture at all. */
+            appliesGamma: ()=>displayGamma.applies(),
         });
 
         current = state;
@@ -928,11 +1059,23 @@ export const graphicsModule = {
             {
                 instance.backend.dispose();
             }
+            // A process's devices go with it, and so do their ramps; the
+            // display's own is the display's, and the next process sees it.
+            for (const owner of instance.gammaOwners)
+            {
+                if (owner !== DISPLAY_RAMP)
+                {
+                    instance.presenter?.setGammaRamp?.(owner, null);
+                }
+            }
+            instance.gammaOwners.clear();
             // The presenter belongs to the run, not to this machine: what
             // replaces this process draws into the same canvas and the same
-            // texture, so it is left exactly as it is. Only a presenter this
-            // layer made itself -- a build assembled without one -- is
-            // disposed here.
+            // texture, so it is left as it is but for this machine's
+            // attachment, which goes with it. Only a presenter this layer
+            // made itself -- a build assembled without one -- is disposed
+            // here.
+            instance.shown?.detach();
             if (instance.presenter && !instance.presenterGiven)
             {
                 instance.presenter.dispose?.();

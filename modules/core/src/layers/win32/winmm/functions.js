@@ -35,17 +35,283 @@
  */
 
 import { parseWave } from './wave.js';
+import { MAX_PERIOD } from './timers.js';
 
 /** Success, and the errors a caller distinguishes. */
 const MMSYSERR_NOERROR = 0;
 const MMSYSERR_BADDEVICEID = 2;
 const MMSYSERR_INVALHANDLE = 5;
+const MMSYSERR_BADERRNUM = 9;
 const MMSYSERR_INVALPARAM = 11;
 const WAVERR_STILLPLAYING = 33;
 const WAVERR_UNPREPARED = 34;
+const TIMERR_NOCANDO = 97;
+
+/**
+ * What the error-text calls say for the codes every device family shares. The
+ * wording is this build's own; a program shows it to a person and compares
+ * nothing against it.
+ */
+const SHARED_ERROR_TEXT = new Map([
+    [0, 'The specified command was carried out.'],
+    [1, 'An unspecified error occurred.'],
+    [2, 'The device identifier is out of range for this system.'],
+    [3, 'The driver could not be enabled.'],
+    [4, 'The device is already in use.'],
+    [5, 'The device handle is not valid.'],
+    [6, 'No driver is installed for this device.'],
+    [7, 'There is not enough memory for this operation.'],
+    [8, 'The driver does not support this function.'],
+    [9, 'The error number is not one this system knows.'],
+    [10, 'A flag passed to the function is not valid.'],
+    [11, 'A parameter passed to the function is not valid.'],
+    [12, 'The handle is in use by another thread.'],
+    [13, 'The alias is not one this system knows.'],
+    [14, 'The registry database is damaged.'],
+    [15, 'The registry key was not found.'],
+    [16, 'The registry could not be read.'],
+    [17, 'The registry could not be written.'],
+    [18, 'The registry entry could not be deleted.'],
+    [19, 'The registry value was not found.'],
+    [20, 'The driver does not call back.'],
+    [21, 'There is more data to return.'],
+]);
+
+/** The wave calls' codes: the shared ones and WAVERR_BASE's. */
+const WAVE_ERROR_TEXT = new Map([
+    ...SHARED_ERROR_TEXT,
+    [32, 'The device does not support this wave format.'],
+    [33, 'The device is still playing its buffers.'],
+    [34, 'The wave header has not been prepared.'],
+    [35, 'The device is synchronous and was not opened to allow that.'],
+]);
+
+/** The MIDI calls' codes: the shared ones and MIDIERR_BASE's. */
+const MIDI_ERROR_TEXT = new Map([
+    ...SHARED_ERROR_TEXT,
+    [64, 'The MIDI header has not been prepared.'],
+    [65, 'The MIDI device is still playing its buffers.'],
+    [66, 'There is no MIDI map to use.'],
+    [67, 'The MIDI port is still sending data to the device.'],
+    [68, 'The MIDI device the setup names is not present.'],
+    [69, 'The MIDI setup is not valid.'],
+    [70, 'The operation is not possible in the mode the device was opened in.'],
+    [71, 'The MIDI message is not to be passed on.'],
+]);
 
 /** MCI's error space begins above the shared one. */
 const MCIERR_INVALID_DEVICE_ID = 257;
+const MCIERR_UNRECOGNIZED_COMMAND = 261;
+const MCIERR_INVALID_DEVICE_NAME = 263;
+const MCIERR_CANNOT_LOAD_DRIVER = 266;
+const MCIERR_MISSING_COMMAND_STRING = 267;
+const MCIERR_CANNOT_USE_ALL = 279;
+const MCIERR_EXTENSION_NOT_FOUND = 281;
+const MCIERR_OUTOFRANGE = 282;
+const MCIERR_MISSING_DEVICE_NAME = 292;
+const MCIERR_NULL_PARAMETER_BLOCK = 297;
+
+/** The id `all` names: every open device at once. */
+const MCI_ALL_DEVICE_ID = 0xffffffff;
+
+/**
+ * mciGetDeviceID's answer for a name. No device is ever open here, so only
+ * `all` names one.
+ *
+ * @param {string} name
+ */
+const deviceIdOf = name=>(name.trim().toLowerCase() === 'all' ? MCI_ALL_DEVICE_ID : 0);
+
+/**
+ * The MCI device types Windows registers a driver for. Naming one opens that
+ * driver, and there being no hardware behind it here is what makes it fail
+ * to load -- the answer a machine with no CD drive gives for `cdaudio`.
+ */
+const MCI_DEVICE_TYPES = new Set([
+    'animation', 'avivideo', 'cdaudio', 'dat', 'digitalvideo', 'mpegvideo', 'other',
+    'overlay', 'scanner', 'sequencer', 'vcr', 'videodisc', 'waveaudio',
+]);
+
+/** The file extensions a registered MCI driver would open by itself. */
+const MCI_EXTENSIONS = new Set([
+    'aif', 'aifc', 'aiff', 'asf', 'au', 'avi', 'cda', 'm1v', 'mid', 'midi', 'mp2', 'mp3',
+    'mpa', 'mpe', 'mpeg', 'mpg', 'rmi', 'snd', 'wav', 'wma', 'wmv',
+]);
+
+/** The command verbs MCI's parser knows, for any device. */
+const MCI_COMMANDS = new Set([
+    'break', 'capability', 'capture', 'close', 'configure', 'copy', 'cue', 'cut', 'delete',
+    'escape', 'freeze', 'info', 'list', 'load', 'monitor', 'open', 'paste', 'pause', 'play',
+    'put', 'quality', 'realize', 'record', 'reserve', 'restore', 'resume', 'save', 'seek',
+    'set', 'setaudio', 'setvideo', 'signal', 'sound', 'spin', 'status', 'step', 'stop',
+    'sysinfo', 'undo', 'unfreeze', 'update', 'where', 'window',
+]);
+
+/** MCI_OPEN, its flags, and the device-type ids MCI_OPEN_TYPE_ID names. */
+const MCI_OPEN = 0x0803;
+const MCI_OPEN_ELEMENT = 0x0200;
+const MCI_OPEN_TYPE_ID = 0x1000;
+const MCI_OPEN_TYPE = 0x2000;
+const MCI_DEVTYPE_FIRST = 0x0201;
+const MCI_DEVTYPE_LAST = 0x020b;
+
+/**
+ * What mciGetErrorString says for each MCI error, MCIERR_BASE (256) up, in
+ * this build's own wording; a code with no text here is one MCI does not
+ * know, and a driver's own codes, from MCIERR_CUSTOM_DRIVER_BASE, are the
+ * driver's to explain.
+ */
+const MCI_ERROR_TEXT = new Map([
+    [257, 'The device identifier is not one an open device has.'],
+    [259, 'The command parameter is not one this command takes.'],
+    [261, 'The command is not one MCI knows.'],
+    [262, 'The device reported a hardware problem.'],
+    [263, 'The device name is not a known device or alias.'],
+    [264, 'There is not enough memory for this command.'],
+    [265, 'The device name is already the alias of an open device.'],
+    [266, 'The device driver could not be loaded.'],
+    [267, 'No command was given.'],
+    [268, 'The answer is longer than the buffer given for it.'],
+    [269, 'The command needs a string that was not given.'],
+    [270, 'An integer in the command is not valid.'],
+    [271, 'The parser met an internal error.'],
+    [272, 'The device driver met an internal error.'],
+    [273, 'The command needs a parameter that was not given.'],
+    [274, 'The device does not support this command.'],
+    [275, 'The file was not found.'],
+    [276, 'The device is not ready.'],
+    [277, 'MCI met an internal error.'],
+    [278, 'The device driver reported an error.'],
+    [279, 'This command cannot be given to all devices at once.'],
+    [280, 'Errors occurred in more than one device.'],
+    [281, 'No device type is registered for the file\'s extension.'],
+    [282, 'The parameter is out of range for this command.'],
+    [284, 'The flags given cannot be used together.'],
+    [286, 'The file was not saved.'],
+    [287, 'The device type must be given.'],
+    [288, 'The device is in use; wait and try again.'],
+    [289, 'The alias is already in use by this application.'],
+    [290, 'A constant in the command is not valid for it.'],
+    [291, 'The device is already in use and must be opened shareable.'],
+    [292, 'The command needs a device name or alias.'],
+    [293, 'The time format is not valid.'],
+    [294, 'A quotation mark in the command is not closed.'],
+    [295, 'A flag is given more than once.'],
+    [296, 'The file is not in a format the device can use.'],
+    [297, 'The command was given a null parameter block.'],
+    [298, 'The resource was not named.'],
+    [299, 'A new file must be given an alias.'],
+    [300, 'A device opened automatically cannot notify.'],
+    [301, 'The device does not take a file name.'],
+    [302, 'The command is not applicable to this device.'],
+    [303, 'A device opened automatically cannot take this command.'],
+    [304, 'The command needs a file name.'],
+    [305, 'There are characters after the end of the command.'],
+    [306, 'The device is not installed.'],
+    [307, 'The current directory could not be read.'],
+    [308, 'The current directory could not be set.'],
+    [309, 'The current drive could not be set.'],
+    [310, 'The device or driver name is too long.'],
+    [311, 'The device or driver name is too long.'],
+    [312, 'The command needs an integer.'],
+    [320, 'Every wave output device is in use.'],
+    [321, 'The wave output device set is in use.'],
+    [322, 'Every wave input device is in use.'],
+    [323, 'The wave input device set is in use.'],
+    [324, 'No wave output device can play the file.'],
+    [325, 'No wave input device can record.'],
+    [326, 'No wave output device can play the file\'s format.'],
+    [327, 'The wave output device set cannot play the file\'s format.'],
+    [328, 'No wave input device can record the format.'],
+    [329, 'The wave input device set cannot record the format.'],
+    [336, 'The file\'s time division does not suit the sequencer.'],
+    [337, 'The MIDI port is in use.'],
+    [338, 'The MIDI port does not exist.'],
+    [339, 'The MIDI map names a device that is not there.'],
+    [340, 'The MIDI port reported an error.'],
+    [341, 'The sequencer could not get a timer.'],
+    [342, 'No MIDI port is set.'],
+    [343, 'There is no MIDI device to play on.'],
+    [346, 'There is no window to show the display in.'],
+    [347, 'The window could not be made.'],
+    [348, 'The file could not be read.'],
+    [349, 'The file could not be written.'],
+    [350, 'The device identity could not be established.'],
+]);
+
+/**
+ * What opening an MCI device or file answers on a machine that has none: a
+ * type a driver is registered for, or a file of an extension one opens, fails
+ * to load its driver; anything else names no device at all. A `type!element`
+ * name is its type.
+ *
+ * @param {string} name
+ */
+const openFailure = name=>{
+    const lower = name.toLowerCase();
+    const type = lower.includes('!') ? lower.slice(0, lower.indexOf('!')) : lower;
+    if (MCI_DEVICE_TYPES.has(type))
+    {
+        return MCIERR_CANNOT_LOAD_DRIVER;
+    }
+    const dot = lower.lastIndexOf('.');
+    if (dot > Math.max(lower.lastIndexOf('\\'), lower.lastIndexOf('/')))
+    {
+        return MCI_EXTENSIONS.has(lower.slice(dot + 1))
+            ? MCIERR_CANNOT_LOAD_DRIVER : MCIERR_EXTENSION_NOT_FOUND;
+    }
+    return MCIERR_INVALID_DEVICE_NAME;
+};
+
+/**
+ * mciSendString's answer and the text it returns. Nothing is ever open here,
+ * so every command that needs a device opens one first, as the string
+ * interface does for a device named by type or file -- and that open is where
+ * it fails. Closing everything and counting devices are the two things that
+ * succeed.
+ *
+ * @param {string} command
+ * @returns {{ error: number, text: string }}
+ */
+const mciString = command=>{
+    const words = (command.trim().match(/"[^"]*"|\S+/g) ?? [])
+        .map(word=>word.replace(/^"(.*)"$/, '$1'));
+    if (words.length === 0)
+    {
+        return { error: MCIERR_MISSING_COMMAND_STRING, text: '' };
+    }
+    const verb = words[0].toLowerCase();
+    const device = words[1];
+    const rest = words.slice(2).map(word=>word.toLowerCase());
+    if (!MCI_COMMANDS.has(verb))
+    {
+        return { error: MCIERR_UNRECOGNIZED_COMMAND, text: '' };
+    }
+    if (device === undefined)
+    {
+        return { error: MCIERR_MISSING_DEVICE_NAME, text: '' };
+    }
+    const all = device.toLowerCase() === 'all';
+    if (verb === 'sysinfo')
+    {
+        return rest.includes('quantity')
+            ? { error: 0, text: '0' }
+            : { error: MCIERR_OUTOFRANGE, text: '' };
+    }
+    if (verb === 'close')
+    {
+        return { error: all ? 0 : MCIERR_INVALID_DEVICE_NAME, text: '' };
+    }
+    if (all)
+    {
+        return { error: MCIERR_CANNOT_USE_ALL, text: '' };
+    }
+    const type = verb === 'open' ? rest.indexOf('type') : -1;
+    return {
+        error: openFailure(type >= 0 && words[type + 3] !== undefined ? words[type + 3] : device),
+        text: '',
+    };
+};
 
 /** joyGetDevCaps/joyGetPosEx on an id no device answers to. */
 const JOYERR_PARMS = 165;
@@ -106,8 +372,12 @@ const WAVEOUTCAPS = Object.freeze({
 /** The formats claimed: 44.1 kHz and 22.05 kHz, mono and stereo, 8 and 16 bit. */
 const WAVE_FORMATS = 0x00000f00 | 0x000000f0;
 
-/** WAVECAPS_VOLUME | WAVECAPS_LRVOLUME | WAVECAPS_SAMPLEACCURATE. */
-const WAVE_SUPPORT = 0x0001 | 0x0008 | 0x0002;
+/**
+ * WAVECAPS_VOLUME | WAVECAPS_SAMPLEACCURATE. One level for both channels, not
+ * WAVECAPS_LRVOLUME: a track has a single gain, and a device without separate
+ * left and right control is documented to take the low word of a volume.
+ */
+const WAVE_SUPPORT = 0x0001 | 0x0002;
 
 /** How the caller asked to be told. The low word of the flags is unrelated. */
 const CALLBACK_TYPEMASK = 0x00070000;
@@ -193,6 +463,16 @@ const dword = value=>new Uint8Array([
 ]);
 
 /**
+ * Which ordinal is which export, for a program that links WINMM.dll by number.
+ * Windows exports PlaySoundA a second time as ordinal 2, with no name.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+export const WINMM_ORDINALS = Object.freeze({
+    2: 'PlaySoundA',
+});
+
+/**
  * @param {WinmmHost} host
  */
 export function createWinmmFunctions(host){
@@ -219,7 +499,212 @@ export function createWinmmFunctions(host){
 
     /** @type {Map<number, WaveOut>} */
     const devices = new Map();
-    let nextHandle = 0x1000;
+    /** Handles start here, above every device id: one below it is an id. */
+    const FIRST_HANDLE = 0x1000;
+    let nextHandle = FIRST_HANDLE;
+
+    /**
+     * The device's volume as waveOutSetVolume last set it. There is one
+     * device, so one level, heard through every track it plays.
+     */
+    let volume = 0xffffffff;
+
+    /** The gain a track plays at for the volume's one level, the low word. */
+    const gain = ()=>(volume & 0xffff) / 0xffff;
+
+    /**
+     * Which of MMSYSERR_NOERROR, MMSYSERR_BADDEVICEID and MMSYSERR_INVALHANDLE
+     * an hwo names: the volume calls take an open device's handle or a device
+     * id, WAVE_MAPPER included.
+     *
+     * @param {number} hwo
+     */
+    const volumeTarget = hwo=>{
+        const value = hwo >>> 0;
+        if (devices.has(value) || value === 0 || value === 0xffffffff)
+        {
+            return MMSYSERR_NOERROR;
+        }
+        return value < FIRST_HANDLE ? MMSYSERR_BADDEVICEID : MMSYSERR_INVALHANDLE;
+    };
+
+    /**
+     * An ANSI string out of guest memory, read a piece at a time so a short
+     * one near the end of mapped memory is not read past.
+     *
+     * @param {number} address @param {number} limit
+     */
+    const ansiAt = (address, limit)=>{
+        let text = '';
+        for (let at = address >>> 0; text.length < limit; at += 64)
+        {
+            const piece = host.readMemory(at, 64);
+            const end = piece.indexOf(0);
+            text += String.fromCharCode(...piece.subarray(0, end < 0 ? piece.length : end));
+            if (end >= 0 || piece.length < 64)
+            {
+                break;
+            }
+        }
+        return text.slice(0, limit);
+    };
+
+    /**
+     * A UTF-16 string out of guest memory, read the same way.
+     *
+     * @param {number} address @param {number} limit
+     */
+    const wideAt = (address, limit)=>{
+        let text = '';
+        for (let at = address >>> 0; text.length < limit; at += 64)
+        {
+            const piece = host.readMemory(at, 64);
+            for (let index = 0; index + 1 < piece.length; index += 2)
+            {
+                const unit = piece[index] | piece[index + 1] << 8;
+                if (unit === 0)
+                {
+                    return text.slice(0, limit);
+                }
+                text += String.fromCharCode(unit);
+            }
+            if (piece.length < 64)
+            {
+                break;
+            }
+        }
+        return text.slice(0, limit);
+    };
+
+    /**
+     * A string into a caller's buffer of `room` characters, cut to fit with
+     * its terminator; nothing at all when there is no room or no buffer.
+     *
+     * @param {number} address @param {number} room @param {string} text
+     * @param {boolean} wide
+     */
+    const writeText = (address, room, text, wide)=>{
+        if ((address >>> 0) === 0 || (room >>> 0) === 0)
+        {
+            return;
+        }
+        const kept = text.slice(0, (room >>> 0) - 1);
+        const bytes = new Uint8Array((kept.length + 1) * (wide ? 2 : 1));
+        for (let at = 0; at < kept.length; at++)
+        {
+            if (wide)
+            {
+                bytes[at * 2] = kept.charCodeAt(at) & 0xff;
+                bytes[at * 2 + 1] = kept.charCodeAt(at) >>> 8;
+            }
+            else
+            {
+                bytes[at] = kept.charCodeAt(at) & 0xff;
+            }
+        }
+        host.writeMemory(address >>> 0, bytes);
+    };
+
+    /**
+     * A family's GetErrorText, for either width: the codes it knows are the
+     * shared ones and its own.
+     *
+     * @param {boolean} wide @param {Map<number, string>} texts
+     */
+    const errorText = (wide, texts)=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([error, buffer, room])=>{
+            const text = texts.get(error >>> 0);
+            if (text === undefined)
+            {
+                return MMSYSERR_BADERRNUM;
+            }
+            if ((room >>> 0) !== 0 && (buffer >>> 0) === 0)
+            {
+                return MMSYSERR_INVALPARAM;
+            }
+            writeText(buffer, room, text, wide);
+            return MMSYSERR_NOERROR;
+        },
+    });
+
+    /**
+     * mciSendString, for either width.
+     *
+     * @param {boolean} wide
+     */
+    const sendString = wide=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([command, buffer, room])=>{
+            const answer = (command >>> 0) === 0
+                ? { error: MCIERR_MISSING_COMMAND_STRING, text: '' }
+                : mciString(wide ? wideAt(command, 1024) : ansiAt(command, 1024));
+            writeText(buffer, room, answer.text, wide);
+            return answer.error;
+        },
+    });
+
+    /**
+     * mciSendCommand, for either width: MCI_OPEN_PARMS is one layout, its
+     * strings of the call's width.
+     *
+     * @param {boolean} wide
+     */
+    const sendCommand = wide=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([, message, flags, parameters])=>{
+            if ((message >>> 0) !== MCI_OPEN)
+            {
+                return MCIERR_INVALID_DEVICE_ID;
+            }
+            if ((parameters >>> 0) === 0)
+            {
+                return MCIERR_NULL_PARAMETER_BLOCK;
+            }
+            /** @param {number} offset */
+            const field = offset=>u32(host.readMemory((parameters >>> 0) + offset, 4), 0);
+            /** @param {number} address @param {number} limit */
+            const text = (address, limit)=>(wide ? wideAt(address, limit) : ansiAt(address, limit));
+            if ((flags & MCI_OPEN_TYPE) !== 0)
+            {
+                const type = field(8);
+                if ((flags & MCI_OPEN_TYPE_ID) !== 0)
+                {
+                    const id = type & 0xffff;
+                    return id >= MCI_DEVTYPE_FIRST && id <= MCI_DEVTYPE_LAST
+                        ? MCIERR_CANNOT_LOAD_DRIVER : MCIERR_INVALID_DEVICE_NAME;
+                }
+                return openFailure(text(type, 128));
+            }
+            if ((flags & MCI_OPEN_ELEMENT) !== 0)
+            {
+                return openFailure(text(field(12), 260));
+            }
+            return MCIERR_MISSING_DEVICE_NAME;
+        },
+    });
+
+    /**
+     * mciGetErrorString, for either width.
+     *
+     * @param {boolean} wide
+     */
+    const errorString = wide=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([error, buffer, room])=>{
+            const text = MCI_ERROR_TEXT.get(error >>> 0);
+            if (text === undefined || (buffer >>> 0) === 0)
+            {
+                return 0;
+            }
+            writeText(buffer, room, text, wide);
+            return 1;
+        },
+    });
 
     /** @param {number} handle */
     const deviceOf = handle=>devices.get(handle >>> 0) ?? null;
@@ -507,6 +992,10 @@ export function createWinmmFunctions(host){
             host.divergence?.('PlaySound', 'a synchronous call does not wait for the sound');
         }
         const track = host.output?.()?.open(wave.format) ?? null;
+        if (track)
+        {
+            track.gain = gain();
+        }
         playing = {
             track,
             pcm: wave.pcm,
@@ -574,8 +1063,95 @@ export function createWinmmFunctions(host){
             },
         },
 
+        /**
+         * MMRESULT timeGetDevCaps(LPTIMECAPS ptc, UINT cbtc)
+         *
+         * The periods timeSetEvent takes, one millisecond to MAX_PERIOD: the
+         * clock has no finer grain than that, and a longer delay is refused.
+         */
+        timeGetDevCaps: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([caps, size])=>{
+                if ((caps >>> 0) === 0 || (size >>> 0) < 8)
+                {
+                    return TIMERR_NOCANDO;
+                }
+                host.writeMemory(caps >>> 0, dword(1));
+                host.writeMemory((caps >>> 0) + 4, dword(MAX_PERIOD));
+                return MMSYSERR_NOERROR;
+            },
+        },
+
         /** UINT waveOutGetNumDevs(void) */
         waveOutGetNumDevs: { argBytes: 0, handler: ()=>1 },
+
+        /**
+         * MMRESULT waveOutGetVolume(HWAVEOUT hwo, LPDWORD pdwVolume)
+         * MMRESULT waveOutSetVolume(HWAVEOUT hwo, DWORD dwVolume)
+         *
+         * One level, the low word, for the one device whichever handle or id
+         * names it, and read back in both words as a device without separate
+         * left and right control reports it.
+         */
+        waveOutGetVolume: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwo, out])=>{
+                const target = volumeTarget(hwo);
+                if (target !== MMSYSERR_NOERROR)
+                {
+                    return target;
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return MMSYSERR_INVALPARAM;
+                }
+                const level = volume & 0xffff;
+                host.writeMemory(out >>> 0, dword(level | level << 16));
+                return MMSYSERR_NOERROR;
+            },
+        },
+        waveOutSetVolume: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwo, level])=>{
+                const target = volumeTarget(hwo);
+                if (target !== MMSYSERR_NOERROR)
+                {
+                    return target;
+                }
+                volume = level >>> 0;
+                for (const device of devices.values())
+                {
+                    if (device.track)
+                    {
+                        device.track.gain = gain();
+                    }
+                }
+                if (playing?.track)
+                {
+                    playing.track.gain = gain();
+                }
+                return MMSYSERR_NOERROR;
+            },
+        },
+
+        /**
+         * MMRESULT waveOutGetErrorTextA(MMRESULT mmrError, LPSTR pszText, UINT cchText)
+         * MMRESULT waveOutGetErrorTextW(MMRESULT, LPWSTR, UINT)
+         *
+         * waveIn's pair is this pair under another name, and midiIn's is
+         * midiOut's: winmm exports each as the other.
+         */
+        waveOutGetErrorTextA: errorText(false, WAVE_ERROR_TEXT),
+        waveOutGetErrorTextW: errorText(true, WAVE_ERROR_TEXT),
+        waveInGetErrorTextA: errorText(false, WAVE_ERROR_TEXT),
+        waveInGetErrorTextW: errorText(true, WAVE_ERROR_TEXT),
+        midiOutGetErrorTextA: errorText(false, MIDI_ERROR_TEXT),
+        midiOutGetErrorTextW: errorText(true, MIDI_ERROR_TEXT),
+        midiInGetErrorTextA: errorText(false, MIDI_ERROR_TEXT),
+        midiInGetErrorTextW: errorText(true, MIDI_ERROR_TEXT),
 
         /**
          * MMRESULT waveOutGetDevCapsA(UINT_PTR uDeviceID, LPWAVEOUTCAPSA pwoc,
@@ -702,6 +1278,10 @@ export function createWinmmFunctions(host){
                     bytesWritten: 0,
                     bytesRetired: 0,
                 };
+                if (opened.track)
+                {
+                    opened.track.gain = gain();
+                }
                 devices.set(handle, opened);
                 // The handle reaches the caller before the open notice does: the
                 // callback is handed that same handle and a program may use it
@@ -872,6 +1452,21 @@ export function createWinmmFunctions(host){
         waveInReset: noDevice(4, MMSYSERR_INVALHANDLE),
         waveInClose: noDevice(4, MMSYSERR_INVALHANDLE),
 
+        /** Midi in: no port to record from. */
+        midiInGetNumDevs: { argBytes: 0, handler: ()=>0 },
+        midiInOpen: noDevice(20, MMSYSERR_BADDEVICEID),
+        midiInGetDevCapsA: noDevice(12, MMSYSERR_BADDEVICEID),
+        midiInGetDevCapsW: noDevice(12, MMSYSERR_BADDEVICEID),
+        midiInClose: noDevice(4, MMSYSERR_INVALHANDLE),
+        midiInStart: noDevice(4, MMSYSERR_INVALHANDLE),
+        midiInStop: noDevice(4, MMSYSERR_INVALHANDLE),
+        midiInReset: noDevice(4, MMSYSERR_INVALHANDLE),
+        midiInAddBuffer: noDevice(12, MMSYSERR_INVALHANDLE),
+        midiInPrepareHeader: noDevice(12, MMSYSERR_INVALHANDLE),
+        midiInUnprepareHeader: noDevice(12, MMSYSERR_INVALHANDLE),
+        midiInGetID: noDevice(8, MMSYSERR_INVALHANDLE),
+        midiInMessage: noDevice(16, MMSYSERR_INVALHANDLE),
+
         /** Midi out: no synthesiser and no port. */
         midiOutGetNumDevs: { argBytes: 0, handler: ()=>0 },
         midiOutOpen: noDevice(20, MMSYSERR_BADDEVICEID),
@@ -897,10 +1492,60 @@ export function createWinmmFunctions(host){
         auxGetVolume: noDevice(8, MMSYSERR_BADDEVICEID),
         auxSetVolume: noDevice(8, MMSYSERR_BADDEVICEID),
 
-        /** MCI, which drives CD audio and video among other things. */
-        mciSendCommandA: { argBytes: 16, handler: ()=>MCIERR_INVALID_DEVICE_ID },
-        /** BOOL mciGetErrorStringA(MCIERROR, LPSTR, UINT): no text for a code, so FALSE. */
-        mciGetErrorStringA: { argBytes: 12, handler: ()=>0 },
+        /**
+         * MCI, which drives CD audio and video among other things. No MCI
+         * device is ever open here, so a command to a device id finds none,
+         * and an open fails the way it fails where the driver has nothing to
+         * drive.
+         */
+        mciSendCommandA: sendCommand(false),
+        mciSendCommandW: sendCommand(true),
+
+        /**
+         * MCIERROR mciSendStringA(LPCSTR lpszCommand, LPSTR lpszReturnString,
+         *                         UINT cchReturn, HWND hwndCallback)
+         * MCIERROR mciSendStringW(LPCWSTR, LPWSTR, UINT, HWND)
+         *
+         * The string form of the same machine: what it answers is written to
+         * the caller's buffer, and an error leaves the buffer empty.
+         */
+        mciSendStringA: sendString(false),
+        mciSendStringW: sendString(true),
+
+        /**
+         * MCIDEVICEID mciGetDeviceIDA(LPCSTR pszDevice)
+         * MCIDEVICEID mciGetDeviceIDW(LPCWSTR pszDevice)
+         *
+         * No device of any name is open, and `all` is every device's id.
+         */
+        mciGetDeviceIDA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([name])=>((name >>> 0) === 0 ? 0 : deviceIdOf(ansiAt(name, 128))),
+        },
+        mciGetDeviceIDW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([name])=>((name >>> 0) === 0 ? 0 : deviceIdOf(wideAt(name, 128))),
+        },
+        /**
+         * MCIDEVICEID mciGetDeviceIDFromElementIDA(DWORD dwElementID, LPCSTR lpstrType)
+         * MCIDEVICEID mciGetDeviceIDFromElementIDW(DWORD, LPCWSTR)
+         *
+         * An element id belongs to a device that opened it, and none is open.
+         */
+        mciGetDeviceIDFromElementIDA: { argBytes: 8, handler: ()=>0 },
+        mciGetDeviceIDFromElementIDW: { argBytes: 8, handler: ()=>0 },
+
+        /**
+         * BOOL mciGetErrorStringA(MCIERROR mcierr, LPSTR pszText, UINT cchText)
+         * BOOL mciGetErrorStringW(MCIERROR, LPWSTR, UINT)
+         *
+         * TRUE with the text of an MCI error, cut to the buffer; FALSE, and
+         * the buffer left alone, for a code MCI has no text for.
+         */
+        mciGetErrorStringA: errorString(false),
+        mciGetErrorStringW: errorString(true),
 
         /**
          * Joysticks. The input layer is a stub, so there are none -- and a
@@ -910,6 +1555,7 @@ export function createWinmmFunctions(host){
         joyGetNumDevs: noDevices(0),
         joyGetDevCapsA: { argBytes: 12, handler: ()=>JOYERR_PARMS },
         joyGetPosEx: { argBytes: 8, handler: ()=>JOYERR_PARMS },
+        joyGetPos: { argBytes: 8, handler: ()=>JOYERR_PARMS },
     };
 
     return {

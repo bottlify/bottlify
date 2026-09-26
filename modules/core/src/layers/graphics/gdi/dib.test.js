@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    BI_BITFIELDS,
     BI_RGB,
     decodeDib,
     encodeDib,
@@ -101,10 +102,80 @@ test('a sixteen-bit DIB widens five-bit channels to full scale', ()=>{
     assert.equal(image.read(1, 0), 0x00ffffff);
 });
 
+test('a BI_BITFIELDS DIB is read by its masks, so 5-6-5 is not 5-5-5', ()=>{
+    const bits = new Uint8Array(dibPitch(3, 16));
+    // Full green and full red in 5-6-5; read as 5-5-5, the first would carry
+    // a sliver of red and the second would lose its top bit to nothing.
+    bits.set([0xe0, 0x07, 0x00, 0xf8, 0xff, 0xff], 0);
+    const image = decodeDib({
+        header: { ...header(3, -1, 16), compression: BI_BITFIELDS },
+        bits,
+        masks: [0xf800, 0x07e0, 0x001f],
+    });
+    assert.ok(image);
+    assert.deepEqual([image.read(0, 0), image.read(1, 0), image.read(2, 0)],
+        [0x0000ff00, 0x00ff0000, 0x00ffffff]);
+
+    // The masks say which bits are which channel, whatever they are.
+    const swapped = new Uint8Array([0xff, 0x00, 0x00, 0x00]);
+    const blueFirst = decodeDib({
+        header: { ...header(1, -1, 32), compression: BI_BITFIELDS },
+        bits: swapped,
+        masks: [0x000000ff, 0x0000ff00, 0x00ff0000],
+    });
+    assert.equal(blueFirst?.read(0, 0), 0x00ff0000, 'the low byte is red under these masks');
+    assert.equal(isConvertibleDib({
+        header: { ...header(1, 1, 24), compression: BI_BITFIELDS }, bits: new Uint8Array(4),
+    }), false, 'masks describe sixteen and thirty-two bits only');
+});
+
+test('one- and four-bit DIBs index their table, the leftmost pixel in the top bits', ()=>{
+    const colors = [0x00111111, 0x00222222, 0x00333333];
+    const one = decodeDib({ header: header(10, -1, 1), bits: new Uint8Array([0b01000000, 0x40]),
+        colors });
+    assert.ok(one);
+    assert.deepEqual([one.read(0, 0), one.read(1, 0), one.read(9, 0)],
+        [0x00111111, 0x00222222, 0x00222222]);
+
+    const four = decodeDib({ header: header(3, -1, 4), bits: new Uint8Array([0x21, 0x00]),
+        colors });
+    assert.ok(four);
+    assert.deepEqual([four.read(0, 0), four.read(1, 0), four.read(2, 0)],
+        [0x00333333, 0x00222222, 0x00111111]);
+});
+
+test('an indexed DIB is written against the table it is given, and not without one', ()=>{
+    const surface = createSurface({ width: 3, height: 1 });
+    surface.write(0, 0, 0x00ffffff);
+    surface.write(1, 0, 0x00101010);
+    surface.write(2, 0, 0x00f0f0f0);
+    const colors = [0x00000000, 0x00ffffff];
+
+    const one = new Uint8Array(4);
+    assert.equal(encodeDib(surface, { header: header(3, 1, 1), bits: one, colors }), 1);
+    assert.equal(one[0], 0b10100000, 'white, nearest black, nearest white');
+
+    const four = new Uint8Array(4);
+    assert.equal(encodeDib(surface, { header: header(3, 1, 4), bits: four,
+        colors: [0, 0x00101010, 0x00ffffff] }), 1);
+    assert.deepEqual([...four.subarray(0, 2)], [0x21, 0x20]);
+
+    const eight = new Uint8Array(4);
+    assert.equal(encodeDib(surface, { header: header(3, 1, 8), bits: eight, colors }), 1);
+    assert.deepEqual([...eight.subarray(0, 3)], [1, 0, 1]);
+    assert.equal(encodeDib(surface, { header: header(3, 1, 8), bits: eight }), 0,
+        'choosing a palette is the caller\'s, never the encoder\'s');
+});
+
 test('a format this layer cannot convert is refused rather than guessed', ()=>{
-    assert.equal(isConvertibleDib({ header: header(2, 2, 4), bits: new Uint8Array(16) }), false);
-    assert.equal(isConvertibleDib({ header: header(2, 2, 1), bits: new Uint8Array(16) }), false);
-    assert.equal(decodeDib({ header: header(2, 2, 4), bits: new Uint8Array(16) }), null);
+    assert.equal(isConvertibleDib({ header: header(2, 2, 2), bits: new Uint8Array(16) }), false);
+    assert.equal(isConvertibleDib({ header: { ...header(2, 2, 4), compression: 1 },
+        bits: new Uint8Array(16) }), false, 'RLE8 encodes eight bits and nothing else');
+    assert.equal(isConvertibleDib({ header: { ...header(2, -2, 8), compression: 1 },
+        bits: new Uint8Array(16) }), false, 'nor is it ever top-down');
+    assert.equal(isConvertibleDib({ header: { ...header(2, 2, 8), compression: 1 },
+        bits: new Uint8Array(16) }), true);
+    assert.equal(decodeDib({ header: header(2, 2, 2), bits: new Uint8Array(16) }), null);
     assert.equal(isConvertibleDib({ header: header(2, 2, 32), bits: new Uint8Array(32) }), true);
 });
 
@@ -161,23 +232,27 @@ test('StretchDIBits scales and honours the stretch mode', ()=>{
     assert.equal(dest.read(3, 3), 0x0000ff00);
 });
 
-test('a negative source height in StretchDIBits mirrors what a positive one draws', ()=>{
+test('a negative source height in StretchDIBits mirrors the rows below ySrc', ()=>{
+    // As a negative extent runs everywhere in GDI: ySrc 2 and a height of -2
+    // are the same two rows as ySrc 0 and 2, upside down; ySrc 0 and -2 lie
+    // before the DIB, which draws nothing.
     const bits = twoByTwo24();
-    /** @param {number} srcHeight */
-    const draw = srcHeight=>{
+    /** @param {number} ySrc @param {number} srcHeight */
+    const draw = (ySrc, srcHeight)=>{
         const dest = createSurface({ width: 2, height: 2 });
         clearSurface(dest, BACKGROUND);
         stretchDIBits({
             dest,
             xDest: 0, yDest: 0, destWidth: 2, destHeight: 2,
-            xSrc: 0, ySrc: 0, srcWidth: 2, srcHeight,
+            xSrc: 0, ySrc, srcWidth: 2, srcHeight,
             image: { header: header(2, 2, 24), bits },
             mode: COLORONCOLOR,
         });
         return [dest.read(0, 0), dest.read(0, 1)];
     };
-    assert.deepEqual(draw(2), [0x000000ff, 0x00ff0000]);
-    assert.deepEqual(draw(-2), [0x00ff0000, 0x000000ff]);
+    assert.deepEqual(draw(0, 2), [0x000000ff, 0x00ff0000]);
+    assert.deepEqual(draw(2, -2), [0x00ff0000, 0x000000ff]);
+    assert.deepEqual(draw(0, -2), [BACKGROUND, BACKGROUND]);
 });
 
 test('GetDIBits writes the surface back out in the caller format', ()=>{
@@ -210,12 +285,4 @@ test('a round trip through a DIB changes no pixel', ()=>{
     {
         assert.equal(back.read(index % 3, Math.floor(index / 3)), colours[index]);
     }
-});
-
-test('encoding refuses eight bits rather than inventing a palette', ()=>{
-    const surface = createSurface({ width: 2, height: 1 });
-    assert.equal(encodeDib(surface, {
-        header: header(2, 1, 8),
-        bits: new Uint8Array(dibPitch(2, 8)),
-    }), 0);
 });

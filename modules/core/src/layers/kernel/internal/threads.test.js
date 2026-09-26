@@ -587,3 +587,22 @@ test('a parked thread resumes on the resting stack it was parked with', ()=>{
     sched.runOnce();
     assert.deepEqual(resumes, [{ eip: 0x7e8166, esp: 0x2ffedc, returnValue: 0 }]);
 });
+
+test('a suspended thread keeps its state and gets no turn until resumed as often', ()=>{
+    const { sched } = scheduler();
+    const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'b' });
+
+    assert.equal(sched.suspend(a), 0);
+    assert.equal(sched.suspend(a), 1);
+    assert.equal(a.state, ThreadState.READY, 'suspension is not a state of its own');
+    assert.equal(sched.runOnce().ran.name, 'b');
+    assert.equal(sched.runOnce().ran.name, 'b');
+    assert.deepEqual(sched.diagnostics().waiting, ['a: suspended 2']);
+
+    assert.equal(sched.resume(a), 2);
+    assert.equal(sched.runOnce().ran.name, 'b', 'once is not enough');
+    assert.equal(sched.resume(a), 1);
+    assert.equal(sched.runOnce().ran.name, 'a');
+    assert.equal(sched.resume(a), 0, 'resuming a thread nobody suspended changes nothing');
+});

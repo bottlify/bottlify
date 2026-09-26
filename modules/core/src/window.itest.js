@@ -88,15 +88,13 @@ test('the whole path was used, not shortcut', { timeout: 20000 }, async t=>{
     const { diagnostics } = await runFixture(t);
     const byName = Object.fromEntries(diagnostics.map((/** @type {any} */ d)=>[d.name, d]));
 
-    // Nine trips into the guest: the WM_CREATE the window is told about, the
-    // four messages that tell a new window its application is active --
-    // WM_ACTIVATEAPP, WM_NCACTIVATE, WM_ACTIVATE and WM_SETFOCUS, which the
-    // input layer delivers once a window exists -- the probe, the close, and
-    // the WM_DESTROY and WM_NCDESTROY the close produced, sent from inside
-    // the close's own handling, which is the one nesting. Fewer means
-    // something was answered on our side that the program was supposed to
-    // answer.
-    assert.equal(byName.bridge.metrics.callbacks, 9);
+    // Six trips into the guest: the WM_NCCREATE and WM_CREATE the window is
+    // told about as it is made, the probe, the close, and the WM_DESTROY and
+    // WM_NCDESTROY the close produced, sent from inside the close's own
+    // handling, which is the one nesting. The window is made hidden and never
+    // shown, so nothing activates it. Fewer means something was answered on
+    // our side that the program was supposed to answer.
+    assert.equal(byName.bridge.metrics.callbacks, 6);
     assert.equal(byName.bridge.metrics.deepestCallback, 2);
     assert.equal(byName.bridge.metrics.failure, null);
 

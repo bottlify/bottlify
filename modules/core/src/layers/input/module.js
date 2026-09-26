@@ -7,6 +7,7 @@
 import { createDirectInput, GUID_SysKeyboard, GUID_SysMouse } from './dinput/seam.js';
 import { createInputRouter } from './router.js';
 import { createDomInput } from './dom.js';
+import { createXInput } from './xinput.js';
 
 /**
  * input -- the devices a program reads, and the one way events get in.
@@ -16,7 +17,8 @@ import { createDomInput } from './dom.js';
  * lives in `win32` because that is where `GetMessage` is, and DirectInput,
  * which a program polls or drains rather than waiting for. This layer owns the
  * second and posts into the first, so that one event reaches a program both
- * ways and the two readings cannot disagree.
+ * ways and the two readings cannot disagree. XInput is answered here too, for
+ * the two system libraries no program brings (`xinput.js`).
  *
  * `send` is the whole input side of this module. What it takes is a normalised
  * event -- a physical key, a pointer motion, a button, a focus change -- and
@@ -64,7 +66,25 @@ export const inputModule = {
                 ?? ((/** @type {number} */ entry, /** @type {number[]} */ args,
                     /** @type {any} */ thread)=>bridge.callGuest({ entry, args, thread })),
             callerThread: config?.callerThread ?? (()=>bridge.callerThread()),
+            // What a window handle names, for SetCooperativeLevel, which
+            // wants a top-level window. A build without win32 has no windows
+            // to tell apart, and any handle is then taken as one.
+            windowKind: config?.windowKind ?? ((/** @type {number} */ hwnd)=>{
+                /** @type {{ hwnd: string, child: boolean }[]} */
+                let listed;
+                try
+                {
+                    listed = win32.windows();
+                }
+                catch {
+                    return undefined;
+                }
+                const found = listed.find(entry=>Number(entry.hwnd) === hwnd);
+                return found ? (found.child ? 'child' : 'top') : null;
+            }),
         });
+
+        const xinput = createXInput();
 
         // The queue is win32's, and this is the seam it exists for: a keystroke
         // is not a window operation, so it arrives from outside and is posted
@@ -100,6 +120,20 @@ export const inputModule = {
             // assembled the process has a journal, and because a build that
             // wants no record should pay for none.
             trace: config?.trace,
+            // A device a program holds exclusively is read through
+            // DirectInput alone, and the window hears nothing of it.
+            exclusive: kind=>dinput.exclusive(kind),
+            // The device's own report, for a program that registered for raw
+            // input; whether one did, and which window hears it, is user32's.
+            rawInput: report=>{
+                try
+                {
+                    win32.rawInput?.(report);
+                }
+                catch {
+                    // No win32: no window to post WM_INPUT to.
+                }
+            },
             // Pasted text is the clipboard's, which is win32's; a build
             // without it has no clipboard to paste into.
             paste: text=>{
@@ -122,11 +156,20 @@ export const inputModule = {
              * assembling caller merges these with win32's and hands the lot to
              * the loader.
              */
-            libraries: ()=>dinput.libraries,
+            libraries: ()=>({ ...dinput.libraries, ...xinput.libraries }),
+
+            /**
+             * The numbers those libraries export by, where Windows pins them:
+             * a library a program imports from by ordinal is synthesised with
+             * these, and xinput1_4 has two functions found by number alone.
+             */
+            ordinals: ()=>({ ...xinput.ordinals }),
 
             /**
              * Feeds one host event in: it becomes a window message and a change
-             * of DirectInput state, both or neither.
+             * of DirectInput state, both or neither -- except that a device a
+             * program holds exclusively through DirectInput reaches it there
+             * alone, as on Windows, where the window's messages then stop.
              *
              * @param {import('./router.js').HostInputEvent} event
              */
@@ -156,9 +199,6 @@ export const inputModule = {
             attach(canvas, options){
                 attached?.detach();
                 attached = null;
-                // Wiring input to a window is when the program becomes the
-                // active one, and it stays active for the rest of the run.
-                router.arm();
                 // The canvas's own pixels are the picture, so they are both
                 // what a pointer position is measured in and what the cursor
                 // may not leave. One number rather than two.
@@ -209,15 +249,6 @@ export const inputModule = {
             /** @param {boolean} visible */
             cursorShown: visible=>router.shown(visible),
 
-            /**
-             * Says a window has appeared, which is when a program can be told
-             * it is the active application at all. Called on every window
-             * rather than guessed at: activation is owed to a window, and until
-             * one exists there is nowhere to deliver it. Does nothing once the
-             * program has been told.
-             */
-            arm: ()=>router.arm(),
-
             /** @param {number} vk */
             keyState: vk=>router.keyState(vk),
             /** @param {number} vk */
@@ -232,6 +263,7 @@ export const inputModule = {
             device: guid=>dinput.device(guid),
 
             dinput: ()=>dinput,
+            xinput: ()=>xinput,
             router: ()=>router,
         };
         return current;
@@ -247,6 +279,9 @@ export const inputModule = {
                 libraries: current ? Object.keys(current.libraries()) : [],
                 ...(current ? current.dinput().diagnostics() : {}),
                 ...(current ? current.router().diagnostics() : {}),
+                // How often a program asked XInput about a pad, every answer
+                // being that there is none.
+                ...(current ? { xinput: current.xinput().diagnostics() } : {}),
             },
         };
     },

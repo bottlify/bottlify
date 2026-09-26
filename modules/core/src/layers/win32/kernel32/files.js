@@ -47,6 +47,12 @@ const ERROR_DIR_NOT_EMPTY = 145;
 const ERROR_ALREADY_EXISTS = 183;
 const ERROR_DIRECTORY = 267;
 const ERROR_IO_DEVICE = 1117;
+const ERROR_HANDLE_EOF = 38;
+
+/** Where an OVERLAPPED keeps its status, its count and its starting offset. */
+const OVERLAPPED_INTERNAL = 0;
+const OVERLAPPED_INTERNAL_HIGH = 4;
+const OVERLAPPED_OFFSET = 8;
 
 /** The failure value of each of the four APIs that has its own. */
 const INVALID_HANDLE_VALUE = 0xffffffff;
@@ -112,6 +118,12 @@ const OF_CREATE = 0x1000;
 const OF_DELETE = 0x0200;
 const OF_EXIST = 0x4000;
 const HFILE_ERROR = 0xffffffff;
+
+/** FindFirstFileEx's levels, search operations and flags, as far as they go here. */
+const FIND_EX_INFO_BASIC = 1;
+const FIND_EX_SEARCH_LIMIT_TO_DIRECTORIES = 1;
+const FIND_FIRST_EX_CASE_SENSITIVE = 0x1;
+const FIND_FIRST_EX_LARGE_FETCH = 0x2;
 
 /** MoveFileEx's flags: the two an installer actually passes. */
 const MOVEFILE_REPLACE_EXISTING = 0x0001;
@@ -226,6 +238,13 @@ export const WIN32_FIND_DATAA = Object.freeze({
  *              closed: (handle: number, object: any) => void }} [ports]
  *           Completion ports. Absent, overlapped I/O still reads and writes;
  *           what it does not do is tell anyone it finished.
+ * @property {(thread: any, routine: number, args: number[]) => void} [queueApc]
+ *           Queues a routine to a thread, to run at its next alertable wait:
+ *           how ReadFileEx and WriteFileEx deliver their completion routines.
+ * @property {string[]} [directories]
+ *           The profile's folders the configured Windows names (the registry's
+ *           `profileDirectories`), parents first, made at start beside the
+ *           system's own. Absent, only the system's are made.
  * @property {() => string} [imagePath]
  *           The running program, whose directory is the first place a search
  *           with no path of its own looks. Absent, the search starts at the
@@ -268,13 +287,13 @@ export function createFileFunctions(host){
 
     // A machine has these directories before any program runs: GetTempPath
     // and GetSystemDirectory promise them, the registry names the program
-    // directories, and an installer's first act is to create its scratch
-    // file in one and its last to move a shared library into another. A
-    // promise of a directory that is not there fails that create or move
-    // with "access denied", which is the wrong answer to a question the
-    // program never asked.
+    // directories and the profile's folders, and an installer's first act is
+    // to create its scratch file in one and its last to move a shared library
+    // into another. A promise of a directory that is not there fails that
+    // create or move with "access denied", which is the wrong answer to a
+    // question the program never asked.
     for (const path of [WINDOWS_DIRECTORY, TEMP_PATH.slice(0, -1), SYSTEM_DIRECTORY,
-        PROGRAM_FILES, `${PROGRAM_FILES}\\Common Files`])
+        PROGRAM_FILES, `${PROGRAM_FILES}\\Common Files`, ...host.directories ?? []])
     {
         try
         {
@@ -316,6 +335,25 @@ export function createFileFunctions(host){
     const readDword = address=>{
         const bytes = host.readMemory(address, 4);
         return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
+    };
+
+    /**
+     * The end of a ReadFileEx or WriteFileEx: the OVERLAPPED says it finished
+     * and how much moved, and the completion routine is queued to the thread
+     * that asked.
+     *
+     * @param {any} thread @param {number} overlapped @param {number} routine
+     * @param {number} transferred
+     */
+    const completeWith = (thread, overlapped, routine, transferred)=>{
+        writeDword(overlapped + OVERLAPPED_INTERNAL, ERROR_SUCCESS);
+        writeDword(overlapped + OVERLAPPED_INTERNAL_HIGH, transferred >>> 0);
+        if ((routine >>> 0) !== 0)
+        {
+            host.queueApc?.(thread, routine >>> 0,
+                [ERROR_SUCCESS, transferred >>> 0, overlapped >>> 0]);
+        }
+        return 1;
     };
 
     /** @param {string} text */
@@ -729,6 +767,27 @@ export function createFileFunctions(host){
     const moveFile = bothForms(8, ([from, to], text)=>
         renamePath(text.path(from), text.path(to), false));
 
+    /**
+     * The move an installer makes when it puts an unpacked file in its
+     * final place. MOVEFILE_REPLACE_EXISTING is the flag that matters: a
+     * second install over the first replaces rather than failing, and
+     * without honouring it the second run stops on the first file it
+     * already wrote.
+     *
+     * MOVEFILE_DELAY_UNTIL_REBOOT names a file to move when the machine
+     * next starts. There is no next start here, so it is refused rather
+     * than accepted and forgotten -- a caller told it succeeded would
+     * believe a file it still needs has been scheduled.
+     */
+    const moveFileEx = bothForms(12, ([from, to, flags], text)=>{
+        if ((flags >>> 0 & MOVEFILE_DELAY_UNTIL_REBOOT) !== 0)
+        {
+            return fail(ERROR_NOT_SUPPORTED);
+        }
+        return renamePath(text.path(from), text.path(to),
+            (flags >>> 0 & MOVEFILE_REPLACE_EXISTING) !== 0);
+    });
+
     /** @param {number[]} args @param {TextForm} text */
     const searchPathBody = ([pathList, fileName, extension, size, buffer, filePart], text)=>{
         let name = text.raw(fileName);
@@ -892,6 +951,25 @@ export function createFileFunctions(host){
         text.findData(data >>> 0, entries[0]);
         host.setLastError(ERROR_SUCCESS);
         return host.handles.open('find', { entries, index: 1 });
+    });
+
+    /**
+     * FindFirstFileEx: the same search, with the level of detail, a search
+     * operation and flags. The basic level leaves out the 8.3 name, which is
+     * never written here anyway; limiting to directories is advice a file
+     * system is free not to take, and a caller filters for itself; and the
+     * flags ask for case-sensitive matching or larger reads, neither of which
+     * changes what is found. Anything else is refused.
+     */
+    const findFirstFileEx = bothForms(24, ([name, level, data, operation, filter, flags], text)=>{
+        if ((level >>> 0) > FIND_EX_INFO_BASIC
+            || (operation >>> 0) > FIND_EX_SEARCH_LIMIT_TO_DIRECTORIES
+            || filter !== 0
+            || ((flags >>> 0) & ~(FIND_FIRST_EX_CASE_SENSITIVE | FIND_FIRST_EX_LARGE_FETCH)) !== 0)
+        {
+            return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+        }
+        return (text === WIDE ? findFirstFile.wide : findFirstFile.ansi).handler([name, data]);
     });
 
     /**
@@ -1107,6 +1185,108 @@ export function createFileFunctions(host){
         },
 
         /**
+         * BOOL ReadFileEx(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead,
+         *   LPOVERLAPPED lpOverlapped, LPOVERLAPPED_COMPLETION_ROUTINE)
+         *
+         * Overlapped I/O that reports through a completion routine instead of
+         * an event or a port: the transfer is done at the OVERLAPPED's offset,
+         * its status and count are written for GetOverlappedResult, and the
+         * routine is queued to the calling thread with (error, count,
+         * OVERLAPPED) -- it runs at that thread's next alertable wait, never
+         * before this returns. hEvent is the program's own to use. A read that
+         * starts at the end of the file fails with ERROR_HANDLE_EOF and queues
+         * nothing.
+         */
+        ReadFileEx: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, buffer, length, overlapped, routine])=>{
+                const file = object(handle, 'file');
+                if (!file)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if (!file.read)
+                {
+                    return fail(ERROR_ACCESS_DENIED);
+                }
+                const pointer = overlapped >>> 0;
+                if (pointer === 0 || !host.queueApc)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const thread = host.currentThread?.() ?? null;
+                /** @param {Uint8Array} bytes */
+                const deliver = bytes=>{
+                    if (bytes.length === 0 && (length >>> 0) > 0)
+                    {
+                        // On the thread that asked, which after a wait for
+                        // the bytes is no longer the one running.
+                        if (thread && host.setLastErrorFor)
+                        {
+                            host.setLastErrorFor(thread, ERROR_HANDLE_EOF);
+                        }
+                        else
+                        {
+                            host.setLastError(ERROR_HANDLE_EOF);
+                        }
+                        return 0;
+                    }
+                    if (bytes.length > 0)
+                    {
+                        host.writeMemory(buffer >>> 0, bytes);
+                    }
+                    return completeWith(thread, pointer, routine, bytes.length);
+                };
+                const bytes = files.read(file.node, readDword(pointer + OVERLAPPED_OFFSET),
+                    length >>> 0);
+                if (typeof (/** @type {any} */ (bytes))?.then !== 'function')
+                {
+                    return deliver(/** @type {any} */ (bytes));
+                }
+                return /** @type {any} */ (bytes).then(deliver, ()=>{
+                    host.setLastErrorFor?.(thread, ERROR_IO_DEVICE);
+                    return 0;
+                });
+            },
+        },
+
+        /**
+         * BOOL WriteFileEx(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite,
+         *   LPOVERLAPPED lpOverlapped, LPOVERLAPPED_COMPLETION_ROUTINE)
+         *
+         * ReadFileEx's counterpart: written at the OVERLAPPED's offset, and the
+         * routine queued the same way.
+         */
+        WriteFileEx: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, buffer, length, overlapped, routine])=>{
+                const file = object(handle, 'file');
+                if (!file)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if (!file.write)
+                {
+                    return fail(ERROR_ACCESS_DENIED);
+                }
+                const pointer = overlapped >>> 0;
+                if (pointer === 0 || !host.queueApc)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const count = length >>> 0;
+                const bytes = count === 0
+                    ? new Uint8Array(0)
+                    : host.readMemory(buffer >>> 0, count).slice();
+                const stored = files.write(file.node, readDword(pointer + OVERLAPPED_OFFSET),
+                    bytes);
+                return completeWith(host.currentThread?.() ?? null, pointer, routine, stored);
+            },
+        },
+
+        /**
          * DWORD SetFilePointer(HANDLE, LONG lDistanceToMove,
          *                      PLONG lpDistanceToMoveHigh, DWORD dwMoveMethod)
          *
@@ -1272,13 +1452,14 @@ export function createFileFunctions(host){
             handler: ([handle])=>{
                 try
                 {
-                    // Only a file handle owns its node. A mapping over the
-                    // file carries the same node, and closing the mapping
-                    // must leave the file open, or the program's own close
-                    // of the file fails as an invalid handle afterwards.
+                    // A file handle and a mapping over the file each hold
+                    // the node, and closing either gives back its own hold:
+                    // the node closes with the last of them, in whichever
+                    // order the program closes them.
                     const type = host.handles.typeOf?.(handle >>> 0);
                     const closed = host.handles.close(handle >>> 0);
-                    if (closed && closed.node && (type === undefined || type === 'file'))
+                    if (closed && closed.node
+                        && (type === undefined || type === 'file' || type === 'mapping'))
                     {
                         files.close(closed.node);
                     }
@@ -1500,36 +1681,22 @@ export function createFileFunctions(host){
         },
 
         /**
-         * BOOL MoveFileExA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName,
-         *                 DWORD dwFlags)
-         *
-         * The move an installer makes when it puts an unpacked file in its
-         * final place. MOVEFILE_REPLACE_EXISTING is the flag that matters: a
-         * second install over the first replaces rather than failing, and
-         * without honouring it the second run stops on the first file it
-         * already wrote.
-         *
-         * MOVEFILE_DELAY_UNTIL_REBOOT names a file to move when the machine
-         * next starts. There is no next start here, so it is refused rather
-         * than accepted and forgotten -- a caller told it succeeded would
-         * believe a file it still needs has been scheduled.
+         * BOOL MoveFileEx(LPCSTR lpExistingFileName, LPCSTR lpNewFileName,
+         *                 DWORD dwFlags) -- one body, both spellings.
          */
-        MoveFileExA: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([from, to, flags])=>{
-                if ((flags >>> 0 & MOVEFILE_DELAY_UNTIL_REBOOT) !== 0)
-                {
-                    return fail(ERROR_NOT_SUPPORTED);
-                }
-                return renamePath(pathArgument(from), pathArgument(to),
-                    (flags >>> 0 & MOVEFILE_REPLACE_EXISTING) !== 0);
-            },
-        },
+        MoveFileExA: moveFileEx.ansi,
+        MoveFileExW: moveFileEx.wide,
 
         /** HANDLE FindFirstFile(LPCSTR, LPWIN32_FIND_DATA) -- one body, both spellings. */
         FindFirstFileA: findFirstFile.ansi,
         FindFirstFileW: findFirstFile.wide,
+
+        /**
+         * HANDLE FindFirstFileEx(LPCSTR, FINDEX_INFO_LEVELS, LPVOID,
+         *   FINDEX_SEARCH_OPS, LPVOID lpSearchFilter, DWORD dwAdditionalFlags)
+         */
+        FindFirstFileExA: findFirstFileEx.ansi,
+        FindFirstFileExW: findFirstFileEx.wide,
 
         /** BOOL FindNextFile(HANDLE, LPWIN32_FIND_DATA) -- one body, both spellings. */
         FindNextFileA: findNextFile.ansi,
@@ -1786,13 +1953,14 @@ export function createFileFunctions(host){
             handler: ([handle])=>{
                 try
                 {
-                    // Only a file handle owns its node. A mapping over the
-                    // file carries the same node, and closing the mapping
-                    // must leave the file open, or the program's own close
-                    // of the file fails as an invalid handle afterwards.
+                    // A file handle and a mapping over the file each hold
+                    // the node, and closing either gives back its own hold:
+                    // the node closes with the last of them, in whichever
+                    // order the program closes them.
                     const type = host.handles.typeOf?.(handle >>> 0);
                     const closed = host.handles.close(handle >>> 0);
-                    if (closed && closed.node && (type === undefined || type === 'file'))
+                    if (closed && closed.node
+                        && (type === undefined || type === 'file' || type === 'mapping'))
                     {
                         files.close(closed.node);
                     }
@@ -1818,6 +1986,43 @@ export function createFileFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle])=>object(handle, 'file') ? 1 : fail(ERROR_INVALID_HANDLE),
+        },
+
+        /**
+         * BOOL LockFileEx(HANDLE, DWORD dwFlags, DWORD dwReserved,
+         *   DWORD nNumberOfBytesToLockLow, DWORD nNumberOfBytesToLockHigh,
+         *   LPOVERLAPPED)
+         *
+         * LockFile's answer, the range starting at the OVERLAPPED's offset:
+         * shared or exclusive, and whether to wait, change nothing when
+         * nothing else can hold a lock.
+         */
+        LockFileEx: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle, , reserved, , , overlapped])=>{
+                if (!object(handle, 'file'))
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                return reserved !== 0 || overlapped === 0 ? fail(ERROR_INVALID_PARAMETER) : 1;
+            },
+        },
+
+        /**
+         * BOOL UnlockFileEx(HANDLE, DWORD dwReserved, DWORD nNumberOfBytesToUnlockLow,
+         *   DWORD nNumberOfBytesToUnlockHigh, LPOVERLAPPED)
+         */
+        UnlockFileEx: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, reserved, , , overlapped])=>{
+                if (!object(handle, 'file'))
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                return reserved !== 0 || overlapped === 0 ? fail(ERROR_INVALID_PARAMETER) : 1;
+            },
         },
 
         /**

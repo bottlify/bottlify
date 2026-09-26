@@ -26,7 +26,9 @@
 
 import { applyRop, ropTable, ropUsesPattern, ropUsesSource } from './rop.js';
 import { TRANSPARENT_PIXEL } from './brush.js';
-import { createSurface, intersectRect, isEmptyRect, surfaceBounds } from './surface.js';
+import {
+    MONOCHROME, colorToPixel, createSurface, intersectRect, isEmptyRect, surfaceBounds,
+} from './surface.js';
 
 /** SetStretchBltMode's modes. */
 export const BLACKONWHITE = 1;
@@ -48,7 +50,44 @@ export const STRETCH_MODES = Object.freeze([BLACKONWHITE, WHITEONBLACK, COLORONC
  * @property {number} [srcY]
  * @property {number} rop
  * @property {import("./contract.js").PatternSource} [pattern]
+ * @property {((pixel: number) => number) | null} [convert]
+ *           What a source pixel means on the destination, when that is not
+ *           the pixel itself: see `sourceConversion`.
  */
+
+/**
+ * How a source pixel is read onto a destination of another kind, or null
+ * when it is read as it is.
+ *
+ * Only a monochrome device bitmap on one side and not the other changes
+ * anything, and it changes it by the device contexts' colours rather than by
+ * nearest colour: to colour, a 0 bit is the destination's text colour and a 1
+ * bit its background colour; to monochrome, a source pixel is 1 exactly when
+ * it is the source's background colour -- compared as the source would store
+ * that colour, so an indexed source matches the entry nearest it and a 32-bit
+ * one only a pixel whose unused byte is zero as well.
+ *
+ * @param {{ src: import("./contract.js").Surface, dest: import("./contract.js").Surface,
+ *     textColor: number, bkColor: number, srcBkColor: number }} options
+ *        The two COLORREFs of the destination's context, and the background
+ *        colour of the source's.
+ * @returns {((pixel: number) => number) | null}
+ */
+export function sourceConversion({ src, dest, textColor, bkColor, srcBkColor }){
+    if (src.mono === true && dest.mono !== true)
+    {
+        const zero = colorToPixel(textColor);
+        const one = colorToPixel(bkColor);
+        return pixel=>((pixel & 0xffffff) === 0 ? zero : one);
+    }
+    if (src.mono !== true && dest.mono === true)
+    {
+        const background = colorToPixel(srcBkColor);
+        const match = src.nearest ? src.nearest(background) : background;
+        return pixel=>((pixel >>> 0) === match ? MONOCHROME[1] : MONOCHROME[0]);
+    }
+    return null;
+}
 
 /**
  * @param {BlitOptions} options
@@ -106,6 +145,7 @@ export function bitBlt(options){
 
     const usesPattern = ropUsesPattern(table);
     const pattern = options.pattern;
+    const convert = options.convert ?? null;
     // Same memory means the copy can eat its own source, so the loops run away
     // from the displacement rather than towards it.
     const overlapping = !!src && src.bytes === dest.bytes;
@@ -123,7 +163,8 @@ export function bitBlt(options){
             {
                 continue;
             }
-            const s = src ? src.read(x + shiftX, y + shiftY) : 0;
+            const read = src ? src.read(x + shiftX, y + shiftY) : 0;
+            const s = convert && src ? convert(read) : read;
             dest.write(x, y, applyRop(table, p, s, dest.read(x, y)));
         }
     }
@@ -161,6 +202,7 @@ export function patBlt(options){
  * @property {number} rop
  * @property {number} [mode]
  * @property {import("./contract.js").PatternSource} [pattern]
+ * @property {((pixel: number) => number) | null} [convert]   As BitBlt's.
  */
 
 /**
@@ -294,6 +336,7 @@ export function stretchBlt(options){
 
     const usesPattern = ropUsesPattern(table);
     const pattern = options.pattern;
+    const convert = options.convert ?? null;
     for (let y = target.top; y < target.bottom; y++)
     {
         const row = mirrorY ? destHeight - 1 - (y - destTop) : y - destTop;
@@ -318,8 +361,9 @@ export function stretchBlt(options){
             {
                 continue;
             }
-            const s = combine(src, box.left - readLeft, box.top - readTop,
+            const combined = combine(src, box.left - readLeft, box.top - readTop,
                 box.right - readLeft, box.bottom - readTop, mode);
+            const s = convert ? convert(combined) : combined;
             dest.write(x, y, applyRop(table, p, s, dest.read(x, y)));
         }
     }

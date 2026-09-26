@@ -30,16 +30,27 @@
  */
 
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
-import { createSoundBuffer, normaliseFormat } from './buffers.js';
+import { createSoundBuffer, normaliseFormat, DSBSTATUS_PLAYING } from './buffers.js';
 
 export const DS_OK = 0;
+const DS_UNCERTIFIED = 1;
 const DSERR_INVALIDPARAM = 0x80070057 | 0;
 const DSERR_OUTOFMEMORY = 0x8007000e | 0;
 const DSERR_UNSUPPORTED = 0x80004001 | 0;
 const DSERR_INVALIDCALL = 0x88780032 | 0;
+const DSERR_CONTROLUNAVAIL = 0x8878001e | 0;
+const DSERR_NODRIVER = 0x88780078 | 0;
 
 /** DSBCAPS flags a program sets when it describes a buffer it wants. */
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
+const DSBCAPS_LOCHARDWARE = 0x00000004;
+const DSBCAPS_LOCSOFTWARE = 0x00000008;
+const DSBCAPS_CTRL3D = 0x00000010;
+const DSBCAPS_CTRLFREQUENCY = 0x00000020;
+const DSBCAPS_CTRLPAN = 0x00000040;
+const DSBCAPS_CTRLVOLUME = 0x00000080;
+const DSBCAPS_CTRLPOSITIONNOTIFY = 0x00000100;
+const DSBCAPS_CTRLFX = 0x00000200;
 
 /** Interface identifiers. Facts about somebody else's ABI; there is no partial credit. */
 export const IID_IDirectSound = '{279AFA83-4981-11CE-A521-0020AF0BE560}';
@@ -168,6 +179,47 @@ const ZEROED_CAPS = Object.freeze([
     DSCAPS.dwPlayCpuOverheadSwBuffers, DSCAPS.dwReserved1, DSCAPS.dwReserved2,
 ]);
 
+/**
+ * Which ordinal is which export, for a program that links DSOUND.dll by
+ * number: Windows' own, and only for the entry points this table has -- a
+ * number bound to nothing is a call that binds and then jumps into nowhere.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+export const DSOUND_ORDINALS = Object.freeze({
+    1: 'DirectSoundCreate',
+    2: 'DirectSoundEnumerateA',
+    3: 'DirectSoundEnumerateW',
+    6: 'DirectSoundCaptureCreate',
+    9: 'GetDeviceID',
+    11: 'DirectSoundCreate8',
+    12: 'DirectSoundCaptureCreate8',
+});
+
+/**
+ * The one device's GUID, as a program reads it: what enumeration hands out
+ * and GetDeviceID answers. Every GUID opens the same output here, so its value
+ * only has to be stable and not null.
+ */
+const DEVICE_GUID = Object.freeze([
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+]);
+
+/**
+ * dsound.h's DSDEVID_Default* aliases, {DEF0000n-9C6D-47ED-AAF1-4DDA8F2B5C03},
+ * as the sixteen bytes a GUID is in memory: n = 0 and 2 are DefaultPlayback
+ * and DefaultVoicePlayback, 1 and 3 DefaultCapture and DefaultVoiceCapture.
+ *
+ * @param {number} which
+ */
+const defaultDeviceId = which=>Object.freeze([
+    which, 0x00, 0xf0, 0xde, 0x6d, 0x9c, 0xed, 0x47,
+    0xaa, 0xf1, 0x4d, 0xda, 0x8f, 0x2b, 0x5c, 0x03,
+]);
+const DEFAULT_PLAYBACK_IDS = Object.freeze([0, 2].map(defaultDeviceId));
+const DEFAULT_CAPTURE_IDS = Object.freeze([1, 3].map(defaultDeviceId));
+
 /** DSBPOSITIONNOTIFY, one per position a program wants to be told about. */
 export const DSBPOSITIONNOTIFY = Object.freeze({
     dwOffset: 0x00,
@@ -185,6 +237,12 @@ export const IDIRECTSOUND_SLOTS = /** @type {[string, number][]} */ ([
     ['GetSpeakerConfig', 1],
     ['SetSpeakerConfig', 1],
     ['Initialize', 1],
+]);
+
+/** IDirectSound8 is IDirectSound with one appended. */
+export const IDIRECTSOUND8_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDIRECTSOUND_SLOTS,
+    ['VerifyCertification', 1],
 ]);
 
 /**
@@ -334,6 +392,22 @@ export function createPublisher({ publishInterface }){
                 },
                 addRef: ()=>api.addRef?.() ?? 1,
                 release: ()=>api.release?.() ?? 0,
+                // Whether the bridge keeps the pointer at a count of zero: a
+                // primary buffer lives as long as its device does.
+                reachable: ()=>api.reachable?.() ?? false,
+                // One count for every interface an object answers to, so its
+                // last reference ends them all; `reachable` still keeps each.
+                get destroyed(){
+                    return api.destroyed === true;
+                },
+                // The bridge let the pointer go, and its words with it.
+                /** @param {number} pointer */
+                forgotten: pointer=>{
+                    if (byPointer.get(pointer) === api)
+                    {
+                        byPointer.delete(pointer);
+                    }
+                },
             };
             adapters.set(api, adapter);
         }
@@ -485,18 +559,35 @@ export function createDirectSound(
     // Described once: the bridge shares one table of stubs per method list, and
     // a list per buffer was a table per buffer. Built on first use, because the
     // methods it names are defined below.
-    /** @type {any[] | null} */
+    /** @type {{ buffer: any, buffer8: any, notify: any } | null} */
     let describedBuffer = null;
-    const bufferInterfaces = ()=>describedBuffer ??= [
-        describe(IID_IDirectSoundBuffer, IDIRECTSOUNDBUFFER_SLOTS, bufferMethods),
-        describe(IID_IDirectSoundBuffer8, IDIRECTSOUNDBUFFER8_SLOTS, bufferMethods),
-        describe(IID_IDirectSoundNotify, IDIRECTSOUNDNOTIFY_SLOTS, notifyMethods),
-        // IID_IDirectSound3DBuffer is deliberately absent: nothing here
-        // positions a sound, and an interface declared with no methods answers
-        // QueryInterface with a table that ends after IUnknown -- the program
-        // then calls slot 3 and jumps off the end of it. E_NOINTERFACE is an
-        // answer a program handles; a short vtable is not.
-    ];
+    const bufferDescriptors = ()=>describedBuffer ??= {
+        buffer: describe(IID_IDirectSoundBuffer, IDIRECTSOUNDBUFFER_SLOTS, bufferMethods),
+        buffer8: describe(IID_IDirectSoundBuffer8, IDIRECTSOUNDBUFFER8_SLOTS, bufferMethods),
+        notify: describe(IID_IDirectSoundNotify, IDIRECTSOUNDNOTIFY_SLOTS, notifyMethods),
+    };
+    /**
+     * What one buffer answers QueryInterface for. IDirectSoundNotify only when
+     * it was created to notify: a program asks for it to learn which kind of
+     * buffer it holds, and E_NOINTERFACE is the answer for one that is not.
+     *
+     * IID_IDirectSound3DBuffer is deliberately absent: nothing here positions
+     * a sound, and an interface declared with no methods answers
+     * QueryInterface with a table that ends after IUnknown -- the program then
+     * calls slot 3 and jumps off the end of it. E_NOINTERFACE is an answer a
+     * program handles; a short vtable is not.
+     *
+     * @param {any} buffer
+     */
+    const bufferInterfaces = buffer=>{
+        const { buffer: base, buffer8, notify } = bufferDescriptors();
+        return [
+            base,
+            // The primary buffer is the one IDirectSoundBuffer8 is not.
+            ...buffer.primary ? [] : [buffer8],
+            ...(buffer.capabilities & DSBCAPS_CTRLPOSITIONNOTIFY) !== 0 ? [notify] : [],
+        ];
+    };
 
     /** @type {Record<string, (target: any, args: number[]) => number>} */
     const notifyMethods = {
@@ -520,6 +611,16 @@ export function createDirectSound(
             return DS_OK;
         },
     };
+
+    /**
+     * Whether a buffer has a control: only if it was created with it, which is
+     * what a program checks GetCaps for before touching one. The primary
+     * buffer is the device's output and has no rate of its own to change.
+     *
+     * @param {any} buffer @param {number} flag
+     */
+    const hasControl = (buffer, flag)=>(buffer.capabilities & flag) !== 0
+        && !(buffer.primary && flag === DSBCAPS_CTRLFREQUENCY);
 
     /** @type {Record<string, (target: any, args: number[]) => number>} */
     const bufferMethods = {
@@ -556,8 +657,10 @@ export function createDirectSound(
         /** HRESULT Stop(void) */
         Stop(buffer){
             calls.Stop = (calls.Stop || 0) + 1;
-            deliver(buffer);
             buffer.stop();
+            // After the stop, so the call itself sets DSBPN_OFFSETSTOP: a
+            // program stops a buffer and at once waits to be told it has.
+            deliver(buffer);
             record(`b${buffers.indexOf(buffer)} Stop cursor=${buffer.cursors().play}`);
             return DS_OK;
         },
@@ -604,7 +707,14 @@ export function createDirectSound(
             {
                 return DSERR_INVALIDPARAM;
             }
-            writeU32(caps + DSBCAPS.dwFlags, buffer.primary ? DSBCAPS_PRIMARYBUFFER : 0);
+            // What the program asked for, which is what it branches on before
+            // touching a control, and where the buffer is mixed. That is in
+            // software unless it asked for hardware and was given it: a
+            // buffer is in one place or the other, never neither.
+            writeU32(caps + DSBCAPS.dwFlags, buffer.primary
+                || (buffer.capabilities & DSBCAPS_LOCHARDWARE) !== 0
+                ? buffer.capabilities
+                : buffer.capabilities | DSBCAPS_LOCSOFTWARE);
             writeU32(caps + DSBCAPS.dwBufferBytes, buffer.bytes);
             writeU32(caps + DSBCAPS.dwUnlockTransferRate, 0);
             writeU32(caps + DSBCAPS.dwPlayCpuOverhead, 0);
@@ -661,11 +771,19 @@ export function createDirectSound(
             {
                 return DSERR_INVALIDPARAM;
             }
+            if (!hasControl(buffer, DSBCAPS_CTRLVOLUME))
+            {
+                return DSERR_CONTROLUNAVAIL;
+            }
             writeU32(out, buffer.volume);
             return DS_OK;
         },
         /** HRESULT SetVolume(LONG) */
         SetVolume(buffer, [value]){
+            if (!hasControl(buffer, DSBCAPS_CTRLVOLUME))
+            {
+                return DSERR_CONTROLUNAVAIL;
+            }
             buffer.setVolume(value | 0);
             return DS_OK;
         },
@@ -675,11 +793,19 @@ export function createDirectSound(
             {
                 return DSERR_INVALIDPARAM;
             }
+            if (!hasControl(buffer, DSBCAPS_CTRLPAN))
+            {
+                return DSERR_CONTROLUNAVAIL;
+            }
             writeU32(out, buffer.pan);
             return DS_OK;
         },
         /** HRESULT SetPan(LONG) */
         SetPan(buffer, [value]){
+            if (!hasControl(buffer, DSBCAPS_CTRLPAN))
+            {
+                return DSERR_CONTROLUNAVAIL;
+            }
             buffer.setPan(value | 0);
             return DS_OK;
         },
@@ -689,13 +815,49 @@ export function createDirectSound(
             {
                 return DSERR_INVALIDPARAM;
             }
+            if (!hasControl(buffer, DSBCAPS_CTRLFREQUENCY))
+            {
+                return DSERR_CONTROLUNAVAIL;
+            }
             writeU32(out, buffer.frequency);
             return DS_OK;
         },
         /** HRESULT SetFrequency(DWORD) */
         SetFrequency(buffer, [hz]){
+            if (!hasControl(buffer, DSBCAPS_CTRLFREQUENCY))
+            {
+                return DSERR_CONTROLUNAVAIL;
+            }
             buffer.setFrequency(hz >>> 0);
             return DS_OK;
+        },
+
+        /**
+         * HRESULT SetFX(DWORD count, LPDSEFFECTDESC effects, LPDWORD results)
+         *
+         * Effects are a control like volume and pan, and a buffer created
+         * without it refuses them as it would refuse either. With it, the
+         * arguments are checked and clearing a chain that was never set is
+         * done; setting one answers E_NOTIMPL, because no effect is hosted.
+         */
+        SetFX(buffer, [count, effects, results]){
+            if ((buffer.capabilities & DSBCAPS_CTRLFX) === 0)
+            {
+                return DSERR_CONTROLUNAVAIL;
+            }
+            // A count names that many descriptions; none names none, and a
+            // result array with nothing to report on is a caller's mistake.
+            if ((count >>> 0) === 0
+                ? (effects >>> 0) !== 0 || (results >>> 0) !== 0
+                : (effects >>> 0) === 0)
+            {
+                return DSERR_INVALIDPARAM;
+            }
+            if (buffer.locked || (buffer.status() & DSBSTATUS_PLAYING) !== 0)
+            {
+                return DSERR_INVALIDCALL;
+            }
+            return (count >>> 0) === 0 ? DS_OK : DSERR_UNSUPPORTED;
         },
 
         /**
@@ -713,7 +875,7 @@ export function createDirectSound(
 
     /** @param {any} buffer */
     const publishBuffer = buffer=>
-        publisher.publish(buffer, bufferInterfaces(), IID_IDirectSoundBuffer);
+        publisher.publish(buffer, bufferInterfaces(buffer), IID_IDirectSoundBuffer);
 
     /** @type {Record<string, (target: any, args: number[]) => number>} */
     const soundMethods = {
@@ -723,14 +885,41 @@ export function createDirectSound(
             {
                 return DSERR_INVALIDPARAM;
             }
+            // One of the two layouts, or a caller that disagrees with us about
+            // where every later field is.
+            const size = readU32(descriptor + DSBUFFERDESC.dwSize);
+            if (size !== DSBUFFERDESC.SIZE && size !== DSBUFFERDESC.SIZE_DX8)
+            {
+                writeU32(out, 0);
+                return DSERR_INVALIDPARAM;
+            }
             const flags = readU32(descriptor + DSBUFFERDESC.dwFlags);
             const primary = (flags & DSBCAPS_PRIMARYBUFFER) !== 0;
             const wanted = readU32(descriptor + DSBUFFERDESC.dwBufferBytes);
-            const format = readFormat(readU32(descriptor + DSBUFFERDESC.lpwfxFormat));
+            const formatAt = readU32(descriptor + DSBUFFERDESC.lpwfxFormat);
+            const format = readFormat(formatAt);
             const asked = `CreateSoundBuffer flags=0x${(flags >>> 0).toString(16)} bytes=${wanted}`
                 + ` fmt=${format ? `${format.sampleRate}/${format.bitsPerSample}/${format.channels}` : '-'}`;
             record(asked);
             creations.push(asked);
+
+            // The primary buffer's format is the device's, set afterwards
+            // through SetFormat; a description that names one is refused.
+            if (primary && formatAt !== 0)
+            {
+                writeU32(out, 0);
+                return DSERR_INVALIDPARAM;
+            }
+
+            // A device has one primary buffer, and asking again hands it out
+            // again with its count raised; the new description is ignored, as
+            // DirectSound's own debug output says it is.
+            if (primary && root.primary)
+            {
+                root.primary.addRef();
+                writeU32(out, publishBuffer(root.primary));
+                return DS_OK;
+            }
 
             // A primary buffer names no size and no format: it is the mix
             // target, and a program creates one only to set the format the
@@ -741,9 +930,23 @@ export function createDirectSound(
                 writeU32(out, 0);
                 return DSERR_INVALIDPARAM;
             }
+            // DirectSound 8's rule, not the older interface's, which makes
+            // both: a sound placed in space is one point, so it is mono and
+            // has no pan of its own.
+            if (root.eight && !primary && (flags & DSBCAPS_CTRL3D) !== 0
+                && ((flags & DSBCAPS_CTRLPAN) !== 0 || format?.channels !== 1))
+            {
+                writeU32(out, 0);
+                return DSERR_INVALIDPARAM;
+            }
 
             const resolved = format ?? normaliseFormat({});
-            const bytes = primary ? resolved.blockAlign * resolved.sampleRate : wanted;
+            // Up to a whole frame, as DirectSound does: every cursor and every
+            // read is frame-aligned, and a lap that ends part way through a
+            // frame starts the next one reading its samples out of step.
+            const bytes = primary
+                ? resolved.blockAlign * resolved.sampleRate
+                : Math.ceil(wanted / resolved.blockAlign) * resolved.blockAlign;
             const address = allocate(bytes);
             if (address === 0)
             {
@@ -752,9 +955,16 @@ export function createDirectSound(
             }
 
             const buffer = createSoundBuffer({
-                bytes, address, format: resolved, now, primary,
+                bytes, address, format: resolved, now, primary, capabilities: flags,
+                // The device's own, which the program can ask for again after
+                // releasing every reference it had.
+                kept: primary ? ()=>root.references > 0 : undefined,
             });
             buffers.push(buffer);
+            if (primary)
+            {
+                root.primary = buffer;
+            }
             writeU32(out, publishBuffer(buffer));
             return DS_OK;
         },
@@ -766,6 +976,11 @@ export function createDirectSound(
             {
                 return DSERR_INVALIDPARAM;
             }
+            // The primary buffer is the device's output, and there is one.
+            if (source.primary)
+            {
+                return DSERR_INVALIDCALL;
+            }
             // A duplicate shares its original's samples and has its own
             // cursors and volume. Sharing the address is the whole point: a
             // program duplicates a sound to play it twice at once without
@@ -775,6 +990,7 @@ export function createDirectSound(
                 address: source.address,
                 format: source.format,
                 now,
+                capabilities: source.capabilities,
             });
             buffers.push(copy);
             writeU32(out, publishBuffer(copy));
@@ -865,30 +1081,69 @@ export function createDirectSound(
         Initialize(){
             return DS_OK;
         },
+
+        /**
+         * HRESULT VerifyCertification(LPDWORD)
+         *
+         * DS_UNCERTIFIED, the answer GetCaps already gives by leaving out
+         * DSCAPS_CERTIFIED: there is no driver behind this device to certify.
+         */
+        VerifyCertification(root, [out]){
+            if ((out >>> 0) === 0)
+            {
+                return DSERR_INVALIDPARAM;
+            }
+            writeU32(out, DS_UNCERTIFIED);
+            return DS_OK;
+        },
     };
 
-    /**
-     * The one object a program is handed by the entry point.
-     *
-     * There is only ever one: DirectSoundCreate on a machine with one device
-     * hands out the same device, and a program that creates two and compares
-     * them is entitled to find them equal.
-     */
-    const root = { addRef: ()=>1, release: ()=>0 };
-    const rootInterfaces = [
-        describe(IID_IDirectSound, IDIRECTSOUND_SLOTS, soundMethods),
-        // Same shape: IDirectSound8's first eight slots are IDirectSound's, and
-        // it adds VerifyCertification, which nothing here needs to answer.
-        describe(IID_IDirectSound8, IDIRECTSOUND_SLOTS, soundMethods),
+    const soundInterfaces = [describe(IID_IDirectSound, IDIRECTSOUND_SLOTS, soundMethods)];
+    const sound8Interfaces = [
+        ...soundInterfaces,
+        describe(IID_IDirectSound8, IDIRECTSOUND8_SLOTS, soundMethods),
     ];
 
-    /** @param {number} out */
-    const createInto = out=>{
+    /**
+     * A new object for every call, as on Windows, each counting its own
+     * references. DirectSoundCreate's is IDirectSound and refuses
+     * IDirectSound8; DirectSoundCreate8's is both, published as the one the
+     * entry point promises, so a program calls it through IDirectSound8's
+     * table, slot eleven included, without asking for it again.
+     *
+     * The count is a real one: the bridge frees an interface pointer whose
+     * release answers zero, so a zero while the program holds another
+     * reference frees a pointer it is still using.
+     *
+     * @param {number} out @param {boolean} eight
+     */
+    const createInto = (out, eight)=>{
         if ((out >>> 0) === 0)
         {
             return DSERR_INVALIDPARAM;
         }
-        writeU32(out, publisher.publish(root, rootInterfaces, IID_IDirectSound));
+        let references = 1;
+        const device = {
+            addRef: ()=>++references,
+            release: ()=>(references = Math.max(0, references - 1)),
+            get references(){
+                return references;
+            },
+            get destroyed(){
+                return references === 0;
+            },
+            eight,
+            /**
+             * This object's primary buffer, once asked for: another object's
+             * is another buffer (Wine's dsound test_primary_independent).
+             *
+             * @type {any}
+             */
+            primary: null,
+        };
+        writeU32(out, eight
+            ? publisher.publish(device, sound8Interfaces, IID_IDirectSound8)
+            : publisher.publish(device, soundInterfaces, IID_IDirectSound));
         return DS_OK;
     };
 
@@ -951,13 +1206,9 @@ export function createDirectSound(
         const blank = stringForGuest('', wide);
         const device = stringForGuest('Bottlify Audio', wide);
         // A GUID is sixteen bytes and a program keeps it to open that device by
-        // name later; every guid opens the same output here, so its contents
-        // only have to be stable and not null.
+        // name later.
         const guid = allocate(16);
-        memory.writeMemory(guid, new Uint8Array([
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        ]));
+        memory.writeMemory(guid, new Uint8Array(DEVICE_GUID));
         // Named once, before the loop's first await -- see the parameter doc.
         const thread = callerThread?.();
         return (async()=>{
@@ -975,7 +1226,6 @@ export function createDirectSound(
     };
 
     return {
-        root,
         publisher,
         /** How many times a program asked what sound devices there are. */
         enumerations: ()=>enumerations,
@@ -984,7 +1234,8 @@ export function createDirectSound(
 
         /**
          * Drops every buffer the program has fully released (`references`
-         * reached zero) from the walk. Without this, a buffer a program
+         * reached zero, and for a primary buffer its device gone as well)
+         * from the walk. Without this, a buffer a program
          * created, played and released stays in this array for the rest of
          * the session -- harmless on its own, but every caller that walks
          * `buffers()` once a turn was walking a list that only ever grew.
@@ -992,7 +1243,7 @@ export function createDirectSound(
         pruneReleased(){
             for (let at = buffers.length - 1; at >= 0; at--)
             {
-                if (!buffers[at].primary && buffers[at].references <= 0)
+                if (!buffers[at].reachable())
                 {
                     buffers.splice(at, 1);
                 }
@@ -1008,13 +1259,13 @@ export function createDirectSound(
                 DirectSoundCreate: {
                     argBytes: 12,
                     /** @param {number[]} args */
-                    handler: ([, out])=>createInto(out),
+                    handler: ([, out])=>createInto(out, false),
                 },
                 /** HRESULT DirectSoundCreate8(LPCGUID, LPDIRECTSOUND8*, IUnknown*) */
                 DirectSoundCreate8: {
                     argBytes: 12,
                     /** @param {number[]} args */
-                    handler: ([, out])=>createInto(out),
+                    handler: ([, out])=>createInto(out, true),
                 },
                 /**
                  * HRESULT DirectSoundEnumerateA(LPDSENUMCALLBACKA, LPVOID)
@@ -1036,6 +1287,38 @@ export function createDirectSound(
                     /** @param {number[]} args */
                     handler: ([callback, context])=>enumerate(callback, context, true),
                 },
+                /**
+                 * HRESULT GetDeviceID(LPCGUID src, LPGUID dest)
+                 *
+                 * Which device a default names. A playback default names the
+                 * one device there is, and a device names itself; a capture
+                 * default names a device that is not there, which is
+                 * DSERR_NODRIVER as DirectSoundCreate answers for one; anything
+                 * else is no device.
+                 */
+                GetDeviceID: {
+                    argBytes: 8,
+                    /** @param {number[]} args */
+                    handler: ([source, dest])=>{
+                        if ((source >>> 0) === 0 || (dest >>> 0) === 0)
+                        {
+                            return DSERR_INVALIDPARAM;
+                        }
+                        const asked = memory.readMemory(source >>> 0, 16);
+                        const names = (/** @type {readonly number[]} */ guid)=>
+                            guid.every((byte, at)=>asked[at] === byte);
+                        if (DEFAULT_CAPTURE_IDS.some(names))
+                        {
+                            return DSERR_NODRIVER;
+                        }
+                        if (!names(DEVICE_GUID) && !DEFAULT_PLAYBACK_IDS.some(names))
+                        {
+                            return DSERR_INVALIDPARAM;
+                        }
+                        memory.writeMemory(dest >>> 0, new Uint8Array(DEVICE_GUID));
+                        return DS_OK;
+                    },
+                },
                 /** HRESULT DirectSoundCaptureCreate(...) — there is no capture device. */
                 DirectSoundCaptureCreate: { argBytes: 12, handler: ()=>DSERR_UNSUPPORTED },
                 DirectSoundCaptureCreate8: { argBytes: 12, handler: ()=>DSERR_UNSUPPORTED },
@@ -1043,6 +1326,9 @@ export function createDirectSound(
                 DllCanUnloadNow: { argBytes: 0, handler: ()=>DS_OK },
             },
         },
+
+        /** The numbers `libraries` is imported by, keyed the same way. */
+        ordinals: { 'DSOUND.dll': DSOUND_ORDINALS },
 
         diagnostics: ()=>({
             buffers: buffers.length,

@@ -148,6 +148,8 @@ test('gain scales the samples and a paused slot contributes nothing', ()=>{
     });
     assert.equal(produced, 1);
     assert.ok(Math.abs(block[0] - 0.25) < 1e-9, `half of half scale, got ${block[0]}`);
+    assert.ok(Math.abs(block[1] - 0.25) < 1e-9,
+        'a header written without a balance, zeroed, plays both sides');
 
     Atomics.store(s.header, PAUSED, 1);
     feed(s, pcm16([16384]));

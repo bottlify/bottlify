@@ -14,11 +14,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStartupFunctions, splitCommandLine } from './startup.js';
+import { windowsVersion } from '../kernel32/versions.js';
 
 const HEAP_BASE = 0x00500000;
 
 /** Guest memory as a flat array, plus a bump allocator over the top of it. */
-function fakeMachine(commandLine = '"C:\\App\\Game.exe"'){
+/**
+ * @param {string} [commandLine]
+ * @param {{ version?: import('../kernel32/versions.js').WindowsVersion }} [options]
+ */
+function fakeMachine(commandLine = '"C:\\App\\Game.exe"', { version } = {}){
     const bytes = new Uint8Array(0x600000);
     let next = HEAP_BASE;
     /** @type {number[]} */
@@ -90,6 +95,7 @@ function fakeMachine(commandLine = '"C:\\App\\Game.exe"'){
         exit: code=>{
             exited.push(code);
         },
+        version,
     });
     return { machine, fns };
 }
@@ -351,6 +357,32 @@ test('_cexit runs the teardown and returns, which is not the same as exiting', (
     assert.deepEqual(machine.exited, []);
 });
 
+test('_cexit runs what atexit and _onexit registered, last first, and returns', async()=>{
+    // One register behind both calls, run once: exit after _cexit finds
+    // nothing left to run.
+    const { machine, fns } = fakeMachine();
+    assert.equal(fns.atexit.handler([0x401000]), 0, 'atexit answers zero on success');
+    assert.equal(fns._onexit.handler([0x402000]), 0x402000);
+    assert.equal(fns.atexit.handler([0x403000]), 0);
+
+    assert.equal(await fns._cexit.handler([]), 0);
+    assert.deepEqual(machine.called, [0x403000, 0x402000, 0x401000]);
+    assert.deepEqual(machine.exited, [], 'the process goes on');
+
+    assert.equal(fns.exit.handler([2]), 'parked', 'nothing is left for exit to run');
+    assert.deepEqual(machine.called, [0x403000, 0x402000, 0x401000]);
+    assert.equal(fns.atexit.argBytes, 4);
+});
+
+test('_c_exit returns without running what atexit registered', ()=>{
+    const { machine, fns } = fakeMachine();
+    fns.atexit.handler([0x401000]);
+
+    assert.equal(fns._c_exit.handler([]), 0);
+    assert.deepEqual(machine.called, []);
+    assert.deepEqual(machine.exited, []);
+});
+
 test('every entry point is cdecl and declares the stack it does not pop', ()=>{
     // The C runtime is cdecl: the caller cleans up. A handler marked stdcall
     // would have the stub pop the arguments as well, and the caller's stack
@@ -369,6 +401,16 @@ test('every entry point is cdecl and declares the stack it does not pop', ()=>{
     assert.equal(fns._controlfp.argBytes, 8);
     assert.equal(fns.__p__commode.argBytes, 0);
     assert.equal(fns.exit.argBytes, 4);
+});
+
+test('the version variables are the Windows the process is told it runs on', ()=>{
+    // The runtime fills them from GetVersion at start-up, so they answer
+    // what GetVersion does for the Windows the process was given.
+    const { fns } = fakeMachine('"C:\\App\\Game.exe"', { version: windowsVersion('win7') });
+    /** @param {string} name */
+    const dword = name=>new DataView(fns[name].data().buffer).getUint32(0, true);
+    assert.deepEqual(['_winmajor', '_winminor', '_winver', '_osver'].map(dword),
+        [6, 1, 0x0601, 7601]);
 });
 
 test('the version variables are GetVersion\'s figures, _HUGE is infinity, _environ a vector', ()=>{

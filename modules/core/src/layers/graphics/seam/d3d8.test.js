@@ -25,14 +25,19 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
+import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { BUFFER, SHADOW, STALE_POINTER, TEXTURE } from './shadow.js';
 import {
-    IDIRECT3D8_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
+    IDIRECT3D8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS, IDIRECT3DDEVICE8_SLOTS,
+    IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS, IDIRECT3DVERTEXBUFFER8_SLOTS,
+    IDIRECT3DVOLUME8_SLOTS, IDIRECT3DVOLUMETEXTURE8_SLOTS, IDIRECT3DSWAPCHAIN8_SLOTS,
 } from './vtables.js';
+import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js';
 import { REFRESH_HZ } from '../../win32/user32/display.js';
+import { createSystemFunctions } from '../../win32/user32/system.js';
 import {
     D3DCAPS8, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS8,
-    D3DSURFACE_DESC8, D3DVIEWPORT8, POINT, RECT, createFields,
+    D3DSURFACE_DESC8, D3DVIEWPORT8, D3DVOLUME_DESC8, POINT, RECT, createFields,
 } from './structs.js';
 import {
     D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8, D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP,
@@ -46,7 +51,6 @@ import {
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
 const D3DERR_NOTAVAILABLE = 0x8876086a;
-const E_NOTIMPL = 0x80004001;
 const E_OUTOFMEMORY = 0x8007000e;
 const D3DERR_OUTOFVIDEOMEMORY = 0x8876017c;
 const S_FALSE = 1;
@@ -188,12 +192,15 @@ function machine(){
  * @param {{ shadow?: boolean,
  *           windowClientSize?: (window: number) => { width: number,
  *               height: number } | null,
- *           allocateCode?: (bytes: number) => number }} [options]  Whether the device keeps a
- *     block in guest memory, as it does under a running processor, and how a
- *     window's client area is measured when a program asks for zero.
+ *           allocateCode?: (bytes: number) => number, caps?: object }} [options]
+ *     Whether the device keeps a block in guest memory, as it does under a
+ *     running processor, how a window's client area is measured when a
+ *     program asks for zero, and what the root is made with.
  */
-function seamed({ shadow = false, windowClientSize, allocateCode } = {}){
+function seamed({ shadow = false, windowClientSize, allocateCode, caps } = {}){
     const box = machine();
+    /** The display's clock, which the test moves. */
+    const clock = { time: 0 };
     /** @type {string[]} */
     const divergences = [];
     /** @type {any[]} */
@@ -216,7 +223,7 @@ function seamed({ shadow = false, windowClientSize, allocateCode } = {}){
                 {
                     return null;
                 }
-                const root = createDirect3D8();
+                const root = createDirect3D8(caps);
                 roots.push(root);
                 return root;
             },
@@ -239,11 +246,13 @@ function seamed({ shadow = false, windowClientSize, allocateCode } = {}){
         resolution: (/** @type {number} */ w, /** @type {number} */ h,
             /** @type {{ window?: number, fullscreen?: boolean } | undefined} */ where)=>
             resolutions.push([w, h, where?.window, where?.fullscreen]),
+        now: ()=>clock.time,
     });
     const fields = createFields(box.services);
 
     const h = {
         box,
+        clock,
         fields,
         publisher,
         roots,
@@ -323,15 +332,25 @@ test('the interrogation a program does before it draws is answered from facts', 
     assert.ok(memory > 0, 'some texture memory is reported');
     assert.equal(h.device(device, 'ResourceManagerDiscardBytes', [1 << 20]), D3D_OK);
 
-    // Nothing scans out here, so both fields of the raster status read as the
-    // start of a frame -- and both are written, so which of the two a program
-    // reads does not matter.
+    // The raster runs on the display's clock: at the top of a frame both
+    // fields read zero -- and both are written, so which of the two a program
+    // reads does not matter -- and in the frame's last lines it is in the blank.
     const status = 0x3100;
     h.box.services.writeMemory(status, new Uint8Array([0xcd, 0xcd, 0xcd, 0xcd,
         0xcd, 0xcd, 0xcd, 0xcd]));
     assert.equal(h.device(device, 'GetRasterStatus', [status]), D3D_OK);
     assert.equal(h.fields.readU32(status + D3DRASTER_STATUS.InVBlank), 0);
     assert.equal(h.fields.readU32(status + D3DRASTER_STATUS.ScanLine), 0);
+    h.clock.time = 1000 / REFRESH_HZ / 2;
+    assert.equal(h.device(device, 'GetRasterStatus', [status]), D3D_OK);
+    assert.equal(h.fields.readU32(status + D3DRASTER_STATUS.InVBlank), 0);
+    assert.equal(h.fields.readU32(status + D3DRASTER_STATUS.ScanLine), 328,
+        'half of a frame of 600 visible lines and 56 blank ones');
+    h.clock.time = 1000 / REFRESH_HZ - 0.1;
+    assert.equal(h.device(device, 'GetRasterStatus', [status]), D3D_OK);
+    assert.equal(h.fields.readU32(status + D3DRASTER_STATUS.InVBlank), 1);
+    assert.equal(h.fields.readU32(status + D3DRASTER_STATUS.ScanLine), 0,
+        'no line is being drawn in the blank');
 
     // The display mode a device reports is the screen it was configured for.
     const mode = 0x3200;
@@ -374,6 +393,13 @@ test('the adapter says who made it, in the shape a card database reads', ()=>{
     assert.equal(text(D3DADAPTER_IDENTIFIER8.Description), 'nvidia ampere');
     assert.equal(text(D3DADAPTER_IDENTIFIER8.Driver), 'webgpu');
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.VendorId), 0x10de);
+    // The answer every generation gives, DirectDraw's GetDeviceIdentifier
+    // included: a program asking through two compares them.
+    const shared = describeAdapter({ vendor: 'nvidia', architecture: 'ampere' });
+    assert.equal(text(D3DADAPTER_IDENTIFIER8.Description), shared.description);
+    assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.VendorId), shared.vendorId);
+    assert.deepEqual([...h.box.services.readMemory(out + D3DADAPTER_IDENTIFIER8.DeviceIdentifier,
+        16)], [...ADAPTER_GUID]);
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.DeviceId), 0);
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.WHQLLevel), 1);
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.DriverVersion + 4), 0x00010000);
@@ -437,8 +463,17 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
         [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, texture, D3DFMT.UNKNOWN]), D3DERR_NOTAVAILABLE);
     const cubeTexture = 5;
     assert.equal(ask('CheckDeviceFormat',
-        [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, cubeTexture, D3DFMT.A8R8G8B8]),
-    D3DERR_NOTAVAILABLE, 'and a kind of resource this build refuses to make is never available');
+        [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, cubeTexture, D3DFMT.A8R8G8B8]), D3D_OK);
+    const volumeTexture = 4;
+    assert.equal(ask('CheckDeviceFormat',
+        [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, volumeTexture, D3DFMT.A8R8G8B8]), D3D_OK);
+    assert.equal(ask('CheckDeviceFormat',
+        [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, volumeTexture, D3DFMT.DXT1]),
+    D3DERR_NOTAVAILABLE, 'a volume is never made in blocks');
+    const vertexBuffer = 6;
+    assert.equal(ask('CheckDeviceFormat',
+        [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, vertexBuffer, D3DFMT.A8R8G8B8]),
+    D3DERR_NOTAVAILABLE, 'and a kind of resource that has no format is never available');
 
     assert.equal(ask('CheckDeviceMultiSampleType',
         [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 1, 0]), D3D_OK, 'one sample per pixel');
@@ -450,6 +485,18 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
     assert.equal(ask('CheckDepthStencilMatch',
         [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, D3DFMT.X8R8G8B8, D3DFMT.A8R8G8B8]),
     D3DERR_NOTAVAILABLE);
+
+    // An HMONITOR, not an HRESULT: the one user32 names for every window, so
+    // it goes straight into GetMonitorInfo (Wine's d3d8 device.c requires
+    // !!monitor). An adapter that does not exist has none.
+    const user32 = createSystemFunctions({ host: {}, live: ()=>null, windows: new Map(),
+        classes: new Map() });
+    assert.equal(ask('GetAdapterMonitor', [0]), user32.MonitorFromWindow.handler());
+    assert.notEqual(ask('GetAdapterMonitor', [0]), 0);
+    assert.equal(ask('GetAdapterMonitor', [1]), 0);
+    // No software rasteriser is ever plugged in, and Direct3D 9 answers the
+    // same call with success.
+    assert.equal(ask('RegisterSoftwareDevice', [0x1234]), D3D_OK);
 
     h.release(root);
     assert.equal(h.roots[0].refCount, 0);
@@ -512,38 +559,17 @@ test('a gamma ramp is three channels of words, and comes back as it went in', ()
     h.release(root);
 });
 
-test('what this build cannot do says so, and clears the pointer it was given', ()=>{
+test('a call given nothing to act on is refused, and GetInfo reports nothing', ()=>{
     const h = seamed();
     const root = h.create();
     const device = h.createDevice(root);
-    const out = 0x6000;
 
-    /** @param {string} name @param {number[]} args */
-    const refused = (name, args)=>{
-        h.box.memory.writeU32(out, 0xdeadbeef);
-        const hr = h.device(device, name, args);
-        assert.equal(h.box.memory.readU32(out), 0, `${name} cleared the caller's pointer`);
-        return hr;
-    };
-
-    // A create that cannot be done reports it and leaves nothing behind: a
-    // program tests the pointer as often as the result.
-    assert.equal(refused('CreateAdditionalSwapChain', [0, out]), D3DERR_NOTAVAILABLE);
-    assert.equal(refused('CreateCubeTexture', [64, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, out]),
-        D3DERR_NOTAVAILABLE, 'nothing samples a cube map here');
-    assert.equal(
-        refused('CreateVolumeTexture', [8, 8, 8, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, out]),
-        D3DERR_NOTAVAILABLE);
-
-    // The cursor, the front buffer, the palettes and the transformed-vertex
-    // path: each refuses because succeeding would promise a picture nothing
-    // here draws.
+    // A cursor with no surface, a front buffer copy into a pointer that names
+    // no surface, vertices processed into no buffer.
     assert.equal(h.device(device, 'SetCursorProperties', [0, 0, 0]), D3DERR_INVALIDCALL);
     assert.equal(h.device(device, 'ShowCursor', [1]), 0, 'no cursor was showing before');
     assert.equal(h.device(device, 'SetCursorPosition', [10, 20, 0]), 0);
     assert.equal(h.device(device, 'GetFrontBuffer', [0x6100]), D3DERR_INVALIDCALL);
-    assert.equal(h.device(device, 'SetPaletteEntries', [0, 0x6100]), D3DERR_INVALIDCALL);
-    assert.equal(h.device(device, 'GetCurrentTexturePalette', [0x6100]), D3DERR_INVALIDCALL);
     assert.equal(h.device(device, 'ProcessVertices', [0, 0, 3, 0, 0]), D3DERR_INVALIDCALL);
 
     // GetInfo succeeded and reported nothing, which is what a program checks
@@ -554,30 +580,149 @@ test('what this build cannot do says so, and clears the pointer it was given', (
     h.release(root);
 });
 
-test('a shader cannot be created, and the format that shares its parameter can', ()=>{
-    // The renderer draws the fixed-function pipeline and drops a draw with a
-    // shader bound. A create that succeeded would send a program down the
-    // programmable path and it would never look back; the refusal is what sends
-    // it down the one that draws.
+test('a vertex shader is made from guest memory and hands its tokens back as they were', ()=>{
+    // Wine's d3d8 test_shader, through the ABI: a size asked for with no
+    // buffer, a buffer too small refused with the size left alone, and the
+    // tokens as the program gave them.
     const h = seamed();
     const root = h.create();
     const device = h.createDevice(root);
+    const declaration = [0x20000000, 0x40020000, 0xffffffff];
+    const shader = [
+        0xfffe0101,
+        0x0002fffe, 0x0000ffff, 0xffffffff,        // a comment holding an end token
+        0x00000009, 0xc0010000, 0x90e40000, 0xa0e40000,
+        0x00000009, 0xc0020000, 0x90e40000, 0xa0e40001,
+        0x00000009, 0xc0040000, 0x90e40000, 0xa0e40002,
+        0x00000009, 0xc0080000, 0x90e40000, 0xa0e40003,
+        0x0000ffff,
+    ];
+    /** @param {number} at @param {number[]} tokens */
+    const write = (at, tokens)=>h.box.services.writeMemory(at,
+        new Uint8Array(Uint32Array.from(tokens).buffer));
+    /** @param {number} at @param {number} count */
+    const read = (at, count)=>Array.from({ length: count }, (_, i)=>h.fields.readU32(at + i * 4));
+    write(0x7000, [...declaration, 0xdeadbeef]);
+    write(0x7100, [...shader, 0xdeadbeef]);
+    const out = 0x7400;
+    const size = 0x7404;
+    const data = 0x7500;
 
-    assert.equal(h.device(device, 'CreateVertexShader', [0x7000, 0x7100, 0x7200, 0]), E_NOTIMPL);
-    assert.equal(h.device(device, 'CreatePixelShader', [0x7100, 0x7200]), E_NOTIMPL);
-    assert.equal(h.device(device, 'DeleteVertexShader', [1]), D3DERR_INVALIDCALL,
-        'and there is no handle to delete');
+    assert.equal(h.device(device, 'CreateVertexShader', [0x7000, 0x7100, out, 0]), D3D_OK);
+    const made = h.fields.readU32(out);
+    assert.equal(made & 1, 1, 'a handle, which no vertex format is');
+    assert.equal(h.device(device, 'GetVertexShader', [out]), D3D_OK);
+    assert.equal(h.fields.readU32(out), 0, 'made, not set');
+
+    for (const [name, tokens] of /** @type {[string, number[]][]} */ ([
+        ['GetVertexShaderDeclaration', declaration], ['GetVertexShaderFunction', shader]]))
+    {
+        assert.equal(h.device(device, name, [made, 0, size]), D3D_OK);
+        assert.equal(h.fields.readU32(size), tokens.length * 4, `${name}: the size alone`);
+        h.fields.writeU32(size, 1);
+        assert.equal(h.device(device, name, [made, data, size]), D3DERR_INVALIDCALL);
+        assert.equal(h.fields.readU32(size), 1, `${name}: the size left as the caller wrote it`);
+        h.fields.writeU32(size, 1024);
+        assert.equal(h.device(device, name, [made, data, size]), D3D_OK);
+        assert.equal(h.fields.readU32(size), tokens.length * 4);
+        assert.deepEqual(read(data, tokens.length), tokens);
+        assert.equal(h.device(device, name, [made, data, 0]), D3DERR_INVALIDCALL,
+            `${name}: nowhere to say the size`);
+    }
+
+    // Constants, four floats a register, and none past the last.
+    const floats = 0x7600;
+    [1.5, 2.5, 3.5, 4.5].forEach((value, i)=>h.fields.writeF32(floats + i * 4, value));
+    assert.equal(h.device(device, 'SetVertexShaderConstant', [7, floats, 1]), D3D_OK);
+    assert.equal(h.device(device, 'GetVertexShaderConstant', [7, data, 1]), D3D_OK);
+    assert.deepEqual([0, 1, 2, 3].map(i=>h.fields.readF32(data + i * 4)), [1.5, 2.5, 3.5, 4.5]);
+    assert.equal(h.device(device, 'SetVertexShaderConstant', [255, floats, 2]),
+        D3DERR_INVALIDCALL);
+    assert.equal(h.device(device, 'SetVertexShaderConstant', [0, floats, 0x10000000]),
+        D3DERR_INVALIDCALL, 'a count past the file is refused without reading it');
+    assert.equal(h.device(device, 'SetVertexShaderConstant', [0, 0, 1]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(device, 'GetVertexShaderConstant', [0, 0, 1]), D3DERR_INVALIDCALL);
+
+    // What is not a shader.
+    assert.equal(h.device(device, 'CreateVertexShader', [0, 0x7100, out, 0]),
+        D3DERR_INVALIDCALL, 'no declaration');
+    assert.equal(h.device(device, 'CreateVertexShader', [0x7000, 0x7100, 0, 0]),
+        D3DERR_INVALIDCALL, 'nowhere to put the handle');
+    write(0x7100, [0xfffe0200, 0x0000ffff]);
+    assert.equal(h.device(device, 'CreateVertexShader', [0x7000, 0x7100, out, 0]),
+        D3DERR_INVALIDCALL, 'a vs_2_0, past the version the caps claim');
+    assert.equal(h.device(device, 'CreatePixelShader', [0x7100, out]), D3DERR_INVALIDCALL,
+        'a vertex shader is not a pixel shader');
+
+    assert.equal(h.device(device, 'DeleteVertexShader', [made]), D3D_OK);
+    assert.equal(h.device(device, 'DeleteVertexShader', [made]), D3DERR_INVALIDCALL,
+        'and a handle deleted is gone');
 
     // D3DFVF_XYZ | D3DFVF_DIFFUSE: a vertex format, which shares this slot with
-    // a shader handle and is the half that has to work.
+    // a shader handle.
     const fvf = 0x002 | 0x040;
     assert.equal(h.device(device, 'SetVertexShader', [fvf]), D3D_OK);
-    const out = 0x7300;
     assert.equal(h.device(device, 'GetVertexShader', [out]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), fvf, 'read back exactly as it was written');
     assert.equal(h.device(device, 'SetPixelShader', [0]), D3D_OK, 'binding no pixel shader');
     assert.equal(h.device(device, 'GetPixelShader', [out]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), 0);
+
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('a pixel shader is made from guest memory, and its constants and function read back', ()=>{
+    // Wine's d3d8 test_shader, through the ABI.
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const shader = [
+        0xffff0101,
+        0x00000051, 0xa00f0001, 0x3f800000, 0x00000000, 0x00000000, 0x00000000,
+        0x00000042, 0xb00f0000,
+        0x00000008, 0x800f0000, 0xa0e40001, 0xa0e40000,
+        0x00000005, 0x800f0000, 0x90e40000, 0x80e40000,
+        0x00000005, 0x800f0000, 0xb0e40000, 0x80e40000,
+        0x0000ffff,
+    ];
+    h.box.services.writeMemory(0x7100,
+        new Uint8Array(Uint32Array.from([...shader, 0xdeadbeef]).buffer));
+    const out = 0x7400;
+    const size = 0x7404;
+    const data = 0x7500;
+    assert.equal(h.device(device, 'CreatePixelShader', [0x7100, out]), D3D_OK);
+    const made = h.fields.readU32(out);
+    assert.equal(h.device(device, 'CreatePixelShader', [0, out]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(device, 'CreatePixelShader', [0x7100, 0]), D3DERR_INVALIDCALL);
+
+    assert.equal(h.device(device, 'GetPixelShaderFunction', [made, 0, size]), D3D_OK);
+    assert.equal(h.fields.readU32(size), shader.length * 4);
+    h.fields.writeU32(size, 1);
+    assert.equal(h.device(device, 'GetPixelShaderFunction', [made, data, size]),
+        D3DERR_INVALIDCALL);
+    assert.equal(h.fields.readU32(size), 1, 'left as the caller wrote it');
+    h.fields.writeU32(size, 1024);
+    assert.equal(h.device(device, 'GetPixelShaderFunction', [made, data, size]), D3D_OK);
+    assert.deepEqual(Array.from({ length: shader.length }, (_, i)=>h.fields.readU32(data + i * 4)),
+        shader);
+
+    const floats = 0x7600;
+    [0.25, 0.5, 0.75, 1].forEach((value, i)=>h.fields.writeF32(floats + i * 4, value));
+    assert.equal(h.device(device, 'SetPixelShaderConstant', [7, floats, 1]), D3D_OK);
+    assert.equal(h.device(device, 'GetPixelShaderConstant', [7, data, 1]), D3D_OK);
+    assert.deepEqual([0, 1, 2, 3].map(i=>h.fields.readF32(data + i * 4)), [0.25, 0.5, 0.75, 1]);
+    assert.equal(h.device(device, 'SetPixelShaderConstant', [7, floats, 2]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(device, 'SetPixelShaderConstant', [0, floats, 0x10000000]),
+        D3DERR_INVALIDCALL);
+    assert.equal(h.device(device, 'GetPixelShaderConstant', [0, 0, 1]), D3DERR_INVALIDCALL);
+
+    assert.equal(h.device(device, 'SetPixelShader', [made]), D3D_OK);
+    assert.equal(h.device(device, 'GetPixelShader', [out]), D3D_OK);
+    assert.equal(h.fields.readU32(out), made);
+    assert.equal(h.device(device, 'DeletePixelShader', [made]), D3D_OK);
+    assert.equal(h.device(device, 'GetPixelShader', [out]), D3D_OK);
+    assert.equal(h.fields.readU32(out), 0);
 
     assert.equal(h.release(device), 0);
     h.release(root);
@@ -961,6 +1106,377 @@ test('UpdateTexture carries a system-memory texture into the one that draws', ()
     h.release(root);
 });
 
+/**
+ * A GUID as DEFINE_GUID spells it, laid out in guest memory: three
+ * little-endian integers, then eight bytes as they stand.
+ *
+ * @param {any} h @param {number} at
+ * @param {[number, number, number, ...number[]]} parts
+ */
+const putGuid = (h, at, [data1, data2, data3, ...tail])=>{
+    const bytes = new Uint8Array(16);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, data1, true);
+    view.setUint16(4, data2, true);
+    view.setUint16(6, data3, true);
+    bytes.set(tail, 8);
+    h.box.services.writeMemory(at, bytes);
+};
+
+test('a texture and an index buffer answer QueryInterface for the GUIDs d3d8.h gives them',
+    ()=>{
+        const h = seamed();
+        const root = h.create();
+        const device = h.createDevice(root);
+        const out = 0xe000;
+        assert.equal(h.device(device, 'CreateTexture',
+            [4, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out]), D3D_OK);
+        const texture = h.box.memory.readU32(out);
+        assert.equal(h.device(device, 'CreateIndexBuffer',
+            [64, 0, 101, D3DPOOL.MANAGED, out]), D3D_OK);
+        const indices = h.box.memory.readU32(out);
+
+        const iid = 0xe100;
+        const queried = 0xe200;
+        putGuid(h, iid, [0xE4CDD575, 0x2866, 0x4F01, 0xB1, 0x2E, 0x7E, 0xEC, 0xE1, 0xEC,
+            0x93, 0x58]);
+        assert.equal(h.box.call(texture, 0, [iid, queried]), D3D_OK, 'IID_IDirect3DTexture8');
+        assert.equal(h.box.memory.readU32(queried), texture, 'the interface it was made as');
+        assert.equal(h.release(texture), 1);
+        putGuid(h, iid, [0x0E689C9A, 0x053D, 0x44A0, 0x9D, 0x92, 0xDB, 0x0E, 0x3D, 0x75,
+            0x0F, 0x86]);
+        assert.equal(h.box.call(indices, 0, [iid, queried]), D3D_OK,
+            'IID_IDirect3DIndexBuffer8');
+        assert.equal(h.box.memory.readU32(queried), indices);
+        assert.equal(h.release(indices), 1);
+
+        assert.equal(h.release(texture), 0);
+        assert.equal(h.release(indices), 0);
+        assert.equal(h.release(device), 0);
+        h.release(root);
+    });
+
+test('every resource answers what IDirect3DResource8 asks of it', ()=>{
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const out = 0xe000;
+    /** @param {number} pool */
+    const texture = pool=>{
+        assert.equal(h.device(device, 'CreateTexture',
+            [16, 16, 3, 0, D3DFMT.X8R8G8B8, pool, out]), D3D_OK);
+        return h.box.memory.readU32(out);
+    };
+    /** @param {number} pool @param {number} [usage] */
+    const vertices = (pool, usage = 0)=>{
+        assert.equal(h.device(device, 'CreateVertexBuffer', [256, usage, 0x102, pool, out]),
+            D3D_OK);
+        return h.box.memory.readU32(out);
+    };
+    /** @param {number} pointer @param {string} name @param {number[]} args */
+    const vb = (pointer, name, args = [])=>
+        h.box.call(pointer, slot(IDIRECT3DVERTEXBUFFER8_SLOTS, name), args);
+
+    // GetType returns the kind itself, not an HRESULT (Wine's d3d8
+    // test_resource_type).
+    const managed = texture(D3DPOOL.MANAGED);
+    assert.equal(h.texture(managed, 'GetType'), 3, 'D3DRTYPE_TEXTURE');
+    const buffer = vertices(D3DPOOL.MANAGED, 0x200);
+    assert.equal(vb(buffer, 'GetType'), 6, 'D3DRTYPE_VERTEXBUFFER');
+    assert.equal(h.device(device, 'CreateIndexBuffer', [64, 0, 101, D3DPOOL.SYSTEMMEM, out]),
+        D3D_OK);
+    const indices = h.box.memory.readU32(out);
+    assert.equal(vb(indices, 'GetType'), 7, 'D3DRTYPE_INDEXBUFFER');
+
+    // The descriptions read back what the buffers were made as.
+    const desc = 0xe100;
+    h.box.services.writeMemory(desc, new Uint8Array(32).fill(0xcd));
+    assert.equal(vb(buffer, 'GetDesc', [desc]), D3D_OK);
+    assert.deepEqual(h.fields.readStruct(desc, D3DVERTEXBUFFER_DESC9), {
+        Format: 100, Type: 6, Usage: 0x200, Pool: D3DPOOL.MANAGED, Size: 256, FVF: 0x102,
+    });
+    h.box.services.writeMemory(desc, new Uint8Array(32).fill(0xcd));
+    assert.equal(vb(indices, 'GetDesc', [desc]), D3D_OK);
+    assert.deepEqual(h.fields.readStruct(desc, D3DINDEXBUFFER_DESC9), {
+        Format: 101, Type: 7, Usage: 0, Pool: D3DPOOL.SYSTEMMEM, Size: 64,
+    });
+    assert.equal(h.fields.readU32(desc + D3DINDEXBUFFER_DESC9.SIZE), 0xcdcdcdcd,
+        'an index buffer\'s description has no FVF to write');
+    assert.equal(vb(buffer, 'GetDesc', [0]), D3DERR_INVALIDCALL);
+
+    // Only a managed resource keeps a priority; Set answers the one before
+    // (Wine's d3d8 test_resource_priority).
+    for (const [pool, keeps] of /** @type {[number, boolean][]} */ ([[D3DPOOL.DEFAULT, false],
+        [D3DPOOL.SYSTEMMEM, false], [D3DPOOL.MANAGED, true]]))
+    {
+        // The resource slots are the front of every resource's table.
+        for (const resource of [texture(pool), vertices(pool)])
+        {
+            assert.equal(vb(resource, 'GetPriority'), 0);
+            assert.equal(vb(resource, 'SetPriority', [1]), 0);
+            assert.equal(vb(resource, 'GetPriority'), keeps ? 1 : 0, `pool ${pool}`);
+            assert.equal(vb(resource, 'SetPriority', [0]), keeps ? 1 : 0);
+            assert.equal(vb(resource, 'PreLoad'), 0);
+            assert.equal(h.release(resource), 0);
+        }
+    }
+
+    // A level of detail is a managed texture's alone, clamped to its last
+    // level; the call answers the level before.
+    const unmanaged = texture(D3DPOOL.DEFAULT);
+    assert.equal(h.texture(unmanaged, 'SetLOD', [2]), 0);
+    assert.equal(h.texture(unmanaged, 'GetLOD'), 0);
+    assert.equal(h.texture(managed, 'SetLOD', [1]), 0);
+    assert.equal(h.texture(managed, 'GetLOD'), 1);
+    assert.equal(h.texture(managed, 'SetLOD', [7]), 1);
+    assert.equal(h.texture(managed, 'GetLOD'), 2, 'the last of three levels');
+
+    // Every resource names the device that made it, with a reference.
+    const got = 0xe200;
+    const before = h.object(device).refCount;
+    for (const resource of [managed, buffer, indices])
+    {
+        h.box.memory.writeU32(got, 0);
+        assert.equal(vb(resource, 'GetDevice', [got]), D3D_OK);
+        assert.equal(h.box.memory.readU32(got), device);
+    }
+    assert.equal(h.object(device).refCount, before + 3);
+    for (let index = 0; index < 3; index++)
+    {
+        h.release(device);
+    }
+
+    assert.equal(h.release(unmanaged), 0);
+    assert.equal(h.release(managed), 0);
+    assert.equal(h.release(buffer), 0);
+    assert.equal(h.release(indices), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('a surface names its container as QueryInterface on it would, and its device', ()=>{
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const out = 0xe000;
+    assert.equal(h.device(device, 'CreateTexture',
+        [128, 128, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out]), D3D_OK);
+    const texture = h.box.memory.readU32(out);
+    assert.equal(h.texture(texture, 'GetSurfaceLevel', [0, out]), D3D_OK);
+    const level = h.box.memory.readU32(out);
+    const iid = 0xe100;
+    const container = 0xe200;
+
+    // IDirect3DTexture8 is the pointer the program holds, with a reference.
+    putGuid(h, iid, [0xE4CDD575, 0x2866, 0x4F01, 0xB1, 0x2E, 0x7E, 0xEC, 0xE1, 0xEC, 0x93,
+        0x58]);
+    assert.equal(h.surface(level, 'GetContainer', [iid, container]), D3D_OK);
+    assert.equal(h.box.memory.readU32(container), texture);
+    assert.equal(h.object(texture).refCount, 3, 'the texture, its level, and the container');
+    h.release(texture);
+    // The interfaces it derives from answer too: IDirect3DBaseTexture8 is
+    // callable as one, and IUnknown is the identity QueryInterface gives.
+    putGuid(h, iid, [0xB4211CFA, 0x51B9, 0x4A9F, 0xAB, 0x78, 0xDB, 0x99, 0xB2, 0xBB, 0x67,
+        0x8E]);
+    assert.equal(h.surface(level, 'GetContainer', [iid, container]), D3D_OK);
+    const base = h.box.memory.readU32(container);
+    assert.notEqual(base, 0);
+    assert.equal(h.box.call(base, slot(IDIRECT3DTEXTURE8_SLOTS, 'GetLevelCount')), 1);
+    h.release(base);
+    putGuid(h, iid, [0x00000000, 0x0000, 0x0000, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x46]);
+    const identity = 0xe300;
+    assert.equal(h.surface(level, 'GetContainer', [iid, container]), D3D_OK);
+    assert.equal(h.box.call(texture, 0, [iid, identity]), D3D_OK);
+    assert.equal(h.box.memory.readU32(container), h.box.memory.readU32(identity),
+        'one identity, however it is reached');
+    h.release(texture);
+    h.release(texture);
+    // A surface is not what holds a surface: E_NOINTERFACE, and the pointer
+    // cleared.
+    putGuid(h, iid, [0xB96EEBCA, 0xB326, 0x4EA5, 0x88, 0x2F, 0x2F, 0xF5, 0xBA, 0xE0, 0x21,
+        0xDD]);
+    h.box.memory.writeU32(container, 0x1337c0d3);
+    assert.equal(h.surface(level, 'GetContainer', [iid, container]), 0x80004002);
+    assert.equal(h.box.memory.readU32(container), 0);
+
+    // A surface of its own, the back buffer included, is held by the device.
+    putGuid(h, iid, [0x7385E5DF, 0x8FE8, 0x41D5, 0x86, 0xB6, 0xD7, 0xB4, 0x85, 0x47, 0xB6,
+        0xCF]);
+    assert.equal(h.device(device, 'GetBackBuffer', [0, 0, out]), D3D_OK);
+    const back = h.box.memory.readU32(out);
+    assert.equal(h.surface(back, 'GetContainer', [iid, container]), D3D_OK);
+    assert.equal(h.box.memory.readU32(container), device);
+    h.release(device);
+    assert.equal(h.device(device, 'CreateImageSurface', [8, 8, D3DFMT.X8R8G8B8, out]), D3D_OK);
+    const image = h.box.memory.readU32(out);
+    for (const surface of [level, back, image])
+    {
+        h.box.memory.writeU32(container, 0);
+        assert.equal(h.surface(surface, 'GetDevice', [container]), D3D_OK);
+        assert.equal(h.box.memory.readU32(container), device);
+        h.release(device);
+    }
+
+    assert.equal(h.release(image), 0);
+    assert.equal(h.release(back), 0);
+    assert.equal(h.release(level), 1);
+    assert.equal(h.release(texture), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('a cube texture is made, and answers for its faces through its own vtable', ()=>{
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const out = 0xe000;
+    assert.equal(h.device(device, 'CreateCubeTexture',
+        [8, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out]), D3D_OK);
+    const cube = h.box.memory.readU32(out);
+    assert.notEqual(cube, 0);
+    /** @param {string} name @param {number[]} [args] */
+    const call = (name, args = [])=>
+        h.box.call(cube, slot(IDIRECT3DCUBETEXTURE8_SLOTS, name), args);
+
+    assert.equal(call('GetType'), 5, 'D3DRTYPE_CUBETEXTURE');
+    assert.equal(call('GetLevelCount'), 4, 'a whole chain for zero levels');
+    const desc = 0xe100;
+    assert.equal(call('GetLevelDesc', [1, desc]), D3D_OK);
+    assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Width), 4);
+
+    // Each face locks at its own storage, and one past the sixth is refused.
+    const locked = 0xe200;
+    assert.equal(call('LockRect', [5, 0, locked, 0, 0]), D3D_OK);
+    assert.equal(h.fields.readU32(locked + D3DLOCKED_RECT.Pitch), 32);
+    const fifth = h.fields.readU32(locked + D3DLOCKED_RECT.pBits);
+    assert.equal(call('UnlockRect', [5, 0]), D3D_OK);
+    assert.equal(call('LockRect', [0, 0, locked, 0, 0]), D3D_OK);
+    assert.notEqual(h.fields.readU32(locked + D3DLOCKED_RECT.pBits), fifth);
+    assert.equal(call('UnlockRect', [0, 0]), D3D_OK);
+    assert.equal(call('LockRect', [6, 0, locked, 0, 0]), D3DERR_INVALIDCALL);
+    assert.equal(call('AddDirtyRect', [1, 0]), D3D_OK);
+    assert.equal(call('AddDirtyRect', [6, 0]), D3DERR_INVALIDCALL);
+
+    // A face's surface names the cube as its container, by d3d8.h's GUID.
+    assert.equal(call('GetCubeMapSurface', [2, 0, out]), D3D_OK);
+    const face = h.box.memory.readU32(out);
+    const iid = 0xe300;
+    putGuid(h, iid, [0x3EE5B968, 0x2ACA, 0x4C34, 0x8B, 0xB5, 0x7E, 0x0C, 0x3D, 0x19, 0xB7,
+        0x50]);
+    assert.equal(h.surface(face, 'GetContainer', [iid, out]), D3D_OK);
+    assert.equal(h.box.memory.readU32(out), cube);
+    h.release(cube);
+    assert.equal(h.release(face), 1, 'the cube holds its face');
+
+    // Bound and read back, it is the pointer the program holds.
+    assert.equal(h.device(device, 'SetTexture', [0, cube]), D3D_OK);
+    assert.equal(h.device(device, 'GetTexture', [0, out]), D3D_OK);
+    assert.equal(h.box.memory.readU32(out), cube);
+    h.release(cube);
+    assert.equal(h.device(device, 'SetTexture', [0, 0]), D3D_OK);
+    assert.equal(h.release(cube), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('a volume texture is made, and its levels lock, describe and name it', ()=>{
+    // Wine's d3d8 test_volume_locking, test_lockbox_invalid and
+    // test_volume_get_container.
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const out = 0xe000;
+    const dynamic = 0x200;
+    assert.equal(h.device(device, 'CreateVolumeTexture',
+        [4, 4, 4, 1, dynamic, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out]), D3DERR_INVALIDCALL,
+    'a managed volume is not dynamic');
+    assert.equal(h.device(device, 'CreateVolumeTexture',
+        [4, 4, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out]), D3D_OK);
+    const placed = h.box.memory.readU32(out);
+    const locked = 0xe100;
+    /** @param {number} texture @param {string} name @param {number[]} [args] */
+    const call = (texture, name, args = [])=>
+        h.box.call(texture, slot(IDIRECT3DVOLUMETEXTURE8_SLOTS, name), args);
+    h.box.memory.writeU32(locked + 8, 0xdeadbeef);
+    assert.equal(call(placed, 'LockBox', [0, locked, 0, 0]), D3DERR_INVALIDCALL,
+        'a default-pool volume that is not dynamic does not lock');
+    assert.equal(h.box.memory.readU32(locked + 8), 0, 'and hands out no address');
+    assert.equal(h.release(placed), 0);
+
+    assert.equal(h.device(device, 'CreateVolumeTexture',
+        [4, 4, 2, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out]), D3D_OK);
+    const texture = h.box.memory.readU32(out);
+    assert.equal(call(texture, 'GetType'), 4, 'D3DRTYPE_VOLUMETEXTURE');
+    assert.equal(call(texture, 'GetLevelCount'), 3);
+    const desc = 0xe200;
+    assert.equal(call(texture, 'GetLevelDesc', [1, desc]), D3D_OK);
+    assert.deepEqual(h.fields.readStruct(desc, D3DVOLUME_DESC8), {
+        Format: D3DFMT.A8R8G8B8, Type: 2, Usage: 0, Pool: D3DPOOL.MANAGED, Size: 2 * 2 * 1 * 4,
+        Width: 2, Height: 2, Depth: 1,
+    });
+    assert.equal(call(texture, 'LockBox', [0, locked, 0, 0]), D3D_OK);
+    assert.deepEqual([h.box.memory.readU32(locked), h.box.memory.readU32(locked + 4)], [16, 64],
+        'the row and slice pitches');
+    assert.equal(call(texture, 'UnlockBox', [0]), D3D_OK);
+
+    assert.equal(call(texture, 'GetVolumeLevel', [0, out]), D3D_OK);
+    const volume = h.box.memory.readU32(out);
+    const iid = 0xe300;
+    putGuid(h, iid, [0x4B8AAAFA, 0x140F, 0x42BA, 0x91, 0x31, 0x59, 0x7E, 0xAF, 0xAA, 0x2E,
+        0xAD]);
+    assert.equal(h.box.call(volume, slot(IDIRECT3DVOLUME8_SLOTS, 'GetContainer'), [iid, out]),
+        D3D_OK);
+    assert.equal(h.box.memory.readU32(out), texture);
+    h.release(texture);
+    assert.equal(h.box.call(volume, slot(IDIRECT3DVOLUME8_SLOTS, 'LockBox'), [locked, 0, 0]),
+        D3D_OK);
+    assert.equal(h.box.call(volume, slot(IDIRECT3DVOLUME8_SLOTS, 'UnlockBox')), D3D_OK);
+    assert.equal(h.release(volume), 1);
+
+    assert.equal(h.device(device, 'SetTexture', [0, texture]), D3D_OK);
+    assert.equal(h.device(device, 'GetTexture', [0, out]), D3D_OK);
+    assert.equal(h.box.memory.readU32(out), texture);
+    h.release(texture);
+    assert.equal(h.device(device, 'SetTexture', [0, 0]), D3D_OK);
+    assert.equal(h.release(texture), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('a texture palette is kept and read back, and one with alpha is refused', ()=>{
+    // Wine's d3d8 test_set_palette and visual.c's palette test: an opaque
+    // palette is taken and a current one chosen; entries with alpha need
+    // D3DPTEXTURECAPS_ALPHAPALETTE, which this device does not claim.
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const table = 0xe000;
+    const entries = Uint8Array.from({ length: 1024 }, (_, index)=>(index % 4 === 3
+        ? 0xff
+        : index >> 2));
+    h.box.services.writeMemory(table, entries);
+    assert.equal(h.device(device, 'SetPaletteEntries', [1, table]), D3D_OK);
+    const read = 0xe400;
+    assert.equal(h.device(device, 'GetPaletteEntries', [1, read]), D3D_OK);
+    assert.deepEqual([...h.box.services.readMemory(read, 1024)], [...entries]);
+    assert.equal(h.device(device, 'GetPaletteEntries', [2, read]), D3DERR_INVALIDCALL,
+        'a palette never set');
+    assert.equal(h.device(device, 'SetCurrentTexturePalette', [1]), D3D_OK);
+    const current = 0xe800;
+    assert.equal(h.device(device, 'GetCurrentTexturePalette', [current]), D3D_OK);
+    assert.equal(h.box.memory.readU32(current), 1);
+
+    h.box.services.writeMemory(table + 7, Uint8Array.of(0x80));
+    assert.equal(h.device(device, 'SetPaletteEntries', [1, table]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(device, 'GetPaletteEntries', [1, read]), D3D_OK);
+    assert.equal(h.box.services.readMemory(read + 7, 1)[0], 0xff, 'the palette as it was');
+    assert.equal(h.device(device, 'SetPaletteEntries', [1, 0]), D3DERR_INVALIDCALL);
+
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
 test('a stream and an index binding read back as the buffers they were given', ()=>{
     const h = seamed();
     const root = h.create();
@@ -1108,24 +1624,26 @@ test('the capabilities a device reports are answers, not gaps', ()=>{
 
     const caps = h.fields.readStruct(at, D3DCAPS8,
         ['MaxVertexW', 'GuardBandLeft', 'GuardBandTop', 'GuardBandRight', 'GuardBandBottom',
-            'ExtentsAdjust', 'MaxPointSize']);
+            'ExtentsAdjust', 'MaxPointSize', 'MaxPixelShaderValue']);
     assert.equal(caps.DeviceType, D3DDEVTYPE.HAL, 'the first field, so the whole run starts right');
+    assert.equal(caps.MaxPixelShaderValue, 1, 'a float');
     assert.equal(caps.MaxTextureAspectRatio, 4096);
-    assert.equal(caps.MaxAnisotropy, 16);
+    assert.equal(caps.MaxAnisotropy, 1, 'the sampler filters no more than linearly');
     assert.equal(caps.MaxTextureBlendStages, 8);
     assert.equal(caps.MaxSimultaneousTextures, 8);
     assert.equal(caps.MaxActiveLights, 8);
-    assert.equal(caps.MaxUserClipPlanes, 6);
+    assert.equal(caps.MaxUserClipPlanes, 0, 'nothing clips against a plane of the program\'s');
     assert.equal(caps.MaxStreams, 16);
     assert.equal(caps.MaxPointSize, 64, 'a float in the middle of the dwords');
     assert.equal(caps.ExtentsAdjust, 0);
     assert.ok(caps.MaxVertexW > 0, 'a zero here is read as no clipping headroom at all');
     assert.ok(caps.GuardBandLeft < 0 && caps.GuardBandRight > 0);
 
-    // Both shader versions are zero deliberately: this device runs neither, and
-    // the entry points make that claim good.
-    assert.equal(caps.VertexShaderVersion, 0);
-    assert.equal(caps.PixelShaderVersion, 0);
+    // Vertex shaders to 1.1 over a file of 256 constants, and pixel shaders
+    // to 1.4, whose registers hold [-1, 1].
+    assert.equal(caps.VertexShaderVersion, 0xfffe0101);
+    assert.equal(caps.MaxVertexShaderConst, 256);
+    assert.equal(caps.PixelShaderVersion, 0xffff0104);
 
     // The bits land in the fields they belong to rather than one field over.
     assert.equal(caps.ZCmpCaps, caps.AlphaCmpCaps, 'both comparison sets are the same set');
@@ -1137,8 +1655,131 @@ test('the capabilities a device reports are answers, not gaps', ()=>{
     // handed and the host shows it. A title was measured drawing its own
     // cursor, from the wrong cell of its sheet, when this field read zero.
     assert.equal(caps.CursorCaps, 0x3, 'D3DCURSORCAPS_COLOR | D3DCURSORCAPS_LOWRES');
+    assert.equal(caps.Caps, 0x00020000, 'D3DCAPS_READ_SCANLINE: the raster can be read');
     assert.equal(caps.Caps3, 0, 'nothing was written into the field before the intervals');
 
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('the fog the raster caps claim is named by the bits d3d8caps.h gives it', ()=>{
+    // Table fog is taken over w under a perspective projection and over z
+    // under an affine one, which is both of the claims.
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const at = 0x3200;
+    assert.equal(h.device(device, 'GetDeviceCaps', [at]), D3D_OK);
+    const raster = h.fields.readU32(at + D3DCAPS8.RasterCaps);
+    assert.ok((raster & 0x00200000) !== 0, 'D3DPRASTERCAPS_ZFOG');
+    assert.ok((raster & 0x00100000) !== 0, 'D3DPRASTERCAPS_WFOG');
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('every capability claimed is one the renderer honours', ()=>{
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const at = 0x3200;
+    assert.equal(h.device(device, 'GetDeviceCaps', [at]), D3D_OK);
+    const caps = h.fields.readStruct(at, D3DCAPS8,
+        ['MaxVertexW', 'GuardBandLeft', 'GuardBandTop', 'GuardBandRight', 'GuardBandBottom',
+            'ExtentsAdjust', 'MaxPointSize']);
+
+    assert.equal(caps.TextureOpCaps, 0x0000ffff,
+        'DISABLE through BLENDCURRENTALPHA, the operations the combiner draws');
+    assert.equal(caps.TextureCaps & (0x00000800 | 0x00010000), 0x00010800,
+        'cube maps and their chains, which the renderer samples');
+    assert.equal(caps.CubeTextureFilterCaps, caps.TextureFilterCaps);
+    assert.equal(caps.TextureCaps & 0x0000a000, 0x0000a000, 'volumes and their chains');
+    assert.equal(caps.VolumeTextureFilterCaps, caps.TextureFilterCaps);
+    assert.equal(caps.VolumeTextureAddressCaps, caps.TextureAddressCaps);
+    assert.equal(caps.Caps2 & 0x00020000, 0,
+        'no D3DCAPS2_FULLSCREENGAMMA: no display here shows a ramp');
+    assert.equal(caps.TextureCaps & 0x00000080, 0,
+        'no D3DPTEXTURECAPS_ALPHAPALETTE: no palettised format is made');
+    assert.equal(caps.RasterCaps & 0x00004000, 0, 'no D3DRS_ZBIAS, which nothing reads');
+    assert.equal(caps.RasterCaps & 0x00020000, 0, 'no anisotropy');
+    assert.equal(caps.TextureFilterCaps & (0x00000400 | 0x04000000), 0,
+        'no anisotropic minification or magnification');
+    assert.equal(caps.RasterCaps & 0x00002000, 0, 'no D3DTSS_MIPMAPLODBIAS, which nothing reads');
+    assert.equal(caps.StencilCaps, 0, 'no stencil test in the pipeline');
+    assert.equal(caps.MaxVertexBlendMatrices, 0, 'no vertex blending');
+    assert.equal(caps.TextureAddressCaps & (0x00000008 | 0x00000020), 0,
+        'no border colour and no mirror-once, which the sampler folds into others');
+    assert.equal(caps.RasterCaps & 0x00010000, 0x00010000,
+        'D3DPRASTERCAPS_FOGRANGE: range fog fades by the distance from the eye');
+
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('a surface keeps private data under a GUID, an interface entry with a reference', ()=>{
+    // After Wine's d3d8 test_private_data.
+    const D3DSPD_IUNKNOWN = 1;
+    const D3DERR_MOREDATA = 0x88760867;
+    const D3DERR_NOTFOUND = 0x88760866;
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const guid = 0xd000;
+    const other = 0xd010;
+    h.box.services.writeMemory(guid, Uint8Array.from({ length: 16 }, (_, i)=>0x40 + i));
+    h.box.services.writeMemory(other, Uint8Array.from({ length: 16 }, (_, i)=>0x80 + i));
+    const out = 0xd100;
+    assert.equal(h.device(device, 'CreateImageSurface', [4, 4, D3DFMT.A8R8G8B8, out]), D3D_OK);
+    const surface = h.box.memory.readU32(out);
+    const deviceModel = h.object(device);
+    const surfaceCall = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        h.surface(surface, name, args);
+
+    for (const size of [0, 5, 8])
+    {
+        assert.equal(surfaceCall('SetPrivateData', [guid, device, size, D3DSPD_IUNKNOWN]),
+            D3DERR_INVALIDCALL, `an interface is the size of a pointer, not ${size}`);
+    }
+    const before = deviceModel.refCount;
+    assert.equal(surfaceCall('SetPrivateData', [guid, device, 4, D3DSPD_IUNKNOWN]), D3D_OK);
+    assert.equal(deviceModel.refCount, before + 1, 'the entry holds the device');
+    assert.equal(surfaceCall('SetPrivateData', [guid, device, 8, D3DSPD_IUNKNOWN]),
+        D3DERR_INVALIDCALL, 'and a refused set leaves it');
+
+    const data = 0xd200;
+    const sizeAt = 0xd210;
+    h.box.memory.writeU32(sizeAt, 8);
+    assert.equal(surfaceCall('GetPrivateData', [guid, data, sizeAt]), D3D_OK);
+    assert.equal(h.box.memory.readU32(data), device);
+    assert.equal(h.box.memory.readU32(sizeAt), 4);
+    assert.equal(deviceModel.refCount, before + 2, 'reading an interface entry takes one more');
+    assert.equal(h.release(device), before + 1);
+
+    h.box.memory.writeU32(sizeAt, 1);
+    assert.equal(surfaceCall('GetPrivateData', [guid, 0, sizeAt]), D3D_OK, 'a size query');
+    assert.equal(h.box.memory.readU32(sizeAt), 4);
+    h.box.memory.writeU32(sizeAt, 1);
+    h.box.memory.writeU32(data, 0xdeadbeef);
+    assert.equal(surfaceCall('GetPrivateData', [guid, data, sizeAt]), D3DERR_MOREDATA);
+    assert.equal(h.box.memory.readU32(sizeAt), 4);
+    assert.equal(h.box.memory.readU32(data), 0xdeadbeef);
+    h.box.memory.writeU32(sizeAt, 0xdeadbabe);
+    assert.equal(surfaceCall('GetPrivateData', [other, data, sizeAt]), D3DERR_NOTFOUND);
+    assert.equal(h.box.memory.readU32(sizeAt), 0xdeadbabe);
+
+    // Bytes, and a free that gives the device's reference back.
+    const bytes = 0xd300;
+    h.box.memory.writeU32(bytes, 0x04030201);
+    assert.equal(surfaceCall('SetPrivateData', [other, bytes, 4, 0]), D3D_OK);
+    h.box.memory.writeU32(sizeAt, 4);
+    assert.equal(surfaceCall('GetPrivateData', [other, data, sizeAt]), D3D_OK);
+    assert.equal(h.box.memory.readU32(data), 0x04030201);
+    assert.equal(surfaceCall('FreePrivateData', [other]), D3D_OK);
+    assert.equal(surfaceCall('FreePrivateData', [other]), D3DERR_NOTFOUND);
+
+    // Destroying the surface lets go of what its entries held, and of the
+    // device reference every resource holds.
+    assert.equal(h.release(surface), 0);
+    assert.equal(deviceModel.refCount, before - 1);
     assert.equal(h.release(device), 0);
     h.release(root);
 });
@@ -1580,3 +2221,85 @@ test('the guest routines a device writes come from the code pages, not the heap 
         assert.ok(code.length > 0, 'a guest routine was placed');
         assert.ok(code.every(([, size])=>size > 0 && size <= 0x100));
     });
+
+test('an additional swap chain has back buffers of its own, and writes back only its count',
+    ()=>{
+        // Wine's d3d8 test_swapchain.
+        const h = seamed();
+        const root = h.create();
+        const device = h.createDevice(root);
+        const at = 0xe400;
+        const out = 0xe000;
+        /** @param {Record<string, number>} fields */
+        const parameters = fields=>{
+            h.box.services.writeMemory(at, new Uint8Array(D3DPRESENT_PARAMETERS8.SIZE));
+            h.fields.writeStruct(at, D3DPRESENT_PARAMETERS8, {
+                Windowed: 1, SwapEffect: 1, BackBufferFormat: D3DFMT.A8R8G8B8, ...fields,
+            });
+        };
+        /** @param {number} chain @param {string} name @param {number[]} [args] */
+        const call = (chain, name, args = [])=>
+            h.box.call(chain, slot(IDIRECT3DSWAPCHAIN8_SLOTS, name), args);
+
+        parameters({ BackBufferCount: 0 });
+        assert.equal(h.device(device, 'CreateAdditionalSwapChain', [at, out]), D3D_OK);
+        const first = h.box.memory.readU32(out);
+        const written = h.fields.readStruct(at, D3DPRESENT_PARAMETERS8);
+        assert.deepEqual([written.BackBufferWidth, written.BackBufferHeight,
+            written.BackBufferFormat, written.BackBufferCount, written.hDeviceWindow],
+        [0, 0, D3DFMT.A8R8G8B8, 1, 0], 'the count a zero stood for, and nothing else');
+        assert.equal(call(first, 'GetBackBuffer', [0, 0, out]), D3D_OK);
+        const back = h.box.memory.readU32(out);
+        /** @type {{ desc?: any }} */
+        const described = {};
+        h.object(back).GetDesc(described);
+        assert.deepEqual([described.desc.Width, described.desc.Height], [640, 480],
+            'the device window\'s client area');
+        h.release(back);
+        h.box.memory.writeU32(out, 0xdeadbeef);
+        assert.equal(call(first, 'GetBackBuffer', [1, 0, out]), D3DERR_INVALIDCALL);
+        assert.equal(h.box.memory.readU32(out), 0xdeadbeef);
+
+        parameters({ BackBufferCount: 2 });
+        assert.equal(h.device(device, 'CreateAdditionalSwapChain', [at, out]), D3D_OK);
+        const second = h.box.memory.readU32(out);
+        assert.equal(call(second, 'GetBackBuffer', [0, 0, 0]), D3DERR_INVALIDCALL);
+        assert.equal(call(second, 'GetBackBuffer', [0, 1 /* LEFT */, out]), D3D_OK);
+        const left = h.box.memory.readU32(out);
+        assert.equal(call(second, 'GetBackBuffer', [0, 0, out]), D3D_OK);
+        assert.equal(h.box.memory.readU32(out), left, 'the type is not looked at');
+        h.release(left);
+        h.release(left);
+        assert.equal(call(second, 'GetBackBuffer', [1, 0, out]), D3D_OK);
+        h.release(h.box.memory.readU32(out));
+        assert.equal(call(second, 'GetBackBuffer', [2, 0, out]), D3DERR_INVALIDCALL);
+        assert.equal(call(second, 'Present', [0, 0, 0, 0]), D3D_OK);
+
+        parameters({ Windowed: 0, hDeviceWindow: HWND, BackBufferCount: 1,
+            BackBufferWidth: 640, BackBufferHeight: 480 });
+        h.box.memory.writeU32(out, 0xdeadbeef);
+        assert.equal(h.device(device, 'CreateAdditionalSwapChain', [at, out]),
+            D3DERR_INVALIDCALL, 'a chain is windowed or not made');
+        assert.equal(h.box.memory.readU32(out), 0);
+
+        assert.equal(h.release(second), 0);
+        assert.equal(h.release(first), 0);
+        assert.equal(h.release(device), 0);
+        h.release(root);
+    });
+
+test('D3DCAPS2_FULLSCREENGAMMA is claimed where a full-screen device\'s ramp is shown', ()=>{
+    const h = seamed({ caps: { gamma: { set: ()=>{}, applies: ()=>true } } });
+    const root = h.create();
+    const at = 0x3200;
+    assert.equal(h.box.call(root, slot(IDIRECT3D8_SLOTS, 'GetDeviceCaps'),
+        [0, D3DDEVTYPE.HAL, at]), D3D_OK);
+    assert.equal(h.fields.readU32(at + D3DCAPS8.Caps2) & 0x00020000, 0x00020000,
+        'the adapter says so');
+    const device = h.createDevice(root);
+    assert.equal(h.device(device, 'GetDeviceCaps', [at]), D3D_OK);
+    assert.equal(h.fields.readU32(at + D3DCAPS8.Caps2) & 0x00020000, 0x00020000,
+        'and so does the device');
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});

@@ -248,6 +248,34 @@ test('a running process reports that it is still running', ()=>{
     assert.deepEqual(host.errors, [ERROR_INVALID_HANDLE]);
 });
 
+test('the native machine is the one GetSystemInfo reports, with no 64-bit system beneath',
+    ()=>{
+        // Wine's kernel32 test_SystemInfo: a process that is not under WOW64
+        // sees no difference between the two.
+        const host = fakeHost();
+        const fns = createSystemFunctions(host);
+        host.bytes.fill(0xcc, 0x200, 0x300);
+        fns.GetSystemInfo.handler([0x200]);
+        fns.GetNativeSystemInfo.handler([0x280]);
+        assert.deepEqual(host.bytes.slice(0x280, 0x2a4), host.bytes.slice(0x200, 0x224));
+        assert.equal(fns.GetNativeSystemInfo.argBytes, 4);
+    });
+
+test('IsWow64Process answers FALSE for this process and a child, and fails a stranger', ()=>{
+    const host = fakeHost();
+    host.handles.set(0x40, { exitCode: STILL_ACTIVE });
+    const fns = createSystemFunctions(host);
+    host.view.setUint32(0x200, 0xdeadbeef, true);
+    assert.equal(fns.IsWow64Process.handler([CURRENT_PROCESS, 0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 0, 'a 32-bit system has no WOW64');
+    host.view.setUint32(0x200, 0xdeadbeef, true);
+    assert.equal(fns.IsWow64Process.handler([0x40, 0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 0);
+    assert.equal(fns.IsWow64Process.handler([0x10, 0x200]), 0);
+    assert.deepEqual(host.errors, [ERROR_INVALID_HANDLE]);
+    assert.equal(fns.IsWow64Process.argBytes, 8);
+});
+
 test('a child process reports its own exit code, not this process\'s', ()=>{
     // The engine only ever answers STILL_ACTIVE for a child -- a child takes
     // this process's place rather than running beside it -- but the value has

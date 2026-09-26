@@ -360,6 +360,23 @@ test('destroying a menu takes its submenus with it', ()=>{
     assert.equal(fns.GetMenuItemCount.handler([inner]), -1, 'the submenu went too');
 });
 
+test('IsMenu holds for a live menu and refuses a destroyed one with the reason', ()=>{
+    // user32's menu tests: a popup is a menu until DestroyMenu, and then IsMenu
+    // fails with ERROR_INVALID_MENU_HANDLE.
+    const ERROR_INVALID_MENU_HANDLE = 1401;
+    /** @type {number[]} */
+    const errors = [];
+    const { fns } = setup({ setLastError: (/** @type {number} */ code)=>errors.push(code) });
+    const menu = fns.CreatePopupMenu.handler([]);
+    assert.equal(fns.IsMenu.handler([menu]), 1);
+    assert.equal(fns.IsMenu.argBytes, 4);
+
+    fns.DestroyMenu.handler([menu]);
+    assert.equal(fns.IsMenu.handler([menu]), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_MENU_HANDLE]);
+    assert.equal(fns.IsMenu.handler([0]), 0, 'nor is null a menu');
+});
+
 /**
  * A menu template in the resource compiler's own layout: items end to end with
  * no padding, a popup's items right after its text, MF_END closing a level.

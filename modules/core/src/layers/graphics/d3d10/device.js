@@ -36,15 +36,17 @@
 
 import { attachCom } from './com.js';
 import {
-    D3D10_CREATE_DEVICE_MASK, D3D10_DEFAULTS, D3D10_DRIVER_TYPE, D3D10_DRIVER_TYPES,
-    D3D10_LIMITS, D3D10_PRIMITIVE_TOPOLOGY, D3D10_QUERY, D3D10_RESOURCE_DIMENSION,
-    D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_USAGE, DXGI_ERROR_INVALID_CALL,
-    DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_FAIL, E_INVALIDARG, E_NOTIMPL,
-    FORMAT_INFO, FORMAT_KIND, IID, S_FALSE, S_OK,
+    D3D10_BIND, D3D10_CREATE_DEVICE, D3D10_CREATE_DEVICE_MASK, D3D10_DEFAULTS, D3D10_DRIVER_TYPE,
+    D3D10_DRIVER_TYPES, D3D10_LIMITS, D3D10_PRIMITIVE_TOPOLOGY, D3D10_QUERY,
+    D3D10_RESOURCE_DIMENSION, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_1_SDK_VERSION,
+    D3D10_USAGE,
+    DXGI_ERROR_INVALID_CALL, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_FAIL,
+    E_INVALIDARG, E_NOTIMPL, FORMAT_INFO, FORMAT_KIND, IID, S_FALSE, S_OK,
 } from './constants.js';
 import { SHADER_KIND, SYSTEM_VALUE, parseDxbc, parseShaderOfKind } from './dxbc.js';
 import { createFactory } from './dxgi.js';
-import { INDEX_FORMAT, TEXTURE_FORMAT, VERTEX_FORMAT } from './gpuformats.js';
+import { INDEX_FORMAT, VERTEX_FORMAT, textureStorage } from './gpuformats.js';
+import { createDrawStatistics, createQueryObject } from './queries.js';
 import { createRenderer } from './render.js';
 import {
     VIEW_KINDS, createResource, createView, resolveMipLevels, resolveViewDesc, textureInterfaces,
@@ -80,6 +82,10 @@ const FORMAT_SUPPORT = Object.freeze({
     DISPLAY: 0x80000,
 });
 
+/** The frames a DXGI device queues ahead unless told otherwise, and the most it will. */
+const DEFAULT_FRAME_LATENCY = 3;
+const MAXIMUM_FRAME_LATENCY = 16;
+
 /** The query kinds that are also predicates. */
 const PREDICATE_QUERIES = new Set([
     D3D10_QUERY.OCCLUSION_PREDICATE, D3D10_QUERY.SO_OVERFLOW_PREDICATE,
@@ -95,6 +101,11 @@ const PREDICATE_QUERIES = new Set([
  * @property {(descriptor: object) => any} [createTexture]
  * @property {(api: string, detail: string) => void} [divergence]
  *     Where a call that succeeded without doing all it promises is reported.
+ * @property {() => number} [now]  Milliseconds, for a timestamp query.
+ * @property {boolean} [compressedTextures]  Whether the GPU samples BC blocks as they are;
+ *     without it a block-compressed texture is decoded on the processor.
+ * @property {boolean} [depthClipControl]  Whether the GPU device can leave depth
+ *     unclipped, as a rasterizer state with DepthClipEnable FALSE asks.
  */
 
 /**
@@ -150,6 +161,101 @@ export function D3D10CreateDevice(adapter, driverType, software, flags, sdkVersi
     }
     out.device = createDevice({ ...options, adapter, flags });
     return S_OK;
+}
+
+/** D3D10_SRV_DIMENSION1_TEXTURECUBEARRAY: a view Direct3D 10.1 added. */
+const D3D10_SRV_DIMENSION1_TEXTURECUBEARRAY = 10;
+
+/**
+ * The feature levels Direct3D 10.1's entry points name.
+ *
+ * @type {readonly number[]}
+ */
+const FEATURE_LEVELS_1 = Object.freeze([
+    D3D_FEATURE_LEVEL.LEVEL_10_1, D3D_FEATURE_LEVEL.LEVEL_10_0, D3D_FEATURE_LEVEL.LEVEL_9_3,
+    D3D_FEATURE_LEVEL.LEVEL_9_2, D3D_FEATURE_LEVEL.LEVEL_9_1,
+]);
+
+/**
+ * Whether a Direct3D 10.1 entry point's version and level can be met: its own
+ * SDK version, and of the levels it may name, 10.0 -- the one this device
+ * is. 10.1 needs cube arrays and more samples than this renderer has, and the
+ * 9.x levels restrictions it does not enforce, so both are refused the way an
+ * adapter without them refuses them.
+ *
+ * @param {number} featureLevel
+ * @param {number} sdkVersion
+ * @returns {number}
+ */
+function featureLevelResult(featureLevel, sdkVersion){
+    if (sdkVersion !== D3D10_1_SDK_VERSION || !FEATURE_LEVELS_1.includes(featureLevel))
+    {
+        return E_INVALIDARG;
+    }
+    return featureLevel === D3D_FEATURE_LEVEL.LEVEL_10_0 ? S_OK : DXGI_ERROR_UNSUPPORTED;
+}
+
+/**
+ * HRESULT D3D10CreateDevice1(IDXGIAdapter*, D3D10_DRIVER_TYPE, HMODULE, UINT,
+ * D3D10_FEATURE_LEVEL1, UINT, ID3D10Device1**). Unlike the 10.0 entry point
+ * it has no use for a null device pointer.
+ *
+ * @param {any} adapter
+ * @param {number} driverType
+ * @param {any} software
+ * @param {number} flags
+ * @param {number} featureLevel
+ * @param {number} sdkVersion
+ * @param {{ device?: any } | null} out
+ * @param {DeviceOptions} [options]
+ * @returns {number}
+ */
+export function D3D10CreateDevice1(adapter, driverType, software, flags, featureLevel,
+    sdkVersion, out, options = {})
+{
+    if (!out)
+    {
+        return E_INVALIDARG;
+    }
+    out.device = null;
+    const hr = featureLevelResult(featureLevel, sdkVersion);
+    return hr === S_OK
+        ? D3D10CreateDevice(adapter, driverType, software, flags, D3D10_SDK_VERSION, out, options)
+        : hr;
+}
+
+/**
+ * @param {any} adapter
+ * @param {number} driverType
+ * @param {any} software
+ * @param {number} flags
+ * @param {number} featureLevel
+ * @param {number} sdkVersion
+ * @param {import('./structs.js').SwapChainFields | null} swapChainDesc
+ * @param {{ swapChain?: any } | null} swapChainOut
+ * @param {{ device?: any } | null} deviceOut
+ * @param {DeviceOptions} [options]
+ * @returns {number}
+ */
+export function D3D10CreateDeviceAndSwapChain1(adapter, driverType, software, flags,
+    featureLevel, sdkVersion, swapChainDesc, swapChainOut, deviceOut, options = {})
+{
+    if (swapChainOut)
+    {
+        swapChainOut.swapChain = null;
+    }
+    if (!deviceOut)
+    {
+        return E_INVALIDARG;
+    }
+    deviceOut.device = null;
+    const hr = featureLevelResult(featureLevel, sdkVersion);
+    if (hr !== S_OK)
+    {
+        return hr;
+    }
+    return D3D10CreateDeviceAndSwapChain(adapter, driverType, software, flags, D3D10_SDK_VERSION,
+        swapChainOut ? swapChainDesc : null, swapChainOut ?? {}, deviceOut, options);
 }
 
 /**
@@ -317,17 +423,22 @@ export function createDevice(options = {}){
     // With a backend the renderer draws; without one it still keeps every
     // resource's bytes, so a map, a copy and an update mean the same thing in
     // a headless build as under a GPU.
+    const textureOptions = { compressed: options.compressedTextures ?? false };
     const renderer = createRenderer({
         backend: options.backend ?? null,
         createSampler: options.createSampler ?? (()=>null),
         createTexture: options.createTexture ?? (()=>null),
         divergence: options.divergence,
+        compressedTextures: textureOptions.compressed,
+        depthClipControl: options.depthClipControl ?? false,
     });
+    const statistics = createDrawStatistics();
     /** @type {import('./resources.js').ResourceStorage} */
     const storage = {
         map: (resource, subresource)=>renderer.map(resource, subresource),
         unmap: (resource, subresource, discard, noOverwrite)=>
             renderer.unmap(resource, subresource, discard, noOverwrite),
+        pending: resource=>renderer.pendingReadback(resource),
     };
 
     /**
@@ -378,6 +489,9 @@ export function createDevice(options = {}){
     };
     let exceptionMode = 0;
     let textFilter = { width: 0, height: 0 };
+    // A device is thread-safe unless it was made single-threaded.
+    let multithreadProtected = ((options.flags ?? 0) & D3D10_CREATE_DEVICE.SINGLETHREADED) === 0;
+    let maximumFrameLatency = DEFAULT_FRAME_LATENCY;
 
     /**
      * @param {any} desc
@@ -457,6 +571,7 @@ export function createDevice(options = {}){
             desc: Object.freeze(reported),
             dimensionName,
             iid: kind.iid,
+            also: kind.also,
             retainDevice,
             releaseDevice,
             device: deviceHandle,
@@ -499,31 +614,6 @@ export function createDevice(options = {}){
     };
 
     /**
-     * A device child with nothing to say for itself: a query, a counter.
-     *
-     * @param {readonly string[]} interfaces
-     * @param {any} desc
-     */
-    const createChild = (interfaces, desc)=>attachCom({
-        desc,
-        /** @param {{ device?: any }} target */
-        GetDevice(target){
-            retainDevice();
-            target.device = self;
-            return S_OK;
-        },
-        /** @param {{ desc?: any }} target */
-        GetDesc(target){
-            target.desc = desc;
-            return S_OK;
-        },
-    }, {
-        interfaces: [IID.ID3D10DeviceChild, ...interfaces],
-        onFirstRef: retainDevice,
-        onLastRef: releaseDevice,
-    });
-
-    /**
      * @param {any} desc
      * @param {{ query?: any } | null} out
      * @param {boolean} predicate  Whether the create is for a predicate.
@@ -548,15 +638,27 @@ export function createDevice(options = {}){
         {
             return S_FALSE;
         }
-        diverge('a query is created and never answers: nothing here measures the GPU');
         /** @type {string[]} */
-        const interfaces = [IID.ID3D10Asynchronous, IID.ID3D10Query];
+        const interfaces = [IID.ID3D10Query];
         if (isPredicate)
         {
             interfaces.push(IID.ID3D10Predicate);
         }
-        out.query = createChild(interfaces,
-            Object.freeze({ Query: desc.Query, MiscFlags: desc.MiscFlags ?? 0 }));
+        out.query = createQueryObject(
+            Object.freeze({ Query: desc.Query, MiscFlags: desc.MiscFlags ?? 0 }), interfaces, {
+                totals: statistics.snapshot,
+                recorded: ()=>renderer.recorded(),
+                submitted: ()=>renderer.submitted(),
+                flush: ()=>{
+                    renderer.flush();
+                },
+                now: options.now ?? (()=>performance.now()),
+                diverge,
+                occlusion: {
+                    begin: ()=>renderer.beginOcclusion(),
+                    end: counter=>renderer.endOcclusion(counter),
+                },
+            }, { retainDevice, releaseDevice, device: deviceHandle });
         return S_OK;
     };
 
@@ -604,6 +706,19 @@ export function createDevice(options = {}){
     };
 
     /**
+     * Every draw, as the queries count it and the renderer records it.
+     *
+     * @param {{ vertexCount: number, startVertex: number, instanceCount?: number,
+     *           indexCount?: number, startIndex?: number, baseVertex?: number,
+     *           startInstance?: number }} request
+     */
+    const draw = request=>{
+        const bound = snapshot();
+        statistics.note(bound, request);
+        renderer.draw(bound, request);
+    };
+
+    /**
      * A copy's two resources have to be the same kind of thing; the runtime
      * ignores a copy that is not, and so does this, saying so.
      *
@@ -626,6 +741,16 @@ export function createDevice(options = {}){
         if (destination.desc.Usage === D3D10_USAGE.IMMUTABLE)
         {
             diverge(`${call} into an immutable resource is ignored`);
+            return false;
+        }
+        // Bits move between formats of one family and no others: a copy
+        // between two families -- a compressed block and a texel among them --
+        // has no meaning and the runtime leaves the destination as it was.
+        if (destination.dimension !== D3D10_RESOURCE_DIMENSION.BUFFER
+            && FORMAT_INFO[destination.desc.Format]?.family
+                !== FORMAT_INFO[source.desc.Format]?.family)
+        {
+            diverge(`${call} between formats of different families is ignored`);
             return false;
         }
         return true;
@@ -750,12 +875,38 @@ export function createDevice(options = {}){
             return createViewOf(resource, desc, VIEW_KINDS.SHADER_RESOURCE, out);
         },
 
+        /**
+         * Direct3D 10.1's description adds cube arrays, which a device of
+         * feature level 10.0 does not have; everything else is laid out as
+         * before.
+         *
+         * @param {any} resource @param {any} desc @param {{ view?: any }} out
+         */
+        CreateShaderResourceView1(resource, desc, out){
+            if (desc && desc.ViewDimension === D3D10_SRV_DIMENSION1_TEXTURECUBEARRAY)
+            {
+                out.view = null;
+                return E_INVALIDARG;
+            }
+            return createViewOf(resource, desc, VIEW_KINDS.SHADER_RESOURCE, out);
+        },
+
         // --- immutable state objects ---
 
         /** @param {any} desc @param {{ state?: any }} out */
         CreateBlendState(desc, out){
             out.state = null;
             return states.create(STATE_KIND.BLEND, desc, out);
+        },
+
+        /**
+         * Direct3D 10.1's blend state: factors per target.
+         *
+         * @param {any} desc @param {{ state?: any }} out
+         */
+        CreateBlendState1(desc, out){
+            out.state = null;
+            return states.create(STATE_KIND.BLEND1, desc, out);
         },
 
         /** @param {any} desc @param {{ state?: any }} out */
@@ -924,7 +1075,8 @@ export function createDevice(options = {}){
             {
                 return E_FAIL;
             }
-            let support = FORMAT_SUPPORT.BUFFER | FORMAT_SUPPORT.CPU_LOCKABLE;
+            const block = info.blockEdge > 1;
+            let support = FORMAT_SUPPORT.CPU_LOCKABLE | (block ? 0 : FORMAT_SUPPORT.BUFFER);
             if (VERTEX_FORMAT[format])
             {
                 support |= FORMAT_SUPPORT.IA_VERTEX_BUFFER;
@@ -933,25 +1085,38 @@ export function createDevice(options = {}){
             {
                 support |= FORMAT_SUPPORT.IA_INDEX_BUFFER;
             }
-            if (TEXTURE_FORMAT[format] || info.kind === FORMAT_KIND.TYPELESS)
+            const kept = textureStorage(format,
+                info.kind === FORMAT_KIND.DEPTH ? D3D10_BIND.DEPTH_STENCIL : 0, textureOptions);
+            if (kept)
             {
-                support |= FORMAT_SUPPORT.TEXTURE1D | FORMAT_SUPPORT.TEXTURE2D
-                    | FORMAT_SUPPORT.TEXTURE3D | FORMAT_SUPPORT.TEXTURECUBE | FORMAT_SUPPORT.MIP;
+                // WebGPU makes no compressed or depth texture of three dimensions.
+                support |= FORMAT_SUPPORT.TEXTURE2D | FORMAT_SUPPORT.TEXTURECUBE
+                    | FORMAT_SUPPORT.MIP
+                    | (block ? 0 : FORMAT_SUPPORT.TEXTURE1D)
+                    | (block || kept.depth ? 0 : FORMAT_SUPPORT.TEXTURE3D);
             }
-            if (TEXTURE_FORMAT[format] && info.kind === FORMAT_KIND.COLOUR)
+            if (kept && info.kind === FORMAT_KIND.COLOUR)
             {
-                support |= FORMAT_SUPPORT.SHADER_LOAD | FORMAT_SUPPORT.RENDER_TARGET;
-                const spelling = TEXTURE_FORMAT[format];
-                if (/unorm|snorm|float/.test(spelling) && !spelling.startsWith('r32'))
+                support |= FORMAT_SUPPORT.SHADER_LOAD;
+                // What a sampler may filter: normalised and float formats, but
+                // not the 32-bit floats, which WebGPU does not filter.
+                const filterable = /unorm|snorm|float/.test(kept.format)
+                    && !/32float/.test(kept.format);
+                if (filterable)
                 {
-                    support |= FORMAT_SUPPORT.SHADER_SAMPLE | FORMAT_SUPPORT.BLENDABLE;
+                    support |= FORMAT_SUPPORT.SHADER_SAMPLE;
                 }
-                if (spelling.startsWith('rgba8unorm') || spelling.startsWith('bgra8unorm'))
+                if (info.renderable && !kept.conversion)
+                {
+                    support |= FORMAT_SUPPORT.RENDER_TARGET
+                        | (filterable ? FORMAT_SUPPORT.BLENDABLE : 0);
+                }
+                if (/^(rgba8unorm|bgra8unorm)/.test(kept.format) && !kept.conversion)
                 {
                     support |= FORMAT_SUPPORT.MIP_AUTOGEN | FORMAT_SUPPORT.DISPLAY;
                 }
             }
-            if (info.kind === FORMAT_KIND.DEPTH)
+            if (info.kind === FORMAT_KIND.DEPTH && kept)
             {
                 support |= FORMAT_SUPPORT.DEPTH_STENCIL | FORMAT_SUPPORT.SHADER_SAMPLE_COMPARISON;
             }
@@ -1148,9 +1313,13 @@ export function createDevice(options = {}){
 
         /** @param {readonly any[]} viewports */
         RSSetViewports(viewports){
-            pipeline.viewports = (viewports ?? [])
-                .slice(0, D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS)
-                .map(viewport=>({ ...viewport }));
+            // More than the pipeline has slots for is ignored whole, not cut
+            // down to what fits.
+            if ((viewports?.length ?? 0) > D3D10_LIMITS.VIEWPORT_AND_SCISSOR_SLOTS)
+            {
+                return;
+            }
+            pipeline.viewports = (viewports ?? []).map(viewport=>({ ...viewport }));
         },
 
         /** @param {{ count?: number, viewports?: any[] }} out */
@@ -1242,13 +1411,12 @@ export function createDevice(options = {}){
 
         /** @param {number} vertexCount @param {number} startVertex */
         Draw(vertexCount, startVertex){
-            renderer.draw(snapshot(), { vertexCount, startVertex });
+            draw({ vertexCount, startVertex });
         },
 
         /** @param {number} indexCount @param {number} startIndex @param {number} baseVertex */
         DrawIndexed(indexCount, startIndex, baseVertex){
-            renderer.draw(snapshot(), { vertexCount: 0, startVertex: 0, indexCount, startIndex,
-                baseVertex });
+            draw({ vertexCount: 0, startVertex: 0, indexCount, startIndex, baseVertex });
         },
 
         /**
@@ -1256,11 +1424,7 @@ export function createDevice(options = {}){
          * @param {number} startVertex @param {number} startInstance
          */
         DrawInstanced(vertexCount, instanceCount, startVertex, startInstance){
-            if (startInstance !== 0)
-            {
-                diverge('an instanced draw starts at instance zero whatever was asked');
-            }
-            renderer.draw(snapshot(), { vertexCount, startVertex, instanceCount });
+            draw({ vertexCount, startVertex, instanceCount, startInstance });
         },
 
         /**
@@ -1268,12 +1432,8 @@ export function createDevice(options = {}){
          * @param {number} baseVertex @param {number} startInstance
          */
         DrawIndexedInstanced(indexCount, instanceCount, startIndex, baseVertex, startInstance){
-            if (startInstance !== 0)
-            {
-                diverge('an instanced draw starts at instance zero whatever was asked');
-            }
-            renderer.draw(snapshot(), { vertexCount: 0, startVertex: 0, indexCount, startIndex,
-                baseVertex, instanceCount });
+            draw({ vertexCount: 0, startVertex: 0, indexCount, startIndex, baseVertex,
+                instanceCount, startInstance });
         },
 
         DrawAuto(){
@@ -1334,6 +1494,12 @@ export function createDevice(options = {}){
             {
                 return;
             }
+            const extent = ['ByteWidth', 'Width', 'Height', 'Depth', 'MipLevels', 'ArraySize'];
+            if (extent.some(field=>destination.desc[field] !== source.desc[field]))
+            {
+                diverge('CopyResource between resources of different extents is ignored');
+                return;
+            }
             renderer.copyResource(destination, source);
         },
 
@@ -1389,8 +1555,9 @@ export function createDevice(options = {}){
                 + ' resolving one that is not is refused');
         },
 
+        /** What has been recorded goes to the GPU now rather than at the next present. */
         Flush(){
-            // Frames reach the queue at present; nothing is held back between.
+            renderer.flush();
         },
 
         // --- stream output and predication ---
@@ -1455,9 +1622,68 @@ export function createDevice(options = {}){
             out.height = textFilter.height;
         },
 
-        /** @returns {number} */
+        /**
+         * Nothing here is ever shared, so no handle names a resource.
+         *
+         * @returns {number}
+         */
         OpenSharedResource(){
-            return E_NOTIMPL;
+            return E_INVALIDARG;
+        },
+
+        // --- ID3D10Multithread ---
+
+        /**
+         * A guest thread reaches the device one call at a time already, so
+         * the device's own lock has nothing left to exclude.
+         */
+        Enter(){
+        },
+
+        Leave(){
+        },
+
+        /**
+         * @param {boolean} enable
+         * @returns {boolean} whether protection was on before
+         */
+        SetMultithreadProtected(enable){
+            const before = multithreadProtected;
+            multithreadProtected = !!enable;
+            return before;
+        },
+
+        /** @returns {boolean} */
+        GetMultithreadProtected(){
+            return multithreadProtected;
+        },
+
+        // --- IDXGIDevice1 ---
+
+        /**
+         * Frames queued ahead of the display: sixteen at most, and zero puts
+         * the default back.
+         *
+         * @param {number} latency
+         * @returns {number}
+         */
+        SetMaximumFrameLatency(latency){
+            if (latency > MAXIMUM_FRAME_LATENCY)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            maximumFrameLatency = latency === 0 ? DEFAULT_FRAME_LATENCY : latency;
+            return S_OK;
+        },
+
+        /** @param {{ latency?: number } | null} out @returns {number} */
+        GetMaximumFrameLatency(out){
+            if (!out)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            out.latency = maximumFrameLatency;
+            return S_OK;
         },
 
         // --- device-wide ---
@@ -1493,7 +1719,7 @@ export function createDevice(options = {}){
             pipeline.predicateValue = false;
         },
 
-        /** @returns {number} always 10.0: this entry point has no other level */
+        /** @returns {number} always 10.0, the one level any entry point makes a device at */
         GetFeatureLevel(){
             return D3D_FEATURE_LEVEL.LEVEL_10_0;
         },
@@ -1598,8 +1824,8 @@ export function createDevice(options = {}){
             });
         },
     }, {
-        interfaces: [IID.ID3D10Device, IID.ID3D10Multithread, IID.IDXGIObject, IID.IDXGIDevice,
-            IID.IDXGIDevice1],
+        interfaces: [IID.ID3D10Device, IID.ID3D10Device1, IID.ID3D10Multithread, IID.IDXGIObject,
+            IID.IDXGIDevice, IID.IDXGIDevice1],
         parent: adapter,
         // The adapter is the device's to hold: a program that releases its own
         // reference to the adapter and keeps the device must still be able to

@@ -37,9 +37,11 @@ export const DDERR_INVALIDOBJECT = dderr(130);
 export const DDERR_INVALIDRECT = dderr(150);
 export const DDERR_INVALIDMODE = dderr(120);
 export const DDERR_NOCOLORKEY = dderr(215);
+export const DDERR_NOCOLORKEYHW = dderr(220);
 export const DDERR_NOCOOPERATIVELEVELSET = dderr(212);
 export const DDERR_NOEXCLUSIVEMODE = dderr(225);
 export const DDERR_NOTFOUND = dderr(255);
+export const DDERR_NOOVERLAYHW = dderr(260);
 export const DDERR_SURFACEALREADYATTACHED = dderr(410);
 export const DDERR_SURFACEBUSY = dderr(430);
 export const DDERR_SURFACELOST = dderr(450);
@@ -49,10 +51,14 @@ export const DDERR_HWNDALREADYSET = dderr(571);
 export const DDERR_CLIPPERISUSINGHWND = dderr(567);
 export const DDERR_NOPALETTEATTACHED = dderr(572);
 export const DDERR_EXCLUSIVEMODEALREADYSET = dderr(581);
+export const DDERR_NOTAOVERLAYSURFACE = dderr(580);
 export const DDERR_NOTFLIPPABLE = dderr(582);
 export const DDERR_NOTLOCKED = dderr(584);
 export const DDERR_NODC = dderr(586);
+export const DDERR_WRONGMODE = dderr(587);
 export const DDERR_IMPLICITLYCREATED = dderr(588);
+export const DDERR_INVALIDSURFACETYPE = dderr(592);
+export const DDERR_NOTONMIPMAPSUBLEVEL = dderr(603);
 export const DDERR_DCALREADYCREATED = dderr(620);
 
 /** DirectDraw borrows these three from COM rather than minting its own. */
@@ -68,6 +74,7 @@ export const DDBLT_KEYDESTOVERRIDE = 0x00004000;
 export const DDBLT_KEYSRC = 0x00008000;
 export const DDBLT_KEYSRCOVERRIDE = 0x00010000;
 export const DDBLT_COLORFILL = 0x00000400;
+export const DDBLT_DEPTHFILL = 0x02000000;
 export const DDBLT_WAIT = 0x01000000;
 
 /** BltFast flags. */
@@ -77,6 +84,7 @@ export const DDBLTFAST_DESTCOLORKEY = 0x00000002;
 export const DDBLTFAST_WAIT = 0x00000010;
 
 /** SetColorKey / GetColorKey: which key a call names. */
+export const DDCKEY_COLORSPACE = 0x00000001;
 export const DDCKEY_DESTBLT = 0x00000002;
 export const DDCKEY_SRCBLT = 0x00000008;
 
@@ -90,6 +98,7 @@ export const DDCAPS_PALETTE = 0x00008000;
 export const DDCAPS_CANBLTSYSMEM = 0x80000000;
 export const DDCAPS2_CERTIFIED = 0x00000001;
 export const DDCAPS2_WIDESURFACES = 0x00001000;
+export const DDCAPS2_PRIMARYGAMMA = 0x00020000;
 export const DDCAPS2_CANRENDERWINDOWED = 0x00080000;
 export const DDCKEYCAPS_DESTBLT = 0x00000001;
 export const DDCKEYCAPS_SRCBLT = 0x00000200;
@@ -194,3 +203,6 @@ export const DDLOCK_READONLY = 0x00000010;
 export const DDLOCK_WRITEONLY = 0x00000020;
 export const DDLOCK_WAIT = 0x00000001;
 export const DDFLIP_WAIT = 0x00000001;
+
+/** GetDeviceIdentifier: the adapter a secondary 3D-only device is attached to. */
+export const DDGDI_GETHOSTIDENTIFIER = 0x00000001;

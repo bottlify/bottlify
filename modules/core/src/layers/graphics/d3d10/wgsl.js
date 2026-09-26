@@ -34,6 +34,7 @@
  * reports, which is the most expensive kind of wrong there is.
  */
 
+import { DXGI_FORMAT } from './constants.js';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 import {
     CUSTOMDATA, MODIFIER, OPCODE, OPERAND, RESOURCE_DIMENSION, RETURN_TYPE, SAMPLER_MODE,
@@ -45,6 +46,10 @@ export const BINDING = Object.freeze({
     CONSTANT_BUFFER: 0,
     TEXTURE: 16,
     SAMPLER: 144,
+    // A buffer bound as a shader resource is storage at its texture binding,
+    // and the view over it -- format, first element, element count, element
+    // size -- a uniform here.
+    BUFFER_VIEW: 160,
 });
 
 /** WebGPU's `GPUShaderStage` bits, spelled out so nothing here reads a global. */
@@ -54,6 +59,138 @@ export const STAGE = Object.freeze({ VERTEX: 1, FRAGMENT: 2 });
 const REG = 'vec4<u32>';
 
 const COMPONENT = ['x', 'y', 'z', 'w'];
+
+/**
+ * How a buffer view's element of each format becomes register bits, given
+ * the four dwords from the one it starts in (`w`) and, for an element
+ * narrower than a dword, the bit it starts at (`s`). A float format answers
+ * float bits and an integer one integers; components the format lacks read
+ * as zero, and its alpha as one.
+ */
+function bufferElement(){
+    const F = DXGI_FORMAT;
+    const ONE = '0x3f800000u';
+    /** @param {string} value a vec4<f32> */
+    const floats = value=>`bitcast<${REG}>(${value})`;
+    /** @param {string} value an i32 */
+    const bits = value=>`bitcast<u32>(${value})`;
+    /** @param {string} value a u32 holding a 16-bit integer */
+    const signed16 = value=>bits(`bitcast<i32>(${value} << 16u) >> 16u`);
+    /** @param {string} value a u32 holding an 8-bit integer */
+    const signed8 = value=>bits(`bitcast<i32>(${value} << 24u) >> 24u`);
+    const half = '((w.x >> s) & 0xffffu)';
+    const pair = half;
+    const byte = '((w.x >> s) & 0xffu)';
+    /** @type {[number[], string][]} */
+    const cases = [
+        [[F.R32G32B32A32_FLOAT, F.R32G32B32A32_UINT, F.R32G32B32A32_SINT], 'w'],
+        [[F.R32G32B32_FLOAT], `${REG}(w.xyz, ${ONE})`],
+        [[F.R32G32B32_UINT, F.R32G32B32_SINT], `${REG}(w.xyz, 1u)`],
+        [[F.R32G32_FLOAT], `${REG}(w.xy, 0u, ${ONE})`],
+        [[F.R32G32_UINT, F.R32G32_SINT], `${REG}(w.xy, 0u, 1u)`],
+        [[F.R32_FLOAT], `${REG}(w.x, 0u, 0u, ${ONE})`],
+        [[F.R32_UINT, F.R32_SINT], `${REG}(w.x, 0u, 0u, 1u)`],
+        [[F.R16G16B16A16_FLOAT],
+            floats('vec4<f32>(unpack2x16float(w.x), unpack2x16float(w.y))')],
+        [[F.R16G16B16A16_UNORM], floats('vec4<f32>(unpack2x16unorm(w.x), unpack2x16unorm(w.y))')],
+        [[F.R16G16B16A16_SNORM], floats('vec4<f32>(unpack2x16snorm(w.x), unpack2x16snorm(w.y))')],
+        [[F.R16G16B16A16_UINT], `${REG}(w.x & 0xffffu, w.x >> 16u, w.y & 0xffffu, w.y >> 16u)`],
+        [[F.R16G16B16A16_SINT], `${REG}(${signed16('w.x')}, ${bits('bitcast<i32>(w.x) >> 16u')},`
+            + ` ${signed16('w.y')}, ${bits('bitcast<i32>(w.y) >> 16u')})`],
+        [[F.R16G16_FLOAT], floats('vec4<f32>(unpack2x16float(w.x), 0.0, 1.0)')],
+        [[F.R16G16_UNORM], floats('vec4<f32>(unpack2x16unorm(w.x), 0.0, 1.0)')],
+        [[F.R16G16_SNORM], floats('vec4<f32>(unpack2x16snorm(w.x), 0.0, 1.0)')],
+        [[F.R16G16_UINT], `${REG}(w.x & 0xffffu, w.x >> 16u, 0u, 1u)`],
+        [[F.R16G16_SINT],
+            `${REG}(${signed16('w.x')}, ${bits('bitcast<i32>(w.x) >> 16u')}, 0u, 1u)`],
+        [[F.R16_FLOAT], floats(`vec4<f32>(unpack2x16float(${half}).x, 0.0, 0.0, 1.0)`)],
+        [[F.R16_UNORM], floats(`vec4<f32>(unpack2x16unorm(${half}).x, 0.0, 0.0, 1.0)`)],
+        [[F.R16_SNORM], floats(`vec4<f32>(unpack2x16snorm(${half}).x, 0.0, 0.0, 1.0)`)],
+        [[F.R16_UINT], `${REG}(${half}, 0u, 0u, 1u)`],
+        [[F.R16_SINT], `${REG}(${signed16(half)}, 0u, 0u, 1u)`],
+        [[F.R8G8B8A8_UNORM], floats('unpack4x8unorm(w.x)')],
+        [[F.B8G8R8A8_UNORM], floats('unpack4x8unorm(w.x).zyxw')],
+        [[F.R8G8B8A8_SNORM], floats('unpack4x8snorm(w.x)')],
+        [[F.R8G8B8A8_UINT],
+            `(${REG}(w.x) >> ${REG}(0u, 8u, 16u, 24u)) & ${REG}(0xffu)`],
+        [[F.R8G8B8A8_SINT], `bitcast<${REG}>(bitcast<vec4<i32>>(${REG}(w.x)`
+            + ` << ${REG}(24u, 16u, 8u, 0u)) >> ${REG}(24u))`],
+        [[F.R8G8_UNORM], floats(`vec4<f32>(unpack4x8unorm(${pair}).xy, 0.0, 1.0)`)],
+        [[F.R8G8_SNORM], floats(`vec4<f32>(unpack4x8snorm(${pair}).xy, 0.0, 1.0)`)],
+        [[F.R8G8_UINT], `${REG}(${pair} & 0xffu, ${pair} >> 8u, 0u, 1u)`],
+        [[F.R8G8_SINT], `${REG}(${signed8(`(${pair} & 0xffu)`)}, ${signed8(`(${pair} >> 8u)`)},`
+            + ' 0u, 1u)'],
+        [[F.R8_UNORM], floats(`vec4<f32>(unpack4x8unorm(${byte}).x, 0.0, 0.0, 1.0)`)],
+        [[F.R8_SNORM], floats(`vec4<f32>(unpack4x8snorm(${byte}).x, 0.0, 0.0, 1.0)`)],
+        [[F.R8_UINT], `${REG}(${byte}, 0u, 0u, 1u)`],
+        [[F.R8_SINT], `${REG}(${signed8(byte)}, 0u, 0u, 1u)`],
+        [[F.R10G10B10A2_UNORM], floats(`vec4<f32>((${REG}(w.x) >> ${REG}(0u, 10u, 20u, 30u))`
+            + ` & ${REG}(0x3ffu, 0x3ffu, 0x3ffu, 3u)) / vec4<f32>(1023.0, 1023.0, 1023.0, 3.0)`)],
+        [[F.R10G10B10A2_UINT], `(${REG}(w.x) >> ${REG}(0u, 10u, 20u, 30u))`
+            + ` & ${REG}(0x3ffu, 0x3ffu, 0x3ffu, 3u)`],
+    ];
+    return {
+        formats: new Set(cases.flatMap(([formats])=>formats)),
+        text: [
+            `fn bufferElement(format: u32, w: ${REG}, s: u32) -> ${REG} {`,
+            '    switch (format) {',
+            ...cases.map(([formats, value])=>`        case ${
+                formats.map(format=>`${format}u`).join(', ')}: { return ${value}; }`),
+            `        default: { return ${REG}(0u); }`,
+            '    }',
+            '}',
+        ],
+    };
+}
+
+const BUFFER_ELEMENT = bufferElement();
+
+/**
+ * The formats a buffer view can be read in.
+ *
+ * @type {ReadonlySet<number>}
+ */
+export const BUFFER_VIEW_FORMATS = BUFFER_ELEMENT.formats;
+
+/**
+ * Functions a translation may call, written into the module of a stage that
+ * uses one, after the ones it calls. WGSL has no high half of a 32x32
+ * multiply, so it is assembled from sixteen-bit halves, whose products and
+ * partial sums all fit in 32 bits; the signed high half is the unsigned one
+ * less each operand wherever the other is negative, modulo 2^32.
+ *
+ * @type {Readonly<Record<string, { needs: string[], text: string[] }>>}
+ */
+export const HELPERS = Object.freeze({
+    umulhi: {
+        needs: [],
+        text: [
+            `fn umulhi(a: ${REG}, b: ${REG}) -> ${REG} {`,
+            `    let al = a & ${REG}(0xffffu);`,
+            `    let ah = a >> ${REG}(16u);`,
+            `    let bl = b & ${REG}(0xffffu);`,
+            `    let bh = b >> ${REG}(16u);`,
+            '    let middle1 = ah * bl;',
+            '    let middle2 = al * bh;',
+            `    let carry = (((al * bl) >> ${REG}(16u)) + (middle1 & ${REG}(0xffffu))`
+                + ` + (middle2 & ${REG}(0xffffu))) >> ${REG}(16u);`,
+            `    return ah * bh + (middle1 >> ${REG}(16u)) + (middle2 >> ${REG}(16u)) + carry;`,
+            '}',
+        ],
+    },
+    bufferElement: { needs: [], text: BUFFER_ELEMENT.text },
+    imulhi: {
+        needs: ['umulhi'],
+        text: [
+            `fn imulhi(a: ${REG}, b: ${REG}) -> ${REG} {`,
+            `    let aNegative = (a >> ${REG}(31u)) != ${REG}(0u);`,
+            `    let bNegative = (b >> ${REG}(31u)) != ${REG}(0u);`,
+            `    return umulhi(a, b) - select(${REG}(0u), b, aNegative)`
+                + ` - select(${REG}(0u), a, bNegative);`,
+            '}',
+        ],
+    },
+});
 
 /**
  * @typedef {Object} ConstantBufferDecl
@@ -91,6 +228,7 @@ const COMPONENT = ['x', 'y', 'z', 'w'];
  * @property {number} outputRegisters              How many `o` registers the body writes.
  * @property {boolean} writesDepth
  * @property {string[]} unsupported                Opcode names with no translation.
+ * @property {string[]} helpers                    HELPERS the body calls, callees first.
  */
 
 /** @param {number} mask @returns {string} the components a mask names */
@@ -135,9 +273,13 @@ export function translateShader(container){
         outputRegisters: 0,
         writesDepth: false,
         unsupported: [],
+        helpers: [],
     };
     let nextTemp = 0;
     let depth = 1;
+    // Not `t`: that is a texture's name, and a `let` of the same name would
+    // hide the texture from every instruction after it in the block.
+    const held = ()=>`held${nextTemp++}`;
 
     /** @param {string} line */
     const emit = line=>{
@@ -256,7 +398,7 @@ export function translateShader(container){
             emit(`${target} = ${value};`);
             return;
         }
-        const temp = `t${nextTemp++}`;
+        const temp = held();
         emit(`let ${temp} = ${value};`);
         for (const component of maskComponents(dest.mask))
         {
@@ -284,29 +426,71 @@ export function translateShader(container){
 
     /**
      * The coordinate a texture instruction samples at, sized to the texture,
-     * and the array index when it has one.
+     * and the array index when it has one. A one-dimensional texture is kept
+     * as a two-dimensional one a row high (see `textureType`), and read at the
+     * middle of that row, or at row zero by an integer address.
      *
      * @param {TextureDecl} texture
      * @param {string} coordinate a vec4<f32> or vec4<i32> expression
-     * @returns {{ coordinate: string, layer: string | null } | null}
+     * @param {boolean} [integer]  An address rather than a coordinate.
+     * @returns {{ coordinate: string, layer: string | null, width: number,
+     *             row: boolean } | null}
      */
-    const coordinateFor = (texture, coordinate)=>{
+    const coordinateFor = (texture, coordinate, integer = false)=>{
+        const row = integer ? `vec2<i32>(${coordinate}.x, 0)` : `vec2<f32>(${coordinate}.x, 0.5)`;
         switch (texture.dimension)
         {
             case RESOURCE_DIMENSION.TEXTURE1D:
-                return { coordinate: `${coordinate}.x`, layer: null };
+                return { coordinate: row, layer: null, width: 2, row: true };
             case RESOURCE_DIMENSION.TEXTURE2D:
             case RESOURCE_DIMENSION.TEXTURE2DMS:
-                return { coordinate: `${coordinate}.xy`, layer: null };
+                return { coordinate: `${coordinate}.xy`, layer: null, width: 2, row: false };
             case RESOURCE_DIMENSION.TEXTURE3D:
             case RESOURCE_DIMENSION.TEXTURECUBE:
-                return { coordinate: `${coordinate}.xyz`, layer: null };
+                return { coordinate: `${coordinate}.xyz`, layer: null, width: 3, row: false };
             case RESOURCE_DIMENSION.TEXTURE1DARRAY:
-                return { coordinate: `${coordinate}.x`, layer: `${coordinate}.y` };
+                return { coordinate: row, layer: `${coordinate}.y`, width: 2, row: true };
             case RESOURCE_DIMENSION.TEXTURE2DARRAY:
-                return { coordinate: `${coordinate}.xy`, layer: `${coordinate}.z` };
+            case RESOURCE_DIMENSION.TEXTURE2DMSARRAY:
+                return {
+                    coordinate: `${coordinate}.xy`, layer: `${coordinate}.z`, width: 2, row: false,
+                };
             case RESOURCE_DIMENSION.TEXTURECUBEARRAY:
-                return { coordinate: `${coordinate}.xyz`, layer: `${coordinate}.w` };
+                return {
+                    coordinate: `${coordinate}.xyz`, layer: `${coordinate}.w`, width: 3, row: false,
+                };
+            default:
+                return null;
+        }
+    };
+
+    /**
+     * What `resinfo` answers for each shape, before its level is checked:
+     * the sizes a level has, then what the third component is when it is
+     * not a size.
+     *
+     * @param {TextureDecl} texture
+     * @param {string} size  The level's `textureDimensions`.
+     * @param {string} name  The texture.
+     * @returns {{ sizes: string[], layers: string | null } | null}
+     */
+    const extentFor = (texture, size, name)=>{
+        switch (texture.dimension)
+        {
+            case RESOURCE_DIMENSION.TEXTURE1D:
+                return { sizes: [`${size}.x`], layers: null };
+            case RESOURCE_DIMENSION.TEXTURE1DARRAY:
+                return { sizes: [`${size}.x`], layers: `textureNumLayers(${name})` };
+            case RESOURCE_DIMENSION.TEXTURE2D:
+            case RESOURCE_DIMENSION.TEXTURE2DMS:
+            case RESOURCE_DIMENSION.TEXTURECUBE:
+                return { sizes: [`${size}.x`, `${size}.y`], layers: null };
+            case RESOURCE_DIMENSION.TEXTURE2DARRAY:
+            case RESOURCE_DIMENSION.TEXTURE2DMSARRAY:
+            case RESOURCE_DIMENSION.TEXTURECUBEARRAY:
+                return { sizes: [`${size}.x`, `${size}.y`], layers: `textureNumLayers(${name})` };
+            case RESOURCE_DIMENSION.TEXTURE3D:
+                return { sizes: [`${size}.x`, `${size}.y`, `${size}.z`], layers: null };
             default:
                 return null;
         }
@@ -332,8 +516,8 @@ export function translateShader(container){
 
     /**
      * @param {import('./sm4.js').Instruction} instruction
-     * @param {(texture: TextureDecl, coordinate: { coordinate: string, layer: string | null },
-     *          sampler: string) => string} call
+     * @param {(texture: TextureDecl, coordinate: { coordinate: string, layer: string | null,
+     *          width: number, row: boolean }, sampler: string) => string} call
      */
     const sampleWith = (instruction, call)=>{
         const [dest, coordinate, resource, sampler] = instruction.operands;
@@ -357,6 +541,16 @@ export function translateShader(container){
         result.unsupported.push(name);
     };
 
+    /** @param {string} name  A HELPERS entry the body is about to call. */
+    const need = name=>{
+        if (result.helpers.includes(name))
+        {
+            return;
+        }
+        HELPERS[name].needs.forEach(need);
+        result.helpers.push(name);
+    };
+
     /**
      * Two-destination integer multiplies and divides: the destination that is
      * `null` is simply not stored.
@@ -366,14 +560,181 @@ export function translateShader(container){
      * @param {string} low
      */
     const storePair = (instruction, high, low)=>{
-        store(instruction.operands[0], high);
-        store(instruction.operands[1], low);
+        const pair = instruction.operands;
+        const first = pair[0];
+        if (first.type === OPERAND.NULL || pair[1].type === OPERAND.NULL)
+        {
+            store(first, high);
+            store(pair[1], low);
+            return;
+        }
+        // Both results are read before either is written: `udiv r0, r1, r0,
+        // r2` divides the r0 it is about to replace.
+        const second = held();
+        emit(`let ${second} = ${low};`);
+        store(first, high);
+        store(pair[1], second);
     };
 
-    for (const instruction of instructions)
+    /**
+     * The subroutines after the main program, by label. A call is translated
+     * by writing the subroutine's body where the call is: Shader Model 4
+     * forbids recursion, so every call graph unrolls, and the body then works
+     * on the caller's registers as the hardware's does.
+     *
+     * @type {Map<number, import('./sm4.js').Instruction[]>}
+     */
+    const subroutines = new Map();
+    const firstLabel = instructions.findIndex(entry=>entry.opcode === OPCODE.LABEL);
+    /** @type {import('./sm4.js').Instruction[]} */
+    let subroutine = [];
+    for (const entry of firstLabel < 0 ? [] : instructions.slice(firstLabel))
     {
+        if (entry.opcode === OPCODE.LABEL)
+        {
+            subroutine = [];
+            subroutines.set(entry.operands[0]?.indices[0]?.value ?? -1, subroutine);
+            continue;
+        }
+        subroutine.push(entry);
+    }
+    /** @type {Set<number>} */
+    const calling = new Set();
+
+    /**
+     * The switches being written. A run of `case`s with nothing between them
+     * shares one body, so a clause is opened only when its first statement
+     * arrives, with every selector gathered by then.
+     *
+     * @type {{ selectors: string[], open: boolean, hasDefault: boolean }[]}
+     */
+    const switches = [];
+
+    const openClause = ()=>{
+        const current = switches.at(-1);
+        if (!current || current.selectors.length === 0)
+        {
+            return;
+        }
+        emit(current.selectors.length === 1 && current.selectors[0] === 'default'
+            ? 'default: {'
+            : `case ${current.selectors.join(', ')}: {`);
+        depth++;
+        current.selectors = [];
+        current.open = true;
+    };
+
+    const closeClause = ()=>{
+        const current = switches.at(-1);
+        if (current?.open)
+        {
+            depth--;
+            emit('}');
+            current.open = false;
+        }
+    };
+
+    /**
+     * Where a `ret` goes. The main program's returns from the entry point; a
+     * subroutine written in place whose only `ret` is its last needs nothing;
+     * one that returns early runs inside a loop of one pass, and its `ret`
+     * sets a flag and breaks, the flag carried out through every loop and
+     * switch of the subroutine that the break leaves it inside.
+     *
+     * @typedef {{ returned: string | null, main: boolean }} Frame
+     */
+
+    /**
+     * @param {import('./sm4.js').Instruction[]} list
+     * @param {Frame} frame
+     */
+    const translateBlock = (list, frame)=>{
+        for (const instruction of list)
+        {
+            translateOne(instruction, frame);
+        }
+    };
+
+    /** @param {number} index */
+    const callSubroutine = index=>{
+        const body = subroutines.get(index);
+        if (!body)
+        {
+            unsupported(`a call to label ${index}, which the program does not have`);
+            return;
+        }
+        if (calling.has(index))
+        {
+            unsupported('a recursive call');
+            return;
+        }
+        calling.add(index);
+        const block = body.at(-1)?.opcode === OPCODE.RET ? body.slice(0, -1) : body;
+        const early = block.some(entry=>entry.opcode === OPCODE.RET
+            || entry.opcode === OPCODE.RETC);
+        if (!early)
+        {
+            translateBlock(block, { returned: null, main: false });
+        }
+        else
+        {
+            const returned = `returned${nextTemp++}`;
+            emit(`var ${returned} = false;`);
+            emit('loop {');
+            depth++;
+            translateBlock(block, { returned, main: false });
+            emit('break;');
+            depth--;
+            emit('}');
+        }
+        calling.delete(index);
+    };
+
+    /**
+     * After a loop or a switch closes inside a subroutine that returns early:
+     * a `ret` inside it broke out of it and no further.
+     *
+     * @param {Frame} frame
+     */
+    const carryReturn = frame=>{
+        if (frame.returned)
+        {
+            emit(`if (${frame.returned}) { break; }`);
+        }
+    };
+
+    /**
+     * @param {string} test  The condition, as WGSL.
+     * @param {Frame} frame
+     */
+    const conditionalReturn = (test, frame)=>{
+        emit(`if (${test}) {`);
+        depth++;
+        if (frame.main)
+        {
+            result.body.push({ ret: true });
+        }
+        else
+        {
+            emit(`${frame.returned} = true;`);
+            emit('break;');
+        }
+        depth--;
+        emit('}');
+    };
+
+    /**
+     * @param {import('./sm4.js').Instruction} instruction
+     * @param {Frame} frame
+     */
+    const translateOne = (instruction, frame)=>{
         const [dest, a, b, c] = instruction.operands;
         const sat = instruction.saturate;
+        if (instruction.opcode !== OPCODE.CASE && instruction.opcode !== OPCODE.DEFAULT
+            && instruction.opcode !== OPCODE.ENDSWITCH)
+        {
+            openClause();
+        }
         switch (instruction.opcode)
         {
             // --- declarations ---
@@ -410,6 +771,10 @@ export function translateShader(container){
                     returnType: (instruction.extra[0] ?? 0) & 0xf,
                     comparison: false,
                 });
+                if ((instruction.control & 0x1f) === RESOURCE_DIMENSION.BUFFER)
+                {
+                    need('bufferElement');
+                }
                 break;
             case OPCODE.DCL_INPUT:
             case OPCODE.DCL_INPUT_SIV:
@@ -539,25 +904,29 @@ export function translateShader(container){
                 store(dest, `(${u(a)} * ${u(b)} + ${u(c)})`);
                 break;
             case OPCODE.IMUL:
-                // The high half of a 32x32 product is not something WGSL can
-                // ask for; only the low half is honoured, and a shader that
-                // reads the high half is refused rather than fed zeros.
                 if (dest.type !== OPERAND.NULL)
                 {
-                    unsupported('imul with a high destination');
+                    need('imulhi');
                 }
-                store(a, fromInt(`(${i(b)} * ${i(c)})`));
+                storePair(instruction, `imulhi(${fromInt(i(b))}, ${fromInt(i(c))})`,
+                    fromInt(`(${i(b)} * ${i(c)})`));
                 break;
             case OPCODE.UMUL:
                 if (dest.type !== OPERAND.NULL)
                 {
-                    unsupported('umul with a high destination');
+                    need('umulhi');
                 }
-                store(a, `(${u(b)} * ${u(c)})`);
+                storePair(instruction, `umulhi(${u(b)}, ${u(c)})`, `(${u(b)} * ${u(c)})`);
                 break;
-            case OPCODE.UDIV:
-                storePair(instruction, `(${u(b)} / ${u(c)})`, `(${u(b)} % ${u(c)})`);
+            case OPCODE.UDIV: {
+                // Division by zero answers all ones in both halves; WGSL's
+                // answers the dividend and zero.
+                const byZero = `${u(c)} == ${REG}(0u)`;
+                storePair(instruction,
+                    `select((${u(b)} / ${u(c)}), ${REG}(0xffffffffu), ${byZero})`,
+                    `select((${u(b)} % ${u(c)}), ${REG}(0xffffffffu), ${byZero})`);
                 break;
+            }
             case OPCODE.IMAX:
                 store(dest, fromInt(`max(${i(a)}, ${i(b)})`));
                 break;
@@ -648,6 +1017,62 @@ export function translateShader(container){
             case OPCODE.ENDLOOP:
                 depth--;
                 emit('}');
+                carryReturn(frame);
+                break;
+            case OPCODE.SWITCH:
+                emit(`switch (${u(dest)}.x) {`);
+                depth++;
+                switches.push({ selectors: [], open: false, hasDefault: false });
+                break;
+            case OPCODE.CASE:
+            case OPCODE.DEFAULT: {
+                const current = switches.at(-1);
+                if (!current)
+                {
+                    unsupported(`${instruction.name} outside a switch`);
+                    break;
+                }
+                closeClause();
+                if (instruction.opcode === OPCODE.DEFAULT)
+                {
+                    current.selectors.push('default');
+                    current.hasDefault = true;
+                }
+                else
+                {
+                    current.selectors.push(u32Literal(dest.immediate[0] ?? 0));
+                }
+                break;
+            }
+            case OPCODE.ENDSWITCH: {
+                const current = switches.at(-1);
+                if (!current)
+                {
+                    unsupported('endswitch outside a switch');
+                    break;
+                }
+                // Trailing cases with no body of their own do nothing.
+                openClause();
+                closeClause();
+                if (!current.hasDefault)
+                {
+                    emit('default: {}');
+                }
+                switches.pop();
+                depth--;
+                emit('}');
+                carryReturn(frame);
+                break;
+            }
+            case OPCODE.CALL:
+                callSubroutine(dest.indices[0]?.value ?? -1);
+                break;
+            case OPCODE.CALLC:
+                emit(`if (${u(dest)}.x ${instruction.testNonZero ? '!=' : '=='} 0u) {`);
+                depth++;
+                callSubroutine(a.indices[0]?.value ?? -1);
+                depth--;
+                emit('}');
                 break;
             case OPCODE.BREAK:
                 emit('break;');
@@ -670,14 +1095,19 @@ export function translateShader(container){
                 emit(`if (${u(dest)}.x ${instruction.testNonZero ? '!=' : '=='} 0u) { discard; }`);
                 break;
             case OPCODE.RET:
-                result.body.push({ ret: true });
+                if (frame.main)
+                {
+                    result.body.push({ ret: true });
+                }
+                else
+                {
+                    emit(`${frame.returned} = true;`);
+                    emit('break;');
+                }
                 break;
             case OPCODE.RETC:
-                emit(`if (${u(dest)}.x ${instruction.testNonZero ? '!=' : '=='} 0u) {`);
-                depth++;
-                result.body.push({ ret: true });
-                depth--;
-                emit('}');
+                conditionalReturn(`${u(dest)}.x ${instruction.testNonZero ? '!=' : '=='} 0u`,
+                    frame);
                 break;
 
             // --- textures ---
@@ -710,13 +1140,14 @@ export function translateShader(container){
                 break;
             case OPCODE.SAMPLE_D:
                 sampleWith(instruction, (texture, shaped, sampler)=>{
-                    const width = shaped.coordinate.endsWith('.x')
-                        ? 1
-                        : shaped.coordinate.endsWith('.xy') ? 2 : 3;
+                    /** @param {import('./sm4.js').Operand} operand */
+                    const gradient = operand=>(shaped.row
+                        ? `vec2<f32>(${f(operand)}.x, 0.0)`
+                        : floats(operand, shaped.width));
                     return `textureSampleGrad(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
                         + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
-                        + `, ${floats(instruction.operands[4], width)}`
-                        + `, ${floats(instruction.operands[5], width)})`;
+                        + `, ${gradient(instruction.operands[4])}`
+                        + `, ${gradient(instruction.operands[5])})`;
                 });
                 break;
             case OPCODE.SAMPLE_C:
@@ -741,39 +1172,104 @@ export function translateShader(container){
                     + `, ${f(instruction.operands[4])}.x))`);
                 break;
             }
-            case OPCODE.LD: {
-                const [target, address, resource] = instruction.operands;
+            case OPCODE.LD:
+            case OPCODE.LD_MS: {
+                const [target, address, resource, sampleIndex] = instruction.operands;
                 const texture = textureOf(resource.indices[0].value);
-                const shaped = texture ? coordinateFor(texture, i(address)) : null;
+                if (texture?.dimension === RESOURCE_DIMENSION.BUFFER
+                    && instruction.opcode === OPCODE.LD)
+                {
+                    store(target, `(loadt${texture.slot}(${u(address)}.x))`
+                        + `.${swizzleText(resource.swizzle)}`);
+                    break;
+                }
+                const shaped = texture ? coordinateFor(texture, i(address), true) : null;
                 if (!texture || !shaped
                     || texture.dimension === RESOURCE_DIMENSION.TEXTURECUBE
                     || texture.dimension === RESOURCE_DIMENSION.TEXTURECUBEARRAY)
                 {
-                    unsupported('ld on an undeclared or unsupported texture');
+                    unsupported(`${instruction.name} on an undeclared or unsupported texture`);
                     break;
                 }
-                const level = texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMS
-                    ? ''
-                    : `, ${i(address)}.w`;
-                store(target, sampledBits(texture, resource,
+                // A multisample view here is of a one-sample texture, whose
+                // one level is its only level and whose sample 0 is its only
+                // sample; any other sample reads as zero, as one out of
+                // range does.
+                const multisample = texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMS
+                    || texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMSARRAY;
+                const level = multisample ? '0' : `${i(address)}.w`;
+                const loaded = sampledBits(texture, resource,
                     `textureLoad(t${texture.slot}, ${shaped.coordinate}`
-                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`}${level})`));
+                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`}, ${level})`);
+                store(target, instruction.opcode === OPCODE.LD_MS && sampleIndex
+                    ? `select(${loaded}, ${REG}(0u), ${u(sampleIndex)}.x != 0u)`
+                    : loaded);
                 break;
             }
             case OPCODE.RESINFO: {
                 const [target, level, resource] = instruction.operands;
                 const texture = textureOf(resource.indices[0].value);
-                if (!texture || texture.dimension !== RESOURCE_DIMENSION.TEXTURE2D)
+                const name = texture ? `t${texture.slot}` : '';
+                const levels = `textureNumLevels(${name})`;
+                const wanted = `${u(level)}.x`;
+                const size = held();
+                const extent = texture ? extentFor(texture, size, name) : null;
+                if (!texture || !extent)
                 {
-                    unsupported('resinfo on anything but a 2D texture');
+                    unsupported('resinfo on an undeclared or unsupported texture');
                     break;
                 }
-                const name = `t${texture.slot}`;
-                const size = `textureDimensions(${name}, ${u(level)}.x)`;
-                const levels = `textureNumLevels(${name})`;
-                const asUint = (instruction.control & 0x3) === 2;
-                const value = `${REG}(${size}.x, ${size}.y, 0u, ${levels})`;
-                store(target, asUint ? value : `bitcast<${REG}>(vec4<f32>(${value}))`);
+                // A level past the last answers zero for its sizes; the
+                // array size and the level count are still the texture's.
+                emit(`let ${size} = textureDimensions(${name}, min(${wanted}, ${levels} - 1u));`);
+                const sizes = extent.sizes.map(component=>
+                    `select(0u, ${component}, ${wanted} < ${levels})`);
+                const mode = instruction.control & 0x3;
+                /** @type {string[]} */
+                const components = [...sizes];
+                if (extent.layers)
+                {
+                    components.push(extent.layers);
+                }
+                while (components.length < 3)
+                {
+                    components.push('0u');
+                }
+                components.push(levels);
+                let value;
+                if (mode === 2)
+                {
+                    value = `${REG}(${components.join(', ')})`;
+                }
+                else
+                {
+                    // resinfo_rcpFloat answers the reciprocal of each size,
+                    // and zero where there is no size to take it of.
+                    const floated = components.map((component, index)=>(mode === 1
+                        && index < sizes.length
+                        ? `select(0.0, 1.0 / f32(${component}), ${component} != 0u)`
+                        : `f32(${component})`));
+                    value = `bitcast<${REG}>(vec4<f32>(${floated.join(', ')}))`;
+                }
+                store(target, `(${value}).${swizzleText(resource.swizzle)}`);
+                break;
+            }
+            case OPCODE.GATHER4: {
+                const gathered = textureOf(instruction.operands[2].indices[0].value);
+                if (gathered && (gathered.returnType === RETURN_TYPE.UINT
+                    || gathered.returnType === RETURN_TYPE.SINT
+                    || gathered.dimension === RESOURCE_DIMENSION.TEXTURE1D
+                    || gathered.dimension === RESOURCE_DIMENSION.TEXTURE1DARRAY
+                    || gathered.dimension === RESOURCE_DIMENSION.TEXTURE3D))
+                {
+                    unsupported('gather4 on an integer, one- or three-dimensional texture');
+                    break;
+                }
+                // The four texels' first components, in the order WGSL and
+                // Direct3D agree on.
+                sampleWith(instruction, (texture, shaped, sampler)=>
+                    `textureGather(0, t${texture.slot}, ${sampler}, ${shaped.coordinate}`
+                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`})`);
                 break;
             }
 
@@ -781,8 +1277,10 @@ export function translateShader(container){
                 unsupported(instruction.name);
                 break;
         }
-    }
+    };
 
+    translateBlock(firstLabel < 0 ? instructions : instructions.slice(0, firstLabel),
+        { returned: null, main: true });
     return result;
 }
 
@@ -796,13 +1294,20 @@ function textureType(texture){
         : texture.returnType === RETURN_TYPE.SINT
             ? { scalar: 'i32', sampleType: 'sint' }
             : { scalar: 'f32', sampleType: 'float' };
+    // WebGPU's one-dimensional texture has one level and no layers, so a
+    // Direct3D one, which may have both, is kept as a two-dimensional texture
+    // one row high; and every texture here has one sample, so a multisample
+    // view of one is a plain view of it.
     /** @type {Record<number, [string, string]>} */
     const shapes = {
-        [RESOURCE_DIMENSION.TEXTURE1D]: ['1d', '1d'],
+        [RESOURCE_DIMENSION.TEXTURE1D]: ['2d', '2d'],
+        [RESOURCE_DIMENSION.TEXTURE1DARRAY]: ['2d_array', '2d-array'],
         [RESOURCE_DIMENSION.TEXTURE2D]: ['2d', '2d'],
+        [RESOURCE_DIMENSION.TEXTURE2DMS]: ['2d', '2d'],
         [RESOURCE_DIMENSION.TEXTURE3D]: ['3d', '3d'],
         [RESOURCE_DIMENSION.TEXTURECUBE]: ['cube', 'cube'],
         [RESOURCE_DIMENSION.TEXTURE2DARRAY]: ['2d_array', '2d-array'],
+        [RESOURCE_DIMENSION.TEXTURE2DMSARRAY]: ['2d_array', '2d-array'],
         [RESOURCE_DIMENSION.TEXTURECUBEARRAY]: ['cube_array', 'cube-array'],
     };
     const shape = shapes[texture.dimension];
@@ -857,6 +1362,30 @@ function declarations(shader, group, visibility){
     }
     for (const texture of shader.textures)
     {
+        if (texture.dimension === RESOURCE_DIMENSION.BUFFER)
+        {
+            // The element is found and bounds-checked here, where the
+            // binding's name is known, and decoded by the shared helper. An
+            // index past the view reads zero, as Direct3D defines it.
+            const binding = BINDING.TEXTURE + texture.slot;
+            const view = BINDING.BUFFER_VIEW + texture.slot;
+            const name = `t${texture.slot}`;
+            text.push(
+                `@group(${group}) @binding(${binding}) var<storage, read> ${name}: array<u32>;`,
+                `@group(${group}) @binding(${view}) var<uniform> ${name}view: ${REG};`,
+                `fn load${name}(index: u32) -> ${REG} {`,
+                `    if (index >= ${name}view.z) { return ${REG}(0u); }`,
+                `    let byte = (${name}view.y + index) * ${name}view.w;`,
+                '    let at = byte / 4u;',
+                `    let last = arrayLength(&${name}) - 1u;`,
+                `    let words = ${REG}(${name}[min(at, last)], ${name}[min(at + 1u, last)],`
+                    + ` ${name}[min(at + 2u, last)], ${name}[min(at + 3u, last)]);`,
+                `    return bufferElement(${name}view.x, words, (byte % 4u) * 8u);`,
+                '}');
+            entries.push({ binding, visibility, buffer: { type: 'read-only-storage' } });
+            entries.push({ binding: view, visibility, buffer: { type: 'uniform' } });
+            continue;
+        }
         const type = textureType(texture);
         if (!type)
         {
@@ -885,6 +1414,10 @@ function declarations(shader, group, visibility){
         const rows = shader.immediateConstants
             .map(row=>`${REG}(${row.map(u32Literal).join(', ')})`);
         text.push(`const icb = array<${REG}, ${rows.length}>(${rows.join(', ')});`);
+    }
+    for (const helper of shader.helpers)
+    {
+        text.push(...HELPERS[helper].text);
     }
     return { text, entries, unsupported: problems };
 }
@@ -923,13 +1456,13 @@ function registerDeclarations(shader){
 
 /**
  * @param {TranslatedShader} shader
- * @param {string} returnExpression
+ * @param {string | null} returnExpression  Null for an entry point that returns nothing.
  * @returns {string[]}
  */
 function bodyText(shader, returnExpression){
     return shader.body.map(line=>(typeof line === 'string'
         ? line
-        : `    return ${returnExpression};`));
+        : `    return${returnExpression === null ? '' : ` ${returnExpression}`};`));
 }
 
 /** @param {import('./dxbc.js').SignatureElement} element */
@@ -950,11 +1483,17 @@ const semanticKey = element=>`${element.name.toUpperCase()}${element.index}`;
  * Writes the two entry points around a vertex and a pixel shader body, with the
  * interface between them numbered once for both.
  *
+ * A render target the shader writes with nothing bound there is left out of
+ * the fragment's outputs, so that a pipeline can be built for exactly the
+ * targets a draw has -- none at all, for a pass that draws depth alone.
+ *
  * @param {TranslatedShader} vs
  * @param {TranslatedShader} ps
+ * @param {{ targets?: readonly number[] }} [options]  The locations with a
+ *     target bound; every location the shader writes when absent.
  * @returns {LinkedProgram}
  */
-export function linkProgram(vs, ps){
+export function linkProgram(vs, ps, options = {}){
     /** @type {string[]} */
     const unsupported = [...vs.unsupported, ...ps.unsupported];
     const vsDecl = declarations(vs, 0, STAGE.VERTEX);
@@ -1115,10 +1654,14 @@ export function linkProgram(vs, ps){
             : `${REG}(0u)`;
         if (element.systemValue === SYSTEM_VALUE.TARGET)
         {
+            targets.push(element.index);
+            if (options.targets && !options.targets.includes(element.index))
+            {
+                continue;
+            }
             const scalar = scalarOf(element.componentType);
             psOut.push(`    @location(${element.index}) target${element.index}: vec4<${scalar}>,`);
             psReturn.push(scalar === 'u32' ? value : `bitcast<vec4<${scalar}>>(${value})`);
-            targets.push(element.index);
             continue;
         }
         if (element.systemValue === SYSTEM_VALUE.DEPTH)
@@ -1144,17 +1687,23 @@ export function linkProgram(vs, ps){
         '}',
     ].join('\n');
 
+    // Direct3D leaves a derivative taken in divergent flow undefined rather
+    // than refusing the shader, and compilers emit sample instructions inside
+    // branches and loops that WGSL's uniformity analysis would reject.
+    // A fragment stage with nothing to write -- depth alone, no target bound
+    // -- still runs, for what it discards, and returns nothing.
+    const writes = psOut.length > 0;
     const fragment = [
+        'diagnostic(off, derivative_uniformity);',
         ...psDecl.text,
         ...(psIn.length > 0 ? ['struct FragmentIn {', ...psIn, '};'] : []),
-        'struct FragmentOut {',
-        ...psOut,
-        '};',
-        `@fragment fn fragmentMain(${psIn.length > 0 ? 'in: FragmentIn' : ''}) -> FragmentOut {`,
+        ...(writes ? ['struct FragmentOut {', ...psOut, '};'] : []),
+        `@fragment fn fragmentMain(${psIn.length > 0 ? 'in: FragmentIn' : ''})`
+            + `${writes ? ' -> FragmentOut' : ''} {`,
         ...psLoad,
         ...registerDeclarations(ps),
         ...(ps.writesDepth ? ['    var oDepth: f32 = 0.0;'] : []),
-        ...bodyText(ps, `FragmentOut(${psReturn.join(', ')})`),
+        ...bodyText(ps, writes ? `FragmentOut(${psReturn.join(', ')})` : null),
         '}',
     ].join('\n');
 

@@ -37,13 +37,23 @@ export const WS_EX_WINDOWEDGE = 0x00000100;
 export const WS_EX_CLIENTEDGE = 0x00000200;
 export const WS_EX_STATICEDGE = 0x00020000;
 
-/** The frame a window with a caption and a sizing border carries. */
+/**
+ * The classic non-client metrics: a border line, a caption, the frame a
+ * sizing window carries (a two-pixel outer edge, the sizing border and the
+ * border line) and a dialog frame (the outer edge and the border line).
+ */
 export const BORDER = 1;
 export const CAPTION_HEIGHT = 19;
 export const SIZE_FRAME = 4;
+export const DIALOG_FRAME = 3;
 export const SCROLLBAR = 16;
-/** A tool window's caption is shorter than an ordinary one's. */
-export const TOOL_CAPTION_HEIGHT = 12;
+/**
+ * A tool window's caption, SM_CYSMCAPTION: the small caption's default
+ * height of 15 and a pixel, as an ordinary caption is 18 and a pixel.
+ */
+export const TOOL_CAPTION_HEIGHT = 16;
+/** A menu bar's height, which a top-level window with a menu takes below its caption. */
+export const MENU_HEIGHT = 19;
 
 /**
  * @typedef {Object} Rect
@@ -56,49 +66,62 @@ export const TOOL_CAPTION_HEIGHT = 12;
 /**
  * @typedef {Object} Frame
  * @property {number} left     Pixels of frame on the left.
- * @property {number} top      On the top, the caption included.
+ * @property {number} top      On the top, the caption and the menu bar included.
  * @property {number} right    On the right, a vertical scroll bar included.
  * @property {number} bottom   On the bottom, a horizontal one included.
  * @property {number} edge     The border alone, without caption or bars.
  * @property {number} caption  The caption's height, or zero without one.
+ * @property {number} menu     The menu bar's height, or zero without one.
  */
 
 /**
  * How much frame a window's styles give it.
  *
- * The edges add up rather than replace one another: a sizing border and a
- * client edge are two separate frames drawn one inside the other.
+ * The edges add up rather than replace one another: a dialog or sizing
+ * frame's outer edge, the sizing border inside it, a border line, and a
+ * client edge inside all of them. WS_EX_WINDOWEDGE is the look of the outer
+ * edge a dialog or sizing frame already has, not width of its own.
  *
  * @param {number} style @param {number} [exStyle]
+ * @param {boolean} [menu]  Whether it has a menu bar, which only a window that
+ *        is not a child can.
  * @returns {Frame}
  */
-export function frameOf(style, exStyle = 0){
+export function frameOf(style, exStyle = 0, menu = false){
     const thick = (style & WS_THICKFRAME) !== 0;
     const border = (style & (WS_BORDER | WS_DLGFRAME)) !== 0;
     const modal = (exStyle & WS_EX_DLGMODALFRAME) !== 0;
-    const windowEdge = (exStyle & (WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE)) !== 0;
+    const clientEdge = (exStyle & WS_EX_CLIENTEDGE) !== 0;
     const staticEdge = (exStyle & WS_EX_STATICEDGE) !== 0;
 
-    let edge = thick ? SIZE_FRAME : border || modal ? BORDER : 0;
-    edge += windowEdge ? 2 * BORDER : 0;
-    edge += staticEdge ? BORDER : 0;
+    // A static edge on its own is a one-pixel outer edge; a dialog or sizing
+    // frame's is two.
+    let edge = staticEdge && !modal ? BORDER
+        : modal || thick || (style & WS_DLGFRAME) !== 0 ? 2 * BORDER : 0;
+    edge += thick ? BORDER : 0;
+    edge += border || modal ? BORDER : 0;
+    edge += clientEdge ? 2 * BORDER : 0;
 
     const captioned = (style & WS_CAPTION) === WS_CAPTION;
     const caption = captioned
         ? ((exStyle & WS_EX_TOOLWINDOW) !== 0 ? TOOL_CAPTION_HEIGHT : CAPTION_HEIGHT)
         : 0;
+    const bar = menu && (style & WS_CHILD) === 0 ? MENU_HEIGHT : 0;
     return {
         left: edge,
-        top: edge + caption,
+        top: edge + caption + bar,
         right: edge + ((style & WS_VSCROLL) !== 0 ? SCROLLBAR : 0),
         bottom: edge + ((style & WS_HSCROLL) !== 0 ? SCROLLBAR : 0),
         edge,
         caption,
+        menu: bar,
     };
 }
 
 /** No frame at all: what a window covering the display is given. */
-const NO_FRAME = Object.freeze({ left: 0, top: 0, right: 0, bottom: 0, edge: 0, caption: 0 });
+const NO_FRAME = Object.freeze({
+    left: 0, top: 0, right: 0, bottom: 0, edge: 0, caption: 0, menu: 0,
+});
 
 /**
  * @typedef {Object} PlacedWindow
@@ -113,6 +136,7 @@ const NO_FRAME = Object.freeze({ left: 0, top: 0, right: 0, bottom: 0, edge: 0, 
  * @property {boolean} [frameless]
  *           A window a fullscreen device took over: it covers the display,
  *           and the frame its style describes is not drawn and takes no room.
+ * @property {number} [menu]  The menu a window that is not a child has, or zero.
  */
 
 /**
@@ -123,7 +147,8 @@ const NO_FRAME = Object.freeze({ left: 0, top: 0, right: 0, bottom: 0, edge: 0, 
  */
 export function createGeometry(windowOf){
     /** @param {PlacedWindow} record @returns {Frame} */
-    const frame = record=>(record.frameless ? NO_FRAME : frameOf(record.style, record.exStyle));
+    const frame = record=>(record.frameless ? NO_FRAME
+        : frameOf(record.style, record.exStyle, (record.menu ?? 0) !== 0));
 
     /**
      * The window a child is placed inside. An owned top-level window names

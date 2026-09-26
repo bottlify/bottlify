@@ -29,9 +29,10 @@ const WM_XBUTTONDOWN = 0x020b;
  * a fake device would test half of it.
  *
  * @param {{ bounds?: (() => { width: number, height: number }) | null,
- *           window?: () => number }} [options]
+ *           window?: () => number,
+ *           exclusive?: (device: 'keyboard' | 'mouse') => boolean }} [options]
  */
-function harness({ bounds = null, window = ()=>HWND } = {}){
+function harness({ bounds = null, window = ()=>HWND, exclusive } = {}){
     /** @type {any[]} */
     const messages = [];
     /** @type {any[]} */
@@ -47,6 +48,8 @@ function harness({ bounds = null, window = ()=>HWND } = {}){
     const composed = [];
     /** @type {import('./router.js').PressRecord[]} */
     const presses = [];
+    /** What went out for raw input, as the device reported it. @type {any[]} */
+    const reports = [];
     const router = createInputRouter({
         post: message=>messages.push(message),
         /** @param {number} character @param {number} lParam */
@@ -59,6 +62,8 @@ function harness({ bounds = null, window = ()=>HWND } = {}){
         target: ()=>window(),
         bounds,
         trace: press=>presses.push(press),
+        exclusive,
+        rawInput: report=>reports.push(report),
     });
 
     return {
@@ -73,9 +78,9 @@ function harness({ bounds = null, window = ()=>HWND } = {}){
         },
         /** @param {import('./router.js').HostInputEvent} event */
         send: event=>router.send(event),
-        /** Everything since the last look, with the noise of a cursor question out. */
+        /** Everything since the last look. */
         drain(){
-            const taken = messages.filter(entry=>entry.message !== WM.SETCURSOR);
+            const taken = [...messages];
             messages.length = 0;
             return taken;
         },
@@ -88,6 +93,12 @@ function harness({ bounds = null, window = ()=>HWND } = {}){
         presses(){
             const taken = [...presses];
             presses.length = 0;
+            return taken;
+        },
+        /** The raw input reports since the last look. */
+        reports(){
+            const taken = [...reports];
+            reports.length = 0;
             return taken;
         },
         /** The characters handed to the queue for TranslateMessage to deliver. */
@@ -231,6 +242,60 @@ test('SetKeyboardState makes the table GetKeyboardState would read', ()=>{
     assert.equal(h.router.keyState(0x41), 0x8000);
     assert.equal(h.router.keyState(0x42), 0);
     assert.equal(h.router.keyboardState()[0x14], 0x01);
+});
+
+test('GetKeyState\'s low bit is the toggle, as GetKeyboardState\'s is', ()=>{
+    // "If the low-order bit is 1, the key is toggled": CapsLock on reads 0x0001
+    // with the key up, and the two calls agree on it.
+    const h = harness();
+    h.send({ kind: 'key', code: 'CapsLock', down: true });
+    assert.equal(h.router.keyState(0x14), 0x8001, 'down and toggled on');
+    h.send({ kind: 'key', code: 'CapsLock', down: false });
+    assert.equal(h.router.keyState(0x14), 0x0001, 'up and still on');
+    h.send({ kind: 'key', code: 'CapsLock', down: true });
+    h.send({ kind: 'key', code: 'CapsLock', down: false });
+    assert.equal(h.router.keyState(0x14), 0, 'the second press turns it off');
+
+    const table = new Uint8Array(256);
+    table[0x90] = 0x01;
+    h.router.setKeyboardState(table);
+    assert.equal(h.router.keyState(0x90), 0x0001, 'a toggle set through the table is read back');
+});
+
+test('the mouse buttons are virtual keys the key state reads', ()=>{
+    // GetAsyncKeyState "works with mouse buttons", and VK_LBUTTON is a slot of
+    // the same table GetKeyState and GetKeyboardState read.
+    const VK_LBUTTON = 0x01;
+    const VK_RBUTTON = 0x02;
+    const VK_XBUTTON2 = 0x06;
+    const h = harness();
+    h.send({ kind: 'pointerButton', button: 'left', down: true });
+    assert.equal(h.router.keyState(VK_LBUTTON), 0x8000);
+    assert.equal(h.router.asyncKeyState(VK_LBUTTON), 0x8001);
+    assert.equal(h.router.keyboardState()[VK_LBUTTON], 0x80);
+    assert.equal(h.router.keyState(VK_RBUTTON), 0);
+    h.send({ kind: 'pointerButton', button: 'left', down: false });
+    assert.equal(h.router.keyState(VK_LBUTTON), 0);
+    assert.equal(h.router.asyncKeyState(VK_LBUTTON), 0);
+
+    h.send({ kind: 'pointerButton', button: 'x2', down: true });
+    assert.equal(h.router.keyState(VK_XBUTTON2), 0x8000);
+});
+
+test('SetKeyboardState is the logical state only: GetAsyncKeyState still reads the keys', ()=>{
+    // A table set with A down does not make A physically down, and one set
+    // with A up while A is held does not lift it.
+    const h = harness();
+    const table = new Uint8Array(256);
+    table[0x41] = 0x80;
+    h.router.setKeyboardState(table);
+    assert.equal(h.router.keyState(0x41), 0x8000, 'the logical state is what was set');
+    assert.equal(h.router.asyncKeyState(0x41) & 0x8000, 0, 'the key is not down');
+
+    h.send({ kind: 'key', code: 'KeyA', down: true });
+    h.router.setKeyboardState(new Uint8Array(256));
+    assert.equal(h.router.keyState(0x41), 0);
+    assert.equal(h.router.asyncKeyState(0x41) & 0x8000, 0x8000, 'and a held key stays held');
 });
 
 test('the async low bit is a press the next read clears', ()=>{
@@ -559,7 +624,7 @@ test('buffered DirectInput sees the same events, in order', ()=>{
 test('gaining focus tells the program nothing at all', ()=>{
     // It used to send the activation trio. Focus is the page's business: it
     // decides whether this element receives keystrokes, and a program has no
-    // reason to hear about it. Activation is sent once by `arm`, below.
+    // reason to hear about it. Activation is user32's, when a window is shown.
     const h = harness();
     h.send({ kind: 'focus', gained: true });
     assert.deepEqual(h.drain(), []);
@@ -608,43 +673,6 @@ test('a released key is not released twice when focus goes away', ()=>{
     assert.deepEqual(h.drain(), []);
 });
 
-test('the program is told it is active once, when input is wired to a window', ()=>{
-    // There is one window in this machine and it is the active one. The
-    // activation a program waits for before it will do anything is owed to it,
-    // so it is sent once -- when input is wired to a window, not when a page
-    // gains focus, which would be the browser deciding it. And it
-    // is never taken back, however often the page loses its focus afterwards.
-    const h = harness();
-    h.router.arm();
-    h.router.arm();
-    assert.deepEqual(h.drain().map(m=>[m.message, m.wParam]),
-        [[WM.ACTIVATEAPP, 1], [WM.NCACTIVATE, 1], [WM.ACTIVATE, 1], [WM.SETFOCUS, 0]]);
-
-    h.send({ kind: 'focus', gained: false });
-    h.send({ kind: 'focus', gained: true });
-    h.send({ kind: 'focus', gained: false });
-    assert.deepEqual(h.drain(), [], 'and the page losing focus says nothing');
-});
-
-test('the cursor question is asked when the answer could have changed, not per move', ()=>{
-    const h = harness();
-    h.send({ kind: 'focus', gained: true });
-    h.all();
-
-    h.send({ kind: 'pointerMove', x: 1, y: 1 });
-    h.send({ kind: 'pointerMove', x: 2, y: 2 });
-    h.send({ kind: 'pointerMove', x: 3, y: 3 });
-    const moves = h.all();
-    const asked = moves.filter(entry=>entry.message === WM.SETCURSOR);
-    assert.equal(asked.length, 1, 'once, on the first move after focus arrived');
-    assert.equal(asked[0].wParam, HWND);
-    assert.equal(asked[0].lParam, WM.MOUSEMOVE << 16 | 1, 'HTCLIENT, and what it precedes');
-    assert.equal(moves.indexOf(asked[0]), 0, 'and before the move it is about');
-
-    h.send({ kind: 'pointerButton', button: 'left', down: true });
-    assert.equal(h.all()[0].message, WM.SETCURSOR, 'a button asks again');
-});
-
 test('a pad is remembered even though nothing reads it yet', ()=>{
     const h = harness();
     h.send({ kind: 'padAxis', axis: 1, value: -0.5 });
@@ -685,29 +713,6 @@ test('the cursor is confined to the viewport showing the program, not a configur
         'detaching gives the configured screen back');
 });
 
-test('activation waits for a window rather than being spent on hwnd zero', ()=>{
-    // Input is wired to the viewport when a run starts, which is before the
-    // program has executed anything and therefore before it owns a window.
-    let hwnd = 0;
-    const h = harness({ window: ()=>hwnd });
-
-    h.router.arm();
-    assert.deepEqual(h.all(), [],
-        'nothing is sent while there is no window: a message posted to zero is'
-        + ' retrieved by the next GetMessage and dispatched to no procedure');
-
-    hwnd = HWND;
-    h.router.arm();
-    const told = h.all();
-    assert.deepEqual(told.map(entry=>entry.message),
-        [WM.ACTIVATEAPP, WM.NCACTIVATE, WM.ACTIVATE, WM.SETFOCUS]);
-    assert.deepEqual(told.map(entry=>entry.hwnd), [HWND, HWND, HWND, HWND]);
-
-    // Latched on having delivered, so a second window does not activate twice.
-    h.router.arm();
-    assert.deepEqual(h.all(), []);
-});
-
 test('a press is written down with the position it was mapped to', ()=>{
     const h = harness();
     h.send({ kind: 'pointerMove', x: 320, y: 240 });
@@ -737,4 +742,68 @@ test('a press nothing recognises is written down nowhere', ()=>{
     const h = harness();
     assert.equal(h.send({ kind: 'pointerButton', button: 'thumb', down: true }), false);
     assert.deepEqual(h.presses(), []);
+});
+
+test('a mouse DirectInput holds exclusively sends the window no mouse messages', ()=>{
+    // device8.c test_mouse_keyboard: an exclusive foreground Acquire takes
+    // the mouse as raw input with RIDEV_NOLEGACY, which stops it generating
+    // the legacy messages -- so one click does not reach a program twice.
+    let held = true;
+    const h = harness({ exclusive: device=>held && device === 'mouse' });
+    h.send({ kind: 'pointerMove', x: 10, y: 10, dx: 10, dy: 10 });
+    h.send({ kind: 'pointerButton', button: 'left', down: true });
+    h.send({ kind: 'pointerButton', button: 'left', down: false });
+    h.send({ kind: 'wheel', delta: 120 });
+    assert.deepEqual(h.all(), [], 'not a move, a button, a wheel or a cursor question');
+    assert.deepEqual(h.raw.map(event=>event.kind),
+        ['mouseMove', 'mouseButton', 'mouseButton', 'mouseWheel'],
+        'every one of them reached DirectInput');
+    assert.deepEqual(h.presses().map(press=>press.withheld), [true, true]);
+    assert.deepEqual(h.router.cursor(), { x: 10, y: 10 }, 'the cursor still follows');
+
+    h.send({ kind: 'key', code: 'KeyA', down: true });
+    assert.deepEqual(h.drain().map(message=>message.message), [WM.KEYDOWN],
+        'the keyboard is not the mouse');
+
+    held = false;
+    h.send({ kind: 'pointerButton', button: 'left', down: true });
+    assert.deepEqual(h.drain().map(message=>message.message), [WM_LBUTTONDOWN],
+        'and once it lets go, the window hears the mouse again');
+    assert.deepEqual(h.presses().map(press=>press.withheld), [false]);
+});
+
+test('a keyboard DirectInput holds exclusively sends the window no key messages', ()=>{
+    // RIDEV_NOHOTKEYS | RIDEV_NOLEGACY for the keyboard, in the same test.
+    const h = harness({ exclusive: device=>device === 'keyboard' });
+    h.send({ kind: 'key', code: 'KeyA', down: true });
+    h.send({ kind: 'text', text: 'a' });
+    h.send({ kind: 'key', code: 'AltLeft', down: true });
+    h.send({ kind: 'key', code: 'AltLeft', down: false });
+    h.send({ kind: 'key', code: 'KeyA', down: false });
+    assert.deepEqual(h.all(), []);
+    assert.deepEqual(h.composed(), [], 'no WM_KEYDOWN, so nothing for TranslateMessage');
+    assert.equal(h.raw.filter(event=>event.kind === 'key').length, 4);
+    assert.equal(h.router.keyState(0x41), 0, 'the key state still follows the keys');
+});
+
+test('every event also goes out as the device reported it, for WM_INPUT', ()=>{
+    // A RAWMOUSE is relative motion, a button transition or the wheel; a
+    // RAWKEYBOARD is the make code, the E0 prefix, the virtual key -- the
+    // unsided one -- and the message the key was. Reported whether or not
+    // the window hears the legacy messages: who registered for raw input is
+    // user32's to decide.
+    const h = harness({ exclusive: ()=>true });
+    h.send({ kind: 'pointerMove', dx: 5, dy: -3 });
+    h.send({ kind: 'pointerMove', dx: 0, dy: 0 });
+    h.send({ kind: 'pointerButton', button: 'left', down: true });
+    h.send({ kind: 'wheel', delta: -120 });
+    h.send({ kind: 'key', code: 'ControlRight', down: true });
+    h.send({ kind: 'key', code: 'KeyA', down: false });
+    assert.deepEqual(h.reports(), [
+        { device: 'mouse', dx: 5, dy: -3 },
+        { device: 'mouse', button: 'left', down: true },
+        { device: 'mouse', wheel: -120 },
+        { device: 'key', scan: 0x1d, extended: true, vk: 0x11, down: true, message: WM.KEYDOWN },
+        { device: 'key', scan: 0x1e, extended: false, vk: 0x41, down: false, message: WM.KEYUP },
+    ], 'a motion of nothing is no report');
 });

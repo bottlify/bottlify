@@ -51,6 +51,8 @@
  *   that picked up ambient or diffuse light would make lit geometry fade.
  */
 
+import { FOG_SOURCE, fogSourceOf } from './pipeline.js';
+
 /** D3DTOP, the colour and alpha operations a stage can name. */
 export const D3DTOP = Object.freeze({
     DISABLE: 1,
@@ -112,6 +114,15 @@ export const generates = (/** @type {number} */ texCoordIndex)=>{
     const mode = generationOf(texCoordIndex);
     return mode === TCI.CAMERASPACENORMAL || mode === TCI.CAMERASPACEPOSITION
         || mode === TCI.CAMERASPACEREFLECTIONVECTOR;
+};
+
+/**
+ * Whether a stage's generated coordinates are taken from the vertex normal:
+ * the normal itself or the eye reflected about it.
+ */
+export const readsNormal = (/** @type {number} */ texCoordIndex)=>{
+    const mode = generationOf(texCoordIndex);
+    return mode === TCI.CAMERASPACENORMAL || mode === TCI.CAMERASPACEREFLECTIONVECTOR;
 };
 
 /**
@@ -290,15 +301,16 @@ export function argumentsRead(op, arg1, arg2){
  * @param {number} arg
  * @param {number} stageIndex
  * @param {string} coordinate  the expression this stage samples with
+ * @param {string} [specular]  the expression the specular colour is read as
  * @returns {string}
  */
-function argument(arg, stageIndex, coordinate){
+function argument(arg, stageIndex, coordinate, specular = 'input.specular'){
     const source = {
         [D3DTA.DIFFUSE]: 'input.diffuse',
         [D3DTA.CURRENT]: 'current',
         [D3DTA.TEXTURE]: `sampleStage${stageIndex}(${coordinate})`,
         [D3DTA.TFACTOR]: 'uniforms.textureFactor',
-        [D3DTA.SPECULAR]: 'input.specular',
+        [D3DTA.SPECULAR]: specular,
     }[arg & D3DTA.SELECTMASK];
 
     if (source === undefined)
@@ -325,12 +337,13 @@ function argument(arg, stageIndex, coordinate){
  * @param {number} stageIndex
  * @param {string} coordinate
  * @param {number} arg1 @param {number} arg2
+ * @param {string} [specular]  as `argument` reads it
  * @returns {string | null}
  */
-function combine(op, stageIndex, coordinate, arg1, arg2){
+function combine(op, stageIndex, coordinate, arg1, arg2, specular = 'input.specular'){
     const read = argumentsRead(op, arg1, arg2);
-    const a = read.length > 0 ? argument(read[0], stageIndex, coordinate) : '';
-    const b = read.length > 1 ? argument(read[1], stageIndex, coordinate) : '';
+    const a = read.length > 0 ? argument(read[0], stageIndex, coordinate, specular) : '';
+    const b = read.length > 1 ? argument(read[1], stageIndex, coordinate, specular) : '';
     switch (op)
     {
         case D3DTOP.DISABLE:
@@ -453,25 +466,33 @@ function lightContribution(index, type, specular){
 }
 
 /**
+ * A transformed normal, renormalised when the program asked for it.
+ *
+ * @param {string} expression @param {boolean} normalizeNormals @returns {string}
+ */
+const normalized = (expression, normalizeNormals)=>
+    (normalizeNormals ? `normalize(${expression})` : expression);
+
+/**
  * The vertex-shader body that lights a vertex, in place of copying its colours
  * through.
  *
- * Lighting is done in world space, so the normal is transformed by the world
- * matrix and renormalised. Renormalising is unconditional rather than following
- * D3DRS_NORMALIZENORMALS: that state exists to buy back the cost of the square
- * root, and skipping it is only correct when the world matrix has no scale --
- * where renormalising is a no-op anyway.
- *
- * Transforming a normal by the world matrix rather than by its inverse
- * transpose is what the fixed-function pipeline specifies; the two differ only
- * under non-uniform scale, and there the specification is the one to follow.
+ * Lighting is done in world space, so the normal is transformed into it --
+ * by the inverse transpose of the world matrix, which the block carries as
+ * `normalMatrix`: the world matrix itself turns a normal aside under
+ * non-uniform scale, and lights a surface under a non-affine world that
+ * Direct3D leaves black. It is renormalised only under
+ * D3DRS_NORMALIZENORMALS. Off -- its default -- a normal that arrives longer
+ * or shorter than one, or is scaled by the transform, lights its vertex by
+ * that length, which is what a program that leaves the state off is shown.
  *
  * @param {import('./pipeline.js').LightingState} lighting
  * @param {(name: string)=>boolean} has
  * @param {boolean} specular
+ * @param {boolean} normalizeNormals  D3DRS_NORMALIZENORMALS.
  * @returns {string}
  */
-function lightingBody(lighting, has, specular){
+function lightingBody(lighting, has, specular, normalizeNormals){
     // With no light enabled the specular sum is zero however it is written, and
     // emitting the terms anyway would leave the shader carrying an eye vector
     // and an accumulator nothing reads.
@@ -479,7 +500,8 @@ function lightingBody(lighting, has, specular){
     /** @type {string[]} */
     const lines = [
         '    let worldPosition = (uniforms.world * vec4f(vertex.position, 1.0)).xyz;',
-        '    let worldNormal = normalize((uniforms.world * vec4f(vertex.normal, 0.0)).xyz);',
+        `    let worldNormal = ${normalized(
+            '(uniforms.normalMatrix * vec4f(vertex.normal, 0.0)).xyz', normalizeNormals)};`,
     ];
     if (highlights)
     {
@@ -539,6 +561,7 @@ export function generateFixedFunction(state, layout){
         layout.attributes.some(attribute=>attribute.name === name);
     const lighting = state.lighting ?? null;
     const specularEnable = state.specularEnable === true;
+    const normalizeNormals = state.normalizeNormals === true;
     if (lighting && !has('normal'))
     {
         throw new Error('A lit vertex format must carry a normal');
@@ -553,11 +576,21 @@ export function generateFixedFunction(state, layout){
     // A colour the vertex did not carry is opaque white, so a modulate against
     // it is an identity. That is the documented default and it matters: the
     // alternative, black, multiplies the scene away.
-    varyings.push(`    @location(${location++}) diffuse: vec4f,`);
-    varyings.push(`    @location(${location++}) specular: vec4f,`);
+    //
+    // Flat shading takes both colours from the primitive's provoking vertex
+    // -- its first, as Direct3D's is -- except the specular alpha, which
+    // D3DSHADE_FLAT still interpolates, and which travels smooth beside them.
+    const flat = state.flatShading === true;
+    const interpolation = flat ? ' @interpolate(flat)' : '';
+    varyings.push(`    @location(${location++})${interpolation} diffuse: vec4f,`);
+    varyings.push(`    @location(${location++})${interpolation} specular: vec4f,`);
+    if (flat)
+    {
+        varyings.push(`    @location(${location++}) specularAlpha: f32,`);
+    }
     if (lighting)
     {
-        assignments.push(lightingBody(lighting, has, specularEnable));
+        assignments.push(lightingBody(lighting, has, specularEnable, normalizeNormals));
     }
     else
     {
@@ -570,23 +603,38 @@ export function generateFixedFunction(state, layout){
             : '    out.specular = vec4f(0.0, 0.0, 0.0, 0.0);');
     }
 
+    if (flat)
+    {
+        assignments.push('    out.specularAlpha = out.specular.a;');
+    }
+
+    // A set a cube or volume stage reads carries all its components, zero
+    // for one the vertex does not have; every other set carries two.
+    const wide = wideSets(state);
     for (let set = 0; set < layout.texCoordSets; set++)
     {
-        varyings.push(`    @location(${location++}) texCoord${set}: vec2f,`);
-        assignments.push(`    out.texCoord${set} = vertex.texCoord${set}.xy;`);
+        const format = layout.attributes.find(attribute=>attribute.name === `texCoord${set}`)
+            ?.format ?? 'float32x2';
+        varyings.push(
+            `    @location(${location++}) texCoord${set}: ${wide.has(set) ? 'vec4f' : 'vec2f'},`);
+        assignments.push(`    out.texCoord${set} = ${wide.has(set)
+            ? widened(`vertex.texCoord${set}`, format) : `vertex.texCoord${set}.xy`};`);
     }
 
     // A stage generating its coordinates from the vertex in camera space gets
     // a varying of its own, with the stage's texture transform applied here
     // as Direct3D applies it, in vertex processing, and not again at the
-    // sample. A pre-transformed vertex has no camera space: it gets zero.
+    // sample. A pre-transformed vertex has no camera space: it gets zero. The
+    // normal goes there by the inverse transpose of world then view, as a lit
+    // normal goes into world space by the world's.
     const generated = state.stages.map(stage=>generates(stage.texCoordIndex));
     if (generated.some(Boolean) && !layout.preTransformed)
     {
         assignments.push(
             '    let cameraPosition = (uniforms.worldView * vec4f(vertex.position, 1.0)).xyz;',
             `    let cameraNormal = ${has('normal')
-                ? 'normalize((uniforms.worldView * vec4f(vertex.normal, 0.0)).xyz)'
+                ? normalized('(uniforms.cameraNormalMatrix * vec4f(vertex.normal, 0.0)).xyz',
+                    normalizeNormals)
                 : 'vec3f(0.0, 0.0, 1.0)'};`);
     }
     for (const [index, stage] of state.stages.entries())
@@ -602,7 +650,12 @@ export function generateFixedFunction(state, layout){
                 generatedCoordinate(stage.texCoordIndex))};`);
     }
 
-    if (state.fogMode !== D3DFOG.NONE)
+    // Table fog is the pixel's own and needs no varying. Vertex fog on a
+    // pre-transformed vertex is the program's, in its specular alpha.
+    const fogSource = fogSourceOf(state);
+    const vertexFog = fogSource === FOG_SOURCE.VERTEX && !layout.preTransformed;
+    const carriedFog = fogSource === FOG_SOURCE.SPECULAR || fogSource === FOG_SOURCE.VERTEX;
+    if (carriedFog)
     {
         varyings.push(`    @location(${location}) fogAmount: f32,`);
     }
@@ -614,48 +667,62 @@ export function generateFixedFunction(state, layout){
 
     // Pre-transformed vertices skip the matrices entirely and go through the
     // viewport's inverse offset and scale, which is what lands them on the
-    // pixel they name.
+    // pixel they name. Their RHW goes back in as the clip w, scaling the rest
+    // with it so the divide gives the same point: it is what the rasteriser
+    // interpolates by, and a w of one everywhere interpolates a perspective
+    // quad affinely. An RHW of zero or less has no w to give and is taken as
+    // one, as Windows still draws such a vertex.
     const position = layout.preTransformed
         ? '    let screen = (vertex.position.xy + uniforms.viewportOffset) '
             + '* uniforms.viewportScale;\n'
+            + '    let clipW = select(1.0, 1.0 / vertex.position.w, vertex.position.w > 0.0);\n'
             + '    out.position = vec4f(screen.x - 1.0, screen.y + 1.0, '
-            + 'vertex.position.z, 1.0);'
+            + 'vertex.position.z, 1.0) * clipW;'
         : '    out.position = uniforms.worldViewProjection * vec4f(vertex.position, 1.0);';
+    // Direct3D puts a pixel's centre on its integer coordinate and WebGPU
+    // half a pixel further on, so every position moves by half a pixel: half
+    // the viewport's scale in clip space, times w. A quad drawn at pixel edges
+    // covers the same pixels either way; what moves is where a sample and an
+    // interpolated value are taken.
+    const pixelCentre = '    out.position = vec4f(out.position.xy'
+        + ' + out.position.w * uniforms.viewportScale * 0.5, out.position.zw);';
 
-    // How much of the fragment survives the fog, computed per vertex and
-    // interpolated across the triangle.
-    //
-    // The distance it fades by is the clip-space w, which for a perspective
-    // projection is the eye-space depth -- the distance Direct3D's fog is
-    // defined against. A pre-transformed vertex has no eye to be far from: it
-    // is already on the screen, and Direct3D takes its fog factor straight
-    // from the specular alpha the program supplied. Where such a format carries
-    // no specular there is nothing to fog by, and inventing a distance would
+    // How much of the fragment survives vertex fog, interpolated across the
+    // triangle. The distance is the magnitude of the camera-space z, not the
+    // clip w: the two agree only under a perspective projection, and an
+    // orthographic one has a w of one at every depth. Range fog takes the
+    // camera-space distance from the eye instead. Where the factor is the
+    // program's own, in the specular alpha, and the format carries no
+    // specular, there is nothing to fog by, and inventing a distance would
     // fade a two-dimensional overlay by how deep the scene behind it happens
     // to be.
-    //
-    // Per vertex rather than per pixel, which is what D3DRS_FOGVERTEXMODE asks
-    // for and an approximation of D3DRS_FOGTABLEMODE. The two differ only where
-    // a triangle is large enough for the curve to bend across it, and the
-    // interpolated factor is exact for linear fog either way.
-    const fogAmount = state.fogMode === D3DFOG.NONE
-        ? []
-        : [layout.preTransformed
-            ? `    out.fogAmount = ${has('specular') ? 'vertex.specular.a' : '1.0'};`
-            : '    out.fogAmount = fogFactorOf(out.position.w);'];
+    const cameraPoint = '(uniforms.worldView * vec4f(vertex.position, 1.0))';
+    const fogAmount = !carriedFog ? []
+        : vertexFog
+            ? [`    out.fogAmount = fogFactorOf(${state.rangeFog
+                ? `length(${cameraPoint}.xyz)` : `abs(${cameraPoint}.z)`});`]
+            : [`    out.fogAmount = ${has('specular') ? 'vertex.specular.a' : '1.0'};`];
 
     const lightCount = lighting === null ? 0 : lighting.lights.length;
+    const keys = state.stages.map(stage=>stage.colorKey ?? null);
+    // The position is @invariant: a second pass over the same geometry with
+    // a different stage or light setup is a different module, and WGSL
+    // promises two modules the same position from the same computation only
+    // under the attribute -- which has no effect where the struct is the
+    // fragment's input.
     const code = `${lightCount === 0 ? '' : LIGHT_STRUCT}${uniformStruct(lightCount)}
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
-${functionDeclarations(lighting, state.fogMode)}${samplerDeclarations(state.stages.length, 0, 1)}
-${sampleFunctions(state.stages.length, state.stages.map((stage, index)=>(generated[index]
-        ? { projected: stage.projected ?? 0 } : null)))}
+${functionDeclarations(lighting, vertexFog || fogSource === FOG_SOURCE.TABLE
+        ? state.fogMode : D3DFOG.NONE)}${samplerDeclarations(dimensionsOf(state), 0, 1)}
+${keys.some(key=>key !== null) ? 'var<private> colourKeyed: bool = false;\n' : ''}${
+    sampleFunctions(state.stages.length, state.stages.map((stage, index)=>(generated[index]
+        ? { projected: stage.projected ?? 0 } : null)), keys, dimensionsOf(state))}
 struct VertexIn {
 ${inputs}
 };
 
 struct VertexOut {
-    @builtin(position) position: vec4f,
+    @builtin(position) @invariant position: vec4f,
 ${varyings.join('\n')}
 };
 
@@ -663,13 +730,15 @@ ${varyings.join('\n')}
 fn vertexMain(vertex: VertexIn) -> VertexOut {
     var out: VertexOut;
 ${position}
+${pixelCentre}
 ${[...assignments, ...fogAmount].join('\n')}
     return out;
 }
 
 @fragment
 fn fragmentMain(input: VertexOut) -> @location(0) vec4f {
-${fragmentBody(state, specularEnable)}
+${fragmentBody(state, specularEnable, undefined, undefined,
+        flat ? 'vec4f(input.specular.rgb, input.specularAlpha)' : 'input.specular')}
     return current;
 }
 `;
@@ -708,7 +777,9 @@ function uniformStruct(lightCount){
     stage1: u32,
     stage2: u32,
     texTransform: array<vec4f, 32>,
-    worldView: mat4x4f,${lightCount === 0 ? '' : `
+    worldView: mat4x4f,
+    normalMatrix: mat4x4f,
+    cameraNormalMatrix: mat4x4f,${lightCount === 0 ? '' : `
     lights: array<Light, ${lightCount}>,`}
 };`;
 }
@@ -730,6 +801,21 @@ function transformedGeneration(index, coordinate){
 }
 
 /**
+ * Table fog's factor for the pixel, from the fragment position builtin: the
+ * curve over its depth, which is its z when the projection is affine and its
+ * w otherwise -- the reciprocal of the interpolated 1/w the builtin carries,
+ * which for a pre-transformed vertex is its RHW. The choice is a uniform
+ * (`fogFactors.w`), so a projection change compiles nothing.
+ *
+ * @param {string} position  the fragment's `@builtin(position)`
+ * @returns {string}
+ */
+function tableFog(position){
+    return `fogFactorOf(select(1.0 / ${position}.w, ${position}.z,`
+        + ' uniforms.fogFactors.w != 0.0))';
+}
+
+/**
  * The fragment half of the fixed function: the stage cascade over `input`'s
  * diffuse, specular and coordinate sets, then the specular add, the fog and
  * the alpha test, leaving the result in `current`.
@@ -738,10 +824,14 @@ function transformedGeneration(index, coordinate){
  * @param {boolean} specularEnable
  * @param {boolean[]} [generated]  Which stages sample a coordinate the
  *     vertex stage generated (`generated{n}`) rather than a carried set.
+ * @param {string} [position]  The fragment's position builtin, for table fog.
+ * @param {string} [specular]  What a stage reads the specular colour as.
  */
 function fragmentBody(state, specularEnable, generated = state.stages.map(
-    stage=>generates(stage.texCoordIndex)))
+    stage=>generates(stage.texCoordIndex)), position = 'input.position',
+specular = 'input.specular')
 {
+    const wide = wideSets(state);
     const stages = state.stages.length === 0
         ? '    var current = input.diffuse;'
         : ['    var current = input.diffuse;', ...state.stages.map((stage, index)=>{
@@ -749,32 +839,39 @@ function fragmentBody(state, specularEnable, generated = state.stages.map(
             // sharing one set is the ordinary way a detail or lightmap pass is
             // written, and reading set N for stage N samples a varying the
             // vertex never carried.
+            const set = stage.texCoordIndex & COORD_SET_MASK;
+            const flat = (stage.dimension ?? '2d') === '2d';
+            const own = `input.generated${index}`;
             const coordinate = generated[index]
-                ? `input.generated${index}`
-                : `input.texCoord${stage.texCoordIndex & COORD_SET_MASK}`;
+                ? flat ? own : stage.projected === 4 ? `(${own}.xyz / ${own}.w)` : `${own}.xyz`
+                : `input.texCoord${set}${wide.has(set) ? flat ? '.xy' : '.xyz' : ''}`;
             const color = combine(
-                stage.colorOp, index, coordinate, stage.colorArg1, stage.colorArg2);
+                stage.colorOp, index, coordinate, stage.colorArg1, stage.colorArg2, specular);
             if (color === null)
             {
                 return `    // stage ${index} disabled`;
             }
             const alpha = combine(
-                stage.alphaOp, index, coordinate, stage.alphaArg1, stage.alphaArg2);
-            return `    current = vec4f((${color}).rgb, `
-                + `${alpha === null ? '(current).a' : `(${alpha}).a`});`;
+                stage.alphaOp, index, coordinate, stage.alphaArg1, stage.alphaArg2, specular);
+            // Each stage's result is held to [0, 1] before the next reads it,
+            // as the fixed function's registers hold it: a sum past one or a
+            // difference below zero is not carried into the stage after.
+            return `    current = vec4f(saturate((${color}).rgb), `
+                + `${alpha === null ? '(current).a' : `saturate((${alpha}).a)`});`;
         })].join('\n');
 
     // The specular colour is added after the cascade and before the fog, which
     // is where the fixed-function pipeline adds it: a highlight is light
     // reflected off the surface, not light that went through its texture.
-    const specular = specularEnable
+    const highlight = specularEnable
         ? '\n    current = vec4f(current.rgb + input.specular.rgb, current.a);'
         : '';
 
-    const fog = state.fogMode === D3DFOG.NONE
+    const fog = fogSourceOf(state) === FOG_SOURCE.NONE
         ? ''
         : '\n    current = vec4f(mix(uniforms.fogColor.rgb, current.rgb,'
-            + ' clamp(input.fogAmount, 0.0, 1.0)), current.a);';
+            + ` clamp(${fogSourceOf(state) === FOG_SOURCE.TABLE
+                ? tableFog(position) : 'input.fogAmount'}, 0.0, 1.0)), current.a);`;
 
     // The test discards rather than returning a transparent pixel: a discarded
     // fragment writes no depth, and one blended to zero alpha still does, which
@@ -784,7 +881,12 @@ function fragmentBody(state, specularEnable, generated = state.stages.map(
         ? `\n    if (!(${compareExpression(state.alphaFunc, 'current.a', 'uniforms.alphaRef')}))`
             + '\n    {\n        discard;\n    }'
         : '';
-    return `${stages}${specular}${fog}${alphaTest}`;
+    // A texel of a stage's colour key is not drawn, whatever it combined to;
+    // the sample that met it said so.
+    const colourKey = state.stages.some(stage=>stage.colorKey !== undefined)
+        ? '\n    if (colourKeyed)\n    {\n        discard;\n    }'
+        : '';
+    return `${stages}${highlight}${fog}${alphaTest}${colourKey}`;
 }
 
 /**
@@ -813,43 +915,55 @@ export function fixedFragmentStage(state, written){
     /** @type {string[]} */
     const carried = [];
     // The programmable convention: colours at 0 and 1, coordinate set n at
-    // 2 + n, fog at 10 (`varyingLocation` in the translator).
+    // 2 + n, fog at 10 (`varyingLocation` in the translator). Flat shading
+    // makes the two colours flat, as the shader was translated to write them.
+    const interpolation = state.flatShading ? ' @interpolate(flat)' : '';
     carried.push(`    input.diffuse = ${has(0) ? 'in.v0' : 'vec4f(1.0)'};`);
     if (has(0))
     {
-        fields.push('    @location(0) v0: vec4f,');
+        fields.push(`    @location(0)${interpolation} v0: vec4f,`);
     }
     carried.push(`    input.specular = ${has(1) ? 'in.v1' : 'vec4f(0.0)'};`);
     if (has(1))
     {
-        fields.push('    @location(1) v1: vec4f,');
+        fields.push(`    @location(1)${interpolation} v1: vec4f,`);
     }
     const sets = state.stages.reduce(
         (most, stage)=>Math.max(most, (stage.texCoordIndex & COORD_SET_MASK) + 1), 0);
+    const wide = wideSets(state);
     for (let set = 0; set < sets; set++)
     {
         if (has(2 + set))
         {
             fields.push(`    @location(${2 + set}) t${set}: vec4f,`);
         }
+        const keep = wide.has(set);
+        const absent = keep ? 'vec4f(0.0)' : 'vec2f(0.0)';
         carried.push(`    input.texCoord${set} = `
-            + `${has(2 + set) ? `in.t${set}.xy` : 'vec2f(0.0)'};`);
+            + `${has(2 + set) ? `in.t${set}${keep ? '' : '.xy'}` : absent};`);
     }
-    if (state.fogMode !== D3DFOG.NONE)
+    // Below table fog, a shader-drawn vertex is fogged by what the shader
+    // wrote: its oFog when it wrote one, else its specular alpha -- neither
+    // the vertex mode's curve nor its range applies.
+    const fogSource = fogSourceOf(state);
+    const carriedFog = fogSource === FOG_SOURCE.SPECULAR || fogSource === FOG_SOURCE.VERTEX;
+    if (carriedFog)
     {
         if (has(10))
         {
             fields.push('    @location(10) fog: vec4f,');
         }
-        carried.push(`    input.fogAmount = ${has(10) ? 'in.fog.x' : '1.0'};`);
+        carried.push(`    input.fogAmount = ${has(10) ? 'in.fog.x' : has(1) ? 'in.v1.a' : '1.0'};`);
     }
     const members = ['    diffuse: vec4f,', '    specular: vec4f,',
-        ...Array.from({ length: sets }, (_, set)=>`    texCoord${set}: vec2f,`),
-        ...(state.fogMode !== D3DFOG.NONE ? ['    fogAmount: f32,'] : [])];
+        ...Array.from({ length: sets },
+            (_, set)=>`    texCoord${set}: ${wide.has(set) ? 'vec4f' : 'vec2f'},`),
+        ...(carriedFog ? ['    fogAmount: f32,'] : [])];
     const wgsl = `${uniformStruct(0)}
 @group(1) @binding(0) var<uniform> uniforms: Uniforms;
-${functionDeclarations(null, state.fogMode)}${samplerDeclarations(state.stages.length, 2, 0)}
-${sampleFunctions(state.stages.length)}
+${functionDeclarations(null, fogSource === FOG_SOURCE.TABLE ? state.fogMode : D3DFOG.NONE)}${
+    samplerDeclarations(dimensionsOf(state), 2, 0)}
+${sampleFunctions(state.stages.length, [], [], dimensionsOf(state))}
 struct PsIn {
 ${fields.join('\n')}
 };
@@ -862,13 +976,13 @@ ${members.join('\n')}
 fn ps_main(in: PsIn) -> @location(0) vec4f {
     var input: Carried;
 ${carried.join('\n')}
-${fragmentBody(state, state.specularEnable === true, [])}
+${fragmentBody(state, state.specularEnable === true, [], 'in.position')}
     return current;
 }
 `;
     return {
         wgsl, entry: 'ps_main',
-        samplers: state.stages.map((_, index)=>({ index, type: '2d' })),
+        samplers: state.stages.map((stage, index)=>({ index, type: stage.dimension ?? '2d' })),
         inputs: [], outputs: [], reads: written.filter(location=>location <= 10),
         constants: 0, error: null,
     };
@@ -930,9 +1044,17 @@ const ADDRESS_FUNCTION = `fn addressCoordinate(t: f32, mode: u32, texels: f32) -
  *     Stages whose coordinate the vertex stage generated and transformed
  *     already, arriving as four components; `projected` names the one the
  *     first two are divided by, or is zero.
+ * @param {(number | null)[]} [keys]
+ *     Per stage, the colour key in force as 0xRRGGBB, or null: a sample
+ *     whose nearest texel is that colour marks the fragment keyed. The texel
+ *     itself is compared, not the filtered sample, which blends it with its
+ *     neighbours, and its colour alone.
+ * @param {readonly string[]} [dimensions]
+ *     Per stage, '2d', 'cube' or '3d': a cube or volume stage samples three
+ *     components, and is sampled by `cubeSample` or `volumeSample`.
  * @returns {string}
  */
-function sampleFunctions(count, generated = []){
+function sampleFunctions(count, generated = [], keys = [], dimensions = []){
     if (count === 0)
     {
         return '';
@@ -942,6 +1064,14 @@ function sampleFunctions(count, generated = []){
     for (let index = 0; index < count; index++)
     {
         const flags = index < 3 ? `uniforms.stage${index}` : '0u';
+        const dimension = dimensions[index] ?? '2d';
+        if (dimension !== '2d')
+        {
+            lines.push(dimension === 'cube'
+                ? cubeSample(index, flags)
+                : volumeSample(index, flags));
+            continue;
+        }
         // The stage's texture transform, as Direct3D applies it to a
         // two-dimensional coordinate: (u, v, 1) through the first three rows,
         // so a translation is the third row and not the fourth. Identity rows
@@ -984,7 +1114,8 @@ ${transformed}    let flags = ${flags};
     if (point == 1u) {
         uv = (floor(uv * levelSize) + 0.5) / levelSize;
     }
-    return textureSampleLevel(texture${index}, sampler${index}, uv, level);
+${keyTest(index, keys[index] ?? null)
+}    return textureSampleLevel(texture${index}, sampler${index}, uv, level);
 }
 `);
     }
@@ -992,19 +1123,183 @@ ${transformed}    let flags = ${flags};
 }
 
 /**
+ * The sampling of a cube stage: the coordinate is a direction, three
+ * components, and a face's own texels are what a level is chosen by -- the
+ * derivatives of the direction over its major axis, at half the face's size.
+ * Address modes do not apply across a cube's faces. A point-filtered sample
+ * moves the direction to the centre of the face's texel it points into: the
+ * two minor components over the major one are that face's coordinates.
+ *
+ * @param {number} index @param {string} flags
+ */
+function cubeSample(index, flags){
+    return `fn sampleStage${index}(direction: vec3f) -> vec4f {
+    let flags = ${flags};
+    let size = f32(textureDimensions(texture${index}, 0).x);
+    let axes = abs(direction);
+    let major = max(max(max(axes.x, axes.y), axes.z), 1.0e-12);
+    let dx = dpdx(direction) / major * size * 0.5;
+    let dy = dpdy(direction) / major * size * 0.5;
+    let levels = f32(textureNumLevels(texture${index}));
+    let lod = clamp(0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0e-12)),
+        f32((flags >> 8u) & 0xffu), max(levels - 1.0, 0.0));
+    let mipMode = (flags >> 6u) & 3u;
+    var level = f32((flags >> 8u) & 0xffu);
+    if (mipMode == 1u) {
+        level = round(lod);
+    } else if (mipMode == 2u) {
+        level = lod;
+    }
+    var point = (flags >> 4u) & 1u;
+    if (lod > 0.0) {
+        point = (flags >> 5u) & 1u;
+    }
+    var towards = direction;
+    if (point == 1u) {
+        let texels = max(floor(size / exp2(floor(level))), 1.0);
+        let face = direction / major;
+        let snapped = (floor((face * 0.5 + 0.5) * texels) + 0.5) / texels * 2.0 - 1.0;
+        if (axes.x >= axes.y && axes.x >= axes.z) {
+            towards = vec3f(face.x, snapped.yz);
+        } else if (axes.y >= axes.z) {
+            towards = vec3f(snapped.x, face.y, snapped.z);
+        } else {
+            towards = vec3f(snapped.xy, face.z);
+        }
+    }
+    return textureSampleLevel(texture${index}, sampler${index}, towards, level);
+}
+`;
+}
+
+/**
+ * The sampling of a volume stage: the 2D stage's, over three coordinates,
+ * with the third's address mode in bits 16-17 of the stage's flags.
+ *
+ * @param {number} index @param {string} flags
+ */
+function volumeSample(index, flags){
+    return `fn sampleStage${index}(raw: vec3f) -> vec4f {
+    let flags = ${flags};
+    let size = vec3f(textureDimensions(texture${index}, 0));
+    let dx = dpdx(raw * size);
+    let dy = dpdy(raw * size);
+    let levels = f32(textureNumLevels(texture${index}));
+    let lod = clamp(0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0e-12)),
+        f32((flags >> 8u) & 0xffu), max(levels - 1.0, 0.0));
+    let mipMode = (flags >> 6u) & 3u;
+    var level = f32((flags >> 8u) & 0xffu);
+    if (mipMode == 1u) {
+        level = round(lod);
+    } else if (mipMode == 2u) {
+        level = lod;
+    }
+    let levelSize = max(floor(size / exp2(floor(level))), vec3f(1.0));
+    var uvw = vec3f(addressCoordinate(raw.x, flags & 3u, levelSize.x),
+        addressCoordinate(raw.y, (flags >> 2u) & 3u, levelSize.y),
+        addressCoordinate(raw.z, (flags >> 16u) & 3u, levelSize.z));
+    var point = (flags >> 4u) & 1u;
+    if (lod > 0.0) {
+        point = (flags >> 5u) & 1u;
+    }
+    if (point == 1u) {
+        uvw = (floor(uvw * levelSize) + 0.5) / levelSize;
+    }
+    return textureSampleLevel(texture${index}, sampler${index}, uvw, level);
+}
+`;
+}
+
+/**
+ * The texture each stage samples, by dimension: '2d', 'cube' or '3d'.
+ *
+ * @param {import('./pipeline.js').PipelineState} state
+ * @returns {string[]}
+ */
+function dimensionsOf(state){
+    return state.stages.map(stage=>stage.dimension ?? '2d');
+}
+
+/**
+ * The carried coordinate sets a cube or volume stage reads: those carry every
+ * component rather than two.
+ *
+ * @param {import('./pipeline.js').PipelineState} state
+ * @returns {Set<number>}
+ */
+function wideSets(state){
+    return new Set(state.stages
+        .filter(stage=>(stage.dimension ?? '2d') !== '2d' && !generates(stage.texCoordIndex))
+        .map(stage=>stage.texCoordIndex & COORD_SET_MASK));
+}
+
+/**
+ * A vertex input of `format` as four components, the missing ones zero.
+ *
+ * @param {string} name @param {string} format
+ */
+function widened(name, format){
+    switch (wgslType(format))
+    {
+        case 'f32':
+            return `vec4f(${name}, 0.0, 0.0, 0.0)`;
+        case 'vec2f':
+            return `vec4f(${name}, 0.0, 0.0)`;
+        case 'vec3f':
+            return `vec4f(${name}, 0.0)`;
+        default:
+            return name;
+    }
+}
+
+/** The WGSL texture type of each sampled dimension. */
+const TEXTURE_TYPE = Object.freeze({ '2d': 'texture_2d<f32>', cube: 'texture_cube<f32>',
+    '3d': 'texture_3d<f32>' });
+
+/**
+ * The colour-key test inside a stage's sample, or nothing for a stage with
+ * no key: its nearest top-level texel against the key, to within half a
+ * level, the key having been expanded exactly as the texel was.
+ *
+ * @param {number} index @param {number | null} key  0xRRGGBB
+ * @returns {string}
+ */
+function keyTest(index, key){
+    if (key === null)
+    {
+        return '';
+    }
+    const channel = (/** @type {number} */ shift)=>literalOf(((key >>> shift) & 0xff) / 255);
+    return `    let keyTexel = textureLoad(texture${index},`
+        + ' vec2i(clamp(floor(uv * size), vec2f(0.0), size - 1.0)), 0);\n'
+        + `    if (all(abs(keyTexel.rgb - vec3f(${channel(16)}, ${channel(8)}, ${channel(0)}))`
+        + ' < vec3f(0.5 / 255.0))) {\n'
+        + '        colourKeyed = true;\n'
+        + '    }\n';
+}
+
+/** @param {number} value @returns {string} a WGSL float literal */
+function literalOf(value){
+    const text = String(value);
+    return text.includes('.') || text.includes('e') ? text : `${text}.0`;
+}
+
+/**
  * Texture and sampler bindings, one pair per stage, from `first` upward in
  * `group`: the fixed-function pipeline's own group after its block, or the
  * programmable layout's sampler group from its start.
  *
- * @param {number} count @param {number} group @param {number} first @returns {string}
+ * @param {readonly string[]} dimensions  Each stage's: '2d', 'cube' or '3d'.
+ * @param {number} group @param {number} first @returns {string}
  */
-function samplerDeclarations(count, group, first){
+function samplerDeclarations(dimensions, group, first){
     /** @type {string[]} */
     const lines = [];
-    for (let index = 0; index < count; index++)
+    for (let index = 0; index < dimensions.length; index++)
     {
         lines.push(`@group(${group}) @binding(${first + index * 2})`
-            + ` var texture${index}: texture_2d<f32>;`);
+            + ` var texture${index}: ${
+                /** @type {Record<string, string>} */ (TEXTURE_TYPE)[dimensions[index]]};`);
         lines.push(`@group(${group}) @binding(${first + 1 + index * 2})`
             + ` var sampler${index}: sampler;`);
     }

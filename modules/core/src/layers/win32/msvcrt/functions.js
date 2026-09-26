@@ -18,7 +18,6 @@
  * undefined, the choice made here is written down at the function.
  */
 
-import { HANDLE_STDOUT } from '../kernel32/console.js';
 import { formatToString, varargsSlots } from './format.js';
 import { createStringFunctions } from './strings.js';
 import { createConversionFunctions } from './convert.js';
@@ -31,9 +30,13 @@ import {
 } from './mbstring.js';
 import { createCxxFunctions } from './cxx.js';
 import { createMathFunctions } from './math.js';
+import { readDouble } from './float.js';
 import { createStartupFunctions } from './startup.js';
-import { createStdioFunctions } from './stdio.js';
+import { createStdioFunctions, standardRecords } from './stdio.js';
 import { createThreadFunctions } from './threads.js';
+import { createGlobals, EINVAL, ERANGE } from './globals.js';
+import { createDescriptors, createIoFunctions } from './io.js';
+import { bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
 
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
@@ -87,9 +90,22 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  * @property {() => number} [systemTimeMs]  Guest wall clock, milliseconds.
  * @property {() => number} [now]           Guest running time, milliseconds.
  * @property {any} [files]                  The volume, for the path functions.
+ * @property {(task: () => void) => void} [atProcessEnd]
+ *           Where the runtime leaves what is to run when the process ends,
+ *           whichever way it ends. Absent, its files stay open at the end.
+ * @property {import('./io.js').FileHandles} [handles]
+ *           kernel32's handle table, as far as files go: what `_get_osfhandle`
+ *           hands out and `_open_osfhandle` takes. Absent, the two stay
+ *           unexported.
  * @property {() => string[]} [drives]      Letters the filesystem has mounted.
  * @property {() => number} [iob]           Where the runtime's `_iob` was placed, once it has been.
+ * @property {(values: Record<string, number>) => void} [setRegisters]
+ *           Registers a call answers in besides EAX: EDX, for the high half
+ *           of an __int64. Absent, the calls answering one stay unexported.
  * @property {import('./float.js').FloatHost} [fpu]
+ * @property {import('../kernel32/versions.js').WindowsVersion} [version]
+ *           The Windows GetVersion answers for the process, which the
+ *           runtime's own copy of it follows. Absent, the default one.
  * @property {() => string} [commandLine]
  *           What the process was started with, as GetCommandLineA reports it.
  * @property {(code: number) => any} [exitProcess]
@@ -143,6 +159,9 @@ export function createMsvcrtFunctions(host){
     /** @param {number} pointer */
     const readString = pointer=>host.readCString(pointer, MAX_STRING);
 
+    /** @param {number} pointer */
+    const readWide = pointer=>wideStringAt(host.readMemory, pointer);
+
     /**
      * The scratch a single-byte search marks in. Handlers answer one call at a
      * time and never await inside a scan, so one table per runtime is safe and
@@ -174,9 +193,43 @@ export function createMsvcrtFunctions(host){
      */
     const copyOf = (address, length)=>host.readMemory(address, length).slice();
 
+    /**
+     * What a narrow printer writes: %S and %ls read wide strings, and the
+     * text is bytes under the C locale (see `formatToString`).
+     *
+     * @param {number} format @param {number[]} values
+     */
+    const narrowText = (format, values)=>formatToString(readString(format), values, readString,
+        { readWideString: readWide, cLocale: true });
+
     /** @param {number[]} args @param {number} fixed */
-    const render = (args, fixed)=>
-        formatToString(readString(args[fixed - 1]), args.slice(fixed), readString);
+    const render = (args, fixed)=>narrowText(args[fixed - 1], args.slice(fixed));
+
+    /**
+     * The _snprintf family's answer: at most `count` characters, with the
+     * terminator only when the text is shorter than that -- a text of
+     * exactly `count` fills the buffer and the byte after it stays the
+     * caller's -- and -1 when the text did not fit. No buffer and a count of
+     * zero asks how long the text is; no buffer for a count is EINVAL.
+     *
+     * @param {number} buffer @param {number} count @param {string} text
+     */
+    const countedPrint = (buffer, count, text)=>{
+        const limit = count >>> 0;
+        if ((buffer >>> 0) === 0)
+        {
+            if (limit === 0)
+            {
+                return text.length;
+            }
+            errno(EINVAL);
+            return -1;
+        }
+        const kept = text.slice(0, limit);
+        host.writeMemory(buffer, packInto(
+            new Uint8Array(kept.length + (text.length < limit ? 1 : 0)), kept));
+        return text.length > limit ? -1 : text.length;
+    };
 
     /** int atoi(const char *str) */
     const atoi = {
@@ -227,6 +280,32 @@ export function createMsvcrtFunctions(host){
      */
     const varargsAt = list=>varargsSlots(
         host.readMemory, address=>host.regionAt?.(address) ?? null, list, VA_LIST_SLOTS);
+
+    /**
+     * The secure printers' shared body. A size of zero leaves nowhere to put
+     * even the terminator, which is the same invalid parameter as a null
+     * buffer.
+     *
+     * @param {number} buffer @param {number} size @param {number} format
+     * @param {number[]} values
+     */
+    const boundedPrint = (buffer, size, format, values)=>{
+        const room = size >>> 0;
+        if ((buffer >>> 0) === 0 || (format >>> 0) === 0 || room === 0)
+        {
+            errno(EINVAL);
+            return -1;
+        }
+        const text = narrowText(format, values);
+        if (text.length + 1 > room)
+        {
+            host.writeMemory(buffer, new Uint8Array(1));
+            errno(ERANGE);
+            return -1;
+        }
+        writeString(buffer, text);
+        return text.length;
+    };
 
     /**
      * Where the runtime would report a fatal error. Nothing here reports one,
@@ -498,6 +577,20 @@ export function createMsvcrtFunctions(host){
         _itoa: itoa,
 
         /**
+         * int _isnan(double x)
+         *
+         * A question about the bits of a double on the stack, answered in EAX:
+         * unlike the maths functions it needs no FPU, so it is here rather than
+         * with them.
+         */
+        _isnan: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>(Number.isNaN(readDouble(args, 0)) ? 1 : 0),
+        },
+
+        /**
          * void srand(unsigned int seed) and int rand(void)
          *
          * This runtime's own generator, not a better one. The sequence is part
@@ -528,37 +621,6 @@ export function createMsvcrtFunctions(host){
             handler: ()=>{
                 randomSeed = (Math.imul(randomSeed, 214013) + 2531011) >>> 0;
                 return (randomSeed >>> 16) & RAND_MAX;
-            },
-        },
-
-        /** int puts(const char *str) */
-        puts: {
-            convention: 'cdecl',
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([string])=>{
-                // puts appends the newline that printf would have had in the
-                // format string.
-                host.write(HANDLE_STDOUT, `${readString(string)}\n`);
-                return 0;
-            },
-        },
-
-        /**
-         * int printf(const char *format, ...)
-         *
-         * The variadic arguments sit contiguously above the format pointer on
-         * the caller's stack and arrive as the tail of `args` -- everything
-         * from index 1 on -- for as many slots as `argBytes` reads.
-         */
-        printf: {
-            convention: 'cdecl',
-            argBytes: 4 + VARIADIC_SLOTS * 4,
-            /** @param {number[]} args */
-            handler: args=>{
-                const text = render(args, 1);
-                host.write(HANDLE_STDOUT, text);
-                return text.length;
             },
         },
 
@@ -639,17 +701,7 @@ export function createMsvcrtFunctions(host){
             convention: 'cdecl',
             argBytes: 12 + VARIADIC_SLOTS * 4,
             /** @param {number[]} args */
-            handler: args=>{
-                const limit = args[1] >>> 0;
-                const text = render(args, 3);
-                if (text.length > limit)
-                {
-                    host.writeMemory(args[0], packInto(new Uint8Array(limit), text));
-                    return -1;
-                }
-                writeString(args[0], text);
-                return text.length;
-            },
+            handler: args=>countedPrint(args[0], args[1], render(args, 3)),
         },
 
         /** int vsprintf(char *buffer, const char *format, va_list args) */
@@ -658,7 +710,7 @@ export function createMsvcrtFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([buffer, format, list])=>{
-                const text = formatToString(readString(format), varargsAt(list), readString);
+                const text = narrowText(format, varargsAt(list));
                 writeString(buffer, text);
                 return text.length;
             },
@@ -674,29 +726,65 @@ export function createMsvcrtFunctions(host){
             convention: 'cdecl',
             argBytes: 16,
             /** @param {number[]} args */
+            handler: ([buffer, count, format, list])=>
+                countedPrint(buffer, count, narrowText(format, varargsAt(list))),
+        },
+
+        /**
+         * int _vsnwprintf(wchar_t *buffer, size_t count, const wchar_t *format,
+         *                 va_list args)
+         *
+         * _vsnprintf in wide characters, where %s is a wide string: at most
+         * `count` characters, terminated only when there is room, and -1 when
+         * the text does not fit. With no buffer and a count of zero it answers
+         * how many the text needs (Wine's msvcrt test_vsnwprintf); no format,
+         * or no buffer for a count, is -1 and EINVAL.
+         */
+        _vsnwprintf: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
             handler: ([buffer, count, format, list])=>{
                 const limit = count >>> 0;
-                const text = formatToString(readString(format), varargsAt(list), readString);
-                if (text.length > limit)
+                if ((format >>> 0) === 0 || ((buffer >>> 0) === 0 && limit !== 0))
                 {
-                    host.writeMemory(buffer, packInto(new Uint8Array(limit), text));
+                    errno(EINVAL);
                     return -1;
                 }
-                writeString(buffer, text);
-                return text.length;
+                const text = formatToString(readWide(format), varargsAt(list), readString,
+                    { readWideString: readWide, wide: true });
+                if ((buffer >>> 0) === 0)
+                {
+                    return text.length;
+                }
+                const units = unitsOfText(text.slice(0, limit));
+                host.writeMemory(buffer, bytesOfUnits(text.length < limit ? [...units, 0] : units));
+                return text.length > limit ? -1 : text.length;
             },
         },
 
-        /** int vprintf(const char *format, va_list args) */
-        vprintf: {
+        /**
+         * int sprintf_s(char *buffer, size_t size, const char *format, ...)
+         *
+         * sprintf with the buffer's size: text that does not fit with its
+         * terminator is not written at all -- the buffer is left an empty
+         * string, and the answer is -1 with ERANGE. A null buffer or format
+         * is -1 and EINVAL.
+         */
+        sprintf_s: {
             convention: 'cdecl',
-            argBytes: 8,
+            argBytes: 12 + VARIADIC_SLOTS * 4,
             /** @param {number[]} args */
-            handler: ([format, list])=>{
-                const text = formatToString(readString(format), varargsAt(list), readString);
-                host.write(HANDLE_STDOUT, text);
-                return text.length;
-            },
+            handler: args=>boundedPrint(args[0], args[1], args[2], args.slice(3)),
+        },
+
+        /** int vsprintf_s(char *buffer, size_t size, const char *format, va_list args) */
+        vsprintf_s: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([buffer, size, format, list])=>
+                boundedPrint(buffer, size, format, (format >>> 0) === 0 ? [] : varargsAt(list)),
         },
 
         /**
@@ -746,6 +834,83 @@ export function createMsvcrtFunctions(host){
     };
 
     const allocate = host.allocate ?? (()=>0);
+
+    // One set of the runtime's variables for the whole table: errno is set by
+    // whichever function fails and read through the address `_errno` hands out.
+    const globals = createGlobals({
+        allocate, readMemory: host.readMemory, writeMemory: host.writeMemory,
+    });
+
+    /**
+     * errno is the calling thread's own, as the runtime keeps it: the
+     * scheduler may switch threads between a failing call and the line that
+     * reads errno after it. Without a thread to ask, there is the one.
+     *
+     * @type {WeakMap<object, string>}
+     */
+    const errnoOf = new WeakMap();
+    let threadsSeen = 0;
+    const errnoName = ()=>{
+        const thread = host.currentThread?.();
+        if (thread === null || typeof thread !== 'object')
+        {
+            return 'errno';
+        }
+        let name = errnoOf.get(thread);
+        if (name === undefined)
+        {
+            name = `errno:${++threadsSeen}`;
+            errnoOf.set(thread, name);
+        }
+        return name;
+    };
+    /** @param {number} code */
+    const errno = code=>globals.set(errnoName(), code);
+
+    // The descriptor table the low-level calls hand out numbers from and the
+    // streams stand on, so `_fileno(f)` is a number `_read` accepts.
+    const descriptors = host.files
+        ? createDescriptors({
+            files: host.files, write: host.write, errno, fmode: ()=>globals.get('fmode'),
+            handles: host.handles,
+        })
+        : null;
+
+    // Every handle a process held closes when it ends, however it ends --
+    // which is when a file opened to be deleted on close goes.
+    if (descriptors)
+    {
+        host.atProcessEnd?.(()=>descriptors.closeAll());
+    }
+
+    const stdio = host.files && host.allocate && host.free
+        ? createStdioFunctions({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            readCString: host.readCString,
+            allocate: host.allocate,
+            free: host.free,
+            files: host.files,
+            write: host.write,
+            iob: host.iob,
+            errno,
+            descriptors: descriptors ?? undefined,
+            varargs: varargsAt,
+        })
+        : null;
+
+    /**
+     * What `_cexit` closes: every stream fopen and its kin opened, and a
+     * standard stream freopen moved to a file, which goes back on the console.
+     */
+    const closeStreams = ()=>{
+        if (stdio)
+        {
+            stdio._fcloseall.handler([]);
+            standardRecords(host.iob?.() ?? 0).forEach(record=>stdio.fclose.handler([record]));
+        }
+    };
+
     const narrow = {
         ...table,
         ...createStringFunctions({
@@ -762,12 +927,18 @@ export function createMsvcrtFunctions(host){
         // Bound to the byte functions above, so the two families cannot drift.
         ...createMultiByteFunctions(narrow),
         ...createWideClassificationFunctions(narrow),
-        ...createWideFunctions(host),
+        ...createWideFunctions({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            readCString: host.readCString,
+            errno,
+        }),
         ...createConversionFunctions({
             readCString: host.readCString,
             writeMemory: host.writeMemory,
             allocate,
             fpu: host.fpu,
+            errno,
         }),
         ...createScanFunctions(host),
         ...createCxxFunctions(host),
@@ -788,6 +959,10 @@ export function createMsvcrtFunctions(host){
                 currentThread: host.currentThread,
                 exitProcess: host.exitProcess,
                 exit: host.exit,
+                globals,
+                errnoName,
+                closeStreams,
+                version: host.version,
             })
             : {}),
 
@@ -804,6 +979,7 @@ export function createMsvcrtFunctions(host){
                 readMemory: host.readMemory,
                 writeMemory: host.writeMemory,
                 fillMemory: host.fillMemory,
+                errno,
             })
             : {}),
         ...(host.systemTimeMs && host.now
@@ -820,27 +996,33 @@ export function createMsvcrtFunctions(host){
         ...(host.files
             ? createPathFunctions({
                 readCString: host.readCString,
+                readMemory: host.readMemory,
                 writeMemory: host.writeMemory,
                 allocate,
                 drives: host.drives,
                 files: host.files,
+                errno,
             })
             : {}),
-        ...(host.files && host.allocate && host.free
-            ? createStdioFunctions({
+        ...(descriptors
+            ? createIoFunctions({
                 readMemory: host.readMemory,
                 writeMemory: host.writeMemory,
                 readCString: host.readCString,
-                allocate: host.allocate,
-                free: host.free,
                 files: host.files,
-                write: host.write,
-                iob: host.iob,
-            })
+                errno,
+                divergence: host.divergence,
+                setRegisters: host.setRegisters,
+            }, descriptors)
             : {}),
+        ...(stdio ?? {}),
         ...(host.threads ? createThreadFunctions(host.threads) : {}),
         ...(host.fpu
-            ? createMathFunctions({ writeMemory: host.writeMemory, fpu: host.fpu })
+            ? createMathFunctions({
+                writeMemory: host.writeMemory,
+                fpu: host.fpu,
+                setRegisters: host.setRegisters,
+            })
             : {}),
     };
 }

@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { fitFrame } from './letterbox.js';
+import { fitFrame, isShown, placementOf, stretchFrame } from './letterbox.js';
 import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
 import { captureTrace, describeAddress, formatTrace } from './trace.js';
@@ -18,9 +18,12 @@ import { planDependencies } from './layers/loader/internal/dependencies.js';
 import { findResource, listResources, loadString } from './layers/loader/internal/resources.js';
 import { readTls } from './layers/loader/internal/tls.js';
 import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
+import { mangledCall } from './layers/loader/internal/mangling.js';
+import { mapImage } from './layers/loader/internal/image.js';
 import { createProcessBlocks } from './layers/win32/kernel32/teb.js';
+import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
-import { synthesiseProcessInit, DLL_PROCESS_ATTACH }
+import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
     from './layers/loader/internal/init.js';
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
 import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
@@ -71,11 +74,12 @@ import { loadZstdWasm } from './zstd-wasm.js';
  *           machine and not something a caller supplies.
  * @property {Object} [system]            The engine's own read-only volume.
  * @property {{ path: string, bytes: Uint8Array }[]} [system.files]
- *           Files to mount under `C:\WINDOWS\system32\`, a name each: the
- *           DirectX runtime a title links against. Absent, the volume has no
- *           system layer and a `d3dx9_*` name answers from the engine's own
- *           table, as it did before this existed. The bytes are handed in the
- *           same way the decoder's are, because which build carries them is the
+ *           Files to mount read-only under `C:\WINDOWS\system32\`, a name
+ *           each, as though the machine had always had them. The engine carries
+ *           none of its own: a library a title's installer puts there (the
+ *           DirectX setup's `d3dx9_*`) is written to the drive like any other
+ *           file. Absent, the volume has no system layer. The bytes are handed
+ *           in the way the decoder's are, because what a build carries is the
  *           assembling caller's decision.
  * @property {number} [stackSize]
  * @property {number} [memorySize]   Guest RAM in bytes; a power of two.
@@ -128,11 +132,23 @@ import { loadZstdWasm } from './zstd-wasm.js';
  *     'function'`. `memory` is set by `createApp` on a rebuilt machine so the
  *     storage outlives the process that made it, and is not something a caller
  *     supplies.
- * @property {{ network?: any }} [win32]
+ * @property {'win2000' | 'winxp' | 'win7' | 'win10'} [windows]
+ *     The Windows the machine is, a bottle's setting: 2000 SP4, XP SP3, 7 SP1
+ *     or 10 (build 19045). Every place a program reads the version from agrees
+ *     on it -- GetVersionEx, VerifyVersionInfo, the process block,
+ *     RtlGetVersion, the registry, a system library's file version -- and so do
+ *     the profile folders the registry, the shell and the environment name.
+ *     Windows 10 tells a program whose manifest does not declare it 6.2, as
+ *     the real one does. Default `winxp`; any other name is refused.
+ * @property {{ network?: any, trustedRoots?: (Uint8Array | string)[] }} [win32]
  *     `network` is the transport under Winsock, in the shape the win32 layer's
  *     `wsock32/transport.js` names: what a relay client hands back, or an
  *     embedder's own. Absent, Winsock runs over the loopback adapter and
  *     nothing outside this runtime is reachable, which is the default.
+ *     `trustedRoots` is the root store WinVerifyTrust judges Authenticode
+ *     chains against, each root as DER bytes or base64; absent, it holds
+ *     Microsoft's "Microsoft Root Authority" alone, and an empty list trusts
+ *     nothing.
  * @property {(record: any) => void} [onCall]
  *           Every host call as it returns. The ring kept for a failure holds
  *           the end of a run; this holds all of it, for a tool willing to
@@ -561,6 +577,35 @@ export function describeEvent(payload){
 }
 
 /**
+ * What a call to an import nothing claims may do: return to its caller, taking
+ * the arguments it was passed off the stack as the caller expects, or not
+ * return at all -- the stack is the one thing a stub must get right.
+ *
+ * A C++ name says its own convention and, mostly, its argument bytes: a C
+ * runtime's classes are `thiscall` whatever the rest of the library is. A
+ * `_name@N` name is stdcall with N bytes. Anything else is cdecl when its
+ * library is, and otherwise stdcall with a count nobody knows. A library the
+ * program brought is a mismatch between two of its own files, and answers
+ * as its name says.
+ *
+ * @param {string | null} name
+ * @param {{ own: boolean, cdeclLibrary: boolean }} library
+ * @returns {{ returns: boolean, argBytes: number }}
+ */
+export function missingImportCall(name, { own, cdeclLibrary }){
+    const mangled = name === null ? null : mangledCall(name);
+    if (mangled)
+    {
+        return { returns: mangled.argBytes !== null || own, argBytes: mangled.argBytes ?? 0 };
+    }
+    const decorated = name === null ? null : /@(\d+)$/.exec(name);
+    return {
+        returns: decorated !== null || own || cdeclLibrary,
+        argBytes: decorated ? Number(decorated[1]) : 0,
+    };
+}
+
+/**
  * Binds an import nothing implements, once per label, and bounds what a
  * program that calls it in a loop does to the engine.
  *
@@ -571,13 +616,13 @@ export function describeEvent(payload){
  * the name.
  *
  * Whether the stub may return is decided by the one thing that must be right
- * for the program to go on: what the caller expects of the callee's stack. A
- * decorated `_name@N` name is stdcall with N argument bytes, and a name from a
- * library `classify` calls cdecl cleans up in its caller; both answer zero and
- * return. An undecorated name from any other library is stdcall with a count
- * nobody knows -- no stub can return from it without leaving the stack short --
- * so the first call goes to `fault`, which names the import and its caller and
- * ends the run. That branch cannot flood, since it happens once.
+ * for the program to go on: what the caller expects of the callee's stack
+ * (`missingImportCall`). Where that is known the stub answers zero and returns;
+ * where nobody knows the count -- an undecorated name from a stdcall library,
+ * a C++ name whose arguments the name does not size -- no stub can return
+ * without leaving the stack short, so the first call goes to `fault`, which
+ * names the import and its caller and ends the run. That branch cannot flood,
+ * since it happens once.
  *
  * The branch that can flood is the returning one. A program calls a missing
  * classifier once per character of every string, and announcing every call puts
@@ -636,11 +681,15 @@ export function createMissingImports({ register, events, journal, classify, faul
             }
             if (returns)
             {
-                // Zero, and back to the caller. It is the only value that reads
-                // as failure under every convention at once -- a null pointer, a
-                // null handle, FALSE, a count of none -- so a caller that checks
-                // its result takes its own failure path and says something about
-                // what it wanted.
+                // Zero, and back to the caller. It reads as failure for the
+                // commonest shapes -- a null pointer, a null handle, FALSE, a
+                // count of none -- so such a caller takes its own failure path
+                // and says something about what it wanted. Not for every shape:
+                // an HRESULT or an error code of zero is success, and a C
+                // runtime call that fails with -1 or EOF (fgetc, _read) or
+                // answers "not yet" with zero (feof) reads it as a result, which
+                // can leave a read loop going round for ever. No one value
+                // fails under every convention; this one fails under most.
                 return 0;
             }
             return fault(label, frame);
@@ -1194,8 +1243,7 @@ export const SYSTEM_VOLUME_DIRECTORY = 'WINDOWS\\system32';
  * The paths the caller gave are bare names -- `d3dx9_26.dll` -- because that is
  * what a runtime directory is; where they appear is this engine's decision and
  * is the same place Windows keeps them. Absent any files the volume has no
- * system layer at all, and a `d3dx9_*` name is answered by the engine's own
- * table, exactly as it was before this route existed.
+ * system layer at all.
  *
  * @param {any} system  The `system` option, or nothing.
  * @returns {import('./layers/filesystem/internal/memory-store.js').SourceStore | null}
@@ -1246,8 +1294,8 @@ export function libraryCandidates(name, imagePath){
  *
  * The order matters because the bytes decide whether a real PE is mapped or a
  * synthesised table stands in for one, and the two answer different exports.
- * A title that shipped its own `d3dx9_26.dll` gets that file; one that did not
- * gets the runtime the engine mounted in `C:\WINDOWS\system32\`.
+ * A title that shipped its own `d3dx9_26.dll` gets that file; one whose
+ * installer put the runtime in `C:\WINDOWS\system32\` gets that one.
  *
  * @param {any} filesystem
  * @param {any} blocks       The bundle fetcher, or null when there is no bundle.
@@ -1301,12 +1349,28 @@ export async function inParallel(items, limit, work){
  * names: a resource found in one module and addressed relative to another's
  * base is a pointer into the wrong image.
  *
+ * A library LoadLibraryEx mapped as data is no module, and its handle is its
+ * base with a low bit set: one for a view of the file as it lies on disk, two
+ * for one laid out as an image. The resource calls take that handle as they
+ * take a module's, and in the file's own layout a resource lies at its file
+ * offset from the base rather than at its RVA -- so that is the `rva` a data
+ * file's lookup answers, since every caller adds it to the base.
+ *
  * @param {() => any} main       The running program's module, once loaded.
  * @param {Map<number, any>} byBase  Every mapped module by its base.
+ * @param {Map<number, any>} [dataFiles]  Libraries mapped as data, by handle.
  */
-export function resourceLookup(main, byBase){
+export function resourceLookup(main, byBase, dataFiles = new Map()){
     /** @param {number} instance */
-    const moduleOf = instance=>(instance === 0 ? main() : byBase.get(instance >>> 0) ?? null);
+    const moduleOf = instance=>{
+        if (instance === 0)
+        {
+            return main();
+        }
+        return (instance & 3) !== 0
+            ? dataFiles.get(instance >>> 0) ?? null
+            : byBase.get(instance >>> 0) ?? null;
+    };
     return {
         /** @param {number} instance @param {number} id */
         loadString: (instance, id)=>{
@@ -1323,9 +1387,22 @@ export function resourceLookup(main, byBase){
          */
         findResource: (instance, type, name, language = null)=>{
             const module = moduleOf(instance);
-            return module?.file
+            const found = module?.file
                 ? findResource(module.file, module.image, type, name, language)
                 : null;
+            if (!found || !module.flat)
+            {
+                return found;
+            }
+            try
+            {
+                return { ...found, rva: rvaToFileOffset(module.image, found.rva) };
+            }
+            catch {
+                // Data outside every section: a file that describes a
+                // resource it does not hold.
+                return null;
+            }
         },
         /**
          * Everything a module carries, for the enumerations: a program picks
@@ -1389,6 +1466,58 @@ export function placePatches(patches, base, size){
  */
 const LIBRARY_ALIGN = 0x10000;
 
+/** LoadLibraryEx's flags: mapped with nothing resolved or run, or loaded as data. */
+const DONT_RESOLVE_DLL_REFERENCES = 0x1;
+const LOAD_LIBRARY_AS_DATAFILE = 0x2;
+const LOAD_LIBRARY_AS_IMAGE_RESOURCE = 0x20;
+const LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE = 0x40;
+const LOAD_AS_DATA = LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE
+    | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE;
+/** A page: a view of a file is mapped in whole ones. */
+const PAGE_SIZE = 0x1000;
+
+/**
+ * The system libraries in every process, whatever it imports.
+ */
+const ALWAYS_LOADED = ['ntdll', 'kernel32'];
+
+/**
+ * What loading one system library brings in with it: the libraries it
+ * imports itself on Windows, as far as those this engine provides go. A
+ * program that imports USER32 finds GDI32 loaded, and may ask for a handle
+ * to it without ever having loaded it.
+ *
+ * @type {Readonly<Record<string, string[]>>}
+ */
+const SYSTEM_IMPORTS = Object.freeze({
+    user32: ['gdi32', 'advapi32'],
+    gdi32: ['user32'],
+    advapi32: ['rpcrt4'],
+    rpcrt4: ['advapi32'],
+    ole32: ['advapi32', 'gdi32', 'user32', 'rpcrt4', 'msvcrt'],
+    oleaut32: ['ole32', 'rpcrt4', 'user32', 'gdi32', 'advapi32'],
+    shell32: ['shlwapi', 'comctl32', 'user32', 'gdi32', 'advapi32', 'msvcrt'],
+    shlwapi: ['advapi32', 'gdi32', 'user32', 'msvcrt'],
+    comctl32: ['advapi32', 'gdi32', 'user32', 'msvcrt'],
+    comdlg32: ['shell32', 'shlwapi', 'comctl32', 'gdi32', 'user32', 'msvcrt'],
+    winmm: ['advapi32', 'user32'],
+    msacm32: ['winmm', 'user32', 'advapi32'],
+    imm32: ['user32', 'gdi32', 'advapi32'],
+    wsock32: ['ws2_32', 'mswsock'],
+    ws2_32: ['advapi32', 'msvcrt'],
+    mswsock: ['ws2_32', 'advapi32', 'msvcrt'],
+    mpr: ['advapi32', 'user32'],
+    wininet: ['shlwapi', 'user32', 'advapi32', 'msvcrt'],
+    winspool: ['gdi32', 'user32', 'advapi32'],
+    quartz: ['ole32', 'oleaut32', 'user32', 'gdi32', 'advapi32', 'winmm', 'msvcrt'],
+    ddraw: ['user32', 'gdi32', 'advapi32', 'msvcrt'],
+    d3d8: ['user32', 'gdi32', 'advapi32', 'msvcrt'],
+    d3d9: ['user32', 'gdi32', 'advapi32', 'msvcrt'],
+    dsound: ['winmm', 'user32', 'advapi32', 'ole32', 'msvcrt'],
+    dinput: ['user32', 'advapi32', 'msvcrt'],
+    dinput8: ['user32', 'advapi32', 'msvcrt'],
+});
+
 /**
  * Where a mounted game appears inside the guest's volume: its files sit
  * directly in this directory, the way an installation's do.
@@ -1439,6 +1568,37 @@ export function versionResourceOf(filesystem, path){
     {
         filesystem.close(handle);
     }
+}
+
+/**
+ * What a program's own image says about the Windows it was written for: the
+ * supportedOS elements of its manifest (RT_MANIFEST 1, the one CreateProcess
+ * reads) and the operating system version its PE header names. Windows 10
+ * answers the program's version calls from these.
+ *
+ * @param {Uint8Array} executable
+ * @returns {import('./layers/win32/kernel32/versions.js').ProgramCompatibility}
+ */
+export function compatibilityOf(executable){
+    const RT_MANIFEST = 24;
+    const image = parsePe(executable);
+    const view = new DataView(executable.buffer, executable.byteOffset, executable.byteLength);
+    // MajorOperatingSystemVersion and its minor, forty bytes into the optional
+    // header that follows the signature and the file header.
+    const optional = view.getUint32(0x3c, true) + 24;
+    const imageVersion = {
+        major: view.getUint16(optional + 40, true),
+        minor: view.getUint16(optional + 42, true),
+    };
+    const found = findResource(executable, image, RT_MANIFEST, 1);
+    if (!found)
+    {
+        return { supportedOS: [], imageVersion };
+    }
+    const at = rvaToFileOffset(image, found.rva);
+    const bytes = executable.subarray(at, at + found.size);
+    const encoding = bytes[0] === 0xff && bytes[1] === 0xfe ? 'utf-16le' : 'utf-8';
+    return { supportedOS: supportedOsOf(new TextDecoder(encoding).decode(bytes)), imageVersion };
 }
 
 /**
@@ -1501,6 +1661,47 @@ async function readWholeFile(filesystem, blocks, path){
 }
 
 /**
+ * Where a library goes.
+ *
+ * One that carries relocations takes the first base at or after `next` that
+ * nothing holds. One that does not can run only at its preferred base -- every
+ * absolute address in it assumes that base -- and takes it when it lies in the
+ * modules' space and nothing holds it; otherwise it is refused, as the PE
+ * format says a loader refuses such an image, rather than mapped somewhere
+ * its addresses do not describe.
+ *
+ * @param {{ relocatable: boolean, imageBase: number, sizeOfImage: number }} image
+ * @param {{ next: number, floor: number, limit: number,
+ *     holder: (base: number, size: number) => { base: number, size: number } | null }} space
+ *        `floor` and `limit` bound the modules' space: below is the program and
+ *        the engine's own, above the thread stacks and the heap. `holder`
+ *        answers what already holds part of a span, if anything.
+ * @returns {{ base: number } | { refused: string }}
+ */
+export function placeLibrary(image, { next, floor, limit, holder }){
+    if (!image.relocatable)
+    {
+        const base = image.imageBase;
+        if (base < floor || base + image.sizeOfImage > limit || holder(base, image.sizeOfImage))
+        {
+            return { refused: `no relocations, and 0x${base.toString(16)} is not free` };
+        }
+        return { base };
+    }
+    let base = next;
+    for (let held = holder(base, image.sizeOfImage); held;
+        held = holder(base, image.sizeOfImage))
+    {
+        base = Math.ceil((held.base + held.size) / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+    }
+    if (base + image.sizeOfImage > limit)
+    {
+        return { refused: 'no room' };
+    }
+    return { base };
+}
+
+/**
  * Maps every library the program brought with it, in dependency order.
  *
  * Nothing is bound here. A set of libraries that import each other has to be
@@ -1514,7 +1715,7 @@ async function readWholeFile(filesystem, blocks, path){
  * @param {any} options
  * @returns {Promise<any[]>}
  */
-async function mapShippedLibraries(options){
+export async function mapShippedLibraries(options){
     const { executable, imagePath, filesystem, loader, blocks, events, isSystem,
         isKnownDll, byName, byBase } = options;
     const directory = imagePath.slice(0, imagePath.lastIndexOf('\\') + 1);
@@ -1523,8 +1724,8 @@ async function mapShippedLibraries(options){
      * The first place a bare library name is on the volume: beside the program,
      * then the system directories. Where it was found is what the module is
      * recorded as living at, so a program reading its own loaded path off a
-     * library gets the directory it is really in -- a `d3dx9_26` off the
-     * system volume belongs in `system32`, not beside the executable.
+     * library gets the directory it is really in -- a `d3dx9_26` an installer
+     * put in `system32` belongs there, not beside the executable.
      *
      * @param {string} name
      * @returns {string}
@@ -1542,6 +1743,8 @@ async function mapShippedLibraries(options){
 
     const { order, missing } = await planDependencies({
         entry: executable,
+        entryName: imagePath.slice(
+            Math.max(imagePath.lastIndexOf('\\'), imagePath.lastIndexOf('/')) + 1),
         isSystem,
         isKnownDll,
         // A file the program brought is read from beside it; a file it did not
@@ -1559,19 +1762,24 @@ async function mapShippedLibraries(options){
         events.emit('libraries-missing', { names: missing });
     }
 
-    let base = options.base;
+    let next = options.base;
     /** @type {any[]} */
     const mapped = [];
     for (const { name, file } of order)
     {
         const image = parsePe(file);
-        if (base + image.sizeOfImage > options.memoryBytes)
+        const place = placeLibrary(image,
+            { next, floor: options.floor, limit: options.limit, holder: options.holder });
+        if ('refused' in place)
         {
-            // Refused here rather than as a RangeError from a write past the
-            // end of RAM, which says nothing about which library or why.
-            events.emit('libraries-missing', { names: [name], reason: 'no room' });
+            // Refused here rather than as an overlap with the pool of thread
+            // stacks above, found only when a thread's stack is laid over it,
+            // or as a throw out of the mapping, saying nothing about which
+            // library or why.
+            events.emit('libraries-missing', { names: [name], reason: place.refused });
             continue;
         }
+        const base = place.base;
         const record = loader.map(file, { base, name });
         const { exports } = readExports(file, image);
 
@@ -1603,16 +1811,19 @@ async function mapShippedLibraries(options){
             // Where it came from. A program asks a library where it lives and
             // then looks for its own data beside it, so this has to be the
             // directory the file was really found in -- a library the program
-            // brought lives beside it, and one the engine supplied out of the
-            // system volume lives in `system32`, where a program that walks
-            // its own installation expects to find it.
+            // brought lives beside it, and one found in `system32` lives
+            // there, where a program that walks its own installation expects
+            // to find it.
             path: placeOf(name),
         };
         byName.set(name.toLowerCase().replace(/\.dll$/, ''), held);
         byBase.set(base, held);
         mapped.push(held);
 
-        base += Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+        if (image.relocatable)
+        {
+            next = base + Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+        }
     }
 
     events.emit('libraries', { loaded: mapped.map(entry=>entry.name), missing });
@@ -2342,6 +2553,7 @@ export function createKernelGl(opengl, journalCall, traced, counters){
  * @param {AppOptions & {
  *     events?: any,
  *     seed?: { path: string, bytes?: Uint8Array, delete?: boolean }[],
+ *     hive?: any,
  *     patches?: { address: number, bytes: Uint8Array }[],
  *     spawned?: (request: any) => void,
  *     logSinks?: Map<Function, (payload: any) => void>,
@@ -2414,8 +2626,44 @@ async function buildApp(options){
     const byName = new Map();
     /** @type {Map<number, any>} */
     const byBase = new Map();
+    /**
+     * Libraries LoadLibraryEx loaded as data, by the handle it gave out: no
+     * modules, so in neither table above.
+     *
+     * @type {Map<number, any>}
+     */
+    const dataFiles = new Map();
+    /**
+     * Every library whose DllMain has been told DLL_PROCESS_ATTACH, in the
+     * order it was: ExitProcess tells them of the detach the other way round.
+     *
+     * @type {any[]}
+     */
+    const attachOrder = [];
     /** @type {any} */
     let mainModule = null;
+
+    /**
+     * Marks a module the process has loaded, with what it brings in, for
+     * everything that answers only about loaded modules: GetModuleHandle and
+     * PEB->Ldr. A module synthesised at the start is there to be bound to
+     * whenever it is asked for, but it is loaded only once something imports
+     * it or loads it.
+     *
+     * @param {any} module
+     */
+    const markLoaded = module=>{
+        if (!module || module.loaded !== false)
+        {
+            return;
+        }
+        module.loaded = true;
+        threadBlocks?.addModule(module);
+        for (const imported of SYSTEM_IMPORTS[moduleKeyOf(module.name)] ?? [])
+        {
+            markLoaded(byName.get(imported) ?? null);
+        }
+    };
 
     /** @param {string | null} name */
     const findModule = name=>{
@@ -2460,6 +2708,7 @@ async function buildApp(options){
      *     createThreadBlock: (thread: { id: number, stackBase: number,
      *         stackLimit: number }) => { teb: number, tls: number },
      *     addModule: (module: import('./layers/win32/kernel32/teb.js').LoadedModule) => number,
+     *     removeModule: (base: number) => void,
      * } | null}
      */
     let threadBlocks = null;
@@ -2603,10 +2852,9 @@ async function buildApp(options){
 
     const core = await assembleModules({
         filesystem: {
-            // The runtime lives in the volume before the bundle is mounted, so
-            // every drive gets it: a title finds a `d3dx9_*` in `system32` the
-            // way it does on a real machine, and the bundle's own copy, when it
-            // has one, still wins.
+            // The host's own files live in the volume before the bundle is
+            // mounted, so every drive gets them, and the bundle's own copy of
+            // one, when it has one, still wins.
             system: systemVolume(options.system),
         },
         kernel: {
@@ -2816,11 +3064,17 @@ async function buildApp(options){
             // build composes below -- the device, the presenter, the screen --
             // is the run's and wins over a caller's value of the same name.
             ...options.graphics,
+            // The display's raster -- the vertical blank, the scan line --
+            // runs on the guest's clock, which only this assembly can reach:
+            // a program times its spin on the blank with its own timers.
+            guestNow: ()=>core.api('kernel').clock.virtualTime(),
             // Where a COM interface goes when a program asks for one. Without
             // it the drawing entry points refuse rather than publishing into
             // nowhere, which is what a build with no bridge should do.
             publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
                 core.api('bridge').publishInterface(object, iid),
+            unpublishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
+                core.api('bridge').unpublishInterface(object, iid),
             // The device, with the frame boundary marked around what it
             // presents. The profiler has always been able to account per frame
             // and nothing ever told it where a frame ends, so every report said
@@ -2955,6 +3209,10 @@ async function buildApp(options){
             },
         },
         win32: {
+            // The Windows the machine is, and what the program says it knows,
+            // which is all Windows 10 needs to decide what to tell it.
+            windows: options.windows,
+            compatibility: compatibilityOf(options.executable),
             // The speed the registry reports: the rate the engine's rdtsc
             // advances at. The emulator's counter keeps the default.
             processorMhz: options.engine === 'cork' ? CORK_TSC_MHZ : undefined,
@@ -2967,6 +3225,9 @@ async function buildApp(options){
             namedObjects: options.namedObjects,
             // The network beyond this runtime, when the embedder supplied one.
             network: options.win32?.network,
+            // The roots WinVerifyTrust judges a signature's chain against;
+            // absent, the win32 layer's default store.
+            trustedRoots: options.win32?.trustedRoots,
             // What the program is told its display is, handed to the libraries
             // that answer for one as well as to the layer that draws on it.
             screen: display,
@@ -3033,6 +3294,12 @@ async function buildApp(options){
                 // a paint pass. The window manager decides when a pass is
                 // over; the graphics layer owns the surface and the screen.
                 presentDesktop: ()=>core.api('graphics').gdiDrawing().presentDesktop(),
+                // The display's gamma ramp, which the presenter shows every
+                // frame through, whichever API set it last.
+                /** @param {any} ramp */
+                setGammaRamp: ramp=>core.api('graphics').gdiDrawing().setDisplayGamma(ramp),
+                gammaRamp: ()=>core.api('graphics').gdiDrawing().displayGamma(),
+                appliesGamma: ()=>core.api('graphics').gdiDrawing().appliesGamma(),
             },
             // What a filter graph plays. Handed down rather than reached for:
             // win32 sits below the media layer and may not import it, and the
@@ -3143,16 +3410,32 @@ async function buildApp(options){
             },
             arena: { base: HEAP_BASE, size: HEAP_SIZE },
             modules: {
-                /** @param {string | null} name */
-                find: name=>findModule(name),
+                /**
+                 * A module the process has loaded: one synthesised but not yet
+                 * imported or loaded is not there to be asked about.
+                 *
+                 * @param {string | null} name
+                 */
+                find: name=>{
+                    const module = findModule(name);
+                    return module?.loaded === false ? null : module;
+                },
                 /** @param {number} base */
                 byBase: base=>byBase.get(base >>> 0) ?? null,
                 imagePath: ()=>options.imagePath ?? 'C:\\app.exe',
                 /** @param {string} name */
-                load: name=>loadLibraryAtRuntime(name),
+                /** @param {string} name @param {number} [flags] */
+                load: (name, flags)=>loadLibraryAtRuntime(name, flags),
+                /** @param {number} handle */
+                dataFile: handle=>dataFiles.get(handle >>> 0) ?? null,
+                /** The libraries still attached, the last attached first. */
+                attachedLibraries: ()=>attachOrder
+                    .filter(held=>held.loaded !== false && held.attached !== false)
+                    .reverse()
+                    .map(held=>({ name: held.name, base: held.base, entryPoint: held.entryPoint })),
                 /** @param {any} asked */
                 resolved: asked=>events.emit('resolved', asked),
-                ...resourceLookup(()=>mainModule, byBase),
+                ...resourceLookup(()=>mainModule, byBase, dataFiles),
                 /**
                  * The version resource of a file on the volume, by path: what
                  * an installer compares before it replaces a shared component.
@@ -3160,6 +3443,13 @@ async function buildApp(options){
                  * @param {string} path
                  */
                 versionInfo: path=>versionResourceOf(filesystem, path),
+                /**
+                 * Whether a library is one this build synthesises, which has
+                 * a version though no file.
+                 *
+                 * @param {string} name
+                 */
+                systemLibrary: name=>systemLibraries.has(moduleKeyOf(name)),
             },
             commandLine: options.commandLine,
             // Every child a program asks for, while the stack that asked is
@@ -3245,13 +3535,6 @@ async function buildApp(options){
             /** @param {number} hwnd */
             created: hwnd=>{
                 lastCreated = hwnd;
-                // A program becomes the active application when it has a window
-                // to be told through, and not before: input is wired to the
-                // viewport when the run starts, which is earlier than the
-                // program's first instruction. Told here, where there is finally
-                // a window; the input layer ignores every call after the first
-                // that lands.
-                core.api('input')?.arm?.();
             },
         },
     });
@@ -3281,6 +3564,13 @@ async function buildApp(options){
     if (seeded.registry)
     {
         core.api('win32').registry().fromJSON(seeded.registry);
+    }
+    // And the registry of the process that started this one, which is the
+    // same registry: a machine has one, and a child reads what its parent
+    // wrote a moment before starting it -- a write no save may have reached.
+    if (options.hive)
+    {
+        core.api('win32').registry().fromJSON(options.hive);
     }
 
     // One way out. What the program writes is announced once the writes settle;
@@ -3506,6 +3796,8 @@ async function buildApp(options){
     // demand cannot promise that.
     const ordinalsOf = {
         ...(win32.ordinals ? win32.ordinals() : {}),
+        ...(audio.ordinals?.() ?? {}),
+        ...(input.ordinals?.() ?? {}),
         ...(core.api('media').ordinals?.() ?? {}),
     };
     // The drawing APIs are libraries like any other as far as a program is
@@ -3593,10 +3885,22 @@ async function buildApp(options){
             // from the first instruction, but its entry point is a promise
             // to whoever loads it, and runs on that caller's thread.
             attached: false,
+            loaded: false,
+            /** @returns {number | Promise<number>} */
+            release: ()=>releaseLibrary(record),
         };
         byName.set(moduleKeyOf(name), record);
         byBase.set(base, record);
     });
+    for (const name of ALWAYS_LOADED)
+    {
+        markLoaded(byName.get(name) ?? null);
+        const always = byName.get(name);
+        if (always)
+        {
+            always.pinned = true;
+        }
+    }
 
     /**
      * An import's address, wherever the library that provides it came from.
@@ -3616,6 +3920,8 @@ async function buildApp(options){
         {
             return null;
         }
+        markLoaded(module);
+        module.pinned = true;
         const address = name !== null
             ? module.addressOf(name)
             : ordinal === null ? null : module.addressOfOrdinal(ordinal);
@@ -3765,6 +4071,58 @@ async function buildApp(options){
     /** Where the next runtime library goes. Set once the shipped ones are placed. */
     let nextLibraryBase = 0;
 
+    /**
+     * FreeLibrary: gives back one of the references LoadLibrary took on a
+     * library the program loaded by name. The last one tells its DllMain,
+     * on the thread that asked, and unloads it -- a library read off the
+     * volume is unmapped and forgotten, one of ours stops being loaded. A
+     * library something imports is pinned and never unloaded.
+     *
+     * @param {any} held
+     * @returns {number | Promise<number>}
+     */
+    const releaseLibrary = held=>{
+        if (held.pinned || !(held.references > 0))
+        {
+            return 1;
+        }
+        held.references--;
+        if (held.references > 0)
+        {
+            return 1;
+        }
+        const unload = ()=>{
+            threadBlocks?.removeModule(held.base);
+            const at = attachOrder.indexOf(held);
+            if (at >= 0)
+            {
+                attachOrder.splice(at, 1);
+            }
+            if (held.file)
+            {
+                byName.delete(moduleKeyOf(held.name));
+                byBase.delete(held.base);
+                memory.unregister(held.name);
+            }
+            else
+            {
+                held.loaded = false;
+                held.attached = false;
+            }
+            events.emit('library-unloaded', { name: held.name, base: held.base });
+            return 1;
+        };
+        if (held.entryPoint && held.entryPoint !== held.base && held.attached !== false)
+        {
+            return bridge.callGuest({
+                entry: held.entryPoint,
+                args: [held.base, DLL_PROCESS_DETACH, 0],
+                thread: kernel.currentThread(),
+            }).then(unload);
+        }
+        return unload();
+    };
+
     /** The libraries this build synthesises, as opposed to ones a program brings. */
     const systemLibraries = new Set(Object.keys(allLibraries).map(moduleKeyOf));
 
@@ -3776,19 +4134,16 @@ async function buildApp(options){
         events,
         journal,
         classify: (dll, name)=>{
-            const decorated = name === null ? null : /@(\d+)$/.exec(name);
             const own = !systemLibraries.has(moduleKeyOf(dll)) && findModule(dll) !== null;
+            // A name a library the program brought does not export is a
+            // mismatch between two of its own files, not a gap in this build:
+            // it is reported as the program's own. The full list of what
+            // nothing claims is already said at bind time, as
+            // `import-unresolved`; the call is the one that matters.
             return {
                 own,
-                // A name a library the program brought does not export is a
-                // mismatch between two of its own files, not a gap in this
-                // build: it answers as the decoration says and is reported as
-                // the program's own. The full list of what nothing claims is
-                // already said at bind time, as `import-unresolved`; the call
-                // is the one that matters.
-                returns: decorated !== null || own
-                    || win32.libraryConvention(dll) === 'cdecl',
-                argBytes: decorated ? Number(decorated[1]) : 0,
+                ...missingImportCall(name,
+                    { own, cdeclLibrary: win32.libraryConvention(dll) === 'cdecl' }),
             };
         },
         fault: (label, frame)=>{
@@ -3828,14 +4183,26 @@ async function buildApp(options){
      * treats a promise as "park the guest thread" and the two cheap answers --
      * already here, known absent -- must not cost that.
      *
+     * `flags` are LoadLibraryEx's. With DONT_RESOLVE_DLL_REFERENCES the library
+     * is mapped and becomes a module, but nothing it imports is loaded or bound
+     * and its entry point never runs -- and a later LoadLibrary hands back that
+     * same module as it is, as Wine's loader test has it. A program, as against
+     * a library, is loaded the same way whatever the flags say.
+     *
      * @param {string} name
+     * @param {number} [flags]
      * @returns {number | Promise<number>}
      */
-    const loadLibraryAtRuntime = name=>{
+    const loadLibraryAtRuntime = (name, flags = 0)=>{
+        if ((flags & LOAD_AS_DATA) !== 0)
+        {
+            return loadAsData(name, flags);
+        }
         // Read now, before anything is awaited: this is the thread whose
         // LoadLibrary call is being answered, and it is the one whose stack the
         // library's entry point has to run on.
         const asked = kernel.currentThread();
+        const unresolved = (flags & DONT_RESOLVE_DLL_REFERENCES) !== 0;
         const key = name.toLowerCase().replace(/\.dll$/, '');
         if (absentLibraries.has(key))
         {
@@ -3905,14 +4272,15 @@ async function buildApp(options){
                         });
                         return 0;
                     }
-                    if (nextLibraryBase + image.sizeOfImage > HEAP_BASE)
+                    const place = placeLibrary(image, { next: nextLibraryBase, ...librarySpace });
+                    if ('refused' in place)
                     {
                         absentLibraries.add(key);
-                        events.emit('libraries-missing', { names: [name], reason: 'no room' });
+                        events.emit('libraries-missing', { names: [name], reason: place.refused });
                         return 0;
                     }
 
-                    const base = nextLibraryBase;
+                    const base = place.base;
                     const mapped = loader.map(file, { base, name });
                     const { exports } = readExports(file, image);
                     const addresses = new Map(exports
@@ -3922,6 +4290,10 @@ async function buildApp(options){
                         .filter(entry=>entry.forwards === null)
                         .map(entry=>[entry.ordinal, base + entry.rva]));
 
+                    // Only a library's imports are resolved and its entry
+                    // point run: a program loaded by name is mapped for what
+                    // it holds, and its entry point is its main.
+                    const inert = unresolved || !image.library;
                     const held = {
                         name, base, size: image.sizeOfImage,
                         /** @param {string} exported */
@@ -3938,6 +4310,11 @@ async function buildApp(options){
                     // Registered before its own imports are bound, so a library
                     // that imports back into itself -- or into one still being
                     // loaded -- finds an address rather than nothing.
+                    Object.assign(held, {
+                        references: 1,
+                        /** @returns {number | Promise<number>} */
+                        release: ()=>releaseLibrary(held),
+                    }, inert ? { inert, attached: false } : {});
                     byName.set(moduleKeyOf(name), held);
                     byBase.set(base, held);
                     // Joins PEB->Ldr's own module list the same moment: a
@@ -3945,8 +4322,11 @@ async function buildApp(options){
                     // returns is not told the library it just asked for was
                     // never loaded.
                     threadBlocks?.addModule(held);
-                    nextLibraryBase = base
-                        + Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+                    if (image.relocatable)
+                    {
+                        nextLibraryBase = base
+                            + Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+                    }
 
                     // Its own libraries first, then binding.
                     //
@@ -3957,18 +4337,22 @@ async function buildApp(options){
                     // slot does not fail at the call, it runs whatever bytes the
                     // slot happened to name. What is seen is an invalid opcode
                     // at an address belonging to nothing.
-                    for (const dependency of readImports(file, image))
+                    if (!inert)
                     {
-                        if (findModule(dependency.dll) === null)
+                        for (const dependency of readImports(file, image))
                         {
-                            await loadLibraryAtRuntime(dependency.dll);
+                            if (findModule(dependency.dll) === null)
+                            {
+                                await loadLibraryAtRuntime(dependency.dll);
+                            }
                         }
-                    }
 
-                    loader.bind(mapped, resolveImport, missingImport);
-                    // Both tables, and in this order: the delay-load pass adds
-                    // to what the first one recorded rather than replacing it.
-                    loader.bindDelayed(mapped, resolveImport, missingImport);
+                        loader.bind(mapped, resolveImport, missingImport);
+                        // Both tables, and in this order: the delay-load pass
+                        // adds to what the first one recorded rather than
+                        // replacing it.
+                        loader.bindDelayed(mapped, resolveImport, missingImport);
+                    }
                     // Before DllMain: a sidecar entry for this library patches
                     // its code, which must happen before any of it has run
                     // or been compiled.
@@ -3981,7 +4365,7 @@ async function buildApp(options){
                         timeDateStamp: image.timeDateStamp,
                     });
 
-                    if (held.entryPoint && held.entryPoint !== base)
+                    if (!inert && held.entryPoint && held.entryPoint !== base)
                     {
                         // On the thread that asked for the library, which by
                         // now is not the one on the processor: mapping it
@@ -3994,6 +4378,7 @@ async function buildApp(options){
                             args: [base, DLL_PROCESS_ATTACH, 0],
                             thread: asked,
                         });
+                        attachOrder.push(held);
                     }
                     events.emit('library-loaded', { name, base });
                     return base;
@@ -4002,7 +4387,12 @@ async function buildApp(options){
         }
         if (loaded)
         {
-            if (loaded.attached !== false || !loaded.entryPoint)
+            markLoaded(loaded);
+            loaded.references = (loaded.references ?? 0) + 1;
+            // One of ours asked for unresolved is left unattached, and a later
+            // load attaches it: its entry point is our own setup, which the
+            // rest of it relies on.
+            if (loaded.attached !== false || !loaded.entryPoint || loaded.inert || unresolved)
             {
                 return loaded.base;
             }
@@ -4015,7 +4405,10 @@ async function buildApp(options){
                 entry: loaded.entryPoint,
                 args: [loaded.base, DLL_PROCESS_ATTACH, 0],
                 thread: asked,
-            }).then(()=>loaded.base);
+            }).then(()=>{
+                attachOrder.push(loaded);
+                return loaded.base;
+            });
         }
         // Said out loud, because this is the failure a program reports as
         // "could not open" and then exits on. Without it the only trace is a
@@ -4028,12 +4421,139 @@ async function buildApp(options){
         return 0;
     };
 
+    /**
+     * FreeLibrary on a data file's handle: the last one unmaps the view.
+     *
+     * @param {number} handle
+     */
+    const releaseData = handle=>{
+        const held = dataFiles.get(handle);
+        if (!held)
+        {
+            return 0;
+        }
+        held.references--;
+        if (held.references === 0)
+        {
+            dataFiles.delete(handle);
+            if (held.region)
+            {
+                memory.unregister(held.region);
+            }
+        }
+        return 1;
+    };
+
+    /**
+     * LoadLibraryEx with a flag that loads a library as data, for its
+     * resources: nothing in it is bound or run.
+     *
+     * A library already loaded as a module is answered with its module handle,
+     * and counted, as Wine's loader test has it. Any other is mapped apart and
+     * is no module -- GetModuleHandle does not find it -- and its handle is its
+     * base with a low bit set: one for a view of the file as it lies on disk,
+     * two for one laid out as an image (LOAD_LIBRARY_AS_IMAGE_RESOURCE). Each
+     * such load is a view of its own.
+     *
+     * @param {string} name
+     * @param {number} flags
+     * @returns {number | Promise<number>}
+     */
+    const loadAsData = (name, flags)=>{
+        const loaded = findModule(name);
+        if (loaded && loaded.loaded !== false)
+        {
+            loaded.references = (loaded.references ?? 0) + 1;
+            return loaded.base;
+        }
+        const layout = (flags & LOAD_LIBRARY_AS_IMAGE_RESOURCE) !== 0 ? 2 : 1;
+        /**
+         * @param {any} held  What was mapped, and where.
+         * @returns {number}
+         */
+        const record = held=>{
+            const handle = (held.base | layout) >>> 0;
+            dataFiles.set(handle, {
+                ...held, references: 1, release: ()=>releaseData(handle),
+            });
+            return handle;
+        };
+        const wanted = libraryCandidates(name, options.imagePath ?? 'C:\\app.exe')
+            .find(candidate=>{
+                try
+                {
+                    const entry = filesystem.stat(candidate);
+                    return entry && !entry.directory;
+                }
+                catch {
+                    return false;
+                }
+            });
+        if (wanted === undefined)
+        {
+            // One of ours nothing has loaded: there is no file to view, and
+            // the image it has holds no resources.
+            if (loaded)
+            {
+                return record({ name, base: loaded.base, file: null, image: null,
+                    flat: false, region: null });
+            }
+            events.emit('library-missing', { name, path: 'as data' });
+            return 0;
+        }
+        return (async()=>{
+            const file = await readWholeFile(filesystem, blocks, wanted);
+            let image;
+            try
+            {
+                image = file ? parsePe(file) : null;
+            }
+            catch {
+                image = null;
+            }
+            if (!file || !image)
+            {
+                events.emit('library-missing', { name, path: wanted, reason: 'not an image' });
+                return 0;
+            }
+            const bytes = layout === 1 ? file : mapImage(file, image.imageBase).bytes;
+            const size = Math.ceil(bytes.length / PAGE_SIZE) * PAGE_SIZE;
+            const place = placeLibrary({ relocatable: true, imageBase: 0, sizeOfImage: size },
+                { next: nextLibraryBase, ...librarySpace });
+            if ('refused' in place)
+            {
+                events.emit('libraries-missing', { names: [name], reason: place.refused });
+                return 0;
+            }
+            const region = `${name} as data at 0x${place.base.toString(16)}`;
+            memory.register({
+                name: region, base: place.base, size,
+                kind: memory.RegionKind.IMAGE, access: memory.Access.READ_WRITE,
+            });
+            memory.writeBytes(place.base, bytes);
+            // Read-only once filled, as a view of a data file is mapped.
+            memory.protect(region, memory.Access.READ);
+            return record({ name, base: place.base, file, image, flat: layout === 1, region,
+                path: wanted });
+        })();
+    };
+
+    // Where a library may go: above the program's own image, which is not in
+    // the map yet, and below the stack pool; and nowhere anything is mapped.
+    const librarySpace = {
+        floor: mainImage.imageBase + mainImage.sizeOfImage,
+        limit: STACK_POOL_BASE,
+        /** @param {number} base @param {number} size */
+        holder: (base, size)=>memory.list().find((/** @type {any} */ region)=>
+            base < region.base + region.size && region.base < base + size) ?? null,
+    };
+
     // The libraries the program brought with it, before the program itself.
     //
     // Every one is mapped before any is bound, because they import each other:
     // binding the first needs the second's exports, which need the second's
-    // base. This is also why the executable is bound last, below, rather than
-    // here -- by then every library it names has an address.
+    // base. And they are bound after the program is mapped and known by name,
+    // because a library may import from the program that loads it.
     const shipped = await mapShippedLibraries({
         executable: options.executable,
         imagePath: options.imagePath ?? 'C:\\app.exe',
@@ -4042,15 +4562,10 @@ async function buildApp(options){
         isKnownDll,
         byName, byBase,
         // Straight after the system modules, which is the first address nothing
-        // else has claimed.
+        // else has claimed, and up to the pool of thread stacks.
         base: MODULE_BASE + Object.keys(allLibraries).length * MODULE_STRIDE,
-        memoryBytes: cpu.layout.memorySize,
+        ...librarySpace,
     });
-    for (const library of shipped)
-    {
-        loader.bind(library.mapped, resolveImport, missingImport);
-        loader.bindDelayed(library.mapped, resolveImport, missingImport);
-    }
     // Where a library asked for later goes: after the ones that came with the
     // program, or after the system modules when there were none.
     nextLibraryBase = shipped.reduce(
@@ -4094,6 +4609,11 @@ async function buildApp(options){
     // module already loaded, rather than a second copy at the one base an
     // image without relocations can take.
     byName.set(moduleKeyOf(mainModule.path), mainModule);
+    for (const library of shipped)
+    {
+        loader.bind(library.mapped, resolveImport, missingImport);
+        loader.bindDelayed(library.mapped, resolveImport, missingImport);
+    }
 
     // What the process that asked for this one wrote into it before it existed.
     // This is the first moment at which the addresses those writes name mean
@@ -4119,14 +4639,30 @@ async function buildApp(options){
     // span rather than the guest heap, because the heap is the program's and
     // this is written before the program exists to allocate from it.
     const STARTUP_ARENA = 0x100000;
-    const startupArena = nextLibraryBase;
+    // After the libraries, like one more of them -- and so only where one
+    // would fit: below the thread stacks and on nothing mapped. When the
+    // libraries reach the stacks, any gap in the modules' space will do.
+    const arenaSpan = { relocatable: true, imageBase: 0, sizeOfImage: STARTUP_ARENA };
+    let arenaPlace = placeLibrary(arenaSpan, { next: nextLibraryBase, ...librarySpace });
+    if ('refused' in arenaPlace)
+    {
+        arenaPlace = placeLibrary(arenaSpan, {
+            ...librarySpace,
+            next: Math.ceil(librarySpace.floor / LIBRARY_ALIGN) * LIBRARY_ALIGN,
+        });
+    }
+    if ('refused' in arenaPlace)
+    {
+        throw new Error('no room below the thread stacks for what the process needs to start');
+    }
+    const startupArena = arenaPlace.base;
     memory.register({
         name: 'process-startup', base: startupArena, size: STARTUP_ARENA,
         // Executable because the stub that runs before the program lives here
         // too, and it is guest code.
         kind: memory.RegionKind.THUNK_CODE, access: memory.Access.READ_WRITE_EXECUTE,
     });
-    nextLibraryBase += STARTUP_ARENA;
+    nextLibraryBase = Math.max(nextLibraryBase, startupArena + STARTUP_ARENA);
 
     let scratch = startupArena;
     /** @param {number} size */
@@ -4332,6 +4868,14 @@ async function buildApp(options){
             set: kernel32.addressOf('TlsSetValue') ?? 0,
         },
     });
+    for (const name of startup.attached)
+    {
+        const held = shipped.find(library=>library.name === name);
+        if (held)
+        {
+            attachOrder.push(held);
+        }
+    }
     // Inside the same span the blocks came from, rather than beside it: it is
     // written once, before anything runs, and giving it a region of its own
     // only creates a boundary two allocations can land on either side of.
@@ -4358,7 +4902,7 @@ async function buildApp(options){
         allocate: allocateFromHeap,
         writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
         processId: 0x1000,
-        version: { major: 5, minor: 1, build: 2600 },
+        version: windowsVersion(options.windows),
         imageBase: image.base,
         imagePath: options.imagePath ?? 'C:\\app.exe',
         // Quoted, and this is not cosmetic: a program is handed one string and
@@ -4369,13 +4913,15 @@ async function buildApp(options){
         commandLine: options.commandLine ?? `"${options.imagePath ?? 'C:\\app.exe'}"`,
         currentDirectory: filesystem.currentDirectory(),
         standardHandles: { input: 0, output: 0, error: 0 },
-        // Every module in the table by the time the first instruction runs:
-        // every system library, everything the program shipped, and the
-        // program's own image -- PEB->Ldr walked before a program calls a
-        // single import of its own finds all of them, never an empty list.
-        modules: [...byBase.values()].map(held=>held === mainModule ? {
-            ...held, entryPoint: image.entryPoint, size: mainModule.image.sizeOfImage,
-        } : held),
+        // Every module loaded by the time the first instruction runs: the
+        // system libraries it imports and theirs, everything the program
+        // shipped, and the program's own image -- PEB->Ldr walked before a
+        // program calls a single import of its own finds all of them, never
+        // an empty list. A system library loaded later joins it then.
+        modules: [...byBase.values()].filter(held=>held.loaded !== false)
+            .map(held=>held === mainModule ? {
+                ...held, entryPoint: image.entryPoint, size: mainModule.image.sizeOfImage,
+            } : held),
     });
     threadBlocks = process;
 
@@ -4453,11 +4999,12 @@ async function buildApp(options){
      * Why a decoded frame did not reach the screen.
      *
      * One counter per way out, because "the film decoded and nothing was shown"
-     * is four different faults wearing the same face, and a report that only
+     * is five different faults wearing the same face, and a report that only
      * says nothing arrived cannot tell them apart.
      */
     const film = {
-        ticks: 0, frames: 0, silent: 0, noScreen: 0, noRoom: 0, shown: 0,
+        ticks: 0, frames: 0, silent: 0, hidden: 0, offScreen: 0, noScreen: 0, noRoom: 0,
+        shown: 0,
         // How far the picture is ahead of the sound, in milliseconds of the
         // film's own timeline. A film has one timeline and two ways to advance
         // along it, and nothing else in a report says whether they agree.
@@ -4465,6 +5012,8 @@ async function buildApp(options){
     };
 
     /** @param {{ hwnd: number, width: number, height: number, bgra: Uint8Array | null,
+     *            window?: { left: number, top: number, width: number, height: number,
+     *                       visible: boolean, fullScreen: boolean },
      *            audio: Int16Array[], sampleRate: number, channels: number,
      *            positionMs: number, film: number } | null} shown */
     /** @param {any} shown  What a filter graph handed back for this tick. */
@@ -4522,6 +5071,11 @@ async function buildApp(options){
             return;
         }
         film.frames++;
+        if (!isShown(shown))
+        {
+            film.hidden++;
+            return;
+        }
         const screen = core.api('graphics');
         if (!screen?.present)
         {
@@ -4532,12 +5086,22 @@ async function buildApp(options){
         // film. A cinematic is authored at its own dimensions and they are
         // rarely the display's -- letting them through resizes the surface
         // everything else is drawn on, and a display does not change shape
-        // because a film started. So the frame is fitted into the screen and
-        // centred, with the margins left black, which is what a video renderer
-        // does with a destination rectangle it does not fill.
+        // because a film started. So a film with the screen to itself is
+        // fitted into it and centred, with the margins left black, which is
+        // what a video renderer does with a destination rectangle it does not
+        // fill; one whose video window the program placed in a window of its
+        // own goes where SetWindowPosition put it inside that window's client
+        // area, and is shown as that window's picture.
         const shape = screen.screen();
         const width = shape.width;
         const height = shape.height;
+        const placement = placementOf(shown,
+            (/** @type {number} */ hwnd)=>win32.clientRect(hwnd), shape);
+        if (placement && !placement.visible)
+        {
+            film.offScreen++;
+            return;
+        }
         const needed = width * height * 4;
         if (!filmSurface || filmSurface.bytes < needed)
         {
@@ -4551,7 +5115,14 @@ async function buildApp(options){
         }
         film.shown++;
         const surface = filmSurface;
-        fitFrame(shown, surface.pixels, width, height);
+        if (placement)
+        {
+            stretchFrame(shown, surface.pixels, width, height, placement);
+        }
+        else
+        {
+            fitFrame(shown, surface.pixels, width, height);
+        }
         memory.writeBytes(surface.address, surface.pixels);
         screen.present({
             buffer: surface.address,
@@ -4560,7 +5131,7 @@ async function buildApp(options){
             pitch: width * 4,
             bitCount: 32,
             palette: null,
-        });
+        }, placement ? shown.hwnd >>> 0 : 0);
     };
 
     /** The guest's own clock, and the host clock it is credited from. */
@@ -5634,6 +6205,9 @@ const EXIT_NOTICE_TYPE = 0x40;
  * @returns {Promise<any>} an AppController
  */
 export async function createApp(options){
+    // Refused before anything is built: a machine made to the wrong Windows
+    // fails later somewhere that says nothing about why.
+    windowsVersion(options.windows);
     // Both outlive every process: subscriptions a caller made before the first
     // child existed still have to fire for the last one, and the record of what
     // asked for a replacement is worthless if it dies with the asker.
@@ -5848,6 +6422,7 @@ export async function createApp(options){
             commandLine: request.commandLine,
             patches: request.patches,
             seed: parent.session.export(),
+            hive: parent.registry().toJSON(),
         }));
         replayLogLevels();
         Object.assign(facade, current, own);
@@ -5861,7 +6436,9 @@ export async function createApp(options){
 
         // Read while the child's machine stands, and put back into the
         // parent's: what an installer's second stage laid down is what the
-        // first stage goes on to find.
+        // first stage goes on to find. The child's registry began as the
+        // parent's, and the parent wrote nothing while it waited, so the
+        // child's is the whole of it.
         const files = current.session.export();
         const registry = current.registry().toJSON();
         noteLogSequence();
@@ -5912,6 +6489,7 @@ export async function createApp(options){
             // child is launched against files that no longer exist.
             const child = await current.readImage(request.imagePath);
             const carried = current.session.export();
+            const hive = current.registry().toJSON();
             // The sequence the journal reached, read while the machine that
             // wrote it still stands. The child's journal continues from
             // here, so the cursor a reader is holding points into it rather
@@ -5941,6 +6519,7 @@ export async function createApp(options){
                 commandLine: request.commandLine,
                 patches: request.patches,
                 seed: carried,
+                hive,
             }));
             imagePath = request.imagePath;
             replayLogLevels();

@@ -47,13 +47,99 @@ import { createPacer } from './pacer.js';
  *   texture, not in guest memory. Whoever drew it claims the address, and a
  *   present of that address is handed to the claimant to show its texture
  *   instead of uploading whatever the guest bytes happen to hold.
+ *
+ * The display's gamma ramp is applied here too, on the way to the canvas,
+ * because this is the one place every frame passes: a DirectDraw primary's,
+ * a Direct3D device's and a GL context's alike. A frame shown while a ramp
+ * other than the identity is in effect is drawn onto the canvas through a
+ * lookup instead of copied onto it.
  */
 
 /** The format every presented texture has; the same one the drawing APIs render to. */
 const FORMAT = 'bgra8unorm';
 
 /** `GPUTextureUsage` bits, as numbers: this file reads no global. */
-const TEXTURE_USAGE = { COPY_DST: 0x02, RENDER_ATTACHMENT: 0x10 };
+const TEXTURE_USAGE = { COPY_DST: 0x02, TEXTURE_BINDING: 0x04, RENDER_ATTACHMENT: 0x10 };
+
+/** `GPUBufferUsage` and `GPUShaderStage` bits the gamma pass needs. */
+const BUFFER_USAGE = { COPY_DST: 0x08, UNIFORM: 0x40 };
+const FRAGMENT_STAGE = 0x2;
+
+/** Entries per channel of a gamma ramp, as DirectX and GDI both give one. */
+export const GAMMA_ENTRIES = 256;
+
+/**
+ * @typedef {Object} GammaRamp  Sixteen-bit entries, 256 to a channel.
+ * @property {ArrayLike<number>} red
+ * @property {ArrayLike<number>} green
+ * @property {ArrayLike<number>} blue
+ */
+
+/**
+ * @typedef {Object} DisplayGamma
+ *     The display's ramp as a drawing API reaches it: what an owner sets is
+ *     shown through, and what it takes back with null no longer is.
+ * @property {(owner: any, ramp: GammaRamp | null) => void} set
+ * @property {() => boolean} applies  Whether a ramp set reaches the picture at all.
+ */
+
+/**
+ * A ramp as the present pass reads it: 256 four-float rows of red, green,
+ * blue and a spare, one per eight-bit input. An entry counts by its high
+ * byte, which is as much of it as an eight-bit display shows: the ramps a
+ * program calls the identity -- each index times 257, or shifted up by
+ * eight -- then both hand every value back unchanged.
+ *
+ * @param {GammaRamp} ramp
+ * @returns {Float32Array}
+ */
+export function gammaTable(ramp){
+    const table = new Float32Array(GAMMA_ENTRIES * 4);
+    for (let index = 0; index < GAMMA_ENTRIES; index++)
+    {
+        table[index * 4] = (ramp.red[index] >>> 8) / 255;
+        table[index * 4 + 1] = (ramp.green[index] >>> 8) / 255;
+        table[index * 4 + 2] = (ramp.blue[index] >>> 8) / 255;
+    }
+    return table;
+}
+
+/** @param {GammaRamp} ramp @returns {boolean} whether every value is shown as it is */
+export function isIdentityRamp(ramp){
+    for (let index = 0; index < GAMMA_ENTRIES; index++)
+    {
+        if ((ramp.red[index] >>> 8) !== index || (ramp.green[index] >>> 8) !== index
+            || (ramp.blue[index] >>> 8) !== index)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * The gamma pass: one triangle over the canvas, each pixel the frame's texel
+ * looked up per channel in the ramp. A load rather than a sample, because the
+ * frame and the canvas are the same size and a pixel is to be itself.
+ */
+export const GAMMA_WGSL = `
+@group(0) @binding(0) var frame: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> ramp: array<vec4<f32>, ${GAMMA_ENTRIES}>;
+
+@vertex
+fn vs(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    let x = f32((index << 1u) & 2u);
+    let y = f32(index & 2u);
+    return vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
+    let texel = textureLoad(frame, vec2<i32>(at.xy), 0);
+    let entry = vec3<u32>(round(saturate(texel.rgb) * 255.0));
+    return vec4<f32>(ramp[entry.r].r, ramp[entry.g].g, ramp[entry.b].b, 1.0);
+}
+`;
 
 /** @param {number} value five bits @returns {number} eight, top bits replicated */
 const five = value=>(value << 3) | (value >>> 2);
@@ -189,24 +275,41 @@ export function createPresenter(options = {}){
         ? (/** @type {() => void} */ flush)=>pacer.request(flush)
         : (options.schedule ?? (flush=>queueMicrotask(flush)));
 
-    // What belongs to the process being drawn for. The graphics layer attaches
-    // its own backend and memory reader on every lifetime, because a rebuilt
-    // machine has a new address space and a new backend -- and the presenter
-    // has neither: it is the same object across both.
-    /** @type {(() => any) | null} */
-    let backend = options.backend ?? null;
-    /** @type {(address: number, length: number) => Uint8Array} */
-    let readMemory = options.readMemory ?? (()=>new Uint8Array(0));
+    /**
+     * What one machine brought: its backend, its address space, and the
+     * addresses whose picture its GPU owns. The graphics layer attaches its
+     * own on every lifetime, because a machine has an address space and a
+     * backend of its own and the presenter has neither -- and a machine goes
+     * while the presenter stays: a child started beside its parent ends and
+     * the parent draws on, a process is replaced. So each attachment is kept
+     * apart, a surface is read through the one that presented it, and one
+     * that has gone is never reached again.
+     *
+     * @typedef {{ backend: (() => any) | null,
+     *     readMemory: (address: number, length: number) => Uint8Array,
+     *     claims: Map<number, () => void>, live: boolean }} Attachment
+     */
+    /** @type {Attachment[]} the construction's own first, the newest last */
+    const attachments = [{
+        backend: options.backend ?? null,
+        readMemory: options.readMemory ?? (()=>new Uint8Array(0)),
+        claims: new Map(),
+        live: true,
+    }];
+    const newest = ()=>attachments[attachments.length - 1];
 
     /** @type {any} the backend surface, remade when the primary changes shape */
     let texture = null;
     /** What the texture holds: the label of the guest surface last uploaded into it. */
     let uploadedLabel = 'guest bytes';
-    /** @type {PresentableSurface | null} what to show at the next flush */
+    /** @type {{ surface: PresentableSurface, from: Attachment } | null} what to show at the next flush */
     let pending = null;
     /** @type {Uint8Array | null} */
     let converted = null;
-    const counters = { presents: 0, uploads: 0, bytes: 0, shownByOwner: 0, shown: 0 };
+    const counters = {
+        presents: 0, uploads: 0, bytes: 0, shownByOwner: 0, shown: 0, gammaShown: 0,
+        dropped: 0,
+    };
     /**
      * Canvas copies by the label of the surface shown: a Direct3D target, a
      * GL swapchain, or the guest bytes of a primary or the desktop. A picture
@@ -219,13 +322,119 @@ export function createPresenter(options = {}){
     let lastBuffer = 0;
     /** @type {string[]} */
     const failures = [];
-    /** @type {Map<number, () => void>} buffer address -> who shows it */
-    const claims = new Map();
     /** The format the canvas was configured in, so it is configured once. */
     let screenFormat = '';
     /** @type {any[]} every canvas copy, for the host's `presented()` */
     const history = [];
     let disposed = false;
+
+    /**
+     * The ramps set, by who set them, oldest first: the latest is the one
+     * shown, and taking it back shows the one before -- as a device that
+     * goes gives the display back the ramp it had.
+     *
+     * @type {Map<any, { red: Uint16Array, green: Uint16Array, blue: Uint16Array }>}
+     */
+    const ramps = new Map();
+    /** @type {Float32Array | null} the ramp in effect as the pass reads it; null is the identity */
+    let gammaInEffect = null;
+    let gammaVersion = 0;
+    /**
+     * What the gamma pass is built of, made on the first frame that needs
+     * it. The table is written when the ramp changes, not every frame.
+     *
+     * @type {{ format: string, pipeline: any, layout: any, table: any, written: number }
+     *     | null}
+     */
+    let gammaPass = null;
+    /** @type {WeakMap<object, { layout: any, bindGroup: any }>} a frame texture's binding */
+    const gammaGroups = new WeakMap();
+
+    const recomputeGamma = ()=>{
+        const latest = [...ramps.values()].at(-1) ?? null;
+        gammaInEffect = latest && !isIdentityRamp(latest) ? gammaTable(latest) : null;
+        gammaVersion++;
+    };
+
+    /**
+     * Whether the gamma pass can read a frame's texture: bound as a texture,
+     * one sample to a pixel. One it cannot is copied as it is.
+     *
+     * @param {any} frameTexture
+     */
+    const readable = frameTexture=>Boolean(frameTexture)
+        && ((frameTexture.usage ?? 0) & TEXTURE_USAGE.TEXTURE_BINDING) !== 0
+        && (frameTexture.sampleCount ?? 1) === 1;
+
+    /**
+     * The frame, drawn onto the canvas texture through the ramp.
+     *
+     * @param {any} encoder @param {any} surface @param {any} canvasTexture
+     */
+    const drawThroughRamp = (encoder, surface, canvasTexture)=>{
+        if (!gammaPass || gammaPass.format !== surface.format)
+        {
+            const layout = gpu.createBindGroupLayout({
+                label: 'present-gamma',
+                entries: [
+                    { binding: 0, visibility: FRAGMENT_STAGE, texture: { sampleType: 'float' } },
+                    { binding: 1, visibility: FRAGMENT_STAGE, buffer: { type: 'uniform' } },
+                ],
+            });
+            const module = gpu.createShaderModule({ label: 'present-gamma', code: GAMMA_WGSL });
+            gammaPass = {
+                format: surface.format,
+                layout,
+                pipeline: gpu.createRenderPipeline({
+                    label: 'present-gamma',
+                    layout: gpu.createPipelineLayout({ bindGroupLayouts: [layout] }),
+                    vertex: { module, entryPoint: 'vs' },
+                    fragment: { module, entryPoint: 'fs', targets: [{ format: surface.format }] },
+                    primitive: { topology: 'triangle-list' },
+                }),
+                table: gpu.createBuffer({
+                    label: 'present-gamma', size: GAMMA_ENTRIES * 16,
+                    usage: BUFFER_USAGE.UNIFORM | BUFFER_USAGE.COPY_DST,
+                }),
+                written: -1,
+            };
+        }
+        const pass = /** @type {NonNullable<typeof gammaPass>} */ (gammaPass);
+        if (pass.written !== gammaVersion)
+        {
+            queue.writeBuffer(pass.table, 0, /** @type {Float32Array} */ (gammaInEffect));
+            pass.written = gammaVersion;
+        }
+        let group = gammaGroups.get(surface.texture);
+        if (!group || group.layout !== pass.layout)
+        {
+            group = {
+                layout: pass.layout,
+                bindGroup: gpu.createBindGroup({
+                    label: 'present-gamma',
+                    layout: pass.layout,
+                    entries: [
+                        { binding: 0, resource: surface.texture.createView() },
+                        { binding: 1, resource: { buffer: pass.table } },
+                    ],
+                }),
+            };
+            gammaGroups.set(surface.texture, group);
+        }
+        const render = encoder.beginRenderPass({
+            label: 'present-gamma',
+            colorAttachments: [{
+                view: canvasTexture.createView(),
+                loadOp: 'clear',
+                clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                storeOp: 'store',
+            }],
+        });
+        render.setPipeline(pass.pipeline);
+        render.setBindGroup(0, group.bindGroup);
+        render.draw(3);
+        render.end();
+    };
 
     /** @param {any} using @param {PresentableSurface} surface */
     const textureFor = (using, surface)=>{
@@ -245,13 +454,21 @@ export function createPresenter(options = {}){
     };
 
     const flush = ()=>{
-        const surface = pending;
+        const held = pending;
         pending = null;
-        if (!surface)
+        if (!held)
         {
             return;
         }
-        const owner = claims.get(surface.buffer);
+        const { surface, from } = held;
+        if (!from.live)
+        {
+            // Presented by a machine that has gone since: the address named a
+            // place in its address space, which went with it.
+            counters.dropped++;
+            return;
+        }
+        const owner = from.claims.get(surface.buffer);
         if (owner)
         {
             counters.shownByOwner++;
@@ -261,7 +478,7 @@ export function createPresenter(options = {}){
         let using;
         try
         {
-            const accessor = backend;
+            const accessor = from.backend;
             if (!accessor)
             {
                 throw new Error('graphics: no process backend was attached to the presenter');
@@ -289,7 +506,7 @@ export function createPresenter(options = {}){
         // pixels: the padding is not part of the picture.
         for (let y = 0; y < surface.height; y++)
         {
-            const row = readMemory(surface.buffer + y * surface.pitch,
+            const row = from.readMemory(surface.buffer + y * surface.pitch,
                 surface.width * (surface.bitCount >>> 3));
             expandRow(row, surface.width, surface.bitCount, surface.palette,
                 converted.subarray(y * rowBytes, (y + 1) * rowBytes));
@@ -354,10 +571,19 @@ export function createPresenter(options = {}){
                 screenFormat = surface.format;
             }
             const encoder = gpu.createCommandEncoder({ label: 'present' });
-            encoder.copyTextureToTexture(
-                { texture: surface.texture },
-                { texture: screen.getCurrentTexture() },
-                { width: surface.width, height: surface.height, depthOrArrayLayers: 1 });
+            const canvasTexture = screen.getCurrentTexture();
+            if (gammaInEffect && readable(surface.texture))
+            {
+                drawThroughRamp(encoder, surface, canvasTexture);
+                counters.gammaShown++;
+            }
+            else
+            {
+                encoder.copyTextureToTexture(
+                    { texture: surface.texture },
+                    { texture: canvasTexture },
+                    { width: surface.width, height: surface.height, depthOrArrayLayers: 1 });
+            }
             queue.submit([encoder.finish()]);
             counters.shown++;
             const label = surface === texture ? uploadedLabel : (surface.label ?? 'surface');
@@ -407,20 +633,13 @@ export function createPresenter(options = {}){
         }
     };
 
-    return {
-        /**
-         * This process's backend and memory. Called by the graphics layer when
-         * it is assembled, once per machine: the presenter is the run's, the
-         * address space and the GPU resources it draws into are not.
-         *
-         * @param {{ backend: () => any, readMemory: (address: number, length: number)
-         *     => Uint8Array }} deps
-         */
-        attach({ backend: accessor, readMemory: reader }){
-            backend = accessor;
-            readMemory = reader;
-        },
-
+    /**
+     * What one machine does with the presenter: present a surface of its own
+     * address space, and say which of its addresses its GPU owns.
+     *
+     * @param {Attachment} from
+     */
+    const machineView = from=>({
         /**
          * The primary surface may have changed. Nothing travels yet: the
          * burst this call is part of is flushed once, afterwards.
@@ -431,7 +650,7 @@ export function createPresenter(options = {}){
             counters.presents++;
             lastBuffer = surface.buffer;
             const first = pending === null;
-            pending = surface;
+            pending = { surface, from };
             if (first)
             {
                 schedule(flush);
@@ -441,9 +660,6 @@ export function createPresenter(options = {}){
         /** Shows whatever is pending now, rather than after the burst. */
         flush,
 
-        /** The canvas copy, used as the backend's `presentTo`. @param {any} frame */
-        show,
-
         /**
          * A GPU owns the picture at this address. Presenting the address
          * calls `show` instead of reading guest memory, until released.
@@ -451,16 +667,101 @@ export function createPresenter(options = {}){
          * @param {number} buffer @param {() => void} owner
          */
         claim(buffer, owner){
-            claims.set(buffer >>> 0, owner);
+            from.claims.set(buffer >>> 0, owner);
         },
 
         /** @param {number} buffer */
         release(buffer){
-            claims.delete(buffer >>> 0);
+            from.claims.delete(buffer >>> 0);
         },
 
         /** Whether a GPU owns the picture at this address. @param {number} buffer */
-        isClaimed: buffer=>claims.has(buffer >>> 0),
+        isClaimed: (/** @type {number} */ buffer)=>from.claims.has(buffer >>> 0),
+    });
+
+    return {
+        /**
+         * This process's backend and memory. Called by the graphics layer when
+         * it is assembled, once per machine: the presenter is the run's, the
+         * address space and the GPU resources it draws into are not.
+         *
+         * Answers the machine's own view, through which it presents and
+         * claims; `detach` ends it. A surface it presented and that was not
+         * shown yet is dropped then rather than read, and the addresses it
+         * claimed are no longer its GPU's.
+         *
+         * @param {{ backend: () => any, readMemory: (address: number, length: number)
+         *     => Uint8Array }} deps
+         */
+        attach({ backend: accessor, readMemory: reader }){
+            /** @type {Attachment} */
+            const own = { backend: accessor, readMemory: reader, claims: new Map(), live: true };
+            attachments.push(own);
+            return {
+                ...machineView(own),
+                detach(){
+                    own.live = false;
+                    own.claims.clear();
+                    const at = attachments.indexOf(own);
+                    if (at >= 0)
+                    {
+                        attachments.splice(at, 1);
+                    }
+                },
+            };
+        },
+
+        // The same, for whoever attached last: a build that made this
+        // presenter for itself and holds nothing else.
+        present: (/** @type {PresentableSurface} */ surface)=>machineView(newest()).present(surface),
+        flush,
+        claim: (/** @type {number} */ buffer, /** @type {() => void} */ owner)=>
+            machineView(newest()).claim(buffer, owner),
+        release: (/** @type {number} */ buffer)=>machineView(newest()).release(buffer),
+        isClaimed: (/** @type {number} */ buffer)=>machineView(newest()).isClaimed(buffer),
+
+        /** The canvas copy, used as the backend's `presentTo`. @param {any} frame */
+        show,
+
+        /**
+         * The gamma ramp frames are shown through, set by `owner`: the
+         * display's own through GDI, a full-screen device's, a DirectDraw
+         * primary's. The latest set is in effect; null takes an owner's ramp
+         * back, and the one set before it is in effect again.
+         *
+         * @param {any} owner  Whoever sets it; setting again replaces its own.
+         * @param {GammaRamp | null} ramp
+         */
+        setGammaRamp(owner, ramp){
+            ramps.delete(owner);
+            if (ramp)
+            {
+                ramps.set(owner, {
+                    red: Uint16Array.from(ramp.red), green: Uint16Array.from(ramp.green),
+                    blue: Uint16Array.from(ramp.blue),
+                });
+            }
+            recomputeGamma();
+        },
+
+        /**
+         * @returns {{ red: Uint16Array, green: Uint16Array, blue: Uint16Array } | null}
+         *     the ramp in effect, or null when none was set
+         */
+        gammaRamp(){
+            const latest = [...ramps.values()].at(-1);
+            return latest
+                ? { red: latest.red.slice(), green: latest.green.slice(),
+                    blue: latest.blue.slice() }
+                : null;
+        },
+
+        /**
+         * Whether a ramp reaches the picture: it is applied on the way to the
+         * canvas, so a presenter with none -- a headless build handing frames
+         * to a caller's sink -- shows every frame as it was drawn.
+         */
+        appliesGamma: ()=>Boolean(gpu && queue && screen),
 
         /** The delivery rhythm, when the assembling caller gave a clock and a schedule. */
         pacing: ()=>pacer ? pacer.diagnostics() : null,
@@ -477,7 +778,9 @@ export function createPresenter(options = {}){
                 shownBy: { ...shownBy },
                 lastBuffer,
                 pending: pending !== null,
-                claimed: claims.size,
+                claimed: attachments.reduce((sum, attached)=>sum + attached.claims.size, 0),
+                gamma: gammaInEffect !== null,
+                attached: attachments.length - 1,
                 failures: [...failures],
                 disposed,
             };
@@ -493,7 +796,13 @@ export function createPresenter(options = {}){
             texture = null;
             converted = null;
             pending = null;
-            claims.clear();
+            for (const attached of attachments)
+            {
+                attached.claims.clear();
+            }
+            ramps.clear();
+            gammaInEffect = null;
+            gammaPass = null;
         },
     };
 }

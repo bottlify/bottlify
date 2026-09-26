@@ -43,6 +43,8 @@ import {
 
 export const STATE_KIND = Object.freeze({
     BLEND: 'blend',
+    // Direct3D 10.1's blend description, one set of factors per target.
+    BLEND1: 'blend1',
     DEPTH_STENCIL: 'depthstencil',
     RASTERIZER: 'rasterizer',
     SAMPLER: 'sampler',
@@ -111,6 +113,116 @@ export function normaliseBlendDesc(desc){
         DestBlendAlpha: factors[3],
         BlendOpAlpha: operations[1],
         RenderTargetWriteMask: Object.freeze(writeMask),
+    });
+}
+
+/**
+ * One target of D3D10_BLEND_DESC1, normalised as a whole description is: a
+ * target that does not blend reports the default factors.
+ *
+ * @param {any} target
+ * @returns {any | null}
+ */
+function normaliseTargetBlend(target){
+    const mask = target?.RenderTargetWriteMask ?? 0;
+    if ((mask & ~D3D10_COLOR_WRITE_ENABLE.ALL) !== 0)
+    {
+        return null;
+    }
+    const enabled = !!target?.BlendEnable;
+    const factors = enabled
+        ? [target.SrcBlend, target.DestBlend, target.SrcBlendAlpha, target.DestBlendAlpha]
+        : [D3D10_BLEND.ONE, D3D10_BLEND.ZERO, D3D10_BLEND.ONE, D3D10_BLEND.ZERO];
+    const operations = enabled
+        ? [target.BlendOp, target.BlendOpAlpha]
+        : [D3D10_BLEND_OP.ADD, D3D10_BLEND_OP.ADD];
+    if (factors.some(factor=>!isMember(D3D10_BLEND, factor))
+        || operations.some(operation=>!isMember(D3D10_BLEND_OP, operation)))
+    {
+        return null;
+    }
+    return Object.freeze({
+        BlendEnable: enabled,
+        SrcBlend: factors[0],
+        DestBlend: factors[1],
+        BlendOp: operations[0],
+        SrcBlendAlpha: factors[2],
+        DestBlendAlpha: factors[3],
+        BlendOpAlpha: operations[1],
+        RenderTargetWriteMask: mask,
+    });
+}
+
+/**
+ * D3D10_BLEND_DESC1: without independent blending every target is the
+ * first, whatever the rest of the array holds.
+ *
+ * @param {any} desc
+ * @returns {any | null}
+ */
+export function normaliseBlendDesc1(desc){
+    if (!desc)
+    {
+        return null;
+    }
+    const targets = [];
+    for (let index = 0; index < D3D10_LIMITS.SIMULTANEOUS_RENDER_TARGETS; index++)
+    {
+        const target = normaliseTargetBlend(
+            (desc.RenderTarget ?? [])[desc.IndependentBlendEnable ? index : 0]);
+        if (!target)
+        {
+            return null;
+        }
+        targets.push(target);
+    }
+    return Object.freeze({
+        AlphaToCoverageEnable: !!desc.AlphaToCoverageEnable,
+        IndependentBlendEnable: !!desc.IndependentBlendEnable,
+        RenderTarget: Object.freeze(targets),
+    });
+}
+
+/**
+ * The Direct3D 10.0 description of a 10.1 one: each target's enable and
+ * write mask, and the first target's factors, which are the only ones the
+ * older description has room for.
+ *
+ * @param {any} desc1
+ */
+export function blendDescOf(desc1){
+    const [first] = desc1.RenderTarget;
+    return Object.freeze({
+        AlphaToCoverageEnable: desc1.AlphaToCoverageEnable,
+        BlendEnable: Object.freeze(desc1.RenderTarget.map((/** @type {any} */ target)=>
+            target.BlendEnable)),
+        SrcBlend: first.SrcBlend,
+        DestBlend: first.DestBlend,
+        BlendOp: first.BlendOp,
+        SrcBlendAlpha: first.SrcBlendAlpha,
+        DestBlendAlpha: first.DestBlendAlpha,
+        BlendOpAlpha: first.BlendOpAlpha,
+        RenderTargetWriteMask: Object.freeze(desc1.RenderTarget.map((/** @type {any} */ target)=>
+            target.RenderTargetWriteMask)),
+    });
+}
+
+/**
+ * The Direct3D 10.1 description of a 10.0 one: its factors on every target
+ * that blends, independent when the targets differ.
+ *
+ * @param {any} desc
+ */
+export function blendDesc1Of(desc){
+    const targets = desc.BlendEnable.map((/** @type {boolean} */ enabled,
+        /** @type {number} */ index)=>normaliseTargetBlend({
+        ...desc, BlendEnable: enabled, RenderTargetWriteMask: desc.RenderTargetWriteMask[index],
+    }));
+    return Object.freeze({
+        AlphaToCoverageEnable: desc.AlphaToCoverageEnable,
+        IndependentBlendEnable: targets.some((/** @type {any} */ target)=>
+            JSON.stringify(target) !== JSON.stringify(targets[0])),
+        RenderTarget: Object.freeze(targets),
     });
 }
 
@@ -277,6 +389,7 @@ export function normaliseSamplerDesc(desc){
 /** @type {Readonly<Record<string, (desc: any) => any | null>>} */
 const NORMALISERS = Object.freeze({
     [STATE_KIND.BLEND]: normaliseBlendDesc,
+    [STATE_KIND.BLEND1]: normaliseBlendDesc1,
     [STATE_KIND.DEPTH_STENCIL]: normaliseDepthStencilDesc,
     [STATE_KIND.RASTERIZER]: normaliseRasterizerDesc,
     [STATE_KIND.SAMPLER]: normaliseSamplerDesc,
@@ -357,7 +470,18 @@ export function createStateStore(options){
 
             /** @param {{ desc?: any }} target */
             GetDesc(target){
-                target.desc = normalised;
+                target.desc = kind === STATE_KIND.BLEND1 ? blendDescOf(normalised) : normalised;
+                return S_OK;
+            },
+
+            /**
+             * A blend state's description in Direct3D 10.1's form, whichever
+             * form it was made from.
+             *
+             * @param {{ desc?: any }} target
+             */
+            GetDesc1(target){
+                target.desc = kind === STATE_KIND.BLEND ? blendDesc1Of(normalised) : normalised;
                 return S_OK;
             },
 

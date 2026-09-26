@@ -43,22 +43,34 @@
 import {
     D3DCLEAR, D3DCREATE, D3DDEVTYPE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET,
     D3DERR_INVALIDCALL, D3DERR_NOTAVAILABLE, D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DPOOL,
-    D3DPRESENTFLAG, D3DRTYPE, D3DSBT, D3DTS, D3DUSAGE, D3D_OK, FORMAT_INFO, isShaderHandle,
+    D3DFMT_VERTEXDATA, D3DPRESENTFLAG, D3DRTYPE, D3DSBT, D3DTS, D3DUSAGE, D3D_OK, FORMAT_INFO,
+    isCompressed, isShaderHandle,
     surfaceBytes, surfacePitch,
 } from './constants.js';
 import { GAMMA_RAMP_ENTRIES } from './structs.js';
 import { DEFAULT_RENDER_STATES, createDefaultRenderStates } from './renderstates.js';
 import { createDefaultStageStates } from './stagestates.js';
 import { IDENTITY, STAGE_COUNT, createRenderer, vertexCountOf } from './render.js';
+import { applyBlock, captureBlock, emptyBlock, fillBlock } from './stateblock.js';
+import { processStreams } from './process.js';
+import { POSITION_MASK, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import {
     SURFACE_TYPE, copyRectsResult, createResult, imageSurfaceCreateResult,
-    reportedBackBufferCount, targetPairResult, validatePresentParameters,
+    reportedBackBufferCount, targetPairResult, validatePresentParameters, validateStages,
 } from './validity.js';
 import {
-    createReferenceCount, createSurface, createTexture, writePixels,
+    createPriority, createReferenceCount, createSurface, createTexture, createVolumeTexture,
+    rectMoveOf, regionAtLevel, volumeUpdate, writeFrontBuffer, writePixels,
 } from '../d3d9/resources.js';
-import { DEVICE_STATE, LIGHT_ENABLED } from '../d3d9/device.js';
+import { volumeCreateResult, volumeLevelCount } from '../d3d9/validity.js';
+import { DEVICE_STATE, LIGHT_ENABLED, createPalettes } from '../d3d9/device.js';
+import { createAdditionalChain } from '../d3d9/swapchain.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
+import {
+    constantsWithin, declaredShader, parseDeclaration, readableByFixedFunction,
+} from './declaration.js';
+import { elementsOfFvf, fixedFunctionLayoutOf } from '../d3d9/declaration.js';
+import { SHADER_KIND, createConstantFile, functionOf, parseShader } from '../d3d9/shader.js';
 
 export { DEVICE_STATE, LIGHT_ENABLED };
 
@@ -71,6 +83,15 @@ export { DEVICE_STATE, LIGHT_ENABLED };
  * @property {boolean} depthTexture2d  Whether depth formats are usable as textures,
  * @property {boolean} depthCube       as cube maps,
  * @property {boolean} depthPlain      and as image surfaces.
+ * @property {number} [maxVolumeExtent]  The longest axis a volume texture may have.
+ * @property {{ major: number, minor: number }} [vertexShaderVersion]
+ *           The newest vertex shader a create accepts; 0.0 makes none.
+ * @property {number} [maxVertexShaderConst]  The vertex shader's float constant registers.
+ * @property {{ major: number, minor: number }} [pixelShaderVersion]
+ *           The newest pixel shader a create accepts; 0.0 makes none.
+ * @property {boolean} [fullscreenGamma]
+ *     Whether a full-screen device's gamma ramp reaches the picture, which
+ *     D3DCAPS2_FULLSCREENGAMMA claims. Decided by the display, not asked for.
  */
 
 /** @type {DeviceCaps} */
@@ -80,7 +101,49 @@ export const DEFAULT_CAPS = Object.freeze({
     compressedTextures: false,
     depthCube: false,
     depthPlain: false,
+    maxVolumeExtent: 256,
+    vertexShaderVersion: Object.freeze({ major: 1, minor: 1 }),
+    maxVertexShaderConst: 256,
+    pixelShaderVersion: Object.freeze({ major: 1, minor: 4 }),
 });
+
+/** Direct3D 8's pixel shader constant registers, c0 to c7. */
+const PIXEL_CONSTANTS = 8;
+
+/**
+ * @typedef {Object} VertexShader8
+ *     What a vertex shader handle names.
+ * @property {number} handle
+ * @property {import('./declaration.js').Declaration8} declaration
+ * @property {Uint32Array | null} tokens  The function as the program gave it, if any.
+ * @property {import('../d3d9/shader.js').ParsedShader | null} parsed
+ *           The function as the translator reads it, its inputs declared.
+ * @property {import('../d3d9/declaration.js').FixedFunctionLayout | null} layout
+ *           How the fixed-function stage reads the declaration, for a handle
+ *           with no function.
+ */
+
+/**
+ * @typedef {Object} PixelShader8
+ *     What a pixel shader handle names.
+ * @property {number} handle
+ * @property {Uint32Array} tokens  The function as the program gave it.
+ * @property {import('../d3d9/shader.js').ParsedShader} parsed
+ */
+
+/**
+ * Whether a function is a shader of this kind no newer than a version.
+ *
+ * @param {import('../d3d9/shader.js').ParsedShader} parsed
+ * @param {string} kind  A SHADER_KIND.
+ * @param {{ major: number, minor: number } | undefined} newest
+ */
+function withinVersion(parsed, kind, newest){
+    const { major, minor } = parsed.version;
+    const limit = newest ?? { major: 0, minor: 0 };
+    return !parsed.error && parsed.version.kind === kind && major === 1
+        && (major < limit.major || (major === limit.major && minor <= limit.minor));
+}
 
 /**
  * @typedef {import('../d3d9/device.js').Light} Light
@@ -214,6 +277,12 @@ function isTransformType(type){
  * @property {boolean} [mips]
  *     Whether textures are sampled below their top level. Off, every sample
  *     comes from the top level, so a frame that changes with it was mips.
+ * @property {(watcher: () => void) => () => void} [onDeviceLost]
+ *     Calls the watcher once the GPU underneath is gone for good, at once if it
+ *     already is; returns how to stop watching. Absent, the GPU never goes.
+ * @property {import('../webgpu/internal/presenter.js').DisplayGamma} [gamma]
+ *     Where a full-screen device's gamma ramp reaches the picture. Absent, a
+ *     ramp is kept and read back only.
  */
 
 /**
@@ -309,14 +378,15 @@ export function createDirect3D8(options = {}){
     const {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, maxDraws, divergence, skipTexture, probeTexture, fog, mips,
-        ...caps
+        onDeviceLost, gamma, ...caps
     } = options;
     /** @type {DeviceCaps} */
-    const resolved = { ...DEFAULT_CAPS, ...caps };
+    const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
     /** @type {DeviceServices} */
     const services = {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, maxDraws, divergence, skipTexture, probeTexture, fog, mips,
+        onDeviceLost, gamma,
     };
     if (backend && !readMemory)
     {
@@ -336,8 +406,8 @@ export function createDirect3D8(options = {}){
          *
          * Answered by the table the creates themselves consult rather than by a
          * list of its own, so that a program told yes here is told yes there.
-         * A kind of resource this build does not make -- a cube map, a volume,
-         * a buffer -- is not available in any format.
+         * A kind of resource this build does not make in a format -- a buffer
+         * -- is not available in any.
          *
          * @param {number} usage
          * @param {number} resourceType  D3DRTYPE
@@ -345,9 +415,18 @@ export function createDirect3D8(options = {}){
          * @returns {number} D3D_OK or D3DERR_NOTAVAILABLE
          */
         CheckDeviceFormat(usage, resourceType, format){
+            if (resourceType === D3DRTYPE.VOLUMETEXTURE)
+            {
+                return volumeCreateResult({
+                    width: 1, height: 1, depth: 1, levels: 1, usage, format,
+                    pool: D3DPOOL.DEFAULT, maxExtent: 1,
+                }) === D3D_OK ? D3D_OK : D3DERR_NOTAVAILABLE;
+            }
             const surfaceType = resourceType === D3DRTYPE.TEXTURE
                 ? SURFACE_TYPE.TEXTURE_2D
-                : surfaceTypeOfUsage(resourceType, usage);
+                : resourceType === D3DRTYPE.CUBETEXTURE
+                    ? SURFACE_TYPE.CUBE
+                    : surfaceTypeOfUsage(resourceType, usage);
             if (!surfaceType)
             {
                 return D3DERR_NOTAVAILABLE;
@@ -434,14 +513,7 @@ export function createDirect3D8(options = {}){
  *     the object it was made through.
  */
 
-/**
- * @typedef {Object} StateBlock
- * @property {Map<number, number>} renderStates
- * @property {Map<number, number>} stageStates   Keyed by (stage << 8) | type.
- * @property {Map<number, Float32Array>} transforms
- * @property {Map<number, any>} textures         Per stage; null means "nothing bound".
- * @property {Material | null} material
- */
+/** @typedef {import('./stateblock.js').StateBlock} StateBlock */
 
 /**
  * @typedef {Object} SurfaceMove
@@ -464,6 +536,17 @@ export function createDirect3D8(options = {}){
 function createDeviceObject(parameters, caps, behaviourFlags, services, identity){
     /** Formats already reported, so a refusal in a loop says it once. */
     const refusedFormats = new Set();
+    /** Divergences already reported, by what makes each one of a kind. */
+    const reported = new Set();
+    /** @param {string} key @param {string} detail */
+    const reportOnce = (key, detail)=>{
+        if (!services.divergence || reported.has(key))
+        {
+            return;
+        }
+        reported.add(key);
+        services.divergence('Direct3D 8', detail);
+    };
 
     /**
      * A refusal a program can act on, but only if it is told which format was
@@ -550,14 +633,26 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * rather than one: the two entry points have separate number spaces, so
      * deleting a pixel shader with a vertex shader's handle has to fail.
      *
-     * @type {Map<number, any>}
+     * @type {Map<number, VertexShader8>}
      */
     const vertexShaders = new Map();
-    /** @type {Map<number, any>} */
+    /** @type {Map<number, PixelShader8>} */
     const pixelShaders = new Map();
+    /**
+     * The elements a vertex format spells, for a pixel shader drawn over the
+     * fixed-function vertex stage: made once a format.
+     *
+     * @type {Map<number, readonly import('../d3d9/declaration.js').VertexElement[] | null>}
+     */
+    const formatElements = new Map();
     let nextShaderHandle = 1;
     let boundVertexShader = 0;
     let boundPixelShader = 0;
+    // This version has float constants only; the integer and boolean files
+    // are there because the translator's constant blocks carry all three.
+    const vertexConstants = createConstantFile(
+        { floats: caps.maxVertexShaderConst ?? 256, ints: 16, bools: 16 });
+    const pixelConstants = createConstantFile({ floats: PIXEL_CONSTANTS, ints: 16, bools: 16 });
 
     /** @type {Map<number, Float32Array>} index -> the four coefficients */
     let clipPlanes = new Map();
@@ -571,6 +666,30 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
     /** @type {GammaRamp} */
     let gammaRamp = identityGammaRamp();
+    /** Whether the program set a ramp, and whether the display shows it now. */
+    let gammaSet = false;
+    let gammaShown = false;
+    /**
+     * Puts the device's ramp on the display, or takes it back. A full-screen
+     * device's ramp is the display's (D3DCAPS2_FULLSCREENGAMMA); a windowed
+     * one's is kept and read back and changes nothing on the screen, and a
+     * device that goes gives the display back the ramp it had before.
+     *
+     * @param {boolean} [going]
+     */
+    const showGamma = (going = false)=>{
+        const shown = caps.fullscreenGamma === true && gammaSet && !going
+            && !presentParameters.windowed;
+        if (shown)
+        {
+            services.gamma?.set(device, gammaRamp);
+        }
+        else if (gammaShown)
+        {
+            services.gamma?.set(device, null);
+        }
+        gammaShown = shown;
+    };
     /**
      * The cursor the program asked the device to draw over its frames: the
      * surface it gave and where the hot spot is in it, and whether it is to
@@ -835,28 +954,6 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         return made;
     };
 
-    /** @returns {StateBlock} a block holding nothing yet */
-    const emptyBlock = ()=>({
-        renderStates: new Map(),
-        stageStates: new Map(),
-        transforms: new Map(),
-        textures: new Map(),
-        material: null,
-    });
-
-    /**
-     * Notes one state into the block being recorded, if one is.
-     *
-     * The state is also applied, which is the reading this layer takes of a
-     * recording device: a program between Begin and End sees its own changes,
-     * and a program that only ever applies the block afterwards cannot tell the
-     * difference.
-     *
-     * @template T
-     * @param {(block: StateBlock) => Map<number, T>} pick
-     * @param {number} key
-     * @param {T} value
-     */
     /**
      * Whether a matrix a program is setting is the one already there.
      *
@@ -874,119 +971,62 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     };
 
     /**
-     * @param {(block: any) => Map<any, any>} pick
-     * @param {any} key
-     * @param {any} value
-     */
-    const recordState = (pick, key, value)=>{
-        if (recording)
-        {
-            pick(recording).set(key, value);
-        }
-    };
-
-    /** @param {StateBlock} block */
-    const applyBlock = block=>{
-        for (const [state, value] of block.renderStates)
-        {
-            renderStates.set(state, value);
-        }
-        for (const [key, value] of block.stageStates)
-        {
-            stageStatesFor(key >>> 8).set(key & 0xff, value);
-        }
-        for (const [type, matrix] of block.transforms)
-        {
-            transforms.set(type, Float32Array.from(matrix));
-        }
-        for (const [stage, texture] of block.textures)
-        {
-            if (texture)
-            {
-                textures.set(stage, texture);
-            }
-            else
-            {
-                textures.delete(stage);
-            }
-        }
-        if (block.material)
-        {
-            material = copyMaterial(block.material);
-        }
-        drawStateVersion++;
-    };
-
-    /**
-     * The block's states take the values of the moment; which states it holds
-     * does not change, which is the whole difference between capturing a block
-     * and making one.
+     * The device's state, as a state block reads and writes it.
      *
-     * @param {StateBlock} block
+     * @type {import('./stateblock.js').StateView}
      */
-    const captureBlock = block=>{
-        for (const state of block.renderStates.keys())
-        {
-            block.renderStates.set(state, renderStates.get(state) ?? 0);
-        }
-        for (const key of block.stageStates.keys())
-        {
-            block.stageStates.set(key, stageStatesFor(key >>> 8).get(key & 0xff) ?? 0);
-        }
-        for (const type of block.transforms.keys())
-        {
-            block.transforms.set(type, Float32Array.from(transforms.get(type) ?? IDENTITY));
-        }
-        for (const stage of block.textures.keys())
-        {
-            block.textures.set(stage, textures.get(stage) ?? null);
-        }
-        if (block.material)
-        {
-            block.material = copyMaterial(material);
-        }
-    };
-
-    /**
-     * Everything of one kind, as it stands now.
-     *
-     * The split between the two halves is coarser than the header's: Direct3D
-     * assigns each render state to the pixel or the vertex half individually,
-     * and this takes the render and stage states as the pixel half and the
-     * transforms and the material as the vertex half. A block of one half
-     * therefore restores a superset of what it should, and a block of
-     * everything is exact.
-     *
-     * @param {StateBlock} block
-     * @param {number} type D3DSBT
-     */
-    const fillBlock = (block, type)=>{
-        if (type !== D3DSBT.VERTEXSTATE)
-        {
-            for (const [state, value] of renderStates)
-            {
-                if (!NOT_CAPTURED_BY_STATE_BLOCK.has(state))
-                {
-                    block.renderStates.set(state, value);
-                }
-            }
-            for (let stage = 0; stage < STAGE_COUNT; stage++)
-            {
-                for (const [tss, value] of stageStatesFor(stage))
-                {
-                    block.stageStates.set((stage << 8) | tss, value);
-                }
-                block.textures.set(stage, textures.get(stage) ?? null);
-            }
-        }
-        if (type !== D3DSBT.PIXELSTATE)
-        {
-            for (const [key, matrix] of transforms)
-            {
-                block.transforms.set(key, Float32Array.from(matrix));
-            }
-            block.material = copyMaterial(material);
-        }
+    const stateView = {
+        get renderStates(){
+            return renderStates;
+        },
+        stageStates: stageStatesFor,
+        stageCount: STAGE_COUNT,
+        textures,
+        get transforms(){
+            return transforms;
+        },
+        get lights(){
+            return lights;
+        },
+        defaultLight,
+        stream,
+        streams,
+        get clipPlanes(){
+            return clipPlanes;
+        },
+        get material(){
+            return material;
+        },
+        set material(value){
+            material = value;
+        },
+        get viewport(){
+            return viewport;
+        },
+        set viewport(value){
+            viewport = value;
+        },
+        get indices(){
+            return { buffer: indices, base: baseVertexIndex };
+        },
+        set indices(value){
+            indices = value.buffer;
+            baseVertexIndex = value.base;
+        },
+        get vertexShader(){
+            return boundVertexShader;
+        },
+        set vertexShader(value){
+            boundVertexShader = value;
+        },
+        get pixelShader(){
+            return boundPixelShader;
+        },
+        set pixelShader(value){
+            boundPixelShader = value;
+        },
+        vertexConstants: vertexConstants.floats,
+        pixelConstants: pixelConstants.floats,
     };
 
     /**
@@ -1026,11 +1066,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      *
      * @param {any} texture
      * @param {number} level
+     * @param {number} [face]  A cube map's; a texture of one face has only the first.
      */
-    const levelSurface = (texture, level)=>{
+    const levelSurface = (texture, level, face = 0)=>{
         /** @type {{ surface?: any }} */
         const held = {};
-        if (texture.GetSurfaceLevel(level, held) !== D3D_OK || !held.surface)
+        if ((texture.cube
+            ? texture.GetCubeMapSurface(face, level, held)
+            : texture.GetSurfaceLevel(level, held)) !== D3D_OK || !held.surface)
         {
             return null;
         }
@@ -1053,11 +1096,31 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         const buffer = {
             ...spec,
             base,
+            ...createPriority(spec.pool),
             get refCount(){
                 return bufferCount.value;
             },
             addRef: ()=>bufferCount.addRef(),
             release: ()=>bufferCount.release(),
+
+            /**
+             * What the buffer was made as. A vertex buffer's format is
+             * D3DFMT_VERTEXDATA whatever it holds; the vertex it holds is the
+             * FVF it was made with, zero for none.
+             *
+             * @param {{ desc?: any }} out
+             */
+            GetDesc(out){
+                out.desc = {
+                    Format: spec.type === D3DRTYPE.INDEXBUFFER ? spec.format : D3DFMT_VERTEXDATA,
+                    Type: spec.type,
+                    Usage: spec.usage,
+                    Pool: spec.pool,
+                    Size: spec.length,
+                    FVF: spec.fvf ?? 0,
+                };
+                return D3D_OK;
+            },
 
             /**
              * A size of zero means "to the end", which is the only way a
@@ -1109,6 +1172,67 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     };
 
     /**
+     * Tokens handed to a caller who says how much room it has: its size in
+     * bytes with no room given, the tokens when they fit, and a refusal that
+     * leaves the caller's size alone when they do not.
+     *
+     * @param {Uint32Array} tokens
+     * @param {{ bytes?: number, tokens?: Uint32Array }} out
+     * @param {number | null} room
+     */
+    const handOver = (tokens, out, room)=>{
+        if (room !== null && room < tokens.length * 4)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        out.bytes = tokens.length * 4;
+        if (room !== null)
+        {
+            out.tokens = tokens;
+        }
+        return D3D_OK;
+    };
+
+    /**
+     * @param {number} fvf
+     * @returns {readonly import('../d3d9/declaration.js').VertexElement[] | null}
+     */
+    const elementsOfFormat = fvf=>{
+        if ((fvf & POSITION_MASK) === 0)
+        {
+            return null;
+        }
+        if (!formatElements.has(fvf))
+        {
+            formatElements.set(fvf, elementsOfFvf(fvf));
+        }
+        return formatElements.get(fvf) ?? null;
+    };
+
+    /**
+     * @param {import('../d3d9/shader.js').ConstantFile} file
+     * @param {'vertexConstants' | 'pixelConstants'} recorded  The block's map of them.
+     * @param {number} register @param {ArrayLike<number>} values @param {number} registers
+     */
+    const setConstants = (file, recorded, register, values, registers)=>{
+        if (!values || register < 0 || registers < 0
+            || register + registers > file.floats.length / 4)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        if (!recording)
+        {
+            return file.setF(register, values, registers);
+        }
+        for (let at = 0; at < registers; at++)
+        {
+            recording[recorded].set(register + at,
+                Float32Array.from({ length: 4 }, (_, index)=>values[at * 4 + index]));
+        }
+        return D3D_OK;
+    };
+
+    /**
      * @param {any} surface
      * @returns {import('../d3d9/resources.js').SurfaceDesc}
      */
@@ -1134,6 +1258,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         get stream(){
             return stream(0);
         },
+        streamAt: stream,
         get indices(){
             return indices;
         },
@@ -1187,10 +1312,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         {
             return D3DERR_INVALIDCALL;
         }
-        const processing = device.stageProcessing;
         // A vertex format with no position is not a format, and there is
         // nothing to draw without either that or a shader.
-        if (processing.vertexShader === 0 && (processing.fvf & 0xe) === 0)
+        if (!isShaderHandle(boundVertexShader) && (boundVertexShader & 0xe) === 0)
         {
             return D3DERR_INVALIDCALL;
         }
@@ -1208,13 +1332,49 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         baseVertexIndex = 0;
     };
 
+    /** @type {(() => void) | undefined} */
+    let stopWatchingLoss;
+
+    /**
+     * An additional swap chain's back buffer presented: onto the display
+     * when it goes into the window the display shows, and otherwise drawn and
+     * kept, which is reported once.
+     *
+     * @param {any} backBuffer @param {boolean} shown
+     */
+    const presentChain = (backBuffer, shown)=>{
+        if (deviceState !== DEVICE_STATE.OK)
+        {
+            return D3DERR_DEVICELOST;
+        }
+        if (shown)
+        {
+            renderer?.present(Object.create(model, { backBuffer: { get: ()=>backBuffer } }));
+        }
+        else
+        {
+            reportOnce('chain-window', 'a swap chain presented into a window the display does'
+                + ' not show: its frame is drawn and its picture is not shown');
+            renderer?.submit();
+        }
+        return D3D_OK;
+    };
+
     const device = {
         caps,
         get refCount(){
             return count.value;
         },
         addRef: ()=>count.addRef(),
-        release: ()=>count.release(),
+        release: ()=>{
+            const left = count.release();
+            if (left === 0)
+            {
+                stopWatchingLoss?.();
+                showGamma(true);
+            }
+            return left;
+        },
 
         /** The state machine's only input, and deliberately not a D3D method. */
         injectDeviceLoss(restorable = false){
@@ -1289,10 +1449,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
-         * The ramp is kept and handed back, and nothing applies it: this device
-         * reports no gamma capability, so a program that checks before setting
-         * one knows that already, and one that does not gets the state it wrote
-         * rather than an invented one.
+         * The ramp is kept and handed back, and shown while the device is
+         * full-screen on a display that applies one -- which is what
+         * D3DCAPS2_FULLSCREENGAMMA says. Windowed, or where the capability is
+         * not claimed, a program gets the state it wrote and the picture it
+         * drew.
          *
          * @param {GammaRamp} ramp
          */
@@ -1302,6 +1463,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 green: Uint16Array.from(ramp.green),
                 blue: Uint16Array.from(ramp.blue),
             };
+            gammaSet = true;
+            showGamma();
         },
 
         /**
@@ -1344,6 +1507,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             return cursor;
         },
 
+        ...createPalettes(),
+
         /** @param {{ ramp?: GammaRamp }} out */
         GetGammaRamp(out){
             out.ramp = {
@@ -1367,6 +1532,50 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 renderer.present(model);
             }
+            return D3D_OK;
+        },
+
+        /**
+         * A swap chain beside the device's own, windowed only (Wine's d3d8
+         * test_swapchain): back buffers of its own, at the size and in the
+         * format its parameters give. As a creation does, it writes back the
+         * back buffer count a zero stood for.
+         *
+         * @param {import('./validity.js').PresentParameters} asked
+         * @param {{ swapChain?: any }} out
+         */
+        CreateAdditionalSwapChain(asked, out){
+            if (!asked || asked.windowed === false || validatePresentParameters(asked) !== D3D_OK)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            reportPresentParameters(asked);
+            const wanted = normalisePresentParameters(asked);
+            const width = wanted.backBufferWidth ?? 640;
+            const height = wanted.backBufferHeight ?? 480;
+            const format = wanted.backBufferFormat ?? D3DFMT.X8R8G8B8;
+            out.swapChain = createAdditionalChain({
+                parameters: wanted,
+                count: explicitCount(D3DPOOL.DEFAULT),
+                makeBackBuffer: chainCount=>createSurface({
+                    type: SURFACE_TYPE.RENDER_TARGET,
+                    width,
+                    height,
+                    format,
+                    pool: D3DPOOL.DEFAULT,
+                    usage: D3DUSAGE.RENDERTARGET,
+                    lockable: ((wanted.flags ?? 0) & D3DPRESENTFLAG.LOCKABLE_BACKBUFFER) !== 0,
+                    divergence: services.divergence ?? null,
+                    pixels: targetPixels(),
+                    base: allocate(surfaceBytes(format, width, height)),
+                    count: chainCount,
+                }),
+                present: presentChain,
+                retire: surface=>{
+                    free(surface.base);
+                    renderer?.retire(surface);
+                },
+            });
             return D3D_OK;
         },
 
@@ -1466,6 +1675,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             clipPlanes = new Map();
             clipStatus = { ClipUnion: 0, ClipIntersection: 0 };
             buildImplicitResources();
+            // The ramp outlasts the reset; whether it is shown follows the mode.
+            showGamma();
             return D3D_OK;
         },
 
@@ -1484,12 +1695,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (recording)
+            {
+                recording.stageStates.set((stage << 8) | type, value >>> 0);
+                return D3D_OK;
+            }
             if (states.get(type) !== value >>> 0)
             {
                 states.set(type, value >>> 0);
                 drawStateVersion++;
             }
-            recordState(block=>block.stageStates, (stage << 8) | type, value >>> 0);
             return D3D_OK;
         },
 
@@ -1528,22 +1743,25 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             // the expensive part, and there were two of them on every call,
             // including one built for a state block that was not recording.
             //
-            // Only while nothing is recording, because a block captures what a
+            // A recording takes every set, because a block captures what a
             // program set rather than what changed, and a block applied later
             // when another matrix is current must still put this one back.
+            if (recording)
+            {
+                recording.transforms.set(type, Float32Array.from(matrix));
+                return D3D_OK;
+            }
             const held = transforms.get(type);
-            if (!recording && held && sameMatrix(held, matrix))
+            if (held && sameMatrix(held, matrix))
             {
                 redundantTransforms++;
                 return D3D_OK;
             }
-            const taken = Float32Array.from(matrix);
-            transforms.set(type, taken);
+            transforms.set(type, Float32Array.from(matrix));
             if (type !== D3DTS.WORLD)
             {
                 drawStateVersion++;
             }
-            recordState(block=>block.transforms, type, taken);
             return D3D_OK;
         },
 
@@ -1590,12 +1808,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     product[row * 4 + column] = sum;
                 }
             }
+            if (recording)
+            {
+                recording.transforms.set(type, product);
+                return D3D_OK;
+            }
             transforms.set(type, product);
             if (type !== D3DTS.WORLD)
             {
                 drawStateVersion++;
             }
-            recordState(block=>block.transforms, type, Float32Array.from(product));
             return D3D_OK;
         },
 
@@ -1605,12 +1827,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            material = copyMaterial(value);
-            drawStateVersion++;
             if (recording)
             {
                 recording.material = copyMaterial(value);
+                return D3D_OK;
             }
+            material = copyMaterial(value);
+            drawStateVersion++;
             return D3D_OK;
         },
 
@@ -1622,7 +1845,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
         /**
          * Clears the viewport, or the given rectangles within it: a viewport
-         * smaller than the target leaves everything outside it alone.
+         * smaller than the target leaves everything outside it alone. An array
+         * with a count of zero names no rectangle and clears nothing; a count
+         * without an array is the whole viewport.
          *
          * @param {number} rectCount
          * @param {readonly { x1: number, y1: number, x2: number, y2: number }[] | null} rects
@@ -1632,8 +1857,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {number} stencil
          */
         Clear(rectCount, rects, flags, color, z, stencil){
-            if ((flags & (D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER | D3DCLEAR.STENCIL)) === 0
-                || (rectCount > 0 && !rects))
+            if ((flags & (D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER | D3DCLEAR.STENCIL)) === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -1649,9 +1873,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     return D3DERR_INVALIDCALL;
                 }
             }
+            if (rects && rectCount === 0)
+            {
+                return D3D_OK;
+            }
             if (renderer)
             {
-                renderer.clear(model, rectCount > 0 ? (rects ?? []).slice(0, rectCount) : [],
+                renderer.clear(model, rects ? rects.slice(0, rectCount) : [],
                     flags, color >>> 0, z, stencil);
             }
             return D3D_OK;
@@ -1761,12 +1989,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (recording)
+            {
+                recording.renderStates.set(state, value >>> 0);
+                return D3D_OK;
+            }
             if (renderStates.get(state) !== value >>> 0)
             {
                 renderStates.set(state, value >>> 0);
                 drawStateVersion++;
             }
-            recordState(block=>block.renderStates, state, value >>> 0);
             return D3D_OK;
         },
 
@@ -1788,6 +2020,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {Light} light
          */
         SetLight(index, light){
+            if (recording)
+            {
+                const held = recording.lights.get(index);
+                recording.lights.set(index, { ...held, light: { ...light } });
+                return D3D_OK;
+            }
             const existing = lights.get(index);
             lights.set(index, { light: { ...light }, enabled: existing?.enabled ?? false });
             lightsVersion++;
@@ -1820,6 +2058,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {boolean} enable
          */
         LightEnable(index, enable){
+            if (recording)
+            {
+                const held = recording.lights.get(index);
+                recording.lights.set(index, { ...held, enabled: enable === true });
+                return D3D_OK;
+            }
             const record = lights.get(index) ?? { light: defaultLight(), enabled: false };
             record.enabled = enable === true;
             lights.set(index, record);
@@ -1855,7 +2099,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            clipPlanes.set(index, Float32Array.from(plane));
+            (recording?.clipPlanes ?? clipPlanes).set(index, Float32Array.from(plane));
             return D3D_OK;
         },
 
@@ -1896,16 +2140,22 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         /**
          * How many passes the state as it stands would take.
          *
-         * Always one, and that is a property of this renderer rather than a
-         * guess: the whole stage cascade becomes a single generated shader, so
-         * a state this device accepts is a state it draws in one pass or not at
-         * all.
+         * One, when the combiner draws the cascade: the whole of it becomes a
+         * single generated shader, so a cascade drawn at all is drawn in one
+         * pass. A stage it cannot draw is named instead, and a pixel shader
+         * replaces the cascade altogether.
          *
-         * @param {{ passes?: number }} out
+         * @param {{ passes?: number }} out  Written only on success.
          */
         ValidateDevice(out){
-            out.passes = 1;
-            return D3D_OK;
+            const hr = boundPixelShader !== 0
+                ? D3D_OK
+                : validateStages(stageStatesFor, STAGE_COUNT);
+            if (hr === D3D_OK)
+            {
+                out.passes = 1;
+            }
+            return hr;
         },
 
         // --- state blocks ---
@@ -1939,7 +2189,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            applyBlock(block);
+            applyBlock(block, stateView);
+            drawStateVersion++;
+            textureBindingVersion++;
+            lightsVersion++;
             return D3D_OK;
         },
 
@@ -1950,7 +2203,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            captureBlock(block);
+            captureBlock(block, stateView);
             return D3D_OK;
         },
 
@@ -1968,8 +2221,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            const block = emptyBlock();
-            fillBlock(block, type);
+            const block = fillBlock(type, stateView, NOT_CAPTURED_BY_STATE_BLOCK);
             const handle = nextStateBlock++;
             stateBlocks.set(handle, block);
             out.handle = handle;
@@ -2001,7 +2253,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            viewport = viewportState({
+            const next = viewportState({
                 x: value.X,
                 y: value.Y,
                 width: value.Width,
@@ -2009,6 +2261,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 minDepth: value.MinZ,
                 maxDepth: value.MaxZ,
             });
+            if (recording)
+            {
+                recording.viewport = next;
+                return D3D_OK;
+            }
+            viewport = next;
             drawStateVersion++;
             return D3D_OK;
         },
@@ -2045,6 +2303,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (recording)
+            {
+                recording.textures.set(stage, texture ?? null);
+                return D3D_OK;
+            }
             if ((textures.get(stage) ?? null) !== (texture ?? null))
             {
                 if (texture)
@@ -2058,7 +2321,6 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 drawStateVersion++;
                 textureBindingVersion++;
             }
-            recordState(block=>block.textures, stage, texture ?? null);
             return D3D_OK;
         },
 
@@ -2088,6 +2350,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {number} [base]
          */
         SetIndices(buffer, base = 0){
+            if (recording)
+            {
+                recording.indices = { buffer: buffer ?? null, base };
+                return D3D_OK;
+            }
             indices = buffer ?? null;
             baseVertexIndex = base;
             return D3D_OK;
@@ -2117,6 +2384,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {number} stride
          */
         SetStreamSource(index, buffer, stride){
+            if (recording)
+            {
+                const held = recording.streams.get(index) ?? { buffer: null, stride: 0 };
+                recording.streams.set(index,
+                    { buffer: buffer ?? null, stride: buffer ? stride : held.stride });
+                return D3D_OK;
+            }
             const record = stream(index);
             record.buffer = buffer ?? null;
             if (buffer)
@@ -2257,6 +2531,35 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
+         * @param {number} width @param {number} height @param {number} depth
+         * @param {number} levels  Zero for the whole chain.
+         * @param {number} usage @param {number} format @param {number} pool
+         * @param {{ texture?: any }} out
+         */
+        CreateVolumeTexture(width, height, depth, levels, usage, format, pool, out){
+            const hr = volumeCreateResult({
+                width, height, depth, levels, usage, format, pool,
+                maxExtent: caps.maxVolumeExtent ?? 256,
+            });
+            if (hr !== D3D_OK)
+            {
+                if (isCompressed(format))
+                {
+                    reportRefusedFormat(format);
+                }
+                return hr;
+            }
+            const chain = levels || volumeLevelCount(width, height, depth);
+            const texture = createVolumeTexture({
+                width, height, depth, levels: chain, format, pool, usage,
+                count: explicitCount(pool), allocate, free,
+            });
+            renderer?.trackTexture(texture, { width, height, depth, format, levels: chain, usage });
+            out.texture = texture;
+            return D3D_OK;
+        },
+
+        /**
          * @param {number} edgeLength
          * @param {number} levels
          * @param {number} usage
@@ -2270,10 +2573,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return hr;
             }
-            out.texture = createTexture({
+            const chain = levels || fullChainOf(edgeLength, edgeLength);
+            const texture = createTexture({
                 width: edgeLength,
                 height: edgeLength,
-                levels: levels || fullChainOf(edgeLength, edgeLength),
+                levels: chain,
                 format,
                 pool,
                 usage,
@@ -2282,6 +2586,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 free,
                 cube: true,
             });
+            renderer?.trackTexture(texture,
+                { width: edgeLength, height: edgeLength, format, levels: chain, usage });
+            out.texture = texture;
             return D3D_OK;
         },
 
@@ -2396,6 +2703,47 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
+         * The picture the last present showed, as A8R8G8B8, into an image
+         * surface; the caller waits for it to come back from the GPU. The
+         * front buffer of a windowed device is the desktop's, with the window
+         * where it stands; here it is the window's picture at the surface's
+         * top-left corner, and said so once. Without a renderer that can read
+         * back there is no picture to copy, and the call is refused.
+         *
+         * @param {any} destination
+         * @returns {number | Promise<number>}
+         */
+        GetFrontBuffer(destination){
+            if (!destination)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const desc = describe(destination);
+            if (desc.Format !== D3DFMT.A8R8G8B8 || desc.Pool !== D3DPOOL.SYSTEMMEM)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const write = services.writeMemory;
+            if (!renderer?.readFront || !write)
+            {
+                reportOnce('frontbuffer', 'GetFrontBuffer was refused: this build draws nothing'
+                    + ' it can read back');
+                return D3DERR_INVALIDCALL;
+            }
+            if (presentParameters.windowed)
+            {
+                reportOnce('frontbuffer-windowed', 'GetFrontBuffer puts a windowed device\'s'
+                    + ' picture at the surface\'s corner, not where the window stands on the'
+                    + ' desktop');
+            }
+            return renderer.readFront().then((/** @type {any} */ image)=>{
+                writeFrontBuffer(destination, image, write);
+                renderer.markDirty(destination);
+                return D3D_OK;
+            });
+        },
+
+        /**
          * A blit between two surfaces, which D3D9 does not have. Neither side
          * may be a depth stencil, and it cannot stretch.
          *
@@ -2457,6 +2805,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     toPitch: pitchOf(to),
                 }))
                 : [wholeSurfaceMove(source, destination)];
+            // A texture level written this way is written as a lock writes
+            // it, which is what the next UpdateTexture from it carries.
+            for (const copy of copies)
+            {
+                destination.noteWritten?.({
+                    left: copy.at.x, top: copy.at.y,
+                    right: copy.at.x + copy.rect.right - copy.rect.left,
+                    bottom: copy.at.y + copy.rect.bottom - copy.rect.top,
+                });
+            }
             renderer?.markDirty(destination);
             return D3D_OK;
         },
@@ -2481,6 +2839,23 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (source.volume || destination.volume)
+            {
+                const update = source.volume && destination.volume && source !== destination
+                    && source.pool === D3DPOOL.SYSTEMMEM && destination.pool !== D3DPOOL.SYSTEMMEM
+                    ? volumeUpdate(source, destination)
+                    : null;
+                if (!update)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                for (const volume of update.written)
+                {
+                    renderer?.markDirty(volume);
+                }
+                out.moves = update.moves;
+                return D3D_OK;
+            }
             const top = levelSurface(source, 0);
             const into = levelSurface(destination, 0);
             if (!top || !into)
@@ -2491,6 +2866,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const to = describe(into);
             if (from.Pool !== D3DPOOL.SYSTEMMEM || to.Pool === D3DPOOL.SYSTEMMEM
                 || from.Format !== to.Format
+                || (source.cube ?? false) !== (destination.cube ?? false)
                 || from.Width !== to.Width || from.Height !== to.Height)
             {
                 return D3DERR_INVALIDCALL;
@@ -2498,18 +2874,79 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             /** @type {SurfaceMove[]} */
             const moves = [];
             const levels = Math.min(source.levels ?? 1, destination.levels ?? 1);
-            for (let level = 0; level < levels; level++)
+            for (let face = 0; face < (source.cube ? 6 : 1); face++)
             {
-                const one = levelSurface(source, level);
-                const other = levelSurface(destination, level);
-                if (one && other)
+                // What the face was written in since it was last carried, and
+                // nothing more: an update of a source nobody touched moves nothing.
+                const region = source.takeDirtyRegion?.(face) ?? null;
+                for (let level = 0; level < (region ? levels : 0); level++)
                 {
-                    moves.push(wholeSurfaceMove(one, other));
+                    const one = levelSurface(source, level, face);
+                    const other = levelSurface(destination, level, face);
+                    if (one && other)
+                    {
+                        const desc = describe(one);
+                        const rect = regionAtLevel(region, level, desc.Width, desc.Height);
+                        moves.push(rectMoveOf(one, rect, other, { x: rect.left, y: rect.top }));
+                        renderer?.markDirty(other);
+                    }
                 }
             }
             out.moves = moves;
-            renderer?.markDirty(destination);
             return D3D_OK;
+        },
+
+        /**
+         * The fixed-function transform and lighting of `vertices` vertices,
+         * read under the vertex format or the declaration bound, from
+         * `start`, into a vertex buffer from `destinationIndex`, in the format
+         * the buffer was made with (Wine's d3d8 visual.c test_sysmem_draw). A
+         * vertex shader would run in software here, which nothing does, so it
+         * is refused.
+         *
+         * @param {number} start @param {number} destinationIndex @param {number} vertices
+         * @param {any} destination @param {number} flags D3DPV
+         */
+        ProcessVertices(start, destinationIndex, vertices, destination, flags){
+            const processing = device.stageProcessing;
+            const attributes = (processing.fvf & POSITION_MASK) !== 0
+                ? decodeFvf(processing.fvf).attributes
+                    .map(attribute=>({ ...attribute, stream: 0 }))
+                : processing.fixedFunctionLayout?.attributes ?? null;
+            if (!destination || destination.type !== D3DRTYPE.VERTEXBUFFER)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            if (processing.vertexShader !== 0 || !services.readMemory || !services.writeMemory)
+            {
+                reportOnce('process', processing.vertexShader !== 0
+                    ? 'ProcessVertices through a vertex shader was refused: no shader runs on'
+                        + ' the processor'
+                    : 'ProcessVertices was refused: this build cannot write guest memory');
+                return D3DERR_INVALIDCALL;
+            }
+            if (!attributes)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            return processStreams({
+                memory: { readMemory: services.readMemory, writeMemory: services.writeMemory },
+                model,
+                attributes,
+                streamAt: index=>{
+                    const source = streams.get(index);
+                    return source?.buffer && source.stride > 0
+                        ? {
+                            base: source.buffer.base,
+                            stride: source.stride,
+                            vertices: Math.floor(source.buffer.length / source.stride),
+                        }
+                        : null;
+                },
+                start, count: vertices, destination, destinationIndex, flags,
+                destinationFvf: destination.fvf ?? 0,
+                renderer,
+            });
         },
 
         // --- shaders, which in this version are handles rather than objects ---
@@ -2519,8 +2956,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * an object, so there is nothing for the device to outlive. The new
          * shader is not bound either, whatever the documentation says.
          *
-         * @param {readonly number[]} declaration
-         * @param {readonly number[] | null} functionCode
+         * A declaration alone is a fixed-function vertex stage reading the
+         * registers it loads. With a function, the function is a vs_1_x of
+         * no newer version than the caps claim, naming no constant past the
+         * file (Wine's d3d8 test_shader and test_unsupported_shaders).
+         *
+         * @param {ArrayLike<number> | null} declaration
+         * @param {ArrayLike<number> | null} functionCode
          * @param {{ handle?: number }} out
          */
         CreateVertexShader(declaration, functionCode, out){
@@ -2528,10 +2970,87 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
+            const declared = parseDeclaration(declaration);
+            if (declared.error)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {import('../d3d9/shader.js').ParsedShader | null} */
+            let parsed = null;
+            /** @type {Uint32Array | null} */
+            let tokens = null;
+            if (functionCode)
+            {
+                tokens = functionOf(functionCode);
+                const read = parseShader(tokens);
+                if (!withinVersion(read, SHADER_KIND.VERTEX, caps.vertexShaderVersion)
+                    || !constantsWithin(read, vertexConstants.floats.length / 4))
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                parsed = declaredShader(read);
+            }
+            else if (!readableByFixedFunction(declared))
+            {
+                return D3DERR_INVALIDCALL;
+            }
             const handle = nextHandle();
-            vertexShaders.set(handle, { declaration, functionCode: functionCode ?? null });
+            vertexShaders.set(handle, {
+                handle, declaration: declared, tokens, parsed,
+                layout: parsed
+                    ? null
+                    : fixedFunctionLayoutOf({ id: handle, elements: declared.elements }),
+            });
             out.handle = handle;
             return D3D_OK;
+        },
+
+        /**
+         * The declaration a shader was made with, token for token. A caller
+         * with no buffer is told its size in bytes; one whose buffer is too
+         * small is refused and told nothing (Wine's d3d8 test_shader).
+         *
+         * @param {number} handle
+         * @param {{ bytes?: number, tokens?: Uint32Array }} out
+         * @param {number | null} room  The caller's buffer in bytes, or null for none.
+         */
+        GetVertexShaderDeclaration(handle, out, room){
+            const shader = vertexShaders.get(handle);
+            return shader ? handOver(shader.declaration.tokens, out, room) : D3DERR_INVALIDCALL;
+        },
+
+        /**
+         * The function a shader was made with, as `GetVertexShaderDeclaration`
+         * hands its declaration over: nothing, for a declaration made alone.
+         *
+         * @param {number} handle
+         * @param {{ bytes?: number, tokens?: Uint32Array }} out
+         * @param {number | null} room
+         */
+        GetVertexShaderFunction(handle, out, room){
+            const shader = vertexShaders.get(handle);
+            return shader
+                ? handOver(shader.tokens ?? new Uint32Array(0), out, room)
+                : D3DERR_INVALIDCALL;
+        },
+
+        /**
+         * Four floats a register, refused past the file. Recording, the
+         * registers go into the block and the device keeps its own (Wine's
+         * d3d8 test_shader_constant_apply).
+         *
+         * @param {number} register @param {ArrayLike<number>} values @param {number} registers
+         */
+        SetVertexShaderConstant(register, values, registers){
+            return setConstants(vertexConstants, 'vertexConstants', register, values, registers);
+        },
+
+        /**
+         * @param {number} register @param {number} registers
+         * @param {{ values?: Float32Array }} out
+         */
+        GetVertexShaderConstant(register, registers, out){
+            return vertexConstants.getF(register, registers, out);
         },
 
         /**
@@ -2546,12 +3065,24 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * pixel shader bound is an ordinary combination rather than a
          * contradiction.
          *
+         * Setting a shader loads the constants its declaration carries.
+         *
          * @param {number} handle
          */
         SetVertexShader(handle){
             if (isShaderHandle(handle) && !vertexShaders.has(handle))
             {
                 return D3DERR_INVALIDCALL;
+            }
+            if (recording)
+            {
+                recording.vertexShader = handle >>> 0;
+                return D3D_OK;
+            }
+            for (const { register, values } of vertexShaders.get(handle)?.declaration.constants
+                ?? [])
+            {
+                vertexConstants.setF(register, values, values.length / 4);
             }
             if (boundVertexShader !== handle >>> 0)
             {
@@ -2588,7 +3119,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
-         * @param {readonly number[]} functionCode
+         * A ps_1_x of no newer version than the caps claim, naming none of
+         * c8 on; like a vertex shader, it is not bound by being made (Wine's
+         * d3d8 test_shader and test_unsupported_shaders).
+         *
+         * @param {ArrayLike<number> | null} functionCode
          * @param {{ handle?: number }} out
          */
         CreatePixelShader(functionCode, out){
@@ -2596,10 +3131,44 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
+            const tokens = functionOf(functionCode);
+            const parsed = parseShader(tokens);
+            if (!withinVersion(parsed, SHADER_KIND.PIXEL, caps.pixelShaderVersion)
+                || !constantsWithin(parsed, PIXEL_CONSTANTS))
+            {
+                return D3DERR_INVALIDCALL;
+            }
             const handle = nextHandle();
-            pixelShaders.set(handle, { functionCode });
+            pixelShaders.set(handle, { handle, tokens, parsed });
             out.handle = handle;
             return D3D_OK;
+        },
+
+        /**
+         * @param {number} handle
+         * @param {{ bytes?: number, tokens?: Uint32Array }} out
+         * @param {number | null} room  See `GetVertexShaderDeclaration`.
+         */
+        GetPixelShaderFunction(handle, out, room){
+            const shader = pixelShaders.get(handle);
+            return shader ? handOver(shader.tokens, out, room) : D3DERR_INVALIDCALL;
+        },
+
+        /**
+         * c0 to c7, recorded into a state block as the vertex shader's are.
+         *
+         * @param {number} register @param {ArrayLike<number>} values @param {number} registers
+         */
+        SetPixelShaderConstant(register, values, registers){
+            return setConstants(pixelConstants, 'pixelConstants', register, values, registers);
+        },
+
+        /**
+         * @param {number} register @param {number} registers
+         * @param {{ values?: Float32Array }} out
+         */
+        GetPixelShaderConstant(register, registers, out){
+            return pixelConstants.getF(register, registers, out);
         },
 
         /** @param {number} handle */
@@ -2607,6 +3176,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             if (handle !== 0 && !pixelShaders.has(handle))
             {
                 return D3DERR_INVALIDCALL;
+            }
+            if (recording)
+            {
+                recording.pixelShader = handle >>> 0;
+                return D3D_OK;
             }
             if (boundPixelShader !== handle >>> 0)
             {
@@ -2644,16 +3218,44 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * a flag that looks only at the vertex side drops the pixel shader.
          */
         get stageProcessing(){
-            const shader = isShaderHandle(boundVertexShader);
+            const handle = isShaderHandle(boundVertexShader);
+            const shader = handle ? vertexShaders.get(boundVertexShader) ?? null : null;
+            const programmed = shader?.parsed ? shader : null;
+            const pixel = pixelShaders.get(boundPixelShader) ?? null;
+            // A handle naming no live shader -- a block applied after a
+            // delete -- is a stage nothing can draw, so it has no program.
+            const drawable = (!handle || shader) && (boundPixelShader === 0 || pixel);
             return {
-                vertexShader: shader ? boundVertexShader : 0,
-                fvf: shader ? 0 : boundVertexShader,
-                fixedFunctionVertex: !shader,
+                vertexShader: programmed || (handle && !shader) ? boundVertexShader : 0,
+                fvf: handle ? 0 : boundVertexShader,
+                fixedFunctionLayout: shader && !programmed ? shader.layout : null,
+                fixedFunctionVertex: !programmed,
                 pixelShader: boundPixelShader,
+                program: drawable && (programmed || pixel)
+                    ? {
+                        vertex: programmed?.parsed ?? null,
+                        vertexShader: programmed,
+                        vertexId: programmed?.handle ?? 0,
+                        pixel: pixel?.parsed ?? null,
+                        pixelShader: pixel,
+                        pixelId: pixel?.handle ?? 0,
+                        // The declaration a handle carries, or the one its
+                        // vertex format spells; a format is never odd, so its
+                        // number is never a handle's.
+                        declaration: shader
+                            ? shader.declaration.elements
+                            : elementsOfFormat(boundVertexShader),
+                        declarationId: shader ? shader.handle : boundVertexShader,
+                        vertexConstants,
+                        pixelConstants,
+                    }
+                    : null,
             };
         },
     };
 
+    // A GPU that is gone takes the device with it, beyond a reset.
+    stopWatchingLoss = services.onDeviceLost?.(()=>device.injectDeviceLoss(false));
     return device;
 }
 

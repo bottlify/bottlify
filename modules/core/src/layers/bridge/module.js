@@ -625,6 +625,19 @@ export const bridgeModule = {
             },
 
             /**
+             * Gives back an interface the program has no Release for.
+             *
+             * @param {any} object
+             * @param {string} interfaceId
+             * @returns {boolean} whether it was published
+             */
+            unpublishInterface(object, interfaceId){
+                return live() && state.vtables
+                    ? state.vtables.unpublish(object, interfaceId)
+                    : false;
+            },
+
+            /**
              * How many host calls are suspended, waiting on something. A driver
              * loop that sees this above zero has to let the host run, not merely
              * flush microtasks.

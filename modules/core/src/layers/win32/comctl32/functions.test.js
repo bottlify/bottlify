@@ -108,6 +108,24 @@ test('a structure of the wrong size is refused rather than half read', ()=>{
     assert.equal(m.comctl._TrackMouseEvent.handler([0x210]), 0);
 });
 
+test('_TrackMouseEvent is user32\'s TrackMouseEvent when there is one to hand it to', ()=>{
+    // comctl32 documents _TrackMouseEvent as calling TrackMouseEvent where
+    // the system has it, so the request is tracked and the answer is its.
+    const memory = new Uint8Array(0x40);
+    /** @type {number[]} */
+    const asked = [];
+    const comctl = /** @type {any} */ (createComctlFunctions({
+        readMemory: (address, length)=>memory.slice(address, address + length),
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        trackMouseEvent: request=>{
+            asked.push(request);
+            return 0;
+        },
+    }));
+    assert.equal(comctl._TrackMouseEvent.handler([0x20]), 0, 'its answer, a refusal included');
+    assert.deepEqual(asked, [0x20]);
+});
+
 test('InitCommonControls is the export ordinal 17 names, and takes nothing', ()=>{
     const m = machine();
     assert.equal(COMCTL32_ORDINALS[17], 'InitCommonControls');

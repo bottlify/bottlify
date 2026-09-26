@@ -129,7 +129,7 @@ test('draining part of the queue leaves the rest, oldest first', ()=>{
 
 test('overflow drops the oldest and is reported once', ()=>{
     const { it } = device(KEYBOARD);
-    it.setBufferSize(2);
+    it.setBufferSize(3);
     for (const code of [1, 2, 3, 4])
     {
         it.post({ kind: 'key', code, down: true });
@@ -142,6 +142,36 @@ test('overflow drops the oldest and is reported once', ()=>{
         'reported twice, a program resynchronises for ever');
 });
 
+test('a buffer of N holds N - 1 events', ()=>{
+    // joystick8.c's buffered reads, in miniature. A buffer of one holds
+    // nothing: a change overflows it, a peek reports that and 0 events, and
+    // the read after the peek is DI_OK -- the peek took the report.
+    const one = device(KEYBOARD).it;
+    one.setBufferSize(1);
+    one.post({ kind: 'key', code: DIK_A, down: true });
+    assert.deepEqual(one.drain(1, true), { events: [], overflow: true });
+    assert.deepEqual(one.drain(1), { events: [], overflow: false });
+
+    // A buffer of ten: five changes, one peeked and four read, leave one;
+    // nine more make ten waiting for nine places, and the one that goes is
+    // the one left over from before.
+    const { it } = device(KEYBOARD);
+    it.setBufferSize(10);
+    /** @param {number[]} codes */
+    const press = codes=>codes.forEach(code=>it.post({ kind: 'key', code, down: true }));
+    press([1, 2, 3, 4, 5]);
+    assert.deepEqual(it.drain(1, true).events.map(e=>e.offset), [1]);
+    assert.deepEqual(it.drain(4).events.map(e=>e.offset), [1, 2, 3, 4]);
+    press([11, 12, 13, 14, 15]);
+    press([21, 22, 23, 24]);
+    const next = it.drain(1);
+    assert.equal(next.overflow, true);
+    assert.deepEqual(next.events.map(e=>e.offset), [11]);
+    const rest = it.drain(10);
+    assert.equal(rest.overflow, false);
+    assert.deepEqual(rest.events.map(e=>e.offset), [12, 13, 14, 15, 21, 22, 23, 24]);
+});
+
 test('setting a buffer size clears whatever was queued under the old one', ()=>{
     const { it } = device(KEYBOARD);
     it.setBufferSize(32);
@@ -150,16 +180,25 @@ test('setting a buffer size clears whatever was queued under the old one', ()=>{
     assert.equal(it.queued, 0);
 });
 
-test('unacquiring throws away the backlog and the pending motion', ()=>{
+test('unacquiring keeps the buffer and throws away the pending motion', ()=>{
+    // device8.c test_sys_mouse: events buffered before Unacquire are still
+    // there after it, and an overflow is still reported; what arrives while
+    // nobody holds the device is never buffered at all.
     const { it } = device(MOUSE);
-    it.setBufferSize(32);
+    it.setBufferSize(3);
     it.post({ kind: 'mouseMove', x: 40, y: 40 });
+    it.post({ kind: 'mouseMove', x: 1, y: 0 });
     it.unacquire();
-    assert.equal(it.queued, 0);
+    assert.equal(it.post({ kind: 'mouseMove', x: 5, y: 5 }), false);
+    assert.equal(it.queued, 2);
     it.acquire();
     const state = it.mouseState();
     assert.equal(state.x, 0, 'a program taking the device back reads it fresh');
     assert.equal(state.y, 0);
+    const kept = it.drain(10);
+    assert.equal(kept.overflow, true, 'three events for two places, reported after it');
+    assert.deepEqual(kept.events.map(e=>[e.offset, e.data]),
+        [[DIMOUSE_OFS.Y, 40], [DIMOUSE_OFS.X, 1]]);
 });
 
 test('a mouse event is queued at the offset of the axis it moved', ()=>{

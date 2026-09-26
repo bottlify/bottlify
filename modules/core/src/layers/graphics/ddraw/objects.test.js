@@ -30,17 +30,20 @@ import {
     DDERR_SURFACEBUSY,
     DDERR_SURFACELOST,
     DDERR_SURFACENOTATTACHED,
+    DDERR_NOTONMIPMAPSUBLEVEL,
     DDPCAPS_4BIT,
     DDPCAPS_8BIT,
     DDPCAPS_ALLOW256,
     DDPCAPS_PRIMARYSURFACE,
     DDPF_PALETTEINDEXED8,
     DDPF_RGB,
+    DDSCAPS2_MIPMAPSUBLEVEL,
     DDSCAPS2_TEXTUREMANAGE,
     DDSCAPS_BACKBUFFER,
     DDSCAPS_COMPLEX,
     DDSCAPS_FLIP,
     DDSCAPS_FRONTBUFFER,
+    DDSCAPS_MIPMAP,
     DDSCAPS_OFFSCREENPLAIN,
     DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY,
@@ -53,6 +56,7 @@ import {
     DDSD_BACKBUFFERCOUNT,
     DDSD_CAPS,
     DDSD_HEIGHT,
+    DDSD_MIPMAPCOUNT,
     DDSD_PIXELFORMAT,
     DDSD_WIDTH,
     DD_OK,
@@ -598,6 +602,35 @@ test('a flip chain runs front to back and closes the loop', ()=>{
     assert.ok(ddraw.destroyed);
 });
 
+test('GetAttachedSurface finds the attached surface that has every capability asked for', ()=>{
+    // Wine's ddraw7 test_gdi_surface asks a flip chain's front for
+    // DDSCAPS_BACKBUFFER and is handed the buffer behind it.
+    const { ddraw, front, back1, back2 } = withFlipChain();
+    /** @param {any} surface @param {number} wanted */
+    const lookFor = (surface, wanted)=>{
+        const found = surface.getAttachedSurface(wanted);
+        found.surface?.release();
+        return found;
+    };
+
+    assert.equal(lookFor(front, DDSCAPS_BACKBUFFER).surface, back1);
+    assert.equal(lookFor(front, DDSCAPS_BACKBUFFER | DDSCAPS_FLIP).surface, back1);
+    assert.equal(lookFor(back1, DDSCAPS_FLIP).surface, back2);
+    assert.equal(lookFor(back1, DDSCAPS_BACKBUFFER).hr, DDERR_NOTFOUND,
+        'only the first buffer behind the front is the back buffer');
+    assert.equal(lookFor(front, DDSCAPS_ZBUFFER).hr, DDERR_NOTFOUND);
+
+    const depth = makeOffscreen(ddraw, { caps: DDSCAPS_ZBUFFER, width: 640, height: 480 });
+    assert.equal(front.addAttachedSurface(depth), DD_OK);
+    assert.equal(lookFor(front, DDSCAPS_ZBUFFER).surface, depth);
+    assert.equal(lookFor(front, DDSCAPS_ZBUFFER | DDSCAPS_FLIP).hr, DDERR_NOTFOUND,
+        'every capability asked for, not any one of them');
+
+    assert.equal(depth.release(), 1);
+    assert.equal(front.release(), 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+});
+
 test('only the front of a chain flips, and only to a buffer of its own', ()=>{
     const { ddraw, front, back1, back2, back3 } = withFlipChain();
     const stranger = makeOffscreen(ddraw, { width: 640, height: 480 });
@@ -817,6 +850,41 @@ test('a depth buffer attaches in its own slot, beside the flip chain', ()=>{
     assert.ok(ddraw.destroyed);
 });
 
+test('detaching null detaches everything the surface attached, and nothing the runtime did',
+    ()=>{
+        const ddraw = withLevel();
+        const head = makeOffscreen(ddraw);
+        const middle = makeOffscreen(ddraw);
+        const tail = makeOffscreen(ddraw);
+        const depth = makeOffscreen(ddraw, { caps: DDSCAPS_ZBUFFER });
+        assert.equal(head.addAttachedSurface(middle), DD_OK);
+        assert.equal(middle.addAttachedSurface(tail), DD_OK);
+        assert.equal(head.addAttachedSurface(depth), DD_OK);
+
+        assert.equal(head.deleteAttachedSurface(null), DD_OK);
+        assert.deepEqual(head.enumAttachedSurfaces(), []);
+        assert.equal(head.caps & DDSCAPS_FLIP, 0, 'nothing is attached, so nothing flips');
+        for (const surface of [middle, tail, depth])
+        {
+            assert.equal(surface.refCount, 1, 'each gave back the reference the head held');
+        }
+
+        const chain = withFlipChain();
+        assert.equal(chain.front.deleteAttachedSurface(null), DD_OK);
+        const behind = chain.front.getAttachedSurface(DDSCAPS_FLIP);
+        assert.equal(behind.surface, chain.back1, 'a complex surface keeps its buffers');
+        behind.surface?.release();
+
+        for (const surface of [head, middle, tail, depth])
+        {
+            assert.equal(surface.release(), 0);
+        }
+        assert.equal(chain.front.release(), 0);
+        assert.equal(chain.ddraw.release('IDirectDraw7'), 0);
+        assert.equal(ddraw.release('IDirectDraw7'), 0);
+        assert.ok(ddraw.destroyed);
+    });
+
 // --- what CreateSurface refuses, through the object ---
 
 test('a primary flip chain needs the screen, and says so only once it is well formed', ()=>{
@@ -856,6 +924,155 @@ test('a surface with no size is refused, and a primary takes the screen\'s', ()=
     assert.equal(primary.release(), 0);
     assert.equal(ddraw.release('IDirectDraw7'), 0);
     assert.ok(ddraw.destroyed);
+});
+
+// --- mip chains ---
+
+/**
+ * @param {ReturnType<typeof createDirectDraw>} ddraw
+ * @param {{ caps: number, width: number, height: number, count?: number,
+ *   version?: 1 | 2 | 4 | 7 }} options
+ */
+function requestMips(ddraw, options){
+    return ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT | (options.count === undefined ? 0 : DDSD_MIPMAPCOUNT),
+        caps: options.caps,
+        width: options.width,
+        height: options.height,
+        mipMapCount: options.count ?? 0,
+        pixelFormat: RGB32,
+    }, { version: options.version ?? 7 });
+}
+
+/** @param {any} top @returns {any[]} the chain from its top, by DDSCAPS2_MIPMAPSUBLEVEL */
+function levelsOf(top){
+    const levels = [top];
+    for (;;)
+    {
+        const found = levels[levels.length - 1].getAttachedSurface(0, DDSCAPS2_MIPMAPSUBLEVEL);
+        if (found.hr !== DD_OK)
+        {
+            assert.equal(found.hr, DDERR_NOTFOUND);
+            return levels;
+        }
+        found.surface.release();
+        levels.push(found.surface);
+    }
+}
+
+const MIPPED = DDSCAPS_TEXTURE | DDSCAPS_COMPLEX | DDSCAPS_MIPMAP;
+
+test('CreateSurface refuses a mip chain that is not a complex texture, or has no levels', ()=>{
+    // Wine's ddraw1, ddraw2, ddraw4 and ddraw7 test_mipmap, row by row.
+    const ddraw = withLevel();
+    /** @type {[{ caps: number, count?: number }, number][]} */
+    const refused = [
+        [{ caps: DDSCAPS_MIPMAP }, DDERR_INVALIDCAPS],
+        [{ caps: DDSCAPS_COMPLEX }, DDERR_INVALIDCAPS],
+        [{ caps: DDSCAPS_MIPMAP | DDSCAPS_COMPLEX }, DDERR_INVALIDCAPS],
+        [{ caps: DDSCAPS_TEXTURE | DDSCAPS_COMPLEX }, DDERR_INVALIDCAPS],
+        [{ caps: DDSCAPS_TEXTURE | DDSCAPS_MIPMAP, count: 1 }, DDERR_INVALIDCAPS],
+        [{ caps: DDSCAPS_TEXTURE | DDSCAPS_MIPMAP, count: 3 }, DDERR_INVALIDCAPS],
+        [{ caps: MIPPED, count: 0 }, DDERR_INVALIDPARAMS],
+        [{ caps: MIPPED, count: 9 }, DDERR_INVALIDPARAMS],
+    ];
+    for (const [options, hr] of refused)
+    {
+        const made = requestMips(ddraw, { width: 128, height: 32, ...options });
+        assert.equal(made.hr, hr, JSON.stringify(options));
+        assert.equal(made.surface, null);
+    }
+    assert.equal(ddraw.surfaceCount, 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+});
+
+test('a complex mip-mapped texture is a chain of halving levels, as long as asked or full', ()=>{
+    const ddraw = withLevel();
+    /** @type {[number, number, number | undefined, number][]} */
+    const chains = [
+        [128, 32, undefined, 8], [32, 64, undefined, 7], [128, 32, 3, 3], [128, 128, 8, 8],
+    ];
+    for (const [width, height, count, expected] of chains)
+    {
+        const made = requestMips(ddraw, { caps: MIPPED, width, height, count });
+        assert.equal(made.hr, DD_OK);
+        const levels = levelsOf(made.surface);
+        assert.equal(levels.length, expected, `${width}x${height}`);
+        levels.forEach((level, index)=>{
+            assert.equal(level.width, Math.max(1, width >> index));
+            assert.equal(level.height, Math.max(1, height >> index));
+            assert.equal(level.pitch, level.width * 4);
+            assert.equal(level.mipMapCount, expected - index, 'each level counts itself and below');
+            assert.equal(level.caps & MIPPED, MIPPED);
+            assert.equal(level.caps2 & DDSCAPS2_MIPMAPSUBLEVEL,
+                index === 0 ? 0 : DDSCAPS2_MIPMAPSUBLEVEL, 'every level but the top is a sublevel');
+            if (index > 0)
+            {
+                assert.notEqual(level.buffer, levels[index - 1].buffer);
+            }
+        });
+        assert.deepEqual(made.surface?.enumAttachedSurfaces(), [levels[1]]);
+        assert.equal(made.surface?.getAttachedSurface(DDSCAPS_COMPLEX).surface, levels[1],
+            'the level below is found by the caps the chain shares, as Wine\'s walks ask');
+        levels[1].release();
+        assert.equal(made.surface?.release(), 0, 'releasing the top releases the chain');
+        assert.ok(levels.every(level=>level.destroyed));
+    }
+
+    const single = requestMips(ddraw,
+        { caps: DDSCAPS_TEXTURE | DDSCAPS_MIPMAP, width: 128, height: 32 });
+    assert.equal(single.hr, DD_OK);
+    assert.equal(single.surface?.mipMapCount, 1, 'not complex: a chain of the one level');
+    assert.equal(levelsOf(single.surface).length, 1);
+    assert.equal(single.surface?.release(), 0);
+
+    assert.equal(ddraw.surfaceCount, 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+});
+
+test('before IDirectDraw7 a full mip chain ends when the shorter side reaches one', ()=>{
+    // Wine's ddraw1, ddraw2 and ddraw4 test_mipmap expect six levels of
+    // 128x32 and of 32x64, where ddraw7 expects eight and seven.
+    for (const version of /** @type {const} */ ([1, 2, 4]))
+    {
+        const ddraw = withLevel({ version });
+        for (const [width, height] of [[128, 32], [32, 64]])
+        {
+            const made = requestMips(ddraw, { caps: MIPPED, width, height, version });
+            assert.equal(made.hr, DD_OK);
+            assert.equal(made.surface?.mipMapCount, 6, `version ${version}, ${width}x${height}`);
+            assert.equal(levelsOf(made.surface).length, 6);
+            assert.equal(made.surface?.release(), 0);
+        }
+    }
+});
+
+test('a mip sublevel takes no palette, no colour key and no detaching of its own', ()=>{
+    // Wine's ddraw7 test_palette_complex, test_ckey_complex and
+    // test_device_load: DDERR_NOTONMIPMAPSUBLEVEL, and nothing attached.
+    const ddraw = withLevel();
+    const top = /** @type {any} */ (requestMips(ddraw, { caps: MIPPED, width: 16, height: 16 })
+        .surface);
+    const [, level1] = levelsOf(top);
+    const palette = /** @type {any} */ (ddraw.createPalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256,
+        new Array(256).fill(0)).palette);
+
+    assert.equal(level1.setPalette(palette), DDERR_NOTONMIPMAPSUBLEVEL);
+    assert.equal(level1.getPalette().hr, DDERR_NOPALETTEATTACHED);
+    assert.equal(level1.setColorKey(DDCKEY_SRCBLT, { low: 0xff, high: 0xff }),
+        DDERR_NOTONMIPMAPSUBLEVEL);
+    assert.equal(level1.getColorKey(DDCKEY_SRCBLT).hr, DDERR_NOCOLORKEY);
+    assert.equal(top.setColorKey(DDCKEY_SRCBLT, { low: 0xff, high: 0xff }), DD_OK,
+        'the top level is the texture, and takes both');
+    assert.equal(top.setPalette(palette), DD_OK);
+    assert.equal(top.deleteAttachedSurface(level1), DDERR_CANNOTDETACHSURFACE,
+        'a level the chain was made with stays');
+    assert.equal(top.deleteAttachedSurface(null), DD_OK);
+    assert.equal(levelsOf(top).length, 5);
+
+    assert.equal(top.release(), 0);
+    assert.equal(palette.release(), 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
 });
 
 // --- the display mode, and the surfaces that take their shape from it ---
@@ -1000,11 +1217,12 @@ test('a surface has no colour key until one is set, and each kind is its own', (
         'the destination key is a different key');
 
     assert.equal(surface.setColorKey(DDCKEY_DESTBLT, { low: 1, high: 2 }), DD_OK);
-    assert.deepEqual(surface.getColorKey(DDCKEY_DESTBLT).key, { low: 1, high: 2 });
+    assert.deepEqual(surface.getColorKey(DDCKEY_DESTBLT).key, { low: 1, high: 1 },
+        'a range named without DDCKEY_COLORSPACE is its low value');
 
     assert.equal(surface.setColorKey(DDCKEY_SRCBLT, null), DD_OK);
     assert.equal(surface.getColorKey(DDCKEY_SRCBLT).hr, DDERR_NOCOLORKEY, 'null removes it');
-    assert.deepEqual(surface.getColorKey(DDCKEY_DESTBLT).key, { low: 1, high: 2 },
+    assert.deepEqual(surface.getColorKey(DDCKEY_DESTBLT).key, { low: 1, high: 1 },
         'and leaves the other alone');
 
     assert.equal(surface.release(), 0);
@@ -1190,4 +1408,108 @@ test('a device context on a palettised surface carries its palette as pixels', (
     assert.equal(held.release(), 0);
     assert.equal(ddraw.release('IDirectDraw7'), 0);
     assert.ok(ddraw.destroyed);
+});
+
+test('a copy of a surface\'s pixels kept elsewhere is asked for them, and told of every write',
+    async()=>{
+        // A device rendering into a surface on the GPU holds its pixels; the
+        // guest's bytes are brought up to date before they are read, and the
+        // device hears when the program wrote them.
+        const ddraw = withLevel();
+        const surface = makeOffscreen(ddraw);
+        const other = makeOffscreen(ddraw);
+        /** @type {string[]} */
+        const heard = [];
+        let resolve = ()=>{};
+        const stop = ddraw.watchPixels({
+            readBack: target=>{
+                if (target !== surface)
+                {
+                    return null;
+                }
+                heard.push('read');
+                return new Promise(done=>{
+                    resolve = ()=>done(undefined);
+                });
+            },
+            written: target=>{
+                heard.push(target === surface ? 'written' : 'written elsewhere');
+            },
+        });
+
+        assert.equal(other.pixelsCurrent(), null, 'a surface nobody holds a copy of is current');
+        const pending = surface.pixelsCurrent();
+        assert.ok(pending, 'the holder is asked');
+        let settled = false;
+        void pending?.then(()=>{
+            settled = true;
+        });
+        await Promise.resolve();
+        assert.equal(settled, false, 'and the bytes are current only once it answers');
+        resolve();
+        await pending;
+        assert.equal(settled, true);
+
+        // A lock that only reads leaves the copy as it was; any other lock,
+        // a device context and a change the program announces are writes.
+        assert.equal(surface.lock(null, 0x10).hr, DD_OK);
+        assert.equal(surface.unlock(null), DD_OK);
+        assert.deepEqual(heard, ['read']);
+        assert.equal(surface.lock(null, 0).hr, DD_OK);
+        assert.equal(surface.unlock(null), DD_OK);
+        assert.equal(surface.getDC().hr, DD_OK);
+        assert.equal(surface.releaseDC(0), DD_OK);
+        surface.changeUniquenessValue();
+        assert.deepEqual(heard, ['read', 'written', 'written', 'written']);
+
+        stop();
+        assert.equal(surface.pixelsCurrent(), null, 'and nobody is asked once it stops');
+        assert.equal(surface.release(), 0);
+        assert.equal(other.release(), 0);
+        assert.equal(ddraw.release('IDirectDraw7'), 0);
+    });
+
+test('a surface gives its pixels back with its last reference, a flip chain each buffer once', ()=>{
+    // Pixels come out of the guest's heap, and a program that makes and drops
+    // surfaces -- a mode change, a level loaded -- would otherwise exhaust it.
+    // A flip swaps the buffers between the chain's members, so what each one
+    // frees is whatever it holds when it goes.
+    let next = 0x100000;
+    /** @type {number[]} */
+    const handedOut = [];
+    /** @type {number[]} */
+    const freed = [];
+    const ddraw = createDirectDraw({
+        version: 7,
+        allocate: bytes=>{
+            const address = next;
+            next += (bytes + 0xfff) & ~0xfff;
+            handedOut.push(address);
+            return address;
+        },
+        free: address=>{
+            freed.push(address);
+        },
+    });
+    ddraw.setCooperativeLevel(HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+
+    const plain = makeOffscreen(ddraw);
+    assert.equal(plain.lock().surfacePointer, handedOut[0], 'the lock hands out that address');
+    plain.unlock(null);
+    assert.equal(plain.release(), 0);
+    assert.deepEqual(freed, [handedOut[0]]);
+
+    const created = ddraw.createSurface({
+        flags: DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        caps: DDSCAPS_PRIMARYSURFACE | DDSCAPS_COMPLEX | DDSCAPS_FLIP,
+        backBufferCount: 2,
+    });
+    assert.equal(created.hr, DD_OK);
+    const front = /** @type {NonNullable<typeof created.surface>} */ (created.surface);
+    assert.equal(front.flip(null), DD_OK);
+    const chain = handedOut.slice(1);
+    assert.equal(chain.length, 3);
+    assert.equal(front.release(), 0);
+    assert.deepEqual([...freed.slice(1)].sort(), [...chain].sort(),
+        'every buffer of the chain once, whichever member held it at the end');
 });

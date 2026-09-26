@@ -29,9 +29,9 @@ the assembler in `src/app.js` does those on top of what this layer provides (see
 | `requires` | `['cpu', 'memory', 'log']`     |
 
 Source: `src/layers/loader/module.js` and `src/layers/loader/internal/{pe,image,synth,
-delayload,tls,resources,dependencies,init}.js`. Of these, only `pe`, `image`, `synth` and
-`delayload` are reached through the module API; `tls`, `resources`, `dependencies` and `init`
-are pure helpers the process assembler imports directly.
+delayload,tls,resources,dependencies,init,mangling}.js`. Of these, only `pe`, `image`, `synth` and
+`delayload` are reached through the module API; `tls`, `resources`, `dependencies`, `init` and
+`mangling` are pure helpers the process assembler imports directly.
 
 ### Configuration
 
@@ -71,10 +71,11 @@ hook of the same shape that says where a call to an unclaimed import should land
 `parsePe(bytes)` reads the DOS and PE signatures, requires machine `0x014c` (i386) and the
 PE32 optional-header magic `0x10b`, and returns `imageBase`, `entryPointRva`, `sizeOfImage`,
 `sectionAlignment`, `sizeOfHeaders`, `subsystem`, `stackReserve`, `stackCommit`, `relocatable`
-(a non-empty base-relocation directory), the section table with its read/write/execute bits,
-and every data directory. `rvaToFileOffset` maps an RVA through the sections — a section
-occupies the larger of its virtual and raw sizes, and RVAs below `sizeOfHeaders` map
-one-to-one.
+(a non-empty base-relocation directory), `library` (the COFF header's `IMAGE_FILE_DLL`: only a
+library's imports are resolved and its entry point run when a program loads one by name), the
+section table with its read/write/execute bits, and every data directory. `rvaToFileOffset` maps
+an RVA through the sections — a section occupies the larger of its virtual and raw sizes, and RVAs
+below `sizeOfHeaders` map one-to-one.
 
 `readImports` walks the import descriptors, reading the lookup table (ILT) or, when a linker
 omitted it, the address table (IAT) before anything has overwritten it. Each entry is by name
@@ -122,13 +123,16 @@ touched now has to exist.
 Patching an IAT covers calls a program makes through its own import table. It does nothing for
 a program that resolves a name at run time, walks an export directory itself, or copies the
 first bytes of an exported function — and all three are ordinary. So every system library is a
-real PE32 DLL image in guest memory: one `.text` section with page-aligned section and file
+real PE32 DLL image in guest memory: a `.text` section with page-aligned section and file
 alignment (so the emitted bytes are simultaneously the file and the mapping), a sixteen-byte
 trampoline per export (`jmp rel32` to the bridge stub, padded with `int3`), then the export
 directory with its function, name and name-ordinal tables and the strings. An export given
-`data` rather than a target is a variable: its address is the bytes, in its own slot when they
-fit and otherwise after the directory, aligned like a slot -- the runtime's `_iob`, twenty
-records, is one of those.
+`data` rather than a target is a variable: its address is the bytes, in a `.data` section of its
+own on the pages after the code, each aligned like a slot, named in the section table as
+initialised read-write data -- the runtime's `_iob`, twenty records, is one of those. A program
+and the runtime's own functions both write those variables (a stream's `_flag`, the file mode),
+where the code beside them stays read-only; a module that exports no variable is the one
+section.
 
 Declared ordinals are honoured exactly and the rest are assigned above them, so an import by
 number binds to the function the program compiled against. The name table is sorted so a
@@ -137,17 +141,28 @@ RVA falls inside the directory's range and reads as a forwarder. An `entryPoint`
 becomes `AddressOfEntryPoint`, for a module that has a `DllMain`.
 
 `synthesise` registers the module as an `IMAGE` region, writes it, and `protect`s it to
-`rx`. The returned `addressOf(name)` is the trampoline's address — and because the assembler
-binds imports and answers `GetProcAddress` from the same map, the address a program takes at
-run time is the one its import was bound to, and the two compare equal as they do on Windows.
+`rx`; a `.data` section is a region of its own, `<name> .data`, left `rw`. The returned
+`addressOf(name)` is the trampoline's address — and because the assembler binds imports and
+answers `GetProcAddress` from the same map, the address a program takes at run time is the one
+its import was bound to, and the two compare equal as they do on Windows.
 
 ### Where system modules go
 
 The assembler places system modules at `0x02000000 + index * 0x00100000` (a megabyte apart) in
 the order the layers list their libraries, then maps the libraries a program ships above them
 (in dependency order from `planDependencies`, `internal/dependencies.js`: depth-first, a
-dependency before what depends on it, cycles visited once, KnownDLL names skipped). A name that
-is not a KnownDLL is looked for on the volume, even when the engine has a table for it — that
+dependency before what depends on it, cycles visited once, KnownDLL names skipped, and the
+executable's own file name counted as already there, as Windows looks in the loaded-module list
+before the disk -- a library that imports from the program is bound to the program itself, not to
+a second copy read off the volume whose entry point would run the program's start-up as a
+`DllMain`). Every shipped library is mapped before any is bound, and they are bound after the
+program's own image is mapped and known by name. A library goes at the next base nothing holds
+if it carries relocations; one without relocations goes at its own preferred base when that lies
+in the modules' space and nothing holds it, and is otherwise refused and reported missing, as the
+PE format says a loader refuses an image whose base is not available. Nothing is placed at or
+above the pool of thread stacks: a library that does not fit below it is refused as `no room`,
+whether the program shipped it or loads it at run time. A name that is not a KnownDLL is
+looked for on the volume, even when the engine has a table for it — that
 file is what a Windows loader maps, and the table is only the fallback when the program did not
 bring one (the set is `win32.knownDlls()`, from Wine's `[KnownDLLs]` registry defaults). The
 redistributable runtimes a layer stands in for -- `audio.runtimes()` (the MPEG provider a sound
@@ -156,12 +171,15 @@ are answered from the table the same way, whoever's copy the program brought: th
 that such a runtime is ours (`roadmap/decisions.md`), and a copy found first runs the whole decoder
 as emulated x86 (`answeredByEngine` in `src/app.js`). The
 search order is `libraryCandidates` in `src/app.js`: the program's own directory first, then
-`C:\WINDOWS\system32\` and `C:\WINDOWS\`, which is where the engine mounts the DirectX runtime —
-so a title that imported `d3dx9_26.dll` without shipping one is bound to the real redistributable
-in the system volume, not to the engine's `d3dx9_*` table. The run-time `LoadLibrary` path makes
-the same choice. Then the assembler places a `process-startup` arena. The name/base module table
-(`byName`, `byBase`, `addressOf`, `addressOfOrdinal`, `attached`) lives in `src/app.js`, not in
-this layer; `list()` here is the flat record of what was placed.
+`C:\WINDOWS\system32\` and `C:\WINDOWS\`, which is where a title's DirectX setup puts the runtime —
+so a title that imported `d3dx9_26.dll` without shipping one, once its installer has run, is bound
+to the real redistributable in `system32`, not to the engine's `d3dx9_*` table. The run-time
+`LoadLibrary` path makes the same choice. Then the assembler places a `process-startup` arena where a library would fit.
+The name/base module table (`byName`, `byBase`, `addressOf`, `addressOfOrdinal`, `attached`,
+`loaded`, `references`) lives in `src/app.js`, not in this layer; `list()` here is the flat record
+of what was placed. Whether a library is loaded, which `GetModuleHandle` and `PEB->Ldr` answer
+about, how `LoadLibraryEx`'s flags map a library, and how `FreeLibrary` unloads one are the
+assembler's too ([`win32.md`](./win32.md), "The process model").
 
 The program's own image is in that table too, known by its file name as well as its base: a
 program that loads or asks for a handle to itself by name is handed the mapping it is already
@@ -262,13 +280,29 @@ linked against, not loaded by name, and a library reads that to choose between t
 different initialisations. The stub ends with a `jmp` to the program's entry. It is guest code
 on the process's first thread, as a real loader does it, rather than host-driven callbacks.
 
+### Decorated C++ names (`internal/mangling.js`)
+
+`mangledCall(name)` reads a Visual C++ decorated name (`?...`) for what a stub standing in for it
+must know: its calling convention, from the convention letter, and how many bytes of arguments the
+callee pops -- the sum of its parameters' sizes, a member's `this` travelling in `ECX` for
+`thiscall`, the hidden pointer a class returned by value goes through, and nothing for `cdecl`.
+Only as much of the grammar is read as it takes to find where each parameter ends: names,
+templates, pointers and references to anything, and the back-references that shorten a repeated
+one. What the name does not carry -- the size of a class passed or returned by value, whether a
+constructor takes the flag a class with virtual bases passes to it -- answers `argBytes: null`, not
+a guess. A name that is not a decorated function answers `null`.
+
 ### Resources (`internal/resources.js`)
 
 `findResource(bytes, image, type, name, language?)`, `loadString(bytes, image, id, language?)`
 and `listResources` read the three-level resource tree. Two traps the code names: every offset
 within the tree is directory-relative but the leaf's `OffsetToData` is an RVA; and a named entry
 is a counted UTF-16 string with no terminator. Strings live in bundles of sixteen under
-`RT_STRING`.
+`RT_STRING`. A language named is that language alone; none named is LANG_NEUTRAL, the search
+Windows makes: `UI_LANGUAGE` (0x0409, the answer `GetUserDefaultUILanguage` gives, read from here),
+its primary language with `SUBLANG_NEUTRAL`, 0x0000, 0x0400, English, and only then the first
+entry -- so a program carrying its dialogs and strings in many languages gets en-US rather than
+whichever sorts first. `FindResource`, `LoadString`, dialogs and menus all look up this way.
 
 ## 4. Limitations and divergences
 
@@ -286,10 +320,13 @@ is a counted UTF-16 string with no terminator. Strings live in bundles of sixtee
   call to one lands wherever `missing` pointed, or on the name block's RVA if no hook was given.
   What the assembler's hook does with the call — answer it or stop the process — is decided by
   the name and the library ([`win32.md`](./win32.md), "From a table to a module").
-- **Images are never unmapped**; `list()` and the memory regions only grow.
-- **Synthesised modules are console-subsystem DLLs** with one section and no resources,
-  version information, or imports of their own; a program inspecting them beyond the export
-  directory sees that.
+- **This layer never unmaps an image**; `list()` only grows. A library the program loaded by
+  name and freed for the last time is unmapped by the assembler, its region given back to the
+  memory layer.
+- **Synthesised modules are console-subsystem DLLs** with a code section, a data section when
+  they export a variable, and no resources, version resource or imports of their own; a program
+  inspecting them beyond the export directory sees that. (`VERSION.dll` answers a version block
+  for them all the same; see [`win32.md`](./win32.md).)
 - **Export names must be non-empty ASCII** and unique within a module; a declared ordinal
   must be a positive integer and unique.
 - **TLS callbacks are capped at 64** per image — a guard against a missing terminator, not a
@@ -321,19 +358,21 @@ Unit tests (`npm test`; filter with `node --test src/layers/loader/internal/<fil
 
 | file | kind | covers |
 |------|------|--------|
-| `internal/pe.test.js` | contract | Headers of a real 32-bit console executable, refusals (no MZ, truncated PE header, wrong machine), import names, RVA translation past raw data, an image without relocations refusing to move, building the image binds the IAT, an unclaimed import is reported, the export directory round-trips the synthesiser's output, a forwarder is a string not code. |
-| `internal/synth.test.js` | contract | The image parses as PE32 at its base, directory 0 leads to the exports, every name resolves to a trampoline that jumps to its stub, sorted name table, dense and explicit ordinals with gaps, signed displacements, an export-less module, invalid inputs refused, a pinned-and-assigned mix, an export as the entry point. |
+| `internal/pe.test.js` | contract | Headers of a real 32-bit console executable, refusals (no MZ, truncated PE header, wrong machine), import names, RVA translation past raw data, an image without relocations refusing to move, a program not a library until its COFF header says `IMAGE_FILE_DLL`, building the image binds the IAT, an unclaimed import is reported, the export directory round-trips the synthesiser's output, a forwarder is a string not code. |
+| `internal/synth.test.js` | contract | The image parses as PE32 at its base, directory 0 leads to the exports, every name resolves to a trampoline that jumps to its stub, sorted name table, dense and explicit ordinals with gaps, signed displacements, an export-less module, invalid inputs refused, a pinned-and-assigned mix, an export as the entry point, variables in a writable data section apart from the code. |
+| `internal/mangling.test.js` | contract | A C runtime class's member is `thiscall` popping its parameters only, a class returned by value goes through a hidden pointer, `stdcall` pops every parameter (eight bytes for the wide ones), `fastcall` only what did not fit in `ECX` and `EDX`, `cdecl` nothing; what the name does not carry is not known, and a name that is not a decorated function is not read as one. |
 | `internal/delayload.test.js` | contract | RVA versus VA descriptors reading the same, the report shaped like an ordinary import, slots as RVAs, ordinal imports, the terminator, images without the directory, binding both storage forms alike, unclaimed entries left as written or pointed by `missing`, bound/unload tables, multiple descriptors, the module-handle slot untouched. |
 | `internal/tls.test.js` | contract | The four addresses come back as RVAs, template and zero-fill, callbacks in order to their terminator, images without callbacks or without TLS, an uninitialised template. |
 | `internal/resources.test.js` | contract | Lookup by type and id, the leaf offset being an RVA, counted names, string bundles, absent slots and types, language selection, listing. |
-| `module.test.js` | unit | `bindHooks` on a stub machine: a good entry writes the registered stub address into the slot, a check mismatch and a wrong slot value are each refused and counted with nothing registered, an entry for another image is refused by name, a kernel `resolveHandler` does not provide is refused by name; a `site` entry (a three-`mov`, no-branch fixture): a good one allocates a trampoline and patches the site with a jump to the registered stub, a byte-pin mismatch leaves the site untouched and refused by name, a kernel nothing provides and a registration answering no address are each refused, an entry with no `allocate` is refused rather than throwing, and one wired to the real `bridge.siteHook` writes the address the bridge itself answered. |
-| `internal/dependencies.test.js` | unit | KnownDLL names skipped even with a file beside the program, a non-KnownDLL the engine has a table for loaded from its file, that name not recorded missing when no file exists, shipped libraries found with dependencies first, cycles terminating, a missing library recorded not thrown, one load per library, case-insensitive names. |
+| `module.test.js` | unit | A synthesised module's variables a writable region beside its read-only code; `bindHooks` on a stub machine: a good entry writes the registered stub address into the slot, a check mismatch and a wrong slot value are each refused and counted with nothing registered, an entry for another image is refused by name, a kernel `resolveHandler` does not provide is refused by name; a `site` entry (a three-`mov`, no-branch fixture): a good one allocates a trampoline and patches the site with a jump to the registered stub, a byte-pin mismatch leaves the site untouched and refused by name, a kernel nothing provides and a registration answering no address are each refused, an entry with no `allocate` is refused rather than throwing, and one wired to the real `bridge.siteHook` writes the address the bridge itself answered. |
+| `internal/dependencies.test.js` | unit | KnownDLL names skipped even with a file beside the program, a non-KnownDLL the engine has a table for loaded from its file, that name not recorded missing when no file exists, shipped libraries found with dependencies first, cycles terminating, a missing library recorded not thrown, one load per library, case-insensitive names, a library importing from the program bound to the program rather than given a copy of it. |
 | `internal/hooks.test.js` | contract | `planHook`'s decision: a good entry resolves the slot and target against the loaded base, a wrong image name, a `timeDateStamp`/`sizeOfImage` mismatch, a slot not holding the target, an unsupported convention; `planSiteHook`'s decision on the same real bytes: a good entry resolves the site and resume addresses, a wrong image name, a stale build, each of the three byte pins failing named, `site.lengths` not summing to the site bytes, a sum under five bytes, a relative branch among the displaced instructions; `parseHexBytes` round-trips a hex string. |
 | `internal/init.test.js` | unit | Attach order, the final jump into the program, libraries without an entry point skipped, `DllMain`'s three arguments. |
 
 Integration (`npm run test:integration`): every `src/*.itest.js` maps a real fixture
 executable through `load`/`map`/`bind` and runs it; `src/hello.itest.js` is the smallest.
-`src/imports.itest.js` builds one that imports three names nothing exports and checks what each
-stub does to the stack: the decorated and the C-runtime one answer zero and leave ESP right, the
-undecorated Win32 one ends the run with a fault naming the import and its caller, and all three
+`src/imports.itest.js` builds one that imports four names nothing exports and checks what each
+stub does to the stack: the decorated one, the C-runtime one and a `thiscall` member of a C
+runtime class answer zero and leave ESP right (the member having popped its one argument), the
+undecorated Win32 one ends the run with a fault naming the import and its caller, and all four
 are in `unresolved` at load.

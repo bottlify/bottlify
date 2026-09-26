@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEnvironmentFunctions } from './environment.js';
+import { createEnvironmentFunctions, defaultEnvironment } from './environment.js';
+import { WINDOWS_VERSIONS } from './versions.js';
+import { shellFolders } from '../advapi32/registry.js';
 
 const ERROR_ENVVAR_NOT_FOUND = 203;
 const STARTUPINFOA_SIZE = 68;
@@ -272,4 +274,43 @@ test('the system directory is inside the windows one, as a program assumes', ()=
     assert.equal(host.readAnsi(0x280), 'C:\\WINDOWS\\system32');
 
     assert.equal(fns.GetSystemDirectoryA.handler([0x280, 4]), 20, 'too small: what is needed');
+});
+
+test('a process starts with the profile variables of the machine\'s layout', ()=>{
+    // The same folders the registry and the shell name: a program that joins
+    // %APPDATA% and one that asks SHGetFolderPath arrive at one directory.
+    const xp = WINDOWS_VERSIONS.winxp;
+    assert.deepEqual(defaultEnvironment(xp, shellFolders(xp)), {
+        ALLUSERSPROFILE: 'C:\\Documents and Settings\\All Users',
+        APPDATA: 'C:\\Documents and Settings\\User\\Application Data',
+        SystemRoot: 'C:\\WINDOWS',
+        TEMP: 'C:\\WINDOWS\\TEMP',
+        TMP: 'C:\\WINDOWS\\TEMP',
+        USERPROFILE: 'C:\\Documents and Settings\\User',
+        windir: 'C:\\WINDOWS',
+    }, 'XP has no LOCALAPPDATA, ProgramData or PUBLIC: they came with Vista');
+    const win2000 = WINDOWS_VERSIONS.win2000;
+    assert.deepEqual(defaultEnvironment(win2000, shellFolders(win2000)),
+        defaultEnvironment(xp, shellFolders(xp)));
+
+    const seven = WINDOWS_VERSIONS.win7;
+    assert.deepEqual(defaultEnvironment(seven, shellFolders(seven)), {
+        ALLUSERSPROFILE: 'C:\\ProgramData',
+        APPDATA: 'C:\\Users\\User\\AppData\\Roaming',
+        LOCALAPPDATA: 'C:\\Users\\User\\AppData\\Local',
+        ProgramData: 'C:\\ProgramData',
+        PUBLIC: 'C:\\Users\\Public',
+        SystemRoot: 'C:\\WINDOWS',
+        TEMP: 'C:\\WINDOWS\\TEMP',
+        TMP: 'C:\\WINDOWS\\TEMP',
+        USERPROFILE: 'C:\\Users\\User',
+        windir: 'C:\\WINDOWS',
+    });
+    const ten = WINDOWS_VERSIONS.win10;
+    assert.deepEqual(defaultEnvironment(ten, shellFolders(ten)),
+        defaultEnvironment(seven, shellFolders(seven)));
+
+    const names = Object.keys(defaultEnvironment(seven, shellFolders(seven)));
+    assert.deepEqual(names, [...names].sort((a, b)=>a.toUpperCase().localeCompare(b.toUpperCase())),
+        'in the order Windows keeps the block, whatever the case');
 });

@@ -130,6 +130,17 @@ function fakeHandles(){
         },
         /** @param {number} handle */
         close: handle=>entries.delete(handle),
+        /** @param {number} handle */
+        typeOf: handle=>entries.get(handle)?.type ?? null,
+        /** @param {number} handle @param {string} type */
+        resolve(handle, type){
+            const entry = entries.get(handle);
+            if (!entry || entry.type !== type)
+            {
+                throw new Error('Invalid handle');
+            }
+            return entry.object;
+        },
     };
 }
 
@@ -182,10 +193,13 @@ function fakeContexts(){
  *        the notice and answering nothing.
  * @param {(region: number) => any} [options.regionBox]
  *        The rectangle a GDI region holds, for the calls that name one.
+ * @param {(instance: number) => number} [options.moduleBase]
+ *        Where a module is mapped, for a resource read in place.
  */
 function setup(
     { cursor, keyState, asyncKeyState, keyboardState, setKeyboardState,
-        findResource, loadString, dispatch = ()=>0, screen, messageBox, regionBox } = {})
+        findResource, loadString, dispatch = ()=>0, screen, messageBox, regionBox,
+        moduleBase } = {})
 {
     screen ??= { ...SCREEN, displayWidth: SCREEN.width, displayHeight: SCREEN.height };
     const memory = fakeMemory();
@@ -203,7 +217,7 @@ function setup(
     /** @type {number[]} */
     const errors = [];
     /** The cursor pictures user32 handed up, oldest first. */
-    /** @type {{ shown: boolean }[]} */
+    /** @type {any[]} */
     const cursors = [];
     /** Where user32 put the cursor, oldest first. */
     /** @type {{ x: number, y: number }[]} */
@@ -230,6 +244,7 @@ function setup(
         keyboardState,
         setKeyboardState,
         findResource,
+        moduleBase,
         loadString,
         regionBox,
         /** @param {any} notice */
@@ -242,7 +257,7 @@ function setup(
         divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
         /** @param {number} code */
         setLastError: code=>errors.push(code),
-        /** @param {{ shown: boolean }} picture */
+        /** @param {any} picture */
         reportCursor: picture=>cursors.push(picture),
         /** @param {number} x @param {number} y */
         placeCursor: (x, y)=>placed.push({ x, y }),
@@ -292,6 +307,162 @@ test('GetWindow walks top-level windows from the top, and children in creation o
         'a dialog\'s first control is the first one made');
     assert.equal(fns.GetWindow.handler([firstControl, GW_HWNDNEXT]), secondControl);
     assert.equal(fns.GetWindow.handler([firstControl, GW_OWNER]), 0, 'a child has no owner');
+});
+
+test('a child is hit where GetWindow stacks it, and SetWindowPos restacks it', ()=>{
+    // user32's window tests: children made one after another are stacked
+    // first-made on top (GW_CHILD, then GW_HWNDNEXT, walks them in creation
+    // order), and the point both overlap belongs to GW_CHILD's window.
+    const GW_CHILD = 5;
+    const GW_HWNDNEXT = 2;
+    const WS_CHILD = 0x40000000;
+    const WS_POPUP = 0x80000000;
+    const HWND_TOP = 0;
+    const HWND_BOTTOM = 1;
+    const SWP_NOSIZE = 0x0001;
+    const SWP_NOMOVE = 0x0002;
+    const { memory, fns } = setup();
+    makeWindow(memory, fns);
+    const parent = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, WS_POPUP | WS_VISIBLE,
+        0, 0, 200, 200, 0, 0, HINSTANCE, 0]);
+    /** @returns {number} */
+    const child = ()=>fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE,
+        WS_CHILD | WS_VISIBLE, 0, 0, 100, 100, parent, 0, HINSTANCE, 0]);
+    const a = child();
+    const b = child();
+    const c = child();
+    /** @returns {number[]} */
+    const stack = ()=>{
+        const listed = [];
+        for (let at = fns.GetWindow.handler([parent, GW_CHILD]); at !== 0;
+            at = fns.GetWindow.handler([at, GW_HWNDNEXT]))
+        {
+            listed.push(at);
+        }
+        return listed;
+    };
+
+    assert.deepEqual(stack(), [a, b, c]);
+    assert.equal(fns.WindowFromPoint.handler([50, 50]), a, 'the top child takes the point');
+    assert.equal(fns.ChildWindowFromPoint.handler([parent, 50, 50]), a);
+
+    fns.SetWindowPos.handler([c, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE]);
+    assert.deepEqual(stack(), [c, a, b], 'HWND_TOP puts a child above its siblings');
+    assert.equal(fns.WindowFromPoint.handler([50, 50]), c);
+    assert.equal(fns.ChildWindowFromPoint.handler([parent, 50, 50]), c);
+
+    fns.SetWindowPos.handler([c, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE]);
+    assert.deepEqual(stack(), [a, b, c], 'and HWND_BOTTOM below them');
+    fns.SetWindowPos.handler([a, b, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE]);
+    assert.deepEqual(stack(), [b, a, c], 'a sibling handle places it just below that sibling');
+    assert.equal(fns.WindowFromPoint.handler([50, 50]), b);
+});
+
+test('the desktop is a window: it exists, it is the screen, and it cannot be destroyed', ()=>{
+    // user32's window tests take GetDesktopWindow for a window throughout: a
+    // parent for top-level windows, a rectangle that is the screen. It is
+    // one window, the same handle every time, of the class #32769.
+    const GW_CHILD = 5;
+    const WS_POPUP = 0x80000000;
+    const { memory, fns } = setup();
+    const desktop = fns.GetDesktopWindow.handler([]);
+    assert.notEqual(desktop, 0);
+    assert.equal(fns.GetDesktopWindow.handler([]), desktop, 'the same one every time');
+    assert.equal(fns.IsWindow.handler([desktop]), 1);
+    assert.equal(fns.IsWindowVisible.handler([desktop]), 1);
+    memory.fill(RECT_BUFFER, 4);
+    assert.equal(fns.GetWindowRect.handler([desktop, RECT_BUFFER]), 1);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)),
+        [0, 0, SCREEN.width, SCREEN.height], 'the screen');
+    fns.GetClientRect.handler([desktop, RECT_BUFFER]);
+    assert.deepEqual([8, 12].map(at=>memory.u32(RECT_BUFFER + at)), [SCREEN.width, SCREEN.height]);
+    assert.equal(fns.GetClassNameA.handler([desktop, TEXT_BUFFER, 32]), 6);
+    assert.equal(memory.readCString(TEXT_BUFFER, 32), '#32769');
+
+    makeWindow(memory, fns);
+    const top = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, WS_POPUP | WS_VISIBLE,
+        0, 0, 50, 50, desktop, 0, HINSTANCE, 0]);
+    assert.notEqual(top, 0);
+    assert.equal(fns.GetParent.handler([top]), 0, 'a window made on the desktop is top-level');
+    assert.equal(fns.GetWindow.handler([desktop, GW_CHILD]), top,
+        'and the topmost of them is the desktop\'s first child');
+
+    assert.equal(fns.DestroyWindow.handler([desktop]), 0);
+    assert.equal(fns.IsWindow.handler([desktop]), 1, 'nothing takes the desktop away');
+});
+
+test('GetLastActivePopup answers the popup of an owner chain that was active last', ()=>{
+    // user32's window tests: an owner, a popup it owns, and a popup that one
+    // owns, each shown as it is made -- the owner's last active popup is the
+    // innermost.
+    const WS_POPUPWINDOW = 0x80880000;
+    const { memory, fns } = setup();
+    makeWindow(memory, fns);
+    /** @param {number} owner */
+    const popup = owner=>fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE,
+        WS_POPUPWINDOW | WS_VISIBLE, 100, 100, 200, 200, owner, 0, HINSTANCE, 0]);
+    const owner = popup(0);
+    const first = popup(owner);
+    const second = popup(first);
+
+    assert.equal(fns.GetLastActivePopup.handler([owner]), second);
+    assert.equal(fns.GetLastActivePopup.handler([first]), first,
+        'an owned window answers itself');
+    fns.DestroyWindow.handler([second]);
+    assert.notEqual(fns.GetLastActivePopup.handler([owner]), second,
+        'and a popup that is gone is no answer');
+    assert.equal(fns.GetLastActivePopup.handler([0x7777]), 0);
+});
+
+test('GetAncestor walks parents and owners as GA_PARENT, GA_ROOT and GA_ROOTOWNER ask, and '
+    + 'IsChild walks the chain of child windows only', ()=>{
+    // user32's window tests (test_SetParent, check_parents): a child, a popup
+    // made on that child, a child of the popup and a popup made on that one.
+    // GA_PARENT of a window that is no child is the desktop, GA_ROOT stops
+    // at the first window that is no child, GA_ROOTOWNER goes on through the
+    // owners; IsChild is true only through WS_CHILD windows, never for the
+    // desktop, and follows a style changed afterwards.
+    const GA_PARENT = 1;
+    const GA_ROOT = 2;
+    const GA_ROOTOWNER = 3;
+    const GWL_STYLE = -16;
+    const WS_CHILD = 0x40000000;
+    const WS_POPUP = 0x80000000;
+    const { memory, fns } = setup();
+    const desktop = fns.GetDesktopWindow.handler([]);
+    const parent = makeWindow(memory, fns);
+    /** @param {number} style @param {number} over */
+    const make = (style, over)=>fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, style,
+        0, 0, 50, 50, over, 0, HINSTANCE, 0]);
+    const child1 = make(WS_CHILD, parent);
+    const child2 = make(WS_POPUP, child1);
+    const child3 = make(WS_CHILD, child2);
+    const child4 = make(WS_POPUP, child3);
+    /** @param {number} hwnd */
+    const ancestors = hwnd=>[GA_PARENT, GA_ROOT, GA_ROOTOWNER].map(flags=>
+        fns.GetAncestor.handler([hwnd, flags]));
+    assert.deepEqual(ancestors(parent), [desktop, parent, parent]);
+    assert.deepEqual(ancestors(child1), [parent, parent, parent]);
+    assert.deepEqual(ancestors(child2), [desktop, child2, parent]);
+    assert.deepEqual(ancestors(child3), [child2, child2, parent]);
+    assert.deepEqual(ancestors(child4), [desktop, child4, parent]);
+    assert.deepEqual(ancestors(desktop), [0, 0, 0], 'the desktop has no ancestor');
+    assert.deepEqual(ancestors(0x7777), [0, 0, 0]);
+
+    const pairs = [[desktop, parent, 0], [desktop, child1, 0], [desktop, child3, 0],
+        [parent, child1, 1], [parent, child2, 0], [child1, child2, 0], [parent, child3, 0],
+        [child2, child3, 1], [parent, child4, 0], [child3, child4, 0]];
+    for (const [over, under, answer] of pairs)
+    {
+        assert.equal(fns.IsChild.handler([over, under]), answer, `IsChild(${over}, ${under})`);
+    }
+    fns.SetWindowLongA.handler([child4, GWL_STYLE, WS_CHILD]);
+    assert.equal(fns.IsChild.handler([child3, child4]), 1);
+    assert.equal(fns.IsChild.handler([child2, child4]), 1);
+    assert.equal(fns.IsChild.handler([child1, child4]), 0, 'a popup ends the chain');
+    fns.SetWindowLongA.handler([child2, GWL_STYLE, WS_CHILD]);
+    assert.equal(fns.IsChild.handler([child1, child4]), 1);
+    assert.equal(fns.IsChild.handler([parent, child4]), 1);
 });
 
 // --- painting ---
@@ -471,6 +642,86 @@ test('a per-frame ShowCursor(FALSE) under a negative count never reports', ()=>{
     assert.equal(cursors.length, 0, 'a hundred more FALSE calls report nothing');
 });
 
+test('a cursor a program made is shown to the page as its picture and hot spot', ()=>{
+    // SetCursor is documented as setting the cursor's shape; a shape the
+    // program made with CreateCursor is handed up with its bitmap, once per
+    // change, and a standard cursor is handed up with none -- the page's own.
+    const { memory, fns, cursors } = setup();
+    const AND = OUT_BUFFER;
+    const XOR = OUT_BUFFER + 4;
+    memory.putU32s(AND, [0b0110_0000]);
+    memory.putU32s(XOR, [0b0101_0000]);
+    const made = fns.CreateCursor.handler([HINSTANCE, 1, 0, 4, 1, AND, XOR]);
+    assert.notEqual(made, 0);
+
+    fns.SetCursor.handler([made]);
+    assert.deepEqual(cursors, [{ shown: true, width: 4, height: 1, hotSpot: { x: 1, y: 0 },
+        bgra: Uint8Array.of(0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 0, 255, 255, 255, 255) }]);
+    fns.SetCursor.handler([made]);
+    assert.equal(cursors.length, 1, 'the same cursor again is no change');
+
+    const IDC_ARROW = 0x7f00;
+    fns.SetCursor.handler([IDC_ARROW]);
+    assert.deepEqual(cursors.at(-1), { shown: true }, 'the standard arrow is the page\'s own');
+    fns.SetCursor.handler([made]);
+    fns.ShowCursor.handler([0]);
+    fns.ShowCursor.handler([1]);
+    assert.deepEqual(cursors.slice(-2).map(picture=>[picture.shown, picture.width]),
+        [[false, undefined], [true, 4]], 'shown again as the picture it was');
+});
+
+test('a cursor out of the program\'s resources is shown as the image its group offers', ()=>{
+    // RT_GROUP_CURSOR names the images by id; RT_CURSOR is the hot spot, then
+    // a DIB whose height counts both masks. A 32x32 image is the one a cursor
+    // of the standard size is loaded from.
+    const BASE = 0x400000;
+    const GROUP = 0x12a00;
+    const IMAGE = 0x12b00;
+    const RT_CURSOR = 1;
+    const RT_GROUP_CURSOR = 12;
+    const width = 32;
+    const group = new Uint8Array(6 + 2 * 14);
+    const groupView = new DataView(group.buffer);
+    groupView.setUint16(2, 2, true);
+    groupView.setUint16(4, 2, true);
+    [[16, 7], [width, 8]].forEach(([size, id], index)=>{
+        groupView.setUint16(6 + index * 14, size, true);
+        groupView.setUint16(6 + index * 14 + 6, 32, true);
+        groupView.setUint16(6 + index * 14 + 12, id, true);
+    });
+    const pixelsSize = width * width * 4;
+    const image = new Uint8Array(4 + 40 + pixelsSize + width * 4);
+    const imageView = new DataView(image.buffer);
+    imageView.setUint16(0, 5, true);
+    imageView.setUint16(2, 9, true);
+    imageView.setUint32(4, 40, true);
+    imageView.setInt32(8, width, true);
+    imageView.setInt32(12, width * 2, true);
+    imageView.setUint16(18, 32, true);
+    // The bottom-left pixel, the first stored: half-transparent blue.
+    image.set([255, 0, 0, 128], 4 + 40);
+    const { fns, memory, cursors } = setup({
+        moduleBase: instance=>(instance === HINSTANCE ? BASE : 0),
+        findResource: (instance, type, name)=>{
+            if (type === RT_GROUP_CURSOR && name === 101)
+            {
+                return { rva: GROUP - BASE, size: group.length };
+            }
+            return type === RT_CURSOR && name === 8 ? { rva: IMAGE - BASE, size: image.length }
+                : null;
+        },
+    });
+    memory.writeMemory(GROUP, group);
+    memory.writeMemory(IMAGE, image);
+
+    fns.SetCursor.handler([fns.LoadCursorA.handler([HINSTANCE, 101])]);
+    const [picture] = cursors;
+    assert.deepEqual([picture.width, picture.height, picture.hotSpot], [width, width,
+        { x: 5, y: 9 }]);
+    assert.deepEqual([...picture.bgra.subarray((width - 1) * width * 4, (width - 1) * width * 4
+        + 4)], [255, 0, 0, 128], 'the image\'s first row is the picture\'s last');
+});
+
 test('SendMessageTimeoutA is a send whose answer goes out through the pointer', async()=>{
     const { memory, fns } = setup({ dispatch: (wndProc, message)=>message.wParam * 2 });
     const hwnd = makeWindow(memory, fns);
@@ -572,6 +823,83 @@ test('the metrics agree with the screen this build was configured for', ()=>{
     assert.equal(fns.GetSystemMetrics.handler([SM_CXVIRTUALSCREEN]), SCREEN.width);
     assert.equal(fns.GetSystemMetrics.handler([0x7fff]), 0,
         'a metric with no answer is zero, not an invented number');
+});
+
+test('the metrics a window, an icon and a mouse are measured by are the classic ones', ()=>{
+    // user32's sysparams tests at 96 dpi with the classic non-client metrics:
+    // icons and cursors 32 across, small icons 16, edges 2, the minimum
+    // window a caption and two sizing frames high, the tracking limits
+    // derived from those -- and a mouse present, with its buttons.
+    const { fns } = setup();
+    /** @param {number} index */
+    const gsm = index=>fns.GetSystemMetrics.handler([index]);
+    const SM_CYCAPTION = 4;
+    const SM_CXICON = 11;
+    const SM_CYICON = 12;
+    const SM_CXCURSOR = 13;
+    const SM_CYCURSOR = 14;
+    const SM_MOUSEPRESENT = 19;
+    const SM_CXMIN = 28;
+    const SM_CYMIN = 29;
+    const SM_CXSIZE = 30;
+    const SM_CYSIZE = 31;
+    const SM_CXFRAME = 32;
+    const SM_CYFRAME = 33;
+    const SM_CXMINTRACK = 34;
+    const SM_CYMINTRACK = 35;
+    const SM_CMOUSEBUTTONS = 43;
+    const SM_CXEDGE = 45;
+    const SM_CYEDGE = 46;
+    const SM_CXSMICON = 49;
+    const SM_CYSMICON = 50;
+    const SM_CXMAXTRACK = 59;
+    const SM_CYMAXTRACK = 60;
+    const SM_CXMENUCHECK = 71;
+    const SM_CYMENUCHECK = 72;
+    const SM_MOUSEWHEELPRESENT = 75;
+
+    assert.deepEqual([SM_CXICON, SM_CYICON, SM_CXCURSOR, SM_CYCURSOR].map(gsm), [32, 32, 32, 32]);
+    assert.deepEqual([SM_CXSMICON, SM_CYSMICON].map(gsm), [16, 16]);
+    assert.deepEqual([SM_CXEDGE, SM_CYEDGE].map(gsm), [2, 2]);
+    assert.equal(gsm(SM_CYSIZE), gsm(SM_CYCAPTION) - 1, 'a caption button is the caption less one');
+    assert.equal(gsm(SM_CXSIZE), gsm(SM_CYSIZE));
+    assert.equal(gsm(SM_CYMIN), gsm(SM_CYCAPTION) + 2 * gsm(SM_CYFRAME));
+    assert.ok(gsm(SM_CXMIN) > 0);
+    assert.deepEqual([gsm(SM_CXMINTRACK), gsm(SM_CYMINTRACK)], [gsm(SM_CXMIN), gsm(SM_CYMIN)]);
+    assert.equal(gsm(SM_CXMAXTRACK), SCREEN.width + 4 + 2 * gsm(SM_CXFRAME));
+    assert.equal(gsm(SM_CYMAXTRACK), SCREEN.height + 4 + 2 * gsm(SM_CYFRAME));
+    const SM_CYFULLSCREEN = 17;
+    const SM_CYMAXIMIZED = 62;
+    assert.equal(gsm(SM_CYFULLSCREEN), gsm(SM_CYMAXIMIZED) - gsm(SM_CYMIN),
+        'a maximised window\'s client height');
+    assert.deepEqual([SM_CXMENUCHECK, SM_CYMENUCHECK].map(gsm), [13, 13]);
+    assert.equal(gsm(SM_MOUSEPRESENT), 1, 'there is a mouse');
+    assert.equal(gsm(SM_CMOUSEBUTTONS), 3, 'with three buttons');
+    assert.equal(gsm(SM_MOUSEWHEELPRESENT), 1, 'and a wheel');
+});
+
+test('a tool window\'s caption is the small caption the metrics give, and a pixel', ()=>{
+    // user32's sysparams tests: SM_CYSMCAPTION is the small caption height
+    // plus one, SM_CYSMSIZE one less than that, and SM_CXSMSIZE the small
+    // caption width -- 15 each by default, as SM_CYCAPTION is the caption
+    // height of 18 plus one. Its window tests take a tool window's caption
+    // as SM_CYSMCAPTION high where any other is SM_CYCAPTION high.
+    const SM_CYSMCAPTION = 51;
+    const SM_CXSMSIZE = 52;
+    const SM_CYSMSIZE = 53;
+    const WS_EX_TOOLWINDOW = 0x00000080;
+    const { memory, fns } = setup();
+    /** @param {number} index */
+    const gsm = index=>fns.GetSystemMetrics.handler([index]);
+    assert.deepEqual([SM_CYSMCAPTION, SM_CXSMSIZE, SM_CYSMSIZE].map(gsm), [16, 15, 15]);
+
+    memory.putU32s(RECT_BUFFER, [0, 0, 100, 100]);
+    fns.AdjustWindowRectEx.handler([RECT_BUFFER, WS_CAPTION, 0, WS_EX_TOOLWINDOW]);
+    const toolTop = memory.u32(RECT_BUFFER + 4) | 0;
+    memory.putU32s(RECT_BUFFER, [0, 0, 100, 100]);
+    fns.AdjustWindowRectEx.handler([RECT_BUFFER, WS_CAPTION, 0, 0]);
+    const plainTop = memory.u32(RECT_BUFFER + 4) | 0;
+    assert.equal(plainTop - toolTop, gsm(SM_CYSMCAPTION) - gsm(4), 'the two captions differ');
 });
 
 test('the display enumeration ends', ()=>{
@@ -747,6 +1075,45 @@ test('AdjustWindowRectEx grows a client rectangle by the frame the style carries
         'the extended style adds frame rather than being ignored');
 });
 
+test('a frame is as wide as the non-client metrics make it, and SM_CXDLGFRAME says so', ()=>{
+    // user32's window tests check AdjustWindowRectEx against the classic
+    // non-client model: a dialog or sizing frame has a two-pixel outer edge,
+    // a sizing frame one more for the sizing border, a border or dialog frame
+    // one more, a static edge alone one, and a client edge two inside the
+    // rest. WS_EX_WINDOWEDGE is the look of the outer edge, not more width.
+    const WS_BORDER = 0x00800000;
+    const WS_DLGFRAME = 0x00400000;
+    const WS_POPUP = 0x80000000;
+    const WS_EX_DLGMODALFRAME = 0x00000001;
+    const WS_EX_WINDOWEDGE = 0x00000100;
+    const WS_EX_STATICEDGE = 0x00020000;
+    const SM_CXDLGFRAME = 7;
+    const SM_CYDLGFRAME = 8;
+    const { memory, fns } = setup();
+    /** @param {number} style @param {number} exStyle @returns {number[]} */
+    const grown = (style, exStyle)=>{
+        memory.putU32s(RECT_BUFFER, [0, 0, 100, 100]);
+        fns.AdjustWindowRectEx.handler([RECT_BUFFER, style, 0, exStyle]);
+        return [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at) | 0);
+    };
+    assert.deepEqual(grown(WS_CAPTION, 0), [-3, -22, 103, 103], 'a dialog frame is three');
+    assert.deepEqual(grown(WS_CAPTION | WS_THICKFRAME, 0), [-4, -23, 104, 104],
+        'a sizing frame four');
+    assert.deepEqual(grown(WS_BORDER, 0), [-1, -1, 101, 101], 'a border one');
+    assert.deepEqual(grown(WS_DLGFRAME, 0), [-3, -3, 103, 103]);
+    assert.deepEqual(grown(WS_THICKFRAME, 0), [-3, -3, 103, 103],
+        'a sizing frame with no border has no inner line');
+    assert.deepEqual(grown(WS_POPUP | WS_CAPTION, WS_EX_DLGMODALFRAME), [-3, -22, 103, 103]);
+    assert.deepEqual(grown(WS_POPUP, WS_EX_DLGMODALFRAME), [-3, -3, 103, 103]);
+    assert.deepEqual(grown(WS_POPUP, WS_EX_STATICEDGE), [-1, -1, 101, 101]);
+    assert.deepEqual(grown(WS_BORDER, WS_EX_CLIENTEDGE), [-3, -3, 103, 103]);
+    assert.deepEqual(grown(WS_POPUP, WS_EX_WINDOWEDGE), [0, 0, 100, 100]);
+    assert.deepEqual(grown(WS_CAPTION | WS_THICKFRAME, WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE),
+        [-6, -25, 106, 106]);
+    assert.deepEqual([SM_CXDLGFRAME, SM_CYDLGFRAME].map(index=>
+        fns.GetSystemMetrics.handler([index])), [3, 3]);
+});
+
 test('AdjustWindowRect is the same call without an extended style', ()=>{
     const { memory, fns } = setup();
     memory.putU32s(RECT_BUFFER, [0, 0, 100, 100]);
@@ -895,6 +1262,264 @@ test('CharLowerA and CharUpperA convert a string in place, or a character by val
     assert.equal(fns.CharLowerBuffA.handler([0, 4]), 0);
 });
 
+test('the IsChar family classifies a character of the ANSI page, or a UTF-16 one', ()=>{
+    const { fns } = setup();
+    /** @param {string} name @param {number} code */
+    const ask = (name, code)=>fns[name].handler([code]);
+
+    for (const name of ['IsCharAlphaA', 'IsCharAlphaNumericA', 'IsCharLowerA', 'IsCharUpperA',
+        'IsCharAlphaW', 'IsCharAlphaNumericW', 'IsCharLowerW', 'IsCharUpperW'])
+    {
+        assert.equal(fns[name].argBytes, 4, `${name} pops its one argument`);
+    }
+    assert.equal(ask('IsCharAlphaA', 0x61), 1, 'a letter');
+    assert.equal(ask('IsCharAlphaA', 0x31), 0, 'a digit is not');
+    assert.equal(ask('IsCharAlphaNumericA', 0x31), 1, 'but is alphanumeric');
+    assert.equal(ask('IsCharAlphaNumericA', 0x2d), 0, 'and a dash is neither');
+    assert.equal(ask('IsCharAlphaA', 0xe9), 1, 'an accented letter of the page counts');
+    assert.equal(ask('IsCharUpperA', 0xc9), 1, 'and has a case');
+    assert.equal(ask('IsCharLowerA', 0xc9), 0);
+    assert.equal(ask('IsCharLowerA', 0xdf), 1, 'sharp s is a lowercase letter');
+    assert.equal(ask('IsCharUpperA', 0x8a), 1, 'S caron sits among the page\'s own additions');
+    assert.equal(ask('IsCharAlphaA', 0xffffff41), 1, 'a CHAR widened with its sign is still A');
+    assert.equal(ask('IsCharLowerW', 0x0431), 1, 'a Cyrillic small letter, read as UTF-16');
+    assert.equal(ask('IsCharUpperW', 0x0411), 1);
+    assert.equal(ask('IsCharAlphaW', 0x3000), 0, 'an ideographic space is no letter');
+});
+
+test('GetCursorInfo reports the cursor, whether it shows and where, for a declared size', ()=>{
+    const { memory, fns, errors } = setup({ cursor: { x: 12, y: 34 } });
+    const CURSORINFO_SIZE = 20;
+    const CURSOR_SHOWING = 1;
+    const ERROR_INVALID_PARAMETER = 87;
+    fns.SetCursor.handler([0x300]);
+    memory.putU32s(OUT_BUFFER, [CURSORINFO_SIZE, UNTOUCHED, UNTOUCHED, UNTOUCHED, UNTOUCHED]);
+
+    assert.equal(fns.GetCursorInfo.handler([OUT_BUFFER]), 1);
+    assert.deepEqual([0, 4, 8, 12, 16].map(at=>memory.u32(OUT_BUFFER + at)),
+        [CURSORINFO_SIZE, CURSOR_SHOWING, 0x300, 12, 34]);
+
+    fns.ShowCursor.handler([0]);
+    fns.GetCursorInfo.handler([OUT_BUFFER]);
+    assert.equal(memory.u32(OUT_BUFFER + 4), 0, 'a count below zero is not showing');
+
+    memory.putU32s(OUT_BUFFER, [CURSORINFO_SIZE - 1]);
+    assert.equal(fns.GetCursorInfo.handler([OUT_BUFFER]), 0, 'a wrong cbSize is refused');
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
+});
+
+test('SystemParametersInfoW answers the work area as the A spelling does', ()=>{
+    const { memory, fns } = setup();
+    const SPI_GETWORKAREA = 0x0030;
+    memory.fill(RECT_BUFFER, 4);
+
+    assert.equal(fns.SystemParametersInfoW.argBytes, 16);
+    assert.equal(fns.SystemParametersInfoW.handler([SPI_GETWORKAREA, 0, RECT_BUFFER, 0]), 1);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)),
+        [0, 0, SCREEN.width, SCREEN.height]);
+    assert.equal(fns.SystemParametersInfoW.handler([0x0068, 0, RECT_BUFFER, 0]), 0,
+        'and refuses what the A spelling refuses');
+});
+
+test('SetMessageExtraInfo answers with the value it replaced, which GetMessageExtraInfo read', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.GetMessageExtraInfo.handler([]), 0, 'nothing set yet');
+    assert.equal(fns.SetMessageExtraInfo.handler([0xdeadbeef]), 0);
+    assert.equal(fns.GetMessageExtraInfo.handler([]), 0xdeadbeef);
+    assert.equal(fns.SetMessageExtraInfo.handler([7]), 0xdeadbeef);
+    assert.equal(fns.SetMessageExtraInfo.argBytes, 4);
+    assert.equal(fns.GetMessageExtraInfo.argBytes, 0);
+});
+
+/** TrackMouseEvent's flags, and the messages its tracking posts. */
+const TME_HOVER = 0x1;
+const TME_LEAVE = 0x2;
+const TME_NONCLIENT = 0x10;
+const TME_QUERY = 0x40000000;
+const TME_CANCEL = 0x80000000;
+const HOVER_DEFAULT = 0xffffffff;
+const HOVER_TIME = 400;
+const WM_MOUSEMOVE = 0x0200;
+const WM_NCMOUSEHOVER = 0x02a0;
+const WM_MOUSEHOVER = 0x02a1;
+const WM_NCMOUSELEAVE = 0x02a2;
+const WM_MOUSELEAVE = 0x02a3;
+
+/**
+ * A captioned window with a child in its client area, the pointer resting on
+ * the window's client area clear of the child, and the calls a test of the
+ * tracking makes: TrackMouseEvent asked and queried, the pointer moved as the
+ * input layer moves it, and the queue emptied.
+ */
+function trackingSetup(){
+    const WS_CHILD = 0x40000000;
+    const TRACKMOUSEEVENT_SIZE = 16;
+    const POINT = OUT_BUFFER + 0x40;
+    const cursor = { x: 0, y: 0 };
+    const context = setup({ cursor });
+    const { memory, fns, queue } = context;
+    const parent = makeWindow(memory, fns, WS_CAPTION | WS_VISIBLE);
+    const child = fns.CreateWindowExA.handler(
+        [0, CLASS_NAME, TITLE, WS_CHILD | WS_VISIBLE, 50, 50, 100, 100, parent, 0, HINSTANCE, 0]);
+    /** @param {number} hwnd @param {number} x @param {number} y */
+    const onScreen = (hwnd, x, y)=>{
+        memory.putU32s(POINT, [x, y]);
+        fns.ClientToScreen.handler([hwnd, POINT]);
+        return { x: memory.u32(POINT), y: memory.u32(POINT + 4) };
+    };
+    /** @param {{ x: number, y: number }} point */
+    const moveTo = point=>{
+        cursor.x = point.x;
+        cursor.y = point.y;
+        queue.post({ hwnd: 0, message: WM_MOUSEMOVE, wParam: 0, lParam: 0, x: point.x,
+            y: point.y });
+    };
+    /** @param {number} flags @param {number} hwnd @param {number} [hoverTime] */
+    const track = (flags, hwnd, hoverTime = 0)=>{
+        memory.putU32s(OUT_BUFFER, [TRACKMOUSEEVENT_SIZE, flags, hwnd, hoverTime]);
+        return fns.TrackMouseEvent.handler([OUT_BUFFER]);
+    };
+    /** What a TME_QUERY fills in: the flags, the window and the hover time. */
+    const query = ()=>{
+        memory.putU32s(OUT_BUFFER, [TRACKMOUSEEVENT_SIZE, TME_QUERY, 0xdeadbeef, 0xdeadbeef]);
+        assert.equal(fns.TrackMouseEvent.handler([OUT_BUFFER]), 1, 'a query succeeds');
+        assert.equal(memory.u32(OUT_BUFFER), TRACKMOUSEEVENT_SIZE, 'and leaves cbSize alone');
+        return [4, 8, 12].map(at=>memory.u32(OUT_BUFFER + at));
+    };
+    /** Every posted message, up to the paint that stays until it is painted. */
+    const take = ()=>{
+        const WM_PAINT = 0x000f;
+        const taken = [];
+        for (let message = queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true });
+            message !== null && message.message !== WM_PAINT;
+            message = queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true }))
+        {
+            taken.push([message.hwnd, message.message, message.wParam, message.lParam]);
+        }
+        return taken;
+    };
+    const rest = onScreen(parent, 10, 10);
+    cursor.x = rest.x;
+    cursor.y = rest.y;
+    return { ...context, parent, child, onScreen, moveTo, track, query, take, rest };
+}
+
+test('TrackMouseEvent refuses a wrong cbSize and a window that does not exist', ()=>{
+    // user32's message tests: a query with cbSize 0 fails with
+    // ERROR_INVALID_PARAMETER, and TME_HOVER, cancelled or not, for a handle
+    // naming no window fails with ERROR_INVALID_WINDOW_HANDLE.
+    const ERROR_INVALID_PARAMETER = 87;
+    const ERROR_INVALID_WINDOW_HANDLE = 1400;
+    const { memory, fns, errors, track } = trackingSetup();
+    memory.putU32s(OUT_BUFFER, [0, TME_QUERY, 0xdeadbeef, 0xdeadbeef]);
+
+    assert.equal(fns.TrackMouseEvent.argBytes, 4);
+    assert.equal(fns.TrackMouseEvent.handler([OUT_BUFFER]), 0);
+    assert.equal(track(TME_HOVER, 0xdeadbeef, 0xdeadbeef), 0);
+    assert.equal(track(TME_HOVER | TME_CANCEL, 0xdeadbeef, 0xdeadbeef), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_WINDOW_HANDLE,
+        ERROR_INVALID_WINDOW_HANDLE]);
+});
+
+test('TrackMouseEvent posts WM_MOUSEHOVER once the pointer has rested for the hover time', ()=>{
+    // user32's message tests: nothing is tracked to begin with; hover asked
+    // for a window the pointer is not over is accepted and tracks nothing; a
+    // hover time of 0 or HOVER_DEFAULT is SPI_GETMOUSEHOVERTIME's, which a
+    // query reports; a move of a pixel and back inside the hover rectangle
+    // does not start the time again; WM_MOUSEHOVER arrives with no buttons
+    // down, and the tracking has ended when it does.
+    const { memory, fns, clock, parent, child, rest, moveTo, track, query, take } =
+        trackingSetup();
+    assert.deepEqual(query(), [0, 0, 0], 'nothing tracked');
+    assert.equal(track(TME_HOVER, child), 1);
+    assert.deepEqual(query(), [0, 0, 0], 'the pointer is not over the child');
+
+    assert.equal(track(TME_HOVER, parent, 0), 1);
+    assert.deepEqual(query(), [TME_HOVER, parent, HOVER_TIME]);
+    clock.at = HOVER_TIME / 2;
+    moveTo({ x: rest.x - 1, y: rest.y });
+    moveTo(rest);
+    assert.deepEqual(query(), [TME_HOVER, parent, HOVER_TIME]);
+    clock.at = HOVER_TIME - 1;
+    assert.deepEqual(take().map(entry=>entry[1]), [WM_MOUSEMOVE], 'not yet');
+    clock.at = HOVER_TIME;
+    assert.deepEqual(take(), [[parent, WM_MOUSEHOVER, 0, (10 << 16 | 10) >>> 0]],
+        'where the pointer is, in client coordinates');
+    assert.deepEqual(query(), [0, 0, 0], 'hover tracking stops once it is posted');
+
+    assert.equal(track(TME_HOVER, parent, HOVER_DEFAULT), 1);
+    assert.deepEqual(query(), [TME_HOVER, parent, HOVER_TIME]);
+    clock.at += 100;
+    moveTo({ x: rest.x + 5, y: rest.y });
+    clock.at += HOVER_TIME - 1;
+    assert.deepEqual(take().map(entry=>entry[1]), [WM_MOUSEMOVE],
+        'leaving the hover rectangle starts the time again');
+    clock.at += 1;
+    assert.deepEqual(take(), [[parent, WM_MOUSEHOVER, 0, (10 << 16 | 15) >>> 0]]);
+
+    assert.equal(track(TME_HOVER, parent, 50), 1);
+    assert.deepEqual(query(), [TME_HOVER, parent, 50], 'a time of its own is its own');
+    memory.putU32s(OUT_BUFFER, [16, TME_HOVER | TME_CANCEL, parent, 0xdeadbeef]);
+    assert.equal(fns.TrackMouseEvent.handler([OUT_BUFFER]), 1);
+    assert.deepEqual(query(), [0, 0, 0], 'cancelled');
+    clock.at += 1000;
+    assert.deepEqual(take(), [], 'and nothing is posted');
+});
+
+test('TrackMouseEvent posts WM_MOUSELEAVE when the pointer leaves, or at once if it is out', ()=>{
+    // As documented for TRACKMOUSEEVENT: a leave asked for a window or area
+    // the pointer is not over is posted at once and nothing is tracked, and
+    // WM_MOUSELEAVE, like WM_NCMOUSELEAVE, ends all the tracking asked for.
+    // Moving onto a child is leaving the parent's client area.
+    const { clock, parent, child, onScreen, rest, moveTo, track, query, take } =
+        trackingSetup();
+    assert.equal(track(TME_LEAVE, child), 1);
+    assert.deepEqual(query(), [0, 0, 0]);
+    assert.deepEqual(take(), [[child, WM_MOUSELEAVE, 0, 0]], 'posted at once');
+
+    assert.equal(track(TME_LEAVE | TME_HOVER, parent), 1);
+    assert.deepEqual(query().slice(0, 2), [TME_LEAVE | TME_HOVER, parent]);
+    moveTo(onScreen(child, 5, 5));
+    assert.deepEqual(take(), [[parent, WM_MOUSELEAVE, 0, 0],
+        [child, WM_MOUSEMOVE, 0, (5 << 16 | 5) >>> 0]], 'the leave comes before the move');
+    assert.deepEqual(query(), [0, 0, 0], 'and ends the hover too');
+    clock.at += 1000;
+    assert.deepEqual(take(), []);
+
+    moveTo(rest);
+    take();
+    const caption = onScreen(parent, 10, -5);
+    assert.equal(track(TME_LEAVE | TME_NONCLIENT, parent), 1);
+    assert.deepEqual(take(), [[parent, WM_NCMOUSELEAVE, 0, 0]],
+        'the frame is an area of its own, and the pointer is not on it');
+    moveTo(caption);
+    take();
+    assert.equal(track(TME_LEAVE | TME_HOVER | TME_NONCLIENT, parent), 1);
+    assert.deepEqual(query().slice(0, 2), [TME_LEAVE | TME_HOVER | TME_NONCLIENT, parent]);
+    clock.at += HOVER_TIME;
+    const HTCAPTION = 2;
+    assert.deepEqual(take(), [[parent, WM_NCMOUSEHOVER, HTCAPTION,
+        (caption.y << 16 | caption.x) >>> 0]], 'a frame hover names the hit and the screen point');
+    moveTo(rest);
+    assert.deepEqual(take().map(entry=>entry[1]), [WM_NCMOUSELEAVE, WM_MOUSEMOVE]);
+});
+
+test('SystemParametersInfo answers the hover time and the hover rectangle', ()=>{
+    // user32's message tests read all three before tracking a hover.
+    const { memory, fns } = setup();
+    const SPI_GETMOUSEHOVERWIDTH = 0x0062;
+    const SPI_GETMOUSEHOVERHEIGHT = 0x0064;
+    const SPI_GETMOUSEHOVERTIME = 0x0066;
+    /** @param {number} action */
+    const ask = action=>{
+        memory.fill(OUT_BUFFER, 1);
+        assert.equal(fns.SystemParametersInfoA.handler([action, 0, OUT_BUFFER, 0]), 1);
+        return memory.u32(OUT_BUFFER);
+    };
+    assert.deepEqual([SPI_GETMOUSEHOVERWIDTH, SPI_GETMOUSEHOVERHEIGHT, SPI_GETMOUSEHOVERTIME]
+        .map(ask), [4, 4, HOVER_TIME]);
+});
+
 test('wsprintfA reads its arguments off the stack and pops none of them', ()=>{
     // cdecl: the caller cleans up, so the count declared here says how many
     // slots to read. Declaring too few is a conversion that gets nothing.
@@ -991,6 +1616,37 @@ test('MapVirtualKeyA maps a virtual key to its scan code and back, and a scan co
 
     assert.equal(fns.MapVirtualKeyA.handler([0xff, MAPVK_VK_TO_VSC]), 0,
         'no key at that code: nothing');
+});
+
+test('MAPVK_VK_TO_VSC_EX prefixes a scan code only where the E0 half alone has the key', ()=>{
+    // user32's input tests: a right-hand control carries its E0 prefix, the
+    // arrows answer the keypad's unprefixed code that also sends them, and
+    // Print Screen answers SysRq's.
+    const { fns } = setup();
+    const MAPVK_VK_TO_VSC_EX = 4;
+    const hkl = fns.GetKeyboardLayout.handler([0]);
+    /** @type {[number, number][]} */
+    const expected = [
+        [0xa1, 0x36],     // VK_RSHIFT
+        [0x6a, 0x37],     // VK_MULTIPLY
+        [0x90, 0x45],     // VK_NUMLOCK
+        [0x26, 0x48],     // VK_UP
+        [0xa2, 0x1d],     // VK_LCONTROL
+        [0xa3, 0xe01d],   // VK_RCONTROL
+        [0xa5, 0xe038],   // VK_RMENU
+        [0x91, 0x46],     // VK_SCROLL
+        [0x2c, 0x54],     // VK_SNAPSHOT
+        [0x6f, 0xe035],   // VK_DIVIDE
+    ];
+    for (const [vk, scan] of expected)
+    {
+        assert.equal(fns.MapVirtualKeyExA.handler([vk, MAPVK_VK_TO_VSC_EX, hkl]), scan,
+            `VK 0x${vk.toString(16)}`);
+    }
+    assert.equal(fns.MapVirtualKeyA.handler([0xa3, 0]), 0x1d,
+        'and MAPVK_VK_TO_VSC never carries the prefix');
+    assert.equal(fns.MapVirtualKeyW.handler([0xa3, MAPVK_VK_TO_VSC_EX]), 0xe01d,
+        'the other spellings answer alike');
 });
 
 test('MapVirtualKeyExA behaves as MapVirtualKeyA for the one layout this build has', ()=>{

@@ -364,12 +364,20 @@ export function baseFormatOf(internalFormat){
     {
         case 1:
         case GL.LUMINANCE:
+        case GL.LUMINANCE4:
         case GL.LUMINANCE8:
+        case GL.LUMINANCE12:
+        case GL.LUMINANCE16:
         case GL.COMPRESSED_LUMINANCE:
             return GL.LUMINANCE;
         case 2:
         case GL.LUMINANCE_ALPHA:
+        case GL.LUMINANCE4_ALPHA4:
+        case GL.LUMINANCE6_ALPHA2:
         case GL.LUMINANCE8_ALPHA8:
+        case GL.LUMINANCE12_ALPHA4:
+        case GL.LUMINANCE12_ALPHA12:
+        case GL.LUMINANCE16_ALPHA16:
         case GL.COMPRESSED_LUMINANCE_ALPHA:
             return GL.LUMINANCE_ALPHA;
         case 3:
@@ -379,6 +387,7 @@ export function baseFormatOf(internalFormat){
         case GL.RGB5:
         case GL.RGB8:
         case GL.RGB10:
+        case GL.RGB12:
         case GL.RGB16:
         case GL.COMPRESSED_RGB:
         case GL.COMPRESSED_RGB_S3TC_DXT1_EXT:
@@ -390,6 +399,7 @@ export function baseFormatOf(internalFormat){
         case GL.RGB5_A1:
         case GL.RGBA8:
         case GL.RGB10_A2:
+        case GL.RGBA12:
         case GL.RGBA16:
         case GL.COMPRESSED_RGBA:
         case GL.COMPRESSED_RGBA_S3TC_DXT1_EXT:
@@ -397,11 +407,17 @@ export function baseFormatOf(internalFormat){
         case GL.COMPRESSED_RGBA_S3TC_DXT5_EXT:
             return GL.RGBA;
         case GL.ALPHA:
+        case GL.ALPHA4:
         case GL.ALPHA8:
+        case GL.ALPHA12:
+        case GL.ALPHA16:
         case GL.COMPRESSED_ALPHA:
             return GL.ALPHA;
         case GL.INTENSITY:
+        case GL.INTENSITY4:
         case GL.INTENSITY8:
+        case GL.INTENSITY12:
+        case GL.INTENSITY16:
         case GL.COMPRESSED_INTENSITY:
             return GL.INTENSITY;
         case GL.DEPTH_COMPONENT:

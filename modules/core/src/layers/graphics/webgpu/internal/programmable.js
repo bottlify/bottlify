@@ -25,7 +25,7 @@
  *   its blocks into the same groups.
  */
 
-import { pipelineDescriptor, pipelineKey } from './pipeline.js';
+import { pipelineDescriptor, pipelineKey, vertexBuffersOf } from './pipeline.js';
 
 /**
  * D3DDECLTYPE → the WebGPU vertex format, and the shape the shader reads.
@@ -77,8 +77,11 @@ export const DECLTYPE_ATTRIBUTE = Object.freeze({
 
 /**
  * @typedef {Object} VertexInputLayout
- * @property {number} stride
- * @property {{ shaderLocation: number, offset: number, format: string }[]} attributes
+ * @property {number} stride  Stream zero's.
+ * @property {{ shaderLocation: number, offset: number, format: string,
+ *     stream?: number }[]} attributes
+ * @property {{ stream: number, stride: number }[]} [streams]
+ *     The further streams read, each a vertex buffer after stream zero's.
  * @property {Map<number, { components: number, scalar: 'f32' | 'u32' | 'i32', bgra: boolean }>}
  *           shapes   By register, for the inputs the declaration supplies.
  */
@@ -86,19 +89,24 @@ export const DECLTYPE_ATTRIBUTE = Object.freeze({
 /**
  * The vertex layout a declaration gives the inputs a shader declares.
  *
- * Only stream zero is read: the renderer binds one vertex buffer. An input
- * the declaration has no element for is left out, and the shader reads it as
- * the default vertex; an element of a type WebGPU cannot deliver, or one in
- * another stream, refuses the whole layout.
+ * Each element is read from its own stream, a vertex buffer per stream at the
+ * stride that stream is bound with. An input the declaration has no element
+ * for is left out, and the shader reads it as the default vertex; an element
+ * of a type WebGPU cannot deliver, or past its stream's stride, refuses the
+ * whole layout.
  *
  * @param {readonly VertexElement[]} elements
  * @param {readonly DeclaredInput[]} wanted
- * @param {number} stride  The bound stream's.
+ * @param {number} stride  Stream zero's.
+ * @param {(stream: number) => number} [strideOf]
+ *     A further stream's stride; zero reads every vertex from its start.
  * @returns {{ layout: VertexInputLayout | null, error: string | null }}
  */
-export function vertexLayoutOf(elements, wanted, stride){
+export function vertexLayoutOf(elements, wanted, stride, strideOf = ()=>0){
     /** @type {VertexInputLayout} */
     const layout = { stride, attributes: [], shapes: new Map() };
+    /** @type {Map<number, number>} */
+    const streams = new Map();
     for (const input of wanted)
     {
         const element = elements.find(one=>
@@ -107,25 +115,33 @@ export function vertexLayoutOf(elements, wanted, stride){
         {
             continue;
         }
-        if (element.Stream !== 0)
-        {
-            return { layout: null, error: `element in stream ${element.Stream}` };
-        }
         const attribute = DECLTYPE_ATTRIBUTE[element.Type];
         if (!attribute)
         {
             return { layout: null, error: `element type ${element.Type}` };
         }
-        if (element.Offset + attribute.bytes > stride)
+        const own = element.Stream === 0 ? stride : strideOf(element.Stream);
+        if (element.Stream !== 0)
         {
-            return { layout: null, error: `element past the stride of ${stride}` };
+            streams.set(element.Stream, own);
+        }
+        if (own !== 0 && element.Offset + attribute.bytes > own)
+        {
+            return { layout: null, error: `element past the stride of ${own}` };
         }
         layout.attributes.push({
             shaderLocation: input.location, offset: element.Offset, format: attribute.format,
+            ...(element.Stream === 0 ? {} : { stream: element.Stream }),
         });
         layout.shapes.set(input.register, {
             components: attribute.components, scalar: attribute.scalar, bgra: attribute.bgra,
         });
+    }
+    if (streams.size > 0)
+    {
+        layout.streams = [...streams.entries()]
+            .sort(([left], [right])=>left - right)
+            .map(([stream, own])=>({ stream, stride: own }));
     }
     return { layout, error: null };
 }
@@ -150,20 +166,40 @@ export function shapeKey(layout){
  * packed four to a vector. Each is taken from the frame's arena, so a draw's
  * constants stay what they were when it was recorded.
  *
+ * The float block is as long as the shader declares, which may run past the
+ * file -- the register a vertex shader's viewport scale rides in does -- and
+ * reads as zero there until the caller fills it: a block shorter than the
+ * declaration fails the binding.
+ *
  * @param {{ floats: Float32Array, ints: Int32Array, bools: Uint32Array }} file
- * @param {number} reach   Float registers the shader reads.
+ * @param {number} reach   Float registers the shader declares.
  * @param {(floats: number) => Float32Array} take
  * @returns {Float32Array[]}
  */
 export function constantBlocks(file, reach, take){
-    const count = Math.max(1, Math.min(reach, file.floats.length / 4));
+    const count = Math.max(1, reach);
     const floats = take(count * 4);
-    floats.set(file.floats.subarray(0, count * 4));
+    floats.set(file.floats.subarray(0, Math.min(count * 4, file.floats.length)));
     const ints = take(16 * 4);
     new Int32Array(ints.buffer, ints.byteOffset, ints.length).set(file.ints.subarray(0, 64));
     const bools = take(16);
     new Uint32Array(bools.buffer, bools.byteOffset, bools.length).set(file.bools.subarray(0, 16));
     return [floats, ints, bools];
+}
+
+/**
+ * The view a sampler declared as `type` binds: a WGSL texture type, or the
+ * fixed stage's own '2d', 'cube' or '3d'.
+ *
+ * @param {string} type
+ * @returns {string}
+ */
+export function samplerDimension(type){
+    if (type === 'texture_cube<f32>' || type === 'cube')
+    {
+        return 'cube';
+    }
+    return type === 'texture_3d<f32>' || type === '3d' ? '3d' : '2d';
 }
 
 /** GPUShaderStage bits. */
@@ -182,14 +218,20 @@ const FRAGMENT_STAGE = 2;
 export function createProgramCache({ backend }){
     /** @type {Map<string, Promise<any>>} */
     const pipelines = new Map();
-    /** @type {Map<number, any>} sampler count -> the three group layouts and the pipeline layout */
+    /**
+     * The samplers' dimensions -> the three group layouts and the pipeline layout.
+     *
+     * @type {Map<string, any>}
+     */
     const layouts = new Map();
     let built = 0;
     let reused = 0;
 
-    /** @param {number} samplerCount */
-    const layoutsFor = samplerCount=>{
-        const existing = layouts.get(samplerCount);
+    /** @param {readonly string[]} dimensions  Each sampler's: '2d', 'cube' or '3d'. */
+    const layoutsFor = dimensions=>{
+        const key = dimensions.join(',');
+        const samplerCount = dimensions.length;
+        const existing = layouts.get(key);
         if (existing)
         {
             return existing;
@@ -205,7 +247,8 @@ export function createProgramCache({ backend }){
         const samplerEntries = [];
         for (let index = 0; index < samplerCount; index++)
         {
-            samplerEntries.push({ binding: index * 2, visibility: FRAGMENT_STAGE, texture: {} });
+            samplerEntries.push({ binding: index * 2, visibility: FRAGMENT_STAGE,
+                texture: dimensions[index] === '2d' ? {} : { viewDimension: dimensions[index] } });
             samplerEntries.push(
                 { binding: index * 2 + 1, visibility: FRAGMENT_STAGE, sampler: {} });
         }
@@ -213,16 +256,16 @@ export function createProgramCache({ backend }){
             constants(VERTEX_STAGE),
             constants(FRAGMENT_STAGE),
             backend.createBindGroupLayout(
-                { label: `samplers:${samplerCount}`, entries: samplerEntries }),
+                { label: `samplers:${key}`, entries: samplerEntries }),
         ];
         const made = {
             groups,
             pipeline: backend.createPipelineLayout({
-                label: `programmable:${samplerCount}`,
+                label: `programmable:${key}`,
                 bindGroupLayouts: groups,
             }),
         };
-        layouts.set(samplerCount, made);
+        layouts.set(key, made);
         return made;
     };
 
@@ -248,7 +291,8 @@ export function createProgramCache({ backend }){
                         { code: program.pixel.wgsl, label: `ps:${program.key}` }),
                 ]);
                 const descriptor = pipelineDescriptor(state, null);
-                const bound = layoutsFor(program.pixel.samplers.length);
+                const bound = layoutsFor(program.pixel.samplers.map(
+                    (/** @type {{ type: string }} */ entry)=>samplerDimension(entry.type)));
                 return {
                     bindGroupLayouts: bound.groups,
                     gpu: await backend.createRenderPipelineAsync({
@@ -257,11 +301,8 @@ export function createProgramCache({ backend }){
                         vertex: {
                             module: vertexModule,
                             entryPoint: program.vertex.entry,
-                            buffers: [{
-                                arrayStride: program.layout.stride,
-                                stepMode: 'vertex',
-                                attributes: program.layout.attributes,
-                            }],
+                            buffers: vertexBuffersOf(program.layout.stride,
+                                program.layout.attributes, program.layout.streams),
                         },
                         fragment: {
                             module: pixelModule,

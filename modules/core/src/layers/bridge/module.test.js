@@ -308,6 +308,7 @@ test('a disposed bridge answers harmlessly rather than throwing', async()=>{
     assert.equal(await machine.api.callGuest({ entry: 0x00402000 }), 0);
     assert.equal(machine.api.useHeap({ allocate: ()=>0 }), null);
     assert.equal(machine.api.publishInterface({ interfaceFor: ()=>null }, 'IUnknown'), 0);
+    assert.equal(machine.api.unpublishInterface({}, 'IUnknown'), false);
     assert.equal(machine.api.suspended(), 0);
     await machine.api.answered();
     assert.equal(machine.api.callerThread(), null);
@@ -321,6 +322,33 @@ test('a disposed bridge answers harmlessly rather than throwing', async()=>{
     machine.api.label(0x1000, 'x');
     machine.api.dispatch(1);
     assert.deepEqual(machine.api.calls(), []);
+});
+
+test('an interface is given back through the bridge that published it', async()=>{
+    const machine = await bridge();
+    const IID = '{00000001-0000-0000-C000-000000000046}';
+    assert.equal(machine.api.unpublishInterface({}, IID), false, 'nothing is published yet');
+    /** @type {number[]} */
+    const freed = [];
+    let next = 0x5000;
+    machine.api.useHeap({
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes;
+            return at;
+        },
+        free: (/** @type {number} */ at)=>freed.push(at),
+    });
+    const object = {
+        /** @param {string} id */
+        interfaceFor: id=>({ id, methods: [{ name: 'GetDesc', argBytes: 8, invoke: ()=>0 }] }),
+    };
+    const pointer = machine.api.publishInterface(object, IID);
+    assert.notEqual(pointer, 0);
+    assert.equal(machine.api.unpublishInterface(object, IID), true);
+    assert.deepEqual(freed, [pointer]);
+    assert.equal(machine.api.unpublishInterface(object, IID), false);
+    await bridgeModule.dispose();
 });
 
 test('register refuses FASTCALL -- only hook builds a stub that saves EDX', async()=>{

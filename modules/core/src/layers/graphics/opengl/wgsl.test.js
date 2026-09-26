@@ -161,7 +161,8 @@ test('the clip depth is remapped, and an absent attribute is the current value',
     const { code } = generateDraw(state({
         attributes: CANONICAL_LAYOUT.attributes.filter(a=>a.name === 'position'),
     }));
-    assert.match(code, /out\.position = vec4f\(clip\.x, clip\.y, \(clip\.z \+ clip\.w\) \* 0\.5, clip\.w\)/);
+    assert.ok(code.includes('out.position = vec4f(clip.x, clip.y,'
+        + ' (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w)'));
     assert.match(code, /out\.color = uniforms\.color;/);
     assert.match(code, /out\.secondary = uniforms\.secondary;/);
 });
@@ -353,7 +354,8 @@ test('a position-invariant program emits the fixed stage\'s position lines', ()=
             offset: 0, format: 'float32x3' }],
         strides: [12],
     })).code;
-    const remap = '    out.position = vec4f(clip.x, clip.y, (clip.z + clip.w) * 0.5, clip.w);';
+    const remap = '    out.position = vec4f(clip.x, clip.y,'
+        + ' (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w);';
     assert.ok(fixed.includes(remap), 'the fixed stage remaps the depth the way GL does');
     assert.ok(emitted.code.includes(remap), 'the invariant position is the fixed one');
     assert.ok(emitted.code.includes(
@@ -361,6 +363,23 @@ test('a position-invariant program emits the fixed stage\'s position lines', ()=
     assert.ok(fixed.includes('let objectPosition = vec4f(vertex.position, 1.0);')
         && fixed.includes('let clip = uniforms.modelViewProjection * objectPosition;'),
     'the same widening and the same product, under another local\'s name');
+});
+
+test('the position both vertex stages write is @invariant', ()=>{
+    // WGSL promises two entry points the same position from the same data and
+    // control flow only under @invariant, so without it the position-invariant
+    // option's promise -- the fixed pipeline's position -- need not hold on the
+    // device, and a depth-equal pass over a fixed pre-pass can fight it.
+    const parsed = parseProgram('!!ARBvp1.0\nOPTION ARB_position_invariant;\n'
+        + 'MOV result.color, vertex.color;\nEND\n');
+    assert.ok(!('error' in parsed), 'error' in parsed ? parsed.error.message : '');
+    const emitted = emitVertex(parsed,
+        [{ name: 'position', components: 3, scalar: 'f32' }],
+        { texcoords: [], fogCoord: false });
+    assert.ok(!('error' in emitted), 'error' in emitted ? emitted.error : '');
+    assert.match(emitted.code, /@builtin\(position\) @invariant position: vec4f,/);
+    const fixed = generateDraw(state()).code;
+    assert.match(fixed, /@builtin\(position\) @invariant position: vec4f,/);
 });
 
 test('a depth test that is off is always-passing, with the attachment kept', ()=>{

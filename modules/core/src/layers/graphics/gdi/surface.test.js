@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    MONOCHROME,
     RGB_555,
     RGB_565,
     clearSurface,
@@ -20,6 +21,7 @@ import {
     narrow16,
     pixelToColor,
     surfaceBounds,
+    surfaceForDdb,
     surfaceForDibSection,
     viewOf,
 } from './surface.js';
@@ -129,7 +131,33 @@ test('byte-exact: an eight-bit surface stores the nearest palette index', ()=>{
 
     assert.throws(()=>createSurface({ width: 1, height: 1, bitCount: 8 }), RangeError,
         'eight bits without a palette');
-    assert.throws(()=>createSurface({ width: 1, height: 1, bitCount: 24 }), RangeError);
+    assert.throws(()=>createSurface({ width: 1, height: 1, bitCount: 2 }), RangeError);
+});
+
+test('byte-exact: a four-bit surface packs its left pixel into the high nibble', ()=>{
+    const palette = [0x00000000, 0x00ff0000, 0x0000ff00, 0x000000ff];
+    const surface = createSurface({ width: 3, height: 2, bitCount: 4, palette });
+    assert.equal(surface.pitch, 4);
+    surface.write(0, 0, 0x00ff0000);
+    surface.write(1, 0, 0x000000f0);
+    surface.write(2, 1, 0x0000e000);
+    assert.deepEqual([...surface.bytes], [0x13, 0x00, 0, 0, 0x00, 0x20, 0, 0]);
+    assert.equal(surface.read(1, 0), 0x000000ff, 'the entry, not what was asked for');
+    surface.write(0, 0, 0);
+    assert.equal(surface.bytes[0], 0x03, 'a nibble written leaves its neighbour alone');
+    assert.equal(surface.nearest(0x00f00000), 0x00ff0000);
+});
+
+test('byte-exact: a twenty-four-bit surface is three bytes a pixel, blue first', ()=>{
+    const surface = createSurface({ width: 3, height: 1, bitCount: 24 });
+    assert.equal(surface.pitch, 12, 'nine bytes of pixels, padded to a DWORD');
+    surface.write(0, 0, 0x00abcdef);
+    surface.write(2, 0, 0xff123456);
+    assert.deepEqual([...surface.bytes], [0xef, 0xcd, 0xab, 0, 0, 0, 0x56, 0x34, 0x12, 0, 0, 0]);
+    assert.equal(surface.read(2, 0), 0x00123456, 'there is no fourth byte to keep');
+    assert.equal(surface.nearest(0xff123456), 0x00123456);
+    assert.equal(createSurface({ width: 1, height: 1 }).nearest(0x0fffffff), 0x0fffffff,
+        'thirty-two bits keep the whole pixel');
 });
 
 test('a write after the palette changed in place lands on the new entry', ()=>{
@@ -199,10 +227,111 @@ test('a DIB section at any drawable depth is a surface, and the rest are not', (
         { width: 2, height: 2, bitCount: 16, bits, format: RGB_565 }, memory, bits));
     assert.ok(sixteen);
     assert.equal(sixteen.format, RGB_565);
-    assert.equal(surfaceForDibSection({ width: 2, height: 2, bitCount: 24, bits }, memory, bits),
-        null);
     assert.equal(surfaceForDibSection({ width: 2, height: 2, bitCount: 32, bits: 0 }, memory),
         null);
+
+    const twentyFour = surfaceForDibSection({ width: 2, height: 2, bitCount: 24, bits },
+        memory, bits);
+    assert.ok(twentyFour);
+    twentyFour.write(1, 0, 0x00abcdef);
+    assert.deepEqual([...memory.subarray(8 + 3, 8 + 6)], [0xef, 0xcd, 0xab],
+        'bottom-up: row zero is the second row of eight bytes');
+
+    // A one-bit section is two colours of its own, not black and white.
+    const one = surfaceForDibSection(
+        { width: 8, height: 1, bitCount: 1, bits, palette: [0x00ffffff, 0], topDown: true },
+        memory, bits);
+    assert.ok(one);
+    assert.equal(/** @type {any} */ (one).mono, false);
+    one.write(0, 0, 0x00101010);
+    assert.equal(memory[0] & 0x80, 0x80, 'black is the second entry here');
+    assert.equal(surfaceForDibSection({ width: 8, height: 1, bitCount: 4, bits }, memory, bits),
+        null, 'an indexed depth with no table');
+});
+
+test('a sixteen-bit section made with BI_BITFIELDS is laid out by its masks', ()=>{
+    const memory = new Uint8Array(16);
+    const bits = 0x100;
+    /** @param {number[]} bitfields */
+    const section = bitfields=>surfaceForDibSection({
+        width: 1, height: 1, bitCount: 16, bits, compression: 3, bitfields,
+    }, memory, bits);
+
+    const sixFive = section([0xf800, 0x07e0, 0x001f]);
+    assert.ok(sixFive);
+    sixFive.write(0, 0, 0x0000ff00);
+    assert.deepEqual([...memory.subarray(0, 2)], [0xe0, 0x07], 'green has six bits here');
+    assert.equal(sixFive.read(0, 0), 0x0000ff00);
+
+    const fiveFive = section([0x7c00, 0x03e0, 0x001f]);
+    assert.ok(fiveFive);
+    fiveFive.write(0, 0, 0x0000ff00);
+    assert.deepEqual([...memory.subarray(0, 2)], [0xe0, 0x03]);
+
+    const fourFour = section([0x0f00, 0x00f0, 0x000f]);
+    assert.ok(fourFour, 'any other masks are drawn by, not as 5-5-5');
+    fourFour.write(0, 0, 0x0000ff00);
+    assert.deepEqual([...memory.subarray(0, 2)], [0xf0, 0x00]);
+    assert.equal(fourFour.read(0, 0), 0x0000ff00);
+});
+
+test('a thirty-two-bit section made with BI_BITFIELDS is laid out by its masks', ()=>{
+    const memory = new Uint8Array(16);
+    const bits = 0x100;
+    /** @param {number[]} bitfields */
+    const section = bitfields=>/** @type {import('./contract.js').Surface} */ (
+        surfaceForDibSection({ width: 1, height: 1, bitCount: 32, bits, compression: 3,
+            bitfields }, memory, bits));
+    const view = new DataView(memory.buffer);
+
+    section([0xff0000, 0x00ff00, 0x0000ff]).write(0, 0, 0x00123456);
+    assert.equal(view.getUint32(0, true), 0x00123456, 'the native layout');
+    const swapped = section([0x0000ff, 0x00ff00, 0xff0000]);
+    swapped.write(0, 0, 0x00123456);
+    assert.equal(view.getUint32(0, true), 0x00563412, 'red in the low byte');
+    assert.equal(swapped.read(0, 0), 0x00123456);
+    const wide = section([0x3ff00000, 0x000ffc00, 0x000003ff]);
+    wide.write(0, 0, 0x00ff00ff);
+    assert.equal(view.getUint32(0, true), 0x3fc003fc, 'each channel in its top bits');
+    assert.equal(wide.read(0, 0), 0x00ff00ff);
+});
+
+test('byte-exact: a one-bit surface packs its leftmost pixel into the top bit', ()=>{
+    const surface = createSurface({ width: 10, height: 2, bitCount: 1, palette: [...MONOCHROME],
+        pitch: ddbPitch(10, 1) });
+    assert.equal(surface.pitch, 2);
+    surface.write(0, 0, 0x00ffffff);
+    surface.write(9, 0, 0x00c0c0c0);
+    surface.write(1, 1, 0x00404040);
+    surface.write(2, 1, 0x00ff00ff);
+    assert.deepEqual([...surface.bytes], [0x80, 0x40, 0x20, 0x00],
+        'the nearer of black and white, bit by bit');
+    assert.equal(surface.read(0, 0), 0x00ffffff);
+    assert.equal(surface.read(1, 0), 0x00000000);
+    surface.write(0, 0, 0);
+    assert.equal(surface.bytes[0], 0, 'and a bit is cleared as well as set');
+    assert.throws(()=>createSurface({ width: 1, height: 1, bitCount: 1 }), RangeError,
+        'one bit without a palette');
+});
+
+test('a device-dependent bitmap\'s own bytes are a surface with WORD-padded rows', ()=>{
+    const pixels = new Uint8Array(ddbPitch(3, 32) * 2);
+    const colour = surfaceForDdb({ width: 3, height: 2, bitCount: 32, pixels });
+    assert.ok(colour);
+    colour.write(2, 1, 0x00abcdef);
+    assert.deepEqual([...pixels.subarray(12 + 8, 12 + 12)], [0xef, 0xcd, 0xab, 0x00],
+        'rows top-down, BGRX');
+
+    const bits = new Uint8Array(ddbPitch(17, 1) * 2);
+    const mono = surfaceForDdb({ width: 17, height: 2, bitCount: 1, pixels: bits });
+    assert.ok(mono);
+    mono.write(16, 1, 0x00ffffff);
+    assert.equal(bits[4 + 2], 0x80, 'seventeen pixels take a WORD and a bit: four bytes a row');
+
+    assert.equal(surfaceForDdb({ width: 3, height: 2, bitCount: 32 }), null,
+        'a bitmap with no bytes of its own');
+    assert.equal(surfaceForDdb({ width: 3, height: 2, bitCount: 8, pixels }), null,
+        'eight bits would need a palette a device bitmap does not carry');
 });
 
 test('clearing a surface reaches every pixel including the last', ()=>{

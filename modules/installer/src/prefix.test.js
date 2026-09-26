@@ -26,6 +26,16 @@ test('the distribution is seeded where the guest can open it, and named as the i
     assert.deepEqual((await options.storage.load()).map(file=>file.path), [options.imagePath]);
 });
 
+test('an install runs under the Windows the bottle will run under', ()=>{
+    // An installer acts on the Windows it finds -- a path it records, a
+    // component it picks -- so it is run under the bottle's own.
+    const media = { name: 'Setup.exe', bytes: bytes('MZ') };
+    assert.equal(prefixOptions(media, { windows: 'win7' }).windows, 'win7');
+    assert.equal('windows' in prefixOptions(media), false, 'absent is the engine\'s default');
+    assert.throws(()=>prefixOptions(media, { windows: /** @type {any} */ ('win98') }),
+        /the choices are win2000, winxp, win7, win10/);
+});
+
 test('the rest of the media is seeded beside the entry, none of it counted as produced', async()=>{
     const options = prefixOptions({
         name: 'Setup.exe', bytes: bytes('MZ'),

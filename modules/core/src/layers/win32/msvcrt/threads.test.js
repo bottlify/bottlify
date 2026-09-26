@@ -52,3 +52,28 @@ test('a runtime thread ends through the kernel, and the call does not return', (
     assert.deepEqual(ended, [7, 0]);
     assert.deepEqual([fns._endthread.argBytes, fns._endthreadex.argBytes], [0, 4]);
 });
+
+test('_sleep waits through the kernel\'s Sleep, a request for none being one millisecond', ()=>{
+    // msvcrt's _sleep never yields for nothing the way Sleep(0) does: zero
+    // is taken as the shortest real wait.
+    /** @type {number[]} */
+    const slept = [];
+    const PARKED = { parked: true };
+    const fns = /** @type {Record<string, any>} */ (createThreadFunctions({
+        start: ()=>0,
+        exit: ()=>PARKED,
+        sleep: milliseconds=>{
+            slept.push(milliseconds);
+            return PARKED;
+        },
+    }));
+    assert.equal(fns._sleep.handler([250]), PARKED);
+    assert.equal(fns._sleep.handler([0]), PARKED);
+    assert.deepEqual(slept, [250, 1]);
+    assert.deepEqual([fns._sleep.convention, fns._sleep.argBytes], ['cdecl', 4]);
+
+    const without = /** @type {Record<string, any>} */ (createThreadFunctions({
+        start: ()=>0, exit: ()=>PARKED,
+    }));
+    assert.equal(without._sleep, undefined, 'unexported without a way to wait');
+});

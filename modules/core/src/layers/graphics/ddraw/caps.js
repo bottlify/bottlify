@@ -34,6 +34,7 @@ import {
     DDERR_INVALIDCAPS,
     DDERR_INVALIDPARAMS,
     DDERR_NOEXCLUSIVEMODE,
+    DDERR_NOOVERLAYHW,
     DDERR_NOPALETTEATTACHED,
     DDPF_PALETTEINDEXED_ANY,
     DDSCAPS2_CUBEMAP,
@@ -45,6 +46,7 @@ import {
     DDSCAPS_FRONTBUFFER,
     DDSCAPS_LOCALVIDMEM,
     DDSCAPS_MIPMAP,
+    DDSCAPS_OVERLAY,
     DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY,
     DDSCAPS_TEXTURE,
@@ -64,6 +66,7 @@ export const D3DERR_SURFACENOTINVIDMEM = 0x88760000 + 747;
  * @property {number} caps2              DDSCAPS2.dwCaps2; zero for the older layout.
  * @property {number} backBufferCount
  * @property {boolean} hasBackBufferCount  DDSD_BACKBUFFERCOUNT was among dwFlags.
+ * @property {boolean} [hasMipMapCount]   DDSD_MIPMAPCOUNT was among dwFlags.
  * @property {boolean} exclusive         The cooperative level holds DDSCL_EXCLUSIVE.
  * @property {1 | 2 | 4 | 7} version     The IDirectDraw generation that was called.
  */
@@ -166,6 +169,14 @@ export function validateSurfaceCaps(request){
         return fail(DDERR_INVALIDCAPS);
     }
 
+    // Levels are a texture's. How many is the caller's to say only when they
+    // come attached: a mip-mapped texture that is not complex is one level.
+    if ((caps & DDSCAPS_MIPMAP)
+        && (!(caps & DDSCAPS_TEXTURE) || (request.hasMipMapCount && !(caps & DDSCAPS_COMPLEX))))
+    {
+        return fail(DDERR_INVALIDCAPS);
+    }
+
     if (caps & DDSCAPS_PRIMARYSURFACE)
     {
         if (caps & (DDSCAPS_TEXTURE | DDSCAPS_BACKBUFFER))
@@ -183,6 +194,14 @@ export function validateSurfaceCaps(request){
         // and refused by every later one, which is a version difference rather
         // than a capability the hardware gained or lost.
         return fail(DDERR_INVALIDCAPS);
+    }
+
+    // No overlay hardware is claimed -- DDCAPS_OVERLAY is not among the caps
+    // -- so a surface that would be an overlay is refused the way a card
+    // without one refuses it, not made and then never shown.
+    if (caps & DDSCAPS_OVERLAY)
+    {
+        return fail(DDERR_NOOVERLAYHW);
     }
 
     return { hr: DD_OK, caps: placedCaps(caps, flipChain), flipChain };
@@ -207,6 +226,37 @@ export function validateSurfaceSize(request){
         return DDERR_INVALIDPARAMS;
     }
     return request.width > 0 && request.height > 0 ? DD_OK : DDERR_INVALIDPARAMS;
+}
+
+/**
+ * How many levels a mip chain has, or null when the count asked for cannot be
+ * built. A full chain halves until both sides are one from IDirectDraw7 on,
+ * and until the shorter side is one before it (Wine's test_mipmap for each
+ * version: 128x32 is eight levels through IDirectDraw7 and six before).
+ *
+ * @param {{ caps: number, width: number, height: number,
+ *   mipMapCount: number | null, version: 1 | 2 | 4 | 7 }} request
+ *           `mipMapCount` is null when DDSD_MIPMAPCOUNT was not given.
+ * @returns {number | null} zero for a surface that is no mip chain
+ */
+export function mipLevelCount(request){
+    if (!(request.caps & DDSCAPS_MIPMAP))
+    {
+        return 0;
+    }
+    if (!(request.caps & DDSCAPS_COMPLEX))
+    {
+        return 1;
+    }
+    const side = request.version === 7
+        ? Math.max(request.width, request.height)
+        : Math.min(request.width, request.height);
+    const full = Math.floor(Math.log2(side)) + 1;
+    if (request.mipMapCount === null)
+    {
+        return full;
+    }
+    return request.mipMapCount >= 1 && request.mipMapCount <= full ? request.mipMapCount : null;
 }
 
 /**

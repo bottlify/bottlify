@@ -323,7 +323,7 @@ test('an export may be the entry point, and the header names it', ()=>{
 test('a data export holds its bytes at the exported address, not a jump', ()=>{
     // A runtime's `_acmdln` is a variable: a program reads a pointer through
     // the address it imported, and a jump there is read as a pointer to
-    // nowhere. The slot is the variable, and the rest of it stays int3.
+    // nowhere.
     const value = new Uint8Array([0x78, 0x56, 0x34, 0x12]);
     const module = synthesiseModule({
         name: 'MSVCRT.dll',
@@ -333,7 +333,38 @@ test('a data export holds its bytes at the exported address, not a jump', ()=>{
     const decoded = decodeExports(module.bytes);
     const rva = decoded.functionRvas[decoded.nameOrdinals[decoded.names.indexOf('_acmdln')]];
     assert.equal(module.addressOf('_acmdln'), BASE + rva);
-    assert.deepEqual([...module.bytes.subarray(rva, rva + 5)], [0x78, 0x56, 0x34, 0x12, 0xcc]);
+    assert.deepEqual([...module.bytes.subarray(rva, rva + 4)], [0x78, 0x56, 0x34, 0x12]);
+});
+
+test('variables live in a writable data section of their own, apart from the code', ()=>{
+    // As a real runtime's do: a program and the runtime itself write a
+    // variable -- a stream's flags, the file mode -- where the code beside it
+    // stays read-only and executable.
+    const module = synthesiseModule({
+        name: 'MSVCRT.dll',
+        base: BASE,
+        exports: [{ name: 'exit', target: 0x2000 }, { name: '_fmode', data: new Uint8Array(4) },
+            { name: '_iob', data: new Uint8Array(20 * 32) }],
+    });
+    const image = parsePe(module.bytes);
+    assert.equal(image.sections.length, 2);
+    const [text, data] = image.sections;
+    assert.equal(text.name, '.text');
+    assert.ok(text.executable && !text.writable);
+    assert.equal(data.name, '.data');
+    assert.ok(data.readable && data.writable && !data.executable);
+    assert.equal(data.virtualAddress % 0x1000, 0, 'on pages of its own');
+    assert.equal(module.dataRva, data.virtualAddress);
+    for (const name of ['_fmode', '_iob'])
+    {
+        const rva = /** @type {number} */ (module.addressOf(name)) - BASE;
+        assert.ok(rva >= data.virtualAddress && rva < data.virtualAddress + data.virtualSize,
+            `${name} is in .data`);
+    }
+    const exit = /** @type {number} */ (module.addressOf('exit')) - BASE;
+    assert.ok(exit >= text.virtualAddress && exit < text.virtualAddress + text.virtualSize);
+    assert.equal(synthesiseModule({ name: 'K.dll', base: BASE, exports: [
+        { name: 'f', target: 0x2000 }] }).dataRva, 0, 'no variables, no data section');
 });
 
 test('a variable larger than a slot gets room of its own, outside the export directory', ()=>{
@@ -357,5 +388,5 @@ test('a variable larger than a slot gets room of its own, outside the export dir
     assert.ok(rva + streams.length <= module.size, 'and inside the image');
     const small = decoded.functionRvas[decoded.nameOrdinals[decoded.names.indexOf('_small')]];
     assert.deepEqual([...module.bytes.subarray(small, small + 4)], [1, 2, 3, 4],
-        'a small one still sits in its slot');
+        'a small one has room of its own too');
 });

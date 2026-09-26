@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createRegistryFunctions } from './functions.js';
 import {
     createHive,
+    HKEY_CLASSES_ROOT,
     HKEY_CURRENT_USER,
     HKEY_LOCAL_MACHINE,
     REG_BINARY,
@@ -733,4 +734,119 @@ test('RegEnumKeyA is the enumeration with a buffer and a size and nothing else',
     assert.equal(fns.RegEnumKeyA.handler([key, 0, OUT_NAME, 1]), ERROR_MORE_DATA,
         'no room for the terminator');
     assert.equal(fns.RegEnumKeyA.argBytes, 16);
+});
+
+/**
+ * The classes root and the two keys it is a view of, as registry.c's
+ * test_classesroot drives them.
+ *
+ * @param {ReturnType<typeof setup>} machine
+ */
+function classes(machine){
+    const { memory, fns } = machine;
+    /** @param {number} root @param {string} path */
+    const createUnder = (root, path)=>{
+        memory.putString(SUBKEY, path);
+        assert.equal(fns.RegCreateKeyExA.handler(
+            [root, SUBKEY, 0, 0, 0, 0, 0, OUT_HANDLE, 0]), ERROR_SUCCESS, path);
+        return memory.dword(OUT_HANDLE);
+    };
+    /** @param {number} root @param {string} path */
+    const open = (root, path)=>{
+        memory.putString(SUBKEY, path);
+        const status = fns.RegOpenKeyExA.handler([root, SUBKEY, 0, 0, OUT_HANDLE]);
+        return status === ERROR_SUCCESS ? memory.dword(OUT_HANDLE) : -status;
+    };
+    /** @param {number} key @param {string} name */
+    const read = (key, name)=>{
+        memory.putString(NAME, name);
+        memory.putDword(OUT_SIZE, 0x40);
+        const status = fns.RegQueryValueExA.handler([key, NAME, 0, OUT_TYPE, OUT_DATA, OUT_SIZE]);
+        return status === ERROR_SUCCESS ? memory.string(OUT_DATA) : status;
+    };
+    /** @param {number} key @param {string} path */
+    const remove = (key, path)=>{
+        memory.putString(SUBKEY, path);
+        return fns.RegDeleteKeyA.handler([key, SUBKEY]);
+    };
+    /** @param {number} key */
+    const subkeys = key=>{
+        const names = [];
+        for (let index = 0; fns.RegEnumKeyA.handler([key, index, OUT_NAME, 64]) === 0; index++)
+        {
+            names.push(memory.readCString(OUT_NAME, 64));
+        }
+        return names;
+    };
+    return { createUnder, open, read, remove, subkeys };
+}
+
+test('a class the machine registers is found under the classes root, both ways', ()=>{
+    // registry.c test_classesroot: HKEY_CLASSES_ROOT is not a hive of its own
+    // but HKLM\Software\Classes, so a key and its values written through
+    // either name are the same key and the same values.
+    const machine = setup();
+    const { setString } = machine;
+    const { createUnder, open, read } = classes(machine);
+
+    const hklm = createUnder(HKEY_LOCAL_MACHINE, 'Software\\Classes\\WineTestCls');
+    const hkcr = open(HKEY_CLASSES_ROOT, 'WineTestCls');
+    assert.ok(hkcr > 0, 'the machine class is found under HKEY_CLASSES_ROOT');
+
+    assert.equal(setString(hklm, 'val2', 'hklm'), ERROR_SUCCESS);
+    assert.equal(read(hkcr, 'val2'), 'hklm');
+    assert.equal(setString(hkcr, 'val2', 'hkcr'), ERROR_SUCCESS);
+    assert.equal(read(hklm, 'val2'), 'hkcr',
+        'written through the classes root, read through the machine');
+
+    // A class a program registers under the classes root is the machine's.
+    createUnder(HKEY_CLASSES_ROOT, 'CLSID\\{00000000-0000-0000-0000-00000000C0DE}\\InprocServer32');
+    assert.ok(open(HKEY_LOCAL_MACHINE,
+        'SOFTWARE\\Classes\\CLSID\\{00000000-0000-0000-0000-00000000C0DE}\\InprocServer32') > 0);
+});
+
+test('the user\'s classes lie over the machine\'s under the classes root', ()=>{
+    const machine = setup();
+    const { setString } = machine;
+    const { createUnder, open, read, remove, subkeys } = classes(machine);
+
+    const hklm = createUnder(HKEY_LOCAL_MACHINE, 'Software\\Classes\\WineTestCls');
+    assert.equal(setString(hklm, 'val2', 'hklm'), ERROR_SUCCESS);
+    assert.equal(setString(hklm, 'machineOnly', 'm'), ERROR_SUCCESS);
+    const user = createUnder(HKEY_CURRENT_USER, 'Software\\Classes\\WineTestCls');
+    const hkcr = open(HKEY_CLASSES_ROOT, 'WineTestCls');
+
+    // A value the user's key has wins; a write through the classes root goes
+    // to the user's key, and the machine's keeps what it had.
+    assert.equal(setString(user, 'val2', 'user'), ERROR_SUCCESS);
+    assert.equal(read(hkcr, 'val2'), 'user');
+    assert.equal(setString(hklm, 'val2', 'hklm'), ERROR_SUCCESS);
+    assert.equal(read(hkcr, 'val2'), 'user', 'the machine does not overwrite the user');
+    assert.equal(setString(hkcr, 'val2', 'hkcr'), ERROR_SUCCESS);
+    assert.equal(read(user, 'val2'), 'hkcr');
+    assert.equal(read(hklm, 'val2'), 'hklm');
+    assert.equal(read(hkcr, 'machineOnly'), 'm', 'what only the machine has still shows');
+
+    // A subkey the machine has is reached through the classes root; a new one
+    // made through it is the machine's.
+    const hklmSub = createUnder(hklm, 'subkey1');
+    assert.equal(setString(hklmSub, 'subval1', 'hklm'), ERROR_SUCCESS);
+    const hkcrSub = open(hkcr, 'subkey1');
+    assert.ok(hkcrSub > 0);
+    assert.equal(read(hkcrSub, 'subval1'), 'hklm');
+    const userSub = createUnder(user, 'subkey1');
+    assert.equal(setString(userSub, 'subval1', 'user'), ERROR_SUCCESS);
+    assert.equal(read(hkcrSub, 'subval1'), 'user');
+    createUnder(hkcr, 'subkey2');
+    assert.equal(open(user, 'subkey2'), -ERROR_FILE_NOT_FOUND, 'not made in the user\'s classes');
+    assert.ok(open(hklm, 'subkey2') > 0, 'but in the machine\'s');
+    assert.deepEqual(subkeys(hkcr), ['subkey1', 'subkey2'], 'one name for a key both have');
+
+    // Deleting through the classes root takes the user's key first.
+    assert.equal(remove(hkcr, 'subkey1'), ERROR_SUCCESS);
+    assert.equal(open(user, 'subkey1'), -ERROR_FILE_NOT_FOUND);
+    assert.ok(open(hklm, 'subkey1') > 0);
+    assert.equal(remove(hkcr, 'subkey1'), ERROR_SUCCESS);
+    assert.equal(open(hklm, 'subkey1'), -ERROR_FILE_NOT_FOUND);
+    assert.equal(remove(hkcr, 'subkey1'), ERROR_FILE_NOT_FOUND);
 });

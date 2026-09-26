@@ -350,9 +350,11 @@ export function fvfOfElements(elements){
 /**
  * @typedef {Object} FixedFunctionLayout
  * @property {number} id           The declaration's, so two layouts are told apart.
- * @property {{ name: string, offset: number, format: string, bytes: number }[]} attributes
+ * @property {{ name: string, offset: number, format: string, bytes: number,
+ *     stream: number }[]} attributes
  * @property {boolean} preTransformed
  * @property {number} texCoordSets
+ * @property {number[]} streams    The streams past zero it reads, in order.
  */
 
 /**
@@ -381,11 +383,11 @@ const IGNORED_BY_FIXED_FUNCTION = new Set([
 
 /**
  * The layout the fixed-function pipeline reads a declaration through when no
- * vertex format spells it -- members in another order, at other offsets, or
- * beside ones only a shader reads -- or null when it reads something this
- * stage cannot: a second stream, a tessellator method, blend weights, a
- * colour that is not a D3DCOLOR, a position of another type, or coordinate
- * sets with a gap.
+ * vertex format spells it -- members in another order, at other offsets, in
+ * other streams, or beside ones only a shader reads -- or null when it reads
+ * something this stage cannot: a tessellator method, blend weights, a colour
+ * that is not a D3DCOLOR, a position of another type, or coordinate sets with
+ * a gap.
  *
  * The names are the ones a decoded vertex format gives, so the stage that
  * reads a format reads this the same way.
@@ -406,14 +408,14 @@ export function fixedFunctionLayoutOf(declaration){
         {
             continue;
         }
-        if (element.Stream !== 0 || element.Method !== D3DDECLMETHOD.DEFAULT)
+        if (element.Method !== D3DDECLMETHOD.DEFAULT)
         {
             return null;
         }
         const bytes = DECLTYPE_BYTES[element.Type];
         /** @param {string} name @param {string} format */
-        const add = (name, format)=>
-            attributes.push({ name, offset: element.Offset, format, bytes });
+        const add = (name, format)=>attributes.push(
+            { name, offset: element.Offset, format, bytes, stream: element.Stream });
         switch (element.Usage)
         {
             case D3DDECLUSAGE.POSITION:
@@ -471,7 +473,10 @@ export function fixedFunctionLayoutOf(declaration){
     {
         return null;
     }
-    return { id: declaration.id, attributes, preTransformed, texCoordSets };
+    const streams = [...new Set(attributes.map(attribute=>attribute.stream))]
+        .filter(stream=>stream !== 0)
+        .sort((left, right)=>left - right);
+    return { id: declaration.id, attributes, preTransformed, texCoordSets, streams };
 }
 
 /**

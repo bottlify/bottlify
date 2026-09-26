@@ -80,18 +80,44 @@ test('the default device advertises the model the renderer draws whole', ()=>{
     assert.ok(words.MaxVertexShaderConst >= 96);
 });
 
+test('table fog is claimed over both depths it is taken over', ()=>{
+    // W under a perspective projection, z under an affine one: the rule the
+    // D3DCAPS9 documentation gives for a device claiming W-based fog.
+    const words = capabilityWords(DEFAULT_CAPS);
+    assert.equal(words.RasterCaps & 0x00100000, 0x00100000, 'D3DPRASTERCAPS_WFOG');
+    assert.equal(words.RasterCaps & 0x00200000, 0x00200000, 'D3DPRASTERCAPS_ZFOG');
+});
+
 test('what the renderer does not do is not claimed', ()=>{
     const words = capabilityWords(DEFAULT_CAPS);
+    assert.equal(words.TextureOpCaps, 0x0000ffff, 'the operations the combiner draws');
+    assert.equal(words.StencilCaps, 0, 'no stencil test in the pipeline');
+    assert.equal(words.RasterCaps & 0x00010000, 0x00010000, 'D3DPRASTERCAPS_FOGRANGE');
     assert.equal(words.MaxUserClipPlanes, 0, 'no clipping against user planes');
-    assert.equal(words.RasterCaps & 0x01000000, 0, 'no scissor test');
+    assert.equal(words.RasterCaps & 0x01000000, 0x01000000,
+        'D3DPRASTERCAPS_SCISSORTEST: draws and clears are cut to the scissor');
     assert.equal(words.StencilCaps & 0x100, 0, 'no two-sided stencil');
-    assert.equal(words.TextureCaps & 0x800, 0, 'no cube maps');
+    assert.equal(words.TextureCaps & 0x10800, 0x10800,
+        'cube maps and their chains, which the renderer samples');
+    assert.equal(words.CubeTextureFilterCaps, words.TextureFilterCaps);
+    assert.equal(words.TextureCaps & 0xa000, 0xa000, 'volumes and their chains');
+    assert.equal(words.VolumeTextureFilterCaps, words.TextureFilterCaps);
+    assert.equal(words.VolumeTextureAddressCaps, words.TextureAddressCaps);
+    assert.equal(words.MaxVolumeExtent, 256);
     assert.equal(words.NumSimultaneousRTs, 1);
     assert.equal(words.StretchRectFilterCaps, 0);
     assert.equal(words.MaxAnisotropy, 1);
     assert.equal(words.Caps2 & 0x00020000, 0, 'no full-screen gamma');
+    assert.equal(words.Caps2 & 0x40000000, 0x40000000,
+        'D3DCAPS2_CANAUTOGENMIPMAP: the renderer makes the levels');
     assert.ok(words.MaxTextureWidth > 0 && words.MaxTextureHeight > 0,
         'a zero here halves a texture for ever');
     assert.ok(words.MaxStreams >= 1);
     assert.ok(words.MaxTextureBlendStages >= words.MaxSimultaneousTextures);
+});
+
+test('D3DCAPS2_FULLSCREENGAMMA is claimed only where a full-screen device\'s ramp is shown', ()=>{
+    assert.equal(capabilityWords(DEFAULT_CAPS).Caps2 & 0x00020000, 0, 'no display, no claim');
+    assert.equal(capabilityWords({ ...DEFAULT_CAPS, fullscreenGamma: true }).Caps2 & 0x00020000,
+        0x00020000);
 });

@@ -318,9 +318,8 @@ async function openDevice(errors){
     {
         return { available: false, reason: 'no adapter answered requestAdapter' };
     }
-    const features = adapter.features.has('texture-compression-bc')
-        ? ['texture-compression-bc']
-        : [];
+    const features = ['texture-compression-bc', 'depth-clip-control']
+        .filter(feature=>adapter.features.has(feature));
     const device = await adapter.requestDevice({ requiredFeatures: features });
     device.addEventListener('uncapturederror', (/** @type {any} */ event)=>{
         errors.push(`gpu:${event.error.message}`);
@@ -389,35 +388,6 @@ function fromBase64(text){
  */
 export function seedFiles(files){
     return files.map(file=>({ path: file.path, bytes: fromBase64(file.base64) }));
-}
-
-/**
- * The DirectX runtime this checkout has fetched, as the engine's own volume.
- *
- * The lock names every DLL; each is optional, because a checkout that never ran
- * `npm run fetch:directx-runtime` has none. Absent, `createApp` gets no system
- * layer and a `d3dx9_*` a title links against is answered by the engine's own
- * table -- a valid machine, just not the one that lets the title's shipped
- * runtime drive the effect.
- *
- * @returns {Promise<{ files: { path: string, bytes: Uint8Array }[] } | undefined>}
- */
-async function loadRuntime(){
-    const lock = await fetch(new URL('../../../directx-runtime-lock.json', import.meta.url))
-        .then(response=>response.ok ? response.json() : null)
-        .catch(()=>null);
-    if (!lock?.artifacts)
-    {
-        return undefined;
-    }
-    const files = (await Promise.all(Object.keys(lock.artifacts).map(async name=>{
-        const bytes = await fetch(
-            new URL(`../../../vendor/prebuilt/directx/${name}`, import.meta.url))
-            .then(response=>response.ok ? response.arrayBuffer() : null)
-            .catch(()=>null);
-        return bytes ? { path: name, bytes: new Uint8Array(bytes) } : null;
-    }))).filter(Boolean);
-    return files.length > 0 ? { files: /** @type {any} */ (files) } : undefined;
 }
 
 /**
@@ -1141,6 +1111,7 @@ export function createHarness(canvas, how = {}){
      *
      * @param {{ exe: string, bundleUrl: string, imagePath: string,
      *           commandLine?: string,
+     *           windows?: 'win2000' | 'winxp' | 'win7' | 'win10',
      *           sidecarHooks?: { spec: any, source: string },
      *           logCategories?: Record<string, string>,
      *           logCapacity?: number, logBytes?: number,
@@ -1176,10 +1147,6 @@ export function createHarness(canvas, how = {}){
             new URL('../../../vendor/prebuilt/video-decoder.wasm', import.meta.url))
             .then(response=>response.ok ? response.arrayBuffer() : null)
             .catch(()=>null);
-
-        // The engine's own volume, when this checkout fetched the runtime. A
-        // run can turn it off to compare against the engine's own d3dx table.
-        const system = request.runtime === false ? undefined : await loadRuntime();
 
         // Reset per run: the frame this run presents is its own, but the
         // counter and the gaps it feeds keep counting across a run -- see
@@ -1317,6 +1284,9 @@ export function createHarness(canvas, how = {}){
             // What the program believes it was started with, so a run can set
             // a command-line-only cvar without touching the bundle.
             commandLine: request.commandLine,
+            // The Windows the bottle runs under, from its manifest; absent is
+            // the engine's default, and a name it does not know fails the run.
+            windows: request.windows,
             // A bundle's own hooks.json/hooks.mjs, read by the tool that
             // started this run from beside the bundle -- never from the
             // bundle itself.
@@ -1336,7 +1306,6 @@ export function createHarness(canvas, how = {}){
                 wasmBytes: wasm,
             },
             media: decoder ? { wasmBytes: decoder } : undefined,
-            system,
             imagePath: request.imagePath,
             screen: request.screen ?? undefined,
             // The graphics layer's own configuration, whatever fields the run

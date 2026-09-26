@@ -383,8 +383,28 @@ test('throw raises the C++ exception code with the object and its type', async()
     assert.equal(m.raised.length, 1);
     assert.equal(m.raised[0].code, EH_EXCEPTION_NUMBER);
     assert.deepEqual(m.raised[0].parameters, [EH_MAGIC.V1, 0x3000, 0x3100]);
-    assert.equal(m.eh.table['?__uncaught_exception@@YA_NXZ'].handler(), 1,
+    assert.equal(m.eh.table.__uncaught_exception.handler(), 1,
         'thrown and not yet caught');
+});
+
+test('the translator and the uncaught query are exported under msvcrt.dll\'s own names', ()=>{
+    const m = machine();
+    const table = /** @type {Record<string, any>} */ (m.eh.table);
+    const setTranslator = '?_set_se_translator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z';
+
+    // msvcrt.spec: the C++ name only for the translator, the C name only for
+    // the query; an import of either spelling resolves by that exact name.
+    assert.equal(table._set_se_translator, undefined);
+    assert.equal(table['?__uncaught_exception@@YA_NXZ'], undefined);
+    assert.deepEqual([table[setTranslator].convention, table[setTranslator].argBytes],
+        ['cdecl', 4]);
+    assert.deepEqual([table.__uncaught_exception.convention,
+        table.__uncaught_exception.argBytes], ['cdecl', 0]);
+
+    assert.equal(table[setTranslator].handler([0x401200]), 0, 'none was installed');
+    assert.equal(table[setTranslator].handler([0x401300]), 0x401200,
+        'the previous translator comes back');
+    assert.equal(table.__uncaught_exception.handler(), 0, 'nothing is in flight');
 });
 
 test('throw; inside a catch throws the same object again, and it is destroyed only once', async()=>{

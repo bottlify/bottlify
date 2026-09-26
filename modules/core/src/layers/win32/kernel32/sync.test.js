@@ -20,6 +20,7 @@ const WAIT_OBJECT_0 = 0x00000000;
 const WAIT_ABANDONED_0 = 0x00000080;
 const WAIT_TIMEOUT = 0x00000102;
 const WAIT_FAILED = 0xffffffff;
+const ERROR_SIGNAL_REFUSED = 156;
 
 /** What the bridge hands back for a call that cannot answer yet. */
 const PARKED = Object.freeze({ parked: true });
@@ -72,6 +73,9 @@ function fakeKernel(){
                 return object.signalled === true;
             case 'semaphore':
                 return object.count > 0;
+            // As the kernel has it: signalled once it has ended, for ever.
+            case 'thread':
+                return (object.exitCode ?? null) !== null;
             default:
                 return false;
         }
@@ -157,6 +161,23 @@ function fakeKernel(){
         block: (thread, reason)=>state.blocked.push({ thread, reason }),
         /** @param {any} thread */
         wake: thread=>state.woken.push(thread),
+        /** The count lives on the thread, and 127 is the most it carries. */
+        /** @param {any} thread */
+        suspendThread(thread){
+            const previous = thread.suspendCount ?? 0;
+            if (previous >= 127)
+            {
+                return null;
+            }
+            thread.suspendCount = previous + 1;
+            return previous;
+        },
+        /** @param {any} thread */
+        resumeThread(thread){
+            const previous = thread.suspendCount ?? 0;
+            thread.suspendCount = Math.max(0, previous - 1);
+            return previous;
+        },
         /** @param {any} thread @param {number} code */
         exitThread: (thread, code)=>state.woken.push({ exited: thread, code }),
         handles: {
@@ -204,6 +225,10 @@ function fakeHost(){
             bytes.set(data, address);
         },
         park: ()=>PARKED,
+        /** @type {number[]} */
+        errors: [],
+        /** @param {number} code */
+        setLastError: code=>host.errors.push(code),
         /** @param {number} milliseconds */
         advanceClock: milliseconds=>kernel.state.advanced.push(milliseconds),
         /** Guest memory for code and counters, from the top of this little machine. */
@@ -474,6 +499,22 @@ test('a waitable timer in a set is ready once the clock has signalled it', ()=>{
         'an armed but not-yet-due timer is not ready');
 });
 
+test('a thread in a polled set is ready once it has ended', ()=>{
+    // Joining a worker by polling its handle with WaitForMultipleObjects: an
+    // ended thread is signalled, one still running is not.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    const worker = { kind: 'thread', id: 0x108, exitCode: /** @type {number | null} */ (null) };
+    host.register(0x20, 'thread', worker);
+    new DataView(host.bytes.buffer).setUint32(0x400, 0x20, true);
+
+    assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, 0]), WAIT_TIMEOUT);
+    worker.exitCode = 0;
+    assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, 0]), WAIT_OBJECT_0);
+    assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 1, 0]), WAIT_OBJECT_0,
+        'and stays so, for a wait on all of the set too');
+});
+
 test('a finite timeout is a wait with a deadline, not an immediate refusal', ()=>{
     const host = fakeHost();
     const fns = createSyncFunctions(host);
@@ -515,7 +556,65 @@ test('suspending another thread reports the count before, and resuming undoes it
     assert.equal(fns.ResumeThread.handler([0x20]), 2);
     assert.equal(fns.ResumeThread.handler([0x20]), 1);
     assert.equal(other.suspendCount, 0);
-    assert.equal(host.kernel.state.woken.includes(other), true, 'and it was woken exactly once');
+    assert.equal(fns.ResumeThread.handler([0x20]), 0, 'resuming a running thread changes nothing');
+    assert.equal(host.kernel.state.blocked.length, 0,
+        'suspension is a count beside the thread\'s state, not a wait of its own');
+});
+
+test('a suspension past MAXIMUM_SUSPEND_COUNT fails and leaves the count alone', ()=>{
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    const other = host.threads.second;
+    host.register(0x20, 'thread', other);
+
+    for (let count = 0; count < 127; count++)
+    {
+        assert.equal(fns.SuspendThread.handler([0x20]), count);
+    }
+    assert.equal(fns.SuspendThread.handler([0x20]), 0xffffffff, '(DWORD)-1');
+    assert.equal(other.suspendCount, 127);
+    assert.deepEqual(host.errors, [ERROR_SIGNAL_REFUSED]);
+});
+
+test('a thread resumed while queued behind a released section takes it', ()=>{
+    // Suspended behind a section, a thread is passed over by the release that
+    // nobody else could take; resuming it hands it the section then.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    const builder = fakeBuilder();
+    fns.EnterCriticalSection.guest(builder);
+    fns.LeaveCriticalSection.guest(builder);
+    const [wait, wake] = builder.registered.map(one=>one.trap);
+    const section = 0x200;
+    const waiter = host.threads.second;
+    host.register(0x20, 'thread', waiter);
+
+    host.run(waiter);
+    wait.handler([section]);
+    host.run(host.threads.first);
+    fns.SuspendThread.handler([0x20]);
+    wake.handler([section]);
+    assert.deepEqual(host.kernel.state.woken, [], 'nobody could take it');
+
+    assert.equal(fns.ResumeThread.handler([0x20]), 1);
+    assert.deepEqual(host.kernel.state.woken, [waiter]);
+    assert.equal(host.readI32(section + CS_OWNING_THREAD), waiter.id);
+});
+
+test('a thread that has ended cannot be suspended', ()=>{
+    // Wine's thread test: SuspendThread on a thread that has finished answers
+    // (DWORD)-1, with ERROR_ACCESS_DENIED.
+    const ERROR_ACCESS_DENIED = 5;
+    const host = fakeHost();
+    Object.assign(host.kernel, { ThreadState: { TERMINATED: 'terminated' } });
+    const fns = createSyncFunctions(host);
+    const other = host.threads.second;
+    other.state = 'terminated';
+    host.register(0x20, 'thread', other);
+
+    assert.equal(fns.SuspendThread.handler([0x20]), 0xffffffff);
+    assert.deepEqual(host.errors, [ERROR_ACCESS_DENIED]);
+    assert.equal(other.suspendCount ?? 0, 0, 'and nothing is counted');
 });
 
 test('resuming a suspended child is what arms the replacement', ()=>{

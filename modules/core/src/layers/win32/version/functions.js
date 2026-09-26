@@ -5,6 +5,8 @@
  */
 
 import { expand } from '../lz32/expand.js';
+import { windowsVersion } from '../kernel32/versions.js';
+import { DIRECTX_VERSION } from '../advapi32/registry.js';
 
 /**
  * version — what a file says about itself.
@@ -89,7 +91,105 @@ const FIXED_FILE_VERSION_LS = 12;
  *           The volume VerInstallFile reads its source from and writes its
  *           destination to. Absent, VerInstallFile reports it cannot create
  *           the file (VIF_CANNOTCREATE), which is a documented failure.
+ * @property {(name: string) => boolean} [systemLibrary]
+ *           Whether the engine answers for a library of this file name
+ *           itself, with no file behind it. Absent, it answers for none, and
+ *           such a library reads as a file that is not there.
+ * @property {import('../kernel32/versions.js').WindowsVersion} [windows]
+ *           The Windows the machine is, whose version its own libraries carry
+ *           -- the real one, even where GetVersionEx is told to answer an older
+ *           one, since a file's version is the file's. Absent, the default.
  */
+
+/**
+ * The DirectX components, whose files carry DirectX's version rather than the
+ * system's.
+ */
+const DIRECTX_LIBRARY =
+    /^(ddraw|d3d\w*|dsound|dinput8?|dplay\w*|dpn\w*|dm\w+|dswave|dxdiag\w*|xinput\w*)\.dll$/i;
+
+/** VS_FIXEDFILEINFO's constants: its version, the flags it may set, NT, a DLL. */
+const VS_FFI_STRUCVERSION = 0x00010000;
+const VS_FFI_FILEFLAGSMASK = 0x0000003f;
+const VOS_NT_WINDOWS32 = 0x00040004;
+const VFT_DLL = 2;
+
+/** US English in UTF-16, the one translation the block carries. */
+const TRANSLATION = '040904B0';
+
+/** @param {string} text */
+const utf16 = text=>{
+    const bytes = new Uint8Array(text.length * 2);
+    for (let at = 0; at < text.length; at++)
+    {
+        bytes[at * 2] = text.charCodeAt(at) & 0xff;
+        bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
+    }
+    return bytes;
+};
+
+/**
+ * One node of a version block, laid out as `readNode` walks one: a text value
+ * counted in characters, a binary one in bytes, and every part on a dword.
+ *
+ * @param {string} key @param {Uint8Array | string | null} value
+ * @param {Uint8Array[]} [children]
+ * @returns {Uint8Array}
+ */
+function buildNode(key, value, children = []){
+    const text = typeof value === 'string';
+    const bytes = text ? utf16(`${value}\0`) : value ?? new Uint8Array(0);
+    const valueAt = aligned(6 + (key.length + 1) * 2);
+    let end = valueAt + bytes.length;
+    const offsets = children.map(child=>{
+        const at = aligned(end);
+        end = at + child.length;
+        return at;
+    });
+    const node = new Uint8Array(end);
+    const view = new DataView(node.buffer);
+    view.setUint16(0, end, true);
+    view.setUint16(2, text ? value.length + 1 : bytes.length, true);
+    view.setUint16(4, text ? 1 : 0, true);
+    node.set(utf16(key), 6);
+    node.set(bytes, valueAt);
+    children.forEach((child, index)=>node.set(child, offsets[index]));
+    return node;
+}
+
+/**
+ * The version block of a library the engine answers for: the system's version
+ * for a system library, and for a DirectX component the DirectX the registry
+ * says is installed -- so a program that reads the version from the file gets
+ * the answer it would have got from the registry.
+ *
+ * @param {string} name  The file name, extension included.
+ * @param {import('../kernel32/versions.js').WindowsVersion} [windows]  The system.
+ * @returns {Uint8Array}
+ */
+export function systemVersionResource(name, windows = windowsVersion()){
+    const directX = DIRECTX_LIBRARY.test(name);
+    const system = [windows.major, windows.minor, windows.build, 0];
+    const quad = directX ? DIRECTX_VERSION.split('.').map(part=>Number(part)) : system;
+    const spelled = directX ? DIRECTX_VERSION : system.join('.');
+    const fixed = new Uint8Array(FIXED_FILE_INFO_SIZE);
+    const view = new DataView(fixed.buffer);
+    const most = (quad[0] << 16 | quad[1]) >>> 0;
+    const least = (quad[2] << 16 | quad[3]) >>> 0;
+    [VS_FFI_SIGNATURE, VS_FFI_STRUCVERSION, most, least, most, least, VS_FFI_FILEFLAGSMASK, 0,
+        VOS_NT_WINDOWS32, VFT_DLL].forEach((field, index)=>view.setUint32(index * 4, field, true));
+    return buildNode('VS_VERSION_INFO', fixed, [
+        buildNode('StringFileInfo', null, [buildNode(TRANSLATION, null, [
+            buildNode('FileVersion', spelled),
+            buildNode('InternalName', name.replace(/\.[^.]*$/, '')),
+            buildNode('OriginalFilename', name),
+            buildNode('ProductVersion', spelled),
+        ])]),
+        buildNode('VarFileInfo', null, [
+            buildNode('Translation', Uint8Array.of(0x09, 0x04, 0xb0, 0x04)),
+        ]),
+    ]);
+}
 
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_RESOURCE_DATA_NOT_FOUND = 1812;
@@ -227,6 +327,22 @@ export function fileVersionOf(block){
  */
 export function createVersionFunctions(host){
     /**
+     * The file name of a library the engine answers for, when the path would
+     * find it there -- a bare name, or one in the system directory -- or
+     * null. A name with no extension is a DLL, as LoadLibrary takes it.
+     *
+     * @param {string} path
+     */
+    const systemName = path=>{
+        const slash = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
+        const directory = slash < 0 ? '' : path.slice(0, slash);
+        const file = path.slice(slash + 1);
+        const name = file.includes('.') ? file : `${file}.dll`;
+        return (directory === '' || directory.toLowerCase() === SYSTEM_DIRECTORY.toLowerCase())
+            && file !== '' && host.systemLibrary?.(name) ? name : null;
+    };
+
+    /**
      * The file's version resource, or null with the last error already set --
      * ERROR_FILE_NOT_FOUND when the file itself is not there (what
      * GetFileAttributes reports, which real GetFileVersionInfoSize falls back
@@ -238,12 +354,18 @@ export function createVersionFunctions(host){
      */
     const resourceFor = path=>{
         const resource = host.versionInfo?.(path) ?? null;
-        if (!resource)
+        if (resource)
         {
-            const exists = host.files ? (host.files.stat(path)?.exists ?? false) : true;
-            host.setLastError(exists ? ERROR_RESOURCE_DATA_NOT_FOUND : ERROR_FILE_NOT_FOUND);
+            return resource;
         }
-        return resource;
+        const exists = host.files ? (host.files.stat(path)?.exists ?? false) : true;
+        const library = exists ? null : systemName(path);
+        if (library !== null)
+        {
+            return systemVersionResource(library, host.windows);
+        }
+        host.setLastError(exists ? ERROR_RESOURCE_DATA_NOT_FOUND : ERROR_FILE_NOT_FOUND);
+        return null;
     };
 
     /** @param {number} address */

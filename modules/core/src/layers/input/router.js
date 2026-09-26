@@ -28,7 +28,6 @@ export const WM = Object.freeze({
     ACTIVATE: 0x0006,
     SETFOCUS: 0x0007,
     KILLFOCUS: 0x0008,
-    SETCURSOR: 0x0020,
     ACTIVATEAPP: 0x001c,
     NCACTIVATE: 0x0086,
     KEYDOWN: 0x0100,
@@ -40,12 +39,6 @@ export const WM = Object.freeze({
     MOUSEMOVE: 0x0200,
     MOUSEWHEEL: 0x020a,
 });
-
-/** WM_ACTIVATE's low word. */
-const WA_ACTIVE = 1;
-
-/** The hit-test code WM_SETCURSOR reports for the client area. */
-const HTCLIENT = 1;
 
 /** The virtual keys this file has an opinion about. */
 const VK_SHIFT = 0x10;
@@ -73,20 +66,20 @@ const MK = Object.freeze({
 /**
  * Buttons, named rather than numbered.
  *
- * A number would be three different numbers at once: a browser calls the middle
- * button 1, a mouse message pairs it with 0x0207, and DirectInput puts it at
- * index 2. Naming the button is what keeps a caller from having to know which
- * of the three it is holding.
+ * A number would be four different numbers at once: a browser calls the middle
+ * button 1, a mouse message pairs it with 0x0207, DirectInput puts it at index
+ * 2 and the key state at VK_MBUTTON, 4. Naming the button is what keeps a
+ * caller from having to know which of them it is holding.
  *
- * @type {Readonly<Record<string, readonly [number, number, number, number, number]>>}
+ * @type {Readonly<Record<string, readonly [number, number, number, number, number, number]>>}
  */
 const BUTTONS = Object.freeze({
-    // down message, up message, wParam bit, DirectInput index, XBUTTON id
-    left: [0x0201, 0x0202, MK.LBUTTON, 0, 0],
-    right: [0x0204, 0x0205, MK.RBUTTON, 1, 0],
-    middle: [0x0207, 0x0208, MK.MBUTTON, 2, 0],
-    x1: [0x020b, 0x020c, MK.XBUTTON1, 3, 1],
-    x2: [0x020b, 0x020c, MK.XBUTTON2, 4, 2],
+    // down message, up message, wParam bit, DirectInput index, XBUTTON id, virtual key
+    left: [0x0201, 0x0202, MK.LBUTTON, 0, 0, 0x01],
+    right: [0x0204, 0x0205, MK.RBUTTON, 1, 0, 0x02],
+    middle: [0x0207, 0x0208, MK.MBUTTON, 2, 0, 0x04],
+    x1: [0x020b, 0x020c, MK.XBUTTON1, 3, 1, 0x05],
+    x2: [0x020b, 0x020c, MK.XBUTTON2, 4, 2, 0x06],
 });
 
 /**
@@ -132,7 +125,12 @@ const BUTTONS = Object.freeze({
  * @property {number} message   The window message synthesised from it.
  * @property {number} wParam
  * @property {number} lParam
+ * @property {boolean} withheld  The message was kept from the window, because
+ *           DirectInput holds the mouse exclusively; the press reached the
+ *           program through that alone.
  */
+
+/** @typedef {import('../win32/user32/rawinput.js').RawInputEvent} RawReport */
 
 /**
  * @typedef {Object} RouterDeps
@@ -157,12 +155,23 @@ const BUTTONS = Object.freeze({
  * @property {(text: string) => void} [paste]
  *     Where pasted text goes: the clipboard, for a program to read. Absent
  *     in a build with no clipboard, where a paste is dropped.
+ * @property {(device: 'keyboard' | 'mouse') => boolean} [exclusive]
+ *     Whether DirectInput holds that device exclusively, in which case its
+ *     events reach the program through DirectInput and the window gets none
+ *     of its messages. Absent, the window always gets them.
+ * @property {(report: RawReport) => void} [rawInput]
+ *     Where each event goes as the device reported it, for the WM_INPUT of a
+ *     program that registered for raw input: user32 decides who is told.
+ *     Absent in a build with no windows.
  */
 
 /**
  * @param {RouterDeps} deps
  */
-export function createInputRouter({ post, device, now, target, bounds, compose, trace, paste }){
+export function createInputRouter(
+    { post, device, now, target, bounds, compose, trace, paste, exclusive, rawInput },
+)
+{
     /** The configured screen, or nothing: what the cursor falls back to. */
     const screen = bounds ?? null;
     // Where the cursor may go. The configured screen until something wires a
@@ -174,9 +183,29 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
     const clock = now ?? (()=>0);
     const targetWindow = target ?? (()=>0);
     const composeCharacter = compose ?? (()=>{});
+    const report = rawInput ?? (()=>{});
+    /**
+     * Whether the window is told what this device does. An exclusive
+     * DirectInput device is taken as raw input with RIDEV_NOLEGACY, which
+     * stops the legacy messages -- a program that reads a click both ways
+     * would otherwise act on it twice.
+     *
+     * @param {'keyboard' | 'mouse'} kind
+     */
+    const windowHears = kind=>exclusive?.(kind) !== true;
 
-    /** Virtual keys that are down. Indexed by VK, both the paired and the sided. */
+    /**
+     * Virtual keys that are down as the thread sees them: what GetKeyState
+     * and GetKeyboardState read, and what SetKeyboardState rewrites. Indexed
+     * by VK, both the paired and the sided.
+     */
     const keys = new Uint8Array(256);
+    /**
+     * Virtual keys that are physically down: what GetAsyncKeyState reads.
+     * SetKeyboardState leaves this alone -- a table that says A is down does
+     * not press A.
+     */
+    const physical = new Uint8Array(256);
     /**
      * Whether a toggle key is toggled on, the low bit GetKeyboardState and
      * GetKeyState report for CapsLock, NumLock and ScrollLock.
@@ -238,19 +267,6 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
      * the keyboard layout, which is the host's, not ours.
      */
     let lastKeyLParam = 0;
-    /**
-     * Whether the program is owed a WM_SETCURSOR. Windows *sends* one on every
-     * mouse move; this queue only posts, and posting one per move would double
-     * the traffic of the busiest message there is. So it is posted when the
-     * answer could have changed -- focus arriving, a button going either way --
-     * which is where a program that sets its own cursor sets it.
-     */
-    let cursorDirty = true;
-    /**
-     * Whether the program has been told it is the active application. Once, and
-     * never taken back: see `focus` below.
-     */
-    let activated = false;
     let posted = 0;
     let dropped = 0;
 
@@ -280,16 +296,6 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
             bits |= BUTTONS[name][2];
         }
         return bits;
-    };
-
-    /** @param {number} message  The mouse message this cursor question precedes. */
-    const announceCursor = message=>{
-        if (!cursorDirty)
-        {
-            return;
-        }
-        cursorDirty = false;
-        emit(WM.SETCURSOR, targetWindow(), (message & 0xffff) << 16 | HTCLIENT);
     };
 
     /**
@@ -322,8 +328,8 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         if (event.down)
         {
             held.set(code, mapping);
-            keys[mapping.vk] = 1;
-            keys[mapping.vkSide] = 1;
+            keys[mapping.vk] = physical[mapping.vk] = 1;
+            keys[mapping.vkSide] = physical[mapping.vkSide] = 1;
             // A repeat is the same press still held, not a new one: the
             // async low bit is owed on the transition only.
             if (!wasDown)
@@ -339,10 +345,11 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         else
         {
             held.delete(code);
-            keys[mapping.vkSide] = 0;
+            keys[mapping.vkSide] = physical[mapping.vkSide] = 0;
             // A modifier is two keys and one virtual key: letting go of the
             // left shift while the right is down does not mean shift is up.
-            keys[mapping.vk] = [...held.values()].some(other=>other.vk === mapping.vk) ? 1 : 0;
+            keys[mapping.vk] = physical[mapping.vk] =
+                [...held.values()].some(other=>other.vk === mapping.vk) ? 1 : 0;
         }
 
         // ALT decides which of the two pairs of messages this is; F10 is a
@@ -367,14 +374,24 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         const messages = event.down
             ? [WM.KEYDOWN, WM.SYSKEYDOWN]
             : [WM.KEYUP, WM.SYSKEYUP];
-        emit(messages[system ? 1 : 0], mapping.vk, lParam);
+        if (windowHears('keyboard'))
+        {
+            emit(messages[system ? 1 : 0], mapping.vk, lParam);
+        }
         device({ kind: 'key', code: dikOf(mapping), down: event.down === true });
+        report({ device: 'key', scan: mapping.scan & 0xff, extended: mapping.extended === true,
+            vk: mapping.vk, down: event.down === true, message: messages[system ? 1 : 0] });
         return true;
     };
 
     /** @param {HostInputEvent} event */
     const text = event=>{
         const string = event.text ?? '';
+        if (!windowHears('keyboard'))
+        {
+            // No key message went out for TranslateMessage to find this by.
+            return false;
+        }
         for (let index = 0; index < string.length; index++)
         {
             // Handed over, not posted. Windows makes a WM_CHAR inside
@@ -464,14 +481,14 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         cursor.x = nx;
         cursor.y = ny;
 
-        if (cursor.x !== px || cursor.y !== py)
+        if ((cursor.x !== px || cursor.y !== py) && windowHears('mouse'))
         {
-            announceCursor(WM.MOUSEMOVE);
             emit(WM.MOUSEMOVE, mask(), point());
         }
         if (stepX !== 0 || stepY !== 0)
         {
             device({ kind: 'mouseMove', x: stepX, y: stepY });
+            report({ device: 'mouse', dx: stepX, dy: stepY });
         }
         return true;
     };
@@ -484,26 +501,36 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
             dropped++;
             return false;
         }
-        const [downMessage, upMessage, , index, extra] = entry;
+        const [downMessage, upMessage, , index, extra, vk] = entry;
+        // A button is a virtual key too, in the table GetKeyState,
+        // GetAsyncKeyState and GetKeyboardState read.
         if (event.down)
         {
+            if (!physical[vk])
+            {
+                pressedSinceRead[vk] = 1;
+            }
+            keys[vk] = physical[vk] = 1;
             pressed.add(String(event.button));
         }
         else
         {
+            keys[vk] = physical[vk] = 0;
             pressed.delete(String(event.button));
         }
 
         const message = event.down ? downMessage : upMessage;
-        // A button is the moment a program is most likely to want a different
-        // cursor, so the question is always asked again here.
-        cursorDirty = true;
-        announceCursor(message);
         const wParam = (extra << 16 | mask()) >>> 0;
         const lParam = point();
-        emit(message, wParam, lParam);
+        const withheld = !windowHears('mouse');
+        if (!withheld)
+        {
+            emit(message, wParam, lParam);
+        }
         // After the message, so a record exists only for a press the guest was
-        // actually told about, and its absence means the press never got here.
+        // actually told about -- by the message, or by DirectInput alone when
+        // that holds the mouse -- and its absence means the press never got
+        // here.
         trace?.({
             button: String(event.button),
             down: event.down === true,
@@ -513,8 +540,12 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
             message,
             wParam,
             lParam,
+            withheld,
         });
         device({ kind: 'mouseButton', code: index, down: event.down === true });
+        // BUTTONS named it, so it is one of the five a RAWMOUSE has.
+        const named = /** @type {RawReport['button']} */ (event.button);
+        report({ device: 'mouse', button: named, down: event.down === true });
         return true;
     };
 
@@ -529,8 +560,12 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         // ones. There is no desktop for a window to sit somewhere on, so the
         // two spaces are the same space, and this will need the window's own
         // origin the moment one is not at zero.
-        emit(WM.MOUSEWHEEL, (delta & 0xffff) << 16 | mask(), point());
+        if (windowHears('mouse'))
+        {
+            emit(WM.MOUSEWHEEL, (delta & 0xffff) << 16 | mask(), point());
+        }
         device({ kind: 'mouseWheel', wheel: delta });
+        report({ device: 'mouse', wheel: delta });
         return true;
     };
 
@@ -548,12 +583,12 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
      * something happened to a web page. In this machine there is one window and
      * it is the active one, always.
      *
-     * The program is told it is active once, by `arm` below, when input is
-     * wired to a window -- not by a focus event, which would be the page
+     * The program is told it is the active application by user32, when it
+     * shows a window -- not by a focus event, which would be the page
      * deciding when a program becomes active. What still happens here on the
-     * way out is the release
-     * of everything held: a key whose release is never delivered stays down for
-     * the rest of the session, the player walks into a wall for ever, and no
+     * way out is the release of everything held: a key whose release is
+     * never delivered stays down for the rest of the session, the player
+     * walks into a wall for ever, and no
      * later event can undo it because as far as the program is concerned
      * nothing has happened. That is not browser state reaching the program --
      * it is the keyboard and the mouse, finished properly.
@@ -563,7 +598,6 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
     const focus = event=>{
         if (event.gained)
         {
-            cursorDirty = true;
             return true;
         }
 
@@ -585,15 +619,6 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
          * dropped here rather than reaching a program as a wrong one.
          *
          * @param {HostInputEvent} event
-         */
-        /**
-         * The one activation this machine ever sends.
-         *
-         * Called when input is wired to a window, which is a fact about this
-         * machine rather than a browser event: there is one window here and it
-         * is the active one. A program that waits to be told so before it will
-         * do anything is owed this once -- and it is never taken back, whatever
-         * the page's focus does afterwards.
          */
         /**
          * Confines the cursor to the viewport now showing the program, in that
@@ -650,7 +675,6 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
             residualY = 0;
             if (cursor.x !== px || cursor.y !== py)
             {
-                announceCursor(WM.MOUSEMOVE);
                 emit(WM.MOUSEMOVE, mask(), point());
             }
         },
@@ -664,39 +688,6 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
          */
         shown(visible){
             cursorVisible = visible;
-        },
-
-        /**
-         * Tells the program it is the active application, once it has a window
-         * to be told through.
-         *
-         * Latched on having delivered, never on having tried. Input is wired to
-         * the viewport when a run starts, which is before the program has
-         * executed a single instruction and therefore before it owns a window:
-         * activation sent then goes to window zero, is retrieved by the first
-         * GetMessage that asks for every window, and is dispatched to no
-         * procedure at all. Latching there left a program believing for the
-         * whole run that it was in the background -- which a program of this era
-         * takes as a reason to ignore input -- and nothing could say otherwise
-         * afterwards.
-         *
-         * So this is called again whenever a window appears, and does nothing
-         * until one has. Windows works the same way round: a window is told it
-         * became active after it exists, never before.
-         */
-        arm(){
-            if (activated || targetWindow() === 0)
-            {
-                return;
-            }
-            activated = true;
-            emit(WM.ACTIVATEAPP, 1, 0);
-            // Matches Wine's dlls/user32/tests/msg.c WmActivateApp/WmSetFocus
-            // sequences: the frame is told it is active (WM_NCACTIVATE)
-            // before the window itself is (WM_ACTIVATE).
-            emit(WM.NCACTIVATE, 1, 0);
-            emit(WM.ACTIVATE, WA_ACTIVE, 0);
-            emit(WM.SETFOCUS, 0, 0);
         },
 
         /** @param {HostInputEvent} event */
@@ -736,12 +727,13 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
 
         /**
          * Whether a virtual key is down, in the form GetKeyState answers with:
-         * the high bit set while it is held. This is the synchronous state the
-         * queue also reads, never the async one.
+         * the high bit set while it is held and the low bit while it is toggled
+         * on, the same two bits GetKeyboardState reports. This is the
+         * synchronous state the queue also reads, never the async one.
          *
          * @param {number} vk
          */
-        keyState: vk=>(keys[vk & 0xff] ? 0x8000 : 0),
+        keyState: vk=>(keys[vk & 0xff] ? 0x8000 : 0) | toggles[vk & 0xff],
 
         /**
          * Whether a virtual key is down and whether it went down since the
@@ -753,7 +745,7 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
          */
         asyncKeyState(vk){
             const index = vk & 0xff;
-            const answer = (keys[index] ? 0x8000 : 0) | (pressedSinceRead[index] ? 1 : 0);
+            const answer = (physical[index] ? 0x8000 : 0) | (pressedSinceRead[index] ? 1 : 0);
             pressedSinceRead[index] = 0;
             return answer;
         },
@@ -778,7 +770,8 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
 
         /**
          * Makes the 256-byte table the synchronous state: the down bits and
-         * the toggle bits in it become what GetKeyState answers.
+         * the toggle bits in it become what GetKeyState answers. The physical
+         * state GetAsyncKeyState reads is not the thread's to set.
          *
          * @param {Uint8Array} bytes
          */

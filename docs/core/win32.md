@@ -42,23 +42,26 @@ the module graph is built. All are optional.
 | option | type | default | meaning |
 |--------|------|---------|---------|
 | `arena` | `{ base, size }` | `{ 0, 0 }` | The byte range the process heap allocates from. |
-| `modules` | `{ find, byBase, imagePath, load?, resolved?, findResource?, moduleBase?, loadString?, versionInfo? }` | inert | How a module is found by name or base, and how a library is read off the volume. |
+| `modules` | `{ find, byBase, imagePath, load?, dataFile?, attachedLibraries?, resolved?, findResource?, moduleBase?, loadString?, versionInfo?, systemLibrary? }` | inert | How a loaded module is found by name or base, how a library is read off the volume (`load(name, flags)`, with `LoadLibraryEx`'s flags), a library mapped as data by its handle, the libraries still attached in the order `ExitProcess` tells them, and whether a name is one of the libraries the engine answers for. |
 | `idle` | `() => Promise` | resolves | How a waiting message pump gets to look again. |
 | `fetchBlocks` | `(blocks) => Promise<void>` | `null` | Brings absent bundle blocks in; without it a block miss is a fault rather than a wait. |
 | `threadBlock` | `(thread) => void` | none | Gives a new thread its TEB. |
 | `registers` | `{ read(name), write(name, value) }` | zeros | CPU registers, for exception dispatch and the helpers that answer in a register pair. |
 | `fpu` | `FloatHost` | none | The x87 stack; **without it the 51 functions returning `double` are not exported at all**. |
 | `screen` | `{ width, height, bitsPerPixel, displayWidth?, displayHeight? }` | `640×480` fallback in each library | What `GetSystemMetrics`, `GetDeviceCaps` and `EnumDisplaySettings` answer. |
-| `graphics` | thunks | none | Where GDI pixels go and which pixel formats exist. |
+| `graphics` | thunks | none | Where GDI pixels go, which pixel formats exist, and the display's gamma ramp (`setGammaRamp`, `gammaRamp`, `appliesGamma`). |
 | `output` | thunk | none | Where wave-out samples go. |
 | `video` | thunks | none | The decoder and the frame sink a filter graph uses. |
 | `network` | adapter `{ bind, unbind, find }` or a `NetworkTransport` | loopback | The transport under Winsock; `createApp` hands its own `win32.network` option here. |
 | `http` | request function | `null` | The transport under WinInet. |
 | `cursor`, `keyState`, `clipCursor` | thunks | nothing pressed, origin | The input layer, handed down. |
-| `commandLine`, `environment` | string, record | the quoted image path; `SystemRoot`, `TEMP`, `windir` under `C:\WINDOWS` | What the program is told it was started with. |
+| `windows` | `'win2000' \| 'winxp' \| 'win7' \| 'win10'` | `'winxp'` | The Windows the machine is: 2000 SP4 (5.0.2195), XP SP3 (5.1.2600), 7 SP1 (6.1.7601) or 10 (10.0.19045). One record (`kernel32/versions.js`) reaches every place a version is read -- the version calls, the hive, the default environment, shell32's folders, `VERSION.dll`'s system libraries, `RtlGetVersion` -- and any other name fails the layer's creation, the four choices in the message. |
+| `compatibility` | `{ supportedOS?: string[], imageVersion?: { major, minor } }` | nothing declared | What the running program says it knows: its manifest's `supportedOS` GUIDs and its PE header's operating system version (`createApp` reads both from the image, `compatibilityOf`). Only `win10` consults it, for what the version calls tell the program (§3, "The version a program is told"). |
+| `commandLine`, `environment` | string, record | the quoted image path; `SystemRoot`, `TEMP`, `TMP`, `windir` under `C:\WINDOWS`, and the profile folders of the Windows's layout (`defaultEnvironment`): `ALLUSERSPROFILE`, `APPDATA`, `USERPROFILE`, and for 7 and 10 `LOCALAPPDATA`, `ProgramData`, `PUBLIC` | What the program is told it was started with. |
 | `onOutput(handle, text)`, `onTrace(text)`, `created(hwnd)`, `spawned(request)` | callbacks | no-ops | Console output, `OutputDebugString`, window creation, `CreateProcess`. |
 | `onMessageBox(notice)` | callback | the box's own default | A message box the program put up. `notice` is `{ id, text, caption, type, buttons, defaultButton, icon }`; the answer is the id of the button pressed, and a promise parks the calling thread until `answerMessageBox(id, button)` supplies it. |
 | `onClipboard(text)` | callback | no-op | The text a program copied. Called from `CloseClipboard` when the clipboard was written under that open and holds `CF_UNICODETEXT` (preferred), `CF_TEXT` or `CF_OEMTEXT`; a close after a read alone, or with only non-text formats, calls nothing. A null handle (delayed rendering) is not rendered. |
+| `trustedRoots` | `(Uint8Array \| string)[]` | Microsoft's "Microsoft Root Authority" | The root store `WinVerifyTrust` judges Authenticode chains against, each root DER bytes or base64; an empty array trusts nothing. |
 | `divergence(api, detail)` | callback | none | See §3, "The divergence rule". |
 
 ### Provided API (`module.js`)
@@ -66,7 +69,7 @@ the module graph is built. All are optional.
 | method | one line |
 |--------|----------|
 | `libraries()` | `{ 'KERNEL32.dll': table, … }` — every DLL, each a map from export name to `{ argBytes, handler }`. |
-| `ordinals()` | Export ordinals for the libraries imported by number: `WSOCK32.dll`, `WS2_32.dll`, `OLEAUT32.dll`. |
+| `ordinals()` | Export ordinals for the libraries imported by number: `WSOCK32.dll`, `WS2_32.dll`, `OLEAUT32.dll`, `COMCTL32.dll`'s one numbered entry point, `WINMM.dll`'s #2 (`PlaySoundA`) and `SFC.dll`'s two catalog calls (#8, #9), which have no names at all. |
 | `libraryConvention(name)` | `'cdecl'` for the C runtime family (`msvcrt`, `msvcr*`, `msvcp*`, `crtdll`, `ucrtbase`), `'stdcall'` for every other library — what an undecorated export of it is, when nothing else says. Asked about libraries this build lacks as well as the ones it has. |
 | `resolve(name)` | One export by name, whichever library publishes it. |
 | `gdi()` | `createSurfaceDc(attributes)` / `deleteSurfaceDc(handle)` — a DC over pixels GDI did not allocate, for the graphics layer. |
@@ -80,7 +83,11 @@ the module graph is built. All are optional.
 | `heap()` | The one allocator: `allocate`, `free`, `block`, `resize`, `diagnostics`. |
 | `mappings()`, `ioCompletionWaits()`, `waveDevices()`, `waveThread()`, `criticalSections()`, `messages()`, `windows()`, `windowProcedures()` | Live views of the state below, used by `diagnostics()`. |
 | `activeWindow()` | The active top-level window, as `GetForegroundWindow` answers, or 0: where the input layer sends what names no window. |
+| `applicationDeactivated()` | Whether the application was last told `WM_ACTIVATEAPP(0)` and not `WM_ACTIVATEAPP(1)` since -- it stays active while the program activates its own windows. Read by the graphics layer: DirectDraw's exclusive mode is lost while it is `true`. |
+| `applicationDeactivations()` | How many times the application has been told `WM_ACTIVATEAPP(0)`: a caller that asks only when a program next calls it -- DirectDraw, whose video memory an exclusive owner loses on each deactivation -- still learns of one that came and went in between. |
+| `rawInput(report)` | One event of the mouse or the keyboard as the device reported it, from the input layer: posted as `WM_INPUT` to a program that registered for that device, and nothing otherwise. |
 | `placeWindow(hwnd, x, y, width, height, how?)` | Place a top-level window as the system would and tell the program with `WM_MOVE` when it moved and `WM_SIZE` when its client size changed -- nothing for a placement that changed neither, as `DefWindowProc` says nothing for one, since a program that resets its device on `WM_SIZE` would otherwise be reset by its own reset's placement without end. `how.announce` says the size whether or not it changed: what a mode switch says to the window it lands in, which the graphics layer asks for once, at a fullscreen device's first frame, when both the window and the device exist to hear it -- a program of this era configures its viewport and its full-speed/background state on that message. |
+| `clientRect(hwnd)` | One window's client rectangle on the screen -- `GetClientRect`'s size at `ClientToScreen`'s origin, a child's inside its parent's frame -- or `null` for a handle that names no window: the size a device's back buffer takes when a program asks for zero, and where a film is placed inside the window a program named its video window's owner. |
 | `dispatchFault(fault)` | Offers a processor exception the running thread took to its structured exception handlers. `null` when the vector is not one a program is handed (see "Exceptions"); otherwise a promise of where the thread goes on, or `null` once nothing took it. The application wires `cpu.onFault` to this. |
 | `exitCode()` | Set once the program has asked to terminate -- or once an exception nothing handled, or the C runtime's `abort`, ended it; `null` before. |
 
@@ -110,34 +117,40 @@ instantiation of the module reports (method in "Inventory" below):
 
 | library | directory | exports | what it covers |
 |---------|-----------|--------:|----------------|
-| `KERNEL32.dll` | `kernel32/` | 331 | Console, threads and waits, heap and virtual memory, process and TLS, modules, files and directories, critical sections, locale and code pages, environment and command line, system info and time, `CreateProcess`, exceptions and SEH, resources, drives, file mappings and pipes, completion ports, file times, console I/O, APCs and the alertable waits (`apc.js`). |
-| `USER32.dll` | `user32/` | 268 | Windows and classes, painting, system queries and display settings, objects (cursors, icons, menus, clipboard), dialogs, hot keys, `SendInput`, the keyboard-layout family (`GetKeyboardLayout`, `MapVirtualKey` A/W/`Ex`, `ToUnicode`/`Ex`, `ToAscii`/`Ex`, `VkKeyScan` A/W/`Ex`) over the one en-US layout this build has, read from one table in `keys.js` (`characterOf`/`keyForCharacter`) that `TranslateMessage`'s fallback reads too, under the modifiers held at the time. |
-| `msvcrt.dll` | `msvcrt/` | 277 (226 without `fpu`) | The C runtime: strings, multibyte strings, conversion, formatting and scanning, heap, math, paths, streams (`stdio.js`: `fopen` and its family over the volume, and the standard three as `_iob`'s first records, writing to the console), threads (`threads.js`: `_beginthread`/`_beginthreadex` through kernel32's `CreateThread`), time, C++ support (`cxx.js`), CRT startup, structured and C++ exceptions (`seh.js`, `eh.js`). |
-| `GDI32.dll` | `gdi32/` | 114 | Device contexts, objects and their lifetimes, metrics, drawing entry points. Text and fonts in both spellings (`CreateFont`/`Indirect`, `GetTextMetrics` with TEXTMETRICW's WCHAR fields, `GetTextExtentPoint`/`32`, `GetCharWidth`/`32`, `GetCharABCWidths`, `TextOut`, `ExtTextOut`); ABC widths are each character's own advance as the black box, with no bearings. Mapping modes set the extents they fix (MM_TEXT one to one, the fixed modes the device's 96-dot inch against their units with y up, MM_ISOTROPIC starting from MM_LOMETRIC's, MM_ANISOTROPIC keeping its own), and `LPtoDP`/`DPtoLP`/`OffsetWindowOrgEx` answer through them; drawing itself is still in device units whatever the mode. |
-| `ntdll.dll` | `ntdll/` | 96 | Counted strings, status translation, machine queries, 64-bit helpers — and 76 entries that are the same function object kernel32 or msvcrt already publish. |
-| `ADVAPI32.dll` | `advapi32/` | 71 | The registry API over the hive, `GetUserNameA`, SIDs, and a CryptoAPI provider (MD5, SHA-1, SHA-256, RC4, RSA signature verification). |
-| `WINMM.dll` | `winmm/` | 59 | `timeGetTime`, multimedia timers (`timers.js`: `timeSetEvent`'s routine runs on a timer thread of its own that the kernel's clock wakes at each due time; the event forms signal instead), wave-out with a real play cursor and a callback thread, multimedia file I/O (`mmio.js`: RIFF chunks over the volume's files); honest refusal for midi, mixer, aux, joystick, MCI and recording. |
-| `ole32.dll` | `ole32/` | 43 | Apartments, `CoCreateInstance`, task memory, GUID conversions, over the COM object model in `objects.js`. Class objects: `CoRegisterClassObject`/`CoRevokeClassObject` keep a program's own (with a reference, revoked by its apartment's last `CoUninitialize`), and activation asks them first -- their `CreateInstance` gets the outer unknown, so aggregation is theirs to allow -- then the classes built in here (which refuse aggregation), then a class's `InprocServer32`, loaded and asked through `DllGetClassObject`. `CoGetClassObject` answers the same three ways, a built-in class through an `IClassFactory` of our own. |
+| `KERNEL32.dll` | `kernel32/` | 375 | Console, threads and waits, heap and virtual memory, process and TLS, the version (`GetVersion`, `GetVersionExA`/`W`, `VerifyVersionInfoA`/`W`, `VerSetConditionMask`), modules (`GetModuleHandleA`/`W`), files and directories (`GetOverlappedResult` reading an operation's outcome out of its OVERLAPPED, and waiting on its event for one still pending), critical sections, `SwitchToThread` (yielding to a ready thread of any priority), SRW locks, condition variables and one-time initialisation (`slimsync.js`), locale and code pages, environment and command line, system info and time (`GetNativeSystemInfo` is `GetSystemInfo`'s answer and `IsWow64Process` answers FALSE: a 32-bit system has no WOW64), `CreateProcess`, exceptions and SEH, resources, drives, file mappings and pipes, completion ports, file times, console I/O, APCs and the alertable waits (`apc.js`), overlapped I/O with a completion routine (`ReadFileEx`/`WriteFileEx`). |
+| `USER32.dll` | `user32/` | 290 | Windows and classes (every window an ANSI one: `SetWindowTextW` and `SetDlgItemTextW` hand their text over in the ANSI page, as Windows converts a wide caller's message for an ANSI window; `EnumWindows` walks the top-level windows topmost first), painting, system queries and display settings, objects (cursors -- decoded to the picture the page shows, `cursors.js` -- icons, menus, clipboard), dialogs, hot keys, `SendInput`, raw input (`rawinput.js`), `TrackMouseEvent`, the keyboard-layout family (`GetKeyboardLayout`, `MapVirtualKey` A/W/`Ex`, `ToUnicode`/`Ex`, `ToAscii`/`Ex`, `VkKeyScan` A/W/`Ex`) over the one en-US layout this build has, read from one table in `keys.js` (`characterOf`/`keyForCharacter`) that `TranslateMessage`'s fallback reads too, under the modifiers held at the time. |
+| `msvcrt.dll` | `msvcrt/` | 351 (300 without `fpu`) | The C runtime: strings, multibyte strings (`wctomb` and `wcstombs` refusing a character past U+00FF with `EILSEQ`, as the C locale does), conversion, formatting and scanning (`%S`/`%ls` reading wide strings in the narrow printers, and `_vsnwprintf`), heap (`_aligned_malloc`/`_aligned_free`), math (`_ftol` answering its `__int64` in EDX:EAX, and `_isnan`, which needs no FPU), paths and directory searches (`_findfirst`/`_findnext`/`_findclose`, the `i64` forms and the wide `_wfindfirst`/`_wfindnext` and `_wfindfirsti64`/`_wfindnexti64`), the low-level file calls over a descriptor table with text mode (`io.js`: `_open`, `_read`, `_write`, `_lseek`, `_stat`/`_stati64`/`_fstati64`, `_setmode` for `_O_TEXT`/`_O_BINARY` and the Unicode translations `_O_WTEXT`/`_O_U16TEXT`/`_O_U8TEXT` (`widetext.js`), `_tell`, `_eof`, `_filelength` and the rest, and `_lseeki64`/`_telli64`/`_filelengthi64` answering in EDX:EAX; `_get_osfhandle`/`_open_osfhandle` share one record, and so one position, with a kernel32 file handle; `_O_TEMPORARY` and fopen's `D` delete the file when that descriptor closes, or when the process ends however it ends), streams standing on those descriptors (`stdio.js`: `fopen` and its family, `_wfopen`, `ccs=` opening in a Unicode translation, `freopen` (of a standard stream too) and `_fdopen`, `fgetpos`/`fsetpos`, `_fcloseall`/`_flushall`, `getchar`/`putchar`, `printf`/`vprintf`/`puts` through `stdout` and `vfprintf`, the wide calls `fgetwc`/`fputwc`, `getwchar`/`putwchar`, `fgetws`/`fputws`, `ungetwc`, `_putws` and `fwprintf`/`wprintf`/`vfwprintf`/`vwprintf`, `_filbuf`/`_flsbuf` and the macros' `_flag`, and the standard three as `_iob`'s first records, writing to the console), the runtime's variables with `errno` per thread and `_osver`/`_winver`/`_winmajor`/`_winminor` the version GetVersion reports (`globals.js`), threads (`threads.js`: `_beginthread`/`_beginthreadex` through kernel32's `CreateThread`), time, C++ support (`cxx.js`), CRT startup and the exits (`atexit`, `_onexit`, `_cexit`, `exit`), structured and C++ exceptions (`seh.js`, `eh.js`). |
+| `GDI32.dll` | `gdi32/` | 140 | Device contexts, objects and their lifetimes, metrics, drawing entry points. A device-dependent bitmap has rows of its own outside guest memory (`CreateBitmap` copies `lpBits`; `GetBitmapBits`/`SetBitmapBits` move them), and `GetObject`/`GetObjectW` report every object as the program reads it back -- a `BITMAP` with its stride, a whole `DIBSECTION`, a font's `LOGFONT`, a palette's entry count. Text and fonts in both spellings (`CreateFont`/`Indirect`, `GetTextMetrics` with TEXTMETRICW's WCHAR fields, `GetTextExtentPoint`/`32`, `GetCharWidth`/`32`, `GetCharABCWidths`, `TextOut`, `ExtTextOut`); ABC widths are each character's own advance as the black box, with no bearings. Mapping modes set the extents they fix (MM_TEXT one to one, the fixed modes the device's 96-dot inch against their units with y up, MM_ISOTROPIC starting from MM_LOMETRIC's, MM_ANISOTROPIC keeping its own), and `LPtoDP`/`DPtoLP`/`OffsetWindowOrgEx` answer through them; `SetLayout`/`GetLayout` keep a DC's layout, an RTL one mirroring `LPtoDP` across the device and reading back `MM_ANISOTROPIC`. Drawing itself is still in device units whatever the mode or layout, but for `SetDIBitsToDevice`, which maps its destination point and, under RTL, places the picture from its right edge. Every spelling of adding and removing a font resource answers the documented failure, the font table being fixed; `GetTextCharset(Info)` and `GetFontLanguageInfo` answer for the selected font. `EnumFontFamiliesExA`/`W` call the program's callback on its own thread with each face the table offers (`gdi32/faces.js`), a substitute such as MS Shell Dlg found by name but never listed, for `ANSI_CHARSET` and `DEFAULT_CHARSET`; every face is reported as a vector font (`FontType` 0, `TMPF_VECTOR` in `tmPitchAndFamily`) rather than TrueType, since none has tables `GetFontData` could read, so a program that lists only TrueType faces finds none. `CreateBitmap` (and `CreateBitmapIndirect`, from a `BITMAP`) rounds a depth up to 1, 4, 8, 16, 24 or 32 and refuses a side past 0x7ffffff with `ERROR_INVALID_PARAMETER`; a zero width or height is the one stock 1x1 monochrome bitmap every memory DC starts with; `CreateCompatibleBitmap` and `CreateDiscardableBitmap` make a device-dependent bitmap at the DC's depth, or, with a DIB section selected, a DIB section in its format; `CreateDIBitmap` makes a device-dependent bitmap at the DC's depth. `CreateDIBSection` takes `BI_BITFIELDS` only at 16 and 32 bits with no mask empty and not with `DIB_PAL_COLORS`, refuses `DIB_PAL_COLORS + 1`, a plane count Windows refuses, and an image past 32 bits of bytes. A `BITMAPCOREHEADER` is taken wherever a DIB is, and `GetDIBits` fills one in with an RGBTRIPLE table. A run-length encoded DIB (`BI_RLE8` at eight bits, `BI_RLE4` at four, bottom-up, with its `biSizeImage`) is drawn by `StretchDIBits`, `SetDIBitsToDevice` and `SetDIBits`, whole whatever lines are asked for, only the pixels its runs reach; `GetDIBits` describes one and writes none. Any other DIB needs planes: one whose `biPlanes` is 0 is refused by all three. `StretchDIBits` answers as Windows does: a `SRCCOPY` copy at the source's own size the lines from the DIB's first to the rectangle's far edge, reading a top-down DIB's `ySrc` from its top; a stretch the DIB's height, negative for a top-down one under another operation, reading `ySrc` from the bottom; and 0, drawing nothing, for a source rectangle that begins before the DIB, a negative extent running below or left of the origin. Scan lines go where Windows puts them, counted from the DIB's bottom whichever way it is stored: `SetDIBitsToDevice` draws only the lines handed in, `SetDIBits` (and `CreateDIBitmap`'s `CBM_INIT`) lays the DIB against the bitmap's top-left, and `GetDIBits` writes zeros for lines outside the bitmap. A `DIB_PAL_COLORS` table is read through the DC's palette, wrapping at its end, and `SetDIBits` takes `DIB_PAL_INDICES` into a monochrome bitmap only; the stock `DEFAULT_PALETTE` holds its twenty colours, which `GetPaletteEntries` reads and `SetPaletteEntries` may not change, and `CreateHalftonePalette` makes 256, the default palette's first and last eight at its ends. A pattern brush keeps its own copy of the bitmap's bits; `CreateDIBPatternBrushPt`, `CreateDIBPatternBrush` and `LOGBRUSH`'s `BS_DIBPATTERN` forms copy a packed DIB's, a palette-relative one resolved through the DC's palette each time it paints, and `BS_PATTERN8X8` is `BS_PATTERN`. `SetDeviceGammaRamp` makes its 768 words the display's ramp, handed to the graphics layer, which shows every frame through it; a ramp with an entry more than 0x8000 from the identity (the index times 256) is refused and the one before it stays, as Wine's `dc.c` `test_gamma` pins. `GetDeviceGammaRamp` writes the ramp the display shows, whoever set it -- a full-screen Direct3D device's included -- and the identity when none was; without a graphics layer the ramp set is kept here and read back. `GetDeviceCaps(COLORMGMTCAPS)` claims `CM_GAMMA_RAMP` only where a ramp reaches the picture. |
+| `ntdll.dll` | `ntdll/` | 98 | Counted strings, status translation, machine queries (`RtlGetVersion`, `RtlVerifyVersionInfo` against the true version), 64-bit helpers — and 77 entries that are the same function object kernel32 or msvcrt already publish, `VerSetConditionMask` among them. |
+| `ADVAPI32.dll` | `advapi32/` | 71 | The registry API over the hive, `GetUserNameA`, SIDs, and a CryptoAPI provider (MD5, SHA-1, SHA-256, RC4, RSA signature verification, the algorithms themselves in `crypto/`). |
+| `WINMM.dll` | `winmm/` | 107 | `timeGetTime` and `timeGetDevCaps`, multimedia timers (`timers.js`: `timeSetEvent`'s routine runs on a timer thread of its own that the kernel's clock wakes at each due time; the event forms signal instead), wave-out with a real play cursor, a callback thread and one volume level applied as every track's gain, `PlaySound` of PCM whether its format chunk says so plainly or as `WAVE_FORMAT_EXTENSIBLE` with the PCM sub-format, multimedia file I/O (`mmio.js`: RIFF chunks over a file on the volume -- by name, or by the handle of one the program already has open, which `mmioClose` closes unless `MMIO_FHOPEN` keeps it -- a memory file, or a file the program's own I/O procedure holds, installed under a code, named by a compound name's extension or handed in the `MMIOINFO`, which is sent each open, read, write, seek and close as a call into its code; buffered through guest memory -- the caller's buffer or one mmio allocates on the program's heap -- with `mmioGetInfo`/`mmioSetInfo`/`mmioAdvance`, `mmioSetBuffer` and `mmioFlush`; `mmioRename` on the volume or through the procedure, and `mmioSendMessage` for a program's own messages to its procedure); MCI answered in either width, command and string, as a machine with no MCI device, error text for the shared, wave and MIDI codes and MCI's own, and honest refusal for midi, mixer, aux, joystick and recording. |
+| `ole32.dll` | `ole32/` | 51 | Apartments, `CoCreateInstance`, task memory, GUID conversions, over the COM object model in `objects.js`. `PropVariantCopy`/`PropVariantClear` (`propvariant.js`) over the types, forms and refusals ole32's propvariant tests hold a PROPVARIANT to: a deep copy in task memory, a BSTR and a SAFEARRAY through oleaut32's own calls, an interface with a reference of its own. `RegisterDragDrop`/`RevokeDragDrop` keep one drop target per window, which is also the window's `OleDropTargetInterface` property meanwhile, with the refusals ole32's tests expect, and nothing is ever dropped on it; the OLE clipboard never holds an object. Class objects: `CoRegisterClassObject`/`CoRevokeClassObject` keep a program's own (with a reference, revoked by its apartment's last `CoUninitialize`), and activation asks them first -- their `CreateInstance` gets the outer unknown, so aggregation is theirs to allow -- then the classes built in here (which refuse aggregation), then a class's `InprocServer32`, loaded and asked through `DllGetClassObject`. `CoGetClassObject` answers the same three ways, a built-in class through an `IClassFactory` of our own. |
 | `OLEAUT32.dll` | `oleaut32/` | 39 | BSTR and VARIANT; imported by ordinal. |
 | `WSOCK32.dll`, `WS2_32.dll` | `wsock32/` | 38 each | One socket registry under both names, over an injected adapter (loopback by default); readiness delivered as a window message (`WSAAsyncSelect`) or a signalled kernel event (`WSAEventSelect`/`WSAEnumNetworkEvents`), and name resolution the same way (`WSAAsyncGetHostByName`/`WSACancelAsyncRequest`). |
-| `SHELL32.dll` | `shell32/` | 21 | Launching a program (`ShellExecute`, `ShellExecuteEx`, `FindExecutable`), documented refusals where a registry or a person is needed (a document's handler, folder browse), the drag-and-drop truths, the namespace (`namespace.js`: `IShellFolder`/`IEnumIDList` over the volume), and `CLSID_ShellLink` (`IShellLinkA/W`, `IPersistFile`). |
-| `COMCTL32.dll` | `comctl32/` | 17 | Image lists (indices only), mouse tracking, and `msctls_progress32`/`SysTreeView32` as built-in window classes. |
-| `d3dx9_25.dll`, `d3dx9_26.dll`, `d3dx9_27.dll` | `d3dx9/` | 13 each | Stub tables for the D3DX helper libraries, shadowed by the real DLL whenever the DirectX system volume is mounted and a program does not ship its own ([`decisions.md`](../../roadmap/decisions.md)). |
+| `SHELL32.dll` | `shell32/` | 24 | Launching a program (`ShellExecute`, `ShellExecuteEx`, `FindExecutable`), file operations on the volume (`fileop.js`: `SHFileOperationA/W` copying, moving, renaming and deleting by the rules shell32's tests check, `SHCreateDirectoryExA/W`), documented refusals where a registry or a person is needed (a document's handler, folder browse), the drag-and-drop truths, the namespace (`namespace.js`: `IShellFolder`/`IEnumIDList` over the volume), and `CLSID_ShellLink` (`IShellLinkA/W`, `IPersistFile`). |
+| `COMCTL32.dll` | `comctl32/` | 29 | Image lists (`imagelist.js`), which copy each image, and its mask with `ILC_MASK`, into bitmaps of their own and draw them through gdi32 (`ImageList_Draw`, `DrawEx`, `DrawIndirect`: through the mask, onto the background colour for `ILD_NORMAL`, the mask for `ILD_MASK`, the image alone for `ILD_IMAGE`, by `ILD_ROP`'s operation; alpha, the blend flags and the state effects are not drawn), `_TrackMouseEvent` (user32's `TrackMouseEvent`), `msctls_progress32`, `SysTreeView32` and `SysTabControl32` (`tab.js`) as built-in window classes, and property sheets and wizards (`propsheet.js`: `PropertySheetA/W`, `CreatePropertySheetPageA/W`, `DestroyPropertySheetPage`) -- a `#32770` dialog built through user32's own calls around a tab control, each page the program's own template and dialog procedure, told the `PSN_*` notifications through `WM_NOTIFY`, and every message the sheet sends -- to a page, to its own window, to a control -- answered before it sends the next, since any of them may run the program's code; Tab walks into a page's controls (`WS_EX_CONTROLPARENT`), `PSM_ISDIALOGMESSAGE` changes page on Ctrl+Tab, Ctrl+Shift+Tab and Ctrl+PgDn/PgUp, as a modal sheet does in its own loop (user32's, lent through the window service), `PSH_WIZARD97` and `PSH_WIZARD_LITE` make a wizard whose interior pages stand under a header band with the header title and subtitle, a page that cannot be made is dropped, and a modal sheet answers 1 when changes were saved, 0 when none were, and `ID_PSRESTARTWINDOWS`/`ID_PSREBOOTSYSTEM` only when OK or Finish closed it. |
+| `d3dx9_25.dll`, `d3dx9_26.dll`, `d3dx9_27.dll` | `d3dx9/` | 13 each | Stub tables for the D3DX helper libraries, shadowed by the real DLL wherever the program ships one or its installer put one in `system32` ([`decisions.md`](../../roadmap/decisions.md)). |
 | `WININET.dll` | `wininet/` | 12 | HTTP as a handle tree; a request parks the caller. |
 | `IMM32.dll` | `imm32/` | 10 | "There is no input method" — which is the state a game asks for. |
-| `RPCRT4.dll` | `rpcrt4/` | 6 | `UuidCreate` and the other GUID/status helpers a COM-adjacent program links directly. |
-| `VERSION.dll` | `version/` | 8 | The version block read out of a file's own image, A and W: `VerQueryValueA` answers a text value in ANSI, in the room `GetFileVersionInfoSize` reserves behind the block (marked `FE2X`), or in place when the caller copied the block into less; `VerQueryValueW` answers the block's own UTF-16. |
+| `RPCRT4.dll` | `rpcrt4/` | 8 | `UuidCreate` and the other GUID/status helpers a COM-adjacent program links directly; `UuidToStringA` spells a UUID without braces, in lower case, into a string the library allocates on the process heap, which `RpcStringFreeA` frees before clearing the caller's pointer. |
+| `VERSION.dll` | `version/` | 8 | The version block read out of a file's own image, A and W: `VerQueryValueA` answers a text value in ANSI, in the room `GetFileVersionInfoSize` reserves behind the block (marked `FE2X`), or in place when the caller copied the block into less; `VerQueryValueW` answers the block's own UTF-16. A library the engine answers for itself, by bare name or in the system directory, has a block built here -- the machine's own version, `major.minor.build.0` of the configured Windows (the real one, even where `GetVersionEx` tells a program an older one), or for a DirectX component the DirectX version the registry holds -- unless a file of that name on the volume answers first. |
 | `LZ32.dll` | `lz32/` | 4 | The LZ compression stubs an older installer links and never has cause to call successfully. |
 | `MSWSOCK.dll` | `wsock32/` | 4 | The Winsock extensions. |
 | `COMDLG32.dll` | `comdlg32/` | 4 | File dialogs, answered as cancelled. |
-| `SHLWAPI.dll` | `shlwapi/` | 4 | Path and string helpers an installer imports for convenience. |
+| `SHLWAPI.dll` | `shlwapi/` | 10 | Path and string helpers an installer imports for convenience, `PathCombine` and `PathMatchSpec` in both spellings among them, and the HLS colour pair. |
+| `ADVPACK.dll` | `advpack/` | 1 | The Advanced INF helper an installer loads at run time: `IsNTAdmin`, true when the token holds `BUILTIN\Administrators` -- asked through `isTokenMember`, the same membership `CheckTokenMembership` answers from. |
+| `SFC.dll` | `sfc/` | 5 | System File Protection's client, loaded at run time by an installer that replaces system files: `SRSetRestorePoint`/`A`/`W` answer FALSE with `ERROR_SERVICE_DISABLED` in `STATEMGRSTATUS.nStatus` (this machine keeps no restore points), and the undocumented catalog calls exported by ordinal alone -- #8 `SfpInstallCatalog(catalog, dependency)` copies a catalog into `system32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}`, #9 `SfpDeleteCatalog(name)` removes it -- answering an error code, zero for success, the shape their callers push and read. |
+| `SETUPAPI.dll` | `setupapi/` | 20 | The Setup API an installer loads at run time. INF files (`inf.js`: the syntax setupapi's parser is observed to accept -- sections merged by name, quotes and `""`, continuation backslashes, `%strings%` and DIRIDs, the load errors with their line; ANSI, or UTF-16 after a byte-order mark) are opened by path, or by bare name from the INF directory and then the system directory, and read line by line (`SetupFindFirstLineA`, `SetupFindNextLine`, `SetupGetLineTextA`, `SetupGetInfInformationA`). `SetupIterateCabinetA` sends `SPFILENOTIFY_CABINETINFO`, `FILEINCABINET` and `FILEEXTRACTED` to the program's callback on the caller's thread, with the structures in its memory, and extracts where the callback says. `SetupInstallFromInfSectionA` with `SPINST_FILES` queues `CopyFiles`, `DelFiles` and `RenFiles` through `DestinationDirs`, `SourceDisksNames` and `SourceDisksFiles` and commits the queue (`queue.js`) with `SetupCommitFileQueue`'s notification sequence, a source that is not beside the INF taken out of the cabinet its disk's tag file names; `SetupDefaultQueueCallbackA` answers each notification as the default handler does with nobody to ask. `SetupCopyOEMInfA` places an INF as `oemN.inf`, the first number free, and its catalog in the catalog store under the same number; `SetupDiGetClassDevsA` and the four device calls beside it work over a device tree with no devices in it. |
+| `WINTRUST.dll` | `wintrust/` | 2 | `WinVerifyTrust` and `WinVerifyTrustEx` under `WINTRUST_ACTION_GENERIC_VERIFY_V2` over a file, as Microsoft's Authenticode specification describes the policy (`authenticode.js`): the file's digest (`subject.js`: a PE image's by the published rule, a cabinet's by the rule every signed Microsoft cabinet measured obeys) is the one `SpcIndirectDataContent` states, the one signer signed it, a PKCS #9 countersignature holds and its authority chains to a trusted root with the time-stamping usage at the time it states, and the publisher's chain reaches a trusted root and allows code signing at that time -- or now, with no timestamp or under lifetime signing. The answer is Windows' code for the first thing that fails, and the last error too. The root store is `trustedRoots`, Microsoft's 1997 root by default (`roots.js`). |
 | `WINSPOOL.DRV` | `winspool/` | 3 | Print spooler entry points, answered as "no printers". |
 | `MPR.dll` | `mpr/` | 2 | Network provider entry points, answered as "not connected to a network". |
 | `MSACM32.dll` | `msacm32/` | 42 | The Audio Compression Manager with no codec drivers installed: the whole exported surface declared for its stack widths, every driver or stream request answered "not supported"/"not possible", so middleware that links against it loads and decodes on its own. |
 | `SHFOLDER.dll` | *(built in `module.js`)* | 2 | A two-export forwarder to shell32's `SHGetFolderPathA`/`SHGetFolderPathW`, sharing shell32's own function objects. |
 | *(no DLL)* | `quartz/` | — | The DirectShow filter graph, reached through `CoCreateInstance(CLSID_FilterGraph)`; registered on the COM registry, not as an import table. |
+| *(no DLL)* | `cabinet/` | — | The cabinet reader SETUPAPI extracts through (`cabinet.js`: `CFHEADER` with its reserved areas and set links, `CFFOLDER`, `CFFILE`, and every `CFDATA` block checked against its checksum when it has one, from the Cabinet SDK's format documents) and its decoders: MSZIP (`inflate.js`, one RFC 1951 stream per block, the 32 KiB history carried across the folder) and LZX (`lzx.js`, windows 2^15 to 2^21; verbatim, aligned-offset and uncompressed blocks; the `E8` call translation undone). A Quantum folder is refused as unsupported. |
+| *(no DLL)* | `crypto/` | — | The cryptography every library shares: MD5, SHA-1 and SHA-256 (`digest.js`), RC4, the RSA arithmetic and PKCS#1 v1.5 verification (`rsa.js`, `signature.js`), a DER reader (`der.js`), X.509 certificates (`x509.js`) and PKCS #7 SignedData with its signers and countersigners (`pkcs7.js`). |
 
-Total: 1552 table entries across 28 libraries, 1419 distinct functions.
+Total: 1827 table entries across 32 libraries, 1693 distinct functions.
 
 **Inventory method.** `dbg/docs/count-dlls.mjs` (throwaway; not part of the build) creates the
 module against the same stub host `src/layers/win32/module.test.js` uses
@@ -154,28 +167,38 @@ instead carry `guest`, a builder that emits guest code and registers the traps i
 (critical sections do this). The assembler (`src/app.js`) merges `win32.libraries()` with the
 tables from `graphics`, `audio`, `input` and `media`, registers every handler with the bridge under
 `DLL!Name`, and asks the loader to synthesise one in-guest module per library, with the ordinals
-`win32.ordinals()` declares for the libraries imported by number
+`win32.ordinals()`, `audio.ordinals()` (`DSOUND.dll`) and `media.ordinals()` declare for the libraries imported by number
 ([`loader.md`](./loader.md)). An export's address is its trampoline inside that module, and it is
 what both the import table and `GetProcAddress` hand out, so a program comparing the two finds them
 equal. A table that exports `DllMain` is a module with an entry point, run on the first
 `LoadLibrary`. An import no table provides is bound to a stub (`app.js`, `missingImport`) that
 counts the call and emits an `unimplemented` event; whether it may return is decided by what the
-caller expects of the stack, since the argument bytes are the one thing that must be right:
+caller expects of the stack (`missingImportCall`), since the argument bytes are the one thing that
+must be right:
 
 | import | stub |
 |--------|------|
 | `_name@N` (decorated stdcall) | Returns zero and pops N bytes. |
-| Any name from a library `win32.libraryConvention()` declares cdecl — `msvcrt`, `msvcr*`, `msvcp*`, `crtdll`, `ucrtbase` | Returns zero and pops nothing; the caller cleans up. |
-| An undecorated name (or an ordinal) from any other library — every Win32 system export is one | **Stops the process** on the first call with a guest fault: `unimplemented import KERNEL32.dll!Name, called from 0x… image+0x… (rva 0x…); argument bytes unknown, the stack holds w0 w1 w2 w3`. No stub can return from it with the stack right, and a program that goes on fails somewhere unrelated several calls later. The full list of what is unbound is already reported at load as `import-unresolved`. |
-| A name a library the program brought does not export | As the decoration says (a mismatch between two of its own files, not a gap in this build); both events carry `origin: 'program'` rather than `'system'`. |
+| A Visual C++ decorated name (`?…`) whose type sizes its parameters, from any library | Returns zero and pops what the name's convention and parameters say ([`loader.md`](./loader.md), "Decorated C++ names"): a C runtime class's `thiscall` member its parameters, a `cdecl` function nothing. |
+| Any other name from a library `win32.libraryConvention()` declares cdecl — `msvcrt`, `msvcr*`, `msvcp*`, `crtdll`, `ucrtbase` | Returns zero and pops nothing; the caller cleans up. |
+| An undecorated name (or an ordinal) from any other library — every Win32 system export is one — or a C++ name that does not carry its argument bytes (a class passed or returned by value, a constructor that may take a virtual-base flag) | **Stops the process** on the first call with a guest fault: `unimplemented import KERNEL32.dll!Name, called from 0x… image+0x… (rva 0x…); argument bytes unknown, the stack holds w0 w1 w2 w3`. No stub can return from it with the stack right, and a program that goes on fails somewhere unrelated several calls later. The full list of what is unbound is already reported at load as `import-unresolved`. |
+| A name a library the program brought does not export | Returns zero as the name says -- N bytes for `_name@N`, a C++ name's own size, otherwise nothing (a mismatch between two of its own files, not a gap in this build); both events carry `origin: 'program'` rather than `'system'`. |
+
+Zero is not a failure under every convention. It reads as one for the commonest shapes -- a null
+pointer, a null handle, `FALSE`, a count of none -- so such a caller takes its own failure path and
+says what it wanted; but an `HRESULT` or an error code of zero is success, and a C runtime call that
+fails with -1 or `EOF` (`fgetc`, `_read`), or answers `feof`'s "not yet" with zero, reads it as a
+result, which can leave a read loop going round for ever. No one value fails under every
+convention; zero fails under most.
 
 The fault is raised through `cpu.raiseFault` and the stub's return is sent into the park loop,
 so the caller never runs another instruction; the run ends as `guest-fault`, the same way a
 processor exception does.
 
-`kernel32/modules.js` therefore creates nothing: `LoadLibrary` reports what is already synthesised
+`kernel32/modules.js` therefore creates nothing: `LoadLibrary` marks a synthesised library loaded
 (or reads a library the program ships through `modules.load`), and an address taken at the first
-instruction is the address that works at the last.
+instruction is the address that works at the last -- `FreeLibrary` of one of ours stops it being
+loaded and unmaps nothing.
 
 ### The process model
 
@@ -214,48 +237,120 @@ gets its own heap, hive, queue and COM registry.
   one of `MEM_DECOMMIT` and `MEM_RELEASE` (87 otherwise); a release takes the reservation's base
   and no size (487 for an interior address, 87 for a size), a decommit any pages inside it. Both
   set the last error on every refusal. The compiled `virtual.exe` (`src/virtual.itest.js`) checks
-  each of these through a real program.
+  each of these through a real program. **`VirtualQuery`** answers a `VirtualAlloc` reservation as
+  its own allocation -- its base as `AllocationBase`, the run of pages sharing the asked page's
+  state as the region, `MEM_COMMIT` or `MEM_RESERVE` page by page as the program committed them --
+  the heap's own blocks as committed memory, and free arena as `MEM_FREE`; an address nothing maps
+  outside the arena is `MEM_RESERVE`, since `VirtualAlloc` cannot reserve there and free means
+  available to be allocated. Each answer covers the whole run of pages that share a state, so a
+  guest walking its address space by `RegionSize` does not step a page at a time.
+  `HeapSetInformation` turns the low-fragmentation heap on once and refuses to turn it off, as
+  `HeapQueryInformation` then reports.
+- **Modules** (`kernel32/modules.js` over the assembler's module table, `src/app.js`). Every system
+  library is synthesised before the first instruction and binds whenever it is asked for, but it is
+  *loaded* -- found by `GetModuleHandle`, listed in `PEB->Ldr` -- only once an image is bound to it
+  or `LoadLibrary` asks for it, along with the system libraries it imports itself on Windows
+  (`USER32` brings `GDI32` and `ADVAPI32`); `ntdll` and `kernel32` are in every process. A library
+  loaded at run time counts its `LoadLibrary` calls, and `FreeLibrary` gives one back; the last
+  `FreeLibrary` calls its `DllMain` with `DLL_PROCESS_DETACH` on the thread that asked, then unmaps
+  it and takes it out of `PEB->Ldr` (one of ours stops being loaded instead). A library something
+  imports is pinned, as Windows pins it. `LoadLibraryExA/W` act on their flags:
+  `LOAD_LIBRARY_AS_DATAFILE` (and `_EXCLUSIVE`) maps the file apart as data,
+  `LOAD_LIBRARY_AS_IMAGE_RESOURCE` lays it out as an image, and the handle is the view's base with a
+  low bit set -- one for a file's view, two for an image's -- invisible to `GetModuleHandle`, its
+  resources found through it, given back by `FreeLibrary`, while a library already loaded is
+  answered with its own handle; `DONT_RESOLVE_DLL_REFERENCES` maps a library without binding its
+  imports or running its entry point, as `LoadLibrary` of a program by name always does. A non-null
+  `hFile` is `ERROR_INVALID_PARAMETER`. `ExitProcess` -- and the C runtime's exits, `exit` after its
+  `atexit` handlers -- ends the other threads and calls every still-attached library's `DllMain`
+  with `DLL_PROCESS_DETACH` (`lpvReserved` non-NULL), the last attached first, on the calling
+  thread, before the exit code is recorded.
 - **Windows** (`user32/windows.js` with `paint.js`, `system.js`, `objects.js`, `dialogs.js`,
-  `controls.js`, `frame.js`). One window table shared by the files. `windowService` is the
-  outward view: `list()` of live windows with their screen rectangles and `place()`, which is what
-  a fullscreen device uses through `placeWindow` so a program re-reading its rectangle on
-  `WM_SIZE` clips its cursor to the picture. A window has the frame its styles give it
-  (`frame.js`: border, caption with title and close box, scroll bars), which `DefWindowProc`
-  paints on `WM_NCPAINT` and which `GetClientRect`, `ClientToScreen` and `AdjustWindowRect` all
-  derive from the same metrics. `DestroyWindow` *sends* `WM_DESTROY`, then destroys the children,
-  then sends `WM_NCDESTROY`, and only then stops the handle resolving -- the procedure runs before
-  the call returns, while whatever the program keeps behind the window still exists; a window
-  whose CBT hook refused it hears nothing, one whose `WM_CREATE` answered -1 hears `WM_NCDESTROY`
-  alone. Painting goes through the desktop surface the graphics layer
-  owns (`docs/core/graphics.md`): `BeginPaint` sends `WM_NCPAINT` and `WM_ERASEBKGND` first, a
-  window's update area is one rectangle, a window that is invalidated marks every window painted
-  after it that overlaps it, and the desktop is presented when the queue finds nothing left to
-  paint. `UpdateWindow` and `RedrawWindow(RDW_UPDATENOW)` *send* `WM_PAINT` (with
-  `RDW_ALLCHILDREN`, to the descendants after the window), so the procedure has painted when the
-  call returns. A region names its bounding rectangle (`InvalidateRgn`, `ValidateRgn`,
-  `RedrawWindow`'s region, read through gdi32's `regionBox`; `GetUpdateRgn` fills one through
-  `setRegion`). `ValidateRect` takes its rectangle out of the update area exactly when what is
-  left is still a rectangle -- a band off one side -- and otherwise leaves the area whole. The **system classes** — `Button`, `Static`, `Edit`, `ListBox`, `ComboBox`,
-  `ScrollBar` and the dialog class `#32770`, also by their atoms — have their procedures on this
-  side (`controls.js`); each has a real address (a bridge stub) that `GetWindowLong(GWL_WNDPROC)`
-  reports and `CallWindowProc` reaches, so a program may subclass one. Dialogs are windows of the
-  dialog class: the template is walked for real, coordinates are dialog units, the dialog
-  procedure sees every message first and `DefDlgProc` the rest, and `IsDialogMessage` handles
-  Enter, Escape and Tab. Pointer messages from the input layer are routed to the window under
-  the point (or the capture), in that window's client coordinates, with the frame's hit test
-  turning them into non-client messages; keys go to the focus window. **Activation** is sent,
-  not posted, whenever a guest call causes it -- `SetFocus`, `SetActiveWindow`,
-  `SetForegroundWindow`, `ShowWindow` -- in Windows' order: `WM_NCACTIVATE` and `WM_ACTIVATE` to
-  the window losing it, the same to the one gaining it, then `WM_KILLFOCUS`/`WM_SETFOCUS`. A press
-  activates its window when the program takes it from the queue (`GetMessage`, `PeekMessage` with
-  `PM_REMOVE`): `WM_MOUSEACTIVATE` is sent (a child's default procedure asks its parent), and
-  `MA_ACTIVATE` activates with `WA_CLICKACTIVE` and raises, the `NOACTIVATE` answers leave the
-  activation alone, and the `ANDEAT` answers drop the press. Only a window made visible as it is
-  created is still told by posting, there being no guest call to send from. The input layer's
-  foreground is the active window (`activeWindow()` on the API) -- not simply the last one
-  created, which may be hidden or a child -- and only while none is active the last created.
-  `GetWindow` walks top-level windows from the top of the Z order and children in creation order,
-  a new child going below its siblings, so a dialog's first control is its `GW_CHILD`.
+  `controls.js`, `frame.js`). One window table shared by the files. `windowService` is the outward
+  view: `list()` of live windows with their screen rectangles and `place()`, which is what a
+  fullscreen device uses through `placeWindow` so a program re-reading its rectangle on `WM_SIZE`
+  clips its cursor to the picture. A window has the frame its styles give it (`frame.js`: border,
+  caption with title and close box, a menu bar below the caption for a window that is not a child
+  and has a menu, scroll bars) at the classic metrics `GetSystemMetrics` answers at 96 dpi -- a
+  dialog frame three pixels, a tool window's caption 16 -- which `DefWindowProc` paints on
+  `WM_NCPAINT` and which `GetClientRect`, `ClientToScreen` and `AdjustWindowRect(Ex)` all derive
+  from, so a window sized from `AdjustWindowRectEx` has the client area asked for. `CreateWindowEx`
+  sends `WM_NCCREATE` and then `WM_CREATE`, with the same `CREATESTRUCT`, and for a window made
+  visible `WM_SIZE`, `WM_MOVE` and `WM_SHOWWINDOW(1)` after them; a `WM_NCCREATE` answered `FALSE`
+  refuses the window. `DestroyWindow` *sends* `WM_DESTROY`, then destroys the children, then sends
+  `WM_NCDESTROY`, and only then stops the handle resolving -- the procedure runs before the call
+  returns, while whatever the program keeps behind the window still exists; a window whose CBT hook
+  refused it hears nothing, one whose `WM_NCCREATE` answered `FALSE` or whose `WM_CREATE` answered
+  -1 hears `WM_NCDESTROY` alone. It destroys the menu of a window that is not a child (for a child,
+  `hMenu` is its id). `GetDesktopWindow` answers one window of the class `#32769`, made when first
+  asked for: visible, the screen in whatever mode it is in, the parent a top-level window is made
+  on, never destroyed, and kept out of the table the other windows are walked in. Painting goes
+  through the desktop surface the graphics layer owns (`docs/core/graphics.md`): `BeginPaint` sends
+  `WM_NCPAINT` and `WM_ERASEBKGND` first, a window's update area is one rectangle, a window that is
+  invalidated marks every window painted after it that overlaps it, and the desktop is presented
+  when the queue finds nothing left to paint. `UpdateWindow` and `RedrawWindow(RDW_UPDATENOW)`
+  *send* `WM_PAINT` (with `RDW_ALLCHILDREN`, to the descendants after the window), so the procedure
+  has painted when the call returns. A region names its bounding rectangle (`InvalidateRgn`,
+  `ValidateRgn`, `RedrawWindow`'s region, read through gdi32's `regionBox`; `GetUpdateRgn` fills one
+  through `setRegion`). `ValidateRect` takes its rectangle out of the update area exactly when what
+  is left is still a rectangle -- a band off one side -- and otherwise leaves the area whole. The
+  **system classes** — `Button`, `Static`, `Edit`, `ListBox`, `ComboBox`, `ScrollBar` and the dialog
+  class `#32770`, also by their atoms — have their procedures on this side (`controls.js`); each has
+  a real address (a bridge stub) that `GetWindowLong(GWL_WNDPROC)` reports and `CallWindowProc`
+  reaches, so a program may subclass one. A static's, a check box's, a radio button's and a group
+  box's text is drawn in the text colour, background mode and background colour the parent left in
+  the context on `WM_CTLCOLORSTATIC` (the default procedures set the system's there); an owner-drawn
+  button or static is drawn by its parent through `WM_DRAWITEM`, with `ODA_DRAWENTIRE`, `ODA_FOCUS`
+  and `ODA_SELECT` as it paints, gains or loses the focus and is pushed or let out; an owner-drawn
+  list box or combo box without `LBS_HASSTRINGS`/`CBS_HASSTRINGS` keeps what `LB_ADDSTRING` is
+  handed as the item's data; an edit answers `WM_COPY`, `WM_CUT`, `WM_PASTE`, `WM_CLEAR` and
+  `WM_UNDO`, keeping one change to undo. Dialogs are windows of the dialog class: the template is
+  walked for real, coordinates are dialog units, the dialog procedure sees every message first and
+  `DefDlgProc` -- the dialog class's whole procedure, so a program's own dialog class reaches its
+  `DWLP_DLGPROC` through it -- the rest, and `IsDialogMessage` handles Enter, Escape and Tab.
+  Tab, `GetNextDlgTabItem`, `GetNextDlgGroupItem` and `DefDlgProc`'s `WM_NEXTDLGCTL` walk through a
+  shown, enabled child with `WS_EX_CONTROLPARENT` as if its controls were the dialog's own
+  (`user32/tabwalk.js`); a group runs from one `WS_GROUP` control to the next, round the end of the
+  dialog to its start. A modal dialog's loop takes each message as `GetMessage` takes it -- the
+  hit test asked, a press activating, `WM_SETCURSOR` sent -- on the thread `DialogBox` was called
+  on, and `DialogBox` answers -1 for a dialog its procedure destroyed during `WM_INITDIALOG`; the
+  window service lends the same loop to another library, each message offered first to a hook,
+  which is how a modal property sheet runs its own. The
+  default push button moves with the focus: a push button the focus reaches is styled
+  `BS_DEFPUSHBUTTON` while it has it, `DM_SETDEFID` moves the style from the old default to the new,
+  and Enter presses the focused push button only while it is the default. Pointer messages from the
+  input layer are routed as they arrive to the window under the point (or the capture), in that
+  window's client coordinates, with the frame's hit test turning them into non-client messages,
+  and nothing of the program runs then -- a dialog's procedure is not asked, since the dialog class
+  hands every message to the program's dialog procedure first; as one is taken for a window whose
+  procedure is the program's own, or a dialog, the windows under the point are
+  sent `WM_NCHITTEST` from the top, deepest first, and the message goes to the first that does not
+  answer `HTTRANSPARENT`, in the client form for `HTCLIENT` and the frame's otherwise --
+  `WindowFromPoint` asks the same, and `PeekMessage`/`GetMessage` ask it before their range and window filter is applied, so a filter sees the message in the form it is delivered in. As each of the mouse's own messages is taken, `WM_SETCURSOR` is
+  sent to the window it goes to, with the hit and the client form of the message (not for the wheel,
+  while the mouse is captured, or for a message a program posted itself); `DefWindowProc` answers it
+  by asking the parent first and then setting the class cursor over the client area and the arrow
+  elsewhere. Keys go to the focus window. **Activation** is sent, not posted, from the call that
+  causes it -- `SetFocus`, `SetActiveWindow`, `SetForegroundWindow`, `ShowWindow`, `CreateWindowEx`
+  with `WS_VISIBLE` (after `WM_SHOWWINDOW`), a click taken from the queue -- in Windows' order:
+  `WM_NCACTIVATE(0)` and `WM_ACTIVATE(WA_INACTIVE)` to the window losing it, `WM_NCACTIVATE(1)` and
+  `WM_ACTIVATE` to the one gaining it, then `WM_KILLFOCUS`/`WM_SETFOCUS`. When none of the program's
+  windows was active -- its first window shown -- every top-level window of the program hears
+  `WM_ACTIVATEAPP(1)` first, and `WM_ACTIVATEAPP(0)` when the activation goes to the desktop,
+  after which `GetActiveWindow`, `GetForegroundWindow` and `GetFocus` answer NULL until the program
+  takes the activation back; a window never shown is never activated. A press activates its window
+  when the program takes it from the queue (`GetMessage`, `PeekMessage` with `PM_REMOVE`):
+  `WM_MOUSEACTIVATE` is sent (a child's default procedure asks its parent), and `MA_ACTIVATE`
+  activates with `WA_CLICKACTIVE` and raises, the `NOACTIVATE` answers leave the activation alone,
+  and the `ANDEAT` answers drop the press. `GetLastActivePopup` answers the popup of an owner chain
+  that was active last; `IsChild` is true only through a chain of `WS_CHILD` windows, and
+  `GetAncestor` answers `GA_PARENT` (the desktop for a window that is no child), `GA_ROOT` and
+  `GA_ROOTOWNER`, none for the desktop. The input layer's foreground is the active window (`activeWindow()` on the
+  API) -- not simply the last one created, which may be hidden or a child -- and only while none is
+  active the last created. `GetWindow` walks top-level windows from the top of the Z order and
+  children in creation order, a new child going below its siblings, so a dialog's first control is
+  its `GW_CHILD`; a click, `WindowFromPoint` and `ChildWindowFromPoint` hit children in that same
+  stacking, and `SetWindowPos` restacks a child by `hWndInsertAfter`.
 - **Message queue** (`user32/messages.js`). Posted messages are a list; `WM_MOUSEMOVE` is one
   slot, not a backlog; `WM_QUIT` is a flag that becomes a message when the queue is empty;
   `WM_TIMER` is never queued but synthesised when a program asks and a timer is due, with the due
@@ -268,11 +363,35 @@ gets its own heap, hive, queue and COM registry.
   window's timer goes to whichever thread pumps. `DispatchMessage` calls a `WM_TIMER`'s lParam
   only when it is the TIMERPROC a live timer of that window and id was set with, and hands it
   the message's time; any other `WM_TIMER` with an lParam is dropped, as Windows drops it,
-  because anyone can post one.
+  because anyone can post one. A message asked for later -- `TrackMouseEvent`'s `WM_MOUSEHOVER`
+  once the pointer has rested for the hover time, `WM_MOUSELEAVE` as it leaves -- is posted when
+  the queue is next looked at or waited on from its due time. `WM_INPUT` is a queue class of its
+  own, `QS_RAWINPUT`: a program that registered a mouse or keyboard with
+  `RegisterRawInputDevices` is posted one per event the input layer reports, to the window the
+  registration names or else the focus, and only while its top-level window is active unless it
+  registered as a sink; `GetRawInputData` reads the whole `RAWINPUT` or its header through the
+  handle. The queue keeps the news a look clears apart from what it holds, so
+  `MsgWaitForMultipleObjects(Ex)` ends for input of the kinds its wake mask names that arrived
+  since the queue was last looked at (a paint or a timer come due counting as news), while it
+  waits on events, semaphores or waitable timers too; with `fWaitAll` it needs the handles and the
+  input together; `MWMO_INPUTAVAILABLE` lets input already seen end it; and a set holding a mutex,
+  a thread or a process, or an alertable one, is held by kernel32.
 - **Registry** (`advapi32/registry.js`). A hive of keys and values; names compare without case,
   string types carry their terminator. It converts to and from JSON, and `onChanged` lets the
-  session saver treat a registry write like a file write. Roots: `HKEY_CLASSES_ROOT`,
-  `HKEY_CURRENT_USER`, `HKEY_LOCAL_MACHINE`, `HKEY_USERS`.
+  session saver treat a registry write like a file write. Roots: `HKEY_CURRENT_USER`,
+  `HKEY_LOCAL_MACHINE` and `HKEY_USERS` are trees; `HKEY_CLASSES_ROOT` is not one of its own but
+  the merged view of `HKLM\Software\Classes` with `HKCU\Software\Classes` over it, as
+  advapi32's tests have it: a key opened through it reads the user's value first and the
+  machine's otherwise, writes to the user's key when there is one, creates a new key on the
+  machine's side, and deletes the user's key before the machine's -- so a class an installer
+  registered under `HKLM\Software\Classes` is found by activation that only reads the classes
+  root. A saved hive carries no classes tree of its own; one saved with it has it folded into the
+  machine's classes without overriding what is there. A hive is made for a Windows
+  (`createHive({ windows })`), and restoring a saved one keeps everything a program wrote but for
+  the values that describe the machine: the version values under `Windows NT\CurrentVersion`
+  and both `Shell Folders` keys are written over, and a version value this Windows lacks is
+  removed, so a bottle whose setting changed describes the Windows it now runs; the processor's
+  `HARDWARE` branch is rewritten whole, as the kernel writes it at every boot.
 - **The display** (`user32/display.js`, `user32/system.js`). `displayModes(screen)` lists the sizes
   of the era whatever the display's own — 640×480, 800×600, 1024×768, 1280×720, 1280×800,
   1280×832, 1440×900, 1512×982, 1600×900, 1680×1050, 1728×1117, 1920×1080, 1920×1200,
@@ -294,19 +413,36 @@ gets its own heap, hive, queue and COM registry.
 ### Threads and waits as a program sees them
 
 `CreateThread` asks the kernel for a thread and gives it a return stub, so a start routine that
-returns exits with its `EAX` as the exit code. `WaitForSingleObject` / `WaitForMultipleObjects`
-poll when the timeout is zero and otherwise hand the thread to `kernel.wait` with a deadline in
-guest time; the bridge parks the caller until it is woken. `Sleep(0)` yields; `Sleep(n)` sleeps on
-the kernel's clock. Events, mutexes and semaphores are kernel objects behind kernel handles.
-`SuspendThread`, `ResumeThread`, `TerminateThread`, `ExitThread` exist; a wait on a child's
-*process* handle hands over to the child and returns when it exits (see below and
-`kernel32/spawn.js`). Critical sections are the exception to "every call crosses into the host":
-`kernel32/critical.js` emits the enter/leave/try-enter fast paths as guest x86 on the pre-Vista
-algorithm over the program's own `CRITICAL_SECTION` fields, and only a contended entry or an owed
-wake traps. Completion ports (`kernel32/iocp.js`) block a worker with the scheduler's own wait and
-owe a packet from every overlapped read or write on a bound handle. TLS slots are read out of the running thread's own block through its TLS pointer rather than
-tracked on the host, so what `TlsGetValue` answers cannot drift from what the guest reaches
-through `FS`.
+returns exits with its `EAX` as the exit code. The stack is the size `dwStackSize` asks, read as a
+commit or, with `STACK_SIZE_PARAM_IS_A_RESERVATION`, as the reserve, and given back when the thread
+ends itself; a stack the pool has no room for fails the call with `ERROR_NOT_ENOUGH_MEMORY`
+([`kernel.md`](./kernel.md)). `CREATE_SUSPENDED` starts the thread with one suspension.
+`WaitForSingleObject` / `WaitForMultipleObjects` poll when the timeout is zero -- a thread that has
+ended reads as signalled there too -- and otherwise hand the thread to `kernel.wait` with a deadline
+in guest time; the bridge parks the caller until it is woken. `Sleep(0)` yields; `Sleep(n)` sleeps
+on the kernel's clock. Events, mutexes and semaphores are kernel objects behind kernel handles,
+created by the plain calls or by their `Ex` forms, whose flags stand for the plain ones' BOOLs.
+`SuspendThread` keeps a thread's wait -- it is handed nothing and gets no turn while suspended, and
+the resume looks at the wait again -- and fails with `ERROR_SIGNAL_REFUSED` past 127 suspensions and
+`ERROR_ACCESS_DENIED` on a thread that has ended; `ResumeThread`, `TerminateThread`, `ExitThread`
+exist; a wait on a child's *process* handle hands over to the child and returns when it exits (see
+below and `kernel32/spawn.js`). Critical sections are the exception to "every call crosses into the
+host": `kernel32/critical.js` emits the enter/leave/try-enter fast paths as guest x86 on the
+pre-Vista algorithm over the program's own `CRITICAL_SECTION` fields, and only a contended entry or
+an owed wake traps; a release goes to the first waiter that can run, never to a suspended one, and
+is kept owed when none can. SRW locks, condition variables and one-time initialisation
+(`kernel32/slimsync.js`) are one word the program allocated, kept true -- zero while an SRW lock is
+free, its low bit set while held and the sharing holders counted above it: a lock is taken at once
+or queued, shared by readers but never past a writer already waiting, and handed on in arrival
+order; a condition variable's sleep joins the queue and lets go of the lock in one host call, so no
+wake falls between them, answers `FALSE` with `ERROR_TIMEOUT` when its time runs out, and takes the
+lock back through the lock's own acquire -- for a critical section, `EnterCriticalSection`'s guest
+code; `InitOnceExecuteOnce` is a few guest instructions around two host calls, so the program's own
+function runs in the one thread that is to run it, and a synchronous begin while another thread runs
+it waits. Completion ports (`kernel32/iocp.js`) block a worker with the scheduler's own wait and owe
+a packet from every overlapped read or write on a bound handle. TLS slots are read out of the
+running thread's own block through its TLS pointer rather than tracked on the host, so what
+`TlsGetValue` answers cannot drift from what the guest reaches through `FS`.
 
 Asynchronous procedure calls (`kernel32/apc.js`) are queued per thread -- by `QueueUserAPC`, or by a
 waitable timer at each expiry for the completion routine `SetWaitableTimer` was given, queued to
@@ -316,7 +452,11 @@ the thread that set it -- and run only when that thread waits alertably: `SleepE
 starts such a wait runs them all, including any they queue, and answers `WAIT_IO_COMPLETION`
 without waiting; one already waiting is taken off its objects' queues by `kernel.alert` and sent,
 instead of back to its caller, to a stub whose return lands on the caller's address -- the stub
-runs the routines on that thread and answers `WAIT_IO_COMPLETION` from the wait.
+runs the routines on that thread and answers `WAIT_IO_COMPLETION` from the wait. `ReadFileEx` and
+`WriteFileEx` transfer at the `OVERLAPPED`'s offset, write its status and count, and queue their
+completion routine to the calling thread as an APC with (error, count, `OVERLAPPED`), so it runs at
+the thread's next alertable wait and never before the call returns; a read at the end of the file
+fails with `ERROR_HANDLE_EOF` and queues nothing.
 
 ### Exceptions
 
@@ -345,20 +485,21 @@ the chain's head and -- for `_setjmp3` -- the routine and level that unwind the 
 `longjmp` unwinds every frame registered since the mark and calls that routine
 (`_seh_longjmp_unwind`, `__CxxLongjmpUnwind`) before going back.
 
-C++ exceptions (`msvcrt/eh.js`) are the same chain. `_CxxThrowException` raises `0xE06D7363`
-with the object and its type description; `__CxxFrameHandler`, `2` and `3` read the tables the
-compiler's stub hands over and answer for the frame: being unwound, they run the destructors of
-every object alive; otherwise they look for a catch among the try blocks around the frame's state,
-matching types by descriptor or by decorated name and by the thrown object's qualifiers. On a
-match the frames below are unwound, the catch object is built (a reference is a pointer to the
-thrown object, a class with a copy constructor is constructed by it), the try block's own objects
-are destroyed, and the catch block runs on the stack below the throw where the thrown object
-still lives; the function goes on at the address the block returns, on the stack the frame's slot
-held before the block wrote its own there, and the thrown object is destroyed unless the block
-threw it again. `throw;` rethrows the innermost catch's object; with none being handled it
-terminates. A structured exception reaches only a `catch (...)`, and not in code built with
-`/EHs`; `_set_se_translator`'s translator is called first when one is installed. `terminate` calls
-what `set_terminate` installed and then aborts; `abort` ends the process with exit code 3.
+C++ exceptions (`msvcrt/eh.js`) are the same chain. `_CxxThrowException` raises `0xE06D7363` with
+the object and its type description; `__CxxFrameHandler`, `2` and `3` read the tables the compiler's
+stub hands over and answer for the frame: being unwound, they run the destructors of every object
+alive; otherwise they look for a catch among the try blocks around the frame's state, matching types
+by descriptor or by decorated name and by the thrown object's qualifiers. On a match the frames
+below are unwound, the catch object is built (a reference is a pointer to the thrown object, a class
+with a copy constructor is constructed by it), the try block's own objects are destroyed, and the
+catch block runs on the stack below the throw where the thrown object still lives; the function goes
+on at the address the block returns, on the stack the frame's slot held before the block wrote its
+own there, and the thrown object is destroyed unless the block threw it again. `throw;` rethrows the
+innermost catch's object; with none being handled it terminates. A structured exception reaches only
+a `catch (...)`, and not in code built with `/EHs`; `_set_se_translator`'s translator -- exported,
+as msvcrt.dll exports it, only under its decorated C++ name -- is called first when one is
+installed. `terminate` calls what `set_terminate` installed and then aborts; `abort` ends the
+process with exit code 3.
 
 Every handler that finds its block answers the host call it is with a continuation
 (`bridge.continueAt`, see [`bridge.md`](./bridge.md)): the throw, the dispatch and the handler
@@ -376,8 +517,10 @@ a fetch that did not deliver. `ReadFile` sees the promise and returns it; the br
 calling guest thread and resumes it with the bytes, exactly as it parks any call that has no answer
 yet. A read that fails once parked writes `ERROR_IO_DEVICE` for the parked thread, not for whoever
 is running by then. File mappings (`kernel32/mapping.js`) are a copy read at map time and written
-back at unmap, and park the same way. The standard handles are never files: writing to them goes to
-`onOutput`.
+back at unmap, and park the same way; a mapping handle and each view hold the file they map, as a
+duplicated file handle does, so a program may close the file, the mapping and the view in any
+order and the file closes with the last of them. The standard handles are never files: writing to
+them goes to `onOutput`.
 
 ### Time and its clock source
 
@@ -388,8 +531,49 @@ Two clocks, both the kernel's ([`kernel.md`](./kernel.md)):
 | `GetTickCount`, `QueryPerformanceCounter` (1 MHz), `timeGetTime`, `clock`, `Sleep` deadlines, message timers | `kernel.clock.virtualTime()` — the guest's clock. A frame loop that times an interval with one call and reads it with another must not disagree with itself. |
 | `GetSystemTimeAsFileTime`, `GetSystemTime`, `GetLocalTime`, `time`, `timeGetSystemTime` | `kernel.clock.wallClock()` — the date. |
 
-`GetTickCount` wraps at 32 bits as Windows does. `GetVersionExA` reports 5.1 build 2600,
-`VER_PLATFORM_WIN32_NT`, workstation, no service pack.
+`GetTickCount` wraps at 32 bits as Windows does.
+
+### The version a program is told
+
+The machine is one of four Windows, the `windows` configuration (`kernel32/versions.js`), each
+with the last service pack its release had; XP SP3 is the default
+([`decisions.md`](../../roadmap/decisions.md)). Every place a program reads the version agrees:
+
+| where | 2000 | XP | 7 | 10 |
+|-------|------|----|---|----|
+| `GetVersion`, `GetVersionExA`/`W` (`dwMajor.Minor.Build`, `szCSDVersion`) | 5.0.2195, Service Pack 4 | 5.1.2600, Service Pack 3 | 6.1.7601, Service Pack 1 | 10.0.19045, none -- or 6.2.9200 / 6.3.9600, below |
+| `OSVERSIONINFOEX` `wServicePackMajor.Minor`, `wSuiteMask`, `wProductType` | 4.0, 0, workstation | 3.0, `VER_SUITE_SINGLEUSERTS`, workstation | 1.0, `VER_SUITE_SINGLEUSERTS`, workstation | 0.0, `VER_SUITE_SINGLEUSERTS`, workstation |
+| the process block (`OSMajorVersion`, `OSMinorVersion`, `OSBuildNumber`, `OSCSDVersion`, `CSDVersion`, `OSPlatformId`) and `RtlGetVersion` | as above | as above | as above | 10.0.19045 always |
+| `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion`: `CurrentVersion`, `CurrentBuildNumber`, `CurrentBuild`, `CSDVersion`, `ProductName` | 5.0, 2195, `1.511.1 () (Obsolete data - do not use)`, Service Pack 4, Microsoft Windows 2000 | 5.1, 2600, the same placeholder, Service Pack 3, Microsoft Windows XP | 6.1, 7601, 7601, Service Pack 1, Windows 7 Professional | 6.3, 19045, 19045, none, Windows 10 Pro, and `CurrentMajorVersionNumber`/`CurrentMinorVersionNumber` 10 and 0, `DisplayVersion` 22H2, `ReleaseId` 2009, `UBR` 6456 |
+| a system library's file version (`VERSION.dll`) | 5.0.2195.0 | 5.1.2600.0 | 6.1.7601.0 | 10.0.19045.0 |
+| the profile (`shellFolders`, the environment) | `C:\Documents and Settings\User`, `...\All Users` | as 2000 | `C:\Users\User` (`AppData\Roaming`, `AppData\Local`, `Documents`), `C:\ProgramData`, `C:\Users\Public` | as 7 |
+
+All four are 32-bit systems with the platform `VER_PLATFORM_WIN32_NT`: `IsWow64Process` answers
+FALSE and there is no `Program Files (x86)`. The Windows directory is `C:\WINDOWS` whichever is
+chosen, and so is the temporary one, `C:\WINDOWS\TEMP` (`GetTempPath`, `TEMP`, `TMP`). The
+profile's folders exist on the volume from the start (`profileDirectories`, made by kernel32's
+file functions beside `WINDOWS`, `TEMP` and the program directories), so a program can make its
+own directory in `%APPDATA%` without making the folder first.
+
+Windows 10 answers `GetVersion`, `GetVersionEx` and `VerifyVersionInfo` with the newest Windows the
+program says it knows, never newer than itself (`reportedVersion`): the highest its manifest's
+`supportedOS` elements name, or, when they name none, its PE header's operating system version
+rounded down to 10.0 or 6.3 -- and 6.2.9200 when older still, which is what a program of the era
+with no manifest is told. 8.1's answer is 6.3.9600. The process block, `RtlGetVersion`, the
+registry and a library's file version keep 10.0.19045. The other three answer every program the
+truth.
+
+`VerifyVersionInfo` compares the major and minor version and the two service pack numbers as one
+version: an `EQUAL` condition demands its own field and passes to the next, the first ordering
+condition decides the rest together, and a version field the type mask names with no condition, or
+with `AND` or `OR`, is not met (Wine's kernel32 `test_VerifyVersionInfo`). The suite compares as a
+set (`AND`: every suite asked for, `OR`: any, or none asked). An empty type mask or condition mask
+is `ERROR_BAD_ARGUMENTS`; a request not met is `ERROR_OLD_WIN_VERSION`. ntdll's
+`RtlVerifyVersionInfo` is the same comparison against the version the process block holds, the
+truth `RtlGetVersion` answers, with `STATUS_INVALID_PARAMETER` and `STATUS_REVISION_MISMATCH`.
+
+The C runtime's `_osver`, `_winver`, `_winmajor` and `_winminor` are still the default XP's figures
+whatever the configuration (`msvcrt/startup.js` reads `kernel32/process.js`'s constants).
 
 ### The divergence rule
 
@@ -398,23 +582,57 @@ reports**, through `config.divergence(api, detail)`; it is never refused for tha
 refusing changes what the program does, usually by stopping it. The assembler emits each distinct
 `(api, detail)` once as a `divergence` event, journalled at `warn`. Sites in this layer:
 `HeapAlloc`/`VirtualAlloc` refusals with the allocator's state (`kernel32/heap.js`),
-`CoCreateInstance` of an unregistered class, naming the CLSID (`ole32/functions.js`), the
-automation library (`oleaut32/functions.js`), `InternetCanonicalizeUrl` browser mode
-(`wininet/functions.js`), and four DirectShow states (`quartz/graph.js`: stop cannot rewind, a film
-running on the host clock without its sound, position and rate accepted and ignored). The
-`NOT_IMPLEMENTED` stub of `system/stub.js` is not used inside this layer; a function that is not
-implemented answers with the documented code that ends the caller's loop
-(`ERROR_CALL_NOT_IMPLEMENTED`, `ERROR_NO_MORE_ITEMS`, `E_NOTIMPL` for a COM slot nothing
-implements).
+`CoCreateInstance` of an unregistered class, naming the CLSID (`ole32/functions.js`), the automation
+library (`oleaut32/functions.js`), `InternetCanonicalizeUrl` browser mode (`wininet/functions.js`),
+four DirectShow states (`quartz/graph.js`: stop cannot rewind, a film running on the host clock
+without its sound, position and rate accepted and ignored), an `mmioOpen` or `mmioRename`
+through a program's own I/O procedure in a build that cannot call it, an `mmioOpen` of a file
+whose built-in procedure the program replaced, and one of mmio's own messages sent to a built-in
+procedure (`winmm/mmio.js`), a `VT_RECORD` a `PropVariantCopy` shares rather than copies and an
+interface it or `PropVariantClear` cannot AddRef or Release in a build that cannot call the
+program (`ole32/propvariant.js`), `RIDEV_NOLEGACY` (`user32/rawinput.js`), a replacement
+`SHFileOperation` makes without asking (`shell32/fileop.js`), and what comctl32's image lists and
+property sheets cannot do (`comctl32/`). The `NOT_IMPLEMENTED` stub of `system/stub.js` is not used
+inside this layer; a function that is not implemented answers with the documented code that ends the
+caller's loop (`ERROR_CALL_NOT_IMPLEMENTED`, `ERROR_NO_MORE_ITEMS`, `E_NOTIMPL` for a COM slot
+nothing implements).
 
 ### Small contracts, one paragraph each
 
 - **The C runtime's variables are data exports**, read through the address a program imported:
   `_acmdln`, `_pctype`, `__mb_cur_max`, `_adjust_fdiv`; the system version as `_osver`,
-  `_winver`, `_winmajor` and `_winminor`, the figures `GetVersion` answers; `_HUGE` as
+  `_winver`, `_winmajor` and `_winminor`, the default Windows's figures (not yet the configured
+  one's); `_HUGE` as
   infinity; `_environ` as the vector `__getmainargs` hands `main`; and `_iob`, twenty `FILE`
   records whose first three are stdin (at its end: nobody types), stdout and stderr (the console)
-  -- `__iob_func` answers the same array.
+  -- `__iob_func` answers the same array. They live in the runtime module's writable `.data`
+  section, apart from its read-only code, since the runtime writes a stream's `_flag` there
+  itself. The variables a program reaches through an accessor -- `errno` through `_errno`,
+  `_fmode`, `_commode` -- are one set shared by the start-up and the functions, and `errno` is the
+  calling thread's own: a failing call sets it with the code its documentation gives, and a call
+  that succeeds leaves it alone.
+- **The C runtime's files are descriptors** (`msvcrt/io.js`). `_open` numbers them from 3 above the
+  console's three, and each keeps its mode: `_O_TEXT`, `_O_BINARY` or else `_fmode`. In text mode a
+  read folds CR LF to LF, stops at a ^Z until a seek, and resolves a CR that ends the read by the
+  byte after it, and a write puts CR before each LF and answers the caller's count. A stream's
+  `_file` is one of these descriptors, at the same position `_read` and `_lseek` see, and each
+  change of its end-of-file and error state is written to the record's `_flag`, so the `feof`,
+  `ferror` and `getc` macros read what the functions do. `_stat`/`_fstat` fill the 36-byte
+  `struct _stat`; `_findfirst`/`_findnext` walk a directory as `FindFirstFile` does into a
+  `_finddata_t`. `printf`, `vprintf` and `puts` are `fprintf` and `fputs` on `stdout`, so they
+  follow it wherever `freopen` moved it. In a Unicode translation (`msvcrt/widetext.js`) -- a
+  `_O_WTEXT`, `_O_U16TEXT` or `_O_U8TEXT` descriptor, or `fopen`'s `ccs=UNICODE`, `UTF-8` or
+  `UTF-16LE` unless `b` overrides it -- the program's text is UTF-16: `_write`, `fwrite` and the
+  wide calls keep it in the file as UTF-16 or UTF-8, LF as CR LF, a file opened empty for writing
+  starting with the byte-order mark of its encoding, and `_read`, `fread` and the wide calls read
+  a file the way its mark says, a file opened only to append to being looked at first. Outside
+  one, the wide calls take a stream's bytes two to a character in binary mode, and one to a
+  character in text mode, where the C locale has no byte for a character past U+00FF
+  (`EILSEQ`). `_cexit` runs what `atexit` and `_onexit`
+  registered, last first, closes every open stream, and returns; `exit` runs the handlers and then
+  ends the process as `ExitProcess` does; `_exit` ends it without running a handler, and `_c_exit`
+  runs none and returns. However the process ends, the runtime's descriptors close with it, as
+  Windows closes every handle a process held -- which is when a temporary file goes.
 - **The processor is described once** (`kernel32/processor.js`): the emulated CPUID's leaf 1 --
   GenuineIntel, family 6 model 7 stepping 3, its EDX and ECX feature bits -- and everything a
   program can ask derives from it: `GetSystemInfo`'s level and revision, `IsProcessorFeaturePresent`
@@ -448,10 +666,16 @@ implements).
   no button held, the pointer's next position is the cursor's again, since the page's pointer could
   not be warped and the person is looking at it (the router's `shown()`, fed by both `cursor`
   reporters).
-- **The `cursor` event is user32's own report.** `ShowCursor`'s display count and `SetCursor`'s
-  null/non-null answer both derive one picture, `{ shown }`, reported to the page only on a change
-  of that picture — a program that hides the cursor inside its frame loop does not flood the page's
-  queue — and it carries no image, because the bitmap behind a cursor handle is never decoded here.
+- **The `cursor` event is user32's own report.** `ShowCursor`'s display count and the cursor
+  `SetCursor` set derive one picture, reported to the page only on a change of that picture — a
+  program that hides the cursor inside its frame loop does not flood the page's queue. For a cursor
+  the program made or loaded it carries `width`, `height`, `hotSpot` and `bgra` -- the shape the
+  Direct3D device cursor uses -- decoded the first time it is set (`user32/cursors.js`):
+  `CreateCursor`'s two planes, or a resource's group directory's 32x32 image, deepest first, from
+  its 1-, 4-, 8-, 24- or 32-bit DIB, the AND mask making it transparent and a 32-bit alpha channel
+  used when there is one. A standard cursor carries none, so the page shows its own; a pixel the
+  masks invert is drawn opaque black, since a page cannot invert what lies under a picture; and an
+  image it cannot read (PNG-compressed, another depth) is reported as no picture.
 - **`CLSID_ShellLink`** (`IShellLinkA/W`, `IPersistFile`) exists so an installer's shortcut step can
   finish: refusing the class turns every shortcut into "Access is denied" and ends the install in a
   warning dialog. `Save` writes an empty file at the target path — enough for a later "is the link
@@ -491,14 +715,14 @@ implements).
   procedure runs after every control exists and has set itself up, and before a template's
   `WS_VISIBLE` shows the window — so a program that fills in a control from that handler finds it
   already filled when the window first appears (`user32/dialogs.js`).
-- **A redistributable installer is a child that has already finished.** `CreateProcess` on
-  `DXSETUP.exe`/`DXWebSetup.exe`, a `vcredist*`/`vc_redist*`, a `dotnetfx*`/`ndp*`/`netfx*`, or
-  anything under a `DirectX\` directory answers a process record created `completed`: exit code 0
-  from the start, and never the process this one hands over to. `WaitForSingleObject`,
-  `WaitForMultipleObjects` and `GetExitCodeProcess` on it all return at once rather than parking for
-  a runtime the engine already carries itself — the DirectX DLLs on its system volume, the C
-  runtime under `msvcrt` — and would otherwise wait for a child that never runs
-  (`kernel32/spawn.js`, `isRedistributableInstaller`).
+- **A redistributable installer is a child that has already finished.** `CreateProcess` on a
+  `vcredist*`/`vc_redist*`, a `dotnetfx*`/`ndp*`/`netfx*` or `oalinst.exe` answers a process record
+  created `completed`: exit code 0 from the start, and never the process this one hands over to.
+  `WaitForSingleObject`, `WaitForMultipleObjects` and `GetExitCodeProcess` on it all return at once
+  rather than parking for a runtime the engine answers for itself — the C runtime under `msvcrt`
+  (`kernel32/spawn.js`, `isRedistributableInstaller`). The DirectX setup (`DXSETUP.exe`) is not
+  one of them: the engine carries no copy of the `d3dx`/`d3dcompiler` libraries it installs, so it
+  runs as the child it is and puts them in `system32`.
 
 ## 4. Limitations and divergences
 
@@ -509,26 +733,27 @@ Stated as the code states them.
   settings follow, the refresh rate is accepted as asked, `CDS_TEST` answers without switching, and
   a null mode returns to the display's own size -- and answer `DISP_CHANGE_BADMODE` for a size or
   depth the list does not carry. `EnumDisplayDevicesA` reports no devices.
-- **One process running at a time.** `CreateProcess`/`WinExec`/`ShellExecute` record the request
-  and succeed; the child runs once the parent has nothing left to do. A parent **waiting on the
-  child** -- `WaitForSingleObject` on its process handle, or `WaitForMultipleObjects` for any of a
-  set holding it -- is noted on the child's record, and the engine (`createApp`'s `runBeside`)
-  builds the child a machine of its own beside the parent's, runs it (its own children the same
-  way), copies back the files it wrote and the registry it changed, and wakes the wait with
-  `WAIT_OBJECT_0` (or the child's place in the set); `GetExitCodeProcess` then answers the child's
-  exit code. `childWaitedOn`/`childExited`/`refreshWindows` on the win32 API are that seam. A parent
-  that exits, is idle for another reason, or waits for *all* of a set holding a child is replaced by
-  the child as before. While the child runs nothing of the parent's does -- no time passes for it,
-  so a wait's timeout is not armed -- and after it, layer diagnostics describe no instance (every
-  layer keeps one current instance, which the child's disposal clears). All three resolve
-  the image the same way (`kernel32/spawn.js`), so a program started through the shell is the one
-  that was named. A child's working directory is its own image's: `lpCurrentDirectory` and
-  `lpDirectory` are accepted, reported as a divergence, and not carried. `ShellExecute` runs a file
-  whose extension is its own handler (`exe`, `com`, `bat`, `cmd`, `pif`, `scr`) under the `open` and
-  `runas` verbs -- `runas` without a prompt, there being one user -- and answers `SE_ERR_NOASSOC` for
-  a document or any other verb, since the handler for one would come from a registry this build does
-  not have; a file that is not on the volume is `SE_ERR_FNF`. `ShellExecuteEx` fills `hInstApp` and,
-  for `SEE_MASK_NOCLOSEPROCESS`, `hProcess`; a record naming an item id list or a class is refused.
+- **One process running at a time.** `CreateProcess`/`WinExec`/`ShellExecute` record the request and
+  succeed; the child runs once the parent has nothing left to do. A parent **waiting on the child**
+  -- `WaitForSingleObject` on its process handle, or `WaitForMultipleObjects` for any of a set
+  holding it -- is noted on the child's record, and the engine (`createApp`'s `runBeside`) builds
+  the child a machine of its own beside the parent's, starting from the parent's registry and files,
+  runs it (its own children the same way), copies back the files it wrote and the registry as it
+  left it -- the parent's with the child's changes -- and wakes the wait with `WAIT_OBJECT_0` (or
+  the child's place in the set); `GetExitCodeProcess` then answers the child's exit code.
+  `childWaitedOn`/`childExited`/`refreshWindows` on the win32 API are that seam. A parent that
+  exits, is idle for another reason, or waits for *all* of a set holding a child is replaced by the
+  child as before. While the child runs nothing of the parent's does -- no time passes for it, so a
+  wait's timeout is not armed -- and after it, layer diagnostics describe no instance (every layer
+  keeps one current instance, which the child's disposal clears). All three resolve the image the
+  same way (`kernel32/spawn.js`), so a program started through the shell is the one that was named.
+  A child's working directory is its own image's: `lpCurrentDirectory` and `lpDirectory` are
+  accepted, reported as a divergence, and not carried. `ShellExecute` runs a file whose extension is
+  its own handler (`exe`, `com`, `bat`, `cmd`, `pif`, `scr`) under the `open` and `runas` verbs --
+  `runas` without a prompt, there being one user -- and answers `SE_ERR_NOASSOC` for a document or
+  any other verb, since the handler for one would come from a registry this build does not have; a
+  file that is not on the volume is `SE_ERR_FNF`. `ShellExecuteEx` fills `hInstApp` and, for
+  `SEE_MASK_NOCLOSEPROCESS`, `hProcess`; a record naming an item id list or a class is refused.
   `SHBrowseForFolder` and the common dialogs are cancelled.
 - **The shell namespace is the volume.** `SHGetDesktopFolder` answers an `IShellFolder` whose one
   child is the computer (`CSIDL_DRIVES`), under which the drives and their directories are
@@ -545,26 +770,78 @@ Stated as the code states them.
   transport fails with "cannot connect". Both libraries load so a program that imports and never
   uses them still starts.
 - **No midi, mixer, aux, joystick, MCI or recording devices**; opening one fails as on a machine
-  without it. Wave-out is real.
+  without it -- `MMSYSERR_BADDEVICEID`, `JOYERR_PARMS`, and for MCI the string parser's own errors
+  or `MCIERR_CANNOT_LOAD_DRIVER` for a registered device type or extension. Wave-out is real.
+- **mmio's own procedures stay its own.** One a program installs under `DOS ` or `MEM ` is not
+  used for those files, which the built-in procedure opens, reported; `MMIO_EXIST` through a
+  program's procedure opens the file rather than only asking.
+- **No drag and drop, no OLE clipboard object.** A registered drop target is never called, and
+  neither `OleSetClipboard` nor `OleGetClipboard` is exported.
+- **A `VT_RECORD` PROPVARIANT is shared, not copied.** `PropVariantCopy` takes a reference on its
+  `IRecordInfo` and hands the copy the same record data, reported; the clear gives the reference
+  back and leaves the data.
+- **Raw input does not silence the legacy messages.** `RIDEV_NOLEGACY` is accepted and reported;
+  the window still gets the mouse and key messages (an exclusive DirectInput device withholds
+  them, [`input.md`](./input.md)).
 - **File mappings are copies**: two views of one file do not see each other's writes.
 - **`EnumSystemLocalesA`** answers `ERROR_CALL_NOT_IMPLEMENTED`; **`FormatMessageA`** handles only
   `FORMAT_MESSAGE_FROM_SYSTEM`; **`HeapWalk`** ends the walk at once.
 - **DirectShow** decodes forward only: stop does not rewind, seeking and rate are ignored, and a
   graph with no decoder for a file answers `VFW_E_CANNOT_RENDER` and raises `EC_ERRORABORT` — the
-  answer a machine without the codec gives.
+  answer a machine without the codec gives. `IVideoWindow` starts hidden (`SW_HIDE`, `Visible`
+  `OAFALSE`, `AutoShow` `OATRUE`), is shown by `Pause` and `Run` under `AutoShow`, and each frame
+  carries its rectangle, visibility and full-screen mode; a hidden window's frames are not drawn, an
+  owned one's are stretched over the rectangle `SetWindowPosition` gave inside the owner's client
+  area, and the rest of that client area shows black while they arrive; one with no owner, or in
+  full-screen mode, is fitted to the whole screen ([`media.md`](./media.md)).
 - **The `double`-returning CRT functions exist only with an `fpu` host**; without one an import of
   `sin` is reported missing rather than bound to a function that never sets the result register.
+- **The C runtime has one locale, C**: `wctomb`, `wcstombs`, the wide calls on a text stream and a
+  wide argument in the narrow printers take a character to a byte and have none past U+00FF -- a
+  printed wide string stops before its first such character, as the older runtimes' did.
+  The narrow character calls refuse a stream in a Unicode translation with `EINVAL` where the
+  runtime asserts. A file opened to be deleted on close goes when the descriptor that asked for it
+  closes, or the process ends, not once the last handle anyone holds on it is closed.
 - **No input method** (`imm32` succeeds by having nothing to do), **no image drawing** in image
   lists, **no message tables or module strings** in `FormatMessage`.
 - **The system classes are the classic look and the common messages**: a combo box's list does
   not drop down (the arrow keys change the selection; said once as a divergence), a scroll bar's
-  thumb is not dragged, an edit does not undo, an owner-drawn button or static paints its
-  background only, and a static's image is drawn only when the bitmap has pixels this build can
-  reach (said once otherwise).
-- **Unimplemented imports** are reported once per name at load. A decorated stdcall name or a
-  C-runtime name is answered with zero, which reads as failure under most conventions but as
-  `S_OK` to a caller expecting an `HRESULT`; an undecorated name from any other library stops
-  the process on its first call (§3, "From a table to a module").
+  thumb is not dragged, an edit undoes one change, and a static's image is drawn only when the
+  bitmap has pixels this build can reach (said once otherwise). A tab control draws its tabs'
+  images from the image list it was given, as an image list draws them, with no alpha. A dialog template naming a
+  class nothing registers fails to make the dialog, as Windows does, unless `DS_NOFAILCREATE`; a
+  class Windows' own libraries register and this build does not implement (a list view, a rich
+  edit) is still made, as a window with no procedure. A property sheet's
+  windows are made through the ANSI calls, which are what user32 has, so a wide sheet's caption
+  and titles are UTF-16 where a template or a tab carries them and in the ANSI page where
+  `SetWindowText` does, where a character the page does not hold is the default character. A wizard's header draws no bitmap, watermark or bold title.
+- **Unimplemented imports** are reported once per name at load. A decorated stdcall name, a
+  C++ name that sizes its arguments or a C-runtime name is answered with zero, which reads as
+  failure under most conventions but as `S_OK` to a caller expecting an `HRESULT` and as a result
+  to a C runtime call that fails with -1 or `EOF`; an undecorated name from any other library, or a
+  C++ name that does not size its arguments, stops the process on its first call (§3, "From a
+  table to a module").
+- **SETUPAPI installs files and nothing else.** `SetupInstallFromInfSectionA` carries out
+  `SPINST_FILES`; any other directive it is asked for (registry, INI, services, registering
+  libraries) is reported once as a divergence and not done. The default queue callback aborts
+  on a copy, rename or delete error rather than asking. There are no Plug and Play devices, so
+  every device set is empty. The OS component calls are undocumented: a component is kept as
+  its two structures under
+  `HKLM\SYSTEM\CurrentControlSet\Control\Setup\OsComponents\{GUID}`, a place of this build's
+  choosing rather than a documented one, and one never registered is `ERROR_FILE_NOT_FOUND`,
+  the code its callers test for. The wide (`W`) spellings do not exist.
+- **WINTRUST verifies Authenticode files and nothing else.** An action other than
+  `WINTRUST_ACTION_GENERIC_VERIFY_V2` is `TRUST_E_PROVIDER_UNKNOWN`, and a subject other than a
+  file (a catalog member, a blob, a signer, a certificate) `TRUST_E_SUBJECT_FORM_UNKNOWN`, each
+  said once as a divergence; a file of a form with no subject package here (an MSI, a catalog, a
+  script) is `TRUST_E_SUBJECT_FORM_UNKNOWN` too. The file is read by its path, never through
+  `hFile`. Revocation is not
+  checked: there is no network path to a CRL, and a request for it is said once. A timestamp
+  is the PKCS #9 countersignature; an RFC 3161 one is not read, and such a signature is judged
+  now. No window is shown, whatever `dwUIChoice` asks. A signer whose RSA signature does not
+  verify answers `NTE_BAD_SIGNATURE`, a message digest that is not the content's
+  `TRUST_E_BAD_DIGEST`, and a malformed signature `TRUST_E_NOSIGNATURE`; which codes Windows
+  gives for those three was not measured.
 
 Reported at runtime: `divergence` (each once), `unimplemented` (each import once, plus a count per
 name in the application's diagnostics as `unimplementedCalls`), `message-box`, `clipboard` (the
@@ -574,17 +851,17 @@ and the metrics in §2.
 ## 5. Tests
 
 Unit tests are colocated with each file, `node:test`, over `fakeMemory`
-(`src/layers/win32/msvcrt/harness.test.js`) or a stub host; there are 104 `*.test.js` files under
+(`src/layers/win32/msvcrt/harness.test.js`) or a stub host; there are 138 `*.test.js` files under
 `src/layers/win32/`. Run with `npm test` from `modules/core`.
 
 | area | files (all `src/layers/win32/…`) |
 |------|----------------------------------|
-| kernel32 | `apc`, `consoleio`, `critical`, `drives`, `environment`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `process`, `processor`, `resources`, `seh`, `spawn`, `sync`, `system`, `teb`, `threading`, `vfs` `.test.js` |
-| msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `heap`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `strings`, `time` `.test.js` |
-| user32 | `controls`, `dialogs`, `display`, `messages`, `objects`, `structs`, `system`, `windows` `.test.js` — `controls.test.js` paints a dialog through the real drawing engine and compares it byte for byte with `controls.reference.png` |
+| kernel32 | `apc`, `atoms`, `code-arena`, `consoleio`, `critical`, `drives`, `environment`, `file-holds`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `modules`, `named-objects`, `process`, `processor`, `profile`, `resources`, `seh`, `slimsync`, `spawn`, `sync`, `system`, `teb`, `threading`, `versions`, `vfs` `.test.js` |
+| msvcrt | `convert`, `cxx`, `eh`, `format`, `functions`, `globals`, `heap`, `io`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `stdio`, `strings`, `threads`, `time`, `widetext` `.test.js` |
+| user32 | `controls`, `cursors`, `dialogs`, `display`, `keys`, `messages`, `objects`, `paint`, `structs`, `system`, `windows` `.test.js` — `controls.test.js` paints a dialog through the real drawing engine and compares it byte for byte with `controls.reference.png` |
 | gdi32 | `drawing`, `functions`, `objects` `.test.js` |
-| the rest | `advapi32/functions`, `advapi32/registry`, `comctl32/functions`, `comdlg32/functions`, `imm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{functions,guid,objects}`, `oleaut32/functions`, `quartz/graph`, `shell32/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,thread,timers}`, `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |
-| module | `module.test.js` — a configured screen reaches user32 and gdi32; a DC through user32 is GDI's; both fall back to 640×480 together; the C runtime family is cdecl and every other library stdcall. |
+| the rest | `advapi32/{crypto,functions,registry,services,tokens}`, `advpack/functions`, `cabinet/{cabinet,inflate,lzx}`, `crypto/{der,digest,pkcs7,pki,rc4,rsa,signature,x509}` (`pki.test.js` builds the keys, certificates and signed messages the others read), `comctl32/{functions,imagelist,progress,propsheet,tab,treeview}`, `comdlg32/functions`, `d3dx9/functions`, `imm32/functions`, `lz32/{expand,functions}`, `mpr/functions`, `msacm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{cfb,functions,guid,objects,propvariant,storage,wbem}`, `oleaut32/{errorinfo,functions,invoke,objects,typelib}`, `quartz/graph`, `rpcrt4/functions`, `setupapi/{functions,inf}`, `sfc/functions`, `shell32/{fileop,functions,namespace,shelllink}`, `shlwapi/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,mmio,thread,timers,wave}`, `winspool/functions`, `wintrust/{authenticode,fixtures,functions,roots}` (`fixtures.test.js` signs cabinets and images with a chain of its own), `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |
+| module | `module.test.js` — a configured screen reaches user32 and gdi32; a DC through user32 is GDI's; both fall back to 640×480 together; the C runtime family is cdecl and every other library stdcall; the runtime's `_sleep` is kernel32's `Sleep`; the KnownDLLs; shfolder's forwarding; comctl32's `_TrackMouseEvent` is user32's. `wiring.test.js` builds the module and asks through it what each library's capabilities were handed: SHLWAPI's wide strings, ADVPACK's `IsNTAdmin` from the account's token, SETUPAPI's INF found on the volume by bare name and its OS components in the hive advapi32 reads, WINTRUST's file read from the volume and judged against the configured roots, VERSION's system libraries, mmio's buffer from the program's heap, mmio reading a file by the program's own kernel32 handle and calling its own I/O procedure through the bridge on the caller's thread, a drop target as its window's property through user32, a PROPVARIANT's BSTR and SAFEARRAY copied by oleaut32's own calls, the synchronisation calls' and the profile structures' last errors and guest memory, `LoadLibraryEx`'s flags reaching the assembler, `ExitProcess` and the runtime's `exit` telling the attached libraries last first (and ending at once with none), `MWMO_INPUTAVAILABLE`. |
 
 `kernel32/critical.itest.js` runs the hand-assembled critical-section fast paths on the real
 emulator (`npm run test:integration`), pinning that the bytes the unit test checks are x86 that
@@ -593,5 +870,14 @@ does the job. `src/exceptions.itest.js` runs three compiled fixtures -- `seh.exe
 lld against the MSVC ABI -- through every path above, processor faults and two threads throwing
 at once included. `src/apc.itest.js` runs `apc.exe`, built the same way: APCs to itself and to
 another thread's alertable sleep, one refused by a wait that is not alertable, a routine queued
-by a routine, and a timer's completion routine. End-to-end tests that drive a program through the whole surface live beside the
-application entry point (`src/*.itest.js`) and in `tools/cdp_test/` (a real browser and GPU).
+by a routine, and a timer's completion routine. Others build their guest program in the test
+itself, most answering one property per bit of its exit code: `src/condition.itest.js` sleeps on a
+condition variable over an SRW lock and over a critical section; `src/suspend.itest.js` creates a
+thread suspended, resumes it and joins it, and suspends it once it has ended; `src/fileex.itest.js`
+drives `ReadFileEx`, `WriteFileEx` and `SleepEx`; `src/loadex.itest.js` loads a library as a
+data file and unresolved, and a program by name; `src/unload.itest.js` counts a library's loads and
+watches the last `FreeLibrary` detach and unload it; `src/exitdetach.itest.js` watches a library
+the program imports be attached and then detached by `ExitProcess`; `src/arena.itest.js` ships a
+library that ends just short of the stack pool and starts a thread.
+End-to-end tests that drive a program through the whole surface live beside the application entry
+point (`src/*.itest.js`) and in `tools/cdp_test/` (a real browser and GPU).

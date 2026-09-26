@@ -48,6 +48,9 @@ export const DXGI_ERROR_WAS_STILL_DRAWING = 0x887a000a;
  */
 export const D3D10_SDK_VERSION = 29;
 
+/** The version tag Direct3D 10.1's entry points are compiled with. */
+export const D3D10_1_SDK_VERSION = 0x20;
+
 export const D3D_FEATURE_LEVEL = Object.freeze({
     LEVEL_9_1: 0x9100,
     LEVEL_9_2: 0x9200,
@@ -108,8 +111,12 @@ export const DXGI_FORMAT = Object.freeze({
     R32G32_SINT: 0x12,
     R32G8X24_TYPELESS: 0x13,
     D32_FLOAT_S8X24_UINT: 0x14,
+    R32_FLOAT_X8X24_TYPELESS: 0x15,
+    X32_TYPELESS_G8X24_UINT: 0x16,
     R10G10B10A2_TYPELESS: 0x17,
     R10G10B10A2_UNORM: 0x18,
+    R10G10B10A2_UINT: 0x19,
+    R11G11B10_FLOAT: 0x1a,
     R8G8B8A8_TYPELESS: 0x1b,
     R8G8B8A8_UNORM: 0x1c,
     R8G8B8A8_UNORM_SRGB: 0x1d,
@@ -130,6 +137,7 @@ export const DXGI_FORMAT = Object.freeze({
     R24G8_TYPELESS: 0x2c,
     D24_UNORM_S8_UINT: 0x2d,
     R24_UNORM_X8_TYPELESS: 0x2e,
+    X24_TYPELESS_G8_UINT: 0x2f,
     R8G8_TYPELESS: 0x30,
     R8G8_UNORM: 0x31,
     R8G8_UINT: 0x32,
@@ -140,6 +148,7 @@ export const DXGI_FORMAT = Object.freeze({
     D16_UNORM: 0x37,
     R16_UNORM: 0x38,
     R16_UINT: 0x39,
+    R16_SNORM: 0x3a,
     R16_SINT: 0x3b,
     R8_TYPELESS: 0x3c,
     R8_UNORM: 0x3d,
@@ -147,8 +156,34 @@ export const DXGI_FORMAT = Object.freeze({
     R8_SNORM: 0x3f,
     R8_SINT: 0x40,
     A8_UNORM: 0x41,
+    R1_UNORM: 0x42,
+    R9G9B9E5_SHAREDEXP: 0x43,
+    R8G8_B8G8_UNORM: 0x44,
+    G8R8_G8B8_UNORM: 0x45,
+    BC1_TYPELESS: 0x46,
+    BC1_UNORM: 0x47,
+    BC1_UNORM_SRGB: 0x48,
+    BC2_TYPELESS: 0x49,
+    BC2_UNORM: 0x4a,
+    BC2_UNORM_SRGB: 0x4b,
+    BC3_TYPELESS: 0x4c,
+    BC3_UNORM: 0x4d,
+    BC3_UNORM_SRGB: 0x4e,
+    BC4_TYPELESS: 0x4f,
+    BC4_UNORM: 0x50,
+    BC4_SNORM: 0x51,
+    BC5_TYPELESS: 0x52,
+    BC5_UNORM: 0x53,
+    BC5_SNORM: 0x54,
+    B5G6R5_UNORM: 0x55,
+    B5G5R5A1_UNORM: 0x56,
     B8G8R8A8_UNORM: 0x57,
     B8G8R8X8_UNORM: 0x58,
+    R10G10B10_XR_BIAS_A2_UNORM: 0x59,
+    B8G8R8A8_TYPELESS: 0x5a,
+    B8G8R8A8_UNORM_SRGB: 0x5b,
+    B8G8R8X8_TYPELESS: 0x5c,
+    B8G8R8X8_UNORM_SRGB: 0x5d,
 });
 
 /** What the validity tables distinguish about a format, and nothing more. */
@@ -162,201 +197,152 @@ export const FORMAT_KIND = Object.freeze({
  * @typedef {Object} FormatDescription
  * @property {string} kind    A FORMAT_KIND.
  * @property {number} family  The typeless format this one may be cast within.
- * @property {number} bytesPerPixel
+ * @property {number} bytesPerPixel  For a block format, the bytes of one block.
+ * @property {number} blockEdge      Texels along each side of one block: 4 for the
+ *                                   block-compressed formats, 1 for the rest.
+ * @property {boolean} renderable    Whether a render target may be made of it. A depth
+ *                                   format is never one; its own rule is its kind.
  */
+
+/**
+ * @param {string} kind
+ * @param {number} family
+ * @param {number} bytesPerPixel
+ * @param {{ renderable?: boolean, blockEdge?: number }} [traits]
+ * @returns {FormatDescription}
+ */
+const format = (kind, family, bytesPerPixel, traits = {})=>Object.freeze({
+    kind,
+    family,
+    bytesPerPixel,
+    blockEdge: traits.blockEdge ?? 1,
+    renderable: kind !== FORMAT_KIND.DEPTH && (traits.renderable ?? true),
+});
+
+/**
+ * One typeless family: the typeless format itself and its members, each a
+ * colour format unless it says otherwise.
+ *
+ * @param {number} typeless
+ * @param {number} bytesPerPixel
+ * @param {Record<number, { kind?: string, renderable?: boolean }>} members
+ * @param {{ blockEdge?: number, renderable?: boolean }} [traits]  Shared by the whole family.
+ * @returns {[number, FormatDescription][]}
+ */
+const family = (typeless, bytesPerPixel, members, traits = {})=>[
+    [typeless, format(FORMAT_KIND.TYPELESS, typeless, bytesPerPixel, traits)],
+    ...Object.entries(members).map(([id, member])=>/** @type {[number, FormatDescription]} */ ([
+        Number(id),
+        format(member.kind ?? FORMAT_KIND.COLOUR, typeless, bytesPerPixel,
+            { ...traits, ...member }),
+    ])),
+];
+
+const F = DXGI_FORMAT;
+const DEPTH = Object.freeze({ kind: FORMAT_KIND.DEPTH });
+const COLOUR = Object.freeze({});
+/** A member only a shader resource view names: the other half of a depth format. */
+const SAMPLED = Object.freeze({ renderable: false });
+const BLOCK = Object.freeze({ blockEdge: 4, renderable: false });
 
 /**
  * The formats this layer knows, each with the typeless family it belongs to.
  * A typeless format is its own family, which is what makes the cast rule a
- * single comparison rather than a table of pairs.
+ * single comparison rather than a table of pairs. A format with no typeless
+ * relative is a family of one.
+ *
+ * Absent, and so refused wherever a format is named: `R1_UNORM` and the two
+ * packed 4:2:2 formats, which no program of this API's era is known to draw
+ * with, and `B5G6R5_UNORM` and `B5G5R5A1_UNORM`, which Direct3D 10 devices do
+ * not support at all.
  *
  * @type {Readonly<Record<number, FormatDescription>>}
  */
-export const FORMAT_INFO = Object.freeze({
-    [DXGI_FORMAT.R32G32B32A32_TYPELESS]: {
-        kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R32G32B32A32_TYPELESS, bytesPerPixel: 16,
-    },
-    [DXGI_FORMAT.R32G32B32A32_FLOAT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32G32B32A32_TYPELESS, bytesPerPixel: 16,
-    },
-    [DXGI_FORMAT.R32G32B32A32_UINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32G32B32A32_TYPELESS, bytesPerPixel: 16,
-    },
-    [DXGI_FORMAT.R32G32B32A32_SINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32G32B32A32_TYPELESS, bytesPerPixel: 16,
-    },
-    [DXGI_FORMAT.R32G32B32_TYPELESS]: {
-        kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R32G32B32_TYPELESS, bytesPerPixel: 12,
-    },
-    [DXGI_FORMAT.R32G32B32_FLOAT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32G32B32_TYPELESS, bytesPerPixel: 12,
-    },
-    [DXGI_FORMAT.R32G32B32_UINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32G32B32_TYPELESS, bytesPerPixel: 12,
-    },
-    [DXGI_FORMAT.R32G32B32_SINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32G32B32_TYPELESS, bytesPerPixel: 12,
-    },
-    [DXGI_FORMAT.R16G16B16A16_TYPELESS]: {
-        kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R16G16B16A16_TYPELESS, bytesPerPixel: 8,
-    },
-    [DXGI_FORMAT.R16G16B16A16_FLOAT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16B16A16_TYPELESS, bytesPerPixel: 8,
-    },
-    [DXGI_FORMAT.R16G16B16A16_UNORM]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16B16A16_TYPELESS, bytesPerPixel: 8,
-    },
-    [DXGI_FORMAT.R16G16B16A16_UINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16B16A16_TYPELESS, bytesPerPixel: 8,
-    },
-    [DXGI_FORMAT.R16G16B16A16_SNORM]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16B16A16_TYPELESS, bytesPerPixel: 8,
-    },
-    [DXGI_FORMAT.R16G16B16A16_SINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16B16A16_TYPELESS, bytesPerPixel: 8,
-    },
-    [DXGI_FORMAT.R32G32_TYPELESS]: {
-        kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R32G32_TYPELESS, bytesPerPixel: 8,
-    },
-    [DXGI_FORMAT.R32G32_FLOAT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32G32_TYPELESS, bytesPerPixel: 8,
-    },
-    [DXGI_FORMAT.R32G32_UINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32G32_TYPELESS, bytesPerPixel: 8,
-    },
-    [DXGI_FORMAT.R32G32_SINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32G32_TYPELESS, bytesPerPixel: 8,
-    },
-    [DXGI_FORMAT.R32G8X24_TYPELESS]: {
-        kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R32G8X24_TYPELESS, bytesPerPixel: 8,
-    },
-    [DXGI_FORMAT.D32_FLOAT_S8X24_UINT]: {
-        kind: FORMAT_KIND.DEPTH, family: DXGI_FORMAT.R32G8X24_TYPELESS, bytesPerPixel: 8,
-    },
-    [DXGI_FORMAT.R10G10B10A2_TYPELESS]: {
-        kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R10G10B10A2_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R10G10B10A2_UNORM]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R10G10B10A2_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R8G8B8A8_TYPELESS]: {
-        kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R8G8B8A8_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R8G8B8A8_UNORM]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8G8B8A8_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R8G8B8A8_UNORM_SRGB]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8G8B8A8_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R8G8B8A8_UINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8G8B8A8_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R8G8B8A8_SNORM]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8G8B8A8_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R8G8B8A8_SINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8G8B8A8_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R16G16_TYPELESS]: {
-        kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R16G16_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R16G16_FLOAT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R16G16_UNORM]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R16G16_UINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R16G16_SINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R16G16_SNORM]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R32_TYPELESS]: {
-        kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R32_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.D32_FLOAT]: {
-        kind: FORMAT_KIND.DEPTH, family: DXGI_FORMAT.R32_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R32_FLOAT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R32_UINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R32_SINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R24G8_TYPELESS]: {
-        kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R24G8_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.D24_UNORM_S8_UINT]: {
-        kind: FORMAT_KIND.DEPTH, family: DXGI_FORMAT.R24G8_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R24_UNORM_X8_TYPELESS]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R24G8_TYPELESS, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.R8G8_TYPELESS]: {
-        kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R8G8_TYPELESS, bytesPerPixel: 2,
-    },
-    [DXGI_FORMAT.R8G8_UNORM]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8G8_TYPELESS, bytesPerPixel: 2,
-    },
-    [DXGI_FORMAT.R8G8_UINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8G8_TYPELESS, bytesPerPixel: 2,
-    },
-    [DXGI_FORMAT.R8G8_SINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8G8_TYPELESS, bytesPerPixel: 2,
-    },
-    [DXGI_FORMAT.R8G8_SNORM]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8G8_TYPELESS, bytesPerPixel: 2,
-    },
-    [DXGI_FORMAT.R16_TYPELESS]: {
-        kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R16_TYPELESS, bytesPerPixel: 2,
-    },
-    [DXGI_FORMAT.R16_FLOAT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16_TYPELESS, bytesPerPixel: 2,
-    },
-    [DXGI_FORMAT.D16_UNORM]: {
-        kind: FORMAT_KIND.DEPTH, family: DXGI_FORMAT.R16_TYPELESS, bytesPerPixel: 2,
-    },
-    [DXGI_FORMAT.R16_UNORM]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16_TYPELESS, bytesPerPixel: 2,
-    },
-    [DXGI_FORMAT.R16_UINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16_TYPELESS, bytesPerPixel: 2,
-    },
-    [DXGI_FORMAT.R16_SINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16_TYPELESS, bytesPerPixel: 2,
-    },
-    [DXGI_FORMAT.R8_TYPELESS]: {
-        kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R8_TYPELESS, bytesPerPixel: 1,
-    },
-    [DXGI_FORMAT.R8_UNORM]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8_TYPELESS, bytesPerPixel: 1,
-    },
-    [DXGI_FORMAT.R8_UINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8_TYPELESS, bytesPerPixel: 1,
-    },
-    [DXGI_FORMAT.R8_SNORM]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8_TYPELESS, bytesPerPixel: 1,
-    },
-    [DXGI_FORMAT.R8_SINT]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8_TYPELESS, bytesPerPixel: 1,
-    },
-    [DXGI_FORMAT.A8_UNORM]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.A8_UNORM, bytesPerPixel: 1,
-    },
-    [DXGI_FORMAT.B8G8R8A8_UNORM]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.B8G8R8A8_UNORM, bytesPerPixel: 4,
-    },
-    [DXGI_FORMAT.B8G8R8X8_UNORM]: {
-        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.B8G8R8X8_UNORM, bytesPerPixel: 4,
-    },
-});
+export const FORMAT_INFO = Object.freeze(Object.fromEntries([
+    ...family(F.R32G32B32A32_TYPELESS, 16, {
+        [F.R32G32B32A32_FLOAT]: COLOUR, [F.R32G32B32A32_UINT]: COLOUR,
+        [F.R32G32B32A32_SINT]: COLOUR,
+    }),
+    ...family(F.R32G32B32_TYPELESS, 12, {
+        [F.R32G32B32_FLOAT]: COLOUR, [F.R32G32B32_UINT]: COLOUR, [F.R32G32B32_SINT]: COLOUR,
+    }),
+    ...family(F.R16G16B16A16_TYPELESS, 8, {
+        [F.R16G16B16A16_FLOAT]: COLOUR, [F.R16G16B16A16_UNORM]: COLOUR,
+        [F.R16G16B16A16_UINT]: COLOUR, [F.R16G16B16A16_SNORM]: COLOUR,
+        [F.R16G16B16A16_SINT]: COLOUR,
+    }),
+    ...family(F.R32G32_TYPELESS, 8, {
+        [F.R32G32_FLOAT]: COLOUR, [F.R32G32_UINT]: COLOUR, [F.R32G32_SINT]: COLOUR,
+    }),
+    ...family(F.R32G8X24_TYPELESS, 8, {
+        [F.D32_FLOAT_S8X24_UINT]: DEPTH, [F.R32_FLOAT_X8X24_TYPELESS]: SAMPLED,
+        [F.X32_TYPELESS_G8X24_UINT]: SAMPLED,
+    }),
+    ...family(F.R10G10B10A2_TYPELESS, 4, {
+        [F.R10G10B10A2_UNORM]: COLOUR, [F.R10G10B10A2_UINT]: COLOUR,
+    }),
+    [F.R11G11B10_FLOAT, format(FORMAT_KIND.COLOUR, F.R11G11B10_FLOAT, 4)],
+    ...family(F.R8G8B8A8_TYPELESS, 4, {
+        [F.R8G8B8A8_UNORM]: COLOUR, [F.R8G8B8A8_UNORM_SRGB]: COLOUR, [F.R8G8B8A8_UINT]: COLOUR,
+        [F.R8G8B8A8_SNORM]: COLOUR, [F.R8G8B8A8_SINT]: COLOUR,
+    }),
+    ...family(F.R16G16_TYPELESS, 4, {
+        [F.R16G16_FLOAT]: COLOUR, [F.R16G16_UNORM]: COLOUR, [F.R16G16_UINT]: COLOUR,
+        [F.R16G16_SNORM]: COLOUR, [F.R16G16_SINT]: COLOUR,
+    }),
+    ...family(F.R32_TYPELESS, 4, {
+        [F.D32_FLOAT]: DEPTH, [F.R32_FLOAT]: COLOUR, [F.R32_UINT]: COLOUR, [F.R32_SINT]: COLOUR,
+    }),
+    ...family(F.R24G8_TYPELESS, 4, {
+        [F.D24_UNORM_S8_UINT]: DEPTH, [F.R24_UNORM_X8_TYPELESS]: SAMPLED,
+        [F.X24_TYPELESS_G8_UINT]: SAMPLED,
+    }),
+    ...family(F.R8G8_TYPELESS, 2, {
+        [F.R8G8_UNORM]: COLOUR, [F.R8G8_UINT]: COLOUR, [F.R8G8_SNORM]: COLOUR,
+        [F.R8G8_SINT]: COLOUR,
+    }),
+    ...family(F.R16_TYPELESS, 2, {
+        [F.R16_FLOAT]: COLOUR, [F.D16_UNORM]: DEPTH, [F.R16_UNORM]: COLOUR, [F.R16_UINT]: COLOUR,
+        [F.R16_SNORM]: COLOUR, [F.R16_SINT]: COLOUR,
+    }),
+    ...family(F.R8_TYPELESS, 1, {
+        [F.R8_UNORM]: COLOUR, [F.R8_UINT]: COLOUR, [F.R8_SNORM]: COLOUR, [F.R8_SINT]: COLOUR,
+    }),
+    [F.A8_UNORM, format(FORMAT_KIND.COLOUR, F.A8_UNORM, 1)],
+    // A shared exponent is a format a texture can be read in, never drawn into.
+    [F.R9G9B9E5_SHAREDEXP, format(FORMAT_KIND.COLOUR, F.R9G9B9E5_SHAREDEXP, 4,
+        { renderable: false })],
+    ...family(F.BC1_TYPELESS, 8, { [F.BC1_UNORM]: COLOUR, [F.BC1_UNORM_SRGB]: COLOUR }, BLOCK),
+    ...family(F.BC2_TYPELESS, 16, { [F.BC2_UNORM]: COLOUR, [F.BC2_UNORM_SRGB]: COLOUR }, BLOCK),
+    ...family(F.BC3_TYPELESS, 16, { [F.BC3_UNORM]: COLOUR, [F.BC3_UNORM_SRGB]: COLOUR }, BLOCK),
+    ...family(F.BC4_TYPELESS, 8, { [F.BC4_UNORM]: COLOUR, [F.BC4_SNORM]: COLOUR }, BLOCK),
+    ...family(F.BC5_TYPELESS, 16, { [F.BC5_UNORM]: COLOUR, [F.BC5_SNORM]: COLOUR }, BLOCK),
+    ...family(F.B8G8R8A8_TYPELESS, 4, {
+        [F.B8G8R8A8_UNORM]: COLOUR, [F.B8G8R8A8_UNORM_SRGB]: COLOUR,
+    }),
+    ...family(F.B8G8R8X8_TYPELESS, 4, {
+        [F.B8G8R8X8_UNORM]: COLOUR, [F.B8G8R8X8_UNORM_SRGB]: COLOUR,
+    }),
+]));
+
+/**
+ * How one subresource of a format is laid out: a block row at a time, a block
+ * being one texel for everything but the compressed formats.
+ *
+ * @param {number} dxgiFormat
+ * @param {number} width   texels
+ * @param {number} height  texels
+ * @returns {{ rowPitch: number, rows: number }}  bytes per block row, block rows
+ */
+export function formatPitch(dxgiFormat, width, height){
+    const info = FORMAT_INFO[dxgiFormat];
+    const edge = info ? info.blockEdge : 1;
+    const bytes = info ? info.bytesPerPixel : 4;
+    return {
+        rowPitch: Math.ceil(width / edge) * bytes,
+        rows: Math.ceil(height / edge),
+    };
+}
 
 export const DXGI_SWAP_EFFECT = Object.freeze({
     DISCARD: 0,
@@ -441,6 +427,35 @@ export const IID = Object.freeze({
     ID3D10VertexShader: '{9B7E4C0A-342C-4106-A19F-4F2704F689F0}',
     ID3D10GeometryShader: '{6316BE88-54CD-4040-AB44-20461BC81F68}',
     ID3D10PixelShader: '{4968B601-9D00-4CDE-8346-8E7F675819B6}',
+    ID3D10Blob: '{8BA5FB08-5195-40E2-AC58-0D989C3A0102}',
+    ID3D10ShaderReflection: '{D40E20B6-F8F7-42AD-AB20-4BAF8F15DFAA}',
+    // Interfaces without IUnknown, so never asked for by these: the key the
+    // publisher lays each table out under.
+    ID3D10ShaderReflectionConstantBuffer: '{66C66A94-DDDD-4B62-A66A-F0DA33C2B4D0}',
+    ID3D10ShaderReflectionVariable: '{1BF63C95-2650-405D-99C1-3636BD1DA0A1}',
+    ID3D10ShaderReflectionType: '{C530AD7D-9B16-4395-A979-BA2ECFF83ADD}',
+    ID3D10Effect: '{51B0CA8B-EC0B-4519-870D-8EE1CB5017C7}',
+    ID3D10EffectPool: '{9537AB04-3250-412E-8213-FCD2F8677933}',
+    ID3D10EffectTechnique: '{DB122CE8-D1C9-4292-B237-24ED3DE8B175}',
+    ID3D10EffectPass: '{5CFBEB89-1A06-46E0-B282-E3F9BFA36A54}',
+    ID3D10EffectType: '{4E9E1DDC-CD9D-4772-A837-00180B9B88FD}',
+    ID3D10EffectVariable: '{AE897105-00E6-45BF-BB8E-281DD6DB8E1B}',
+    ID3D10EffectConstantBuffer: '{56648F4D-CC8B-4444-A5AD-B5A3D76E91B3}',
+    ID3D10EffectScalarVariable: '{00E48F7B-D2C8-49E8-A86C-022DEE53431F}',
+    ID3D10EffectVectorVariable: '{62B98C44-1F82-4C67-BCD0-72CF8F217E81}',
+    ID3D10EffectMatrixVariable: '{50666C24-B82F-4EED-A172-5B6E7E8522E0}',
+    ID3D10EffectStringVariable: '{71417501-8DF9-4E0A-A78A-255F9756BAFF}',
+    ID3D10EffectShaderResourceVariable: '{C0A7157B-D872-4B1D-8073-EFC2ACD4B1FC}',
+    ID3D10EffectRenderTargetViewVariable: '{28CA0CC3-C2C9-40BB-B57F-67B737122B17}',
+    ID3D10EffectDepthStencilViewVariable: '{3E02C918-CC79-4985-B622-2D92AD701623}',
+    ID3D10EffectShaderVariable: '{80849279-C799-4797-8C33-0407A07D9E06}',
+    ID3D10EffectBlendVariable: '{1FCD2294-DF6D-4EAE-86B3-0E9160CFB07B}',
+    ID3D10EffectDepthStencilVariable: '{AF482368-330A-46A5-9A5C-01C71AF24C8D}',
+    ID3D10EffectRasterizerVariable: '{21AF9F0E-4D94-4EA9-9785-2CB76B8C0B34}',
+    ID3D10EffectSamplerVariable: '{6530D5C7-07E9-4271-A418-E7CE4BD1E480}',
+    ID3D10StateBlock: '{0803425A-57F5-4DD6-9465-A87570834A08}',
+    ID3D10ShaderResourceView1: '{9B7E4C87-342C-4106-A19F-4F2704F689F0}',
+    ID3D10BlendState1: '{EDAD8D99-8A35-4D6D-8566-2EA276CDE161}',
 });
 
 // --- Direct3D 10 ---

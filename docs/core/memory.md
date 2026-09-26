@@ -46,6 +46,7 @@ Region map:
 | member | signature | meaning |
 |--------|-----------|---------|
 | `register` | `({ name, base, size, kind, access }) => Region` | Records a region. Throws on non-positive size, unknown access, or overlap with anything already mapped. |
+| `unregister` | `(name) => void` | Gives a region back: its span is unmapped from then on and free for whatever is registered next. For memory whose owner is gone -- the stack of a thread that has exited, a library the program freed for the last time -- never for memory someone may still reach. Throws for an unknown name. |
 | `protect` | `(name, access) => void` | Changes what a named region permits, the way `VirtualProtect` does. Throws for an unknown name or access. |
 | `find` | `(address) => Region \| undefined` | The region containing an address. |
 | `nextRegionAfter` | `(address) => Region \| undefined` | The mapped region with the lowest base strictly above an address, or `undefined` past the last one. Answers how far a free gap runs; a linear scan, unasked on the hot read/write path. |
@@ -82,8 +83,8 @@ than throwing: `register` answers `null`, `find` and `nextRegionAfter` answer `u
 `assert` answers `undefined` instead of validating, `writer`/`charging` answer `-1`, `readBytes`/
 `window` answer an empty `Uint8Array`, `readU8`/`readU16`/`readU32` answer `0`, `readU32sInto`/
 `readF32sInto` fill `into` with zeroes, `readCString`/`readWideString` answer `''`, `scanCString`
-answers `{ index: -1, byte: 0 }`, and `protect`/`writeBytes`/`fillBytes`/`writeU8`/`writeU16`/
-`writeU32` are no-ops.
+answers `{ index: -1, byte: 0 }`, and `unregister`/`protect`/`writeBytes`/`fillBytes`/`writeU8`/
+`writeU16`/`writeU32` are no-ops.
 
 ### Diagnostics
 
@@ -91,15 +92,15 @@ answers `{ index: -1, byte: 0 }`, and `protect`/`writeBytes`/`fillBytes`/`writeU
 
 | metric    | meaning | when it moves |
 |-----------|---------|---------------|
-| `regions` | Number of regions registered. | Every `register`. |
-| `layout`  | One string per region, `name 0xbase+0xsize access`, lowest first. | Every `register` and `protect`. A layout that looks wrong usually explains a fault faster than the fault does. |
+| `regions` | Number of regions registered. | Every `register` and `unregister`. |
+| `layout`  | One string per region, `name 0xbase+0xsize access`, lowest first. | Every `register`, `unregister` and `protect`. A layout that looks wrong usually explains a fault faster than the fault does. |
 
 `diagnostics()` builds those strings on request and is for a one-off look. The layout is also
 published as the `memory/regions` table of the log layer (`REGION_COLUMNS`: `name` as a journal
 dictionary id, `base`, `size`, `access` as its index in `Access`; up to `REGION_ROWS` = 1024 rows,
-lowest first), rewritten on every `register` and `protect`, which is rare. A reader elsewhere names
-a page of guest code from it without asking this thread; with no registry (the log layer stubbed)
-nothing is published and nothing else changes.
+lowest first), rewritten on every `register`, `unregister` and `protect`, which is rare. A reader
+elsewhere names a page of guest code from it without asking this thread; with no registry (the log
+layer stubbed) nothing is published and nothing else changes.
 
 ## 3. How it works
 
@@ -107,9 +108,10 @@ nothing is published and nothing else changes.
 
 `createRegionMap()` keeps a flat array of `{ name, base, size, kind, access }`. Registration
 scans for overlap and throws — an overlap is a layout bug, and it is far cheaper to hear about
-it at registration than to debug a guest whose stack grew into its own code. Regions are only
-ever added; `protect` changes permissions in place. A `version` counter is bumped by both so a
-caller that cached a region can tell when the cache is stale. `version` and `scans` are plain
+it at registration than to debug a guest whose stack grew into its own code. `protect` changes
+permissions in place; `unregister` takes a region out and forgets the lookup cache below, the one
+change that can make it name a region no longer there. A `version` counter is bumped by all three
+so a caller that cached a region can tell when the cache is stale. `version` and `scans` are plain
 fields of the map, not getters: a getter in that object literal put the whole map in V8's
 dictionary mode, and `version`, read on every host read of guest memory, was a tenth of a host
 call (`lstrlenA` in a loop under cork: 1219 -> 834 ns a call).
@@ -187,10 +189,11 @@ layers that own each piece register it. What a booted process looks like:
 | `thunks` | assembler | `THUNK_CODE`, rwx while written then `protect`ed to rx | `cpu.layout.thunkBase` (`0x100000`), `thunkCapacity` bytes |
 | `stack` | assembler | `STACK` rw | Below `cpu.layout.initialStack` (`0x300000`), sized from the image's `SizeOfStackReserve` (floored at 64 KiB, clamped to the room above the thunks) |
 | the program image | [`loader`](./loader.md) | `IMAGE` rwx | Its own `ImageBase` |
-| system modules | loader `synthesise` | `IMAGE`, rwx then rx | `0x02000000 + index * 0x00100000` |
-| libraries the program ships | loader `map` | `IMAGE` rwx | Above the system modules |
-| `process-startup` | assembler | `THUNK_CODE` rwx | 1 MiB after the last library: TLS blocks and the stub that attaches libraries |
-| `stack-N` | [`kernel`](./kernel.md) | `STACK` rw | Pool at `0x08000000`, 64 MiB, one image-sized stack per thread |
+| system modules | loader `synthesise` | `IMAGE`, rwx then rx; `<name> .data` rw beside it for a module that exports variables | `0x02000000 + index * 0x00100000` |
+| libraries the program ships, and those it loads by name | loader `map` | `IMAGE` rwx | Above the system modules and below the stack pool: a relocatable one at the next free base, one without relocations at its own base or not at all |
+| `<name> as data at 0x…` | assembler | `IMAGE` r | A library `LoadLibraryEx` mapped as data, where a library would go |
+| `process-startup` | assembler | `THUNK_CODE` rwx | 1 MiB where a library would fit -- after the libraries, or in the first gap below the stack pool: TLS blocks and the stub that attaches libraries |
+| `stack-N` | [`kernel`](./kernel.md) | `STACK` rw | Pool at `0x08000000`, 64 MiB: a stack per thread, the image's `SizeOfStackReserve` unless `CreateThread` asked for another size, given back when the thread ends itself |
 | `heap` | assembler | `THUNK_DATA` rw | `0x0c000000` to the end of RAM |
 
 The heap is last and takes everything left because it is the part that has to be big. The
@@ -210,8 +213,9 @@ through the typed accessors.
 
 - **Not an allocator.** There is no `allocate`/`free`; `RegionKind.RESERVED` exists as a kind
   but nothing reserves guard bands today.
-- **Regions are never removed.** `list()` and the overlap check only grow; there is no
-  `unregister`. A library that is unloaded keeps its region.
+- **A region is removed only by its owner**, by name, once nothing can reach it: a thread's
+  stack after the thread ended itself, a library the program freed for the last time, a library
+  mapped as data once its last handle is freed. The system modules are never removed.
 - **Coarse permissions.** One `access` per region. The loader maps an image as a single `rwx`
   span rather than per section (see [`loader.md`](./loader.md)); a guest writing into its own
   code is not caught here.
@@ -236,6 +240,7 @@ from `modules/core/`):
 | test | what it pins |
 |------|--------------|
 | a layout that overlaps is refused when it is registered | Partial overlap is refused; butting up against a region's end is not an overlap. |
+| a region given back is gone from every answer, and its span can be registered again | `unregister` reaches the lookup cache and the accessors, and frees the span. |
 | access is checked against the region that holds it | `assert` per mode. |
 | protect tightens a region after it has been filled in | `protect` and the `rwx → rx` pattern the thunk table uses. |
 | a span may not run past its region, even into an adjacent one | The one-region rule. |

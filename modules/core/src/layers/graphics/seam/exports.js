@@ -31,6 +31,7 @@ import { createDirect3D10Seam } from './d3d10.js';
 import { createVulkanSeam } from './vulkan.js';
 import { createDirectDrawSeam, readGuid } from './ddraw.js';
 import { createDirect3D7Seam } from './d3d7.js';
+import { createLegacyDirect3DSeam } from './d3dlegacy.js';
 import { IID_IDirectDraw7, IID_IDirectDrawClipper } from './iids.js';
 import { createFields } from './structs.js';
 
@@ -48,6 +49,9 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @param {any} deps.graphics   The graphics api: create(name), available().
  * @param {any} deps.memory     readMemory/writeMemory.
  * @param {(object: any, interfaceId: string) => number} deps.publishInterface
+ * @param {(object: any, interfaceId: string) => boolean} [deps.unpublishInterface]
+ *        The bridge's way to give back an interface the program has no
+ *        Release for.
  * @param {() => any} deps.screen
  * @param {import('./ddraw.js').SurfaceDcServices} [deps.gdi]
  *        How a DirectDraw surface gets a device context GDI can draw through.
@@ -83,6 +87,22 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *     [deps.windowClientSize]
  *        A window's client area, which is the size a back buffer asked for as
  *        zero by zero takes.
+ * @param {import('../webgpu/internal/presenter.js').DisplayGamma} [deps.gamma]
+ *        The display's gamma ramp, which a DirectDraw primary's sets. The
+ *        Direct3D 8 and 9 devices reach it through the objects `graphics`
+ *        makes, which carry it from the layer.
+ * @param {() => boolean} [deps.deactivated]
+ *        Whether the application has been told it is not the active one,
+ *        which is when a DirectDraw object loses exclusive mode.
+ * @param {() => number} [deps.deactivations]
+ *        How many times it has been, each of which loses an exclusive
+ *        owner's video memory.
+ * @param {() => number} [deps.now]
+ *        The clock the display's raster runs on, in milliseconds; the host's
+ *        when none is given.
+ * @param {(ms: number, run: () => void) => void} [deps.schedule]
+ *        How a wait for the vertical blank is woken; a host timer when none is
+ *        given.
  * @returns {{ libraries: Record<string, Record<string, any>>,
  *             opengl: { pixelFormat: { size: () => number, count: () => number,
  *                                      choose: (bytes: Uint8Array) => number,
@@ -96,21 +116,26 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *             shadow: () => any }}
  */
 export function createGraphicsLibraries(
-    { graphics, memory, publishInterface, screen, gdi, present, publisher: shared, callGuest,
+    { graphics, memory, publishInterface, unpublishInterface, screen, gdi, present,
+        publisher: shared, callGuest,
         free, exportAddress,
         currentThread,
-        scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize },
+        scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
+        gamma, deactivated, deactivations, now = ()=>performance.now(),
+        schedule = (ms, run)=>{
+            setTimeout(run, ms);
+        } },
 )
 {
-    const publisher = shared ?? createPublisher({ publishInterface });
+    const publisher = shared ?? createPublisher({ publishInterface, unpublishInterface });
     const fields = createFields(memory);
     const d3d8 = createDirect3D8Seam({
         publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution,
-        windowClientSize,
+        windowClientSize, now,
         identity: ()=>graphics.adapter?.() ?? null,
     });
     const d3d9 = createDirect3D9Seam({
-        publisher, memory, screen, divergence, cursor, resolution, windowClientSize,
+        publisher, memory, screen, divergence, cursor, resolution, windowClientSize, gdi, now,
         identity: ()=>graphics.adapter?.() ?? null,
     });
     const d3d10 = createDirect3D10Seam({
@@ -122,9 +147,20 @@ export function createGraphicsLibraries(
     const d3d7 = createDirect3D7Seam({
         publisher, memory, render, callGuest, currentThread, scratch,
     });
+    const d3dLegacy = createLegacyDirect3DSeam({
+        publisher, memory, d3d7: d3d7.shared, callGuest, currentThread, scratch,
+        // A first-generation device is asked of a surface, whose object the
+        // DirectDraw seam knows; that seam is made next, beside these tables.
+        ownerOf: surface=>ddraw.ownerOf(surface),
+    });
     const ddraw = createDirectDrawSeam({
-        publisher, memory, screen, gdi, present, callGuest, currentThread, scratch,
-        extraInterfaces: [d3d7.interface],
+        publisher, memory, screen, gdi, present, callGuest, currentThread, scratch, now, schedule,
+        extraInterfaces: [d3d7.interface, ...d3dLegacy.interfaces],
+        extraSurfaceInterfaces: d3dLegacy.surfaceInterfaces,
+        identity: ()=>graphics.adapter?.() ?? null,
+        gamma,
+        deactivated,
+        deactivations,
     });
 
     /** What a program has actually asked us to make, for a report. */
@@ -235,6 +271,20 @@ export function createGraphicsLibraries(
                     return d3d9.publishRoot(root);
                 },
             },
+
+            /** HRESULT Direct3DCreate9Ex(UINT SDKVersion, IDirect3D9Ex **out) */
+            Direct3DCreate9Ex: {
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([, out])=>{
+                    const root = graphics.create('d3d9');
+                    if (root)
+                    {
+                        created.push('d3d9');
+                    }
+                    return d3d9.publishRootEx(root, out);
+                },
+            },
         },
 
         ...d3d10.libraries,
@@ -281,15 +331,28 @@ export function createGraphicsLibraries(
             },
 
             /**
-             * HRESULT DirectDrawEnumerateA(LPDDENUMCALLBACKA, LPVOID)
-             *
-             * Enumeration needs to call back into guest code once per device.
-             * There is one device and the callback machinery is the bridge's,
-             * not this table's, so this reports success having enumerated
-             * nothing -- which a caller reads as "no secondary devices" and
-             * handles, since that is the common case on a real machine.
+             * HRESULT DirectDrawEnumerateA(LPDDENUMCALLBACKA, LPVOID), its Ex
+             * form with flags and a monitor, and the two wide forms. Each
+             * calls back into guest code once per device, so the answer is a
+             * promise the bridge parks the caller on.
              */
-            DirectDrawEnumerateA: { argBytes: 8, handler: ()=>DD_OK },
+            DirectDrawEnumerateA: {
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([callback, context])=>ddraw.enumerate.ansi(callback, context),
+            },
+            DirectDrawEnumerateExA: {
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([callback, context, flags])=>
+                    ddraw.enumerate.ansiEx(callback, context, flags),
+            },
+            DirectDrawEnumerateW: {
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([callback])=>ddraw.enumerate.wide(callback),
+            },
+            DirectDrawEnumerateExW: { argBytes: 12, handler: ()=>ddraw.enumerate.wideEx() },
 
             /**
              * HRESULT DirectDrawCreateClipper(DWORD, LPDIRECTDRAWCLIPPER*, IUnknown*)

@@ -29,11 +29,17 @@ import {
     describeEvent,
     chooseZstdDecoder,
     answeredByEngine,
+    mapShippedLibraries,
+    placeLibrary,
+    missingImportCall,
+    compatibilityOf,
+    createApp,
 } from './app.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
 import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
+import { parsePe } from './layers/loader/internal/pe.js';
 import { decompressZstd } from './zstd.js';
 import { createAccessors } from './layers/memory/internal/accessors.js';
 import { Access, RegionKind, createRegionMap } from './layers/memory/internal/regions.js';
@@ -335,6 +341,154 @@ test('a resource is addressed relative to the module its instance names', ()=>{
     assert.equal(lookup.loadString(0, 1), null, 'a module without its file has no resources');
 });
 
+/**
+ * A library whose only section holds one resource: RCDATA 1, four bytes, at
+ * RVA 0x1058 and file offset 0x258 -- two different numbers, so a lookup that
+ * mixes them up lands somewhere else.
+ */
+function resourceLibrary(){
+    const bytes = new Uint8Array(0x260);
+    const view = new DataView(bytes.buffer);
+    const put = (/** @type {number} */ at, /** @type {number} */ value)=>
+        view.setUint32(at, value, true);
+    view.setUint16(0, 0x5a4d, true); //              "MZ"
+    put(0x3c, 0x80);
+    put(0x80, 0x4550); //                             "PE\0\0"
+    view.setUint16(0x84, 0x014c, true); //           i386
+    view.setUint16(0x86, 1, true); //                one section
+    view.setUint16(0x94, 224, true);
+    view.setUint16(0x96, 0x2102, true); //           a DLL
+    view.setUint16(0x98, 0x010b, true); //           PE32
+    put(0x98 + 28, 0x10000000); //                    ImageBase
+    put(0x98 + 32, 0x1000); //                        SectionAlignment
+    put(0x98 + 56, 0x2000); //                        SizeOfImage
+    put(0x98 + 60, 0x200); //                         SizeOfHeaders
+    put(0x98 + 92, 16);
+    put(0x98 + 96 + 2 * 8, 0x1000); //                the resource directory
+    put(0x98 + 96 + 2 * 8 + 4, 0x60);
+    bytes.set([...'.rsrc'].map(ch=>ch.charCodeAt(0)), 0x178);
+    put(0x178 + 8, 0x60);
+    put(0x178 + 12, 0x1000);
+    put(0x178 + 16, 0x60);
+    put(0x178 + 20, 0x200);
+    // Type 10, then name 1, then language 0x409, then the data entry.
+    view.setUint16(0x200 + 14, 1, true);
+    put(0x200 + 16, 10);
+    put(0x200 + 20, 24 | 0x80000000);
+    view.setUint16(0x200 + 24 + 14, 1, true);
+    put(0x200 + 40, 1);
+    put(0x200 + 44, 48 | 0x80000000);
+    view.setUint16(0x200 + 48 + 14, 1, true);
+    put(0x200 + 64, 0x409);
+    put(0x200 + 68, 72);
+    put(0x200 + 72, 0x1058);
+    put(0x200 + 76, 4);
+    bytes.set([0xca, 0xfe, 0xf0, 0x0d], 0x258);
+    return bytes;
+}
+
+/**
+ * A program whose only resource is its manifest (RT_MANIFEST 1, the one
+ * CreateProcess reads) and whose PE header names an operating system version.
+ *
+ * @param {Uint8Array | null} manifest  Absent, the resource is RCDATA instead.
+ * @param {number} major @param {number} minor
+ */
+function manifestProgram(manifest, major, minor){
+    const data = manifest ?? Uint8Array.of(0xca, 0xfe, 0xf0, 0x0d);
+    const bytes = new Uint8Array(0x258 + data.length);
+    const view = new DataView(bytes.buffer);
+    const put = (/** @type {number} */ at, /** @type {number} */ value)=>
+        view.setUint32(at, value, true);
+    view.setUint16(0, 0x5a4d, true);
+    put(0x3c, 0x80);
+    put(0x80, 0x4550);
+    view.setUint16(0x84, 0x014c, true);
+    view.setUint16(0x86, 1, true);
+    view.setUint16(0x94, 224, true);
+    view.setUint16(0x96, 0x0102, true); //           an executable
+    view.setUint16(0x98, 0x010b, true);
+    put(0x98 + 28, 0x00400000);
+    put(0x98 + 32, 0x1000);
+    view.setUint16(0x98 + 40, major, true); //       MajorOperatingSystemVersion
+    view.setUint16(0x98 + 42, minor, true);
+    put(0x98 + 56, 0x2000);
+    put(0x98 + 60, 0x200);
+    put(0x98 + 92, 16);
+    put(0x98 + 96 + 2 * 8, 0x1000);
+    put(0x98 + 96 + 2 * 8 + 4, 0x58 + data.length);
+    bytes.set([...'.rsrc'].map(ch=>ch.charCodeAt(0)), 0x178);
+    put(0x178 + 8, 0x58 + data.length);
+    put(0x178 + 12, 0x1000);
+    put(0x178 + 16, 0x58 + data.length);
+    put(0x178 + 20, 0x200);
+    view.setUint16(0x200 + 14, 1, true);
+    put(0x200 + 16, manifest ? 24 : 10);
+    put(0x200 + 20, 24 | 0x80000000);
+    view.setUint16(0x200 + 24 + 14, 1, true);
+    put(0x200 + 40, 1);
+    put(0x200 + 44, 48 | 0x80000000);
+    view.setUint16(0x200 + 48 + 14, 1, true);
+    put(0x200 + 64, 0x409);
+    put(0x200 + 68, 72);
+    put(0x200 + 72, 0x1058);
+    put(0x200 + 76, data.length);
+    bytes.set(data, 0x258);
+    return bytes;
+}
+
+test('a program says what Windows it knows through its manifest and its PE header', ()=>{
+    // Windows 10 answers a program's version calls from these two
+    // (versions.js's reportedVersion), so they are read from the program's
+    // own image, the way CreateProcess reads them.
+    const WINDOWS_10 = '8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a';
+    const WINDOWS_7 = '35138b9a-5d96-4fbd-8e2d-a2440225f93a';
+    const text = '<?xml version="1.0" encoding="UTF-8"?><assembly><compatibility><application>'
+        + `<supportedOS Id="{${WINDOWS_7}}"/><supportedOS Id="{${WINDOWS_10}}"/>`
+        + '</application></compatibility></assembly>';
+    assert.deepEqual(compatibilityOf(manifestProgram(new TextEncoder().encode(text), 6, 0)),
+        { supportedOS: [WINDOWS_7, WINDOWS_10], imageVersion: { major: 6, minor: 0 } });
+
+    const utf16 = new Uint8Array(2 + text.length * 2);
+    utf16.set([0xff, 0xfe]);
+    [...text].forEach((character, index)=>{
+        utf16[2 + index * 2] = character.charCodeAt(0);
+    });
+    assert.deepEqual(compatibilityOf(manifestProgram(utf16, 5, 1)).supportedOS,
+        [WINDOWS_7, WINDOWS_10], 'a manifest written in UTF-16 says the same');
+
+    assert.deepEqual(compatibilityOf(manifestProgram(null, 4, 0)),
+        { supportedOS: [], imageVersion: { major: 4, minor: 0 } }, 'no manifest at all');
+});
+
+test('a Windows that is not one of the four is refused before anything is built', async()=>{
+    // A launcher passes what a manifest said, which no type checks.
+    const options = /** @type {any} */ ({ executable: new Uint8Array(0), windows: 'win98' });
+    await assert.rejects(createApp(options),
+        /unknown Windows version "win98": the choices are win2000, winxp, win7, win10/);
+});
+
+test('a library loaded as data answers for its resources by the handle it was given', ()=>{
+    // LoadLibraryEx hands out a data file's base with a low bit set -- one for
+    // a view of the file as it lies on disk, two for one laid out as an image
+    // -- and FindResource, LoadResource and the rest take that handle. In the
+    // file's own layout a resource is at its file offset from the base, not at
+    // its RVA.
+    const file = resourceLibrary();
+    const image = parsePe(file);
+    const flat = { base: 0x10000000, file, image, flat: true };
+    const laidOut = { base: 0x10100000, file, image, flat: false };
+    const lookup = resourceLookup(()=>null, new Map(),
+        new Map([[0x10000001, flat], [0x10100002, laidOut]]));
+
+    assert.equal(lookup.moduleBase(0x10000001), 0x10000000);
+    assert.equal(lookup.findResource(0x10000001, 10, 1)?.rva, 0x258);
+    assert.equal(lookup.moduleBase(0x10100002), 0x10100000);
+    assert.equal(lookup.findResource(0x10100002, 10, 1)?.rva, 0x1058);
+    assert.equal(lookup.moduleBase(0x10000000), 0, 'the base alone names no module');
+    assert.equal(lookup.findResource(0x10000003, 10, 1), null, 'nor does another low bit');
+});
+
 test('a bare name is looked for beside the executable, then where the system keeps its own', ()=>{
     // An installer puts a library it brought into the system directory and
     // loads it by bare name; a search that stops beside the executable
@@ -365,9 +519,9 @@ test('a redistributable runtime is answered by the engine whoever brought a copy
 });
 
 test('a library missing beside the program is read from the system volume', async()=>{
-    // The runtime a title links against lives in `system32`, put there by the
-    // engine the way `DXSETUP` puts it there on a real machine. A search that
-    // stopped beside the executable would report every one of them missing.
+    // The runtime a title links against lives in `system32`, where its
+    // installer's `DXSETUP` put it. A search that stopped beside the
+    // executable would report every one of them missing.
     const d3dx = new Uint8Array([1, 2, 3, 4]);
     const filesystem = await filesystemModule.create({
         system: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx }),
@@ -415,6 +569,172 @@ test('an import the engine has a table for is planned from the system file', asy
     assert.deepEqual([...order[0].file], [...d3dx], 'the file was planned, not the table');
     assert.deepEqual(missing, []);
 });
+
+/**
+ * A fixture image given a relocation directory -- one empty block -- so that
+ * it can be mapped anywhere, as nearly every library a program ships can.
+ *
+ * @param {Uint8Array} file
+ */
+function movable(file){
+    const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
+    const optional = view.getUint32(0x3c, true) + 4 + 20;
+    const BLOCK_RVA = 0x1020;
+    const BLOCK_OFFSET = 0x220;
+    view.setUint32(optional + 96 + 5 * 8, BLOCK_RVA, true);
+    view.setUint32(optional + 96 + 5 * 8 + 4, 8, true);
+    view.setUint32(BLOCK_OFFSET, 0x1000, true);
+    view.setUint32(BLOCK_OFFSET + 4, 8, true);
+    return file;
+}
+
+/**
+ * The program's libraries, mapped by `mapShippedLibraries` over a loader that
+ * only records where each one went.
+ *
+ * @param {Record<string, Uint8Array>} files  Beside the program, by name.
+ * @param {Uint8Array} executable
+ * @param {{ base: number, limit: number, floor?: number,
+ *           held?: { base: number, size: number }[] }} space
+ */
+async function mapBeside(files, executable, space){
+    const filesystem = await filesystemModule.create({
+        drives: { C: { source: createMemoryStore(Object.fromEntries(
+            Object.entries(files).map(([name, bytes])=>[`App\\${name}`, bytes]))) } },
+    });
+    /** @type {{ name: string, base: number, size: number }[]} */
+    const placed = [];
+    /** @type {any[]} */
+    const emitted = [];
+    const loader = {
+        /** @param {Uint8Array} file @param {{ base: number, name: string }} where */
+        map: (file, { base, name })=>{
+            placed.push({ name, base, size: parsePe(file).sizeOfImage });
+            return { record: { entryPoint: 0 } };
+        },
+    };
+    const kernel32 = (/** @type {string} */ name)=>name.toLowerCase() === 'kernel32.dll';
+    const { held = [], floor = 0x00500000, ...bounds } = space;
+    const mapped = await mapShippedLibraries({
+        executable, imagePath: IMAGE, filesystem, loader, blocks: null,
+        events: { emit: (/** @type {string} */ name, /** @type {any} */ payload)=>
+            emitted.push([name, payload]) },
+        isSystem: kernel32, isKnownDll: kernel32,
+        byName: new Map(), byBase: new Map(),
+        floor,
+        /** @param {number} base @param {number} size */
+        holder: (base, size)=>[...held, ...placed].find(one=>
+            base < one.base + one.size && one.base < base + size) ?? null,
+        ...bounds,
+    });
+    return { mapped, placed, emitted };
+}
+
+test('a library that would reach past the modules\' space is refused, not mapped over the stacks',
+    async()=>{
+        // Above the modules' space the pool of thread stacks begins, and a
+        // library mapped there is found only when a thread's stack is laid over
+        // it -- as an overlap far from anything that explains it.
+        const library = ()=>movable(new Uint8Array(buildExe({
+            imports: { 'KERNEL32.dll': ['Anything'] }, code: ()=>[0xc3],
+        })));
+        const executable = new Uint8Array(buildExe({
+            imports: { 'first.dll': ['Anything'], 'second.dll': ['Anything'] },
+            code: ()=>[0xc3],
+        }));
+        const { placed, emitted } = await mapBeside(
+            { 'first.dll': library(), 'second.dll': library() }, executable,
+            { base: 0x02000000, limit: 0x02010000 });
+
+        assert.deepEqual(placed.map(one=>[one.name, one.base]), [['first.dll', 0x02000000]]);
+        assert.ok(emitted.some(([name, payload])=>name === 'libraries-missing'
+            && payload.names.includes('second.dll') && payload.reason === 'no room'));
+    });
+
+test('a library without relocations goes to its own base, and movable ones fill in around it',
+    async()=>{
+        // Its absolute addresses assume that base, and it runs nowhere else.
+        const fixed = new Uint8Array(buildExe({
+            imports: { 'KERNEL32.dll': ['Anything'] }, code: ()=>[0xc3],
+        }));
+        new DataView(fixed.buffer).setUint32(
+            new DataView(fixed.buffer).getUint32(0x3c, true) + 4 + 20 + 28, 0x02020000, true);
+        const executable = new Uint8Array(buildExe({
+            imports: { 'first.dll': ['Anything'], 'fixed.dll': ['Anything'],
+                'second.dll': ['Anything'], 'third.dll': ['Anything'] },
+            code: ()=>[0xc3],
+        }));
+        const library = ()=>movable(new Uint8Array(buildExe({
+            imports: { 'KERNEL32.dll': ['Anything'] }, code: ()=>[0xc3],
+        })));
+        const { placed } = await mapBeside(
+            { 'first.dll': library(), 'fixed.dll': fixed, 'second.dll': library(),
+                'third.dll': library() },
+            executable, { base: 0x02000000, limit: 0x08000000 });
+
+        assert.deepEqual(placed.map(one=>[one.name, one.base]), [
+            ['first.dll', 0x02000000], ['fixed.dll', 0x02020000],
+            ['second.dll', 0x02010000], ['third.dll', 0x02030000],
+        ]);
+    });
+
+test('a library without relocations whose base is taken is refused, not moved', async()=>{
+    // "If the base address is not available, the loader reports an error"
+    // (the PE format's IMAGE_FILE_RELOCS_STRIPPED): a library moved without
+    // relocations runs with every absolute address pointing at its old base.
+    const fixed = new Uint8Array(buildExe({
+        imports: { 'KERNEL32.dll': ['Anything'] }, code: ()=>[0xc3],
+    }));
+    const executable = new Uint8Array(buildExe({
+        imports: { 'fixed.dll': ['Anything'] }, code: ()=>[0xc3],
+    }));
+    const { placed, emitted } = await mapBeside({ 'fixed.dll': fixed }, executable,
+        { base: 0x02000000, limit: 0x08000000 });
+
+    assert.deepEqual(placed, [], 'its base, 0x400000, is the program\'s');
+    assert.ok(emitted.some(([name, payload])=>name === 'libraries-missing'
+        && payload.names.includes('fixed.dll') && /no relocations/.test(payload.reason)));
+});
+
+test('a movable library takes the first free base at or after the next one', ()=>{
+    const held = [{ base: 0x02000000, size: 0x3000 }, { base: 0x02010000, size: 0x10000 }];
+    /** @param {number} base @param {number} size */
+    const holder = (base, size)=>held.find(one=>
+        base < one.base + one.size && one.base < base + size) ?? null;
+    const space = { next: 0x02000000, floor: 0x00500000, limit: 0x08000000, holder };
+
+    assert.deepEqual(placeLibrary(
+        { relocatable: true, imageBase: 0x10000000, sizeOfImage: 0x5000 }, space),
+    { base: 0x02020000 });
+    assert.deepEqual(placeLibrary(
+        { relocatable: true, imageBase: 0x10000000, sizeOfImage: 0x06000000 }, space),
+    { refused: 'no room' });
+    assert.deepEqual(placeLibrary(
+        { relocatable: false, imageBase: 0x03000000, sizeOfImage: 0x5000 }, space),
+    { base: 0x03000000 });
+    assert.ok('refused' in placeLibrary(
+        { relocatable: false, imageBase: 0x10000000, sizeOfImage: 0x5000 }, space),
+    'above the modules\' space is the stacks\' and the heap\'s');
+    assert.ok('refused' in placeLibrary(
+        { relocatable: false, imageBase: 0x00400000, sizeOfImage: 0x5000 }, space),
+    'below the floor is the program\'s and the engine\'s');
+});
+
+test('a library that imports from the program is not given a second copy of the program',
+    async()=>{
+        const executable = movable(new Uint8Array(buildExe({
+            imports: { 'game.dll': ['Anything'] }, code: ()=>[0xc3],
+        })));
+        const game = movable(new Uint8Array(buildExe({
+            imports: { 'GAME.EXE': ['Anything'] }, code: ()=>[0xc3],
+        })));
+        const { placed, emitted } = await mapBeside(
+            { 'game.dll': game, 'Game.exe': executable }, executable,
+            { base: 0x02000000, limit: 0x08000000 });
+
+        assert.deepEqual(placed.map(one=>one.name), ['game.dll']);
+        assert.ok(!emitted.some(([, payload])=>payload?.missing?.length > 0));
+    });
 
 test('a parent\'s deferred writes land only inside the child it wrote them for', ()=>{
     // A write that falls outside the image was addressing a mapping this
@@ -874,6 +1194,28 @@ test('two missing imports are two announcements, each counted on its own', ()=>{
     assert.equal(missing.calls.get('KERNEL32.dll!iswspace'), 2);
     assert.equal(missing.calls.get('USER32.dll!NoSuchThing'), 1);
 });
+
+test('a missing C++ import returns as its name says, and not at all when the name cannot say',
+    ()=>{
+        const crt = { own: false, cdeclLibrary: true };
+        const system = { own: false, cdeclLibrary: false };
+
+        assert.deepEqual(missingImportCall('??4__non_rtti_object@@QAEAAV0@ABV0@@Z', crt),
+            { returns: true, argBytes: 4 }, 'a thiscall member of a cdecl library pops its own');
+        assert.deepEqual(missingImportCall('?what@exception@@UBEPBDXZ', crt),
+            { returns: true, argBytes: 0 });
+        assert.deepEqual(missingImportCall('?f@@YGXHN_J@Z', system),
+            { returns: true, argBytes: 20 }, 'the name sizes what an undecorated one cannot');
+        assert.equal(missingImportCall('??0exception@@QAE@ABQBD@Z', crt).returns, false,
+            'a constructor may take an argument its name does not show');
+        assert.deepEqual(missingImportCall('??0exception@@QAE@ABQBD@Z',
+            { own: true, cdeclLibrary: false }), { returns: true, argBytes: 0 },
+        'a library the program brought answers as before');
+
+        assert.deepEqual(missingImportCall('_stat', crt), { returns: true, argBytes: 0 });
+        assert.deepEqual(missingImportCall('_Thing@8', system), { returns: true, argBytes: 8 });
+        assert.equal(missingImportCall('Thing', system).returns, false);
+    });
 
 test('a missing import is bound once, however often it is asked for', ()=>{
     const { handlers, missing } = missingImportsHarness();

@@ -25,9 +25,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { D3DFMT, D3DPOOL, D3DRS, D3DSWAPEFFECT, D3DUSAGE, D3D_OK } from './constants.js';
-import { D3DCLEAR, D3DPT } from '../d3d8/constants.js';
-import { createDirect3D9 } from './device.js';
+import {
+    D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRS, D3DSWAPEFFECT, D3DUSAGE, D3D_OK,
+} from './constants.js';
+import { D3DCLEAR, D3DPT, D3DTA, D3DTEXF, D3DTOP, D3DTSS } from '../d3d8/constants.js';
+import { D3DISSUE, D3DQUERYTYPE, createDirect3D9 } from './device.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
@@ -57,10 +59,11 @@ const argb = (r, g, b, a = 255)=>((a << 24) | (r << 16) | (g << 8) | b) >>> 0;
  * `readMemory`. An address invented for the purpose would read back as zeroes
  * with nothing reporting a failure.
  *
- * @param {{ width?: number, height?: number, depth?: boolean }} [options]
+ * @param {{ width?: number, height?: number, depth?: boolean,
+ *     occlusionSamples?: (slot: number) => number }} [options]
  */
 function harness(options = {}){
-    const gpu = createFakeDevice();
+    const gpu = createFakeDevice({ occlusionSamples: options.occlusionSamples });
     /** @type {any[]} */
     const presented = [];
     const backend = createBackend({
@@ -261,6 +264,17 @@ test('byte-exact: a cleared frame is that colour in every pixel, blue byte first
     assert.equal(toBase64(surface),
         'VjQS/1Y0Ev9WNBL/VjQS/1Y0Ev9WNBL/VjQS/1Y0Ev9WNBL/VjQS/1Y0Ev9WNBL/VjQS/1Y0Ev9WNBL/VjQS/w==',
         'the whole image, every pixel of which the clear decides');
+});
+
+test('Clear with a count of zero clears nothing, and with no array clears the whole', ()=>{
+    // Wine's d3d9 visual tests: Clear(0, rects) and Clear(1, NULL) both
+    // succeed; the first leaves the target alone, the second clears all of it.
+    const h = harness();
+    const everything = [{ x1: 0, y1: 0, x2: 4, y2: 4 }];
+    assert.equal(h.device.Clear(0, everything, D3DCLEAR.TARGET, argb(255, 0, 0), 0, 0), D3D_OK);
+    assert.equal(h.device.diagnostics().clears, 0);
+    assert.equal(h.device.Clear(1, null, D3DCLEAR.TARGET, argb(0, 255, 0), 0, 0), D3D_OK);
+    assert.equal(h.device.diagnostics().clears, 1);
 });
 
 test('byte-exact: a triangle from a locked vertex buffer covers the pixels it names',
@@ -504,13 +518,66 @@ test('a target smaller than the bound depth surface gets a depth of its own size
     small.surface.release();
 });
 
-test('a viewport wider than its target is refused', ()=>{
+test('a viewport past its target is taken, and draws keep its mapping', async()=>{
+    // Wine's d3d9 test_viewport: (0, 0, 1280, 960) and (100, 100, 640, 480) on
+    // a 640x480 target are D3D_OK, and the picture is the viewport's mapping
+    // cut to the target. Direct3D 8 refuses the same viewports.
     const h = harness({ width: 8, height: 8 });
+    const wide = { X: 4, Y: 2, Width: 8, Height: 16, MinZ: 0, MaxZ: 1 };
+    assert.equal(h.device.SetViewport(wide), D3D_OK);
+    /** @type {{ viewport?: any }} */
+    const out = {};
+    assert.equal(h.device.GetViewport(out), D3D_OK);
+    assert.deepEqual(out.viewport, wide);
+    assert.notEqual(
+        h.device.SetViewport({ X: 0, Y: 0, Width: 0, Height: 8, MinZ: 0, MaxZ: 1 }), D3D_OK,
+        'an empty one is still refused');
 
-    assert.notEqual(
-        h.device.SetViewport({ X: 4, Y: 0, Width: 8, Height: 8, MinZ: 0, MaxZ: 1 }), D3D_OK);
-    assert.notEqual(
-        h.device.SetViewport({ X: 0, Y: 0, Width: 0, Height: 8, MinZ: 0, MaxZ: 1 }), D3D_OK);
+    assert.equal(h.device.SetFVF(FVF_TRIANGLE), D3D_OK);
+    assert.equal(h.device.BeginScene(), D3D_OK);
+    assert.equal(h.device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, Uint8Array.from([
+        ...vertex(4, 2, argb(255, 0, 0)), ...vertex(12, 2, argb(255, 0, 0)),
+        ...vertex(4, 18, argb(255, 0, 0)),
+    ]), TRIANGLE_STRIDE), D3D_OK);
+    assert.equal(h.device.EndScene(), D3D_OK);
+    await h.present();
+    const viewports = h.gpu.of('setViewport').map((/** @type {any} */ call)=>call.rect);
+    assert.ok(viewports.some((/** @type {number[]} */ args)=>args[0] === 4 && args[1] === 2
+        && args[2] === 8 && args[3] === 16), 'the viewport reaches the pass as it was set');
+});
+
+test('a draw under the scissor test is cut to the scissor rectangle, and only then', async()=>{
+    // D3DRS_SCISSORTESTENABLE with SetScissorRect "defines the rendering area
+    // within the render target" (Microsoft's IDirect3DDevice9::SetScissorRect)
+    // for draws, not only for Clear: each draw runs under the scissor cut to
+    // the viewport, and with the test off under the viewport's own again.
+    const h = harness({ width: 8, height: 8 });
+    const triangle = Uint8Array.from([
+        ...vertex(0, 0, argb(255, 0, 0)), ...vertex(8, 0, argb(255, 0, 0)),
+        ...vertex(0, 8, argb(255, 0, 0)),
+    ]);
+    const draw = ()=>assert.equal(
+        h.device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, triangle, TRIANGLE_STRIDE), D3D_OK);
+    assert.equal(h.device.SetFVF(FVF_TRIANGLE), D3D_OK);
+    assert.equal(h.device.SetScissorRect({ left: 2, top: 1, right: 20, bottom: 5 }), D3D_OK);
+    assert.equal(h.device.BeginScene(), D3D_OK);
+    draw();
+    assert.equal(h.device.SetRenderState(D3DRS.SCISSORTESTENABLE, 1), D3D_OK);
+    draw();
+    draw();
+    assert.equal(h.device.SetRenderState(D3DRS.SCISSORTESTENABLE, 0), D3D_OK);
+    draw();
+    assert.equal(h.device.EndScene(), D3D_OK);
+    await h.present();
+
+    const commands = h.device.diagnostics().lastFrame
+        .filter((/** @type {any} */ command)=>command.kind === 'draw' || command.kind === 'scissor')
+        .map((/** @type {any} */ command)=>(command.kind === 'draw' ? 'draw'
+            : `${command.rect.x},${command.rect.y},${command.rect.width},${command.rect.height}`));
+    assert.deepEqual(commands, ['draw', '2,1,6,4', 'draw', 'draw', '0,0,8,8', 'draw'],
+        'the scissor cut to the viewport, set once for two draws and put back after');
+    const scissors = h.gpu.of('setScissorRect').map((/** @type {any} */ call)=>call.rect);
+    assert.deepEqual(scissors.slice(-2), [[2, 1, 6, 4], [0, 0, 8, 8]]);
 });
 
 test('a stream whose offset straddles the stride is refused rather than drawn wrong', ()=>{
@@ -705,14 +772,308 @@ test('a fixed-function draw reads a declaration no format spells at its offsets'
 });
 
 test('a declaration the fixed-function stage cannot read is dropped, not raised', async()=>{
-    // A colour in a second stream: this stage reads one stream. The draw must
-    // not throw into the program's thread; it is counted and said once.
+    // A colour of four bytes read as R, G, B, A: this stage reads D3DCOLOR.
+    // The draw must not throw into the program's thread; it is counted and
+    // said once.
     const h = harness();
     const { device } = h;
-    colourFirstDeclaration(device, 1);
+    /** @type {{ declaration?: any }} */
+    const made = {};
+    assert.equal(device.CreateVertexDeclaration([
+        { Stream: 0, Offset: 0, Type: D3DDECLTYPE.UBYTE4N, Method: 0,
+            Usage: D3DDECLUSAGE.COLOR, UsageIndex: 0 },
+        { Stream: 0, Offset: 4, Type: D3DDECLTYPE.FLOAT4, Method: 0,
+            Usage: D3DDECLUSAGE.POSITIONT, UsageIndex: 0 },
+    ], made), D3D_OK);
+    assert.equal(device.SetVertexDeclaration(made.declaration), D3D_OK);
     assert.equal(device.BeginScene(), D3D_OK);
     assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK);
     assert.equal(device.EndScene(), D3D_OK);
     await h.present();
     assert.equal(device.diagnostics().skipped.layout, 1);
 });
+
+test('a fixed-function draw reads a member in another stream from that stream', async()=>{
+    // Wine's d3d9 test_color_vertex: a declaration with its diffuse colour in
+    // stream 1 draws through the fixed-function stage; with stream 1 bound the
+    // colour is read from that buffer at its stride, and with nothing bound
+    // there -- the Wine test's DrawPrimitiveUP -- it reads as zero, which is
+    // what the test's lit colours come out as.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    colourFirstDeclaration(device, 1);
+    const positions = new DataView(new ArrayBuffer(60));
+    [[1, 1], [7, 1], [1, 4]].forEach(([x, y], index)=>{
+        positions.setFloat32(index * 20 + 4, x, true);
+        positions.setFloat32(index * 20 + 8, y, true);
+        positions.setFloat32(index * 20 + 12, 0.5, true);
+        positions.setFloat32(index * 20 + 16, 1, true);
+    });
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1,
+        new Uint8Array(positions.buffer), 20), D3D_OK);
+    /** @type {{ buffer?: any }} */
+    const colours = {};
+    assert.equal(device.CreateVertexBuffer(12, 0, 0, D3DPOOL.MANAGED, colours), D3D_OK);
+    assert.equal(device.SetStreamSource(1, colours.buffer, 0, 4), D3D_OK);
+    /** @type {{ buffer?: any }} */
+    const vertices = {};
+    assert.equal(device.CreateVertexBuffer(60, 0, 0, D3DPOOL.MANAGED, vertices), D3D_OK);
+    assert.equal(device.SetStreamSource(0, vertices.buffer, 0, 20), D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    assert.equal(device.diagnostics().skipped.layout, 0);
+    const pipelines = h.gpu.of('createRenderPipeline')
+        .map((/** @type {any} */ call)=>call.descriptor.vertex.buffers)
+        .filter((/** @type {any[]} */ buffers)=>buffers.length === 2);
+    assert.deepEqual(pipelines.map((/** @type {any[]} */ buffers)=>buffers.map(buffer=>
+        [buffer.arrayStride, buffer.attributes.map((/** @type {any} */ a)=>a.offset)])), [
+        [[20, [4]], [0, [0]]],
+        [[20, [4]], [4, [0]]],
+    ], 'stream 1 as its own buffer: unbound at a stride of nothing, then at its own');
+    const bound = h.gpu.of('setVertexBuffer')
+        .filter((/** @type {any} */ call)=>call.slot === 1)
+        .map((/** @type {any} */ call)=>call.buffer.descriptor.label);
+    assert.equal(bound.length, 2);
+    assert.match(bound[0], /zero/, 'nothing bound reads as zero');
+    assert.doesNotMatch(bound[1], /zero/, 'and the bound buffer after');
+    colours.buffer.release();
+    vertices.buffer.release();
+});
+
+/**
+ * A draw of one textured triangle, the stage selecting the texture.
+ *
+ * @param {ReturnType<typeof harness>} h
+ */
+async function drawTextured(h){
+    const { device } = h;
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.SELECTARG1), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.TEXTURE), D3D_OK);
+    assert.equal(device.SetFVF(FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT)), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+}
+
+/**
+ * The passes that made a texture's levels, as the level each drew, the
+ * level it read and the filter it read it through.
+ *
+ * @param {any} gpu @param {any} texture  The GPU texture.
+ * @returns {any[][]}
+ */
+function mipPasses(gpu, texture){
+    return gpu.of('beginRenderPass')
+        .filter((/** @type {any} */ call)=>call.descriptor.label.startsWith('mips:')
+            && call.descriptor.colorAttachments[0].view.texture === texture)
+        .map((/** @type {any} */ call)=>{
+            const binds = gpu.of('setBindGroup').filter(
+                (/** @type {any} */ bound)=>bound.pass === call.pass);
+            const source = binds[0].group.entries[0].resource;
+            return [call.descriptor.colorAttachments[0].view.viewDescriptor.baseMipLevel,
+                source.viewDescriptor.baseMipLevel, binds[0].group.entries[1].resource
+                    .descriptor.magFilter];
+        });
+}
+
+test('recorded: a texture that makes its own levels makes them before a draw samples them',
+    async()=>{
+        // Wine's d3d9 autogen_mipmap_test: the program writes the top level
+        // alone, and a sample far enough away reads a level the device made
+        // from it.
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(8, 8, 0, D3DUSAGE.AUTOGENMIPMAP, D3DFMT.X8R8G8B8,
+            D3DPOOL.MANAGED, out), D3D_OK);
+        const texture = out.texture;
+        assert.equal(texture.levels, 1, 'the program sees one level');
+        const fill = (/** @type {number} */ value)=>{
+            /** @type {{ pBits?: number }} */
+            const locked = {};
+            assert.equal(texture.LockRect(0, locked, null, 0), D3D_OK);
+            h.write(/** @type {number} */ (locked.pBits), new Uint8Array(8 * 8 * 4).fill(value));
+            assert.equal(texture.UnlockRect(0), D3D_OK);
+        };
+        fill(9);
+        assert.equal(device.SetTexture(0, texture), D3D_OK);
+        await drawTextured(h);
+
+        const made = gpu.of('createTexture').find(
+            (/** @type {any} */ call)=>call.descriptor.label === 'texture');
+        assert.equal(made.descriptor.mipLevelCount, 4, 'the GPU holds the whole chain');
+        const uploads = ()=>gpu.of('copyBufferToTexture').filter(
+            (/** @type {any} */ call)=>call.destination.texture === made.texture).length;
+        assert.equal(uploads(), 1, 'the top level alone goes up');
+        assert.deepEqual(mipPasses(gpu, made.texture),
+            [[1, 0, 'linear'], [2, 1, 'linear'], [3, 2, 'linear']],
+            'each level from the one above');
+        const order = gpu.calls.filter((/** @type {any} */ call)=>call.op === 'beginRenderPass'
+            || call.op === 'draw').map((/** @type {any} */ call)=>(call.op === 'draw'
+            ? 'draw' : call.descriptor.label.startsWith('mips:') ? 'mips' : 'pass'));
+        assert.ok(order.lastIndexOf('mips') < order.lastIndexOf('draw'),
+            'the levels are made before the draw that samples them');
+        assert.equal(device.diagnostics().mipsGenerated, 1);
+
+        await drawTextured(h);
+        assert.equal(mipPasses(gpu, made.texture).length, 3, 'nothing changed, nothing made');
+
+        // A new top level, or the program asking, makes them again; a point
+        // filter makes them from one texel of each four.
+        fill(12);
+        await drawTextured(h);
+        assert.equal(mipPasses(gpu, made.texture).length, 6);
+        assert.equal(texture.SetAutoGenFilterType(D3DTEXF.POINT), D3D_OK);
+        texture.GenerateMipSubLevels();
+        await drawTextured(h);
+        assert.deepEqual(mipPasses(gpu, made.texture).slice(6).map(each=>each[2]),
+            ['nearest', 'nearest', 'nearest']);
+    });
+
+test('recorded: a render target that makes its own levels makes them from what was drawn',
+    async()=>{
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(4, 4, 0, D3DUSAGE.RENDERTARGET | D3DUSAGE.AUTOGENMIPMAP,
+            D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT, out), D3D_OK);
+        const texture = out.texture;
+        /** @type {{ surface?: any }} */
+        const level = {};
+        assert.equal(texture.GetSurfaceLevel(0, level), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const back = {};
+        assert.equal(device.GetRenderTarget(0, back), D3D_OK);
+        const frame = async()=>{
+            assert.equal(device.SetRenderTarget(0, level.surface), D3D_OK);
+            assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0xff00ff00, 1, 0), D3D_OK);
+            assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+            assert.equal(device.SetTexture(0, texture), D3D_OK);
+            await drawTextured(h);
+        };
+        await frame();
+        const made = gpu.of('createTexture').find((/** @type {any} */ call)=>
+            call.descriptor.label === 'texture' && call.descriptor.mipLevelCount === 3);
+        assert.ok(made, 'a chain of three behind a target the program sees one level of');
+        assert.deepEqual(mipPasses(gpu, made.texture).map(each=>each.slice(0, 2)),
+            [[1, 0], [2, 1]]);
+        await frame();
+        assert.equal(mipPasses(gpu, made.texture).length, 4, 'drawn into again, made again');
+        level.surface.release();
+        back.surface.release();
+        assert.equal(device.SetTexture(0, null), D3D_OK);
+        texture.release();
+    });
+
+test('recorded: an additional swap chain shows its own back buffer in the device\'s window',
+    async()=>{
+        const h = harness();
+        const { device } = h;
+        /** @type {{ swapChain?: any }} */
+        const out = {};
+        assert.equal(device.CreateAdditionalSwapChain({
+            swapEffect: D3DSWAPEFFECT.DISCARD, backBufferWidth: 8, backBufferHeight: 6,
+            backBufferFormat: D3DFMT.X8R8G8B8, backBufferCount: 1, windowed: true,
+        }, out), D3D_OK);
+        const chain = out.swapChain;
+        /** @type {{ surface?: any }} */
+        const back = {};
+        assert.equal(chain.GetBackBuffer(0, 0, back), D3D_OK);
+        const draw = ()=>{
+            assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+            assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0xff00ff00, 1, 0), D3D_OK);
+        };
+        draw();
+        assert.equal(chain.Present(true), D3D_OK);
+        await device.idle();
+        assert.equal(h.presented.length, 1);
+        assert.deepEqual([h.presented[0].surface.width, h.presented[0].surface.height], [8, 6],
+            'the chain\'s back buffer, not the device\'s');
+
+        // Into a window the display does not show: drawn, submitted, not shown.
+        draw();
+        assert.equal(chain.Present(false), D3D_OK);
+        await device.idle();
+        assert.equal(h.presented.length, 1, 'nothing more reached the display');
+        assert.ok(h.gpu.of('submit').length >= 2, 'the frame was drawn all the same');
+
+        // A reset waits for the chain, a default-pool resource, to go.
+        back.surface.release();
+        assert.equal(device.Reset(), D3DERR_INVALIDCALL);
+        assert.equal(chain.release(), 0);
+        assert.equal(device.Reset(), D3D_OK);
+    });
+
+test('recorded: an occlusion query counts the samples of the draws between its BEGIN and END',
+    async()=>{
+        // Wine's d3d9 test_occlusion_query: S_FALSE while the answer is on
+        // its way, and a flush that waits for it. The recording GPU's query
+        // at slot n of a frame counts 10 to the n, so a count says which
+        // draws it took in.
+        const h = harness({ occlusionSamples: slot=>10 ** slot });
+        const { device, gpu } = h;
+        /** @type {{ query?: any }} */
+        const out = {};
+        assert.equal(device.CreateQuery(D3DQUERYTYPE.OCCLUSION, out), D3D_OK);
+        const query = out.query;
+        const triangle = new Uint8Array(3 * TRIANGLE_STRIDE);
+        assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+        const draw = ()=>assert.equal(
+            device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, triangle, TRIANGLE_STRIDE), D3D_OK);
+
+        assert.equal(device.BeginScene(), D3D_OK);
+        draw();
+        assert.equal(query.Issue(D3DISSUE.BEGIN), D3D_OK);
+        draw();
+        draw();
+        assert.equal(query.Issue(D3DISSUE.END), D3D_OK);
+        draw();
+        assert.equal(device.EndScene(), D3D_OK);
+        /** @type {{ value?: number }} */
+        const data = {};
+        assert.equal(query.GetData(data, 4, 0), 1, 'S_FALSE: nothing has gone to the GPU yet');
+        const flushed = query.GetData(data, 4, 1);
+        assert.ok(flushed instanceof Promise, 'a flush has the caller wait');
+        assert.equal(await flushed, D3D_OK);
+        assert.equal(data.value, 11, 'the two draws inside, not the two outside');
+        assert.equal(gpu.of('createQuerySet')[0].descriptor.type, 'occlusion');
+        assert.equal(query.GetData(data, 4, 0), D3D_OK, 'and it stays answered');
+        assert.equal(data.value, 11);
+
+        // Across a change of target and across a present, one count.
+        /** @type {{ surface?: any }} */
+        const other = {};
+        assert.equal(device.CreateRenderTarget(4, 4, D3DFMT.X8R8G8B8, false, other), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const back = {};
+        assert.equal(device.GetRenderTarget(0, back), D3D_OK);
+        assert.equal(query.Issue(D3DISSUE.BEGIN), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        draw();
+        assert.equal(device.SetRenderTarget(0, other.surface), D3D_OK);
+        draw();
+        assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        assert.equal(query.GetData(data, 4, 0), 1, 'still open');
+        assert.equal(device.BeginScene(), D3D_OK);
+        draw();
+        assert.equal(query.Issue(D3DISSUE.END), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        assert.equal(await query.GetData(data, 4, 1), D3D_OK);
+        assert.equal(data.value, 12, 'three draws, in two passes of one frame and one of the next');
+        const begun = gpu.of('beginOcclusionQuery').map((/** @type {any} */ call)=>call.index);
+        assert.deepEqual(begun, [0, 1, 0, 1, 0], 'a query a draw, from the first slot each frame');
+        assert.equal(gpu.count('endOcclusionQuery'), 5);
+
+        other.surface.release();
+        back.surface.release();
+        assert.equal(query.release(), 0);
+    });

@@ -137,6 +137,24 @@ test('an unreadable layout is refused rather than guessed', ()=>{
     assert.equal(baseFormatOf(GL.COMPRESSED_RGBA_S3TC_DXT5_EXT), GL.RGBA);
 });
 
+test('every sized internal format GL 1.1 names has its base format', ()=>{
+    // The GL 1.1 enumerants of the glTexImage2D reference page's list: a
+    // program may ask for any of them, and the implementation picks storage.
+    const sized = [
+        [0x803b, GL.ALPHA], [0x803d, GL.ALPHA], [0x803e, GL.ALPHA],
+        [0x803f, GL.LUMINANCE], [0x8041, GL.LUMINANCE], [0x8042, GL.LUMINANCE],
+        [0x8043, GL.LUMINANCE_ALPHA], [0x8044, GL.LUMINANCE_ALPHA],
+        [0x8046, GL.LUMINANCE_ALPHA], [0x8047, GL.LUMINANCE_ALPHA],
+        [0x8048, GL.LUMINANCE_ALPHA],
+        [0x804a, GL.INTENSITY], [0x804c, GL.INTENSITY], [0x804d, GL.INTENSITY],
+        [0x8053, GL.RGB], [0x805a, GL.RGBA],
+    ];
+    for (const [internal, base] of sized)
+    {
+        assert.equal(baseFormatOf(internal), base, `0x${internal.toString(16)}`);
+    }
+});
+
 test('decodeS3tc and compressedBytes read the GL S3TC enum, the decoding itself is'
     + ' webgpu/internal/s3tc.js\'s (see its own tests)', ()=>{
     // colour0 = pure red in 5-6-5 (0xf800), colour1 = pure blue (0x001f),

@@ -164,3 +164,31 @@ test('the spelling of an import descriptor is not depended on', async()=>{
 
     assert.equal(order.length, 1);
 });
+
+test('a library importing from the program is bound to the program, not given a copy of it',
+    async()=>{
+        // The program is already the module of that name: Windows checks the
+        // loaded-module list first, and a copy mapped as a library would have
+        // its entry point -- the program's own startup -- run as a DllMain.
+        const program = importing(['game.dll', 'KERNEL32.dll']);
+        const game = importing(['Blade.exe', 'KERNEL32.dll']);
+        /** @type {string[]} */
+        const asked = [];
+        /** @type {Record<string, Uint8Array>} */
+        const beside = { 'game.dll': game, 'blade.exe': program };
+
+        const { order, missing } = await planDependencies({
+            entry: program,
+            entryName: 'BLADE.EXE',
+            isSystem: systemOnly(['kernel32.dll']),
+            isKnownDll: systemOnly(['kernel32.dll']),
+            readLibrary: async name=>{
+                asked.push(name);
+                return beside[name.toLowerCase()] ?? null;
+            },
+        });
+
+        assert.deepEqual(order.map(one=>one.name), ['game.dll']);
+        assert.deepEqual(missing, []);
+        assert.deepEqual(asked, ['game.dll'], 'the program is not looked for on the volume');
+    });

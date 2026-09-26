@@ -27,6 +27,8 @@
  * a caller can disagree, and overridden by naming one.
  */
 
+import { windowsChoice } from './windows.js';
+
 /** Where the distribution is put so the guest can read its own file. */
 export const MEDIA_DIRECTORY = 'C:\\Install';
 
@@ -92,10 +94,16 @@ const directoryOf = path=>{
  * the caller's business and none of it is this module's.
  *
  * @param {InstallMedia} media
+ * @param {{ windows?: import('./windows.js').WindowsChoice }} [under]
+ *        The Windows the bottle will run under, which the install runs under
+ *        too: an installer acts on the Windows it finds. Absent, the engine's
+ *        default.
  * @returns {{ executable: Uint8Array, imagePath: string,
- *             storage: { load: () => Promise<PrefixFile[]> }, seeded: string[] }}
+ *             storage: { load: () => Promise<PrefixFile[]> }, seeded: string[],
+ *             windows?: import('./windows.js').WindowsChoice }}
  */
-export function prefixOptions(media){
+export function prefixOptions(media, under = {}){
+    const windows = windowsChoice(under.windows);
     const path = `${MEDIA_DIRECTORY}\\${media.name}`;
     const files = [{ path, bytes: media.bytes }];
     for (const file of media.files ?? [])
@@ -113,6 +121,7 @@ export function prefixOptions(media){
         // instruction, which is exactly when the distribution has to be there.
         storage: { load: async()=>files },
         seeded: files.map(file=>file.path),
+        ...windows === undefined ? {} : { windows },
     };
 }
 

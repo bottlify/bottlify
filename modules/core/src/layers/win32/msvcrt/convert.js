@@ -20,6 +20,7 @@
  */
 
 import { readDouble, returningDouble } from './float.js';
+import { ERANGE } from './globals.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -59,14 +60,19 @@ function digitValue(character){
 }
 
 /**
- * The integer scanner behind strtol and strtoul.
+ * The integer scanner behind strtol and strtoul, and scanf's integers.
  *
  * @param {string} text
  * @param {number} requestedBase  Zero means "let the prefix decide".
+ * @param {boolean} [zeroBeforeX]  Read "0x" with no hex digit after it as a
+ *        zero the x ends, as scanf here does. Without it the "0x" is a prefix
+ *        with nothing after it and nothing converts, which is strtol's
+ *        reading: Wine's msvcrt test_strtol has "-0x" leave the end pointer
+ *        at the start.
  * @returns {{ magnitude: bigint, negative: boolean, end: number } | null}
  *          Null when nothing converted, which is not the same as a zero.
  */
-export function scanInteger(text, requestedBase){
+export function scanInteger(text, requestedBase, zeroBeforeX = false){
     let at = 0;
     while (at < text.length && WHITESPACE.includes(text[at]))
     {
@@ -82,11 +88,8 @@ export function scanInteger(text, requestedBase){
 
     let base = requestedBase;
     const hexPrefix = text[at] === '0' && (text[at + 1] === 'x' || text[at + 1] === 'X');
-    // "0x" is only a prefix when a hex digit follows it. Otherwise the zero is
-    // the whole number and the 'x' is where the caller resumes -- which is what
-    // makes strtol("0xzz") answer 0 rather than failing.
-    if ((base === 0 || base === 16) && hexPrefix && digitValue(text[at + 2]) >= 0
-        && digitValue(text[at + 2]) < 16)
+    const hexDigitAfter = digitValue(text[at + 2]) >= 0 && digitValue(text[at + 2]) < 16;
+    if ((base === 0 || base === 16) && hexPrefix && (hexDigitAfter || !zeroBeforeX))
     {
         base = 16;
         at += 2;
@@ -145,6 +148,7 @@ export function scanFloat(text){
  * @property {(bytes: number) => number} allocate
  * @property {import('./float.js').FloatHost} [fpu]  Absent means the functions
  *           that return a double are not exported at all.
+ * @property {(code: number) => void} [errno]  Where an out-of-range value says so.
  */
 
 /**
@@ -193,9 +197,11 @@ export function createConversionFunctions(host){
 
     /**
      * @param {number} argBytes
-     * @param {(magnitude: bigint, negative: boolean) => bigint} clamp
+     * @param {(magnitude: bigint, negative: boolean) => bigint | null} convert
+     *        The value, or null when it is out of range and `limit` answers.
+     * @param {(negative: boolean) => bigint} limit
      */
-    const strtoInteger = (argBytes, clamp)=>({
+    const strtoInteger = (argBytes, convert, limit)=>({
         convention: 'cdecl',
         argBytes,
         /** @param {number[]} args */
@@ -205,9 +211,19 @@ export function createConversionFunctions(host){
             // Nothing converted: the end pointer goes back to the start, so a
             // caller comparing it against the input sees no progress.
             writeInt(end, scanned ? string + scanned.end : string);
-            return scanned === null
-                ? 0
-                : Number(BigInt.asIntN(32, clamp(scanned.magnitude, scanned.negative)));
+            if (scanned === null)
+            {
+                return 0;
+            }
+            // errno is set only when the value does not fit: a caller clears it
+            // first and tests it after, to tell a clamped limit from the limit.
+            let value = convert(scanned.magnitude, scanned.negative);
+            if (value === null)
+            {
+                host.errno?.(ERANGE);
+                value = limit(scanned.negative);
+            }
+            return Number(BigInt.asIntN(32, value));
         },
     });
 
@@ -250,22 +266,25 @@ export function createConversionFunctions(host){
         /** long strtol(const char *str, char **end, int base) */
         strtol: strtoInteger(12, (magnitude, negative)=>{
             const value = negative ? -magnitude : magnitude;
-            return value > LONG_MAX ? LONG_MAX : (value < LONG_MIN ? LONG_MIN : value);
-        }),
+            return value > LONG_MAX || value < LONG_MIN ? null : value;
+        }, negative=>(negative ? LONG_MIN : LONG_MAX)),
 
         /**
          * unsigned long strtoul(const char *str, char **end, int base)
          *
          * A minus sign is accepted and the magnitude is negated within 32 bits,
-         * which C requires: strtoul("-1") is ULONG_MAX, not a failure.
+         * which C requires: strtoul("-1") is ULONG_MAX, not a failure. A
+         * magnitude out of range is clamped before the sign is applied, so a
+         * negative one comes back as ULONG_MAX negated, 1 (Wine's msvcrt
+         * test_strtol).
          */
         strtoul: strtoInteger(12, (magnitude, negative)=>{
             if (magnitude > ULONG_MAX)
             {
-                return ULONG_MAX;
+                return null;
             }
             return negative ? BigInt.asUintN(32, -magnitude) : magnitude;
-        }),
+        }, negative=>(negative ? BigInt.asUintN(32, -ULONG_MAX) : ULONG_MAX)),
 
         /** char *_ltoa(long value, char *buffer, int radix) */
         _ltoa: toText(1, true),

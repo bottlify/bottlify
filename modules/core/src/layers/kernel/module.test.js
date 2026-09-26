@@ -44,7 +44,17 @@ function fakeMemory(){
         RegionKind: { STACK: 'stack' },
         Access: { READ_WRITE: 'rw' },
         /** @param {any} region */
-        register: region=>regions.push(region),
+        register: region=>{
+            const clash = regions.find(other=>
+                region.base < other.base + other.size && other.base < region.base + region.size);
+            if (clash)
+            {
+                throw new Error(`${region.name} overlaps ${clash.name}`);
+            }
+            regions.push(region);
+        },
+        /** @param {string} name */
+        unregister: name=>regions.splice(regions.findIndex(region=>region.name === name), 1),
         /** @param {number} address @param {number} value */
         writeU32: (address, value)=>words.set(address >>> 0, value >>> 0),
         /** @param {number} address */
@@ -123,6 +133,95 @@ test('the first thread may bring its own stack', async()=>{
 
     assert.equal(memory.regions.length, 0, 'nothing was allocated for it');
     assert.equal(thread.stackTop, 0x00280000 - 16);
+});
+
+/**
+ * A kernel whose threads can be given the CPU, over a pool with room for
+ * `slots` stacks of the default size.
+ *
+ * @param {number} slots @param {number} [size]
+ */
+async function makeRunningKernel(slots, size = STACK_SIZE){
+    const memory = fakeMemory();
+    const cpu = {
+        ...fakeCpu(),
+        captureContext: ()=>({}),
+        restoreContext: ()=>{},
+        resumeContextAt: ()=>{},
+        runSlice: ()=>0,
+        eip: ()=>0,
+    };
+    const kernel = await kernelModule.create(
+        { stacks: { base: STACK_BASE, size, limit: STACK_BASE + slots * size } },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? cpu : name === 'log' ? {} : memory),
+            provide: ()=>{},
+        }),
+    );
+    return { kernel, memory };
+}
+
+test('a thread that exits gives its stack back, and the next thread is given it', async()=>{
+    // Otherwise a program that makes a worker per task and lets each one end
+    // runs out of room after as many threads as the pool holds stacks, having
+    // never had more than two alive.
+    const { kernel, memory } = await makeRunningKernel(2);
+    const first = kernel.createThread({ entry: 0x00402000, name: 'first' });
+    const second = kernel.createThread({ entry: 0x00402000, name: 'second' });
+    assert.equal(kernel.createThread({ entry: 0x00402000, name: 'third' }), null,
+        'a full pool refuses a thread rather than throwing out of the machine');
+
+    kernel.runOnce();
+    assert.equal(kernel.currentThread(), first);
+    kernel.exitThread(first, 0);
+    kernel.runOnce();
+    assert.equal(kernel.currentThread(), second);
+
+    const third = kernel.createThread({ entry: 0x00402000, name: 'third' });
+    assert.notEqual(third, null);
+    assert.equal(third.stackLimit, first.stackLimit, 'on the stack the first one left');
+    assert.equal(memory.regions.length, 2, 'the first one\'s region went with it');
+
+    for (let round = 0; round < 64; round++)
+    {
+        const worker = kernel.createThread({ entry: 0x00402000, name: `worker-${round}` });
+        assert.equal(worker, null, 'the pool is full again: second and third are alive');
+    }
+});
+
+test('a thread ended by another keeps its stack', async()=>{
+    // Microsoft's "Thread Stack Size": a stack is freed when its thread exits,
+    // and not when the thread is terminated by another thread.
+    const { kernel } = await makeRunningKernel(2);
+    const first = kernel.createThread({ entry: 0x00402000, name: 'first' });
+    kernel.createThread({ entry: 0x00402000, name: 'second' });
+
+    kernel.runOnce();
+    kernel.runOnce();
+    assert.notEqual(kernel.currentThread(), first);
+    kernel.exitThread(first, 1);
+
+    assert.equal(kernel.createThread({ entry: 0x00402000, name: 'third' }), null);
+});
+
+test('a stack size asked for is honoured the way CreateThread honours it', async()=>{
+    const MEGABYTE = 0x100000;
+    const { kernel } = await makeRunningKernel(64, MEGABYTE);
+    /** @param {any} options */
+    const reserve = options=>{
+        const thread = kernel.createThread({ entry: 0x00402000, ...options });
+        return thread.stackTop + 16 - thread.stackLimit;
+    };
+
+    assert.equal(reserve({}), MEGABYTE, 'nothing asked is the default reserve');
+    assert.equal(reserve({ stackSize: 0x8000 }), MEGABYTE,
+        'a commit below the default reserve leaves the reserve alone');
+    assert.equal(reserve({ stackSize: 0x180000 }), 2 * MEGABYTE,
+        'a commit at or above it raises the reserve to it, to a whole megabyte');
+    assert.equal(reserve({ stackSize: 8 * MEGABYTE }), 8 * MEGABYTE);
+    assert.equal(reserve({ stackReserve: 0x18000 }), 0x20000,
+        'a reserve is itself, to the allocation granularity');
 });
 
 /** A log layer that publishes into tables the test can read back. */
@@ -332,6 +431,77 @@ test('alert ends an alertable wait with the answer given, and leaves any other a
     assert.equal(thread.waitResult, 0xc0, 'what the wait answers');
     assert.deepEqual(event.waiters, [], 'and it is no longer queued on the event');
     assert.equal(kernel.alert(thread, 0xc0), false, 'a thread not waiting is left alone');
+});
+
+test('a suspended waiter is passed over by what it waits on, and a resume does not end the wait',
+    async()=>{
+        // Suspended, a thread runs nothing, so a signal handed to it is a
+        // signal nobody can act on: the other waiter starves for as long as
+        // the suspension lasts. And resumed, it goes back to its wait, which
+        // only its object can end.
+        const { kernel } = await makeKernel();
+        const first = kernel.createThread({ entry: 0x00402000, name: 'first' });
+        const second = kernel.createThread({ entry: 0x00402000, name: 'second' });
+        const event = kernel.createEvent({});
+
+        assert.equal(kernel.wait(event, first), null);
+        assert.equal(kernel.suspendThread(first), 0);
+        assert.equal(kernel.wait(event, second), null);
+        kernel.setEvent(event);
+        assert.equal(second.state, 'ready', 'the signal goes to the waiter that can run');
+        assert.equal(first.state, 'blocked', 'the suspended one is still waiting');
+        assert.equal(event.signalled, false);
+
+        assert.equal(kernel.resumeThread(first), 1);
+        assert.equal(first.state, 'blocked', 'nothing signalled it, so it is still waiting');
+        kernel.setEvent(event);
+        assert.equal(first.state, 'ready', 'and the next signal is its own');
+        assert.equal(first.waitResult, kernel.WaitResult.OBJECT_0);
+    });
+
+test('a wait satisfied while its thread was suspended ends when the thread is resumed', async()=>{
+    const { kernel } = await makeKernel();
+    const thread = kernel.createThread({ entry: 0x00402000, name: 'worker' });
+    const quiet = kernel.createEvent({});
+    const open = kernel.createEvent({ manualReset: true });
+
+    assert.equal(kernel.waitAny([quiet, open], thread), null);
+    kernel.suspendThread(thread);
+    kernel.suspendThread(thread);
+    kernel.setEvent(open);
+    assert.equal(thread.state, 'blocked');
+
+    assert.equal(kernel.resumeThread(thread), 2);
+    assert.equal(thread.state, 'blocked', 'still suspended once');
+    assert.equal(kernel.resumeThread(thread), 1);
+    assert.equal(thread.state, 'ready');
+    assert.equal(thread.waitResult, 1, 'with the index of the object that came');
+    assert.deepEqual(quiet.waiters, [], 'and out of the queue of the one that did not');
+});
+
+test('a resumed thread whose last wait was answered is not handed its old objects', async()=>{
+    const { kernel } = await makeKernel();
+    const thread = kernel.createThread({ entry: 0x00402000, name: 'worker' });
+    const event = kernel.createEvent({ manualReset: true });
+
+    assert.equal(kernel.wait(event, thread), null);
+    kernel.setEvent(event);
+    kernel.block(thread, 'something of its own');
+    kernel.suspendThread(thread);
+    kernel.resumeThread(thread);
+    assert.equal(thread.state, 'blocked', 'the block it is in now is not the old wait');
+});
+
+test('a thread carries at most MAXIMUM_SUSPEND_COUNT suspensions', async()=>{
+    const { kernel } = await makeKernel();
+    const thread = kernel.createThread({ entry: 0x00402000, name: 'worker' });
+
+    for (let count = 0; count < 127; count++)
+    {
+        assert.equal(kernel.suspendThread(thread), count);
+    }
+    assert.equal(kernel.suspendThread(thread), null, 'the next one is refused');
+    assert.equal(kernel.resumeThread(thread), 127, 'and did not add to the count');
 });
 
 test('the cpu layer is given the guest\'s clock, for the time-stamp counter', async()=>{

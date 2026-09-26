@@ -10,7 +10,7 @@ import {
     D3DCLEAR, D3DCREATE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL,
     D3DERR_NOTFOUND, D3DFMT, D3DFMT_INDEX, D3DLIGHTTYPE, D3DLOCK, D3DORDER, D3DPOOL, D3DPT, D3DRS,
     D3DRS_MAX,
-    D3DPRESENTFLAG, D3DRS_REMOVED_IN_D3D9, D3DSWAPEFFECT, D3DTA, D3DTOP, D3DTS, D3DTSS,
+    D3DPRESENTFLAG, D3DRS_REMOVED_IN_D3D9, D3DSBT, D3DSWAPEFFECT, D3DTA, D3DTOP, D3DTS, D3DTSS,
     D3DUSAGE, D3D_OK,
     dwordToFloat, floatToDword, isShaderHandle, surfaceBytes,
 } from './constants.js';
@@ -18,6 +18,8 @@ import { DEFAULT_STAGE_STATES } from './stagestates.js';
 import { D3DRS as D3DRS9 } from '../d3d9/constants.js';
 import { DEFAULT_RENDER_STATES, resolveRenderStateDefault } from './renderstates.js';
 import { DEVICE_STATE, LIGHT_ENABLED, createDirect3D8 } from './device.js';
+import { createBackend } from '../webgpu/backend.js';
+import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 
 /** Distinguishes "the call wrote nothing" from "the call wrote a zero". */
 const UNTOUCHED = Symbol('untouched');
@@ -868,6 +870,30 @@ test('a leaked resource keeps the device alive, which is how a leak is noticed',
 
 // --- shaders, which are handles rather than objects ---
 
+/** D3DVSD_STREAM(0), D3DVSD_REG(D3DVSDE_POSITION, D3DVSDT_FLOAT3), D3DVSD_END(). */
+const DECLARATION = [0x20000000, 0x40020000, 0xffffffff];
+
+/** ps_1_1: def c1, tex t0, dp3, mul, mul -- Wine's simple_ps. */
+const PIXEL_SHADER = [
+    0xffff0101,
+    0x00000051, 0xa00f0001, 0x3f800000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000042, 0xb00f0000,
+    0x00000008, 0x800f0000, 0xa0e40001, 0xa0e40000,
+    0x00000005, 0x800f0000, 0x90e40000, 0x80e40000,
+    0x00000005, 0x800f0000, 0xb0e40000, 0x80e40000,
+    0x0000ffff,
+];
+
+/** vs_1_1: dp4 oPos.x..w, v0, c0..c3 -- Wine's simple_vs. */
+const SHADER = [
+    0xfffe0101,
+    0x00000009, 0xc0010000, 0x90e40000, 0xa0e40000,
+    0x00000009, 0xc0020000, 0x90e40000, 0xa0e40001,
+    0x00000009, 0xc0040000, 0x90e40000, 0xa0e40002,
+    0x00000009, 0xc0080000, 0x90e40000, 0xa0e40003,
+    0x0000ffff,
+];
+
 test('creating a shader takes no reference on the device', ()=>{
     const device = createDevice();
     /** @type {{ handle?: number }} */
@@ -875,9 +901,9 @@ test('creating a shader takes no reference on the device', ()=>{
     /** @type {{ handle?: number }} */
     const pixel = {};
 
-    assert.equal(device.CreateVertexShader([0], [0], vertex), D3D_OK);
+    assert.equal(device.CreateVertexShader(DECLARATION, SHADER, vertex), D3D_OK);
     assert.equal(device.refCount, 1, 'a handle is not an object with a lifetime');
-    assert.equal(device.CreatePixelShader([0], pixel), D3D_OK);
+    assert.equal(device.CreatePixelShader(PIXEL_SHADER, pixel), D3D_OK);
     assert.equal(device.refCount, 1);
 
     assert.equal(device.DeleteVertexShader(vertex.handle ?? 0), D3D_OK);
@@ -908,7 +934,7 @@ test('a created shader is not bound by its creation', ()=>{
     /** @type {{ handle?: number }} */
     const out = {};
 
-    assert.equal(device.CreateVertexShader([0], [0], shader), D3D_OK);
+    assert.equal(device.CreateVertexShader(DECLARATION, SHADER, shader), D3D_OK);
     assert.equal(device.GetVertexShader(out), D3D_OK);
     assert.equal(out.handle, 0, 'creating a shader does not set it');
 
@@ -929,8 +955,8 @@ test('a shader handle is never mistaken for a vertex format', ()=>{
     /** @type {{ handle?: number }} */
     const second = {};
 
-    assert.equal(device.CreateVertexShader([0], [0], first), D3D_OK);
-    assert.equal(device.CreateVertexShader([0], [0], second), D3D_OK);
+    assert.equal(device.CreateVertexShader(DECLARATION, SHADER, first), D3D_OK);
+    assert.equal(device.CreateVertexShader(DECLARATION, SHADER, second), D3D_OK);
     assert.notEqual(first.handle, second.handle);
     for (const handle of [first.handle ?? 0, second.handle ?? 0])
     {
@@ -952,8 +978,8 @@ test('deleting the bound shader unbinds it and deleting another does not', ()=>{
     /** @type {{ handle?: number }} */
     const out = {};
 
-    assert.equal(device.CreateVertexShader([0], [0], bound), D3D_OK);
-    assert.equal(device.CreateVertexShader([0], [0], other), D3D_OK);
+    assert.equal(device.CreateVertexShader(DECLARATION, SHADER, bound), D3D_OK);
+    assert.equal(device.CreateVertexShader(DECLARATION, SHADER, other), D3D_OK);
     assert.equal(device.SetVertexShader(bound.handle ?? 0), D3D_OK);
 
     assert.equal(device.DeleteVertexShader(other.handle ?? 0), D3D_OK);
@@ -979,7 +1005,7 @@ test('the two shader stages are independent questions', ()=>{
     /** @type {{ handle?: number }} */
     const out = {};
 
-    assert.equal(device.CreatePixelShader([0], pixel), D3D_OK);
+    assert.equal(device.CreatePixelShader(PIXEL_SHADER, pixel), D3D_OK);
     assert.equal(device.GetPixelShader(out), D3D_OK);
     assert.equal(out.handle, 0, 'creating a pixel shader does not set it either');
 
@@ -999,12 +1025,290 @@ test('the two shader stages are independent questions', ()=>{
     assertFullyReleased(device);
 });
 
+test('a shader hands back the declaration and function it was made with', ()=>{
+    // Wine's d3d8 test_shader: no buffer is told the size in bytes, a buffer
+    // too small is refused and told nothing, and the tokens come back as given.
+    const device = createDevice();
+    /** @type {{ handle?: number }} */
+    const made = {};
+    assert.equal(device.CreateVertexShader([...DECLARATION, 0x12345678], SHADER, made), D3D_OK);
+    const handle = made.handle ?? 0;
+
+    /** @type {{ bytes?: number, tokens?: Uint32Array }} */
+    let out = {};
+    assert.equal(device.GetVertexShaderDeclaration(handle, out, null), D3D_OK);
+    assert.equal(out.bytes, 12, 'to the end token and no further');
+    assert.equal(out.tokens, undefined, 'a caller with no buffer gets no tokens');
+    out = {};
+    assert.equal(device.GetVertexShaderDeclaration(handle, out, 1), D3DERR_INVALIDCALL);
+    assert.deepEqual(out, {}, 'a refusal tells the caller nothing');
+    assert.equal(device.GetVertexShaderDeclaration(handle, out, 12), D3D_OK);
+    assert.deepEqual([...out.tokens ?? []], DECLARATION);
+
+    out = {};
+    assert.equal(device.GetVertexShaderFunction(handle, out, null), D3D_OK);
+    assert.equal(out.bytes, SHADER.length * 4);
+    assert.equal(device.GetVertexShaderFunction(handle, {}, SHADER.length * 4 - 4),
+        D3DERR_INVALIDCALL);
+    assert.equal(device.GetVertexShaderFunction(handle, out, 1024), D3D_OK);
+    assert.deepEqual([...out.tokens ?? []], SHADER, 'as given: no declaration of ours in it');
+
+    /** @type {{ handle?: number }} */
+    const alone = {};
+    assert.equal(device.CreateVertexShader(DECLARATION, null, alone), D3D_OK);
+    out = {};
+    assert.equal(device.GetVertexShaderFunction(alone.handle ?? 0, out, 64), D3D_OK);
+    assert.equal(out.bytes, 0, 'a declaration made alone has no function');
+
+    assert.equal(device.DeleteVertexShader(handle), D3D_OK);
+    assert.equal(device.GetVertexShaderDeclaration(handle, {}, null), D3DERR_INVALIDCALL);
+    assert.equal(device.DeleteVertexShader(alone.handle ?? 0), D3D_OK);
+    assertFullyReleased(device);
+});
+
+test('a vertex shader is made only from what this version runs', ()=>{
+    const device = createDevice();
+    const make = (/** @type {number[] | null} */ declaration,
+        /** @type {number[] | null} */ code)=>device.CreateVertexShader(declaration, code, {});
+    // Wine's d3d8 test_shader: a normal the fixed-function stage cannot read
+    // refuses a declaration made alone and not one beside a function.
+    for (const type of [1, 3, 4])
+    {
+        const normal = [0x20000000, 0x40020000, (0x40000003 | (type << 16)) >>> 0, 0xffffffff];
+        assert.equal(make(normal, null), D3DERR_INVALIDCALL, `a normal of type ${type} alone`);
+        assert.equal(make(normal, SHADER), D3D_OK);
+    }
+    // Wine's d3d8 test_unsupported_shaders: a pixel shader, a vs_2_0, a
+    // constant past the file.
+    assert.equal(make(DECLARATION, [0xffff0101, 0x0000ffff]), D3DERR_INVALIDCALL);
+    assert.equal(make(DECLARATION, [0xfffe0200, 0x0000ffff]), D3DERR_INVALIDCALL);
+    /** @param {number} register */
+    const defining = register=>[
+        0xfffe0101,
+        0x00000051, (0xa00f0000 | register) >>> 0, 0x3f800000, 0x3f800000, 0x3f800000,
+        0x3f800000,
+        0x00000002, 0x800f0000, 0x90e40000, (0xa0e40000 | register) >>> 0,
+        0x00000001, 0xc00f0000, 0x80e40000,
+        0x0000ffff,
+    ];
+    assert.equal(make(DECLARATION, defining(255)), D3D_OK);
+    assert.equal(make(DECLARATION, defining(256)), D3DERR_INVALIDCALL);
+    // And what is not a declaration or a function at all.
+    assert.equal(make(null, SHADER), D3DERR_INVALIDCALL);
+    assert.equal(make([0x20000000, 0x40020000], SHADER), D3DERR_INVALIDCALL, 'no end token');
+    assert.equal(make(DECLARATION, [0xfffe0101, 0x00000001]), D3DERR_INVALIDCALL);
+    // A device that claims no vertex shader makes none.
+    const none = createDevice({ caps: { vertexShaderVersion: { major: 0, minor: 0 } } });
+    assert.equal(none.CreateVertexShader(DECLARATION, SHADER, {}), D3DERR_INVALIDCALL);
+    assert.equal(none.CreateVertexShader(DECLARATION, null, {}), D3D_OK,
+        'a declaration alone is the fixed-function stage');
+    assertFullyReleased(none);
+    assertFullyReleased(device);
+});
+
+test('vertex shader constants are a file of 256 registers a state block records into', ()=>{
+    // Wine's d3d8 test_shader_constant_apply: a set while recording goes into
+    // the block and not the device, and applying the block writes only what
+    // it recorded.
+    const device = createDevice();
+    const initial = [0, 0, 0, 0];
+    const vs = [1, 2, 3, 4];
+    /** @param {number} register */
+    const read = register=>{
+        /** @type {{ values?: Float32Array }} */
+        const out = {};
+        assert.equal(device.GetVertexShaderConstant(register, 1, out), D3D_OK);
+        return [...out.values ?? []];
+    };
+    assert.equal(device.SetVertexShaderConstant(0, vs, 1), D3D_OK);
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    assert.equal(device.SetVertexShaderConstant(1, vs, 1), D3D_OK);
+    /** @type {{ handle?: number }} */
+    const block = {};
+    assert.equal(device.EndStateBlock(block), D3D_OK);
+    assert.deepEqual(read(0), vs);
+    assert.deepEqual(read(1), initial, 'the recorded set did not reach the device');
+    assert.equal(device.SetVertexShaderConstant(0, [9, 9, 9, 9], 1), D3D_OK);
+    assert.equal(device.ApplyStateBlock(block.handle ?? 0), D3D_OK);
+    assert.deepEqual(read(0), [9, 9, 9, 9], 'a register the block did not record is left');
+    assert.deepEqual(read(1), vs);
+
+    // A block of every state holds every register, and gives them back.
+    /** @type {{ handle?: number }} */
+    const all = {};
+    assert.equal(device.CreateStateBlock(D3DSBT.ALL, all), D3D_OK);
+    assert.equal(device.SetVertexShaderConstant(255, [5, 6, 7, 8], 1), D3D_OK);
+    assert.equal(device.ApplyStateBlock(all.handle ?? 0), D3D_OK);
+    assert.deepEqual(read(255), initial);
+
+    assert.equal(device.SetVertexShaderConstant(255, vs, 1), D3D_OK, 'the last register');
+    assert.equal(device.SetVertexShaderConstant(255, [...vs, ...vs], 2), D3DERR_INVALIDCALL);
+    assert.equal(device.GetVertexShaderConstant(256, 1, {}), D3DERR_INVALIDCALL);
+    assert.equal(device.SetVertexShaderConstant(0, null, 1), D3DERR_INVALIDCALL);
+    assert.equal(device.DeleteStateBlock(block.handle ?? 0), D3D_OK);
+    assert.equal(device.DeleteStateBlock(all.handle ?? 0), D3D_OK);
+    assertFullyReleased(device);
+});
+
+test('setting a shader loads the constants its declaration carries', ()=>{
+    // Wine's d3d8 visual.c test_scalar_instructions draws with c0 given by
+    // D3DVSD_CONST in the declaration and never set otherwise.
+    const device = createDevice();
+    /** @type {{ handle?: number }} */
+    const made = {};
+    assert.equal(device.CreateVertexShader([
+        0x20000000, 0x40020000,
+        0x82000002, 0x3e800000, 0x3f000000, 0x3f800000, 0x40000000,
+        0xffffffff,
+    ], SHADER, made), D3D_OK);
+    /** @type {{ values?: Float32Array }} */
+    const out = {};
+    assert.equal(device.GetVertexShaderConstant(2, 1, out), D3D_OK);
+    assert.deepEqual([...out.values ?? []], [0, 0, 0, 0], 'not by making it');
+    assert.equal(device.SetVertexShader(made.handle ?? 0), D3D_OK);
+    assert.equal(device.GetVertexShaderConstant(2, 1, out), D3D_OK);
+    assert.deepEqual([...out.values ?? []], [0.25, 0.5, 1, 2]);
+    assert.equal(device.DeleteVertexShader(made.handle ?? 0), D3D_OK);
+    assertFullyReleased(device);
+});
+
+test('a declaration made alone is a fixed-function stage, and one with a function a program',
+    ()=>{
+        const device = createDevice();
+        /** @type {{ handle?: number }} */
+        const alone = {};
+        /** @type {{ handle?: number }} */
+        const programmed = {};
+        // Position in stream zero, the colour in stream one.
+        const twoStreams = [0x20000000, 0x40020000, 0x20000001, 0x40040005, 0xffffffff];
+        assert.equal(device.CreateVertexShader(twoStreams, null, alone), D3D_OK);
+        assert.equal(device.CreateVertexShader(twoStreams, SHADER, programmed), D3D_OK);
+
+        assert.equal(device.SetVertexShader(alone.handle ?? 0), D3D_OK);
+        let processing = device.stageProcessing;
+        assert.equal(processing.vertexShader, 0, 'no shader runs');
+        assert.equal(processing.fixedFunctionVertex, true);
+        assert.equal(processing.fvf, 0);
+        assert.deepEqual(processing.fixedFunctionLayout.attributes.map(
+            (/** @type {any} */ attribute)=>[attribute.name, attribute.stream, attribute.offset]),
+        [['position', 0, 0], ['diffuse', 1, 0]]);
+        assert.deepEqual(processing.fixedFunctionLayout.streams, [1]);
+        assert.equal(processing.program, null);
+
+        assert.equal(device.SetVertexShader(programmed.handle ?? 0), D3D_OK);
+        processing = device.stageProcessing;
+        assert.equal(processing.vertexShader, programmed.handle);
+        assert.equal(processing.fixedFunctionVertex, false);
+        assert.equal(processing.fixedFunctionLayout, null);
+        assert.equal(processing.program.vertexId, programmed.handle);
+        assert.equal(processing.program.pixel, null);
+        assert.deepEqual(processing.program.declaration.map(
+            (/** @type {any} */ element)=>[element.Stream, element.Usage]), [[0, 0], [1, 10]]);
+
+        assert.equal(device.DeleteVertexShader(alone.handle ?? 0), D3D_OK);
+        assert.equal(device.DeleteVertexShader(programmed.handle ?? 0), D3D_OK);
+        assertFullyReleased(device);
+    });
+
+test('a pixel shader is made from a ps_1_x, hands its function back and has eight constants',
+    ()=>{
+        // Wine's d3d8 test_shader and test_unsupported_shaders.
+        const device = createDevice();
+        /** @type {{ handle?: number }} */
+        const made = {};
+        assert.equal(device.CreatePixelShader(PIXEL_SHADER, made), D3D_OK);
+        /** @type {{ handle?: number }} */
+        const out = {};
+        assert.equal(device.GetPixelShader(out), D3D_OK);
+        assert.equal(out.handle, 0, 'made, not set');
+        /** @type {{ bytes?: number, tokens?: Uint32Array }} */
+        const read = {};
+        assert.equal(device.GetPixelShaderFunction(made.handle, read, null), D3D_OK);
+        assert.equal(read.bytes, PIXEL_SHADER.length * 4);
+        assert.equal(device.GetPixelShaderFunction(made.handle, {}, 1), D3DERR_INVALIDCALL);
+        assert.equal(device.GetPixelShaderFunction(made.handle, read, 1024), D3D_OK);
+        assert.deepEqual([...read.tokens ?? []], PIXEL_SHADER);
+        assert.equal(device.GetPixelShaderFunction(1234567, {}, null), D3DERR_INVALIDCALL);
+
+        for (const tokens of [
+            SHADER,                                     // a vertex shader
+            [0xffff0200, 0x0000ffff],                   // ps_2_0
+            [0xffff0105, 0x0000ffff],                   // past ps_1_4
+            // def c8: past the eight registers.
+            [0xffff0101, 0x00000051, 0xa00f0008, 0, 0, 0, 0, 0x0000ffff],
+            [0xffff0101, 0x00000001],                   // no end token
+        ])
+        {
+            assert.equal(device.CreatePixelShader(tokens, {}), D3DERR_INVALIDCALL);
+        }
+        for (const minor of [0, 1, 2, 3, 4])
+        {
+            /** @type {{ handle?: number }} */
+            const each = {};
+            assert.equal(device.CreatePixelShader([0xffff0100 | minor, 0x0000ffff], each), D3D_OK,
+                `ps_1_${minor}`);
+            assert.equal(device.DeletePixelShader(each.handle ?? 0), D3D_OK);
+        }
+        const none = createDevice({ caps: { pixelShaderVersion: { major: 0, minor: 0 } } });
+        assert.equal(none.CreatePixelShader(PIXEL_SHADER, {}), D3DERR_INVALIDCALL,
+            'a device that claims no pixel shader makes none');
+        assertFullyReleased(none);
+
+        // Constants: c0 to c7, recorded into a block (Wine's d3d8
+        // test_shader_constant_apply).
+        const ps = [5, 6, 7, 8];
+        assert.equal(device.SetPixelShaderConstant(7, ps, 1), D3D_OK);
+        assert.equal(device.SetPixelShaderConstant(7, [...ps, ...ps], 2), D3DERR_INVALIDCALL);
+        assert.equal(device.BeginStateBlock(), D3D_OK);
+        assert.equal(device.SetPixelShaderConstant(1, ps, 1), D3D_OK);
+        /** @type {{ handle?: number }} */
+        const block = {};
+        assert.equal(device.EndStateBlock(block), D3D_OK);
+        /** @type {{ values?: Float32Array }} */
+        const values = {};
+        assert.equal(device.GetPixelShaderConstant(1, 1, values), D3D_OK);
+        assert.deepEqual([...values.values ?? []], [0, 0, 0, 0]);
+        assert.equal(device.ApplyStateBlock(block.handle ?? 0), D3D_OK);
+        assert.equal(device.GetPixelShaderConstant(1, 1, values), D3D_OK);
+        assert.deepEqual([...values.values ?? []], ps);
+        assert.equal(device.GetPixelShaderConstant(7, 2, values), D3DERR_INVALIDCALL);
+
+        assert.equal(device.SetPixelShader(made.handle ?? 0), D3D_OK);
+        assert.equal(device.DeletePixelShader(made.handle ?? 0), D3D_OK);
+        assert.equal(device.GetPixelShader(out), D3D_OK);
+        assert.equal(out.handle, 0, 'deleting the bound shader unbinds it');
+        assert.equal(device.DeletePixelShader(made.handle ?? 0), D3DERR_INVALIDCALL);
+        assert.equal(device.DeleteStateBlock(block.handle ?? 0), D3D_OK);
+        assertFullyReleased(device);
+    });
+
+test('a pixel shader over a vertex format is a program over the format\'s elements', ()=>{
+    const device = createDevice();
+    /** @type {{ handle?: number }} */
+    const made = {};
+    assert.equal(device.CreatePixelShader(PIXEL_SHADER, made), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_XYZ_DIFFUSE), D3D_OK);
+    assert.equal(device.SetPixelShader(made.handle ?? 0), D3D_OK);
+    const processing = device.stageProcessing;
+    assert.equal(processing.fixedFunctionVertex, true);
+    assert.equal(processing.program.vertex, null, 'the vertex stage is the fixed one');
+    assert.equal(processing.program.pixelId, made.handle);
+    assert.deepEqual(processing.program.declaration.map(
+        (/** @type {any} */ element)=>[element.Usage, element.Offset]), [[0, 0], [10, 12]]);
+    assert.equal(processing.program.declarationId, FVF_XYZ_DIFFUSE,
+        'a format is never odd, so it is never a handle');
+    assert.equal(device.SetPixelShader(0), D3D_OK);
+    assert.equal(device.stageProcessing.program, null, 'no shader, no program');
+    assert.equal(device.DeletePixelShader(made.handle ?? 0), D3D_OK);
+    assertFullyReleased(device);
+});
+
 test('a handle from one shader kind is not a handle of the other', ()=>{
     const device = createDevice();
     /** @type {{ handle?: number }} */
     const vertex = {};
 
-    assert.equal(device.CreateVertexShader([0], [0], vertex), D3D_OK);
+    assert.equal(device.CreateVertexShader(DECLARATION, SHADER, vertex), D3D_OK);
     assert.equal(device.SetPixelShader(vertex.handle ?? 0), D3DERR_INVALIDCALL);
     assert.equal(device.DeletePixelShader(vertex.handle ?? 0), D3DERR_INVALIDCALL);
     assert.equal(device.SetVertexShader(vertex.handle ?? 0), D3D_OK);
@@ -1314,6 +1618,172 @@ test('the material reads back as a copy of what was set', ()=>{
     assertFullyReleased(device);
 });
 
+// --- state blocks, after Wine's d3d8 stateblock tests ---
+
+/**
+ * One value of each kind a block may or may not hold, set as the test's
+ * values or as the device's defaults, and read back.
+ *
+ * @param {any} device
+ */
+function stateKinds(device){
+    /** @type {{ texture?: any }} */
+    const texture = {};
+    /** @type {{ buffer?: any }} */
+    const vertices = {};
+    /** @type {{ buffer?: any }} */
+    const indices = {};
+    /** @type {{ handle?: number }} */
+    const vs = {};
+    /** @type {{ handle?: number }} */
+    const ps = {};
+    assert.equal(device.CreateTexture(8, 8, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT, texture),
+        D3D_OK);
+    assert.equal(device.CreateVertexBuffer(64, 0, 0, D3DPOOL.DEFAULT, vertices), D3D_OK);
+    assert.equal(device.CreateIndexBuffer(64, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.DEFAULT, indices),
+        D3D_OK);
+    assert.equal(device.CreateVertexShader([0x20000000, 0xffffffff], null, vs), D3D_OK);
+    assert.equal(device.CreatePixelShader([0xffff0101, 0x0000ffff], ps), D3D_OK);
+    const scaled = (/** @type {number} */ x)=>[x, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    /** @param {boolean} testing */
+    const set = testing=>{
+        device.SetRenderState(D3DRS.CULLMODE, testing ? 1 : 3);
+        device.SetRenderState(D3DRS.ZFUNC, testing ? 8 : 4);
+        device.SetTransform(D3DTS.WORLD, scaled(testing ? 7 : 1));
+        device.SetTexture(0, testing ? texture.texture : null);
+        device.LightEnable(0, testing);
+        device.SetVertexShader(testing ? vs.handle : 0);
+        device.SetPixelShader(testing ? ps.handle : 0);
+        device.SetStreamSource(0, testing ? vertices.buffer : null, 16);
+        device.SetIndices(testing ? indices.buffer : null, 0);
+    };
+    const read = ()=>{
+        /** @type {any} */
+        const out = {};
+        const value = (/** @type {number} */ state)=>{
+            device.GetRenderState(state, out);
+            return out.value;
+        };
+        device.GetTransform(D3DTS.WORLD, out);
+        const world = out.matrix[0];
+        device.GetTexture(0, out);
+        const boundTexture = out.texture;
+        boundTexture?.release();
+        device.GetLightEnable(0, out);
+        const light = out.enabled !== 0;
+        device.GetVertexShader(out);
+        const vertexShader = out.handle;
+        device.GetPixelShader(out);
+        const pixelShader = out.handle;
+        device.GetStreamSource(0, out);
+        const stream = out.buffer;
+        stream?.release();
+        device.GetIndices(out);
+        const index = out.buffer;
+        index?.release();
+        return {
+            cull: value(D3DRS.CULLMODE), zfunc: value(D3DRS.ZFUNC), world,
+            texture: boundTexture === texture.texture, light,
+            vs: vertexShader === vs.handle, ps: pixelShader === ps.handle,
+            stream: stream === vertices.buffer, indices: index === indices.buffer,
+        };
+    };
+    const release = ()=>{
+        set(false);
+        texture.texture.release();
+        vertices.buffer.release();
+        indices.buffer.release();
+    };
+    return { set, read, release };
+}
+
+const TEST_ALL = { cull: 1, zfunc: 8, world: 7, texture: true, light: true, vs: true, ps: true,
+    stream: true, indices: true };
+const DEFAULTS = { cull: 3, zfunc: 4, world: 1, texture: false, light: false, vs: false,
+    ps: false, stream: false, indices: false };
+
+test('a recorded block changes nothing until it is applied', ()=>{
+    const device = createDevice();
+    const kinds = stateKinds(device);
+    kinds.set(false);
+    /** @type {{ handle?: number }} */
+    const block = {};
+
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    kinds.set(true);
+    assert.equal(device.EndStateBlock(block), D3D_OK);
+    assert.deepEqual(kinds.read(), DEFAULTS, 'what was set while recording is the block\'s');
+    assert.equal(device.ApplyStateBlock(block.handle), D3D_OK);
+    assert.deepEqual(kinds.read(), TEST_ALL, 'and applying it is what sets it');
+
+    kinds.set(false);
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    kinds.set(true);
+    assert.equal(device.EndStateBlock(block), D3D_OK);
+    assert.equal(device.DeleteStateBlock(block.handle), D3D_OK);
+    assert.deepEqual(kinds.read(), DEFAULTS, 'an abandoned block leaves the device as it was');
+
+    kinds.release();
+    assertFullyReleased(device);
+});
+
+test('a made block holds its half: the vertex half, the pixel half, or everything', ()=>{
+    const expected = {
+        [D3DSBT.ALL]: TEST_ALL,
+        // Transforms, textures, streams and indices are in neither half.
+        [D3DSBT.VERTEXSTATE]: { ...DEFAULTS, cull: 1, light: true, vs: true },
+        [D3DSBT.PIXELSTATE]: { ...DEFAULTS, zfunc: 8, ps: true },
+    };
+    for (const type of [D3DSBT.ALL, D3DSBT.VERTEXSTATE, D3DSBT.PIXELSTATE])
+    {
+        const device = createDevice();
+        const kinds = stateKinds(device);
+        /** @type {{ handle?: number }} */
+        const block = {};
+
+        kinds.set(true);
+        assert.equal(device.CreateStateBlock(type, block), D3D_OK);
+        kinds.set(false);
+        assert.equal(device.ApplyStateBlock(block.handle), D3D_OK);
+        assert.deepEqual(kinds.read(), expected[type], `made with the test values, ${type}`);
+
+        // The same half, made at the defaults and captured at the test values.
+        kinds.set(false);
+        assert.equal(device.CreateStateBlock(type, block), D3D_OK);
+        kinds.set(true);
+        assert.equal(device.CaptureStateBlock(block.handle), D3D_OK);
+        kinds.set(false);
+        assert.equal(device.ApplyStateBlock(block.handle), D3D_OK);
+        assert.deepEqual(kinds.read(), expected[type], `captured at the test values, ${type}`);
+
+        kinds.release();
+        assertFullyReleased(device);
+    }
+});
+
+test('ValidateDevice refuses a stage the combiner does not draw, and writes no passes', ()=>{
+    const device = createDevice();
+    /** @type {{ passes?: number }} */
+    const out = {};
+    assert.equal(device.ValidateDevice(out), D3D_OK);
+    assert.equal(out.passes, 1);
+
+    /** @type {{ passes?: number }} */
+    const refused = {};
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, 24), D3D_OK, 'DOTPRODUCT3');
+    assert.equal(device.ValidateDevice(refused), 0x88760819, 'D3DERR_UNSUPPORTEDCOLOROPERATION');
+    assert.equal(refused.passes, undefined);
+
+    // A pixel shader replaces the cascade, so the cascade is not what is drawn.
+    /** @type {{ handle?: number }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader([0xffff0101, 0x0000ffff], ps), D3D_OK);
+    assert.equal(device.SetPixelShader(ps.handle), D3D_OK);
+    assert.equal(device.ValidateDevice(out), D3D_OK);
+    assert.equal(device.SetPixelShader(0), D3D_OK);
+    assertFullyReleased(device);
+});
+
 // --- what a draw or a clear is refused for, with nothing behind the device ---
 
 test('a draw outside a scene, of nothing, or without a stream is refused', ()=>{
@@ -1410,8 +1880,6 @@ test('Clear refuses a depth or stencil clear it has no buffer for', ()=>{
     assert.equal(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.STENCIL, 0, 1, 0),
         D3DERR_INVALIDCALL);
     assert.equal(device.Clear(0, null, 0, 0, 1, 0), D3DERR_INVALIDCALL, 'nothing to clear');
-    assert.equal(device.Clear(2, null, D3DCLEAR.TARGET, 0, 1, 0), D3DERR_INVALIDCALL,
-        'two rectangles and no rectangles');
 
     /** @type {{ surface?: any }} */
     const depth = {};
@@ -1424,6 +1892,26 @@ test('Clear refuses a depth or stencil clear it has no buffer for', ()=>{
     depth.surface.release();
     assertFullyReleased(device);
 });
+
+test('Clear takes the rectangle count at its word and the missing array as the whole target',
+    ()=>{
+        // Wine's visual tests on d3d8: Clear(0, rects) succeeds and leaves the
+        // target as it was, Clear(1, NULL) succeeds and clears all of it.
+        const gpu = createFakeDevice();
+        const backend = createBackend({
+            device: gpu.device, queue: gpu.queue, presentTo: ()=>{}, now: ()=>0,
+        });
+        const device = createDevice({ caps: { backend, readMemory: ()=>new Uint8Array(0) } });
+        const everything = [{ x1: 0, y1: 0, x2: WIDTH, y2: HEIGHT }];
+
+        assert.equal(device.Clear(0, everything, D3DCLEAR.TARGET, 0xffff0000, 0, 0), D3D_OK);
+        assert.equal(device.diagnostics().clears, 0, 'no rectangles counted, none cleared');
+        assert.equal(device.Clear(1, null, D3DCLEAR.TARGET, 0xff00ff00, 0, 0), D3D_OK);
+        assert.equal(device.diagnostics().clears, 1, 'a count without an array is the whole');
+        assert.equal(device.Clear(2, null, D3DCLEAR.TARGET, 0, 1, 0), D3D_OK);
+        assert.equal(device.diagnostics().clears, 2);
+        assertFullyReleased(device);
+    });
 
 test('a back buffer is lockable exactly when the program asked for one', ()=>{
     // The flag was read out of the parameters and then looked at by nothing, so
@@ -1660,4 +2148,133 @@ test('what a back buffer says about itself agrees with the storage it was given'
             device.release();
         }
     }
+});
+
+test('UpdateTexture carries what the source was written in since it was last carried', ()=>{
+    // Wine's d3d8 add_dirty_rect_test: a texture starts dirty; an update
+    // takes its region, so a second finds nothing; a lock records its
+    // rectangle unless it is read-only or asked for no dirty update; and
+    // AddDirtyRect adds one, refusing a rectangle that is empty or leaves the
+    // texture.
+    const device = createDevice();
+    /** @param {number} pool */
+    const texture = pool=>{
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(256, 256, 2, 0, D3DFMT.X8R8G8B8, pool, out), D3D_OK);
+        return out.texture;
+    };
+    const source = texture(D3DPOOL.SYSTEMMEM);
+    const destination = texture(D3DPOOL.DEFAULT);
+    /** @returns {any[]} */
+    const update = ()=>{
+        /** @type {{ moves?: any[] }} */
+        const out = {};
+        assert.equal(device.UpdateTexture(source, destination, out), D3D_OK);
+        return out.moves ?? [];
+    };
+    /** @param {any} move */
+    const extent = move=>[move.rowBytes / 4, move.rows];
+
+    assert.deepEqual(update().map(extent), [[256, 256], [128, 128]], 'all of it, at first');
+    assert.deepEqual(update(), [], 'and nothing, once carried');
+
+    /** @param {any} rect @param {number} flags */
+    const lock = (rect, flags)=>{
+        /** @type {any} */
+        const locked = {};
+        assert.equal(source.LockRect(0, locked, rect, flags), D3D_OK);
+        assert.equal(source.UnlockRect(0), D3D_OK);
+    };
+    lock(null, D3DLOCK.READONLY);
+    lock(null, 0x8000);
+    assert.deepEqual(update(), [], 'a read-only lock and a NO_DIRTY_UPDATE one record nothing');
+
+    const part = { left: 96, top: 96, right: 160, bottom: 160 };
+    lock(part, 0);
+    const moves = update();
+    assert.deepEqual(moves.map(extent), [[64, 64], [32, 32]], 'a lock\'s rectangle, per level');
+    const top = /** @type {any} */ ({});
+    assert.equal(source.GetSurfaceLevel(0, top), D3D_OK);
+    top.surface.release();
+    assert.equal(moves[0].from, top.surface.base + 96 * 1024 + 96 * 4);
+
+    assert.equal(destination.AddDirtyRect(part), D3D_OK);
+    assert.deepEqual(update(), [], 'a dirty rectangle on the destination is not carried');
+    assert.equal(source.AddDirtyRect(part), D3D_OK);
+    assert.deepEqual(update().map(extent), [[64, 64], [32, 32]]);
+    assert.equal(source.AddDirtyRect(null), D3D_OK);
+    assert.deepEqual(update().map(extent), [[256, 256], [128, 128]]);
+    for (const rect of [{ left: 0, top: 0, right: 300, bottom: 200 },
+        { left: 100, top: 100, right: 10, bottom: 10 }, { left: 0, top: 0, right: 0, bottom: 0 }])
+    {
+        assert.equal(source.AddDirtyRect(rect), D3DERR_INVALIDCALL);
+    }
+    assert.deepEqual(update(), []);
+
+    // A copy into a level is a write the next update carries.
+    /** @type {{ surface?: any }} */
+    const image = {};
+    assert.equal(device.CreateImageSurface(16, 16, D3DFMT.X8R8G8B8, image), D3D_OK);
+    assert.equal(device.CopyRects(image.surface, [{ left: 0, top: 0, right: 16, bottom: 16 }], 1,
+        top.surface, [{ x: 32, y: 48 }]), D3D_OK);
+    assert.deepEqual(update().map(extent), [[16, 16], [8, 8]]);
+
+    image.surface.release();
+    source.release();
+    destination.release();
+    device.release();
+});
+
+test('a full-screen device\'s gamma ramp is the display\'s, and a windowed one\'s is kept', ()=>{
+    // D3DCAPS2_FULLSCREENGAMMA: the ramp is the display's in full-screen mode;
+    // windowed, SetGammaRamp succeeds and changes nothing on the screen.
+    /** @type {any[][]} */
+    const set = [];
+    const gamma = {
+        /** @param {any} owner @param {any} ramp */
+        set: (owner, ramp)=>set.push([owner, ramp]),
+        applies: ()=>true,
+    };
+    const channel = Uint16Array.from({ length: 256 }, (_, index)=>(255 - index) * 257);
+    const inverted = { red: channel, green: channel.slice(), blue: channel.slice() };
+
+    const windowed = createDevice({ caps: { gamma } });
+    assert.equal(windowed.caps.fullscreenGamma, true, 'the display applies a ramp here');
+    windowed.SetGammaRamp(inverted);
+    assert.equal(set.length, 0, 'windowed: kept, not shown');
+    /** @type {{ ramp?: any }} */
+    const read = {};
+    windowed.GetGammaRamp(read);
+    assert.deepEqual([...read.ramp.red], [...channel]);
+    assertFullyReleased(windowed);
+    assert.equal(set.length, 0);
+
+    const full = createDevice({ caps: { gamma }, parameters: { windowed: false } });
+    full.SetGammaRamp(inverted);
+    assert.equal(set.length, 1);
+    assert.equal(set[0][0], full);
+    assert.deepEqual([...set[0][1].blue], [...channel]);
+
+    assert.equal(full.Reset({
+        swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1, backBufferWidth: 640,
+        backBufferHeight: 480, backBufferFormat: D3DFMT.X8R8G8B8, enableAutoDepthStencil: true,
+        autoDepthStencilFormat: D3DFMT.D24S8, windowed: true,
+    }), D3D_OK);
+    assert.deepEqual(set.at(-1), [full, null], 'reset to a window, the display is given back');
+    assert.equal(full.Reset({
+        swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1, backBufferWidth: 640,
+        backBufferHeight: 480, backBufferFormat: D3DFMT.X8R8G8B8, enableAutoDepthStencil: true,
+        autoDepthStencilFormat: D3DFMT.D24S8, windowed: false,
+    }), D3D_OK);
+    assert.equal(set.at(-1)?.[1]?.red[0], 0xffff, 'and full-screen again, its ramp is shown');
+    const count = set.length;
+    assertFullyReleased(full);
+    assert.deepEqual(set.at(-1), [full, null], 'the device\'s end gives the display back');
+    assert.equal(set.length, count + 1);
+
+    const headless = createDevice({ caps: { gamma: { set: ()=>{}, applies: ()=>false } } });
+    assert.equal(headless.caps.fullscreenGamma, false);
+    assertFullyReleased(headless);
+    assert.equal(createDevice().caps.fullscreenGamma, false, 'nor without a display at all');
 });

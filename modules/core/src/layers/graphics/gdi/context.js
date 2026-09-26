@@ -28,7 +28,9 @@
  */
 
 import { BS_SOLID, OPAQUE, createPattern, solidPattern } from './brush.js';
-import { BLACKONWHITE, STRETCH_MODES, bitBlt, patBlt, stretchBlt } from './blit.js';
+import {
+    BLACKONWHITE, STRETCH_MODES, bitBlt, patBlt, sourceConversion, stretchBlt,
+} from './blit.js';
 import { DSTINVERT, PATCOPY, R2_COPYPEN } from './rop.js';
 import { PS_SOLID, createPainter, ellipse, fillRect, frameRect, line, polygon, rectangle }
     from './shapes.js';
@@ -36,6 +38,7 @@ import { colorToPixel, intersectRect, isEmptyRect, pixelToColor, surfaceBounds }
     from './surface.js';
 import { encodeDib, setDIBitsToDevice, stretchDIBits } from './dib.js';
 import { extTextOut, textExtent } from './text.js';
+import { paletteEntryToPixel } from '../../win32/gdi32/structs.js';
 
 /** What a call that should have returned a COLORREF says when it failed. */
 export const CLR_INVALID = 0xffffffff;
@@ -119,9 +122,29 @@ export function createGdiDrawing(options = {}){
             attributes: record && record.type === 'brush' ? record.attributes : DEFAULT_BRUSH,
             bkMode: context.state.bkMode,
             bkColor: context.state.bkColor,
+            textColor: context.state.textColor,
+            mono: context.surface.mono === true,
             origin: context.brushOrigin,
+            paletteColors: ()=>{
+                const palette = objects.get(context.state.palette ?? 0);
+                return palette && palette.type === 'palette'
+                    ? palette.attributes.entries.map(paletteEntryToPixel)
+                    : [];
+            },
         });
     };
+
+    /**
+     * @param {any} context  The destination.
+     * @param {any} from     The source.
+     */
+    const conversionOf = (context, from)=>sourceConversion({
+        src: from.surface,
+        dest: context.surface,
+        textColor: context.state.textColor,
+        bkColor: context.state.bkColor,
+        srcBkColor: from.state.bkColor,
+    });
 
     /** @param {any} context @returns {import("./contract.js").TextMetrics} */
     const metricsOf = context=>{
@@ -308,6 +331,7 @@ export function createGdiDrawing(options = {}){
                 srcX, srcY,
                 rop,
                 pattern: patternOf(context),
+                convert: from ? conversionOf(context, from) : null,
             });
         },
 
@@ -343,6 +367,7 @@ export function createGdiDrawing(options = {}){
                 rop,
                 mode: context.stretchMode,
                 pattern: patternOf(context),
+                convert: conversionOf(context, from),
             });
         },
 
