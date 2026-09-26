@@ -3656,6 +3656,7 @@ async function buildApp(options){
     const ordinalsOf = {
         ...(win32.ordinals ? win32.ordinals() : {}),
         ...(audio.ordinals?.() ?? {}),
+        ...(input.ordinals?.() ?? {}),
         ...(core.api('media').ordinals?.() ?? {}),
     };
     // The drawing APIs are libraries like any other as far as a program is

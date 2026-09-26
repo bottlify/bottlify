@@ -121,6 +121,19 @@ test('XInput is answered too, with no pad in any slot', async()=>{
     await inputModule.dispose();
 });
 
+test('XInput\'s ordinals are offered beside its table', async()=>{
+    // The assembling caller synthesises every library with the numbers its
+    // layer declares, and XInputGetStateEx is found by number alone.
+    const { api } = await open();
+    const ordinals = api.ordinals()['XINPUT1_4.dll'];
+    assert.equal(ordinals[100], 'XInputGetStateEx');
+    assert.equal(ordinals[108], 'XInputGetCapabilitiesEx');
+    assert.ok(Object.values(ordinals).every(name=>name in api.libraries()['XINPUT1_4.dll']),
+        'every number names an export the table has');
+
+    await inputModule.dispose();
+});
+
 test('a build with no win32 still takes input, it just has nowhere to post it', async()=>{
     const { api } = await open({ win32: createStubApi('win32') });
 

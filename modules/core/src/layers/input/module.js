@@ -159,6 +159,13 @@ export const inputModule = {
             libraries: ()=>({ ...dinput.libraries, ...xinput.libraries }),
 
             /**
+             * The numbers those libraries export by, where Windows pins them:
+             * a library a program imports from by ordinal is synthesised with
+             * these, and xinput1_4 has two functions found by number alone.
+             */
+            ordinals: ()=>({ ...xinput.ordinals }),
+
+            /**
              * Feeds one host event in: it becomes a window message and a change
              * of DirectInput state, both or neither -- except that a device a
              * program holds exclusively through DirectInput reaches it there

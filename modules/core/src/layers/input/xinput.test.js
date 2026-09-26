@@ -43,6 +43,25 @@ test('each library exports what its .spec does, and nothing it does not', ()=>{
     ]);
 });
 
+test('xinput1_4 keeps the ordinals its .spec gives, the two taken by number among them', ()=>{
+    // Wine's xinput1_4.spec numbers every export; its xinput.c takes
+    // XInputGetStateEx by ordinal 100 where the name is absent.
+    const { ordinals } = createXInput();
+    assert.deepEqual(ordinals['XINPUT1_4.dll'], {
+        2: 'XInputGetState',
+        3: 'XInputSetState',
+        4: 'XInputGetCapabilities',
+        5: 'XInputEnable',
+        7: 'XInputGetBatteryInformation',
+        8: 'XInputGetKeystroke',
+        10: 'XInputGetAudioDeviceIds',
+        100: 'XInputGetStateEx',
+        108: 'XInputGetCapabilitiesEx',
+    });
+    assert.equal(ordinals['XINPUT9_1_0.dll'], undefined,
+        'xinput9_1_0.spec pins no number, so none is claimed');
+});
+
 test('every slot answers that no pad is connected there', ()=>{
     for (const dll of ['XINPUT9_1_0.dll', 'XINPUT1_4.dll'])
     {
