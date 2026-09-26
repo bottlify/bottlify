@@ -313,6 +313,39 @@ test('CreateDevice refuses what cannot be a target, and publishes what can', ()=
     h.assertAllReleased();
 });
 
+test('ComputeSphereVisibility reads the spheres and writes a status word for each', ()=>{
+    const h = seamed();
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const device = h.createDevice(d3d, target).device;
+
+    // With every transform the identity the volume is -1..1 across and 0..1
+    // deep: one sphere inside it, one wholly left of it.
+    const centers = 0x6100;
+    const radii = 0x6200;
+    const results = 0x6300;
+    new DataView(h.box.bytes.buffer).setFloat32(centers + 8, 0.5, true);
+    [-20, 0, 0.5].forEach((value, k)=>
+        new DataView(h.box.bytes.buffer).setFloat32(centers + 12 + k * 4, value, true));
+    new DataView(h.box.bytes.buffer).setFloat32(radii, 0.25, true);
+    new DataView(h.box.bytes.buffer).setFloat32(radii + 4, 3, true);
+    h.box.bytes.fill(0xcd, results, results + 12);
+    assert.equal(h.device(device, 'ComputeSphereVisibility', [centers, radii, 2, 0, results]),
+        D3D_OK);
+    assert.equal(h.box.memory.readU32(results), 0);
+    assert.equal(h.box.memory.readU32(results + 4), 0x103d, 'Wine\'s answer for the same sphere');
+    assert.equal(h.box.memory.readU32(results + 8), 0xcdcdcdcd, 'and nothing past the count');
+    assert.equal(h.device(device, 'ComputeSphereVisibility', [centers, radii, 2, 0, 0]),
+        DDERR_INVALIDPARAMS >>> 0);
+
+    assert.equal(h.release(device), 0);
+    h.release(d3d);
+    h.release(target);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
 test('GetCaps writes a description a program reads field by field', ()=>{
     const h = seamed();
     const ddraw = h.create7();

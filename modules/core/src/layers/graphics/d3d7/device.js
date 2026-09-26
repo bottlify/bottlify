@@ -38,15 +38,17 @@ import {
     D3DERR_INBEGINSTATEBLOCK, D3DERR_INVALIDPRIMITIVETYPE, D3DERR_INVALIDSTATEBLOCK,
     D3DERR_INVALIDVERTEXFORMAT, D3DERR_NOTINBEGINSTATEBLOCK, D3DERR_SCENE_IN_SCENE,
     D3DERR_SCENE_NOT_IN_SCENE, D3DERR_VERTEXBUFFERLOCKED, D3DFMT, D3DLIGHTTYPE,
-    D3DRENDERSTATE_D3D7_ONLY, D3DRENDERSTATE_MAX, D3DSBT, D3DTSS_MAX, D3DVBCAPS_OPTIMIZED, D3D_OK,
-    DDERR_INVALIDPARAMS,
-    DDERR_NOTFOUND, DDLOCK_DISCARDCONTENTS, DDLOCK_NOOVERWRITE, DDLOCK_READONLY, transformStateOf,
+    D3DRENDERSTATE_D3D7_ONLY, D3DRENDERSTATE_MAX, D3DSBT, D3DTRANSFORMSTATE, D3DTSS_MAX,
+    D3DVBCAPS_OPTIMIZED, D3D_OK, DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DDLOCK_DISCARDCONTENTS,
+    DDLOCK_NOOVERWRITE, DDLOCK_READONLY, transformStateOf,
 } from './constants.js';
 import { DEVICE_DESCRIPTIONS } from './caps.js';
 import { D3DCLEAR, D3DLOCK, D3DFMT_INDEX, D3DTSS } from '../d3d8/constants.js';
 import { createDefaultRenderStates } from '../d3d8/renderstates.js';
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
-import { IDENTITY, STAGE_COUNT, createRenderer, vertexCountOf } from '../d3d8/render.js';
+import {
+    IDENTITY, STAGE_COUNT, createRenderer, multiplyMatrices, vertexCountOf,
+} from '../d3d8/render.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { validateDeviceTarget } from '../ddraw/caps.js';
@@ -76,6 +78,10 @@ import {
 
 /** How many indices the scratch record can carry; a bigger draw grows it. */
 const INDEX_SCRATCH = 0x10000;
+
+/** D3DRENDERSTATE_CLIPPLANEENABLE, and the user planes a D3DSTATUS word has bits for. */
+const D3DRENDERSTATE_CLIPPLANEENABLE = 152;
+const USER_CLIP_PLANES = 6;
 
 /**
  * The D3DFMT a DirectDraw pixel format means, as the renderer names formats.
@@ -1087,6 +1093,76 @@ export function createDirect3D7(ddraw, services = {}){
                     return DDERR_INVALIDPARAMS;
                 }
                 clipPlanes.set(index, [...plane]);
+                return D3D_OK;
+            },
+
+            /**
+             * Where each sphere lies against the six sides of the view volume
+             * and the user clip planes enabled, as D3DSTATUS bits: a plane the
+             * sphere crosses or lies beyond sets its union bit (D3DCLIP_*), and
+             * one it lies wholly beyond its intersection bit too, twelve places
+             * up. The volume's sides come out of world, view and projection
+             * together, a user plane out of the world transform alone.
+             *
+             * @param {readonly number[][]} centers @param {readonly number[]} radii
+             * @param {{ results?: number[] }} out
+             */
+            ComputeSphereVisibility(centers, radii, out){
+                const world = transforms.get(transformStateOf(D3DTRANSFORMSTATE.WORLD) ?? 0)
+                    ?? IDENTITY;
+                const all = multiplyMatrices(multiplyMatrices(world,
+                    transforms.get(D3DTRANSFORMSTATE.VIEW) ?? IDENTITY),
+                transforms.get(D3DTRANSFORMSTATE.PROJECTION) ?? IDENTITY);
+                /** @param {ArrayLike<number>} m @param {number} c */
+                const column = (m, c)=>[m[c], m[4 + c], m[8 + c], m[12 + c]];
+                /** @param {number[]} a @param {number[]} b @param {number} sign */
+                const combine = (a, b, sign)=>a.map((value, k)=>value + sign * b[k]);
+                const [x, y, z, w] = [0, 1, 2, 3].map(c=>column(all, c));
+                // Left, right, top, bottom, front, back: D3DCLIP_LEFT up to _BACK.
+                /** @type {(number[] | null)[]} */
+                const planes = [
+                    combine(w, x, 1), combine(w, x, -1), combine(w, y, -1), combine(w, y, 1),
+                    z, combine(w, z, -1),
+                ];
+                const enabled = renderStates.get(D3DRENDERSTATE_CLIPPLANEENABLE) ?? 0;
+                for (let index = 0; index < USER_CLIP_PLANES; index++)
+                {
+                    if ((enabled & (1 << index)) !== 0)
+                    {
+                        // A plane in world space tests a point in model space
+                        // as the world matrix times the plane.
+                        const p = clipPlanes.get(index) ?? [0, 0, 0, 0];
+                        planes.push([0, 1, 2, 3].map(row=>world[row * 4] * p[0]
+                            + world[row * 4 + 1] * p[1] + world[row * 4 + 2] * p[2]
+                            + world[row * 4 + 3] * p[3]));
+                    }
+                    else
+                    {
+                        planes.push(null);
+                    }
+                }
+                out.results = centers.map((center, sphere)=>{
+                    const radius = radii[sphere];
+                    let result = 0;
+                    planes.forEach((plane, bit)=>{
+                        if (!plane)
+                        {
+                            return;
+                        }
+                        const length = Math.hypot(plane[0], plane[1], plane[2]) || 1;
+                        const distance = (plane[0] * center[0] + plane[1] * center[1]
+                            + plane[2] * center[2] + plane[3]) / length;
+                        if (distance < -radius)
+                        {
+                            result |= (1 << bit) | (1 << (bit + 12));
+                        }
+                        else if (distance < radius)
+                        {
+                            result |= 1 << bit;
+                        }
+                    });
+                    return result >>> 0;
+                });
                 return D3D_OK;
             },
 

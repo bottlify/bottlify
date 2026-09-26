@@ -715,6 +715,26 @@ export function createDirect3D7Seam(
         },
 
         /** @param {any} device @param {number[]} args */
+        ComputeSphereVisibility: (device, [centers, radii, count, , results])=>{
+            if ((centers >>> 0) === 0 || (radii >>> 0) === 0 || (results >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const points = readFloats(centers, (count >>> 0) * 3);
+            /** @type {{ results?: number[] }} */
+            const held = {};
+            const hr = device.ComputeSphereVisibility(
+                Array.from({ length: count >>> 0 }, (_, k)=>[...points.subarray(k * 3, k * 3 + 3)]),
+                [...readFloats(radii, count >>> 0)], held);
+            if (hr === D3D_OK)
+            {
+                (held.results ?? []).forEach((status, k)=>
+                    fields.writeU32((results >>> 0) + k * 4, status));
+            }
+            return hr;
+        },
+
+        /** @param {any} device @param {number[]} args */
         SetClipPlane: (device, [index, pointer])=>((pointer >>> 0) === 0
             ? DDERR_INVALIDPARAMS
             : device.SetClipPlane(index >>> 0, [...readFloats(pointer, 4)])),

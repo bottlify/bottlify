@@ -349,6 +349,51 @@ test('stage zero modulates by default and the stage states stop at D3D7\'s last'
     releaseAll(f);
 });
 
+test('ComputeSphereVisibility names the planes a sphere crosses and the ones it lies beyond', ()=>{
+    // Wine's ddraw7 test_compute_sphere_visibility, its table and its answers.
+    const f = fixture();
+    const { device } = f;
+    const proj1 = [1.810660, 0, 0, 0, 0, 2.414213, 0, 0, 0, 0, 1.020408, 1, 0, 0, -0.102041, 0];
+    const proj2 = [10, 0, 0, 0, 0, 10, 0, 0, 0, 0, 10, 0, 0, 0, 0, 1];
+    const view1 = [1, 0, 0, 0, 0, 0.768221, -0.640185, 0, -0, 0.640185, 0.768221, 0,
+        -14.852037, 9.857489, 11.600972, 1];
+    const CLIPPLANEENABLE = 152;
+    /** @type {[number[], number[], number[][], number[], number, number[]][]} */
+    const cases = [
+        [view1, proj1, [[11.461533, -4.761727, -1.171646]], [38.252632], 0, [0x3f]],
+        [view1, proj1, [[-3.515620, -1.560661, -12.464638], [14.290396, -2.981143, -24.311312],
+            [1.461626, -6.093709, -13.901010]], [4.354097, 12.500704, 17.251318], 0,
+        [0x103d, 0x3f, 0x3f]],
+        [IDENTITY, proj2, [[0, 0, 0.05]], [0.04], 0, [0]],
+        [IDENTITY, IDENTITY, [[0, 0, 0.5]], [0.5], 0, [0]],
+        [IDENTITY, IDENTITY, [[0, 0, 0]], [0], 0, [0]],
+        [IDENTITY, IDENTITY, [[-1, -1, 0.5]], [0.25], 0, [0x9]],
+        [IDENTITY, IDENTITY, [[-20, 0, 0.5]], [3], 0, [0x103d]],
+        [IDENTITY, IDENTITY, [[20, 0, 0.5]], [3], 0, [0x203e]],
+        [IDENTITY, IDENTITY, [[0, -20, 0.5]], [3], 0, [0x803b]],
+        [IDENTITY, IDENTITY, [[0, 20, 0.5]], [3], 0, [0x4037]],
+        [IDENTITY, IDENTITY, [[0, 0, -20]], [3], 0, [0x1001f]],
+        [IDENTITY, IDENTITY, [[0, 0, 20]], [3], 0, [0x2002f]],
+        [IDENTITY, IDENTITY, [[0, 0, 0]], [5], 1, [0x7f]],
+        [IDENTITY, IDENTITY, [[-0.5, 0, 0]], [5], 1, [0x7f]],
+        [IDENTITY, IDENTITY, [[-0.5, 0, 0]], [1], 1, [0x51]],
+        [IDENTITY, IDENTITY, [[-2.5, 0, 0]], [1], 1, [0x41051]],
+    ];
+    assert.equal(device.SetClipPlane(0, [1, 0, 0, 0.5]), D3D_OK);
+    assert.equal(device.SetTransform(D3DTRANSFORMSTATE.WORLD, IDENTITY), D3D_OK);
+    cases.forEach(([view, projection, centers, radii, planes, expected], index)=>{
+        assert.equal(device.SetTransform(D3DTRANSFORMSTATE.VIEW, view), D3D_OK);
+        assert.equal(device.SetTransform(D3DTRANSFORMSTATE.PROJECTION, projection), D3D_OK);
+        assert.equal(device.SetRenderState(CLIPPLANEENABLE, planes), D3D_OK);
+        /** @type {{ results?: number[] }} */
+        const out = {};
+        assert.equal(device.ComputeSphereVisibility(centers, radii, out), D3D_OK);
+        assert.deepEqual(out.results, expected, `case ${index}`);
+    });
+
+    releaseAll(f);
+});
+
 test('ValidateDevice refuses a stage the combiner does not draw', ()=>{
     const f = fixture();
     const { device } = f;
