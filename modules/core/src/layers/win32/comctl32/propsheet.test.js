@@ -25,6 +25,7 @@ import {
     PSM_INDEXTOID, PSM_ISDIALOGMESSAGE, PSBTN_NEXT, PSBTN_BACK, PSBTN_OK, PSBTN_CANCEL,
     PSBTN_APPLYNOW, PSM_RESTARTWINDOWS, PSM_REBOOTSYSTEM, ID_PSRESTARTWINDOWS, ID_PSREBOOTSYSTEM,
     IDOK, IDCANCEL, IDHELP, IDC_APPLY_BUTTON, IDC_NEXT_BUTTON, IDC_BACK_BUTTON,
+    IDC_HEADER_TITLE, IDC_HEADER_SUBTITLE, IDC_SUNKEN_LINEHEADER,
 } from './propsheet.js';
 
 /**
@@ -1163,4 +1164,59 @@ async()=>{
     assert.equal(await run([PSM_RESTARTWINDOWS], [PSBTN_APPLYNOW, PSBTN_CANCEL]), 1,
         'applied, then cancelled: changes were saved, and no restart');
     assert.equal(await run([PSM_RESTARTWINDOWS], [PSBTN_CANCEL]), 0);
+});
+
+test('a Wizard97 sheet is a wizard: an interior page shows its header title and subtitle '
+    + 'in a band over it, an exterior page hides the band, and the caption is the page\'s',
+async()=>{
+    // The wizard documentation: PSH_WIZARD97 alone makes a Wizard97 wizard,
+    // whose pszCaption is ignored for the caption of the page's template; an
+    // interior page's template is 317x143 units against an exterior one's
+    // 317x193, the header taking the difference, and PSP_USEHEADERTITLE and
+    // PSP_USEHEADERSUBTITLE put pszHeaderTitle and pszHeaderSubTitle in it
+    // unless PSP_HIDEHEADER hides it; PSM_SETHEADERTITLE changes a page's
+    // title, repainted at once on the page on show.
+    const PSH_WIZARD97 = 0x01000000;
+    const PSP_HIDEHEADER = 0x0800;
+    const PSP_USEHEADERTITLE = 0x1000;
+    const PSP_USEHEADERSUBTITLE = 0x2000;
+    const PSM_SETHEADERTITLEA = 0x047d;
+    const PSP_V2_SIZE = 48;
+    const WHITE = 0x00ffffff;
+    const context = setup();
+    const { fns } = context;
+    const exterior = await context.createPage(context.description({ size: PSP_V2_SIZE,
+        template: IDD_PROP_PAGE_INTRO, flags: PSP_HIDEHEADER }));
+    const interior = await context.createPage(context.description({ size: PSP_V2_SIZE,
+        template: IDD_PROP_PAGE_EXIT, flags: PSP_USEHEADERTITLE | PSP_USEHEADERSUBTITLE,
+        extra: [context.string('Choose a folder'), context.string('Where the files go.')] }));
+    const hwnd = await context.comctl.PropertySheetA.handler([context.header({
+        flags: PSH_MODELESS | PSH_WIZARD97, pages: [exterior, interior] })]);
+    const item = (/** @type {number} */ id)=>fns.GetDlgItem.handler([hwnd, id]);
+    const shown = (/** @type {number} */ id)=>fns.IsWindowVisible.handler([item(id)]);
+    const page = ()=>context.windowRect(context.send([hwnd, PSM_GETCURRENTPAGEHWND, 0, 0]));
+    assert.equal(shown(IDC_NEXT_BUTTON), 1, 'Back and Next, as a wizard has');
+    assert.equal(item(IDOK), 0);
+    assert.equal(context.textOf(hwnd), 'Edit Control Page', 'the caption of the page\'s template');
+    assert.equal(shown(IDC_HEADER_TITLE), 0, 'an exterior page hides the header');
+    const top = page().top;
+
+    await context.send([hwnd, PSM_PRESSBUTTON, PSBTN_NEXT, 0]);
+    assert.equal(context.textOf(hwnd), 'Exit Page');
+    assert.equal(shown(IDC_HEADER_TITLE), 1);
+    assert.equal(shown(IDC_HEADER_SUBTITLE), 1);
+    assert.equal(context.textOf(item(IDC_HEADER_TITLE)), 'Choose a folder');
+    assert.equal(context.textOf(item(IDC_HEADER_SUBTITLE)), 'Where the files go.');
+    const line = context.windowRect(item(IDC_SUNKEN_LINEHEADER));
+    assert.ok(line.top > top && page().top >= line.bottom, 'the page under the header');
+    await context.pump();
+    const band = context.windowRect(item(IDC_HEADER_TITLE));
+    assert.equal(context.desktop.read(band.right - 1, band.bottom - 1), WHITE,
+        'the header is drawn in the window colour');
+
+    context.send([hwnd, PSM_SETHEADERTITLEA, 1, context.string('Another folder')]);
+    assert.equal(context.textOf(item(IDC_HEADER_TITLE)), 'Another folder');
+    await context.send([hwnd, PSM_PRESSBUTTON, PSBTN_BACK, 0]);
+    assert.equal(shown(IDC_HEADER_TITLE), 0);
+    assert.equal(page().top, top, 'the exterior page where the header was');
 });

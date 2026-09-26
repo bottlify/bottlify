@@ -35,16 +35,23 @@ import { after } from '../user32/controls.js';
 const MAX_INTRESOURCE = 0x10000;
 const RT_DIALOG = 5;
 
-/** PROPSHEETPAGE: the same shape in both spellings. */
+/**
+ * PROPSHEETPAGE: the same shape in both spellings. The header's title and
+ * subtitle are the two members the second version adds.
+ */
 export const PSP = Object.freeze({
     dwSize: 0, dwFlags: 4, hInstance: 8, pszTemplate: 12, hIcon: 16, pszTitle: 20,
     pfnDlgProc: 24, lParam: 28, pfnCallback: 32, pcRefParent: 36, V1_SIZE: 40,
+    pszHeaderTitle: 40, pszHeaderSubTitle: 44, V2_SIZE: 48,
 });
 export const PSP_DLGINDIRECT = 0x0001;
 export const PSP_USETITLE = 0x0008;
 export const PSP_HASHELP = 0x0020;
 export const PSP_USECALLBACK = 0x0080;
 export const PSP_PREMATURE = 0x0400;
+export const PSP_HIDEHEADER = 0x0800;
+export const PSP_USEHEADERTITLE = 0x1000;
+export const PSP_USEHEADERSUBTITLE = 0x2000;
 export const PSPCB_ADDREF = 0;
 export const PSPCB_RELEASE = 1;
 export const PSPCB_CREATE = 2;
@@ -63,6 +70,10 @@ export const PSH_NOAPPLYNOW = 0x0080;
 export const PSH_USECALLBACK = 0x0100;
 export const PSH_HASHELP = 0x0200;
 export const PSH_MODELESS = 0x0400;
+/** Wizard97, under the value the older headers gave it and the newer. */
+export const PSH_WIZARD97_OLD = 0x00002000;
+export const PSH_WIZARD_LITE = 0x00400000;
+export const PSH_WIZARD97 = 0x01000000;
 export const PSCB_INITIALIZED = 1;
 export const PSCB_PRECREATE = 2;
 
@@ -102,6 +113,10 @@ export const PSM_GETCURRENTPAGEHWND = 0x0476;
 export const PSM_INSERTPAGE = 0x0477;
 export const PSM_SETTITLEW = 0x0478;
 export const PSM_SETFINISHTEXTW = 0x0479;
+export const PSM_SETHEADERTITLEA = 0x047d;
+export const PSM_SETHEADERTITLEW = 0x047e;
+export const PSM_SETHEADERSUBTITLEA = 0x047f;
+export const PSM_SETHEADERSUBTITLEW = 0x0480;
 export const PSM_HWNDTOINDEX = 0x0481;
 export const PSM_INDEXTOHWND = 0x0482;
 export const PSM_PAGETOINDEX = 0x0483;
@@ -134,6 +149,11 @@ export const IDC_BACK_BUTTON = 12323;
 export const IDC_NEXT_BUTTON = 12324;
 export const IDC_FINISH_BUTTON = 12325;
 export const IDC_SUNKEN_LINE = 12326;
+export const IDC_SUNKEN_LINEHEADER = 12327;
+/** A Wizard97 header's own controls: the band, and the title and subtitle on it. */
+export const IDC_HEADER_BAND = 12328;
+export const IDC_HEADER_TITLE = 12329;
+export const IDC_HEADER_SUBTITLE = 12330;
 
 /** Which button each PSBTN_ presses. */
 const PRESSED = Object.freeze([IDC_BACK_BUTTON, IDC_NEXT_BUTTON, IDC_FINISH_BUTTON, IDOK,
@@ -145,6 +165,7 @@ const WM_KEYDOWN = 0x0100;
 const WM_NOTIFY = 0x004e;
 const WM_INITDIALOG = 0x0110;
 const WM_COMMAND = 0x0111;
+const WM_CTLCOLORSTATIC = 0x0138;
 const DM_GETDEFID = 0x0400;
 const DM_SETDEFID = 0x0401;
 const DWLP_MSGRESULT = 0;
@@ -192,6 +213,8 @@ const DS_CONTEXTHELP = 0x2000;
 const BS_PUSHBUTTON = 0x0;
 const BS_DEFPUSHBUTTON = 0x1;
 const SS_ETCHEDHORZ = 0x10;
+const SS_NOPREFIX = 0x80;
+const COLOR_WINDOW = 5;
 
 /**
  * The sheet's own window: what the style is read back as, which programs
@@ -209,11 +232,29 @@ const MARGIN = 7;
 const BUTTON = Object.freeze({ width: 50, height: 14 });
 const GAP = 4;
 const SHEET_FONT = Object.freeze({ points: 8, face: 'MS Shell Dlg' });
+/**
+ * How far down a Wizard97 interior page sits: the documented templates are
+ * 317x143 units inside and 317x193 outside, the header taking the rest.
+ * The band ends a margin above the page, and its title and subtitle stand
+ * in it as the Wizard97 pictures show them.
+ */
+const HEADER = 50;
+const HEADER_TITLE = Object.freeze({ x: 2 * MARGIN, y: MARGIN, height: 10 });
+const HEADER_SUBTITLE = Object.freeze({ x: 3 * MARGIN, y: MARGIN + 12, height: 20 });
 
 /** NMHDR and the lParam PSHNOTIFY adds to it. */
 const PSHNOTIFY_SIZE = 16;
 /** Guest memory each sheet keeps for the structures it hands user32. */
 const SCRATCH = 64;
+
+/**
+ * Whether a sheet's flags make it a wizard: the plain one, the lite one or
+ * Wizard97, each alone.
+ *
+ * @param {number} flags
+ */
+const wizardFlags = flags=>(flags & (PSH_WIZARD | PSH_WIZARD_LITE | PSH_WIZARD97
+    | PSH_WIZARD97_OLD)) !== 0;
 
 /**
  * What a property sheet needs from the rest of the system; fields of the
@@ -248,6 +289,8 @@ const SCRATCH = 64;
  * @typedef {Object} Entry
  * @property {Page} page
  * @property {number} hwnd  Zero until the page's dialog is made.
+ * @property {string} headerTitle  What a Wizard97 header shows over it.
+ * @property {string} headerSubtitle
  *
  * @typedef {Object} Sheet
  * @property {number} hwnd
@@ -268,6 +311,7 @@ const SCRATCH = 64;
  * @property {number} scratch
  * @property {number} tab
  * @property {{ x: number, y: number }} origin  Where a page sits in the sheet.
+ * @property {number} header  How much lower a Wizard97 interior page sits, in pixels.
  */
 
 /**
@@ -538,7 +582,39 @@ export function createPropertySheetFunctions(host){
             : 0);
 
     /** @param {Sheet} sheet */
-    const wizard = sheet=>(sheet.flags & PSH_WIZARD) !== 0;
+    const wizard = sheet=>wizardFlags(sheet.flags);
+    /** @param {Sheet} sheet */
+    const wizard97 = sheet=>(sheet.flags & (PSH_WIZARD97 | PSH_WIZARD97_OLD)) !== 0;
+
+    /**
+     * The entry of a page in a sheet, with the header a Wizard97 interior
+     * page shows: a string or a resource id of the sheet's instance, read
+     * from a description of the second version or later.
+     *
+     * @param {Sheet} sheet @param {Page} page @returns {Entry}
+     */
+    const entryFor = (sheet, page)=>{
+        const flags = u32(page.handle + PSP.dwFlags);
+        const recent = u32(page.handle + PSP.dwSize) >= PSP.V2_SIZE;
+        /** @param {number} flag @param {number} at */
+        const text = (flag, at)=>(recent && (flags & flag) !== 0
+            ? stringOf(u32(page.handle + at), sheet.instance, page.wide) : '');
+        return { page, hwnd: 0,
+            headerTitle: text(PSP_USEHEADERTITLE, PSP.pszHeaderTitle),
+            headerSubtitle: text(PSP_USEHEADERSUBTITLE, PSP.pszHeaderSubTitle) };
+    };
+
+    /** @param {Entry} entry  Whether it is a Wizard97 page without the header. */
+    const exterior = entry=>(u32(entry.page.handle + PSP.dwFlags) & PSP_HIDEHEADER) !== 0;
+
+    /**
+     * Where a page sits in the sheet: a Wizard97 interior page under the
+     * header, every other at the sheet's origin.
+     *
+     * @param {Sheet} sheet @param {Entry} entry
+     */
+    const originOf = (sheet, entry)=>({ x: sheet.origin.x,
+        y: sheet.origin.y + (wizard97(sheet) && !exterior(entry) ? sheet.header : 0) });
 
     /** @param {Sheet} sheet @param {number} id */
     const item = (sheet, id)=>api('GetDlgItem', [sheet.hwnd, id]) >>> 0;
@@ -570,11 +646,22 @@ export function createPropertySheetFunctions(host){
                 word(0);
             }
         };
-        const isWizard = (flags & PSH_WIZARD) !== 0;
         const shown = (/** @type {boolean} */ on)=>(on ? WS_VISIBLE : 0);
-        /** @type {[number, string | number, string, number][]} id, class, text, style */
-        const controls = isWizard
+        // A Wizard97 header, shown for the pages that have one: the band,
+        // its title and subtitle, and the line under it.
+        /** @type {[number, string | number, string, number][]} */
+        const header = (flags & (PSH_WIZARD97 | PSH_WIZARD97_OLD)) !== 0
             ? [
+                [IDC_HEADER_BAND, 0x82, '', SS_NOPREFIX],
+                [IDC_HEADER_TITLE, 0x82, '', SS_NOPREFIX],
+                [IDC_HEADER_SUBTITLE, 0x82, '', SS_NOPREFIX],
+                [IDC_SUNKEN_LINEHEADER, 0x82, '', SS_ETCHEDHORZ],
+            ]
+            : [];
+        /** @type {[number, string | number, string, number][]} id, class, text, style */
+        const controls = wizardFlags(flags)
+            ? [
+                ...header,
                 [IDC_TABCONTROL, 'SysTabControl32', '', WS_CLIPSIBLINGS],
                 [IDC_BACK_BUTTON, 0x80, '< &Back', WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON],
                 [IDC_NEXT_BUTTON, 0x80, '&Next >', WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON],
@@ -670,8 +757,9 @@ export function createPropertySheetFunctions(host){
     /**
      * Sizes the sheet to its largest page and places its controls: the tab
      * control around the page, the buttons in a row under it from the
-     * right; a wizard's page over a rule and its buttons. The sheet is then
-     * centred on its owner, or on the screen.
+     * right; a wizard's page over a rule and its buttons, and a Wizard97
+     * one from the sheet's edges, an interior page under the header. The
+     * sheet is then centred on its owner, or on the screen.
      *
      * @param {Sheet} sheet
      */
@@ -679,6 +767,7 @@ export function createPropertySheetFunctions(host){
         const margin = units(sheet, MARGIN, MARGIN);
         const button = units(sheet, BUTTON.width, BUTTON.height);
         const gap = units(sheet, GAP, GAP);
+        sheet.header = wizard97(sheet) ? units(sheet, 0, HEADER).y : 0;
         let width = 0;
         let height = 0;
         for (const entry of sheet.entries)
@@ -689,7 +778,7 @@ export function createPropertySheetFunctions(host){
                 const shape = describe(template);
                 const size = units(sheet, shape.cx, shape.cy);
                 width = Math.max(width, size.x);
-                height = Math.max(height, size.y);
+                height = Math.max(height, size.y + (exterior(entry) ? 0 : sheet.header));
             }
         }
         /** @param {number} id @param {number} x @param {number} y @param {number} w @param {number} h */
@@ -701,18 +790,31 @@ export function createPropertySheetFunctions(host){
         let client;
         if (wizard(sheet))
         {
-            sheet.origin = { x: margin.x, y: margin.y };
-            const line = margin.y + height + gap.y;
+            const inset = wizard97(sheet) ? { x: 0, y: 0 } : margin;
+            sheet.origin = { x: inset.x, y: inset.y };
+            const line = inset.y + height + (wizard97(sheet) ? 0 : gap.y);
             const buttons = line + 2 + gap.y;
             const alongside = (sheet.flags & PSH_WIZARDHASFINISH) !== 0;
             const lead = alongside ? [IDC_BACK_BUTTON, IDC_NEXT_BUTTON, IDC_FINISH_BUTTON]
                 : [IDC_BACK_BUTTON, IDC_NEXT_BUTTON];
             const trailing = (sheet.flags & PSH_HASHELP) !== 0 ? [IDCANCEL, IDHELP] : [IDCANCEL];
             const across = (lead.length + trailing.length) * (button.x + gap.x);
-            client = { x: Math.max(width + 2 * margin.x, across + 2 * margin.x),
+            client = { x: Math.max(width + 2 * inset.x, across + 2 * margin.x),
                 y: buttons + button.y + margin.y };
-            move(IDC_TABCONTROL, margin.x, margin.y, width, height);
-            move(IDC_SUNKEN_LINE, margin.x, line, client.x - 2 * margin.x, 2);
+            move(IDC_TABCONTROL, inset.x, inset.y, width, height);
+            move(IDC_SUNKEN_LINE, inset.x, line, client.x - 2 * inset.x, 2);
+            if (wizard97(sheet))
+            {
+                const band = sheet.header - margin.y;
+                const title = units(sheet, HEADER_TITLE.x, HEADER_TITLE.y);
+                const subtitle = units(sheet, HEADER_SUBTITLE.x, HEADER_SUBTITLE.y);
+                move(IDC_HEADER_BAND, 0, 0, client.x, band);
+                move(IDC_SUNKEN_LINEHEADER, 0, band, client.x, 2);
+                move(IDC_HEADER_TITLE, title.x, title.y, client.x - title.x - margin.x,
+                    units(sheet, 0, HEADER_TITLE.height).y);
+                move(IDC_HEADER_SUBTITLE, subtitle.x, subtitle.y,
+                    client.x - subtitle.x - margin.x, units(sheet, 0, HEADER_SUBTITLE.height).y);
+            }
             const right = client.x - margin.x;
             row(trailing, right, buttons);
             // The two groups stand a gap further apart than their buttons,
@@ -840,7 +942,8 @@ export function createPropertySheetFunctions(host){
                 if (hwnd !== 0)
                 {
                     entry.hwnd = hwnd;
-                    api('SetWindowPos', [hwnd, 0, sheet.origin.x, sheet.origin.y, 0, 0,
+                    const origin = originOf(sheet, entry);
+                    api('SetWindowPos', [hwnd, 0, origin.x, origin.y, 0, 0,
                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
                 }
                 return hwnd;
@@ -972,11 +1075,42 @@ export function createPropertySheetFunctions(host){
                     }
                     sheet.current = index;
                     api('SendMessageA', [sheet.tab, TCM_SETCURSEL, index, 0]);
+                    showHeader(sheet);
                     return after(api('ShowWindow', [hwnd, SW_SHOW]), ()=>after(
                         initialFocus(sheet), ()=>true));
                 });
             });
         });
+    };
+
+    /**
+     * A Wizard97 sheet's header for the page on show: the band with the
+     * page's title and subtitle for an interior page, nothing for an
+     * exterior one; and the caption the page's template names, as a
+     * Wizard97 wizard shows in place of its own.
+     *
+     * @param {Sheet} sheet
+     */
+    const showHeader = sheet=>{
+        const entry = sheet.entries[sheet.current];
+        if (!entry || !wizard97(sheet))
+        {
+            return;
+        }
+        const on = exterior(entry) ? SW_HIDE : SW_SHOW;
+        for (const id of [IDC_HEADER_BAND, IDC_HEADER_TITLE, IDC_HEADER_SUBTITLE,
+            IDC_SUNKEN_LINEHEADER])
+        {
+            api('ShowWindow', [item(sheet, id), on]);
+        }
+        setText(sheet, item(sheet, IDC_HEADER_TITLE), entry.headerTitle);
+        setText(sheet, item(sheet, IDC_HEADER_SUBTITLE), entry.headerSubtitle);
+        const template = templateOf(entry.page);
+        const caption = template !== 0 ? describe(template).title : '';
+        if (caption !== '')
+        {
+            setText(sheet, sheet.hwnd, caption);
+        }
     };
 
     /** A page's index by the resource id its template was named by, or -1. */
@@ -1005,7 +1139,7 @@ export function createPropertySheetFunctions(host){
                 return page && !given ? after(destroyPage(page.handle, thread), ()=>0) : 0;
             }
             const at = Math.max(0, Math.min(index, sheet.entries.length));
-            sheet.entries.splice(at, 0, { page, hwnd: 0 });
+            sheet.entries.splice(at, 0, entryFor(sheet, page));
             addTab(sheet, at, titleOf(page));
             if (sheet.current >= at)
             {
@@ -1473,6 +1607,35 @@ export function createPropertySheetFunctions(host){
                 return answer(sheet, 0);
             case PSM_RECALCPAGESIZES:
                 return answer(sheet, 1);
+            case PSM_SETHEADERTITLEA:
+            case PSM_SETHEADERTITLEW:
+            case PSM_SETHEADERSUBTITLEA:
+            case PSM_SETHEADERSUBTITLEW: {
+                const entry = sheet.entries[index];
+                const kind = message >>> 0;
+                if (entry)
+                {
+                    const text = stringOf(handle, sheet.instance,
+                        kind === PSM_SETHEADERTITLEW || kind === PSM_SETHEADERSUBTITLEW);
+                    if (kind === PSM_SETHEADERTITLEA || kind === PSM_SETHEADERTITLEW)
+                    {
+                        entry.headerTitle = text;
+                    }
+                    else
+                    {
+                        entry.headerSubtitle = text;
+                    }
+                    if (index === sheet.current)
+                    {
+                        showHeader(sheet);
+                    }
+                }
+                return answer(sheet, 0);
+            }
+            case WM_CTLCOLORSTATIC:
+                // The header is drawn in the window colour, not the face.
+                return [IDC_HEADER_BAND, IDC_HEADER_TITLE, IDC_HEADER_SUBTITLE].some(id=>
+                    item(sheet, id) === handle) ? api('GetSysColorBrush', [COLOR_WINDOW]) : 0;
             default:
                 return 0;
         }
@@ -1523,7 +1686,7 @@ export function createPropertySheetFunctions(host){
             owner: u32(header + PSH.hwndParent), callback: u32(header + PSH.pfnCallback),
             entries: [], current: -1, start: 0, changed: new Set(), applied: false, restart: 0,
             result: 0, ended: false,
-            template: 0, scratch: 0, tab: 0, origin: { x: 0, y: 0 },
+            template: 0, scratch: 0, tab: 0, origin: { x: 0, y: 0 }, header: 0,
         };
         let cursor = list;
         /** @param {number} index @returns {any} */
@@ -1547,7 +1710,7 @@ export function createPropertySheetFunctions(host){
                 const page = pages.get(handle >>> 0);
                 if (page)
                 {
-                    sheet.entries.push({ page, hwnd: 0 });
+                    sheet.entries.push(entryFor(sheet, page));
                 }
                 return collect(index + 1);
             });
