@@ -668,6 +668,11 @@ export function generateFixedFunction(state, layout){
             : [`    out.fogAmount = ${has('specular') ? 'vertex.specular.a' : '1.0'};`];
 
     const lightCount = lighting === null ? 0 : lighting.lights.length;
+    // The position is @invariant: a second pass over the same geometry with
+    // a different stage or light setup is a different module, and WGSL
+    // promises two modules the same position from the same computation only
+    // under the attribute -- which has no effect where the struct is the
+    // fragment's input.
     const code = `${lightCount === 0 ? '' : LIGHT_STRUCT}${uniformStruct(lightCount)}
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 ${functionDeclarations(lighting, vertexFog || fogSource === FOG_SOURCE.TABLE
@@ -679,7 +684,7 @@ ${inputs}
 };
 
 struct VertexOut {
-    @builtin(position) position: vec4f,
+    @builtin(position) @invariant position: vec4f,
 ${varyings.join('\n')}
 };
 

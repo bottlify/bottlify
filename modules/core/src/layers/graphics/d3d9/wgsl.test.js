@@ -300,7 +300,7 @@ test('a whole vertex shader declares its inputs by location and its outputs by s
     ]);
     assertLine(translated.wgsl, '@location(0) v0: vec4<f32>,');
     assertLine(translated.wgsl, '@location(1) v3: vec4<f32>,');
-    assertLine(translated.wgsl, '@builtin(position) oPos: vec4f,');
+    assertLine(translated.wgsl, '@builtin(position) @invariant oPos: vec4f,');
     assertLine(translated.wgsl, `@location(${varyingLocation(D3DDECLUSAGE.COLOR, 1)}) oD1: vec4f,`);
     assertLine(translated.wgsl,
         `@location(${varyingLocation(D3DDECLUSAGE.TEXCOORD, 2)}) oT2: vec4f,`);
@@ -454,6 +454,19 @@ test('a relatively addressed constant file is declared whole', ()=>{
     assert.equal(translated.constants, 257);
     assert.equal(translated.viewportRegister, 256);
     assertLine(translated.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 257>;');
+});
+
+test('a vertex stage\'s position is invariant, shader-written or fixed', ()=>{
+    // Multipass over one mesh through two pipelines -- the same vertex shader
+    // under two pixel shaders, or a hybrid's fixed stage under two -- is
+    // compiled twice, and only @invariant makes WGSL promise the two the same
+    // position from the same computation.
+    const translated = vertexBody([]);
+    assertLine(translated.wgsl, '@builtin(position) @invariant oPos: vec4f,');
+    const fixed = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
+    ], new Map([[0, { components: 3, scalar: 'f32', bgra: false }]]));
+    assertLine(fixed.wgsl, '@builtin(position) @invariant oPos: vec4f,');
 });
 
 test('a vertex shader\'s position lands on the centre of the pixel it names', ()=>{

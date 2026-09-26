@@ -1034,7 +1034,10 @@ export function translateShader(parsed, options = {}){
                 fail(`v${register} is read without a declaration`);
             }
         }
-        outputFields.push('    @builtin(position) oPos: vec4f,');
+        // Invariant, so the same shader compiled into two pipelines -- one
+        // mesh drawn in two passes under two pixel shaders -- gives both the
+        // same position.
+        outputFields.push('    @builtin(position) @invariant oPos: vec4f,');
         /** @param {number} location @param {string} name */
         const emits = (location, name)=>{
             outputFields.push(`    @location(${location}) ${name}: vec4f,`);
@@ -1225,7 +1228,7 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     /** @type {string[]} */
     const inputFields = [];
     /** @type {string[]} */
-    const outputFields = ['    @builtin(position) oPos: vec4f,'];
+    const outputFields = ['    @builtin(position) @invariant oPos: vec4f,'];
     /** @type {number[]} */
     const outputs = [];
     /** @type {string[]} */

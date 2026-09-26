@@ -73,7 +73,7 @@ test('the same state generates the same source, byte for byte', ()=>{
     const second = generate(baseState()).code;
 
     assert.equal(first, second);
-    assert.equal(digest(first), 'ef13ce84a53559a0');
+    assert.equal(digest(first), '8583ff9772f52935');
 });
 
 test('a stage generating its coordinates takes them from the vertex in camera space', ()=>{
@@ -228,6 +228,19 @@ test('a Direct3D screen coordinate lands on the centre of the pixel it names', (
         assert.ok(at > 0, body);
         assert.ok(lines.slice(0, at).some(line=>line.startsWith('out.position = ')),
             'after the position is computed');
+    }
+});
+
+test('the position is invariant, so two passes over the same geometry meet exactly', ()=>{
+    // A second pass drawn with ZFUNC EQUAL over the first -- a light map, a
+    // detail layer, a highlight -- runs a different module whenever its stage
+    // or light setup differs, and WGSL promises two modules the same position
+    // from the same data and control flow only under @invariant; without it a
+    // compiler may fuse the product differently and the pass z-fights.
+    for (const state of [baseState(), baseState({ fvf: FVF.XYZRHW | FVF.DIFFUSE }),
+        baseState({ fvf: LIT_FVF, lighting: lighting() })])
+    {
+        assert.match(generate(state).code, /@builtin\(position\) @invariant position: vec4f,/);
     }
 });
 
