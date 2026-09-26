@@ -767,6 +767,20 @@ test('each thread has its own errno: another thread\'s failure does not overwrit
     assert.equal(fns._errno.handler([]), mainErrno, 'the same cell every time');
 });
 
+test('_snprintf and _vsnprintf with no buffer and a count of zero answer the length needed', ()=>{
+    // Wine's ntdll test__snprintf: _snprintf(NULL, 0, "hello world") is 11.
+    // With no buffer and a count to fill it is -1 and EINVAL, the answer the
+    // documentation gives and the test allows.
+    const { fns, put, u32 } = wholeRuntime(fakeVolume({}));
+    const text = put(0x100, 'hello world');
+    assert.equal(fns._snprintf.handler([0, 0, text]), 11);
+    assert.equal(fns._vsnprintf.handler([0, 0, text, 0x180]), 11);
+    assert.equal(u32(fns._errno.handler([])), 0);
+    assert.equal(fns._snprintf.handler([0, 1, text]), -1);
+    assert.equal(u32(fns._errno.handler([])), 22);
+    assert.equal(fns._vsnprintf.handler([0, 12, text, 0x180]), -1);
+});
+
 test('printf, puts and vprintf write through stdout, so freopen moves them with it', ()=>{
     // printf is fprintf on stdout and puts is fputs on it: a program that
     // moved stdout to a file with freopen finds their output there.

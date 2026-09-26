@@ -209,12 +209,22 @@ export function createMsvcrtFunctions(host){
      * The _snprintf family's answer: at most `count` characters, with the
      * terminator only when the text is shorter than that -- a text of
      * exactly `count` fills the buffer and the byte after it stays the
-     * caller's -- and -1 when the text did not fit.
+     * caller's -- and -1 when the text did not fit. No buffer and a count of
+     * zero asks how long the text is; no buffer for a count is EINVAL.
      *
      * @param {number} buffer @param {number} count @param {string} text
      */
     const countedPrint = (buffer, count, text)=>{
         const limit = count >>> 0;
+        if ((buffer >>> 0) === 0)
+        {
+            if (limit === 0)
+            {
+                return text.length;
+            }
+            errno(EINVAL);
+            return -1;
+        }
         const kept = text.slice(0, limit);
         host.writeMemory(buffer, packInto(
             new Uint8Array(kept.length + (text.length < limit ? 1 : 0)), kept));
