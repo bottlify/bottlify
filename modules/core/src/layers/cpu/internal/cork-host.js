@@ -155,7 +155,7 @@ export function createCorkHost(config){
      * ring of starts, in its area past the tables; `wasmInterpreter: false`
      * runs the JavaScript interpreter alone.
      *
-     * @type {import('../../../../../cork/src/interp-wasm.js').WasmInterpreter | null}
+     * @type {import('../engine.js').WasmInterpreter | null}
      */
     const wasmTier = wasmWanted
         ? engine.createWasmInterpreter({ memory, layout, area: wasmArea,

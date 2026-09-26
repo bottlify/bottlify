@@ -153,6 +153,24 @@
  */
 
 /**
+ * The engine's interpreter tier in wasm, as the host drives it: the integer instruction set
+ * run straight from guest memory over the state block, the host's own interpreter taking
+ * what it leaves. It is the engine's `createWasmInterpreter` that makes one.
+ *
+ * @typedef {Object} WasmInterpreter
+ * @property {(budget: number) => number} run  runs from the state block's eip, at most
+ *     `budget` instructions; answers a `WasmExit`, with eip and the eager flags word back
+ *     in the block
+ * @property {() => number} retired     instructions the last run retired
+ * @property {() => number} exitValue
+ * @property {() => number} exitSize
+ * @property {Uint8Array} hotCounts     the counts, a slot per `(address >>> 2) & (HOT_SLOTS - 1)`
+ * @property {Uint32Array} starts       the ring of recent jump targets
+ * @property {() => number} startIndex  the ring's next slot, not yet wrapped
+ * @property {(value: number) => void} setStartIndex
+ */
+
+/**
  * Where translations are kept between runs.
  *
  * @typedef {Object} TranslationStore
