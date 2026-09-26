@@ -129,7 +129,7 @@ test('draining part of the queue leaves the rest, oldest first', ()=>{
 
 test('overflow drops the oldest and is reported once', ()=>{
     const { it } = device(KEYBOARD);
-    it.setBufferSize(2);
+    it.setBufferSize(3);
     for (const code of [1, 2, 3, 4])
     {
         it.post({ kind: 'key', code, down: true });
@@ -140,6 +140,36 @@ test('overflow drops the oldest and is reported once', ()=>{
         'the newest survive, or an overflow looks like the player stopped');
     assert.equal(it.drain(10).overflow, false,
         'reported twice, a program resynchronises for ever');
+});
+
+test('a buffer of N holds N - 1 events', ()=>{
+    // joystick8.c's buffered reads, in miniature. A buffer of one holds
+    // nothing: a change overflows it, a peek reports that and 0 events, and
+    // the read after the peek is DI_OK -- the peek took the report.
+    const one = device(KEYBOARD).it;
+    one.setBufferSize(1);
+    one.post({ kind: 'key', code: DIK_A, down: true });
+    assert.deepEqual(one.drain(1, true), { events: [], overflow: true });
+    assert.deepEqual(one.drain(1), { events: [], overflow: false });
+
+    // A buffer of ten: five changes, one peeked and four read, leave one;
+    // nine more make ten waiting for nine places, and the one that goes is
+    // the one left over from before.
+    const { it } = device(KEYBOARD);
+    it.setBufferSize(10);
+    /** @param {number[]} codes */
+    const press = codes=>codes.forEach(code=>it.post({ kind: 'key', code, down: true }));
+    press([1, 2, 3, 4, 5]);
+    assert.deepEqual(it.drain(1, true).events.map(e=>e.offset), [1]);
+    assert.deepEqual(it.drain(4).events.map(e=>e.offset), [1, 2, 3, 4]);
+    press([11, 12, 13, 14, 15]);
+    press([21, 22, 23, 24]);
+    const next = it.drain(1);
+    assert.equal(next.overflow, true);
+    assert.deepEqual(next.events.map(e=>e.offset), [11]);
+    const rest = it.drain(10);
+    assert.equal(rest.overflow, false);
+    assert.deepEqual(rest.events.map(e=>e.offset), [12, 13, 14, 15, 21, 22, 23, 24]);
 });
 
 test('setting a buffer size clears whatever was queued under the old one', ()=>{

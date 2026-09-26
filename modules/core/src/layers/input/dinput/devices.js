@@ -200,11 +200,14 @@ export function createInputDevice({ kind, now }){
             return;
         }
         queue.push({ offset, data, time: now(), sequence: sequence++ });
-        if (queue.length > bufferSize)
+        // A buffer of N holds N - 1 -- one of one holds nothing and only
+        // reports that it overflowed, as Windows does in Wine's joystick8.c.
+        if (queue.length > bufferSize - 1)
         {
             // The oldest goes, not the newest: a program draining a ring reads
             // the most recent events, and dropping those instead would make an
-            // overflow look like the player stopped moving.
+            // overflow look like the player stopped moving. joystick8.c's
+            // first read after an overflow is the oldest of the newer events.
             queue.shift();
             overflowed = true;
         }
@@ -365,11 +368,12 @@ export function createInputDevice({ kind, now }){
             if (!peek)
             {
                 queue = queue.slice(events.length);
-                // Reported once and cleared. A program resynchronises from the
-                // device state when it hears this; hearing it again on every
-                // later call would make it resynchronise for ever.
-                overflowed = false;
             }
+            // Reported once and cleared, by a peek as well. A program
+            // resynchronises from the device state when it hears this; hearing
+            // it again on every later call would make it resynchronise for
+            // ever.
+            overflowed = false;
             return { events, overflow };
         },
     };

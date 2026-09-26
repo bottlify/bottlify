@@ -588,7 +588,7 @@ test('DIGDD_PEEK leaves the events where they were', ()=>{
 
 test('an overflowed buffer answers DI_BUFFEROVERFLOW, which is a success', ()=>{
     const f = keyboard();
-    setBufferSize(f, f.device, 2);
+    setBufferSize(f, f.device, 3);
     for (const code of [1, 2, 3, 4])
     {
         f.dinput.post({ kind: 'key', code, down: true });
