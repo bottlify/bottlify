@@ -59,6 +59,9 @@ const MODULE_END = 16384;
 
 /** @type {WebAssembly.Module | null} */
 let compiled = null;
+/** What the process's hosts ran on the JavaScript interpreter before one started the tier: its
+ * start is paid once a process, so the stretch that waits for it to pay is the process's too. */
+const stretch = { work: 0 };
 
 /** The module, compiled once a process. */
 function wasmModule(){
@@ -96,31 +99,48 @@ export function createWasmInterpreter({ memory, layout, area, hotThreshold, trap
     {
         return null;
     }
-    const exports = /** @type {any} */ (
-        new WebAssembly.Instance(wasmModule(), { env: { memory } }).exports);
-    exports.configure(layout.ramBase, layout.tables + Tables.PAGE_FLAGS,
-        layout.tables + Tables.CODE_RANGES, layout.tables + Tables.HASH, layout.hashShift ?? 16,
-        layout.regs, layout.eip, layout.eflags, layout.fsBase, area, HOT_SLOTS, hotThreshold,
-        // No port a byte or a word can name: every `out` is left to the JavaScript tier.
-        trapPort ?? 0x10000, parkBase >>> 0);
+    // The module is decoded, compiled and instantiated at the first run, not
+    // here: a process whose programs the JavaScript interpreter carries alone
+    // (their first stretch) never pays for it, nor for the optimising compile
+    // the wasm engine gives `run` once it has looped a few hundred times.
+    // The exports are taken out once, not looked up on the exports object at
+    // every run: a run is a crossing a region's every untranslated exit may make.
+    /** @type {((budget: number) => number) | null} */
+    let run = null;
+    let retired = ()=>0;
+    let exitValue = ()=>0;
+    let exitSize = ()=>0;
+    const instantiate = ()=>{
+        const exports = /** @type {any} */ (
+            new WebAssembly.Instance(wasmModule(), { env: { memory } }).exports);
+        exports.configure(layout.ramBase, layout.tables + Tables.PAGE_FLAGS,
+            layout.tables + Tables.CODE_RANGES, layout.tables + Tables.HASH, layout.hashShift ?? 16,
+            layout.regs, layout.eip, layout.eflags, layout.fsBase, area, HOT_SLOTS, hotThreshold,
+            // No port a byte or a word can name: every `out` is left to the JavaScript tier.
+            trapPort ?? 0x10000, parkBase >>> 0);
+        ({ retired, exitValue, exitSize } = exports);
+        run = /** @type {(budget: number) => number} */ (exports.run);
+        return run;
+    };
     const view = new DataView(memory.buffer);
     const starts = new Uint32Array(memory.buffer, area + HOT_SLOTS, RING_STARTS);
     const index = area + HOT_SLOTS + RING_STARTS * 4;
-    const run = exports.run;
     return {
         run(budget){
             // The record a region left, folded into the word the tier reads.
             eflagsOf(view, layout);
-            return run(budget);
+            return (run ?? instantiate())(budget);
         },
-        retired: exports.retired,
-        exitValue: ()=>exports.exitValue() >>> 0,
-        exitSize: exports.exitSize,
+        retired: ()=>retired(),
+        exitValue: ()=>exitValue() >>> 0,
+        exitSize: ()=>exitSize(),
         hotCounts: new Uint8Array(memory.buffer, area, HOT_SLOTS),
         starts,
         startIndex: ()=>view.getUint32(index, true),
         setStartIndex(value){
             view.setUint32(index, value >>> 0, true);
         },
+        started: ()=>compiled !== null,
+        stretch,
     };
 }

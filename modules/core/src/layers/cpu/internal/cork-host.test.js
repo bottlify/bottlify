@@ -328,6 +328,92 @@ test('a tight loop run with no frame to feed the translator is translated in its
         `translated share ${h.cork().counters().translatedShare}`);
 });
 
+/**
+ * The engine with what each interpreter retires counted, its wasm tier's
+ * process-wide stretch and start standing for a process of its own: a fresh
+ * one, whatever tests ran in this one before.
+ */
+function countingEngine(){
+    const retired = { js: 0, wasm: 0 };
+    const stretch = { work: 0 };
+    let started = false;
+    const counting = {
+        ...engine,
+        /** @param {any} state @param {number} budget @param {any} hooks */
+        interpret(state, budget, hooks){
+            const before = state.retired;
+            try
+            {
+                return engine.interpret(state, budget, hooks);
+            }
+            finally
+            {
+                retired.js += state.retired - before;
+            }
+        },
+        /** @param {any} options */
+        createWasmInterpreter(options){
+            const tier = engine.createWasmInterpreter(options);
+            return tier && { ...tier, stretch, started: ()=>started,
+                run(/** @type {number} */ budget){
+                    started = true;
+                    const code = tier.run(budget);
+                    retired.wasm += tier.retired();
+                    return code;
+                } };
+        },
+    };
+    return { counting, retired };
+}
+
+/** mov ecx, n; L: dec ecx; jnz L; hlt -- 2n + 2 instructions, one jump target. */
+const countdown = (/** @type {number} */ n)=>[0xb9, n & 0xff, n >>> 8 & 0xff, n >>> 16, 0,
+    0x49, 0x75, 0xfd, 0xf4];
+
+/**
+ * Runs a program to its halt on a fresh host of a counting engine, and
+ * answers what each interpreter retired for it.
+ *
+ * @param {ReturnType<typeof countingEngine>} counted @param {number[]} code
+ * @param {Record<string, unknown>} [cork]
+ */
+function runCounted(counted, code, cork = {}){
+    const before = { ...counted.retired };
+    const h = host({ engine: counted.counting, cork: { translate: false, ...cork } });
+    load(h, 0x1000, code);
+    h.runSlice(100_000);
+    assert.ok(h.halted());
+    return { js: counted.retired.js - before.js, wasm: counted.retired.wasm - before.wasm };
+}
+
+test('the JavaScript interpreter carries a process\'s first stretch, the wasm tier the rest', ()=>{
+    assert.deepEqual(runCounted(countingEngine(), countdown(2000)), { js: 4002, wasm: 0 },
+        'a program this short never starts the tier');
+    const long = runCounted(countingEngine(), countdown(10_000));
+    assert.equal(long.js + long.wasm, 20_002);
+    assert.ok(long.js > 8000 && long.js <= 8192, `the stretch, then the tier: ${long.js}`);
+    // 200 short jumps, each to the next four bytes on: every one a target new to the
+    // interpreter, each in a count slot of its own.
+    const chain = runCounted(countingEngine(),
+        [...Array.from({ length: 200 }, ()=>[0xeb, 0x02, 0x90, 0x90]).flat(), 0xf4]);
+    assert.equal(chain.js + chain.wasm, 201);
+    assert.equal(chain.js, 65, 'new code hands over at its 64th new target, after the run there');
+    assert.deepEqual(runCounted(countingEngine(), countdown(2000), { wasmInterpreterAfter: 0 }),
+        { js: 0, wasm: 4002 }, 'no stretch');
+});
+
+test('the stretch is the process\'s: hosts add to it, a host after the tier started runs it',
+    ()=>{
+        const process = countingEngine();
+        assert.deepEqual(runCounted(process, countdown(2000)), { js: 4002, wasm: 0 });
+        const second = runCounted(process, countdown(2000));
+        assert.equal(second.js + second.wasm, 4002);
+        assert.ok(second.js < 4002 && second.js > 3900,
+            `the second host spends what the first left of the stretch: ${second.js}`);
+        assert.deepEqual(runCounted(process, countdown(2000)), { js: 0, wasm: 4002 },
+            'the tier started, a third host runs it from its first instruction');
+    });
+
 test('a slow slice accounts for itself only when the translator\'s timings are asked for', ()=>{
     // mov ecx, 250000; L: add eax, ecx; xor ebx, eax; dec ecx; jnz L; hlt -- a
     // million instructions on the JavaScript interpreter in one slice, past its

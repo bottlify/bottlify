@@ -58,6 +58,20 @@ const DEFAULT_MXCSR = 0x1f80;
 const DEFAULT_EFLAGS = 0x2;
 /** The flat 32-bit code selector the segments are implicit at. */
 const FLAT_CS = 0x08;
+/**
+ * How far the JavaScript interpreter carries a process's hosts before the wasm
+ * tier takes over, in their instructions (`wasmInterpreterAfter`'s default),
+ * and what a jump target new to a host counts as. The tier's start -- its
+ * module compiled, and the optimising compile the wasm engine gives its `run`
+ * a few hundred instructions in, once a process -- costs more on one core than
+ * the two to four thousand instructions a small program interprets before its
+ * loops are translated; new code is what the JavaScript interpreter is slow at
+ * (a decode and closures an instruction), so a loader or a table of many small
+ * functions hands over within a few dozen new targets, a loop only once it has
+ * run the whole stretch.
+ */
+const WASM_AFTER = 8192;
+const NEW_TARGET_WORK = 128;
 /** The names an engine module must export for this host. */
 const ENGINE_EXPORTS = Object.freeze([
     'createEngine', 'ownLayout', 'pagesFor', 'Tables', 'STATE_BLOCK_SIZE',
@@ -151,9 +165,11 @@ export function createCorkHost(config){
     /**
      * The interpreter tier in wasm (`interp-wasm.js`): the integer instruction
      * set run straight from guest memory, the JavaScript interpreter taking
-     * what it leaves. It counts hotness in the same table and keeps the same
-     * ring of starts, in its area past the tables; `wasmInterpreter: false`
-     * runs the JavaScript interpreter alone.
+     * what it leaves, once the JavaScript interpreter has carried the
+     * process's first stretch (`interpretRange`). It counts hotness in the
+     * same table and keeps the same ring of starts, in its area past the
+     * tables, from the first instruction; `wasmInterpreter: false` runs the
+     * JavaScript interpreter alone.
      *
      * @type {import('../engine.js').WasmInterpreter | null}
      */
@@ -354,11 +370,29 @@ export function createCorkHost(config){
         ? wasmTier.hotCounts : new Uint8Array(HOT_SLOTS);
     /** Instructions either interpreter has retired. */
     const interpretedSoFar = ()=>(interpreter?.retired ?? 0) + wasmRetired;
+    // The JavaScript interpreter's stretch before the wasm tier (WASM_AFTER).
+    // It is the process's, not the host's: the tier's start is paid once a
+    // process, so every host adds what it runs to the tier's one account, and
+    // a host made once the tier has started runs it from the first
+    // instruction. Once the stretch is spent the tier runs every range, and
+    // `wasmSwitch` ends the range it ran out in.
+    const wasmAfter = corkConfig?.wasmInterpreterAfter ?? WASM_AFTER;
+    let wasmDue = wasmTier !== null && (wasmAfter <= 0 || wasmTier.started());
+    let wasmSwitch = false;
     /** Counts one interpreted start and notes the address once it is hot.
      * @param {number} address
      */
     const countHot = address=>{
         const slot = (address >>> 2) & HOT_MASK;
+        if (hotCounts[slot] === 0 && !wasmDue && wasmTier !== null)
+        {
+            wasmTier.stretch.work += NEW_TARGET_WORK;
+            if (wasmTier.stretch.work >= wasmAfter)
+            {
+                wasmDue = true;
+                wasmSwitch = true;
+            }
+        }
         // Saturating: past 255 a start is as hot as it gets.
         if (hotCounts[slot] < 255)
         {
@@ -461,7 +495,7 @@ export function createCorkHost(config){
         // eip or stop the machine; an address with an entry is translated code
         // and a different register file.
         shouldStop: ()=>interpreter.trapped.length > 0 || feedDue || translateDue || hooks.once
-            || runtime.entryOf(interpreter.eip, x87Top()) >= 0,
+            || wasmSwitch || runtime.entryOf(interpreter.eip, x87Top()) >= 0,
         onStep: (/** @type {number} */ at, /** @type {boolean} */ jumped)=>{
             lastStart = at;
             // Neither the park loop nor a slide through zero-filled memory
@@ -507,14 +541,35 @@ export function createCorkHost(config){
      * slice's end or at a feed -- and a start counted there became a region
      * entered in the middle of another's block, a different set each run.
      *
+     * The JavaScript interpreter runs the process's first stretch
+     * (`WASM_AFTER`) even where the wasm tier exists, a range cut where the
+     * stretch ends.
+     *
      * @param {number} address @param {number} budget @param {boolean} [force]
      * @param {boolean} [jumpedIn]
      * @returns {number}
      */
-    const interpretRange = (address, budget, force = false, jumpedIn = false)=>(
-        wasmTier !== null && !force
-            ? interpretWasm(wasmTier, address, budget, jumpedIn)
-            : interpretJs(address, budget, force, jumpedIn, false));
+    const interpretRange = (address, budget, force = false, jumpedIn = false)=>{
+        if (wasmTier === null || force)
+        {
+            return interpretJs(address, budget, force, jumpedIn, false);
+        }
+        if (!wasmDue)
+        {
+            const account = wasmTier.stretch;
+            const left = wasmAfter - account.work;
+            if (left > 0 && !wasmTier.started())
+            {
+                const retired = interpretJs(address, Math.min(budget, left), false, jumpedIn,
+                    false);
+                account.work += retired;
+                return retired;
+            }
+            wasmDue = true;
+        }
+        wasmSwitch = false;
+        return interpretWasm(wasmTier, address, budget, jumpedIn);
+    };
 
     /**
      * The interpreter tier in wasm over a range, as `interpretRange` runs one:

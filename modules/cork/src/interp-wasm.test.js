@@ -352,6 +352,21 @@ test('the string instructions repeat, compare and stop as the JavaScript interpr
     }
 });
 
+test('the module is instantiated at the tier\'s first run, not when the tier is made', ()=>{
+    const m = machine();
+    // Its data and stack live in the page below RAM, past the state block: a
+    // tier made and never run has written nothing there.
+    const own = m.bytes.subarray(512, m.layout.ramBase);
+    assert.ok(own.every(byte=>byte === 0), 'nothing of the module yet');
+    assert.equal(m.tier.retired(), 0);
+    reset(m, [0x40, 0xf4], random(10));
+    assert.equal(m.tier.run(100), WasmExit.HALT);
+    assert.equal(m.tier.retired(), 2);
+    assert.ok(own.some(byte=>byte !== 0), 'the module\'s data, once it has run');
+    assert.equal(m.tier.started(), true, 'and the process has the tier started');
+    assert.equal(machine().tier.stretch, m.tier.stretch, 'one stretch for every tier of a process');
+});
+
 test('an instruction the tier does not run is left at eip, unexecuted', ()=>{
     const m = machine();
     // inc eax; fld1; hlt

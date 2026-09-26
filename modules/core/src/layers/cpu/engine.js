@@ -150,6 +150,10 @@
  * @property {boolean} [wasmInterpreter]  Under cork alone, the interpreter tier's integer
  *     instructions run in wasm (`interp-wasm.js`), the JavaScript interpreter taking the rest;
  *     false runs the JavaScript interpreter alone. Default true.
+ * @property {number} [wasmInterpreterAfter]  How far the JavaScript interpreter carries a
+ *     process's cork hosts, between them, before the wasm tier takes over: their instructions,
+ *     a jump target new to a host counting as 128. Default 8192; 0 runs the wasm tier from the
+ *     first instruction.
  */
 
 /**
@@ -168,6 +172,11 @@
  * @property {Uint32Array} starts       the ring of recent jump targets
  * @property {() => number} startIndex  the ring's next slot, not yet wrapped
  * @property {(value: number) => void} setStartIndex
+ * @property {() => boolean} started    whether the process has started the tier already (its
+ *     module compiled at a first run), so a run costs no start
+ * @property {{ work: number }} stretch  what the process's hosts have run on the JavaScript
+ *     interpreter before the tier started, one record for every tier of the process, as the
+ *     tier's start is paid once a process (`wasmInterpreterAfter`)
  */
 
 /**
