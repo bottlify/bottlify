@@ -632,3 +632,44 @@ test('errno is one variable: a failing call sets what _errno points at', ()=>{
     assert.equal(fns.strtol.handler([put(0x100, '99999999999'), 0, 10]), 0x7fffffff);
     assert.equal(u32(cell), ERANGE, 'and written through the cell after');
 });
+
+test('sprintf_s and vsprintf_s write what fits with its terminator, and refuse the rest', ()=>{
+    // "If the buffer is too small for the formatted text, including the
+    // terminating null, then the buffer is set to an empty string"; a null
+    // buffer or format is -1 and EINVAL, as a size of zero is for vsprintf_s.
+    const { host, fns, put, u32 } = wholeRuntime({
+        stat: ()=>null, currentDirectory: ()=>'C:\\', setCurrentDirectory: ()=>true,
+    });
+    const errno = fns._errno.handler([]);
+    const format = put(0x100, '%s=%d');
+    const name = put(0x120, 'x');
+    host.writeMemory(0x140, new Uint8Array([name & 0xff, name >>> 8 & 0xff, 0, 0, 42, 0, 0, 0]));
+    const text = (/** @type {number} */ address)=>host.readCString(address, 64);
+    const ERANGE = 34;
+    const EINVAL = 22;
+
+    assert.equal(fns.sprintf_s.handler([0x200, 5, format, name, 42]), 4, 'exactly room');
+    assert.equal(text(0x200), 'x=42');
+    assert.equal(fns.vsprintf_s.handler([0x300, 16, format, 0x140]), 4);
+    assert.equal(text(0x300), 'x=42');
+
+    host.bytes.fill(0x7f, 0x400, 0x408);
+    assert.equal(fns.sprintf_s.handler([0x400, 4, format, name, 42]), -1,
+        'no room for the terminator');
+    assert.deepEqual([...host.bytes.subarray(0x400, 0x402)], [0, 0x7f]);
+    assert.equal(u32(errno), ERANGE);
+    host.bytes[0x400] = 0x7f;
+    assert.equal(fns.vsprintf_s.handler([0x400, 2, format, 0x140]), -1);
+    assert.equal(host.bytes[0x400], 0);
+
+    assert.equal(fns.sprintf_s.handler([0, 16, format]), -1);
+    assert.equal(u32(errno), EINVAL);
+    host.writeMemory(errno, new Uint8Array(4));
+    assert.equal(fns.vsprintf_s.handler([0x400, 16, 0, 0x140]), -1);
+    assert.equal(u32(errno), EINVAL);
+    host.writeMemory(errno, new Uint8Array(4));
+    assert.equal(fns.vsprintf_s.handler([0x400, 0, format, 0x140]), -1);
+    assert.equal(u32(errno), EINVAL);
+    assert.deepEqual([fns.sprintf_s.convention, fns.vsprintf_s.argBytes], ['cdecl', 16]);
+    assert.ok(fns.sprintf_s.argBytes >= 12 + 4 * 4, 'sprintf_s reads a tail');
+});

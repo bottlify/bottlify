@@ -34,7 +34,7 @@ import { createMathFunctions } from './math.js';
 import { createStartupFunctions } from './startup.js';
 import { createStdioFunctions } from './stdio.js';
 import { createThreadFunctions } from './threads.js';
-import { createGlobals } from './globals.js';
+import { createGlobals, EINVAL, ERANGE } from './globals.js';
 import { createDescriptors, createIoFunctions } from './io.js';
 
 /** How many argument slots a `va_list` is read for, since it carries no count. */
@@ -229,6 +229,32 @@ export function createMsvcrtFunctions(host){
      */
     const varargsAt = list=>varargsSlots(
         host.readMemory, address=>host.regionAt?.(address) ?? null, list, VA_LIST_SLOTS);
+
+    /**
+     * The secure printers' shared body. A size of zero leaves nowhere to put
+     * even the terminator, which is the same invalid parameter as a null
+     * buffer.
+     *
+     * @param {number} buffer @param {number} size @param {number} format
+     * @param {number[]} values
+     */
+    const boundedPrint = (buffer, size, format, values)=>{
+        const room = size >>> 0;
+        if ((buffer >>> 0) === 0 || (format >>> 0) === 0 || room === 0)
+        {
+            errno(EINVAL);
+            return -1;
+        }
+        const text = formatToString(readString(format), values, readString);
+        if (text.length + 1 > room)
+        {
+            host.writeMemory(buffer, new Uint8Array(1));
+            errno(ERANGE);
+            return -1;
+        }
+        writeString(buffer, text);
+        return text.length;
+    };
 
     /**
      * Where the runtime would report a fatal error. Nothing here reports one,
@@ -687,6 +713,30 @@ export function createMsvcrtFunctions(host){
                 writeString(buffer, text);
                 return text.length;
             },
+        },
+
+        /**
+         * int sprintf_s(char *buffer, size_t size, const char *format, ...)
+         *
+         * sprintf with the buffer's size: text that does not fit with its
+         * terminator is not written at all -- the buffer is left an empty
+         * string, and the answer is -1 with ERANGE. A null buffer or format
+         * is -1 and EINVAL.
+         */
+        sprintf_s: {
+            convention: 'cdecl',
+            argBytes: 12 + VARIADIC_SLOTS * 4,
+            /** @param {number[]} args */
+            handler: args=>boundedPrint(args[0], args[1], args[2], args.slice(3)),
+        },
+
+        /** int vsprintf_s(char *buffer, size_t size, const char *format, va_list args) */
+        vsprintf_s: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([buffer, size, format, list])=>
+                boundedPrint(buffer, size, format, (format >>> 0) === 0 ? [] : varargsAt(list)),
         },
 
         /** int vprintf(const char *format, va_list args) */

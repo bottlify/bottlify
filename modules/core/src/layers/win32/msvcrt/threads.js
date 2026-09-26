@@ -30,6 +30,10 @@
  * @property {(code: number) => any} exit
  *           Ends the calling thread with the code and answers with what the
  *           call must return, since the call does not come back.
+ * @property {(milliseconds: number) => any} [sleep]
+ *           Suspends the calling thread for that long, the way Sleep does,
+ *           and answers with what the call must return meanwhile. Absent,
+ *           `_sleep` stays unexported.
  */
 
 /**
@@ -76,5 +80,19 @@ export function createThreadFunctions(seam){
 
         /** void _endthreadex(unsigned code) */
         _endthreadex: cdecl(4, ([code])=>seam.exit(code >>> 0)),
+
+        /**
+         * void _sleep(unsigned long milliseconds)
+         *
+         * Sleep under the runtime's older name, except that zero is a wait of
+         * one millisecond rather than a yield: a loop that sleeps "nothing"
+         * between polls still lets time pass.
+         */
+        ...(seam.sleep
+            ? {
+                _sleep: cdecl(4, ([milliseconds])=>
+                    /** @type {(ms: number) => any} */ (seam.sleep)((milliseconds >>> 0) || 1)),
+            }
+            : {}),
     };
 }
