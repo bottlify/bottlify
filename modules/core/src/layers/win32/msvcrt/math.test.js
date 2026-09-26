@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMathFunctions } from './math.js';
+import { FTOL_CODE, createMathFunctions } from './math.js';
 import { fakeMemory, fakeFpu, doubleSlots } from './harness.test.js';
 
 const build = ()=>{
@@ -66,20 +66,16 @@ test('the _CI form of a binary function reads ST(1) as the left operand', ()=>{
     assert.equal(fpu.stack.length, 1);
 });
 
-test('_ftol truncates towards zero rather than rounding', ()=>{
-    const { fpu, table } = build();
-    fpu.load([2.9]);
-    assert.equal(table._ftol.handler([]), 2);
-    fpu.load([-2.9]);
-    assert.equal(table._ftol.handler([]), -2, 'not -3');
-    assert.equal(table._ftol2, table._ftol, 'the same function under both names');
-});
-
-test('_ftol consumes its argument', ()=>{
-    const { fpu, table } = build();
-    fpu.load([1.5, 9]);
-    table._ftol.handler([]);
-    assert.deepEqual(fpu.stack, [9]);
+test('_ftol and its two other names are one body of guest code: fisttp into EDX:EAX', ()=>{
+    // What it answers is held in crt-inguest.itest.js, run on both engines.
+    const { table } = build();
+    assert.deepEqual(table._ftol.data(), FTOL_CODE);
+    assert.equal(table._ftol2, table._ftol);
+    assert.equal(table._ftol2_sse, table._ftol);
+    assert.equal('handler' in table._ftol, false, 'no crossing into the host');
+    assert.deepEqual([...FTOL_CODE.subarray(0, 4)], [0xdd, 0x4c, 0x24, 0xf8],
+        'fisttp qword [esp-8]');
+    assert.equal(FTOL_CODE[FTOL_CODE.length - 1], 0xc3, 'and a ret');
 });
 
 test('ldexp scales by a power of two given as a plain integer slot', ()=>{

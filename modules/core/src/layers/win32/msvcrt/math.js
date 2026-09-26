@@ -67,6 +67,10 @@ const BINARY = {
     hypot: Math.hypot,
 };
 
+/** `_ftol`'s body: fisttp qword [esp-8]; mov eax, [esp-8]; mov edx, [esp-4]; ret. */
+export const FTOL_CODE = Uint8Array.of(
+    0xdd, 0x4c, 0x24, 0xf8, 0x8b, 0x44, 0x24, 0xf8, 0x8b, 0x54, 0x24, 0xfc, 0xc3);
+
 /**
  * @param {MathHost} host
  */
@@ -116,27 +120,16 @@ export function createMathFunctions(host){
     }
 
     /**
-     * long _ftol(double value)
+     * __int64 _ftol(double value)
      *
-     * The cast every `(int)` in compiled C goes through. It truncates towards
-     * zero -- not the rounding the FPU's own control word asks for, which is
-     * exactly why the compiler calls a function instead of emitting `fistp`.
-     *
-     * It is declared as returning __int64, in EDX:EAX. Only EAX is set here,
-     * because a handler has no way to reach EDX; a program casting to `int`
-     * reads EAX alone and is right, and one casting to `__int64` reads a high
-     * half that is whatever EDX already held. Widening the return path is the
-     * fix, and it belongs in the bridge rather than here.
+     * The cast every `(int)` in compiled C goes through: ST0 truncated toward
+     * zero into EDX:EAX, the integer indefinite for NaN and out of range. It is
+     * code in the guest's own module rather than a handler -- `fisttp` and the
+     * two halves read back -- so a cast costs an instruction, not a crossing,
+     * and the high half is there. `fisttp` stores below ESP, where the call has
+     * just written its return address: bytes the program gave up.
      */
-    const ftol = {
-        convention: 'cdecl',
-        argBytes: 0,
-        handler: ()=>{
-            const value = fpu.get(0);
-            fpu.pop();
-            return Math.trunc(value) | 0;
-        },
-    };
+    const ftol = { data: ()=>FTOL_CODE };
 
     return {
         ...table,
