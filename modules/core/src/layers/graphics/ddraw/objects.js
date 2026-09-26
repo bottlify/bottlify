@@ -51,8 +51,10 @@ import {
     DDERR_CANNOTDETACHSURFACE,
     DDERR_DCALREADYCREATED,
     DDERR_CLIPPERISUSINGHWND,
+    DDERR_INVALIDCAPS,
     DDERR_INVALIDMODE,
     DDERR_INVALIDPARAMS,
+    DDERR_INVALIDSURFACETYPE,
     DDERR_NOCLIPPERATTACHED,
     DDERR_NOCOLORKEY,
     DDERR_NOCOLORKEYHW,
@@ -75,7 +77,9 @@ import {
     DDPF_PALETTEINDEXED8,
     DDPF_RGB,
     DDPF_ZBUFFER,
+    DDSCAPS2_D3DTEXTUREMANAGE,
     DDSCAPS2_MIPMAPSUBLEVEL,
+    DDSCAPS2_TEXTUREMANAGE,
     DDSCAPS_FLIP,
     DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY,
@@ -83,8 +87,12 @@ import {
     DDSCAPS_ZBUFFER,
     DDSCL_EXCLUSIVE,
     DDSD_BACKBUFFERCOUNT,
+    DDSD_CAPS,
     DDSD_HEIGHT,
+    DDSD_LPSURFACE,
     DDSD_MIPMAPCOUNT,
+    DDSD_PITCH,
+    DDSD_PIXELFORMAT,
     DDSD_WIDTH,
     DDSD_ZBUFFERBITDEPTH,
     DD_OK,
@@ -147,7 +155,13 @@ const LEGACY_D3D = Object.freeze(new Set(['IDirect3D', 'IDirect3D2', 'IDirect3D3
  * @property {import("./structs.js").PixelFormatFields} [pixelFormat]
  * @property {ColorKey} [srcColorKey]   ddckCKSrcBlt, when DDSD_CKSRCBLT names it.
  * @property {ColorKey} [destColorKey]  ddckCKDestBlt, when DDSD_CKDESTBLT names it.
+ * @property {number} [pitch]           lPitch, when DDSD_PITCH names it.
+ * @property {number} [surfacePointer]  lpSurface, when DDSD_LPSURFACE names it.
  */
+
+/** The fields SetSurfaceDesc may name; lpSurface has to be among them. */
+const SETTABLE_FIELDS = DDSD_LPSURFACE | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH | DDSD_PIXELFORMAT
+    | DDSD_CAPS;
 
 /**
  * The pixel format of a depth buffer asked for by bit depth alone, which is
@@ -258,6 +272,7 @@ export function depthFormatForDepth(bitDepth){
  *           getAttachedSurface
  * @property {() => Surface[]} enumAttachedSurfaces
  * @property {(target?: Surface | null, flags?: number) => number} flip
+ * @property {(request: SurfaceRequest, flags: number) => number} setSurfaceDesc
  */
 
 /**
@@ -729,9 +744,14 @@ export function createDirectDraw(options = {}){
      */
     function makeSurface(spec){
         let caps = spec.caps >>> 0;
-        const bpp = bytesPerPixel(spec.pixelFormat);
-        const pitch = spec.width * (bpp > 0 ? bpp : 1);
-        let buffer = allocate(pitch * spec.height);
+        // The geometry is the creation's until SetSurfaceDesc hands the
+        // surface memory of the program's own, of a size it names.
+        let width = spec.width;
+        let height = spec.height;
+        let pixelFormat = spec.pixelFormat;
+        let bpp = bytesPerPixel(pixelFormat);
+        let pitch = width * (bpp > 0 ? bpp : 1);
+        let buffer = allocate(pitch * height);
 
         /** @type {Surface | null} */
         let flipNext = null;
@@ -805,10 +825,18 @@ export function createDirectDraw(options = {}){
             get caps2(){
                 return spec.caps2;
             },
-            width: spec.width,
-            height: spec.height,
-            pitch,
-            pixelFormat: spec.pixelFormat,
+            get width(){
+                return width;
+            },
+            get height(){
+                return height;
+            },
+            get pitch(){
+                return pitch;
+            },
+            get pixelFormat(){
+                return pixelFormat;
+            },
             get backBufferCount(){
                 return spec.backBufferCount;
             },
@@ -1019,12 +1047,12 @@ export function createDirectDraw(options = {}){
                 {
                     return fail(DDERR_SURFACEBUSY);
                 }
-                const area = wholeSurface(rect, spec.width, spec.height);
+                const area = wholeSurface(rect, width, height);
                 if (locks.some(held=>sameRect(held, area)))
                 {
                     return fail(DDERR_SURFACEBUSY);
                 }
-                if (!rectIsValid(area, spec.width, spec.height)
+                if (!rectIsValid(area, width, height)
                     && !acceptsMalformedLockRect(caps, spec.caps2))
                 {
                     return fail(DDERR_INVALIDPARAMS);
@@ -1076,8 +1104,8 @@ export function createDirectDraw(options = {}){
                     return { hr: DDERR_SURFACELOST, dc: null };
                 }
                 dc = createDc({
-                    width: spec.width,
-                    height: spec.height,
+                    width: width,
+                    height: height,
                     pitch,
                     bitCount: bpp * 8,
                     bits: buffer,
@@ -1086,7 +1114,7 @@ export function createDirectDraw(options = {}){
                     // surface with none of its own draws in the primary's, the
                     // colours its pixels are shown in once blitted there.
                     palette: bpp === 1 ? (palette ?? primaryPalette())?.pixels ?? null : null,
-                    format: spec.pixelFormat.greenMask === 0x07e0 ? '565' : '555',
+                    format: pixelFormat.greenMask === 0x07e0 ? '565' : '555',
                 });
                 return { hr: DD_OK, dc };
             },
@@ -1132,7 +1160,7 @@ export function createDirectDraw(options = {}){
                 {
                     return DDERR_CANNOTATTACHSURFACE;
                 }
-                if (other.width !== spec.width || other.height !== spec.height)
+                if (other.width !== width || other.height !== height)
                 {
                     return DDERR_CANNOTATTACHSURFACE;
                 }
@@ -1289,6 +1317,68 @@ export function createDirectDraw(options = {}){
                 }
                 members[members.length - 1].setBuffer(first);
                 surface.present();
+                return DD_OK;
+            },
+
+            /**
+             * Puts the surface over memory the program owns, with a new size,
+             * pitch or format if it names one. Only a system-memory surface
+             * the runtime does not manage can be moved -- video memory and
+             * the screen are not the program's to point elsewhere -- and that
+             * is decided before the descriptor is read. The memory has to be
+             * named every time: the call hands memory over, it does not
+             * resize. The pitch is the program's word, checked only for being
+             * a positive whole number of dwords. Everything else the surface
+             * has -- keys, palette, attachments -- is kept.
+             *
+             * @param {SurfaceRequest} request
+             * @param {number} flags  The call's own, which are reserved.
+             */
+            setSurfaceDesc(request, flags){
+                if (flags !== 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                if ((caps & DDSCAPS_SYSTEMMEMORY) === 0 || (caps & DDSCAPS_PRIMARYSURFACE) !== 0
+                    || (spec.caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) !== 0)
+                {
+                    return DDERR_INVALIDSURFACETYPE;
+                }
+                const named = request.flags >>> 0;
+                const has = (/** @type {number} */ flag)=>(named & flag) !== 0;
+                if ((named & ~SETTABLE_FIELDS) !== 0 || !has(DDSD_LPSURFACE)
+                    || (request.surfacePointer ?? 0) >>> 0 === 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                if (has(DDSD_CAPS) && request.caps !== 0)
+                {
+                    return DDERR_INVALIDCAPS;
+                }
+                const newPitch = (request.pitch ?? 0) | 0;
+                if ((has(DDSD_HEIGHT) && !((request.height ?? 0) > 0))
+                    || has(DDSD_WIDTH) !== has(DDSD_PITCH)
+                    || (has(DDSD_WIDTH) && (!((request.width ?? 0) > 0) || newPitch <= 0
+                        || (newPitch & 3) !== 0)))
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                buffer = /** @type {number} */ (request.surfacePointer) >>> 0;
+                if (has(DDSD_WIDTH))
+                {
+                    width = /** @type {number} */ (request.width);
+                    pitch = newPitch;
+                }
+                if (has(DDSD_HEIGHT))
+                {
+                    height = /** @type {number} */ (request.height);
+                }
+                if (has(DDSD_PIXELFORMAT) && request.pixelFormat)
+                {
+                    pixelFormat = request.pixelFormat;
+                    bpp = bytesPerPixel(pixelFormat);
+                }
+                uniqueness++;
                 return DD_OK;
             },
         };

@@ -224,6 +224,7 @@ export function writePixelFormat(memory, address, format){
  * @property {PixelFormatFields} pixelFormat
  * @property {{ low: number, high: number }} [srcColorKey]   Read and written under DDSD_CKSRCBLT.
  * @property {{ low: number, high: number }} [destColorKey]  Read and written under DDSD_CKDESTBLT.
+ * @property {number} [surfacePointer]  lpSurface: memory the program hands over, or a lock's.
  */
 
 /**
@@ -264,6 +265,7 @@ export function readSurfaceDesc(memory, address, layout){
         pixelFormat: readPixelFormat(memory, address + layout.ddpfPixelFormat),
         srcColorKey: keyAt(DDSD_CKSRCBLT, layout.ddckCKSrcBlt),
         destColorKey: keyAt(DDSD_CKDESTBLT, layout.ddckCKDestBlt),
+        surfacePointer: field(layout.lpSurface),
     };
 }
 
@@ -279,7 +281,7 @@ export function readSurfaceDesc(memory, address, layout){
  * @param {DrawMemory} memory
  * @param {number} address
  * @param {typeof DDSURFACEDESC | typeof DDSURFACEDESC2} layout
- * @param {SurfaceDescFields & { surfacePointer?: number }} desc
+ * @param {SurfaceDescFields} desc
  */
 export function writeSurfaceDesc(memory, address, layout, desc){
     writeU32(memory, address + layout.dwSize, layout.SIZE);

@@ -925,6 +925,14 @@ export function createDirectDrawSeam(
             PageUnlock: ()=>DD_OK,
 
             /** @param {any} surface @param {number[]} args */
+            SetSurfaceDesc: (surface, [desc, flags])=>{
+                const request = (desc >>> 0) === 0
+                    ? null
+                    : readSurfaceDesc(memory, desc >>> 0, layout);
+                return request ? surface.setSurfaceDesc(request, flags >>> 0) : DDERR_INVALIDPARAMS;
+            },
+
+            /** @param {any} surface @param {number[]} args */
             GetUniquenessValue: (surface, [out])=>{
                 if ((out >>> 0) === 0)
                 {

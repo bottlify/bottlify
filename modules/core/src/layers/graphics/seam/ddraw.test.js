@@ -26,7 +26,7 @@ import {
     IDIRECTDRAWPALETTE_SLOTS, IDIRECTDRAWCLIPPER_SLOTS,
 } from './vtables.js';
 import { IID_IDirectDraw4, IID_IDirectDraw7, IID_IDirectDrawSurface7 } from './iids.js';
-import { DDBLTFX, DDCAPS, RECT, createFields } from './structs.js';
+import { DDBLTFX, DDCAPS, DDCOLORKEY, RECT, createFields } from './structs.js';
 import {
     DDDEVICEIDENTIFIER2, DDSURFACEDESC, DDSURFACEDESC2, MAX_DDDEVICEID_STRING, writeSurfaceDesc,
 } from '../ddraw/structs.js';
@@ -1436,6 +1436,197 @@ test('GetDeviceIdentifier names the driver DLL and the adapter, and fills its ow
         assert.equal(h.box.memory.readU32(out + DDDEVICEIDENTIFIER2.dwWHQLLevel), 0xcccccccc);
 
         assert.equal(h.release(fourth), 0);
+        assert.equal(h.release(ddraw), 0);
+        h.assertAllReleased();
+    });
+
+// --- SetSurfaceDesc, after Wine's ddraw7 test_set_surface_desc ---
+
+const DDSD_PITCH = 0x00000008;
+const DDSD_LPSURFACE = 0x00000800;
+const DDSCAPS_SYSTEMMEMORY = 0x00000800;
+const DDSCAPS_VIDEOMEMORY = 0x00004000;
+const DDERR_INVALIDCAPS = 0x88760064;
+const DDERR_INVALIDSURFACETYPE = 0x88760250;
+const X8R8G8B8 = Object.freeze({ size: 0x20, flags: DDPF_RGB, fourCC: 0, bitCount: 32,
+    redMask: 0xff0000, greenMask: 0xff00, blueMask: 0xff, alphaMask: 0 });
+
+/**
+ * SetSurfaceDesc through the seventh generation, with a descriptor holding
+ * only what is given.
+ *
+ * @param {ReturnType<typeof seamed>} h @param {number} surface
+ * @param {{ flags: number, width?: number, height?: number, pitch?: number, caps?: number,
+ *   caps2?: number, pixelFormat?: any, lpSurface?: number }} fields
+ * @param {number} [flags]  The call's own flags argument.
+ */
+function setDesc(h, surface, fields, flags = 0){
+    const at = 0x5400;
+    h.box.bytes.fill(0, at, at + DDSURFACEDESC2.SIZE);
+    writeSurfaceDesc(h.box.services, at, DDSURFACEDESC2, {
+        flags: fields.flags, width: fields.width ?? 0, height: fields.height ?? 0,
+        pitch: fields.pitch ?? 0, backBufferCount: 0, mipMapCount: 0,
+        caps: fields.caps ?? 0, caps2: fields.caps2 ?? 0,
+        pixelFormat: fields.pixelFormat ?? X8R8G8B8, surfacePointer: fields.lpSurface,
+    });
+    return h.surface7(surface, 'SetSurfaceDesc', [at, flags]);
+}
+
+/** @param {ReturnType<typeof seamed>} h @param {number} surface @returns {any} */
+function descOf(h, surface){
+    const at = 0x5600;
+    h.box.memory.writeU32(at, DDSURFACEDESC2.SIZE);
+    assert.equal(h.surface7(surface, 'GetSurfaceDesc', [at]), DD_OK);
+    /** @param {number} offset */
+    const field = offset=>h.box.memory.readU32(at + offset);
+    return {
+        flags: field(DDSURFACEDESC2.dwFlags), width: field(DDSURFACEDESC2.dwWidth),
+        height: field(DDSURFACEDESC2.dwHeight), pitch: field(DDSURFACEDESC2.lPitch),
+        lpSurface: field(DDSURFACEDESC2.lpSurface), caps: field(DDSURFACEDESC2.dwCaps),
+        caps2: field(DDSURFACEDESC2.dwCaps2),
+        bitCount: field(DDSURFACEDESC2.ddpfPixelFormat + 0x0c),
+    };
+}
+
+/** @param {ReturnType<typeof seamed>} h @param {number} surface @returns {number} lpSurface */
+function lockedAt(h, surface){
+    const at = 0x5800;
+    h.box.memory.writeU32(at, DDSURFACEDESC2.SIZE);
+    assert.equal(h.surface7(surface, 'Lock', [0, at, 0, 0]), DD_OK);
+    const pointer = h.box.memory.readU32(at + DDSURFACEDESC2.lpSurface);
+    assert.equal(h.surface7(surface, 'Unlock', [0]), DD_OK);
+    return pointer;
+}
+
+test('SetSurfaceDesc puts a system-memory surface over the program\'s own memory', ()=>{
+    const h = seamed();
+    const ddraw = h.create7();
+    const plain = DDSCAPS_SYSTEMMEMORY | DDSCAPS_OFFSCREENPLAIN;
+    const surface = h.createSurface7(ddraw, { caps: plain, width: 8, height: 8 });
+    const data = 0x9000;
+
+    assert.equal(setDesc(h, surface, { flags: DDSD_LPSURFACE, lpSurface: data }), DD_OK);
+    assert.equal(setDesc(h, surface, { flags: DDSD_LPSURFACE, lpSurface: data }), DD_OK,
+        'the same memory again is not an error');
+    const described = descOf(h, surface);
+    assert.equal(described.flags & DDSD_LPSURFACE, 0, 'GetSurfaceDesc does not report it');
+    assert.equal(described.lpSurface, 0);
+    assert.equal(lockedAt(h, surface), data, 'a lock hands out the program\'s memory');
+
+    // A fill lands in the program's memory, not the memory the surface had.
+    const fx = 0x5700;
+    h.box.memory.writeU32(fx + DDBLTFX.dwSize, DDBLTFX.SIZE);
+    h.box.memory.writeU32(fx + DDBLTFX.dwFillColor, 0x00123456);
+    assert.equal(h.surface7(surface, 'Blt', [0, 0, 0, DDBLT_COLORFILL, fx]), DD_OK);
+    assert.equal(h.box.memory.readU32(data + 7 * 32 + 7 * 4), 0x00123456);
+
+    assert.equal(setDesc(h, surface, { flags: DDSD_LPSURFACE, lpSurface: data }, 1),
+        DDERR_INVALIDPARAMS, 'the flags argument is reserved');
+    assert.equal(setDesc(h, surface, { flags: DDSD_LPSURFACE, lpSurface: 0 }),
+        DDERR_INVALIDPARAMS, 'a null lpSurface');
+    assert.equal(h.surface7(surface, 'SetSurfaceDesc', [0, 0]), DDERR_INVALIDPARAMS);
+
+    // Caps cannot be set: without lpSurface the call is malformed, with it
+    // the caps are refused -- unless they are zero, and then caps2 is ignored.
+    assert.equal(setDesc(h, surface, { flags: DDSD_CAPS, caps: plain }), DDERR_INVALIDPARAMS);
+    assert.equal(setDesc(h, surface, { flags: DDSD_CAPS | DDSD_LPSURFACE, caps: plain,
+        lpSurface: data }), DDERR_INVALIDCAPS);
+    assert.equal(setDesc(h, surface, { flags: DDSD_CAPS | DDSD_LPSURFACE, caps: 0,
+        caps2: 0xdeadbeef, lpSurface: data }), DD_OK);
+    assert.deepEqual([descOf(h, surface).caps, descOf(h, surface).caps2], [plain, 0]);
+
+    // The height goes with lpSurface only, and never to zero.
+    assert.equal(setDesc(h, surface, { flags: DDSD_HEIGHT, height: 16 }), DDERR_INVALIDPARAMS);
+    assert.equal(setDesc(h, surface, { flags: DDSD_HEIGHT | DDSD_LPSURFACE, height: 16,
+        lpSurface: data }), DD_OK);
+    assert.equal(setDesc(h, surface, { flags: DDSD_HEIGHT | DDSD_LPSURFACE, height: 0,
+        lpSurface: data }), DDERR_INVALIDPARAMS);
+    assert.deepEqual([descOf(h, surface).width, descOf(h, surface).height], [8, 16]);
+
+    // The width and the pitch go together, and the pitch is dword-aligned
+    // and positive but otherwise taken at the program's word.
+    const both = DDSD_WIDTH | DDSD_PITCH | DDSD_LPSURFACE;
+    assert.equal(setDesc(h, surface, { flags: DDSD_PITCH | DDSD_LPSURFACE, pitch: 64,
+        lpSurface: data }), DDERR_INVALIDPARAMS);
+    assert.equal(setDesc(h, surface, { flags: DDSD_WIDTH | DDSD_LPSURFACE, width: 16,
+        lpSurface: data }), DDERR_INVALIDPARAMS);
+    assert.equal(setDesc(h, surface, { flags: both, width: 16, pitch: 64, lpSurface: data }),
+        DD_OK);
+    assert.deepEqual([descOf(h, surface).width, descOf(h, surface).pitch], [16, 64]);
+    for (const [width, pitch, hr] of [[16, 16, DD_OK], [16, 4, DD_OK],
+        [16, 65, DDERR_INVALIDPARAMS], [16, 67, DDERR_INVALIDPARAMS],
+        [16, -4, DDERR_INVALIDPARAMS], [16, 0, DDERR_INVALIDPARAMS],
+        [0, 64, DDERR_INVALIDPARAMS], [16, 64, DD_OK]])
+    {
+        assert.equal(setDesc(h, surface, { flags: both, width, pitch, lpSurface: data }), hr,
+            `width ${width}, pitch ${pitch}`);
+    }
+
+    assert.equal(setDesc(h, surface, { flags: DDSD_PIXELFORMAT }), DDERR_INVALIDPARAMS);
+    assert.equal(setDesc(h, surface, { flags: DDSD_PIXELFORMAT | DDSD_LPSURFACE,
+        lpSurface: data }), DD_OK);
+    assert.equal(setDesc(h, surface, { flags: DDSD_CKSRCBLT | DDSD_LPSURFACE, lpSurface: data }),
+        DDERR_INVALIDPARAMS, 'a colour key is not the descriptor\'s to set');
+
+    // Everything else about the surface is kept: its colour key survives a
+    // new size and format.
+    h.fields.writeStruct(0x5a00, DDCOLORKEY, { low: 0x00ff00ff, high: 0x00ff00ff });
+    assert.equal(h.surface7(surface, 'SetColorKey', [DDCKEY_SRCBLT, 0x5a00]), DD_OK);
+    const rgb565 = { size: 0x20, flags: DDPF_RGB, fourCC: 0, bitCount: 16,
+        redMask: 0xf800, greenMask: 0x07e0, blueMask: 0x001f, alphaMask: 0 };
+    assert.equal(setDesc(h, surface, { flags: both | DDSD_HEIGHT | DDSD_PIXELFORMAT, width: 8,
+        height: 8, pitch: 16, pixelFormat: rgb565, lpSurface: data }), DD_OK);
+    assert.equal(h.surface7(surface, 'GetColorKey', [DDCKEY_SRCBLT, 0x5a10]), DD_OK);
+    assert.equal(h.box.memory.readU32(0x5a10), 0x00ff00ff);
+    assert.deepEqual(descOf(h, surface), { flags: descOf(h, surface).flags, width: 8, height: 8,
+        pitch: 16, lpSurface: 0, caps: plain, caps2: 0, bitCount: 16 });
+    assert.equal(h.publisher.objectAt(surface).bytesPerPixel, 2);
+
+    assert.equal(h.release(surface), 0);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
+test('SetSurfaceDesc is for system memory the program may own: not video memory, not the primary',
+    ()=>{
+        const h = seamed();
+        const ddraw = h.create7();
+        const data = 0x9000;
+        for (const caps of [DDSCAPS_VIDEOMEMORY | DDSCAPS_OFFSCREENPLAIN,
+            DDSCAPS_OFFSCREENPLAIN])
+        {
+            const surface = h.createSurface7(ddraw, { caps, width: 8, height: 8 });
+            assert.equal(setDesc(h, surface, { flags: DDSD_LPSURFACE, lpSurface: data }),
+                DDERR_INVALIDSURFACETYPE);
+            assert.equal(setDesc(h, surface, { flags: DDSD_WIDTH }), DDERR_INVALIDSURFACETYPE,
+                'the surface is looked at before the descriptor');
+            assert.equal(h.release(surface), 0);
+        }
+        const primary = h.createSurface7(ddraw,
+            { caps: DDSCAPS_PRIMARYSURFACE | DDSCAPS_SYSTEMMEMORY });
+        assert.equal(setDesc(h, primary, { flags: DDSD_LPSURFACE, lpSurface: data }),
+            DDERR_INVALIDSURFACETYPE);
+        assert.equal(h.release(primary), 0);
+
+        // A mip chain in system memory: each level is its own memory, and
+        // setting one leaves the others where they were.
+        const top = h.createSurface7(ddraw, { caps: DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY
+            | DDSCAPS_COMPLEX | DDSCAPS_MIPMAP, width: 8, height: 8, mipMapCount: 3 });
+        h.box.memory.writeU32(0x5b00, DDSCAPS_TEXTURE);
+        h.box.bytes.fill(0, 0x5b04, 0x5b10);
+        assert.equal(h.surface7(top, 'GetAttachedSurface', [0x5b00, 0x5b20]), DD_OK);
+        const second = h.box.memory.readU32(0x5b20);
+        const secondAt = lockedAt(h, second);
+        assert.equal(setDesc(h, top, { flags: DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH
+            | DDSD_LPSURFACE, width: 8, height: 8, pitch: 32, lpSurface: data }), DD_OK);
+        assert.equal(lockedAt(h, second), secondAt);
+        assert.equal(setDesc(h, second, { flags: DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH
+            | DDSD_LPSURFACE, width: 4, height: 4, pitch: 16, lpSurface: data + 0x400 }), DD_OK);
+        assert.equal(lockedAt(h, second), data + 0x400);
+        assert.equal(lockedAt(h, top), data);
+
+        assert.equal(h.release(second), 1);
+        assert.equal(h.release(top), 0);
         assert.equal(h.release(ddraw), 0);
         h.assertAllReleased();
     });
