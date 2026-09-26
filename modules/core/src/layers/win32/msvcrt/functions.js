@@ -918,6 +918,7 @@ export function createMsvcrtFunctions(host){
                 readMemory: host.readMemory,
                 writeMemory: host.writeMemory,
                 fillMemory: host.fillMemory,
+                errno,
             })
             : {}),
         ...(host.systemTimeMs && host.now
