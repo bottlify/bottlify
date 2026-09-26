@@ -78,7 +78,16 @@ const BS_SOLID = 0;
 const BS_NULL = 1;
 const BS_HATCHED = 2;
 const BS_PATTERN = 3;
-const BRUSH_STYLES = new Set([BS_SOLID, BS_NULL, BS_HATCHED, BS_PATTERN]);
+/**
+ * A packed DIB's brush: lbHatch the DIB -- an HGLOBAL, which is its address
+ * here, or the address itself -- and lbColor its usage. BS_PATTERN8X8 is
+ * BS_PATTERN under an older name.
+ */
+const BS_DIBPATTERN = 5;
+const BS_DIBPATTERNPT = 6;
+const BS_PATTERN8X8 = 7;
+const BRUSH_STYLES = new Set([BS_SOLID, BS_NULL, BS_HATCHED, BS_PATTERN, BS_DIBPATTERN,
+    BS_DIBPATTERNPT, BS_PATTERN8X8]);
 
 /** Pen styles, PS_SOLID through PS_INSIDEFRAME. */
 const PS_NULL = 5;
@@ -190,9 +199,10 @@ const BI_BITFIELDS = 3;
 const IMAGE_COMPRESSIONS = new Set([4, 5]);
 
 /**
- * iUsage: the colour table is palette indices, not colours; or there is no
+ * iUsage: the colour table is colours; it is palette indices; or there is no
  * table, and each pixel is a palette index itself.
  */
+const DIB_RGB_COLORS = 0;
 const DIB_PAL_COLORS = 1;
 const DIB_PAL_INDICES = 2;
 
@@ -1051,6 +1061,83 @@ export function createGdiFunctions(host){
     };
 
     /**
+     * A pattern brush over a packed DIB -- header, masks, colour table and
+     * rows in one block -- or zero for one that cannot be a pattern.
+     *
+     * The rows are copied now, as a bitmap's are. A DIB_RGB_COLORS table is
+     * copied too, but a palette-relative one is kept as its indices: Windows
+     * resolves them through the palette the DC has when the brush paints,
+     * and again through the next one (Wine's test_palette_brush). LOGBRUSH
+     * names the DIB it was made from and no colour.
+     *
+     * @param {number} packed @param {number} usage
+     */
+    const dibPatternBrush = (packed, usage)=>{
+        if (packed === 0 || usage > DIB_PAL_INDICES)
+        {
+            return 0;
+        }
+        const header = readBitmapInfoHeader(host, packed);
+        const { width, bitCount, compression } = header;
+        const height = Math.abs(header.height);
+        const masked = compression === BI_BITFIELDS && (bitCount === 16 || bitCount === 32);
+        if (header.size < BITMAPINFOHEADER.SIZE || !BIT_COUNTS.has(bitCount)
+            || (compression !== BI_RGB && !masked) || width <= 0 || height === 0)
+        {
+            return 0;
+        }
+        const indexed = bitCount <= 8;
+        const size = colorTableSize(bitCount);
+        const entries = !indexed ? header.clrUsed
+            : usage === DIB_PAL_INDICES ? 0
+                : Math.min(header.clrUsed || size, size);
+        const table = packed + header.size
+            + (masked && header.size === BITMAPINFOHEADER.SIZE ? 12 : 0);
+        const bitsAt = table + entries * (usage === DIB_PAL_COLORS ? 2 : 4);
+        const stride = ddbStride(width, bitCount);
+        const pitch = dibStride(width, bitCount);
+        const pixels = new Uint8Array(stride * height);
+        for (let y = 0; y < height; y++)
+        {
+            const row = header.height < 0 ? y : height - 1 - y;
+            pixels.set(host.readMemory(bitsAt + row * pitch, stride), y * stride);
+        }
+        /** @type {number[] | undefined} */
+        let indices;
+        if (indexed && usage === DIB_PAL_COLORS)
+        {
+            const raw = host.readMemory(table, entries * 2);
+            indices = Array.from({ length: entries }, (_, index)=>raw[index * 2]
+                | (raw[index * 2 + 1] << 8));
+        }
+        else if (indexed && usage === DIB_PAL_INDICES)
+        {
+            indices = Array.from({ length: size }, (_, index)=>index);
+        }
+        return objects.create('brush', {
+            style: BS_DIBPATTERN,
+            color: 0,
+            hatch: packed,
+            pattern: {
+                width,
+                height,
+                bitCount,
+                pixels,
+                dib: true,
+                palette: indexed && !indices
+                    ? [...readColorTable(table, entries, DIB_RGB_COLORS, null, false),
+                        ...new Array(size - entries).fill(0)]
+                    : undefined,
+                indices,
+                compression,
+                bitfields: masked
+                    ? [0, 4, 8].map(at=>readU32(host, packed + BITMAPINFOHEADER.SIZE + at))
+                    : [0, 0, 0],
+            },
+        });
+    };
+
+    /**
      * Runs `action` over a memory context of this layer's own with `bitmap`
      * in it, whether or not a program has the bitmap selected somewhere: a
      * bitmap read back or drawn for the window manager is not a selection,
@@ -1459,8 +1546,12 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                return fields.style === BS_PATTERN
-                    ? patternBrush(fields.hatch)
+                if (fields.style === BS_PATTERN || fields.style === BS_PATTERN8X8)
+                {
+                    return patternBrush(fields.hatch);
+                }
+                return fields.style === BS_DIBPATTERN || fields.style === BS_DIBPATTERNPT
+                    ? dibPatternBrush(fields.hatch, fields.color)
                     : objects.create('brush', fields);
             },
         },
@@ -1476,6 +1567,24 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([bitmap])=>patternBrush(bitmap),
+        },
+
+        /**
+         * HBRUSH CreateDIBPatternBrushPt(const void *lpPackedDIB, UINT iUsage)
+         * HBRUSH CreateDIBPatternBrush(HGLOBAL hglbDIBPacked, UINT fuColorSpec)
+         *
+         * A brush over a packed DIB, which the BS_DIBPATTERNPT and BS_DIBPATTERN
+         * forms of a LOGBRUSH describe; an HGLOBAL is the address it locks to.
+         */
+        CreateDIBPatternBrushPt: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([packed, usage])=>dibPatternBrush(packed >>> 0, usage >>> 0),
+        },
+        CreateDIBPatternBrush: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([packed, usage])=>dibPatternBrush(packed >>> 0, usage >>> 0),
         },
 
         /** HBRUSH CreateHatchBrush(int iHatch, COLORREF color) */

@@ -492,6 +492,56 @@ test('a pattern brush names its bitmap and no colour, and outlives the bitmap', 
     assert.equal(fns.CreateBrushIndirect.handler([STRUCT]), 0, 'no bitmap, no pattern');
 });
 
+test('a DIB pattern brush reads back as BS_DIBPATTERN naming its packed DIB', ()=>{
+    // Wine's test_pattern_brush: CreateDIBPatternBrushPt, CreateDIBPatternBrush
+    // and the BS_DIBPATTERN forms of LOGBRUSH all read back as BS_DIBPATTERN,
+    // colour zero, and the DIB they were made from -- an HGLOBAL's being its
+    // address here, which is what GlobalLock hands back for it. BS_PATTERN8X8
+    // reads back as BS_PATTERN. The usages end at DIB_PAL_COLORS + 1, and
+    // neither run-length encoding nor the other styles make a brush.
+    const { fns, memory } = setup();
+    const DIB = STRUCT + 0x40;
+    /** @param {number} bitCount @param {number} [compression] */
+    const putDib = (bitCount, compression = 0)=>{
+        memory.putU32s(DIB, [40, 32, 32, 1 | (bitCount << 16), compression, 0, 0, 0, 2, 0]);
+        memory.putU32s(DIB + 40, [0, 0x00ffffff]);
+    };
+    /** @param {number} brush @returns {number[]} its LOGBRUSH */
+    const logBrush = brush=>{
+        memory.fill(OUT, 3);
+        assert.equal(fns.GetObjectA.handler([brush, LOGBRUSH.SIZE, OUT]), LOGBRUSH.SIZE);
+        return [memory.u32(OUT), memory.u32(OUT + 4), memory.u32(OUT + 8)];
+    };
+    putDib(1);
+    assert.equal(fns.CreateDIBPatternBrushPt.argBytes, 8);
+    assert.deepEqual(logBrush(fns.CreateDIBPatternBrushPt.handler([DIB, 0])), [5, 0, DIB]);
+    assert.equal(fns.CreateDIBPatternBrush.argBytes, 8);
+    assert.deepEqual(logBrush(fns.CreateDIBPatternBrush.handler([DIB, 1])), [5, 0, DIB]);
+    for (const style of [5, 6])
+    {
+        memory.putU32s(STRUCT, [style, 1, DIB]);
+        assert.deepEqual(logBrush(fns.CreateBrushIndirect.handler([STRUCT])), [5, 0, DIB]);
+    }
+    const bitmap = fns.CreateBitmap.handler([8, 8, 1, 1, 0]);
+    memory.putU32s(STRUCT, [7, 0x12345, bitmap]);
+    assert.deepEqual(logBrush(fns.CreateBrushIndirect.handler([STRUCT])), [3, 0, bitmap]);
+
+    assert.ok(fns.CreateDIBPatternBrushPt.handler([DIB, 1]) > 0);
+    assert.ok(fns.CreateDIBPatternBrushPt.handler([DIB, 2]) > 0);
+    assert.equal(fns.CreateDIBPatternBrushPt.handler([DIB, 3]), 0);
+    assert.equal(fns.CreateDIBPatternBrushPt.handler([DIB, 4]), 0);
+    putDib(8, 1);
+    assert.equal(fns.CreateDIBPatternBrushPt.handler([DIB, 0]), 0, 'BI_RLE8');
+    putDib(4, 2);
+    assert.equal(fns.CreateDIBPatternBrushPt.handler([DIB, 0]), 0, 'BI_RLE4');
+    putDib(1);
+    for (const style of [8, 9, 4])
+    {
+        memory.putU32s(STRUCT, [style, 0, DIB]);
+        assert.equal(fns.CreateBrushIndirect.handler([STRUCT]), 0, `style ${style}`);
+    }
+});
+
 test('CreateFontIndirectA reads LOGFONTA at the documented offsets', ()=>{
     const { fns, memory, hdc } = withDC();
     putLogFont(memory, { height: -20, weight: 700, italic: 1, charSet: 0xcc });

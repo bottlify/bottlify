@@ -489,21 +489,30 @@ export function surfaceForDdb(attributes){
  * the brush was made with, in the layout GetBitmapBits hands out -- rows
  * top-down, each padded to a WORD -- whichever kind of bitmap it came from.
  * A copy of a device-dependent bitmap reads as that bitmap does, a single bit
- * being monochrome; a copy of a DIB section keeps the section's colours.
+ * being monochrome; a copy of a DIB keeps the DIB's colours, or, where the
+ * DIB's table was palette indices, takes them from `colors` -- the palette
+ * of the DC being painted, an index past its end wrapping to its start.
  *
  * @param {{ width: number, height: number, bitCount: number, pixels: Uint8Array,
- *           dib?: boolean, palette?: number[], format?: string,
+ *           dib?: boolean, palette?: number[], indices?: number[], format?: string,
  *           compression?: number, bitfields?: number[] }} pattern
+ * @param {number[]} [colors]
  * @returns {DepthSurface | null}
  */
-export function surfaceForPattern(pattern){
+export function surfaceForPattern(pattern, colors = []){
     const depth = pattern.bitCount;
     if (!pattern.dib)
     {
         return surfaceForDdb(pattern);
     }
     const format = formatOf(pattern);
-    if (!DEPTHS.has(depth) || (depth <= 8 && !pattern.palette) || format === null)
+    const palette = pattern.indices
+        ? Array.from({ length: 1 << depth }, (_, index)=>colors.length
+            && index < /** @type {number[]} */ (pattern.indices).length
+            ? colors[/** @type {number[]} */ (pattern.indices)[index] % colors.length]
+            : 0)
+        : pattern.palette;
+    if (!DEPTHS.has(depth) || (depth <= 8 && !palette) || format === null)
     {
         return null;
     }
@@ -514,7 +523,7 @@ export function surfaceForPattern(pattern){
         pitch: ddbPitch(pattern.width, depth),
         bytes: pattern.pixels,
         bitCount: depth,
-        palette: pattern.palette,
+        palette,
         format,
     });
 }

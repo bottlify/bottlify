@@ -38,6 +38,7 @@ import { colorToPixel, intersectRect, isEmptyRect, pixelToColor, surfaceBounds }
     from './surface.js';
 import { encodeDib, setDIBitsToDevice, stretchDIBits } from './dib.js';
 import { extTextOut, textExtent } from './text.js';
+import { paletteEntryToPixel } from '../../win32/gdi32/structs.js';
 
 /** What a call that should have returned a COLORREF says when it failed. */
 export const CLR_INVALID = 0xffffffff;
@@ -124,6 +125,12 @@ export function createGdiDrawing(options = {}){
             textColor: context.state.textColor,
             mono: context.surface.mono === true,
             origin: context.brushOrigin,
+            paletteColors: ()=>{
+                const palette = objects.get(context.state.palette ?? 0);
+                return palette && palette.type === 'palette'
+                    ? palette.attributes.entries.map(paletteEntryToPixel)
+                    : [];
+            },
         });
     };
 

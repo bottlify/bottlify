@@ -1091,3 +1091,63 @@ test('GetDIBits hands back the scan lines asked for, zeros where the bitmap is n
         assert.deepEqual(got, wanted, name);
     }
 });
+
+test('a DIB pattern brush paints its DIB, a palette-relative one through the DC\'s palette', ()=>{
+    // Wine's test_palette_brush: an 8-bit DIB_PAL_COLORS brush made before any
+    // palette is selected paints each index through the palette selected
+    // when it is drawn, and again through the next one.
+    const { fns, view, bytes } = wiredGdi();
+    putInfo(view, { width: 16, height: 16, bitCount: 32 });
+    const section = fns.CreateDIBSection.handler([0, WIRED_INFO, 0, WIRED_POINTER, 0, 0]);
+    const bits = view.getUint32(WIRED_POINTER, true);
+    const dc = fns.CreateCompatibleDC.handler([0]);
+    fns.SelectObject.handler([dc, section]);
+
+    const PACKED = 0x4000;
+    putInfo(view, { width: 16, height: 16, bitCount: 8 });
+    bytes.copyWithin(PACKED, WIRED_INFO, WIRED_INFO + 40);
+    for (let index = 0; index < 256; index++)
+    {
+        view.setUint16(PACKED + 40 + index * 2, 255 - index, true);
+        bytes[PACKED + 40 + 512 + index] = index;
+    }
+    const brush = fns.CreateDIBPatternBrushPt.handler([PACKED, 1]);
+    assert.notEqual(brush, 0);
+
+    const LOGPALETTE = 0x5000;
+    /** @param {(index: number) => number} red */
+    const palette = red=>{
+        view.setUint16(LOGPALETTE, 0x300, true);
+        view.setUint16(LOGPALETTE + 2, 256, true);
+        for (let index = 0; index < 256; index++)
+        {
+            bytes.set([red(index) & 0xff, index * 2 & 0xff, index * 2 & 0xff, 0],
+                LOGPALETTE + 4 + index * 4);
+        }
+        return fns.CreatePalette.handler([LOGPALETTE]);
+    };
+    fns.SelectObject.handler([dc, brush]);
+    for (const red of [(/** @type {number} */ index)=>index * 2,
+        (/** @type {number} */ index)=>index * 3])
+    {
+        fns.SelectPalette.handler([dc, palette(red), 0]);
+        bytes.fill(0xaa, bits, bits + 16 * 16 * 4);
+        assert.equal(fns.PatBlt.handler([dc, 0, 0, 16, 16, PATCOPY]), 1);
+        for (let index = 0; index < 256; index++)
+        {
+            const entry = 255 - index;
+            const expect = ((red(entry) & 0xff) << 16) | ((entry * 2 & 0xff) << 8)
+                | (entry * 2 & 0xff);
+            assert.equal(view.getUint32(bits + index * 4, true), expect, `${index}`);
+        }
+    }
+
+    // A DIB_RGB_COLORS brush keeps its own colours, and tiles from the origin.
+    putInfo(view, { width: 2, height: -1, bitCount: 1, table: [0x00ff0000, 0x000000ff] });
+    bytes.copyWithin(PACKED, WIRED_INFO, WIRED_INFO + 48);
+    bytes[PACKED + 48] = 0b01000000;
+    fns.SelectObject.handler([dc, fns.CreateDIBPatternBrushPt.handler([PACKED, 0])]);
+    fns.PatBlt.handler([dc, 0, 0, 4, 1, PATCOPY]);
+    assert.deepEqual([0, 1, 2, 3].map(x=>fns.GetPixel.handler([dc, x, 0])),
+        [0x0000ff, 0xff0000, 0x0000ff, 0xff0000], 'red, blue, as COLORREFs');
+});

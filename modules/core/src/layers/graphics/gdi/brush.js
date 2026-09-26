@@ -84,6 +84,8 @@ function hatchCovers(style, x, y){
  * @property {{ x: number, y: number }} origin The brush origin, in surface coordinates.
  * @property {number} [textColor]  What a monochrome pattern's 0 bits are drawn in.
  * @property {boolean} [mono]      Whether the destination is monochrome.
+ * @property {() => number[]} [paletteColors]  The DC's palette, as pixels, for a
+ *           pattern whose colours are indices into it.
  */
 
 /**
@@ -110,8 +112,9 @@ export function createPattern(options){
             ? foreground
             : background;
     }
-    const tile = style === BS_PATTERN && attributes.pattern
-        ? surfaceForPattern(attributes.pattern)
+    const tile = attributes.pattern
+        ? surfaceForPattern(attributes.pattern,
+            attributes.pattern.indices ? options.paletteColors?.() : undefined)
         : null;
     if (tile)
     {
