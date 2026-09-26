@@ -334,6 +334,9 @@ const LIST_TYPES = new Map([
  *           The device has `texture-compression-bc`: an S3TC texture whose
  *           every level kept its blocks uploads them as blocks instead of
  *           the four-to-eight-times-larger texels the context decoded.
+ * @property {boolean} [raster]
+ *           `false` leaves primitives drawn on the processor unrasterised, so a
+ *           run without a device measures everything but the rasteriser.
  */
 
 /**
@@ -368,6 +371,7 @@ export function createOpengl(services){
         get gpu(){
             return gpuRenderer();
         },
+        raster: services.raster,
     });
 
     /** @type {Map<number, any>} guest handle -> the context it names */

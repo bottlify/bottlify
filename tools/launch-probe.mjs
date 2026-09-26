@@ -94,6 +94,10 @@ function parse(argv){
         heap: argv.includes('--heap')
             ? Number(argv[argv.indexOf('--heap') + 1]) * 1024 * 1024
             : undefined,
+        // Without a GPU every OpenGL primitive is rasterised on the processor,
+        // which past a title's load is most of the thread: off, a run measures
+        // the program and the layers instead (the graphics layer's `raster`).
+        raster: !argv.includes('--no-raster'),
     };
 }
 
@@ -387,7 +391,7 @@ function seriesRow(app, last, began){
 
 async function main(){
     const { id, turns, map, grep, calls, heap, profile, log, watch, peek, which, engine,
-        corkConfig, series } = parse(process.argv.slice(2));
+        corkConfig, series, raster } = parse(process.argv.slice(2));
     if (!id)
     {
         console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N] '
@@ -452,6 +456,7 @@ async function main(){
                     import.meta.url).href,
                 ...corkConfig } } } : {}),
         heapSize: heap,
+        ...(raster ? {} : { graphics: { raster: false } }),
         quantum: profile > 0 ? profile : undefined,
         sample: profile > 0 ? (/** @type {number} */ eip)=>samples.push(eip) : undefined,
         // A probe is read afterwards, which is exactly when a stack string is gone.

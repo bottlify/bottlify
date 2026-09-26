@@ -41,11 +41,12 @@ function machine(){
     };
 }
 
-/** @param {{ divergence?: (detail: string) => void }} [options] */
+/** @param {{ divergence?: (detail: string) => void, raster?: boolean }} [options] */
 function drawing(options = {}){
     const box = machine();
     /** @type {any} */
-    const context = createGlContext({ memory: box.memory, divergence: options.divergence });
+    const context = createGlContext({ memory: box.memory, divergence: options.divergence,
+        raster: options.raster });
     context.attach({ width: 8, height: 8, doubleBuffered: false, depthBits: 24 });
     context.glMatrixMode(GL.PROJECTION);
     context.glLoadIdentity();
@@ -367,6 +368,37 @@ test('glDrawArrays draws the same pixels as the immediate-mode calls it stands f
     assert.deepEqual(context.glGetIntegerv(GL.COLOR_ARRAY_SIZE), [3]);
     assert.deepEqual(context.glGetIntegerv(GL.COLOR_ARRAY_TYPE), [GL.UNSIGNED_BYTE]);
     assert.deepEqual(context.glGetPointerv(GL.COLOR_ARRAY_POINTER), [0x200]);
+});
+
+test('with rasterisation off a draw does its state work and paints nothing', ()=>{
+    const { context, box } = drawing({ raster: false });
+    context.glClearColor(0, 0, 1, 1);
+    context.glClear(GL.COLOR_BUFFER_BIT);
+    const cleared = context.framebuffer.bytes.slice();
+    assert.deepEqual(pixelAt(context.framebuffer, 1, 1), [0, 0, 255, 255], 'a clear still clears');
+    box.floats(0x100, [0, 0, 8, 0, 0, 8]);
+    context.glVertexPointer(2, GL.FLOAT, 0, 0x100);
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    context.glColor3f(1, 0, 0);
+    context.glDrawArrays(GL.TRIANGLES, 0, 3);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(8, 0);
+    context.glVertex2f(0, 8);
+    context.glEnd();
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    assert.equal(context.submittedPrimitives.length, 2, 'both primitives were assembled');
+    assert.deepEqual(context.framebuffer.bytes, cleared, 'and neither was rasterised');
+
+    const painted = drawing();
+    painted.box.floats(0x100, [0, 0, 8, 0, 0, 8]);
+    painted.context.glVertexPointer(2, GL.FLOAT, 0, 0x100);
+    painted.context.glEnableClientState(GL.VERTEX_ARRAY);
+    painted.context.glColor3f(1, 0, 0);
+    painted.context.glDrawArrays(GL.TRIANGLES, 0, 3);
+    // Row zero is the top: (1, 6) is inside the lower-left triangle.
+    assert.deepEqual(pixelAt(painted.context.framebuffer, 1, 6), [255, 0, 0, 255],
+        'the default rasterises');
 });
 
 test('glDrawElements reads its indices, and a stride of zero means packed', ()=>{

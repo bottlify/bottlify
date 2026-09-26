@@ -366,6 +366,9 @@ export const graphicsModule = {
                 // would be lost to the next.
                 /** @param {number} hdc */
                 describeDrawable: hdc=>win32.gdi().describeDrawable(hdc),
+                // On the configuration rather than the device handle: it
+                // concerns the build that has no device.
+                raster: config?.raster,
                 ...options,
             }),
             // Direct3D 10's seam makes the device itself from what a program

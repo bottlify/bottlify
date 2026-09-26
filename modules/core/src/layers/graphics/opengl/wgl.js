@@ -89,6 +89,9 @@ import { PIXEL_FORMATS, choosePixelFormat, writePixelFormatDescriptor } from './
  * @property {ReturnType<typeof import('./gpu.js').createGpuRenderer>} [gpu]
  *           Handed to every context: where its draws go when this build has a
  *           device. Absent, a context draws on the processor.
+ * @property {boolean} [raster]
+ *           Handed to every context: `false` skips the processor's
+ *           rasterisation of primitives (see `GlContextOptions.raster`).
  */
 
 /**
@@ -285,6 +288,7 @@ export function createWgl(options){
                 memory: contextMemory,
                 divergence: options.divergence,
                 gpu: options.gpu,
+                raster: options.raster,
             });
             live.set(context, {
                 key: drawable.key,

@@ -57,7 +57,7 @@ function machine(){
 /**
  * A library over a 4x4 screen, with whatever it presented recorded.
  *
- * @param {{ present?: boolean }} [options]
+ * @param {{ present?: boolean, raster?: boolean }} [options]
  */
 function library(options = {}){
     const box = machine();
@@ -69,6 +69,7 @@ function library(options = {}){
         screen: ()=>({ width: 4, height: 4 }),
         scratch: box.scratch,
         present: options.present === false ? undefined : (/** @type {any} */ s)=>presented.push(s),
+        raster: options.raster,
     });
     return { box, opengl, presented, table: opengl.table };
 }
@@ -725,3 +726,25 @@ test('through entry, the same two calls leave the framebuffer the table path lea
         lib.presented[0].buffer, lib.presented[0].buffer + 4)];
     assert.deepEqual(pixel(byEntry), pixel(byTable));
 });
+
+test('raster: false reaches the library\'s contexts: a triangle over a clear paints nothing',
+    ()=>{
+        /** @param {boolean | undefined} raster @returns {number[]} */
+        const drawn = raster=>{
+            const lib = library({ raster });
+            const hdc = contextOn(lib);
+            lib.table.glClearColor.handler([0, 0, floatBits(1), floatBits(1)]);
+            lib.table.glClear.handler([GL.COLOR_BUFFER_BIT]);
+            lib.table.glColor3f.handler([floatBits(1), 0, 0]);
+            lib.table.glBegin.handler([GL.TRIANGLES]);
+            lib.table.glVertex2f.handler([floatBits(-1), floatBits(-1)]);
+            lib.table.glVertex2f.handler([floatBits(3), floatBits(-1)]);
+            lib.table.glVertex2f.handler([floatBits(-1), floatBits(3)]);
+            lib.table.glEnd.handler([]);
+            lib.table.wglSwapBuffers.handler([hdc]);
+            const frame = lib.presented[0];
+            return [...lib.box.bytes.subarray(frame.buffer, frame.buffer + 4)];
+        };
+        assert.deepEqual(drawn(undefined), [0, 0, 255, 255], 'rasterised: red, in BGRX');
+        assert.deepEqual(drawn(false), [255, 0, 0, 255], 'not rasterised: the clear\'s blue');
+    });

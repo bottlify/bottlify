@@ -224,6 +224,12 @@ const ATTRIB_STACK_LIMIT = 16;
  *           A renderer that draws on a device. With one, the processor
  *           pipeline is not run and the framebuffer here holds nothing;
  *           without one, every draw lands in `framebuffer`.
+ * @property {boolean} [raster]
+ *           `false` leaves a primitive drawn on the processor unrasterised:
+ *           every call still does its state work and a draw still reads its
+ *           scene, but nothing reaches `framebuffer`. A diagnostic for a run
+ *           without a device that measures something other than the
+ *           rasteriser; a context with a `gpu` never rasterises either way.
  */
 
 /** @typedef {import('./kernel.js').ContextKernel} ContextKernel */
@@ -237,6 +243,7 @@ export function createGlContext(options = {}){
     const extensions = [...(options.extensions ?? [])];
     const memory = options.memory ?? null;
     const gpu = options.gpu ?? null;
+    const raster = options.raster !== false;
 
     let attached = false;
     let state = createDefaultState({ width: 0, height: 0, doubleBuffered: false });
@@ -1717,6 +1724,13 @@ export function createGlContext(options = {}){
             // exists only as a shader, so there is nothing here to run it.
             diverge('a program was enabled and bound, and the processor path draws nothing'
                 + ' under it: the program stages run only on a device');
+            return;
+        }
+        if (!raster)
+        {
+            // The scene is what a device draw reads too, so a run without the
+            // rasteriser still pays for the state a draw depends on.
+            scenes.scene();
             return;
         }
         scenes.draw(mode, vertices);
