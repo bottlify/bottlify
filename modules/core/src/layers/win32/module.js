@@ -1089,7 +1089,16 @@ export const win32Module = {
             'WINMM.dll': {
                 ...winmm.table,
                 // The files a program reads its sounds from are the volume's.
-                ...createMmioFunctions({ readMemory, writeMemory, readCString, files: volume }),
+                ...createMmioFunctions({
+                    readMemory, writeMemory, readCString, files: volume,
+                    // A buffer mmio makes is guest memory, because mmioGetInfo
+                    // hands its pointers to the program.
+                    allocate: bytes=>heap.allocate(bytes),
+                    free: address=>{
+                        heap.free(address);
+                    },
+                    divergence: config?.divergence,
+                }),
             },
 
             'COMCTL32.dll': createComctlFunctions({
@@ -1124,6 +1133,10 @@ export const win32Module = {
                 setLastError: setError,
                 /** @param {string} path */
                 versionInfo: path=>modules.versionInfo?.(path) ?? null,
+                // The libraries the engine answers for with no file behind
+                // them, which carry a version all the same.
+                /** @param {string} name */
+                systemLibrary: name=>modules.systemLibrary?.(name) ?? false,
                 // Where VerInstallFile reads a compressed source and writes the
                 // expanded file: the same volume every other file call uses.
                 files: volume,
@@ -1135,7 +1148,7 @@ export const win32Module = {
 
             'IMM32.dll': createImmFunctions({ writeMemory }),
 
-            'SHLWAPI.dll': createShlwapiFunctions({ readCString, writeMemory }),
+            'SHLWAPI.dll': createShlwapiFunctions({ readCString, readWideString, writeMemory }),
 
             // The maths half of the Direct3D helper: pure vector and matrix
             // functions, here for their stack width as much as their answers,
@@ -1393,6 +1406,9 @@ export const win32Module = {
                         libraries['KERNEL32.dll'].GetProcAddress.handler([module, name]),
                 },
                 makeObject: createComObject,
+                // A drop target hangs on a window, which user32 knows.
+                /** @param {number} window */
+                isWindow: window=>libraries['USER32.dll'].IsWindow.handler([window]) === 1,
             }),
 
             'RPCRT4.dll': createRpcFunctions({

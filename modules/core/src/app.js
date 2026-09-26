@@ -3077,6 +3077,13 @@ async function buildApp(options){
                  * @param {string} path
                  */
                 versionInfo: path=>versionResourceOf(filesystem, path),
+                /**
+                 * Whether a library is one this build synthesises, which has
+                 * a version though no file.
+                 *
+                 * @param {string} name
+                 */
+                systemLibrary: name=>systemLibraries.has(moduleKeyOf(name)),
             },
             commandLine: options.commandLine,
             // Every child a program asks for, while the stack that asked is
