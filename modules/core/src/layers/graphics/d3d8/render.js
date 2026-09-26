@@ -44,6 +44,7 @@ import {
 } from './constants.js';
 import { FVF, POSITION_MASK, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { levelExtent } from '../d3d9/resources.js';
+import { D3DRS as D3DRS9 } from '../d3d9/constants.js';
 import { resourceId } from '../webgpu/internal/bindings.js';
 import {
     constantBlocks, createProgramCache, shapeKey, vertexLayoutOf,
@@ -987,6 +988,9 @@ export function eyePosition(view){
  * @property {(stage: number)=>Map<number, number>} stageStates
  * @property {Map<number, any>} textures
  * @property {{ buffer: any, stride: number }} stream       Stream zero.
+ * @property {{ left: number, top: number, right: number, bottom: number }} [scissor]
+ *     The scissor rectangle, where the API has one; D3DRS_SCISSORTESTENABLE
+ *     says whether draws are cut to it.
  * @property {any} indices
  * @property {number} baseVertexIndex
  * @property {import('../webgpu/contract.js').ViewportState} viewport
@@ -3199,7 +3203,9 @@ export function createRenderer(options){
         {
             const arena = arenas.pop() ?? createUniformArena();
             arena.reset();
-            recording = { commands: [], pipelines: [], pass: null, viewport: null, arena };
+            recording = {
+                commands: [], pipelines: [], pass: null, viewport: null, scissor: '', arena,
+            };
         }
         return recording;
     };
@@ -3279,6 +3285,7 @@ export function createRenderer(options){
         frame.commands.push({ kind: 'pass', target, depth, ...clearing });
         frame.pass = { target, depth };
         frame.viewport = null;
+        frame.scissor = '';
     };
 
     /** @param {RenderModel} model */
@@ -3313,8 +3320,47 @@ export function createRenderer(options){
         {
             frame.commands.push({ kind: 'viewport', rect: model.viewport.rect });
             frame.viewport = model.viewport;
+            frame.scissor = '';
         }
         return frame;
+    };
+
+    /**
+     * The scissor a draw runs under: under D3DRS_SCISSORTESTENABLE the
+     * scissor rectangle cut to the viewport, which is what the draw may
+     * touch; otherwise the viewport's own, which setting the viewport set.
+     * The recording remembers which is in force (the empty string for the
+     * viewport's), so a run of draws under one scissor sets it once.
+     *
+     * @param {RenderModel} model
+     * @param {any} frame  the recording, with the model's viewport applied
+     */
+    const ensureScissor = (model, frame)=>{
+        const scissor = model.scissor;
+        const on = scissor !== undefined
+            && (model.renderStates.get(D3DRS9.SCISSORTESTENABLE) ?? 0) !== 0;
+        const view = model.viewport.rect;
+        let key = '';
+        let rect = null;
+        if (on)
+        {
+            const x = Math.max(view.x, scissor.left);
+            const y = Math.max(view.y, scissor.top);
+            rect = {
+                x, y,
+                width: Math.max(0, Math.min(view.x + view.width, scissor.right) - x),
+                height: Math.max(0, Math.min(view.y + view.height, scissor.bottom) - y),
+            };
+            key = `${rect.x},${rect.y},${rect.width},${rect.height}`;
+        }
+        if (frame.scissor === key)
+        {
+            return;
+        }
+        frame.scissor = key;
+        frame.commands.push({ kind: 'scissor', rect: rect ?? {
+            x: view.x, y: view.y, width: view.width, height: view.height,
+        } });
     };
 
     const programs = createProgramCache({ backend });
@@ -3875,8 +3921,10 @@ export function createRenderer(options){
      * @param {RenderModel} model
      * @param {PreparedDraw} prepared
      * @param {any} geometry
+     * @param {boolean} [scissored]  False for a draw that sets its own
+     *     scissor -- a partial clear, cut to its area already.
      */
-    const record = (model, prepared, geometry)=>{
+    const record = (model, prepared, geometry, scissored = true)=>{
         if (maxDraws >= 0 && kept >= maxDraws)
         {
             return;
@@ -3900,6 +3948,10 @@ export function createRenderer(options){
             }
         }
         const frame = ensureViewport(model);
+        if (scissored)
+        {
+            ensureScissor(model, frame);
+        }
         if (prepared.pipelineFrame !== frame)
         {
             prepared.pipelineIndex = frame.pipelines.length;
@@ -4887,11 +4939,12 @@ export function createRenderer(options){
                     indices: null,
                     count: 6,
                     first: 0,
-                });
+                }, false);
             }
             frame.commands.push({ kind: 'scissor', rect: {
                 x: rect.x, y: rect.y, width: rect.width, height: rect.height,
             } });
+            frame.scissor = '';
         },
 
         /**
@@ -5511,7 +5564,10 @@ export function createRenderer(options){
             reopen();
             if (command.kind === 'viewport')
             {
+                // Setting the viewport sets the scissor to it, so a pass
+                // reopened after this must not bring back an older scissor.
                 viewport = command.rect;
+                scissor = null;
                 pass.setViewport(command.rect);
                 continue;
             }

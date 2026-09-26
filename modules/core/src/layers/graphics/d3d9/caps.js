@@ -62,6 +62,7 @@ const D3DPRASTERCAPS_FOGTABLE = 0x00000100;
 const D3DPRASTERCAPS_FOGRANGE = 0x00010000;
 const D3DPRASTERCAPS_WFOG = 0x00100000;
 const D3DPRASTERCAPS_ZFOG = 0x00200000;
+const D3DPRASTERCAPS_SCISSORTEST = 0x01000000;
 
 /** NEVER, LESS, EQUAL, LESSEQUAL, GREATER, NOTEQUAL, GREATEREQUAL, ALWAYS. */
 const ALL_COMPARE_CAPS = 0x000000ff;
@@ -149,11 +150,11 @@ export function capabilityWords(caps, identity = {}){
             | D3DDEVCAPS_PUREDEVICE,
         PrimitiveMiscCaps: D3DPMISCCAPS_MASKZ | D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW
             | D3DPMISCCAPS_CULLCCW | D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP,
-        // No scissor, no depth bias, no anisotropy, no level bias: the renderer
-        // reads none of those states.
+        // No depth bias, no anisotropy, no level bias: the renderer reads none
+        // of those states.
         RasterCaps: D3DPRASTERCAPS_DITHER | D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_FOGVERTEX
             | D3DPRASTERCAPS_FOGTABLE | D3DPRASTERCAPS_FOGRANGE | D3DPRASTERCAPS_WFOG
-            | D3DPRASTERCAPS_ZFOG,
+            | D3DPRASTERCAPS_ZFOG | D3DPRASTERCAPS_SCISSORTEST,
         ZCmpCaps: ALL_COMPARE_CAPS,
         SrcBlendCaps: BLEND_CAPS,
         DestBlendCaps: BLEND_CAPS,

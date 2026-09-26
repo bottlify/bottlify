@@ -94,7 +94,8 @@ test('what the renderer does not do is not claimed', ()=>{
     assert.equal(words.StencilCaps, 0, 'no stencil test in the pipeline');
     assert.equal(words.RasterCaps & 0x00010000, 0x00010000, 'D3DPRASTERCAPS_FOGRANGE');
     assert.equal(words.MaxUserClipPlanes, 0, 'no clipping against user planes');
-    assert.equal(words.RasterCaps & 0x01000000, 0, 'no scissor test');
+    assert.equal(words.RasterCaps & 0x01000000, 0x01000000,
+        'D3DPRASTERCAPS_SCISSORTEST: draws and clears are cut to the scissor');
     assert.equal(words.StencilCaps & 0x100, 0, 'no two-sided stencil');
     assert.equal(words.TextureCaps & 0x800, 0, 'no cube maps');
     assert.equal(words.NumSimultaneousRTs, 1);

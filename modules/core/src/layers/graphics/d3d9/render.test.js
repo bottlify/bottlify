@@ -543,6 +543,40 @@ test('a viewport past its target is taken, and draws keep its mapping', async()=
         && args[2] === 8 && args[3] === 16), 'the viewport reaches the pass as it was set');
 });
 
+test('a draw under the scissor test is cut to the scissor rectangle, and only then', async()=>{
+    // D3DRS_SCISSORTESTENABLE with SetScissorRect "defines the rendering area
+    // within the render target" (Microsoft's IDirect3DDevice9::SetScissorRect)
+    // for draws, not only for Clear: each draw runs under the scissor cut to
+    // the viewport, and with the test off under the viewport's own again.
+    const h = harness({ width: 8, height: 8 });
+    const triangle = Uint8Array.from([
+        ...vertex(0, 0, argb(255, 0, 0)), ...vertex(8, 0, argb(255, 0, 0)),
+        ...vertex(0, 8, argb(255, 0, 0)),
+    ]);
+    const draw = ()=>assert.equal(
+        h.device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, triangle, TRIANGLE_STRIDE), D3D_OK);
+    assert.equal(h.device.SetFVF(FVF_TRIANGLE), D3D_OK);
+    assert.equal(h.device.SetScissorRect({ left: 2, top: 1, right: 20, bottom: 5 }), D3D_OK);
+    assert.equal(h.device.BeginScene(), D3D_OK);
+    draw();
+    assert.equal(h.device.SetRenderState(D3DRS.SCISSORTESTENABLE, 1), D3D_OK);
+    draw();
+    draw();
+    assert.equal(h.device.SetRenderState(D3DRS.SCISSORTESTENABLE, 0), D3D_OK);
+    draw();
+    assert.equal(h.device.EndScene(), D3D_OK);
+    await h.present();
+
+    const commands = h.device.diagnostics().lastFrame
+        .filter((/** @type {any} */ command)=>command.kind === 'draw' || command.kind === 'scissor')
+        .map((/** @type {any} */ command)=>(command.kind === 'draw' ? 'draw'
+            : `${command.rect.x},${command.rect.y},${command.rect.width},${command.rect.height}`));
+    assert.deepEqual(commands, ['draw', '2,1,6,4', 'draw', 'draw', '0,0,8,8', 'draw'],
+        'the scissor cut to the viewport, set once for two draws and put back after');
+    const scissors = h.gpu.of('setScissorRect').map((/** @type {any} */ call)=>call.rect);
+    assert.deepEqual(scissors.slice(-2), [[2, 1, 6, 4], [0, 0, 8, 8]]);
+});
+
 test('a stream whose offset straddles the stride is refused rather than drawn wrong', ()=>{
     const h = harness();
     const { device } = h;

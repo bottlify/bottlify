@@ -1070,6 +1070,9 @@ function createDeviceObject(parameters, caps, services, identity){
         get stream(){
             return stream(0);
         },
+        get scissor(){
+            return scissor;
+        },
         get indices(){
             return indices;
         },
