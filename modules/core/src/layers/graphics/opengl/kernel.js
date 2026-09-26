@@ -15,6 +15,10 @@
 /**
  * @typedef {Object} ContextMemory
  * @property {(address: number, length: number) => Uint8Array} read
+ * @property {(address: number, length: number) => Uint8Array} [window]  the bytes
+ *           themselves rather than a copy, valid until the guest runs again: for
+ *           what is consumed before the call returns -- a draw's arrays and
+ *           indices, a buffer object's new contents
  * @property {(address: number, bytes: Uint8Array) => void} write
  * @property {(bytes: number) => number} [allocate]  guest memory a program
  *           can write through, for a mapped buffer; absent when there is none

@@ -190,7 +190,10 @@ export function installArrayCalls(context, kernel){
             return (at, length)=>buffer.data.subarray(at, at + length);
         }
         const memory = kernel.memory();
-        return memory ? (at, length)=>memory.read(at, length) : null;
+        // A window: whatever reads an array copies what it keeps before the
+        // call returns -- the processor's vertices, the device's scratch ring.
+        const view = memory?.window ?? memory?.read;
+        return view ? (at, length)=>view(at, length) : null;
     };
 
     /**
@@ -479,13 +482,14 @@ export function installArrayCalls(context, kernel){
                 buffer: bufferObject, offset: base };
         }
         const memory = kernel.memory();
+        const view = memory?.window ?? memory?.read;
         return kernel.drawArrays({
             mode,
             first,
             count,
             indices,
             arrays,
-            read: memory ? (at, n)=>memory.read(at, n) : ()=>new Uint8Array(0),
+            read: view ? (at, n)=>view(at, n) : ()=>new Uint8Array(0),
             bufferObject: name=>kernel.shareGroup().buffers.objects.get(name),
         });
     }
@@ -1130,7 +1134,7 @@ export function installArrayCalls(context, kernel){
                 const memory = kernel.memory();
                 if (memory)
                 {
-                    buffer.data.set(memory.read(data, size));
+                    buffer.data.set((memory.window ?? memory.read)(data, size));
                 }
             }
         },
@@ -1163,7 +1167,7 @@ export function installArrayCalls(context, kernel){
             }
             const memory = kernel.memory();
             const bytes = data instanceof Uint8Array ? data.subarray(0, size)
-                : memory ? memory.read(data, size) : null;
+                : memory ? (memory.window ?? memory.read)(data, size) : null;
             if (bytes && size > 0)
             {
                 buffer.data.set(bytes, offset);

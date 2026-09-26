@@ -80,6 +80,7 @@ import { PIXEL_FORMATS, choosePixelFormat, writePixelFormatDescriptor } from './
  *           Extension name -> the functions it adds. What is not in here is
  *           not reported and is not obtainable, which is the honest answer.
  * @property {{ readMemory: (address: number, length: number) => Uint8Array,
+ *              windowMemory?: (address: number, length: number) => Uint8Array,
  *              writeMemory: (address: number, bytes: Uint8Array) => void,
  *              allocate?: (bytes: number) => number }} [memory]
  *           DescribePixelFormat writes through it when given an address, and
@@ -129,6 +130,7 @@ export function createWgl(options){
     const contextMemory = options.memory
         ? {
             read: options.memory.readMemory,
+            window: options.memory.windowMemory,
             write: options.memory.writeMemory,
             allocate: options.memory.allocate,
         }

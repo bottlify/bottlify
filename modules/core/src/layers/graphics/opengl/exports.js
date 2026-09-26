@@ -361,6 +361,7 @@ export function createOpengl(services){
         setLastError: services.setLastError,
         memory: {
             readMemory: services.readMemory,
+            windowMemory: services.windowMemory,
             writeMemory: services.writeMemory,
             allocate: services.scratch?.allocate,
         },

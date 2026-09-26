@@ -401,6 +401,42 @@ test('with rasterisation off a draw does its state work and paints nothing', ()=
         'the default rasterises');
 });
 
+test('arrays, indices and buffer contents are read through the window, not copied', ()=>{
+    // Each is consumed before the call returns -- gathered into vertices, or
+    // set into the buffer object's own bytes -- so a copy per call is garbage.
+    const box = machine();
+    let copies = 0;
+    let windows = 0;
+    /** @type {any} */
+    const context = createGlContext({ memory: {
+        ...box.memory,
+        read: (/** @type {number} */ at, /** @type {number} */ length)=>{
+            copies++;
+            return box.bytes.slice(at, at + length);
+        },
+        window: (/** @type {number} */ at, /** @type {number} */ length)=>{
+            windows++;
+            return box.bytes.subarray(at, at + length);
+        },
+    } });
+    context.attach({ width: 8, height: 8, doubleBuffered: false, depthBits: 24 });
+    context.glOrtho(0, 8, 0, 8, -1, 1);
+    box.floats(0x100, [0, 0, 8, 0, 0, 8]);
+    box.bytes.set([0, 1, 2], 0x300);
+    context.glVertexPointer(2, GL.FLOAT, 0, 0x100);
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    context.glColor3f(1, 1, 1);
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_BYTE, 0x300);
+    const [name] = context.glGenBuffersARB(1);
+    context.glBindBufferARB(GL.ARRAY_BUFFER, name);
+    context.glBufferDataARB(GL.ARRAY_BUFFER, 24, 0x100, GL.STATIC_DRAW);
+    context.glBufferSubDataARB(GL.ARRAY_BUFFER, 0, 8, 0x108);
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    assert.equal(copies, 0, 'nothing copied');
+    assert.ok(windows >= 3, `read through the window (${windows} reads)`);
+    assert.deepEqual(pixelAt(context.framebuffer, 1, 6), [255, 255, 255, 255], 'and drawn');
+});
+
 test('glDrawElements reads its indices, and a stride of zero means packed', ()=>{
     const { context, box } = drawing();
     // Interleaved x, y, and a pad, stride 12.

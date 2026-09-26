@@ -471,7 +471,9 @@ scanned once, not once per light; a list read from client memory, or one a seam 
 dereferenced into its own scratch bytes, has no such identity and is scanned fresh every draw, as
 before. Arrays in client memory are copied
 by that range into a ring, and a vertex assembled on the processor -- immediate mode, a lit draw,
-a type the GPU has no format for -- is packed into one canonical layout. `wgsl.js` writes the
+a type the GPU has no format for -- is packed into one canonical layout. Client arrays, a client
+index list and the source of `glBufferDataARB` and `glBufferSubDataARB` are read through a window
+onto guest memory rather than a copy of it, since each is consumed before its call returns. `wgsl.js` writes the
 fixed-function formula as a shader per draw state (texture environment per base format, combine
 with dot3, texture generation, projective coordinates, fog, colour sum, alpha test as a discard,
 GL's clip depth remapped) and the pipeline descriptor (blend, depth, two-sided stencil, cull,
