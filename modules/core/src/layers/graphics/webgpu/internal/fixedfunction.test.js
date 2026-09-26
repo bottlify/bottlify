@@ -73,7 +73,7 @@ test('the same state generates the same source, byte for byte', ()=>{
     const second = generate(baseState()).code;
 
     assert.equal(first, second);
-    assert.equal(digest(first), 'df32dcf97ac7fd52');
+    assert.equal(digest(first), '723c3e6c587a87c2');
 });
 
 test('a stage generating its coordinates takes them from the vertex in camera space', ()=>{
@@ -137,8 +137,8 @@ test('a stage generating its coordinates takes them from the vertex in camera sp
         fvf: FVF.XYZ | FVF.NORMAL, stages: [stage(TCI.CAMERASPACEREFLECTIONVECTOR)],
         normalizeNormals: true,
     })).code;
-    assert.ok(lit.includes(
-        'let cameraNormal = normalize((uniforms.worldView * vec4f(vertex.normal, 0.0)).xyz);'));
+    assert.ok(lit.includes('let cameraNormal ='
+        + ' normalize((uniforms.cameraNormalMatrix * vec4f(vertex.normal, 0.0)).xyz);'));
     assert.ok(lit.includes('reflect(normalize(cameraPosition), cameraNormal)'));
 
     // A pre-transformed vertex has no camera space to be taken in.
@@ -718,12 +718,12 @@ test('with NORMALIZENORMALS off a normal keeps the length its transform gave it'
         fvf: FVF.XYZ | FVF.NORMAL, stages: [generating],
     })).code;
     assert.ok(unnormalized.includes(
-        'let cameraNormal = (uniforms.worldView * vec4f(vertex.normal, 0.0)).xyz;'));
+        'let cameraNormal = (uniforms.cameraNormalMatrix * vec4f(vertex.normal, 0.0)).xyz;'));
     const normalized = generate(baseState({
         fvf: FVF.XYZ | FVF.NORMAL, stages: [generating], normalizeNormals: true,
     })).code;
-    assert.ok(normalized.includes(
-        'let cameraNormal = normalize((uniforms.worldView * vec4f(vertex.normal, 0.0)).xyz);'));
+    assert.ok(normalized.includes('let cameraNormal ='
+        + ' normalize((uniforms.cameraNormalMatrix * vec4f(vertex.normal, 0.0)).xyz);'));
 });
 
 test('a directional light is a negated direction and nothing else', ()=>{

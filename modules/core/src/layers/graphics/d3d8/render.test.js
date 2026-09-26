@@ -2046,6 +2046,42 @@ test('recorded: each lit draw carries the normal matrix of its own world', async
     assert.equal(draws[1].uniforms[at], 0.5, 'x scaled by two carries a normal by a half');
 });
 
+test('recorded: a coordinate generated from the normal carries it as a normal into camera space',
+    async()=>{
+        // D3DTSS_TCI_CAMERASPACENORMAL: the normal through the inverse
+        // transpose of world then view, as a lit normal goes through the
+        // world's -- a view doubling x carries a normal by a half there, where
+        // world-view itself would double it. Each draw carries its own.
+        const h = harness();
+        const { device } = h;
+        /** @type {{ texture?: any }} */
+        const made = {};
+        assert.equal(device.CreateTexture(1, 1, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, made),
+            D3D_OK);
+        assert.equal(device.SetTexture(0, made.texture), D3D_OK);
+        assert.equal(device.SetTextureStageState(0, D3DTSS.TEXCOORDINDEX, 0x10000), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF.XYZ | FVF.NORMAL | FVF.DIFFUSE), D3D_OK);
+        const vertices = new Uint8Array(28 * 3);
+        [[0, 0, 0], [1, 0, 0], [0, 1, 0]].forEach((at, index)=>
+            vertices.set(litVertexBytes(at), index * 28));
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, vertices, 28), D3D_OK);
+        const scaled = Float32Array.from(IDENTITY);
+        scaled[0] = 2;
+        assert.equal(device.SetTransform(D3DTS.VIEW, scaled), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, vertices, 28), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        const draws = h.device.diagnostics().lastFrame
+            .filter((/** @type {any} */ command)=>command.kind === 'draw');
+        const at = UNIFORM_AT.cameraNormalMatrix;
+        assert.deepEqual([...draws[0].uniforms.subarray(at, at + 16)], [...IDENTITY]);
+        assert.equal(draws[1].uniforms[at], 0.5);
+        assert.equal(draws[1].uniforms[UNIFORM_AT.worldView], 2, 'world-view itself doubles');
+        assert.equal(device.SetTexture(0, null), D3D_OK);
+        made.texture.release();
+    });
+
 test('recorded: a lit draw carries its lights, its material and the scene ambient', async()=>{
     // The defect this pins is that all of this reached the device and stopped
     // there: the program set sixteen lights and a material, and the draw was
@@ -2637,14 +2673,15 @@ test('byte-exact: a two-coordinate texture transform moves the sample by its thi
 test('the block lays a texture transform out as two rows per sampled stage', ()=>{
     // The shader reads array<vec4f, 32> at float 76 -- byte 304, sixteen-aligned
     // after the three sampler words, a matrix per stage for all eight --
-    // then the world-view matrix at byte 816, the normal matrix at byte 880
-    // and the lights from byte 944. A row at the wrong index is read as
-    // another stage's, or as a light.
+    // then the world-view matrix at byte 816, the normal matrix at byte 880,
+    // the camera-space normal matrix at byte 944 and the lights from byte
+    // 1008. A row at the wrong index is read as another stage's, or as a light.
     assert.equal(UNIFORM_AT.textureTransforms, 76);
     assert.equal(UNIFORM_AT.worldView, 204);
     assert.equal(UNIFORM_AT.normalMatrix, 220);
-    assert.equal(UNIFORM_AT.lights, 236);
-    assert.equal(UNIFORM_FLOATS, 236);
+    assert.equal(UNIFORM_AT.cameraNormalMatrix, 236);
+    assert.equal(UNIFORM_AT.lights, 252);
+    assert.equal(UNIFORM_FLOATS, 252);
     const columns = Array.from({ length: 16 }, (_, at)=>at + 2);
     const block = uniformBlock({
         worldViewProjection: IDENTITY,

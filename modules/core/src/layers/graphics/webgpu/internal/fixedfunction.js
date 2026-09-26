@@ -117,6 +117,15 @@ export const generates = (/** @type {number} */ texCoordIndex)=>{
 };
 
 /**
+ * Whether a stage's generated coordinates are taken from the vertex normal:
+ * the normal itself or the eye reflected about it.
+ */
+export const readsNormal = (/** @type {number} */ texCoordIndex)=>{
+    const mode = generationOf(texCoordIndex);
+    return mode === TCI.CAMERASPACENORMAL || mode === TCI.CAMERASPACEREFLECTIONVECTOR;
+};
+
+/**
  * The WGSL for one generated coordinate, from the camera-space position and
  * normal the vertex stage has in hand.
  *
@@ -615,14 +624,16 @@ export function generateFixedFunction(state, layout){
     // A stage generating its coordinates from the vertex in camera space gets
     // a varying of its own, with the stage's texture transform applied here
     // as Direct3D applies it, in vertex processing, and not again at the
-    // sample. A pre-transformed vertex has no camera space: it gets zero.
+    // sample. A pre-transformed vertex has no camera space: it gets zero. The
+    // normal goes there by the inverse transpose of world then view, as a lit
+    // normal goes into world space by the world's.
     const generated = state.stages.map(stage=>generates(stage.texCoordIndex));
     if (generated.some(Boolean) && !layout.preTransformed)
     {
         assignments.push(
             '    let cameraPosition = (uniforms.worldView * vec4f(vertex.position, 1.0)).xyz;',
             `    let cameraNormal = ${has('normal')
-                ? normalized('(uniforms.worldView * vec4f(vertex.normal, 0.0)).xyz',
+                ? normalized('(uniforms.cameraNormalMatrix * vec4f(vertex.normal, 0.0)).xyz',
                     normalizeNormals)
                 : 'vec3f(0.0, 0.0, 1.0)'};`);
     }
@@ -767,7 +778,8 @@ function uniformStruct(lightCount){
     stage2: u32,
     texTransform: array<vec4f, 32>,
     worldView: mat4x4f,
-    normalMatrix: mat4x4f,${lightCount === 0 ? '' : `
+    normalMatrix: mat4x4f,
+    cameraNormalMatrix: mat4x4f,${lightCount === 0 ? '' : `
     lights: array<Light, ${lightCount}>,`}
 };`;
 }

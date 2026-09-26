@@ -54,7 +54,7 @@ import {
 import { D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import {
-    fixedFragmentStage, generates, generationOf,
+    fixedFragmentStage, generates, generationOf, readsNormal,
 } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE, fogSourceOf, pipelineKey } from '../webgpu/internal/pipeline.js';
 
@@ -782,7 +782,10 @@ export const UNIFORM_AT = Object.freeze({
     // The inverse transpose of the world matrix, which a lit normal goes
     // through; identity unless the draw is lit.
     normalMatrix: 220,
-    lights: 236,
+    // The inverse transpose of world then view, which a normal a coordinate
+    // is generated from goes through; identity unless a stage takes one.
+    cameraNormalMatrix: 236,
+    lights: 252,
 });
 
 /** How many stages the block carries sampler state for. */
@@ -879,6 +882,8 @@ function putDword(block, at, dword){
  *     Per stage, the sixteen elements in `PLANAR_ROWS` order; identity when absent.
  * @property {ArrayLike<number>} [worldView]  Identity unless a stage generates coordinates.
  * @property {ArrayLike<number>} [normalMatrix]  See `normalMatrixOf`; identity unless lit.
+ * @property {ArrayLike<number>} [cameraNormalMatrix]
+ *     `normalMatrixOf` world then view; identity unless a stage generates from the normal.
  * @property {number} [ambient]      D3DCOLOR, the scene's own ambient light.
  * @property {readonly number[]} [eye]     Camera position in world space.
  * @property {readonly Light[]} [lights]
@@ -930,6 +935,7 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     }
     block.set(values.worldView ?? IDENTITY, at.worldView);
     block.set(values.normalMatrix ?? IDENTITY, at.normalMatrix);
+    block.set(values.cameraNormalMatrix ?? IDENTITY, at.cameraNormalMatrix);
     for (let index = 0; index < lights.length; index++)
     {
         packLight(block, at.lights + index * LIGHT_FLOATS, lights[index]);
@@ -1236,6 +1242,9 @@ export function uniformsOf(model, lighting, take, mips = true){
         ambient: rs('AMBIENT'),
         eye: eyePosition(view),
         ...(lighting ? { normalMatrix: normalMatrixOf(world, NORMAL_MATRIX) } : {}),
+        ...(generatesFromNormal(model)
+            ? { cameraNormalMatrix: normalMatrixOf(worldView, CAMERA_NORMAL_MATRIX) }
+            : {}),
         // The shader declares an array exactly as long as the lighting state
         // said, so a block that carried lights it does not know about would be
         // read past its own end.
@@ -1293,6 +1302,30 @@ const WORLD_VIEW = new Float32Array(16);
 const WORLD_VIEW_PROJECTION = new Float32Array(16);
 /** Scratch for a lit draw's normal matrix, likewise. */
 const NORMAL_MATRIX = new Float32Array(16);
+/** Scratch for the camera-space one of a draw generating from the normal. */
+const CAMERA_NORMAL_MATRIX = new Float32Array(16);
+
+/**
+ * Whether a stage the cascade runs generates its coordinates from the
+ * vertex normal.
+ *
+ * @param {RenderModel} model
+ */
+function generatesFromNormal(model){
+    for (let stage = 0; stage < STAGE_COUNT; stage++)
+    {
+        const states = model.stageStates(stage);
+        if ((states.get(D3DTSS.COLOROP) ?? 0) === D3DTOP.DISABLE)
+        {
+            return false;
+        }
+        if (readsNormal(states.get(D3DTSS.TEXCOORDINDEX) ?? 0))
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
 /** What a preparation's block field holds before its first draw writes one. */
 const EMPTY_BLOCK = new Float32Array(0);
@@ -4492,6 +4525,11 @@ export function createRenderer(options){
         floats.set(model.viewport.offset, HYBRID_CONSTANTS.VIEWPORT * 4);
         floats.set(model.viewport.scale, HYBRID_CONSTANTS.VIEWPORT * 4 + 2);
         floats.set(worldView, HYBRID_CONSTANTS.WORLD_VIEW * 4);
+        if (generatesFromNormal(model))
+        {
+            floats.set(normalMatrixOf(worldView, CAMERA_NORMAL_MATRIX),
+                HYBRID_CONSTANTS.CAMERA_NORMAL * 4);
+        }
         for (const [index, rows] of stageTransforms(model).entries())
         {
             floats.set(rows, (HYBRID_CONSTANTS.TRANSFORMS + index * 4) * 4);
@@ -5095,6 +5133,11 @@ export function createRenderer(options){
         if (prepared.lighting)
         {
             block.set(normalMatrixOf(world, NORMAL_MATRIX), UNIFORM_AT.normalMatrix);
+        }
+        if (prepared.state.stages.some(stage=>readsNormal(stage.texCoordIndex)))
+        {
+            block.set(normalMatrixOf(worldView, CAMERA_NORMAL_MATRIX),
+                UNIFORM_AT.cameraNormalMatrix);
         }
         return block;
     };

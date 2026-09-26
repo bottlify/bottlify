@@ -25,7 +25,7 @@ import { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, versionToken } from './shader
 import { HYBRID_CONSTANTS, varyingLocation } from './wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
-import { UNIFORM_FLOATS, multiplyMatrices } from '../d3d8/render.js';
+import { UNIFORM_FLOATS, multiplyMatrices, normalMatrixOf } from '../d3d8/render.js';
 
 const RAM_BASE = 0x40000000;
 const RAM_SIZE = 4 << 20;
@@ -756,6 +756,38 @@ test('a pixel shader over a declaration that carries only a position is given wh
         assert.equal(h.device.release(), 0);
     });
 
+test('a pixel shader over fixed-function vertices generating from the normal carries it as one',
+    async()=>{
+        // D3DTSS_TCI_CAMERASPACENORMAL: the made vertex stage's constants
+        // carry the inverse transpose of world then view, which a view that
+        // doubles x makes a half there.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTexture(0, h.texture);
+        h.device.SetTextureStageState(0, D3DTSS.TEXCOORDINDEX, 0x10000);
+        const view = [2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 5, 1];
+        h.device.SetTransform(D3DTS.VIEW, view);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        const floats = new Float32Array(h.boundBytes(h.groupsOfDraw().get(0), 0).buffer);
+        const at = HYBRID_CONSTANTS.CAMERA_NORMAL * 4;
+        assert.deepEqual([...floats.subarray(at, at + 16)],
+            [...normalMatrixOf(view)].map(Math.fround));
+        assert.equal(floats[at], 0.5);
+        h.device.SetTexture(0, null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        ps.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
 test('a pixel shader over fixed-function vertices reads a coordinate the stages generate',
     async()=>{
         // Stage 0 set to D3DTSS_TCI_CAMERASPACEPOSITION with a three-coordinate
@@ -807,12 +839,15 @@ test('a pixel shader over fixed-function vertices reads a coordinate the stages 
         // D3DRS_NORMALIZENORMALS reaches the made stage's camera-space
         // normal, as it reaches the fixed-function stage's: off by default,
         // and set, a stage of its own.
-        assert.ok(vertexModule.code.includes('let cameraNormal = (worldView'));
+        // The normal goes into camera space by the inverse transpose of
+        // world then view, which the constants carry once a stage takes one.
+        assert.ok(vertexModule.code.includes('let cameraNormal = (mat4x4f(c[43]'));
         h.device.SetRenderState(D3DRS.NORMALIZENORMALS, 1);
+        h.device.SetTextureStageState(0, D3DTSS.TEXCOORDINDEX, 0x10000);
         await h.draw();
         assert.ok(h.gpu.of('createShaderModule').map(call=>call.descriptor)
             .some(module=>module.label.startsWith('vs:')
-                && module.code.includes('let cameraNormal = normalize((worldView')));
+                && module.code.includes('let cameraNormal = normalize((mat4x4f(c[43]')));
 
         h.device.SetTexture(0, null);
         h.device.SetPixelShader(null);

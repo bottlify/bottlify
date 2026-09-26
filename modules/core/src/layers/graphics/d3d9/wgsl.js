@@ -121,7 +121,9 @@ export const HYBRID_CONSTANTS = Object.freeze({
     /** The fixed-function fog's start, end and density, and the fog colour beside it. */
     FOG: 41,
     FOG_COLOR: 42,
-    COUNT: 43,
+    /** Four rows: the inverse transpose of world then view, which the normal goes through. */
+    CAMERA_NORMAL: 43,
+    COUNT: 47,
 });
 
 /**
@@ -1581,12 +1583,15 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     if (generated.some(mode=>mode !== 0) && vertex)
     {
         const wv = HYBRID_CONSTANTS.WORLD_VIEW;
+        const cn = HYBRID_CONSTANTS.CAMERA_NORMAL;
+        const turned = `(mat4x4f(c[${cn}], c[${cn + 1}], c[${cn + 2}], c[${cn + 3}])`
+            + ` * vec4f(${normal}, 0.0)).xyz`;
         body.push(
             `    let worldView = mat4x4f(c[${wv}], c[${wv + 1}], c[${wv + 2}], c[${wv + 3}]);`,
             `    let cameraPosition = (worldView * vec4f(${vertex}, 1.0)).xyz;`,
             options.normalizeNormals
-                ? `    let cameraNormal = normalize((worldView * vec4f(${normal}, 0.0)).xyz);`
-                : `    let cameraNormal = (worldView * vec4f(${normal}, 0.0)).xyz;`);
+                ? `    let cameraNormal = normalize(${turned});`
+                : `    let cameraNormal = ${turned};`);
     }
     for (const [set, mode] of generated.entries())
     {
