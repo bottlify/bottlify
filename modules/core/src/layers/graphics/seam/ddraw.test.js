@@ -31,10 +31,10 @@ import { DDSURFACEDESC, DDSURFACEDESC2, writeSurfaceDesc } from '../ddraw/struct
 import { createDirectDraw } from '../ddraw/objects.js';
 import {
     DDBLT_COLORFILL, DDCAPS_BLT, DDERR_DCALREADYCREATED, DDERR_INVALIDPARAMS,
-    DDERR_NOCOOPERATIVELEVELSET, DDERR_NOTFLIPPABLE, DDERR_SURFACEBUSY, DDPCAPS_8BIT, DDPF_RGB,
-    DDSCAPS_COMPLEX, DDSCAPS_FLIP, DDSCAPS_OFFSCREENPLAIN, DDSCAPS_PRIMARYSURFACE, DDSCL_EXCLUSIVE,
-    DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT,
-    DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
+    DDERR_NOCOOPERATIVELEVELSET, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_SURFACEBUSY,
+    DDPCAPS_8BIT, DDPF_RGB, DDSCAPS_COMPLEX, DDSCAPS_FLIP, DDSCAPS_OFFSCREENPLAIN,
+    DDSCAPS_PRIMARYSURFACE, DDSCL_EXCLUSIVE, DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSD_BACKBUFFERCOUNT,
+    DDSD_CAPS, DDSD_HEIGHT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
 } from '../ddraw/constants.js';
 
 const HWND = 0x00010044;
@@ -663,6 +663,24 @@ test('a colour fill is refused on a depth buffer, which it would leave as it was
     assert.deepEqual([...h.box.bytes.subarray(model.buffer, model.buffer + 8)],
         new Array(8).fill(0x11));
 
+    assert.equal(h.release(depth), 0);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
+test('DeleteAttachedSurface with no surface detaches all of them', ()=>{
+    const h = seamed();
+    const ddraw = h.create7();
+    const target = h.createSurface7(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 4, height: 1 });
+    const depth = createDepth(h, ddraw, 4);
+    assert.equal(h.surface7(target, 'AddAttachedSurface', [depth]), DD_OK);
+
+    assert.equal(h.surface7(target, 'DeleteAttachedSurface', [0, 0]), DD_OK);
+    h.box.bytes.fill(0, 0x7600, 0x7610);
+    h.box.memory.writeU32(0x7600, DDSCAPS_ZBUFFER);
+    assert.equal(h.surface7(target, 'GetAttachedSurface', [0x7600, 0x7700]), DDERR_NOTFOUND);
+
+    assert.equal(h.release(target), 0);
     assert.equal(h.release(depth), 0);
     assert.equal(h.release(ddraw), 0);
     h.assertAllReleased();

@@ -660,6 +660,10 @@ export function createDirectDrawSeam(
 
             /** @param {any} surface @param {number[]} args */
             DeleteAttachedSurface: (surface, [, other])=>{
+                if ((other >>> 0) === 0)
+                {
+                    return surface.deleteAttachedSurface(null);
+                }
                 const attached = publisher.objectAt(other);
                 return attached ? surface.deleteAttachedSurface(attached) : DDERR_INVALIDPARAMS;
             },

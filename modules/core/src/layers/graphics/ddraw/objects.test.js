@@ -817,6 +817,41 @@ test('a depth buffer attaches in its own slot, beside the flip chain', ()=>{
     assert.ok(ddraw.destroyed);
 });
 
+test('detaching null detaches everything the surface attached, and nothing the runtime did',
+    ()=>{
+        const ddraw = withLevel();
+        const head = makeOffscreen(ddraw);
+        const middle = makeOffscreen(ddraw);
+        const tail = makeOffscreen(ddraw);
+        const depth = makeOffscreen(ddraw, { caps: DDSCAPS_ZBUFFER });
+        assert.equal(head.addAttachedSurface(middle), DD_OK);
+        assert.equal(middle.addAttachedSurface(tail), DD_OK);
+        assert.equal(head.addAttachedSurface(depth), DD_OK);
+
+        assert.equal(head.deleteAttachedSurface(null), DD_OK);
+        assert.deepEqual(head.enumAttachedSurfaces(), []);
+        assert.equal(head.caps & DDSCAPS_FLIP, 0, 'nothing is attached, so nothing flips');
+        for (const surface of [middle, tail, depth])
+        {
+            assert.equal(surface.refCount, 1, 'each gave back the reference the head held');
+        }
+
+        const chain = withFlipChain();
+        assert.equal(chain.front.deleteAttachedSurface(null), DD_OK);
+        const behind = chain.front.getAttachedSurface(DDSCAPS_FLIP);
+        assert.equal(behind.surface, chain.back1, 'a complex surface keeps its buffers');
+        behind.surface?.release();
+
+        for (const surface of [head, middle, tail, depth])
+        {
+            assert.equal(surface.release(), 0);
+        }
+        assert.equal(chain.front.release(), 0);
+        assert.equal(chain.ddraw.release('IDirectDraw7'), 0);
+        assert.equal(ddraw.release('IDirectDraw7'), 0);
+        assert.ok(ddraw.destroyed);
+    });
+
 // --- what CreateSurface refuses, through the object ---
 
 test('a primary flip chain needs the screen, and says so only once it is well formed', ()=>{

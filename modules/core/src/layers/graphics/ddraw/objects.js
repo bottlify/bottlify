@@ -244,7 +244,7 @@ export function depthFormatForDepth(bitDepth){
  * @property {() => { hr: number, dc: number | null }} getDC
  * @property {(handle: number) => number} releaseDC
  * @property {(other: Surface) => number} addAttachedSurface
- * @property {(other: Surface) => number} deleteAttachedSurface
+ * @property {(other: Surface | null) => number} deleteAttachedSurface
  * @property {(wanted: number) => { hr: number, surface: Surface | null }} getAttachedSurface
  * @property {() => Surface[]} enumAttachedSurfaces
  * @property {(target?: Surface | null, flags?: number) => number} flip
@@ -1087,8 +1087,27 @@ export function createDirectDraw(options = {}){
                 return DD_OK;
             },
 
-            /** @param {Surface} other */
+            /**
+             * Null detaches every surface this one attached. What the runtime
+             * attached stays, as it does when named one at a time.
+             *
+             * @param {Surface | null} other
+             */
             deleteAttachedSurface(other){
+                if (other === null)
+                {
+                    if (depth)
+                    {
+                        surface.deleteAttachedSurface(depth);
+                    }
+                    // Each detach splices the next one up behind this surface.
+                    let next = flipNext;
+                    while (next !== null && surface.deleteAttachedSurface(next) === DD_OK)
+                    {
+                        next = flipNext;
+                    }
+                    return DD_OK;
+                }
                 if (depth === other)
                 {
                     depth = null;
