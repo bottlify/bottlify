@@ -44,6 +44,7 @@ const DSERR_CONTROLUNAVAIL = 0x8878001e | 0;
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
 const DSBCAPS_LOCHARDWARE = 0x00000004;
 const DSBCAPS_LOCSOFTWARE = 0x00000008;
+const DSBCAPS_CTRLPOSITIONNOTIFY = 0x00000100;
 const DSBCAPS_CTRLFX = 0x00000200;
 
 /** Interface identifiers. Facts about somebody else's ABI; there is no partial credit. */
@@ -512,18 +513,32 @@ export function createDirectSound(
     // Described once: the bridge shares one table of stubs per method list, and
     // a list per buffer was a table per buffer. Built on first use, because the
     // methods it names are defined below.
-    /** @type {any[] | null} */
+    /** @type {{ buffer: any, buffer8: any, notify: any } | null} */
     let describedBuffer = null;
-    const bufferInterfaces = ()=>describedBuffer ??= [
-        describe(IID_IDirectSoundBuffer, IDIRECTSOUNDBUFFER_SLOTS, bufferMethods),
-        describe(IID_IDirectSoundBuffer8, IDIRECTSOUNDBUFFER8_SLOTS, bufferMethods),
-        describe(IID_IDirectSoundNotify, IDIRECTSOUNDNOTIFY_SLOTS, notifyMethods),
-        // IID_IDirectSound3DBuffer is deliberately absent: nothing here
-        // positions a sound, and an interface declared with no methods answers
-        // QueryInterface with a table that ends after IUnknown -- the program
-        // then calls slot 3 and jumps off the end of it. E_NOINTERFACE is an
-        // answer a program handles; a short vtable is not.
-    ];
+    const bufferDescriptors = ()=>describedBuffer ??= {
+        buffer: describe(IID_IDirectSoundBuffer, IDIRECTSOUNDBUFFER_SLOTS, bufferMethods),
+        buffer8: describe(IID_IDirectSoundBuffer8, IDIRECTSOUNDBUFFER8_SLOTS, bufferMethods),
+        notify: describe(IID_IDirectSoundNotify, IDIRECTSOUNDNOTIFY_SLOTS, notifyMethods),
+    };
+    /**
+     * What one buffer answers QueryInterface for. IDirectSoundNotify only when
+     * it was created to notify: a program asks for it to learn which kind of
+     * buffer it holds, and E_NOINTERFACE is the answer for one that is not.
+     *
+     * IID_IDirectSound3DBuffer is deliberately absent: nothing here positions
+     * a sound, and an interface declared with no methods answers
+     * QueryInterface with a table that ends after IUnknown -- the program then
+     * calls slot 3 and jumps off the end of it. E_NOINTERFACE is an answer a
+     * program handles; a short vtable is not.
+     *
+     * @param {any} buffer
+     */
+    const bufferInterfaces = buffer=>{
+        const { buffer: base, buffer8, notify } = bufferDescriptors();
+        return (buffer.capabilities & DSBCAPS_CTRLPOSITIONNOTIFY) !== 0
+            ? [base, buffer8, notify]
+            : [base, buffer8];
+    };
 
     /** @type {Record<string, (target: any, args: number[]) => number>} */
     const notifyMethods = {
@@ -777,7 +792,7 @@ export function createDirectSound(
 
     /** @param {any} buffer */
     const publishBuffer = buffer=>
-        publisher.publish(buffer, bufferInterfaces(), IID_IDirectSoundBuffer);
+        publisher.publish(buffer, bufferInterfaces(buffer), IID_IDirectSoundBuffer);
 
     /** @type {Record<string, (target: any, args: number[]) => number>} */
     const soundMethods = {

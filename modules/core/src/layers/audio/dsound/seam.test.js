@@ -270,7 +270,7 @@ test('one object has one identity however many times it is published', ()=>{
 
 test('an object answers QueryInterface for what it has and refuses what it has not', ()=>{
     const f = createRoot();
-    const buffer = createBuffer(f);
+    const buffer = createBuffer(f, { flags: DSBCAPS_CTRLPOSITIONNOTIFY });
     const adapter = f.bridge.recordAt(buffer).object;
     assert.ok(adapter.interfaceFor(IID_IDirectSoundBuffer));
     assert.ok(adapter.interfaceFor(IID_IDirectSoundBuffer8));
@@ -576,9 +576,26 @@ test('the getters refuse a null rather than writing to address zero', ()=>{
     }
 });
 
+test('IDirectSoundNotify is there only on a buffer created to notify', ()=>{
+    // Wine's dsound test_notifications: without DSBCAPS_CTRLPOSITIONNOTIFY the
+    // interface is E_NOINTERFACE, with it DS_OK -- a program that asks is
+    // finding out which kind of buffer it holds.
+    const f = createRoot();
+    const plain = createBuffer(f, { flags: DSBCAPS_GETCURRENTPOSITION2 });
+    assert.equal(f.bridge.recordAt(plain).object.interfaceFor(IID_IDirectSoundNotify), null);
+    assert.equal(notifyOn(f, plain), 0);
+
+    const notifying = createBuffer(f, { flags: DSBCAPS_CTRLPOSITIONNOTIFY });
+    assert.notEqual(notifyOn(f, notifying), 0);
+
+    const out = 0x1e00;
+    assert.equal(f.bridge.call(f.root, 'DuplicateSoundBuffer', [plain, out, 0]), DS_OK);
+    assert.equal(notifyOn(f, f.memory.u32(out)), 0, 'a duplicate has what its original has');
+});
+
 test('SetNotificationPositions reads an array of DSBPOSITIONNOTIFY', ()=>{
     const f = createRoot();
-    const buffer = createBuffer(f, { bytes: 88200 });
+    const buffer = createBuffer(f, { bytes: 88200, flags: DSBCAPS_CTRLPOSITIONNOTIFY });
     const array = 0x1d00;
     f.memory.setU32(array + DSBPOSITIONNOTIFY.dwOffset, 44100);
     f.memory.setU32(array + DSBPOSITIONNOTIFY.hEventNotify, 0x77);
@@ -592,7 +609,7 @@ test('SetNotificationPositions reads an array of DSBPOSITIONNOTIFY', ()=>{
 
 test('SetNotificationPositions with a count and no array is refused', ()=>{
     const f = createRoot();
-    const buffer = createBuffer(f);
+    const buffer = createBuffer(f, { flags: DSBCAPS_CTRLPOSITIONNOTIFY });
     assert.equal(f.bridge.call(notifyOn(f, buffer), 'SetNotificationPositions', [3, 0]),
         DSERR_INVALIDPARAM);
     assert.equal(f.bridge.call(notifyOn(f, buffer), 'SetNotificationPositions', [0, 0]), DS_OK,
@@ -601,7 +618,7 @@ test('SetNotificationPositions with a count and no array is refused', ()=>{
 
 test('a notification the cursor passed is signalled when the buffer is next read', ()=>{
     const f = createRoot();
-    const buffer = createBuffer(f, { bytes: 88200 });
+    const buffer = createBuffer(f, { bytes: 88200, flags: DSBCAPS_CTRLPOSITIONNOTIFY });
     const array = 0x1d00;
     f.memory.setU32(array + DSBPOSITIONNOTIFY.dwOffset, 22000);
     f.memory.setU32(array + DSBPOSITIONNOTIFY.hEventNotify, 0x77);

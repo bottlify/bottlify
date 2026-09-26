@@ -26,6 +26,10 @@ import {
     WAVEFORMATEX, DSBUFFERDESC, DS_OK, IID_IDirectSoundNotify,
 } from './dsound/seam.js';
 
+/** DSBCAPS_CTRLFREQUENCY, CTRLPAN and CTRLVOLUME together. */
+const DSBCAPS_CTRLDEFAULT = 0x000000e0;
+const DSBCAPS_CTRLPOSITIONNOTIFY = 0x00000100;
+
 const FORMAT_AT = 0x100;
 const DESC_AT = 0x200;
 const OUT_AT = 0x300;
@@ -149,6 +153,9 @@ async function playing({ silent = false, drained = true, shared = false, memory 
     f.view.setUint32(FORMAT_AT + WAVEFORMATEX.nSamplesPerSec, RATE, true);
     f.view.setUint16(FORMAT_AT + WAVEFORMATEX.wBitsPerSample, BITS, true);
     f.view.setUint32(DESC_AT + DSBUFFERDESC.dwSize, DSBUFFERDESC.SIZE, true);
+    // The controls a program of this era asks for, and the positions it waits on.
+    f.view.setUint32(DESC_AT + DSBUFFERDESC.dwFlags,
+        DSBCAPS_CTRLDEFAULT | DSBCAPS_CTRLPOSITIONNOTIFY, true);
     f.view.setUint32(DESC_AT + DSBUFFERDESC.dwBufferBytes, BUFFER_BYTES, true);
     f.view.setUint32(DESC_AT + DSBUFFERDESC.lpwfxFormat, FORMAT_AT, true);
 
