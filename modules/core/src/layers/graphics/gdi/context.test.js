@@ -1041,6 +1041,27 @@ test('SetDIBitsToDevice draws only the scan lines it was given, from the picture
     }
 });
 
+test('SetDIBits takes DIB_PAL_INDICES into a monochrome bitmap, and only there', ()=>{
+    // Wine's test_dib_formats: SetDIBits with DIB_PAL_COLORS + 1 fails into a
+    // bitmap compatible with the screen and succeeds into one made with
+    // CreateBitmap at one bit; + 2 fails into either. A monochrome bitmap's
+    // palette is its two colours, so each pixel is the bit it names.
+    const { fns, view, bytes } = wiredGdi();
+    const screen = fns.GetDC.handler([0]);
+    const mono = fns.CreateBitmap.handler([8, 2, 1, 1, 0]);
+    const colour = fns.CreateCompatibleBitmap.handler([screen, 8, 2]);
+    putInfo(view, { width: 8, height: 2, bitCount: 1, table: [0x00ff0000, 0x000000ff] });
+    bytes.set([0b10110000, 0, 0, 0, 0b01000000, 0, 0, 0], WIRED_BITS);
+
+    assert.equal(fns.SetDIBits.handler([screen, colour, 0, 2, WIRED_BITS, WIRED_INFO, 2]), 0);
+    assert.equal(fns.SetDIBits.handler([screen, mono, 0, 2, WIRED_BITS, WIRED_INFO, 3]), 0);
+    assert.equal(fns.SetDIBits.handler([screen, mono, 0, 2, WIRED_BITS, WIRED_INFO, 2]), 2);
+    const OUT = 0x5000;
+    assert.equal(fns.GetBitmapBits.handler([mono, 4, OUT]), 4);
+    assert.deepEqual([...bytes.subarray(OUT, OUT + 4)], [0b01000000, 0, 0b10110000, 0],
+        'the bits as they were, the top row first');
+});
+
 test('SetDIBits lays the scan lines it is given against the top of the bitmap', ()=>{
     // Wine's test_SetDIBits: uStartScan and cLines, and what lands where.
     /** @type {[boolean, number, number, number, [number, number, any][]][]} */

@@ -446,7 +446,9 @@ export function createDrawingFunctions(
      * supplied lines land where they belong in it (Wine's test_SetDIBits);
      * a row outside the bitmap is dropped. The answer is the lines handed
      * in, however many of them landed. Unlike the calls that draw a DIB, this
-     * one checks a BI_BITFIELDS DIB's masks, and refuses DIB_PAL_INDICES.
+     * one checks a BI_BITFIELDS DIB's masks, and takes DIB_PAL_INDICES only
+     * into a monochrome bitmap, whose palette is its black and white (Wine's
+     * test_dib_formats).
      *
      * @param {number} bitmap @param {number} start @param {number} lines
      * @param {number} bits @param {number} info @param {number} usage
@@ -454,11 +456,17 @@ export function createDrawingFunctions(
      * @returns {number}
      */
     const setDIBits = (bitmap, start, lines, bits, info, usage, dc)=>{
-        const image = usage === DIB_PAL_INDICES ? null
+        const shape = objects.get(bitmap)?.attributes;
+        const monochrome = shape?.bitCount === 1 && (shape.section >>> 0) === 0;
+        const image = usage === DIB_PAL_INDICES && !monochrome ? null
             : readDib(info, bits, usage, dc, lines);
         if (!image || image.masks.some(mask=>mask === 0))
         {
             return 0;
+        }
+        if (usage === DIB_PAL_INDICES)
+        {
+            image.colors = image.colors.map((_, index)=>((index & 1) === 0 ? 0 : 0xffffff));
         }
         const header = image.header;
         const landed = lend(bitmap, target=>{
