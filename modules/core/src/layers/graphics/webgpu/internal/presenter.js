@@ -76,6 +76,14 @@ export const GAMMA_ENTRIES = 256;
  */
 
 /**
+ * @typedef {Object} DisplayGamma
+ *     The display's ramp as a drawing API reaches it: what an owner sets is
+ *     shown through, and what it takes back with null no longer is.
+ * @property {(owner: any, ramp: GammaRamp | null) => void} set
+ * @property {() => boolean} applies  Whether a ramp set reaches the picture at all.
+ */
+
+/**
  * A ramp as the present pass reads it: 256 four-float rows of red, green,
  * blue and a spare, one per eight-bit input. An entry counts by its high
  * byte, which is as much of it as an eight-bit display shows: the ramps a

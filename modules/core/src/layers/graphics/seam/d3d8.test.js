@@ -191,11 +191,12 @@ function machine(){
  * @param {{ shadow?: boolean,
  *           windowClientSize?: (window: number) => { width: number,
  *               height: number } | null,
- *           allocateCode?: (bytes: number) => number }} [options]  Whether the device keeps a
- *     block in guest memory, as it does under a running processor, and how a
- *     window's client area is measured when a program asks for zero.
+ *           allocateCode?: (bytes: number) => number, caps?: object }} [options]
+ *     Whether the device keeps a block in guest memory, as it does under a
+ *     running processor, how a window's client area is measured when a
+ *     program asks for zero, and what the root is made with.
  */
-function seamed({ shadow = false, windowClientSize, allocateCode } = {}){
+function seamed({ shadow = false, windowClientSize, allocateCode, caps } = {}){
     const box = machine();
     /** The display's clock, which the test moves. */
     const clock = { time: 0 };
@@ -221,7 +222,7 @@ function seamed({ shadow = false, windowClientSize, allocateCode } = {}){
                 {
                     return null;
                 }
-                const root = createDirect3D8();
+                const root = createDirect3D8(caps);
                 roots.push(root);
                 return root;
             },
@@ -1687,7 +1688,7 @@ test('every capability claimed is one the renderer honours', ()=>{
     assert.equal(caps.VolumeTextureFilterCaps, caps.TextureFilterCaps);
     assert.equal(caps.VolumeTextureAddressCaps, caps.TextureAddressCaps);
     assert.equal(caps.Caps2 & 0x00020000, 0,
-        'no D3DCAPS2_FULLSCREENGAMMA: a ramp is kept and read back, and nothing applies it');
+        'no D3DCAPS2_FULLSCREENGAMMA: no display here shows a ramp');
     assert.equal(caps.TextureCaps & 0x00000080, 0,
         'no D3DPTEXTURECAPS_ALPHAPALETTE: no palettised format is made');
     assert.equal(caps.RasterCaps & 0x00004000, 0, 'no D3DRS_ZBIAS, which nothing reads');
@@ -2278,3 +2279,19 @@ test('an additional swap chain has back buffers of its own, and writes back only
         assert.equal(h.release(device), 0);
         h.release(root);
     });
+
+test('D3DCAPS2_FULLSCREENGAMMA is claimed where a full-screen device\'s ramp is shown', ()=>{
+    const h = seamed({ caps: { gamma: { set: ()=>{}, applies: ()=>true } } });
+    const root = h.create();
+    const at = 0x3200;
+    assert.equal(h.box.call(root, slot(IDIRECT3D8_SLOTS, 'GetDeviceCaps'),
+        [0, D3DDEVTYPE.HAL, at]), D3D_OK);
+    assert.equal(h.fields.readU32(at + D3DCAPS8.Caps2) & 0x00020000, 0x00020000,
+        'the adapter says so');
+    const device = h.createDevice(root);
+    assert.equal(h.device(device, 'GetDeviceCaps', [at]), D3D_OK);
+    assert.equal(h.fields.readU32(at + D3DCAPS8.Caps2) & 0x00020000, 0x00020000,
+        'and so does the device');
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});

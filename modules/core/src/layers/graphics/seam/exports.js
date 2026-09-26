@@ -84,6 +84,10 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *     [deps.windowClientSize]
  *        A window's client area, which is the size a back buffer asked for as
  *        zero by zero takes.
+ * @param {import('../webgpu/internal/presenter.js').DisplayGamma} [deps.gamma]
+ *        The display's gamma ramp, which a DirectDraw primary's sets. The
+ *        Direct3D 8 and 9 devices reach it through the objects `graphics`
+ *        makes, which carry it from the layer.
  * @param {() => number} [deps.now]
  *        The clock the display's raster runs on, in milliseconds; the host's
  *        when none is given.
@@ -107,7 +111,7 @@ export function createGraphicsLibraries(
         free, exportAddress,
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
-        now = ()=>performance.now(), schedule = (ms, run)=>{
+        gamma, now = ()=>performance.now(), schedule = (ms, run)=>{
             setTimeout(run, ms);
         } },
 )
@@ -143,6 +147,7 @@ export function createGraphicsLibraries(
         extraInterfaces: [d3d7.interface, ...d3dLegacy.interfaces],
         extraSurfaceInterfaces: d3dLegacy.surfaceInterfaces,
         identity: ()=>graphics.adapter?.() ?? null,
+        gamma,
     });
 
     /** What a program has actually asked us to make, for a report. */

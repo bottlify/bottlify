@@ -243,6 +243,9 @@ export function createPalettes(){
  * @property {number} maxSimultaneousTextures
  * @property {number} maxVertexBlendMatrices
  * @property {number} maxVertexW
+ * @property {boolean} [fullscreenGamma]
+ *     Whether a full-screen device's gamma ramp reaches the picture, which
+ *     D3DCAPS2_FULLSCREENGAMMA claims. Decided by the display, not asked for.
  */
 
 /** @type {DeviceCaps} */
@@ -427,6 +430,9 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {(watcher: () => void) => () => void} [onDeviceLost]
  *     Calls the watcher once the GPU underneath is gone for good, at once if it
  *     already is; returns how to stop watching. Absent, the GPU never goes.
+ * @property {import('../webgpu/internal/presenter.js').DisplayGamma} [gamma]
+ *     Where a full-screen device's gamma ramp reaches the picture. Absent, a
+ *     ramp is kept and read back only.
  */
 
 /**
@@ -448,15 +454,15 @@ export function createDirect3D9(options = {}){
     const {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, maxDraws, skipTexture, probeTexture, fog, mips,
-        onDeviceLost, ...caps
+        onDeviceLost, gamma, ...caps
     } = options;
     /** @type {DeviceCaps} */
-    const resolved = { ...DEFAULT_CAPS, ...caps };
+    const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
     /** @type {DeviceServices} */
     const services = {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, maxDraws, skipTexture, probeTexture, fog, mips,
-        onDeviceLost,
+        onDeviceLost, gamma,
     };
     if (backend && !readMemory)
     {
@@ -730,6 +736,30 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     let nPatchMode = 0;
     let clipStatus = { ClipUnion: 0, ClipIntersection: 0 };
     let gammaRamp = identityRamp();
+    /** Whether the program set a ramp, and whether the display shows it now. */
+    let gammaSet = false;
+    let gammaShown = false;
+    /**
+     * Puts the device's ramp on the display, or takes it back. A full-screen
+     * device's ramp is the display's (D3DCAPS2_FULLSCREENGAMMA); a windowed
+     * one's is kept and read back and changes nothing on the screen, and a
+     * device that goes gives the display back the ramp it had before.
+     *
+     * @param {boolean} [going]
+     */
+    const showGamma = (going = false)=>{
+        const shown = caps.fullscreenGamma === true && gammaSet && !going
+            && !presentParameters.windowed;
+        if (shown)
+        {
+            services.gamma?.set(device, gammaRamp);
+        }
+        else if (gammaShown)
+        {
+            services.gamma?.set(device, null);
+        }
+        gammaShown = shown;
+    };
     let dialogBoxMode = false;
     let softwareVertexProcessing =
         (identity.BehaviorFlags & D3DCREATE.SOFTWARE_VERTEXPROCESSING) !== 0;
@@ -1657,6 +1687,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             if (left === 0)
             {
                 stopWatchingLoss?.();
+                showGamma(true);
             }
             return left;
         },
@@ -1949,6 +1980,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             });
             scissor = wholeOf(target);
             drawStateVersion++;
+            // The ramp outlasts the reset; whether it is shown follows the mode.
+            showGamma();
             return D3D_OK;
         },
 
@@ -2360,10 +2393,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /**
-         * The ramp is kept and handed back, and nothing applies it: this device
-         * reports no gamma capability, so a program that checks before setting
-         * one knows that already, and one that does not gets the state it wrote
-         * rather than an invented one.
+         * The ramp is kept and handed back, and shown while the device is
+         * full-screen on a display that applies one -- which is what
+         * D3DCAPS2_FULLSCREENGAMMA says. Windowed, or where the capability is
+         * not claimed, a program gets the state it wrote and the picture it
+         * drew.
          *
          * @param {GammaRamp} ramp
          */
@@ -2373,6 +2407,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 green: Uint16Array.from(ramp.green),
                 blue: Uint16Array.from(ramp.blue),
             };
+            gammaSet = true;
+            showGamma();
         },
 
         /** @param {{ ramp?: GammaRamp }} out */

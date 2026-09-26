@@ -115,3 +115,9 @@ test('what the renderer does not do is not claimed', ()=>{
     assert.ok(words.MaxStreams >= 1);
     assert.ok(words.MaxTextureBlendStages >= words.MaxSimultaneousTextures);
 });
+
+test('D3DCAPS2_FULLSCREENGAMMA is claimed only where a full-screen device\'s ramp is shown', ()=>{
+    assert.equal(capabilityWords(DEFAULT_CAPS).Caps2 & 0x00020000, 0, 'no display, no claim');
+    assert.equal(capabilityWords({ ...DEFAULT_CAPS, fullscreenGamma: true }).Caps2 & 0x00020000,
+        0x00020000);
+});

@@ -393,6 +393,10 @@ function sameRect(a, b){
  *           what a DC *is* belongs to gdi, which is told where the pixels are.
  * @property {(handle: number) => void} [releaseDc]
  *           The other end of `createDc`.
+ * @property {import('../webgpu/internal/presenter.js').DisplayGamma} [gamma]
+ *           The display's gamma ramp, which is the primary surface's: set when
+ *           a program sets one through the primary's gamma control, taken back
+ *           when the primary goes. Absent, a ramp is kept and read back only.
  * @property {(surface: Surface, window: number, exclusive: boolean) => void} [onPresent]
  *           Called whenever what the primary surface shows may have changed: a
  *           flip, an unlock or a released DC on it, a blit into it -- with the
@@ -886,6 +890,10 @@ export function createDirectDraw(options = {}){
             if (spec.owner)
             {
                 release(spec.owner);
+            }
+            if (gammaRamp && (caps & DDSCAPS_PRIMARYSURFACE) !== 0)
+            {
+                options.gamma?.set(surface, null);
             }
             // Whatever the surface holds now: a flip moves buffers between a
             // chain's members, and each member gives back the one it ends with.
@@ -1492,9 +1500,8 @@ export function createDirectDraw(options = {}){
 
             /**
              * The ramp a gamma control on this surface holds. Only the
-             * primary's reaches the screen on Windows, and there it is the
-             * display's; nothing here applies one yet, so a ramp is kept and
-             * read back and the picture is shown as drawn.
+             * primary's reaches the screen, and there it is the display's;
+             * another surface's is kept and read back.
              */
             get gammaRamp(){
                 return gammaRamp;
@@ -1505,6 +1512,15 @@ export function createDirectDraw(options = {}){
             /** @param {ArrayLike<number>} ramp  Red, green and blue, 256 words each. */
             setGammaRamp(ramp){
                 gammaRamp = Uint16Array.from({ length: GAMMA_WORDS }, (_, index)=>ramp[index] ?? 0);
+                if ((caps & DDSCAPS_PRIMARYSURFACE) !== 0)
+                {
+                    const channel = GAMMA_WORDS / 3;
+                    options.gamma?.set(surface, {
+                        red: gammaRamp.subarray(0, channel),
+                        green: gammaRamp.subarray(channel, channel * 2),
+                        blue: gammaRamp.subarray(channel * 2),
+                    });
+                }
                 return DD_OK;
             },
 

@@ -64,6 +64,7 @@ import {
 import {
     DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_DEPTHFILL, DDBLT_KEYDESTOVERRIDE,
     DDBLT_KEYSRCOVERRIDE, DDPF_ZBUFFER, DDCAPS2_CANRENDERWINDOWED, DDCAPS2_CERTIFIED,
+    DDCAPS2_PRIMARYGAMMA,
     DDCAPS2_WIDESURFACES, DDCAPS_BLT, DDCAPS_BLTCOLORFILL, DDCAPS_BLTSTRETCH, DDCAPS_CANBLTSYSMEM,
     DDCAPS_COLORKEY, DDCAPS_GDI, DDCAPS_PALETTE, DDCKEYCAPS_DESTBLT, DDCKEYCAPS_SRCBLT,
     DDCKEY_DESTBLT, DDCKEY_SRCBLT, DDERR_ALREADYINITIALIZED, DDERR_INVALIDPARAMS,
@@ -246,13 +247,15 @@ export function versionOf(id){
  *        How a wait for the vertical blank is woken.
  * @param {() => import('./adapter.js').AdapterIdentity | null} [deps.identity]
  *        The hardware behind the display, as the assembling caller knows it.
+ * @param {import('../webgpu/internal/presenter.js').DisplayGamma} [deps.gamma]
+ *        Where a primary surface's gamma ramp reaches the picture.
  */
 export function createDirectDrawSeam(
     { publisher, memory, screen, gdi, present, callGuest, currentThread, scratch,
         extraInterfaces = [], extraSurfaceInterfaces = [], now = ()=>performance.now(),
         schedule = (ms, run)=>{
             setTimeout(run, ms);
-        }, identity },
+        }, identity, gamma },
 )
 {
     const fields = createFields(memory);
@@ -1127,7 +1130,9 @@ export function createDirectDrawSeam(
             dwSize: size,
             dwCaps: DDCAPS_BLT | DDCAPS_BLTSTRETCH | DDCAPS_BLTCOLORFILL | DDCAPS_COLORKEY
                 | DDCAPS_GDI | DDCAPS_PALETTE | DDCAPS_CANBLTSYSMEM,
-            dwCaps2: DDCAPS2_CERTIFIED | DDCAPS2_WIDESURFACES | DDCAPS2_CANRENDERWINDOWED,
+            // A primary's gamma ramp is claimed where the display applies it.
+            dwCaps2: DDCAPS2_CERTIFIED | DDCAPS2_WIDESURFACES | DDCAPS2_CANRENDERWINDOWED
+                | (gamma?.applies() ? DDCAPS2_PRIMARYGAMMA : 0),
             dwCKeyCaps: DDCKEYCAPS_SRCBLT | DDCKEYCAPS_DESTBLT,
             dwPalCaps: DDPCAPS_8BIT | DDPCAPS_PRIMARYSURFACE | DDPCAPS_ALLOW256,
             dwVidMemTotal: VIDEO_MEMORY,
@@ -1605,6 +1610,10 @@ export function createDirectDrawSeam(
             {
                 options.createDc = attributes=>gdi.createSurfaceDc(attributes);
                 options.releaseDc = handle=>gdi.deleteSurfaceDc(handle);
+            }
+            if (gamma)
+            {
+                options.gamma = gamma;
             }
             const display = screen();
             options.screenWidth = display.width;

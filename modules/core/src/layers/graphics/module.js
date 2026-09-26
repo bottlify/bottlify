@@ -155,6 +155,13 @@ export function uncoveredRegion(windows, owner, exclusive, screen){
  */
 let current = null;
 
+/**
+ * The owner GDI's device ramp is set under. One for every machine, because
+ * the ramp is the display's rather than a process's: the next process on the
+ * same canvas replaces it rather than stacking another on top.
+ */
+const DISPLAY_RAMP = 'display';
+
 export const graphicsModule = {
     name: 'graphics',
     version: '0.1.0',
@@ -180,7 +187,8 @@ export const graphicsModule = {
          * the run's: a given one is attached, never disposed here.
          *
          * @type {{ backend: any, factories: any, created: string[], seam: any,
-         *     presenter: any, presenterGiven: boolean, disposed: boolean }}
+         *     presenter: any, presenterGiven: boolean, disposed: boolean,
+         *     gammaOwners: Set<any> }}
          */
         const state = {
             backend: null,
@@ -190,6 +198,30 @@ export const graphicsModule = {
             presenter: null,
             presenterGiven: false,
             disposed: false,
+            gammaOwners: new Set(),
+        };
+
+        /**
+         * The display's gamma ramp, which is the run presenter's: whichever
+         * ramp was set last is shown through. The owners this machine set one
+         * for are kept, so that its devices' ramps go with it -- a presenter
+         * the caller handed in outlives the process.
+         *
+         * @type {import('./webgpu/internal/presenter.js').DisplayGamma}
+         */
+        const displayGamma = {
+            set(owner, ramp){
+                if (ramp)
+                {
+                    state.gammaOwners.add(owner);
+                }
+                else
+                {
+                    state.gammaOwners.delete(owner);
+                }
+                state.presenter?.setGammaRamp?.(owner, ramp);
+            },
+            applies: ()=>state.presenter?.appliesGamma?.() === true,
         };
 
         /**
@@ -339,6 +371,8 @@ export const graphicsModule = {
                 fog: device?.fog,
                 mips: device?.mips,
                 onDeviceLost,
+                // Where a full-screen device's gamma ramp is shown.
+                gamma: displayGamma,
             }),
             // The same wiring, except that the backend is asked for only when
             // this build has a GPU: a Direct3D 9 object made in a headless
@@ -374,6 +408,7 @@ export const graphicsModule = {
                 fog: device?.fog,
                 mips: device?.mips,
                 onDeviceLost,
+                gamma: displayGamma,
             }),
             // OpenGL asks for a device only when there is one, so it is the
             // one API here that a headless build can run to a finished frame.
@@ -761,6 +796,8 @@ export const graphicsModule = {
             },
 
             present: presentPrimary,
+            // A DirectDraw primary's gamma ramp is the display's.
+            gamma: displayGamma,
 
             // What a Direct3D 7 device draws with. Reached when a program
             // first asks its DirectDraw object for Direct3D, not now, so a
@@ -904,6 +941,22 @@ export const graphicsModule = {
                     state.presenter.present({ ...screen, label: 'desktop' });
                 }
             },
+            /**
+             * The display's ramp, as SetDeviceGammaRamp sets it: three
+             * channels of 256 sixteen-bit entries; null takes it back. A
+             * full-screen device's or a DirectDraw primary's ramp set after
+             * it is shown instead, until that one is taken back.
+             *
+             * @param {import('./webgpu/internal/presenter.js').GammaRamp | null} ramp
+             */
+            setDisplayGamma: ramp=>displayGamma.set(DISPLAY_RAMP, ramp),
+            /**
+             * The ramp the display shows through, whoever set it, or null
+             * when none was: GetDeviceGammaRamp answers the identity then.
+             */
+            displayGamma: ()=>state.presenter?.gammaRamp?.() ?? null,
+            /** Whether a ramp set reaches the picture at all. */
+            appliesGamma: ()=>displayGamma.applies(),
         });
 
         current = state;
@@ -993,6 +1046,16 @@ export const graphicsModule = {
             {
                 instance.backend.dispose();
             }
+            // A process's devices go with it, and so do their ramps; the
+            // display's own is the display's, and the next process sees it.
+            for (const owner of instance.gammaOwners)
+            {
+                if (owner !== DISPLAY_RAMP)
+                {
+                    instance.presenter?.setGammaRamp?.(owner, null);
+                }
+            }
+            instance.gammaOwners.clear();
             // The presenter belongs to the run, not to this machine: what
             // replaces this process draws into the same canvas and the same
             // texture, so it is left exactly as it is. Only a presenter this

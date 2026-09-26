@@ -87,6 +87,7 @@ const PIXEL_SHADER_CONSTANTS = 8;
 const D3DCURSORCAPS_COLOR = 0x00000001;
 const D3DCURSORCAPS_LOWRES = 0x00000002;
 const D3DCAPS2_CANRENDERWINDOWED = 0x00080000;
+const D3DCAPS2_FULLSCREENGAMMA = 0x00020000;
 
 const D3DPRESENT_INTERVAL_ONE = 0x00000001;
 const D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
@@ -1521,7 +1522,7 @@ export function createDirect3D8Seam(
         // --- the desktop, none of which this build owns ---
 
         // Both gamma calls are declared void, so what they leave in EAX is not
-        // read; the ramp is state a program reads back rather than a picture.
+        // read.
         /** @param {any} device @param {number[]} args */
         SetGammaRamp: (device, [, ramp])=>{
             if ((ramp >>> 0) !== 0)
@@ -2389,9 +2390,9 @@ export function createDirect3D8Seam(
         fields.writeStruct(address, D3DCAPS8, {
             DeviceType: D3DDEVTYPE.HAL,
             Caps: D3DCAPS_READ_SCANLINE,
-            // D3DCAPS2_FULLSCREENGAMMA is not claimed: a ramp is kept and read
-            // back, and nothing applies it to the picture.
-            Caps2: D3DCAPS2_CANRENDERWINDOWED,
+            // A full-screen device's ramp is claimed where the display shows it.
+            Caps2: D3DCAPS2_CANRENDERWINDOWED
+                | (caps.fullscreenGamma === true ? D3DCAPS2_FULLSCREENGAMMA : 0),
             PresentationIntervals: D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE,
             CursorCaps: D3DCURSORCAPS_COLOR | D3DCURSORCAPS_LOWRES,
             DevCaps: D3DDEVCAPS_HWTRANSFORMANDLIGHT | D3DDEVCAPS_HWRASTERIZATION

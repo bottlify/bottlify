@@ -2225,3 +2225,56 @@ test('UpdateTexture carries what the source was written in since it was last car
     destination.release();
     device.release();
 });
+
+test('a full-screen device\'s gamma ramp is the display\'s, and a windowed one\'s is kept', ()=>{
+    // D3DCAPS2_FULLSCREENGAMMA: the ramp is the display's in full-screen mode;
+    // windowed, SetGammaRamp succeeds and changes nothing on the screen.
+    /** @type {any[][]} */
+    const set = [];
+    const gamma = {
+        /** @param {any} owner @param {any} ramp */
+        set: (owner, ramp)=>set.push([owner, ramp]),
+        applies: ()=>true,
+    };
+    const channel = Uint16Array.from({ length: 256 }, (_, index)=>(255 - index) * 257);
+    const inverted = { red: channel, green: channel.slice(), blue: channel.slice() };
+
+    const windowed = createDevice({ caps: { gamma } });
+    assert.equal(windowed.caps.fullscreenGamma, true, 'the display applies a ramp here');
+    windowed.SetGammaRamp(inverted);
+    assert.equal(set.length, 0, 'windowed: kept, not shown');
+    /** @type {{ ramp?: any }} */
+    const read = {};
+    windowed.GetGammaRamp(read);
+    assert.deepEqual([...read.ramp.red], [...channel]);
+    assertFullyReleased(windowed);
+    assert.equal(set.length, 0);
+
+    const full = createDevice({ caps: { gamma }, parameters: { windowed: false } });
+    full.SetGammaRamp(inverted);
+    assert.equal(set.length, 1);
+    assert.equal(set[0][0], full);
+    assert.deepEqual([...set[0][1].blue], [...channel]);
+
+    assert.equal(full.Reset({
+        swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1, backBufferWidth: 640,
+        backBufferHeight: 480, backBufferFormat: D3DFMT.X8R8G8B8, enableAutoDepthStencil: true,
+        autoDepthStencilFormat: D3DFMT.D24S8, windowed: true,
+    }), D3D_OK);
+    assert.deepEqual(set.at(-1), [full, null], 'reset to a window, the display is given back');
+    assert.equal(full.Reset({
+        swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1, backBufferWidth: 640,
+        backBufferHeight: 480, backBufferFormat: D3DFMT.X8R8G8B8, enableAutoDepthStencil: true,
+        autoDepthStencilFormat: D3DFMT.D24S8, windowed: false,
+    }), D3D_OK);
+    assert.equal(set.at(-1)?.[1]?.red[0], 0xffff, 'and full-screen again, its ramp is shown');
+    const count = set.length;
+    assertFullyReleased(full);
+    assert.deepEqual(set.at(-1), [full, null], 'the device\'s end gives the display back');
+    assert.equal(set.length, count + 1);
+
+    const headless = createDevice({ caps: { gamma: { set: ()=>{}, applies: ()=>false } } });
+    assert.equal(headless.caps.fullscreenGamma, false);
+    assertFullyReleased(headless);
+    assert.equal(createDevice().caps.fullscreenGamma, false, 'nor without a display at all');
+});

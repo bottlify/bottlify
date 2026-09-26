@@ -35,7 +35,7 @@ import {
 } from '../ddraw/structs.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import {
-    DDBLT_COLORFILL, DDCAPS_BLT, DDERR_DCALREADYCREATED, DDERR_INVALIDPARAMS,
+    DDBLT_COLORFILL, DDCAPS2_PRIMARYGAMMA, DDCAPS_BLT, DDERR_DCALREADYCREATED, DDERR_INVALIDPARAMS,
     DDGDI_GETHOSTIDENTIFIER, DDERR_NOCOOPERATIVELEVELSET, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND,
     DDERR_NOTONMIPMAPSUBLEVEL, DDERR_SURFACEBUSY, DDPCAPS_8BIT, DDPF_RGB,
     DDSCAPS2_MIPMAPSUBLEVEL, DDSCAPS_BACKBUFFER, DDSCAPS_COMPLEX, DDSCAPS_FLIP, DDSCAPS_MIPMAP,
@@ -161,7 +161,8 @@ function machine(){
  * The seam over real DirectDraw objects, with spies where GDI and the
  * presenter would be.
  *
- * @param {{ adapter?: any }} [build]  What the build says the hardware is.
+ * @param {{ adapter?: any, gamma?: any }} [build]  What the build says the hardware is,
+ *     and where a primary's gamma ramp is shown.
  */
 function seamed(build = {}){
     const box = machine();
@@ -211,6 +212,7 @@ function seamed(build = {}){
             },
         },
         present: surface=>presented.push(surface),
+        gamma: build.gamma,
     });
     const fields = createFields(box.services);
     const ddrawDll = libraries.libraries['DDRAW.dll'];
@@ -1864,3 +1866,68 @@ test('a surface whose pixels are kept elsewhere is brought up to date before a l
     assert.equal(h.release(ddraw), 0);
     h.assertAllReleased();
 });
+
+test('a primary\'s gamma ramp is the display\'s, and the caps say so only where one is applied',
+    ()=>{
+        /** @type {any[][]} */
+        const set = [];
+        const gamma = {
+            /** @param {any} owner @param {any} ramp */
+            set: (owner, ramp)=>set.push([owner, ramp]),
+            applies: ()=>true,
+        };
+        const h = seamed({ gamma });
+        const ddraw = h.create7();
+        const caps = 0x6100;
+        h.box.memory.writeU32(caps + DDCAPS.dwSize, DDCAPS.SIZE);
+        h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'GetCaps'), [caps, 0]);
+        assert.equal(h.box.memory.readU32(caps + DDCAPS.dwCaps2) & DDCAPS2_PRIMARYGAMMA,
+            DDCAPS2_PRIMARYGAMMA);
+
+        const riid = h.box.putGuid(0x4000, IID_IDirectDrawGammaControl);
+        const controlOf = (/** @type {number} */ surface)=>{
+            assert.equal(h.box.call(surface, 0, [riid, 0x4300]), DD_OK);
+            return h.box.memory.readU32(0x4300);
+        };
+        const setRamp = slot(IDIRECTDRAWGAMMACONTROL_SLOTS, 'SetGammaRamp');
+        const ramp = 0x7800;
+        for (let index = 0; index < 768; index++)
+        {
+            const value = (255 - (index & 0xff)) * 257;
+            h.box.bytes[ramp + index * 2] = value & 0xff;
+            h.box.bytes[ramp + index * 2 + 1] = value >> 8;
+        }
+
+        const texture = h.createSurface7(ddraw, { caps: DDSCAPS_TEXTURE, width: 8, height: 8 });
+        const textureGamma = controlOf(texture);
+        assert.equal(h.box.call(textureGamma, setRamp, [0, ramp]), DD_OK);
+        assert.equal(set.length, 0, 'a surface that is not the primary keeps its ramp to itself');
+
+        const primary = h.createSurface7(ddraw, { caps: DDSCAPS_PRIMARYSURFACE });
+        const primaryGamma = controlOf(primary);
+        assert.equal(h.box.call(primaryGamma, setRamp, [0, ramp]), DD_OK);
+        assert.equal(set.length, 1);
+        const [owner, shown] = set[0];
+        assert.equal(owner, h.publisher.objectAt(primary));
+        assert.deepEqual([shown.red.length, shown.green.length, shown.blue.length],
+            [256, 256, 256]);
+        assert.deepEqual([shown.red[0], shown.green[255], shown.blue[128]],
+            [0xffff, 0, 127 * 257]);
+
+        h.release(primaryGamma);
+        h.release(textureGamma);
+        assert.equal(h.release(primary), 0);
+        assert.deepEqual(set[1], [owner, null], 'the primary\'s end takes its ramp back');
+        assert.equal(h.release(texture), 0);
+        assert.equal(set.length, 2);
+        assert.equal(h.release(ddraw), 0);
+        h.assertAllReleased();
+
+        const headless = seamed({ gamma: { set: ()=>{}, applies: ()=>false } });
+        const other = headless.create7();
+        headless.box.memory.writeU32(caps + DDCAPS.dwSize, DDCAPS.SIZE);
+        headless.box.call(other, slot(IDIRECTDRAW7_SLOTS, 'GetCaps'), [caps, 0]);
+        assert.equal(headless.box.memory.readU32(caps + DDCAPS.dwCaps2) & DDCAPS2_PRIMARYGAMMA, 0,
+            'no canvas, no gamma claimed');
+        headless.release(other);
+    });

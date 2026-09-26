@@ -1405,8 +1405,9 @@ export function createDirect3D9Seam(
         /** @param {any} device @param {number[]} args */
         SetDialogBoxMode: (device, [enable])=>device.SetDialogBoxMode((enable >>> 0) !== 0),
 
-        // Both gamma calls are declared void; the ramp is state a program
-        // reads back rather than a picture.
+        // Both gamma calls are declared void. The swap chain and the
+        // calibration flag are not read: a device's one ramp is its implicit
+        // chain's, and nothing here calibrates.
         /** @param {any} device @param {number[]} args */
         SetGammaRamp: (device, [, , ramp])=>{
             if ((ramp >>> 0) !== 0)

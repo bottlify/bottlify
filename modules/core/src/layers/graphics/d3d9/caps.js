@@ -24,6 +24,7 @@
 import { TEXTURE_OP_CAPS } from '../d3d8/validity.js';
 
 const D3DCAPS_READ_SCANLINE = 0x00020000;
+const D3DCAPS2_FULLSCREENGAMMA = 0x00020000;
 const D3DCAPS2_DYNAMICTEXTURES = 0x20000000;
 const D3DCAPS2_CANAUTOGENMIPMAP = 0x40000000;
 
@@ -143,9 +144,10 @@ export function capabilityWords(caps, identity = {}){
         AdapterOrdinal: identity.adapterOrdinal ?? 0,
         // The raster the clock gives can be read; there is no overlay.
         Caps: D3DCAPS_READ_SCANLINE,
-        // Textures may be made dynamic, and are uploaded when they change.
-        // Gamma is kept and not applied, so it is not claimed.
-        Caps2: D3DCAPS2_DYNAMICTEXTURES | D3DCAPS2_CANAUTOGENMIPMAP,
+        // Textures may be made dynamic, and are uploaded when they change. A
+        // full-screen device's ramp is claimed where the display shows it.
+        Caps2: D3DCAPS2_DYNAMICTEXTURES | D3DCAPS2_CANAUTOGENMIPMAP
+            | (caps.fullscreenGamma === true ? D3DCAPS2_FULLSCREENGAMMA : 0),
         // No copy between video and system memory through StretchRect.
         Caps3: 0,
         PresentationIntervals: D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE,

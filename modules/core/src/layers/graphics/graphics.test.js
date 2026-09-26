@@ -790,3 +790,54 @@ test('diagnostics answers for the live instance', async()=>{
         'the live instance is the one whose request is reported');
     await graphicsModule.dispose();
 });
+
+test('the display\'s gamma ramp is the run\'s: a device\'s goes with the machine, GDI\'s stays',
+    async()=>{
+        const gpu = createFakeDevice();
+        const gpuDevice = /** @type {any} */ (gpu.device);
+        gpuDevice.features = new Set();
+        gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler',
+            descriptor });
+        const presenter = createPresenter({
+            device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+            now: ()=>0,
+        });
+        const device = {
+            device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+            presentTo: (/** @type {any} */ frame)=>presenter.show(frame),
+        };
+        const api = await graphicsModule.create({ presenter, device }, hostWith(ramMemory()));
+        /** @param {(index: number) => number} entry */
+        const rampOf = entry=>{
+            const channel = Uint16Array.from({ length: 256 }, (_, index)=>entry(index));
+            return { red: channel, green: channel.slice(), blue: channel.slice() };
+        };
+        const dim = rampOf(index=>(index >> 1) * 257);
+        const inverted = rampOf(index=>(255 - index) * 257);
+
+        const gdi = api.gdiDrawing();
+        assert.equal(gdi.displayGamma(), null, 'none set: the caller answers the identity');
+        gdi.setDisplayGamma(dim);
+        assert.deepEqual([...(presenter.gammaRamp()?.green ?? [])], [...dim.green]);
+
+        const d3d9 = api.create('d3d9');
+        assert.equal(d3d9.caps.fullscreenGamma, true, 'the presenter draws through a ramp');
+        /** @type {{ device?: any }} */
+        const out = {};
+        assert.equal(d3d9.CreateDevice({
+            swapEffect: 1, backBufferCount: 1, backBufferWidth: 4, backBufferHeight: 4,
+            backBufferFormat: D3DFMT.X8R8G8B8, windowed: false,
+        }, out), D3D_OK);
+        out.device.SetGammaRamp(inverted);
+        assert.deepEqual([...(gdi.displayGamma()?.red ?? [])], [...inverted.red],
+            'the device\'s ramp is the display\'s while it is full-screen');
+
+        await graphicsModule.dispose();
+        assert.deepEqual([...(presenter.gammaRamp()?.red ?? [])], [...dim.red],
+            'the machine\'s device went with it, and the display keeps its own ramp');
+
+        const headless = await graphicsModule.create({}, hostWith(fakeMemory()));
+        assert.equal(headless.create('d3d9').caps.fullscreenGamma, false,
+            'without a canvas no ramp is shown, and none is claimed');
+        await graphicsModule.dispose();
+    });
