@@ -314,8 +314,9 @@ the emitter's version, the host's features, the layout and the emitting settings
 another engine, another bundle or other code bytes made is one no lookup here names.
 `translation-store.itest.js` seeds a fresh store from runs with the default NaN's sign flipped,
 without tail calls (no entry hash, so no tier resumed from it), with another layout, with
-`structure` off and with it unset against a run with it off, with `precise`, with another trap
-port, under another precision control (wide, narrow and mixed against each other, on one program's
+`structure` off and with it unset against a run with it off, with `precise`, with `dispatch` and
+with `callTargets` each against the other setting, with another trap port, under another precision
+control (wide, narrow and mixed against each other, on one program's
 code bytes), and from the program with one code byte changed: none answers a lookup, and each run's
 checksum is the one a run without a seed computes. `seedRecords` (cork's `runtime/cache.js`) is the
 `select` an export takes to keep only the region records of this emitter and the modules they name:
