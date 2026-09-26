@@ -3036,11 +3036,6 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         },
     });
 
-    // An effect is still refused where it is made: it is read and can be
-    // walked (`effects.fromMemory`), but its passes apply nothing yet, and an
-    // effect whose passes applied nothing would draw wrongly far from here.
-    const EFFECT_REFUSAL = 'the effect framework is not implemented: no pass applies its state';
-
     const effects = createEffectSeam({
         publisher, fields, memory, allocate, free, report, constantString, readCString, handBack,
         writeObjects, deviceInterfaces: ()=>deviceInterfaces,
@@ -3349,15 +3344,16 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
          * HRESULT D3D10CreateEffectFromMemory(void*, SIZE_T, UINT, ID3D10Device*,
          *     ID3D10EffectPool*, ID3D10Effect**)
          */
-        D3D10CreateEffectFromMemory: refusal(24, 5, EFFECT_REFUSAL),
+        D3D10CreateEffectFromMemory: { argBytes: 24, handler: effects.fromMemory },
         /**
          * HRESULT D3D10CreateEffectPoolFromMemory(void*, SIZE_T, UINT, ID3D10Device*,
          *     ID3D10EffectPool**)
          */
-        D3D10CreateEffectPoolFromMemory: refusal(20, 4, EFFECT_REFUSAL),
+        D3D10CreateEffectPoolFromMemory: refusal(20, 4, 'D3D10CreateEffectPoolFromMemory:'
+            + ' effect pools are not implemented, nor the effects that share their variables'),
         /** HRESULT D3D10DisassembleEffect(ID3D10Effect*, BOOL, ID3D10Blob**) */
-        D3D10DisassembleEffect: refusal(12, 2, 'D3D10DisassembleEffect: no effect is ever'
-            + ' made here to disassemble'),
+        D3D10DisassembleEffect: refusal(12, 2, 'D3D10DisassembleEffect: no disassembler is'
+            + ' kept here'),
         /**
          * HRESULT D3D10PreprocessShader(const char*, SIZE_T, const char*,
          *     const D3D10_SHADER_MACRO*, ID3D10Include*, ID3D10Blob**, ID3D10Blob**)
@@ -3455,10 +3451,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         deviceInterfaces,
         swapChainInterfaces,
         factoryInterfaces,
-        /**
-         * The effect framework: what D3D10CreateEffectFromMemory will call
-         * once passes can be applied.
-         */
+        /** The effect framework, which D3D10CreateEffectFromMemory calls. */
         effects,
 
         libraries: {

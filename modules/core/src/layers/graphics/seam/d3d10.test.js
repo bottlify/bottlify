@@ -1133,19 +1133,19 @@ test('a compile is refused as a failed compile, with the reason in the error blo
     assert.equal(h.d3d10.D3D10DisassembleShader.handler([0, 0, 0, 0, outs]) >>> 0, E_NOTIMPL);
     assert.ok(h.divergences.some(line=>line.includes('D3D10CompileShader')));
 
-    // The effect framework is refused where an effect is made, with the out
-    // pointer cleared and the argument bytes the header gives.
+    // An effect without a device is D3DERR_INVALIDCALL, with the out pointer
+    // cleared; a pool is refused, as its child would be.
     const effectAt = h.box.place([0xdeadbeef]);
     assert.equal(h.d3d10.D3D10CreateEffectFromMemory.argBytes, 24);
     assert.equal(h.d3d10.D3D10CreateEffectFromMemory.handler([0, 0, 0, 0, 0, effectAt]) >>> 0,
-        E_NOTIMPL);
+        0x8876086c);
     assert.equal(h.box.memory.readU32(effectAt), 0);
-    assert.ok(h.divergences.some(line=>line.includes('effect framework')));
     h.box.memory.writeU32(effectAt, 0xdeadbeef);
     assert.equal(h.d3d10.D3D10CreateEffectPoolFromMemory.argBytes, 20);
     assert.equal(h.d3d10.D3D10CreateEffectPoolFromMemory.handler([0, 0, 0, 0, effectAt])
         >>> 0, E_NOTIMPL);
     assert.equal(h.box.memory.readU32(effectAt), 0);
+    assert.ok(h.divergences.some(line=>line.includes('effect pools')));
     assert.equal(h.d3d10.D3D10DisassembleEffect.argBytes, 12);
     assert.equal(h.d3d10.D3D10PreprocessShader.argBytes, 28);
     /** @type {Record<string, any>} */
@@ -1536,8 +1536,21 @@ test('an effect is made on a device and walked through its interfaces', ()=>{
     assert.equal(variable(f2, 'IsValid'), E_POINTER, 'its variables went with it');
     assert.equal(technique(render, 'IsValid'), E_POINTER);
     assert.equal(variable(none, 'IsValid'), 0, 'the invalid objects stay');
+
+    // The entry point a program imports makes one the same way.
     assert.equal(h.d3d10.D3D10CreateEffectFromMemory.handler([e.at, e.bytes.length, 0, e.device,
-        0, e.outAt]) >>> 0, E_NOTIMPL, 'the entry point still refuses');
+        0, e.outAt]) >>> 0, S_OK);
+    const imported = h.box.memory.readU32(e.outAt);
+    assert.equal(h.box.call(imported, slot(ID3D10EFFECT_SLOTS, 'IsValid')), 1);
+    assert.equal(h.box.call(imported, 2), 0);
+    assert.equal(e.references(), e.baseline);
+    const pool = h.box.place([0]);
+    assert.equal(h.d3d10.D3D10CreateEffectFromMemory.handler([e.at, e.bytes.length, 0, e.device,
+        pool, e.outAt]) >>> 0, E_NOTIMPL, 'the child of a pool is refused');
+    assert.equal(h.box.memory.readU32(e.outAt), 0);
+    assert.equal((/** @type {Record<string, any>} */ (h.seam.libraries['D3D10_1.dll']))
+        .D3D10CreateEffectFromMemory, h.d3d10.D3D10CreateEffectFromMemory,
+    'd3d10_1.dll\'s is d3d10.dll\'s');
 });
 
 test('an effect variable\'s typed views are called through its vtable', ()=>{
