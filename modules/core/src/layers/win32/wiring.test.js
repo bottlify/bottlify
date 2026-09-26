@@ -313,3 +313,27 @@ test('ExitProcess with no library to tell ends the process at once', async()=>{
     assert.deepEqual(ended, [], 'nothing runs after it, so nothing else is ended');
     await win32Module.dispose();
 });
+
+test('MsgWaitForMultipleObjectsEx with MWMO_INPUTAVAILABLE wakes for a message seen already',
+    async()=>{
+        // user32's message tests: a message a PeekMessage has looked at and left
+        // no longer ends a wait for new input, but it ends one that asks whether
+        // any input is there at all.
+        const QS_POSTMESSAGE = 0x8;
+        const MWMO_INPUTAVAILABLE = 0x4;
+        const PM_NOREMOVE = 0;
+        const WAIT_OBJECT_0 = 0;
+        const WAIT_TIMEOUT = 0x102;
+        const WM_USER = 0x400;
+        const thread = { id: 1 };
+        const { libraries } = await build({ kernel: { currentThread: ()=>thread } });
+        const user32 = libraries['USER32.dll'];
+
+        assert.equal(user32.PostMessageA.handler([0, WM_USER, 0, 0]), 1);
+        assert.equal(user32.PeekMessageA.handler([0x6000, 0, 0, 0, PM_NOREMOVE]), 1);
+        assert.equal(user32.MsgWaitForMultipleObjectsEx.handler([0, 0, 0, QS_POSTMESSAGE, 0]),
+            WAIT_TIMEOUT, 'nothing new');
+        assert.equal(user32.MsgWaitForMultipleObjectsEx.handler(
+            [0, 0, 0, QS_POSTMESSAGE, MWMO_INPUTAVAILABLE]), WAIT_OBJECT_0, 'but something there');
+        await win32Module.dispose();
+    });
