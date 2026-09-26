@@ -30,7 +30,7 @@ import { formRegion, formShared, hashRegion } from '../region.js';
 import { TIER_SLOT, enterRegion, mathImports } from '../emit/region.js';
 import { decode } from '../decode/decoder.js';
 import { SHAPE, isX87, trackRegion } from '../emit/x87.js';
-import { PRECISION } from '../emit/memory.js';
+import { HELD, PRECISION } from '../emit/memory.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { Body, ModuleBuilder, ValType } from '../wasm/encoder.js';
 import { createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
@@ -2163,7 +2163,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
             else if (kind === 'untranslated')
             {
-                this.missAt(view().getUint32(layout.eip, true), view().getUint8(layout.x87Top));
+                this.missAt(view().getUint32(layout.eip, true), view().getUint8(layout.x87Top),
+                    code >>> 8 === HELD);
             }
             if (kind === 'stale')
             {
@@ -2188,8 +2189,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
          * misses at a top that is already served never withholds the one that
          * is not; it is bounded and the coldest key makes room.
          * @param {number} address @param {number} [top]
+         * @param {boolean} [held]  a region left it to the host on purpose (`HELD`)
          */
-        missAt(address, top = 0){
+        missAt(address, top = 0, held = false){
             const at = top & 7;
             // One record a target, changed in place: a call into a page left
             // to the interpreter exits once a call, and a map read and write
@@ -2216,6 +2218,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                         exitTargets.delete(addr);
                     }
                 }
+            }
+            if (held)
+            {
+                // A window its accesses would fault on or a store into code: a
+                // region formed there, or one formed again with copies, tests
+                // the same and leaves the same way, so it is no candidate --
+                // counted, a hot one had every region holding it closed formed
+                // again (a hundred and more for one small function formed into
+                // its callers) and each such copy left there again.
+                return;
             }
             const key = keyOf(address, at);
             const seen = (misses.get(key) ?? 0) + 1;

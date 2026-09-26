@@ -322,8 +322,9 @@
  * @property {(eip: number, x87Top?: number, hotness?: number) => void} noteHot
  *     A candidate from the layer's
  *     sampler, with the x87 top a region there is compiled for.
- * @property {(address: number, x87Top?: number) => void} missAt  One untranslated exit to
- *     an address at an x87 top; it becomes a candidate once enough land there at that top.
+ * @property {(address: number, x87Top?: number, held?: boolean) => void} missAt  One
+ *     untranslated exit to an address at an x87 top; it becomes a candidate once enough land
+ *     there at that top -- unless the region left it to the host on purpose (`held`).
  * @property {() => void} forcedStep  Records one turn the host forced an interpreted instruction
  *     through, for the progress guarantee's `forcedSteps`.
  * @property {() => Promise<number>} translatePending

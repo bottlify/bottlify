@@ -476,6 +476,32 @@ test('a page whose regions partly go keeps the code range of the ones left on it
     assert.deepEqual(m.runtime.pages.codeRange(next), [0, 0]);
 });
 
+test('a region that leaves a block inside its loop to the host on purpose is not formed again'
+    + ' for it', async()=>{
+    const m = machine();
+    // mov ecx, 10; L: inc edx; test dl, 1; jz N; mov eax, [ebx]; mov esi, [ebx+4]; N: dec
+    // ecx; jnz L; hlt -- the loads a block of their own inside the loop, with no entry, one
+    // window tested at its start, and ebx past the RAM: the window faults, and the region
+    // leaves there for the host to raise the fault.
+    m.write(CODE, [0xb9, 10, 0, 0, 0, 0x42, 0xf6, 0xc2, 0x01, 0x74, 0x05, 0x8b, 0x03,
+        0x8b, 0x73, 0x04, 0x49, 0x75, 0xf2, 0xf4]);
+    m.runtime.noteHot(CODE);
+    await m.runtime.translatePending();
+    for (let i = 0; i < 100; i++)
+    {
+        m.setReg(2, 0);
+        m.setReg(3, 0x800000);
+        const exit = m.runtime.run(m.runtime.entryOf(CODE), 1000);
+        assert.equal(exit.kind, 'untranslated');
+        assert.equal(m.eip(), CODE + 0xb);
+    }
+    await m.runtime.translatePending();
+    const d = m.runtime.diagnostics();
+    assert.equal(d.copied, 0, 'no copies of the region for its own deliberate exit');
+    assert.equal(d.queued, 0);
+    assert.equal(d.exitsByTarget[0]?.address, CODE + 0xb, 'the exits still counted');
+});
+
 test('a store into a code page leaves stale and drops the page\'s regions', async()=>{
     const m = machine();
     // The loop at CODE; a writer at CODE + 0x100 that stores into the loop's page.

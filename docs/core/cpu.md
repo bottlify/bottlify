@@ -624,7 +624,11 @@ exit carries vector `HELD`): an untranslated exit with budget left goes through 
 hash probe, which found this very address's entry and tail-called it, whose check left again
 with nothing retired -- a loop spinning for ever with the budget untouched the moment its window
 met a page it could not use. Held, it returns to the host, which interprets the instruction.
-All the windows tested at one place share one such exit.
+All the windows tested at one place share one such exit. A held exit is counted by target but is
+no candidate and asks for no copies (`missAt`): a region formed there, or formed again with
+copies, tests the same and leaves the same way, and counted, a small function formed into many
+callers inside their loops had every region holding it formed again once its count came up
+(the same workload with `callTargets` alone, 300 M instructions: 490 regions formed again with copies and 10 188 held exits, 30 and 935 once held exits were counted apart).
 
 That probe takes EIP 0 for a miss before it looks: an empty slot's key is 0, so a jump to address
 0 -- a call through a null pointer -- took the first empty slot it met for an entry and ran some
