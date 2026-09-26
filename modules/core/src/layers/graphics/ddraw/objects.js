@@ -273,7 +273,19 @@ export function depthFormatForDepth(bitDepth){
  * @property {() => Surface[]} enumAttachedSurfaces
  * @property {(target?: Surface | null, flags?: number) => number} flip
  * @property {(request: SurfaceRequest, flags: number) => number} setSurfaceDesc
+ * @property {Uint16Array | null} gammaRamp  What SetGammaRamp set; null is the identity.
+ * @property {() => Uint16Array} getGammaRamp
+ * @property {(ramp: ArrayLike<number>) => number} setGammaRamp
  */
+
+/** Entries per channel of a DDGAMMARAMP, and its three channels end to end. */
+const GAMMA_ENTRIES = 256;
+const GAMMA_WORDS = GAMMA_ENTRIES * 3;
+
+/** @returns {Uint16Array} red, green and blue, each passing its input straight through */
+function identityRamp(){
+    return Uint16Array.from({ length: GAMMA_WORDS }, (_, index)=>(index % GAMMA_ENTRIES) * 257);
+}
 
 /**
  * The pixel format a display depth means, which is what a primary surface --
@@ -778,6 +790,8 @@ export function createDirectDraw(options = {}){
         /** Colour keys by the DDCKEY flag that names them. @type {Map<number, ColorKey>} */
         const colorKeys = new Map();
         let uniqueness = 1;
+        /** @type {Uint16Array | null} */
+        let gammaRamp = null;
 
         const life = counted(()=>{
             surfaces.delete(surface);
@@ -1379,6 +1393,24 @@ export function createDirectDraw(options = {}){
                     bpp = bytesPerPixel(pixelFormat);
                 }
                 uniqueness++;
+                return DD_OK;
+            },
+
+            /**
+             * The ramp a gamma control on this surface holds. Only the
+             * primary's reaches the screen on Windows, and there it is the
+             * display's; nothing here applies one yet, so a ramp is kept and
+             * read back and the picture is shown as drawn.
+             */
+            get gammaRamp(){
+                return gammaRamp;
+            },
+            getGammaRamp(){
+                return gammaRamp ? gammaRamp.slice() : identityRamp();
+            },
+            /** @param {ArrayLike<number>} ramp  Red, green and blue, 256 words each. */
+            setGammaRamp(ramp){
+                gammaRamp = Uint16Array.from({ length: GAMMA_WORDS }, (_, index)=>ramp[index] ?? 0);
                 return DD_OK;
             },
         };

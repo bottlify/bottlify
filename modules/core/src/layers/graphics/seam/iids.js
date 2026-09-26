@@ -31,6 +31,7 @@ export const IID_IDirectDrawSurface7 = '{06675A80-3B9B-11D2-B92F-00609797EA5B}';
 
 export const IID_IDirectDrawPalette = '{6C14DB84-A733-11CE-A521-0020AF0BE560}';
 export const IID_IDirectDrawClipper = '{6C14DB85-A733-11CE-A521-0020AF0BE560}';
+export const IID_IDirectDrawGammaControl = '{69C11C3E-B46B-11D1-AD7A-00C04FC29B4E}';
 
 /**
  * Direct3D 7, which is reached from the DirectDraw object by QueryInterface

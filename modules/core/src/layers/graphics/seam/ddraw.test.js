@@ -25,7 +25,10 @@ import {
     IDIRECTDRAW7_SLOTS, IDIRECTDRAW_SLOTS, IDIRECTDRAWSURFACE7_SLOTS, IDIRECTDRAWSURFACE_SLOTS,
     IDIRECTDRAWPALETTE_SLOTS, IDIRECTDRAWCLIPPER_SLOTS,
 } from './vtables.js';
-import { IID_IDirectDraw4, IID_IDirectDraw7, IID_IDirectDrawSurface7 } from './iids.js';
+import {
+    IID_IDirectDraw4, IID_IDirectDraw7, IID_IDirectDrawGammaControl, IID_IDirectDrawSurface7,
+} from './iids.js';
+import { IDIRECTDRAWGAMMACONTROL_SLOTS } from './vtables-ddraw.js';
 import { DDBLTFX, DDCAPS, DDCOLORKEY, RECT, createFields } from './structs.js';
 import {
     DDDEVICEIDENTIFIER2, DDSURFACEDESC, DDSURFACEDESC2, MAX_DDDEVICEID_STRING, writeSurfaceDesc,
@@ -1627,6 +1630,56 @@ test('SetSurfaceDesc is for system memory the program may own: not video memory,
 
         assert.equal(h.release(second), 1);
         assert.equal(h.release(top), 0);
+        assert.equal(h.release(ddraw), 0);
+        h.assertAllReleased();
+    });
+
+test('a surface answers IDirectDrawGammaControl, whose ramp starts as the identity and is kept',
+    ()=>{
+        // ddraw7.c test_surface_qi (2586) and ddraw1.c (2407): the gamma
+        // control is S_OK on a surface; the colour control is not.
+        const h = seamed();
+        const ddraw = h.create7();
+        const surface = h.createSurface7(ddraw, { caps: DDSCAPS_TEXTURE, width: 8, height: 8 });
+        const riid = h.box.putGuid(0x4000, IID_IDirectDrawGammaControl);
+        assert.equal(h.box.call(surface, 0, [riid, 0x4300]), DD_OK);
+        const gamma = h.box.memory.readU32(0x4300);
+        assert.notEqual(gamma, 0);
+        assert.notEqual(gamma, surface, 'another table, so another pointer');
+        h.box.putGuid(0x4000, '{4B9F0EE0-0D7E-11D0-9B06-00A0C903A3B8}');
+        assert.equal(h.box.call(surface, 0, [0x4000, 0x4310]), 0x80004002,
+            'IDirectDrawColorControl is not there');
+
+        const get = slot(IDIRECTDRAWGAMMACONTROL_SLOTS, 'GetGammaRamp');
+        const set = slot(IDIRECTDRAWGAMMACONTROL_SLOTS, 'SetGammaRamp');
+        const ramp = 0x7000;
+        /** @param {number} channel @param {number} index */
+        const entry = (channel, index)=>h.box.bytes[ramp + channel * 512 + index * 2]
+            | h.box.bytes[ramp + channel * 512 + index * 2 + 1] << 8;
+        assert.equal(h.box.call(gamma, get, [0, ramp]), DD_OK);
+        assert.deepEqual([entry(0, 0), entry(0, 255), entry(1, 128), entry(2, 1)],
+            [0, 0xffff, 128 * 257, 257], 'every channel straight through');
+        assert.equal(h.box.call(gamma, get, [0, 0]), DDERR_INVALIDPARAMS);
+        assert.equal(h.box.call(gamma, set, [0, 0]), DDERR_INVALIDPARAMS);
+
+        for (let index = 0; index < 768; index++)
+        {
+            h.box.bytes[0x7800 + index * 2] = index & 0xff;
+            h.box.bytes[0x7800 + index * 2 + 1] = index >> 8;
+        }
+        assert.equal(h.box.call(gamma, set, [1, 0x7800]), DD_OK, 'DDSGR_CALIBRATE is taken');
+        h.box.bytes.fill(0, ramp, ramp + 1536);
+        assert.equal(h.box.call(gamma, get, [0, ramp]), DD_OK);
+        assert.deepEqual([entry(0, 3), entry(1, 0), entry(2, 255)], [3, 256, 767]);
+
+        // Back to the surface from its gamma control, as from any interface.
+        h.box.putGuid(0x4000, IID_IDirectDrawSurface7);
+        assert.equal(h.box.call(gamma, 0, [0x4000, 0x4320]), DD_OK);
+        assert.equal(h.box.memory.readU32(0x4320), surface);
+        h.release(surface);
+
+        h.release(gamma);
+        assert.equal(h.release(surface), 0);
         assert.equal(h.release(ddraw), 0);
         h.assertAllReleased();
     });

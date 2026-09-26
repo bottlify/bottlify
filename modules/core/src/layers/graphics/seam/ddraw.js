@@ -46,11 +46,12 @@ import {
     IDIRECTDRAWSURFACE2_SLOTS, IDIRECTDRAWSURFACE_SLOTS, IDIRECTDRAWPALETTE_SLOTS,
     IDIRECTDRAWCLIPPER_SLOTS,
 } from './vtables.js';
+import { IDIRECTDRAWGAMMACONTROL_SLOTS } from './vtables-ddraw.js';
 import {
     IID_IDirectDraw, IID_IDirectDraw2, IID_IDirectDraw4, IID_IDirectDraw7,
     IID_IDirectDrawSurface, IID_IDirectDrawSurface2, IID_IDirectDrawSurface3,
     IID_IDirectDrawSurface4, IID_IDirectDrawSurface7, IID_IDirectDrawPalette,
-    IID_IDirectDrawClipper,
+    IID_IDirectDrawClipper, IID_IDirectDrawGammaControl,
 } from './iids.js';
 import {
     DDBLTFX, DDCAPS, DDCAPS_SIZES, DDCOLORKEY, DDSCAPS2, RECT, createFields,
@@ -88,6 +89,9 @@ const DDWAITVB_BLOCKEND = 0x00000004;
 
 /** The Direct3D 7 interface, whose count is IDirectDraw7's. */
 const IID_IDirect3D7 = '{F5049E77-4861-11D2-A407-00A0C90629A8}';
+
+/** DDGAMMARAMP: red, green and blue, 256 words each. */
+const DDGAMMARAMP_BYTES = 3 * 256 * 2;
 
 /** What the caps report as video memory: a round number nothing here measures. */
 const VIDEO_MEMORY = 256 << 20;
@@ -950,10 +954,42 @@ export function createDirectDrawSeam(
         };
     };
 
+    /**
+     * The gamma control a surface answers for: a DDGAMMARAMP, three channels
+     * of 256 little-endian words, read and written whole. Both flags are
+     * taken as the runtime takes them -- the calibration flag asks for a
+     * calibrator there is none of -- so only a missing ramp is refused.
+     */
+    const gammaInterface = describe(IID_IDirectDrawGammaControl, IDIRECTDRAWGAMMACONTROL_SLOTS, {
+        /** @param {any} surface @param {number[]} args */
+        GetGammaRamp: (surface, [, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const ramp = surface.getGammaRamp();
+            memory.writeMemory(out >>> 0, new Uint8Array(ramp.buffer, ramp.byteOffset,
+                ramp.byteLength));
+            return DD_OK;
+        },
+        /** @param {any} surface @param {number[]} args */
+        SetGammaRamp: (surface, [, ramp])=>{
+            if ((ramp >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const bytes = memory.readMemory(ramp >>> 0, DDGAMMARAMP_BYTES);
+            return surface.setGammaRamp(new Uint16Array(bytes.slice().buffer));
+        },
+    });
+
     /** Every surface generation, so a QueryInterface across them succeeds. */
-    const surfaceInterfaces = SURFACE_GENERATIONS.map(generation=>
-        describe(generation.id, generation.slots, surfaceMethods(generation), {},
-            privateData.released));
+    const surfaceInterfaces = [
+        ...SURFACE_GENERATIONS.map(generation=>
+            describe(generation.id, generation.slots, surfaceMethods(generation), {},
+                privateData.released)),
+        gammaInterface,
+    ];
 
     /**
      * Names each surface to the callback in turn, stopping when it says so.
