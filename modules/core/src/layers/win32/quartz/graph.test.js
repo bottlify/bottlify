@@ -431,10 +431,27 @@ test('a frame carries where the program put the video window and whether it is s
     tick(1000);
     const shown = tick(1100);
     assert.deepEqual(shown?.window,
-        { left: 16, top: 32, width: 160, height: 120, visible: true });
+        { left: 16, top: 32, width: 160, height: 120, visible: true, fullScreen: false });
 
     call(object, IID_IVIDEO_WINDOW, 'put_Visible', [0]);
     assert.equal(tick(1200)?.window.visible, false);
+});
+
+test('a frame says when the program asked for the film to fill the screen', ()=>{
+    // Full-screen mode is the graph's, not the window's: the rectangle the
+    // program laid out stays what it was, and the film covers the screen.
+    const OATRUE = -1;
+    const { object, host, tick } = createObject(CLSID_FILTER_GRAPH,
+        { clip: fakeClip({ frameCount: 3, fps: 10 }) });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IVIDEO_WINDOW, 'put_Owner', [0x40b4]);
+    call(object, IID_IVIDEO_WINDOW, 'SetWindowPosition', [16, 32, 160, 120]);
+    call(object, IID_IVIDEO_WINDOW, 'put_FullScreenMode', [OATRUE]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+    tick(1000);
+    assert.deepEqual(tick(1100)?.window,
+        { left: 16, top: 32, width: 160, height: 120, visible: true, fullScreen: true });
 });
 
 test('IBasicVideo answers a size a caller can lay a window out from', ()=>{

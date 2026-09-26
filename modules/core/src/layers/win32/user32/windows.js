@@ -348,10 +348,11 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           says nothing about what a click would reach.
  * @property {(hwnd: number) => { left: number, top: number, right: number,
  *     bottom: number } | null} clientRect
- *           One window's client rectangle, or null for a handle that names
- *           none: the measurement GetClientRect answers with, for the callers
- *           outside this layer that must answer a size a program asked for as
- *           zero -- a back buffer's, which means exactly this rectangle.
+ *           One window's client rectangle on the screen, or null for a handle
+ *           that names none: GetClientRect's size at ClientToScreen's origin,
+ *           for the callers outside this layer that must answer a size a
+ *           program asked for as zero -- a back buffer's, which means exactly
+ *           this rectangle -- or place a picture inside a window.
  * @property {(hwnd: number, x: number, y: number, width: number, height: number,
  *     how?: { announce?: boolean }) => boolean} place
  * @property {() => number} active
@@ -2978,10 +2979,10 @@ export function createWindowFunctions(host){
         },
 
         /**
-         * One window's client rectangle, or null for a handle that names no
-         * window. Read by whoever has to answer a size a program asked for as
-         * zero -- a back buffer's, which means exactly this rectangle -- and
-         * the same measurement GetClientRect answers with.
+         * One window's client rectangle on the screen, or null for a handle
+         * that names no window. Read by whoever has to answer a size a
+         * program asked for as zero -- a back buffer's, which means exactly
+         * this rectangle -- or place a picture inside the window.
          *
          * @param {number} hwnd
          */

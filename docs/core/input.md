@@ -47,6 +47,7 @@ Source: `src/layers/input/module.js`. The DirectInput seam imports `IUNKNOWN_MET
 | member | what it is |
 |---|---|
 | `libraries()` | `{ 'DINPUT.dll', 'DINPUT8.dll', 'XINPUT9_1_0.dll', 'XINPUT1_4.dll' }`, shaped like a `win32` library's tables. |
+| `ordinals()` | Export ordinals where Windows pins them: every `XINPUT1_4.dll` export by its `.spec` number, `XInputGetStateEx` at 100 and `XInputGetCapabilitiesEx` at 108 among them. `src/app.js` synthesises the library with these. |
 | `send(event)` | One `HostInputEvent` in; a window message and a DirectInput state change out, both or neither -- except that a device a program holds exclusively through DirectInput reaches it there alone (see "Exclusive devices"). Returns whether anything came of it. |
 | `post(event)` | One event straight to a DirectInput device in its own codes; false when no device is created or acquired. |
 | `attach(canvas, { pointerLock?, listen? })` | Listens to one canvas (a second call detaches the first) and confines the cursor to the canvas's own pixels. `listen: false` takes the canvas as the picture only, for an `OffscreenCanvas` whose events live on the page. |
@@ -257,11 +258,12 @@ succeed; `FindDevice` and `GetDeviceStatus` for an unknown GUID answer `DIERR_DE
 
 `src/layers/input/xinput.js` answers the two XInput libraries that are part of Windows rather
 than of the DirectX redistributable, so no program brings a copy and the system volume holds none.
-Each exports what its Wine `.spec` lists. Every call checks its arguments first -- a user index
-past three (`XUSER_INDEX_ANY` allowed for `XInputGetKeystroke`), a null structure or a flag other
-than `XINPUT_FLAG_GAMEPAD` is `ERROR_BAD_ARGUMENTS` -- and otherwise answers
-`ERROR_DEVICE_NOT_CONNECTED` with the caller's structure untouched: there is no pad in any of the
-four slots.
+Each exports what its Wine `.spec` lists, and `xinput1_4` at the numbers that `.spec` gives: a
+program takes `XInputGetStateEx` (100) and `XInputGetCapabilitiesEx` (108) with `GetProcAddress` on
+the ordinal. Every call checks its arguments first -- a user index past three (`XUSER_INDEX_ANY`
+allowed for `XInputGetKeystroke`), a null structure or a flag other than `XINPUT_FLAG_GAMEPAD` is
+`ERROR_BAD_ARGUMENTS` -- and otherwise answers `ERROR_DEVICE_NOT_CONNECTED` with the caller's
+structure untouched: there is no pad in any of the four slots.
 
 ## Limitations and divergences
 
@@ -298,12 +300,13 @@ All under `npm test` from `modules/core` (`node --test "src/**/*.test.js"`); 177
 
 | file | kind | what it pins |
 |---|---|---|
-| `src/layers/input/module.test.js` | Wiring, over the real `win32` message queue | A key sent to the layer arrives in the queue the program pumps; DirectInput is published beside the message path and XInput answered with no pad; an event reaches win32 as the device reported it; a mouse held exclusively through DirectInput stops reaching the window; `SetCooperativeLevel` asks win32 what a handle names; a build without `win32` still takes input; diagnostics report both halves. |
+| `src/layers/input/module.test.js` | Wiring, over the real `win32` message queue | A key sent to the layer arrives in the queue the program pumps; DirectInput is published beside the message path and XInput answered with no pad, its ordinals offered beside its tables; an event reaches win32 as the device reported it; a mouse held exclusively through DirectInput stops reaching the window; `SetCooperativeLevel` asks win32 what a handle names; a build without `win32` still takes input; diagnostics report both halves. |
 | `src/layers/input/router.test.js` | Contract | Message and lParam encoding for keys, modifiers and system keys; mouse messages and masks; text composition; clip scaling and confinement; focus gained telling the program nothing and focus loss releasing everything; the keyboard-state table, its toggles, the logical state apart from the physical one, the buttons as keys and the async press bit; an exclusive DirectInput device's messages withheld; every event also reported for `WM_INPUT`. |
 | `src/layers/input/dom.test.js` | Unit, against a stand-in canvas | Which keys are taken from the page, what a press becomes, where a click is in the game's own pixels through border and scale, wheel accumulation, double-Escape release, that nothing stays attached. |
 | `src/layers/input/dinput/devices.test.js` | Contract | Delta consumption, a buffer of N holding N - 1, ring overflow reporting, the buffer kept across `Unacquire`, unacquired refusal, key state layout. |
-| `src/layers/input/dinput/seam.test.js` | Contract, over a flat guest memory | Every slot's argument count for all eight interface generations, each device generation found by its IID and `CreateDevice` answering the one its root is declared with, `SetDataFormat` by size, `GetDeviceState` size checks, `GetDeviceData` in both structure sizes and unbuffered, properties and what an acquired device refuses, `DI_NOEFFECT` from `Acquire`, `Unacquire` and `Poll`, `SetCooperativeLevel`'s checks and exclusive holding, `GetCapabilities`' types and counts, `GetDeviceInfo`, `EnumObjects` and `GetObjectInfo`, creation and refusals; `EnumDevices` describing both devices to a recorded guest callback, in both widths and both device-type generations. |
-| `src/layers/input/xinput.test.js` | Contract | Each library exports what its `.spec` does and nothing else, every slot answers that no pad is connected, arguments are checked before the slot is, `XInputEnable` is remembered. |
+| `src/layers/input/dinput/seam.test.js` | Contract, over a flat guest memory | Every slot's argument count for all eight interface generations, each device generation found by its IID and `CreateDevice` answering the one its root is declared with, `SetDataFormat` by size, `GetDeviceState` size checks, `GetDeviceData` in both structure sizes and unbuffered, properties and what an acquired device refuses, `DI_NOEFFECT` from `Acquire`, `Unacquire` and `Poll`, `SetCooperativeLevel`'s checks and exclusive holding, `GetCapabilities`' types and counts, `GetDeviceInfo`, `EnumObjects` and `GetObjectInfo`, creation and refusals, a device's last `Release` ending every generation a program asked it for; `EnumDevices` describing both devices to a recorded guest callback, in both widths and both device-type generations. |
+| `src/layers/input/xinput.test.js` | Contract | Each library exports what its `.spec` does and nothing else, `xinput1_4` at its `.spec`'s ordinals, every slot answers that no pad is connected, arguments are checked before the slot is, `XInputEnable` is remembered. |
+| `src/xinput.itest.js` | Integration, a built program on the emulator | `GetProcAddress` on `xinput1_4.dll` by ordinal 100 and 108 answers the address the names do, and 100 answers as `XInputGetStateEx` does with no pad. |
 
 What a real browser does with a `KeyboardEvent` or a `PointerEvent` is not covered by the unit
 suite; the `dom.js` tests settle only what the adapter decides for itself. No tracked CDP scenario

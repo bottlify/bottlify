@@ -82,6 +82,7 @@ the module graph is built. All are optional.
 | `activeWindow()` | The active top-level window, as `GetForegroundWindow` answers, or 0: where the input layer sends what names no window. |
 | `rawInput(report)` | One event of the mouse or the keyboard as the device reported it, from the input layer: posted as `WM_INPUT` to a program that registered for that device, and nothing otherwise. |
 | `placeWindow(hwnd, x, y, width, height, how?)` | Place a top-level window as the system would and tell the program with `WM_MOVE` when it moved and `WM_SIZE` when its client size changed -- nothing for a placement that changed neither, as `DefWindowProc` says nothing for one, since a program that resets its device on `WM_SIZE` would otherwise be reset by its own reset's placement without end. `how.announce` says the size whether or not it changed: what a mode switch says to the window it lands in, which the graphics layer asks for once, at a fullscreen device's first frame, when both the window and the device exist to hear it -- a program of this era configures its viewport and its full-speed/background state on that message. |
+| `clientRect(hwnd)` | One window's client rectangle on the screen -- `GetClientRect`'s size at `ClientToScreen`'s origin, a child's inside its parent's frame -- or `null` for a handle that names no window: the size a device's back buffer takes when a program asks for zero, and where a film is placed inside the window a program named its video window's owner. |
 | `dispatchFault(fault)` | Offers a processor exception the running thread took to its structured exception handlers. `null` when the vector is not one a program is handed (see "Exceptions"); otherwise a promise of where the thread goes on, or `null` once nothing took it. The application wires `cpu.onFault` to this. |
 | `exitCode()` | Set once the program has asked to terminate -- or once an exception nothing handled, or the C runtime's `abort`, ended it; `null` before. |
 
@@ -717,9 +718,10 @@ Stated as the code states them.
   graph with no decoder for a file answers `VFW_E_CANNOT_RENDER` and raises `EC_ERRORABORT` — the
   answer a machine without the codec gives. `IVideoWindow` starts hidden (`SW_HIDE`, `Visible`
   `OAFALSE`, `AutoShow` `OATRUE`), is shown by `Pause` and `Run` under `AutoShow`, and each frame
-  carries its rectangle and visibility; a hidden window's frames are not drawn, but a shown one's
-  are fitted to the whole screen rather than placed where `SetWindowPosition` put the window
-  ([`media.md`](./media.md)).
+  carries its rectangle, visibility and full-screen mode; a hidden window's frames are not drawn, an
+  owned one's are stretched over the rectangle `SetWindowPosition` gave inside the owner's client
+  area, and the rest of that client area shows black while they arrive; one with no owner, or in
+  full-screen mode, is fitted to the whole screen ([`media.md`](./media.md)).
 - **The `double`-returning CRT functions exist only with an `fpu` host**; without one an import of
   `sin` is reported missing rather than bound to a function that never sets the result register.
 - **The C runtime's Unicode text stops at the descriptor calls.** `_read`, `_write`, `fread` and

@@ -463,6 +463,12 @@ export function createPublisher({ publishInterface }){
                 },
                 addRef: ()=>api.addRef?.() ?? 1,
                 release: ()=>api.release?.() ?? 0,
+                // A device keeps one count whichever generation it is reached
+                // through, so its last reference ends them all; an object that
+                // says nothing ends only the interface it was released through.
+                get destroyed(){
+                    return api.destroyed === true;
+                },
             };
             adapters.set(api, adapter);
         }

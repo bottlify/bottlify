@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { fitFrame, isShown } from './letterbox.js';
+import { fitFrame, isShown, placementOf, stretchFrame } from './letterbox.js';
 import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
 import { captureTrace, describeAddress, formatTrace } from './trace.js';
@@ -3655,6 +3655,7 @@ async function buildApp(options){
     const ordinalsOf = {
         ...(win32.ordinals ? win32.ordinals() : {}),
         ...(audio.ordinals?.() ?? {}),
+        ...(input.ordinals?.() ?? {}),
         ...(core.api('media').ordinals?.() ?? {}),
     };
     // The drawing APIs are libraries like any other as far as a program is
@@ -4856,11 +4857,12 @@ async function buildApp(options){
      * Why a decoded frame did not reach the screen.
      *
      * One counter per way out, because "the film decoded and nothing was shown"
-     * is four different faults wearing the same face, and a report that only
+     * is five different faults wearing the same face, and a report that only
      * says nothing arrived cannot tell them apart.
      */
     const film = {
-        ticks: 0, frames: 0, silent: 0, hidden: 0, noScreen: 0, noRoom: 0, shown: 0,
+        ticks: 0, frames: 0, silent: 0, hidden: 0, offScreen: 0, noScreen: 0, noRoom: 0,
+        shown: 0,
         // How far the picture is ahead of the sound, in milliseconds of the
         // film's own timeline. A film has one timeline and two ways to advance
         // along it, and nothing else in a report says whether they agree.
@@ -4869,7 +4871,7 @@ async function buildApp(options){
 
     /** @param {{ hwnd: number, width: number, height: number, bgra: Uint8Array | null,
      *            window?: { left: number, top: number, width: number, height: number,
-     *                       visible: boolean },
+     *                       visible: boolean, fullScreen: boolean },
      *            audio: Int16Array[], sampleRate: number, channels: number,
      *            positionMs: number, film: number } | null} shown */
     /** @param {any} shown  What a filter graph handed back for this tick. */
@@ -4942,12 +4944,22 @@ async function buildApp(options){
         // film. A cinematic is authored at its own dimensions and they are
         // rarely the display's -- letting them through resizes the surface
         // everything else is drawn on, and a display does not change shape
-        // because a film started. So the frame is fitted into the screen and
-        // centred, with the margins left black, which is what a video renderer
-        // does with a destination rectangle it does not fill.
+        // because a film started. So a film with the screen to itself is
+        // fitted into it and centred, with the margins left black, which is
+        // what a video renderer does with a destination rectangle it does not
+        // fill; one whose video window the program placed in a window of its
+        // own goes where SetWindowPosition put it inside that window's client
+        // area, and is shown as that window's picture.
         const shape = screen.screen();
         const width = shape.width;
         const height = shape.height;
+        const placement = placementOf(shown,
+            (/** @type {number} */ hwnd)=>win32.clientRect(hwnd), shape);
+        if (placement && !placement.visible)
+        {
+            film.offScreen++;
+            return;
+        }
         const needed = width * height * 4;
         if (!filmSurface || filmSurface.bytes < needed)
         {
@@ -4961,7 +4973,14 @@ async function buildApp(options){
         }
         film.shown++;
         const surface = filmSurface;
-        fitFrame(shown, surface.pixels, width, height);
+        if (placement)
+        {
+            stretchFrame(shown, surface.pixels, width, height, placement);
+        }
+        else
+        {
+            fitFrame(shown, surface.pixels, width, height);
+        }
         memory.writeBytes(surface.address, surface.pixels);
         screen.present({
             buffer: surface.address,
@@ -4970,7 +4989,7 @@ async function buildApp(options){
             pitch: width * 4,
             bitCount: 32,
             palette: null,
-        });
+        }, placement ? shown.hwnd >>> 0 : 0);
     };
 
     /** The guest's own clock, and the host clock it is credited from. */

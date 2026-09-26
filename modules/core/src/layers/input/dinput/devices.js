@@ -307,6 +307,10 @@ export function createInputDevice({ kind, now }){
 
         addRef: ()=>++references,
         release: ()=>Math.max(0, --references),
+        /** Whether the last reference has gone: the device is then over whole. */
+        get destroyed(){
+            return references <= 0;
+        },
 
         acquire(){
             acquired = true;

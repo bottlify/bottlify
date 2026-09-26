@@ -29,6 +29,26 @@
  * tests hold to on Windows).
  */
 
+/**
+ * The numbers xinput1_4.dll exports by, per Wine's xinput1_4.spec. A program
+ * takes the undocumented pair -- XInputGetStateEx, which reports the guide
+ * button, at 100 and XInputGetCapabilitiesEx at 108 -- with GetProcAddress on
+ * the ordinal, as Wine's xinput tests do where the name is absent, so a number
+ * assigned here instead would bind that call to some other function. 9.1.0's
+ * .spec pins none.
+ */
+const XINPUT1_4_ORDINALS = Object.freeze({
+    2: 'XInputGetState',
+    3: 'XInputSetState',
+    4: 'XInputGetCapabilities',
+    5: 'XInputEnable',
+    7: 'XInputGetBatteryInformation',
+    8: 'XInputGetKeystroke',
+    10: 'XInputGetAudioDeviceIds',
+    100: 'XInputGetStateEx',
+    108: 'XInputGetCapabilitiesEx',
+});
+
 const ERROR_BAD_ARGUMENTS = 160;
 const ERROR_DEVICE_NOT_CONNECTED = 1167;
 
@@ -45,6 +65,7 @@ const XINPUT_FLAG_GAMEPAD = 0x00000001;
  * The XInput libraries.
  *
  * @returns {{ libraries: Record<string, Record<string, Export>>,
+ *             ordinals: Record<string, Readonly<Record<number, string>>>,
  *             diagnostics: () => { asked: number, enabled: boolean } }}
  */
 export function createXInput(){
@@ -160,6 +181,7 @@ export function createXInput(){
                 },
             },
         },
+        ordinals: { 'XINPUT1_4.dll': XINPUT1_4_ORDINALS },
         diagnostics: ()=>({ asked, enabled }),
     };
 }
