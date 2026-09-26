@@ -506,3 +506,48 @@ test('a record the store holds already stays as the store holds it', async()=>{
     assert.deepEqual([...await store.get(SEED_KEYS[0]) ?? []], [4, 4]);
     assert.equal(await store.seededWith(), null, 'no identity, no mark');
 });
+
+test('inside a worker an open store answers a lookup at once, without a turn', async()=>{
+    const counter = { probes: 0, syncReads: 0 };
+    const root = fakeDirectory(counter, true);
+    const first = await createDirectoryTranslationStore(root, 'bundle');
+    await first.put('cork/1/a', new Uint8Array([1, 2, 3]));
+    await first.flush();
+    first.close();
+    const store = await createDirectoryTranslationStore(root, 'bundle');
+    assert.equal(store.getNow('cork/1/a'), undefined, 'not open yet: asking starts the opening');
+    await store.prepare();
+    const reads = counter.syncReads;
+    assert.deepEqual([...store.getNow('cork/1/a') ?? []], [1, 2, 3]);
+    assert.equal(counter.syncReads, reads + 1, 'one read at the record\'s offset');
+    assert.equal(store.getNow('cork/1/b'), null, 'a miss reads nothing');
+    assert.equal(counter.syncReads, reads + 1);
+    store.close();
+    assert.equal(store.getNow('cork/1/a'), undefined, 'the handle let go of');
+    assert.deepEqual([...await store.get('cork/1/a') ?? []], [1, 2, 3], 'get still answers');
+});
+
+test('a page\'s store, with no synchronous handle, answers only through get', async()=>{
+    const root = fakeDirectory();
+    const store = await createDirectoryTranslationStore(root, 'bundle');
+    await store.put('cork/1/a', new Uint8Array([5]));
+    await store.prepare();
+    assert.equal(store.getNow('cork/1/a'), undefined);
+    assert.deepEqual([...await store.get('cork/1/a') ?? []], [5]);
+});
+
+test('while a seed is on its way a lookup is not answered at once', async()=>{
+    const seed = await (await capturedStore(createMemoryDirectory())).exportSeed();
+    const store = await createDirectoryTranslationStore(createMemoryDirectory(), 'game');
+    await store.prepare();
+    assert.equal(store.getNow(SEED_KEYS[0]), null, 'open and empty: a miss at once');
+    /** @type {(bytes: Uint8Array) => void} */
+    let arrive = ()=>{};
+    const taking = store.seed(new Promise(resolve=>{
+        arrive = resolve;
+    }), 'late');
+    assert.equal(store.getNow(SEED_KEYS[0]), undefined, 'the seed may bring it');
+    arrive(seed);
+    await taking;
+    assert.deepEqual([...store.getNow(SEED_KEYS[0]) ?? []], [1, 2, 3]);
+});

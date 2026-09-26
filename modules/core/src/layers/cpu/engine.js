@@ -195,6 +195,11 @@
  * @typedef {Object} TranslationStore
  * @property {(key: string) => Promise<Uint8Array | null>} get
  * @property {(key: string, bytes: Uint8Array) => Promise<void>} put
+ * @property {(key: string) => Uint8Array | null | undefined} [getNow]  The record at once,
+ *     without a turn of the event loop, where the store can answer so; undefined where it
+ *     cannot yet, and the translator asks `get`. Optional.
+ * @property {() => Promise<void>} [prepare]  Opens the store ahead of its first lookup (a
+ *     directory store reads its index). Optional.
  * @property {() => Promise<void>} [flush]  Writes any pending bookkeeping
  *     (a directory store's index) before the run ends. Optional.
  * @property {() => void} [close]  Lets go of what the store holds open (a directory

@@ -31,7 +31,8 @@
 /** @typedef {{ offset: number, length: number, session: number }} Place */
 /**
  * @typedef {TranslationStore & {
- *     flush: () => Promise<void>, close: () => void,
+ *     flush: () => Promise<void>, close: () => void, prepare: () => Promise<void>,
+ *     getNow: (key: string) => Uint8Array | null | undefined,
  *     seed: (source: Uint8Array | null | Promise<Uint8Array | null>, identity?: string)
  *         => Promise<{ taken: boolean, added: number, present: number }>,
  *     seededWith: () => Promise<string | null>,
@@ -308,6 +309,10 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
     let end = 0;
     /** @type {Promise<void> | null} */
     let opening = null;
+    /** The index is read and the files are this opening's, so `places` answers at once. */
+    let opened = false;
+    /** Seeds on their way in, which every lookup waits for. */
+    let seedsTaking = 0;
     /** The index file's length: where the next lines go. */
     let indexEnd = 0;
     /** Lines put since the last append. @type {string[]} */
@@ -335,12 +340,17 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         }
     };
 
+    /** Through the synchronous handle. @param {number} offset @param {number} length */
+    const readNow = (offset, length)=>{
+        const bytes = new Uint8Array(length);
+        return access.read(bytes, { at: offset }) === length ? bytes : null;
+    };
+
     /** @param {number} offset @param {number} length */
     const readAt = async(offset, length)=>{
         if (access !== null)
         {
-            const bytes = new Uint8Array(length);
-            return access.read(bytes, { at: offset }) === length ? bytes : null;
+            return readNow(offset, length);
         }
         const file = await records.getFile();
         return new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
@@ -485,6 +495,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             session = last + 1;
             await compact();
             pendingLines.push(`# ${session}\n`);
+            opened = true;
         })();
         return opening;
     };
@@ -566,28 +577,55 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         await seeding;
     };
 
+    /**
+     * The place of a key's record, named again in this session when it is
+     * used in it, so it outlives the records nobody reads (written with the
+     * next batch of lines).
+     *
+     * @param {string} key
+     */
+    const use = key=>{
+        const recordName = fileNameOf(key);
+        const place = /** @type {Map<string, Place>} */ (places).get(recordName);
+        if (place && place.session !== session)
+        {
+            place.session = session;
+            pendingLines.push(`${recordName} ${place.offset} ${place.length}\n`);
+            if (pendingLines.length >= 512)
+            {
+                publish();
+            }
+        }
+        return place;
+    };
+
     return {
         async get(key){
             await ready();
-            const recordName = fileNameOf(key);
-            const place = /** @type {Map<string, Place>} */ (places).get(recordName);
-            if (!place)
-            {
-                return null;
-            }
-            if (place.session !== session)
-            {
-                // Used in this session: named in it again, so it outlives the
-                // records nobody reads. Written with the next batch of lines.
-                place.session = session;
-                pendingLines.push(`${recordName} ${place.offset} ${place.length}\n`);
-                if (pendingLines.length >= 512)
-                {
-                    publish();
-                }
-            }
-            return readAt(place.offset, place.length);
+            const place = use(key);
+            return place ? readAt(place.offset, place.length) : null;
         },
+        /**
+         * The record at once, without a turn of the event loop -- through the
+         * records file's synchronous handle, which a worker has -- or
+         * undefined when the store cannot answer that way yet: not opened
+         * (asking starts the opening), a seed on its way in, or no such
+         * handle (a page). The translator then asks `get`.
+         *
+         * @param {string} key
+         * @returns {Uint8Array | null | undefined}
+         */
+        getNow(key){
+            if (!opened || seedsTaking > 0 || access === null)
+            {
+                open();
+                return undefined;
+            }
+            const place = use(key);
+            return place ? readNow(place.offset, place.length) : null;
+        },
+        /** Opens the store ahead of its first lookup: its index read, its files open. */
+        prepare: ()=>open(),
         async put(key, bytes){
             await ready();
             const offset = end;
@@ -625,6 +663,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
          */
         seed(source, identity){
             const after = seeding;
+            seedsTaking++;
             const taking = (async()=>{
                 await after;
                 await open();
@@ -659,7 +698,9 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                 }
                 return { taken: true, added: writes.length,
                     present: entries.length - writes.length };
-            })().catch(()=>({ taken: false, added: 0, present: 0 }));
+            })().catch(()=>({ taken: false, added: 0, present: 0 })).finally(()=>{
+                seedsTaking--;
+            });
             seeding = taking;
             return taking;
         },

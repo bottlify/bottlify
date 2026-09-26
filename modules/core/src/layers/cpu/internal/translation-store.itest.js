@@ -103,12 +103,14 @@ function x87Program(control){
 }
 
 /**
- * A run of `iterations` with a fresh store, exported as a seed.
+ * A run of `iterations` with a fresh store, open before the host starts,
+ * exported as a seed.
  *
  * @param {Uint8Array} image @param {HostOptions} [options]
  */
 async function capture(image, options = {}, iterations = 3){
     const store = await createDirectoryTranslationStore(createMemoryDirectory(), 'bench');
+    await store.prepare();
     const host = hostFor(image, store, options);
     for (let i = 0; i < iterations; i++)
     {
@@ -119,12 +121,14 @@ async function capture(image, options = {}, iterations = 3){
 }
 
 /**
- * The first iteration of a run on a fresh store, seeded when there is a seed.
+ * The first iteration of a run on a fresh store, seeded when there is a seed,
+ * and open before the host starts, as a launch's start leaves it.
  *
  * @param {Uint8Array} image @param {Uint8Array | null} seed @param {HostOptions} [options]
  */
 async function firstIteration(image, seed, options = {}){
     const store = await createDirectoryTranslationStore(createMemoryDirectory(), 'bench');
+    await store.prepare();
     if (seed !== null)
     {
         await store.seed(seed);
@@ -213,6 +217,24 @@ test('a seed made under another precision control answers no x87 region', { time
             assert.equal(seeded.cork.cacheHits, 0, `${what}: no hit`);
             assert.ok(seeded.cork.cacheMisses > 0, `${what}: looked up`);
             assert.equal(seeded.eax, same.eax, `${what}: the same sum`);
+        }
+    });
+
+test('an empty store\'s first iteration forms and emits what one without a store does',
+    { timeout: 60000 }, async()=>{
+        // A lookup answered a turn later let the program run on interpreted
+        // and turn other starts hot: crc-x87 formed and emitted two regions,
+        // in two modules, where without a store it forms one.
+        for (const name of ['crc-x87', 'fmath-x87', 'game-x87'])
+        {
+            const image = imageOf(name);
+            const host = hostFor(image, null);
+            const eax = await iteration(host);
+            const without = host.cork().diagnostics();
+            const empty = await firstIteration(image, null);
+            assert.equal(empty.eax, eax, name);
+            assert.deepEqual([empty.cork.regions, empty.cork.modules, empty.cork.cacheMisses],
+                [without.regions, without.modules, without.regions], `${name}: regions, modules`);
         }
     });
 

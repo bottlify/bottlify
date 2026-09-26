@@ -763,6 +763,45 @@ test('precise keeps the x87 exception flags, in a store entry of its own; the de
     assert.equal((await status(false)).hits, 1, 'the fast one is, for a fast run');
 });
 
+test('a store that answers at once has a batch published in the call that formed it', async()=>{
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    /** @type {Map<string, Uint8Array>} */
+    const records = new Map();
+    const store = {
+        get: async(/** @type {string} */ key)=>records.get(key) ?? null,
+        put: async(/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
+            records.set(key, bytes);
+        },
+        getNow: (/** @type {string} */ key)=>records.get(key) ?? null,
+    };
+    /** @param {any} which */
+    const hot = which=>{
+        const m = machine({ store: which, bundleId: 'test' });
+        m.write(CODE, COUNTDOWN);
+        m.setReg(4, 0x80000);
+        m.runtime.noteHot(CODE);
+        return m;
+    };
+    const first = hot(store);
+    assert.equal(await first.runtime.translatePending(), 1, 'a miss, emitted and published');
+    assert.ok(first.runtime.entryOf(CODE) >= 0);
+    assert.equal(records.size, 2, 'and stored');
+    const second = hot(store);
+    assert.equal(await second.runtime.translatePending(), 1, 'a hit, published');
+    assert.deepEqual([second.runtime.diagnostics().cacheHits, records.size], [1, 2],
+        'nothing emitted or stored again');
+    const exit = second.runtime.run(second.runtime.entryOf(CODE), 1_000_000);
+    assert.equal(exit.kind, 'halt');
+    assert.equal(exit.retired, 1 + 2 * 1000 + 1);
+    // One that cannot answer so yet is asked through `get`, a turn later.
+    const third = hot({ ...store, getNow: ()=>undefined });
+    assert.equal(await third.runtime.translatePending(), 0);
+    assert.equal(third.runtime.entryOf(CODE), -1);
+    await settle();
+    assert.ok(third.runtime.entryOf(CODE) >= 0);
+    assert.equal(third.runtime.diagnostics().cacheHits, 1);
+});
+
 test('a region whose code is written while its lookups are out is not published for the old bytes',
     async()=>{
         const { memoryTranslationStore } = await import('./cache.js');

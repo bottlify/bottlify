@@ -279,10 +279,13 @@ test) are defined once in a shared module instantiated with the same memory and 
 each region, not copied into every module -- a saving of about 3 KB a region, which on a
 route that builds tens of thousands of them is most of the module bytes. The directory holds one `records` file with every record appended back to back and one
 `index` naming each record's place in it (a hashed name, an offset, a length), read once when
-the store is first used: a miss never asks the file system, whose answer to a miss is an
+the store is opened -- as the translator is made (`prepare`), so it is open by the program's first
+batch: a miss never asks the file system, whose answer to a miss is an
 exception that costs milliseconds a record, and a hit is one read at an offset -- synchronous
 through the records file's access handle inside a worker, where the engine runs, so a warm
-load's tens of thousands of hits cost microseconds each rather than a file open apiece. Opening the store removes the bundle's directories of other layout versions: nothing reads them again, and the block store mounts the origin's whole private file system and stats every file in it on every start, so a version that kept a file per record cost a minute of every launch until swept. The
+load's tens of thousands of hits cost microseconds each rather than a file open apiece. The
+translator asks that way first (`getNow`), and a batch the store answers so is published in the
+call that formed it, as a batch is without a store. Opening the store removes the bundle's directories of other layout versions: nothing reads them again, and the block store mounts the origin's whole private file system and stats every file in it on every start, so a version that kept a file per record cost a minute of every launch until swept. The
 index is a log the batch's lines are appended to (a name that appears twice means the later
 place), one write in flight at a time and going round again when a put lands during it, the
 records flushed before it; a place the file does not reach (a torn write) or a line cut short
@@ -336,16 +339,26 @@ A launch hands its store out as such a seed through `app.exportTranslations()` (
 translating engine or a store), asked before `dispose`; `tools/cdp_test/game.mjs
 --export-translations FILE` writes a browser run's to a file.
 `tools/cork-bench/bench.mjs --capture DIR` writes a benchmark program's seed, `--seed DIR` starts
-every rep from one and `--store fresh` from an empty store, the event loop turning between slices
+every rep from one and `--store fresh` from an empty store, each opened before the host starts, the event loop turning between slices
 so the store's answers come back. A seeded first iteration against an empty store, the median of
 seven processes a workload, each five hosts (the first host, the engine's own JavaScript cold as at
 a launch, and `coldMs`, hosts three to five): over the thirteen original workloads the first host
 159 -> 85 ms and `coldMs` 33 -> 21 by geometric mean, load-x87 1178 -> 401 and 454 -> 145, the
-checksums the empty store's. What is left is not the emitting: a region is still formed to find its
-key, and a batch's records come back a turn of the event loop after it is formed and no batch is
-formed meanwhile, which costs a first run more than the emitting -- with no store at all the first
-host is 83 ms by the same mean, and on a small program a seed's is still above it (vcall-x87 56 ms
-with none, 129 seeded). A region with x87 instructions in it is compiled for the x87 stack top it is entered
+checksums the empty store's. A store that can answer at once (`getNow`, above) answers a batch's
+lookups in the call that formed it; one that cannot -- a page's, with no synchronous handle, or one
+with a seed on its way in -- is asked through `get`, and the batch is published a turn of the event
+loop later, no batch formed meanwhile. That turn cost a first run more than the emitting it spared:
+the program ran on in the interpreter tier and turned other starts hot, so crc-x87 formed and emitted two
+regions in two modules where without a store it forms one. Answered at once, an empty store's run
+forms what a run without one does (`translation-store.itest.js`); the same thirteen workloads, seven
+processes each, the store open before the host starts as a launch leaves it: the first host with
+an empty store 158 -> 89 ms by geometric mean (81-83 with none) and with a seed 86 -> 43, now half
+of no store's, seeded `coldMs` 20.5 -> 21.6. The turn had also held translation back, which a first
+iteration run mostly by the wasm tier gained from: with an empty store `coldMs` went 34.7 -> 40.1,
+where a run without a store is (34.7-36.1), load-x87's 452 -> 778 ms (676 with none) -- held back it
+formed 1 380 regions in 10 batches, and now forms 2 075 in 214, as it does without a store. How
+eagerly a loading phase is translated is the translator's own policy, the same with a store or
+without. A region with x87 instructions in it is compiled for the x87 stack top it is entered
 with, and its entries are keyed by address and top (`entryOf(eip, x87Top)`, the top read off
 the emulator's `fpu_stack_ptr` before every turn); a region without them is entered with any
 top. A lookup that misses at an address compiled for another top queues that top for the

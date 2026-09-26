@@ -859,6 +859,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     let profileResetAt = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiling
         && settings.blockProfileFrom > 0
         ? performance.now() + settings.blockProfileFrom * 1000 : null;
+    // The store is opened (a directory store reads its index) while the host
+    // is still starting, so it can answer the first batch's lookups at once.
+    if (leaveOut.size === 0 && !settings.undoLog && !profiling)
+    {
+        settings.store?.prepare?.()?.catch(()=>{});
+    }
     /** The options both the inline emitter and the worker's take. */
     const emitOptions = ()=>({
         undoLog: settings.undoLog,
@@ -1812,12 +1818,105 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     }
 
     /**
+     * Takes a formed region's record as the store answered it: none, one
+     * whose batch module this run has an instance of (`moduleBytes`
+     * undefined), or one with its batch module's bytes -- a miss when those
+     * are gone.
+     *
+     * @param {any} one  a formed region
+     * @param {import('./cache.js').CachedRegion | null} cached
+     * @param {Uint8Array | null} [moduleBytes]
+     */
+    const settle = (one, cached, moduleBytes)=>{
+        one.cached = cached;
+        if (cached === null)
+        {
+            counts.missNoRecord++;
+        }
+        else if (moduleBytes !== undefined)
+        {
+            one.moduleBytes = moduleBytes;
+            if (moduleBytes === null)
+            {
+                counts.missNoModule++;
+                one.cached = null;
+            }
+        }
+        if (one.cached !== null)
+        {
+            counts.cacheHits++;
+        }
+        else
+        {
+            counts.cacheMisses++;
+            trace(storeTrace.missed, one);
+        }
+    };
+
+    /**
+     * A batch's lookups answered at once, where the store can answer without
+     * a turn of the event loop (`getNow`: a directory store in a worker reads
+     * its records file through a synchronous handle). The batch is then
+     * published in the call that formed it, as without a store, where a turn
+     * later -- with no batch formed meanwhile -- a first run went on
+     * interpreted, formed other regions and emitted more than the store
+     * saved. False, with nothing taken, when a lookup cannot be answered so.
+     *
+     * @param {any[]} formed @param {any} store
+     */
+    const lookUpNow = (formed, store)=>{
+        if (typeof store.getNow !== 'function')
+        {
+            return false;
+        }
+        /** A batch module's bytes are read once for every record naming it.
+         * @type {Map<string, Uint8Array | null>} */
+        const modules = new Map();
+        /** @type {[import('./cache.js').CachedRegion | null, Uint8Array | null | undefined][]} */
+        const answers = [];
+        try
+        {
+            for (const one of formed)
+            {
+                const bytes = store.getNow(regionKey(one));
+                if (bytes === undefined)
+                {
+                    return false;
+                }
+                const cached = bytes === null ? null : unpackRegion(bytes);
+                const batchKey = cached?.moduleKey;
+                /** @type {Uint8Array | null | undefined} */
+                let batchBytes;
+                if (batchKey !== undefined && !batchInstances.has(batchKey))
+                {
+                    if (!modules.has(batchKey))
+                    {
+                        const stored = store.getNow(batchKey);
+                        if (stored === undefined)
+                        {
+                            return false;
+                        }
+                        modules.set(batchKey,
+                            stored === null ? null : unpackRegion(stored)?.module ?? null);
+                    }
+                    batchBytes = modules.get(batchKey);
+                }
+                answers.push([cached, batchBytes]);
+            }
+        }
+        catch {
+            return false;
+        }
+        formed.forEach((one, i)=>settle(one, ...answers[i]));
+        return true;
+    };
+
+    /**
      * The publish half of a batch, when its store lookups are back (or at
-     * once, without a store): the regions the store held are instantiated and
-     * published, and the rest are emitted -- on the worker if there is one,
-     * inline otherwise -- stored and published. Runs off the slice that
-     * requested the batch, so a region whose bytes are not back is not
-     * published this frame.
+     * once, without a store or with one that answers at once): the regions
+     * the store held are instantiated and published, and the rest are
+     * emitted -- on the worker if there is one, inline otherwise -- stored and
+     * published.
      *
      * @param {any[]} formed
      * @param {any} store
@@ -2294,12 +2393,18 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 return finishBatch(formed, null);
             }
-            // The store's reads leave the slice path: the batch's records are
-            // requested here and the slice goes on. The batch is published
-            // when the bytes are back -- between frames, as instantiation
-            // already is -- and a region not back is not published this frame.
-            // `lookupMs` is the engine thread's own time to start them.
             const lookupAt = clock();
+            if (lookUpNow(formed, store))
+            {
+                counts.lookupMs += clock() - lookupAt;
+                return finishBatch(formed, store);
+            }
+            // A store that cannot answer at once answers off the slice path:
+            // the batch's records are requested here and the slice goes on. The
+            // batch is published when the bytes are back -- between frames, as
+            // instantiation already is -- and a region not back is not
+            // published this frame. `lookupMs` is the engine thread's own time
+            // to start them.
             storePending = true;
             // A batch module's bytes are read once for every record naming it.
             /** @type {Map<string, Promise<Uint8Array | null>>} */
@@ -2327,39 +2432,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 finishBatch(formed, store);
             };
             Promise.all(formed.map(async one=>{
-                const key = regionKey(one);
                 try
                 {
-                    const bytes = await store.get(key);
-                    one.cached = bytes === null ? null : unpackRegion(bytes);
-                    if (one.cached === null)
-                    {
-                        counts.missNoRecord++;
-                    }
-                    const batchKey = one.cached?.moduleKey;
-                    if (batchKey !== undefined && !batchInstances.has(batchKey))
-                    {
-                        // Its batch's module, unless this run instantiated it
-                        // already; a record whose module is gone is a miss.
-                        one.moduleBytes = await moduleBytes(batchKey);
-                        if (one.moduleBytes === null)
-                        {
-                            counts.missNoModule++;
-                            one.cached = null;
-                        }
-                    }
+                    const bytes = await store.get(regionKey(one));
+                    const cached = bytes === null ? null : unpackRegion(bytes);
+                    const batchKey = cached?.moduleKey;
+                    // Its batch's module, unless this run instantiated it already.
+                    settle(one, cached, batchKey !== undefined && !batchInstances.has(batchKey)
+                        ? await moduleBytes(batchKey) : undefined);
                 }
                 catch {
-                    one.cached = null;
-                }
-                if (one.cached !== null)
-                {
-                    counts.cacheHits++;
-                }
-                else
-                {
-                    counts.cacheMisses++;
-                    trace(storeTrace.missed, one);
+                    settle(one, null);
                 }
             })).then(answered, answered);
             counts.lookupMs += clock() - lookupAt;

@@ -35,9 +35,10 @@
  * (`compare.mjs`). A steady-state figure moves by five to ten per cent between
  * processes; `node --no-liftoff` takes the baseline tier out of it.
  *
- * With a translation store every rep's host gets a fresh one in memory and
- * the event loop turns between slices, as a launch's frames let the store's
- * answers come back: `--store fresh` is an empty store (a bottle's first run),
+ * With a translation store every rep's host gets a fresh one in memory, open
+ * before the host starts as a launch's start leaves it, and the event loop
+ * turns between slices, as a launch's frames let the store's answers come
+ * back: `--store fresh` is an empty store (a bottle's first run),
  * `--seed DIR` one seeded from `DIR/<name>.seed` before the host starts (the
  * rows say `hits` in the first iteration and the seeding's `seedMs`), and
  * `--capture DIR` writes the first rep's store, once its iterations are done,
@@ -146,6 +147,7 @@ for (const name of names)
     {
         const store = stores === null ? null
             : await stores.createDirectoryTranslationStore(stores.createMemoryDirectory(), 'bench');
+        await store?.prepare?.();
         if (seed !== null)
         {
             const seedAt = performance.now();
