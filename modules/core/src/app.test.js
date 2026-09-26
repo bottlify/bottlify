@@ -29,11 +29,13 @@ import {
     describeEvent,
     chooseZstdDecoder,
     answeredByEngine,
+    mapShippedLibraries,
 } from './app.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
 import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
+import { parsePe } from './layers/loader/internal/pe.js';
 import { decompressZstd } from './zstd.js';
 import { createAccessors } from './layers/memory/internal/accessors.js';
 import { Access, RegionKind, createRegionMap } from './layers/memory/internal/regions.js';
@@ -415,6 +417,81 @@ test('an import the engine has a table for is planned from the system file', asy
     assert.deepEqual([...order[0].file], [...d3dx], 'the file was planned, not the table');
     assert.deepEqual(missing, []);
 });
+
+/**
+ * A fixture image given a relocation directory -- one empty block -- so that
+ * it can be mapped anywhere, as nearly every library a program ships can.
+ *
+ * @param {Uint8Array} file
+ */
+function movable(file){
+    const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
+    const optional = view.getUint32(0x3c, true) + 4 + 20;
+    const BLOCK_RVA = 0x1020;
+    const BLOCK_OFFSET = 0x220;
+    view.setUint32(optional + 96 + 5 * 8, BLOCK_RVA, true);
+    view.setUint32(optional + 96 + 5 * 8 + 4, 8, true);
+    view.setUint32(BLOCK_OFFSET, 0x1000, true);
+    view.setUint32(BLOCK_OFFSET + 4, 8, true);
+    return file;
+}
+
+/**
+ * The program's libraries, mapped by `mapShippedLibraries` over a loader that
+ * only records where each one went.
+ *
+ * @param {Record<string, Uint8Array>} files  Beside the program, by name.
+ * @param {Uint8Array} executable
+ * @param {{ base: number, limit: number }} space
+ */
+async function mapBeside(files, executable, space){
+    const filesystem = await filesystemModule.create({
+        drives: { C: { source: createMemoryStore(Object.fromEntries(
+            Object.entries(files).map(([name, bytes])=>[`App\\${name}`, bytes]))) } },
+    });
+    /** @type {{ name: string, base: number, size: number }[]} */
+    const placed = [];
+    /** @type {any[]} */
+    const emitted = [];
+    const loader = {
+        /** @param {Uint8Array} file @param {{ base: number, name: string }} where */
+        map: (file, { base, name })=>{
+            placed.push({ name, base, size: parsePe(file).sizeOfImage });
+            return { record: { entryPoint: 0 } };
+        },
+    };
+    const kernel32 = (/** @type {string} */ name)=>name.toLowerCase() === 'kernel32.dll';
+    const mapped = await mapShippedLibraries({
+        executable, imagePath: IMAGE, filesystem, loader, blocks: null,
+        events: { emit: (/** @type {string} */ name, /** @type {any} */ payload)=>
+            emitted.push([name, payload]) },
+        isSystem: kernel32, isKnownDll: kernel32,
+        byName: new Map(), byBase: new Map(),
+        ...space,
+    });
+    return { mapped, placed, emitted };
+}
+
+test('a library that would reach past the modules\' space is refused, not mapped over the stacks',
+    async()=>{
+        // Above the modules' space the pool of thread stacks begins, and a
+        // library mapped there is found only when a thread's stack is laid over
+        // it -- as an overlap far from anything that explains it.
+        const library = ()=>movable(new Uint8Array(buildExe({
+            imports: { 'KERNEL32.dll': ['Anything'] }, code: ()=>[0xc3],
+        })));
+        const executable = new Uint8Array(buildExe({
+            imports: { 'first.dll': ['Anything'], 'second.dll': ['Anything'] },
+            code: ()=>[0xc3],
+        }));
+        const { placed, emitted } = await mapBeside(
+            { 'first.dll': library(), 'second.dll': library() }, executable,
+            { base: 0x02000000, limit: 0x02010000 });
+
+        assert.deepEqual(placed.map(one=>[one.name, one.base]), [['first.dll', 0x02000000]]);
+        assert.ok(emitted.some(([name, payload])=>name === 'libraries-missing'
+            && payload.names.includes('second.dll') && payload.reason === 'no room'));
+    });
 
 test('a parent\'s deferred writes land only inside the child it wrote them for', ()=>{
     // A write that falls outside the image was addressing a mapping this

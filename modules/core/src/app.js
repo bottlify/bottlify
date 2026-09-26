@@ -1506,7 +1506,7 @@ async function readWholeFile(filesystem, blocks, path){
  * @param {any} options
  * @returns {Promise<any[]>}
  */
-async function mapShippedLibraries(options){
+export async function mapShippedLibraries(options){
     const { executable, imagePath, filesystem, loader, blocks, events, isSystem,
         isKnownDll, byName, byBase } = options;
     const directory = imagePath.slice(0, imagePath.lastIndexOf('\\') + 1);
@@ -1557,10 +1557,11 @@ async function mapShippedLibraries(options){
     for (const { name, file } of order)
     {
         const image = parsePe(file);
-        if (base + image.sizeOfImage > options.memoryBytes)
+        if (base + image.sizeOfImage > options.limit)
         {
-            // Refused here rather than as a RangeError from a write past the
-            // end of RAM, which says nothing about which library or why.
+            // Refused here rather than as an overlap with the pool of thread
+            // stacks above, found only when a thread's stack is laid over it
+            // and saying nothing about which library or why.
             events.emit('libraries-missing', { names: [name], reason: 'no room' });
             continue;
         }
@@ -3829,7 +3830,7 @@ async function buildApp(options){
                         });
                         return 0;
                     }
-                    if (nextLibraryBase + image.sizeOfImage > HEAP_BASE)
+                    if (nextLibraryBase + image.sizeOfImage > STACK_POOL_BASE)
                     {
                         absentLibraries.add(key);
                         events.emit('libraries-missing', { names: [name], reason: 'no room' });
@@ -3966,9 +3967,9 @@ async function buildApp(options){
         isKnownDll,
         byName, byBase,
         // Straight after the system modules, which is the first address nothing
-        // else has claimed.
+        // else has claimed, and up to the pool of thread stacks.
         base: MODULE_BASE + Object.keys(allLibraries).length * MODULE_STRIDE,
-        memoryBytes: cpu.layout.memorySize,
+        limit: STACK_POOL_BASE,
     });
     for (const library of shipped)
     {
