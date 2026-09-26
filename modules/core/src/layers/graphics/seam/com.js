@@ -95,9 +95,17 @@ function adapt(api, interfaces, onGone){
      * one past what the program owes, and the object dies while it is held.
      */
     const settle = ()=>api.settleGuestRefs?.();
+    /** Whether the latest release ended the object, which the bridge asks next. */
+    let gone = false;
 
     const adapter = {
         api,
+        // Every interface pointer goes with the object at the bridge then,
+        // and not while the object says it outlives the count that went, as
+        // a DirectDraw object does while another generation is held.
+        get destroyed(){
+            return gone;
+        },
         // Where a method that runs in the guest finds the object's memory:
         // the object's own answer, or nothing for an object that keeps none.
         guestState: ()=>(typeof api.guestState === 'function' ? api.guestState() : 0),
@@ -156,7 +164,8 @@ function adapt(api, interfaces, onGone){
             }
             settle();
             const left = api.release(id);
-            if (left === 0 && api.destroyed !== false)
+            gone = left === 0 && api.destroyed !== false;
+            if (gone)
             {
                 for (const descriptor of declared.values())
                 {

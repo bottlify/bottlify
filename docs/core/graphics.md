@@ -267,7 +267,10 @@ when the caller passed somewhere to put it.
 
 `com.js` adapts an API object for the bridge's vtable publisher: it supplies `interfaceFor`,
 `addRef` and `release` from the object's own lifetime model and memoises one adapter per object,
-so one surface is one identity. Every slot of every interface is declared in `vtables.js`; a slot
+so one surface is one identity. Its `destroyed` says whether the latest release ended the object --
+a count of zero on an object that does not report `destroyed: false`, as a DirectDraw object does
+while another generation is held -- and the bridge then forgets every interface pointer of it, not
+only the one released through. Every slot of every interface is declared in `vtables.js`; a slot
 nothing implements answers `E_NOTIMPL` from the index the program compiled against rather than
 shifting the ones after it, and `argBytes` counts the interface pointer and every argument because
 the callee pops the stack.

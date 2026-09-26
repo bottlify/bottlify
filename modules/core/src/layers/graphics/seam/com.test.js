@@ -17,6 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createPublisher } from './com.js';
+import { createVtables } from '../../bridge/internal/vtable.js';
 
 const IID_ONE = '{00000001-0000-0000-C000-000000000046}';
 const IID_TWO = '{00000002-0000-0000-C000-000000000046}';
@@ -203,4 +204,93 @@ test('a descriptor is told of the last release while the pointers still resolve'
     assert.equal(seam.adapterFor(api).release(IID_ONE), 0);
     assert.deepEqual(seen, [`true ${pointer.toString(16)} true`]);
     assert.equal(seam.objectAt(pointer), null, 'and then it is gone');
+});
+
+/**
+ * The publisher over the bridge's own vtables, called through the stubs as a
+ * guest calls them: what the bridge forgets is decided by the code that
+ * decides it in a running program.
+ */
+function overTheBridge(){
+    /** @type {Map<string, any>} */
+    const handlers = new Map();
+    let next = 0x2000;
+    const vtables = createVtables({
+        memory: { writeU32: ()=>{}, readBytes: (/** @type {number} */ at,
+            /** @type {number} */ length)=>new Uint8Array(length) },
+        register: (/** @type {string} */ name, /** @type {any} */ fn)=>{
+            handlers.set(name, fn);
+            return 0x1000 + handlers.size * 0x10;
+        },
+        heap: { allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes;
+            return at;
+        } },
+    });
+    return {
+        seam: createPublisher({ publishInterface: (object, id)=>vtables.publish(object, id) }),
+        /** @param {string} id @param {string} name @param {number} pointer */
+        call: (id, name, pointer)=>handlers.get(`${id}::${name}`).handler([pointer]) >>> 0,
+    };
+}
+
+const E_POINTER = 0x80004003;
+
+test('an object whose last reference goes loses every interface pointer at the bridge', ()=>{
+    // Released through one interface, the object is over: the pointer it was
+    // published as through another must not go on reaching it.
+    const { seam, call } = overTheBridge();
+    const api = counted();
+    const one = seam.publish(api, DESCRIPTORS, IID_ONE);
+    const two = seam.publish(api, DESCRIPTORS, IID_TWO);
+
+    assert.equal(call(IID_TWO, 'Release', two), 0);
+    assert.equal(call(IID_ONE, 'AddRef', one), E_POINTER);
+    assert.equal(call(IID_TWO, 'AddRef', two), E_POINTER);
+});
+
+test('a generation reaching zero at the bridge leaves the others the program holds', ()=>{
+    // DirectDraw counts each generation apart: only the one whose count went
+    // is forgotten, until the object says it is over.
+    const counts = new Map([[IID_ONE, 1], [IID_TWO, 1]]);
+    const api = {
+        get destroyed(){
+            return [...counts.values()].every(value=>value === 0);
+        },
+        /** @param {string} id */
+        addRef: id=>counts.set(id, (counts.get(id) ?? 0) + 1).get(id),
+        /** @param {string} id */
+        release: id=>{
+            counts.set(id, Math.max((counts.get(id) ?? 0) - 1, 0));
+            return counts.get(id) ?? 0;
+        },
+    };
+    const { seam, call } = overTheBridge();
+    const one = seam.publish(api, DESCRIPTORS, IID_ONE);
+    const two = seam.publish(api, DESCRIPTORS, IID_TWO);
+
+    assert.equal(call(IID_ONE, 'Release', one), 0);
+    assert.equal(call(IID_ONE, 'AddRef', one), E_POINTER, 'its own generation went');
+    assert.equal(call(IID_TWO, 'AddRef', two), 2, 'the other is still the program\'s');
+    assert.equal(call(IID_TWO, 'Release', two), 1);
+    assert.equal(call(IID_TWO, 'Release', two), 0);
+    assert.equal(call(IID_TWO, 'AddRef', two), E_POINTER);
+});
+
+test('an object that says it outlives its count is not ended by reaching zero', ()=>{
+    // Only the interface released through is let go of: the object is still
+    // there behind the others.
+    const { seam, call } = overTheBridge();
+    let count = 1;
+    const api = {
+        destroyed: false,
+        addRef: ()=>++count,
+        release: ()=>(count = Math.max(0, count - 1)),
+    };
+    const one = seam.publish(api, DESCRIPTORS, IID_ONE);
+    const two = seam.publish(api, DESCRIPTORS, IID_TWO);
+    assert.equal(call(IID_ONE, 'Release', one), 0);
+    assert.equal(seam.adapterFor(api).destroyed, false);
+    assert.equal(call(IID_TWO, 'AddRef', two), 1, 'the other pointer still reaches it');
 });
