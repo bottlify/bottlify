@@ -773,6 +773,28 @@ test('the narrow stream calls refuse a stream whose descriptor is in a Unicode m
     assert.deepEqual(errno, [22, 22]);
 });
 
+test('fwrite and fread on a stream in a Unicode mode carry UTF-16 through the translation', ()=>{
+    // fwrite's buffer "is interpreted as a pointer to an array of wchar_t
+    // that contains UTF-16 data", an odd count a parameter validation error;
+    // fread reads it back folded (Wine's msvcrt test_fopen_s).
+    const O_U16TEXT = 0x20000;
+    const { memory, fns, open, errno, files } = runtime({});
+    const out = open('C:\\u.txt', 'w');
+    fns._setmode.handler([fns._fileno.handler([out]), O_U16TEXT]);
+    assert.equal(fns.fwrite.handler([memory.put('a\0\n\0'), 1, 4, out]), 4);
+    assert.equal(fns.fwrite.handler([memory.put('b'), 1, 1, out]), 0);
+    assert.deepEqual(errno.splice(0), [22]);
+    fns.fclose.handler([out]);
+    assert.deepEqual([...files.files['C:\\u.txt']], [0x61, 0, 0x0d, 0, 0x0a, 0]);
+
+    const input = open('C:\\u.txt', 'r');
+    fns._setmode.handler([fns._fileno.handler([input]), O_U16TEXT]);
+    const buffer = memory.allocate(16);
+    assert.equal(fns.fread.handler([buffer, 1, 16, input]), 4);
+    assert.deepEqual([...memory.bytes.subarray(buffer, buffer + 4)], [0x61, 0, 0x0a, 0]);
+    assert.deepEqual(errno, []);
+});
+
 test('the stream calls are cdecl with the argument count each reads', ()=>{
     const { fns } = runtime({});
     const expected = {

@@ -351,6 +351,32 @@ export function createDescriptors(host){
     };
 
     /**
+     * Up to `limit` bytes of the program's UTF-16 from a descriptor in a
+     * Unicode translation: the file's units, CR LF folded to LF, and the
+     * position moved past the bytes of the file they came from. As many
+     * bytes are asked for as the units could take, and a unit more, which
+     * says whether a CR is the first half of a CR LF. A read waits for the
+     * file's mark when that is still on its way.
+     *
+     * @param {Descriptor} descriptor @param {number} limit
+     * @returns {Uint8Array | Promise<Uint8Array>}
+     */
+    const pullUnicode = (descriptor, limit)=>{
+        const units = Math.floor(limit / 2);
+        const widest = descriptor.encoding === 'utf16' ? 2 : descriptor.encoding === 'utf8' ? 3 : 1;
+        /** @returns {Uint8Array | Promise<Uint8Array>} */
+        const read = ()=>{
+            const start = descriptor.position;
+            return settle(host.files.read(descriptor.node, start, (units + 2) * widest + 2), raw=>{
+                const folded = foldUnits(decodeUnits(raw, descriptor.encoding), units);
+                descriptor.position = start + folded.consumed;
+                return bytesOfUnits(folded.units);
+            });
+        };
+        return descriptor.ready ? descriptor.ready.then(read) : read();
+    };
+
+    /**
      * A stretch of the file for a stream, from what the last one read when it
      * holds the stretch -- or holds the end of the file, when that read found
      * it and some of what it read is still unconsumed. Past that, the volume
@@ -545,7 +571,8 @@ export function createDescriptors(host){
          * position stays the offset of the next byte the program has not
          * seen; in text mode a CR LF is one LF that consumed two bytes, a CR
          * not before an LF is itself, and a ^Z ends the data, the position
-         * going to the end of the file since nothing after it is data.
+         * going to the end of the file since nothing after it is data. In a
+         * Unicode translation the bytes are the program's UTF-16.
          *
          * @param {Descriptor} descriptor @param {number} limit @param {boolean} line
          * @returns {Uint8Array | Promise<Uint8Array>}
@@ -554,6 +581,10 @@ export function createDescriptors(host){
             if (descriptor.node === null || descriptor.ended || limit <= 0)
             {
                 return new Uint8Array(0);
+            }
+            if (descriptor.unicode !== 0)
+            {
+                return pullUnicode(descriptor, limit);
             }
             if (!descriptor.text)
             {
@@ -746,29 +777,6 @@ export function createIoFunctions(host, descriptors){
         view.setUint32(layout.MTIME, time, true);
         view.setUint32(layout.CTIME, time, true);
         host.writeMemory(address >>> 0, bytes);
-    };
-
-    /**
-     * `_read` in a Unicode translation: up to `limit` UTF-16 units of the
-     * file, CR LF folded to LF, delivered as UTF-16LE; the position moves
-     * past the bytes of the file they came from. As many bytes are asked for
-     * as the units could take, and a unit more, which says whether a CR is
-     * the first half of a CR LF.
-     *
-     * @param {Descriptor} descriptor @param {number} buffer @param {number} limit
-     */
-    const readUnicode = (descriptor, buffer, limit)=>{
-        const widest = descriptor.encoding === 'utf16' ? 2 : descriptor.encoding === 'utf8' ? 3 : 1;
-        const start = descriptor.position;
-        return settle(host.files.read(descriptor.node, start, (limit + 2) * widest + 2), raw=>{
-            const { units, consumed } = foldUnits(decodeUnits(raw, descriptor.encoding), limit);
-            if (units.length > 0)
-            {
-                host.writeMemory(buffer >>> 0, bytesOfUnits(units));
-            }
-            descriptor.position = start + consumed;
-            return units.length * 2;
-        });
     };
 
     /**
@@ -1023,7 +1031,13 @@ export function createIoFunctions(host, descriptors){
             }
             if (descriptor.unicode !== 0)
             {
-                return settle(descriptor.ready, ()=>readUnicode(descriptor, buffer, wanted / 2));
+                return settle(descriptors.pull(descriptor, wanted, false), bytes=>{
+                    if (bytes.length > 0)
+                    {
+                        host.writeMemory(buffer >>> 0, bytes);
+                    }
+                    return bytes.length;
+                });
             }
             const start = descriptor.position;
             /** @param {Uint8Array} bytes @param {number} consumed */

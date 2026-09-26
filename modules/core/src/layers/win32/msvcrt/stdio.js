@@ -340,9 +340,11 @@ export function createStdioFunctions(host){
 
     /**
      * Whether a stream's descriptor is in a Unicode translation, which the
-     * byte calls here cannot read or write: the runtime asserts on a narrow
-     * call made on such a stream, and here it is an error on the stream and
-     * EINVAL instead.
+     * narrow character calls do not read or write -- "fputc doesn't
+     * currently support output into a UNICODE stream", and the runtime
+     * asserts on a narrow print into one; here it is an error on the stream
+     * and EINVAL. fread and fwrite are not refused: in a Unicode translation
+     * their bytes are UTF-16.
      *
      * @param {Stream} stream
      */
@@ -364,10 +366,6 @@ export function createStdioFunctions(host){
      * @returns {Uint8Array | Promise<Uint8Array>}
      */
     const take = (stream, limit, line)=>{
-        if (narrowRefused(stream))
-        {
-            return new Uint8Array(0);
-        }
         /** @type {number[]} */
         const head = [];
         while (stream.pushback.length > 0 && head.length < limit)
@@ -403,7 +401,7 @@ export function createStdioFunctions(host){
      * @param {Stream} stream @param {Uint8Array} bytes
      */
     const emit = (stream, bytes)=>{
-        const descriptor = narrowRefused(stream) ? null : descriptorOf(stream);
+        const descriptor = descriptorOf(stream);
         const stored = descriptor ? descriptors.put(descriptor, bytes) : 0;
         if (stored < bytes.length)
         {
@@ -431,6 +429,10 @@ export function createStdioFunctions(host){
      * @returns {number | Promise<number>}
      */
     const nextByte = stream=>{
+        if (narrowRefused(stream))
+        {
+            return EOF;
+        }
         if (!readable(stream))
         {
             raise(stream, IOERR);
@@ -453,6 +455,10 @@ export function createStdioFunctions(host){
      * @param {Stream} stream @param {number} format @param {number[]} values
      */
     const printTo = (stream, format, values)=>{
+        if (narrowRefused(stream))
+        {
+            return EOF;
+        }
         if (!writable(stream))
         {
             refuseWrite(stream);
@@ -464,6 +470,10 @@ export function createStdioFunctions(host){
 
     /** @param {Stream} stream @param {number} c */
     const putByte = (stream, c)=>{
+        if (narrowRefused(stream))
+        {
+            return EOF;
+        }
         if (!writable(stream))
         {
             refuseWrite(stream);
@@ -685,7 +695,12 @@ export function createStdioFunctions(host){
             });
         }),
 
-        /** size_t fwrite(const void *buffer, size_t size, size_t count, FILE *stream) */
+        /**
+         * size_t fwrite(const void *buffer, size_t size, size_t count, FILE *stream)
+         *
+         * In a Unicode translation the bytes are UTF-16, and an odd count of
+         * them is EINVAL with nothing written.
+         */
         fwrite: cdecl(16, ([buffer, size, count, pointer])=>{
             const stream = argument(pointer);
             const wanted = (size >>> 0) * (count >>> 0);
@@ -696,6 +711,11 @@ export function createStdioFunctions(host){
             if (!writable(stream))
             {
                 refuseWrite(stream);
+                return 0;
+            }
+            if ((descriptorOf(stream)?.unicode ?? 0) !== 0 && wanted % 2 !== 0)
+            {
+                fail(EINVAL);
                 return 0;
             }
             const stored = emit(stream, host.readMemory(buffer >>> 0, wanted).slice());
@@ -868,7 +888,7 @@ export function createStdioFunctions(host){
             {
                 fail(EINVAL);
             }
-            if (!stream || (buffer >>> 0) === 0 || (count | 0) <= 0)
+            if (!stream || (buffer >>> 0) === 0 || (count | 0) <= 0 || narrowRefused(stream))
             {
                 return 0;
             }
@@ -937,7 +957,7 @@ export function createStdioFunctions(host){
             {
                 fail(EINVAL);
             }
-            if (!stream || (string >>> 0) === 0)
+            if (!stream || (string >>> 0) === 0 || narrowRefused(stream))
             {
                 return EOF;
             }
@@ -958,7 +978,7 @@ export function createStdioFunctions(host){
          */
         ungetc: cdecl(8, ([c, pointer])=>{
             const stream = argument(pointer);
-            if (!stream || (c | 0) === EOF || !readable(stream))
+            if (!stream || (c | 0) === EOF || !readable(stream) || narrowRefused(stream))
             {
                 return EOF;
             }
@@ -996,9 +1016,9 @@ export function createStdioFunctions(host){
         /** int puts(const char *str) -- the string and a newline on stdout: 0, or EOF. */
         puts: cdecl(4, ([string])=>{
             const stream = standardStream(1);
-            if (!stream || !writable(stream))
+            if (!stream || narrowRefused(stream) || !writable(stream))
             {
-                if (stream)
+                if (stream && !writable(stream))
                 {
                     refuseWrite(stream);
                 }
