@@ -2171,3 +2171,207 @@ test('PostThreadMessageA refuses a thread that does not exist, and says why', ()
     assert.equal(queue.depth(), 0, 'and queues nothing for nobody to find');
     assert.deepEqual(errors, [ERROR_INVALID_THREAD_ID]);
 });
+
+// --- raw input ---
+
+const WM_INPUT = 0x00ff;
+const RID_INPUT = 0x10000003;
+const RID_HEADER = 0x10000005;
+const RIDEV_REMOVE = 0x0001;
+const RIDEV_INPUTSINK = 0x0100;
+const RIM_INPUT = 0;
+const RIM_INPUTSINK = 1;
+const RAWINPUTDEVICE_SIZE = 12;
+const RAWINPUTHEADER_SIZE = 16;
+const ERROR_INVALID_PARAMETER = 87;
+const ERROR_INVALID_HANDLE = 6;
+const ERROR_INSUFFICIENT_BUFFER = 122;
+const DEVICES = 0x11400;
+const COUNT = 0x11500;
+const RAW = 0x11600;
+
+/**
+ * @param {ReturnType<typeof fakeMemory>} memory
+ * @param {[number, number, number, number][]} devices  page, usage, flags, target
+ */
+function putDevices(memory, devices){
+    devices.forEach(([page, usage, flags, target], index)=>{
+        memory.putU32s(DEVICES + index * RAWINPUTDEVICE_SIZE,
+            [(usage << 16 | page) >>> 0, flags, target]);
+    });
+    return devices.length;
+}
+
+/** @param {ReturnType<typeof fakeMemory>} memory @param {number} at */
+const u16 = (memory, at)=>memory.u32(at) & 0xffff;
+
+test('RegisterRawInputDevices checks its devices, and the registered list is ordered', ()=>{
+    // user32's input tests: no devices or a cbSize of 0 is ERROR_INVALID_PARAMETER;
+    // the registered list is counted with a null buffer, refused for a count of
+    // 0, too small with ERROR_INSUFFICIENT_BUFFER and the count needed, and
+    // comes back ordered by usage; RIDEV_INPUTSINK needs a window and
+    // RIDEV_REMOVE must not name one.
+    const HID_USAGE_GENERIC_JOYSTICK = 0x04;
+    const HID_USAGE_GENERIC_GAMEPAD = 0x05;
+    const { fns, memory, hwnd, errors } = withWindow({ style: WS_VISIBLE });
+    const count = putDevices(memory, [[1, HID_USAGE_GENERIC_GAMEPAD, 0, 0],
+        [1, HID_USAGE_GENERIC_JOYSTICK, 0, 0]]);
+    const registered = (/** @type {number} */ buffer, /** @type {number} */ size)=>
+        fns.GetRegisteredRawInputDevices.handler([buffer, COUNT, size]);
+
+    assert.equal(fns.RegisterRawInputDevices.handler([0, 0, 0]), 0);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, count, 0]), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER]);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, count, RAWINPUTDEVICE_SIZE]), 1);
+
+    errors.length = 0;
+    assert.equal(fns.GetRegisteredRawInputDevices.handler([0, 0, 0]), 0xffffffff);
+    assert.equal(registered(0, 0), 0xffffffff);
+    memory.putU32s(COUNT, [0]);
+    assert.equal(registered(0, RAWINPUTDEVICE_SIZE), 0);
+    assert.equal(memory.u32(COUNT), 2, 'counted');
+    memory.putU32s(COUNT, [0]);
+    assert.equal(registered(DEVICES, RAWINPUTDEVICE_SIZE), 0xffffffff);
+    assert.equal(memory.u32(COUNT), 0);
+    memory.putU32s(COUNT, [1]);
+    assert.equal(registered(DEVICES, RAWINPUTDEVICE_SIZE), 0xffffffff);
+    assert.equal(memory.u32(COUNT), 2, 'told how many it needs');
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER,
+        ERROR_INVALID_PARAMETER, ERROR_INSUFFICIENT_BUFFER]);
+    memory.fill(DEVICES, 6);
+    memory.putU32s(COUNT, [2]);
+    assert.equal(registered(DEVICES, RAWINPUTDEVICE_SIZE), 2);
+    assert.deepEqual([0, 12].map(at=>memory.u32(DEVICES + at)),
+        [(HID_USAGE_GENERIC_JOYSTICK << 16 | 1) >>> 0, (HID_USAGE_GENERIC_GAMEPAD << 16 | 1) >>> 0],
+        'ordered by usage, not by registration');
+
+    errors.length = 0;
+    putDevices(memory, [[1, 4, RIDEV_INPUTSINK, 0], [1, 5, RIDEV_INPUTSINK, 0]]);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, 2, RAWINPUTDEVICE_SIZE]), 0);
+    putDevices(memory, [[1, 4, RIDEV_INPUTSINK, hwnd], [1, 5, RIDEV_INPUTSINK, hwnd]]);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, 2, RAWINPUTDEVICE_SIZE]), 1);
+    putDevices(memory, [[1, 4, RIDEV_REMOVE, hwnd], [1, 5, RIDEV_REMOVE, hwnd]]);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, 2, RAWINPUTDEVICE_SIZE]), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER]);
+    putDevices(memory, [[1, 4, RIDEV_REMOVE, 0], [1, 5, RIDEV_REMOVE, 0]]);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, 2, RAWINPUTDEVICE_SIZE]), 1);
+    memory.putU32s(COUNT, [0]);
+    assert.equal(registered(0, RAWINPUTDEVICE_SIZE), 0);
+    assert.equal(memory.u32(COUNT), 0, 'both removed');
+});
+
+test('GetRawInputData refuses a handle that names no input', ()=>{
+    const { fns, memory, errors } = setup();
+    memory.putU32s(COUNT, [0]);
+    assert.equal(fns.GetRawInputData.handler([0, RID_INPUT, 0, COUNT, RAWINPUTHEADER_SIZE]),
+        0xffffffff);
+    assert.deepEqual(errors, [ERROR_INVALID_HANDLE]);
+});
+
+test('a registered mouse is posted WM_INPUT, and GetRawInputData reads the report', ()=>{
+    // As documented for WM_INPUT and GetRawInputData: wParam says whether the
+    // window was in the foreground, lParam is the handle, a null buffer asks
+    // the size, RID_HEADER reads the RAWINPUTHEADER alone, and a RAWMOUSE
+    // carries relative motion, button transitions and the wheel.
+    const RI_MOUSE_LEFT_BUTTON_DOWN = 0x0001;
+    const RI_MOUSE_WHEEL = 0x0400;
+    const RAWINPUT_MOUSE_SIZE = 40;
+    const { fns, memory, hwnd, queue, service, errors } = withWindow({ style: WS_VISIBLE });
+    fns.SetFocus.handler([hwnd]);
+    service.rawInput({ device: 'mouse', dx: 5, dy: -3 });
+    assert.equal(queue.depth(), 0, 'nothing is posted for a device nobody registered');
+
+    putDevices(memory, [[1, 2, 0, hwnd]]);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, 1, RAWINPUTDEVICE_SIZE]), 1);
+    service.rawInput({ device: 'mouse', dx: 5, dy: -3 });
+    assert.equal(fns.GetQueueStatus.handler([0x0400]) >>> 16, 0x0400, 'QS_RAWINPUT');
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.deepEqual([MSG.hwnd, MSG.message, MSG.wParam].map(at=>memory.u32(MSG_BUFFER + at)),
+        [hwnd, WM_INPUT, RIM_INPUT]);
+    const handle = memory.u32(MSG_BUFFER + MSG.lParam);
+    assert.notEqual(handle, 0);
+
+    memory.putU32s(COUNT, [0]);
+    assert.equal(fns.GetRawInputData.handler([handle, RID_INPUT, 0, COUNT, RAWINPUTHEADER_SIZE]),
+        0, 'a null buffer asks the size');
+    assert.equal(memory.u32(COUNT), RAWINPUT_MOUSE_SIZE);
+    memory.fill(RAW, 10);
+    assert.equal(fns.GetRawInputData.handler([handle, RID_INPUT, RAW, COUNT, RAWINPUTHEADER_SIZE]),
+        RAWINPUT_MOUSE_SIZE);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RAW + at)),
+        [0, RAWINPUT_MOUSE_SIZE, 0, 0], 'RIM_TYPEMOUSE, its size, no device, RIM_INPUT');
+    assert.deepEqual([16, 20, 24, 28, 32, 36].map(at=>memory.u32(RAW + at)),
+        [0, 0, 0, 5, 0xfffffffd, 0], 'relative motion, no buttons');
+
+    memory.putU32s(COUNT, [RAWINPUTHEADER_SIZE]);
+    memory.fill(RAW, 10);
+    assert.equal(fns.GetRawInputData.handler([handle, RID_HEADER, RAW, COUNT,
+        RAWINPUTHEADER_SIZE]), RAWINPUTHEADER_SIZE);
+    assert.equal(memory.u32(RAW + 16), UNTOUCHED, 'the header alone');
+    assert.equal(fns.GetRawInputData.handler([handle, RID_INPUT, RAW, COUNT,
+        RAWINPUTHEADER_SIZE]), 0xffffffff, 'a buffer too small for the report');
+    assert.equal(fns.GetRawInputData.handler([handle, RID_INPUT, RAW, COUNT, 12]), 0xffffffff);
+    assert.deepEqual(errors, [ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER]);
+
+    service.rawInput({ device: 'mouse', button: 'left', down: true });
+    service.rawInput({ device: 'mouse', wheel: -120 });
+    memory.putU32s(COUNT, [RAWINPUT_MOUSE_SIZE]);
+    /** @returns {number[]} usButtonFlags and usButtonData of the next report */
+    const nextButtons = ()=>{
+        fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+        fns.GetRawInputData.handler([memory.u32(MSG_BUFFER + MSG.lParam), RID_INPUT, RAW,
+            COUNT, RAWINPUTHEADER_SIZE]);
+        return [u16(memory, RAW + 20), u16(memory, RAW + 22)];
+    };
+    assert.deepEqual(nextButtons(), [RI_MOUSE_LEFT_BUTTON_DOWN, 0]);
+    assert.deepEqual(nextButtons(), [RI_MOUSE_WHEEL, 0xff88], 'the wheel\'s signed delta');
+});
+
+test('a registered keyboard follows the focus, and only a sink hears it in the background', ()=>{
+    // RAWINPUTDEVICE documents a null hwndTarget as the keyboard focus, and
+    // RIDEV_INPUTSINK as input received while the window is not in the
+    // foreground, with wParam RIM_INPUTSINK; a RAWKEYBOARD carries the make
+    // code, RI_KEY_BREAK and RI_KEY_E0, the virtual key and the message.
+    const RI_KEY_BREAK = 1;
+    const RI_KEY_E0 = 2;
+    const WM_KEYUP = 0x0101;
+    const RAWINPUT_KEYBOARD_SIZE = 32;
+    const { fns, memory, hwnd, queue, service } = withWindow({ style: WS_VISIBLE });
+    const other = createWindow(fns, memory, { style: WS_VISIBLE });
+    /** Moves the focus, dropping what activation posted, so only raw input is queued. */
+    const focusOn = (/** @type {number} */ target)=>{
+        fns.SetFocus.handler([target]);
+        queue.purge(hwnd);
+        queue.purge(other);
+    };
+    focusOn(hwnd);
+    putDevices(memory, [[1, 6, 0, 0]]);
+    assert.equal(fns.RegisterRawInputDevices.handler([DEVICES, 1, RAWINPUTDEVICE_SIZE]), 1);
+
+    /** @returns {number[]} the window, wParam and the RAWKEYBOARD's fields */
+    const next = ()=>{
+        assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+        assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_INPUT);
+        memory.putU32s(COUNT, [RAWINPUT_KEYBOARD_SIZE]);
+        assert.equal(fns.GetRawInputData.handler([memory.u32(MSG_BUFFER + MSG.lParam),
+            RID_INPUT, RAW, COUNT, RAWINPUTHEADER_SIZE]), RAWINPUT_KEYBOARD_SIZE);
+        assert.equal(memory.u32(RAW), 1, 'RIM_TYPEKEYBOARD');
+        return [memory.u32(MSG_BUFFER + MSG.hwnd), memory.u32(MSG_BUFFER + MSG.wParam),
+            u16(memory, RAW + 16), u16(memory, RAW + 18), u16(memory, RAW + 22),
+            memory.u32(RAW + 24)];
+    };
+    service.rawInput({ device: 'key', scan: 0x1e, vk: 0x41, down: true });
+    assert.deepEqual(next(), [hwnd, RIM_INPUT, 0x1e, 0, 0x41, WM_KEYDOWN]);
+    focusOn(other);
+    service.rawInput({ device: 'key', scan: 0x1d, extended: true, vk: 0x11, down: false });
+    assert.deepEqual(next(), [other, RIM_INPUT, 0x1d, RI_KEY_BREAK | RI_KEY_E0, 0x11, WM_KEYUP]);
+
+    putDevices(memory, [[1, 6, 0, hwnd]]);
+    fns.RegisterRawInputDevices.handler([DEVICES, 1, RAWINPUTDEVICE_SIZE]);
+    service.rawInput({ device: 'key', scan: 0x1e, vk: 0x41, down: true });
+    assert.equal(queue.depth(), 0, 'a window in the background is not told');
+    putDevices(memory, [[1, 6, RIDEV_INPUTSINK, hwnd]]);
+    fns.RegisterRawInputDevices.handler([DEVICES, 1, RAWINPUTDEVICE_SIZE]);
+    service.rawInput({ device: 'key', scan: 0x1e, vk: 0x41, down: true });
+    assert.deepEqual(next().slice(0, 2), [hwnd, RIM_INPUTSINK], 'unless it is a sink');
+});

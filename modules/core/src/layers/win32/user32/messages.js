@@ -73,6 +73,10 @@ export const QS_TIMER = 0x0010;
 export const QS_PAINT = 0x0020;
 export const QS_HOTKEY = 0x0080;
 export const QS_ALLPOSTMESSAGE = 0x0100;
+export const QS_RAWINPUT = 0x0400;
+
+/** Raw input's one message, a class of its own. */
+const WM_INPUT = 0x00ff;
 
 /** The ends of the two input ranges, and the one message of its own class. */
 const WM_KEYFIRST = 0x0100;
@@ -131,6 +135,10 @@ const classOf = message=>{
     if (message === WM_HOTKEY)
     {
         return QS_HOTKEY;
+    }
+    if (message === WM_INPUT)
+    {
+        return QS_RAWINPUT;
     }
     if (message >= WM_KEYFIRST && message <= WM_KEYLAST)
     {

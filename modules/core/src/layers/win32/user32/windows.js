@@ -22,6 +22,7 @@ import { createPaintFunctions } from './paint.js';
 import { HOVER_SIZE, HOVER_TIME, SYS_COLORS, createSystemFunctions } from './system.js';
 import { createObjectFunctions } from './objects.js';
 import { createDialogFunctions } from './dialogs.js';
+import { createRawInput } from './rawinput.js';
 import {
     WS_CHILD, WS_DISABLED, contains, createGeometry, intersect, isEmpty,
 } from './frame.js';
@@ -353,6 +354,9 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           or zero while there is none.
  * @property {() => void} refresh
  *           Repaints the desktop and every window shown on it.
+ * @property {(event: import('./rawinput.js').RawInputEvent) => void} rawInput
+ *           One event of the mouse or the keyboard as the device reported it,
+ *           posted as WM_INPUT to whoever registered for that device.
  */
 
 /**
@@ -2711,9 +2715,26 @@ export function createWindowFunctions(host){
         return 0;
     });
 
+    const rawInput = createRawInput({
+        host,
+        isWindow: hwnd=>live(hwnd) !== null,
+        focus: ()=>focusWindow() || activeWindow(),
+        foreground: hwnd=>{
+            const record = live(hwnd);
+            return record !== null && topLevelOf(record).hwnd === activeWindow();
+        },
+    });
+
     host.windowService?.({
         /** The window GetForegroundWindow answers with, or zero. */
         active: ()=>activeWindow(),
+
+        /**
+         * One event of the mouse or the keyboard as the device reported it,
+         * for WM_INPUT: what a program that registered for raw input reads,
+         * beside the messages it has always had.
+         */
+        rawInput: rawInput.deliver,
 
         /**
          * The desktop and every window shown on it paint again: what the
@@ -2961,6 +2982,7 @@ export function createWindowFunctions(host){
                 cls=>cls.name.toLowerCase() === name.toLowerCase())
                 ? classNamed(name) : null),
         }),
+        ...rawInput.table,
 
         /** ATOM RegisterClassA(const WNDCLASSA *lpWndClass) */
         RegisterClassA: {
