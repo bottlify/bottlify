@@ -554,6 +554,69 @@ test('a vertex buffer is a guest allocation with a description of its own', ()=>
     h.assertAllReleased();
 });
 
+test('ProcessVertices and ProcessVerticesStrided write transformed vertices into the buffer', ()=>{
+    // Wine's ddraw7 test_process_vertices, its first viewport and vertices.
+    const h = seamed();
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const device = h.createDevice(d3d, target).device;
+    const floats = new DataView(h.box.bytes.buffer);
+    /** @param {number} fvf @param {number} count */
+    const vertexBuffer = (fvf, count)=>{
+        const desc = 0x6400;
+        h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwSize, D3DVERTEXBUFFERDESC.SIZE);
+        h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwCaps, 0);
+        h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwFVF, fvf);
+        h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwNumVertices, count);
+        assert.equal(h.box.call(d3d, slot(IDIRECT3D7_SLOTS, 'CreateVertexBuffer'),
+            [desc, 0x6500, 0]), D3D_OK);
+        const buffer = h.box.memory.readU32(0x6500);
+        assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3D_OK);
+        const data = h.box.memory.readU32(0x6600);
+        assert.equal(h.buffer(buffer, 'Unlock'), D3D_OK);
+        return { buffer, data };
+    };
+    const quad = [[0, 0, 0], [1, 1, 1], [-1, -1, 0.5], [0.5, -0.5, 0.25]];
+    const src = vertexBuffer(FVF.XYZ, 4);
+    quad.flat().forEach((value, k)=>floats.setFloat32(src.data + k * 4, value, true));
+    const dest = vertexBuffer(FVF.XYZRHW, 4);
+
+    const viewport = 0x6800;
+    [0, 0, 8, 8].forEach((value, k)=>h.box.memory.writeU32(viewport + k * 4, value));
+    floats.setFloat32(viewport + D3DVIEWPORT7.dvMinZ, 0, true);
+    floats.setFloat32(viewport + D3DVIEWPORT7.dvMaxZ, 1, true);
+    assert.equal(h.device(device, 'SetViewport', [viewport]), D3D_OK);
+
+    const D3DVOP_TRANSFORM = 1;
+    assert.equal(h.buffer(dest.buffer, 'ProcessVertices',
+        [D3DVOP_TRANSFORM, 0, 4, src.buffer, 0, device, 0]), D3D_OK);
+    /** @param {number} k */
+    const written = k=>[0, 1, 2, 3].map(i=>floats.getFloat32(dest.data + k * 16 + i * 4, true));
+    assert.deepEqual(written(1), [8, 0, 1, 1]);
+    assert.deepEqual(written(2), [0, 8, 0.5, 1]);
+    assert.equal(h.buffer(dest.buffer, 'ProcessVertices',
+        [D3DVOP_TRANSFORM, 0, 4, 0, 0, device, 0]), DDERR_INVALIDPARAMS >>> 0, 'no source');
+
+    // The strided form: a position stream at its own stride, starting at vertex zero.
+    const strided = 0x6900;
+    h.box.bytes.fill(0, strided, strided + 96);
+    h.box.memory.writeU32(strided, src.data + 12);
+    h.box.memory.writeU32(strided + 4, 12);
+    assert.equal(h.buffer(dest.buffer, 'ProcessVerticesStrided',
+        [D3DVOP_TRANSFORM, 0, 3, strided, FVF.XYZ, device, 0]), D3D_OK);
+    assert.deepEqual(written(0), [8, 0, 1, 1], 'what was the second vertex is now the first');
+    assert.deepEqual(written(1), [0, 8, 0.5, 1]);
+
+    h.release(src.buffer);
+    h.release(dest.buffer);
+    assert.equal(h.release(device), 0);
+    h.release(d3d);
+    h.release(target);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
 /**
  * The enumerations, driven through the descriptor directly: each answers with
  * a promise the bridge would suspend the caller on, and the vtable harness

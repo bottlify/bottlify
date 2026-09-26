@@ -37,6 +37,7 @@ import { depthFormatForDepth, pixelFormatForDepth } from '../ddraw/objects.js';
 import { DDERR_INVALIDPARAMS, D3D_OK } from '../d3d7/constants.js';
 import { createDirect3D7 } from '../d3d7/device.js';
 import { loadTexture } from '../d3d7/load.js';
+import { processVertices } from '../d3d7/process.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 
 /** What an enumeration callback answers to stop. */
@@ -298,6 +299,36 @@ export function createDirect3D7Seam(
 
     // --- vertex buffer ---
 
+    /**
+     * Runs ProcessVertices into a buffer, which is written as a lock would
+     * write it, so a device drawing the buffer takes the new vertices.
+     *
+     * @param {any} buffer
+     * @param {number} op @param {number} destIndex @param {number} count
+     * @param {number} device @param {number} flags
+     * @param {import('../d3d7/process.js').VertexSource} source
+     */
+    const processInto = (buffer, op, destIndex, count, device, flags, source)=>{
+        const owner = publisher.objectAt(device);
+        if (!owner)
+        {
+            return DDERR_INVALIDPARAMS;
+        }
+        const locking = !buffer.locked;
+        if (locking)
+        {
+            buffer.Lock(0, {});
+        }
+        const hr = processVertices({ memory, vertexOp: op >>> 0, dest: buffer,
+            destIndex: destIndex >>> 0, count: count >>> 0, source,
+            state: owner.processingState(), flags: flags >>> 0 });
+        if (locking)
+        {
+            buffer.Unlock();
+        }
+        return hr;
+    };
+
     const bufferInterfaces = [describe(IID_IDirect3DVertexBuffer7, IDIRECT3DVERTEXBUFFER7_SLOTS, {
         /** @param {any} buffer @param {number[]} args */
         Lock: (buffer, [flags, out, sizeOut])=>{
@@ -339,6 +370,62 @@ export function createDirect3D7Seam(
         },
         /** @param {any} buffer */
         Optimize: (/** @type {any} */ buffer)=>buffer.Optimize(),
+        /** @param {any} buffer @param {number[]} args */
+        ProcessVertices: (buffer, [op, destIndex, count, source, sourceIndex, device, flags])=>{
+            const from = publisher.objectAt(source);
+            if (!from || (sourceIndex >>> 0) + (count >>> 0) > from.numVertices)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const layout = decodeFvf(from.fvf);
+            return processInto(buffer, op, destIndex, count, device, flags, {
+                fvf: from.fvf,
+                addressOf: (name, k)=>{
+                    const attribute = layout.attributes.find(entry=>entry.name === name);
+                    return attribute
+                        ? from.base + ((sourceIndex >>> 0) + k) * layout.stride + attribute.offset
+                        : null;
+                },
+            });
+        },
+        /**
+         * D3DDRAWPRIMITIVESTRIDEDDATA: a pointer and a stride for the position,
+         * the normal, the two colours and eight coordinate sets, each stream
+         * read from its first vertex. Blend weights ride in the position's.
+         *
+         * @param {any} buffer @param {number[]} args
+         */
+        ProcessVerticesStrided: (buffer, [op, destIndex, count, data, fvf, device, flags])=>{
+            if ((data >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            let layout;
+            try
+            {
+                layout = decodeFvf(fvf >>> 0);
+            }
+            catch (e){
+                void e;
+                return DDERR_INVALIDPARAMS;
+            }
+            /** @type {Record<string, [number, number]>} entry and offset in it */
+            const streams = { position: [0, 0], blendWeight: [0, 12], normal: [1, 0],
+                diffuse: [2, 0], specular: [3, 0] };
+            return processInto(buffer, op, destIndex, count, device, flags, {
+                fvf: fvf >>> 0,
+                addressOf: (name, k)=>{
+                    if (!layout.attributes.some(entry=>entry.name === name))
+                    {
+                        return null;
+                    }
+                    const [entry, offset] = streams[name]
+                        ?? [4 + Number(name.slice('texCoord'.length)), 0];
+                    const at = (data >>> 0) + entry * 8;
+                    return fields.readU32(at) + k * fields.readU32(at + 4) + offset;
+                },
+            });
+        },
     })];
 
     // --- device ---

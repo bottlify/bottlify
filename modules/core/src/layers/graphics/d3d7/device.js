@@ -1136,6 +1136,22 @@ export function createDirect3D7(ddraw, services = {}){
             },
 
             /**
+             * What ProcessVertices reads of this device.
+             *
+             * @returns {import('./process.js').ProcessingState}
+             */
+            processingState(){
+                return {
+                    transform: type=>transforms.get(type) ?? IDENTITY,
+                    viewport: viewport.rect,
+                    renderState: state=>renderStates.get(state) ?? 0,
+                    lights: [...lights.values()].filter(entry=>entry.enabled)
+                        .map(entry=>entry.light),
+                    material,
+                };
+            },
+
+            /**
              * Where each sphere lies against the six sides of the view volume
              * and the user clip planes enabled, as D3DSTATUS bits: a plane the
              * sphere crosses or lies beyond sets its union bit (D3DCLIP_*), and
