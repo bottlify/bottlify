@@ -265,23 +265,49 @@ export function createProcessBlocks(options){
         write(head, head);
         write(head + 4, head);
     }
-    let loadTail = loadHead;
-    let memoryTail = memoryHead;
-    let initTail = initHead;
+    /**
+     * Each list's nodes after its head, in order: what linking and unlinking
+     * are done from, since nothing here reads guest memory back.
+     *
+     * @type {Map<number, number[]>}
+     */
+    const lists = new Map([[loadHead, []], [memoryHead, []], [initHead, []]]);
+    /** Each module's entry, by its base. @type {Map<number, number>} */
+    const entries = new Map();
 
     /**
      * `InsertTailList`, done by hand: nothing here keeps a live pointer into
      * guest memory to call the real one on, only the address it would be at.
      *
-     * @param {number} head @param {number} tail @param {number} node
-     * @returns {number} the new tail
+     * @param {number} head @param {number} node
      */
-    const insertTail = (head, tail, node)=>{
+    const insertTail = (head, node)=>{
+        const nodes = /** @type {number[]} */ (lists.get(head));
+        const tail = nodes.at(-1) ?? head;
         write(node, head);
         write(node + 4, tail);
         write(tail, node);
         write(head + 4, node);
-        return node;
+        nodes.push(node);
+    };
+
+    /**
+     * `RemoveEntryList`: the neighbours are joined around the node.
+     *
+     * @param {number} head @param {number} node
+     */
+    const remove = (head, node)=>{
+        const nodes = /** @type {number[]} */ (lists.get(head));
+        const at = nodes.indexOf(node);
+        if (at < 0)
+        {
+            return;
+        }
+        const before = at > 0 ? nodes[at - 1] : head;
+        const after = at + 1 < nodes.length ? nodes[at + 1] : head;
+        write(before, after);
+        write(after + 4, before);
+        nodes.splice(at, 1);
     };
 
     /**
@@ -331,10 +357,29 @@ export function createProcessBlocks(options){
         writeEntryString(entry + LDR_ENTRY.FULL_DLL_NAME, fullNameBuffer, fullName);
         writeEntryString(entry + LDR_ENTRY.BASE_DLL_NAME, baseNameBuffer, baseName);
 
-        loadTail = insertTail(loadHead, loadTail, entry + LDR_ENTRY.IN_LOAD_ORDER_LINKS);
-        memoryTail = insertTail(memoryHead, memoryTail, entry + LDR_ENTRY.IN_MEMORY_ORDER_LINKS);
-        initTail = insertTail(initHead, initTail, entry + LDR_ENTRY.IN_INITIALIZATION_ORDER_LINKS);
+        insertTail(loadHead, entry + LDR_ENTRY.IN_LOAD_ORDER_LINKS);
+        insertTail(memoryHead, entry + LDR_ENTRY.IN_MEMORY_ORDER_LINKS);
+        insertTail(initHead, entry + LDR_ENTRY.IN_INITIALIZATION_ORDER_LINKS);
+        entries.set(module.base >>> 0, entry);
         return entry;
+    };
+
+    /**
+     * Takes a module FreeLibrary unloaded out of all three lists. Its entry
+     * stays where it was, unlinked, as the loader leaves it.
+     *
+     * @param {number} base
+     */
+    const removeModule = base=>{
+        const entry = entries.get(base >>> 0);
+        if (entry === undefined)
+        {
+            return;
+        }
+        remove(loadHead, entry + LDR_ENTRY.IN_LOAD_ORDER_LINKS);
+        remove(memoryHead, entry + LDR_ENTRY.IN_MEMORY_ORDER_LINKS);
+        remove(initHead, entry + LDR_ENTRY.IN_INITIALIZATION_ORDER_LINKS);
+        entries.delete(base >>> 0);
     };
 
     for (const module of options.modules ?? [])
@@ -347,6 +392,7 @@ export function createProcessBlocks(options){
         params,
         ldr,
         addModule,
+        removeModule,
 
         /**
          * A block for one thread, with its own thread-local array.

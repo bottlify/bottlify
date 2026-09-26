@@ -122,6 +122,26 @@ test('a name nothing provides is zero and sets ERROR_MOD_NOT_FOUND', ()=>{
     assert.equal(f.lastError(), 126);
 });
 
+test('FreeLibrary gives one reference back to the module, which decides when it is unloaded',
+    ()=>{
+        const f = hostFor({ lookup: { 'probe.dll': 0x10000000, 'kernel32.dll': 0x77000000 } });
+        /** @type {string[]} */
+        const released = [];
+        const probe = /** @type {any} */ (f.host.byBase(0x10000000));
+        probe.release = ()=>{
+            released.push(probe.name);
+            return 1;
+        };
+        const fns = createModuleFunctions(f.host);
+
+        assert.equal(fns.FreeLibrary.handler([0x10000000]), 1);
+        assert.deepEqual(released, ['probe.dll']);
+        assert.equal(fns.FreeLibrary.handler([0x77000000]), 1,
+            'a module with no count of its own stays');
+        assert.equal(fns.FreeLibrary.handler([0x12345678]), 0, 'and nothing is not a module');
+        assert.equal(f.lastError(), 126, 'ERROR_MOD_NOT_FOUND');
+    });
+
 test('the wide entry point reaches the same loader', ()=>{
     /** @type {string[]} */
     const asked = [];

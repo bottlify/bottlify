@@ -65,6 +65,10 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  * @property {(name: string) => number | null} addressOf
  * @property {(ordinal: number) => number | null} addressOfOrdinal
  * @property {string} [path]  Where it was loaded from, when it came from a file.
+ * @property {() => number | Promise<number>} [release]
+ *           Gives back one reference a LoadLibrary took; the last one unloads
+ *           the module, its DllMain told first. A module without one -- the
+ *           program, and every library it imports -- is never unloaded.
  */
 
 /**
@@ -217,9 +221,13 @@ export function createModuleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                // Nothing is unmapped: an address handed out earlier must keep
-                // working, and a system module has no lifetime of its own.
-                return host.byBase(handle >>> 0) ? 1 : 0;
+                const module = host.byBase(handle >>> 0);
+                if (!module)
+                {
+                    host.setLastError(ERROR_MOD_NOT_FOUND);
+                    return 0;
+                }
+                return module.release ? module.release() : 1;
             },
         },
 

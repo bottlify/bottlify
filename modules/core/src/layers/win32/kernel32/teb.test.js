@@ -236,6 +236,41 @@ test('the modules given at build time are all three lists, in order, walkable fr
     assert.deepEqual(initOrder, loadOrder);
 });
 
+test('removeModule unlinks a library from all three lists, both ways round', ()=>{
+    const memory = guest();
+    const blocks = build(memory, { modules: [
+        { name: 'kernel32.dll', base: 0x77000000, size: 0x1000 },
+        { name: 'probe.dll', base: 0x10000000, size: 0x1000 },
+        { name: 'other.dll', base: 0x10100000, size: 0x1000 },
+    ] });
+    const ldr = memory.view.getUint32(blocks.peb + PEB.LDR, true);
+
+    blocks.removeModule(0x10000000);
+    blocks.removeModule(0x10100000);
+    blocks.addModule({ name: 'late.dll', base: 0x10200000, size: 0x1000 });
+
+    for (const [list, link] of [
+        [LDR_DATA.IN_LOAD_ORDER_MODULE_LIST, LDR_ENTRY.IN_LOAD_ORDER_LINKS],
+        [LDR_DATA.IN_MEMORY_ORDER_MODULE_LIST, LDR_ENTRY.IN_MEMORY_ORDER_LINKS],
+        [LDR_DATA.IN_INITIALIZATION_ORDER_MODULE_LIST, LDR_ENTRY.IN_INITIALIZATION_ORDER_LINKS],
+    ])
+    {
+        const head = ldr + list;
+        const nodes = walkList(memory, head);
+        assert.deepEqual(nodes.map(node=>readUnicodeString(memory,
+            node - link + LDR_ENTRY.BASE_DLL_NAME)), ['kernel32.dll', 'late.dll']);
+        // Backwards too: every Blink is the node before it.
+        let at = memory.view.getUint32(head + 4, true);
+        for (const node of [...nodes].reverse())
+        {
+            assert.equal(at, node);
+            at = memory.view.getUint32(at + 4, true);
+        }
+        assert.equal(at, head);
+    }
+    blocks.removeModule(0x12345678);
+});
+
 test('addModule joins a library LoadLibrary mapped after the process started', ()=>{
     const memory = guest();
     const blocks = build(memory, {

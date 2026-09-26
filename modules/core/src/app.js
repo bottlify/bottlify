@@ -20,7 +20,7 @@ import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js'
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { createProcessBlocks } from './layers/win32/kernel32/teb.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
-import { synthesiseProcessInit, DLL_PROCESS_ATTACH }
+import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
     from './layers/loader/internal/init.js';
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
 import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
@@ -2536,6 +2536,7 @@ async function buildApp(options){
      *     createThreadBlock: (thread: { id: number, stackBase: number,
      *         stackLimit: number }) => { teb: number, tls: number },
      *     addModule: (module: import('./layers/win32/kernel32/teb.js').LoadedModule) => number,
+     *     removeModule: (base: number) => void,
      * } | null}
      */
     let threadBlocks = null;
@@ -3679,6 +3680,8 @@ async function buildApp(options){
             // to whoever loads it, and runs on that caller's thread.
             attached: false,
             loaded: false,
+            /** @returns {number | Promise<number>} */
+            release: ()=>releaseLibrary(record),
         };
         byName.set(moduleKeyOf(name), record);
         byBase.set(base, record);
@@ -3686,6 +3689,11 @@ async function buildApp(options){
     for (const name of ALWAYS_LOADED)
     {
         markLoaded(byName.get(name) ?? null);
+        const always = byName.get(name);
+        if (always)
+        {
+            always.pinned = true;
+        }
     }
 
     /**
@@ -3707,6 +3715,7 @@ async function buildApp(options){
             return null;
         }
         markLoaded(module);
+        module.pinned = true;
         const address = name !== null
             ? module.addressOf(name)
             : ordinal === null ? null : module.addressOfOrdinal(ordinal);
@@ -3855,6 +3864,53 @@ async function buildApp(options){
     const absentLibraries = new Set();
     /** Where the next runtime library goes. Set once the shipped ones are placed. */
     let nextLibraryBase = 0;
+
+    /**
+     * FreeLibrary: gives back one of the references LoadLibrary took on a
+     * library the program loaded by name. The last one tells its DllMain,
+     * on the thread that asked, and unloads it -- a library read off the
+     * volume is unmapped and forgotten, one of ours stops being loaded. A
+     * library something imports is pinned and never unloaded.
+     *
+     * @param {any} held
+     * @returns {number | Promise<number>}
+     */
+    const releaseLibrary = held=>{
+        if (held.pinned || !(held.references > 0))
+        {
+            return 1;
+        }
+        held.references--;
+        if (held.references > 0)
+        {
+            return 1;
+        }
+        const unload = ()=>{
+            threadBlocks?.removeModule(held.base);
+            if (held.file)
+            {
+                byName.delete(moduleKeyOf(held.name));
+                byBase.delete(held.base);
+                memory.unregister(held.name);
+            }
+            else
+            {
+                held.loaded = false;
+                held.attached = false;
+            }
+            events.emit('library-unloaded', { name: held.name, base: held.base });
+            return 1;
+        };
+        if (held.entryPoint && held.entryPoint !== held.base && held.attached !== false)
+        {
+            return bridge.callGuest({
+                entry: held.entryPoint,
+                args: [held.base, DLL_PROCESS_DETACH, 0],
+                thread: kernel.currentThread(),
+            }).then(unload);
+        }
+        return unload();
+    };
 
     /** The libraries this build synthesises, as opposed to ones a program brings. */
     const systemLibraries = new Set(Object.keys(allLibraries).map(moduleKeyOf));
@@ -4027,6 +4083,11 @@ async function buildApp(options){
                     // Registered before its own imports are bound, so a library
                     // that imports back into itself -- or into one still being
                     // loaded -- finds an address rather than nothing.
+                    Object.assign(held, {
+                        references: 1,
+                        /** @returns {number | Promise<number>} */
+                        release: ()=>releaseLibrary(held),
+                    });
                     byName.set(moduleKeyOf(name), held);
                     byBase.set(base, held);
                     // Joins PEB->Ldr's own module list the same moment: a
@@ -4095,6 +4156,7 @@ async function buildApp(options){
         if (loaded)
         {
             markLoaded(loaded);
+            loaded.references = (loaded.references ?? 0) + 1;
             if (loaded.attached !== false || !loaded.entryPoint)
             {
                 return loaded.base;

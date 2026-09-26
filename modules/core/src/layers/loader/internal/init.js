@@ -28,6 +28,8 @@
 
 /** DLL_PROCESS_ATTACH. The other three reasons are per-thread and per-detach. */
 export const DLL_PROCESS_ATTACH = 1;
+/** DLL_PROCESS_DETACH: the library is being unloaded. */
+export const DLL_PROCESS_DETACH = 0;
 
 /**
  * What DllMain's third argument says here: the library was linked against, not
