@@ -121,6 +121,7 @@ async function build(replace){
             systemLibrary: name=>name.toLowerCase() === 'kernel32.dll',
             ...replace?.modules,
         },
+        registers: replace?.registers,
     }), host));
     return {
         bytes, view, libraries: api.libraries(), lastError: ()=>api.lastError(),
@@ -324,6 +325,32 @@ test('a file msvcrt opened to be deleted on close is gone once the process ends'
         await win32Module.dispose();
         await filesystemModule.dispose();
     }
+});
+
+test('msvcrt\'s __int64 answers reach EDX through the processor\'s registers', async()=>{
+    const filesystem = await filesystemModule.create({});
+    /** @type {Record<string, number>} */
+    const written = {};
+    const { bytes, libraries } = await build({
+        filesystem,
+        registers: {
+            read: ()=>0,
+            /** @param {string} name @param {number} value */
+            write: (name, value)=>{
+                written[name] = value;
+            },
+        },
+    });
+    const crt = libraries['msvcrt.dll'];
+    bytes.set([...'C:\\big.dat\0'].map(ch=>ch.charCodeAt(0)), 0x1000);
+    const O_CREAT_RDWR_BINARY = 0x8102;
+    const fd = crt._open.handler([0x1000, O_CREAT_RDWR_BINARY, 0]);
+    const SEEK_SET = 0;
+
+    assert.equal(crt._lseeki64.handler([fd, 7, 1, SEEK_SET]) >>> 0, 7);
+    assert.equal(written.edx, 1, 'the high half of 0x100000007');
+    await win32Module.dispose();
+    await filesystemModule.dispose();
 });
 
 test('LoadLibraryEx\'s flags reach whoever assembled the process', async()=>{

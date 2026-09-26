@@ -1122,6 +1122,9 @@ export const win32Module = {
                     exitProcess: (/** @type {number} */ code)=>endProcess(code),
                     exit: (/** @type {number} */ code)=>detachAndEnd(code),
                     atProcessEnd: task=>endTasks.push(task),
+                    // The high half of an __int64 answer, which a program
+                    // reads from EDX.
+                    setRegisters,
                     files: volume,
                     // kernel32's own file handles, so the handle
                     // `_get_osfhandle` gives is one ReadFile and
