@@ -75,20 +75,68 @@ export const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
  * @property {string} reason
  */
 
-/** Whether each table entry's forms need a modrm byte, worked out once an entry.
- * @type {WeakMap<object, boolean>} */
-const modrmForms = new WeakMap();
-/** Forms that name a fixed register (AL, DX, ES…), by form, worked out once a form. */
-const fixedForms = new Map();
-/** @param {string} form */
-function isFixed(form){
-    let fixed = fixedForms.get(form);
-    if (fixed === undefined)
+/**
+ * What a table entry's forms need, worked out once an entry: whether they take
+ * a modrm byte, and each form's size letters, x87 memory size and whether it
+ * names a fixed register (AL, DX, ES…) -- the string work the operand loop
+ * would otherwise do for every instruction.
+ *
+ * @typedef {{ needsModrm: boolean, string: boolean,
+ *     forms: { form: string, first: string, letter: string, x87: number, fixed: boolean }[] }} Plan
+ * @type {WeakMap<object, Plan>}
+ */
+const plans = new WeakMap();
+
+/** @param {import('./table.js').Entry} entry @returns {Plan} */
+function planOf(entry){
+    let plan = plans.get(entry);
+    if (plan === undefined)
     {
-        fixed = /^[A-Z][A-Z]$|^eAX$|^1$|^Xlat$/.test(form);
-        fixedForms.set(form, fixed);
+        // The forms that live in a modrm byte, and only those: a fixed segment
+        // register (ES, GS) shares its first letter with the r/m and reg forms.
+        const needsModrm = entry.forms.some(form=>
+            /^(E[a-z]?$|G[a-z]$|M[a-z]*$|Q[a-z]$|W[a-z]+$|U[a-z]+$|N[a-z]$|V[a-z]+$|P[a-z]$|Sw$|STi$)/
+                .test(form) || /^m\d/.test(form));
+        plan = {
+            needsModrm, string: isString(entry.op),
+            forms: entry.forms.map(form=>({ form, first: form[0], letter: form.slice(1),
+                x87: x87Size(form), fixed: /^[A-Z][A-Z]$|^eAX$|^1$|^Xlat$/.test(form) })),
+        };
+        plans.set(entry, plan);
     }
-    return fixed;
+    return plan;
+}
+
+const MODE_32 = Object.freeze({ bits: /** @type {32 | 64} */ (32) });
+
+// The instruction being decoded: whose bytes, where it starts, how far it has
+// been read, its modrm byte once fetched (-1 before) and its memory operand
+// once resolved. Module state rather than closures made for every instruction,
+// which a region's forming decodes by the thousand.
+/** @type {(address: number) => number} */
+let source = ()=>0;
+let origin = 0;
+let cursor = 0;
+let modrmByte = -1;
+/** @type {Operand | null} */
+let rmOperand = null;
+
+/** The instruction's next byte. @returns {number} */
+function next(){
+    if (cursor - origin >= MAX_LENGTH)
+    {
+        throw new TooLong();
+    }
+    return source(cursor++) & 0xff;
+}
+
+/** The modrm byte, read the first time it is asked for. */
+function fetchModrm(){
+    if (modrmByte < 0)
+    {
+        modrmByte = next();
+    }
+    return modrmByte;
 }
 
 /**
@@ -97,23 +145,26 @@ function isFixed(form){
  * @param {{ bits: 32 | 64 }} [mode]
  * @returns {Instruction | Refusal}
  */
-export function decode(read, eip, mode = { bits: 32 }){
+export function decode(read, eip, mode = MODE_32){
     if (mode.bits !== 32)
     {
         return refusal(eip, '', 'a 64-bit decoder is a later package');
     }
-    let at = eip;
-    /** @returns {number} */
-    const byte = ()=>{
-        if (at - eip >= MAX_LENGTH)
-        {
-            throw new TooLong();
-        }
-        return read(at++) & 0xff;
-    };
+    // Put back afterwards, so a reader that decodes does not lose its own
+    // instruction, and nothing holds on to this one's reader.
+    const outerSource = source;
+    const outerOrigin = origin;
+    const outerCursor = cursor;
+    const outerModrm = modrmByte;
+    const outerRm = rmOperand;
+    source = read;
+    origin = eip;
+    cursor = eip;
+    modrmByte = -1;
+    rmOperand = null;
     try
     {
-        return decodeAt(byte, eip, ()=>at - eip);
+        return decodeAt(eip);
     }
     catch (e){
         if (e instanceof TooLong)
@@ -121,6 +172,14 @@ export function decode(read, eip, mode = { bits: 32 }){
             return refusal(eip, '', 'longer than fifteen bytes');
         }
         throw e;
+    }
+    finally
+    {
+        source = outerSource;
+        origin = outerOrigin;
+        cursor = outerCursor;
+        modrmByte = outerModrm;
+        rmOperand = outerRm;
     }
 }
 
@@ -132,16 +191,46 @@ function refusal(eip, opcode, reason){
 }
 
 /**
- * @param {() => number} byte
+ * The memory operand of the modrm byte at `size`, its addressing bytes read the
+ * first time; a register form's register, or null where only memory will do.
+ *
+ * @param {number} size @param {'reg' | 'mm' | 'xmm'} regKind @param {boolean} memoryOnly
+ * @param {number} segment @param {16 | 32} addressSize
+ * @returns {Operand | null}
+ */
+function resolveRm(size, regKind, memoryOnly, segment, addressSize){
+    const m = fetchModrm();
+    if (m >= 0xc0)
+    {
+        if (memoryOnly)
+        {
+            return null;
+        }
+        return register(regKind, m & 7, size);
+    }
+    if (rmOperand === null)
+    {
+        rmOperand = addressSize === 32 ? memory32(m, next, segment) : memory16(m, next, segment);
+    }
+    return { ...rmOperand, size };
+}
+
+/** `d9 c0` and the like, by x87 opcode and modrm, each made once. @type {string[]} */
+const X87_TEXT = [];
+/** `0f 1f` and the like, by the second byte. @type {string[]} */
+const TWO_TEXT = [];
+/** A group member's `81 /7`, by the opcode's text and the reg field. @type {Map<string, string[]>} */
+const GROUP_TEXT = new Map();
+
+/**
  * @param {number} eip
- * @param {() => number} consumed
  * @returns {Instruction | Refusal}
  */
-function decodeAt(byte, eip, consumed){
+function decodeAt(eip){
     const prefixes = {
         lock: false, rep: false, repne: false, segment: -1, operand: false, address: false,
     };
-    let opcode = byte();
+    let opcode = next();
     for (;;)
     {
         if (opcode === 0x66)
@@ -178,20 +267,11 @@ function decodeAt(byte, eip, consumed){
         {
             break;
         }
-        opcode = byte();
+        opcode = next();
     }
 
     const operandSize = prefixes.operand ? 2 : 4;
     const addressSize = prefixes.address ? 16 : 32;
-    /** @type {number | null} */
-    let modrm = null;
-    const fetchModrm = ()=>{
-        if (modrm === null)
-        {
-            modrm = byte();
-        }
-        return modrm;
-    };
 
     /** @type {import('./table.js').Entry | Group | Prefixed | typeof SYS | null} */
     let entry;
@@ -204,13 +284,13 @@ function decodeAt(byte, eip, consumed){
         const map = X87[opcode - 0xd8];
         const m = fetchModrm();
         entry = m < 0xc0 ? map.mem[m >> 3 & 7] : (map.reg[m] ?? null);
-        opcodeText = `${hex(opcode)} ${hex(m)}`;
+        opcodeText = X87_TEXT[(opcode - 0xd8) << 8 | m] ??= `${hex(opcode)} ${hex(m)}`;
     }
     else if (opcode === 0x0f)
     {
-        const second = byte();
+        const second = next();
         zReg = second & 7;
-        opcodeText = `0f ${hex(second)}`;
+        opcodeText = TWO_TEXT[second] ??= `0f ${hex(second)}`;
         entry = TWO_BYTE[second];
         if (entry instanceof Prefixed)
         {
@@ -239,8 +319,15 @@ function decodeAt(byte, eip, consumed){
 
     if (entry instanceof Group)
     {
-        entry = entry.entries[fetchModrm() >> 3 & 7];
-        opcodeText = `${opcodeText} /${fetchModrm() >> 3 & 7}`;
+        const reg = fetchModrm() >> 3 & 7;
+        entry = entry.entries[reg];
+        let texts = GROUP_TEXT.get(opcodeText);
+        if (texts === undefined)
+        {
+            texts = [];
+            GROUP_TEXT.set(opcodeText, texts);
+        }
+        opcodeText = texts[reg] ??= `${opcodeText} /${reg}`;
     }
     if (entry === null || entry === undefined)
     {
@@ -258,48 +345,18 @@ function decodeAt(byte, eip, consumed){
     const operands = new Array(entry.forms.length);
     let memory = false;
     let mainSize = 0;
-    // The forms that live in a modrm byte, and only those: a fixed segment
-    // register (ES, GS) shares its first letter with the r/m and reg forms.
-    let needsModrm = modrmForms.get(entry);
-    if (needsModrm === undefined)
-    {
-        needsModrm = entry.forms.some(form=>
-            /^(E[a-z]?$|G[a-z]$|M[a-z]*$|Q[a-z]$|W[a-z]+$|U[a-z]+$|N[a-z]$|V[a-z]+$|P[a-z]$|Sw$|STi$)/
-                .test(form) || /^m\d/.test(form));
-        modrmForms.set(entry, needsModrm);
-    }
-    if (needsModrm)
+    const plan = planOf(entry);
+    if (plan.needsModrm)
     {
         fetchModrm();
     }
-    /** @type {Operand | null} */
-    let rmOperand = null;
+    const segment = prefixes.segment;
     /** A relative operand's displacement, until the instruction's end is known. */
     let relative = 0;
-    /** @param {number} size @param {'reg' | 'mm' | 'xmm'} regKind @param {boolean} memoryOnly */
-    const resolveRm = (size, regKind, memoryOnly)=>{
-        const m = fetchModrm();
-        if (m >= 0xc0)
-        {
-            if (memoryOnly)
-            {
-                return null;
-            }
-            return register(regKind, m & 7, size);
-        }
-        if (rmOperand === null)
-        {
-            rmOperand = addressSize === 32
-                ? memory32(m, byte, prefixes.segment)
-                : memory16(m, byte, prefixes.segment);
-        }
-        return { ...rmOperand, size };
-    };
 
-    for (let index = 0; index < entry.forms.length; index++)
+    for (let index = 0; index < plan.forms.length; index++)
     {
-        const form = entry.forms[index];
-        const sizeLetter = form.slice(1);
+        const { form, first, letter: sizeLetter, x87, fixed } = plan.forms[index];
         /** @type {Operand | null} */
         let operand;
         // The x87 forms first: their letters collide with the segment and
@@ -312,11 +369,11 @@ function decodeAt(byte, eip, consumed){
         {
             operand = { kind: 'x87', size: 10, reg: 0 };
         }
-        else if (x87Size(form) > 0)
+        else if (x87 > 0)
         {
-            operand = resolveRm(x87Size(form), 'reg', true);
+            operand = resolveRm(x87, 'reg', true, segment, addressSize);
         }
-        else if (isFixed(form))
+        else if (fixed)
         {
             // A fixed register (AL, DX, ES…): the segment names start with
             // the letters of the r/m and segment-field forms.
@@ -326,11 +383,12 @@ function decodeAt(byte, eip, consumed){
                 throw new Error(`decoder: unknown operand form "${form}"`);
             }
         }
-        else switch (form[0])
+        else switch (first)
         {
             case 'E':
             case 'M':
-                operand = resolveRm(gpSize(sizeLetter, operandSize), 'reg', form[0] === 'M');
+                operand = resolveRm(gpSize(sizeLetter, operandSize), 'reg', first === 'M', segment,
+                    addressSize);
                 break;
             case 'G':
                 operand = register('reg', fetchModrm() >> 3 & 7, gpSize(sizeLetter, operandSize));
@@ -346,11 +404,11 @@ function decodeAt(byte, eip, consumed){
                 operand = register('reg', zReg, gpSize(sizeLetter, operandSize));
                 break;
             case 'I':
-                operand = immediate(sizeLetter, operandSize, byte);
+                operand = immediate(sizeLetter, operandSize, next);
                 break;
             case 'J':
             {
-                const displacement = immediate(sizeLetter === 'b' ? 'bs' : 'zs', operandSize, byte);
+                const displacement = immediate(sizeLetter === 'b' ? 'bs' : 'zs', operandSize, next);
                 operand = { kind: 'rel', size: 4, target: 0 };
                 // The target is relative to the end of the instruction, which
                 // is known only once every byte is consumed: patched below.
@@ -361,7 +419,7 @@ function decodeAt(byte, eip, consumed){
                 operand = {
                     kind: 'mem', size: gpSize(sizeLetter, operandSize),
                     base: -1, index: -1, scale: 1,
-                    disp: addressSize === 32 ? readU32(byte) : readU16(byte),
+                    disp: addressSize === 32 ? readU32(next) : readU16(next),
                     segment: prefixes.segment >= 0 ? prefixes.segment : 3, addressSize,
                 };
                 break;
@@ -376,10 +434,10 @@ function decodeAt(byte, eip, consumed){
                 operand = register('mm', fetchModrm() >> 3 & 7, 8);
                 break;
             case 'Q':
-                operand = resolveRm(8, 'mm', false);
+                operand = resolveRm(8, 'mm', false, segment, addressSize);
                 break;
             case 'N':
-                operand = resolveRm(8, 'mm', false);
+                operand = resolveRm(8, 'mm', false, segment, addressSize);
                 if (operand?.kind === 'mem')
                 {
                     return refusal(eip, opcodeText, 'register form only');
@@ -389,10 +447,10 @@ function decodeAt(byte, eip, consumed){
                 operand = register('xmm', fetchModrm() >> 3 & 7, simdSize(sizeLetter));
                 break;
             case 'W':
-                operand = resolveRm(simdSize(sizeLetter), 'xmm', false);
+                operand = resolveRm(simdSize(sizeLetter), 'xmm', false, segment, addressSize);
                 break;
             case 'U':
-                operand = resolveRm(simdSize(sizeLetter), 'xmm', false);
+                operand = resolveRm(simdSize(sizeLetter), 'xmm', false, segment, addressSize);
                 if (operand?.kind === 'mem')
                 {
                     return refusal(eip, opcodeText, 'register form only');
@@ -423,7 +481,7 @@ function decodeAt(byte, eip, consumed){
         operands[index] = operand;
     }
 
-    const length = consumed();
+    const length = cursor - eip;
     for (const operand of operands)
     {
         if (operand.kind === 'rel')
@@ -443,7 +501,7 @@ function decodeAt(byte, eip, consumed){
         op: entry.op,
         operands,
         size: mainSize || operandSize,
-        flagsRead: flags.r | (isString(entry.op) ? DF : 0),
+        flagsRead: flags.r | (plan.string ? DF : 0),
         flagsWritten: flags.w,
         flagsUndefined: flags.u,
         faults: entry.faults,
@@ -461,6 +519,24 @@ function decodeAt(byte, eip, consumed){
 const STRING_OPS = new Set(['movs', 'cmps', 'stos', 'lods', 'scas']);
 /** @param {string} op */
 const isString = op=>STRING_OPS.has(op);
+
+/**
+ * Whether an opcode text (`Instruction.opcode`) is an x87 one: an escape byte
+ * d8..df with its modrm (`d9 c0`), or the wait (`9b`) -- what
+ * `/^(9b$|d[89a-f] )/` answers, without a regular expression on every
+ * instruction the emitter and the planner ask about.
+ *
+ * @param {string} text
+ */
+export function isX87Opcode(text){
+    if (text.length <= 2)
+    {
+        return text === '9b';
+    }
+    const second = text.charCodeAt(1);
+    return text.charCodeAt(0) === 0x64 && text.charCodeAt(2) === 0x20
+        && (second === 0x38 || second === 0x39 || (second >= 0x61 && second <= 0x66));
+}
 
 /** Every byte as two hex digits, for the opcode text a record carries. */
 const HEX = Array.from({ length: 256 }, (_, value)=>value.toString(16).padStart(2, '0'));

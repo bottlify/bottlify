@@ -24,13 +24,13 @@
  * while it was being compiled.
  */
 
-import { formRegion } from '../region.js';
+import { formRegion, formShared } from '../region.js';
 import { enterRegion, mathImports } from '../emit/region.js';
 import { decode } from '../decode/decoder.js';
 import { SHAPE, isX87, trackRegion } from '../emit/x87.js';
 import { PRECISION } from '../emit/memory.js';
 import { features as probeFeatures } from '../wasm/features.js';
-import { emitBatch, relinkBatch } from './emit-built.js';
+import { createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
 import { buildHelpersModule } from '../emit/helpers.js';
 import { openTranslationWorker } from './translator.js';
 import { ANY_TOP, createEntries } from './entries.js';
@@ -791,6 +791,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     // order and the waiting is never the slice's.
     let storePending = false;
     let workerRequest = 0;
+    /** What emitting inline keeps for a relink to take again, as the worker keeps its own. */
+    const emitCache = createEmitCache();
 
     // The block profile is past cork's own tables, in a memory sized for it;
     // the hybrid layout's tables are carved from the emulator's RAM.
@@ -1394,7 +1396,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     // At most one merge in this many: its module is instantiated on the
     // engine thread, 23 ms for a whole chunk of `relinkRegions`.
     const MERGE_EVERY = 1 << 23;
+    // And past that, this many for each region the last one built: a merge
+    // builds both modules whole again, and with the worker no longer the one
+    // that paced them, a module of hundreds gathering a few new regions at a
+    // time would have the engine thread instantiate it over and over.
+    const MERGE_PER_REGION = 1 << 19;
     let mergedAt = -MERGE_EVERY;
+    let mergeWait = MERGE_EVERY;
     /**
      * The two placed modules one of which transfers into the other most,
      * gathered into one module on the worker once it has crossed `mergeAfter`
@@ -1417,7 +1425,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return false;
         }
         sampledAt = corkRetired;
-        const due = corkRetired - mergedAt >= MERGE_EVERY;
+        const due = corkRetired - mergedAt >= mergeWait;
         /** @type {[Placed, Placed] | null} */
         let pair = null;
         let most = 0;
@@ -1464,6 +1472,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
         counts.merges++;
         mergedAt = corkRetired;
+        mergeWait = Math.max(MERGE_EVERY, chunk.length * MERGE_PER_REGION);
         return relinkChunk(chunk, store);
     };
 
@@ -1662,7 +1671,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 options: emitOptions() }, [...copies.values()].map(bytes=>bytes.buffer));
             return true;
         }
-        const batch = relinkBatch(relink, layout, found, emitOptions());
+        const batch = relinkBatch(relink, layout, found, emitOptions(), emitCache);
         counts.emitMs += batch.emitMs;
         counts.encodeMs += batch.encodeMs;
         applyRelink(chunk, batch, null, store);
@@ -1812,7 +1821,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // program runs on without it.
             const jobs = unbuilt.map(one=>({ region: one.region, entryTop: one.entryTop,
                 checked: one.checked, copies: one.copies === true }));
-            const batch = emitBatch(jobs, layout, found, emitOptions());
+            const batch = emitBatch(jobs, layout, found, emitOptions(), emitCache);
             counts.emitMs += batch.emitMs;
             counts.encodeMs += batch.encodeMs;
             published += publishBatch(unbuilt, batch, null, store);
@@ -2135,6 +2144,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // is noted again should its block get no entry after all.
             /** @type {Set<number>} */
             const covered = new Set();
+            // Nothing runs while the batch is formed, so its regions share
+            // what decoding finds.
+            const shared = formShared();
             for (let i = 0; i < batch.length; i++)
             {
                 const [key, eip] = batch[i];
@@ -2144,7 +2156,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     inFlight.delete(key);
                     continue;
                 }
-                const region = formRegion(read, eip, { ...formOptions, translatable });
+                const region = formRegion(read, eip, { ...formOptions, translatable, shared });
                 // What the region calls directly lands in the same batch, so
                 // the call and the return transfer without a miss -- each
                 // callee at the top the call site has, which the tracker

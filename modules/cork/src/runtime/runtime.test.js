@@ -1329,6 +1329,69 @@ test('two modules that keep transferring into each other are gathered into one, 
     await m.runtime.flush();
 });
 
+test('after a merge, the next waits for translated instructions in proportion to the regions'
+    + ' it built', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return;
+    }
+    const m = machine({ leafCalls: false, mergeAfter: 100_000, worker: true,
+        batchRegions: 128 });
+    // Two loops, each calling a callee of its own; the first one's batch has
+    // sixty-four more regions, so its merge with its callee builds 66.
+    const OTHER = CODE + 0x200;
+    const STUBS = CODE + 0x100;
+    m.write(CODE, callLoop(300_000));
+    m.write(STUBS, new Array(64).fill(0xc3));
+    m.write(OTHER, callLoop(3_000_000));
+    /** @param {() => boolean} done */
+    const until = async done=>{
+        for (let i = 0; i < 300 && !done(); i++)
+        {
+            await m.runtime.translatePending();
+            await new Promise(resolve=>setTimeout(resolve, 10));
+        }
+        assert.ok(done());
+    };
+    /** Runs a loop to its halt, then lets the translator read the crossings. @param {number} at */
+    const loop = async at=>{
+        m.setReg(4, 0x80000);
+        assert.equal(m.runtime.run(m.runtime.entryOf(at), 100_000_000).kind, 'halt');
+        await m.runtime.translatePending();
+        await new Promise(resolve=>setTimeout(resolve, 50));
+    };
+    try
+    {
+        m.runtime.noteHot(CODE + 14);
+        await until(()=>m.runtime.entryOf(CODE + 14) >= 0);
+        m.runtime.noteHot(CODE);
+        for (let i = 0; i < 64; i++)
+        {
+            m.runtime.noteHot(STUBS + i);
+        }
+        await until(()=>m.runtime.entryOf(CODE) >= 0 && m.runtime.entryOf(STUBS + 63) >= 0);
+        m.runtime.noteHot(OTHER + 14);
+        await until(()=>m.runtime.entryOf(OTHER + 14) >= 0);
+        m.runtime.noteHot(OTHER);
+        await until(()=>m.runtime.entryOf(OTHER) >= 0);
+        await loop(CODE);
+        await until(()=>(m.runtime.diagnostics().relinked ?? 0) >= 66);
+        assert.equal(m.runtime.diagnostics().merges, 1);
+        // Three million crossings each way, fifteen million instructions: the
+        // other pair would merge after 2^23, and waits for 66 x 2^19.
+        await loop(OTHER);
+        await loop(OTHER);
+        assert.equal(m.runtime.diagnostics().merges, 1);
+        await loop(OTHER);
+        await until(()=>(m.runtime.diagnostics().relinked ?? 0) >= 68);
+        assert.equal(m.runtime.diagnostics().merges, 2);
+    }
+    finally
+    {
+        await m.runtime.flush();
+    }
+});
+
 /**
  * mov ecx, n; L: mov eax, ecx; and eax, 15; call [TABLE + eax*4]; dec ecx; jnz L; hlt;
  * F: add edx, 1; ret; G: add edx, 3; ret; H: add edx, 100; ret -- the table F and G in

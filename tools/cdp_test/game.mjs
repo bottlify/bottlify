@@ -501,7 +501,8 @@ function describeCork(cork, say){
     say(`  cork: ${cork.regions} regions, ${cork.entries} entries, ${cork.modules} modules`
         + `, share ${(share * 100).toFixed(1)}%`
         + ` (retired ${cork.retired ?? 0})`
-        + (cork.relinks ? `, ${cork.relinked} regions relinked in ${cork.relinks} relinks` : ''));
+        + (cork.relinks || cork.merges ? `, ${cork.relinked} regions relinked in ${cork.relinks}`
+            + ` relinks and ${cork.merges ?? 0} merges` : ''));
     say(`    x87 precision: ${cork.wide ? 'wide' : 'rounding'}`
         + `, switched ${cork.precisionSwitches ?? 0} times`);
     say(`    volatile pages: ${cork.volatilePages ?? 0}`

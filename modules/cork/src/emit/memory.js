@@ -21,6 +21,7 @@
 
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { DF } from '../decode/table.js';
+import { isX87Opcode } from '../decode/decoder.js';
 import { Tables } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { I32 } from './flags.js';
@@ -269,7 +270,6 @@ export function addCodeHitHelper(m, layout){
 // did not foresee, or a store it took for a load, is an error rather than a
 // check left out.
 
-const X87_OPCODE = /^(9b$|d[89a-f] )/;
 /** Integer operations whose memory destination is read and written. */
 const INT_RW = new Set([
     'add', 'sub', 'adc', 'sbb', 'and', 'or', 'xor', 'inc', 'dec', 'not', 'neg',
@@ -390,7 +390,7 @@ function accessOf(ins){
     }
     /** @param {boolean} store */
     const access = store=>({ operand: mem, size: mem.size, store, stack: 0 });
-    if (X87_OPCODE.test(ins.opcode))
+    if (isX87Opcode(ins.opcode))
     {
         return X87_LOAD.has(op) ? access(false) : X87_STORE.has(op) ? access(true) : null;
     }
@@ -503,6 +503,9 @@ export function planRegion(blocks, options = {}){
     const groups = [];
     /** @type {(Joined | undefined)[]} by block: each instruction's accesses and their groups */
     const joined = [];
+    /** @type {(Place[][] | undefined)[]} by block and instruction: `groupAccessesOf`, which
+     * the entry tests ask again for every block below one that has them */
+    const placesOf = [];
     /**
      * Values split off at a block's start (`split`): the value each was, the
      * amount it was moved by, and that block's depth.
@@ -544,10 +547,13 @@ export function planRegion(blocks, options = {}){
             split(values, depth);
         }
         const { instructions } = blocks[s];
+        /** @type {Place[][]} */
+        const blockPlaces = placesOf[s] = [];
         for (let i = 0; i < instructions.length; i++)
         {
             const ins = instructions[i];
             const places = groupAccessesOf(ins);
+            blockPlaces.push(places);
             for (let k = 0; k < places.length; k++)
             {
                 const { base, index, scale, disp, size, store } = places[k];
@@ -638,7 +644,7 @@ export function planRegion(blocks, options = {}){
     const entries = blocks.map((_, s)=>{
         const covered = reached[s];
         return covered === undefined ? NO_TESTS
-            : entryTests({ blocks, children, joined, next }, s, covered, dropped);
+            : entryTests({ blocks, children, joined, placesOf, next }, s, covered, dropped);
     });
     /** @type {(Map<number, Planned> | undefined)[]} */
     const plans = [];
@@ -870,42 +876,71 @@ function loopsOnto(block){
  * own test.
  *
  * @param {{ blocks: import('../region.js').Block[], children: (number[] | undefined)[],
- *     joined: (Joined | undefined)[], next: { n: number } }} walked
- *     the region's blocks, which take from which, the group of each access
+ *     joined: (Joined | undefined)[], placesOf: (Place[][] | undefined)[],
+ *     next: { n: number } }} walked
+ *     the region's blocks, which take from which, the group of each access, and each
+ *     instruction's accesses
  * @param {number} s @param {Set<Access>} reached @param {Set<Access>} dropped
  * @returns {Group[]}
  */
-function entryTests({ blocks, children, joined, next }, s, reached, dropped){
+function entryTests({ blocks, children, joined, placesOf, next }, s, reached, dropped){
     const values = freshValues(next);
     const first = values.sym[0];
     /** The register a value was in at the start, or -1. @param {number} sym */
     const held = sym=>(sym >= first && sym < first + 8 ? sym - first : -1);
-    /** One window per group and register: each within its group's 4096 bytes. */
-    /** @type {Map<Growing, Map<string, Group & { hi: number }>>} */
+    /** One window per group and register: each within its group's 4096 bytes, by
+     * `(base + 1, index + 1, scale)`. */
+    /** @type {Map<Growing, Map<number, Group & { hi: number }>>} */
     const windows = new Map();
+    // Only the blocks below this one that hold an access it reaches, and the
+    // ways down to them, are followed: nothing else adds a window or drops an
+    // access, and a region's chain of blocks each taking from the one before
+    // was followed to its end from every block of it.
+    /** @type {Set<number>} */
+    const holding = new Set();
+    for (const access of reached)
+    {
+        holding.add(access.block);
+    }
+    /** 1: the block or one below it holds such an access, 2: none does. */
+    const leads = new Uint8Array(blocks.length);
+    /** @param {number} t @returns {boolean} */
+    const needed = t=>{
+        if (leads[t] === 0)
+        {
+            leads[t] = holding.has(t) || (children[t] ?? []).some(needed) ? 1 : 2;
+        }
+        return leads[t] === 1;
+    };
     /** @param {number} t @param {Values} at */
     const visit = (t, at)=>{
-        blocks[t].instructions.forEach((ins, i)=>{
-            groupAccessesOf(ins).forEach(({ base, index, scale, disp, size, store }, k)=>{
+        const { instructions } = blocks[t];
+        for (let i = 0; i < instructions.length; i++)
+        {
+            const ins = instructions[i];
+            const places = placesOf[t]?.[i] ?? groupAccessesOf(ins);
+            for (let k = 0; k < places.length; k++)
+            {
+                const { base, index, scale, disp, size, store } = places[k];
                 // The walk joined every access of every block to a group.
                 const { group, access } = /** @type {{ group: Growing, access: Access }[]} */ (
                     /** @type {Joined} */ (joined[t]).get(i))[k];
                 if (!reached.has(access))
                 {
-                    return;
+                    continue;
                 }
                 const from = base < 0 ? -1 : held(at.sym[base]);
                 const by = index < 0 ? -1 : held(at.sym[index]);
                 if ((base >= 0 && from < 0) || (index >= 0 && by < 0))
                 {
                     dropped.add(access);
-                    return;
+                    continue;
                 }
                 const off = disp + (base < 0 ? 0 : at.delta[base])
                     + (index < 0 ? 0 : at.delta[index] * scale);
                 const own = windows.get(group) ?? new Map();
                 windows.set(group, own);
-                const key = `${from}.${by}.${scale}`;
+                const key = ((from + 1) * 16 + by + 1) * 16 + scale;
                 const window = own.get(key) ?? { base: from, index: by, scale, db: 0, di: 0,
                     first: 0, list: [], lo: off, hi: off + size, width: 0 };
                 own.set(key, window);
@@ -913,10 +948,10 @@ function entryTests({ blocks, children, joined, next }, s, reached, dropped){
                 window.lo = Math.min(window.lo, off);
                 window.hi = Math.max(window.hi, off + size);
                 window.width = window.hi - window.lo;
-            });
+            }
             effect(ins, at);
-        });
-        for (const child of children[t] ?? [])
+        }
+        for (const child of (children[t] ?? []).filter(needed))
         {
             visit(child, copyValues(at));
         }
@@ -1088,7 +1123,7 @@ function effect(ins, values, forward = false){
             || op.startsWith('set') || op.startsWith('cmov');
         KNOWN_OPS.set(op, byOp);
     }
-    const known = byOp || X87_OPCODE.test(ins.opcode) || operands.some(o=>o.kind === 'xmm');
+    const known = byOp || isX87Opcode(ins.opcode) || operands.some(o=>o.kind === 'xmm');
     if (!known || op === 'push' || op === 'pop')
     {
         for (let r = 0; r < 8; r++)

@@ -55,6 +55,7 @@
  */
 
 import { CF, PF, ZF, AF, SF, OF } from '../decode/table.js';
+import { isX87Opcode } from '../decode/decoder.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { I32 } from './flags.js';
 import { Local, Exit, STATE_PARAMS } from './region.js';
@@ -95,8 +96,6 @@ const RELAXED_TAG = 0x7ffe;
 /** The default control word `fninit` leaves. */
 const DEFAULT_CONTROL = 0x37f;
 
-/** The x87 opcodes: the eight escape bytes and the wait. */
-const X87_OPCODE = /^(9b$|d[89a-f] )/;
 
 /**
  * The vector of an untranslated exit a region takes at its entry when the
@@ -109,7 +108,7 @@ export const SHAPE = 3;
 
 /** @param {Instruction} instruction */
 export function isX87(instruction){
-    return X87_OPCODE.test(instruction.opcode);
+    return isX87Opcode(instruction.opcode);
 }
 
 /** The instructions this step leaves to the other executor. */

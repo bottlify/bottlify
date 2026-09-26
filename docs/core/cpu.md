@@ -207,6 +207,17 @@ again, kept only when its bytes hash as they did, emitted into one module per ch
 switched in place -- the entries it made take the new function and its index in the new
 module's range of the table (below), the labels being the same. A title's regions then live in tens of modules rather than hundreds; the
 store keeps the relinked records (`linked`), so the next launch starts from the big modules.
+The emitter keeps what it emitted (`createEmitCache`, 48 MB, the least recently used out first;
+the worker's own, and one a runtime emitting inline keeps): a region's function is a pure
+function of the formed region, the top and shape test it is compiled for and a module prepared
+with the same layout, features and options, whatever else the module holds, so a relink or a
+merge takes each region that forms again to the same blocks and bytes from there and emits only
+what is new -- the same bytes as emitting it again. The regions a batch or a relink forms share
+their decoded instructions and callees' leaf tests (`formShared`): nothing writes their bytes
+while they are formed, and a loading phase's regions call the same small functions. The messages
+a Doom 3 run posted its worker in its first 35 s (8 596 regions, 17 243 emitted, merges
+emitting a module of hundreds again for every few regions they gathered), replayed in node by
+`tools/cork-bench/translate.mjs`, took the worker's work from 34.1 to 19.4 s.
 A transfer between regions is one function a module, not code in every region: an untranslated
 exit with budget left tail-calls its module's transfer function with its EIP in the label's
 place and the state it carries, and that function probes the entry hash (the first slot before
@@ -223,9 +234,12 @@ compile 8.0 -> 7.0 s). A transfer out of its module counts (`crossings`, with th
 to), and on the translation worker two modules one of which has crossed into the other
 `mergeAfter` times (2^16) are gathered into one module, both whole, or the region crossed into
 alone -- once only -- when the two would not fit `relinkRegions` (`merges`); one merge in 2^23
-translated instructions at most, since its module is instantiated on the engine thread, and the
-engine thread merges nothing without a worker, where a relink after the warm-up is a slice's
-toll. A loop of indirect calls to one small function (two transfers a turn) went 17.9 -> 12.9 ns a
+translated instructions at most, and after one that built n regions one in n x 2^19, since its
+module is instantiated on the engine thread whole -- with the worker taking the regions it
+emitted before from what it keeps, the worker's time no longer spaced merges out, and a module
+of hundreds gathering a few new regions at a time would be instantiated again every few million
+instructions -- and the engine thread merges nothing without a worker, where a relink after the
+warm-up is a slice's toll. A loop of indirect calls to one small function (two transfers a turn) went 17.9 -> 12.9 ns a
 turn in Node; cork-bench's `calls` workloads (32 768 calls an iteration through a table of 8, 512
 or 4096 small functions) 1.28-1.45x in Node and 1.10-1.70x in Chrome 141; and `vcall`, whose loop
 and callees land in batches of their own until a merge gathers them, 850 -> 615 us an iteration in
