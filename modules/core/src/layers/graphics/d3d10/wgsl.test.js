@@ -661,6 +661,18 @@ test('the fragment stage lets a derivative be taken in divergent flow, as Direct
     assert.ok(!linked.vertex.includes('diagnostic'));
 });
 
+test('an output with no target bound is left out, and with none left nothing is returned', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([0, 0, 1, 1]))));
+    const kept = linkProgram(vs, ps, { targets: [0, 3] });
+    assert.match(kept.fragment, /@location\(0\) target0/);
+    const none = linkProgram(vs, ps, { targets: [] });
+    assert.deepEqual(none.targets, [0], 'what the shader writes is still reported');
+    assert.doesNotMatch(none.fragment, /FragmentOut/);
+    assert.match(none.fragment, /@fragment fn fragmentMain\(\) \{/);
+    assert.match(none.fragment, /\n {4}return;\n\}$/);
+});
+
 test('a pass-through vertex shader and a solid pixel shader link into two entry points', ()=>{
     const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
     const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([0, 0, 1, 1]))));

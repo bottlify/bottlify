@@ -24,9 +24,8 @@
  * resource is read back after the frame that holds it is submitted.
  *
  * What this cut does not do is stated where it is decided, each as a divergence
- * that names the call: several render targets at once, a blend factor that is
- * not the default, wireframe fill, geometry shaders,
- * stream output, predication, and multisampling.
+ * that names the call: a blend factor that is not the default, wireframe fill,
+ * geometry shaders, stream output, predication, and multisampling.
  */
 
 import {
@@ -156,6 +155,16 @@ const ADDRESS = Object.freeze({
     [D3D10_TEXTURE_ADDRESS.BORDER]: 'clamp-to-edge',
     [D3D10_TEXTURE_ADDRESS.MIRROR_ONCE]: 'clamp-to-edge',
 });
+
+/**
+ * Formats WebGPU blends. An integer target is never blended (Direct3D skips
+ * blending for one too), and a 32-bit float one only with a device feature
+ * this build does not ask for, which CheckFormatSupport says by not claiming
+ * it blendable.
+ *
+ * @param {string} format
+ */
+const blendable = format=>!/int$/.test(format) && !/32float$/.test(format);
 
 /** The state a null rasterizer, depth-stencil or blend state stands for. */
 const DEFAULT_RASTERIZER = Object.freeze({
@@ -1135,7 +1144,8 @@ export function createRenderer(services){
     const pipelineKey = state=>[
         idOf(state.vertexShader), idOf(state.pixelShader), idOf(state.inputLayout),
         idOf(state.blendState), idOf(state.depthStencilState), idOf(state.rasterizerState),
-        state.topology, state.targetFormat, state.targetWriteMask, state.depthFormat ?? '-',
+        state.topology, state.targetFormats.join(','), state.targetWriteMasks.join(','),
+        state.depthFormat ?? '-',
         state.sampleMask >>> 0,
         state.sampleCount, state.strides.join(','), state.indexFormat ?? '-',
     ].join('|');
@@ -1167,13 +1177,42 @@ export function createRenderer(services){
     };
 
     /**
+     * Every target's blend, from a blend state of either version: a 10.0 one
+     * shares its factors among targets, a 10.1 one may not.
+     *
+     * @param {any} state
+     * @returns {{ alphaToCoverage: boolean, targets: any[] }}
+     */
+    const blendTargetsOf = state=>{
+        if (!state)
+        {
+            return {
+                alphaToCoverage: false,
+                targets: DEFAULT_BLEND.BlendEnable.map((_, index)=>({
+                    ...DEFAULT_BLEND, BlendEnable: false,
+                    RenderTargetWriteMask: DEFAULT_BLEND.RenderTargetWriteMask[index],
+                })),
+            };
+        }
+        /** @type {{ desc?: any }} */
+        const held = {};
+        state.GetDesc1(held);
+        return {
+            alphaToCoverage: held.desc.AlphaToCoverageEnable, targets: held.desc.RenderTarget,
+        };
+    };
+
+    /**
      * @param {any} state the draw's captured state
      * @returns {Promise<any>}
      */
     const buildPipeline = async state=>{
         const vs = translationOf(state.vertexShader);
         const ps = translationOf(state.pixelShader);
-        const program = linkProgram(vs, ps);
+        /** @type {(string | null)[]} */
+        const formats = state.targetFormats;
+        const bound = formats.flatMap((format, index)=>(format ? [index] : []));
+        const program = linkProgram(vs, ps, { targets: bound });
         if (program.unsupported.length > 0)
         {
             throw new Error(`the shaders cannot be translated: ${program.unsupported.join('; ')}`);
@@ -1189,7 +1228,7 @@ export function createRenderer(services){
         const depthStencil = state.depthStencilState
             ? stateDesc(state.depthStencilState)
             : DEFAULT_DEPTH_STENCIL;
-        const blend = state.blendState ? stateDesc(state.blendState) : DEFAULT_BLEND;
+        const blend = blendTargetsOf(state.blendState);
         if (rasterizer.FillMode === D3D10_FILL_MODE.WIREFRAME)
         {
             diverge('wireframe fill is drawn solid: the backend has no line rasterisation'
@@ -1200,14 +1239,55 @@ export function createRenderer(services){
             diverge('depth clipping stays on: turning it off needs a device feature this'
                 + ' build does not ask for');
         }
-        for (const factor of [blend.SrcBlend, blend.DestBlend, blend.SrcBlendAlpha,
-            blend.DestBlendAlpha])
-        {
-            if (blend.BlendEnable[0] && !BLEND_FACTOR[factor])
+        /**
+         * @param {string | null} format
+         * @param {number} index
+         * @returns {object | null}
+         */
+        const colourTarget = (format, index)=>{
+            if (!format)
             {
-                throw new Error(`blend factor ${factor} has no counterpart`);
+                return null;
             }
-        }
+            const target = blend.targets[index];
+            for (const factor of [target.SrcBlend, target.DestBlend, target.SrcBlendAlpha,
+                target.DestBlendAlpha])
+            {
+                if (target.BlendEnable && !BLEND_FACTOR[factor])
+                {
+                    throw new Error(`blend factor ${factor} has no counterpart`);
+                }
+            }
+            if (target.BlendEnable && !blendable(format) && !/int$/.test(format))
+            {
+                diverge(`a ${format} target is drawn unblended: WebGPU blends one only with a`
+                    + ' device feature');
+            }
+            return {
+                format,
+                // A target the shader does not write keeps what it holds.
+                writeMask: program.targets.includes(index)
+                    ? target.RenderTargetWriteMask & state.targetWriteMasks[index]
+                    : 0,
+                ...(target.BlendEnable && blendable(format)
+                    ? {
+                        blend: {
+                            color: {
+                                srcFactor: pipelineFactor(target.SrcBlend),
+                                dstFactor: pipelineFactor(target.DestBlend),
+                                operation: BLEND_OP[target.BlendOp],
+                            },
+                            alpha: {
+                                srcFactor: pipelineFactor(target.SrcBlendAlpha),
+                                dstFactor: pipelineFactor(target.DestBlendAlpha),
+                                operation: BLEND_OP[target.BlendOpAlpha],
+                            },
+                        },
+                    }
+                    : {}),
+            };
+        };
+        const colourTargets = formats.map(colourTarget);
 
         const [vertexModule, fragmentModule] = await Promise.all([
             backend.createShaderModule({ code: program.vertex, label: `d3d10:vs#${idOf(vs)}` }),
@@ -1234,26 +1314,7 @@ export function createRenderer(services){
             fragment: {
                 module: fragmentModule,
                 entryPoint: 'fragmentMain',
-                targets: [{
-                    format: state.targetFormat,
-                    writeMask: blend.RenderTargetWriteMask[0] & state.targetWriteMask,
-                    ...(blend.BlendEnable[0]
-                        ? {
-                            blend: {
-                                color: {
-                                    srcFactor: pipelineFactor(blend.SrcBlend),
-                                    dstFactor: pipelineFactor(blend.DestBlend),
-                                    operation: BLEND_OP[blend.BlendOp],
-                                },
-                                alpha: {
-                                    srcFactor: pipelineFactor(blend.SrcBlendAlpha),
-                                    dstFactor: pipelineFactor(blend.DestBlendAlpha),
-                                    operation: BLEND_OP[blend.BlendOpAlpha],
-                                },
-                            },
-                        }
-                        : {}),
-                }],
+                targets: colourTargets,
             },
             primitive: {
                 topology: state.topology,
@@ -1287,7 +1348,7 @@ export function createRenderer(services){
             multisample: {
                 count: state.sampleCount,
                 mask: state.sampleMask >>> 0,
-                alphaToCoverageEnabled: !!blend.AlphaToCoverageEnable,
+                alphaToCoverageEnabled: !!blend.alphaToCoverage,
             },
         });
         return {
@@ -1932,17 +1993,32 @@ export function createRenderer(services){
             {
                 return;
             }
-            const target = targetOf(pipeline.renderTargets[0]);
-            if (!target)
+            // Every bound render target, by slot, and the depth target: the
+            // first of them sizes the pass, and a draw with a depth target and
+            // no colour one draws depth alone.
+            const depth = targetOf(pipeline.depthStencilView);
+            const bound = pipeline.renderTargets.map(view=>targetOf(view));
+            const sizing = bound.find(entry=>entry) ?? depth;
+            if (!sizing)
             {
                 counters.skipped.noTarget++;
                 return;
             }
-            if (pipeline.renderTargets.slice(1).some(view=>view))
+            const colour = bound.map(entry=>(entry
+                && (entry.surface.width !== sizing.surface.width
+                    || entry.surface.height !== sizing.surface.height)
+                ? null
+                : entry));
+            if (colour.some((entry, index)=>entry !== bound[index]))
             {
-                diverge('only the first render target is drawn into: several at once are not'
-                    + ' bound');
+                diverge('a render target of another size than the first is not drawn into:'
+                    + ' the targets of a pass are one size');
             }
+            while (colour.length > 0 && !colour[colour.length - 1])
+            {
+                colour.pop();
+            }
+            const target = colour.find(entry=>entry) ?? null;
             const viewport = pipeline.viewports[0];
             if (!viewport || !(viewport.Width > 0) || !(viewport.Height > 0))
             {
@@ -1964,7 +2040,6 @@ export function createRenderer(services){
                 diverge(`primitive topology ${pipeline.topology} cannot be drawn`);
                 return;
             }
-            const depth = targetOf(pipeline.depthStencilView);
             const indexFormat = INDEX_FORMAT[pipeline.indexFormat] ?? null;
             const state = {
                 vertexShader: pipeline.stages.vs.shader,
@@ -1974,11 +2049,11 @@ export function createRenderer(services){
                 depthStencilState: pipeline.depthStencilState,
                 rasterizerState: pipeline.rasterizerState,
                 topology,
-                targetFormat: target.format,
-                targetWriteMask: target.writeMask,
+                targetFormats: colour.map(entry=>(entry ? entry.format : null)),
+                targetWriteMasks: colour.map(entry=>(entry ? entry.writeMask : 0)),
                 depthFormat: depth ? depth.format : null,
                 sampleMask: pipeline.sampleMask,
-                sampleCount: target.sampleCount,
+                sampleCount: sizing.sampleCount,
                 strides: pipeline.vertexStrides.slice(),
                 indexFormat: draw.indexCount === undefined ? null : indexFormat,
             };
@@ -2022,6 +2097,7 @@ export function createRenderer(services){
                 kind: 'draw',
                 pipeline: pipelineFor(state),
                 target,
+                targets: colour,
                 depth,
                 groups: [
                     bindingsFor(pipeline.stages.vs, program.groups[0]),
@@ -2170,40 +2246,51 @@ export function createRenderer(services){
         const readers = [];
         /** @type {any} */
         let pass = null;
-        /** @type {any} */
-        let passTarget = null;
+        /** @type {string | null} */
+        let passTargets = null;
         /** @type {any} */
         let passDepth = null;
         let passStencil = 0;
 
         const closePass = ()=>{
             pass = null;
-            passTarget = null;
+            passTargets = null;
             passDepth = null;
         };
 
         /**
-         * @param {any} target
+         * A pass over these colour targets, by slot, and this depth target;
+         * the one open already when it is the same. A clear still waiting on
+         * any of them is made by the pass's load.
+         *
+         * @param {any[]} targetList
          * @param {any} depth
          */
-        const passFor = (target, depth)=>{
-            if (pass && passTarget === target && passDepth === depth)
+        const passFor = (targetList, depth)=>{
+            const key = targetList.map(entry=>(entry ? entry.key : '-')).join('|');
+            if (pass && passTargets === key && passDepth === depth)
             {
                 return pass;
             }
-            const clear = pendingClears.get(target.key) ?? null;
+            const clearValues = targetList.map(entry=>{
+                const clear = entry ? pendingClears.get(entry.key) ?? null : null;
+                if (!clear || !clear.color)
+                {
+                    return null;
+                }
+                pendingClears.delete(entry.key);
+                return { r: clear.color[0], g: clear.color[1], b: clear.color[2],
+                    a: clear.color[3] };
+            });
             const depthClear = depth ? pendingClears.get(depth.key) ?? null : null;
-            pendingClears.delete(target.key);
             if (depth)
             {
                 pendingClears.delete(depth.key);
             }
             pass = frame.beginPass({
-                target: target.surface,
-                clear: !!clear,
-                clearValue: clear
-                    ? { r: clear.color[0], g: clear.color[1], b: clear.color[2], a: clear.color[3] }
-                    : undefined,
+                targets: targetList.map(entry=>(entry ? entry.surface : null)),
+                clearValues,
+                ...(depth ? { depthTarget: depth.surface } : {}),
                 ...(depth
                     ? {
                         depthStencilAttachment: {
@@ -2227,7 +2314,7 @@ export function createRenderer(services){
                     }
                     : {}),
             });
-            passTarget = target;
+            passTargets = key;
             passDepth = depth;
             // What a new pass compares against until a draw says otherwise.
             passStencil = 0;
@@ -2246,7 +2333,7 @@ export function createRenderer(services){
                 if (clear.color && key.startsWith(`${id}:`))
                 {
                     closePass();
-                    passFor(clear.target, null);
+                    passFor([clear.target], null);
                 }
             }
             closePass();
@@ -2322,7 +2409,7 @@ export function createRenderer(services){
                     continue;
                 }
                 const pipeline = settled.value;
-                const current = passFor(command.target, command.depth);
+                const current = passFor(command.targets, command.depth);
                 current.setPipeline(pipeline.gpu);
                 current.setViewport(command.viewport);
                 if (command.scissor)
@@ -2383,7 +2470,7 @@ export function createRenderer(services){
                 if (target)
                 {
                     closePass();
-                    passFor(target.target, null);
+                    passFor([target.target], null);
                 }
             }
             if (surface)

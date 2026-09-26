@@ -161,7 +161,7 @@ export function createDrawStatistics(){
             totals.iaPrimitives += primitives;
             totals.vsInvocations += pipeline.stages.vs.shader ? count * instances : 0;
             const viewport = pipeline.viewports[0];
-            const target = viewExtent(pipeline.renderTargets[0])
+            const target = viewExtent(pipeline.renderTargets.find(view=>view))
                 ?? viewExtent(pipeline.depthStencilView);
             if (primitives === 0 || !viewport || !target)
             {

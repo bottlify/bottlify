@@ -1456,13 +1456,13 @@ function registerDeclarations(shader){
 
 /**
  * @param {TranslatedShader} shader
- * @param {string} returnExpression
+ * @param {string | null} returnExpression  Null for an entry point that returns nothing.
  * @returns {string[]}
  */
 function bodyText(shader, returnExpression){
     return shader.body.map(line=>(typeof line === 'string'
         ? line
-        : `    return ${returnExpression};`));
+        : `    return${returnExpression === null ? '' : ` ${returnExpression}`};`));
 }
 
 /** @param {import('./dxbc.js').SignatureElement} element */
@@ -1483,11 +1483,17 @@ const semanticKey = element=>`${element.name.toUpperCase()}${element.index}`;
  * Writes the two entry points around a vertex and a pixel shader body, with the
  * interface between them numbered once for both.
  *
+ * A render target the shader writes with nothing bound there is left out of
+ * the fragment's outputs, so that a pipeline can be built for exactly the
+ * targets a draw has -- none at all, for a pass that draws depth alone.
+ *
  * @param {TranslatedShader} vs
  * @param {TranslatedShader} ps
+ * @param {{ targets?: readonly number[] }} [options]  The locations with a
+ *     target bound; every location the shader writes when absent.
  * @returns {LinkedProgram}
  */
-export function linkProgram(vs, ps){
+export function linkProgram(vs, ps, options = {}){
     /** @type {string[]} */
     const unsupported = [...vs.unsupported, ...ps.unsupported];
     const vsDecl = declarations(vs, 0, STAGE.VERTEX);
@@ -1648,10 +1654,14 @@ export function linkProgram(vs, ps){
             : `${REG}(0u)`;
         if (element.systemValue === SYSTEM_VALUE.TARGET)
         {
+            targets.push(element.index);
+            if (options.targets && !options.targets.includes(element.index))
+            {
+                continue;
+            }
             const scalar = scalarOf(element.componentType);
             psOut.push(`    @location(${element.index}) target${element.index}: vec4<${scalar}>,`);
             psReturn.push(scalar === 'u32' ? value : `bitcast<vec4<${scalar}>>(${value})`);
-            targets.push(element.index);
             continue;
         }
         if (element.systemValue === SYSTEM_VALUE.DEPTH)
@@ -1680,18 +1690,20 @@ export function linkProgram(vs, ps){
     // Direct3D leaves a derivative taken in divergent flow undefined rather
     // than refusing the shader, and compilers emit sample instructions inside
     // branches and loops that WGSL's uniformity analysis would reject.
+    // A fragment stage with nothing to write -- depth alone, no target bound
+    // -- still runs, for what it discards, and returns nothing.
+    const writes = psOut.length > 0;
     const fragment = [
         'diagnostic(off, derivative_uniformity);',
         ...psDecl.text,
         ...(psIn.length > 0 ? ['struct FragmentIn {', ...psIn, '};'] : []),
-        'struct FragmentOut {',
-        ...psOut,
-        '};',
-        `@fragment fn fragmentMain(${psIn.length > 0 ? 'in: FragmentIn' : ''}) -> FragmentOut {`,
+        ...(writes ? ['struct FragmentOut {', ...psOut, '};'] : []),
+        `@fragment fn fragmentMain(${psIn.length > 0 ? 'in: FragmentIn' : ''})`
+            + `${writes ? ' -> FragmentOut' : ''} {`,
         ...psLoad,
         ...registerDeclarations(ps),
         ...(ps.writesDepth ? ['    var oDepth: f32 = 0.0;'] : []),
-        ...bodyText(ps, `FragmentOut(${psReturn.join(', ')})`),
+        ...bodyText(ps, writes ? `FragmentOut(${psReturn.join(', ')})` : null),
         '}',
     ].join('\n');
 

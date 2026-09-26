@@ -893,8 +893,7 @@ export function createDevice(options = {}){
         },
 
         /**
-         * Direct3D 10.1's blend state: factors per target. Only the first
-         * target is ever drawn here, with the first target's factors.
+         * Direct3D 10.1's blend state: factors per target.
          *
          * @param {any} desc @param {{ state?: any }} out
          */
