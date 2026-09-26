@@ -42,6 +42,7 @@ import {
     DDSCAPS_OFFSCREENPLAIN, DDSCAPS_PRIMARYSURFACE, DDSCAPS_TEXTURE, DDSCL_EXCLUSIVE,
     DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT,
     DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK, DDERR_UNSUPPORTED,
+    DDERR_EXCLUSIVEMODEALREADYSET, DDERR_NOEXCLUSIVEMODE,
 } from '../ddraw/constants.js';
 
 const HWND = 0x00010044;
@@ -161,8 +162,9 @@ function machine(){
  * The seam over real DirectDraw objects, with spies where GDI and the
  * presenter would be.
  *
- * @param {{ adapter?: any, gamma?: any }} [build]  What the build says the hardware is,
- *     and where a primary's gamma ramp is shown.
+ * @param {{ adapter?: any, gamma?: any, deactivated?: () => boolean }} [build]
+ *     What the build says the hardware is, where a primary's gamma ramp is
+ *     shown, and whether the application has been deactivated.
  */
 function seamed(build = {}){
     const box = machine();
@@ -213,6 +215,7 @@ function seamed(build = {}){
         },
         present: surface=>presented.push(surface),
         gamma: build.gamma,
+        deactivated: build.deactivated,
     });
     const fields = createFields(box.services);
     const ddrawDll = libraries.libraries['DDRAW.dll'];
@@ -1930,4 +1933,51 @@ test('a primary\'s gamma ramp is the display\'s, and the caps say so only where 
         assert.equal(headless.box.memory.readU32(caps + DDCAPS.dwCaps2) & DDCAPS2_PRIMARYGAMMA, 0,
             'no canvas, no gamma claimed');
         headless.release(other);
+    });
+
+// --- TestCooperativeLevel, after Wine's ddraw7 test_lost_device ---
+
+test('exclusive mode is lost while the application is deactivated, and normal mode is not',
+    ()=>{
+        // test_lost_device: DD_OK in exclusive mode, DDERR_NOEXCLUSIVEMODE once
+        // another window is in the foreground, DD_OK again once the program's
+        // is; in normal mode DD_OK throughout, the foreground wherever it is.
+        let deactivated = false;
+        const h = seamed({ deactivated: ()=>deactivated });
+        const test7 = slot(IDIRECTDRAW7_SLOTS, 'TestCooperativeLevel');
+        const ddraw = h.create7(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        assert.equal(h.box.call(ddraw, test7, []), DD_OK);
+        deactivated = true;
+        assert.equal(h.box.call(ddraw, test7, []), DDERR_NOEXCLUSIVEMODE);
+        const riid = h.box.putGuid(0x4000, IID_IDirectDraw4);
+        assert.equal(h.box.call(ddraw, 0, [riid, 0x4300]), DD_OK);
+        const fourth = h.box.memory.readU32(0x4300);
+        assert.equal(h.box.call(fourth, test7, []), DDERR_NOEXCLUSIVEMODE,
+            'IDirectDraw4 answers the same, from the same slot');
+        deactivated = false;
+        assert.equal(h.box.call(ddraw, test7, []), DD_OK, 'back in the foreground');
+
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
+            [HWND, DDSCL_NORMAL]), DD_OK);
+        deactivated = true;
+        assert.equal(h.box.call(ddraw, test7, []), DD_OK, 'normal mode holds nothing to lose');
+        deactivated = false;
+
+        // Another object holding the screen is what a normal-mode object is
+        // told about (the method's documented DDERR_EXCLUSIVEMODEALREADYSET).
+        const other = h.create7(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        assert.equal(h.box.call(ddraw, test7, []), DDERR_EXCLUSIVEMODEALREADYSET);
+        assert.equal(h.box.call(other, test7, []), DD_OK);
+        assert.equal(h.release(other), 0);
+        assert.equal(h.box.call(ddraw, test7, []), DD_OK, 'and not once it is gone');
+
+        assert.equal(h.release(fourth), 0);
+        assert.equal(h.release(ddraw), 0);
+        h.assertAllReleased();
+
+        const alone = seamed();
+        const unknowing = alone.create7(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        assert.equal(alone.box.call(unknowing, test7, []), DD_OK,
+            'with nothing to ask about activation the application is taken to be active');
+        alone.release(unknowing);
     });

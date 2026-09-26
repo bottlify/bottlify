@@ -51,6 +51,7 @@ import {
     DDERR_CANNOTDETACHSURFACE,
     DDERR_DCALREADYCREATED,
     DDERR_CLIPPERISUSINGHWND,
+    DDERR_EXCLUSIVEMODEALREADYSET,
     DDERR_INVALIDCAPS,
     DDERR_INVALIDMODE,
     DDERR_INVALIDOBJECT,
@@ -1812,6 +1813,24 @@ export function createDirectDraw(options = {}){
                 }
             }
             return DD_OK;
+        },
+
+        /**
+         * Whether the screen is this object's to draw on. Exclusive mode is
+         * the screen held, lost while the application is not the active one
+         * and held again once it is back; normal mode holds nothing to lose,
+         * and hears only that another object holds the screen. A display
+         * mode changed under a normal-mode object (DDERR_WRONGMODE) is not
+         * answered: nothing here changes it behind a program's back.
+         *
+         * @param {{ deactivated?: boolean, heldElsewhere?: boolean }} [display]
+         */
+        testCooperativeLevel({ deactivated = false, heldElsewhere = false } = {}){
+            if (exclusive())
+            {
+                return deactivated ? DDERR_NOEXCLUSIVEMODE : DD_OK;
+            }
+            return heldElsewhere ? DDERR_EXCLUSIVEMODEALREADYSET : DD_OK;
         },
 
         createSurface,

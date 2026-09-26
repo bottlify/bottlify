@@ -798,6 +798,9 @@ export const graphicsModule = {
             present: presentPrimary,
             // A DirectDraw primary's gamma ramp is the display's.
             gamma: displayGamma,
+            // What exclusive mode is lost on. Asked on each TestCooperativeLevel
+            // rather than now: win32 answers about windows made later.
+            deactivated: ()=>win32.applicationDeactivated?.() === true,
 
             // What a Direct3D 7 device draws with. Reached when a program
             // first asks its DirectDraw object for Direct3D, not now, so a

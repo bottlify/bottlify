@@ -74,7 +74,7 @@ import {
     DDPCAPS_PRIMARYSURFACE, DDPF_RGB, DDSCAPS_3DDEVICE, DDSCAPS_BACKBUFFER, DDSCAPS_COMPLEX,
     DDSCAPS_FLIP, DDSCAPS_FRONTBUFFER, DDSCAPS_LOCALVIDMEM, DDSCAPS_MIPMAP, DDSCAPS_OFFSCREENPLAIN,
     DDSCAPS_PRIMARYSURFACE, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_VIDEOMEMORY,
-    DDSCAPS_ZBUFFER, DDSD_BACKBUFFERCOUNT,
+    DDSCAPS_ZBUFFER, DDSCL_EXCLUSIVE, DDSD_BACKBUFFERCOUNT,
     DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PITCH,
     DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK, DDGDI_GETHOSTIDENTIFIER,
 } from '../ddraw/constants.js';
@@ -249,16 +249,26 @@ export function versionOf(id){
  *        The hardware behind the display, as the assembling caller knows it.
  * @param {import('../webgpu/internal/presenter.js').DisplayGamma} [deps.gamma]
  *        Where a primary surface's gamma ramp reaches the picture.
+ * @param {() => boolean} [deps.deactivated]
+ *        Whether the application has been told it is not the active one.
+ *        Absent, it always is.
  */
 export function createDirectDrawSeam(
     { publisher, memory, screen, gdi, present, callGuest, currentThread, scratch,
         extraInterfaces = [], extraSurfaceInterfaces = [], now = ()=>performance.now(),
         schedule = (ms, run)=>{
             setTimeout(run, ms);
-        }, identity, gamma },
+        }, identity, gamma, deactivated },
 )
 {
     const fields = createFields(memory);
+    /**
+     * The objects that took exclusive mode, for another one's
+     * TestCooperativeLevel: the screen is one, whichever object holds it.
+     *
+     * @type {Set<any>}
+     */
+    const exclusiveHolders = new Set();
 
     const privateData = createPrivateData({ memory, publisher, rules: DDRAW_PRIVATE_DATA });
 
@@ -1462,8 +1472,18 @@ export function createDirectDrawSeam(
         RestoreDisplayMode: (/** @type {any} */ root)=>root.restoreDisplayMode(),
 
         /** @param {any} root @param {number[]} args */
-        SetCooperativeLevel: (root, [window, flags])=>
-            root.setCooperativeLevel(window >>> 0, flags >>> 0),
+        SetCooperativeLevel: (root, [window, flags])=>{
+            const hr = root.setCooperativeLevel(window >>> 0, flags >>> 0);
+            if ((root.cooperativeLevel & DDSCL_EXCLUSIVE) !== 0)
+            {
+                exclusiveHolders.add(root);
+            }
+            else
+            {
+                exclusiveHolders.delete(root);
+            }
+            return hr;
+        },
 
         // The first generation takes width, height and depth; every later one
         // adds a refresh rate and flags after them.
@@ -1522,7 +1542,20 @@ export function createDirectDrawSeam(
         /** @param {any} root */
         RestoreAllSurfaces: (/** @type {any} */ root)=>root.restoreAllSurfaces(),
 
-        TestCooperativeLevel: ()=>DD_OK,
+        /** @param {any} root */
+        TestCooperativeLevel: root=>{
+            for (const holder of exclusiveHolders)
+            {
+                if (holder.destroyed || (holder.cooperativeLevel & DDSCL_EXCLUSIVE) === 0)
+                {
+                    exclusiveHolders.delete(holder);
+                }
+            }
+            return root.testCooperativeLevel({
+                deactivated: deactivated?.() === true,
+                heldElsewhere: [...exclusiveHolders].some(holder=>holder !== root),
+            });
+        },
 
         /**
          * The host flag asks after the adapter a 3D-only card is attached to,

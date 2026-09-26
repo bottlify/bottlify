@@ -88,6 +88,9 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *        The display's gamma ramp, which a DirectDraw primary's sets. The
  *        Direct3D 8 and 9 devices reach it through the objects `graphics`
  *        makes, which carry it from the layer.
+ * @param {() => boolean} [deps.deactivated]
+ *        Whether the application has been told it is not the active one,
+ *        which is when a DirectDraw object loses exclusive mode.
  * @param {() => number} [deps.now]
  *        The clock the display's raster runs on, in milliseconds; the host's
  *        when none is given.
@@ -111,7 +114,7 @@ export function createGraphicsLibraries(
         free, exportAddress,
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
-        gamma, now = ()=>performance.now(), schedule = (ms, run)=>{
+        gamma, deactivated, now = ()=>performance.now(), schedule = (ms, run)=>{
             setTimeout(run, ms);
         } },
 )
@@ -148,6 +151,7 @@ export function createGraphicsLibraries(
         extraSurfaceInterfaces: d3dLegacy.surfaceInterfaces,
         identity: ()=>graphics.adapter?.() ?? null,
         gamma,
+        deactivated,
     });
 
     /** What a program has actually asked us to make, for a report. */
