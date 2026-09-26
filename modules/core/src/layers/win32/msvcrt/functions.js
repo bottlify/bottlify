@@ -102,6 +102,9 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  *           Registers a call answers in besides EAX: EDX, for the high half
  *           of an __int64. Absent, the calls answering one stay unexported.
  * @property {import('./float.js').FloatHost} [fpu]
+ * @property {import('../kernel32/versions.js').WindowsVersion} [version]
+ *           The Windows GetVersion answers for the process, which the
+ *           runtime's own copy of it follows. Absent, the default one.
  * @property {() => string} [commandLine]
  *           What the process was started with, as GetCommandLineA reports it.
  * @property {(code: number) => any} [exitProcess]
@@ -902,6 +905,7 @@ export function createMsvcrtFunctions(host){
                 globals,
                 errnoName,
                 closeStreams,
+                version: host.version,
             })
             : {}),
 
