@@ -1685,6 +1685,30 @@ export function createGdiFunctions(host){
                 {
                     return defaultBitmap();
                 }
+                const selected = objects.get(dc.bitmap);
+                const shape = selected?.type === 'bitmap' ? selected.attributes : null;
+                if (shape && (shape.section >>> 0) !== 0)
+                {
+                    // Also documented: over a DIB section, the bitmap made is a
+                    // DIB section, in the selected one's format -- its depth,
+                    // masks and colours, copied -- with bottom-up rows of its own.
+                    const address = host.surfaces.allocate(dibSize(cx | 0, cy | 0,
+                        shape.bitCount));
+                    return objects.create('bitmap', {
+                        width: cx | 0,
+                        height: cy | 0,
+                        planes: 1,
+                        bitCount: shape.bitCount,
+                        topDown: false,
+                        usage: 0,
+                        bits: address,
+                        section: address,
+                        palette: shape.palette ? [...shape.palette] : undefined,
+                        compression: shape.compression,
+                        bitfields: [...(shape.bitfields ?? [0, 0, 0])],
+                        pelsPerMeter: [0, 0],
+                    });
+                }
                 const attributes = deviceBitmap(cx | 0, cy | 0, surfaceOf(dc).bitCount);
                 return attributes ? objects.create('bitmap', attributes) : 0;
             },

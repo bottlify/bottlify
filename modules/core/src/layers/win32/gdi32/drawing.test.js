@@ -555,6 +555,47 @@ test('GetObject fills a DIBSECTION for a DIB section when there is room for one'
     assert.equal(memory.u32(OUT + 24 + 32), 0, 'no colour table above eight bits');
 });
 
+test('CreateCompatibleBitmap on a DC with a DIB section selected makes a DIB section', ()=>{
+    // The CreateCompatibleBitmap documentation: with a DIB section selected,
+    // the bitmap it makes is a DIB section -- here in the selected one's
+    // format, its depth, masks and colours, over rows of its own.
+    const { memory, fns, hdc } = setup();
+    const dc = fns.CreateCompatibleDC.handler([hdc]);
+    const colors = [...Array(256).keys()].map(index=>index * 0x010203 & 0xffffff);
+    putInfo(memory, { width: 4, height: -4, bitCount: 8, colors });
+    const section = fns.CreateDIBSection.handler([hdc, STRUCT, 0, OUT + 0x80, 0, 0]);
+    const first = memory.u32(OUT + 0x80);
+    const previous = fns.SelectObject.handler([dc, section]);
+
+    const made = fns.CreateCompatibleBitmap.handler([dc, 5, 3]);
+    memory.bytes.fill(0xaa, OUT, OUT + 84);
+    assert.equal(fns.GetObjectA.handler([made, 84, OUT]), 84, 'a DIBSECTION, so a section');
+    assert.ok(memory.u32(OUT + 20) !== 0 && memory.u32(OUT + 20) !== first, 'rows of its own');
+    assert.deepEqual([4, 8, 12].map(at=>memory.u32(OUT + at)), [5, 3, 8]);
+    assert.equal(memory.u16(OUT + 18), 8, 'the section\'s depth, not the screen\'s');
+    const other = fns.CreateCompatibleDC.handler([hdc]);
+    fns.SelectObject.handler([other, made]);
+    memory.bytes.fill(0, OUT, OUT + 1024);
+    assert.equal(fns.GetDIBColorTable.handler([other, 0, 256, OUT]), 256);
+    assert.deepEqual([...Array(256).keys()].map(index=>memory.u32(OUT + index * 4)), colors);
+    fns.SelectObject.handler([other, previous]);
+
+    putInfo(memory, { width: 2, height: 2, bitCount: 16, colors: [0xf800, 0x07e0, 0x001f] });
+    memory.putU32s(STRUCT + 16, [3]);
+    memory.putU32s(STRUCT + 32, [0]);
+    fns.SelectObject.handler([dc, fns.CreateDIBSection.handler([hdc, STRUCT, 0, OUT + 0x80,
+        0, 0])]);
+    const masked = fns.CreateCompatibleBitmap.handler([dc, 2, 2]);
+    assert.equal(fns.GetObjectA.handler([masked, 84, OUT]), 84);
+    assert.equal(memory.u16(OUT + 18), 16);
+    assert.equal(memory.u32(OUT + 24 + 16), 3, 'BI_BITFIELDS');
+    assert.deepEqual([64, 68, 72].map(at=>memory.u32(OUT + at)), [0xf800, 0x07e0, 0x001f]);
+
+    fns.SelectObject.handler([dc, fns.CreateCompatibleBitmap.handler([hdc, 2, 2])]);
+    assert.equal(fns.GetObjectA.handler([fns.CreateCompatibleBitmap.handler([dc, 2, 2]), 84,
+        OUT]), 24, 'with a device-dependent bitmap selected, a device-dependent bitmap');
+});
+
 test('GetObject hands a font back as the LOGFONT it was made from, in either spelling', ()=>{
     const { memory, fns } = setup();
     memory.bytes.set([...'Arial'].map(c=>c.charCodeAt(0)).concat(0), STRUCT);
