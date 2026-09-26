@@ -104,6 +104,26 @@ test('wcstombs terminates only when the null character comes within the count', 
     }
 });
 
+test('wcstombs refuses a character the C locale has no byte for with -1 and EILSEQ', ()=>{
+    // "If wcstombs encounters a wide character it can't convert to a
+    // multibyte character, it returns -1 cast to type size_t and sets errno
+    // to EILSEQ" -- as wctomb does for the same character.
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (
+        createWideFunctions({ ...memory, errno: code=>errno.push(code) }));
+    const destination = memory.allocate(16);
+    const text = memory.putWide('ab☺');
+    assert.equal(table.wcstombs.handler([destination, text, 8]), -1);
+    assert.equal(table.wcstombs.handler([0, text, 0]), -1, 'nor can it say how many bytes');
+    assert.equal(table.wcstombs.handler([destination, text, 2]), 2, 'the count ends before it');
+    assert.equal(table.wcstombs.handler([destination, memory.putWide('caf\xe9'), 8]), 4);
+    assert.equal(memory.text(destination), 'caf\xe9');
+    const EILSEQ = 42;
+    assert.deepEqual(errno, [EILSEQ, EILSEQ]);
+});
+
 test('wctomb writes a character to U+00FF as its byte, and refuses one past it with EILSEQ', ()=>{
     // "If the conversion isn't possible in the current locale, wctomb returns
     // -1 and errno is set to EILSEQ." The C locale has a byte for each of the
