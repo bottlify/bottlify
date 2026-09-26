@@ -210,6 +210,22 @@ test('a pre-transformed vertex goes through the viewport, not the matrices', ()=
     assert.doesNotMatch(ordinary, /let screen =/);
 });
 
+test('a pre-transformed vertex gives its RHW back as the clip w', ()=>{
+    // The RHW is what the rasteriser interpolates by: Microsoft's "Viewports
+    // and Clipping" has a pre-transformed vertex taken back to clip space by
+    // it, and D3DPTEXTURECAPS_PERSPECTIVE promises the perspective-correct
+    // interpolation it makes possible. A w of one everywhere interpolates a
+    // perspective-drawn quad affinely and bends its texture along the
+    // diagonal. An RHW of zero or less has no w to give, and Windows still
+    // draws such a vertex (Wine's test_table_fog_zw draws RHW 0), so it is
+    // taken as one.
+    const code = generate(baseState({ fvf: FVF.XYZRHW | FVF.DIFFUSE })).code;
+    assert.ok(code.includes('let clipW = select(1.0, 1.0 / vertex.position.w,'
+        + ' vertex.position.w > 0.0);'), code);
+    assert.ok(code.includes('out.position = vec4f(screen.x - 1.0, screen.y + 1.0,'
+        + ' vertex.position.z, 1.0) * clipW;'));
+});
+
 test('no stages leaves the diffuse colour alone', ()=>{
     // A stage that is off is absent, not neutral: "neutral" is only an identity
     // for some operations, and emitting one for a subtract darkens the scene.

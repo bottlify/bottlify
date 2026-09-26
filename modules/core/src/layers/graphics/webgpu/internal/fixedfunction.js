@@ -633,12 +633,17 @@ export function generateFixedFunction(state, layout){
 
     // Pre-transformed vertices skip the matrices entirely and go through the
     // viewport's inverse offset and scale, which is what lands them on the
-    // pixel they name.
+    // pixel they name. Their RHW goes back in as the clip w, scaling the rest
+    // with it so the divide gives the same point: it is what the rasteriser
+    // interpolates by, and a w of one everywhere interpolates a perspective
+    // quad affinely. An RHW of zero or less has no w to give and is taken as
+    // one, as Windows still draws such a vertex.
     const position = layout.preTransformed
         ? '    let screen = (vertex.position.xy + uniforms.viewportOffset) '
             + '* uniforms.viewportScale;\n'
+            + '    let clipW = select(1.0, 1.0 / vertex.position.w, vertex.position.w > 0.0);\n'
             + '    out.position = vec4f(screen.x - 1.0, screen.y + 1.0, '
-            + 'vertex.position.z, 1.0);'
+            + 'vertex.position.z, 1.0) * clipW;'
         : '    out.position = uniforms.worldViewProjection * vec4f(vertex.position, 1.0);';
 
     // How much of the fragment survives vertex fog, interpolated across the
@@ -744,9 +749,9 @@ function transformedGeneration(index, coordinate){
 /**
  * Table fog's factor for the pixel, from the fragment position builtin: the
  * curve over its depth, which is its z when the projection is affine and its
- * w otherwise -- the reciprocal of the interpolated 1/w the builtin carries.
- * The choice is a uniform (`fogFactors.w`), so a projection change compiles
- * nothing.
+ * w otherwise -- the reciprocal of the interpolated 1/w the builtin carries,
+ * which for a pre-transformed vertex is its RHW. The choice is a uniform
+ * (`fogFactors.w`), so a projection change compiles nothing.
  *
  * @param {string} position  the fragment's `@builtin(position)`
  * @returns {string}

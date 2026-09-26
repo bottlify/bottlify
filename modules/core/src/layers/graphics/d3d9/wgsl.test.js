@@ -518,6 +518,11 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     assertLine(transformed.wgsl, 'out.oPos = viewportPosition(in.v0);');
     assertLine(transformed.wgsl, `let screen = (vertex.xy + c[${HYBRID_CONSTANTS.VIEWPORT}].xy)`
         + ` * c[${HYBRID_CONSTANTS.VIEWPORT}].zw;`);
+    // Its RHW goes back in as the clip w, which is what the rasteriser
+    // interpolates by; one of zero or less is taken as one.
+    assertLine(transformed.wgsl, 'let clipW = select(1.0, 1.0 / vertex.w, vertex.w > 0.0);');
+    assertLine(transformed.wgsl,
+        'return vec4f(screen.x - 1.0, screen.y + 1.0, vertex.z, 1.0) * clipW;');
 
     const none = fixedVertexStage([
         { usage: D3DDECLUSAGE.COLOR, usageIndex: 0, register: 0 },

@@ -1346,11 +1346,13 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         // The fog curve over the fixed function's own range row.
         fogFunctionDeclaration(vertexFog ? fog : 0, `c[${HYBRID_CONSTANTS.FOG}]`).trimEnd(),
         // The viewport's inverse offset and scale, as the fixed-function stage
-        // applies them to a vertex given in target pixels.
+        // applies them to a vertex given in target pixels, and its RHW back as
+        // the clip w the rasteriser interpolates by (one for none to give).
         'fn viewportPosition(vertex: vec4f) -> vec4f {',
         `    let screen = (vertex.xy + c[${HYBRID_CONSTANTS.VIEWPORT}].xy)`
             + ` * c[${HYBRID_CONSTANTS.VIEWPORT}].zw;`,
-        '    return vec4f(screen.x - 1.0, screen.y + 1.0, vertex.z, 1.0);',
+        '    let clipW = select(1.0, 1.0 / vertex.w, vertex.w > 0.0);',
+        '    return vec4f(screen.x - 1.0, screen.y + 1.0, vertex.z, 1.0) * clipW;',
         '}',
         '@vertex',
         'fn vs_main(in: VsIn) -> VsOut {',
