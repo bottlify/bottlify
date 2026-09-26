@@ -18,13 +18,14 @@
  *
  * Every resource keeps a host copy of its bytes. That is what a map hands out
  * and an unmap reads back, what a copy between resources moves, and what an
- * upload sends. It is also the honest limit of this cut: a resource the GPU
- * wrote -- a render target -- has no host copy worth reading, and a copy out of
- * one says so rather than copying stale bytes quietly.
+ * upload sends. A resource the GPU wrote -- a render target, or one the GPU
+ * copied or filtered into -- has no host copy worth reading, so a copy out of
+ * one is recorded for the GPU to make in its turn, and one into a staging
+ * resource is read back after the frame that holds it is submitted.
  *
  * What this cut does not do is stated where it is decided, each as a divergence
- * that names the call: several render targets at once, a blend factor or a
- * stencil reference that is not the default, wireframe fill, geometry shaders,
+ * that names the call: several render targets at once, a blend factor that is
+ * not the default, wireframe fill, geometry shaders,
  * stream output, predication, and multisampling.
  */
 
@@ -37,11 +38,11 @@ import {
 } from './constants.js';
 import { convertTexels, convertedTexelBytes } from './blocks.js';
 import {
-    INDEX_FORMAT, VERTEX_FORMAT, VERTEX_FORMAT_BYTES, isDepthFormat, textureStorage,
-    viewFormatOf,
+    INDEX_FORMAT, TEXEL_BYTES, VERTEX_FORMAT, VERTEX_FORMAT_BYTES, copyCompatible,
+    isDepthFormat, textureStorage, viewFormatOf,
 } from './gpuformats.js';
 import { levelExtent } from './validity.js';
-import { BINDING, linkProgram, translateShader } from './wgsl.js';
+import { BINDING, STAGE, linkProgram, translateShader } from './wgsl.js';
 import { LockFlags } from '../webgpu/internal/buffers.js';
 
 /**
@@ -260,6 +261,29 @@ const DEFAULT_BLEND = Object.freeze({
  * @property {'clear'} kind
  * @property {number[]} color
  */
+
+/** The formats a level is drawn into and filtered from when the GPU makes mips. */
+const FILTERED_TARGET = /^(rgba8unorm|bgra8unorm|rgba16float|rg16float|r16float|rgb10a2unorm|rg8unorm|r8unorm)/;
+
+/**
+ * A triangle over the whole target, sampling the level above at the middle of
+ * each target texel.
+ */
+const MIP_SHADER = [
+    '@group(0) @binding(0) var source: texture_2d<f32>;',
+    '@group(0) @binding(1) var linear: sampler;',
+    'struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> };',
+    '@vertex fn vertexMain(@builtin(vertex_index) index: u32) -> Out {',
+    '    let uv = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));',
+    '    var out: Out;',
+    '    out.position = vec4<f32>(uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);',
+    '    out.uv = uv;',
+    '    return out;',
+    '}',
+    '@fragment fn fragmentMain(in: Out) -> @location(0) vec4<f32> {',
+    '    return textureSampleLevel(source, linear, in.uv, 0.0);',
+    '}',
+].join('\n');
 
 /**
  * @param {number} a
@@ -602,13 +626,16 @@ export function createRenderer(services){
     };
 
     /**
-     * Sends a subresource's host bytes to the GPU.
+     * Sends a subresource's host bytes to the GPU: all of them, or the box a
+     * program wrote -- the rest of a level the GPU drew into is newer on the
+     * GPU than on the host, and must not be overwritten with it.
      *
      * @param {any} resource
      * @param {number} subresource
      * @param {number} [flags]  A LockFlags value for a buffer.
+     * @param {Box | null} [box]
      */
-    const upload = (resource, subresource, flags = LockFlags.NONE)=>{
+    const upload = (resource, subresource, flags = LockFlags.NONE, box = null)=>{
         const backing = backingOf(resource);
         if (backing.gpu)
         {
@@ -633,24 +660,55 @@ export function createRenderer(services){
         const { level, slice } = subresourceOf(resource, subresource);
         const geometry = backing.layout.levels[level];
         const held = subresourceBytes(resource, subresource);
-        const texels = texelsForGpu(backing.layout, geometry, held.bytes);
-        if (!texels)
+        const layout = backing.layout;
+        const is3D = resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D;
+        let texels;
+        let area = { x: 0, y: 0, z: 0, width: geometry.width, height: geometry.height,
+            depth: geometry.depth };
+        if (box && !layout.storage.conversion)
+        {
+            const region = blocksOf(layout, geometry, box);
+            const edge = layout.blockEdge;
+            const x = Math.floor(box.left / edge) * edge;
+            const y = Math.floor(box.top / edge) * edge;
+            area = {
+                x, y, z: region.front,
+                width: Math.min(box.right, geometry.width) - x,
+                height: Math.min(box.bottom, geometry.height) - y,
+                depth: region.depth,
+            };
+            const data = new Uint8Array(region.rowBytes * region.rows * region.depth);
+            for (let z = 0; z < region.depth; z++)
+            {
+                for (let row = 0; row < region.rows; row++)
+                {
+                    const from = (region.front + z) * held.depthPitch
+                        + (region.top + row) * held.rowPitch + region.left;
+                    data.set(held.bytes.subarray(from, from + region.rowBytes),
+                        (z * region.rows + row) * region.rowBytes);
+                }
+            }
+            texels = { data, bytesPerRow: region.rowBytes };
+        }
+        else
+        {
+            texels = texelsForGpu(layout, geometry, held.bytes);
+        }
+        if (!texels || area.width <= 0 || area.height <= 0 || area.depth <= 0)
         {
             return;
         }
-        const compressedBlocks = backing.layout.blockEdge > 1 && !backing.layout.storage.conversion;
+        const compressedBlocks = layout.blockEdge > 1 && !layout.storage.conversion;
         try
         {
             backend.uploadTexture({
                 texture: backing.texture,
-                format: backing.layout.format,
-                width: geometry.width,
-                height: geometry.height,
-                depthOrArrayLayers: geometry.depth,
+                format: layout.format,
+                width: area.width,
+                height: area.height,
+                depthOrArrayLayers: area.depth,
                 mipLevel: level,
-                origin: { x: 0, y: 0, z: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
-                    ? 0
-                    : slice },
+                origin: { x: area.x, y: area.y, z: is3D ? area.z : slice },
                 bytesPerRow: texels.bytesPerRow,
                 data: texels.data,
                 // Blocks go through a staging buffer, the path they arrive by.
@@ -663,9 +721,27 @@ export function createRenderer(services){
         }
     };
 
-    /** @param {any} resource */
+    /**
+     * Whether the GPU's copy of a resource may be newer than the host's: one
+     * a draw can write, and one the GPU copied or filtered into.
+     *
+     * @param {any} resource
+     */
     const gpuWritten = resource=>(resource.desc.BindFlags
-        & (D3D10_BIND.RENDER_TARGET | D3D10_BIND.DEPTH_STENCIL)) !== 0;
+        & (D3D10_BIND.RENDER_TARGET | D3D10_BIND.DEPTH_STENCIL)) !== 0
+        || backingOf(resource).gpuDirty === true;
+
+    /**
+     * Whether a level of this texture can be read back as it is: four-byte
+     * texels the GPU keeps in the program's own layout, one sample each.
+     *
+     * @param {any} backing
+     */
+    const readable = backing=>{
+        const storage = backing.layout.storage;
+        return !!storage && !storage.conversion && !storage.depth
+            && TEXEL_BYTES[storage.format] === 4 && backing.sampleCount === 1;
+    };
 
     /**
      * @param {any} view
@@ -1269,6 +1345,203 @@ export function createRenderer(services){
         });
     };
 
+    /**
+     * A copy made by the GPU, recorded in its turn: see copySubresourceRegion.
+     *
+     * @param {any} destination
+     * @param {number} destinationSubresource
+     * @param {{ x: number, y: number, z: number }} at
+     * @param {any} source
+     * @param {number} sourceSubresource
+     * @param {Box | null} box
+     * @returns {boolean} whether the GPU makes it
+     */
+    const gpuCopy = (destination, destinationSubresource, at, source, sourceSubresource, box)=>{
+        const from = backingOf(source);
+        const to = backingOf(destination);
+        if (!from.texture || from.layout.storage.depth || from.sampleCount !== 1)
+        {
+            return false;
+        }
+        const is3D = source.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D;
+        const src = subresourceOf(source, sourceSubresource);
+        const dst = subresourceOf(destination, destinationSubresource);
+        const fromLevel = from.layout.levels[src.level];
+        const toLevel = to.layout.levels[dst.level];
+        const region = box ?? {
+            left: 0, top: 0, front: 0,
+            right: fromLevel.width, bottom: fromLevel.height, back: fromLevel.depth,
+        };
+        const size = {
+            width: Math.min(region.right, fromLevel.width) - region.left,
+            height: Math.min(region.bottom, fromLevel.height) - region.top,
+            depthOrArrayLayers: Math.min(region.back, fromLevel.depth) - region.front,
+        };
+        size.width = Math.min(size.width, toLevel.width - at.x);
+        size.height = Math.min(size.height, toLevel.height - at.y);
+        size.depthOrArrayLayers = Math.min(size.depthOrArrayLayers, toLevel.depth - at.z);
+        if (size.width <= 0 || size.height <= 0 || size.depthOrArrayLayers <= 0)
+        {
+            return true;
+        }
+        if (to.texture)
+        {
+            if (!copyCompatible(from.layout.format, to.layout.format)
+                || to.layout.storage.depth || to.sampleCount !== 1)
+            {
+                return false;
+            }
+            record({
+                kind: 'copyTexture',
+                sourceId: from.id,
+                destinationId: to.id,
+                source: {
+                    texture: from.texture, mipLevel: src.level,
+                    origin: { x: region.left, y: region.top, z: is3D ? region.front : src.slice },
+                },
+                destination: {
+                    texture: to.texture, mipLevel: dst.level,
+                    origin: { x: at.x, y: at.y, z: is3D ? at.z : dst.slice },
+                },
+                size,
+            });
+            to.gpuDirty = true;
+            return true;
+        }
+        // A staging resource: the level comes back whole, and the box is
+        // placed where the program asked.
+        if (destination.desc.Usage !== D3D10_USAGE.STAGING || !readable(from) || is3D
+            || src.slice !== 0)
+        {
+            return false;
+        }
+        /** @type {(value?: any) => void} */
+        let resolve = ()=>{};
+        const promise = new Promise(done=>{
+            resolve = done;
+        });
+        const waiting = { promise, sequence: recordedCount + 1 };
+        let delivered = false;
+        record({
+            kind: 'readback',
+            sourceId: from.id,
+            surface: {
+                texture: from.texture, mipLevel: src.level,
+                width: fromLevel.width, height: fromLevel.height,
+            },
+            /** @param {{ width: number, height: number, data: Uint8Array } | null} image */
+            deliver(image){
+                if (delivered)
+                {
+                    return;
+                }
+                delivered = true;
+                if (image)
+                {
+                    const into = subresourceBytes(destination, destinationSubresource);
+                    for (let row = 0; row < size.height; row++)
+                    {
+                        const start = ((region.top + row) * image.width + region.left) * 4;
+                        into.bytes.set(image.data.subarray(start, start + size.width * 4),
+                            (at.y + row) * into.rowPitch + at.x * 4);
+                    }
+                }
+                else
+                {
+                    diverge('a read back that did not arrive leaves the staging resource as it'
+                        + ' was');
+                }
+                if (to.readback === waiting)
+                {
+                    to.readback = null;
+                }
+                resolve();
+            },
+        });
+        to.readback = waiting;
+        return true;
+    };
+
+    /** @type {Map<string, Promise<any>>} format -> the pipeline that draws a level from above */
+    const mipPipelines = new Map();
+
+    /** @param {string} format */
+    const mipPipelineFor = format=>{
+        let built = mipPipelines.get(format);
+        if (!built)
+        {
+            built = (async()=>{
+                const module = await backend.createShaderModule({
+                    code: MIP_SHADER, label: 'd3d10:mips',
+                });
+                const layout = layoutFor([
+                    { binding: 0, visibility: STAGE.FRAGMENT,
+                        texture: { sampleType: 'float', viewDimension: '2d' } },
+                    { binding: 1, visibility: STAGE.FRAGMENT, sampler: { type: 'filtering' } },
+                ], 'd3d10:mips');
+                const gpu = backend.createRenderPipeline({
+                    label: `d3d10:mips:${format}`,
+                    layout: backend.createPipelineLayout({
+                        label: 'd3d10:mips', bindGroupLayouts: [layout],
+                    }),
+                    vertex: { module, entryPoint: 'vertexMain', buffers: [] },
+                    fragment: { module, entryPoint: 'fragmentMain', targets: [{ format }] },
+                    primitive: { topology: 'triangle-list' },
+                });
+                return { gpu, layout };
+            })();
+            mipPipelines.set(format, built);
+        }
+        return built;
+    };
+
+    /** @type {any} */
+    let mipSampler = null;
+
+    /**
+     * Every level below the top drawn from the one above by the GPU, one
+     * slice at a time: a linear sample at the middle of each two-by-two
+     * block is its average.
+     *
+     * @param {any} resource
+     * @param {any} backing
+     */
+    const recordMips = (resource, backing)=>{
+        mipSampler = mipSampler ?? createSampler({
+            label: 'd3d10:mips', magFilter: 'linear', minFilter: 'linear',
+        });
+        const format = backing.layout.format;
+        const steps = [];
+        for (let slice = 0; slice < backing.layout.slices; slice++)
+        {
+            for (let level = 1; level < backing.layout.levels.length; level++)
+            {
+                /** @param {number} mip @param {string} label */
+                const view = (mip, label)=>backing.texture.createView({
+                    label, format, dimension: '2d', baseMipLevel: mip, mipLevelCount: 1,
+                    baseArrayLayer: slice, arrayLayerCount: 1,
+                });
+                const geometry = backing.layout.levels[level];
+                steps.push({
+                    surface: {
+                        texture: backing.texture,
+                        view: view(level, 'd3d10:mips:target'),
+                        width: geometry.width,
+                        height: geometry.height,
+                        format,
+                        label: `d3d10:mips:${level}`,
+                    },
+                    entries: [
+                        { binding: 0, resource: view(level - 1, 'd3d10:mips:source') },
+                        { binding: 1, resource: mipSampler },
+                    ],
+                });
+            }
+        }
+        record({ kind: 'mips', id: backing.id, pipeline: mipPipelineFor(format), steps });
+        backing.gpuDirty = true;
+    };
+
     return {
         /**
          * @param {any} resource
@@ -1355,10 +1628,16 @@ export function createRenderer(services){
                     held.bytes.set(data.subarray(from, from + region.rowBytes), to);
                 }
             }
-            upload(resource, subresource);
+            upload(resource, subresource, LockFlags.NONE, box);
         },
 
         /**
+         * A copy out of what the GPU may have written is made by the GPU, in
+         * its turn among the draws: into a texture it keeps, as a texture
+         * copy; into a staging resource, as a read back once the frame that
+         * holds it has been submitted, which a map of that resource waits
+         * for. Anything else moves the host bytes the program wrote.
+         *
          * @param {any} destination
          * @param {number} destinationSubresource
          * @param {{ x: number, y: number, z: number }} at
@@ -1369,10 +1648,15 @@ export function createRenderer(services){
         copySubresourceRegion(destination, destinationSubresource, at, source, sourceSubresource,
             box)
         {
-            if (gpuWritten(source))
+            if (backend && gpuWritten(source))
             {
-                diverge('a copy out of a render target reads the bytes the program last wrote,'
-                    + ' not what the GPU drew');
+                if (gpuCopy(destination, destinationSubresource, at, source, sourceSubresource,
+                    box))
+                {
+                    return;
+                }
+                diverge('a copy out of a render target the GPU cannot copy or read back moves'
+                    + ' the bytes the program last wrote, not what the GPU drew');
             }
             const from = subresourceBytes(source, sourceSubresource);
             const to = subresourceBytes(destination, destinationSubresource);
@@ -1399,7 +1683,12 @@ export function createRenderer(services){
                             + place.left);
                 }
             }
-            upload(destination, destinationSubresource);
+            upload(destination, destinationSubresource, LockFlags.NONE, {
+                left: at.x, top: at.y, front: at.z,
+                right: at.x + (box ? box.right - box.left : from.level.width),
+                bottom: at.y + (box ? box.bottom - box.top : from.level.height),
+                back: at.z + (box ? box.back - box.front : from.level.depth),
+            });
         },
 
         /**
@@ -1407,15 +1696,20 @@ export function createRenderer(services){
          * @param {any} source
          */
         copyResource(destination, source){
-            if (gpuWritten(source))
+            const count = (source.desc.MipLevels ?? 1) * backingOf(source).layout.slices;
+            if (backend && gpuWritten(source) && source.dimension
+                !== D3D10_RESOURCE_DIMENSION.BUFFER)
             {
-                diverge('a copy out of a render target reads the bytes the program last wrote,'
-                    + ' not what the GPU drew');
+                for (let index = 0; index < count; index++)
+                {
+                    this.copySubresourceRegion(destination, index, { x: 0, y: 0, z: 0 },
+                        source, index, null);
+                }
+                return;
             }
             const from = backingOf(source);
             const to = backingOf(destination);
             to.bytes.set(from.bytes.subarray(0, Math.min(from.bytes.length, to.bytes.length)));
-            const count = (destination.desc.MipLevels ?? 1) * to.layout.slices;
             for (let index = 0; index < count; index++)
             {
                 upload(destination, index);
@@ -1432,6 +1726,14 @@ export function createRenderer(services){
         generateMips(resource){
             const backing = backingOf(resource);
             const format = backing.layout.format ?? '';
+            if (backend && backing.texture && gpuWritten(resource)
+                && resource.dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE1D
+                && resource.dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE3D
+                && FILTERED_TARGET.test(format) && backing.sampleCount === 1)
+            {
+                recordMips(resource, backing);
+                return true;
+            }
             if (backing.layout.texelBytes !== 4 || backing.layout.storage?.conversion
                 || !(format.startsWith('rgba8') || format.startsWith('bgra8')))
             {
@@ -1681,6 +1983,26 @@ export function createRenderer(services){
             return submit(null);
         },
 
+        /**
+         * The read back a map of this resource has to wait for, sent to the
+         * GPU if it has not been: null when there is none.
+         *
+         * @param {any} resource
+         * @returns {Promise<void> | null}
+         */
+        pendingReadback(resource){
+            const waiting = backings.get(resource)?.readback ?? null;
+            if (!waiting)
+            {
+                return null;
+            }
+            if (waiting.sequence > handedOver)
+            {
+                this.flush();
+            }
+            return waiting.promise;
+        },
+
         /** @returns {number} commands recorded so far */
         recorded: ()=>recordedCount,
 
@@ -1717,6 +2039,16 @@ export function createRenderer(services){
         chain = chain.then(()=>replay(recorded, surface)).catch(failure=>{
             counters.failures.push(String(failure && failure.message || failure));
             diverge(`a frame could not be replayed: ${failure && failure.message || failure}`);
+        }).then(()=>{
+            // A read back that never arrived leaves the host bytes as they
+            // were, rather than a map waiting for ever.
+            for (const command of recorded)
+            {
+                if (command.kind === 'readback')
+                {
+                    command.deliver(null);
+                }
+            }
         });
         return chain;
     }
@@ -1727,8 +2059,10 @@ export function createRenderer(services){
      */
     async function replay(recorded, surface){
         const pipelinesNeeded = await Promise.allSettled(
-            recorded.filter(command=>command.kind === 'draw').map(command=>command.pipeline));
+            recorded.map(command=>command.pipeline ?? null));
         const frame = backend.beginFrame();
+        /** @type {{ read: () => Promise<any>, command: any }[]} */
+        const readers = [];
         /** @type {any} */
         let pass = null;
         /** @type {any} */
@@ -1736,7 +2070,6 @@ export function createRenderer(services){
         /** @type {any} */
         let passDepth = null;
         let passStencil = 0;
-        let built = 0;
 
         const closePass = ()=>{
             pass = null;
@@ -1796,14 +2129,66 @@ export function createRenderer(services){
             return pass;
         };
 
+        /**
+         * A clear still waiting for a pass on a texture a copy is about to
+         * read or write happens first, in a pass of its own.
+         *
+         * @param {number} id  The backing's.
+         */
+        const settleClears = id=>{
+            for (const [key, clear] of [...pendingClears])
+            {
+                if (clear.color && key.startsWith(`${id}:`))
+                {
+                    closePass();
+                    passFor(clear.target, null);
+                }
+            }
+            closePass();
+        };
+
         try
         {
-            for (const command of recorded)
+            for (const [position, command] of recorded.entries())
             {
                 if (command.kind === 'clear')
                 {
                     closePass();
-                    pendingClears.set(command.target.key, { color: command.color });
+                    pendingClears.set(command.target.key,
+                        { color: command.color, target: command.target });
+                    continue;
+                }
+                if (command.kind === 'copyTexture')
+                {
+                    settleClears(command.sourceId);
+                    settleClears(command.destinationId);
+                    frame.copyTexture(command.source, command.destination, command.size);
+                    continue;
+                }
+                if (command.kind === 'readback')
+                {
+                    settleClears(command.sourceId);
+                    readers.push({ read: frame.snapshot(command.surface), command });
+                    continue;
+                }
+                if (command.kind === 'mips')
+                {
+                    settleClears(command.id);
+                    const built = pipelinesNeeded[position];
+                    if (built.status === 'rejected')
+                    {
+                        diverge(`mips were not generated: ${built.reason && built.reason.message
+                            || built.reason}`);
+                        continue;
+                    }
+                    for (const step of command.steps)
+                    {
+                        const mipPass = frame.beginPass({ target: step.surface });
+                        mipPass.setPipeline(built.value.gpu);
+                        mipPass.setBindings(0, built.value.layout, step.entries, 'd3d10:mips');
+                        mipPass.draw(3, 1, 0, 0);
+                    }
+                    closePass();
                     continue;
                 }
                 if (command.kind === 'clearDepth')
@@ -1823,7 +2208,7 @@ export function createRenderer(services){
                     });
                     continue;
                 }
-                const settled = pipelinesNeeded[built++];
+                const settled = pipelinesNeeded[position];
                 if (settled.status === 'rejected')
                 {
                     counters.skipped.pipeline++;
@@ -1907,9 +2292,13 @@ export function createRenderer(services){
             // above must not leave the frame open for every present after.
             frame.end();
         }
+        for (const reader of readers)
+        {
+            reader.command.deliver(await reader.read());
+        }
         // The record a test reads, without the promise a draw carried.
         lastFrame = recorded.map(command=>{
-            if (command.kind !== 'draw')
+            if (!command.pipeline)
             {
                 return command;
             }

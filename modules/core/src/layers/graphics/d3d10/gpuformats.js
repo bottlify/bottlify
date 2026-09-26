@@ -283,6 +283,19 @@ export function textureStorage(dxgiFormat, bindFlags, options = {}){
 }
 
 /**
+ * Whether WebGPU copies texels between textures of these two formats: the
+ * same format, or the two halves of an sRGB pair.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+export function copyCompatible(a, b){
+    const linear = (/** @type {string} */ format)=>format.replace(/-srgb$/, '');
+    return linear(a) === linear(b);
+}
+
+/**
  * The GPU view a Direct3D view of a resource kept in `storage` is: its
  * format, or the aspect of a depth format it reads. A view the GPU cannot
  * express -- a cast between types WebGPU does not alias -- is the storage's

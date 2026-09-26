@@ -339,6 +339,7 @@ export function createDevice(options = {}){
         map: (resource, subresource)=>renderer.map(resource, subresource),
         unmap: (resource, subresource, discard, noOverwrite)=>
             renderer.unmap(resource, subresource, discard, noOverwrite),
+        pending: resource=>renderer.pendingReadback(resource),
     };
 
     /**

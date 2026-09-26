@@ -29,7 +29,8 @@ import {
 } from './d3d10.js';
 import {
     D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE, D3D10_MAP, D3D10_PRIMITIVE_TOPOLOGY,
-    D3D10_QUERY, D3D10_SDK_VERSION, D3D10_USAGE, DXGI_ERROR_INVALID_CALL, DXGI_FORMAT,
+    D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_QUERY, D3D10_SDK_VERSION, D3D10_USAGE,
+    DXGI_ERROR_INVALID_CALL, DXGI_FORMAT,
     DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, IID, S_OK,
 } from '../d3d10/constants.js';
 import { DXGI_SWAP_CHAIN_DESC, writeSwapChainDesc } from '../d3d10/structs.js';
@@ -101,6 +102,18 @@ function machine(){
             const entry = registered.get(memory.readU32(table + index * 4));
             assert.ok(entry, `slot ${index} has an implementation`);
             return entry.fn.handler([pointer, ...args]) >>> 0;
+        },
+        /**
+         * A call whose answer may be a promise the bridge would park the
+         * caller on: awaited here as the caller would be resumed.
+         *
+         * @param {number} pointer @param {number} index @param {number[]} args
+         */
+        async callParked(pointer, index, args = []){
+            const table = memory.readU32(pointer);
+            const entry = registered.get(memory.readU32(table + index * 4));
+            assert.ok(entry, `slot ${index} has an implementation`);
+            return (await entry.fn.handler([pointer, ...args])) >>> 0;
         },
         /** @param {number} pointer @param {number} index */
         argBytesOf(pointer, index){
@@ -760,6 +773,43 @@ test('an adapter is an IDXGIAdapter1 too, whose description has a word of flags 
     assert.equal(h.box.call(adapter1, slot(IDXGIADAPTER1_SLOTS, 'GetDesc1'), [desc]), S_OK);
     assert.equal(h.box.memory.readU32(desc), 0x006f0042, 'the same description');
     assert.equal(h.box.memory.readU32(desc + 0x124), 0, 'Flags');
+});
+
+test('a staging copy of what the GPU drew is read back, and its map waits for it', async()=>{
+    // After Wine's d3d10core get_texture_readback: CopyResource into a
+    // staging texture, then Map(READ).
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    const targetDesc = h.box.place([4, 4, 1, 1, DXGI_FORMAT.R8G8B8A8_UNORM, 1, 0,
+        D3D10_USAGE.DEFAULT, D3D10_BIND.RENDER_TARGET, 0, 0]);
+    const targetAt = h.box.place([0]);
+    assert.equal(h.device(device, 'CreateTexture2D', [targetDesc, 0, targetAt]), S_OK);
+    const target = h.box.memory.readU32(targetAt);
+    const viewAt = h.box.place([0]);
+    assert.equal(h.device(device, 'CreateRenderTargetView', [target, 0, viewAt]), S_OK);
+    h.device(device, 'ClearRenderTargetView',
+        [h.box.memory.readU32(viewAt), h.box.place(floatBits([1, 0, 0, 1]))]);
+
+    const stagingDesc = h.box.place([4, 4, 1, 1, DXGI_FORMAT.R8G8B8A8_UNORM, 1, 0,
+        D3D10_USAGE.STAGING, 0, D3D10_CPU_ACCESS.READ, 0]);
+    const stagingAt = h.box.place([0]);
+    assert.equal(h.device(device, 'CreateTexture2D', [stagingDesc, 0, stagingAt]), S_OK);
+    const staging = h.box.memory.readU32(stagingAt);
+    h.device(device, 'CopyResource', [staging, target]);
+
+    const mapped = h.box.place([0, 0]);
+    const mapSlot = slot(ID3D10TEXTURE_SLOTS, 'Map');
+    assert.equal(h.box.call(staging, mapSlot, [0, D3D10_MAP.READ, D3D10_MAP_FLAG_DO_NOT_WAIT,
+        mapped]), 0x887a000a, 'DXGI_ERROR_WAS_STILL_DRAWING while the copy is on its way');
+    assert.equal(await h.box.callParked(staging, mapSlot, [0, D3D10_MAP.READ, 0, mapped]), S_OK,
+        'a map that may wait, waits');
+    const bytes = h.box.services.readMemory(h.box.memory.readU32(mapped), 64);
+    assert.deepEqual([...bytes.subarray(0, 4)], [255, 0, 0, 255], 'what the GPU cleared');
+    assert.deepEqual([...bytes.subarray(60, 64)], [255, 0, 0, 255]);
+    assert.equal(h.gpu.count('copyTextureToBuffer'), 1);
+    assert.equal(h.presented.length, 0, 'nothing was shown to get there');
+    h.box.call(staging, slot(ID3D10TEXTURE_SLOTS, 'Unmap'), [0]);
+    assert.deepEqual(h.divergences, []);
 });
 
 test('what this build cannot do says so in the slot rather than in a crash', ()=>{

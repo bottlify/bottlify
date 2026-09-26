@@ -30,8 +30,8 @@ import { describe as describeSlots } from './vtables.js';
 import { readGuid } from './ddraw.js';
 import { createFields } from './structs.js';
 import {
-    D3D10_LIMITS, D3D10_MAP, D3D10_RESOURCE_DIMENSION, DXGI_ERROR_INVALID_CALL, E_INVALIDARG,
-    E_NOTIMPL, IID, S_OK, formatPitch,
+    D3D10_LIMITS, D3D10_MAP, D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_RESOURCE_DIMENSION,
+    DXGI_ERROR_INVALID_CALL, E_INVALIDARG, E_NOTIMPL, IID, S_OK, formatPitch,
 } from '../d3d10/constants.js';
 import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain } from '../d3d10/device.js';
 import { CreateDXGIFactory } from '../d3d10/dxgi.js';
@@ -40,12 +40,14 @@ import { levelExtent } from '../d3d10/validity.js';
 
 /**
  * A method here may answer nothing: the setters of this API are `void`, and
- * the bridge reads an absent result as zero. The declared type of a slot's
+ * the bridge reads an absent result as zero. It may also answer a promise,
+ * which the bridge parks the caller on. The declared type of a slot's
  * implementation says a number, so the map is widened once, here.
  *
  * @param {string} id
  * @param {[string, number][]} slots
- * @param {Record<string, (target: any, args: number[]) => number | void>} implemented
+ * @param {Record<string, (target: any, args: number[]) => number | void | Promise<number>>}
+ *     implemented
  */
 const describe = (id, slots, implemented)=>describeSlots(id, slots,
     /** @type {Record<string, (target: any, args: number[]) => number>} */ (implemented));
@@ -636,7 +638,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
      * is a prefix of the derived vtable, so the map serves both.
      *
      * @param {[string, [string, number][]][]} faces  Interface id and its slots.
-     * @param {Record<string, (target: any, args: number[]) => number | void>} methods
+     * @param {Record<string, (target: any, args: number[]) => number | void | Promise<number>>}
+     *     methods
      */
     const describeAll = (faces, methods)=>faces.map(([id, slots])=>describe(id, slots, methods));
 
@@ -953,6 +956,23 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         };
     };
 
+    /**
+     * Runs a map once the GPU has delivered what the resource is waiting for
+     * -- a copy it is making into it -- parking the caller until then. A map
+     * that asked not to wait is answered at once, by the object.
+     *
+     * @param {any} resource
+     * @param {number} flags
+     * @param {() => number} run
+     * @returns {number | Promise<number>}
+     */
+    const whenMappable = (resource, flags, run)=>{
+        const waiting = (flags & D3D10_MAP_FLAG_DO_NOT_WAIT) === 0
+            ? resource.pendingReadback?.() ?? null
+            : null;
+        return waiting ? waiting.then(run) : run();
+    };
+
     /** @param {any} resource @param {number} subresource */
     const unmapFrom = (resource, subresource)=>{
         const block = mappings.get(resource)?.get(subresource);
@@ -1062,13 +1082,15 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             {
                 return E_INVALIDARG;
             }
-            const mapped = mapInto(texture, 0, mapType, 0);
-            if (mapped.hr === S_OK)
-            {
-                fields.writeU32(rect, mapped.rowPitch);
-                fields.writeU32(rect + 4, mapped.address);
-            }
-            return mapped.hr;
+            return whenMappable(texture, 0, ()=>{
+                const mapped = mapInto(texture, 0, mapType, 0);
+                if (mapped.hr === S_OK)
+                {
+                    fields.writeU32(rect, mapped.rowPitch);
+                    fields.writeU32(rect + 4, mapped.address);
+                }
+                return mapped.hr;
+            });
         },
         /** @param {any} texture */
         Unmap: texture=>{
@@ -1100,19 +1122,20 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
      * @param {number[]} args
      * @param {boolean} pitches  Whether the out structure has room for pitches.
      */
-    const mapTexture = (texture, [subresource, mapType, flags, out], pitches)=>{
-        const mapped = mapInto(texture, subresource >>> 0, mapType >>> 0, flags >>> 0);
-        if (mapped.hr !== S_OK || (out >>> 0) === 0)
-        {
-            return mapped.hr;
-        }
-        fields.writeU32(out, mapped.address);
-        if (pitches)
-        {
-            fields.writeU32(out + 4, mapped.rowPitch);
-        }
-        return S_OK;
-    };
+    const mapTexture = (texture, [subresource, mapType, flags, out], pitches)=>
+        whenMappable(texture, flags >>> 0, ()=>{
+            const mapped = mapInto(texture, subresource >>> 0, mapType >>> 0, flags >>> 0);
+            if (mapped.hr !== S_OK || (out >>> 0) === 0)
+            {
+                return mapped.hr;
+            }
+            fields.writeU32(out, mapped.address);
+            if (pitches)
+            {
+                fields.writeU32(out + 4, mapped.rowPitch);
+            }
+            return S_OK;
+        });
 
     /** @param {any} texture @param {number[]} args */
     const unmapTexture = (texture, [subresource])=>unmapFrom(texture, subresource >>> 0);
@@ -1121,14 +1144,14 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
     const bufferInterfaces = [describe(IID.ID3D10Buffer, ID3D10BUFFER_SLOTS, {
         ...resourceMethods,
         /** @param {any} buffer @param {number[]} args */
-        Map: (buffer, [mapType, flags, out])=>{
+        Map: (buffer, [mapType, flags, out])=>whenMappable(buffer, flags >>> 0, ()=>{
             const mapped = mapInto(buffer, 0, mapType >>> 0, flags >>> 0);
             if (mapped.hr === S_OK && (out >>> 0) !== 0)
             {
                 fields.writeU32(out, mapped.address);
             }
             return mapped.hr;
-        },
+        }),
         /** @param {any} buffer */
         Unmap: buffer=>unmapFrom(buffer, 0),
         /** @param {any} buffer @param {number[]} args */
@@ -1169,17 +1192,18 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
     const texture3DInterfaces = [describe(IID.ID3D10Texture3D, ID3D10TEXTURE_SLOTS, {
         ...resourceMethods,
         /** @param {any} texture @param {number[]} args */
-        Map: (texture, [subresource, mapType, flags, out])=>{
-            const mapped = mapInto(texture, subresource >>> 0, mapType >>> 0, flags >>> 0);
-            if (mapped.hr !== S_OK || (out >>> 0) === 0)
-            {
-                return mapped.hr;
-            }
-            fields.writeU32(out, mapped.address);
-            fields.writeU32(out + 4, mapped.rowPitch);
-            fields.writeU32(out + 8, mapped.depthPitch);
-            return S_OK;
-        },
+        Map: (texture, [subresource, mapType, flags, out])=>whenMappable(texture, flags >>> 0,
+            ()=>{
+                const mapped = mapInto(texture, subresource >>> 0, mapType >>> 0, flags >>> 0);
+                if (mapped.hr !== S_OK || (out >>> 0) === 0)
+                {
+                    return mapped.hr;
+                }
+                fields.writeU32(out, mapped.address);
+                fields.writeU32(out + 4, mapped.rowPitch);
+                fields.writeU32(out + 8, mapped.depthPitch);
+                return S_OK;
+            }),
         Unmap: unmapTexture,
         /** @param {any} texture @param {number[]} args */
         GetDesc: (texture, [out])=>{

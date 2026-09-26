@@ -750,7 +750,7 @@ test('a depth stencil view attaches to the pass and shapes the pipeline', async(
 
 // --- resource traffic ---
 
-test('UpdateSubresource lands a box at its offset and uploads the level', ()=>{
+test('UpdateSubresource lands a box at its offset and uploads that box alone', ()=>{
     const h = harness();
     const { device } = h;
     /** @type {{ resource?: any }} */
@@ -762,10 +762,11 @@ test('UpdateSubresource lands a box at its offset and uploads the level', ()=>{
         Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8]), 8, 0);
     const uploads = h.gpu.of('writeTexture');
     assert.equal(uploads.length, 1);
-    const bytes = uploads[0].bytes;
-    assert.equal(bytes.length, 64);
-    assert.deepEqual([...bytes.subarray(2 * 16 + 4, 2 * 16 + 12)], [1, 2, 3, 4, 5, 6, 7, 8]);
-    assert.deepEqual([...bytes.subarray(0, 16)], new Array(16).fill(0), 'row 0 untouched');
+    // The rest of the level may hold what the GPU drew; only the box travels.
+    assert.deepEqual([...uploads[0].bytes], [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.deepEqual(uploads[0].destination.origin, { x: 1, y: 2, z: 0 });
+    assert.deepEqual(uploads[0].size, { width: 2, height: 1, depthOrArrayLayers: 1 });
+    assert.equal(uploads[0].layout.bytesPerRow, 8);
     assert.deepEqual(h.divergences, []);
 
     // Not a default resource: ignored, and said so.
@@ -779,7 +780,7 @@ test('UpdateSubresource lands a box at its offset and uploads the level', ()=>{
     assert.ok(diverged(h, 'UpdateSubresource'));
 });
 
-test('CopyResource moves the bytes the program wrote and uploads the destination', ()=>{
+test('CopyResource moves the bytes the program wrote and uploads the destination', async()=>{
     const h = harness();
     const { device } = h;
     /** @type {{ resource?: any }} */
@@ -812,13 +813,18 @@ test('CopyResource moves the bytes the program wrote and uploads the destination
     staging.resource.Unmap(0);
     assert.equal(h.gpu.count('writeTexture'), 2, 'a staging resource is never uploaded');
 
-    // Out of a render target, what is copied is not what was drawn.
+    // Out of a render target, the GPU copies what it drew, in its turn.
     /** @type {{ resource?: any }} */
     const target = {};
     assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, BindFlags: D3D10_BIND.RENDER_TARGET },
         null, target), S_OK);
     device.CopyResource(destination.resource, target.resource);
-    assert.ok(diverged(h, 'copy out of a render target'));
+    await h.present();
+    const copies = h.gpu.of('copyTextureToTexture');
+    assert.equal(copies.length, 1);
+    assert.equal(copies[0].destination.texture, uploads[1].destination.texture);
+    assert.deepEqual(copies[0].size, { width: 2, height: 2, depthOrArrayLayers: 1 });
+    assert.ok(!diverged(h, 'copy out of a render target'));
 
     // A copy between resources of different extents is not a copy.
     device.CopyResource(destination.resource, h.backBuffer);
@@ -838,33 +844,85 @@ test('CopySubresourceRegion places a box at the destination offset', ()=>{
         destination), S_OK);
     device.CopySubresourceRegion(destination.resource, 0, 2, 1, 0, source.resource, 0,
         { left: 1, top: 0, front: 0, right: 2, bottom: 2, back: 1 });
-    const bytes = h.gpu.of('writeTexture')[1].bytes;
-    assert.deepEqual([...bytes.subarray(1 * 16 + 8, 1 * 16 + 12)], [0, 255, 0, 255]);
-    assert.deepEqual([...bytes.subarray(2 * 16 + 8, 2 * 16 + 12)], [255, 255, 255, 255]);
-    assert.deepEqual([...bytes.subarray(0, 16)], new Array(16).fill(0));
+    const upload = h.gpu.of('writeTexture')[1];
+    assert.deepEqual([...upload.bytes], [0, 255, 0, 255, 255, 255, 255, 255],
+        'the column copied, and no more');
+    assert.deepEqual(upload.destination.origin, { x: 2, y: 1, z: 0 });
+    assert.deepEqual(upload.size, { width: 1, height: 2, depthOrArrayLayers: 1 });
 });
 
-test('GenerateMips filters a texture made for it and leaves any other alone', ()=>{
+test('GenerateMips draws each level from the one above on the GPU', async()=>{
     const h = harness();
     const { device } = h;
     /** @type {{ resource?: any }} */
     const texture = {};
     assert.equal(device.CreateTexture2D({
         ...TEXTURE_2X2,
-        MipLevels: 2,
+        Width: 4,
+        Height: 4,
+        MipLevels: 3,
+        ArraySize: 2,
         BindFlags: D3D10_BIND.SHADER_RESOURCE | D3D10_BIND.RENDER_TARGET,
         MiscFlags: D3D10_RESOURCE_MISC.GENERATE_MIPS,
-    }, [{ pSysMem: TEXELS, SysMemPitch: 8 }], texture), S_OK);
+    }, null, texture), S_OK);
     /** @type {{ view?: any }} */
     const view = {};
     assert.equal(device.CreateShaderResourceView(texture.resource, null, view), S_OK);
     device.GenerateMips(view.view);
-    const uploads = h.gpu.of('writeTexture');
-    assert.equal(uploads.length, 2);
-    assert.equal(uploads[1].destination.mipLevel, 1);
-    // The average of red, green, blue and white: (255+0+0+255)/4 rounded.
-    assert.deepEqual([...uploads[1].bytes], [128, 128, 128, 255]);
+    await h.present();
+    const passes = h.gpu.of('beginRenderPass').map((/** @type {any} */ call)=>{
+        const target = call.descriptor.colorAttachments[0].view.viewDescriptor;
+        return [target.baseArrayLayer, target.baseMipLevel];
+    });
+    assert.deepEqual(passes, [[0, 1], [0, 2], [1, 1], [1, 2]],
+        'every level below the top, slice by slice');
+    assert.equal(h.gpu.count('draw'), 4);
+    const pipeline = h.gpu.of('createRenderPipeline').at(-1);
+    assert.equal(pipeline.descriptor.fragment.targets[0].format, 'rgba8unorm');
+    const sources = h.gpu.of('createBindGroup').map((/** @type {any} */ call)=>
+        call.descriptor.entries[0].resource.viewDescriptor.baseMipLevel);
+    assert.deepEqual(sources.slice(0, 2), [0, 1], 'each drawn from the level above it');
+    assert.deepEqual(h.divergences, []);
+});
 
+test('GenerateMips on the processor filters a texture made for it and leaves any other alone',
+    ()=>{
+        // Without a GPU the host copy is the texture, and the filter runs there.
+        /** @type {{ device?: any }} */
+        const out = {};
+        assert.equal(D3D10CreateDeviceAndSwapChain(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0,
+            D3D10_SDK_VERSION, null, {}, out, {}), S_OK);
+        const device = out.device;
+        /** @type {{ resource?: any }} */
+        const texture = {};
+        assert.equal(device.CreateTexture2D({
+            ...TEXTURE_2X2,
+            MipLevels: 2,
+            BindFlags: D3D10_BIND.SHADER_RESOURCE | D3D10_BIND.RENDER_TARGET,
+            MiscFlags: D3D10_RESOURCE_MISC.GENERATE_MIPS,
+        }, [{ pSysMem: TEXELS, SysMemPitch: 8 }], texture), S_OK);
+        /** @type {{ view?: any }} */
+        const view = {};
+        assert.equal(device.CreateShaderResourceView(texture.resource, null, view), S_OK);
+        device.GenerateMips(view.view);
+        /** @type {{ resource?: any }} */
+        const staging = {};
+        assert.equal(device.CreateTexture2D({
+            ...TEXTURE_2X2, MipLevels: 2, Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+            CPUAccessFlags: D3D10_CPU_ACCESS.READ,
+        }, null, staging), S_OK);
+        device.CopyResource(staging.resource, texture.resource);
+        /** @type {{ data?: Uint8Array | null }} */
+        const mapped = {};
+        assert.equal(staging.resource.Map(1, D3D10_MAP.READ, 0, mapped), S_OK);
+        // The average of red, green, blue and white: (255+0+0+255)/4 rounded.
+        assert.deepEqual([...(mapped.data ?? [])], [128, 128, 128, 255]);
+        staging.resource.Unmap(1);
+    });
+
+test('GenerateMips leaves a texture not made for it alone', ()=>{
+    const h = harness();
+    const { device } = h;
     /** @type {{ resource?: any }} */
     const plain = {};
     assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, MipLevels: 2 },
@@ -873,7 +931,8 @@ test('GenerateMips filters a texture made for it and leaves any other alone', ()
     const plainView = {};
     assert.equal(device.CreateShaderResourceView(plain.resource, null, plainView), S_OK);
     device.GenerateMips(plainView.view);
-    assert.equal(h.gpu.count('writeTexture'), 4, 'two levels of initial data, nothing more');
+    assert.equal(h.gpu.count('writeTexture'), 2, 'two levels of initial data, nothing more');
+    assert.equal(h.device.diagnostics().draws, 0);
 });
 
 // --- formats ---

@@ -31,8 +31,9 @@
 import { attachCom } from './com.js';
 import {
     ALL_REMAINING, D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DSV_DIMENSION, D3D10_MAP,
-    D3D10_RESOURCE_DIMENSION, D3D10_RTV_DIMENSION, D3D10_SRV_DIMENSION, D3D10_USAGE, DXGI_USAGE,
-    E_INVALIDARG, FORMAT_INFO, FORMAT_KIND, IID, S_OK,
+    D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_RESOURCE_DIMENSION, D3D10_RTV_DIMENSION, D3D10_SRV_DIMENSION,
+    D3D10_USAGE, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_USAGE, E_INVALIDARG, FORMAT_INFO, FORMAT_KIND,
+    IID, S_OK,
 } from './constants.js';
 import { fullMipChainLength, levelExtent, resolveViewFormat } from './validity.js';
 
@@ -66,6 +67,8 @@ const VIEW_SHAPE = Object.freeze({
  * @property {(resource: any, subresource: number) => MappedSubresource} map
  * @property {(resource: any, subresource: number, discard: boolean,
  *             noOverwrite: boolean) => void} unmap
+ * @property {(resource: any) => Promise<void> | null} [pending]
+ *     The GPU work a map of this resource has to wait for, if any.
  */
 
 /**
@@ -144,12 +147,26 @@ export function createResource(options){
             {
                 return E_INVALIDARG;
             }
+            if ((flags & D3D10_MAP_FLAG_DO_NOT_WAIT) !== 0 && this.pendingReadback())
+            {
+                return DXGI_ERROR_WAS_STILL_DRAWING;
+            }
             const held = options.storage.map(this, subresource);
             mapped.set(subresource, mapType);
             out.data = held.data;
             out.rowPitch = held.rowPitch;
             out.depthPitch = held.depthPitch;
             return S_OK;
+        },
+
+        /**
+         * What a map has to wait for: a copy the GPU is still making into
+         * this resource. A caller that can wait, waits for it before `Map`.
+         *
+         * @returns {Promise<void> | null}
+         */
+        pendingReadback(){
+            return options.storage.pending?.(this) ?? null;
         },
 
         /** @param {number} subresource */
