@@ -90,10 +90,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // A small leaf callee formed into its caller, the call and its return
         // jumps inside the region (false: every call crosses regions).
         leafCalls: true,
-        // x87 regions compiled for the wide precision controls (double,
-        // extended) until the program is seen with single set: a block tests
-        // precision control once rather than every operation rounding by it
-        // (false: the test on every operation from the start).
+        // x87 regions compiled for the precision control the program runs
+        // under -- the wide ones (double, extended) until it is seen with
+        // single set, single from then on until it is seen with another --
+        // a block testing precision control once rather than every
+        // operation rounding by it (false: the test on every operation from
+        // the start, as after a program is seen with both).
         wideFirst: true,
         // x87 regions compiled for the stack's shape at their entries -- which
         // registers are held and which empty -- tested once at an entry rather
@@ -123,8 +125,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** The host clock for a diagnostic timing, or zero when timings are off. */
     const clock = import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.timings === true
         ? ()=>performance.now() : ()=>0;
-    /** Whether new x87 regions are compiled for the wide precision controls. */
-    let wide = settings.wideFirst === true;
+    /**
+     * The precision control new x87 regions are compiled for: `wide` (double,
+     * extended: no rounding), `narrow` (single: every arithmetic rounded, no
+     * test of its own) or `mixed`, a test at every rounding operation.
+     * @type {'wide' | 'narrow' | 'mixed'}
+     */
+    let precision = settings.wideFirst === true ? 'wide' : 'mixed';
     /** How a region is formed, the same on this thread, in a batch and in a relink. */
     const formOptions = { maxBlocks: settings.maxRegionBlocks,
         maxBytes: settings.maxRegionBytes, leafCalls: settings.leafCalls };
@@ -357,6 +364,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      *     must keep for the entries to stand
      * @property {boolean} [linked]  its function is in a relinked module already
      * @property {boolean} [wide]  an x87 region compiled for the wide precision controls
+     * @property {boolean} [narrow]  an x87 region compiled for single precision
      * @property {boolean} [checked]  an x87 region whose entries test nothing of the stack's shape
      * @property {number} [shapeMisses]  its entries' tests that failed
      */
@@ -545,19 +553,24 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     };
 
     /**
-     * Single precision seen: x87 regions are compiled with the rounding from
-     * now on, and the wide ones go -- each would only leave at its first
-     * rounding block. Once: a program that sets single keeps it, as Direct3D
-     * does from CreateDevice on.
+     * A region found another precision control than it was compiled for:
+     * x87 regions are compiled for the one found from now on -- single after
+     * the wide ones found it, a test at every rounding operation after the
+     * single ones found another -- and the regions compiled for the old one
+     * go, since each would only leave at its first rounding block. Direct3D
+     * sets single at CreateDevice and keeps it, so a program under it moves
+     * once; one seen with both moves twice, and no further.
      */
     const precisionSeen = ()=>{
-        if (!wide)
+        if (precision === 'mixed')
         {
             return;
         }
-        wide = false;
+        const was = precision;
+        precision = precision === 'wide' ? 'narrow' : 'mixed';
         counts.precisionSwitches++;
-        const on = new Set([...regions].filter(record=>record.wide)
+        const on = new Set([...regions]
+            .filter(record=>(was === 'wide' ? record.wide : record.narrow))
             .flatMap(record=>[...record.pages]));
         for (const page of on)
         {
@@ -708,7 +721,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             && settings.countTransfers === true,
         blockProfile: profiling,
         hash: table !== null,
-        wide,
+        wide: precision === 'wide',
+        narrow: precision === 'narrow',
         structure: settings.structure,
         precise: settings.precise === true,
         leaveOut,
@@ -795,7 +809,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * answer and an inline emission take the same path.
      *
      * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string,
-     *     wide?: boolean, checked?: boolean }} one
+     *     wide?: boolean, narrow?: boolean, checked?: boolean }} one
      * @param {{ labels: [number, number][], cut: number[], entryTop: number,
      *     exportName?: string, linked?: boolean }} built
      * @param {WebAssembly.Instance} instance
@@ -806,10 +820,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         inFlight.delete(keyOf(region.entry, one.entryTop));
         const eip = region.entry;
         const publishAt = clock();
-        // A wide x87 region built before single precision was seen would
-        // only leave at once: its bytes are translated again with the rounding.
+        // An x87 region built for a precision control before another was seen
+        // would only leave at once: its bytes are translated again for that.
         // So would one built to test the stack's shape once its test had failed.
-        if (one.stamp !== stamp(region.pages) || (one.wide && !wide)
+        if (one.stamp !== stamp(region.pages) || (one.wide && precision !== 'wide')
+            || (one.narrow && precision !== 'narrow')
             || (one.checked !== true && checkedAt(region, one.entryTop)))
         {
             // A page of it was written while the batch was built.
@@ -838,7 +853,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             spans: region.blocks.map(block=>[block.start, block.end]),
             entryTop: one.entryTop, hash: region.hash, labels: JSON.stringify(built.labels),
             linked: built.linked === true, wide: one.wide === true,
-            checked: one.checked === true,
+            narrow: one.narrow === true, checked: one.checked === true,
         };
         if (table)
         {
@@ -918,14 +933,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
     };
     /** The store key of one formed region: an x87 region compiled for the wide
-     * precision controls, or checked, or a `precise` run's, is another
-     * translation of the same bytes.
+     * precision controls or for single, or checked, or a `precise` run's, is
+     * another translation of the same bytes.
      * @param {{ region: { entry: number, hash: string }, entryTop: number, wide?: boolean,
-     *     checked?: boolean }} one */
+     *     narrow?: boolean, checked?: boolean }} one */
     const regionKey = one=>cacheKey({
         version: CACHE_VERSION, features: found, layoutId: layout.id,
         bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
-        hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}${one.checked ? '-c' : ''}`
+        hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}`
+            + `${one.narrow ? '-n' : ''}${one.checked ? '-c' : ''}`
             + (settings.precise === true ? '-p' : ''),
     });
 
@@ -1052,7 +1068,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             if (store !== null)
             {
                 const one = { region: { entry: record.entry, hash: record.hash },
-                    entryTop: record.entryTop, wide: record.wide, checked: record.checked };
+                    entryTop: record.entryTop, wide: record.wide, narrow: record.narrow,
+                    checked: record.checked };
                 store.put(regionKey(one), packRegion({ ...result.region,
                     module: new Uint8Array(0), moduleKey: key, linked: true })).catch(()=>{});
             }
@@ -1233,7 +1250,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // they said when formed.
         for (const one of unbuilt)
         {
-            one.wide = one.wide === true && wide;
+            one.wide = precision === 'wide' && usesX87(one.region);
+            one.narrow = precision === 'narrow' && usesX87(one.region);
             one.checked = checkedAt(one.region, one.entryTop);
         }
         if (unbuilt.length > 0 && worker !== null)
@@ -1536,7 +1554,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 ? null : (settings.store ?? null);
             /** @type {{ region: import('../region.js').Region, entryTop: number,
              *     stamp: string, cached: import('./cache.js').CachedRegion | null, wide?: boolean,
-             *     checked?: boolean, moduleBytes?: Uint8Array | null }[]} */
+             *     narrow?: boolean, checked?: boolean, moduleBytes?: Uint8Array | null }[]} */
             const formed = [];
             const formedAt = clock();
             // The block starts of the regions this batch formed with no x87 in
@@ -1596,7 +1614,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     continue;
                 }
                 formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null,
-                    wide: wide && usesX87(region), checked: checkedAt(region, entryTop) });
+                    wide: precision === 'wide' && usesX87(region),
+                    narrow: precision === 'narrow' && usesX87(region),
+                    checked: checkedAt(region, entryTop) });
                 if (!usesX87(region))
                 {
                     for (const block of region.blocks)
@@ -1736,9 +1756,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 cacheMisses: counts.cacheMisses,
                 missNoRecord: counts.missNoRecord,
                 missNoModule: counts.missNoModule,
-                // x87 regions compiled for the wide precision controls until this is 1.
+                // x87 regions compiled for the wide precision controls until this is
+                // 1, for single until it is 2 (`precision`).
                 precisionSwitches: counts.precisionSwitches,
-                wide,
+                wide: precision === 'wide',
+                precision,
                 // Entries that found the x87 stack in another shape than their
                 // block's, and the regions translated checked for it.
                 shapeMisses: counts.shapeMisses,

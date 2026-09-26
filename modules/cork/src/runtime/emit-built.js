@@ -70,8 +70,8 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
  *     blockProfile?: boolean, timings?: boolean,
- *     leaveOut?: Set<string> | string[], wide?: boolean, structure?: boolean,
- *     precise?: boolean }} [options]
+ *     leaveOut?: Set<string> | string[], wide?: boolean, narrow?: boolean,
+ *     structure?: boolean, precise?: boolean }} [options]
  *     timings: `emitMs` and `encodeMs` are measured (the runtime's `timings`), else 0;
  *     precise: nothing relaxed (the runtime's `precise`)
  * @returns {BuiltBatch}
@@ -89,6 +89,7 @@ export function emitBatch(jobs, layout, features, options = {}){
         countTransfers: options.countTransfers === true,
         blockProfile: options.blockProfile === true,
         wide: options.wide === true,
+        narrow: options.narrow === true,
         structure: options.structure === true,
         precise: options.precise === true,
         leaveOut,

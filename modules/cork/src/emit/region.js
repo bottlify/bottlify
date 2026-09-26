@@ -133,8 +133,8 @@ export const MMX_TOP = 2;
 const UNLIKELY = new Set([
     'spent', 'bulkSpent', 'flagged', 'window', 'windowFaults', 'windowCode', 'storeCode',
     'inaccessible', 'maybeCode', 'code', 'stale', 'streamsFlagged', 'fault', 'overflow',
-    'unshaped', 'single', 'nan', 'signalling', 'made', 'invalid', 'negative', 'underflow',
-    'indefinite', 'unordered',
+    'unshaped', 'single', 'notSingle', 'nan', 'signalling', 'made', 'invalid', 'negative',
+    'underflow', 'indefinite', 'unordered',
 ]);
 
 /** Local indices every region function shares. */
@@ -193,6 +193,9 @@ const LOCAL_TYPES = [
  *     for a float compare's flags, whose liveness decides its fusion with its branch either way
  * @property {boolean} [wide]  compiled for the wide precision controls (double, extended):
  *     no rounding to single, and a block leaves with `PRECISION` if it finds single set
+ * @property {boolean} [narrow]  compiled for single precision: every rounding instruction
+ *     rounds to single with no test of its own, and a block leaves with `PRECISION` if it
+ *     finds another precision set
  * @property {boolean} [precise]  every relaxation off: the x87 exception flags, the
  *     signalling-NaN tests, the underflow test and C1 kept as the processor keeps them
  *     (the runtime's `precise`); without it they are not computed
@@ -222,8 +225,8 @@ const LOCAL_TYPES = [
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
- *     countTransfers?: boolean, wide?: boolean, blockProfile?: boolean, structure?: boolean,
- *     precise?: boolean }}
+ *     countTransfers?: boolean, wide?: boolean, narrow?: boolean, blockProfile?: boolean,
+ *     structure?: boolean, precise?: boolean }}
  *     [options]  undoLog:
  *     record every store's old bytes (differential builds only; part of the cache key);
  *     hash: import the host's function table and transfer through the entry hash (needs
@@ -232,7 +235,8 @@ const LOCAL_TYPES = [
  */
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
-        wide = false, blockProfile = false, structure = false, precise = false } = {})
+        wide = false, narrow = false, blockProfile = false, structure = false,
+        precise = false } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -301,6 +305,10 @@ export function prepareModule(m, layout, features, memory = {},
     if (wide)
     {
         context.wide = true;
+    }
+    else if (narrow)
+    {
+        context.narrow = true;
     }
     if (precise)
     {

@@ -36,7 +36,9 @@
  * plan names and counts (the emulator computes in f64 as well). The control
  * word is honoured at run time: its rounding control rounds the integer
  * stores and `frndint`, and precision control set to single rounds every
- * arithmetic result to a float (extended is treated as double). Exception
+ * arithmetic result to a float (extended is treated as double) -- a region
+ * compiled for single (`narrow`) or for the others (`wide`) tests the word
+ * once a block and rounds, or does not, with no test of its own. Exception
  * masks are not honoured: an exception behaves as masked. The
  * transcendentals go through the host's `Math`, as the emulator's do, so
  * the two agree bit for bit on one engine; the environment forms end a
@@ -1309,14 +1311,20 @@ export function emitX87(e, instruction, flagsLive){
         x.stack = NOTHING;
     }
     // A region compiled for the wide precision controls (double, extended)
-    // leaves before the block's first rounding instruction when single is set:
-    // one test a block rather than one an operation. Precision control changes
-    // in a block only by its own fldcw/fldenv/frstor/finit, which clear the
-    // check; an x87 region's host calls leave the region.
-    if (e.context.wide && ROUNDS.has(op) && x.checkedPrecision !== e.blockIndex)
+    // leaves before the block's first rounding instruction when single is set,
+    // and one compiled for single when it is not: one test a block rather than
+    // one an operation. Precision control changes in a block only by its own
+    // fldcw/fldenv/frstor/finit, which clear the check; an x87 region's host
+    // calls leave the region.
+    if ((e.context.wide || e.context.narrow) && ROUNDS.has(op)
+        && x.checkedPrecision !== e.blockIndex)
     {
-        b.localGet(Local.x87Control).i32const(0x300).op(I32.and).op(I32.eqz);
-        e.openIf('single', EMPTY);
+        b.localGet(Local.x87Control).i32const(0x300).op(I32.and);
+        if (e.context.wide)
+        {
+            b.op(I32.eqz);
+        }
+        e.openIf(e.context.wide ? 'single' : 'notSingle', EMPTY);
         // Not `exitBefore`: the exit is conditional, and the block stays an entry.
         e.blockRetired--;
         e.exitAt(instruction.eip, Exit.UNTRANSLATED, PRECISION);
@@ -1530,9 +1538,12 @@ export function emitX87(e, instruction, flagsLive){
             // Checked at the block's first rounding instruction (`emitX87`).
             return;
         }
-        // The mantissa rounded to 24 bits, to nearest even, in the double's
-        // own bits: the exponent range stays the extended one, which a demote
-        // would not keep. Infinity and NaN pass through.
+        if (e.context.narrow)
+        {
+            // Likewise, the other way round.
+            roundSingle(e);
+            return;
+        }
         // Only under single precision: a branch the common control words
         // never take, where computing both and selecting paid the rounding on
         // every operation.
@@ -1540,14 +1551,9 @@ export function emitX87(e, instruction, flagsLive){
         b.localGet(Local.x87Control).i32const(0x300).op(I32.and).op(I32.eqz);
         // Not `single`, the wide regions' way out: under Direct3D this one is taken.
         e.openIf('narrow', EMPTY);
-        b.localGet(x.temp3).op(I64.reinterpretF64).localSet(Local.t64);
-        b.localGet(Local.t64).localGet(Local.t64).i64const(29n).op(I64.shrU).i64const(1n)
-            .op(I64.and).op(I64.add).i64const(0x0fffffffn).op(I64.add)
-            .i64const(-0x20000000n).op(I64.and).localSet(Local.t64b);
-        b.localGet(Local.t64).localGet(Local.t64b);
-        b.localGet(Local.t64).i64const(0x7ff0000000000000n).op(I64.and)
-            .i64const(0x7ff0000000000000n).op(I64.eq);
-        b.select().op(F64.reinterpretI64).localSet(x.temp3);
+        b.localGet(x.temp3);
+        roundSingle(e);
+        b.localSet(x.temp3);
         e.close();
         b.localGet(x.temp3);
     };
@@ -2681,6 +2687,43 @@ function storeFloat(e, operand, pushValue){
         return;
     }
     b.store('f64', { offset: e.layout.ramBase });
+}
+
+/**
+ * Rounds the f64 on the stack to single precision's 24-bit mantissa, to
+ * nearest even, keeping the double's exponent range: under PC = 00 the
+ * processor keeps its own, so a value past a float's range neither overflows
+ * nor goes denormal as a demote to f32 would make it.
+ *
+ * `precise` rounds in the double's bits, as the interpreter does, infinity
+ * and NaN passed through. Otherwise Veltkamp's split: c = x * (2^29 + 1), and
+ * x rounded is c - (c - x) -- three dependent operations where the bits were
+ * ten and a round trip through the integer registers, the rounding being on
+ * the path of every value computed from the result. It gives the same double
+ * for every magnitude under 2^995 - 2^966 (ties included, every pattern of the
+ * kept bits tested); an infinity, a NaN or anything larger, where c overflows
+ * and the difference is a NaN, keeps its value unrounded. A double's own
+ * denormal keeps 24 bits of its own, where the bits round at a fixed place.
+ *
+ * @param {E} e
+ */
+function roundSingle(e){
+    const { b } = e;
+    if (e.context.precise === true)
+    {
+        b.op(I64.reinterpretF64).localSet(Local.t64);
+        b.localGet(Local.t64);
+        b.localGet(Local.t64).localGet(Local.t64).i64const(29n).op(I64.shrU).i64const(1n)
+            .op(I64.and).op(I64.add).i64const(0x0fffffffn).op(I64.add)
+            .i64const(-0x20000000n).op(I64.and);
+        b.localGet(Local.t64).i64const(0x7ff0000000000000n).op(I64.and)
+            .i64const(0x7ff0000000000000n).op(I64.eq);
+        b.select().op(F64.reinterpretI64);
+        return;
+    }
+    b.localTee(Local.d0).f64const(2 ** 29 + 1).op(F64.mul).localTee(Local.d1);
+    b.localGet(Local.d1).localGet(Local.d0).op(F64.sub).op(F64.sub).localTee(Local.d1);
+    b.localGet(Local.d0).localGet(Local.d1).localGet(Local.d1).op(F64.eq).select();
 }
 
 /**
