@@ -753,6 +753,48 @@ test('an edit takes typing at its caret, selects, and tells its parent EN_CHANGE
     assert.equal(context.memory.readCString(OUT, 16), 'replaced!', 'read-only takes nothing');
 });
 
+test('statics and check boxes write their text in the colour WM_CTLCOLORSTATIC set',
+    async()=>{
+        // As documented for WM_CTLCOLORSTATIC: the parent sets the text
+        // colour on the device context it is handed, and the control draws
+        // its text in it. A push button keeps the system colours, as
+        // documented for WM_CTLCOLORBTN.
+        const RED = 0x000000ff;
+        /** @type {any} */
+        let gdi = null;
+        const context = setup({
+            reply: message=>{
+                if (message.message === WM_CTLCOLORSTATIC || message.message === 0x0135)
+                {
+                    gdi.table.SetTextColor.handler([message.wParam, RED]);
+                }
+                return 0;
+            },
+        });
+        gdi = context.gdi;
+        const dialog = await openDialog(context);
+        /** @param {number} id @returns {Set<number>} the pixels in the control */
+        const colours = id=>{
+            context.fns.GetWindowRect.handler([context.fns.GetDlgItem.handler([dialog, id]), OUT]);
+            const [left, top, right, bottom] = [0, 4, 8, 12]
+                .map(at=>context.memory.u32(OUT + at));
+            const seen = new Set();
+            for (let y = top; y < bottom; y++)
+            {
+                for (let x = left; x < right; x++)
+                {
+                    seen.add(context.desktop.read(x, y));
+                }
+            }
+            return seen;
+        };
+        const red = 0x00ff0000;
+        assert.ok(colours(100).has(red), 'the static\'s text is red');
+        assert.ok(!colours(100).has(0), 'and none of it is left black');
+        assert.ok(colours(101).has(red), 'so is the check box\'s');
+        assert.ok(!colours(3).has(red), 'a push button keeps its own');
+    });
+
 test('an edit copies, cuts, pastes and clears through the clipboard, and undoes a change',
     async()=>{
         // user32's edit tests: WM_PASTE inserts the clipboard's CF_TEXT, and a

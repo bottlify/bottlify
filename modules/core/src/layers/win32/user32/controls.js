@@ -449,6 +449,7 @@ const RADIO_DOT = [
  * @property {(hdc: number, rect: Rect, brush: number) => boolean} fillWith
  * @property {(hdc: number, rect: Rect, brush: number) => boolean} frame
  * @property {(hdc: number, rect: Rect) => boolean} invert
+ * @property {(hdc: number) => number} [textColor]  The colour a context draws text in.
  * @property {(hdc: number, x: number, y: number, text: string,
  *     options?: { color?: number, clip?: Rect | null }) => boolean} text
  * @property {(hdc: number, text: string) => { width: number, height: number,
@@ -778,6 +779,16 @@ export function createControlProcedures(host){
     /** @param {any} record */
     const disabled = record=>(record.style & 0x08000000) !== 0;
 
+    /**
+     * The colour a control painted on WM_CTLCOLORSTATIC writes its text in:
+     * whatever the parent left in the context it was handed -- the window
+     * text colour unless the parent set its own -- and grey while disabled.
+     *
+     * @param {any} record @param {number} hdc
+     */
+    const staticInk = (record, hdc)=>(disabled(record) ? color(COLOR_GRAYTEXT)
+        : host.draw?.textColor?.(hdc) ?? color(COLOR_WINDOWTEXT));
+
     // --- Button -------------------------------------------------------------
 
     /** @param {any} record */
@@ -895,7 +906,8 @@ export function createControlProcedures(host){
                 const label = { left: rect.left + 8, top: rect.top,
                     right: rect.left + 8 + metrics.width + 4, bottom: rect.top + metrics.height };
                 background(hdc, label, brush, COLOR_3DFACE);
-                drawText(hdc, text, { ...label, left: label.left + 2 }, DT_SINGLELINE, ink);
+                drawText(hdc, text, { ...label, left: label.left + 2 }, DT_SINGLELINE,
+                    staticInk(record, hdc));
             }
             return;
         }
@@ -932,7 +944,7 @@ export function createControlProcedures(host){
         const textRect = leftText
             ? { ...rect, right: box.left - CHECK_GAP }
             : { ...rect, left: box.right + CHECK_GAP };
-        drawText(hdc, text, textRect, DT_VCENTER | multi, ink);
+        drawText(hdc, text, textRect, DT_VCENTER | multi, staticInk(record, hdc));
     };
 
     /**
@@ -1137,8 +1149,7 @@ export function createControlProcedures(host){
             | (kind === SS_SIMPLE ? DT_SINGLELINE : 0)
             | ((record.style & SS_CENTERIMAGE) !== 0 ? DT_VCENTER | DT_SINGLELINE : 0)
             | ((record.style & SS_NOPREFIX) !== 0 ? DT_NOPREFIX : 0);
-        drawText(hdc, record.title, inside, format,
-            color(disabled(record) ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT));
+        drawText(hdc, record.title, inside, format, staticInk(record, hdc));
         return true;
     };
 
