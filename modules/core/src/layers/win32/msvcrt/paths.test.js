@@ -311,6 +311,34 @@ test('_findfirsti64 and _findnexti64 walk the same way into the 64-bit record', 
     assert.deepEqual([table._findfirsti64.argBytes, table._findnexti64.argBytes], [8, 8]);
 });
 
+/** `struct _wfinddatai64_t`: the same, with 260 wide characters of name. */
+const WFIND64 = { ATTRIB: 0, CREATE: 4, SIZE: 16, NAME: 24, BYTES: 544 };
+
+test('_wfindfirsti64 and _wfindnexti64 take a wide pattern and write wide names', ()=>{
+    const { memory, table, errno, written } = finder();
+    const data = memory.allocate(WFIND64.BYTES);
+    memory.writeMemory(data, new Uint8Array(WFIND64.BYTES).fill(0xcc));
+    const view = new DataView(memory.bytes.buffer, data, WFIND64.BYTES);
+
+    const handle = table._wfindfirsti64.handler([memory.putWide('C:\\game\\*.dat'), data]);
+    assert.notEqual(handle, -1);
+    assert.equal(memory.wide(data + WFIND64.NAME), 'a.dat');
+    assert.equal(view.getUint32(WFIND64.ATTRIB, true), 0x20);
+    assert.equal(view.getUint32(WFIND64.CREATE, true), written / 1000);
+    assert.equal(view.getBigUint64(WFIND64.SIZE, true), 3n);
+    assert.equal(view.getUint8(WFIND64.BYTES - 1), 0, 'the whole record is written');
+
+    assert.equal(table._wfindnexti64.handler([handle, data]), 0);
+    assert.equal(memory.wide(data + WFIND64.NAME), 'b.dat');
+    assert.equal(view.getBigUint64(WFIND64.SIZE, true), 5n);
+    assert.equal(table._wfindnexti64.handler([handle, data]), -1);
+    assert.equal(table._findclose.handler([handle]), 0);
+    assert.equal(table._wfindfirsti64.handler([memory.putWide('C:\\game\\*.exe'), data]), -1);
+    assert.equal(table._wfindfirsti64.handler([0, data]), -1);
+    assert.deepEqual(errno, [2, 2, 22]);
+    assert.deepEqual([table._wfindfirsti64.argBytes, table._wfindnexti64.argBytes], [8, 8]);
+});
+
 test('_findfirsti64 reports a size past 4 GiB whole', ()=>{
     const memory = fakeMemory();
     const big = 5 * 2 ** 30;

@@ -97,6 +97,9 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  *           unexported.
  * @property {() => string[]} [drives]      Letters the filesystem has mounted.
  * @property {() => number} [iob]           Where the runtime's `_iob` was placed, once it has been.
+ * @property {(values: Record<string, number>) => void} [setRegisters]
+ *           Registers a call answers in besides EAX: EDX, for the high half
+ *           of an __int64. Absent, the calls answering one stay unexported.
  * @property {import('./float.js').FloatHost} [fpu]
  * @property {() => string} [commandLine]
  *           What the process was started with, as GetCommandLineA reports it.
@@ -916,6 +919,7 @@ export function createMsvcrtFunctions(host){
         ...(host.files
             ? createPathFunctions({
                 readCString: host.readCString,
+                readMemory: host.readMemory,
                 writeMemory: host.writeMemory,
                 allocate,
                 drives: host.drives,
@@ -931,6 +935,7 @@ export function createMsvcrtFunctions(host){
                 files: host.files,
                 errno,
                 divergence: host.divergence,
+                setRegisters: host.setRegisters,
             }, descriptors)
             : {}),
         ...(stdio ?? {}),

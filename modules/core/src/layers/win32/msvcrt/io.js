@@ -600,6 +600,8 @@ export function createDescriptors(host){
  * @property {(code: number) => void} [errno]
  * @property {(api: string, detail: string) => void} [divergence]
  *           Where a call refuses what real Windows would have done.
+ * @property {(values: Record<string, number>) => void} [setRegisters]
+ *           Where the high half of an __int64 answer goes: EDX.
  */
 
 /**
@@ -666,6 +668,76 @@ export function createIoFunctions(host, descriptors){
         view.setUint32(layout.MTIME, time, true);
         view.setUint32(layout.CTIME, time, true);
         host.writeMemory(address >>> 0, bytes);
+    };
+
+    /**
+     * The body `_lseek` and `_lseeki64` share: the new position; -1 with
+     * EINVAL for an origin that is not one or a position before the start,
+     * EBADF for a number that is not a file.
+     *
+     * @param {number} fd @param {number} offset @param {number} origin
+     */
+    const seekTo = (fd, offset, origin)=>{
+        const descriptor = fileAt(fd);
+        if (!descriptor)
+        {
+            return -1;
+        }
+        const base = origin === SEEK_SET ? 0
+            : origin === SEEK_CUR ? descriptor.position
+                : origin === SEEK_END ? descriptors.size(descriptor) : -1;
+        const position = base + offset;
+        if (base < 0 || position < 0)
+        {
+            fail(EINVAL);
+            return -1;
+        }
+        descriptors.seek(descriptor, position);
+        return position;
+    };
+
+    /**
+     * An __int64 answer: the high half to EDX, the low half returned for EAX.
+     *
+     * @param {number} value
+     */
+    const wide = value=>{
+        const bits = BigInt.asUintN(64, BigInt(value));
+        host.setRegisters?.({ edx: Number(bits >> 32n) });
+        return Number(bits & 0xffffffffn);
+    };
+
+    /**
+     * The body `_fstat` and `_fstati64` share. A file is a regular file
+     * anyone may read and write, on device 0; a console descriptor is a
+     * character device whose device is its number.
+     *
+     * @param {number} fd @param {number} buffer
+     * @param {typeof STAT | typeof STATI64} layout
+     */
+    const statDescriptor = (fd, buffer, layout)=>{
+        const descriptor = descriptors.get(fd | 0);
+        if (!descriptor)
+        {
+            fail(EBADF);
+            return -1;
+        }
+        if ((buffer >>> 0) === 0)
+        {
+            fail(EINVAL);
+            return -1;
+        }
+        if (descriptor.node === null)
+        {
+            writeStat(buffer, { device: fd | 0, mode: S_IFCHR, size: 0, modified: 0 }, layout);
+            return 0;
+        }
+        const entry = host.files.stat(descriptor.path);
+        writeStat(buffer, {
+            device: 0, mode: S_IFREG | ALL_READ | ALL_WRITE,
+            size: entry?.size ?? 0, modified: entry?.modified ?? 0,
+        }, layout);
+        return 0;
     };
 
     /**
@@ -913,24 +985,7 @@ export function createIoFunctions(host, descriptors){
          * The new position; -1 with EINVAL for an origin that is not one or a
          * position before the start, EBADF for a number that is not a file.
          */
-        _lseek: cdecl(12, ([fd, offset, origin])=>{
-            const descriptor = fileAt(fd);
-            if (!descriptor)
-            {
-                return -1;
-            }
-            const base = origin === SEEK_SET ? 0
-                : origin === SEEK_CUR ? descriptor.position
-                    : origin === SEEK_END ? descriptors.size(descriptor) : -1;
-            const position = base + (offset | 0);
-            if (base < 0 || position < 0)
-            {
-                fail(EINVAL);
-                return -1;
-            }
-            descriptors.seek(descriptor, position);
-            return position;
-        }),
+        _lseek: cdecl(12, ([fd, offset, origin])=>seekTo(fd, offset | 0, origin)),
 
         /** long _tell(int fd) -- the position, as `_lseek(fd, 0, SEEK_CUR)` answers it. */
         _tell: cdecl(4, ([fd])=>fileAt(fd)?.position ?? -1),
@@ -996,30 +1051,10 @@ export function createIoFunctions(host, descriptors){
          * A file is a regular file anyone may read and write, on device 0; a
          * console descriptor is a character device whose device is its number.
          */
-        _fstat: cdecl(8, ([fd, buffer])=>{
-            const descriptor = descriptors.get(fd | 0);
-            if (!descriptor)
-            {
-                fail(EBADF);
-                return -1;
-            }
-            if ((buffer >>> 0) === 0)
-            {
-                fail(EINVAL);
-                return -1;
-            }
-            if (descriptor.node === null)
-            {
-                writeStat(buffer, { device: fd | 0, mode: S_IFCHR, size: 0, modified: 0 });
-                return 0;
-            }
-            const entry = host.files.stat(descriptor.path);
-            writeStat(buffer, {
-                device: 0, mode: S_IFREG | ALL_READ | ALL_WRITE,
-                size: entry?.size ?? 0, modified: entry?.modified ?? 0,
-            });
-            return 0;
-        }),
+        _fstat: cdecl(8, ([fd, buffer])=>statDescriptor(fd, buffer, STAT)),
+
+        /** int _fstati64(int fd, struct _stati64 *buffer) -- `_fstat` with the 64-bit size. */
+        _fstati64: cdecl(8, ([fd, buffer])=>statDescriptor(fd, buffer, STATI64)),
 
         /** int _stat(const char *path, struct _stat *buffer) */
         _stat: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT)),
@@ -1030,5 +1065,30 @@ export function createIoFunctions(host, descriptors){
          * `_stat` with a size that goes past 4 GiB, and the same answers.
          */
         _stati64: cdecl(8, ([path, buffer])=>statPath(path, buffer, STATI64)),
+
+        // An __int64 answer is EDX:EAX, and only a seam onto the registers
+        // reaches EDX: without one these would answer a high half that is
+        // whatever the register held, so they stay unexported.
+        ...(host.setRegisters
+            ? {
+                /**
+                 * __int64 _lseeki64(int fd, __int64 offset, int origin)
+                 *
+                 * `_lseek` with an offset and an answer past 4 GiB: -1 as an
+                 * __int64, with the same errno, when it fails.
+                 */
+                _lseeki64: cdecl(16, ([fd, low, high, origin])=>
+                    wide(seekTo(fd, (high | 0) * 0x100000000 + (low >>> 0), origin))),
+
+                /** __int64 _telli64(int fd) */
+                _telli64: cdecl(4, ([fd])=>wide(fileAt(fd)?.position ?? -1)),
+
+                /** __int64 _filelengthi64(int fd) */
+                _filelengthi64: cdecl(4, ([fd])=>{
+                    const descriptor = fileAt(fd);
+                    return wide(descriptor ? descriptors.size(descriptor) : -1);
+                }),
+            }
+            : {}),
     };
 }

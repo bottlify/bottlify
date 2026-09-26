@@ -354,6 +354,81 @@ test('_stati64 reports a size past 4 GiB whole', ()=>{
     assert.equal(view.getBigInt64(STATI64.SIZE, true), BigInt(big));
 });
 
+/**
+ * The descriptor calls with a register for the high half of an __int64
+ * answer, which a program reads from EDX:EAX.
+ *
+ * @param {Record<string, Uint8Array>} [contents]
+ */
+function wide(contents = {}){
+    const memory = fakeMemory();
+    const files = fakeVolume(contents, { directories: ['C:\\', 'C:\\game'] });
+    /** @type {number[]} */
+    const errno = [];
+    const registers = { edx: 0x5a5a5a5a };
+    const fns = /** @type {Record<string, any>} */ (createIoFunctions({
+        ...memory, files, errno: code=>errno.push(code),
+        setRegisters: values=>Object.assign(registers, values),
+    }, createDescriptors({ files, errno: code=>errno.push(code) })));
+    /** @param {number} eax */
+    const pair = eax=>BigInt(registers.edx >>> 0) << 32n | BigInt(eax >>> 0);
+    /** @param {string} path @param {number} flags */
+    const open = (path, flags)=>fns._open.handler([memory.put(path), flags, 0x180]);
+    return { memory, files, errno, fns, pair, open };
+}
+
+test('_lseeki64, _telli64 and _filelengthi64 answer in EDX:EAX', ()=>{
+    const { files, errno, fns, pair, open } = wide({ 'C:\\game\\data.bin': bytesOf('12345') });
+    const fd = open('C:\\game\\data.bin', O_RDWR | O_BINARY);
+
+    assert.equal(pair(fns._lseeki64.handler([fd, 3, 0, SEEK_SET])), 3n);
+    assert.equal(pair(fns._telli64.handler([fd])), 3n);
+    assert.equal(pair(fns._lseeki64.handler([fd, -1, -1, SEEK_END])), 4n, 'a negative offset');
+    assert.equal(pair(fns._lseeki64.handler([fd, 0, 1, SEEK_SET])), 0x100000000n,
+        'past 4 GiB');
+    assert.equal(pair(fns._telli64.handler([fd])), 0x100000000n);
+    assert.equal(pair(fns._filelengthi64.handler([fd])), 5n);
+    assert.equal(pair(fns._telli64.handler([fd])), 0x100000000n, 'the position stays');
+
+    files.stat = ()=>({ exists: true, isDirectory: false, size: 5 * 2 ** 30, modified: 0 });
+    assert.equal(pair(fns._filelengthi64.handler([fd])), BigInt(5 * 2 ** 30));
+
+    for (const call of [
+        ()=>fns._lseeki64.handler([77, 0, 0, SEEK_SET]),
+        ()=>fns._telli64.handler([77]),
+        ()=>fns._filelengthi64.handler([77]),
+    ])
+    {
+        assert.equal(pair(call()), 0xffffffffffffffffn, '-1 as an __int64');
+    }
+    assert.equal(pair(fns._lseeki64.handler([fd, -1, -1, SEEK_SET])), 0xffffffffffffffffn);
+    assert.deepEqual(errno, [EBADF, EBADF, EBADF, EINVAL]);
+    assert.deepEqual([fns._lseeki64.argBytes, fns._telli64.argBytes,
+        fns._filelengthi64.argBytes], [16, 4, 4]);
+});
+
+test('_fstati64 answers as _fstat does, into the record with the 64-bit size', ()=>{
+    const { memory, fns, open } = wide({ 'C:\\game\\data.bin': bytesOf('12345') });
+    const stat = memory.allocate(STATI64.BYTES);
+    memory.writeMemory(stat, new Uint8Array(STATI64.BYTES).fill(0xcc));
+    const view = new DataView(memory.bytes.buffer, stat, STATI64.BYTES);
+
+    assert.equal(fns._fstati64.handler([open('C:\\game\\data.bin', O_RDONLY), stat]), 0);
+    assert.equal(view.getUint16(STATI64.MODE, true), 0x8000 | 0o666);
+    assert.equal(view.getBigInt64(STATI64.SIZE, true), 5n);
+    assert.equal(view.getUint32(44, true), 0, 'the whole record');
+    assert.equal(fns._fstati64.handler([1, stat]), 0);
+    assert.equal(view.getUint16(STATI64.MODE, true), 0x2000, 'the console');
+    assert.equal(fns._fstati64.handler([77, stat]), -1);
+});
+
+test('without a register for the high half the __int64 calls are not exported', ()=>{
+    const { fns } = build();
+    assert.deepEqual([fns._lseeki64, fns._telli64, fns._filelengthi64],
+        [undefined, undefined, undefined]);
+    assert.notEqual(fns._fstati64, undefined, 'its answer is an int');
+});
+
 test('a stream\'s read folds text as the program reads it and consumes only that', ()=>{
     // Wine's msvcrt test_asciimode: CR CR LF is CR LF, and "foo" then ^Z is
     // three bytes and then the end.
