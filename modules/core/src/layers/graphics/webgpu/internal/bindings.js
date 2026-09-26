@@ -146,6 +146,10 @@ export const UNIFORM_ALIGNMENT = 256;
  * and each write is a trip to the GPU process. The queue orders those writes
  * after the submits before them, so a wrap overwrites only blocks whose frames
  * have finished; what was laid before a wrap or a new ring is written first.
+ * That holds only while one frame's blocks fit the ring: the writes of a frame
+ * all land before its own submit, so a frame that wrapped onto its own first
+ * blocks would draw them with its last ones. A frame that would is handed a
+ * ring twice the size instead, and the draws it has already bound keep theirs.
  *
  * @param {Object} options
  * @param {import('../contract.js').GpuDeviceLike} options.device
@@ -167,6 +171,8 @@ export function createUniformPool(options){
     /** The laid bytes not yet written: [pendingFrom, pendingTo). */
     let pendingFrom = 0;
     let pendingTo = 0;
+    /** Ring bytes the frame being recorded has used, a wrap's skipped tail included. */
+    let frameUsed = 0;
 
     const flush = ()=>{
         if (ring && pendingTo > pendingFrom)
@@ -200,10 +206,12 @@ export function createUniformPool(options){
          */
         allocate(block){
             const needed = Math.ceil(block.byteLength / UNIFORM_ALIGNMENT) * UNIFORM_ALIGNMENT;
-            if (needed > capacity)
+            const tail = cursor + needed > capacity ? capacity - cursor : 0;
+            if (needed > capacity || (ring && frameUsed + tail + needed > capacity))
             {
                 capacity = Math.max(capacity * 2, needed);
                 make();
+                frameUsed = 0;
             }
             if (!ring)
             {
@@ -212,12 +220,14 @@ export function createUniformPool(options){
             else if (cursor + needed > capacity)
             {
                 flush();
+                frameUsed += capacity - cursor;
                 cursor = 0;
                 pendingFrom = 0;
                 pendingTo = 0;
             }
             const at = cursor;
             cursor += needed;
+            frameUsed += needed;
             reused++;
             const bytes = block instanceof Uint8Array
                 ? block
@@ -232,8 +242,9 @@ export function createUniformPool(options){
         /** Writes what was laid since the last write; before every submit. */
         flush,
 
-        /** Nothing to return: the ring is reused by wrapping. */
+        /** The frame is submitted: the next may wrap onto its blocks. */
         endFrame(){
+            frameUsed = 0;
         },
 
         stats(){

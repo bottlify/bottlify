@@ -96,6 +96,7 @@ test('the ring wraps rather than growing, and a block larger than it gets a larg
 
     pool.allocate(new Uint8Array(64));
     pool.allocate(new Uint8Array(64));
+    pool.endFrame();
     const wrapped = pool.allocate(new Uint8Array(64).fill(3));
     assert.equal(wrapped.dynamicOffset, 0,
         'back to the start: the queue orders the write after the submits before it');
@@ -109,4 +110,41 @@ test('the ring wraps rather than growing, and a block larger than it gets a larg
     assert.ok(gpu.of('createBuffer')[1].descriptor.size >= 1024);
     assert.equal(large.dynamicOffset, 0);
     assert.deepEqual(pool.stats(), { created: 2, reused: 4, writes: 2 });
+});
+
+test('a frame whose blocks outgrow the ring gets a larger one, not a wrap onto itself', ()=>{
+    // Every write of a frame lands before its own submit, so a block laid over
+    // one the same frame handed out earlier is what that earlier draw reads:
+    // a frame of more draws than the ring holds drew its first draws with the
+    // uniforms of its last.
+    const gpu = createFakeDevice();
+    const pool = createUniformPool({ device: gpu.device, queue: gpu.queue, capacity: 1024 });
+    /** @type {{ buffer: any, dynamicOffset: number }[]} */
+    const blocks = [];
+    for (let draw = 0; draw < 12; draw++)
+    {
+        blocks.push(pool.allocate(new Uint8Array(64).fill(draw + 1)));
+    }
+    pool.flush();
+    const places = new Set(blocks.map(block=>`${block.buffer.id}@${block.dynamicOffset}`));
+    assert.equal(places.size, 12, 'no two blocks of one frame share a place');
+    blocks.forEach((block, draw)=>assert.equal(block.buffer.bytes[block.dynamicOffset], draw + 1,
+        `draw ${draw} reads its own block`));
+    assert.ok(gpu.count('createBuffer') > 1, 'the frame was given a larger ring');
+
+    // The ring doubles as a frame outgrows it, so it settles at a size the
+    // frames fit, and from there wraps from one frame into the next.
+    /** @param {number} count */
+    const frame = count=>{
+        pool.endFrame();
+        for (let draw = 0; draw < count; draw++)
+        {
+            pool.allocate(new Uint8Array(64));
+        }
+    };
+    frame(12);
+    const rings = gpu.count('createBuffer');
+    frame(12);
+    frame(12);
+    assert.equal(gpu.count('createBuffer'), rings, 'frames that fit keep the ring they have');
 });

@@ -159,7 +159,10 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
   keyed on those identities and lives as long as the backend. The blocks are laid into a copy of the
   ring on this side and reach the GPU in one `writeBuffer` per frame, just before its submit (and
   once more before a wrap or a new ring), not in one per block: a shader draw hands out six blocks,
-  and each write is a trip to the GPU process.
+  and each write is a trip to the GPU process. A frame whose blocks would outgrow the ring is handed
+  one twice the size rather than wrapping onto its own first blocks, since every write of a frame
+  lands before its submit and those first draws would read the last ones' uniforms -- a frame of
+  fixed-function OpenGL draws, a kilobyte of uniforms each, reached that at about four thousand.
 - **Dynamic buffers** (`internal/buffers.js`). A lock's flags are a promise: `DISCARD` renames the
   backing and only bytes written since travel; `NOOVERWRITE` renames nothing and sends the newly
   written ranges; neither flag leaves the decision to whether a draw of a frame not yet submitted
