@@ -927,6 +927,12 @@ export function createDialogFunctions(options){
         {
             return 0;
         }
+        // Destroyed while it was being made, and not by EndDialog: there is
+        // no dialog to run, as though it could not be made.
+        if (record.destroyed && record.dialogResult === undefined)
+        {
+            return DIALOG_FAILED;
+        }
         // The owner is disabled for as long as the dialog is up, as Windows
         // disables it: a program asking IsWindowEnabled of its own frame
         // meanwhile is told no, and a click on the frame reaches nothing.

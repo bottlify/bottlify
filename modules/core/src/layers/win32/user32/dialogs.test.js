@@ -546,6 +546,50 @@ test('a quit retrieved inside a modal loop ends the dialog and is put back', asy
     assert.equal(queue.quitPending(), true, 'the loop outside has yet to see it');
 });
 
+test('DialogBox answers -1 for a dialog its procedure destroyed during WM_INITDIALOG, and 0 '
+    + 'for one destroyed later', async()=>{
+    // user32's dialog tests (test_DialogBoxParam): DestroyWindow from
+    // WM_INITDIALOG leaves no dialog to run, and DialogBox answers -1;
+    // destroyed from WM_CLOSE once it runs, it answers 0; EndDialog from
+    // WM_INITDIALOG answers what EndDialog was given.
+    const WM_CLOSE = 0x0010;
+    /** @type {any} */
+    let table = null;
+    let how = 'destroy';
+    const { memory, fns } = setup({ dispatch: (wndProc, message)=>{
+        if (message.message === WM_INITDIALOG)
+        {
+            if (how === 'destroy')
+            {
+                table.DestroyWindow.handler([message.hwnd]);
+            }
+            else if (how === 'end')
+            {
+                table.EndDialog.handler([message.hwnd, 1]);
+            }
+            else
+            {
+                table.PostMessageA.handler([message.hwnd, WM_CLOSE, 0, 0]);
+            }
+            return 1;
+        }
+        if (message.message === WM_CLOSE)
+        {
+            table.DestroyWindow.handler([message.hwnd]);
+            return 1;
+        }
+        return 0;
+    } });
+    table = fns;
+    putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6 }]);
+    const run = ()=>fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    assert.equal(await run(), -1);
+    how = 'end';
+    assert.equal(await run(), 1);
+    how = 'close';
+    assert.equal(await run(), 0);
+});
+
 test('coordinates are dialog units, not pixels', ()=>{
     // Four horizontal units to a character width and eight vertical to a
     // character height. Read as pixels, every control lands in the top-left
