@@ -177,6 +177,13 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
         },
         registry: ()=>({ toJSON: ()=>({ HKLM: {} }) }),
         session: { export: ()=>[{ path: 'C:\\a.txt', bytes: Uint8Array.of(1, 2) }] },
+        files: {
+            /** @param {string} path */
+            list: path=>[{ name: 'a.txt', path: path + '\\a.txt', directory: false, size: 2,
+                modified: 0 }],
+            /** @param {string} path */
+            read: path=>(path === 'C:\\a.txt' ? Uint8Array.of(1, 2) : new Uint8Array(0)),
+        },
         diagnostics: ()=>[
             { name: 'cpu', metrics: { instructions: 5, ring: ()=>0,
                 tail: Uint8Array.of(1, 2), texels: new Uint8Array(4096),
@@ -662,6 +669,14 @@ test('diagnostics cross as they are, less what a clone refuses, whole or one lay
     assert.deepEqual(await remote.diagnostics('nothing'), []);
     const counted = remote.traffic();
     assert.ok(counted.request >= 3 && counted.answer >= 3, 'the port counts what crossed');
+    await remote.dispose();
+});
+
+test('the page lists and reads the volume while the program runs', async()=>{
+    const { remote } = await connect();
+    assert.deepEqual(await remote.files.list('C:'),
+        [{ name: 'a.txt', path: 'C:\\a.txt', directory: false, size: 2, modified: 0 }]);
+    assert.deepEqual(await remote.files.read('C:\\a.txt'), Uint8Array.of(1, 2));
     await remote.dispose();
 });
 

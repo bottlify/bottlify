@@ -66,6 +66,25 @@ test('a file handed in at start lies over the session\'s own', { timeout: 15000 
     assert.equal(new TextDecoder().decode(held.bytes), 'set realmlist mine');
 });
 
+test('the volume is read from outside while it runs: a file saved by an earlier run too', async t=>{
+    // A saved game lives in the bottle's storage, not in what this run wrote:
+    // the session's export does not hold it, the volume does.
+    const path = 'C:\\App\\save\\slot1.sav';
+    const app = await startApp(t, {
+        storage: { load: async()=>({
+            files: [{ path, bytes: Uint8Array.of(7, 8, 9) }],
+            registry: null,
+        }) },
+    });
+    const entry = app.files.list('C:\\App\\save')
+        .find((/** @type {any} */ e)=>e.path === path);
+    assert.deepEqual(entry && { name: entry.name, directory: entry.directory, size: entry.size },
+        { name: 'slot1.sav', directory: false, size: 3 });
+    assert.deepEqual(app.files.read(path), Uint8Array.of(7, 8, 9));
+    assert.ok(app.files.list('C:\\App')
+        .some((/** @type {any} */ e)=>e.name === 'save' && e.directory));
+});
+
 test('hello.exe prints what it prints on Windows, then exits cleanly',
     { timeout: 15000 }, async t=>{
         const app = await startApp(t);

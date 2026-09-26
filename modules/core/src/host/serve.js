@@ -645,6 +645,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 : tables.filter((/** @type {{ name: string }} */ table)=>table.name === layer));
         },
         trace: ()=>app.trace(),
+        'files.list': (/** @type {string} */ path)=>app.files.list(path),
+        'files.read': (/** @type {string} */ path)=>app.files.read(path),
         presented: ()=>({ count: frames, history: presented.slice() }),
         /*
          * The emulator's account of where the guest ran, by address. Only the

@@ -386,6 +386,13 @@ export async function createRemoteApp(wiring){
         traffic: ()=>({ ...traffic }),
         /** @returns {Promise<string>} */
         trace: ()=>request('trace'),
+        /** The volume as the program sees it (the local controller's `files`), asked of the worker. */
+        files: {
+            /** @param {string} path @returns {Promise<any[]>} */
+            list: path=>request('files.list', [path]),
+            /** @param {string} path @returns {Promise<Uint8Array>} */
+            read: path=>request('files.read', [path]),
+        },
         /** @returns {Promise<{ count: number, history: import('./messages.js').Presented[] }>} */
         presented: ()=>request('presented'),
 

@@ -213,6 +213,8 @@ settings panel prints it.
 | `input.detach()`, `input.send(event)`, `input.poll()` | synchronous | |
 | `session.export()` | `SessionFile[]` | Synchronous, once `run()` has resolved; throws `the program has not exited yet` before. Empty unless `collectOnExit`. |
 | `registry()` | `{ toJSON() }` | The registry as of exit; same rule. |
+| `files.list(path)` | `Promise<{ name, path, directory, size, modified }[]>` | A directory of the volume as the program sees it, while it runs: the bundle, the system volume and what the program wrote, a file a previous run saved among it -- which `session.export()` does not hold. |
+| `files.read(path)` | `Promise<Uint8Array>` | A file of that volume, whole. Opened sharing read and write, so a file the program holds open reads as it stands. |
 | `canvas`, `host` | | The viewport adopted, or `null`; `'worker'` or `'thread'`. |
 
 Events an engine emits and the page may subscribe to include `frame`, `output`, `exit`, `error`,

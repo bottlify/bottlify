@@ -5469,6 +5469,41 @@ async function buildApp(options){
         },
 
         /**
+         * The volume as the program sees it, read from outside while it runs:
+         * a directory's entries and a file's bytes, the bundle, the system
+         * volume and what the program wrote alike.
+         */
+        files: {
+            /**
+             * @param {string} path
+             * @returns {{ name: string, path: string, directory: boolean, size: number,
+             *     modified: number }[]}
+             */
+            list: path=>filesystem.list(path).map((/** @type {any} */ entry)=>({
+                name: entry.name, path: entry.path, directory: entry.directory === true,
+                size: entry.size ?? 0, modified: entry.modified ?? 0 })),
+            /**
+             * The whole file. Bytes of the bundle not fetched yet read as what
+             * the bundle's reader answers for them.
+             *
+             * @param {string} path
+             * @returns {Uint8Array}
+             */
+            read: path=>{
+                const handle = filesystem.open(path,
+                    { read: true, shareRead: true, shareWrite: true });
+                try
+                {
+                    return filesystem.read(handle, filesystem.size(handle));
+                }
+                finally
+                {
+                    filesystem.close(handle);
+                }
+            },
+        },
+
+        /**
          * What the translator has made of this bundle's code, as the seed a
          * bundle carries (`attachTranslations`); null without a translating
          * engine or a store. Asked before `dispose`, which takes the
