@@ -1412,6 +1412,48 @@ export function placePatches(patches, base, size){
 const LIBRARY_ALIGN = 0x10000;
 
 /**
+ * The system libraries in every process, whatever it imports.
+ */
+const ALWAYS_LOADED = ['ntdll', 'kernel32'];
+
+/**
+ * What loading one system library brings in with it: the libraries it
+ * imports itself on Windows, as far as those this engine provides go. A
+ * program that imports USER32 finds GDI32 loaded, and may ask for a handle
+ * to it without ever having loaded it.
+ *
+ * @type {Readonly<Record<string, string[]>>}
+ */
+const SYSTEM_IMPORTS = Object.freeze({
+    user32: ['gdi32', 'advapi32'],
+    gdi32: ['user32'],
+    advapi32: ['rpcrt4'],
+    rpcrt4: ['advapi32'],
+    ole32: ['advapi32', 'gdi32', 'user32', 'rpcrt4', 'msvcrt'],
+    oleaut32: ['ole32', 'rpcrt4', 'user32', 'gdi32', 'advapi32'],
+    shell32: ['shlwapi', 'comctl32', 'user32', 'gdi32', 'advapi32', 'msvcrt'],
+    shlwapi: ['advapi32', 'gdi32', 'user32', 'msvcrt'],
+    comctl32: ['advapi32', 'gdi32', 'user32', 'msvcrt'],
+    comdlg32: ['shell32', 'shlwapi', 'comctl32', 'gdi32', 'user32', 'msvcrt'],
+    winmm: ['advapi32', 'user32'],
+    msacm32: ['winmm', 'user32', 'advapi32'],
+    imm32: ['user32', 'gdi32', 'advapi32'],
+    wsock32: ['ws2_32', 'mswsock'],
+    ws2_32: ['advapi32', 'msvcrt'],
+    mswsock: ['ws2_32', 'advapi32', 'msvcrt'],
+    mpr: ['advapi32', 'user32'],
+    wininet: ['shlwapi', 'user32', 'advapi32', 'msvcrt'],
+    winspool: ['gdi32', 'user32', 'advapi32'],
+    quartz: ['ole32', 'oleaut32', 'user32', 'gdi32', 'advapi32', 'winmm', 'msvcrt'],
+    ddraw: ['user32', 'gdi32', 'advapi32', 'msvcrt'],
+    d3d8: ['user32', 'gdi32', 'advapi32', 'msvcrt'],
+    d3d9: ['user32', 'gdi32', 'advapi32', 'msvcrt'],
+    dsound: ['winmm', 'user32', 'advapi32', 'ole32', 'msvcrt'],
+    dinput: ['user32', 'advapi32', 'msvcrt'],
+    dinput8: ['user32', 'advapi32', 'msvcrt'],
+});
+
+/**
  * Where a mounted game appears inside the guest's volume: its files sit
  * directly in this directory, the way an installation's do.
  *
@@ -2429,6 +2471,28 @@ async function buildApp(options){
     /** @type {any} */
     let mainModule = null;
 
+    /**
+     * Marks a module the process has loaded, with what it brings in, for
+     * everything that answers only about loaded modules: GetModuleHandle and
+     * PEB->Ldr. A module synthesised at the start is there to be bound to
+     * whenever it is asked for, but it is loaded only once something imports
+     * it or loads it.
+     *
+     * @param {any} module
+     */
+    const markLoaded = module=>{
+        if (!module || module.loaded !== false)
+        {
+            return;
+        }
+        module.loaded = true;
+        threadBlocks?.addModule(module);
+        for (const imported of SYSTEM_IMPORTS[moduleKeyOf(module.name)] ?? [])
+        {
+            markLoaded(byName.get(imported) ?? null);
+        }
+    };
+
     /** @param {string | null} name */
     const findModule = name=>{
         if (name === null || name === '')
@@ -3142,8 +3206,16 @@ async function buildApp(options){
             },
             arena: { base: HEAP_BASE, size: HEAP_SIZE },
             modules: {
-                /** @param {string | null} name */
-                find: name=>findModule(name),
+                /**
+                 * A module the process has loaded: one synthesised but not yet
+                 * imported or loaded is not there to be asked about.
+                 *
+                 * @param {string | null} name
+                 */
+                find: name=>{
+                    const module = findModule(name);
+                    return module?.loaded === false ? null : module;
+                },
                 /** @param {number} base */
                 byBase: base=>byBase.get(base >>> 0) ?? null,
                 imagePath: ()=>options.imagePath ?? 'C:\\app.exe',
@@ -3606,10 +3678,15 @@ async function buildApp(options){
             // from the first instruction, but its entry point is a promise
             // to whoever loads it, and runs on that caller's thread.
             attached: false,
+            loaded: false,
         };
         byName.set(moduleKeyOf(name), record);
         byBase.set(base, record);
     });
+    for (const name of ALWAYS_LOADED)
+    {
+        markLoaded(byName.get(name) ?? null);
+    }
 
     /**
      * An import's address, wherever the library that provides it came from.
@@ -3629,6 +3706,7 @@ async function buildApp(options){
         {
             return null;
         }
+        markLoaded(module);
         const address = name !== null
             ? module.addressOf(name)
             : ordinal === null ? null : module.addressOfOrdinal(ordinal);
@@ -4016,6 +4094,7 @@ async function buildApp(options){
         }
         if (loaded)
         {
+            markLoaded(loaded);
             if (loaded.attached !== false || !loaded.entryPoint)
             {
                 return loaded.base;
@@ -4393,13 +4472,15 @@ async function buildApp(options){
         commandLine: options.commandLine ?? `"${options.imagePath ?? 'C:\\app.exe'}"`,
         currentDirectory: filesystem.currentDirectory(),
         standardHandles: { input: 0, output: 0, error: 0 },
-        // Every module in the table by the time the first instruction runs:
-        // every system library, everything the program shipped, and the
-        // program's own image -- PEB->Ldr walked before a program calls a
-        // single import of its own finds all of them, never an empty list.
-        modules: [...byBase.values()].map(held=>held === mainModule ? {
-            ...held, entryPoint: image.entryPoint, size: mainModule.image.sizeOfImage,
-        } : held),
+        // Every module loaded by the time the first instruction runs: the
+        // system libraries it imports and theirs, everything the program
+        // shipped, and the program's own image -- PEB->Ldr walked before a
+        // program calls a single import of its own finds all of them, never
+        // an empty list. A system library loaded later joins it then.
+        modules: [...byBase.values()].filter(held=>held.loaded !== false)
+            .map(held=>held === mainModule ? {
+                ...held, entryPoint: image.entryPoint, size: mainModule.image.sizeOfImage,
+            } : held),
     });
     threadBlocks = process;
 

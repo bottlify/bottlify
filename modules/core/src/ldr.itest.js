@@ -90,3 +90,63 @@ test('a fixture that walks InLoadOrderModuleList counts every module, never a nu
     assert.ok(count > 1, `expected more than the program's own entry, got ${count}`);
     assert.ok(count < 256, 'the walk ended by reaching the head again, not by wrapping the count');
 });
+
+/** @param {string} text @returns {number[]} */
+const cString = text=>[...text].map(c=>c.charCodeAt(0)).concat(0);
+
+/**
+ * Asks GetModuleHandleA about three libraries, and a fourth time after loading
+ * one of them, and exits with one bit per handle that came back non-zero:
+ * comctl32 before (1), kernel32 (2), gdi32 (4), comctl32 after (8).
+ */
+function buildHandlesExe(){
+    return buildExe({
+        imports: {
+            'KERNEL32.dll': ['GetModuleHandleA', 'LoadLibraryA', 'ExitProcess'],
+            'USER32.dll': ['MessageBeep'],
+        },
+        data: {
+            comctl: cString('comctl32.dll'), kernel: cString('KERNEL32.DLL'),
+            gdi: cString('gdi32'),
+        },
+        codeSize: 0x80,
+        code: ({ iat, at })=>{
+            /** @param {string} name @param {number} bit */
+            const handle = (name, bit)=>[
+                0x68, ...u32(at(name)), //                     push name
+                0xff, 0x15, ...u32(iat('GetModuleHandleA')), // call [GetModuleHandleA]
+                0x85, 0xc0, 0x74, 0x03, //                     test eax, eax; jz +3
+                0x80, 0xcb, bit, //                            or bl, bit
+            ];
+            return [
+                0x31, 0xdb, //                                 xor ebx, ebx
+                ...handle('comctl', 1),
+                ...handle('kernel', 2),
+                ...handle('gdi', 4),
+                0x68, ...u32(at('comctl')), //                 push comctl
+                0xff, 0x15, ...u32(iat('LoadLibraryA')), //    call [LoadLibraryA]
+                ...handle('comctl', 8),
+                0x53, //                                       push ebx
+                0xff, 0x15, ...u32(iat('ExitProcess')),
+            ];
+        },
+    });
+}
+
+test('a module is there for GetModuleHandle once it is loaded, and not before', async t=>{
+    // Wine's own tests find comctl32 absent from a program that imports only
+    // user32 and friends; a system library the program imports brings in
+    // those it imports itself, and kernel32 is in every process.
+    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+    const app = await createApp({
+        executable: buildHandlesExe(),
+        imagePath: 'C:\\App\\Handles.exe',
+        v86: {
+            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+        },
+    });
+    t.after(()=>app.dispose());
+
+    assert.equal(await app.run({ timeoutMs: 8000 }), 2 | 4 | 8);
+});
