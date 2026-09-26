@@ -134,6 +134,7 @@ test('a stage generating its coordinates takes them from the vertex in camera sp
     assert.ok(normal.includes('vec4f(cameraNormal, 1.0)'));
     const lit = generate(baseState({
         fvf: FVF.XYZ | FVF.NORMAL, stages: [stage(TCI.CAMERASPACEREFLECTIONVECTOR)],
+        normalizeNormals: true,
     })).code;
     assert.ok(lit.includes(
         'let cameraNormal = normalize((uniforms.worldView * vec4f(vertex.normal, 0.0)).xyz);'));
@@ -463,13 +464,40 @@ test('a lit vertex transforms its normal by the world matrix and renormalises', 
     // Lighting happens in world space. A normal left in object space is lit as
     // though the model never rotated, which reads as light that follows the
     // geometry around -- and only once something rotates.
-    const code = generate(baseState({ fvf: LIT_FVF, lighting: lighting() })).code;
+    const code = generate(baseState({
+        fvf: LIT_FVF, lighting: lighting(), normalizeNormals: true,
+    })).code;
     assert.match(code,
         /let worldNormal = normalize\(\(uniforms\.world \* vec4f\(vertex\.normal, 0\.0\)\)\.xyz\);/);
     assert.match(code,
         /let worldPosition = \(uniforms\.world \* vec4f\(vertex\.position, 1\.0\)\)\.xyz;/);
     // The position still goes through the whole product, not the world matrix.
     assert.match(code, /out\.position = uniforms\.worldViewProjection/);
+});
+
+test('with NORMALIZENORMALS off a normal keeps the length its transform gave it', ()=>{
+    // The state's default. A normal longer or shorter than one -- as the
+    // program supplied it, or scaled by the world matrix -- lights its vertex
+    // by that length on Windows, and only D3DRS_NORMALIZENORMALS renormalises
+    // it, for lighting and for a coordinate generated from it alike.
+    const lit = generate(baseState({ fvf: LIT_FVF, lighting: lighting() })).code;
+    assert.ok(lit.includes(
+        'let worldNormal = (uniforms.world * vec4f(vertex.normal, 0.0)).xyz;'), lit);
+    const generating = {
+        colorOp: D3DTOP.SELECTARG1, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
+        alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.DIFFUSE, alphaArg2: D3DTA.CURRENT,
+        texCoordIndex: TCI.CAMERASPACENORMAL,
+    };
+    const unnormalized = generate(baseState({
+        fvf: FVF.XYZ | FVF.NORMAL, stages: [generating],
+    })).code;
+    assert.ok(unnormalized.includes(
+        'let cameraNormal = (uniforms.worldView * vec4f(vertex.normal, 0.0)).xyz;'));
+    const normalized = generate(baseState({
+        fvf: FVF.XYZ | FVF.NORMAL, stages: [generating], normalizeNormals: true,
+    })).code;
+    assert.ok(normalized.includes(
+        'let cameraNormal = normalize((uniforms.worldView * vec4f(vertex.normal, 0.0)).xyz);'));
 });
 
 test('a directional light is a negated direction and nothing else', ()=>{

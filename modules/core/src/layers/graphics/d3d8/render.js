@@ -1329,6 +1329,7 @@ export function pipelineStateOf(model, shape){
         // computed it or the program supplied it.
         specularEnable: rs('SPECULARENABLE') !== 0,
         lighting: shape.lighting ?? null,
+        normalizeNormals: rs('NORMALIZENORMALS') !== 0,
         ...(shape.vertexLayout ? {
             vertexLayout: shape.vertexLayout,
             vertexLayoutKey: shape.vertexLayoutKey,

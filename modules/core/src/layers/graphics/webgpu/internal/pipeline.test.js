@@ -87,6 +87,7 @@ test('every field the descriptor reads is a field the key folds', ()=>{
         alphaFunc: 8,
         fogMode: 3,
         specularEnable: true,
+        normalizeNormals: true,
     };
 
     const original = pipelineKey(base);

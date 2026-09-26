@@ -1786,6 +1786,27 @@ test('a state with no lighting in its shape is unlit, and still reads the specul
     assert.equal(state.specularEnable, true, 'but the specular state is read from the device');
 });
 
+test('a state renormalises its normals only when NORMALIZENORMALS asks', ()=>{
+    const model = /** @type {any} */ ({
+        renderStates: new Map([[D3DRS.LIGHTING, 1]]),
+        stageStates: ()=>new Map(),
+        textures: new Map(),
+        transforms: new Map(),
+        lights: new Map(),
+        material: material8(),
+    });
+    const shape = {
+        fvf: FVF.XYZ | FVF.NORMAL,
+        topology: 'triangle-list',
+        targetFormat: 'bgra8unorm',
+        depthFormat: undefined,
+        stages: [],
+    };
+    assert.equal(pipelineStateOf(model, shape).normalizeNormals, false, 'off by default');
+    model.renderStates.set(D3DRS.NORMALIZENORMALS, 1);
+    assert.equal(pipelineStateOf(model, shape).normalizeNormals, true);
+});
+
 test('the run counts what lighting it was actually asked for', async()=>{
     // A picture that is uniformly too dark or too flat cannot be diagnosed from
     // the frame. The question is always whether the program enabled lighting,

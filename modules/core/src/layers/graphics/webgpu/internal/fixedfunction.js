@@ -453,14 +453,22 @@ function lightContribution(index, type, specular){
 }
 
 /**
+ * A transformed normal, renormalised when the program asked for it.
+ *
+ * @param {string} expression @param {boolean} normalizeNormals @returns {string}
+ */
+const normalized = (expression, normalizeNormals)=>
+    (normalizeNormals ? `normalize(${expression})` : expression);
+
+/**
  * The vertex-shader body that lights a vertex, in place of copying its colours
  * through.
  *
  * Lighting is done in world space, so the normal is transformed by the world
- * matrix and renormalised. Renormalising is unconditional rather than following
- * D3DRS_NORMALIZENORMALS: that state exists to buy back the cost of the square
- * root, and skipping it is only correct when the world matrix has no scale --
- * where renormalising is a no-op anyway.
+ * matrix, and renormalised only under D3DRS_NORMALIZENORMALS. Off -- its
+ * default -- a normal that arrives longer or shorter than one, or is scaled by
+ * the world matrix, lights its vertex by that length, which is what a program
+ * that leaves the state off is shown.
  *
  * Transforming a normal by the world matrix rather than by its inverse
  * transpose is what the fixed-function pipeline specifies; the two differ only
@@ -469,9 +477,10 @@ function lightContribution(index, type, specular){
  * @param {import('./pipeline.js').LightingState} lighting
  * @param {(name: string)=>boolean} has
  * @param {boolean} specular
+ * @param {boolean} normalizeNormals  D3DRS_NORMALIZENORMALS.
  * @returns {string}
  */
-function lightingBody(lighting, has, specular){
+function lightingBody(lighting, has, specular, normalizeNormals){
     // With no light enabled the specular sum is zero however it is written, and
     // emitting the terms anyway would leave the shader carrying an eye vector
     // and an accumulator nothing reads.
@@ -479,7 +488,8 @@ function lightingBody(lighting, has, specular){
     /** @type {string[]} */
     const lines = [
         '    let worldPosition = (uniforms.world * vec4f(vertex.position, 1.0)).xyz;',
-        '    let worldNormal = normalize((uniforms.world * vec4f(vertex.normal, 0.0)).xyz);',
+        `    let worldNormal = ${normalized('(uniforms.world * vec4f(vertex.normal, 0.0)).xyz',
+            normalizeNormals)};`,
     ];
     if (highlights)
     {
@@ -539,6 +549,7 @@ export function generateFixedFunction(state, layout){
         layout.attributes.some(attribute=>attribute.name === name);
     const lighting = state.lighting ?? null;
     const specularEnable = state.specularEnable === true;
+    const normalizeNormals = state.normalizeNormals === true;
     if (lighting && !has('normal'))
     {
         throw new Error('A lit vertex format must carry a normal');
@@ -557,7 +568,7 @@ export function generateFixedFunction(state, layout){
     varyings.push(`    @location(${location++}) specular: vec4f,`);
     if (lighting)
     {
-        assignments.push(lightingBody(lighting, has, specularEnable));
+        assignments.push(lightingBody(lighting, has, specularEnable, normalizeNormals));
     }
     else
     {
@@ -586,7 +597,8 @@ export function generateFixedFunction(state, layout){
         assignments.push(
             '    let cameraPosition = (uniforms.worldView * vec4f(vertex.position, 1.0)).xyz;',
             `    let cameraNormal = ${has('normal')
-                ? 'normalize((uniforms.worldView * vec4f(vertex.normal, 0.0)).xyz)'
+                ? normalized('(uniforms.worldView * vec4f(vertex.normal, 0.0)).xyz',
+                    normalizeNormals)
                 : 'vec3f(0.0, 0.0, 1.0)'};`);
     }
     for (const [index, stage] of state.stages.entries())

@@ -165,6 +165,9 @@ function lookUp(table, value, what){
  * @property {StageKey[]} stages         Empty means no cascade at all.
  * @property {boolean} [specularEnable]  D3DRS_SPECULARENABLE.
  * @property {LightingState | null} [lighting]  Absent or null means unlit.
+ * @property {boolean} [normalizeNormals]
+ *     D3DRS_NORMALIZENORMALS: whether a normal is renormalised after its
+ *     transform, for lighting and for a coordinate generated from it.
  * @property {import('./vertexformat.js').VertexLayout} [vertexLayout]
  *     The vertex layout when the vertex format cannot spell it -- a declaration
  *     read by the fixed-function stage -- with `vertexLayoutKey` naming it.
@@ -221,8 +224,10 @@ export function pipelineKey(state){
         state.specularEnable ? 1 : 0,
         lightingKey(state.lighting),
         // Only a layout the format cannot spell adds a part, so every key of a
-        // formatted draw reads as it always has.
+        // formatted draw reads as it always has; the same for the states below,
+        // each named so that no two optional parts can be read as each other.
         ...(state.vertexLayoutKey === undefined ? [] : [state.vertexLayoutKey]),
+        ...(state.normalizeNormals ? ['normalize'] : []),
     ].join('|');
 }
 
