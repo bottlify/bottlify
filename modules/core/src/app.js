@@ -2353,6 +2353,7 @@ export function createKernelGl(opengl, journalCall, traced, counters){
  * @param {AppOptions & {
  *     events?: any,
  *     seed?: { path: string, bytes?: Uint8Array, delete?: boolean }[],
+ *     hive?: any,
  *     patches?: { address: number, bytes: Uint8Array }[],
  *     spawned?: (request: any) => void,
  *     logSinks?: Map<Function, (payload: any) => void>,
@@ -3286,6 +3287,13 @@ async function buildApp(options){
     if (seeded.registry)
     {
         core.api('win32').registry().fromJSON(seeded.registry);
+    }
+    // And the registry of the process that started this one, which is the
+    // same registry: a machine has one, and a child reads what its parent
+    // wrote a moment before starting it -- a write no save may have reached.
+    if (options.hive)
+    {
+        core.api('win32').registry().fromJSON(options.hive);
     }
 
     // One way out. What the program writes is announced once the writes settle;
@@ -5815,6 +5823,7 @@ export async function createApp(options){
             commandLine: request.commandLine,
             patches: request.patches,
             seed: parent.session.export(),
+            hive: parent.registry().toJSON(),
         }));
         replayLogLevels();
         Object.assign(facade, current, own);
@@ -5828,7 +5837,9 @@ export async function createApp(options){
 
         // Read while the child's machine stands, and put back into the
         // parent's: what an installer's second stage laid down is what the
-        // first stage goes on to find.
+        // first stage goes on to find. The child's registry began as the
+        // parent's, and the parent wrote nothing while it waited, so the
+        // child's is the whole of it.
         const files = current.session.export();
         const registry = current.registry().toJSON();
         noteLogSequence();
@@ -5879,6 +5890,7 @@ export async function createApp(options){
             // child is launched against files that no longer exist.
             const child = await current.readImage(request.imagePath);
             const carried = current.session.export();
+            const hive = current.registry().toJSON();
             // The sequence the journal reached, read while the machine that
             // wrote it still stands. The child's journal continues from
             // here, so the cursor a reader is holding points into it rather
@@ -5908,6 +5920,7 @@ export async function createApp(options){
                 commandLine: request.commandLine,
                 patches: request.patches,
                 seed: carried,
+                hive,
             }));
             imagePath = request.imagePath;
             replayLogLevels();
