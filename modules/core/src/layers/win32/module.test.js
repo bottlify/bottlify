@@ -387,3 +387,27 @@ test('a Windows that is not one of the four is refused when the layer is made', 
     await assert.rejects(win32Module.create({ windows: 'win98' }, stubHost()),
         /win2000, winxp, win7, win10/);
 });
+
+test('the configured Windows\'s profile folders are made on the volume at start', async()=>{
+    // The folders the registry and the environment name for this Windows, and
+    // not the other layout's.
+    /** @type {string[]} */
+    const made = [];
+    const host = stubHost();
+    const filesystem = {
+        drives: ()=>[],
+        stat: ()=>null,
+        createDirectory: (/** @type {string} */ path)=>{
+            made.push(path);
+        },
+    };
+    await win32Module.create({ windows: 'win7' }, /** @type {any} */ ({
+        ...host,
+        requireApi: (/** @type {string} */ name)=>(name === 'filesystem'
+            ? filesystem : host.requireApi(name)),
+    }));
+    assert.ok(made.includes('C:\\Users\\User\\AppData\\Roaming'));
+    assert.ok(made.includes('C:\\ProgramData'));
+    assert.ok(!made.some(path=>path.startsWith('C:\\Documents and Settings')));
+    await win32Module.dispose();
+});

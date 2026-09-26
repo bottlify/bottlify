@@ -41,7 +41,7 @@ import { createRegistryFunctions } from './advapi32/functions.js';
 import { ADMINISTRATORS_SID, createTokenFunctions, isTokenMember } from './advapi32/tokens.js';
 import { createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
-import { createHive, shellFolders } from './advapi32/registry.js';
+import { createHive, profileDirectories, shellFolders } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
 import { createSocketRegistry } from './wsock32/sockets.js';
@@ -1073,6 +1073,7 @@ export const win32Module = {
                     readCString,
                     readWideString,
                     files: volume,
+                    directories: profileDirectories(windows),
                     imagePath: ()=>modules.imagePath(),
                     setLastError: setError,
                     writeConsole: (handle, text)=>sink(handle, text),
