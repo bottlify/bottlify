@@ -115,6 +115,7 @@ const NORMAL_PRIORITY_CLASS = 0x20;
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, maxLength: number) => string} [readWideString]
  * @property {() => any} currentThread     The record per-thread state hangs on.
  * @property {() => number} now            Guest milliseconds since boot.
  * @property {() => number} systemTimeMs   Guest wall clock, milliseconds since 1970.
@@ -365,6 +366,21 @@ export function createProcessFunctions(host){
     const { stateOf, setError, lastErrorOf } = createThreadState(host.currentThread, memory);
 
     /**
+     * GetModuleHandle's answer for a name already read, null for the running
+     * image; nothing is loaded by asking.
+     *
+     * @param {string | null} name
+     */
+    const moduleHandleOf = name=>{
+        const handle = host.moduleHandle(name) >>> 0;
+        if (handle === 0)
+        {
+            setError(ERROR_MOD_NOT_FOUND);
+        }
+        return handle;
+    };
+
+    /**
      * The guest-side paths, placed once and shared by the exports that use
      * them: reading and writing the last error, and reading a TLS slot.
      *
@@ -600,17 +616,18 @@ export function createProcessFunctions(host){
         GetModuleHandleA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([pointer])=>{
-                const name = pointer === 0
-                    ? null
-                    : host.readCString(pointer >>> 0, MAX_MODULE_NAME);
-                const handle = host.moduleHandle(name) >>> 0;
-                if (handle === 0)
-                {
-                    setError(ERROR_MOD_NOT_FOUND);
-                }
-                return handle;
-            },
+            handler: ([pointer])=>moduleHandleOf(pointer === 0
+                ? null
+                : host.readCString(pointer >>> 0, MAX_MODULE_NAME)),
+        },
+
+        /** HMODULE GetModuleHandleW(LPCWSTR lpModuleName) */
+        GetModuleHandleW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>moduleHandleOf(pointer === 0
+                ? null
+                : host.readWideString?.(pointer >>> 0, MAX_MODULE_NAME) ?? ''),
         },
 
         /** DWORD GetVersion(VOID) */

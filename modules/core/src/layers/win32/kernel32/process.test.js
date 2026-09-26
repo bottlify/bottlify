@@ -86,6 +86,20 @@ function fakeHost({ arena = 0 } = {}){
             }
             return text;
         },
+        /** @param {number} address @param {number} maxLength */
+        readWideString(address, maxLength){
+            let text = '';
+            for (let i = 0; i < maxLength && address + i * 2 + 1 < bytes.length; i++)
+            {
+                const unit = view.getUint16(address + i * 2, true);
+                if (unit === 0)
+                {
+                    break;
+                }
+                text += String.fromCharCode(unit);
+            }
+            return text;
+        },
         /** @param {string | null} name */
         moduleHandle: name=>(name === null || name.toLowerCase() === 'app.exe' ? IMAGE_BASE : 0),
         /** @param {number} milliseconds */
@@ -331,6 +345,24 @@ test('GetModuleHandleA answers for the image itself and fails for what is not lo
     assert.equal(fns.GetModuleHandleA.handler([put(0x600, 'app.exe')]), IMAGE_BASE);
 
     assert.equal(fns.GetModuleHandleA.handler([put(0x700, 'nowhere.dll')]), 0);
+    assert.equal(fns.GetLastError.handler(), ERROR_MOD_NOT_FOUND);
+});
+
+test('GetModuleHandleW is the same lookup through a wide name', ()=>{
+    const { host, fns } = setup();
+    /** @param {number} address @param {string} text */
+    const putWide = (address, text)=>{
+        [...text, '\0'].forEach((ch, i)=>
+            host.view.setUint16(address + i * 2, ch.charCodeAt(0), true));
+        return address;
+    };
+
+    assert.equal(fns.GetModuleHandleW.argBytes, 4);
+    assert.equal(fns.GetModuleHandleW.handler([0]), IMAGE_BASE, 'NULL means the running image');
+    assert.equal(fns.GetModuleHandleW.handler([putWide(0x600, 'APP.EXE')]), IMAGE_BASE);
+
+    fns.SetLastError.handler([0]);
+    assert.equal(fns.GetModuleHandleW.handler([putWide(0x700, 'nowhere.dll')]), 0);
     assert.equal(fns.GetLastError.handler(), ERROR_MOD_NOT_FOUND);
 });
 

@@ -842,6 +842,7 @@ export const win32Module = {
                     readMemory,
                     writeMemory,
                     readCString,
+                    readWideString,
                     currentThread: ()=>kernel.currentThread(),
                     now: ()=>kernel.clock.virtualTime(),
                     systemTimeMs: ()=>kernel.clock.wallClock(),
