@@ -292,6 +292,26 @@ function parse(argv){
             const [x, y, after] = argv[index + 1].split(',');
             return [{ x: Number(x), y: Number(y), ...afterOf(after) }];
         }),
+        // Clicks and key taps at a wall-clock moment, milliseconds after the
+        // run starts, as `x,y,ms` and `Code,ms`: a screen that waits for a
+        // click without presenting -- a dialog, a film's first frame -- never
+        // reaches the frame a frame-counted click would be sent on.
+        clickTimes: argv.flatMap((flag, index)=>{
+            if (flag !== '--click-at')
+            {
+                return [];
+            }
+            const [x, y, atMs] = argv[index + 1].split(',').map(Number);
+            return [{ x, y, atMs }];
+        }),
+        keyTimes: argv.flatMap((flag, index)=>{
+            if (flag !== '--key-at')
+            {
+                return [];
+            }
+            const [code, atMs] = argv[index + 1].split(',');
+            return [{ code, atMs: Number(atMs) }];
+        }),
         // Key taps in the program's own keyboard codes, after that many
         // presented frames each, as `Code,after`: pressed on one frame and
         // released on the next. `Code` is a KeyboardEvent.code -- `Enter`,
@@ -1190,6 +1210,8 @@ export async function game(options){
             snapCount: options.snapCount,
             snapEvery: options.snapEvery,
             clicks: options.clicks,
+            clickTimes: options.clickTimes,
+            keyTimes: options.keyTimes,
             typed: options.typed,
             looks: options.looks,
             pasted: options.pasted,
