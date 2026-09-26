@@ -105,14 +105,14 @@ reading each table:
 | `D3D10_1.dll` | 27 | `D3D10CreateDevice1` and `D3D10CreateDeviceAndSwapChain1`, which make an `ID3D10Device1` at feature level 10.0 and answer `DXGI_ERROR_UNSUPPORTED` for 10.1 and the 9.x levels, and the other 25 of `D3D10.dll`. |
 | `DXGI.dll` | 2 | `CreateDXGIFactory`, and `CreateDXGIFactory1`, whose factory and adapters answer as DXGI 1.1's. |
 | `D3D8.dll` | 1 | `Direct3DCreate8`. |
-| `D3D9.dll` | 1 | `Direct3DCreate9`. |
+| `D3D9.dll` | 2 | `Direct3DCreate9`, and `Direct3DCreate9Ex`, whose root answers as both `IDirect3D9Ex` and `IDirect3D9`. |
 
 The COM entry points are thin on purpose: each makes one object and publishes one interface, and
 everything a program does afterwards goes through the vtable. The vtable slot lists are in
-`src/layers/graphics/seam/vtables.js` (DirectDraw, Direct3D 7 and 8: 22 lists, 288 slots),
-`src/layers/graphics/d3d9/interfaces.js` (11 lists) and `src/layers/graphics/seam/d3d10.js`
-(29 lists for DXGI and Direct3D 10, three of them the shader reflection's tables without
-`IUnknown`).
+`src/layers/graphics/seam/vtables.js` (DirectDraw, Direct3D 7 and 8, and `IDirect3D9`: 27 lists,
+582 slots), `src/layers/graphics/d3d9/interfaces.js` (18 lists, three of them 9Ex's) and
+`src/layers/graphics/seam/d3d10.js` (29 lists for DXGI and Direct3D 10, three of them the shader
+reflection's tables without `IUnknown`).
 
 ### `diagnostics()`
 
@@ -122,7 +122,7 @@ everything a program does afterwards goes through the vtable. The vtable slot li
 | `libraries` | The library names published. |
 | `created` | Which APIs a program actually asked for, in order. |
 | `seam.created`, `seam.interfaces` | Objects made through the entry points; interfaces published. |
-| `seam.device` | The most recent Direct3D 8 device's counters, or the Direct3D 9 one's: `frames`, `draws`, `clears`, `programmable`, `prepared` (`built`, `reused`), `programs`, `skipped.*`, `cascade.*`, `failures`, `lighting.*`, `recording`, `recentFrames`, `lastFrame`, `lastDump`, `textureRecords`, `textures`, `redundantTransforms`. Each `recentFrames` entry (the last 240 presents) carries `draws`, `offscreenDraws` and `offscreenTargets` (draws into a target other than the back buffer, and how many such targets), `clears` and `clearColor` (the last whole clear of the back buffer as `#aarrggbb`, empty when there was none), `viewport` (`x,y wxh` at the present) and `target` (the back buffer's size), plus `placeholder`, `truncated`, `uploads`, `textures`, fog and light summaries -- so a frame that only cleared, or drew only offscreen, or drew into a viewport that is not the picture, is read off the record rather than guessed from a screenshot. When neither made a device and the OpenGL runtime drew, its renderer's counters instead: `frames`, `pipelines`, `draws`, `clears`, `fallbacks`, `uploads`, `renames`, `refused`, `skipped`, `cut`, `resident`, `samplers`, `unflushed`, `failures`, `lastDump`. |
+| `seam.device` | The most recent Direct3D 8 device's counters, or the Direct3D 9 one's: `frames`, `draws`, `clears`, `programmable`, `mipsGenerated`, `prepared` (`built`, `reused`), `programs`, `skipped.*`, `cascade.*`, `failures`, `lighting.*`, `recording`, `recentFrames`, `lastFrame`, `lastDump`, `textureRecords`, `textures`, `redundantTransforms`. Each `recentFrames` entry (the last 240 presents) carries `draws`, `offscreenDraws` and `offscreenTargets` (draws into a target other than the back buffer, and how many such targets), `clears` and `clearColor` (the last whole clear of the back buffer as `#aarrggbb`, empty when there was none), `viewport` (`x,y wxh` at the present) and `target` (the back buffer's size), plus `placeholder`, `truncated`, `uploads`, `textures`, fog and light summaries -- so a frame that only cleared, or drew only offscreen, or drew into a viewport that is not the picture, is read off the record rather than guessed from a screenshot. When neither made a device and the OpenGL runtime drew, its renderer's counters instead: `frames`, `pipelines`, `draws`, `clears`, `fallbacks`, `uploads`, `renames`, `refused`, `skipped`, `cut`, `resident`, `samplers`, `unflushed`, `failures`, `lastDump`. |
 | `seam.vulkan` | `placed` traps, `objects` by kind, `unimplemented` by command name. |
 | `shadow` | The Direct3D 8 guest-side state block: `placed`, `slowPath`, `renderStateCalls`, `transformCalls`, `bindingCalls`, `lockCalls`, `unlockCalls`, `textureCalls`, `stageStateCalls`, `materialCalls`, `buffers`, `synced`, `skipped`, `refused`. |
 | `backend` | Profiler snapshot (`frames`, `counters`, `uploadsByLabel`, `recentFrames` with phases), `shaders` (`builds`, `errors`, `warnings`, `dropped`, `distinct`), `shaderMessages`, `pipelines` (`built`, `reused`, `resident`), `uniforms`, `buffers` per dynamic buffer (`renames`, `pooled`, `dirty`), `frameOpen`, `pendingTextureCopies`, `surfaceWrites`, `presents`. |
@@ -210,13 +210,15 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
   it, and nothing at all for an empty list; a texture transform of two to four coordinates is
   applied per stage, for every one of the eight (the block carries a matrix per stage); a stage set
   to `D3DTSS_TCI_CAMERASPACEPOSITION`, `_CAMERASPACENORMAL` or `_CAMERASPACEREFLECTIONVECTOR` takes
-  its coordinate from the vertex through world and view, through the stage's whole transform, in the
-  vertex stage, whatever set the vertex carries, and under `D3DTTFF_PROJECTED` is divided per pixel
-  by the count's last component (a pixel shader over fixed-function vertices is handed the same four
-  components undivided); per-vertex lighting is unrolled per enabled light (point, spot,
-  directional, with range, attenuation and cone in uniforms), the normal carried into world space by
-  the inverse transpose of the world matrix (`normalMatrix` in the block, so a non-affine world
-  leaves a surface unlit as Direct3D does) and renormalised -- there and for a generated coordinate
+  its coordinate from the vertex through world and view -- the normal by the inverse transpose of
+  the two (`cameraNormalMatrix` in the block, computed only when a stage generates from the
+  normal) -- through the stage's whole transform, in the vertex stage, whatever set the vertex
+  carries, and under `D3DTTFF_PROJECTED` is divided per pixel by the count's last component (a
+  pixel shader over fixed-function vertices is handed the same four components undivided);
+  per-vertex lighting is unrolled per enabled light (point, spot, directional, with range,
+  attenuation and cone in uniforms), the normal carried into world space by the inverse transpose
+  of the world matrix (`normalMatrix` in the block, so a non-affine world leaves a surface unlit as
+  Direct3D does) and renormalised -- there and for a generated coordinate
   -- only under `D3DRS_NORMALIZENORMALS`, the material sources honour `D3DRS_COLORVERTEX`, the
   specular sum is added after the cascade, and alpha comes from the diffuse source alone. Fog
   (`LINEAR`, `EXP`, `EXP2`) takes its factor where Direct3D does: table fog per pixel, the curve
@@ -311,14 +313,17 @@ Per API:
 - **`d3d7.js`** publishes no root; it hands the DirectDraw seam the `IDirect3D7` descriptor to put
   beside its own, and keeps one Direct3D 7 object per DirectDraw object. A draw takes its vertex
   format as an argument and its indices by pointer.
-- **`d3d8.js`** publishes `IDirect3D8`, `IDirect3DDevice8`, surfaces, textures, vertex and index
-  buffers. Modes are offered in `D3DFMT_X8R8G8B8` only. Present parameters use Direct3D 8's own
-  layout, which differs from 9's. `Clear` takes the rectangle count at its word, as 9's does: a
-  count of zero clears nothing whatever the pointer, and a null array the whole target.
-- **`d3d9.js`** publishes the eleven interfaces of `d3d9/interfaces.js`, including vertex
-  declarations, shaders, state blocks, swap chains and queries. Nearly every create ends in a
-  shared-handle pointer that must be null; a handful of methods return a count, a boolean or a
-  float rather than an `HRESULT`.
+- **`d3d8.js`** publishes `IDirect3D8`, `IDirect3DDevice8`, additional swap chains, surfaces,
+  textures, cube and volume textures and their volumes, vertex and index buffers; a vertex or pixel
+  shader is a handle, as Direct3D 8 has it, not an interface. Modes are offered in
+  `D3DFMT_X8R8G8B8` only. Present parameters use Direct3D 8's own layout, which differs from 9's.
+  `Clear` takes the rectangle count at its word, as 9's does: a count of zero clears nothing
+  whatever the pointer, and a null array the whole target.
+- **`d3d9.js`** publishes the interfaces of `d3d9/interfaces.js`, including cube and volume
+  textures, vertex declarations, shaders, state blocks, swap chains and queries, and -- for a root
+  `Direct3DCreate9Ex` made -- the root's, device's and swap chain's 9Ex interfaces beside the plain
+  ones. Nearly every create ends in a shared-handle pointer that must be null; a handful of methods
+  return a count, a boolean or a float rather than an `HRESULT`.
 - **`d3d10.js`** publishes the DXGI factory, adapter, output, swap chain and device interfaces and
   the Direct3D 10 and 10.1 device, resources, views, state objects, shaders, queries, state
   blocks, blobs and the shader reflection. The reflection's constant buffers, variables and types
@@ -417,8 +422,8 @@ the GPU has drawn (`UpdateSurface`, `UpdateTexture`, a `StretchRect` or `CopyRec
 surface) replaces the whole level with the guest bytes, which the draw was never read back into,
 so a partial blit onto a drawn target reverts the rest of it; and a mip-chained render-target
 texture is drawn into one level at a time, with nothing generating the smaller levels from the
-drawn one (`D3DUSAGE_AUTOGENMIPMAP` and `GenerateMipSubLevels` do nothing), so a sample that
-reaches those levels reads what the guest put there.
+drawn one unless it was made with Direct3D 9's `D3DUSAGE_AUTOGENMIPMAP`, so a sample that reaches
+those levels reads what the guest put there.
 
 A draw is prepared once per state change rather than once per draw. The device raises one counter,
 `drawStateVersion`, for every state change a preparation depends on -- a render state, a stage
@@ -455,6 +460,34 @@ texture at the first present that finds it bound on no stage, after that frame's
 holds its texture without a public reference (binding changes no count, as the API reports it), so a
 program may release its own reference and go on drawing with it. `diagnostics().textureRecords`
 lists the textures still held.
+
+Both versions make cube and volume textures. A cube is six array layers of one backend texture
+sampled through a cube view, each face locked, uploaded and drawn into as its own layer; a volume is
+one 3D texture, each level uploaded with all its slices and its third coordinate addressed by
+`D3DTSS_ADDRESSW`. A fixed-function cube stage samples the direction its coordinate set carries, or
+a generated vector; a shader's `dcl_cube` or `dcl_volume` sampler binds a texture of that kind. A
+texture keeps a dirty region -- it starts dirty, a lock adds its rectangle or box unless it is
+`D3DLOCK_READONLY` or `D3DLOCK_NO_DIRTY_UPDATE`, and `AddDirtyRect` and `AddDirtyBox` add one -- and
+`UpdateTexture` carries only that region into each level, then clears it. Texture palettes are kept,
+though no palettised format is made. `CreateAdditionalSwapChain` makes a windowed chain with back
+buffers of its own, presenting into the device's window when it names none. `GetFrontBuffer` (8) and
+`GetFrontBufferData` (9, on the device and on a chain) read back the picture the chain last
+presented, after that frame and before the next, into a system-memory `A8R8G8B8` surface, the caller
+waiting on the read. `ProcessVertices` transforms and lights the bound streams into a vertex buffer
+with the arithmetic Direct3D 7's vertex buffers use (`d3d7/process.js`); `d3d8/process.js` supplies
+what a draw would read and the destination's layout.
+
+Direct3D 8 makes vertex shaders to `vs_1_1` and pixel shaders to `ps_1_4`. `d3d8/declaration.js`
+reads a vertex shader's declaration token by token -- streams, registers at the running offset,
+skips, `D3DVSD_CONST` values -- into Direct3D 9 elements of the usage each `D3DVSDE_*` register
+names; the function is translated as Direct3D 9's `vs_1_1` is, with each of `v0`-`v15` declared as
+that usage, and draws over the fixed-function pixel stage or a pixel shader. A declaration made
+without a function drives the fixed-function stage, several streams included, for draws and for
+`ProcessVertices`. Setting a shader loads the constants its declaration carries. A pixel shader
+draws through the same translation, over a vertex shader or over the fixed vertex stage made from
+the declaration or the vertex format, with its eight constants and the stage states its 1.x reads
+take. The shader constants are recorded into a state block as the other states are, and the
+`Get*Declaration` and `Get*Function` calls hand the tokens back as given.
 
 **Direct3D 9** (`src/layers/graphics/d3d9/`). The device advertises vertex and pixel shader model
 2.0 -- the version the translator builds a pipeline from whole -- and refuses a create for a higher
@@ -495,6 +528,38 @@ nothing bound reads as zero. A declaration this stage cannot read -- a tessellat
 weights, a colour that is not a `D3DCOLOR`, a position of another type, coordinate sets with a gap,
 or a member past its stream's stride -- is dropped, counted in `skipped.layout` and reported once,
 rather than raised into the program's thread.
+
+A 1.x pixel shader draws its whole texture machine: a stage's read samples the texture bound there,
+of its dimension, and below 1.4 at its coordinate set divided as `D3DTTFF_PROJECTED` asks; `texbem`,
+`texbeml` and `bem` move coordinates by the stage's `D3DTSS_BUMPENVMAT` (carried in pixel constants
+past the shader's own, filled from the stage states at each draw); the `texm3x2` and `texm3x3` rows,
+`texreg2ar`, `texreg2gb`, `texreg2rgb`, `texdp3tex`, `texdp3`, `texdepth` and `texm3x2depth` compute
+what the reference describes; a destination's shift is applied, `texcoord` holds its coordinates to
+[0, 1], and a 1.x shader's constants read held to [-1, 1]. A 1.x translation is kept per dimension
+bound at each stage and per projection. An indexed draw is instanced by `SetStreamSourceFreq`: it
+draws as many instances as stream zero's frequency counts when that stream is marked
+`D3DSTREAMSOURCE_INDEXEDDATA` or another is marked `D3DSTREAMSOURCE_INSTANCEDATA`, and such a stream
+is a vertex buffer stepping once an instance, bound at its own offset. An occlusion query counts
+through the backend's per-frame query set, the one Direct3D 10 counts through: each draw between its
+`BEGIN` and `END` counts in a slot of its own, and a frame's counts are read after it is submitted,
+so one count spans targets, passes and frames. `GetData` answers `S_FALSE` until every frame the
+count took in has come back, `D3DGETDATA_FLUSH` sends the recorded draws and has the caller wait,
+and the count is written in as many of its four bytes as the caller has room for. A texture made
+with `D3DUSAGE_AUTOGENMIPMAP` shows the program one level and has the rest drawn from it on the GPU
+whenever its top level changes or `GenerateMipSubLevels` is called, ahead of the next draw that
+samples it.
+
+**Direct3D 9Ex** is the same device behind more interfaces. `Direct3DCreate9Ex` hands back a root
+answering `IDirect3D9Ex` and `IDirect3D9` with one count; its `CreateDevice` and `CreateDeviceEx`
+make a device that answers `IDirect3DDevice9Ex`, whose chains answer `IDirect3DSwapChain9Ex`, where
+a root, device or chain from `Direct3DCreate9` answers none of the three. Such a device keeps 9Ex's
+rules: it is never lost -- `TestCooperativeLevel` succeeds, and once the GPU is gone `Present`,
+`PresentEx` and `CheckDeviceState` answer `D3DERR_DEVICEREMOVED` -- it has no managed pool, takes
+`D3DSWAPEFFECT_FLIPEX` and up to thirty back buffers, and resets without waiting for default-pool
+resources, keeping its state but for the targets, the viewport's rectangle and the scissor. The mode
+calls take a `D3DDISPLAYMODEFILTER` and fill a `D3DDISPLAYMODEEX`; the Ex slots answer the frame
+latency, the GPU thread priority, residency, `GetLastPresentCount` and the vertical blank of the
+chain there is.
 
 **Direct3D 10 and DXGI** (`src/layers/graphics/d3d10/`). `dxbc.js` opens the container (`ISGN`,
 `OSGN`, `SHDR`; older token streams answer `E_INVALIDARG`); `sm4.js` decodes the token stream with
@@ -695,14 +760,16 @@ reports that size. Each version's caps claim what its renderer honours. Direct3D
 stages and simultaneous textures, 4096-texel textures, eight active lights, every compare and blend,
 point and linear filtering with no anisotropy, wrap, mirror and clamp addressing, projected
 textures, the texture operations the combiner draws (derived from its own list, so the two cannot
-part), vertex, table, range, Z-based and W-based fog, a readable scan line, `TEXGEN`, and no cube
-maps, stencil operations, user clip planes or blend matrices, with both shader versions at zero;
-what is left beyond the renderer -- `TEXGEN`'s sphere map, a projected transform over a carried
-coordinate set -- is accepted and reported (see *Limitations*). Direct3D 9's `DEFAULT_CAPS`
-(`d3d9/device.js`) and `capabilityWords` (`d3d9/caps.js`) claim shader model 2.0 for both stages,
-eight lights, no user clip planes, no anisotropy, no stencil operations, the same combiner-derived
-texture operations, the same fog, the scissor test and a readable scan line. Direct3D 7's
-(`d3d7/caps.js`) claim range fog and point and linear mip filtering among the rest.
+part), vertex, table, range, Z-based and W-based fog, a readable scan line, `TEXGEN`, cube and
+volume maps, vertex shader 1.1 with 256 constants and pixel shader 1.4 with a `MaxPixelShaderValue`
+of 1, and no stencil operations, user clip planes, blend matrices, full-screen gamma or alpha in a
+palette; what is left beyond the renderer -- `TEXGEN`'s sphere map, a projected transform over a
+carried coordinate set -- is accepted and reported (see *Limitations*). Direct3D 9's
+`DEFAULT_CAPS` (`d3d9/device.js`) and `capabilityWords` (`d3d9/caps.js`) claim shader model 2.0 for
+both stages, cube and volume maps, generated mipmaps (`D3DCAPS2_CANAUTOGENMIPMAP`), eight lights, no
+user clip planes, no anisotropy, no stencil operations, the same combiner-derived texture
+operations, the same fog, the scissor test and a readable scan line. Direct3D 7's (`d3d7/caps.js`)
+claim range fog and point and linear mip filtering among the rest.
 
 ### The divergence rule
 
@@ -731,19 +798,23 @@ by nothing else.
 
 Refused (the program is told no):
 
-- Direct3D 8: `CreateVertexShader` and `CreatePixelShader` are absent from the table on purpose,
-  so a program takes the fixed-function path the renderer draws; `CreateCubeTexture`,
-  `CreateVolumeTexture` and `CreateAdditionalSwapChain` answer `D3DERR_NOTAVAILABLE`; the four
-  palette calls, `ProcessVertices` and `GetFrontBuffer` answer `D3DERR_INVALIDCALL`;
-  `SetCursorProperties` answers `D3DERR_INVALIDCALL` unless a `cursor` receiver is configured;
-  `GetInfo` answers `S_FALSE`; `SetViewport` past the target answers `D3DERR_INVALIDCALL`, as
-  Direct3D 8 does. A texture in a format the device does not offer is refused and reported once per
-  format.
-- Direct3D 9: `CreateCubeTexture`, `CreateVolumeTexture`, `CreateAdditionalSwapChain` answer
-  `D3DERR_NOTAVAILABLE`; a shader above model 2.0 is refused at create; `maxUserClipPlanes` is
-  zero. `GetNPatchMode` returns a float in `ST(0)`, which the bridge cannot set, and is reported.
-  `IDirect3DSurface9::GetDC` on a surface of any other format answers `D3DERR_INVALIDCALL` with the
-  handle untouched.
+- Direct3D 8: a vertex shader declaration with a tessellator stream; `ProcessVertices` with a vertex
+  shader bound (nothing runs one on the processor), which is reported; a volume texture in a
+  block-compressed or depth format, the first reported; `SetCursorProperties` answers
+  `D3DERR_INVALIDCALL` unless a `cursor` receiver is configured; `GetInfo` answers `S_FALSE`;
+  `SetViewport` past the target answers `D3DERR_INVALIDCALL`, as Direct3D 8 does; `DrawRectPatch`,
+  `DrawTriPatch` and `DeletePatch` are absent. A texture in a format the device does not offer is
+  refused and reported once per format.
+- Direct3D 9: a shader above model 2.0 is refused at create; `maxUserClipPlanes` is zero;
+  `ProcessVertices` through a vertex shader and a volume texture in a block-compressed or depth
+  format are refused as in Direct3D 8; `DrawRectPatch`, `DrawTriPatch` and `DeletePatch` answer
+  `D3DERR_INVALIDCALL`. `GetNPatchMode` returns a float in `ST(0)`, which the bridge cannot set, and
+  is reported. `IDirect3DSurface9::GetDC` on a surface of any other format answers
+  `D3DERR_INVALIDCALL` with the handle untouched.
+- Direct3D 9Ex: a shared handle, as the plain interfaces refuse it; `GetPresentStats`, nothing here
+  seeing the display's refreshes; `SetConvolutionMonoKernel` and `ComposeRects` are absent.
+  `PresentEx` presents as `Present` does, its flags not honoured, and `S_PRESENT_OCCLUDED` is never
+  answered.
 - Direct3D 10: a shader using an untranslated instruction has its draws refused by name (counted in
   `skipped.untranslatable`); a geometry shader with stream output answers `E_NOTIMPL`; a
   multisampled resource (`CheckMultisampleQualityLevels` offers one sample only); a 10.1 device at
@@ -768,9 +839,17 @@ Accepted and reported through `divergence`:
   set in the low bits is sampled as the vertex carries it; a texture transform of one coordinate,
   or a projected one over a set the vertex carries; a texture-stage cascade cut short because a stage reads `TEXTURE` with
   nothing bound or names a coordinate set the vertex lacks (the draw runs untextured from that
-  stage on, counted under `cascade.noTexture` / `cascade.noCoordSet`); a draw with a vertex shader
-  feeding the fixed-function pixel stage, or a shader pair the renderer could not build a pipeline
-  for; a render state or transform set in the guest shadow that the device refuses.
+  stage on, counted under `cascade.noTexture` / `cascade.noCoordSet`); a shader the translator
+  refuses or a declaration it cannot lay out, whose draws are not drawn (`skipped.program`); a
+  sampler declared of one dimension with a texture of another bound there, which samples nothing; a
+  render state or transform set in the guest shadow that the device refuses.
+- Direct3D 8 and 9: a swap chain presenting into a window the display does not show -- its own, or a
+  `Present` override -- has its frame drawn and submitted, not shown, the display showing the device
+  window's picture; a windowed device's `GetFrontBuffer` or `GetFrontBufferData` puts the picture at
+  the surface's corner, not where the window stands; an instanced draw with a stream stepping once
+  every several instances is not drawn (`skipped.instancing`), a WebGPU vertex buffer stepping every
+  instance; a frame with more draws inside occlusion queries than WebGPU's 4096 a frame leaves the
+  draws past them uncounted.
 - Direct3D 10: wireframe fill drawn solid; depth clipping left on by a GPU device made without
   `depth-clip-control`; a render target of another size than the first is not drawn into; a
   32-bit float target is drawn unblended; a bound geometry shader is ignored; per-instance data
@@ -813,20 +892,26 @@ Accepted and reported through `divergence`:
   applied to the back face's test and write as well, because WebGPU's stencil reference and masks
   are not per-face.
 
-Counted rather than reported (`seam.device.skipped`): Direct3D 8 draws skipped for `vertexShader`,
-`pixelShader`, `stride` (the stream's stride disagrees with the FVF), `indexFormat`, `stencilRect`
-(a stencil-only clear of part of the target), `texture` (the `skipTexture` knob) and `program`;
-Direct3D 10 draws skipped for `noViewport`, `noTarget`, `noShader`, `untranslatable` and
-`pipeline`.
+Counted rather than reported (`seam.device.skipped`): Direct3D 8 and 9 draws skipped for
+`vertexShader` and `pixelShader` (a handle naming no live shader), `stride` (the stream's stride
+disagrees with the FVF), `indexFormat`, `stencilRect` (a stencil-only clear of part of the target),
+`texture` (the `skipTexture` knob), `layout`, `stream` (a further stream bound at an offset its
+buffer cannot start at) and `program`; Direct3D 10 draws skipped for `noViewport`, `noTarget`,
+`noShader`, `untranslatable` and `pipeline`.
 
 Known ceilings the code names: the OpenGL rasteriser's depth buffer is a float per pixel and a
 mipmapped minification filter samples the base level; Direct3D 7's capability lists claim no
 stencil, bump mapping, cube maps or W-buffer; WebGPU cannot cull a line or a point, so a culled
 wireframe also draws its back faces' edges, where Direct3D culls the triangle first; the D3D 9
-translator does not translate 1.x texture-addressing instructions, predication, subroutines or
-vertex-shader texture reads. A lost WebGPU device loses every Direct3D 8 and 9 device made on it --
-`TestCooperativeLevel` and `Present` answer `D3DERR_DEVICELOST` -- and nothing recovers it: `Reset`
-still answers `D3DERR_DEVICELOST`, there being no second GPU device to rebuild on. The raster's
+translator does not translate predication, subroutines or vertex-shader texture reads, holds a 1.x
+shader's constants but not its arithmetic to the range of its registers, and carries a register's
+alpha across a `ps_1_4` phase marker, which Direct3D does not promise; no signed texture format
+(`D3DFMT_V8U8` and the like) is offered for a bump map. WebGPU lets an implementation report any
+non-zero occlusion count as one, which a Direct3D 9 query then answers. A lost WebGPU device loses
+every Direct3D 8 and 9 device made on it -- `TestCooperativeLevel` and `Present` answer
+`D3DERR_DEVICELOST` -- and nothing recovers it: `Reset` still answers `D3DERR_DEVICELOST`, there
+being no second GPU device to rebuild on; a 9Ex device, which is never lost, answers
+`D3DERR_DEVICEREMOVED` from `Present`, `PresentEx` and `CheckDeviceState` instead. The raster's
 position is read from the guest's clock, but `WaitForVerticalBlank` waits the time to the edge on a
 host timer, the layer having no hook into the kernel's scheduler.
 
@@ -840,8 +925,8 @@ host timer, the layer having no hook into the kernel's scheduler.
 |---|---|
 | Layer assembly | `graphics.test.js` -- a build with no GPU comes up; the backend is built once; APIs are made by name; diagnostics report what was asked for; the pacer honours `maxFps`; a second instance in one realm does not take the first one's backend; a disposed machine answers as a build with graphics disabled (the stub's refusal); `dispose()` releases this machine's backend and leaves a presenter handed to the run untouched; the raster reads the clock handed over as `guestNow`; a lost device loses the Direct3D devices made on it. `bitmaps.test.js` -- gdi32's bookkeeping over this layer's drawing, wired as `app.js` wires them: a double buffer, a monochrome mask made from the program's bits. |
 | Byte-exact against the reference rasteriser or a stored image (base64 of the raw BGRX buffer beside the code, no tolerance) | `webgpu/internal/reference.test.js`, `d3d8/render.test.js`, `d3d9/render.test.js`, `d3d9/program.test.js`, `opengl/raster.test.js`, `opengl/pipeline.test.js`, `gdi/*.test.js`, `ddraw/blit.test.js`. A triangle is asserted at named pixels rather than as a whole image, so no rasterisation rule is pinned. |
-| Recorded commands through the fake device (what the GPU was asked to do, never what a frame looks like) | `webgpu/backend.test.js`, `webgpu/internal/*.test.js` (including `presenter.test.js`: one presenter serves two machine lifetimes, configures the canvas once, and shows the second lifetime's frame rather than a cleared target), `d3d7/device.test.js`, `d3d8/render.test.js`, `d3d10/render.test.js`, `opengl/gpu.test.js` (a context on the renderer: buffer objects bound as they lie, the rename-or-range rule, client copies by index range, the canonical packing, uniform contents, uploads per written level, the clear's masks, the opaque shown copies, program draws and their blocks, the draw dump with its cut, skip and probe). |
-| Contract, against documented behaviour and conformance expectations of the real runtime | `d3d7/load.test.js`, `d3d7/process.test.js`, `seam/raster.test.js`, `d3d9/contract.test.js`, `d3d9/validity.test.js`, `d3d8/validity.test.js`, `d3d10/validity.test.js`, `d3d10/device.test.js`, `d3d10/dxgi.test.js`, `d3d10/structs.test.js`, `ddraw/objects.test.js`, `ddraw/caps.test.js`, `ddraw/structs.test.js`, `opengl/wgl.test.js`, `opengl/pixelformat.test.js`, `opengl/context.test.js`, `opengl/context-calls.test.js`, `opengl/context-programs.test.js`, `vulkan/*.test.js`, `d3d7/caps.test.js`, `d3d9/caps.test.js`. |
+| Recorded commands through the fake device (what the GPU was asked to do, never what a frame looks like) | `webgpu/backend.test.js`, `webgpu/internal/*.test.js` (including `presenter.test.js`: one presenter serves two machine lifetimes, configures the canvas once, and shows the second lifetime's frame rather than a cleared target), `d3d7/device.test.js`, `d3d8/render.test.js`, `d3d8/program.test.js`, `d3d10/render.test.js`, `opengl/gpu.test.js` (a context on the renderer: buffer objects bound as they lie, the rename-or-range rule, client copies by index range, the canonical packing, uniform contents, uploads per written level, the clear's masks, the opaque shown copies, program draws and their blocks, the draw dump with its cut, skip and probe). |
+| Contract, against documented behaviour and conformance expectations of the real runtime | `d3d7/load.test.js`, `d3d7/process.test.js`, `seam/raster.test.js`, `d3d9/contract.test.js`, `d3d9/ex.test.js`, `d3d9/validity.test.js`, `d3d8/validity.test.js`, `d3d8/declaration.test.js`, `d3d8/process.test.js`, `d3d10/validity.test.js`, `d3d10/device.test.js`, `d3d10/dxgi.test.js`, `d3d10/structs.test.js`, `ddraw/objects.test.js`, `ddraw/caps.test.js`, `ddraw/structs.test.js`, `opengl/wgl.test.js`, `opengl/pixelformat.test.js`, `opengl/context.test.js`, `opengl/context-calls.test.js`, `opengl/context-programs.test.js`, `vulkan/*.test.js`, `d3d7/caps.test.js`, `d3d9/caps.test.js`. |
 | Observed behaviour, pinned | `d3d9/observed.test.js` -- lock-flag traffic, matrix order, render-target alpha, viewport placement. |
 | Translators | `d3d9/shader.test.js`, `d3d9/wgsl.test.js`, `d3d10/dxbc.test.js`, `d3d10/sm4.test.js`, `d3d10/wgsl.test.js`, `vulkan/spirv.test.js`, `opengl/wgsl.test.js` (the GL formula as WGSL and the descriptor, and that every field the key must fold changes it), `opengl/arb-program.test.js` (the ARB program grammar, its error positions and limits), `opengl/arb-wgsl.test.js` (one stage at a time: every instruction, the parameters as one materialised block, the attribute aliasing, a real program's coordinate sets and image units), `opengl/gpu-layout.test.js` (array shapes to vertex formats and slots, mode expansion, index scanning). |
 | Seam and ABI | `seam/*.test.js` drive the bridge's real vtable publisher over a flat buffer and read the same words a guest would; `seam/shadow.test.js` pins the guest-side code's bytes and layout; `seam/shadow.itest.js` runs that code on the real emulated processor. |
