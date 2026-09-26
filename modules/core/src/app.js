@@ -666,11 +666,15 @@ export function createMissingImports({ register, events, journal, classify, faul
             }
             if (returns)
             {
-                // Zero, and back to the caller. It is the only value that reads
-                // as failure under every convention at once -- a null pointer, a
-                // null handle, FALSE, a count of none -- so a caller that checks
-                // its result takes its own failure path and says something about
-                // what it wanted.
+                // Zero, and back to the caller. It reads as failure for the
+                // commonest shapes -- a null pointer, a null handle, FALSE, a
+                // count of none -- so such a caller takes its own failure path
+                // and says something about what it wanted. Not for every shape:
+                // an HRESULT or an error code of zero is success, and a C
+                // runtime call that fails with -1 or EOF (fgetc, _read) or
+                // answers "not yet" with zero (feof) reads it as a result, which
+                // can leave a read loop going round for ever. No one value
+                // fails under every convention; this one fails under most.
                 return 0;
             }
             return fault(label, frame);
