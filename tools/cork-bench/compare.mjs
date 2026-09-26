@@ -8,7 +8,7 @@
  * Two or more engines, or configurations, side by side on the benchmark.
  *
  *   node tools/cork-bench/compare.mjs '{"base":["--root","../base"],"new":[]}'
- *       [name...] [--metric usPerIter|coldMs|nsPerInstr] [--runs N] [bench options...]
+ *       [name...] [--metric usPerIter|coldMs|firstMs|nsPerInstr] [--runs N] [bench options...]
  *
  * Each configuration is a list of `bench.mjs` arguments (`--root`, `--cork`);
  * node's own flags (`--no-liftoff`) are given to node running this script and

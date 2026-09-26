@@ -23,7 +23,12 @@
  * Each rep makes a fresh host, times its first iteration (`coldMs`: the
  * interpreter, the translator and the tier-up, what a new stretch of code
  * costs), runs `--warm` iterations and times `--iters` more (`usPerIter`, the
- * best rep: translated code in its steady state). `eax` is the program's own
+ * best rep: translated code in its steady state). `firstMs` is the first
+ * rep's first iteration alone: in a process that has run nothing before --
+ * the first workload named, or any under `compare.mjs`, which runs each in a
+ * process of its own -- the engine's own JavaScript and wasm are cold too, as
+ * at a launch, where `coldMs` leaves the first reps out to time the
+ * translator warm. `eax` is the program's own
  * checksum and must not change with the engine. `--cork` is the translator's
  * configuration (`{"translate":false}` times the interpreter alone), `--root`
  * a checkout whose engine to run, so one tree compares against another
@@ -136,6 +141,7 @@ for (const name of names)
         name,
         // The first reps warm the engine's own JavaScript, as a title's first seconds do.
         coldMs: Number(median(colds.length > 3 ? colds.slice(2) : colds).toFixed(2)),
+        firstMs: Number(colds[0].toFixed(2)),
         usPerIter: Number(best.toFixed(1)),
         nsPerInstr: Number((best * 1000 / summary.instructions).toFixed(3)),
         instructions: Math.round(summary.instructions),
