@@ -1491,10 +1491,11 @@ test('after a merge, the next waits for translated instructions in proportion to
     {
         return;
     }
-    const m = machine({ leafCalls: false, mergeAfter: 100_000, worker: true, dispatch: true,
+    const m = machine({ leafCalls: false, mergeAfter: 4000, worker: true, dispatch: true,
         batchRegions: 128 });
     // Two loops, each calling a callee of its own; the first one's batch has
-    // sixty-four more regions, so its merge with its callee builds 66.
+    // sixty-four more regions, so its merge with its callee builds 66 (and
+    // takes 66 x 4000 crossings, which its 300 000 calls make).
     const OTHER = CODE + 0x200;
     const STUBS = CODE + 0x100;
     m.write(CODE, callLoop(300_000));
@@ -1541,6 +1542,126 @@ test('after a merge, the next waits for translated instructions in proportion to
         await loop(OTHER);
         await until(()=>(m.runtime.diagnostics().relinked ?? 0) >= 68);
         assert.equal(m.runtime.diagnostics().merges, 2);
+    }
+    finally
+    {
+        await m.runtime.flush();
+    }
+});
+
+/** A runtime with a worker, and the helpers the merge tests drive it with.
+ * @param {Record<string, unknown>} config */
+function mergeMachine(config){
+    const m = machine({ leafCalls: false, dispatch: true, worker: true, ...config });
+    /** Translates until the condition holds, the worker answering on its own turns.
+     * @param {() => boolean} done */
+    const until = async done=>{
+        for (let i = 0; i < 300 && !done(); i++)
+        {
+            await m.runtime.translatePending();
+            await new Promise(resolve=>setTimeout(resolve, 10));
+        }
+        assert.ok(done());
+    };
+    /** Runs a loop to its halt, then lets the translator read the crossings. @param {number} at */
+    const loop = async at=>{
+        m.setReg(4, 0x80000);
+        assert.equal(m.runtime.run(m.runtime.entryOf(at), 100_000_000).kind, 'halt');
+        await m.runtime.translatePending();
+        await new Promise(resolve=>setTimeout(resolve, 50));
+    };
+    /** Translates the start in a batch of its own. @param {number} at */
+    const translate = async at=>{
+        m.runtime.noteHot(at);
+        await until(()=>m.runtime.entryOf(at) >= 0);
+    };
+    return { m, until, loop, translate };
+}
+
+test('a merge waits for crossings in proportion to the regions it would build', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return;
+    }
+    // A loop whose batch has sixty-four more regions calling a callee in a
+    // module of its own: their merge builds 66 regions, so 66 x 10 000
+    // crossings; each run of the loop makes 250 000 each way.
+    const { m, until, loop, translate } = mergeMachine({ mergeAfter: 10_000,
+        batchRegions: 128 });
+    const STUBS = CODE + 0x100;
+    m.write(CODE, callLoop(250_000));
+    m.write(STUBS, new Array(64).fill(0xc3));
+    try
+    {
+        await translate(CODE + 14);
+        m.runtime.noteHot(CODE);
+        for (let i = 0; i < 64; i++)
+        {
+            m.runtime.noteHot(STUBS + i);
+        }
+        await until(()=>m.runtime.entryOf(CODE) >= 0 && m.runtime.entryOf(STUBS + 63) >= 0);
+        await loop(CODE);
+        await loop(CODE);
+        await until(()=>true);
+        assert.equal(m.runtime.diagnostics().merges, 0, '500 000 crossings build no 66 regions');
+        await loop(CODE);
+        await until(()=>(m.runtime.diagnostics().relinked ?? 0) >= 66);
+        assert.equal(m.runtime.diagnostics().merges, 1);
+        assert.equal(m.runtime.diagnostics().merged, 66);
+    }
+    finally
+    {
+        await m.runtime.flush();
+    }
+});
+
+/**
+ * mov ecx, n; L: call F; dec ecx; jnz L; hlt -- at `at`, F at CODE.
+ * @param {number} at @param {number} n
+ */
+const loopCalling = (at, n)=>{
+    const rel = (CODE - (at + 10)) >>> 0;
+    return [0xb9, n & 0xff, n >>> 8 & 0xff, n >>> 16 & 0xff, n >>> 24,
+        0xe8, rel & 0xff, rel >>> 8 & 0xff, rel >>> 16 & 0xff, rel >>> 24,
+        0x49, 0x75, 0xf8, 0xf4];
+};
+
+test('a region is built again by two merges at most', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return;
+    }
+    // Three loops calling one function, each translated after the one before
+    // has merged with it: the first merge builds the function and the first
+    // loop, the second those two and the second loop, and the third would build
+    // them a third time.
+    const { m, until, loop, translate } = mergeMachine({ mergeAfter: 1000 });
+    const loops = [CODE + 0x10, CODE + 0x30, CODE + 0x50];
+    m.write(CODE, [0x42, 0xc3]);
+    for (const at of loops)
+    {
+        m.write(at, loopCalling(at, 2_000_000));
+    }
+    try
+    {
+        await translate(CODE);
+        await translate(loops[0]);
+        await loop(loops[0]);
+        await until(()=>(m.runtime.diagnostics().relinked ?? 0) >= 2);
+        await translate(loops[1]);
+        await loop(loops[1]);
+        await until(()=>(m.runtime.diagnostics().relinked ?? 0) >= 5);
+        assert.equal(m.runtime.diagnostics().merges, 2);
+        await translate(loops[2]);
+        await loop(loops[2]);
+        await loop(loops[2]);
+        await until(()=>true);
+        const d = m.runtime.diagnostics();
+        assert.equal(d.merges, 2, 'no third merge of the function');
+        assert.equal(d.merged, 5);
+        m.setReg(2, 0);
+        await loop(loops[2]);
+        assert.equal(m.reg(2), 2_000_000);
     }
     finally
     {

@@ -248,6 +248,7 @@
  * @property {number} [relinked]       Regions switched to a relinked module's function.
  * @property {number} [merges]         Two modules gathered into one because one kept
  *     transferring into the other (`mergeAfter`).
+ * @property {number} [merged]         The regions those merges built again (of `relinked`).
  * @property {number} [reforms]        Regions formed again with the callees their indirect
  *     calls were sampled going to (`callTargets`).
  * @property {number} [copied]         Regions formed again with copies of the blocks inside

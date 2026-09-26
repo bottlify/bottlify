@@ -457,6 +457,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @property {number} [blocks]  how many blocks it has: a label from twice as many is a copy's
      * @property {Placed} [module]  the placed module its table index is in (`placeModule`)
      * @property {boolean} [movedAlone]  a merge took it alone into the module calling it
+     * @property {number} [merged]  the merges that built it again (`MERGES_A_REGION`)
      * @property {number} [shapeMisses]  its entries' tests that failed
      * @property {[number, number[]][]} [targets]  by indirect call, the callees formed into it
      * @property {number} [reforms]  times it was formed again for its indirect calls
@@ -548,7 +549,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
         // always agree.
-        relinks: 0, relinked: 0, merges: 0, reforms: 0, copied: 0,
+        relinks: 0, relinked: 0, merges: 0, merged: 0, reforms: 0, copied: 0,
         formingMs: 0, lookupMs: 0, emitMs: 0, encodeMs: 0, storeMs: 0, instantiateMs: 0,
         publishMs: 0,
         // Emitting and encoding the worker did: reported apart from
@@ -1199,6 +1200,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // the old region's entries give way to this one's.
             record.targets = one.targets;
             record.reforms = (one.replaces.reforms ?? 0) + (one.copying === true ? 0 : 1);
+            // The same code for the merges' bounds: formed again, it would
+            // otherwise start over at none.
+            record.merged = one.replaces.merged;
+            record.movedAlone = one.replaces.movedAlone;
             if (regions.has(one.replaces))
             {
                 unpublish([one.replaces]);
@@ -1563,14 +1568,54 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const MERGE_PER_REGION = 1 << 19;
     let mergedAt = -MERGE_EVERY;
     let mergeWait = MERGE_EVERY;
+    // The merges a region is built again by at most. A merge builds both
+    // modules whole, and a module that merged once is crossed into by the
+    // next new one: without a bound, every module of new code calling into a
+    // hot one could have it built again, for as long as new code arrives.
+    const MERGES_A_REGION = 2;
     /**
-     * The two placed modules one of which transfers into the other most,
-     * gathered into one module on the worker once it has crossed `mergeAfter`
-     * times: a transfer between them is then a direct tail call. The whole of
-     * both when they fit in `relinkRegions`, else the region crossed into
-     * last, alone, into the module it is called from. Each module's count of
-     * transfers out of it is read here, and its last one's index names where
-     * they went.
+     * What a merge of `from` into `into` would build: both whole when they fit
+     * in `relinkRegions`, else the region `from` crossed into last, alone, into
+     * `from`'s module -- or null when there is no such merge to take.
+     *
+     * @param {Placed} from @param {Placed} into
+     * @returns {{ chunk: RegionRecord[], alone: RegionRecord | null } | null}
+     */
+    const mergeChunk = (from, into)=>{
+        /** @type {RegionRecord[]} */
+        let chunk = [...from.records, ...into.records];
+        /** @type {RegionRecord | null} */
+        let alone = null;
+        if (chunk.length > settings.relinkRegions)
+        {
+            // A region moved alone goes nowhere again: two callers in two
+            // full modules would otherwise take it from each other for good.
+            const target = recordAt.get(from.crossedTo.value >>> 0);
+            if (target === undefined || target.module !== into || target.movedAlone
+                || from.records.size >= settings.relinkRegions)
+            {
+                return null;
+            }
+            alone = target;
+            chunk = [...from.records, target];
+        }
+        if (chunk.some(record=>(record.merged ?? 0) >= MERGES_A_REGION))
+        {
+            return null;
+        }
+        return { chunk, alone };
+    };
+    /**
+     * Two placed modules one of which transfers into the other, gathered into
+     * one module on the worker once it has crossed `mergeAfter` times for every
+     * region the merge builds: a transfer between them is then a direct tail
+     * call, and a merge builds every region of both again -- the worker emits
+     * them, the engine thread instantiates the module and compiles each
+     * function at its first call, and the code runs on the engine's baseline
+     * tier until its optimising compile catches up -- so the crossings it saves
+     * must be many for each region it builds. The pair crossed most of those
+     * that qualify; each module's count of transfers out of it is read here,
+     * and its last one's index names where they went.
      *
      * @param {any} store
      * @returns {boolean} whether a merge was taken this call
@@ -1585,10 +1630,6 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return false;
         }
         sampledAt = corkRetired;
-        const due = corkRetired - mergedAt >= mergeWait;
-        /** @type {[Placed, Placed] | null} */
-        let pair = null;
-        let most = 0;
         for (const placed of placedLive)
         {
             const now = placed.crossings.value;
@@ -1596,41 +1637,52 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             placed.seen = now;
             const into = crossed === 0 ? undefined
                 : recordAt.get(placed.crossedTo.value >>> 0)?.module;
-            if (into === undefined || into === placed)
+            if (into !== undefined && into !== placed)
             {
-                continue;
-            }
-            const weight = (placed.toward.get(into) ?? 0) + crossed;
-            placed.toward.set(into, weight);
-            if (weight > most)
-            {
-                most = weight;
-                pair = [placed, into];
+                placed.toward.set(into, (placed.toward.get(into) ?? 0) + crossed);
             }
         }
-        if (pair === null || most < settings.mergeAfter || !due)
+        if (corkRetired - mergedAt < mergeWait)
         {
             return false;
         }
-        const [from, into] = pair;
+        /** @type {{ from: Placed, into: Placed, chunk: RegionRecord[],
+         *     alone: RegionRecord | null } | null} */
+        let best = null;
+        let most = 0;
+        for (const from of placedLive)
+        {
+            for (const [into, weight] of from.toward)
+            {
+                if (weight <= most || weight < settings.mergeAfter * 2)
+                {
+                    continue;
+                }
+                const merge = mergeChunk(from, into);
+                if (merge !== null && weight >= settings.mergeAfter * merge.chunk.length)
+                {
+                    best = { from, into, ...merge };
+                    most = weight;
+                }
+            }
+        }
+        if (best === null)
+        {
+            return false;
+        }
+        const { from, into, chunk, alone } = best;
         from.toward.delete(into);
         into.toward.delete(from);
-        const target = recordAt.get(from.crossedTo.value >>> 0);
-        /** @type {RegionRecord[]} */
-        let chunk = [...from.records, ...into.records];
-        if (chunk.length > settings.relinkRegions)
+        if (alone !== null)
         {
-            // A region moved alone goes nowhere again: two callers in two
-            // full modules would otherwise take it from each other for good.
-            if (target === undefined || target.movedAlone
-                || from.records.size >= settings.relinkRegions)
-            {
-                return false;
-            }
-            target.movedAlone = true;
-            chunk = [...from.records, target];
+            alone.movedAlone = true;
+        }
+        for (const record of chunk)
+        {
+            record.merged = (record.merged ?? 0) + 1;
         }
         counts.merges++;
+        counts.merged += chunk.length;
         mergedAt = corkRetired;
         mergeWait = Math.max(MERGE_EVERY, chunk.length * MERGE_PER_REGION);
         return relinkChunk(chunk, store);
@@ -2626,6 +2678,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 relinks: counts.relinks,
                 relinked: counts.relinked,
                 merges: counts.merges,
+                // The regions those merges built again, of `relinked`.
+                merged: counts.merged,
                 reforms: counts.reforms,
                 copied: counts.copied,
                 // Transfers that left a placed module through the table, as it
