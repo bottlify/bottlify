@@ -64,6 +64,7 @@ import { createImmFunctions } from './imm32/functions.js';
 import { createShlwapiFunctions } from './shlwapi/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
+import { createSetupapiFunctions } from './setupapi/functions.js';
 import { createD3dxFunctions } from './d3dx9/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
 import { createNetworkFunctions } from './mpr/functions.js';
@@ -1324,6 +1325,31 @@ export const win32Module = {
             }),
 
             'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
+
+            // An installer's INF files, cabinets and file queues, over the
+            // volume every file call uses; a queue's notifications go to the
+            // program's own callback on the thread that asked.
+            'SETUPAPI.dll': createSetupapiFunctions({
+                readMemory,
+                writeMemory,
+                readCString,
+                readWideString,
+                setLastError: setError,
+                setLastErrorFor: setErrorOn,
+                files: volume,
+                /** @param {string} path */
+                fullPath: path=>filesystem.resolve(path).path,
+                /** @param {number} bytes */
+                allocate: bytes=>heap.allocate(bytes),
+                /** @param {number} address */
+                free: address=>heap.free(address),
+                call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                callerThread: ()=>bridge.callerThread(),
+                handles,
+                folders: SHELL_FOLDERS,
+                registry: hive,
+                divergence: config?.divergence,
+            }),
 
             // The maths half of the Direct3D helper: pure vector and matrix
             // functions, here for their stack width as much as their answers,
