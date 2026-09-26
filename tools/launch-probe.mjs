@@ -26,6 +26,7 @@ import { createWriteStream } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { openBundle } from './btl.mjs';
 import { createApp } from '../modules/core/src/app.js';
+import { DEFAULT_ENGINE } from '../modules/core/src/layers/cpu/module.js';
 import { peekBytes } from '../modules/core/src/trace.js';
 
 const PREBUILT = new URL('../modules/core/vendor/prebuilt/', import.meta.url);
@@ -44,8 +45,8 @@ function parse(argv){
         // bundle -- a launcher is a different program from the game it starts,
         // and only running it says whether it runs.
         which: argv.includes('--which') ? argv[argv.indexOf('--which') + 1] : null,
-        // The execution engine (emulator by default), so a title's own code can
-        // be measured on the translator outside a browser.
+        // The execution engine (the translator by default), so a title's own code
+        // can be measured on either engine outside a browser.
         engine: argv.includes('--engine') ? argv[argv.indexOf('--engine') + 1] : undefined,
         // Which calls to print with their arguments. A name, or a fragment of
         // one, narrows a long trace to the handful that answer the question.
@@ -383,7 +384,7 @@ async function main(){
         engine,
         // No frames here to feed the translator between: it takes its
         // candidates inside the slice.
-        ...(engine === 'cork' ? { cork: { config: { feed: 'slice' } } } : {}),
+        ...((engine ?? DEFAULT_ENGINE) === 'cork' ? { cork: { config: { feed: 'slice' } } } : {}),
         heapSize: heap,
         quantum: profile > 0 ? profile : undefined,
         sample: profile > 0 ? (/** @type {number} */ eip)=>samples.push(eip) : undefined,

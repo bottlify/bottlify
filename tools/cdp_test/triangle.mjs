@@ -191,6 +191,8 @@ export async function triangle(){
         // per directory would mean an import map that says the same thing.
         sandboxDir: PACKAGE_DIR,
         srcDir: join(PACKAGE_DIR, 'src'),
+        // The translator package beside core, where app.js resolves the default engine.
+        extra: [{ prefix: '/cork/', root: join(PACKAGE_DIR, '..', 'cork') }],
     });
     const browser = await launchWithGpu();
     mkdirSync(REPORTS_DIR, { recursive: true });

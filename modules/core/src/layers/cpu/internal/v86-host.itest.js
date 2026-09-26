@@ -513,10 +513,17 @@ test('generated code goes on into the next module, and the slice still bounds it
     host.stop();
 });
 
-test('cork\'s CPUID table is the emulator\'s answer, leaf and subleaf', async()=>{
+test('cork\'s CPUID table is the emulator\'s answer, leaf and subleaf, clocks aside', async()=>{
     const { cpuidLeaf } = await import('../../../../../cork/src/cpuid.js');
+    const { CORK_TSC_MHZ } = await import('./cork-host.js');
+    // The clock leaves state the rate cork's host counts rdtsc at, which is not
+    // the emulator's: 0x15 as a crystal times a ratio, 0x16 in MHz.
+    const tsc = cpuidLeaf(0x15, 0);
+    assert.equal(tsc.ecx * tsc.ebx / tsc.eax, CORK_TSC_MHZ * 1e6, 'leaf 0x15 states the rate');
+    assert.deepEqual([cpuidLeaf(0x16, 0).eax, cpuidLeaf(0x16, 0).ebx], [CORK_TSC_MHZ, CORK_TSC_MHZ],
+        'leaf 0x16 states it in MHz, base and maximum');
     const host = await boot();
-    const leaves = [0, 1, 2, 3, 4, 5, 6, 7, 0xb, 0xd, 0x15, 0x16, 0x17, 0x40000000, 0x80000000,
+    const leaves = [0, 1, 2, 3, 4, 5, 6, 7, 0xb, 0xd, 0x17, 0x40000000, 0x80000000,
         0x80000001, 0x80000004];
     for (const leaf of leaves)
     {

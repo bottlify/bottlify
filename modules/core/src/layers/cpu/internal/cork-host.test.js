@@ -13,7 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createCorkHost } from './cork-host.js';
+import { CORK_TSC_MHZ, createCorkHost } from './cork-host.js';
 import { freshThreadFpu } from './context.js';
 import * as engine from '../../../../../cork/src/index.js';
 
@@ -448,8 +448,9 @@ test('a fresh thread\'s block starts at 0x27f and MXCSR 0x1f80, not its creator\
     assert.equal(h.readReg32('ebx'), 0x1234, 'the rest of the template stays');
 });
 
-test('rdtsc counts the guest\'s clock once one is given, in nanoseconds, never backward', ()=>{
+test('rdtsc counts the guest\'s clock once one is given, at CORK_TSC_MHZ, never backward', ()=>{
     const h = host();
+    const perMs = BigInt(CORK_TSC_MHZ) * 1000n;
     let ms = 5000;
     h.useGuestClock(()=>ms);
     /** @returns {bigint} edx:eax after rdtsc; hlt */
@@ -461,12 +462,12 @@ test('rdtsc counts the guest\'s clock once one is given, in nanoseconds, never b
         return BigInt(h.readReg32('edx') >>> 0) << 32n | BigInt(h.readReg32('eax') >>> 0);
     };
     const first = read();
-    assert.ok(first >= 5_000_000_000n && first < 5_016_000_001n,
-        `the guest's 5 s in nanoseconds, within a credit: ${first}`);
+    assert.ok(first >= 5000n * perMs && first < 5016n * perMs + 1n,
+        `the guest's 5 s in ticks, within a credit: ${first}`);
     ms = 5100;
     const second = read();
-    assert.ok(second - first >= 99_000_000n && second - first < 116_000_001n,
-        `a tenth of a second of guest time reads as 1e8 ticks: ${second - first}`);
+    assert.ok(second - first >= 99n * perMs && second - first < 116n * perMs + 1n,
+        `a tenth of a second of guest time reads as a tenth of the rate: ${second - first}`);
     const third = read();
     assert.ok(third > second, 'the guest clock standing still, the counter still moves on');
 });
