@@ -171,6 +171,19 @@ test('the C runtime family is cdecl and every other library is stdcall', async()
     await win32Module.dispose();
 });
 
+test('the runtime\'s _sleep is Sleep, wired to kernel32', async()=>{
+    // The runtime exports _sleep only once its thread seam can sleep; left
+    // unwired it is an import bound to the missing-import stub, and a loop
+    // that sleeps between polls spins.
+    const api = await win32Module.create({}, stubHost());
+    const sleep = api.libraries()['msvcrt.dll']._sleep;
+    assert.ok(sleep, 'exported');
+    assert.equal(sleep.convention, 'cdecl');
+    assert.equal(sleep.argBytes, 4);
+
+    await win32Module.dispose();
+});
+
 test('the KnownDLLs are the ones Windows never searches beside the program', async()=>{
     // The set decides which of our tables a program's own file may replace.
     // The system libraries are in it; every library a title is likely to have

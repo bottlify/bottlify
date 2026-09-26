@@ -1051,6 +1051,7 @@ export const win32Module = {
                             libraries['KERNEL32.dll'].CreateThread.handler(
                                 [0, stackSize, entry, parameter, 0, threadIdOut]) >>> 0,
                         exit: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
+                        sleep: ms=>libraries['KERNEL32.dll'].Sleep.handler([ms]),
                     },
                     divergence: config?.divergence,
                     abort: abortProcess,
