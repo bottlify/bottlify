@@ -949,7 +949,7 @@ export function createGdiFunctions(host){
      * @param {number} bitCount
      */
     const dibSize = (width, height, bitCount)=>
-        (((((width * bitCount) + 31) / 32) | 0) * 4) * Math.abs(height);
+        Math.floor(((width * bitCount) + 31) / 32) * 4 * Math.abs(height);
 
     /**
      * A device-dependent bitmap's attributes, its bits among them: rows
@@ -1704,8 +1704,12 @@ export function createGdiFunctions(host){
                     // Also documented: over a DIB section, the bitmap made is a
                     // DIB section, in the selected one's format -- its depth,
                     // masks and colours, copied -- with bottom-up rows of its own.
-                    const address = host.surfaces.allocate(dibSize(cx | 0, cy | 0,
-                        shape.bitCount));
+                    const bytes = dibSize(cx | 0, cy | 0, shape.bitCount);
+                    const address = bytes > 0xffffffff ? 0 : host.surfaces.allocate(bytes);
+                    if (address === 0)
+                    {
+                        return 0;
+                    }
                     return objects.create('bitmap', {
                         width: cx | 0,
                         height: cy | 0,
@@ -1905,8 +1909,14 @@ export function createGdiFunctions(host){
                     // back memory that is not the file.
                     return 0;
                 }
+                // An image whose bytes 32 bits cannot count is refused (Wine's
+                // test_dib_formats), and so is one the arena has no room for.
                 const bytes = dibSize(header.width, header.height, header.bitCount);
-                const address = host.surfaces.allocate(bytes);
+                const address = bytes > 0xffffffff ? 0 : host.surfaces.allocate(bytes);
+                if (address === 0)
+                {
+                    return 0;
+                }
                 if ((bitsOut >>> 0) !== 0)
                 {
                     writeU32s(host, bitsOut, [address]);

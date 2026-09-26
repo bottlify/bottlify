@@ -805,6 +805,33 @@ test('CreateDIBSection refuses what it cannot back with plain memory', ()=>{
     assert.deepEqual(surfaces.allocated, [], 'a refused section allocates nothing');
 });
 
+test('CreateDIBSection refuses an image past 32 bits of bytes, or one there is no room for',
+    ()=>{
+        // Wine's test_dib_formats: 0x4000 square at one bit is made, and five
+        // shapes whose rows come to more bytes than 32 bits count are not.
+        const { fns, memory, surfaces, hdc } = withDC();
+        /** @param {number} width @param {number} height @param {number} bitCount */
+        const made = (width, height, bitCount)=>{
+            putBitmapInfo(memory, { width, height, bitCount });
+            return fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]) !== 0;
+        };
+        assert.equal(made(0x4000, 0x4000, 1), true);
+        assert.equal(made(0x8001, 0x8001, 32), false);
+        assert.equal(made(1, 0x40000001, 32), false);
+        assert.equal(made(2, 0x40000001, 16), false);
+        assert.equal(made(0x40000001, 1, 32), false);
+        assert.equal(made(0x40000001, 4, 8), false);
+        assert.equal(surfaces.allocated.length, 1, 'nothing asked for the refused ones');
+
+        putBitmapInfo(memory, { width: 4, height: 4, bitCount: 32 });
+        const dc = fns.CreateCompatibleDC.handler([hdc]);
+        fns.SelectObject.handler([dc, fns.CreateDIBSection.handler([hdc, STRUCT, 0, 0, 0, 0])]);
+        surfaces.allocate = ()=>0;
+        assert.equal(made(16, 16, 32), false, 'no memory, no section');
+        assert.equal(fns.CreateCompatibleBitmap.handler([dc, 16, 16]), 0,
+            'nor one made compatible with a section');
+    });
+
 test('CreateDIBSection takes a BITMAPCOREHEADER or a header of forty bytes or more', ()=>{
     // Wine's test_bitmapinfoheadersize: a BITMAPINFOHEADER of 39 bytes is
     // refused and one of 40, 41, 44, BITMAPV4HEADER's 108 or BITMAPV5HEADER's
