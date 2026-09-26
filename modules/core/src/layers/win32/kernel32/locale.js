@@ -400,6 +400,13 @@ export const ANSI_PAGE = CP_WINDOWS_1252;
 export const encodeAnsi = text=>encodeSingleByte(text, ANSI_PAGE).bytes;
 
 /**
+ * Bytes of the ANSI page as text, as MultiByteToWideChar(CP_ACP) reads them.
+ *
+ * @param {Uint8Array} bytes
+ */
+export const decodeAnsi = bytes=>decodeSingleByte(bytes, ANSI_PAGE);
+
+/**
  * Bytes of the ANSI page with their case changed, one byte to one byte.
  *
  * What CharUpper and CharLower do to a buffer: a byte whose mapping is not

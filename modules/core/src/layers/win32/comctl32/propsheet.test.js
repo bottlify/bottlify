@@ -18,7 +18,7 @@ import {
     PSPCB_CREATE, PSH, PSH_MODELESS, PSH_USECALLBACK, PSH_PROPSHEETPAGE, PSH_WIZARD,
     PSH_NOAPPLYNOW, PSCB_INITIALIZED, PSCB_PRECREATE,
     PSN_SETACTIVE, PSN_KILLACTIVE, PSN_APPLY, PSN_RESET, PSN_QUERYCANCEL,
-    PSN_QUERYINITIALFOCUS, PSN_WIZNEXT, PSN_WIZBACK, PSN_WIZFINISH, PSM_SETTITLEA,
+    PSN_QUERYINITIALFOCUS, PSN_WIZNEXT, PSN_WIZBACK, PSN_WIZFINISH, PSM_SETTITLEA, PSM_SETTITLEW,
     PSM_SETWIZBUTTONS, PSWIZB_BACK, PSWIZB_NEXT, PSWIZB_FINISH, PSBTN_FINISH,
     PSM_SETCURSEL, PSM_REMOVEPAGE, PSM_ADDPAGE, PSM_CHANGED, PSM_UNCHANGED, PSM_QUERYSIBLINGS,
     PSM_PRESSBUTTON, PSM_GETTABCONTROL, PSM_GETCURRENTPAGEHWND, PSM_INSERTPAGE,
@@ -1354,4 +1354,43 @@ test('a sheet waits for the answer to each message it sends before it goes on, a
         || code === PSN_WIZFINISH), [['first', PSN_SETACTIVE], ['first', PSN_WIZNEXT],
         ['last', PSN_SETACTIVE], ['last', PSN_WIZFINISH]]);
     assert.equal(context.fns.IsWindowEnabled.handler([owner]), 1, 'the owner is given back');
+});
+
+test('a caption reaches the sheet in the ANSI page: a wide one converted as a wide call\'s '
+    + 'text is for an ANSI window, an ANSI one byte for byte', async()=>{
+    // The windows here are ANSI ones, so what a wide sheet or PSM_SETTITLEW
+    // names reaches the caption as WideCharToMultiByte(CP_ACP) writes it: the
+    // euro sign is 0x80 in the page, and a character the page does not hold
+    // is the default character. An ANSI caption is the program's own bytes.
+    const context = setup();
+    const page = await context.createPage(context.description({}));
+    const hwnd = await context.comctl.PropertySheetA.handler([context.header({
+        flags: PSH_MODELESS, pages: [page] })]);
+    /** @param {string} text */
+    const wide = text=>{
+        const address = context.string(' '.repeat(text.length * 2 + 2));
+        for (let index = 0; index <= text.length; index++)
+        {
+            const unit = index < text.length ? text.charCodeAt(index) : 0;
+            context.memory.bytes[address + index * 2] = unit & 0xff;
+            context.memory.bytes[address + index * 2 + 1] = unit >>> 8;
+        }
+        return address;
+    };
+
+    /** The caption's bytes, as GetWindowTextA hands them back. */
+    const caption = ()=>{
+        const out = context.string(' '.repeat(32));
+        const length = context.fns.GetWindowTextA.handler([hwnd, out, 32]);
+        return [...context.memory.bytes.subarray(out, out + length)];
+    };
+
+    await context.send([hwnd, PSM_SETTITLEW, 0, wide('\u20ac und \u5b89')]);
+    assert.deepEqual(caption(), [0x80, 0x20, 0x75, 0x6e, 0x64, 0x20, 0x3f]);
+
+    const ansi = context.string(' '.repeat(8));
+    context.memory.bytes.set([0x99, 0x20, 0x97, 0xe9, 0], ansi);
+    await context.send([hwnd, PSM_SETTITLEA, 0, ansi]);
+    assert.deepEqual(caption(), [0x99, 0x20, 0x97, 0xe9], 'the ANSI bytes as they were');
+    await context.pump();
 });

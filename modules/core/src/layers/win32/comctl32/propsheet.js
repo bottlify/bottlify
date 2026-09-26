@@ -24,11 +24,14 @@
  * needs besides is an address for its dialog procedure, which the host makes.
  *
  * Every window is made through the ANSI calls, which are what user32 has here.
- * A wide sheet's strings are read as UTF-16 and its templates are the same
- * bytes either way; its caption and titles reach the windows as UTF-16 where
- * a template or a tab carries them, and as Latin-1 where SetWindowText does.
+ * A wide sheet's strings are read as UTF-16 and an ANSI one's in the ANSI page,
+ * and its templates are the same bytes either way; its caption and titles
+ * reach the windows as UTF-16 where a template or a tab carries them, and in
+ * the ANSI page where SetWindowText does, as a wide call's text reaches an
+ * ANSI window.
  */
 
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { after } from '../user32/controls.js';
 
 /** The handle a page description is copied under can never be this small. */
@@ -371,6 +374,8 @@ export function createPropertySheetFunctions(host){
     /** @param {number} address @param {boolean} wide */
     const readText = (address, wide)=>{
         let text = '';
+        /** @type {number[]} */
+        const bytes = [];
         for (let at = address >>> 0, count = 0; count < 1024; count++)
         {
             const unit = wide ? u16(at) : host.readMemory(at, 1)[0];
@@ -378,26 +383,31 @@ export function createPropertySheetFunctions(host){
             {
                 break;
             }
-            text += String.fromCharCode(unit);
-            at += wide ? 2 : 1;
-        }
-        return text;
-    };
-    /** @param {string} text @param {boolean} wide */
-    const encode = (text, wide)=>{
-        const bytes = new Uint8Array((text.length + 1) * (wide ? 2 : 1));
-        for (let index = 0; index < text.length; index++)
-        {
-            const unit = text.charCodeAt(index);
             if (wide)
             {
-                bytes[index * 2] = unit & 0xff;
-                bytes[index * 2 + 1] = unit >>> 8;
+                text += String.fromCharCode(unit);
             }
             else
             {
-                bytes[index] = unit & 0xff;
+                bytes.push(unit);
             }
+            at += wide ? 2 : 1;
+        }
+        return wide ? text : decodeAnsi(Uint8Array.from(bytes));
+    };
+    /** Terminated, as UTF-16 or in the ANSI page. @param {string} text @param {boolean} wide */
+    const encode = (text, wide)=>{
+        const bytes = new Uint8Array((text.length + 1) * (wide ? 2 : 1));
+        if (!wide)
+        {
+            bytes.set(encodeAnsi(text));
+            return bytes;
+        }
+        for (let index = 0; index < text.length; index++)
+        {
+            const unit = text.charCodeAt(index);
+            bytes[index * 2] = unit & 0xff;
+            bytes[index * 2 + 1] = unit >>> 8;
         }
         return bytes;
     };
@@ -1688,9 +1698,9 @@ export function createPropertySheetFunctions(host){
     };
 
     /**
-     * A window's text, through SetWindowTextA and so as Latin-1. The copy
-     * is kept until the window has answered: a procedure of the program's
-     * reads it when it is run, which may be later.
+     * A window's text, through SetWindowTextA and so in the ANSI page. The
+     * copy is kept until the window has answered: a procedure of the
+     * program's reads it when it is run, which may be later.
      *
      * @param {number} hwnd @param {string} text @returns {any}
      */
