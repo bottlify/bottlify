@@ -10,7 +10,7 @@ import {
     createSoundBuffer, normaliseFormat,
     DSBSTATUS_PLAYING, DSBSTATUS_LOOPING, DSBPLAY_LOOPING,
     DSBLOCK_FROMWRITECURSOR, DSBLOCK_ENTIREBUFFER,
-    DSBVOLUME_MIN, DSBVOLUME_MAX, DSBPAN_LEFT, DSBPAN_RIGHT,
+    DSBVOLUME_MIN, DSBVOLUME_MAX, DSBPAN_LEFT, DSBPAN_RIGHT, DSBPN_OFFSETSTOP,
 } from './buffers.js';
 
 /** 22050 Hz, stereo, 16-bit: 4 bytes a frame, 88200 a second. */
@@ -212,6 +212,38 @@ test('a notification behind the cursor fires when the buffer wraps past it', ()=
     time.advance(400); // past the end, round to 200ms
     assert.deepEqual(sound.drainNotifications(), [7],
         'comparing offsets instead of testing the crossing would miss this');
+});
+
+test('DSBPN_OFFSETSTOP fires when playback stops, and not while a loop goes round', ()=>{
+    // dsound.h defines it as -1: a marker for the stop, not a place in the
+    // buffer. A streaming thread waits on it to learn its sound has ended, and
+    // one woken on every lap would take a playing buffer for a stopped one.
+    const { sound, time } = buffer({ bytes: SECOND / 2 });
+    sound.setNotifications([{ offset: DSBPN_OFFSETSTOP, event: 9 }]);
+    sound.play(DSBPLAY_LOOPING);
+    for (let lap = 0; lap < 6; lap++)
+    {
+        time.advance(200);
+        assert.deepEqual(sound.drainNotifications(), [], `still playing at ${lap * 200 + 200} ms`);
+    }
+    // Wine's dsound test_notify and dsound8 test_effects: Play, Stop, and the
+    // event is set.
+    sound.stop();
+    assert.deepEqual(sound.drainNotifications(), [9]);
+    assert.deepEqual(sound.drainNotifications(), [], 'once');
+});
+
+test('a one-shot that plays to its end has stopped, and says so once', ()=>{
+    const { sound, time } = buffer({ bytes: SECOND / 2 });
+    sound.setNotifications([{ offset: DSBPN_OFFSETSTOP, event: 9 }]);
+    sound.play(0);
+    time.advance(200);
+    assert.deepEqual(sound.drainNotifications(), []);
+    time.advance(400);
+    assert.deepEqual(sound.drainNotifications(), [9]);
+    sound.stop();
+    assert.deepEqual(sound.drainNotifications(), [],
+        'a Stop after the end stops nothing that was playing');
 });
 
 test('volume and pan are clamped to their documented bounds', ()=>{

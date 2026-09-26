@@ -614,6 +614,40 @@ test('a notification the cursor passed is signalled when the buffer is next read
         'a program that polls instead of waiting must still see its notifications');
 });
 
+test('Stop signals DSBPN_OFFSETSTOP in the call, and only the stopped buffer\'s', ()=>{
+    // Wine's dsound test_duplicate/test_notify: Play, Stop, GetStatus reads 0,
+    // and the event is already set -- the duplicate's own, not the original's.
+    const f = createRoot();
+    const original = createBuffer(f, { bytes: 4410, flags: DSBCAPS_CTRLPOSITIONNOTIFY });
+    const array = 0x1d00;
+    f.memory.setU32(array + DSBPOSITIONNOTIFY.dwOffset, 0xffffffff);
+    f.memory.setU32(array + DSBPOSITIONNOTIFY.hEventNotify, 0x70);
+    f.bridge.call(notifyOn(f, original), 'SetNotificationPositions', [1, array]);
+
+    const out = 0x1e00;
+    assert.equal(f.bridge.call(f.root, 'DuplicateSoundBuffer', [original, out, 0]), DS_OK);
+    const copy = f.memory.u32(out);
+    f.memory.setU32(array + DSBPOSITIONNOTIFY.hEventNotify, 0x71);
+    f.bridge.call(notifyOn(f, copy), 'SetNotificationPositions', [1, array]);
+
+    const status = 0x1f00;
+    f.bridge.call(copy, 'SetCurrentPosition', [0]);
+    f.bridge.call(copy, 'Play', [0, 0, 0]);
+    f.bridge.call(copy, 'GetStatus', [status]);
+    assert.equal(f.memory.u32(status), DSBSTATUS_PLAYING);
+    f.bridge.call(copy, 'Stop');
+    f.bridge.call(copy, 'GetStatus', [status]);
+    assert.equal(f.memory.u32(status), 0);
+    assert.deepEqual(f.signalled, [0x71]);
+
+    f.bridge.call(original, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.time.advance(300);
+    f.bridge.call(original, 'GetCurrentPosition', [0x1900, 0x1904]);
+    assert.deepEqual(f.signalled, [0x71], 'a loop going round is not a stop');
+    f.bridge.call(original, 'Stop');
+    assert.deepEqual(f.signalled, [0x71, 0x70]);
+});
+
 test('DuplicateSoundBuffer shares the samples and not the cursor', ()=>{
     const f = createRoot();
     const original = createBuffer(f, { bytes: 88200 });

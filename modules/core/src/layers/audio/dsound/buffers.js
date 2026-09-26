@@ -55,6 +55,12 @@ export const DSBSTATUS_LOOPING = 0x0004;
 /** DSBPLAY_LOOPING, the only play flag that changes what the cursor does. */
 export const DSBPLAY_LOOPING = 0x0001;
 
+/**
+ * The offset a notification names to be told when playback stops, rather than
+ * when the cursor reaches a place: dsound.h's -1, read as the dword it is.
+ */
+export const DSBPN_OFFSETSTOP = 0xffffffff;
+
 /** Lock flags. */
 export const DSBLOCK_FROMWRITECURSOR = 0x0001;
 export const DSBLOCK_ENTIREBUFFER = 0x0002;
@@ -124,6 +130,8 @@ export function createSoundBuffer(
     let notifications = [];
     /** Where the play cursor stood the last time notifications were tested. */
     let lastNotified = 0;
+    /** Playback stopped, by Stop or at the end, since notifications were tested. */
+    let stopOwed = false;
     /**
      * How far the bytes have been read out for mixing: the write cursor, not
      * the play cursor. The span between the two is what a real device has
@@ -260,6 +268,7 @@ export function createSoundBuffer(
             anchorByte = 0;
             anchorMs = now();
             reachedEnd = true;
+            stopOwed = true;
         }
     };
 
@@ -432,6 +441,9 @@ export function createSoundBuffer(
             // back there hands over the whole sound a second time.
             anchorByte = playCursor();
             anchorMs = now();
+            // Only a buffer that was playing stops; one that already ran to
+            // its end said so when it got there.
+            stopOwed ||= playing;
             playing = false;
         },
 
@@ -493,6 +505,8 @@ export function createSoundBuffer(
         setNotifications(positions){
             notifications = positions.map(entry=>({ ...entry }));
             lastNotified = playCursor();
+            // A stop from before these were set is not theirs to report.
+            stopOwed = false;
         },
         get notifications(){
             return notifications;
@@ -500,12 +514,14 @@ export function createSoundBuffer(
 
         /**
          * Which notification events the cursor has passed since this was last
-         * asked, in the order it passed them.
+         * asked, in the order it passed them, and then those waiting for
+         * playback to stop if it has.
          *
          * Crossing is tested rather than compared, because the cursor wraps: a
          * position behind the current one may have been passed a moment ago or
          * not for another whole buffer, and only the direction of travel says
-         * which.
+         * which. DSBPN_OFFSETSTOP is no position and never crossed; tested as
+         * one, it is past everything and fires on every lap.
          *
          * @returns {number[]}
          */
@@ -513,14 +529,23 @@ export function createSoundBuffer(
             const play = playCursor();
             const from = lastNotified;
             lastNotified = play;
-            if (notifications.length === 0 || from === play)
+            const stopped = stopOwed;
+            stopOwed = false;
+            if (notifications.length === 0)
             {
                 return [];
             }
-            const passed = (/** @type {number} */ offset)=>(from < play
-                ? offset > from && offset <= play
-                : offset > from || offset <= play);
-            return notifications.filter(entry=>passed(entry.offset)).map(entry=>entry.event);
+            const passed = (/** @type {number} */ offset)=>offset !== DSBPN_OFFSETSTOP
+                && from !== play
+                && (from < play
+                    ? offset > from && offset <= play
+                    : offset > from || offset <= play);
+            return notifications
+                .filter(entry=>passed(entry.offset >>> 0))
+                .concat(stopped
+                    ? notifications.filter(entry=>(entry.offset >>> 0) === DSBPN_OFFSETSTOP)
+                    : [])
+                .map(entry=>entry.event);
         },
 
         /**

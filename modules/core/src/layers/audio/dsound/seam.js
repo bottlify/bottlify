@@ -567,8 +567,10 @@ export function createDirectSound(
         /** HRESULT Stop(void) */
         Stop(buffer){
             calls.Stop = (calls.Stop || 0) + 1;
-            deliver(buffer);
             buffer.stop();
+            // After the stop, so the call itself sets DSBPN_OFFSETSTOP: a
+            // program stops a buffer and at once waits to be told it has.
+            deliver(buffer);
             record(`b${buffers.indexOf(buffer)} Stop cursor=${buffer.cursors().play}`);
             return DS_OK;
         },
