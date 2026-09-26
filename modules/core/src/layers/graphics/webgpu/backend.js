@@ -299,23 +299,67 @@ export function createBackend(options){
     };
 
     /**
+     * The colour attachments a pass descriptor names. One `target` is the
+     * common case; `targets` lists several by location, a null leaving that
+     * location empty, with `clearValues` saying per target whether it is
+     * cleared, and to what. A pass with no colour target at all draws depth
+     * alone and takes its size from `depthTarget`.
+     *
+     * @param {any} descriptor
+     * @returns {{ sizing: any, attachments: any[] }}
+     */
+    const colourAttachmentsOf = descriptor=>{
+        /** @type {any[]} */
+        const targets = descriptor.targets ?? [descriptor.target];
+        const present = targets.filter(target=>target);
+        const sizing = present[0] ?? descriptor.depthTarget;
+        if (!sizing)
+        {
+            throw new Error('A pass with no target cannot be sized');
+        }
+        if (present.some(target=>target.width !== sizing.width
+            || target.height !== sizing.height))
+        {
+            throw new Error('The colour targets of one pass must be one size');
+        }
+        const attachments = targets.map((target, index)=>{
+            if (!target)
+            {
+                return null;
+            }
+            const clearValue = descriptor.targets
+                ? descriptor.clearValues?.[index] ?? null
+                : descriptor.clear
+                    ? descriptor.clearValue ?? OPAQUE_BLACK
+                    : null;
+            return {
+                view: target.view,
+                loadOp: clearValue ? 'clear' : 'load',
+                storeOp: 'store',
+                clearValue: clearValue ?? descriptor.clearValue ?? OPAQUE_BLACK,
+            };
+        });
+        return { sizing, attachments };
+    };
+
+    /**
      * @param {any} encoder
      * @param {any} descriptor
      * @returns {any}
      */
     function beginPass(encoder, descriptor){
-        const target = descriptor.target;
-        remember(surfaceWrites,
-            { index: frameIndex, label: target.label ?? 'surface', at: now() });
-        const attachment = {
-            view: target.view,
-            loadOp: descriptor.clear ? 'clear' : 'load',
-            storeOp: 'store',
-            clearValue: descriptor.clearValue === undefined ? OPAQUE_BLACK : descriptor.clearValue,
-        };
+        const { sizing: target, attachments } = colourAttachmentsOf(descriptor);
+        for (const written of descriptor.targets ?? [descriptor.target])
+        {
+            if (written)
+            {
+                remember(surfaceWrites,
+                    { index: frameIndex, label: written.label ?? 'surface', at: now() });
+            }
+        }
         const raw = encoder.beginRenderPass({
             label: descriptor.label === undefined ? `pass:${target.label}` : descriptor.label,
-            colorAttachments: [attachment],
+            colorAttachments: attachments,
             depthStencilAttachment: descriptor.depthStencilAttachment,
         });
         profiler.count('passes');

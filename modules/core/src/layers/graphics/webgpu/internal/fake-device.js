@@ -113,8 +113,9 @@ export function createFakeDevice(options = {}){
         const pass = object('pass', { descriptor });
         for (const attachment of descriptor.colorAttachments ?? [])
         {
-            const texture = attachment.view?.texture;
-            if (attachment.loadOp === 'clear' && texture?.bytes)
+            // A location left empty is a null, as WebGPU takes it.
+            const texture = attachment?.view?.texture;
+            if (attachment?.loadOp === 'clear' && texture?.bytes)
             {
                 const value = attachment.clearValue ?? { r: 0, g: 0, b: 0, a: 1 };
                 /** @param {number} channel */

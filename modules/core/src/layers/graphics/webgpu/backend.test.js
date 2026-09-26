@@ -546,6 +546,56 @@ test('a pass takes a stencil reference as dynamic state', ()=>{
         [0x80]);
 });
 
+test('a pass of several colour targets attaches each at its location', ()=>{
+    const { gpu, backend } = harness();
+    const a = target(backend, 64);
+    const b = target(backend, 64);
+    const frame = backend.beginFrame();
+    const pass = frame.beginPass({
+        targets: [a, null, b],
+        clearValues: [{ r: 1, g: 0, b: 0, a: 1 }, null, null],
+    });
+    pass.setScissor({ x: 0, y: 0, width: 512, height: 512 });
+    frame.end();
+    const [begun] = gpu.of('beginRenderPass');
+    const attachments = begun.descriptor.colorAttachments;
+    assert.equal(attachments.length, 3);
+    assert.deepEqual([attachments[0].view, attachments[0].loadOp, attachments[0].clearValue],
+        [a.view, 'clear', { r: 1, g: 0, b: 0, a: 1 }], 'a value clears its own target');
+    assert.equal(attachments[1], null, 'a location with nothing bound stays empty');
+    assert.deepEqual([attachments[2].view, attachments[2].loadOp], [b.view, 'load']);
+    assert.equal(pass.target, a, 'the first target sizes the pass');
+    assert.deepEqual(gpu.of('setScissorRect').map(call=>call.rect).at(-1), [0, 0, 64, 64],
+        'the scissor is clamped to the targets');
+});
+
+test('the colour targets of one pass are one size, and a pass has some target', ()=>{
+    const { backend } = harness();
+    const frame = backend.beginFrame();
+    assert.throws(()=>frame.beginPass({ targets: [target(backend, 64), target(backend, 32)] }),
+        /one size/);
+    assert.throws(()=>frame.beginPass({ targets: [] }), /no target/);
+    frame.end();
+});
+
+test('a pass may draw depth alone, sized by its depth target', ()=>{
+    const { gpu, backend } = harness();
+    const depth = backend.createSurface({ width: 32, height: 16, format: 'depth32float',
+        label: 'shadow' });
+    const frame = backend.beginFrame();
+    frame.beginPass({
+        targets: [],
+        depthTarget: depth,
+        depthStencilAttachment: { view: depth.view, depthLoadOp: 'clear', depthStoreOp: 'store',
+            depthClearValue: 1 },
+    });
+    frame.end();
+    const [begun] = gpu.of('beginRenderPass');
+    assert.deepEqual(begun.descriptor.colorAttachments, []);
+    assert.equal(begun.descriptor.depthStencilAttachment.view, depth.view);
+    assert.deepEqual(gpu.of('setViewport')[0].rect, [0, 0, 32, 16, 0, 1]);
+});
+
 test('a texture copy closes the pass it interrupts and records on the frame encoder', ()=>{
     const { gpu, backend } = harness();
     const a = target(backend, 64);
