@@ -150,8 +150,8 @@ test('a program reaches Direct3D through a library, not by asking for an object'
     const { libraries } = seamed();
 
     assert.deepEqual(Object.keys(libraries.libraries).sort(),
-        ['D3D10.dll', 'D3D8.dll', 'D3D9.dll', 'DDRAW.dll', 'DXGI.dll', 'OPENGL32.dll',
-            'vulkan-1.dll']);
+        ['D3D10.dll', 'D3D10_1.dll', 'D3D8.dll', 'D3D9.dll', 'DDRAW.dll', 'DXGI.dll',
+            'OPENGL32.dll', 'vulkan-1.dll']);
     assert.equal(libraries.libraries['D3D8.dll'].Direct3DCreate8.argBytes, 4,
         'one argument, the SDK version');
 });

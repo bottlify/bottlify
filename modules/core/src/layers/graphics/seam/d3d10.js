@@ -34,7 +34,10 @@ import {
     DXGI_ERROR_INVALID_CALL, DXGI_ERROR_MORE_DATA, DXGI_ERROR_UNSUPPORTED, E_FAIL, E_INVALIDARG,
     E_NOTIMPL, E_OUTOFMEMORY, IID, S_OK, formatPitch,
 } from '../d3d10/constants.js';
-import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain } from '../d3d10/device.js';
+import {
+    D3D10CreateDevice, D3D10CreateDevice1, D3D10CreateDeviceAndSwapChain,
+    D3D10CreateDeviceAndSwapChain1,
+} from '../d3d10/device.js';
 import { CreateDXGIFactory, CreateDXGIFactory1 } from '../d3d10/dxgi.js';
 import {
     DXGI_MODE_DESC, readModeDesc, readSwapChainDesc, writeModeDesc, writeSwapChainDesc,
@@ -344,6 +347,16 @@ export const ID3D10STATE_SLOTS = /** @type {[string, number][]} */ ([
     ['GetDesc', 1],
 ]);
 
+export const ID3D10SHADERRESOURCEVIEW1_SLOTS = /** @type {[string, number][]} */ ([
+    ...ID3D10VIEW_SLOTS,
+    ['GetDesc1', 1],
+]);
+
+export const ID3D10BLENDSTATE1_SLOTS = /** @type {[string, number][]} */ ([
+    ...ID3D10STATE_SLOTS,
+    ['GetDesc1', 1],
+]);
+
 export const ID3D10SHADER_SLOTS = /** @type {[string, number][]} */ ([
     ...ID3D10DEVICECHILD_SLOTS,
 ]);
@@ -377,6 +390,21 @@ export const ID3D10SHADERREFLECTION_SLOTS = /** @type {[string, number][]} */ ([
     ['GetInputParameterDesc', 2],
     ['GetOutputParameterDesc', 2],
 ]);
+
+/** D3D10_BLEND_DESC1: two words, then eight targets of thirty-two bytes. */
+const D3D10_BLEND_DESC1 = Object.freeze({
+    AlphaToCoverageEnable: 0x00, IndependentBlendEnable: 0x04, RenderTarget: 0x08,
+    TARGET_SIZE: 0x20, SIZE: 0x108,
+});
+
+/** One target of D3D10_BLEND_DESC1; the write mask is a byte. */
+const D3D10_RENDER_TARGET_BLEND_DESC1 = Object.freeze({
+    BlendEnable: 0x00, SrcBlend: 0x04, DestBlend: 0x08, BlendOp: 0x0c, SrcBlendAlpha: 0x10,
+    DestBlendAlpha: 0x14, BlendOpAlpha: 0x18,
+});
+
+/** Where the write mask byte of a D3D10_RENDER_TARGET_BLEND_DESC1 sits. */
+const RENDER_TARGET_WRITE_MASK1 = 0x1c;
 
 /**
  * ID3D10Device, after IUnknown's three: ninety-five slots, transcribed from
@@ -480,6 +508,14 @@ export const ID3D10DEVICE_SLOTS = /** @type {[string, number][]} */ ([
     ['OpenSharedResource', 3],
     ['SetTextFilterSize', 2],
     ['GetTextFilterSize', 2],
+]);
+
+/** ID3D10Device1: the device, and three methods Direct3D 10.1 added after it. */
+export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
+    ...ID3D10DEVICE_SLOTS,
+    ['CreateShaderResourceView1', 3],
+    ['CreateBlendState1', 2],
+    ['GetFeatureLevel', 0],
 ]);
 
 /**
@@ -827,8 +863,9 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             }
             return hr;
         },
-        // Direct3D 10 is what this adapter speaks; anything else asked by GUID
-        // is refused, which is how a program picks between its own paths.
+        // Direct3D 10 and 10.1 are what this adapter speaks, as every device
+        // made on it answers both; anything else asked by GUID is refused,
+        // which is how a program picks between its own paths.
         /** @param {any} adapter @param {number[]} args */
         CheckInterfaceSupport: (adapter, [guid, version])=>{
             if ((version >>> 0) !== 0)
@@ -836,7 +873,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 fields.writeU32(version, 0);
                 fields.writeU32(version + 4, 0);
             }
-            return readGuid(memory, guid) === IID.ID3D10Device ? S_OK : DXGI_ERROR_INVALID_CALL;
+            const id = readGuid(memory, guid);
+            return id === IID.ID3D10Device || id === IID.ID3D10Device1
+                ? S_OK
+                : DXGI_ERROR_INVALID_CALL;
         },
     });
 
@@ -1366,10 +1406,11 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
      * @param {string} id
      * @param {(desc: any) => Record<string, number>} unionOf
      *     The union fields after the head, in order, as the view reports them.
+     * @param {[string, [string, number][]][]} [later]  Later versions it also answers as.
      */
-    const viewInterfaces = (id, unionOf)=>describeAll([
+    const viewInterfaces = (id, unionOf, later = [])=>describeAll([
         [id, ID3D10VIEW_SLOTS], [IID.ID3D10View, ID3D10BASEVIEW_SLOTS],
-        [IID.ID3D10DeviceChild, ID3D10DEVICECHILD_SLOTS],
+        [IID.ID3D10DeviceChild, ID3D10DEVICECHILD_SLOTS], ...later,
     ], {
         GetDevice: getDevice,
         ...privateDataMethods,
@@ -1383,6 +1424,19 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         },
         /** @param {any} view @param {number[]} args */
         GetDesc: (view, [out])=>{
+            /** @type {{ desc?: any }} */
+            const held = {};
+            view.GetDesc(held);
+            fields.writeStruct(out, VIEW_DESC, {
+                Format: held.desc.Format,
+                ViewDimension: held.desc.ViewDimension,
+                ...unionOf(held.desc),
+            });
+        },
+        // Direct3D 10.1's description differs only by a cube-array member no
+        // view here has, so the older one is written in its place.
+        /** @param {any} view @param {number[]} args */
+        GetDesc1: (view, [out])=>{
             /** @type {{ desc?: any }} */
             const held = {};
             view.GetDesc(held);
@@ -1409,14 +1463,15 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         u1: desc.MipLevels ?? desc.ElementWidth ?? 0,
         u2: desc.FirstArraySlice ?? 0,
         u3: desc.ArraySize ?? 0,
-    }));
+    }), [[IID.ID3D10ShaderResourceView1, ID3D10SHADERRESOURCEVIEW1_SLOTS]]);
 
     /**
      * @param {string} id
      * @param {(desc: any, out: number) => void} write
+     * @param {[string, [string, number][]][]} [later]  Later versions it also answers as.
      */
-    const stateInterfaces = (id, write)=>describeAll([
-        [id, ID3D10STATE_SLOTS], [IID.ID3D10DeviceChild, ID3D10DEVICECHILD_SLOTS],
+    const stateInterfaces = (id, write, later = [])=>describeAll([
+        [id, ID3D10STATE_SLOTS], [IID.ID3D10DeviceChild, ID3D10DEVICECHILD_SLOTS], ...later,
     ], {
         GetDevice: getDevice,
         ...privateDataMethods,
@@ -1427,7 +1482,30 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             state.GetDesc(held);
             write(held.desc, out);
         },
+        /** @param {any} state @param {number[]} args */
+        GetDesc1: (state, [out])=>{
+            /** @type {{ desc?: any }} */
+            const held = {};
+            state.GetDesc1(held);
+            writeBlendDesc1(held.desc, out);
+        },
     });
+
+    /** @param {any} desc a normalised D3D10_BLEND_DESC1 @param {number} out */
+    const writeBlendDesc1 = (desc, out)=>{
+        fields.writeU32(out + D3D10_BLEND_DESC1.AlphaToCoverageEnable,
+            desc.AlphaToCoverageEnable ? 1 : 0);
+        fields.writeU32(out + D3D10_BLEND_DESC1.IndependentBlendEnable,
+            desc.IndependentBlendEnable ? 1 : 0);
+        desc.RenderTarget.forEach((/** @type {any} */ target, /** @type {number} */ index)=>{
+            const at = out + D3D10_BLEND_DESC1.RenderTarget + index * D3D10_BLEND_DESC1.TARGET_SIZE;
+            fields.writeStruct(at, D3D10_RENDER_TARGET_BLEND_DESC1, {
+                ...target, BlendEnable: target.BlendEnable ? 1 : 0,
+            });
+            memory.writeMemory(at + RENDER_TARGET_WRITE_MASK1,
+                Uint8Array.from([target.RenderTargetWriteMask, 0, 0, 0]));
+        });
+    };
 
     const blendStateInterfaces = stateInterfaces(IID.ID3D10BlendState, (desc, out)=>{
         fields.writeStruct(out, D3D10_BLEND_DESC, {
@@ -1446,7 +1524,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         }
         memory.writeMemory(out + D3D10_BLEND_DESC.RenderTargetWriteMask,
             Uint8Array.from(desc.RenderTargetWriteMask));
-    });
+    }, [[IID.ID3D10BlendState1, ID3D10BLENDSTATE1_SLOTS]]);
     const depthStencilStateInterfaces = stateInterfaces(IID.ID3D10DepthStencilState, (desc, out)=>{
         fields.writeStruct(out, D3D10_DEPTH_STENCIL_DESC, {
             DepthEnable: desc.DepthEnable ? 1 : 0,
@@ -1685,6 +1763,24 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             RenderTargetWriteMask: [...masks],
         };
     };
+
+    /** @param {number} address @returns {any} */
+    const readBlendDesc1 = address=>({
+        AlphaToCoverageEnable: fields.readU32(address + D3D10_BLEND_DESC1.AlphaToCoverageEnable)
+            !== 0,
+        IndependentBlendEnable: fields.readU32(address + D3D10_BLEND_DESC1.IndependentBlendEnable)
+            !== 0,
+        RenderTarget: Array.from({ length: 8 }, (_, index)=>{
+            const at = address + D3D10_BLEND_DESC1.RenderTarget
+                + index * D3D10_BLEND_DESC1.TARGET_SIZE;
+            const target = fields.readStruct(at, D3D10_RENDER_TARGET_BLEND_DESC1);
+            return {
+                ...target,
+                BlendEnable: target.BlendEnable !== 0,
+                RenderTargetWriteMask: memory.readMemory(at + RENDER_TARGET_WRITE_MASK1, 1)[0],
+            };
+        }),
+    });
 
     /** @param {number} address @returns {any} */
     const readDepthStencilDesc = address=>{
@@ -1953,7 +2049,9 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
 
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const deviceInterfaces = [
-        describe(IID.ID3D10Device, ID3D10DEVICE_SLOTS, {
+        ...describeAll([
+            [IID.ID3D10Device, ID3D10DEVICE_SLOTS], [IID.ID3D10Device1, ID3D10DEVICE1_SLOTS],
+        ], {
             ...stageMethods('VS'),
             ...stageMethods('GS'),
             ...stageMethods('PS'),
@@ -2344,6 +2442,13 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 IID.ID3D10PixelShader),
             CreateBlendState: stateCreate('CreateBlendState', readBlendDesc, blendStateInterfaces,
                 IID.ID3D10BlendState, 'state'),
+            CreateBlendState1: stateCreate('CreateBlendState1', readBlendDesc1,
+                blendStateInterfaces, IID.ID3D10BlendState1, 'state'),
+            CreateShaderResourceView1: viewCreate('CreateShaderResourceView1',
+                shaderResourceViewInterfaces, IID.ID3D10ShaderResourceView1,
+                ['MostDetailedMip', 'MipLevels', 'FirstArraySlice', 'ArraySize']),
+            /** @param {any} device */
+            GetFeatureLevel: device=>device.GetFeatureLevel(),
             CreateDepthStencilState: stateCreate('CreateDepthStencilState', readDepthStencilDesc,
                 depthStencilStateInterfaces, IID.ID3D10DepthStencilState, 'state'),
             CreateRasterizerState: stateCreate('CreateRasterizerState', readRasterizerDesc,
@@ -2928,8 +3033,237 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         return handBack(deviceOut.device, deviceInterfaces, IID.ID3D10Device, out);
     };
 
+    /**
+     * Direct3D 10.1's two entry points, which name a feature level and, unlike
+     * the 10.0 ones, have no use for a null device pointer.
+     *
+     * @param {number[]} args  adapter, driverType, software, flags, featureLevel,
+     *     sdkVersion, [swapChainDesc, swapChainOut,] deviceOut
+     * @param {boolean} withSwapChain
+     */
+    const createDevice1Entry = (args, withSwapChain)=>{
+        const [adapterPointer, driverType, software, flags, featureLevel, sdkVersion] = args;
+        const [descAt, chainAt, deviceAt] = withSwapChain ? args.slice(6, 9) : [0, 0, args[6]];
+        /** @type {{ device?: any } | null} */
+        const deviceOut = (deviceAt >>> 0) === 0 ? null : {};
+        /** @type {{ swapChain?: any } | null} */
+        const chainOut = (chainAt >>> 0) === 0 ? null : {};
+        const options = { ...deviceOptions(), factoryOptions };
+        const adapter = publisher.objectAt(adapterPointer);
+        const softwareModule = (software >>> 0) === 0 ? null : { module: software >>> 0 };
+        const hr = withSwapChain
+            ? D3D10CreateDeviceAndSwapChain1(adapter, driverType >>> 0, softwareModule,
+                flags >>> 0, featureLevel >>> 0, sdkVersion >>> 0,
+                (descAt >>> 0) === 0 ? null : readSwapChainDesc(memory, descAt), chainOut,
+                deviceOut, options)
+            : D3D10CreateDevice1(adapter, driverType >>> 0, softwareModule, flags >>> 0,
+                featureLevel >>> 0, sdkVersion >>> 0, deviceOut, options);
+        if ((chainAt >>> 0) !== 0)
+        {
+            fields.writeU32(chainAt, 0);
+        }
+        if (hr !== S_OK || !deviceOut)
+        {
+            if ((deviceAt >>> 0) !== 0)
+            {
+                fields.writeU32(deviceAt, 0);
+            }
+            return hr;
+        }
+        if (chainOut?.swapChain)
+        {
+            swapChainDevices.set(chainOut.swapChain, deviceOut.device);
+            fields.writeU32(chainAt, publisher.publish(chainOut.swapChain, swapChainInterfaces,
+                IID.IDXGISwapChain));
+        }
+        created.push(deviceOut.device);
+        return handBack(deviceOut.device, deviceInterfaces, IID.ID3D10Device1, deviceAt);
+    };
+
     /** @type {any[]} */
     const created = [];
+
+    /** d3d10.dll's exports, which d3d10_1.dll forwards but for its own two creates. */
+    const d3d10Exports = {
+        /**
+         * HRESULT D3D10CreateDevice(IDXGIAdapter*, D3D10_DRIVER_TYPE, HMODULE, UINT,
+         *                           UINT SDKVersion, ID3D10Device**)
+         */
+        D3D10CreateDevice: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>createDeviceEntry(args, false),
+        },
+        /**
+         * HRESULT D3D10CreateDeviceAndSwapChain(IDXGIAdapter*, D3D10_DRIVER_TYPE,
+         *     HMODULE, UINT, UINT SDKVersion, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**,
+         *     ID3D10Device**)
+         */
+        D3D10CreateDeviceAndSwapChain: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: args=>createDeviceEntry(args, true),
+        },
+        /** HRESULT D3D10CreateBlob(SIZE_T, ID3D10Blob**) */
+        D3D10CreateBlob: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([size, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                return (size >>> 0) > LARGEST_BLOB
+                    ? E_OUTOFMEMORY
+                    : blobInto(out, new Uint8Array(size >>> 0), E_OUTOFMEMORY);
+            },
+        },
+        /** HRESULT D3D10GetInputSignatureBlob(const void*, SIZE_T, ID3D10Blob**) */
+        D3D10GetInputSignatureBlob: signatureEntry(['ISGN']),
+        /** HRESULT D3D10GetOutputSignatureBlob(const void*, SIZE_T, ID3D10Blob**) */
+        D3D10GetOutputSignatureBlob: signatureEntry(['OSGN']),
+        /**
+         * HRESULT D3D10GetInputAndOutputSignatureBlob(const void*, SIZE_T,
+         *     ID3D10Blob**)
+         */
+        D3D10GetInputAndOutputSignatureBlob: signatureEntry(['ISGN', 'OSGN']),
+        /** HRESULT D3D10GetShaderDebugInfo(const void*, SIZE_T, ID3D10Blob**) */
+        D3D10GetShaderDebugInfo: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([data, size, out])=>{
+                const bytes = shaderBytes(data, size);
+                if (!bytes || (out >>> 0) === 0)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                return blobInto(out, debugInfoOf(bytes), E_FAIL);
+            },
+        },
+        /** HRESULT D3D10ReflectShader(const void*, SIZE_T, ID3D10ShaderReflection**) */
+        D3D10ReflectShader: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([data, size, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const bytes = shaderBytes(data, size);
+                const reflected = bytes ? reflectShader(bytes) : null;
+                if (!bytes || !reflected)
+                {
+                    fields.writeU32(out, 0);
+                    return E_FAIL;
+                }
+                const copy = allocate ? allocate(bytes.length) : 0;
+                if (!copy)
+                {
+                    fields.writeU32(out, 0);
+                    return E_OUTOFMEMORY;
+                }
+                memory.writeMemory(copy, bytes);
+                const reflection = createShaderReflection(reflected, ()=>free?.(copy));
+                reflectionCopies.set(reflection, copy);
+                return handBack(reflection, reflectionInterfaces,
+                    IID.ID3D10ShaderReflection, out);
+            },
+        },
+        /**
+         * HRESULT D3D10CreateStateBlock(ID3D10Device*, D3D10_STATE_BLOCK_MASK*,
+         *     ID3D10StateBlock**)
+         */
+        D3D10CreateStateBlock: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([devicePointer, maskAt, out])=>{
+                const device = publisher.objectAt(devicePointer);
+                const mask = readMask(maskAt);
+                if (!device || !mask || (out >>> 0) === 0)
+                {
+                    if ((out >>> 0) !== 0)
+                    {
+                        fields.writeU32(out, 0);
+                    }
+                    return E_INVALIDARG;
+                }
+                return handBack(createStateBlock(device, mask), stateBlockInterfaces,
+                    IID.ID3D10StateBlock, out);
+            },
+        },
+        /** HRESULT D3D10StateBlockMaskEnableAll(D3D10_STATE_BLOCK_MASK*) */
+        D3D10StateBlockMaskEnableAll: maskEntry(stateBlockMask.EnableAll, 4),
+        /** HRESULT D3D10StateBlockMaskDisableAll(D3D10_STATE_BLOCK_MASK*) */
+        D3D10StateBlockMaskDisableAll: maskEntry(stateBlockMask.DisableAll, 4),
+        /**
+         * HRESULT D3D10StateBlockMaskEnableCapture(D3D10_STATE_BLOCK_MASK*,
+         *     D3D10_DEVICE_STATE_TYPES, UINT, UINT)
+         */
+        D3D10StateBlockMaskEnableCapture: maskEntry(stateBlockMask.EnableCapture, 16),
+        /**
+         * HRESULT D3D10StateBlockMaskDisableCapture(D3D10_STATE_BLOCK_MASK*,
+         *     D3D10_DEVICE_STATE_TYPES, UINT, UINT)
+         */
+        D3D10StateBlockMaskDisableCapture: maskEntry(stateBlockMask.DisableCapture, 16),
+        /**
+         * BOOL D3D10StateBlockMaskGetSetting(D3D10_STATE_BLOCK_MASK*,
+         *     D3D10_DEVICE_STATE_TYPES, UINT)
+         */
+        D3D10StateBlockMaskGetSetting: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([maskAt, type, entry])=>stateBlockMask.GetSetting(readMask(maskAt),
+                type >>> 0, entry >>> 0),
+        },
+        /** HRESULT D3D10StateBlockMaskDifference(mask*, mask*, mask*) */
+        D3D10StateBlockMaskDifference: combineEntry(stateBlockMask.Difference),
+        /** HRESULT D3D10StateBlockMaskIntersect(mask*, mask*, mask*) */
+        D3D10StateBlockMaskIntersect: combineEntry(stateBlockMask.Intersect),
+        /** HRESULT D3D10StateBlockMaskUnion(mask*, mask*, mask*) */
+        D3D10StateBlockMaskUnion: combineEntry(stateBlockMask.Union),
+        /** const char* D3D10GetVertexShaderProfile(ID3D10Device*) */
+        D3D10GetVertexShaderProfile: profileEntry(SHADER_PROFILE.VERTEX),
+        /** const char* D3D10GetPixelShaderProfile(ID3D10Device*) */
+        D3D10GetPixelShaderProfile: profileEntry(SHADER_PROFILE.PIXEL),
+        /** const char* D3D10GetGeometryShaderProfile(ID3D10Device*) */
+        D3D10GetGeometryShaderProfile: profileEntry(SHADER_PROFILE.GEOMETRY),
+        /**
+         * HRESULT D3D10CompileShader(const char*, SIZE_T, const char*,
+         *     const D3D10_SHADER_MACRO*, ID3D10Include*, const char*, const char*,
+         *     UINT, ID3D10Blob**, ID3D10Blob**)
+         */
+        D3D10CompileShader: {
+            argBytes: 40,
+            /** @param {number[]} args */
+            handler: args=>refuseCompile('D3D10CompileShader', args[8], args[9]),
+        },
+        /**
+         * HRESULT D3D10CompileEffectFromMemory(void*, SIZE_T, const char*,
+         *     const D3D10_SHADER_MACRO*, ID3D10Include*, UINT, UINT, ID3D10Blob**,
+         *     ID3D10Blob**)
+         */
+        D3D10CompileEffectFromMemory: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: args=>refuseCompile('D3D10CompileEffectFromMemory', args[7],
+                args[8]),
+        },
+        /**
+         * HRESULT D3D10DisassembleShader(const void*, SIZE_T, BOOL, const char*,
+         *     ID3D10Blob**): no disassembler is kept here.
+         */
+        D3D10DisassembleShader: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([, , , , out])=>{
+                if ((out >>> 0) !== 0)
+                {
+                    fields.writeU32(out, 0);
+                }
+                return E_NOTIMPL;
+            },
+        },
+    };
 
     return {
         deviceInterfaces,
@@ -2937,186 +3271,31 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         factoryInterfaces,
 
         libraries: {
-            'D3D10.dll': {
+            'D3D10_1.dll': {
                 /**
-                 * HRESULT D3D10CreateDevice(IDXGIAdapter*, D3D10_DRIVER_TYPE, HMODULE, UINT,
-                 *                           UINT SDKVersion, ID3D10Device**)
+                 * HRESULT D3D10CreateDevice1(IDXGIAdapter*, D3D10_DRIVER_TYPE, HMODULE, UINT,
+                 *     D3D10_FEATURE_LEVEL1, UINT SDKVersion, ID3D10Device1**)
                  */
-                D3D10CreateDevice: {
-                    argBytes: 24,
+                D3D10CreateDevice1: {
+                    argBytes: 28,
                     /** @param {number[]} args */
-                    handler: args=>createDeviceEntry(args, false),
+                    handler: args=>createDevice1Entry(args, false),
                 },
                 /**
-                 * HRESULT D3D10CreateDeviceAndSwapChain(IDXGIAdapter*, D3D10_DRIVER_TYPE,
-                 *     HMODULE, UINT, UINT SDKVersion, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**,
-                 *     ID3D10Device**)
+                 * HRESULT D3D10CreateDeviceAndSwapChain1(IDXGIAdapter*, D3D10_DRIVER_TYPE,
+                 *     HMODULE, UINT, D3D10_FEATURE_LEVEL1, UINT SDKVersion,
+                 *     DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**, ID3D10Device1**)
                  */
-                D3D10CreateDeviceAndSwapChain: {
-                    argBytes: 32,
-                    /** @param {number[]} args */
-                    handler: args=>createDeviceEntry(args, true),
-                },
-                /** HRESULT D3D10CreateBlob(SIZE_T, ID3D10Blob**) */
-                D3D10CreateBlob: {
-                    argBytes: 8,
-                    /** @param {number[]} args */
-                    handler: ([size, out])=>{
-                        if ((out >>> 0) === 0)
-                        {
-                            return D3DERR_INVALIDCALL;
-                        }
-                        return (size >>> 0) > LARGEST_BLOB
-                            ? E_OUTOFMEMORY
-                            : blobInto(out, new Uint8Array(size >>> 0), E_OUTOFMEMORY);
-                    },
-                },
-                /** HRESULT D3D10GetInputSignatureBlob(const void*, SIZE_T, ID3D10Blob**) */
-                D3D10GetInputSignatureBlob: signatureEntry(['ISGN']),
-                /** HRESULT D3D10GetOutputSignatureBlob(const void*, SIZE_T, ID3D10Blob**) */
-                D3D10GetOutputSignatureBlob: signatureEntry(['OSGN']),
-                /**
-                 * HRESULT D3D10GetInputAndOutputSignatureBlob(const void*, SIZE_T,
-                 *     ID3D10Blob**)
-                 */
-                D3D10GetInputAndOutputSignatureBlob: signatureEntry(['ISGN', 'OSGN']),
-                /** HRESULT D3D10GetShaderDebugInfo(const void*, SIZE_T, ID3D10Blob**) */
-                D3D10GetShaderDebugInfo: {
-                    argBytes: 12,
-                    /** @param {number[]} args */
-                    handler: ([data, size, out])=>{
-                        const bytes = shaderBytes(data, size);
-                        if (!bytes || (out >>> 0) === 0)
-                        {
-                            return D3DERR_INVALIDCALL;
-                        }
-                        return blobInto(out, debugInfoOf(bytes), E_FAIL);
-                    },
-                },
-                /** HRESULT D3D10ReflectShader(const void*, SIZE_T, ID3D10ShaderReflection**) */
-                D3D10ReflectShader: {
-                    argBytes: 12,
-                    /** @param {number[]} args */
-                    handler: ([data, size, out])=>{
-                        if ((out >>> 0) === 0)
-                        {
-                            return E_INVALIDARG;
-                        }
-                        const bytes = shaderBytes(data, size);
-                        const reflected = bytes ? reflectShader(bytes) : null;
-                        if (!bytes || !reflected)
-                        {
-                            fields.writeU32(out, 0);
-                            return E_FAIL;
-                        }
-                        const copy = allocate ? allocate(bytes.length) : 0;
-                        if (!copy)
-                        {
-                            fields.writeU32(out, 0);
-                            return E_OUTOFMEMORY;
-                        }
-                        memory.writeMemory(copy, bytes);
-                        const reflection = createShaderReflection(reflected, ()=>free?.(copy));
-                        reflectionCopies.set(reflection, copy);
-                        return handBack(reflection, reflectionInterfaces,
-                            IID.ID3D10ShaderReflection, out);
-                    },
-                },
-                /**
-                 * HRESULT D3D10CreateStateBlock(ID3D10Device*, D3D10_STATE_BLOCK_MASK*,
-                 *     ID3D10StateBlock**)
-                 */
-                D3D10CreateStateBlock: {
-                    argBytes: 12,
-                    /** @param {number[]} args */
-                    handler: ([devicePointer, maskAt, out])=>{
-                        const device = publisher.objectAt(devicePointer);
-                        const mask = readMask(maskAt);
-                        if (!device || !mask || (out >>> 0) === 0)
-                        {
-                            if ((out >>> 0) !== 0)
-                            {
-                                fields.writeU32(out, 0);
-                            }
-                            return E_INVALIDARG;
-                        }
-                        return handBack(createStateBlock(device, mask), stateBlockInterfaces,
-                            IID.ID3D10StateBlock, out);
-                    },
-                },
-                /** HRESULT D3D10StateBlockMaskEnableAll(D3D10_STATE_BLOCK_MASK*) */
-                D3D10StateBlockMaskEnableAll: maskEntry(stateBlockMask.EnableAll, 4),
-                /** HRESULT D3D10StateBlockMaskDisableAll(D3D10_STATE_BLOCK_MASK*) */
-                D3D10StateBlockMaskDisableAll: maskEntry(stateBlockMask.DisableAll, 4),
-                /**
-                 * HRESULT D3D10StateBlockMaskEnableCapture(D3D10_STATE_BLOCK_MASK*,
-                 *     D3D10_DEVICE_STATE_TYPES, UINT, UINT)
-                 */
-                D3D10StateBlockMaskEnableCapture: maskEntry(stateBlockMask.EnableCapture, 16),
-                /**
-                 * HRESULT D3D10StateBlockMaskDisableCapture(D3D10_STATE_BLOCK_MASK*,
-                 *     D3D10_DEVICE_STATE_TYPES, UINT, UINT)
-                 */
-                D3D10StateBlockMaskDisableCapture: maskEntry(stateBlockMask.DisableCapture, 16),
-                /**
-                 * BOOL D3D10StateBlockMaskGetSetting(D3D10_STATE_BLOCK_MASK*,
-                 *     D3D10_DEVICE_STATE_TYPES, UINT)
-                 */
-                D3D10StateBlockMaskGetSetting: {
-                    argBytes: 12,
-                    /** @param {number[]} args */
-                    handler: ([maskAt, type, entry])=>stateBlockMask.GetSetting(readMask(maskAt),
-                        type >>> 0, entry >>> 0),
-                },
-                /** HRESULT D3D10StateBlockMaskDifference(mask*, mask*, mask*) */
-                D3D10StateBlockMaskDifference: combineEntry(stateBlockMask.Difference),
-                /** HRESULT D3D10StateBlockMaskIntersect(mask*, mask*, mask*) */
-                D3D10StateBlockMaskIntersect: combineEntry(stateBlockMask.Intersect),
-                /** HRESULT D3D10StateBlockMaskUnion(mask*, mask*, mask*) */
-                D3D10StateBlockMaskUnion: combineEntry(stateBlockMask.Union),
-                /** const char* D3D10GetVertexShaderProfile(ID3D10Device*) */
-                D3D10GetVertexShaderProfile: profileEntry(SHADER_PROFILE.VERTEX),
-                /** const char* D3D10GetPixelShaderProfile(ID3D10Device*) */
-                D3D10GetPixelShaderProfile: profileEntry(SHADER_PROFILE.PIXEL),
-                /** const char* D3D10GetGeometryShaderProfile(ID3D10Device*) */
-                D3D10GetGeometryShaderProfile: profileEntry(SHADER_PROFILE.GEOMETRY),
-                /**
-                 * HRESULT D3D10CompileShader(const char*, SIZE_T, const char*,
-                 *     const D3D10_SHADER_MACRO*, ID3D10Include*, const char*, const char*,
-                 *     UINT, ID3D10Blob**, ID3D10Blob**)
-                 */
-                D3D10CompileShader: {
-                    argBytes: 40,
-                    /** @param {number[]} args */
-                    handler: args=>refuseCompile('D3D10CompileShader', args[8], args[9]),
-                },
-                /**
-                 * HRESULT D3D10CompileEffectFromMemory(void*, SIZE_T, const char*,
-                 *     const D3D10_SHADER_MACRO*, ID3D10Include*, UINT, UINT, ID3D10Blob**,
-                 *     ID3D10Blob**)
-                 */
-                D3D10CompileEffectFromMemory: {
+                D3D10CreateDeviceAndSwapChain1: {
                     argBytes: 36,
                     /** @param {number[]} args */
-                    handler: args=>refuseCompile('D3D10CompileEffectFromMemory', args[7],
-                        args[8]),
+                    handler: args=>createDevice1Entry(args, true),
                 },
-                /**
-                 * HRESULT D3D10DisassembleShader(const void*, SIZE_T, BOOL, const char*,
-                 *     ID3D10Blob**): no disassembler is kept here.
-                 */
-                D3D10DisassembleShader: {
-                    argBytes: 20,
-                    /** @param {number[]} args */
-                    handler: ([, , , , out])=>{
-                        if ((out >>> 0) !== 0)
-                        {
-                            fields.writeU32(out, 0);
-                        }
-                        return E_NOTIMPL;
-                    },
-                },
+                // Everything else d3d10_1.dll exports is d3d10.dll's, forwarded.
+                ...Object.fromEntries(Object.entries(d3d10Exports).filter(([name])=>
+                    name !== 'D3D10CreateDevice' && name !== 'D3D10CreateDeviceAndSwapChain')),
             },
+            'D3D10.dll': d3d10Exports,
             'DXGI.dll': {
                 /** HRESULT CreateDXGIFactory(REFIID, void**) */
                 CreateDXGIFactory: {

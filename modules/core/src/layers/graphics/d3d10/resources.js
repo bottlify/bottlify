@@ -449,6 +449,7 @@ function resolveBufferViewDesc(resource, desc, dimensions){
  * @property {any} desc              The already-resolved description.
  * @property {string} dimensionName  The shape the view looks at, by its enumeration name.
  * @property {string} iid
+ * @property {readonly string[]} [also]  Later versions of the interface it answers to.
  * @property {() => void} retainDevice
  * @property {() => void} releaseDevice
  * @property {() => any} device
@@ -491,7 +492,8 @@ export function createView(options){
             return S_OK;
         },
     }, {
-        interfaces: [IID.ID3D10DeviceChild, IID.ID3D10View, options.iid],
+        interfaces: [IID.ID3D10DeviceChild, IID.ID3D10View, options.iid,
+            ...(options.also ?? [])],
         onFirstRef: options.retainDevice,
         onLastRef: options.releaseDevice,
     });
@@ -516,6 +518,7 @@ export const VIEW_KINDS = Object.freeze({
         bindFlag: D3D10_BIND.SHADER_RESOURCE,
         mipRange: true,
         iid: IID.ID3D10ShaderResourceView,
+        also: Object.freeze([IID.ID3D10ShaderResourceView1]),
     }),
 });
 

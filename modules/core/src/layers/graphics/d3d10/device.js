@@ -38,7 +38,8 @@ import { attachCom } from './com.js';
 import {
     D3D10_BIND, D3D10_CREATE_DEVICE, D3D10_CREATE_DEVICE_MASK, D3D10_DEFAULTS, D3D10_DRIVER_TYPE,
     D3D10_DRIVER_TYPES, D3D10_LIMITS, D3D10_PRIMITIVE_TOPOLOGY, D3D10_QUERY,
-    D3D10_RESOURCE_DIMENSION, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_USAGE,
+    D3D10_RESOURCE_DIMENSION, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_1_SDK_VERSION,
+    D3D10_USAGE,
     DXGI_ERROR_INVALID_CALL, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_FAIL,
     E_INVALIDARG, E_NOTIMPL, FORMAT_INFO, FORMAT_KIND, IID, S_FALSE, S_OK,
 } from './constants.js';
@@ -158,6 +159,101 @@ export function D3D10CreateDevice(adapter, driverType, software, flags, sdkVersi
     }
     out.device = createDevice({ ...options, adapter, flags });
     return S_OK;
+}
+
+/** D3D10_SRV_DIMENSION1_TEXTURECUBEARRAY: a view Direct3D 10.1 added. */
+const D3D10_SRV_DIMENSION1_TEXTURECUBEARRAY = 10;
+
+/**
+ * The feature levels Direct3D 10.1's entry points name.
+ *
+ * @type {readonly number[]}
+ */
+const FEATURE_LEVELS_1 = Object.freeze([
+    D3D_FEATURE_LEVEL.LEVEL_10_1, D3D_FEATURE_LEVEL.LEVEL_10_0, D3D_FEATURE_LEVEL.LEVEL_9_3,
+    D3D_FEATURE_LEVEL.LEVEL_9_2, D3D_FEATURE_LEVEL.LEVEL_9_1,
+]);
+
+/**
+ * Whether a Direct3D 10.1 entry point's version and level can be met: its own
+ * SDK version, and of the levels it may name, 10.0 -- the one this device
+ * is. 10.1 needs per-target blending, cube arrays and more samples than this
+ * renderer has, and the 9.x levels restrictions it does not enforce, so both
+ * are refused the way an adapter without them refuses them.
+ *
+ * @param {number} featureLevel
+ * @param {number} sdkVersion
+ * @returns {number}
+ */
+function featureLevelResult(featureLevel, sdkVersion){
+    if (sdkVersion !== D3D10_1_SDK_VERSION || !FEATURE_LEVELS_1.includes(featureLevel))
+    {
+        return E_INVALIDARG;
+    }
+    return featureLevel === D3D_FEATURE_LEVEL.LEVEL_10_0 ? S_OK : DXGI_ERROR_UNSUPPORTED;
+}
+
+/**
+ * HRESULT D3D10CreateDevice1(IDXGIAdapter*, D3D10_DRIVER_TYPE, HMODULE, UINT,
+ * D3D10_FEATURE_LEVEL1, UINT, ID3D10Device1**). Unlike the 10.0 entry point
+ * it has no use for a null device pointer.
+ *
+ * @param {any} adapter
+ * @param {number} driverType
+ * @param {any} software
+ * @param {number} flags
+ * @param {number} featureLevel
+ * @param {number} sdkVersion
+ * @param {{ device?: any } | null} out
+ * @param {DeviceOptions} [options]
+ * @returns {number}
+ */
+export function D3D10CreateDevice1(adapter, driverType, software, flags, featureLevel,
+    sdkVersion, out, options = {})
+{
+    if (!out)
+    {
+        return E_INVALIDARG;
+    }
+    out.device = null;
+    const hr = featureLevelResult(featureLevel, sdkVersion);
+    return hr === S_OK
+        ? D3D10CreateDevice(adapter, driverType, software, flags, D3D10_SDK_VERSION, out, options)
+        : hr;
+}
+
+/**
+ * @param {any} adapter
+ * @param {number} driverType
+ * @param {any} software
+ * @param {number} flags
+ * @param {number} featureLevel
+ * @param {number} sdkVersion
+ * @param {import('./structs.js').SwapChainFields | null} swapChainDesc
+ * @param {{ swapChain?: any } | null} swapChainOut
+ * @param {{ device?: any } | null} deviceOut
+ * @param {DeviceOptions} [options]
+ * @returns {number}
+ */
+export function D3D10CreateDeviceAndSwapChain1(adapter, driverType, software, flags,
+    featureLevel, sdkVersion, swapChainDesc, swapChainOut, deviceOut, options = {})
+{
+    if (swapChainOut)
+    {
+        swapChainOut.swapChain = null;
+    }
+    if (!deviceOut)
+    {
+        return E_INVALIDARG;
+    }
+    deviceOut.device = null;
+    const hr = featureLevelResult(featureLevel, sdkVersion);
+    if (hr !== S_OK)
+    {
+        return hr;
+    }
+    return D3D10CreateDeviceAndSwapChain(adapter, driverType, software, flags, D3D10_SDK_VERSION,
+        swapChainOut ? swapChainDesc : null, swapChainOut ?? {}, deviceOut, options);
 }
 
 /**
@@ -472,6 +568,7 @@ export function createDevice(options = {}){
             desc: Object.freeze(reported),
             dimensionName,
             iid: kind.iid,
+            also: kind.also,
             retainDevice,
             releaseDevice,
             device: deviceHandle,
@@ -771,12 +868,39 @@ export function createDevice(options = {}){
             return createViewOf(resource, desc, VIEW_KINDS.SHADER_RESOURCE, out);
         },
 
+        /**
+         * Direct3D 10.1's description adds cube arrays, which a device of
+         * feature level 10.0 does not have; everything else is laid out as
+         * before.
+         *
+         * @param {any} resource @param {any} desc @param {{ view?: any }} out
+         */
+        CreateShaderResourceView1(resource, desc, out){
+            if (desc && desc.ViewDimension === D3D10_SRV_DIMENSION1_TEXTURECUBEARRAY)
+            {
+                out.view = null;
+                return E_INVALIDARG;
+            }
+            return createViewOf(resource, desc, VIEW_KINDS.SHADER_RESOURCE, out);
+        },
+
         // --- immutable state objects ---
 
         /** @param {any} desc @param {{ state?: any }} out */
         CreateBlendState(desc, out){
             out.state = null;
             return states.create(STATE_KIND.BLEND, desc, out);
+        },
+
+        /**
+         * Direct3D 10.1's blend state: factors per target. Only the first
+         * target is ever drawn here, with the first target's factors.
+         *
+         * @param {any} desc @param {{ state?: any }} out
+         */
+        CreateBlendState1(desc, out){
+            out.state = null;
+            return states.create(STATE_KIND.BLEND1, desc, out);
         },
 
         /** @param {any} desc @param {{ state?: any }} out */
@@ -1589,7 +1713,7 @@ export function createDevice(options = {}){
             pipeline.predicateValue = false;
         },
 
-        /** @returns {number} always 10.0: this entry point has no other level */
+        /** @returns {number} always 10.0, the one level any entry point makes a device at */
         GetFeatureLevel(){
             return D3D_FEATURE_LEVEL.LEVEL_10_0;
         },
@@ -1694,8 +1818,8 @@ export function createDevice(options = {}){
             });
         },
     }, {
-        interfaces: [IID.ID3D10Device, IID.ID3D10Multithread, IID.IDXGIObject, IID.IDXGIDevice,
-            IID.IDXGIDevice1],
+        interfaces: [IID.ID3D10Device, IID.ID3D10Device1, IID.ID3D10Multithread, IID.IDXGIObject,
+            IID.IDXGIDevice, IID.IDXGIDevice1],
         parent: adapter,
         // The adapter is the device's to hold: a program that releases its own
         // reference to the adapter and keeps the device must still be able to

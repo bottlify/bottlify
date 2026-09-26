@@ -48,6 +48,9 @@ export const DXGI_ERROR_WAS_STILL_DRAWING = 0x887a000a;
  */
 export const D3D10_SDK_VERSION = 29;
 
+/** The version tag Direct3D 10.1's entry points are compiled with. */
+export const D3D10_1_SDK_VERSION = 0x20;
+
 export const D3D_FEATURE_LEVEL = Object.freeze({
     LEVEL_9_1: 0x9100,
     LEVEL_9_2: 0x9200,
@@ -427,6 +430,8 @@ export const IID = Object.freeze({
     ID3D10Blob: '{8BA5FB08-5195-40E2-AC58-0D989C3A0102}',
     ID3D10ShaderReflection: '{D40E20B6-F8F7-42AD-AB20-4BAF8F15DFAA}',
     ID3D10StateBlock: '{0803425A-57F5-4DD6-9465-A87570834A08}',
+    ID3D10ShaderResourceView1: '{9B7E4C87-342C-4106-A19F-4F2704F689F0}',
+    ID3D10BlendState1: '{EDAD8D99-8A35-4D6D-8566-2EA276CDE161}',
 });
 
 // --- Direct3D 10 ---

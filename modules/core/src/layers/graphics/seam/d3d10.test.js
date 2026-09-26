@@ -22,7 +22,9 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import {
-    ID3D10BLOB_SLOTS, ID3D10BUFFER_SLOTS, ID3D10DEVICE_SLOTS, ID3D10MULTITHREAD_SLOTS,
+    ID3D10BLENDSTATE1_SLOTS, ID3D10BLOB_SLOTS, ID3D10BUFFER_SLOTS, ID3D10DEVICE1_SLOTS,
+    ID3D10DEVICE_SLOTS, ID3D10MULTITHREAD_SLOTS, ID3D10SHADERRESOURCEVIEW1_SLOTS,
+    ID3D10STATE_SLOTS,
     ID3D10QUERY_SLOTS, ID3D10SHADERREFLECTION_SLOTS, ID3D10STATEBLOCK_SLOTS, ID3D10TEXTURE_SLOTS,
     ID3D10VIEW_SLOTS, IDXGIADAPTER1_SLOTS, IDXGIADAPTER_SLOTS, IDXGIDEVICE1_SLOTS,
     IDXGIDEVICE_SLOTS, IDXGIFACTORY1_SLOTS, IDXGIFACTORY_SLOTS, IDXGIOUTPUT_SLOTS,
@@ -1063,6 +1065,99 @@ test('DXGI 1.1: the second factory entry point answers as IDXGIFactory1', ()=>{
     assert.equal(h.box.call(h.box.memory.readU32(firstAt), 0,
         [h.box.placeGuid(IID.IDXGIFactory1), queried]), 0x80004002,
     'a first-version factory is not the second');
+});
+
+test('d3d10_1.dll makes an ID3D10Device1 at 10.0, and forwards the rest to d3d10.dll', ()=>{
+    // After Wine's d3d10_1 test_create_device and test_create_blend_state.
+    const h = seamed();
+    const library = /** @type {Record<string, any>} */ (h.seam.libraries['D3D10_1.dll']);
+    assert.equal(library.D3D10CreateDevice1.argBytes, 28);
+    assert.equal(library.D3D10CreateDeviceAndSwapChain1.argBytes, 36);
+    assert.equal(library.D3D10CreateDevice, undefined, 'its own creates, not 10.0\'s');
+    assert.equal(library.D3D10CreateBlob, h.d3d10.D3D10CreateBlob, 'forwarded');
+    assert.equal(library.D3D10CreateStateBlock, h.d3d10.D3D10CreateStateBlock);
+
+    const deviceAt = h.box.place([0xdeadbeef]);
+    assert.equal(library.D3D10CreateDevice1.handler([0, D3D10_DRIVER_TYPE.HARDWARE, 0, 0,
+        0xa100, 0x20, deviceAt]) >>> 0, 0x887a0004, 'DXGI_ERROR_UNSUPPORTED for 10.1');
+    assert.equal(h.box.memory.readU32(deviceAt), 0);
+    assert.equal(library.D3D10CreateDevice1.handler([0, D3D10_DRIVER_TYPE.HARDWARE, 0, 0,
+        0xa000, 0x20, 0]) >>> 0, E_INVALIDARG, 'no device pointer');
+    assert.equal(library.D3D10CreateDevice1.handler([0, D3D10_DRIVER_TYPE.HARDWARE, 0, 0,
+        0xa000, 0x20, deviceAt]) >>> 0, S_OK);
+    const device = h.box.memory.readU32(deviceAt);
+    const call = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        h.box.call(device, slot(ID3D10DEVICE1_SLOTS, name), args);
+    assert.equal(call('GetFeatureLevel', []), 0xa000);
+    assert.equal(h.box.argBytesOf(device, slot(ID3D10DEVICE1_SLOTS, 'CreateBlendState1')), 12);
+
+    // The adapter says so too, as dxgi test_check_interface_support wants of
+    // an adapter whose devices answer as ID3D10Device1.
+    const dxgiAt = h.box.place([0]);
+    assert.equal(h.box.call(device, 0, [h.box.placeGuid(IID.IDXGIDevice), dxgiAt]), S_OK);
+    const adapterAt = h.box.place([0]);
+    assert.equal(h.box.call(h.box.memory.readU32(dxgiAt), slot(IDXGIDEVICE_SLOTS, 'GetAdapter'),
+        [adapterAt]), S_OK);
+    const adapter = h.box.memory.readU32(adapterAt);
+    const supports = (/** @type {string} */ iid)=>h.box.call(adapter,
+        slot(IDXGIADAPTER_SLOTS, 'CheckInterfaceSupport'), [h.box.placeGuid(iid), 0]);
+    assert.equal(supports(IID.ID3D10Device), S_OK);
+    assert.equal(supports(IID.ID3D10Device1), S_OK);
+    assert.equal(supports(IID.IDXGIFactory), DXGI_ERROR_INVALID_CALL);
+
+    // D3D10_BLEND_DESC1: two words, then eight targets of eight words.
+    const desc = h.box.allocate(0x108);
+    h.box.memory.writeU32(desc + 4, 1);
+    for (let index = 0; index < 8; index++)
+    {
+        const at = desc + 8 + index * 32;
+        [index % 2, 2, 1, 1, 2, 1, 1].forEach((value, field)=>
+            h.box.memory.writeU32(at + field * 4, value));
+        h.box.memory.writeU32(at + 28, index === 1 ? 1 : 15);
+    }
+    const stateAt = h.box.place([0]);
+    assert.equal(call('CreateBlendState1', [desc, stateAt]), S_OK);
+    const state = h.box.memory.readU32(stateAt);
+    const back = h.box.allocate(0x108);
+    h.box.call(state, slot(ID3D10BLENDSTATE1_SLOTS, 'GetDesc1'), [back]);
+    assert.deepEqual([...h.box.services.readMemory(back, 0x108)],
+        [...h.box.services.readMemory(desc, 0x108)], 'the description as it was given');
+    const old = h.box.allocate(0x44);
+    const asOld = h.box.place([0]);
+    assert.equal(h.box.call(state, 0, [h.box.placeGuid(IID.ID3D10BlendState), asOld]), S_OK);
+    h.box.call(h.box.memory.readU32(asOld), slot(ID3D10STATE_SLOTS, 'GetDesc'), [old]);
+    assert.deepEqual([4, 8, 12].map(at=>h.box.memory.readU32(old + at)), [0, 1, 0],
+        'the older reading: each target\'s enable');
+
+    const textureDesc = h.box.place([4, 4, 1, 1, DXGI_FORMAT.R8G8B8A8_UNORM, 1, 0,
+        D3D10_USAGE.DEFAULT, D3D10_BIND.SHADER_RESOURCE, 0, 0]);
+    const textureAt = h.box.place([0]);
+    assert.equal(call('CreateTexture2D', [textureDesc, 0, textureAt]), S_OK);
+    const viewAt = h.box.place([0]);
+    assert.equal(call('CreateShaderResourceView1', [h.box.memory.readU32(textureAt), 0, viewAt]),
+        S_OK);
+    const viewDesc = h.box.allocate(24);
+    h.box.call(h.box.memory.readU32(viewAt), slot(ID3D10SHADERRESOURCEVIEW1_SLOTS, 'GetDesc1'),
+        [viewDesc]);
+    assert.deepEqual([0, 4, 8, 12].map(at=>h.box.memory.readU32(viewDesc + at)),
+        [DXGI_FORMAT.R8G8B8A8_UNORM, 4, 0, 1]);
+
+    const chainAt = h.box.place([0xdeadbeef]);
+    const swapDesc = h.box.allocate(DXGI_SWAP_CHAIN_DESC.SIZE);
+    writeSwapChainDesc(h.box.services, swapDesc, {
+        bufferDesc: { width: 8, height: 8, refreshNumerator: 60, refreshDenominator: 1,
+            format: DXGI_FORMAT.R8G8B8A8_UNORM, scanlineOrdering: 0, scaling: 0 },
+        sampleDesc: { count: 1, quality: 0 }, bufferUsage: DXGI_USAGE.RENDER_TARGET_OUTPUT,
+        bufferCount: 1, outputWindow: 0x1234, windowed: true,
+        swapEffect: DXGI_SWAP_EFFECT.DISCARD, flags: 0,
+    });
+    assert.equal(library.D3D10CreateDeviceAndSwapChain1.handler([0, D3D10_DRIVER_TYPE.HARDWARE,
+        0, 0, 0xa000, 0x20, swapDesc, chainAt, 0]) >>> 0, E_INVALIDARG);
+    assert.equal(h.box.memory.readU32(chainAt), 0, 'the swap chain pointer cleared');
+    assert.equal(library.D3D10CreateDeviceAndSwapChain1.handler([0, D3D10_DRIVER_TYPE.HARDWARE,
+        0, 0, 0xa000, 0x20, swapDesc, chainAt, deviceAt]) >>> 0, S_OK);
+    assert.notEqual(h.box.memory.readU32(chainAt), 0);
+    assert.notEqual(h.box.memory.readU32(deviceAt), 0);
 });
 
 test('a state block is made from a mask in guest memory and captures through its vtable', ()=>{
