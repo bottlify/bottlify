@@ -137,6 +137,8 @@ const BUTTONS = Object.freeze({
  *           program through that alone.
  */
 
+/** @typedef {import('../win32/user32/rawinput.js').RawInputEvent} RawReport */
+
 /**
  * @typedef {Object} RouterDeps
  * @property {(message: {
@@ -164,13 +166,17 @@ const BUTTONS = Object.freeze({
  *     Whether DirectInput holds that device exclusively, in which case its
  *     events reach the program through DirectInput and the window gets none
  *     of its messages. Absent, the window always gets them.
+ * @property {(report: RawReport) => void} [rawInput]
+ *     Where each event goes as the device reported it, for the WM_INPUT of a
+ *     program that registered for raw input: user32 decides who is told.
+ *     Absent in a build with no windows.
  */
 
 /**
  * @param {RouterDeps} deps
  */
 export function createInputRouter(
-    { post, device, now, target, bounds, compose, trace, paste, exclusive },
+    { post, device, now, target, bounds, compose, trace, paste, exclusive, rawInput },
 )
 {
     /** The configured screen, or nothing: what the cursor falls back to. */
@@ -184,6 +190,7 @@ export function createInputRouter(
     const clock = now ?? (()=>0);
     const targetWindow = target ?? (()=>0);
     const composeCharacter = compose ?? (()=>{});
+    const report = rawInput ?? (()=>{});
     /**
      * Whether the window is told what this device does. An exclusive
      * DirectInput device is taken as raw input with RIDEV_NOLEGACY, which
@@ -402,6 +409,8 @@ export function createInputRouter(
             emit(messages[system ? 1 : 0], mapping.vk, lParam);
         }
         device({ kind: 'key', code: dikOf(mapping), down: event.down === true });
+        report({ device: 'key', scan: mapping.scan & 0xff, extended: mapping.extended === true,
+            vk: mapping.vk, down: event.down === true, message: messages[system ? 1 : 0] });
         return true;
     };
 
@@ -510,6 +519,7 @@ export function createInputRouter(
         if (stepX !== 0 || stepY !== 0)
         {
             device({ kind: 'mouseMove', x: stepX, y: stepY });
+            report({ device: 'mouse', dx: stepX, dy: stepY });
         }
         return true;
     };
@@ -568,6 +578,9 @@ export function createInputRouter(
             withheld,
         });
         device({ kind: 'mouseButton', code: index, down: event.down === true });
+        // BUTTONS named it, so it is one of the five a RAWMOUSE has.
+        const named = /** @type {RawReport['button']} */ (event.button);
+        report({ device: 'mouse', button: named, down: event.down === true });
         return true;
     };
 
@@ -587,6 +600,7 @@ export function createInputRouter(
             emit(WM.MOUSEWHEEL, (delta & 0xffff) << 16 | mask(), point());
         }
         device({ kind: 'mouseWheel', wheel: delta });
+        report({ device: 'mouse', wheel: delta });
         return true;
     };
 

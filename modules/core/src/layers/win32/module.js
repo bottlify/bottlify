@@ -178,10 +178,11 @@ export const win32Module = {
         /** @type {{ list: () => any[], clientRect: (hwnd: number) => any,
          *     place: (hwnd: number, x: number, y: number, width: number,
          *     height: number, how?: { announce?: boolean }) => boolean,
-         *     active: () => number, refresh: () => void }} */
+         *     active: () => number, refresh: () => void,
+         *     rawInput: (report: import('./user32/rawinput.js').RawInputEvent) => void }} */
         let windowService = {
             list: ()=>[], clientRect: ()=>null, place: ()=>false, active: ()=>0,
-            refresh: ()=>{},
+            refresh: ()=>{}, rawInput: ()=>{},
         };
 
         /** @type {(handle: number, text: string) => void} */
@@ -1732,6 +1733,15 @@ export const win32Module = {
 
             /** The window the program is active through, as GetForegroundWindow answers. */
             activeWindow: ()=>windowService.active(),
+
+            /**
+             * One event of the mouse or the keyboard as the device reported
+             * it, from the input layer: WM_INPUT for a program that registered
+             * for raw input, and nothing for one that did not.
+             *
+             * @param {import('./user32/rawinput.js').RawInputEvent} report
+             */
+            rawInput: report=>windowService.rawInput(report),
 
             /**
              * Whether one of this process's threads is blocked waiting on a

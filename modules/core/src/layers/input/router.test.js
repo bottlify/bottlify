@@ -48,6 +48,8 @@ function harness({ bounds = null, window = ()=>HWND, exclusive } = {}){
     const composed = [];
     /** @type {import('./router.js').PressRecord[]} */
     const presses = [];
+    /** What went out for raw input, as the device reported it. @type {any[]} */
+    const reports = [];
     const router = createInputRouter({
         post: message=>messages.push(message),
         /** @param {number} character @param {number} lParam */
@@ -61,6 +63,7 @@ function harness({ bounds = null, window = ()=>HWND, exclusive } = {}){
         bounds,
         trace: press=>presses.push(press),
         exclusive,
+        rawInput: report=>reports.push(report),
     });
 
     return {
@@ -90,6 +93,12 @@ function harness({ bounds = null, window = ()=>HWND, exclusive } = {}){
         presses(){
             const taken = [...presses];
             presses.length = 0;
+            return taken;
+        },
+        /** The raw input reports since the last look. */
+        reports(){
+            const taken = [...reports];
+            reports.length = 0;
             return taken;
         },
         /** The characters handed to the queue for TranslateMessage to deliver. */
@@ -835,4 +844,26 @@ test('a keyboard DirectInput holds exclusively sends the window no key messages'
     assert.deepEqual(h.composed(), [], 'no WM_KEYDOWN, so nothing for TranslateMessage');
     assert.equal(h.raw.filter(event=>event.kind === 'key').length, 4);
     assert.equal(h.router.keyState(0x41), 0, 'the key state still follows the keys');
+});
+
+test('every event also goes out as the device reported it, for WM_INPUT', ()=>{
+    // A RAWMOUSE is relative motion, a button transition or the wheel; a
+    // RAWKEYBOARD is the make code, the E0 prefix, the virtual key -- the
+    // unsided one -- and the message the key was. Reported whether or not
+    // the window hears the legacy messages: who registered for raw input is
+    // user32's to decide.
+    const h = harness({ exclusive: ()=>true });
+    h.send({ kind: 'pointerMove', dx: 5, dy: -3 });
+    h.send({ kind: 'pointerMove', dx: 0, dy: 0 });
+    h.send({ kind: 'pointerButton', button: 'left', down: true });
+    h.send({ kind: 'wheel', delta: -120 });
+    h.send({ kind: 'key', code: 'ControlRight', down: true });
+    h.send({ kind: 'key', code: 'KeyA', down: false });
+    assert.deepEqual(h.reports(), [
+        { device: 'mouse', dx: 5, dy: -3 },
+        { device: 'mouse', button: 'left', down: true },
+        { device: 'mouse', wheel: -120 },
+        { device: 'key', scan: 0x1d, extended: true, vk: 0x11, down: true, message: WM.KEYDOWN },
+        { device: 'key', scan: 0x1e, extended: false, vk: 0x41, down: false, message: WM.KEYUP },
+    ], 'a motion of nothing is no report');
 });

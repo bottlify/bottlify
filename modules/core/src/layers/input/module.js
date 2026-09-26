@@ -123,6 +123,17 @@ export const inputModule = {
             // A device a program holds exclusively is read through
             // DirectInput alone, and the window hears nothing of it.
             exclusive: kind=>dinput.exclusive(kind),
+            // The device's own report, for a program that registered for raw
+            // input; whether one did, and which window hears it, is user32's.
+            rawInput: report=>{
+                try
+                {
+                    win32.rawInput?.(report);
+                }
+                catch {
+                    // No win32: no window to post WM_INPUT to.
+                }
+            },
             // Pasted text is the clipboard's, which is win32's; a build
             // without it has no clipboard to paste into.
             paste: text=>{

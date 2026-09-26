@@ -66,6 +66,21 @@ test('the module keeps the contract it is registered under', ()=>{
     assert.equal(typeof inputModule.diagnostics, 'function');
 });
 
+test('an event reaches win32 as the device reported it, for raw input', async()=>{
+    /** @type {any[]} */
+    const reports = [];
+    const queue = createMessageQueue();
+    const { api } = await open({ win32: {
+        queue: ()=>queue,
+        rawInput: (/** @type {any} */ report)=>reports.push(report),
+    } });
+
+    api.send({ kind: 'pointerMove', dx: 2, dy: 1 });
+    assert.deepEqual(reports, [{ device: 'mouse', dx: 2, dy: 1 }]);
+
+    await inputModule.dispose();
+});
+
 test('a key sent to the layer arrives in the window queue the program pumps', async()=>{
     const { api, drain } = await open();
 
