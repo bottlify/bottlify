@@ -596,6 +596,16 @@ test('a pass may draw depth alone, sized by its depth target', ()=>{
     assert.deepEqual(gpu.of('setViewport')[0].rect, [0, 0, 32, 16, 0, 1]);
 });
 
+test('a pass takes a blend constant as dynamic state', ()=>{
+    const { gpu, backend } = harness();
+    const frame = backend.beginFrame();
+    const pass = frame.beginPass({ target: target(backend) });
+    pass.setBlendConstant({ r: 0.5, g: 0.25, b: 0, a: 1 });
+    frame.end();
+    assert.deepEqual(gpu.of('setBlendConstant').map((/** @type {any} */ c)=>c.color),
+        [{ r: 0.5, g: 0.25, b: 0, a: 1 }]);
+});
+
 test('a texture copy closes the pass it interrupts and records on the frame encoder', ()=>{
     const { gpu, backend } = harness();
     const a = target(backend, 64);

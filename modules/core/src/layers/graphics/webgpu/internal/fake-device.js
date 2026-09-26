@@ -137,6 +137,7 @@ export function createFakeDevice(options = {}){
         pass.setScissorRect = (/** @type {number[]} */ ...rect)=>record('setScissorRect', { rect });
         pass.setStencilReference = (/** @type {number} */ reference)=>
             record('setStencilReference', { reference });
+        pass.setBlendConstant = (/** @type {any} */ color)=>record('setBlendConstant', { color });
         pass.setPipeline = (/** @type {any} */ pipeline)=>record('setPipeline', { pipeline });
         // A dynamic binding resolves to the byte range the shader would read:
         // the offsets arrive in binding order, and the resource names the

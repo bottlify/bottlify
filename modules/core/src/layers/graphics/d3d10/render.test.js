@@ -1482,10 +1482,10 @@ test('the stencil reference reaches the pass, once per change', async()=>{
     assert.ok(!diverged(h, 'stencil reference'));
 });
 
-test('a blend by the constant factor blends by white, the only constant this build sets',
+test('a blend by the constant factor blends by the device\'s factor, set on the pass',
     async()=>{
-        // WebGPU's constant is black until set, and the backend's pass sets
-        // none, so a pipeline naming it would blend by zero.
+        // WebGPU's constant is black until a pass sets it; Direct3D's is
+        // white until a program does.
         const h = harness();
         const { device } = h;
         bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
@@ -1504,15 +1504,22 @@ test('a blend by the constant factor blends by white, the only constant this bui
         await h.present();
         const pipeline = h.gpu.of('createRenderPipeline').at(-1);
         assert.deepEqual(pipeline.descriptor.fragment.targets[0].blend, {
-            color: { srcFactor: 'one', dstFactor: 'zero', operation: 'add' },
-            alpha: { srcFactor: 'one', dstFactor: 'zero', operation: 'add' },
+            color: { srcFactor: 'constant', dstFactor: 'one-minus-constant', operation: 'add' },
+            alpha: { srcFactor: 'constant', dstFactor: 'zero', operation: 'add' },
         });
-        assert.ok(!diverged(h, 'blend factor'));
+        assert.deepEqual(h.gpu.of('setBlendConstant').map((/** @type {any} */ c)=>c.color),
+            [{ r: 1, g: 1, b: 1, a: 1 }], 'the default, white, on the pass');
 
-        device.OMSetBlendState(blend.state, [0.5, 0.5, 0.5, 1], 0xffffffff);
+        device.OMSetBlendState(blend.state, [0.5, 0.25, 0.125, 1], 0xffffffff);
+        device.Draw(3, 0);
+        device.Draw(3, 0);
+        device.OMSetBlendState(blend.state, [0, 0, 0, 0], 0xffffffff);
         device.Draw(3, 0);
         await h.present();
-        assert.ok(diverged(h, 'blend factor other than white is drawn as white'));
+        assert.deepEqual(h.gpu.of('setBlendConstant').slice(1).map((/** @type {any} */ c)=>
+            c.color), [{ r: 0.5, g: 0.25, b: 0.125, a: 1 }, { r: 0, g: 0, b: 0, a: 0 }],
+        'once per change');
+        assert.ok(!diverged(h, 'blend factor'));
     });
 
 // --- queries ---

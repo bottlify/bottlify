@@ -417,6 +417,17 @@ export function createBackend(options){
                 raw.setStencilReference(reference);
             },
 
+            /**
+             * The colour a pipeline's constant blend factor stands for. Dynamic
+             * state like the stencil reference, and black at the start of
+             * every pass until set.
+             *
+             * @param {{ r: number, g: number, b: number, a: number }} color
+             */
+            setBlendConstant(color){
+                raw.setBlendConstant(color);
+            },
+
             /** @param {any} next */
             setPipeline(next){
                 if (next === pipeline)

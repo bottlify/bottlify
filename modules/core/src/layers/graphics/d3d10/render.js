@@ -24,8 +24,8 @@
  * resource is read back after the frame that holds it is submitted.
  *
  * What this cut does not do is stated where it is decided, each as a divergence
- * that names the call: a blend factor that is not the default, wireframe fill,
- * geometry shaders, stream output, predication, and multisampling.
+ * that names the call: wireframe fill, geometry shaders, stream output,
+ * predication, and multisampling.
  */
 
 import {
@@ -111,24 +111,6 @@ const BLEND_FACTOR = Object.freeze({
     [D3D10_BLEND.BLEND_FACTOR]: 'constant',
     [D3D10_BLEND.INV_BLEND_FACTOR]: 'one-minus-constant',
 });
-
-/**
- * A blend factor as the pipeline is given it. The backend's pass sets no
- * blend constant, and WebGPU's is black until one is set, so the constant
- * factors are written as what they equal under Direct3D's default constant,
- * white: one, and one minus one. A program's own constant is reported at the
- * draw.
- *
- * @param {number} factor
- * @returns {string}
- */
-const pipelineFactor = factor=>{
-    if (factor === D3D10_BLEND.BLEND_FACTOR)
-    {
-        return 'one';
-    }
-    return factor === D3D10_BLEND.INV_BLEND_FACTOR ? 'zero' : BLEND_FACTOR[factor];
-};
 
 /** @type {Readonly<Record<number, string>>} */
 const BLEND_OP = Object.freeze({
@@ -1273,13 +1255,13 @@ export function createRenderer(services){
                     ? {
                         blend: {
                             color: {
-                                srcFactor: pipelineFactor(target.SrcBlend),
-                                dstFactor: pipelineFactor(target.DestBlend),
+                                srcFactor: BLEND_FACTOR[target.SrcBlend],
+                                dstFactor: BLEND_FACTOR[target.DestBlend],
                                 operation: BLEND_OP[target.BlendOp],
                             },
                             alpha: {
-                                srcFactor: pipelineFactor(target.SrcBlendAlpha),
-                                dstFactor: pipelineFactor(target.DestBlendAlpha),
+                                srcFactor: BLEND_FACTOR[target.SrcBlendAlpha],
+                                dstFactor: BLEND_FACTOR[target.DestBlendAlpha],
                                 operation: BLEND_OP[target.BlendOpAlpha],
                             },
                         },
@@ -2062,11 +2044,6 @@ export function createRenderer(services){
                 diverge('a draw with no input layout is skipped');
                 return;
             }
-            if (pipeline.blendFactor.some((/** @type {number} */ value)=>value !== 1))
-            {
-                diverge('a blend factor other than white is drawn as white: the backend'
-                    + ' exposes no blend constant');
-            }
             const rasterizer = pipeline.rasterizerState
                 ? stateDesc(pipeline.rasterizerState)
                 : DEFAULT_RASTERIZER;
@@ -2127,6 +2104,7 @@ export function createRenderer(services){
                 instanceCount: draw.instanceCount ?? 1,
                 startInstance: draw.startInstance ?? 0,
                 stencilRef: pipeline.stencilRef,
+                blendFactor: [...pipeline.blendFactor],
                 indexCount: draw.indexCount ?? null,
                 startIndex: draw.startIndex ?? 0,
                 baseVertex: draw.baseVertex ?? 0,
@@ -2251,6 +2229,7 @@ export function createRenderer(services){
         /** @type {any} */
         let passDepth = null;
         let passStencil = 0;
+        let passBlend = '';
 
         const closePass = ()=>{
             pass = null;
@@ -2316,8 +2295,10 @@ export function createRenderer(services){
             });
             passTargets = key;
             passDepth = depth;
-            // What a new pass compares against until a draw says otherwise.
+            // What a new pass compares against, and blends by, until a draw
+            // says otherwise.
             passStencil = 0;
+            passBlend = '0,0,0,0';
             return pass;
         };
 
@@ -2425,6 +2406,13 @@ export function createRenderer(services){
                 {
                     current.setStencilReference(command.stencilRef);
                     passStencil = command.stencilRef;
+                }
+                const blendFactor = command.blendFactor.join(',');
+                if (passBlend !== blendFactor)
+                {
+                    const [r, g, b, a] = command.blendFactor;
+                    current.setBlendConstant({ r, g, b, a });
+                    passBlend = blendFactor;
                 }
                 pipeline.slots.forEach((/** @type {number} */ slot, /** @type {number} */ index)=>{
                     const buffer = command.vertexBuffers[slot];
